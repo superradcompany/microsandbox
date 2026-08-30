@@ -27,6 +27,7 @@ mod profile;
 pub(crate) mod sandbox;
 pub(crate) mod volume;
 
+pub(crate) use cloud::sandbox::{CloudPortBindings, activate_cloud_port_bindings};
 pub use cloud::{CloudBackend, CloudBackendBuilder, DEFAULT_CLOUD_API_URL};
 use futures::future::BoxFuture;
 pub use local::{LocalBackend, LocalBackendBuilder};
@@ -177,6 +178,12 @@ pub trait Backend: Send + Sync + 'static {
     /// paths) without keeping a separate `Arc<LocalBackend>` alongside the
     /// `Arc<dyn Backend>`. Returns `None` for cloud backends.
     fn as_local(&self) -> Option<&LocalBackend> {
+        None
+    }
+
+    /// Try downcast to the built-in cloud backend for cloud-only transport
+    /// setup such as SDK-owned TCP listeners.
+    fn as_cloud(&self) -> Option<&CloudBackend> {
         None
     }
 

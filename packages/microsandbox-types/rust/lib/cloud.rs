@@ -15,11 +15,11 @@ use zeroize::Zeroizing;
 
 use crate::domain::{
     CpuPlacement, DeploymentProfile, DiskImageFormat, EnvVar, HandoffInit, HostPattern,
-    HostPermissions, MountOptions, NetworkPolicy, NetworkSpec, OciRootfsSource, Patch, PullPolicy,
-    Rlimit, RlimitResource, RootDisk, RootfsSource, SandboxLogLevel, SandboxPolicy,
-    SandboxResources, SandboxRuntimeOptions, SandboxSpec, SecretEntry, SecretInjection,
-    SecretsConfig, SecurityProfile, StatVirtualization, TransparentHugePagePolicy, ViolationAction,
-    VolumeMount, VsockSpec, default_private, default_strict,
+    HostPermissions, MountOptions, NetworkPolicy, NetworkSpec, OciRootfsSource, Patch,
+    PublishedPortSpec, PullPolicy, Rlimit, RlimitResource, RootDisk, RootfsSource, SandboxLogLevel,
+    SandboxPolicy, SandboxResources, SandboxRuntimeOptions, SandboxSpec, SecretEntry,
+    SecretInjection, SecretsConfig, SecurityProfile, StatVirtualization, TransparentHugePagePolicy,
+    ViolationAction, VolumeMount, VsockSpec, default_private, default_strict,
 };
 use crate::modify::SecretSource;
 use crate::{TypesError, TypesResult};
@@ -729,8 +729,8 @@ impl From<VolumeMount> for CloudVolumeMount {
 }
 
 /// Cloud network specification: a subset of the domain [`NetworkSpec`].
-/// Interface overrides, host port mapping, DNS, TLS interception, rate limits,
-/// and host-CA trust are not part of this type. `deny_unknown_fields` — posting
+/// Interface overrides, DNS, TLS interception, rate limits, and host-CA trust
+/// are not part of this type. `deny_unknown_fields` — posting
 /// an omitted field is an error, not a silent drop.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
@@ -743,6 +743,10 @@ pub struct CloudNetworkSpec {
     /// Egress/ingress policy.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub policy: Option<NetworkPolicy>,
+
+    /// TCP listeners the SDK exposes locally and relays to guest ports.
+    #[serde(default)]
+    pub ports: Vec<PublishedPortSpec>,
 
     /// Secret-injection config.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -758,6 +762,7 @@ impl Default for CloudNetworkSpec {
         Self {
             enabled: true,
             policy: None,
+            ports: Vec::new(),
             secrets: None,
             max_connections: None,
         }
@@ -993,7 +998,7 @@ impl TryFrom<CloudSandboxSpec> for SandboxSpec {
         let network = NetworkSpec {
             enabled: spec.network.enabled,
             interface: None,
-            ports: Vec::new(),
+            ports: spec.network.ports,
             policy: spec.network.policy,
             dns: None,
             tls: None,
@@ -1097,6 +1102,7 @@ impl From<SandboxSpec> for CloudSandboxSpec {
             network: CloudNetworkSpec {
                 enabled: spec.network.enabled,
                 policy: spec.network.policy,
+                ports: spec.network.ports,
                 secrets: spec.network.secrets.map(Into::into),
                 max_connections: spec.network.max_connections,
             },

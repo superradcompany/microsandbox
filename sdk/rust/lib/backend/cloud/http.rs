@@ -60,6 +60,13 @@ enum CloudSseItem {
     Ignore,
 }
 
+enum CloudLogReadOutcome {
+    Terminal,
+    Retry(String),
+    Fatal(MicrosandboxError),
+    Cancelled,
+}
+
 #[derive(Serialize)]
 struct CloudSandboxListQuery<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -77,6 +84,12 @@ struct CloudSandboxWaitQuery {
     wait_timeout: u64,
 }
 
+#[derive(Debug, Deserialize)]
+struct CloudCapabilities {
+    #[serde(default)]
+    cloud_tcp_ports: bool,
+}
+
 //--------------------------------------------------------------------------------------------------
 // Methods: Sandbox lifecycle
 //
@@ -85,6 +98,31 @@ struct CloudSandboxWaitQuery {
 //--------------------------------------------------------------------------------------------------
 
 impl CloudBackend {
+    pub(in crate::backend) async fn require_cloud_tcp_ports(&self) -> MicrosandboxResult<()> {
+        let url = format!("{}/v1/capabilities", self.url);
+        let response = self
+            .http
+            .get(&url)
+            .send()
+            .await
+            .map_err(|error| cloud_io_error("GET /v1/capabilities", error))?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Err(MicrosandboxError::unsupported(
+                Operation::SandboxCreate,
+                UnsupportedReason::ConfigField("cloud TCP port mappings"),
+            ));
+        }
+        let capabilities: CloudCapabilities = decode_json(response, "GET /v1/capabilities").await?;
+        if capabilities.cloud_tcp_ports {
+            Ok(())
+        } else {
+            Err(MicrosandboxError::unsupported(
+                Operation::SandboxCreate,
+                UnsupportedReason::ConfigField("cloud TCP port mappings"),
+            ))
+        }
+    }
+
     /// `POST /v1/sandboxes` (optionally create, start, and wait for readiness).
     ///
     /// Pass `start=true` to atomically create-and-start in a single round-trip
@@ -335,7 +373,7 @@ impl CloudBackend {
             .await
             .map_err(|e| cloud_io_error("GET /v1/sandboxes/:id/logs", e))?;
         let status = resp.status();
-        if !status.is_success() {
+        if !status.is_success() && !matches!(status.as_u16(), 502..=504) {
             let body_text = resp.text().await.unwrap_or_default();
             let typed: Option<CloudErrorBody> = serde_json::from_str(&body_text).ok();
             return Err(cloud_http_error(
@@ -348,8 +386,99 @@ impl CloudBackend {
 
         let (tx, rx) = mpsc::unbounded_channel();
         let opts = opts.clone();
+        let http = self.http.clone();
         tokio::spawn(async move {
-            parse_cloud_log_sse(Box::pin(resp.bytes_stream()), opts, tx).await;
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+            let mut backoff = Duration::from_millis(100);
+            let mut response = Some(resp);
+            let mut last_cursor = match &opts.start {
+                LogStreamStart::From(cursor) => Some(cursor.clone()),
+                _ => None,
+            };
+
+            loop {
+                match parse_cloud_log_sse(
+                    Box::pin(
+                        response
+                            .take()
+                            .expect("log response is installed before every read")
+                            .bytes_stream(),
+                    ),
+                    &opts,
+                    &tx,
+                    &mut last_cursor,
+                )
+                .await
+                {
+                    CloudLogReadOutcome::Terminal | CloudLogReadOutcome::Cancelled => return,
+                    CloudLogReadOutcome::Fatal(error) => {
+                        let _ = tx.send(Err(error));
+                        return;
+                    }
+                    CloudLogReadOutcome::Retry(reason) => {
+                        if tokio::time::Instant::now() >= deadline {
+                            let _ = tx.send(Err(MicrosandboxError::Runtime(format!(
+                                "cloud log reconnect deadline exceeded: {reason}"
+                            ))));
+                            return;
+                        }
+                    }
+                }
+
+                tokio::select! {
+                    () = tokio::time::sleep(backoff) => {}
+                    () = tx.closed() => return,
+                }
+                backoff = (backoff * 2).min(Duration::from_secs(5));
+
+                let mut request = http
+                    .get(&url)
+                    .header(ACCEPT, HeaderValue::from_static("text/event-stream"));
+                if let Some(cursor) = &last_cursor {
+                    request = request
+                        .header(HeaderName::from_static("last-event-id"), cursor.to_string());
+                }
+                loop {
+                    match request
+                        .try_clone()
+                        .expect("log request is cloneable")
+                        .send()
+                        .await
+                    {
+                        Ok(next) if matches!(next.status().as_u16(), 502..=504) => {}
+                        Ok(next) if next.status().is_success() => {
+                            response = Some(next);
+                            break;
+                        }
+                        Ok(next) => {
+                            let status = next.status();
+                            let body_text = next.text().await.unwrap_or_default();
+                            let typed: Option<CloudErrorBody> =
+                                serde_json::from_str(&body_text).ok();
+                            let _ = tx.send(Err(cloud_http_error(
+                                status.as_u16(),
+                                typed.as_ref(),
+                                &body_text,
+                                "GET /v1/sandboxes/:id/logs",
+                            )));
+                            return;
+                        }
+                        Err(_) => {}
+                    }
+                    if tokio::time::Instant::now() >= deadline {
+                        let _ = tx.send(Err(MicrosandboxError::Runtime(
+                            "cloud log reconnect deadline exceeded".to_string(),
+                        )));
+                        return;
+                    }
+                    tokio::select! {
+                        () = tokio::time::sleep(backoff) => {}
+                        () = tx.closed() => return,
+                    }
+                    backoff = (backoff * 2).min(Duration::from_secs(5));
+                }
+                backoff = Duration::from_millis(100);
+            }
         });
 
         Ok(Box::pin(stream::unfold(rx, |mut rx| async {
@@ -568,37 +697,44 @@ fn cloud_http_error(
 
 async fn parse_cloud_log_sse(
     mut chunks: Pin<Box<dyn futures::Stream<Item = Result<Bytes, reqwest::Error>> + Send>>,
-    opts: LogStreamOptions,
-    tx: mpsc::UnboundedSender<MicrosandboxResult<LogEntry>>,
-) {
+    opts: &LogStreamOptions,
+    tx: &mpsc::UnboundedSender<MicrosandboxResult<LogEntry>>,
+    last_cursor: &mut Option<LogCursor>,
+) -> CloudLogReadOutcome {
     let mut buffer = Vec::new();
 
     while let Some(chunk) = chunks.next().await {
         match chunk {
             Ok(bytes) => buffer.extend_from_slice(&bytes),
             Err(error) => {
-                let _ = tx.send(Err(MicrosandboxError::Http(error)));
-                return;
+                return CloudLogReadOutcome::Retry(error.to_string());
             }
         }
 
         while let Some((block, consumed)) = take_sse_block(&buffer) {
             buffer.drain(..consumed);
-            match parse_cloud_sse_item(&block, &opts) {
+            match parse_cloud_sse_item(&block, opts) {
                 Ok(CloudSseItem::Entry(entry)) => {
+                    let resumable = entry.cursor != LogCursor::empty();
+                    if resumable && last_cursor.as_ref() == Some(&entry.cursor) {
+                        continue;
+                    }
+                    if resumable {
+                        *last_cursor = Some(entry.cursor.clone());
+                    }
                     if tx.send(Ok(entry)).is_err() {
-                        return;
+                        return CloudLogReadOutcome::Cancelled;
                     }
                 }
-                Ok(CloudSseItem::End) => return,
+                Ok(CloudSseItem::End) => return CloudLogReadOutcome::Terminal,
                 Ok(CloudSseItem::Ignore) => {}
                 Err(error) => {
-                    let _ = tx.send(Err(error));
-                    return;
+                    return CloudLogReadOutcome::Fatal(error);
                 }
             }
         }
     }
+    CloudLogReadOutcome::Retry("cloud log stream reached EOF".to_string())
 }
 
 fn take_sse_block(buffer: &[u8]) -> Option<(Vec<u8>, usize)> {
@@ -754,7 +890,79 @@ pub(super) fn urlencoding(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use base64::Engine;
+    use futures::StreamExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
     use super::*;
+
+    fn test_cursor(offset: u64) -> String {
+        let mut bytes = vec![1_u8];
+        bytes.extend_from_slice(&1_u64.to_le_bytes());
+        bytes.extend_from_slice(&offset.to_le_bytes());
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    }
+
+    #[tokio::test]
+    async fn cloud_log_stream_resumes_with_last_event_id_and_deduplicates_cursor() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let cursor_one = test_cursor(1);
+        let cursor_two = test_cursor(2);
+        let server_cursor_one = cursor_one.clone();
+        let server_cursor_two = cursor_two.clone();
+        let server = tokio::spawn(async move {
+            for attempt in 0..2 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut chunk = [0_u8; 1024];
+                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let count = socket.read(&mut chunk).await.unwrap();
+                    assert_ne!(count, 0);
+                    request.extend_from_slice(&chunk[..count]);
+                }
+                let request = String::from_utf8(request).unwrap();
+                if attempt == 1 {
+                    assert!(request.to_ascii_lowercase().contains(&format!(
+                        "last-event-id: {}",
+                        server_cursor_one.to_ascii_lowercase()
+                    )));
+                }
+                let body = if attempt == 0 {
+                    format!(
+                        "id: {}\nevent: log\ndata: {{\"source\":\"stdout\",\"ts\":\"2026-05-31T10:00:00Z\",\"text\":\"one\"}}\n\n",
+                        server_cursor_one
+                    )
+                } else {
+                    format!(
+                        "id: {}\nevent: log\ndata: {{\"source\":\"stdout\",\"ts\":\"2026-05-31T10:00:00Z\",\"text\":\"duplicate\"}}\n\nid: {}\nevent: log\ndata: {{\"source\":\"stdout\",\"ts\":\"2026-05-31T10:00:01Z\",\"text\":\"two\"}}\n\nevent: end\ndata: {{}}\n\n",
+                        server_cursor_one, server_cursor_two
+                    )
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+
+        let backend = CloudBackend::new(format!("http://{address}"), "test-key").unwrap();
+        let mut stream = backend
+            .open_log_stream_by_id("sandbox", &LogStreamOptions::default())
+            .await
+            .unwrap();
+        let first = stream.next().await.unwrap().unwrap();
+        let second = stream.next().await.unwrap().unwrap();
+        assert_eq!(first.data, Bytes::from_static(b"one"));
+        assert_eq!(second.data, Bytes::from_static(b"two"));
+        assert_eq!(first.cursor.to_string(), cursor_one);
+        assert_eq!(second.cursor.to_string(), cursor_two);
+        assert!(stream.next().await.is_none());
+        server.await.unwrap();
+    }
 
     #[test]
     fn cloud_http_error_uses_nested_error_body() {

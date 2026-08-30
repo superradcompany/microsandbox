@@ -6,6 +6,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::future::BoxFuture;
+use microsandbox_protocol::{
+    message::MessageType,
+    tcp::{TcpClose, TcpClosed, TcpConnect, TcpConnected, TcpData, TcpEof, TcpFailed},
+};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
 
 use super::CloudBackend;
 use crate::backend::{
@@ -66,6 +72,25 @@ pub(in crate::backend) enum CloudRegistrySelection {
     },
 }
 
+/// Owns SDK-local listeners for a running cloud sandbox. Clones of `Sandbox`
+/// share this value; dropping the final handle aborts only the local listener
+/// tasks and deliberately leaves the remote sandbox running.
+pub(crate) struct CloudPortBindings {
+    tasks: Vec<tokio::task::JoinHandle<()>>,
+}
+
+struct PreparedCloudPortBindings {
+    listeners: Vec<(TcpListener, u16)>,
+}
+
+impl Drop for CloudPortBindings {
+    fn drop(&mut self) {
+        for task in &self.tasks {
+            task.abort();
+        }
+    }
+}
+
 //--------------------------------------------------------------------------------------------------
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
@@ -79,11 +104,14 @@ impl SandboxBackend for CloudBackend {
     ) -> BoxFuture<'a, MicrosandboxResult<Sandbox>> {
         Box::pin(async move {
             let (req, config) = cloud_create_body_and_config(config)?;
+            let bindings = prepare_cloud_port_bindings(self, &config).await?;
             let cloud = CloudBackend::create_sandbox(self, &req, start).await?;
             if start {
                 ensure_cloud_sandbox_ready(&cloud)?;
             }
-            Ok(Sandbox::from_cloud(backend, cloud, config))
+            let name = cloud.name.clone();
+            Ok(Sandbox::from_cloud(backend.clone(), cloud, config)
+                .with_cloud_port_bindings(bindings.activate(backend, name)))
         })
     }
 
@@ -96,6 +124,12 @@ impl SandboxBackend for CloudBackend {
         // by msb-cloud, not by this process. Reuse the eager-start path.
         Box::pin(async move {
             let (req, config) = cloud_create_body_and_config(config)?;
+            if !config.spec.network.ports.is_empty() {
+                return Err(MicrosandboxError::unsupported(
+                    Operation::SandboxCreate,
+                    UnsupportedReason::ConfigField("detached cloud sandbox port mappings"),
+                ));
+            }
             let cloud = CloudBackend::create_sandbox(self, &req, true).await?;
             ensure_cloud_sandbox_ready(&cloud)?;
             Ok(Sandbox::from_cloud(backend, cloud, config))
@@ -110,9 +144,12 @@ impl SandboxBackend for CloudBackend {
         Box::pin(async move {
             let current = CloudBackend::get_sandbox(self, name).await?;
             let config = sandbox_config_from_cloud(&current);
+            let bindings = prepare_cloud_port_bindings(self, &config).await?;
             let cloud = CloudBackend::start_sandbox(self, name).await?;
             ensure_cloud_sandbox_ready(&cloud)?;
-            Ok(Sandbox::from_cloud(backend, cloud, config))
+            let name = cloud.name.clone();
+            Ok(Sandbox::from_cloud(backend.clone(), cloud, config)
+                .with_cloud_port_bindings(bindings.activate(backend, name)))
         })
     }
 
@@ -126,6 +163,12 @@ impl SandboxBackend for CloudBackend {
         Box::pin(async move {
             let current = CloudBackend::get_sandbox(self, name).await?;
             let config = sandbox_config_from_cloud(&current);
+            if !config.spec.network.ports.is_empty() {
+                return Err(MicrosandboxError::unsupported(
+                    Operation::SandboxStart,
+                    UnsupportedReason::ConfigField("detached cloud sandbox port mappings"),
+                ));
+            }
             let cloud = CloudBackend::start_sandbox(self, name).await?;
             ensure_cloud_sandbox_ready(&cloud)?;
             Ok(Sandbox::from_cloud(backend, cloud, config))
@@ -142,9 +185,12 @@ impl SandboxBackend for CloudBackend {
             let id = cloud_identity(identity)?;
             let current = CloudBackend::get_sandbox_by_id(self, &id).await?;
             let config = sandbox_config_from_cloud(&current);
+            let bindings = prepare_cloud_port_bindings(self, &config).await?;
             let cloud = CloudBackend::start_sandbox_by_id(self, &id).await?;
             ensure_cloud_sandbox_ready(&cloud)?;
-            Ok(Sandbox::from_cloud(backend, cloud, config))
+            let name = cloud.name.clone();
+            Ok(Sandbox::from_cloud(backend.clone(), cloud, config)
+                .with_cloud_port_bindings(bindings.activate(backend, name)))
         })
     }
 
@@ -363,15 +409,25 @@ impl TryFrom<SandboxConfig> for CloudCreateBody {
         #[cfg(feature = "net")]
         {
             // Only flag user-set opt-in fields the cloud's create contract does
-            // not accept (published ports, custom DNS resolvers, host-CA trust).
+            // not accept (UDP ports, custom DNS resolvers, host-CA trust).
             // Policy and secrets ride in the request's network section, and the
             // default `NetworkConfig` ships with a baseline policy plus built-in
             // DNS settings, so comparing those would always trigger.
             let net = config.local_network_config()?;
-            if !net.ports.is_empty() || !net.dns.nameservers.is_empty() || net.trust_host_cas {
+            if !net.dns.nameservers.is_empty() || net.trust_host_cas {
                 return Err(MicrosandboxError::unsupported(
                     Operation::SandboxCreate,
-                    UnsupportedReason::ConfigField("network ports / custom DNS / host-CA trust"),
+                    UnsupportedReason::ConfigField("custom DNS / host-CA trust"),
+                ));
+            }
+            if net
+                .ports
+                .iter()
+                .any(|port| port.protocol != microsandbox_network::config::PortProtocol::Tcp)
+            {
+                return Err(MicrosandboxError::unsupported(
+                    Operation::SandboxCreate,
+                    UnsupportedReason::ConfigField("UDP port mappings"),
                 ));
             }
         }
@@ -618,6 +674,197 @@ fn ensure_cloud_sandbox_ready(cloud: &CloudCreateSandboxResponse) -> Microsandbo
     }
 }
 
+async fn prepare_cloud_port_bindings(
+    cloud: &CloudBackend,
+    config: &SandboxConfig,
+) -> MicrosandboxResult<PreparedCloudPortBindings> {
+    let ports = &config.spec.network.ports;
+    if ports.is_empty() {
+        return Ok(PreparedCloudPortBindings {
+            listeners: Vec::new(),
+        });
+    }
+    cloud.require_cloud_tcp_ports().await?;
+
+    let mut listeners = Vec::with_capacity(ports.len());
+    for port in ports {
+        if port.protocol != microsandbox_types::PortProtocol::Tcp {
+            return Err(MicrosandboxError::unsupported(
+                Operation::SandboxCreate,
+                UnsupportedReason::ConfigField("UDP port mappings"),
+            ));
+        }
+        if port.host_port == 0 || port.guest_port == 0 {
+            return Err(MicrosandboxError::InvalidConfig(
+                "cloud TCP port mappings require non-zero host and guest ports".to_string(),
+            ));
+        }
+        let bind_ip = port
+            .host_bind
+            .parse::<std::net::IpAddr>()
+            .map_err(|error| {
+                MicrosandboxError::InvalidConfig(format!(
+                    "invalid cloud TCP bind address {:?}: {error}",
+                    port.host_bind
+                ))
+            })?;
+        let listener = TcpListener::bind((bind_ip, port.host_port))
+            .await
+            .map_err(|error| {
+                MicrosandboxError::Runtime(format!(
+                    "failed to bind cloud TCP listener {}:{}: {error}",
+                    bind_ip, port.host_port
+                ))
+            })?;
+        listeners.push((listener, port.guest_port));
+    }
+    Ok(PreparedCloudPortBindings { listeners })
+}
+
+impl PreparedCloudPortBindings {
+    fn activate(
+        self,
+        backend: Arc<dyn Backend>,
+        sandbox_name: String,
+    ) -> Option<Arc<CloudPortBindings>> {
+        if self.listeners.is_empty() {
+            return None;
+        }
+        let tasks = self
+            .listeners
+            .into_iter()
+            .map(|(listener, guest_port)| {
+                let backend = backend.clone();
+                let sandbox_name = sandbox_name.clone();
+                tokio::spawn(async move {
+                    loop {
+                        let Ok((stream, _peer)) = listener.accept().await else {
+                            break;
+                        };
+                        let backend = backend.clone();
+                        let sandbox_name = sandbox_name.clone();
+                        tokio::spawn(async move {
+                            if let Err(error) =
+                                relay_cloud_tcp(backend, &sandbox_name, stream, guest_port).await
+                            {
+                                tracing::debug!(guest_port, %error, "cloud TCP relay closed");
+                            }
+                        });
+                    }
+                })
+            })
+            .collect();
+        Some(Arc::new(CloudPortBindings { tasks }))
+    }
+}
+
+pub(crate) async fn activate_cloud_port_bindings(
+    cloud: &CloudBackend,
+    backend: Arc<dyn Backend>,
+    sandbox_name: String,
+    config: &SandboxConfig,
+) -> MicrosandboxResult<Option<Arc<CloudPortBindings>>> {
+    Ok(prepare_cloud_port_bindings(cloud, config)
+        .await?
+        .activate(backend, sandbox_name))
+}
+
+async fn relay_cloud_tcp(
+    backend: Arc<dyn Backend>,
+    sandbox_name: &str,
+    mut socket: TcpStream,
+    guest_port: u16,
+) -> MicrosandboxResult<()> {
+    let client = Arc::new(
+        backend
+            .dial_agent(sandbox_name, Duration::from_secs(10))
+            .await?,
+    );
+    if !client.supports(MessageType::TcpConnect) {
+        return Err(MicrosandboxError::Runtime(
+            "sandbox runtime does not support TCP relay".to_string(),
+        ));
+    }
+    let (id, mut inbound) = client
+        .stream(
+            MessageType::TcpConnect,
+            &TcpConnect {
+                host: "127.0.0.1".to_string(),
+                port: guest_port,
+            },
+        )
+        .await?;
+    let first = inbound.recv().await.ok_or_else(|| {
+        MicrosandboxError::Runtime("sandbox TCP relay closed during connect".to_string())
+    })?;
+    match first.t {
+        MessageType::TcpConnected => {
+            let _: TcpConnected = first.payload()?;
+        }
+        MessageType::TcpFailed => {
+            let failed: TcpFailed = first.payload()?;
+            return Err(MicrosandboxError::Runtime(format!(
+                "sandbox TCP connect failed: {}",
+                failed.error
+            )));
+        }
+        other => {
+            return Err(MicrosandboxError::Runtime(format!(
+                "sandbox TCP relay returned unexpected {}",
+                other.as_str()
+            )));
+        }
+    }
+
+    let mut buffer = vec![0_u8; 64 * 1024];
+    let mut local_eof = false;
+    loop {
+        tokio::select! {
+            read = socket.read(&mut buffer), if !local_eof => {
+                match read {
+                    Ok(0) => {
+                        client.send(id, MessageType::TcpEof, &TcpEof {}).await?;
+                        local_eof = true;
+                    }
+                    Ok(count) => client.send(
+                        id,
+                        MessageType::TcpData,
+                        &TcpData { data: buffer[..count].to_vec() },
+                    ).await?,
+                    Err(error) => return Err(error.into()),
+                }
+            }
+            message = inbound.recv() => {
+                let Some(message) = message else { break };
+                match message.t {
+                    MessageType::TcpData => {
+                        let data: TcpData = message.payload()?;
+                        socket.write_all(&data.data).await?;
+                    }
+                    MessageType::TcpEof => {
+                        let _: TcpEof = message.payload()?;
+                        socket.shutdown().await?;
+                    }
+                    MessageType::TcpClosed => {
+                        let _: TcpClosed = message.payload()?;
+                        break;
+                    }
+                    MessageType::TcpFailed => {
+                        let failed: TcpFailed = message.payload()?;
+                        return Err(MicrosandboxError::Runtime(format!(
+                            "sandbox TCP relay failed: {}",
+                            failed.error
+                        )));
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    let _ = client.send(id, MessageType::TcpClose, &TcpClose {}).await;
+    Ok(())
+}
+
 /// Build the best available runtime config for a sandbox the SDK did not
 /// create itself.
 ///
@@ -671,6 +918,68 @@ mod tests {
     use super::*;
     use crate::backend::{Backend, SandboxBackend};
     use crate::sandbox::{EnvVar, OciRootfsSource, RootDisk, SandboxBuilder, SandboxSpec};
+
+    #[tokio::test]
+    async fn cloud_bind_conflict_fails_before_remote_create() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let occupied = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let occupied_port = occupied.local_addr().unwrap().port();
+        let api = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let api_address = api.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = api.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let count = socket.read(&mut chunk).await.unwrap();
+                request.extend_from_slice(&chunk[..count]);
+            }
+            assert!(
+                String::from_utf8(request)
+                    .unwrap()
+                    .starts_with("GET /v1/capabilities ")
+            );
+            let body = r#"{"billing_enabled":false,"cloud_tcp_ports":true}"#;
+            socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                        body.len(), body
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            assert!(
+                tokio::time::timeout(Duration::from_millis(200), api.accept())
+                    .await
+                    .is_err(),
+                "bind failure must prevent POST /v1/sandboxes"
+            );
+        });
+
+        let backend =
+            Arc::new(CloudBackend::new(format!("http://{api_address}"), "test-key").unwrap());
+        let backend_dyn: Arc<dyn Backend> = backend.clone();
+        let mut config = base_cloud_config();
+        config
+            .spec
+            .network
+            .ports
+            .push(microsandbox_types::PublishedPortSpec {
+                host_port: occupied_port,
+                guest_port: 8080,
+                protocol: microsandbox_types::PortProtocol::Tcp,
+                host_bind: "127.0.0.1".to_string(),
+            });
+        let error = match backend.create(backend_dyn, config, true).await {
+            Ok(_) => panic!("occupied listener must fail cloud create"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, MicrosandboxError::Runtime(_)));
+        server.await.unwrap();
+    }
 
     #[tokio::test]
     async fn cloud_boot_error_is_absent_until_the_api_exposes_diagnostics() {
@@ -1150,7 +1459,7 @@ mod tests {
 
     #[cfg(feature = "net")]
     #[test]
-    fn cloud_create_request_rejects_published_ports() {
+    fn cloud_create_request_accepts_tcp_ports_and_rejects_udp() {
         let mut config = base_cloud_config();
         config
             .spec
@@ -1162,6 +1471,9 @@ mod tests {
                 protocol: microsandbox_types::PortProtocol::Tcp,
                 host_bind: std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST).to_string(),
             });
+        let req = CloudCreateBody::try_from(config.clone()).unwrap();
+        assert_eq!(req.envelope.spec.network.ports.len(), 1);
+        config.spec.network.ports[0].protocol = microsandbox_types::PortProtocol::Udp;
         let err = CloudCreateBody::try_from(config).unwrap_err();
         assert!(matches!(err, MicrosandboxError::Unsupported { .. }));
     }
