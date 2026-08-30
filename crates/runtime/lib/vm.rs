@@ -1392,6 +1392,38 @@ fn writeback_limited_disk_paths(vm: &VmConfig) -> RuntimeResult<Vec<PathBuf>> {
     Ok(paths)
 }
 
+/// virglrenderer init flags (virglrenderer.h) for the experimental virtio-gpu device.
+#[cfg(unix)]
+const VIRGL_RENDERER_VENUS: u32 = 1 << 6;
+#[cfg(unix)]
+const VIRGL_RENDERER_NO_VIRGL: u32 = 1 << 7;
+/// Guest-visible SHM window for virtio-gpu host-mapped blobs (256 MiB).
+#[cfg(unix)]
+const GPU_SHM_SIZE: usize = 1 << 28;
+
+/// `MSB_GPU=1` attaches a 2D-only virtio-gpu; `MSB_GPU=venus` also enables
+/// Venus (Vulkan passthrough via virglrenderer). Unset or anything else: no GPU.
+#[cfg(unix)]
+fn gpu_virgl_flags_from_env() -> Option<u32> {
+    match std::env::var("MSB_GPU").ok()?.as_str() {
+        "1" | "2d" => Some(VIRGL_RENDERER_NO_VIRGL),
+        "venus" => Some(VIRGL_RENDERER_NO_VIRGL | VIRGL_RENDERER_VENUS),
+        _ => None,
+    }
+}
+
+/// `MSB_GPU_DISPLAY=WIDTHxHEIGHT` sizes the single scanout (default 1920x1080).
+#[cfg(unix)]
+fn gpu_display_from_env() -> (u32, u32) {
+    std::env::var("MSB_GPU_DISPLAY")
+        .ok()
+        .and_then(|value| {
+            let (width, height) = value.split_once('x')?;
+            Some((width.parse().ok()?, height.parse().ok()?))
+        })
+        .unwrap_or((1920, 1080))
+}
+
 fn is_writeback_limited_disk(format: msb_krun::DiskImageFormat, read_only: bool) -> bool {
     !read_only && matches!(format, msb_krun::DiskImageFormat::Raw)
 }
@@ -1900,10 +1932,21 @@ fn build_vm(
     #[cfg(unix)]
     {
         builder = builder.console(|c| {
-            c.output(&kernel_log_path).custom(
+            let c = c.output(&kernel_log_path).custom(
                 microsandbox_protocol::AGENT_PORT_NAME,
                 Box::new(console_backend),
-            )
+            );
+            // Experimental: attach a virtio-gpu device so the guest gets a DRM
+            // node. Opt-in via MSB_GPU while the host display path is built out.
+            match gpu_virgl_flags_from_env() {
+                Some(flags) => {
+                    let (width, height) = gpu_display_from_env();
+                    c.gpu_virgl_flags(flags)
+                        .gpu_shm_size(GPU_SHM_SIZE)
+                        .gpu_display(width, height)
+                }
+                None => c,
+            }
         });
     }
     #[cfg(windows)]

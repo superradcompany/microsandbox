@@ -207,3 +207,8 @@ parking_lot = "0.12"
 rpassword = "7"
 russh = "0.62.4"
 russh-sftp = "2.3.0"
+
+# Local msb_krun with a `gpu_display` builder method (scanout configuration is
+# not exposed by the published 0.1.32 API). Upstream target: zerocore-ai/libkrun.
+[patch.crates-io]
+msb_krun = { path = "/Users/luotao/.cache/msb-omarchy/msb_krun-0.1.32-patched" }
