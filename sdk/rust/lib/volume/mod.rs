@@ -17,26 +17,34 @@ pub mod fs;
 pub use fs::{VolumeFs, VolumeFsReadStream, VolumeFsWriteSink};
 pub use microsandbox_types::{VolumeKind, VolumeSpec, VolumeSpec as VolumeConfig};
 
+#[cfg(feature = "local")]
 use std::fs::File;
-#[cfg(unix)]
+#[cfg(all(feature = "local", unix))]
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+#[cfg(feature = "local")]
 use microsandbox_image::ext4::{self, Ext4FormatOptions};
+#[cfg(feature = "local")]
 use sea_orm::ConnectionTrait;
+#[cfg(feature = "local")]
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, Set};
 
 use crate::backend::{
-    Backend, BackendKind, LocalBackend, VolumeCloudState, VolumeHandleCloudState,
-    VolumeHandleInner, VolumeHandleLocalState, VolumeInner, VolumeLocalState,
+    Backend, BackendKind, VolumeCloudState, VolumeHandleCloudState, VolumeHandleInner,
+    VolumeHandleLocalState, VolumeInner, VolumeLocalState,
 };
 use crate::{
     MicrosandboxError, MicrosandboxResult,
-    db::entity::{sandbox as sandbox_entity, volume as volume_entity},
     error::Operation,
     sandbox::{SandboxConfig, SandboxStatus, VolumeMount},
     size::Mebibytes,
+};
+#[cfg(feature = "local")]
+use crate::{
+    backend::LocalBackend,
+    db::entity::{sandbox as sandbox_entity, volume as volume_entity},
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -270,6 +278,7 @@ impl VolumeHandle {
     /// Panics if `backend` is not a [`LocalBackend`]; this is the local
     /// construction path and is only called from `get_local` / `list_local`,
     /// which have already routed through the local trait impl.
+    #[cfg(feature = "local")]
     pub(crate) fn from_local_model(backend: Arc<dyn Backend>, model: volume_entity::Model) -> Self {
         let labels = model
             .labels
@@ -568,6 +577,7 @@ impl std::fmt::Debug for VolumeHandle {
 /// Local create path. Inserts a DB record, creates the host directory, and
 /// returns a wrapped [`Volume`]. On directory-create failure rolls back the
 /// DB insert so we don't leak phantom rows.
+#[cfg(feature = "local")]
 pub(crate) async fn create_local(
     backend: Arc<dyn Backend>,
     config: VolumeConfig,
@@ -640,6 +650,7 @@ pub(crate) async fn create_local(
 
 /// Local get path. Loads a volume row by name and wraps it in a
 /// [`VolumeHandle`] bound to the supplied backend.
+#[cfg(feature = "local")]
 pub(crate) async fn get_local(
     backend: Arc<dyn Backend>,
     name: &str,
@@ -660,6 +671,7 @@ pub(crate) async fn get_local(
 }
 
 /// Local list path. Returns all volumes ordered newest-first.
+#[cfg(feature = "local")]
 pub(crate) async fn list_local(backend: Arc<dyn Backend>) -> MicrosandboxResult<Vec<VolumeHandle>> {
     let local_backend = backend
         .as_local()
@@ -678,6 +690,7 @@ pub(crate) async fn list_local(backend: Arc<dyn Backend>) -> MicrosandboxResult<
 }
 
 /// Local remove path. Deletes the DB record first, then the directory.
+#[cfg(feature = "local")]
 pub(crate) async fn remove_local(backend: Arc<dyn Backend>, name: &str) -> MicrosandboxResult<()> {
     let local_backend = backend
         .as_local()
@@ -713,6 +726,7 @@ pub(crate) async fn remove_local(backend: Arc<dyn Backend>, name: &str) -> Micro
 /// Materialize a volume under a temporary sibling directory, then atomically
 /// rename it into place. This keeps failed disk formatting from exposing a
 /// half-populated final volume path.
+#[cfg(feature = "local")]
 pub(crate) async fn materialize_volume_path(
     config: &VolumeConfig,
     path: &Path,
@@ -738,6 +752,7 @@ pub(crate) async fn materialize_volume_path(
     Ok(())
 }
 
+#[cfg(feature = "local")]
 pub(crate) async fn provision_volume_path(
     config: &VolumeConfig,
     path: &Path,
@@ -768,6 +783,7 @@ pub(crate) async fn provision_volume_path(
     }
 }
 
+#[cfg(feature = "local")]
 pub(crate) fn lock_volume_name(local: &LocalBackend, name: &str) -> MicrosandboxResult<File> {
     let volumes_dir = local.volumes_dir();
     std::fs::create_dir_all(&volumes_dir)?;
@@ -789,6 +805,7 @@ pub(crate) fn lock_volume_name(local: &LocalBackend, name: &str) -> Microsandbox
     Ok(file)
 }
 
+#[cfg(feature = "local")]
 fn lock_disk_volume_for_remove(handle: &VolumeHandle) -> MicrosandboxResult<Option<File>> {
     if handle.kind() != VolumeKind::Disk {
         return Ok(None);
@@ -830,6 +847,7 @@ fn lock_disk_volume_for_remove(handle: &VolumeHandle) -> MicrosandboxResult<Opti
     Ok(Some(file))
 }
 
+#[cfg(feature = "local")]
 async fn ensure_volume_not_referenced_by_active_sandbox<C>(
     db: &C,
     name: &str,

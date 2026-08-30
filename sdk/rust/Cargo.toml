@@ -14,74 +14,98 @@ path = "lib/lib.rs"
 [[bin]]
 name = "microsandbox"
 path = "bin/main.rs"
+required-features = ["local"]
 
 [features]
-default = ["download-binaries", "keyring", "net"]
+default = ["cloud", "download-binaries", "keyring", "local", "net"]
 # Exposes the archive walker to the fuzz harness (sdk/rust/fuzz). Never enabled in shipping builds.
-fuzzing = []
+fuzzing = ["local"]
+local = [
+    "dep:astral-tokio-tar",
+    "dep:async-compression",
+    "dep:blake3",
+    "dep:cap-primitives",
+    "dep:cap-std",
+    "dep:docker_credential",
+    "dep:flate2",
+    "dep:hex",
+    "dep:microsandbox-db",
+    "dep:microsandbox-filesystem",
+    "dep:microsandbox-image",
+    "dep:microsandbox-metrics",
+    "dep:microsandbox-migration",
+    "dep:microsandbox-runtime",
+    "dep:nix",
+    "dep:rand",
+    "dep:rayon",
+    "dep:reqwest",
+    "dep:sea-orm",
+    "dep:tar",
+    "dep:tempfile",
+]
+cloud = [
+    "dep:reqwest",
+    "dep:rustls",
+    "dep:rustls-platform-verifier",
+    "dep:tokio-tungstenite",
+]
 keyring = ["dep:dbus", "dep:keyring"]
 ssh = ["dep:anyhow", "dep:russh", "dep:russh-sftp"]
 download-binaries = [
-    "microsandbox-filesystem/download-binaries",
-    "microsandbox-runtime/download-binaries",
+    "local",
     "microsandbox-utils/http-client",
 ]
 embed-binaries = [
-    "microsandbox-filesystem/embed-binaries",
-    "microsandbox-runtime/embed-binaries",
+    "local",
 ]
-net = ["dep:microsandbox-network", "microsandbox-runtime/net"]
+net = ["dep:microsandbox-network", "microsandbox-runtime?/net"]
 
 [dependencies]
 anyhow = { workspace = true, optional = true }
-astral-tokio-tar.workspace = true
-async-compression = { workspace = true, features = ["tokio", "zstd", "gzip"] }
+astral-tokio-tar = { workspace = true, optional = true }
+async-compression = { workspace = true, features = ["tokio", "zstd", "gzip"], optional = true }
 base64.workspace = true
-blake3.workspace = true
+blake3 = { workspace = true, optional = true }
 bytes.workspace = true
-cap-primitives.workspace = true
-cap-std.workspace = true
+cap-primitives = { workspace = true, optional = true }
+cap-std = { workspace = true, optional = true }
 chrono.workspace = true
-ciborium.workspace = true
 crossterm.workspace = true
-dirs.workspace = true
-docker_credential = "1.4.0"
-flate2.workspace = true
+docker_credential = { version = "1.4.0", optional = true }
+flate2 = { workspace = true, optional = true }
 futures.workspace = true
-hex.workspace = true
+hex = { workspace = true, optional = true }
 libc.workspace = true
-microsandbox-db.workspace = true
+microsandbox-db = { workspace = true, optional = true }
 microsandbox-agent-client = { workspace = true, features = ["named-pipe", "uds"] }
-microsandbox-filesystem.workspace = true
-microsandbox-image.workspace = true
-microsandbox-metrics.workspace = true
-microsandbox-migration.workspace = true
-microsandbox-network = { workspace = true, optional = true }
+microsandbox-image = { workspace = true, optional = true }
+microsandbox-metrics = { workspace = true, optional = true }
+microsandbox-migration = { workspace = true, optional = true }
+microsandbox-network = { workspace = true, default-features = false, optional = true }
 microsandbox-protocol.workspace = true
-microsandbox-runtime.workspace = true
+microsandbox-runtime = { workspace = true, features = ["client"], optional = true }
 microsandbox-types.workspace = true
 microsandbox-utils.workspace = true
-nix = { workspace = true, features = ["process", "signal", "term"] }
+nix = { workspace = true, features = ["process", "signal", "term"], optional = true }
 notify.workspace = true
-rand.workspace = true
-rayon.workspace = true
-reqwest.workspace = true
-rustls.workspace = true
-rustls-platform-verifier.workspace = true
+rand = { workspace = true, optional = true }
+rayon = { workspace = true, optional = true }
+reqwest = { workspace = true, features = ["query"], optional = true }
+rustls = { workspace = true, optional = true }
+rustls-platform-verifier = { workspace = true, optional = true }
 russh = { workspace = true, optional = true }
 russh-sftp = { workspace = true, optional = true }
 scopeguard.workspace = true
-sea-orm.workspace = true
+sea-orm = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-tar.workspace = true
-tempfile.workspace = true
+tar = { workspace = true, optional = true }
+tempfile = { workspace = true, optional = true }
 thiserror.workspace = true
 tokio.workspace = true
-tokio-tungstenite.workspace = true
+tokio-tungstenite = { workspace = true, optional = true }
 tracing.workspace = true
-typed-builder.workspace = true
 typed-path.workspace = true
 zeroize.workspace = true
 
@@ -90,6 +114,9 @@ flate2.workspace = true
 microsandbox-utils.workspace = true
 tar.workspace = true
 tempfile.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+microsandbox-filesystem = { workspace = true, optional = true }
 
 [dev-dependencies]
 ipnetwork.workspace = true

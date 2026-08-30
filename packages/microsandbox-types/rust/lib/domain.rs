@@ -1670,6 +1670,12 @@ impl FromStr for SandboxLogLevel {
     }
 }
 
+impl std::fmt::Display for SandboxLogLevel {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 impl Serialize for VolumeMount {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeMap;

@@ -6,11 +6,13 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use microsandbox_image::{PullProgressHandle, RegistryAuth};
+#[cfg(feature = "local")]
+use microsandbox_image::PullProgressHandle;
 #[cfg(feature = "net")]
 use microsandbox_network::builder::{NetworkBuilder, SecretBuilder};
 #[cfg(feature = "net")]
 use microsandbox_network::policy::{NetworkPolicy, Rule};
+use microsandbox_types::RegistryAuth;
 use microsandbox_types::{CpuPlacement, EnvVar, PullPolicy, VsockRouteSpec, VsockSocketType};
 #[cfg(feature = "net")]
 use microsandbox_types::{PortProtocol, PublishedPortSpec};
@@ -25,9 +27,10 @@ use super::{
         RootDiskBuilder, RootfsSource, SecurityProfile, VolumeMount,
     },
 };
+#[cfg(feature = "local")]
+use crate::config::LocalConfig;
 use crate::{
-    LogLevel, MicrosandboxError, MicrosandboxResult, Operation, UnsupportedReason,
-    config::LocalConfig, size::Mebibytes,
+    LogLevel, MicrosandboxError, MicrosandboxResult, Operation, UnsupportedReason, size::Mebibytes,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -116,6 +119,7 @@ impl SandboxBuilder {
     /// This runs before caller-supplied builder methods, so explicit SDK and CLI options retain
     /// ordinary last-write-wins behavior. Root-disk defaults remain unresolved until local create,
     /// where the runtime knows the rootfs is OCI-backed and can persist the effective disk shape.
+    #[cfg(feature = "local")]
     pub(crate) fn with_local_defaults(mut self, local: &LocalConfig) -> Self {
         if let Err(error) = local.validate_sandbox_defaults() {
             self.build_error = Some(error);
@@ -1198,6 +1202,7 @@ impl SandboxBuilder {
     /// Open the deferred snapshot artifact and copy its pinned image
     /// reference, manifest digest, and upper-layer source path into the
     /// config. Internal — driven by [`build`](Self::build).
+    #[cfg(feature = "local")]
     async fn resolve_pending(&mut self) -> MicrosandboxResult<()> {
         let Some(snapshot_ref) = self.pending_snapshot.take() else {
             return Ok(());
@@ -1258,6 +1263,14 @@ impl SandboxBuilder {
         Ok(())
     }
 
+    #[cfg(not(feature = "local"))]
+    async fn resolve_pending(&mut self) -> MicrosandboxResult<()> {
+        if self.pending_snapshot.take().is_some() {
+            return Err(MicrosandboxError::local_only(Operation::SnapshotOps));
+        }
+        Ok(())
+    }
+
     fn has_explicit_rootfs_source(&self) -> bool {
         match &self.config.spec.image {
             RootfsSource::Oci(oci) => !oci.reference.is_empty() || oci.root_disk.is_some(),
@@ -1291,6 +1304,7 @@ impl SandboxBuilder {
     /// [`from_snapshot`](Self::from_snapshot), snapshot resolution
     /// happens inside the spawned task so this entry point stays
     /// synchronous.
+    #[cfg(feature = "local")]
     pub fn create_with_pull_progress(
         self,
     ) -> crate::MicrosandboxResult<(
@@ -1340,6 +1354,7 @@ impl SandboxBuilder {
 
     /// Like `create_with_pull_progress` but spawns the sandbox process in detached
     /// mode so the sandbox survives after the creating process exits.
+    #[cfg(feature = "local")]
     pub fn create_detached_with_pull_progress(
         self,
     ) -> crate::MicrosandboxResult<(

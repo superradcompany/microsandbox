@@ -49,7 +49,7 @@ pub fn init_tracing(log_level: Option<LogLevel>, ansi: bool) {
     if let Some(level) = log_level {
         // Silence oci_client logs — the crate logs the auth token in debug mode
         // See: https://github.com/oras-project/rust-oci-client/issues/254
-        let filter = EnvFilter::new(level.as_tracing_level().to_string())
+        let filter = EnvFilter::new(level.as_str())
             .add_directive("oci_client=info".parse::<Directive>().unwrap());
 
         tracing_subscriber::fmt()

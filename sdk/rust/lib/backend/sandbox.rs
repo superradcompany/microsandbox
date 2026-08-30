@@ -21,6 +21,7 @@ use super::Backend;
 use crate::MicrosandboxResult;
 use crate::agent::AgentClient;
 use crate::logs::{LogEntry, LogOptions, LogStreamOptions};
+#[cfg(feature = "local")]
 use crate::runtime::ProcessHandle;
 use crate::sandbox::exec::{ExecHandle, ExecOptions, ExecOutput};
 use crate::sandbox::fs::{FsEntry, FsMetadata, FsReadStream, FsWriteSink};
@@ -31,6 +32,7 @@ use crate::sandbox::{
 
 // Keep the pre-split path `crate::backend::sandbox::cloud_status_to_sandbox_status`
 // working for callers like `sandbox/handle.rs`.
+#[cfg(feature = "cloud")]
 pub(crate) use super::cloud::sandbox::{
     cloud_status_to_sandbox_status, sandbox_config_from_cloud_spec,
 };
@@ -67,6 +69,7 @@ pub struct SandboxLocalState {
     /// SQLite row id for this sandbox.
     pub db_id: i32,
     /// Owned libkrun process handle, when this `Sandbox` owns the lifecycle.
+    #[cfg(feature = "local")]
     pub handle: Option<Arc<tokio::sync::Mutex<ProcessHandle>>>,
     /// UDS connection to the in-VM agentd relay.
     pub client: Arc<AgentClient>,

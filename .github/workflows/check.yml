@@ -393,7 +393,7 @@ jobs:
           # The KVM job supplies both the host runtime and Agentd explicitly,
           # so this archive needs neither download nor embedded binary features.
           mold -run cargo nextest archive -p microsandbox --tests \
-            --no-default-features --features keyring,net \
+            --no-default-features --features keyring,local,net \
             --archive-file artifacts/rust-integration-tests.tar.zst
 
       - name: Upload nextest archive
@@ -548,7 +548,7 @@ jobs:
           $ErrorActionPreference = "Stop"
           . "$env:GITHUB_WORKSPACE\vendor\libkrunfw\scripts\msvc-env.ps1"
           Set-MsvcEnvironment -Architecture ${{ matrix.vs_arch }} -HostArchitecture ${{ matrix.vs_host_arch }}
-          cargo +stable test --no-default-features --features net -p microsandbox-runtime --lib --target ${{ matrix.rust_target }} test_bind_rootfs_backend_exposes_host_file_and_init
+          cargo +stable test --no-default-features --features net,runner -p microsandbox-runtime --lib --target ${{ matrix.rust_target }} test_bind_rootfs_backend_exposes_host_file_and_init
 
       - name: Test bind rootfs patches
         shell: pwsh
@@ -556,7 +556,7 @@ jobs:
           $ErrorActionPreference = "Stop"
           . "$env:GITHUB_WORKSPACE\vendor\libkrunfw\scripts\msvc-env.ps1"
           Set-MsvcEnvironment -Architecture ${{ matrix.vs_arch }} -HostArchitecture ${{ matrix.vs_host_arch }}
-          cargo +stable test --no-default-features --features net -p microsandbox --lib --target ${{ matrix.rust_target }} sandbox::patch::tests::bind_patch_
+          cargo +stable test --no-default-features --features local,net -p microsandbox --lib --target ${{ matrix.rust_target }} sandbox::patch::tests::bind_patch_
 
       - name: Test Windows DNS resolver
         shell: pwsh
@@ -749,6 +749,13 @@ jobs:
 
       - name: Clippy
         run: cargo +stable clippy --workspace --exclude microsandbox-agentd -- -D warnings
+
+      - name: Check Rust SDK feature surfaces
+        run: |
+          cargo +stable check -p microsandbox --no-default-features --features cloud,net
+          cargo +stable check -p microsandbox --no-default-features --features local,net
+          cargo +stable check -p microsandbox-runtime --no-default-features --features client,net
+          cargo +stable check -p microsandbox-network --no-default-features
 
       - name: Docs
         env:

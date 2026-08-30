@@ -313,6 +313,7 @@ impl VolumeFsWriteSink {
 // Module: local (free fn impls called by LocalBackend's VolumeBackend impl)
 //--------------------------------------------------------------------------------------------------
 
+#[cfg(feature = "local")]
 pub(crate) mod local {
     //! Local FS ops keyed by `(volume_name, rel_path)`.
     //!

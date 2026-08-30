@@ -513,6 +513,7 @@ impl<'a> SandboxFsOps<'a> {
     /// connection: local callers should go through `Sandbox::fs` on a live
     /// sandbox; cloud backends do not expose them at all.
     fn unsupported_reason(&self) -> UnsupportedReason {
+        #[cfg(feature = "local")]
         if self.backend.as_local().is_some() {
             return UnsupportedReason::UseInstead(Operation::SandboxFs);
         }

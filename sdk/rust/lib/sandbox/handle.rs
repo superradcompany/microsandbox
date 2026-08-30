@@ -8,17 +8,19 @@
 
 use std::sync::Arc;
 
+#[cfg(feature = "cloud")]
+use crate::backend::{CloudCreateSandboxResponse, SandboxCloudState};
+#[cfg(feature = "local")]
+use crate::db::entity::sandbox as sandbox_entity;
 use crate::{
     MicrosandboxError, MicrosandboxResult,
-    backend::{
-        Backend, CloudCreateSandboxResponse, SandboxCloudState, SandboxHandleCloudState,
-        SandboxHandleInner, SandboxHandleLocalState,
-    },
-    db::entity::sandbox as sandbox_entity,
+    backend::{Backend, SandboxHandleCloudState, SandboxHandleInner, SandboxHandleLocalState},
     error::Operation,
 };
 
-use super::{Sandbox, SandboxConfig, SandboxModificationBuilder, SandboxStatus, SandboxStopResult};
+#[cfg(feature = "local")]
+use super::SandboxModificationBuilder;
+use super::{Sandbox, SandboxConfig, SandboxStatus, SandboxStopResult};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -59,6 +61,7 @@ pub struct SandboxHandle {
 
 impl SandboxHandle {
     /// Build a handle from a local sandbox DB row + active PID.
+    #[cfg(feature = "local")]
     pub(crate) fn from_local_model(
         backend: Arc<dyn Backend>,
         model: sandbox_entity::Model,
@@ -85,6 +88,7 @@ impl SandboxHandle {
     /// Preserves the cloud's optional curated spec as JSON for the
     /// `config_json()` inspection view. An absent spec is represented as JSON
     /// `null`; it is not replaced with a fabricated SDK configuration.
+    #[cfg(feature = "cloud")]
     pub(crate) fn from_cloud(
         backend: Arc<dyn Backend>,
         cloud: CloudCreateSandboxResponse,
@@ -220,6 +224,7 @@ impl SandboxHandle {
     /// The builder fetches a fresh handle during [`dry_run`](SandboxModificationBuilder::dry_run)
     /// so planning uses current status and persisted config rather than this
     /// handle's possibly stale snapshot.
+    #[cfg(feature = "local")]
     pub fn modify(&self) -> SandboxModificationBuilder {
         SandboxModificationBuilder::new(self.backend.clone(), self.name.clone())
     }
@@ -298,6 +303,7 @@ impl SandboxHandle {
     }
 
     /// Get the latest metrics snapshot for this sandbox. **Local handles only**.
+    #[cfg(feature = "local")]
     pub async fn metrics(&self) -> MicrosandboxResult<super::SandboxMetrics> {
         let local = self
             .local()
@@ -375,6 +381,7 @@ impl SandboxHandle {
         }
 
         match &self.inner {
+            #[cfg(feature = "local")]
             SandboxHandleInner::Local(local) => {
                 let local_backend = self.backend.as_local().ok_or_else(|| {
                     MicrosandboxError::local_only(Operation::SandboxHandleConnect)
@@ -397,30 +404,44 @@ impl SandboxHandle {
                     config,
                 ))
             }
+            #[cfg(not(feature = "local"))]
+            SandboxHandleInner::Local(_) => Err(MicrosandboxError::local_only(
+                Operation::SandboxHandleConnect,
+            )),
             SandboxHandleInner::Cloud(cloud) => {
-                // The cloud handle stores the optional curated spec exactly as
-                // returned by the API. Decode it on reconnect, falling back to
-                // SDK defaults when the server intentionally omitted it.
-                let spec = serde_json::from_str(&cloud.config_json)?;
-                let config =
-                    crate::backend::sandbox::sandbox_config_from_cloud_spec(&self.name, spec);
-                let created_at = cloud.created_at.ok_or_else(|| {
-                    MicrosandboxError::Runtime(format!(
-                        "cloud sandbox {:?} is missing its creation timestamp",
-                        self.name
-                    ))
-                })?;
+                #[cfg(not(feature = "cloud"))]
+                {
+                    let _ = cloud;
+                    return Err(MicrosandboxError::cloud_only(
+                        Operation::SandboxHandleConnect,
+                    ));
+                }
+                #[cfg(feature = "cloud")]
+                {
+                    // The cloud handle stores the optional curated spec exactly as
+                    // returned by the API. Decode it on reconnect, falling back to
+                    // SDK defaults when the server intentionally omitted it.
+                    let spec = serde_json::from_str(&cloud.config_json)?;
+                    let config =
+                        crate::backend::sandbox::sandbox_config_from_cloud_spec(&self.name, spec);
+                    let created_at = cloud.created_at.ok_or_else(|| {
+                        MicrosandboxError::Runtime(format!(
+                            "cloud sandbox {:?} is missing its creation timestamp",
+                            self.name
+                        ))
+                    })?;
 
-                Ok(Sandbox::from_cloud_state(
-                    self.backend.clone(),
-                    SandboxCloudState {
-                        id: cloud.id.clone(),
-                        org_id: cloud.org_id.clone(),
-                        created_at,
-                    },
-                    self.name.clone(),
-                    config,
-                ))
+                    Ok(Sandbox::from_cloud_state(
+                        self.backend.clone(),
+                        SandboxCloudState {
+                            id: cloud.id.clone(),
+                            org_id: cloud.org_id.clone(),
+                            created_at,
+                        },
+                        self.name.clone(),
+                        config,
+                    ))
+                }
             }
         }
     }
@@ -430,6 +451,7 @@ impl SandboxHandle {
     /// Connects to the running sandbox and sends `core.ping`. Stopped sandboxes
     /// are not started implicitly; call [`start`](Self::start) first when that
     /// is the desired behavior.
+    #[cfg(feature = "local")]
     pub async fn ping(&self) -> MicrosandboxResult<super::SandboxPingResult> {
         self.require_running("ping")?;
         self.connect().await?.ping().await
@@ -440,6 +462,7 @@ impl SandboxHandle {
     /// Connects to the running sandbox and sends `core.touch`. Stopped sandboxes
     /// are not started implicitly; call [`start`](Self::start) first when that
     /// is the desired behavior.
+    #[cfg(feature = "local")]
     pub async fn touch(&self) -> MicrosandboxResult<super::SandboxTouchResult> {
         self.require_running("touch")?;
         self.connect().await?.touch().await
@@ -451,6 +474,7 @@ impl SandboxHandle {
     /// The sandbox must be stopped (or crashed); running sandboxes are
     /// rejected with `MicrosandboxError::SnapshotSandboxRunning`. **Local
     /// handles only** — cloud snapshot semantics are deferred.
+    #[cfg(feature = "local")]
     pub async fn snapshot(
         &self,
         name: &str,
@@ -490,7 +514,7 @@ impl SandboxHandle {
                 // Windows: the DB can record the guest poweroff while the VM
                 // process never exits; a successful stop must mean "no
                 // process".
-                #[cfg(windows)]
+                #[cfg(all(feature = "local", windows))]
                 current.reap_leaked_local_runtime().await?;
                 return Ok(());
             }
@@ -619,6 +643,7 @@ impl SandboxHandle {
     /// backend trait so cloud handles hit `DELETE /v1/sandboxes/by-name/:name`.
     pub async fn remove(&self) -> MicrosandboxResult<()> {
         match &self.inner {
+            #[cfg(feature = "local")]
             SandboxHandleInner::Local(_) => {
                 let refreshed = self.refresh().await?;
                 let local = refreshed
@@ -643,10 +668,14 @@ impl SandboxHandle {
                 // process. Deleting the row and run records now would orphan
                 // it while it keeps serving this name's agent pipes, so kill
                 // it (identity-checked) or fail before touching any state.
-                #[cfg(windows)]
+                #[cfg(all(feature = "local", windows))]
                 super::reap_leaked_runtime_process(local_backend, local.db_id, &self.name).await?;
                 super::remove_local_persisted_sandbox(local_backend, &self.name, local.db_id).await
             }
+            #[cfg(not(feature = "local"))]
+            SandboxHandleInner::Local(_) => Err(MicrosandboxError::local_only(
+                Operation::SandboxHandleRemove,
+            )),
             SandboxHandleInner::Cloud(_) => {
                 self.backend
                     .sandboxes()
@@ -658,7 +687,7 @@ impl SandboxHandle {
 
     /// Kill any leftover VM process still backing this local sandbox after
     /// its DB row went terminal. No-op for cloud handles.
-    #[cfg(windows)]
+    #[cfg(all(feature = "local", windows))]
     async fn reap_leaked_local_runtime(&self) -> MicrosandboxResult<()> {
         let Some(local) = self.local() else {
             return Ok(());
