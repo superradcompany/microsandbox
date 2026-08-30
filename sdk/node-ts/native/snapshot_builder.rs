@@ -3,7 +3,7 @@ use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
 use crate::error::to_napi_error;
-use crate::snapshot::JsSnapshot;
+use crate::snapshot::{JsSnapshot, JsSnapshotArchive};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -157,6 +157,24 @@ impl JsSnapshotBuilder {
             .ok_or_else(|| napi::Error::from_reason("SnapshotBuilder already consumed"))?;
         let snap = b.create().await.map_err(to_napi_error)?;
         Ok(JsSnapshot::from_rust(snap))
+    }
+
+    /// Capture directly to an archive without installing a snapshot artifact.
+    #[napi(js_name = "createArchive")]
+    pub async unsafe fn create_archive(
+        &mut self,
+        out: String,
+        plain_tar: Option<bool>,
+    ) -> Result<JsSnapshotArchive> {
+        let builder = self
+            .inner
+            .take()
+            .ok_or_else(|| napi::Error::from_reason("SnapshotBuilder already consumed"))?;
+        let archive = builder
+            .create_archive(out, plain_tar.unwrap_or(false))
+            .await
+            .map_err(to_napi_error)?;
+        Ok(JsSnapshotArchive::from_rust(archive))
     }
 }
 

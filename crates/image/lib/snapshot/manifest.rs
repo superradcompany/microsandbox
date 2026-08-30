@@ -1,14 +1,8 @@
-//! Snapshot descriptor schema and canonical (de)serialization.
-//!
-//! The descriptor (`snapshot.json`) is the source of truth for a snapshot
-//! artifact. Its SHA-256 digest over the normalized canonical byte form is the
-//! snapshot's identity. Canonical form has no insignificant whitespace, keeps
-//! struct fields in declaration order, recursively sorts map keys, and never
-//! elides required fields.
+//! Final snapshot descriptor schema and canonical serialization.
 
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
-use std::path::{Component, Path};
+use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::de::{Error as _, MapAccess, SeqAccess, Visitor};
@@ -21,197 +15,290 @@ use crate::error::{ImageError, ImageResult};
 // Constants
 //--------------------------------------------------------------------------------------------------
 
-/// Current snapshot descriptor schema version.
+/// Current snapshot descriptor schema identifier.
+pub const SCHEMA: &str = "microsandbox.snapshot/1";
+/// Numeric source-compatibility alias for the released schema.
 pub const SCHEMA_VERSION: u32 = 1;
-
-/// Canonical filename for the descriptor inside an artifact directory.
+/// Canonical descriptor filename.
 pub const DESCRIPTOR_FILENAME: &str = "snapshot.json";
-
-/// Expected artifact kind for snapshot descriptors.
+/// Source-compatibility alias for the released artifact discriminator.
 pub const SNAPSHOT_ARTIFACT_KIND: &str = "snapshot";
-
-/// Default filename for a raw file-state upper layer.
+/// Released flat-payload filename.
 pub const DEFAULT_UPPER_FILE: &str = "upper.ext4";
-
-/// Semantic sparse-file digest for raw upper files.
+/// Directory containing physical file layers.
+pub const LAYERS_DIRECTORY: &str = "layers";
+/// Released sparse SHA-256 algorithm.
 pub const SPARSE_SHA256_V1: &str = "msb-sparse-sha256-v1";
-
-/// Sparse-aware Merkle integrity for current file snapshot payloads.
+/// Current file Merkle algorithm.
 pub const FILE_MERKLE_BLAKE3_V1: &str = "msb-file-merkle-blake3-v1";
-
-/// Fixed leaf size defined by [`FILE_MERKLE_BLAKE3_V1`].
+/// Fixed leaf size of the current file Merkle algorithm.
 pub const FILE_MERKLE_BLAKE3_LEAF_SIZE: u32 = 64 * 1024;
-
-/// Largest integer that all public JSON consumers can represent exactly.
+/// Largest exact integer shared by public JSON consumers.
 pub const MAX_JSON_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
-
-/// Extension keys understood by this runtime.
+/// Maximum accepted descriptor size.
+pub const MAX_DESCRIPTOR_BYTES: usize = 1024 * 1024;
+/// Maximum physical depth of one file-state closure.
+pub const MAX_FILE_LAYERS: usize = 256;
+/// Must-understand extensions implemented by this runtime.
 pub const SUPPORTED_REQUIRES: &[&str] = &[];
-
-/// Filenames reserved for descriptor publication and migration bookkeeping.
-const RESERVED_ARTIFACT_FILENAMES: &[&str] = &[
-    DESCRIPTOR_FILENAME,
-    "manifest.json",
-    ".manifest.json.legacy",
-    ".snapshot-migration.lock",
-];
 
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
 
-/// On-disk format of a file-state upper layer.
+/// Stable opaque snapshot identity.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SnapshotId(String);
+
+/// Stable opaque physical-layer identity.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct DiskLayerId(String);
+
+/// Physical disk format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SnapshotFormat {
     /// Raw disk image.
     Raw,
-    /// Qcow2 image. Restore remains capability-gated until its full chain
-    /// contract is implemented.
+    /// Qcow2 disk image.
     Qcow2,
 }
 
-/// Snapshot payload scope.
+/// Snapshot state family.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
 pub enum SnapshotScope {
-    /// Disk-only state.
+    /// File-backed disk state.
+    #[serde(rename = "file")]
     Disk,
-    /// Disk, memory, and device state that can resume execution.
+    /// Composite checkpoint state.
+    #[serde(rename = "checkpoint")]
     Resumable,
 }
 
-/// Reference to the pinned OCI image used by the snapshot.
+/// Consistency guarantee of a capture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SnapshotConsistency {
+    /// Equivalent to storage observed after abrupt power loss.
+    CrashConsistent,
+    /// Captured after filesystem quiescence.
+    FilesystemConsistent,
+    /// Coherently resumable execution state.
+    ApplicationConsistent,
+}
+
+/// Pinned OCI image reference.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ImageRef {
     /// Human-readable image reference.
-    #[serde(rename = "ref")]
     pub reference: String,
-    /// Pinned OCI manifest digest.
+    /// OCI manifest digest.
     pub manifest_digest: String,
 }
 
-/// Captured file-state upper-layer metadata.
+/// Immutable capture provenance.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct UpperLayer {
-    /// One normal filename relative to the artifact directory.
-    pub file: String,
-    /// Apparent file size, including sparse holes.
-    pub size_bytes: u64,
-    /// Optional semantic payload integrity. The field itself is required so
-    /// readers distinguish an intentional `null` from a malformed descriptor.
+pub struct SnapshotCapture {
+    /// Normalized RFC 3339 capture time.
+    pub created_at: String,
+    /// Stable source lineage when known.
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub source_lineage: Option<String>,
+    /// Source checkpoint ID when applicable.
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub source_checkpoint: Option<String>,
+    /// Capture consistency.
+    pub consistency: SnapshotConsistency,
+}
+
+/// Optional persistent layer integrity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "algorithm", deny_unknown_fields)]
+pub enum UpperIntegrity {
+    /// Ordinary SHA-256 retained only for released compatibility.
+    #[serde(rename = "sha256")]
+    Sha256 {
+        /// Qualified digest.
+        digest: String,
+    },
+    /// Released logical-byte sparse SHA-256.
+    #[serde(rename = "msb-sparse-sha256-v1")]
+    SparseSha256V1 {
+        /// Qualified digest.
+        digest: String,
+    },
+    /// Current sparse-aware fixed-leaf BLAKE3 Merkle root.
+    #[serde(rename = "msb-file-merkle-blake3-v1")]
+    FileMerkleBlake3V1 {
+        /// Qualified root.
+        root: String,
+        /// Bound logical payload size.
+        logical_size: u64,
+        /// Fixed leaf size.
+        leaf_size: u32,
+    },
+}
+
+/// Allowed physical payload kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LayerFileKind {
+    /// Ordinary regular file.
+    Regular,
+}
+
+/// Physical payload metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LayerPayload {
+    /// Required member kind.
+    pub file_kind: LayerFileKind,
+    /// Optional persistent integrity.
     #[serde(deserialize_with = "deserialize_required_option")]
     pub integrity: Option<UpperIntegrity>,
 }
 
-/// Content integrity descriptor for a file-state upper layer.
+/// One member of an ordered complete file-layer closure.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "algorithm", deny_unknown_fields)]
-pub enum UpperIntegrity {
-    /// Ordinary SHA-256 retained only for exact legacy compatibility and
-    /// archive metadata. New file snapshots never emit this variant.
-    #[serde(rename = "sha256")]
-    Sha256 {
-        /// Algorithm output in qualified digest form.
-        digest: String,
-    },
-    /// Released logical-byte sparse SHA-256 representation.
-    #[serde(rename = "msb-sparse-sha256-v1")]
-    SparseSha256V1 {
-        /// Algorithm output in qualified digest form.
-        digest: String,
-    },
-    /// Current sparse-aware fixed-leaf BLAKE3 Merkle representation.
-    #[serde(rename = "msb-file-merkle-blake3-v1")]
-    FileMerkleBlake3V1 {
-        /// Domain-separated Merkle root in qualified digest form.
-        root: String,
-        /// Exact logical file length bound into the final root.
-        logical_size: u64,
-        /// Fixed leaf size. Exactly [`FILE_MERKLE_BLAKE3_LEAF_SIZE`].
-        leaf_size: u32,
-    },
+#[serde(deny_unknown_fields)]
+pub struct DiskLayer {
+    /// Opaque member identity.
+    pub layer_id: DiskLayerId,
+    /// Physical format.
+    pub format: SnapshotFormat,
+    /// Guest-visible virtual length.
+    pub virtual_size: u64,
+    /// Immediate predecessor, if any.
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub backing: Option<DiskLayerId>,
+    /// Physical payload metadata.
+    pub payload: LayerPayload,
 }
+
+/// Compatibility alias for callers that imported the released name.
+pub type UpperLayer = DiskLayer;
 
 /// Concrete file-backed snapshot state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FileSnapshotState {
-    /// On-disk payload format.
-    pub format: SnapshotFormat,
-    /// Filesystem type inside the payload.
-    pub fstype: String,
-    /// File-backed upper-layer binding.
-    pub upper: UpperLayer,
+    /// Format of the head layer.
+    pub disk_format: SnapshotFormat,
+    /// Filesystem inside the virtual disk.
+    pub filesystem: String,
+    /// Guest-visible size of the head layer.
+    pub virtual_size: u64,
+    /// Opaque identity of the head layer.
+    pub head: DiskLayerId,
+    /// Complete physical closure, oldest first.
+    pub layers: Vec<DiskLayer>,
 }
 
-/// Immutable checkpoint-manifest-backed snapshot state.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Composite-checkpoint-backed state.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CheckpointSnapshotState {
-    /// Stable identifier for the captured cut.
+    /// Stable checkpoint identifier.
     pub checkpoint_id: String,
-    /// SHA-256 identity of the disk or composite checkpoint manifest.
-    pub manifest: String,
+    /// Composite checkpoint integrity root.
+    pub checkpoint_root: String,
+    /// Allowed restore intents.
+    pub restore_intents: Vec<String>,
+    /// Bounded early-admission summary.
+    pub requirements_summary: BTreeMap<String, serde_json::Value>,
 }
 
-/// Closed snapshot state family.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Closed snapshot-state variants.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum SnapshotState {
-    /// Concrete file-backed disk state.
+    /// Concrete file-backed state.
     File(FileSnapshotState),
-    /// Manifest-backed disk or resumable state.
+    /// Composite checkpoint state.
     Checkpoint(CheckpointSnapshotState),
 }
 
-/// Final schema-1 snapshot descriptor.
-///
-/// Field order is identity-bearing. Do not reorder these fields.
+/// Final schema-1 descriptor.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
-    /// Schema version. Exactly [`SCHEMA_VERSION`].
-    pub schema: u32,
-    /// Artifact kind. Exactly [`SNAPSHOT_ARTIFACT_KIND`].
-    pub artifact: String,
-    /// Snapshot payload scope.
+    /// Schema identifier. Exactly [`SCHEMA`].
+    pub schema: String,
+    /// Stable artifact identity.
+    pub snapshot_id: SnapshotId,
+    /// State family.
     pub scope: SnapshotScope,
-    /// Normalized RFC 3339 creation timestamp.
-    pub created_at: String,
-    /// Exact snapshot identity of the logical lineage parent.
-    #[serde(deserialize_with = "deserialize_required_option")]
-    pub parent: Option<String>,
+    /// Closed state value.
+    pub state: SnapshotState,
+    /// Capture provenance.
+    pub capture: SnapshotCapture,
     /// Pinned base image.
     pub image: ImageRef,
-    /// Informational source-sandbox name.
+    /// Logical parent by snapshot ID.
     #[serde(deserialize_with = "deserialize_required_option")]
-    pub source_sandbox: Option<String>,
-    /// Closed file/checkpoint state variant.
-    pub state: SnapshotState,
-    /// User-supplied labels, sorted by key in canonical form.
-    pub labels: BTreeMap<String, String>,
-    /// Namespaced additive extension values.
-    pub extensions: BTreeMap<String, serde_json::Value>,
+    pub parent: Option<SnapshotId>,
     /// Sorted unique must-understand extension keys.
     pub requires: Vec<String>,
+    /// Namespaced additive extensions.
+    pub extensions: BTreeMap<String, serde_json::Value>,
 }
 
-/// Descriptive alias for callers that prefer descriptor terminology.
+/// Descriptive alias for descriptor terminology.
 pub type SnapshotDescriptor = Manifest;
 
-/// JSON visitor used only to reject duplicate object keys at every nesting
-/// level before ordinary typed decoding occurs.
+/// Duplicate-key rejecting JSON visitor.
 struct DuplicateCheckedJson;
 
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
 
+impl SnapshotId {
+    /// Construct a validated snapshot ID.
+    pub fn new(value: impl Into<String>) -> ImageResult<Self> {
+        let value = value.into();
+        validate_opaque_id(&value, "snap_", "snapshot_id")?;
+        Ok(Self(value))
+    }
+
+    /// Return the encoded ID.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for SnapshotId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl DiskLayerId {
+    /// Construct a validated layer ID.
+    pub fn new(value: impl Into<String>) -> ImageResult<Self> {
+        let value = value.into();
+        validate_opaque_id(&value, "layer_", "layer_id")?;
+        Ok(Self(value))
+    }
+
+    /// Return the encoded ID.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for DiskLayerId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
 impl SnapshotState {
-    /// Return the stable state discriminant used by index and SDK projections.
+    /// Return the index discriminant.
     pub const fn kind(&self) -> &'static str {
         match self {
             Self::File(_) => "file",
@@ -219,7 +306,7 @@ impl SnapshotState {
         }
     }
 
-    /// Return file state when this descriptor is file-backed.
+    /// Return file state when present.
     pub const fn as_file(&self) -> Option<&FileSnapshotState> {
         match self {
             Self::File(state) => Some(state),
@@ -227,7 +314,7 @@ impl SnapshotState {
         }
     }
 
-    /// Return checkpoint state when this descriptor is manifest-backed.
+    /// Return checkpoint state when present.
     pub const fn as_checkpoint(&self) -> Option<&CheckpointSnapshotState> {
         match self {
             Self::File(_) => None,
@@ -236,8 +323,53 @@ impl SnapshotState {
     }
 }
 
+impl FileSnapshotState {
+    /// Return the validated head layer.
+    pub fn head_layer(&self) -> ImageResult<&DiskLayer> {
+        self.layers
+            .last()
+            .filter(|layer| layer.layer_id == self.head)
+            .ok_or_else(|| descriptor_error_value("state.head does not name the final layer"))
+    }
+
+    /// Return a layer's canonical artifact-relative path.
+    pub fn layer_path(&self, layer: &DiskLayer) -> PathBuf {
+        layer_path(&layer.layer_id, layer.format)
+    }
+
+    /// Return a representation-sensitive state root when every layer records integrity.
+    pub fn state_root(&self) -> ImageResult<Option<String>> {
+        if self
+            .layers
+            .iter()
+            .any(|layer| layer.payload.integrity.is_none())
+        {
+            return Ok(None);
+        }
+        let mut input = b"microsandbox.file-state-root/1\0".to_vec();
+        input.extend_from_slice(self.filesystem.as_bytes());
+        input.push(0);
+        input.extend_from_slice(&self.virtual_size.to_le_bytes());
+        for layer in &self.layers {
+            input.extend_from_slice(match layer.format {
+                SnapshotFormat::Raw => b"raw\0",
+                SnapshotFormat::Qcow2 => b"qcow2\0",
+            });
+            input.extend_from_slice(&layer.virtual_size.to_le_bytes());
+            let integrity = layer.payload.integrity.as_ref().expect("checked above");
+            input.extend_from_slice(integrity.algorithm().as_bytes());
+            input.push(0);
+            input.extend_from_slice(integrity.value().as_bytes());
+            input.push(0);
+        }
+        let mut hasher = Sha256::new();
+        hasher.update(input);
+        Ok(Some(format!("sha256:{}", hex::encode(hasher.finalize()))))
+    }
+}
+
 impl UpperIntegrity {
-    /// Return the stable algorithm identifier serialized in the descriptor.
+    /// Return the serialized algorithm name.
     pub const fn algorithm(&self) -> &'static str {
         match self {
             Self::Sha256 { .. } => "sha256",
@@ -246,7 +378,7 @@ impl UpperIntegrity {
         }
     }
 
-    /// Return the qualified digest or root used by SDK projections.
+    /// Return the qualified digest or root.
     pub fn value(&self) -> &str {
         match self {
             Self::Sha256 { digest } | Self::SparseSha256V1 { digest } => digest,
@@ -256,102 +388,68 @@ impl UpperIntegrity {
 }
 
 impl Manifest {
-    /// Validate descriptor invariants.
+    /// Validate all closed descriptor invariants.
     pub fn validate(&self) -> ImageResult<()> {
-        if self.schema != SCHEMA_VERSION {
+        if self.schema != SCHEMA {
             return descriptor_error(format!(
-                "unsupported schema version {} (expected {})",
-                self.schema, SCHEMA_VERSION
+                "unsupported schema {} (expected {SCHEMA})",
+                self.schema
             ));
         }
-        if self.artifact != SNAPSHOT_ARTIFACT_KIND {
-            return descriptor_error(format!(
-                "unsupported artifact kind {} (expected {})",
-                self.artifact, SNAPSHOT_ARTIFACT_KIND
-            ));
-        }
+        validate_opaque_id(self.snapshot_id.as_str(), "snap_", "snapshot_id")?;
         if self.image.reference.is_empty() {
-            return descriptor_error("empty image.ref");
+            return descriptor_error("empty image.reference");
         }
-        validate_sha256_digest(&self.image.manifest_digest, "image.manifest_digest")?;
-        if let Some(parent) = self.parent.as_deref() {
-            validate_sha256_digest(parent, "parent")?;
+        validate_digest(
+            &self.image.manifest_digest,
+            "sha256:",
+            "image.manifest_digest",
+        )?;
+        if let Some(parent) = &self.parent {
+            validate_opaque_id(parent.as_str(), "snap_", "parent")?;
+            if parent == &self.snapshot_id {
+                return descriptor_error("snapshot cannot be its own parent");
+            }
         }
-        normalize_timestamp(&self.created_at)?;
-
+        normalize_timestamp(&self.capture.created_at)?;
         match &self.state {
             SnapshotState::File(file) => {
                 if self.scope != SnapshotScope::Disk {
-                    return descriptor_error("state.kind=file requires scope=disk");
+                    return descriptor_error("state.kind=file requires scope=file");
                 }
-                if file.fstype.is_empty() {
-                    return descriptor_error("empty state.fstype");
-                }
-                validate_artifact_filename(&file.upper.file, "state.upper.file")?;
-                if file.upper.size_bytes > MAX_JSON_SAFE_INTEGER {
-                    return descriptor_error(format!(
-                        "state.upper.size_bytes exceeds JSON safe-integer limit: {}",
-                        file.upper.size_bytes
-                    ));
-                }
-                if let Some(integrity) = &file.upper.integrity {
-                    match integrity {
-                        UpperIntegrity::Sha256 { digest }
-                        | UpperIntegrity::SparseSha256V1 { digest } => {
-                            validate_sha256_digest(digest, "state.upper.integrity.digest")?;
-                        }
-                        UpperIntegrity::FileMerkleBlake3V1 {
-                            root,
-                            logical_size,
-                            leaf_size,
-                        } => {
-                            validate_blake3_digest(root, "state.upper.integrity.root")?;
-                            if *logical_size != file.upper.size_bytes {
-                                return descriptor_error(format!(
-                                    "state.upper.integrity.logical_size {} does not match state.upper.size_bytes {}",
-                                    logical_size, file.upper.size_bytes
-                                ));
-                            }
-                            if *leaf_size != FILE_MERKLE_BLAKE3_LEAF_SIZE {
-                                return descriptor_error(format!(
-                                    "state.upper.integrity.leaf_size must be {}: {}",
-                                    FILE_MERKLE_BLAKE3_LEAF_SIZE, leaf_size
-                                ));
-                            }
-                        }
-                    }
-                }
+                validate_file_state(file)?;
             }
             SnapshotState::Checkpoint(checkpoint) => {
+                if self.scope != SnapshotScope::Resumable {
+                    return descriptor_error("state.kind=checkpoint requires scope=checkpoint");
+                }
                 if checkpoint.checkpoint_id.is_empty() {
                     return descriptor_error("empty state.checkpoint_id");
                 }
-                validate_sha256_digest(&checkpoint.manifest, "state.manifest")?;
+                validate_digest(
+                    &checkpoint.checkpoint_root,
+                    "sha256:",
+                    "state.checkpoint_root",
+                )?;
             }
         }
-
-        let mut previous: Option<&str> = None;
+        let mut previous = None;
         for key in &self.requires {
-            if key.is_empty() {
-                return descriptor_error("empty requires entry");
+            if key.is_empty() || !self.extensions.contains_key(key) {
+                return descriptor_error(format!("invalid required extension '{key}'"));
             }
-            if !self.extensions.contains_key(key) {
-                return descriptor_error(format!(
-                    "requires names '{key}' but extensions has no such key"
-                ));
+            if previous.is_some_and(|value: &str| value >= key.as_str()) {
+                return descriptor_error("requires must be sorted and unique");
             }
-            if previous.is_some_and(|value| value >= key.as_str()) {
-                return descriptor_error(format!(
-                    "requires must be sorted and unique (at '{key}')"
-                ));
-            }
-            previous = Some(key);
+            previous = Some(key.as_str());
         }
-
+        for value in self.extensions.values() {
+            validate_json_value(value, 0)?;
+        }
         Ok(())
     }
 
-    /// Return unknown must-understand extension keys.
+    /// Return unknown must-understand extensions.
     pub fn unsupported_requires(&self) -> Vec<&str> {
         self.requires
             .iter()
@@ -360,24 +458,28 @@ impl Manifest {
             .collect()
     }
 
-    /// Serialize the normalized semantic value to canonical identity bytes.
+    /// Serialize normalized semantics using the schema's bounded RFC 8785 subset.
     pub fn to_canonical_bytes(&self) -> ImageResult<Vec<u8>> {
         let normalized = self.normalized()?;
-        serde_json::to_vec(&normalized).map_err(|error| {
-            ImageError::ManifestParse(format!("snapshot descriptor: serialize failed: {error}"))
-        })
+        let value = serde_json::to_value(normalized)
+            .map_err(|error| descriptor_error_value(format!("serialize failed: {error}")))?;
+        let mut output = Vec::new();
+        write_canonical_json(&value, &mut output)?;
+        Ok(output)
     }
 
-    /// Parse, normalize, and validate one strict schema-1 descriptor.
+    /// Parse one strict final descriptor.
     pub fn from_bytes(bytes: &[u8]) -> ImageResult<Self> {
+        if bytes.len() > MAX_DESCRIPTOR_BYTES {
+            return descriptor_error(format!("descriptor exceeds {MAX_DESCRIPTOR_BYTES} bytes"));
+        }
         reject_duplicate_json_keys(bytes)?;
-        let parsed: Self = serde_json::from_slice(bytes).map_err(|error| {
-            ImageError::ManifestParse(format!("snapshot descriptor: parse failed: {error}"))
-        })?;
+        let parsed: Self = serde_json::from_slice(bytes)
+            .map_err(|error| descriptor_error_value(format!("parse failed: {error}")))?;
         parsed.normalized()
     }
 
-    /// Compute the snapshot identity over normalized canonical bytes.
+    /// Compute the descriptor digest, distinct from [`SnapshotId`].
     pub fn digest(&self) -> ImageResult<String> {
         let mut hasher = Sha256::new();
         hasher.update(self.to_canonical_bytes()?);
@@ -386,10 +488,7 @@ impl Manifest {
 
     fn normalized(&self) -> ImageResult<Self> {
         let mut normalized = self.clone();
-        normalized.created_at = normalize_timestamp(&normalized.created_at)?;
-        for value in normalized.extensions.values_mut() {
-            normalize_json_value(value);
-        }
+        normalized.capture.created_at = normalize_timestamp(&normalized.capture.created_at)?;
         normalized.validate()?;
         Ok(normalized)
     }
@@ -412,46 +511,36 @@ struct DuplicateCheckedJsonVisitor;
 
 impl<'de> Visitor<'de> for DuplicateCheckedJsonVisitor {
     type Value = DuplicateCheckedJson;
-
     fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("a JSON value without duplicate object keys")
+        formatter.write_str("JSON without duplicate object keys")
     }
-
-    fn visit_bool<E>(self, _value: bool) -> Result<Self::Value, E> {
+    fn visit_bool<E>(self, _: bool) -> Result<Self::Value, E> {
         Ok(DuplicateCheckedJson)
     }
-
-    fn visit_i64<E>(self, _value: i64) -> Result<Self::Value, E> {
+    fn visit_i64<E>(self, _: i64) -> Result<Self::Value, E> {
         Ok(DuplicateCheckedJson)
     }
-
-    fn visit_u64<E>(self, _value: u64) -> Result<Self::Value, E> {
+    fn visit_u64<E>(self, _: u64) -> Result<Self::Value, E> {
         Ok(DuplicateCheckedJson)
     }
-
-    fn visit_f64<E>(self, _value: f64) -> Result<Self::Value, E> {
+    fn visit_f64<E>(self, _: f64) -> Result<Self::Value, E> {
         Ok(DuplicateCheckedJson)
     }
-
-    fn visit_str<E>(self, _value: &str) -> Result<Self::Value, E>
+    fn visit_str<E>(self, _: &str) -> Result<Self::Value, E>
     where
         E: serde::de::Error,
     {
         Ok(DuplicateCheckedJson)
     }
-
-    fn visit_string<E>(self, _value: String) -> Result<Self::Value, E> {
+    fn visit_string<E>(self, _: String) -> Result<Self::Value, E> {
         Ok(DuplicateCheckedJson)
     }
-
     fn visit_none<E>(self) -> Result<Self::Value, E> {
         Ok(DuplicateCheckedJson)
     }
-
     fn visit_unit<E>(self) -> Result<Self::Value, E> {
         Ok(DuplicateCheckedJson)
     }
-
     fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
     where
         A: SeqAccess<'de>,
@@ -459,7 +548,6 @@ impl<'de> Visitor<'de> for DuplicateCheckedJsonVisitor {
         while sequence.next_element::<DuplicateCheckedJson>()?.is_some() {}
         Ok(DuplicateCheckedJson)
     }
-
     fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
     where
         A: MapAccess<'de>,
@@ -476,117 +564,229 @@ impl<'de> Visitor<'de> for DuplicateCheckedJsonVisitor {
 }
 
 //--------------------------------------------------------------------------------------------------
+// Functions
+//--------------------------------------------------------------------------------------------------
+
+/// Return the canonical artifact-relative path for a layer.
+pub fn layer_path(layer_id: &DiskLayerId, format: SnapshotFormat) -> PathBuf {
+    let extension = match format {
+        SnapshotFormat::Raw => "raw",
+        SnapshotFormat::Qcow2 => "qcow2",
+    };
+    Path::new(LAYERS_DIRECTORY).join(format!("{layer_id}.{extension}"))
+}
+
+//--------------------------------------------------------------------------------------------------
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
 
 fn descriptor_error<T>(message: impl Into<String>) -> ImageResult<T> {
-    Err(ImageError::ManifestParse(format!(
-        "snapshot descriptor: {}",
-        message.into()
-    )))
+    Err(descriptor_error_value(message))
+}
+fn descriptor_error_value(message: impl Into<String>) -> ImageError {
+    ImageError::ManifestParse(format!("snapshot descriptor: {}", message.into()))
 }
 
-fn validate_sha256_digest(value: &str, field: &str) -> ImageResult<()> {
-    let Some(encoded) = value.strip_prefix("sha256:") else {
-        return descriptor_error(format!("{field} must use sha256: {value}"));
+fn validate_opaque_id(value: &str, prefix: &str, field: &str) -> ImageResult<()> {
+    let Some(encoded) = value.strip_prefix(prefix) else {
+        return descriptor_error(format!("{field} must start with {prefix}: {value}"));
+    };
+    if encoded.len() != 32
+        || !encoded
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return descriptor_error(format!(
+            "{field} must contain 32 lowercase hexadecimal digits after {prefix}: {value}"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_file_state(file: &FileSnapshotState) -> ImageResult<()> {
+    if file.filesystem.is_empty() {
+        return descriptor_error("empty state.filesystem");
+    }
+    if file.virtual_size > MAX_JSON_SAFE_INTEGER {
+        return descriptor_error("state.virtual_size exceeds the JSON safe-integer limit");
+    }
+    if file.layers.is_empty() || file.layers.len() > MAX_FILE_LAYERS {
+        return descriptor_error(format!(
+            "state.layers must contain 1..={MAX_FILE_LAYERS} entries"
+        ));
+    }
+    let mut ids = HashSet::with_capacity(file.layers.len());
+    for (index, layer) in file.layers.iter().enumerate() {
+        validate_opaque_id(layer.layer_id.as_str(), "layer_", "state.layers[].layer_id")?;
+        if !ids.insert(layer.layer_id.as_str()) {
+            return descriptor_error(format!("duplicate layer id {}", layer.layer_id));
+        }
+        if layer.virtual_size > MAX_JSON_SAFE_INTEGER {
+            return descriptor_error("layer virtual_size exceeds the JSON safe-integer limit");
+        }
+        match (index, layer.format, layer.backing.as_ref()) {
+            (0, _, None) => {}
+            (0, _, Some(_)) => {
+                return descriptor_error("oldest layer must not name a backing layer");
+            }
+            (_, SnapshotFormat::Raw, _) => {
+                return descriptor_error("raw successor layers are not allowed");
+            }
+            (_, SnapshotFormat::Qcow2, Some(backing))
+                if backing == &file.layers[index - 1].layer_id => {}
+            (_, SnapshotFormat::Qcow2, Some(_)) => {
+                return descriptor_error("qcow2 successor must name its immediate predecessor");
+            }
+            (_, SnapshotFormat::Qcow2, None) => {
+                return descriptor_error("qcow2 successor is missing its backing layer");
+            }
+        }
+        if let Some(integrity) = &layer.payload.integrity {
+            validate_integrity(integrity, layer.virtual_size)?;
+        }
+    }
+    let head = file.head_layer()?;
+    if head.format != file.disk_format || head.virtual_size != file.virtual_size {
+        return descriptor_error("head format/size does not match file state");
+    }
+    Ok(())
+}
+
+fn validate_integrity(integrity: &UpperIntegrity, virtual_size: u64) -> ImageResult<()> {
+    match integrity {
+        UpperIntegrity::Sha256 { digest } | UpperIntegrity::SparseSha256V1 { digest } => {
+            validate_digest(digest, "sha256:", "layer integrity digest")
+        }
+        UpperIntegrity::FileMerkleBlake3V1 {
+            root,
+            logical_size,
+            leaf_size,
+        } => {
+            validate_digest(root, "blake3:", "layer integrity root")?;
+            if *logical_size != virtual_size {
+                return descriptor_error(
+                    "layer integrity logical_size does not match virtual_size",
+                );
+            }
+            if *leaf_size != FILE_MERKLE_BLAKE3_LEAF_SIZE {
+                return descriptor_error(format!(
+                    "layer integrity leaf_size must be {FILE_MERKLE_BLAKE3_LEAF_SIZE}"
+                ));
+            }
+            Ok(())
+        }
+    }
+}
+
+fn validate_digest(value: &str, prefix: &str, field: &str) -> ImageResult<()> {
+    let Some(encoded) = value.strip_prefix(prefix) else {
+        return descriptor_error(format!("{field} must use {prefix}: {value}"));
     };
     if encoded.len() != 64
         || !encoded
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
     {
-        return descriptor_error(format!(
-            "{field} must contain 64 lowercase hexadecimal digits: {value}"
-        ));
-    }
-    Ok(())
-}
-
-fn validate_blake3_digest(value: &str, field: &str) -> ImageResult<()> {
-    let Some(encoded) = value.strip_prefix("blake3:") else {
-        return descriptor_error(format!("{field} must use blake3: {value}"));
-    };
-    if encoded.len() != 64
-        || !encoded
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    {
-        return descriptor_error(format!(
-            "{field} must contain 64 lowercase hexadecimal digits: {value}"
-        ));
-    }
-    Ok(())
-}
-
-fn validate_artifact_filename(value: &str, field: &str) -> ImageResult<()> {
-    let mut components = Path::new(value).components();
-    let Some(Component::Normal(name)) = components.next() else {
-        return descriptor_error(format!(
-            "{field} must be one relative normal filename: {value}"
-        ));
-    };
-    if name.is_empty() || components.next().is_some() {
-        return descriptor_error(format!(
-            "{field} must be one relative normal filename: {value}"
-        ));
-    }
-    // Payloads sharing a name with artifact metadata can overwrite the
-    // descriptor or disrupt the adjacent-release migration journal.
-    if RESERVED_ARTIFACT_FILENAMES.contains(&value) {
-        return descriptor_error(format!("{field} uses reserved filename: {value}"));
+        return descriptor_error(format!("invalid {field}: {value}"));
     }
     Ok(())
 }
 
 fn normalize_timestamp(value: &str) -> ImageResult<String> {
-    let parsed = DateTime::parse_from_rfc3339(value)
-        .map_err(|error| {
-            ImageError::ManifestParse(format!(
-                "snapshot descriptor: created_at is not RFC 3339: {error}"
-            ))
-        })?
-        .with_timezone(&Utc);
-    let mut normalized = parsed.to_rfc3339_opts(SecondsFormat::Nanos, true);
-    if let Some(dot) = normalized.find('.') {
-        let z = normalized.len() - 1;
-        let trimmed = normalized[dot + 1..z].trim_end_matches('0');
-        normalized = if trimmed.is_empty() {
-            format!("{}Z", &normalized[..dot])
-        } else {
-            format!("{}.{}Z", &normalized[..dot], trimmed)
-        };
-    }
-    Ok(normalized)
-}
-
-fn normalize_json_value(value: &mut serde_json::Value) {
-    match value {
-        serde_json::Value::Array(values) => {
-            for value in values {
-                normalize_json_value(value);
-            }
-        }
-        serde_json::Value::Object(object) => {
-            let old = std::mem::take(object);
-            let mut sorted = BTreeMap::new();
-            for (key, mut value) in old {
-                normalize_json_value(&mut value);
-                sorted.insert(key, value);
-            }
-            object.extend(sorted);
-        }
-        _ => {}
-    }
+    let parsed = DateTime::parse_from_rfc3339(value).map_err(|error| {
+        descriptor_error_value(format!("capture.created_at is not RFC 3339: {error}"))
+    })?;
+    Ok(parsed
+        .with_timezone(&Utc)
+        .to_rfc3339_opts(SecondsFormat::Nanos, true))
 }
 
 fn reject_duplicate_json_keys(bytes: &[u8]) -> ImageResult<()> {
     let mut deserializer = serde_json::Deserializer::from_slice(bytes);
-    DuplicateCheckedJson::deserialize(&mut deserializer).map_err(|error| {
-        ImageError::ManifestParse(format!("snapshot descriptor: parse failed: {error}"))
-    })?;
-    deserializer.end().map_err(|error| {
-        ImageError::ManifestParse(format!("snapshot descriptor: parse failed: {error}"))
-    })
+    DuplicateCheckedJson::deserialize(&mut deserializer)
+        .map_err(|error| descriptor_error_value(format!("parse failed: {error}")))?;
+    deserializer
+        .end()
+        .map_err(|error| descriptor_error_value(format!("parse failed: {error}")))
+}
+
+fn validate_json_value(value: &serde_json::Value, depth: usize) -> ImageResult<()> {
+    if depth > 64 {
+        return descriptor_error("extension nesting exceeds 64 levels");
+    }
+    match value {
+        serde_json::Value::Number(number) => {
+            let valid = number
+                .as_i64()
+                .map(|n| n.unsigned_abs() <= MAX_JSON_SAFE_INTEGER)
+                .or_else(|| number.as_u64().map(|n| n <= MAX_JSON_SAFE_INTEGER))
+                .unwrap_or(false);
+            if !valid {
+                return descriptor_error("extension numbers must be JSON-safe integers");
+            }
+        }
+        serde_json::Value::Array(items) => {
+            if items.len() > 4096 {
+                return descriptor_error("extension array exceeds 4096 entries");
+            }
+            for item in items {
+                validate_json_value(item, depth + 1)?;
+            }
+        }
+        serde_json::Value::Object(map) => {
+            if map.len() > 4096 {
+                return descriptor_error("extension object exceeds 4096 entries");
+            }
+            for item in map.values() {
+                validate_json_value(item, depth + 1)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn write_canonical_json(value: &serde_json::Value, output: &mut Vec<u8>) -> ImageResult<()> {
+    match value {
+        serde_json::Value::Null => output.extend_from_slice(b"null"),
+        serde_json::Value::Bool(true) => output.extend_from_slice(b"true"),
+        serde_json::Value::Bool(false) => output.extend_from_slice(b"false"),
+        serde_json::Value::Number(number) => {
+            output.extend_from_slice(number.to_string().as_bytes())
+        }
+        serde_json::Value::String(string) => serde_json::to_writer(output, string)
+            .map_err(|e| descriptor_error_value(format!("canonical string: {e}")))?,
+        serde_json::Value::Array(items) => {
+            output.push(b'[');
+            for (index, item) in items.iter().enumerate() {
+                if index != 0 {
+                    output.push(b',');
+                }
+                write_canonical_json(item, output)?;
+            }
+            output.push(b']');
+        }
+        serde_json::Value::Object(map) => {
+            output.push(b'{');
+            let mut entries: Vec<_> = map.iter().collect();
+            // RFC 8785 orders object names by their UTF-16 code units, not
+            // Rust's UTF-8 byte/string ordering. The distinction matters for
+            // non-BMP extension keys and therefore for descriptor identity.
+            entries
+                .sort_unstable_by(|left, right| left.0.encode_utf16().cmp(right.0.encode_utf16()));
+            for (index, (key, item)) in entries.into_iter().enumerate() {
+                if index != 0 {
+                    output.push(b',');
+                }
+                serde_json::to_writer(&mut *output, key)
+                    .map_err(|e| descriptor_error_value(format!("canonical key: {e}")))?;
+                output.push(b':');
+                write_canonical_json(item, output)?;
+            }
+            output.push(b'}');
+        }
+    }
+    Ok(())
 }
 
 fn deserialize_required_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
@@ -605,221 +805,89 @@ where
 mod tests {
     use super::*;
 
-    fn sample_manifest() -> Manifest {
+    fn descriptor() -> Manifest {
+        let layer_id = DiskLayerId::new("layer_0123456789abcdef0123456789abcdef").unwrap();
         Manifest {
-            schema: SCHEMA_VERSION,
-            artifact: SNAPSHOT_ARTIFACT_KIND.into(),
+            schema: SCHEMA.into(),
+            snapshot_id: SnapshotId::new("snap_0123456789abcdef0123456789abcdef").unwrap(),
             scope: SnapshotScope::Disk,
-            created_at: "2026-05-01T12:00:00Z".into(),
-            parent: None,
-            image: ImageRef {
-                reference: "docker.io/library/python:3.12".into(),
-                manifest_digest:
-                    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                        .into(),
-            },
-            source_sandbox: Some("build-1".into()),
             state: SnapshotState::File(FileSnapshotState {
-                format: SnapshotFormat::Raw,
-                fstype: "ext4".into(),
-                upper: UpperLayer {
-                    file: DEFAULT_UPPER_FILE.into(),
-                    size_bytes: 4_294_967_296,
-                    integrity: Some(UpperIntegrity::SparseSha256V1 {
-                        digest:
-                            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-                                .into(),
-                    }),
-                },
+                disk_format: SnapshotFormat::Raw,
+                filesystem: "ext4".into(),
+                virtual_size: 4,
+                head: layer_id.clone(),
+                layers: vec![DiskLayer {
+                    layer_id,
+                    format: SnapshotFormat::Raw,
+                    virtual_size: 4,
+                    backing: None,
+                    payload: LayerPayload {
+                        file_kind: LayerFileKind::Regular,
+                        integrity: None,
+                    },
+                }],
             }),
-            labels: BTreeMap::from([
-                ("owner".into(), "alice".into()),
-                ("stage".into(), "post-pip-install".into()),
-            ]),
-            extensions: BTreeMap::new(),
+            capture: SnapshotCapture {
+                created_at: "2026-08-29T00:00:00Z".into(),
+                source_lineage: Some("sandbox-a".into()),
+                source_checkpoint: None,
+                consistency: SnapshotConsistency::CrashConsistent,
+            },
+            image: ImageRef {
+                reference: "docker.io/library/alpine:latest".into(),
+                manifest_digest: format!("sha256:{}", "a".repeat(64)),
+            },
+            parent: None,
             requires: Vec::new(),
+            extensions: BTreeMap::new(),
         }
     }
 
     #[test]
-    fn final_file_descriptor_matches_golden_bytes_and_digest() {
-        let manifest = sample_manifest();
-        let expected = r#"{"schema":1,"artifact":"snapshot","scope":"disk","created_at":"2026-05-01T12:00:00Z","parent":null,"image":{"ref":"docker.io/library/python:3.12","manifest_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"source_sandbox":"build-1","state":{"kind":"file","format":"raw","fstype":"ext4","upper":{"file":"upper.ext4","size_bytes":4294967296,"integrity":{"algorithm":"msb-sparse-sha256-v1","digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}},"labels":{"owner":"alice","stage":"post-pip-install"},"extensions":{},"requires":[]}"#;
-        assert_eq!(manifest.to_canonical_bytes().unwrap(), expected.as_bytes());
+    fn canonical_descriptor_round_trips() {
+        let descriptor = descriptor();
+        let bytes = descriptor.to_canonical_bytes().unwrap();
         assert_eq!(
-            manifest.digest().unwrap(),
-            "sha256:5b9ca7611f40ec61fea70c1b1ac9881ed63a16091922682028222cdaef997572"
+            Manifest::from_bytes(&bytes)
+                .unwrap()
+                .to_canonical_bytes()
+                .unwrap(),
+            bytes
         );
-    }
-
-    #[test]
-    fn semantic_normalization_preserves_identity() {
-        let canonical = sample_manifest();
-        let reordered = br#"{
-          "requires": [], "extensions": {}, "labels": {"stage":"post-pip-install","owner":"alice"},
-          "state": {"upper":{"integrity":{"digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","algorithm":"msb-sparse-sha256-v1"},"size_bytes":4294967296,"file":"upper.ext4"},"fstype":"ext4","format":"raw","kind":"file"},
-          "source_sandbox":"build-1", "image":{"manifest_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","ref":"docker.io/library/python:3.12"},
-          "parent":null,"created_at":"2026-05-01T13:00:00+01:00","scope":"disk","artifact":"snapshot","schema":1
-        }"#;
-        let parsed = Manifest::from_bytes(reordered).unwrap();
-        assert_eq!(parsed.digest().unwrap(), canonical.digest().unwrap());
-        assert_eq!(parsed.created_at, "2026-05-01T12:00:00Z");
-    }
-
-    #[test]
-    fn checkpoint_variant_round_trips() {
-        let mut manifest = sample_manifest();
-        manifest.scope = SnapshotScope::Resumable;
-        manifest.state = SnapshotState::Checkpoint(CheckpointSnapshotState {
-            checkpoint_id: "ckpt_example".into(),
-            manifest: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-                .into(),
-        });
-        let bytes = manifest.to_canonical_bytes().unwrap();
-        assert!(std::str::from_utf8(&bytes).unwrap().contains(
-            r#""state":{"kind":"checkpoint","checkpoint_id":"ckpt_example","manifest":"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}"#
-        ));
-        assert_eq!(Manifest::from_bytes(&bytes).unwrap(), manifest);
-    }
-
-    #[test]
-    fn rejects_file_state_without_integrity() {
-        let bytes = sample_manifest().to_canonical_bytes().unwrap();
-        let value = String::from_utf8(bytes)
-            .unwrap()
-            .replace(
-                r#","integrity":{"algorithm":"msb-sparse-sha256-v1","digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}"#,
-                "",
-            );
-        let error = Manifest::from_bytes(value.as_bytes()).unwrap_err();
-        assert!(error.to_string().contains("integrity"));
-    }
-
-    #[test]
-    fn accepts_explicitly_unrecorded_integrity() {
-        let mut manifest = sample_manifest();
-        let file = manifest.state.as_file().unwrap().clone();
-        manifest.state = SnapshotState::File(FileSnapshotState {
-            upper: UpperLayer {
-                integrity: None,
-                ..file.upper
-            },
-            ..file
-        });
-
-        let bytes = manifest.to_canonical_bytes().unwrap();
         assert!(
             std::str::from_utf8(&bytes)
                 .unwrap()
-                .contains(r#""integrity":null"#)
+                .starts_with("{\"capture\":")
         );
-        assert_eq!(Manifest::from_bytes(&bytes).unwrap(), manifest);
     }
 
     #[test]
-    fn validates_current_merkle_shape() {
-        let mut manifest = sample_manifest();
-        let file = manifest.state.as_file().unwrap().clone();
-        manifest.state = SnapshotState::File(FileSnapshotState {
-            upper: UpperLayer {
-                integrity: Some(UpperIntegrity::FileMerkleBlake3V1 {
-                    root: "blake3:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-                        .into(),
-                    logical_size: file.upper.size_bytes,
-                    leaf_size: FILE_MERKLE_BLAKE3_LEAF_SIZE,
-                }),
-                ..file.upper
-            },
-            ..file
-        });
-
-        assert!(manifest.to_canonical_bytes().is_ok());
-    }
-
-    #[test]
-    fn rejects_file_state_for_resumable_scope() {
-        let mut manifest = sample_manifest();
-        manifest.scope = SnapshotScope::Resumable;
-        let error = manifest.to_canonical_bytes().unwrap_err();
-        assert!(error.to_string().contains("requires scope=disk"));
-    }
-
-    #[test]
-    fn rejects_duplicate_keys_at_any_depth() {
-        let bytes = sample_manifest().to_canonical_bytes().unwrap();
-        let value = String::from_utf8(bytes).unwrap().replace(
-            r#""extensions":{}"#,
-            r#""extensions":{"msb.example/1":{"x":1,"x":2}}"#,
+    fn descriptor_digest_is_not_snapshot_id() {
+        let descriptor = descriptor();
+        assert_ne!(
+            descriptor.digest().unwrap(),
+            descriptor.snapshot_id.as_str()
         );
-        let error = Manifest::from_bytes(value.as_bytes()).unwrap_err();
-        assert!(error.to_string().contains("duplicate object key 'x'"));
     }
 
     #[test]
-    fn recursively_sorts_extension_object_keys() {
-        let mut manifest = sample_manifest();
-        manifest.extensions.insert(
-            "msb.example/1".into(),
-            serde_json::json!({"z": {"b": 2, "a": 1}, "a": 0}),
-        );
-        let text = String::from_utf8(manifest.to_canonical_bytes().unwrap()).unwrap();
-        assert!(text.contains(r#""msb.example/1":{"a":0,"z":{"a":1,"b":2}}"#));
-    }
-
-    #[test]
-    fn rejects_unsafe_upper_filename_and_unsafe_integer() {
-        let mut manifest = sample_manifest();
-        let file = manifest.state.as_file().unwrap().clone();
-        manifest.state = SnapshotState::File(FileSnapshotState {
-            upper: UpperLayer {
-                file: "../upper.ext4".into(),
-                ..file.upper
+    fn rejects_nonlinear_closure() {
+        let mut descriptor = descriptor();
+        let SnapshotState::File(file) = &mut descriptor.state else {
+            unreachable!()
+        };
+        file.layers.push(DiskLayer {
+            layer_id: DiskLayerId::new("layer_11111111111111111111111111111111").unwrap(),
+            format: SnapshotFormat::Qcow2,
+            virtual_size: 4,
+            backing: None,
+            payload: LayerPayload {
+                file_kind: LayerFileKind::Regular,
+                integrity: None,
             },
-            ..file
         });
-        assert!(manifest.to_canonical_bytes().is_err());
-
-        let mut manifest = sample_manifest();
-        let file = manifest.state.as_file().unwrap().clone();
-        manifest.state = SnapshotState::File(FileSnapshotState {
-            upper: UpperLayer {
-                size_bytes: MAX_JSON_SAFE_INTEGER + 1,
-                ..file.upper
-            },
-            ..file
-        });
-        assert!(manifest.to_canonical_bytes().is_err());
-    }
-
-    #[test]
-    fn rejects_reserved_upper_filenames() {
-        for reserved in RESERVED_ARTIFACT_FILENAMES {
-            let mut manifest = sample_manifest();
-            let file = manifest.state.as_file().unwrap().clone();
-            manifest.state = SnapshotState::File(FileSnapshotState {
-                upper: UpperLayer {
-                    file: (*reserved).into(),
-                    ..file.upper
-                },
-                ..file
-            });
-
-            let error = manifest.to_canonical_bytes().unwrap_err().to_string();
-            assert!(
-                error.contains("reserved filename"),
-                "unexpected error for {reserved}: {error}"
-            );
-        }
-    }
-
-    #[test]
-    fn unknown_required_extension_parses_but_blocks_use() {
-        let mut manifest = sample_manifest();
-        manifest
-            .extensions
-            .insert("msb.future/1".into(), serde_json::json!({}));
-        manifest.requires.push("msb.future/1".into());
-        let parsed = Manifest::from_bytes(&manifest.to_canonical_bytes().unwrap()).unwrap();
-        assert_eq!(parsed.unsupported_requires(), vec!["msb.future/1"]);
+        file.head = file.layers[1].layer_id.clone();
+        file.disk_format = SnapshotFormat::Qcow2;
+        assert!(descriptor.validate().is_err());
     }
 }

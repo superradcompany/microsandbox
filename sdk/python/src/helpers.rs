@@ -202,60 +202,73 @@ pub fn sandbox_builder_from_args(
                 "from_snapshot must be str or os.PathLike",
             ));
         };
-        // Resolve the snapshot synchronously: read the manifest and
-        // pin the image. We can't use the async `from_snapshot` here
-        // because `sandbox_builder_from_args` runs in sync context; instead
-        // we replicate the resolution against the on-disk artifact
-        // directly via `snapshot_resolved`.
-        let snap_dir = resolve_snapshot_dir(&snap_str);
-        if !snap_dir.exists() {
-            return Err(pyo3::exceptions::PyFileNotFoundError::new_err(format!(
-                "snapshot artifact not found: {}",
-                snap_dir.display()
-            )));
-        }
-        let manifest_bytes = std::fs::read(
-            snap_dir.join(microsandbox::snapshot::DESCRIPTOR_FILENAME),
-        )
-        .map_err(|e| {
-            pyo3::exceptions::PyFileNotFoundError::new_err(format!(
-                "snapshot descriptor not readable at {}: {e}",
-                snap_dir.display(),
-            ))
-        })?;
-        let manifest =
-            microsandbox::snapshot::Manifest::from_bytes(&manifest_bytes).map_err(|e| {
-                pyo3::exceptions::PyValueError::new_err(format!("snapshot descriptor invalid: {e}"))
+        // Archive sources are resolved asynchronously by the Rust builder so
+        // the payload can stream directly into child staging in one pass.
+        if std::path::Path::new(&snap_str).is_file() {
+            builder = builder.from_snapshot(snap_str);
+        } else {
+            // Resolve an installed snapshot synchronously: read the manifest and
+            // pin the image. We can't use the async `from_snapshot` here
+            // because `sandbox_builder_from_args` runs in sync context; instead
+            // we replicate the resolution against the on-disk artifact
+            // directly via `snapshot_resolved`.
+            let snap_dir = resolve_snapshot_dir(&snap_str);
+            if !snap_dir.exists() {
+                return Err(pyo3::exceptions::PyFileNotFoundError::new_err(format!(
+                    "snapshot artifact not found: {}",
+                    snap_dir.display()
+                )));
+            }
+            let manifest_bytes = std::fs::read(
+                snap_dir.join(microsandbox::snapshot::DESCRIPTOR_FILENAME),
+            )
+            .map_err(|e| {
+                pyo3::exceptions::PyFileNotFoundError::new_err(format!(
+                    "snapshot descriptor not readable at {}: {e}",
+                    snap_dir.display(),
+                ))
             })?;
-        if manifest.scope != microsandbox::snapshot::SnapshotScope::Disk {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "restoring non-disk snapshots is not supported by this runtime",
-            ));
-        }
-        let file_state = match &manifest.state {
-            microsandbox::snapshot::SnapshotState::File(state) => state,
-            microsandbox::snapshot::SnapshotState::Checkpoint(_) => {
+            let manifest =
+                microsandbox::snapshot::Manifest::from_bytes(&manifest_bytes).map_err(|e| {
+                    pyo3::exceptions::PyValueError::new_err(format!(
+                        "snapshot descriptor invalid: {e}"
+                    ))
+                })?;
+            if manifest.scope != microsandbox::snapshot::SnapshotScope::Disk {
                 return Err(pyo3::exceptions::PyValueError::new_err(
-                    "restoring checkpoint-state snapshots is not supported by this runtime",
+                    "restoring non-disk snapshots is not supported by this runtime",
                 ));
             }
-        };
-        if file_state.format != microsandbox::snapshot::SnapshotFormat::Raw
-            || file_state.fstype != "ext4"
-        {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "snapshot file state is not a supported raw ext4 upper",
-            ));
+            let file_state = match &manifest.state {
+                microsandbox::snapshot::SnapshotState::File(state) => state,
+                microsandbox::snapshot::SnapshotState::Checkpoint(_) => {
+                    return Err(pyo3::exceptions::PyValueError::new_err(
+                        "restoring checkpoint-state snapshots is not supported by this runtime",
+                    ));
+                }
+            };
+            if file_state.disk_format != microsandbox::snapshot::SnapshotFormat::Raw
+                || file_state.filesystem != "ext4"
+            {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "snapshot file state is not a supported raw ext4 upper",
+                ));
+            }
+            let head = file_state.head_layer().map_err(|error| {
+                pyo3::exceptions::PyValueError::new_err(format!(
+                    "snapshot file closure is invalid: {error}"
+                ))
+            })?;
+            let upper_path = snap_dir.join(file_state.layer_path(head));
+            if !upper_path.exists() {
+                return Err(pyo3::exceptions::PyFileNotFoundError::new_err(format!(
+                    "snapshot upper file missing: {}",
+                    upper_path.display(),
+                )));
+            }
+            builder = builder.image(manifest.image.reference.as_str());
+            builder = builder.snapshot_resolved(manifest.image.manifest_digest.clone(), upper_path);
         }
-        let upper_path = snap_dir.join(&file_state.upper.file);
-        if !upper_path.exists() {
-            return Err(pyo3::exceptions::PyFileNotFoundError::new_err(format!(
-                "snapshot upper file missing: {}",
-                upper_path.display(),
-            )));
-        }
-        builder = builder.image(manifest.image.reference.as_str());
-        builder = builder.snapshot_resolved(manifest.image.manifest_digest.clone(), upper_path);
     } else {
         let image_obj = kwargs.get_item("image")?.unwrap();
         // Accept an open image reference/path or the concrete ImageSource

@@ -13,9 +13,9 @@ use std::sync::Arc;
 use microsandbox::Snapshot;
 use microsandbox::backend::{Backend, LocalBackend};
 use microsandbox_image::snapshot::{
-    CheckpointSnapshotState, DEFAULT_UPPER_FILE, DESCRIPTOR_FILENAME, FileSnapshotState, ImageRef,
-    Manifest, SCHEMA_VERSION, SNAPSHOT_ARTIFACT_KIND, SnapshotFormat, SnapshotScope, SnapshotState,
-    UpperIntegrity, UpperLayer,
+    CheckpointSnapshotState, DEFAULT_UPPER_FILE, DESCRIPTOR_FILENAME, DiskLayer, DiskLayerId,
+    FileSnapshotState, ImageRef, LayerFileKind, LayerPayload, Manifest, SCHEMA, SnapshotCapture,
+    SnapshotConsistency, SnapshotFormat, SnapshotId, SnapshotScope, SnapshotState, UpperIntegrity,
 };
 use sha2::{Digest, Sha256};
 use tar::{Builder, EntryType, Header};
@@ -57,8 +57,10 @@ fn make_artifact_with_scope(
             scope,
             state: SnapshotState::Checkpoint(CheckpointSnapshotState {
                 checkpoint_id: "ckpt_synthetic".into(),
-                manifest: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-                    .into(),
+                checkpoint_root:
+                    "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".into(),
+                restore_intents: vec!["resume".into()],
+                requirements_summary: BTreeMap::new(),
             }),
             ..sample_manifest(upper_bytes.len() as u64)
         }
@@ -72,32 +74,41 @@ fn make_artifact_with_scope(
 }
 
 fn sample_manifest(upper_size: u64) -> Manifest {
+    let snapshot_id = SnapshotId::new(format!("snap_{:032x}", rand::random::<u128>())).unwrap();
+    let layer_id = DiskLayerId::new(format!("layer_{:032x}", rand::random::<u128>())).unwrap();
     Manifest {
-        schema: SCHEMA_VERSION,
-        artifact: SNAPSHOT_ARTIFACT_KIND.into(),
+        schema: SCHEMA.into(),
+        snapshot_id,
         scope: SnapshotScope::Disk,
-        created_at: "2026-05-01T12:00:00Z".into(),
-        parent: None,
+        state: SnapshotState::File(FileSnapshotState {
+            disk_format: SnapshotFormat::Raw,
+            filesystem: "ext4".into(),
+            virtual_size: upper_size,
+            head: layer_id.clone(),
+            layers: vec![DiskLayer {
+                layer_id,
+                format: SnapshotFormat::Raw,
+                virtual_size: upper_size,
+                backing: None,
+                payload: LayerPayload {
+                    file_kind: LayerFileKind::Regular,
+                    integrity: Some(UpperIntegrity::SparseSha256V1 {
+                        digest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+                    }),
+                },
+            }],
+        }),
+        capture: SnapshotCapture {
+            created_at: "2026-05-01T12:00:00Z".into(),
+            source_lineage: Some("synthetic".into()),
+            source_checkpoint: None,
+            consistency: SnapshotConsistency::CrashConsistent,
+        },
         image: ImageRef {
             reference: "docker.io/library/alpine:3.20".into(),
-            manifest_digest:
-                "sha256:0000000000000000000000000000000000000000000000000000000000000001".into(),
+            manifest_digest: "sha256:0000000000000000000000000000000000000000000000000000000000000001".into(),
         },
-        source_sandbox: Some("synthetic".into()),
-        state: SnapshotState::File(FileSnapshotState {
-            format: SnapshotFormat::Raw,
-            fstype: "ext4".into(),
-            upper: UpperLayer {
-                file: DEFAULT_UPPER_FILE.into(),
-                size_bytes: upper_size,
-                integrity: Some(UpperIntegrity::SparseSha256V1 {
-                    digest:
-                        "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-                            .into(),
-                }),
-            },
-        }),
-        labels: BTreeMap::new(),
+        parent: None,
         extensions: BTreeMap::new(),
         requires: Vec::new(),
     }
@@ -138,16 +149,16 @@ fn make_artifact_with_parent(
     parent: &Path,
     name: &str,
     upper_bytes: &[u8],
-    parent_digest: Option<String>,
+    parent_id: Option<String>,
 ) -> (std::path::PathBuf, String) {
-    make_artifact_with_parent_and_integrity(parent, name, upper_bytes, parent_digest, false)
+    make_artifact_with_parent_and_integrity(parent, name, upper_bytes, parent_id, false)
 }
 
 fn make_artifact_with_parent_and_integrity(
     parent: &Path,
     name: &str,
     upper_bytes: &[u8],
-    parent_digest: Option<String>,
+    parent_id: Option<String>,
     record_integrity: bool,
 ) -> (std::path::PathBuf, String) {
     let dir = parent.join(name);
@@ -157,17 +168,12 @@ fn make_artifact_with_parent_and_integrity(
     std::fs::write(&upper_path, upper_bytes).unwrap();
 
     let mut manifest = sample_manifest(upper_bytes.len() as u64);
-    manifest.parent = parent_digest;
-    manifest.state = SnapshotState::File(FileSnapshotState {
-        format: SnapshotFormat::Raw,
-        fstype: "ext4".into(),
-        upper: UpperLayer {
-            file: DEFAULT_UPPER_FILE.into(),
-            size_bytes: upper_bytes.len() as u64,
-            integrity: record_integrity.then(|| UpperIntegrity::SparseSha256V1 {
-                digest: sparse_digest(upper_bytes),
-            }),
-        },
+    manifest.parent = parent_id.map(|id| SnapshotId::new(id).unwrap());
+    let SnapshotState::File(file) = &mut manifest.state else {
+        unreachable!()
+    };
+    file.layers[0].payload.integrity = record_integrity.then(|| UpperIntegrity::SparseSha256V1 {
+        digest: sparse_digest(upper_bytes),
     });
     let bytes = manifest.to_canonical_bytes().unwrap();
     let digest = manifest.digest().unwrap();
@@ -191,15 +197,11 @@ fn make_artifact_with_image(
         reference: image_reference,
         manifest_digest: image_manifest_digest,
     };
-    let file = manifest.state.as_file().unwrap().clone();
-    manifest.state = SnapshotState::File(FileSnapshotState {
-        upper: UpperLayer {
-            integrity: Some(UpperIntegrity::SparseSha256V1 {
-                digest: sparse_digest(upper_bytes),
-            }),
-            ..file.upper
-        },
-        ..file
+    let SnapshotState::File(file) = &mut manifest.state else {
+        unreachable!()
+    };
+    file.layers[0].payload.integrity = Some(UpperIntegrity::SparseSha256V1 {
+        digest: sparse_digest(upper_bytes),
     });
     let bytes = manifest.to_canonical_bytes().unwrap();
     let digest = manifest.digest().unwrap();
@@ -211,6 +213,27 @@ fn sha256_digest(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     format!("sha256:{}", hex::encode(hasher.finalize()))
+}
+
+fn artifact_id(dir: &Path) -> String {
+    let bytes = std::fs::read(dir.join(DESCRIPTOR_FILENAME)).unwrap();
+    Manifest::from_bytes(&bytes)
+        .unwrap()
+        .snapshot_id
+        .to_string()
+}
+
+fn artifact_payload_path(dir: &Path) -> std::path::PathBuf {
+    let layers = dir.join("layers");
+    if layers.is_dir() {
+        return std::fs::read_dir(layers)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+    }
+    dir.join(DEFAULT_UPPER_FILE)
 }
 
 fn sparse_digest(bytes: &[u8]) -> String {
@@ -273,15 +296,11 @@ fn make_sparse_artifact(
     }
 
     let mut manifest = sample_manifest(len);
-    let file = manifest.state.as_file().unwrap().clone();
-    manifest.state = SnapshotState::File(FileSnapshotState {
-        upper: UpperLayer {
-            integrity: Some(UpperIntegrity::SparseSha256V1 {
-                digest: sparse_digest(&logical),
-            }),
-            ..file.upper
-        },
-        ..file
+    let SnapshotState::File(file) = &mut manifest.state else {
+        unreachable!()
+    };
+    file.layers[0].payload.integrity = Some(UpperIntegrity::SparseSha256V1 {
+        digest: sparse_digest(&logical),
     });
     let bytes = manifest.to_canonical_bytes().unwrap();
     let digest = manifest.digest().unwrap();
@@ -429,6 +448,55 @@ fn write_v066_archive(archive: &Path, prefix: &str, upper: &[u8]) {
     builder.finish().unwrap();
 }
 
+fn write_v066_artifact(dir: &Path, upper: &[u8], parent: Option<&str>) -> String {
+    std::fs::create_dir_all(dir).unwrap();
+    std::fs::write(dir.join(DEFAULT_UPPER_FILE), upper).unwrap();
+    let parent = serde_json::to_string(&parent).unwrap();
+    // Keep the exact field order emitted by the v0.6.6 model: its canonical
+    // SHA-256 identity is what the child's legacy parent edge references.
+    let descriptor = format!(
+        "{{\"schema\":1,\"format\":\"raw\",\"fstype\":\"ext4\",\"image\":{{\"ref\":\"docker.io/library/alpine:3.20\",\"manifest_digest\":\"sha256:0000000000000000000000000000000000000000000000000000000000000001\"}},\"parent\":{parent},\"created_at\":\"2026-05-01T12:00:00Z\",\"labels\":{{}},\"upper\":{{\"file\":\"upper.ext4\",\"size_bytes\":{},\"integrity\":null}},\"source_sandbox\":\"synthetic\"}}",
+        upper.len()
+    );
+    std::fs::write(dir.join("manifest.json"), descriptor.as_bytes()).unwrap();
+    sha256_digest(descriptor.as_bytes())
+}
+
+fn write_released_flat_archive(archive: &Path, upper: &[u8]) {
+    let descriptor = format!(
+        "{{\"schema\":1,\"artifact\":\"snapshot\",\"scope\":\"disk\",\"created_at\":\"2026-05-01T12:00:00Z\",\"parent\":null,\"image\":{{\"ref\":\"docker.io/library/alpine:3.20\",\"manifest_digest\":\"sha256:0000000000000000000000000000000000000000000000000000000000000001\"}},\"source_sandbox\":\"synthetic\",\"state\":{{\"kind\":\"file\",\"format\":\"raw\",\"fstype\":\"ext4\",\"upper\":{{\"file\":\"upper.ext4\",\"size_bytes\":{},\"integrity\":null}}}},\"labels\":{{}},\"extensions\":{{}},\"requires\":[]}}",
+        upper.len()
+    );
+    let descriptor_digest = sha256_digest(descriptor.as_bytes());
+    let digest_hex = descriptor_digest.strip_prefix("sha256:").unwrap();
+    let descriptor_path = format!("snapshots/{digest_hex}/snapshot.json");
+    let upper_path = format!("files/{digest_hex}/upper.ext4");
+    let inventory = format!(
+        "{{\"schema\":1,\"artifact\":\"snapshot-archive\",\"head\":\"{descriptor_digest}\",\"suggested_name\":\"released\",\"completeness\":\"boot-complete\",\"with_parents\":false,\"with_image\":false,\"snapshots\":[{{\"snapshot_id\":\"{descriptor_digest}\",\"descriptor\":\"{descriptor_path}\"}}],\"entries\":[{{\"path\":\"{upper_path}\",\"owner_snapshot\":\"{descriptor_digest}\",\"kind\":\"file-payload\",\"included\":true,\"encoded_size\":{},\"apparent_size\":{},\"integrity\":null}},{{\"path\":\"{descriptor_path}\",\"owner_snapshot\":\"{descriptor_digest}\",\"kind\":\"snapshot-descriptor\",\"included\":true,\"encoded_size\":{},\"apparent_size\":{},\"integrity\":{{\"algorithm\":\"sha256\",\"digest\":\"{descriptor_digest}\"}}}}],\"protection_requirements\":[],\"extensions\":{{}},\"requires\":[]}}",
+        upper.len(),
+        upper.len(),
+        descriptor.len(),
+        descriptor.len()
+    );
+
+    let file = std::fs::File::create(archive).unwrap();
+    let mut builder = Builder::new(file);
+    for (path, contents) in [
+        (descriptor_path.as_str(), descriptor.as_bytes()),
+        (upper_path.as_str(), upper),
+        ("archive.json", inventory.as_bytes()),
+    ] {
+        let mut header = Header::new_gnu();
+        header.set_entry_type(EntryType::Regular);
+        header.set_path(path).unwrap();
+        header.set_mode(0o644);
+        header.set_size(contents.len() as u64);
+        header.set_cksum();
+        builder.append(&header, Cursor::new(contents)).unwrap();
+    }
+    builder.finish().unwrap();
+}
+
 fn write_symlink_traversal_archive(archive: &Path, escape_dir: &Path) {
     let file = std::fs::File::create(archive).unwrap();
     let mut builder = Builder::new(file);
@@ -524,7 +592,7 @@ async fn explicit_open_migrates_v066_manifest_json_artifact() {
     std::fs::write(dir.join(DEFAULT_UPPER_FILE), b"old upper bytes").unwrap();
     std::fs::write(
         dir.join("manifest.json"),
-        br#"{"schema":1,"format":"raw","fstype":"ext4","image":{"ref":"docker.io/library/alpine:3.20","manifest_digest":"sha256:0000000000000000000000000000000000000000000000000000000000000001"},"parent":null,"created_at":"2026-05-01T12:00:00Z","labels":{},"upper":{"file":"upper.ext4","size_bytes":15,"integrity":null},"source_sandbox":"synthetic"}"#,
+        br#"{"schema":1,"format":"raw","fstype":"ext4","image":{"ref":"docker.io/library/alpine:3.20","manifest_digest":"sha256:0000000000000000000000000000000000000000000000000000000000000001"},"parent":null,"created_at":"2026-05-01T12:00:00Z","labels":{"stage":"legacy"},"upper":{"file":"upper.ext4","size_bytes":15,"integrity":null},"source_sandbox":"synthetic"}"#,
     )
     .unwrap();
 
@@ -534,10 +602,47 @@ async fn explicit_open_migrates_v066_manifest_json_artifact() {
             .unwrap()
     })
     .await;
-    assert_eq!(snap.state().as_file().unwrap().upper.size_bytes, 15);
+    assert_eq!(snap.state().as_file().unwrap().virtual_size, 15);
     assert!(dir.join(DESCRIPTOR_FILENAME).is_file());
+    assert_eq!(
+        snap.labels().get("stage").map(String::as_str),
+        Some("legacy")
+    );
+    assert!(dir.join("metadata.json").is_file());
     assert!(dir.join(".manifest.json.legacy").is_file());
     assert!(!dir.join("manifest.json").exists());
+}
+
+#[tokio::test]
+async fn managed_v066_migration_rewrites_parent_to_stable_snapshot_id() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    let snapshots = home.join("snapshots");
+    let parent_dir = snapshots.join("legacy-parent");
+    let child_dir = snapshots.join("legacy-child");
+    let parent_legacy_digest = write_v066_artifact(&parent_dir, b"parent upper", None);
+    write_v066_artifact(&child_dir, b"child upper", Some(&parent_legacy_digest));
+
+    let backend = isolated_backend(&home).await;
+    let (parent, child) = microsandbox::with_backend(backend, async {
+        // The first DB-backed operation reconciles the complete managed graph
+        // in parent-first order before returning any indexed handles.
+        Snapshot::list().await.unwrap();
+        let parent = Snapshot::open(parent_dir.to_string_lossy().as_ref())
+            .await
+            .unwrap();
+        let child = Snapshot::open(child_dir.to_string_lossy().as_ref())
+            .await
+            .unwrap();
+        (parent, child)
+    })
+    .await;
+
+    assert_eq!(child.manifest().parent.as_ref(), Some(parent.id()));
+    assert_ne!(
+        child.manifest().parent.as_ref().map(|id| id.as_str()),
+        Some(parent.digest())
+    );
 }
 
 #[tokio::test]
@@ -678,6 +783,11 @@ async fn list_dir_skips_non_artifact_directories() {
 async fn save_then_load_round_trips_via_zstd() {
     let tmp = TempDir::new().unwrap();
     let (dir, original_digest) = make_artifact(tmp.path(), "src-snap", b"the upper bytes");
+    std::fs::write(
+        dir.join("metadata.json"),
+        br#"{"schema":"microsandbox.snapshot-metadata/1","labels":{"stage":"deps"}}"#,
+    )
+    .unwrap();
 
     let archive = tmp.path().join("bundle.tar.zst");
     Snapshot::save(
@@ -699,6 +809,10 @@ async fn save_then_load_round_trips_via_zstd() {
         .await
         .unwrap();
     assert_eq!(imported.digest(), original_digest);
+    assert_eq!(
+        imported.labels().get("stage").map(String::as_str),
+        Some("deps")
+    );
 }
 
 #[tokio::test]
@@ -755,7 +869,7 @@ async fn save_sparse_upper_round_trips_and_preserves_holes() {
     let dest = tmp.path().join("imported-sparse");
     let handle = Snapshot::load(&archive, Some(&dest)).await.unwrap();
     assert_eq!(handle.digest(), original_digest);
-    let imported_upper = handle.path().join(DEFAULT_UPPER_FILE);
+    let imported_upper = artifact_payload_path(handle.path());
     assert_eq!(std::fs::read(&imported_upper).unwrap(), logical);
 
     // Holes must come back as holes, not zero-filled blocks.
@@ -809,7 +923,7 @@ async fn sparse_save_stores_only_data_extents_in_plain_tar() {
     for entry in ar.entries().unwrap() {
         let entry = entry.unwrap();
         let path = entry.path().unwrap().to_path_buf();
-        if path.file_name().and_then(|n| n.to_str()) == Some(DEFAULT_UPPER_FILE) {
+        if path.extension().and_then(|n| n.to_str()) == Some("raw") {
             upper_entry_type = Some(entry.header().entry_type());
             upper_archive_path = Some(path);
         }
@@ -854,7 +968,7 @@ async fn sparse_save_many_extents_round_trips() {
     let dest = tmp.path().join("imported-many");
     let handle = Snapshot::load(&archive, Some(&dest)).await.unwrap();
     assert_eq!(handle.digest(), original_digest);
-    let imported_upper = handle.path().join(DEFAULT_UPPER_FILE);
+    let imported_upper = artifact_payload_path(handle.path());
     assert_eq!(std::fs::read(&imported_upper).unwrap(), logical);
 }
 
@@ -881,7 +995,7 @@ async fn sparse_save_all_hole_upper_round_trips() {
     let dest = tmp.path().join("imported-hole");
     let handle = Snapshot::load(&archive, Some(&dest)).await.unwrap();
     assert_eq!(handle.digest(), original_digest);
-    let imported_upper = handle.path().join(DEFAULT_UPPER_FILE);
+    let imported_upper = artifact_payload_path(handle.path());
     assert_eq!(std::fs::read(&imported_upper).unwrap(), logical);
 }
 
@@ -907,7 +1021,7 @@ async fn dense_upper_keeps_regular_entry() {
     for entry in ar.entries().unwrap() {
         let entry = entry.unwrap();
         let path = entry.path().unwrap().to_path_buf();
-        if path.file_name().and_then(|n| n.to_str()) == Some(DEFAULT_UPPER_FILE) {
+        if path.extension().and_then(|n| n.to_str()) == Some("raw") {
             upper_entry_type = Some(entry.header().entry_type());
         }
     }
@@ -1000,7 +1114,7 @@ async fn load_rejects_payload_corruption_without_recorded_snapshot_integrity() {
     .await
     .unwrap();
 
-    corrupt_dense_tar_member(&archive, "/upper.ext4");
+    corrupt_dense_tar_member(&archive, ".raw");
     let err = Snapshot::load(&archive, Some(&tmp.path().join("dest")))
         .await
         .unwrap_err()
@@ -1186,19 +1300,14 @@ async fn load_does_not_follow_preexisting_symlink_parent() {
 }
 
 #[test]
-fn manifest_validation_rejects_upper_file_that_escapes_artifact() {
-    let mut manifest = sample_manifest(4);
-    let file = manifest.state.as_file().unwrap().clone();
-    manifest.state = SnapshotState::File(FileSnapshotState {
-        upper: UpperLayer {
-            file: "../outside.ext4".into(),
-            ..file.upper
-        },
-        ..file
-    });
-    let bytes = manifest.to_canonical_bytes().unwrap_err().to_string();
+fn manifest_validation_rejects_noncanonical_layer_identity() {
+    let manifest = sample_manifest(4);
+    let mut value = serde_json::to_value(manifest).unwrap();
+    value["state"]["layers"][0]["layer_id"] = serde_json::json!("../outside.ext4");
+    let bytes = serde_json::to_vec(&value).unwrap();
+    let error = Manifest::from_bytes(&bytes).unwrap_err().to_string();
 
-    assert!(bytes.contains("upper.file"), "unexpected error: {bytes}");
+    assert!(error.contains("layer_id"), "unexpected error: {error}");
 }
 
 #[tokio::test]
@@ -1271,10 +1380,29 @@ async fn load_translates_v066_plain_and_zstd_archives() {
         let manifest =
             Manifest::from_bytes(&std::fs::read(handle.path().join(DESCRIPTOR_FILENAME)).unwrap())
                 .unwrap();
-        assert_eq!(manifest.state.as_file().unwrap().upper.size_bytes, 12);
+        assert_eq!(manifest.state.as_file().unwrap().virtual_size, 12);
         assert!(handle.path().join(DESCRIPTOR_FILENAME).is_file());
         assert!(handle.path().join(".manifest.json.legacy").is_file());
     }
+}
+
+#[tokio::test]
+async fn load_translates_released_flat_inventory_archive() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    let backend = isolated_backend(&home).await;
+    let archive = tmp.path().join("released.tar");
+    write_released_flat_archive(&archive, b"released upper");
+
+    microsandbox::with_backend(backend, async {
+        let handle = Snapshot::load(&archive, None).await.unwrap();
+        let snapshot = handle.open().await.unwrap();
+        assert_eq!(
+            std::fs::read(artifact_payload_path(snapshot.path())).unwrap(),
+            b"released upper"
+        );
+    })
+    .await;
 }
 
 #[tokio::test]
@@ -1283,9 +1411,11 @@ async fn load_selects_child_head_when_parents_are_present() {
     let home = tmp.path().join("home");
     let backend = isolated_backend(&home).await;
     let snapshots_dir = home.join("snapshots");
-    let (parent_dir, parent_digest) = make_artifact(&snapshots_dir, "parent", b"parent");
+    let (parent_dir, _) = make_artifact(&snapshots_dir, "parent", b"parent");
+    let parent_id = artifact_id(&parent_dir);
     let (child_dir, child_digest) =
-        make_artifact_with_parent(&snapshots_dir, "child", b"child", Some(parent_digest));
+        make_artifact_with_parent(&snapshots_dir, "child", b"child", Some(parent_id));
+    let child_id = artifact_id(&child_dir);
     let archive = tmp.path().join("chain.tar");
     let dest = tmp.path().join("imported-chain");
     let handle = microsandbox::with_backend(
@@ -1313,10 +1443,8 @@ async fn load_selects_child_head_when_parents_are_present() {
     )
     .await;
     assert_eq!(handle.digest(), child_digest);
-    assert_eq!(
-        handle.path(),
-        dest.join(child_digest.strip_prefix("sha256:").unwrap())
-    );
+    assert_eq!(handle.id(), child_id);
+    assert_eq!(handle.path(), dest.join(child_id));
 }
 
 #[tokio::test]
@@ -1424,16 +1552,13 @@ async fn failed_load_with_conflicting_cache_target_does_not_install_cache_entrie
 
 #[tokio::test]
 async fn manifest_digest_is_stable_across_processes() {
-    // Regenerating the manifest from the same logical inputs should
-    // yield the same digest. This is the load-bearing invariant for
-    // file-first identity.
-    let tmp = TempDir::new().unwrap();
-    let (_, digest_a) = make_artifact(tmp.path(), "a", b"same upper");
-
-    let tmp2 = TempDir::new().unwrap();
-    let (_, digest_b) = make_artifact(tmp2.path(), "a", b"same upper");
-
-    assert_eq!(digest_a, digest_b);
+    // Canonicalization is stable for one immutable descriptor. Independent
+    // captures intentionally receive different opaque snapshot IDs.
+    let manifest = sample_manifest(10);
+    assert_eq!(
+        manifest.digest().unwrap(),
+        manifest.clone().digest().unwrap()
+    );
 }
 
 // A slurp implementation would allocate 4 GiB and OOM the runner;
@@ -1534,9 +1659,10 @@ async fn replacing_child_in_place_does_not_inflate_parent_child_count() {
     std::fs::create_dir_all(&snapshots).unwrap();
 
     microsandbox::with_backend(backend, async {
-        let (_pdir, pdigest) = make_artifact(&snapshots, "parent", b"parent upper");
+        let (pdir, _pdigest) = make_artifact(&snapshots, "parent", b"parent upper");
+        let parent_id = artifact_id(&pdir);
         let (cdir, _c1) =
-            make_artifact_with_parent(&snapshots, "child", b"child v1", Some(pdigest.clone()));
+            make_artifact_with_parent(&snapshots, "child", b"child v1", Some(parent_id.clone()));
         Snapshot::reindex(&snapshots).await.unwrap();
 
         // Replace the child in place: same name and path, different digest,
@@ -1547,7 +1673,7 @@ async fn replacing_child_in_place_does_not_inflate_parent_child_count() {
             &snapshots,
             "child",
             b"child v2 with different size",
-            Some(pdigest.clone()),
+            Some(parent_id),
         );
         Snapshot::open("child").await.unwrap();
 

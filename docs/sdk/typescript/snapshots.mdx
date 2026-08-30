@@ -93,6 +93,14 @@ const snap = await h.snapshot("after-pip-install");
 
 A `Snapshot` is a snapshot artifact on disk. The artifact directory is the source of truth; the local database index is a rebuildable cache.
 
+#### <span className="msb-recv">snap.</span><span className="msb-hn">id</span>
+
+```typescript
+get id(): string
+```
+
+Stable opaque `snap_...` identity.
+
 #### <span className="msb-recv">snap.</span><span className="msb-hn">path</span>
 
 ```typescript
@@ -229,6 +237,22 @@ const snap = await Snapshot.builder("after-pip-install")
 ```
 
 </Accordion>
+
+---
+
+#### <span className="msb-recv">builder.</span><span className="msb-hn">createArchive()</span>
+
+```typescript
+createArchive(out: string, plainTar?: boolean): Promise<SnapshotArchive>
+```
+
+Capture directly into an archive without installing a snapshot directory or index row.
+
+```typescript
+const archive = await Snapshot.builder("after-pip-install")
+  .fromSandbox("baseline")
+  .createArchive("/tmp/after-pip-install.tar.zst");
+```
 
 ---
 

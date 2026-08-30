@@ -18,7 +18,7 @@ Snapshots are **disk-only** and require a sandbox that is not running. Stopped a
 | -------- | ------------ |
 | Writable filesystem changes | Memory contents |
 | Pinned image identity | Running processes |
-| Optional labels and integrity hash | Network state |
+| Optional labels and integrity metadata | Network state |
 
 Booting from a snapshot is a cold boot of a fresh VM that starts from the captured filesystem changes.
 
@@ -46,7 +46,7 @@ By default, the snapshot lives at `~/.microsandbox/snapshots/after-pip-install/`
 
 ## Snapshot a sandbox
 
-Snapshot under a bare name, resolved to `~/.microsandbox/snapshots/<name>/` by default. The name is the snapshot's identity; pass a destination directory to create the artifact on a different volume (`DIR/<name>`). Either way the directory is the whole artifact; move it with save/load (or plain `mv`):
+Snapshot under a bare name, resolved to `~/.microsandbox/snapshots/<name>/` by default. The name is a local alias; the descriptor carries a stable `snap_...` identity. Pass a destination directory to create the artifact on a different volume (`DIR/<name>`). Either way the directory is the whole artifact; move it with save/load (or plain `mv`):
 
 <CodeGroup>
 ```rust Rust
@@ -105,6 +105,65 @@ msb snapshot create after-pip-install --from baseline --dest-dir /mnt/big
 </CodeGroup>
 
 The sandbox must be stopped or crashed; running sandboxes are rejected.
+
+## Capture directly to an archive
+
+When the archive is the desired result, capture straight into it instead of creating an installed snapshot directory and then saving a second copy:
+
+<CodeGroup>
+```rust Rust
+use microsandbox::Snapshot;
+
+let archive = Snapshot::builder("after-pip-install")
+    .from_sandbox("baseline")
+    .create_archive("/tmp/after-pip-install.tar.zst", false)
+    .await?;
+```
+
+```typescript TypeScript
+import { Snapshot } from "microsandbox";
+
+const archive = await Snapshot.builder("after-pip-install")
+  .fromSandbox("baseline")
+  .createArchive("/tmp/after-pip-install.tar.zst");
+```
+
+```python Python
+from microsandbox import Snapshot
+
+archive = await Snapshot.create_archive(
+    "after-pip-install",
+    "/tmp/after-pip-install.tar.zst",
+    from_sandbox="baseline",
+)
+```
+
+```go Go
+archive, err := m.Snapshot.CreateArchive(ctx, m.SnapshotArchiveOptions{
+    SnapshotCreateOptions: m.SnapshotCreateOptions{
+        Name:        "after-pip-install",
+        FromSandbox: "baseline",
+    },
+    ArchivePath: "/tmp/after-pip-install.tar.zst",
+})
+```
+
+```bash CLI
+msb snapshot create after-pip-install \
+    --from baseline \
+    --archive /tmp/after-pip-install.tar.zst
+```
+</CodeGroup>
+
+Direct capture publishes only the archive and returns its snapshot ID and path. It creates no intermediate snapshot directory and no local index row. Add `--plain-tar` or the corresponding SDK option to skip zstd compression.
+
+An explicit archive path can also be used directly as the source of a new sandbox:
+
+```bash
+msb run --name worker --from-snapshot ./after-pip-install.tar.zst -- python -V
+```
+
+The archive is unpacked into child-owned staging and then discarded from that operation; no intermediate installed snapshot is loaded into `~/.microsandbox/snapshots`.
 
 ## Boot from a snapshot
 
@@ -235,6 +294,20 @@ ssh other-host msb snapshot load /tmp/snap.tar.zst
 ```
 
 Archives default to `.tar.zst`. Pass `--plain-tar` for a plain `.tar`. SDKs expose the same save and load operations as the CLI.
+
+## Artifact identity and layout
+
+Current file snapshots use a stable opaque snapshot ID, a separate SHA-256 descriptor digest, and one ordered physical layer closure. A normal raw ext4 snapshot is still one layer:
+
+```text
+after-pip-install/
+├── snapshot.json
+├── metadata.json        # present when local labels exist
+└── layers/
+    └── layer_....raw
+```
+
+`metadata.json` contains mutable local labels and does not participate in the descriptor digest or snapshot identity. The descriptor names each layer by `DiskLayerId`; future qcow2 snapshots can carry an oldest-first raw/qcow2 chain without changing the artifact family.
 
 ## Integrity verification
 

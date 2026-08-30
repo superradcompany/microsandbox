@@ -5655,11 +5655,7 @@ fn snapshot_scope_str(scope: SnapshotScope) -> &'static str {
 
 fn snapshot_json(s: &Snapshot) -> serde_json::Value {
     let manifest = s.manifest();
-    let labels: HashMap<String, String> = manifest
-        .labels
-        .iter()
-        .map(|(key, value)| (key.clone(), value.clone()))
-        .collect();
+    let labels = s.labels();
     let (
         state_kind,
         format,
@@ -5674,7 +5670,8 @@ fn snapshot_json(s: &Snapshot) -> serde_json::Value {
         checkpoint_manifest_digest,
     ) = match &manifest.state {
         microsandbox::snapshot::SnapshotState::File(state) => {
-            let integrity = state.upper.integrity.as_ref();
+            let head = state.head_layer().ok();
+            let integrity = head.and_then(|layer| layer.payload.integrity.as_ref());
             let (root, logical_size, leaf_size) = match integrity {
                 Some(microsandbox::UpperIntegrity::FileMerkleBlake3V1 {
                     root,
@@ -5685,9 +5682,9 @@ fn snapshot_json(s: &Snapshot) -> serde_json::Value {
             };
             (
                 "file",
-                Some(snapshot_format_str(state.format)),
-                Some(state.fstype.as_str()),
-                Some(state.upper.file.as_str()),
+                Some(snapshot_format_str(state.disk_format)),
+                Some(state.filesystem.as_str()),
+                head.map(|layer| state.layer_path(layer).to_string_lossy().into_owned()),
                 integrity.map(microsandbox::UpperIntegrity::algorithm),
                 integrity.map(microsandbox::UpperIntegrity::value),
                 root,
@@ -5708,11 +5705,12 @@ fn snapshot_json(s: &Snapshot) -> serde_json::Value {
             None,
             None,
             Some(state.checkpoint_id.as_str()),
-            Some(state.manifest.as_str()),
+            Some(state.checkpoint_root.as_str()),
         ),
     };
     serde_json::json!({
         "path": s.path().display().to_string(),
+        "id": s.id().as_str(),
         "digest": s.digest(),
         "size_bytes": s.size_bytes(),
         "image_ref": manifest.image.reference,
@@ -5730,14 +5728,15 @@ fn snapshot_json(s: &Snapshot) -> serde_json::Value {
         "checkpoint_id": checkpoint_id,
         "checkpoint_manifest_digest": checkpoint_manifest_digest,
         "parent": manifest.parent,
-        "created_at": manifest.created_at,
+        "created_at": manifest.capture.created_at,
         "labels": labels,
-        "source_sandbox": manifest.source_sandbox,
+        "source_sandbox": manifest.capture.source_lineage,
     })
 }
 
 fn snapshot_handle_json(h: &microsandbox::SnapshotHandle) -> serde_json::Value {
     serde_json::json!({
+        "id": h.id(),
         "digest": h.digest(),
         "name": h.name(),
         "parent_digest": h.parent_digest(),
@@ -5833,6 +5832,38 @@ pub unsafe extern "C" fn msb_snapshot_create(
         Ok(Box::pin(async move {
             let snap = builder.create().await.map_err(FfiError::from)?;
             Ok(snapshot_json(&snap).to_string())
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_snapshot_create_archive(
+    cancel_id: u64,
+    source_sandbox: *const c_char,
+    archive_path: *const c_char,
+    opts_json: *const c_char,
+    plain_tar: bool,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let source_sandbox = unsafe { cstr(source_sandbox) }?;
+        let archive_path = unsafe { cstr(archive_path) }?;
+        let opts_raw = unsafe { cstr(opts_json) }?;
+        let opts: SnapshotCreateOpts = serde_json::from_str(&opts_raw)
+            .map_err(|e| FfiError::invalid_argument(format!("invalid opts JSON: {e}")))?;
+        let builder = snapshot_builder_from_opts(source_sandbox, opts)?;
+        Ok(Box::pin(async move {
+            let archive = builder
+                .create_archive(archive_path, plain_tar)
+                .await
+                .map_err(FfiError::from)?;
+            Ok(serde_json::json!({
+                "id": archive.id().as_str(),
+                "descriptor_digest": archive.descriptor_digest(),
+                "path": archive.path().display().to_string(),
+            })
+            .to_string())
         }))
     })
 }

@@ -34,6 +34,7 @@ from microsandbox._microsandbox import (
     SandboxTouchResult,
     SftpClient,
     Snapshot,
+    SnapshotArchive,
     SnapshotHandle,
     SshClient,
     SshOutput,
@@ -261,6 +262,7 @@ __all__ = [
     "NamedVolumeMode",
     # Snapshots
     "Snapshot",
+    "SnapshotArchive",
     "SnapshotHandle",
     "SnapshotStateKind",
     "SnapshotFormat",

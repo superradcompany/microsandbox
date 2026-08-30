@@ -3,9 +3,10 @@ use std::path::PathBuf;
 
 use microsandbox::snapshot::SaveOpts as RustSaveOpts;
 use microsandbox::{
-    Snapshot as RustSnapshot, SnapshotFormat as RustSnapshotFormat,
-    SnapshotHandle as RustSnapshotHandle, SnapshotScope as RustSnapshotScope,
-    UpperIntegrity as RustUpperIntegrity, UpperVerifyStatus as RustUpperVerifyStatus,
+    Snapshot as RustSnapshot, SnapshotArchive as RustSnapshotArchive,
+    SnapshotFormat as RustSnapshotFormat, SnapshotHandle as RustSnapshotHandle,
+    SnapshotScope as RustSnapshotScope, UpperIntegrity as RustUpperIntegrity,
+    UpperVerifyStatus as RustUpperVerifyStatus,
 };
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
@@ -20,6 +21,12 @@ use crate::error::to_napi_error;
 #[napi(js_name = "Snapshot")]
 pub struct JsSnapshot {
     inner: RustSnapshot,
+}
+
+/// Result of direct sandbox-to-archive capture.
+#[napi(js_name = "SnapshotArchive")]
+pub struct JsSnapshotArchive {
+    inner: RustSnapshotArchive,
 }
 
 /// Lightweight snapshot handle from the local index.
@@ -63,6 +70,7 @@ pub struct JsSnapshotRemoveOpts {
 /// Snapshot index info from the local DB cache.
 #[napi(object, js_name = "SnapshotInfo")]
 pub struct JsSnapshotInfo {
+    pub id: String,
     pub digest: String,
     pub name: Option<String>,
     pub parent_digest: Option<String>,
@@ -186,6 +194,11 @@ impl JsSnapshot {
     }
 
     #[napi(getter)]
+    pub fn id(&self) -> String {
+        self.inner.id().to_string()
+    }
+
+    #[napi(getter)]
     pub fn digest(&self) -> String {
         self.inner.digest().to_string()
     }
@@ -216,7 +229,7 @@ impl JsSnapshot {
             .manifest()
             .state
             .as_file()
-            .map(|state| format_str(state.format).into())
+            .map(|state| format_str(state.disk_format).into())
     }
 
     #[napi(getter)]
@@ -225,7 +238,7 @@ impl JsSnapshot {
             .manifest()
             .state
             .as_file()
-            .map(|state| state.fstype.clone())
+            .map(|state| state.filesystem.clone())
     }
 
     #[napi(getter)]
@@ -234,7 +247,8 @@ impl JsSnapshot {
             .manifest()
             .state
             .as_file()
-            .map(|state| state.upper.file.clone())
+            .and_then(|state| state.head_layer().ok().map(|layer| state.layer_path(layer)))
+            .map(|path| path.to_string_lossy().into_owned())
     }
 
     #[napi(getter)]
@@ -243,7 +257,8 @@ impl JsSnapshot {
             .manifest()
             .state
             .as_file()
-            .and_then(|state| state.upper.integrity.as_ref())
+            .and_then(|state| state.head_layer().ok())
+            .and_then(|layer| layer.payload.integrity.as_ref())
             .map(|integrity| integrity.algorithm().into())
     }
 
@@ -253,7 +268,8 @@ impl JsSnapshot {
             .manifest()
             .state
             .as_file()
-            .and_then(|state| state.upper.integrity.as_ref())
+            .and_then(|state| state.head_layer().ok())
+            .and_then(|layer| layer.payload.integrity.as_ref())
             .map(|integrity| integrity.value().into())
     }
 
@@ -263,7 +279,8 @@ impl JsSnapshot {
             .manifest()
             .state
             .as_file()
-            .and_then(|state| state.upper.integrity.as_ref())
+            .and_then(|state| state.head_layer().ok())
+            .and_then(|layer| layer.payload.integrity.as_ref())
             .and_then(|integrity| match integrity {
                 RustUpperIntegrity::FileMerkleBlake3V1 { logical_size, .. } => {
                     Some(BigInt::from(*logical_size))
@@ -278,7 +295,8 @@ impl JsSnapshot {
             .manifest()
             .state
             .as_file()
-            .and_then(|state| state.upper.integrity.as_ref())
+            .and_then(|state| state.head_layer().ok())
+            .and_then(|layer| layer.payload.integrity.as_ref())
             .and_then(|integrity| match integrity {
                 RustUpperIntegrity::FileMerkleBlake3V1 { leaf_size, .. } => Some(*leaf_size),
                 _ => None,
@@ -300,12 +318,16 @@ impl JsSnapshot {
             .manifest()
             .state
             .as_checkpoint()
-            .map(|state| state.manifest.clone())
+            .map(|state| state.checkpoint_root.clone())
     }
 
     #[napi(getter)]
     pub fn parent(&self) -> Option<String> {
-        self.inner.manifest().parent.clone()
+        self.inner
+            .manifest()
+            .parent
+            .as_ref()
+            .map(ToString::to_string)
     }
 
     #[napi(getter, ts_return_type = "'disk' | 'resumable'")]
@@ -315,28 +337,51 @@ impl JsSnapshot {
 
     #[napi(getter)]
     pub fn created_at(&self) -> String {
-        self.inner.manifest().created_at.clone()
+        self.inner.manifest().capture.created_at.clone()
     }
 
     #[napi(getter)]
     pub fn labels(&self) -> HashMap<String, String> {
         self.inner
-            .manifest()
-            .labels
+            .labels()
             .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
+            .map(|(key, value)| (key.clone(), value.clone()))
             .collect()
     }
 
     #[napi(getter)]
     pub fn source_sandbox(&self) -> Option<String> {
-        self.inner.manifest().source_sandbox.clone()
+        self.inner.manifest().capture.source_lineage.clone()
     }
 
     #[napi]
     pub async fn verify(&self) -> Result<JsSnapshotVerifyReport> {
         let report = self.inner.verify().await.map_err(to_napi_error)?;
         Ok(verify_report_to_js(report))
+    }
+}
+
+#[napi]
+impl JsSnapshotArchive {
+    #[napi(getter)]
+    pub fn id(&self) -> String {
+        self.inner.id().to_string()
+    }
+
+    #[napi(getter)]
+    pub fn descriptor_digest(&self) -> String {
+        self.inner.descriptor_digest().to_string()
+    }
+
+    #[napi(getter)]
+    pub fn path(&self) -> String {
+        self.inner.path().display().to_string()
+    }
+}
+
+impl JsSnapshotArchive {
+    pub(crate) fn from_rust(inner: RustSnapshotArchive) -> Self {
+        Self { inner }
     }
 }
 
@@ -350,6 +395,11 @@ impl JsSnapshot {
 
 #[napi]
 impl JsSnapshotHandle {
+    #[napi(getter)]
+    pub fn id(&self) -> String {
+        self.inner.id().to_string()
+    }
+
     #[napi(getter)]
     pub fn digest(&self) -> String {
         self.inner.digest().to_string()
@@ -469,6 +519,7 @@ fn format_scope(scope: RustSnapshotScope) -> &'static str {
 
 fn snapshot_handle_to_info(h: &RustSnapshotHandle) -> JsSnapshotInfo {
     JsSnapshotInfo {
+        id: h.id().to_string(),
         digest: h.digest().to_string(),
         name: h.name().map(|s| s.to_string()),
         parent_digest: h.parent_digest().map(|s| s.to_string()),

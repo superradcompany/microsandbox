@@ -171,6 +171,12 @@ pub struct SandboxConfig {
     #[serde(skip)]
     pub(crate) snapshot_upper_source: Option<PathBuf>,
 
+    /// Archive to materialize directly into child staging during create.
+    ///
+    /// Transient and never persisted.
+    #[serde(skip)]
+    pub(crate) snapshot_archive_source: Option<PathBuf>,
+
     /// Transient process-launch intent for the current create operation.
     #[serde(skip)]
     pub(crate) launch_intent: LaunchIntent,
@@ -417,7 +423,7 @@ impl SandboxConfig {
             ));
         }
 
-        if self.snapshot_upper_source.is_some() {
+        if self.snapshot_upper_source.is_some() || self.snapshot_archive_source.is_some() {
             return Ok(());
         }
 
@@ -704,6 +710,7 @@ impl Default for SandboxConfig {
             slug: None,
             manifest_digest: None,
             snapshot_upper_source: None,
+            snapshot_archive_source: None,
             launch_intent: LaunchIntent::None,
             init_owns_workload: false,
             init_workload_arg_count: 0,

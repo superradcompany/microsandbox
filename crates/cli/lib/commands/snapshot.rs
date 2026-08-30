@@ -63,6 +63,14 @@ pub struct SnapshotCreateArgs {
     #[arg(long = "dest-dir", value_name = "DIR")]
     pub dest_dir: Option<std::path::PathBuf>,
 
+    /// Write directly to an archive without installing a snapshot directory.
+    #[arg(long, value_name = "PATH", conflicts_with = "dest_dir")]
+    pub archive: Option<std::path::PathBuf>,
+
+    /// Write a plain tar archive instead of zstd-compressed tar.
+    #[arg(long, requires = "archive")]
+    pub plain_tar: bool,
+
     /// Add a `key=value` label. May be repeated.
     #[arg(long = "label", value_name = "K=V")]
     pub labels: Vec<String>,
@@ -220,11 +228,21 @@ async fn create(args: SnapshotCreateArgs) -> anyhow::Result<()> {
         ui::Spinner::start("Snapshotting", &args.from)
     };
 
+    if let Some(archive_path) = args.archive.as_ref() {
+        let archive = builder.create_archive(archive_path, args.plain_tar).await?;
+        spinner.finish_success("Snapshotted");
+        if !args.quiet {
+            println!("{}", archive.id());
+            println!("{}", archive.path().display());
+        }
+        return Ok(());
+    }
+
     match builder.create().await {
         Ok(snap) => {
             spinner.finish_success("Snapshotted");
             if !args.quiet {
-                println!("{}", snap.digest());
+                println!("{}", snap.id());
                 println!("{}", snap.path().display());
             }
             Ok(())
@@ -314,26 +332,40 @@ async fn inspect(args: SnapshotInspectArgs) -> anyhow::Result<()> {
     let snap = Snapshot::open(&args.snapshot).await?;
     let m = snap.manifest();
 
-    ui::detail_kv("Digest", snap.digest());
+    ui::detail_kv("Snapshot ID", snap.id().as_str());
+    ui::detail_kv("Descriptor Digest", snap.digest());
     ui::detail_kv("Path", &snap.path().display().to_string());
     ui::detail_kv("Image", &m.image.reference);
     ui::detail_kv("Image Manifest", &m.image.manifest_digest);
     ui::detail_kv("Scope", format_scope(m.scope));
-    ui::detail_kv("Parent", m.parent.as_deref().unwrap_or("-"));
-    ui::detail_kv("Created", &ui::format_rfc3339_datetime(&m.created_at)?);
+    ui::detail_kv(
+        "Parent",
+        m.parent
+            .as_ref()
+            .map(|parent| parent.as_str())
+            .unwrap_or("-"),
+    );
+    ui::detail_kv(
+        "Created",
+        &ui::format_rfc3339_datetime(&m.capture.created_at)?,
+    );
     match &m.state {
         microsandbox::SnapshotState::File(state) => {
             ui::detail_kv("State", "file");
-            ui::detail_kv("Format", format_str(state.format));
-            ui::detail_kv("Filesystem", &state.fstype);
-            ui::detail_kv("Upper File", &state.upper.file);
-            ui::detail_kv("Upper Size", &format_size(state.upper.size_bytes));
-            ui::detail_kv("Integrity", &format_integrity(&state.upper.integrity));
+            ui::detail_kv("Format", format_str(state.disk_format));
+            ui::detail_kv("Filesystem", &state.filesystem);
+            ui::detail_kv("Virtual Size", &format_size(state.virtual_size));
+            ui::detail_kv("Layers", &state.layers.len().to_string());
+            let integrity = state
+                .layers
+                .last()
+                .and_then(|layer| layer.payload.integrity.as_ref());
+            ui::detail_kv("Head Integrity", &format_integrity(&integrity.cloned()));
         }
         microsandbox::SnapshotState::Checkpoint(state) => {
             ui::detail_kv("State", "checkpoint");
             ui::detail_kv("Checkpoint", &state.checkpoint_id);
-            ui::detail_kv("Checkpoint Manifest", &state.manifest);
+            ui::detail_kv("Checkpoint Root", &state.checkpoint_root);
         }
     }
     if !m.requires.is_empty() {
@@ -350,14 +382,14 @@ async fn inspect(args: SnapshotInspectArgs) -> anyhow::Result<()> {
         let report = snap.verify().await?;
         ui::detail_kv("Verification", &format_verify_status(&report.upper));
     }
-    if let Some(ref src) = m.source_sandbox {
+    if let Some(ref src) = m.capture.source_lineage {
         ui::detail_kv("Source Sandbox", src);
     }
-    if !m.labels.is_empty() {
-        let labels = m
-            .labels
+    if !snap.labels().is_empty() {
+        let labels = snap
+            .labels()
             .iter()
-            .map(|(k, v)| format!("{k}={v}"))
+            .map(|(key, value)| format!("{key}={value}"))
             .collect::<Vec<_>>()
             .join(", ");
         ui::detail_kv("Labels", &labels);
@@ -530,6 +562,28 @@ mod tests {
             args.dest_dir.as_deref(),
             Some(std::path::Path::new("/mnt/big"))
         );
+    }
+
+    #[test]
+    fn create_parses_direct_archive_without_installed_destination() {
+        let args = parse_snapshot_args(&[
+            "create",
+            "clean",
+            "--from",
+            "box",
+            "--archive",
+            "/tmp/clean.tar",
+            "--plain-tar",
+        ]);
+        let SnapshotCommands::Create(args) = args.command else {
+            panic!("expected create command");
+        };
+        assert_eq!(
+            args.archive.as_deref(),
+            Some(std::path::Path::new("/tmp/clean.tar"))
+        );
+        assert!(args.plain_tar);
+        assert!(args.dest_dir.is_none());
     }
 
     #[test]

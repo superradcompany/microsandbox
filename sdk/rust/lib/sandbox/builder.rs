@@ -1210,6 +1210,12 @@ impl SandboxBuilder {
             ));
         }
 
+        let snapshot_path = std::path::Path::new(&snapshot_ref);
+        if snapshot_path.is_file() {
+            self.config.snapshot_archive_source = Some(snapshot_path.to_path_buf());
+            return Ok(());
+        }
+
         let snap = crate::snapshot::Snapshot::open(&snapshot_ref).await?;
         if snap.manifest().scope != crate::snapshot::SnapshotScope::Disk {
             return Err(crate::MicrosandboxError::unsupported(
@@ -1240,13 +1246,14 @@ impl SandboxBuilder {
                 ));
             }
         };
-        if file_state.format != crate::snapshot::SnapshotFormat::Raw || file_state.fstype != "ext4"
+        if file_state.disk_format != crate::snapshot::SnapshotFormat::Raw
+            || file_state.filesystem != "ext4"
         {
             return Err(crate::MicrosandboxError::unsupported(
                 Operation::SnapshotOps,
                 UnsupportedReason::NotAvailable(format!(
                     "snapshot file state {:?}/{} is not qualified for restore",
-                    file_state.format, file_state.fstype
+                    file_state.disk_format, file_state.filesystem
                 )),
             ));
         }
@@ -1254,7 +1261,10 @@ impl SandboxBuilder {
 
         self.config.spec.image = RootfsSource::oci(snap_ref);
         self.config.manifest_digest = Some(snap.manifest().image.manifest_digest.clone());
-        self.config.snapshot_upper_source = Some(snap.path().join(&file_state.upper.file));
+        let head = file_state
+            .head_layer()
+            .map_err(|e| crate::MicrosandboxError::SnapshotIntegrity(e.to_string()))?;
+        self.config.snapshot_upper_source = Some(snap.layer_path(head));
         Ok(())
     }
 
@@ -1619,7 +1629,9 @@ impl SandboxBuilder {
                         "patches require a managed root disk (they are baked into the upper at create time)".into(),
                     ));
                 }
-                if self.config.snapshot_upper_source.is_some() {
+                if self.config.snapshot_upper_source.is_some()
+                    || self.config.snapshot_archive_source.is_some()
+                {
                     return Err(crate::MicrosandboxError::InvalidConfig(
                         "from_snapshot requires a managed root disk".into(),
                     ));
@@ -1637,7 +1649,9 @@ impl SandboxBuilder {
                         "patches require a managed root disk (they are baked into the upper at create time)".into(),
                     ));
                 }
-                if self.config.snapshot_upper_source.is_some() {
+                if self.config.snapshot_upper_source.is_some()
+                    || self.config.snapshot_archive_source.is_some()
+                {
                     return Err(crate::MicrosandboxError::InvalidConfig(
                         "from_snapshot requires a managed root disk".into(),
                     ));
@@ -1662,7 +1676,9 @@ impl SandboxBuilder {
                         "patches are not yet compatible with flat OCI rootfs".into(),
                     ));
                 }
-                if self.config.snapshot_upper_source.is_some() {
+                if self.config.snapshot_upper_source.is_some()
+                    || self.config.snapshot_archive_source.is_some()
+                {
                     return Err(crate::MicrosandboxError::InvalidConfig(
                         "from_snapshot is not yet compatible with flat OCI rootfs".into(),
                     ));

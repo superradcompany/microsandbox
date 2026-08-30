@@ -4,7 +4,9 @@ use std::path::{Path, PathBuf};
 
 use chrono::Utc;
 use microsandbox_image::snapshot::migration::V066_DESCRIPTOR_FILENAME;
-use microsandbox_image::snapshot::{DESCRIPTOR_FILENAME, Manifest, SnapshotState};
+use microsandbox_image::snapshot::{
+    DEFAULT_UPPER_FILE, DESCRIPTOR_FILENAME, Manifest, SnapshotState,
+};
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter,
     QueryOrder,
@@ -54,40 +56,60 @@ pub(super) async fn open_snapshot(
     let bytes = tokio::fs::read(&manifest_path).await.map_err(|e| {
         MicrosandboxError::SnapshotNotFound(format!("{}: {e}", manifest_path.display()))
     })?;
-    let manifest = Manifest::from_bytes(&bytes)
-        .map_err(|e| MicrosandboxError::SnapshotIntegrity(format!("{e}")))?;
+    let (manifest, translated_labels) = match Manifest::from_bytes(&bytes) {
+        Ok(manifest) => (manifest, None),
+        Err(final_error) => {
+            microsandbox_image::snapshot::migration::translate_released_flat_forward(&bytes)
+                .map(|translation| (translation.target, Some(translation.labels)))
+                .map_err(|legacy_error| {
+                    MicrosandboxError::SnapshotIntegrity(format!(
+                        "descriptor is neither final nor a supported released flat snapshot: {final_error}; {legacy_error}"
+                    ))
+                })?
+        }
+    };
     let digest = manifest
         .digest()
         .map_err(|e| MicrosandboxError::SnapshotIntegrity(format!("{e}")))?;
 
     if let SnapshotState::File(file_state) = &manifest.state {
-        // Metadata open proves the confined payload exists and has the bound
-        // apparent size. Explicit verify performs the potentially large hash.
-        let upper_path = dir.join(&file_state.upper.file);
-        let upper_meta = tokio::fs::symlink_metadata(&upper_path)
-            .await
-            .map_err(|e| {
-                MicrosandboxError::SnapshotIntegrity(format!(
-                    "missing upper file: {}: {e}",
+        // Metadata open proves every member of the physical closure exists
+        // with its bound apparent size. Explicit verify reads payload bytes.
+        for layer in &file_state.layers {
+            let canonical_path = dir.join(file_state.layer_path(layer));
+            let upper_path = if canonical_path.exists() {
+                canonical_path
+            } else if file_state.layers.len() == 1 && dir.join(DEFAULT_UPPER_FILE).exists() {
+                dir.join(DEFAULT_UPPER_FILE)
+            } else {
+                canonical_path
+            };
+            let upper_meta = tokio::fs::symlink_metadata(&upper_path)
+                .await
+                .map_err(|e| {
+                    MicrosandboxError::SnapshotIntegrity(format!(
+                        "missing upper file: {}: {e}",
+                        upper_path.display()
+                    ))
+                })?;
+            if !upper_meta.file_type().is_file() {
+                return Err(MicrosandboxError::SnapshotIntegrity(format!(
+                    "upper is not a regular file: {}",
                     upper_path.display()
-                ))
-            })?;
-        if !upper_meta.file_type().is_file() {
-            return Err(MicrosandboxError::SnapshotIntegrity(format!(
-                "upper is not a regular file: {}",
-                upper_path.display()
-            )));
-        }
-        let actual_size = upper_meta.len();
-        if actual_size != file_state.upper.size_bytes {
-            return Err(MicrosandboxError::SnapshotIntegrity(format!(
-                "upper size mismatch: descriptor says {}, file is {}",
-                file_state.upper.size_bytes, actual_size
-            )));
+                )));
+            }
+            let actual_size = upper_meta.len();
+            if actual_size != layer.virtual_size {
+                return Err(MicrosandboxError::SnapshotIntegrity(format!(
+                    "upper size mismatch: descriptor says {}, file is {}",
+                    layer.virtual_size, actual_size
+                )));
+            }
         }
     }
 
-    let snap = Snapshot::from_parts(dir.clone(), digest.clone(), manifest);
+    let labels = super::metadata::read(&dir, &manifest, translated_labels).await?;
+    let snap = Snapshot::from_parts(dir.clone(), digest.clone(), manifest, labels);
 
     // Opportunistic auto-reindex: if the artifact lives under the
     // configured snapshots dir but its digest isn't in the local
@@ -114,7 +136,7 @@ pub(super) async fn index_upsert(
 ) -> MicrosandboxResult<()> {
     let db = local.db().await?.write();
 
-    let created_at = chrono::DateTime::parse_from_rfc3339(&manifest.created_at)
+    let created_at = chrono::DateTime::parse_from_rfc3339(&manifest.capture.created_at)
         .map(|d| d.naive_utc())
         .unwrap_or_else(|_| Utc::now().naive_utc());
     let indexed_at = Utc::now().naive_utc();
@@ -133,6 +155,7 @@ pub(super) async fn index_upsert(
     // its own edge below.
     let mut supersede = sea_orm::Condition::any()
         .add(snapshot_entity::Column::Digest.eq(digest.to_string()))
+        .add(snapshot_entity::Column::SnapshotId.eq(manifest.snapshot_id.to_string()))
         .add(snapshot_entity::Column::ArtifactPath.eq(artifact_path_str.clone()));
     if let Some(name) = artifact_name.as_ref() {
         supersede = supersede.add(snapshot_entity::Column::Name.eq(name.clone()));
@@ -144,7 +167,7 @@ pub(super) async fn index_upsert(
     for row in &superseded {
         if let Some(parent) = row.parent_digest.as_ref() {
             db.execute_unprepared(&format!(
-                "UPDATE snapshot_index SET child_count = MAX(0, child_count - 1) WHERE digest = '{}'",
+                "UPDATE snapshot_index SET child_count = MAX(0, child_count - 1) WHERE snapshot_id = '{}'",
                 parent.replace('\'', "''")
             ))
             .await?;
@@ -158,25 +181,29 @@ pub(super) async fn index_upsert(
     let (state_kind, format, fstype, checkpoint_manifest_digest, size_bytes) = match &manifest.state
     {
         SnapshotState::File(state) => {
-            let format = match state.format {
+            let format = match state.disk_format {
                 microsandbox_image::snapshot::SnapshotFormat::Raw => "raw",
                 microsandbox_image::snapshot::SnapshotFormat::Qcow2 => "qcow2",
             };
             (
                 "file",
                 Some(format.to_string()),
-                Some(state.fstype.clone()),
+                Some(state.filesystem.clone()),
                 None,
-                Some(i64::try_from(state.upper.size_bytes).map_err(|_| {
+                Some(i64::try_from(state.virtual_size).map_err(|_| {
                     MicrosandboxError::SnapshotIntegrity(
                         "snapshot size does not fit the local index".into(),
                     )
                 })?),
             )
         }
-        SnapshotState::Checkpoint(state) => {
-            ("checkpoint", None, None, Some(state.manifest.clone()), None)
-        }
+        SnapshotState::Checkpoint(state) => (
+            "checkpoint",
+            None,
+            None,
+            Some(state.checkpoint_root.clone()),
+            None,
+        ),
     };
     let scope_str = match manifest.scope {
         SnapshotScope::Disk => "disk",
@@ -185,8 +212,10 @@ pub(super) async fn index_upsert(
 
     let row = snapshot_entity::ActiveModel {
         digest: Set(digest.to_string()),
+        snapshot_id: Set(Some(manifest.snapshot_id.to_string())),
+        descriptor_digest: Set(Some(digest.to_string())),
         name: Set(artifact_name),
-        parent_digest: Set(manifest.parent.clone()),
+        parent_digest: Set(manifest.parent.as_ref().map(ToString::to_string)),
         scope: Set(scope_str.into()),
         state_kind: Set(state_kind.into()),
         image_ref: Set(manifest.image.reference.clone()),
@@ -211,8 +240,8 @@ pub(super) async fn index_upsert(
     if let Some(parent) = manifest.parent.as_ref() {
         use sea_orm::ConnectionTrait;
         db.execute_unprepared(&format!(
-            "UPDATE snapshot_index SET child_count = child_count + 1 WHERE digest = '{}'",
-            parent.replace('\'', "''")
+            "UPDATE snapshot_index SET child_count = child_count + 1 WHERE snapshot_id = '{}'",
+            parent.as_str().replace('\'', "''")
         ))
         .await?;
     }
@@ -302,31 +331,37 @@ pub(super) async fn remove_snapshot(
     let write_db = pools.write();
 
     // Resolve the target row. Accept digest, name, or path.
-    let (digest, artifact_path) =
-        if path_or_name.starts_with("sha256:") || path_or_name.starts_with("sha512:") {
-            let row = snapshot_entity::Entity::find_by_id(path_or_name.to_string())
-                .one(read_db)
-                .await?
-                .ok_or_else(|| MicrosandboxError::SnapshotNotFound(path_or_name.into()))?;
+    let (digest, artifact_path) = if path_or_name.starts_with("snap_") {
+        let row = snapshot_entity::Entity::find()
+            .filter(snapshot_entity::Column::SnapshotId.eq(path_or_name.to_string()))
+            .one(read_db)
+            .await?
+            .ok_or_else(|| MicrosandboxError::SnapshotNotFound(path_or_name.into()))?;
+        (row.digest.clone(), PathBuf::from(row.artifact_path))
+    } else if path_or_name.starts_with("sha256:") || path_or_name.starts_with("sha512:") {
+        let row = snapshot_entity::Entity::find_by_id(path_or_name.to_string())
+            .one(read_db)
+            .await?
+            .ok_or_else(|| MicrosandboxError::SnapshotNotFound(path_or_name.into()))?;
+        (row.digest.clone(), PathBuf::from(row.artifact_path))
+    } else if looks_like_path(path_or_name) {
+        // Path: open to read the digest, then drop both row and dir.
+        let snap = open_snapshot(local, path_or_name).await?;
+        (snap.digest.clone(), snap.path.clone())
+    } else {
+        // Bare name: prefer the index lookup; fall back to default-dir resolution.
+        let row = snapshot_entity::Entity::find()
+            .filter(snapshot_entity::Column::Name.eq(path_or_name.to_string()))
+            .one(read_db)
+            .await?;
+        if let Some(row) = row {
             (row.digest.clone(), PathBuf::from(row.artifact_path))
-        } else if looks_like_path(path_or_name) {
-            // Path: open to read the digest, then drop both row and dir.
-            let snap = open_snapshot(local, path_or_name).await?;
-            (snap.digest.clone(), snap.path.clone())
         } else {
-            // Bare name: prefer the index lookup; fall back to default-dir resolution.
-            let row = snapshot_entity::Entity::find()
-                .filter(snapshot_entity::Column::Name.eq(path_or_name.to_string()))
-                .one(read_db)
-                .await?;
-            if let Some(row) = row {
-                (row.digest.clone(), PathBuf::from(row.artifact_path))
-            } else {
-                let dir = local.snapshots_dir().join(path_or_name);
-                let snap = open_snapshot(local, dir.to_string_lossy().as_ref()).await?;
-                (snap.digest.clone(), snap.path.clone())
-            }
-        };
+            let dir = local.snapshots_dir().join(path_or_name);
+            let snap = open_snapshot(local, dir.to_string_lossy().as_ref()).await?;
+            (snap.digest.clone(), snap.path.clone())
+        }
+    };
 
     // Check children unless --force.
     let row = snapshot_entity::Entity::find_by_id(digest.clone())
@@ -350,7 +385,7 @@ pub(super) async fn remove_snapshot(
     if let Some(p) = parent {
         write_db
             .execute_unprepared(&format!(
-                "UPDATE snapshot_index SET child_count = MAX(0, child_count - 1) WHERE digest = '{}'",
+                "UPDATE snapshot_index SET child_count = MAX(0, child_count - 1) WHERE snapshot_id = '{}'",
                 p.replace('\'', "''")
             ))
             .await?;
@@ -379,7 +414,7 @@ pub(super) async fn reindex_dir(local: &LocalBackend, dir: &Path) -> Microsandbo
     db.execute_unprepared(
         "UPDATE snapshot_index SET child_count = (\
             SELECT COUNT(*) FROM snapshot_index AS c \
-            WHERE c.parent_digest = snapshot_index.digest)",
+            WHERE c.parent_digest = snapshot_index.snapshot_id)",
     )
     .await?;
     Ok(indexed)
@@ -392,7 +427,12 @@ pub(super) async fn get_handle(
 ) -> MicrosandboxResult<SnapshotHandle> {
     let db = local.db().await?.read();
 
-    let row = if needle.starts_with("sha256:") || needle.starts_with("sha512:") {
+    let row = if needle.starts_with("snap_") {
+        snapshot_entity::Entity::find()
+            .filter(snapshot_entity::Column::SnapshotId.eq(needle.to_string()))
+            .one(db)
+            .await?
+    } else if needle.starts_with("sha256:") || needle.starts_with("sha512:") {
         snapshot_entity::Entity::find_by_id(needle.to_string())
             .one(db)
             .await?
@@ -422,7 +462,12 @@ pub(super) async fn lookup_by_digest(
     digest: &str,
 ) -> MicrosandboxResult<Option<SnapshotHandle>> {
     let db = local.db().await?.read();
-    let row = snapshot_entity::Entity::find_by_id(digest.to_string())
+    let row = snapshot_entity::Entity::find()
+        .filter(
+            sea_orm::Condition::any()
+                .add(snapshot_entity::Column::Digest.eq(digest.to_string()))
+                .add(snapshot_entity::Column::SnapshotId.eq(digest.to_string())),
+        )
         .one(db)
         .await?;
     Ok(row.map(handle_from_model))
@@ -442,6 +487,7 @@ fn handle_from_model(m: snapshot_entity::Model) -> SnapshotHandle {
         }
     };
     SnapshotHandle {
+        snapshot_id: m.snapshot_id.unwrap_or_else(|| m.digest.clone()),
         digest: m.digest,
         name: m.name,
         parent_digest: m.parent_digest,

@@ -958,10 +958,9 @@ mod tests {
             Manifest::from_bytes(&std::fs::read(root_dir.join("snapshot.json")).unwrap()).unwrap();
         let child_manifest =
             Manifest::from_bytes(&std::fs::read(child_dir.join("snapshot.json")).unwrap()).unwrap();
-        let root_target_digest = root_manifest.digest().unwrap();
         assert_eq!(
-            child_manifest.parent.as_deref(),
-            Some(root_target_digest.as_str())
+            child_manifest.parent.as_ref().map(|parent| parent.as_str()),
+            Some(root_manifest.snapshot_id.as_str())
         );
         assert!(!root_dir.join("manifest.json").exists());
         assert!(!child_dir.join("manifest.json").exists());

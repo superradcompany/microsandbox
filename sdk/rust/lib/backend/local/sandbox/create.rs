@@ -114,6 +114,18 @@ impl LocalBackend {
         let sandbox_dir = self.sandboxes_dir().join(&config.spec.name);
         Self::prepare_create_target(db, &config, &sandbox_dir, &self.config().run_dir()).await?;
 
+        // A direct archive restore streams its layer into the ordinary child
+        // staging location before image resolution. The archive supplies the
+        // pinned image identity; no installed snapshot artifact is created.
+        if let Some(archive) = config.snapshot_archive_source.take() {
+            let manifest =
+                crate::snapshot::materialize_archive_for_child(self, &archive, &sandbox_dir)
+                    .await?;
+            config.spec.image = RootfsSource::oci(manifest.image.reference);
+            config.manifest_digest = Some(manifest.image.manifest_digest);
+            config.snapshot_upper_source = Some(sandbox_dir.join("upper.ext4"));
+        }
+
         // Resolve OCI images before spawning the sandbox process.
         if let RootfsSource::Oci(oci) = config.spec.image.clone() {
             let reference = oci.reference;
@@ -278,14 +290,16 @@ impl LocalBackend {
                         "patches cannot be combined with from_snapshot".into(),
                     ));
                 }
-                let dst = upper_path.clone();
-                tokio::task::spawn_blocking(move || {
-                    microsandbox_utils::copy::fast_copy(&snap_upper, &dst)
-                })
-                .await
-                .map_err(|e| {
-                    crate::MicrosandboxError::Custom(format!("snapshot copy task: {e}"))
-                })??;
+                if snap_upper != upper_path {
+                    let dst = upper_path.clone();
+                    tokio::task::spawn_blocking(move || {
+                        microsandbox_utils::copy::fast_copy(&snap_upper, &dst)
+                    })
+                    .await
+                    .map_err(|e| {
+                        crate::MicrosandboxError::Custom(format!("snapshot copy task: {e}"))
+                    })??;
+                }
             } else {
                 match &root_disk {
                     RootDisk::Managed { size_mib } => {
