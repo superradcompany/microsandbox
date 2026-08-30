@@ -211,9 +211,9 @@ rpassword = "7"
 russh = "0.62.4"
 russh-sftp = "2.3.0"
 
-# Local msb_krun with a `gpu_display` builder method (scanout configuration is
-# not exposed by the published 0.1.32 API). Upstream target: zerocore-ai/libkrun.
+# Published 0.1.32 crates plus the changes the experimental virtio-gpu display
+# needs (see third_party/README.md). Upstream target: zerocore-ai/libkrun.
 [patch.crates-io]
-msb_krun = { path = "/Users/luotao/.cache/msb-omarchy/msb_krun-0.1.32-patched" }
-msb_krun_devices = { path = "/Users/luotao/.cache/msb-omarchy/msb_krun_devices-0.1.32-patched" }
-msb_krun_utils = { path = "/Users/luotao/.cache/msb-omarchy/msb_krun_utils-0.1.32-patched" }
+msb_krun = { path = "third_party/msb_krun" }
+msb_krun_devices = { path = "third_party/msb_krun_devices" }
+msb_krun_utils = { path = "third_party/msb_krun_utils" }

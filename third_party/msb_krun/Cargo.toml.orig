@@ -1,0 +1,46 @@
+[package]
+name = "msb_krun"
+version = "0.1.32"
+authors = ["The libkrun Authors"]
+edition = "2021"
+description = "Native Rust API for libkrun microVMs"
+repository = "https://github.com/zerocore-ai/libkrun"
+license = "Apache-2.0"
+
+[features]
+default = []
+net = ["devices/net", "vmm/net"]
+blk = ["devices/blk", "vmm/blk"]
+gpu = ["krun_display", "devices/gpu", "vmm/gpu"]
+snd = ["devices/snd", "vmm/snd"]
+tee = ["devices/tee", "vmm/tee"]
+aws-nitro = ["dep:aws-nitro", "dep:nitro-enclaves", "devices/aws-nitro", "vmm/aws-nitro"]
+amd-sev = ["blk", "tee", "devices/amd-sev", "vmm/amd-sev"]
+tdx = ["blk", "tee", "devices/tdx", "vmm/tdx"]
+efi = ["blk", "net", "devices/efi", "vmm/efi"]
+input = ["krun_input", "vmm/input", "devices/input"]
+
+[dependencies]
+crossbeam-channel = ">=0.5.15"
+libc = ">=0.2.39"
+libloading = "0.8"
+log = "0.4.0"
+
+devices = { package = "msb_krun_devices", version = "0.1.32", path = "../devices" }
+polly = { package = "msb_krun_polly", version = "0.1.32", path = "../polly" }
+utils = { package = "msb_krun_utils", version = "0.1.32", path = "../utils" }
+vmm = { package = "msb_krun_vmm", version = "0.1.32", path = "../vmm" }
+
+# Optional dependencies
+krun_display = { package = "msb_krun_display", version = "0.1.32", path = "../krun_display", optional = true, features = ["bindgen_clang_runtime"] }
+krun_input = { package = "msb_krun_input", version = "0.1.32", path = "../krun_input", optional = true, features = ["bindgen_clang_runtime"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+hvf = { package = "msb_krun_hvf", version = "0.1.32", path = "../hvf" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+kvm-bindings = { version = ">=0.11", features = ["fam-wrappers"] }
+kvm-ioctls = ">=0.21"
+vm-memory = { package = "msb-vm-memory", version = "=0.18.0-msb.1", default-features = false, features = ["backend-mmap"] }
+aws-nitro = { package = "msb_krun_aws_nitro", version = "0.1.32", path = "../aws_nitro", optional = true }
+nitro-enclaves = { version = "0.6.0", optional = true }

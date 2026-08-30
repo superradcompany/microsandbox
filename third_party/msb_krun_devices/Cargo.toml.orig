@@ -1,0 +1,62 @@
+[package]
+name = "msb_krun_devices"
+version = "0.1.32"
+authors = ["The Chromium OS Authors"]
+edition = "2021"
+license = "Apache-2.0 AND BSD-3-Clause"
+description = "Virtio device implementations for msb_krun microVMs"
+repository = "https://github.com/containers/libkrun"
+
+[features]
+tee = []
+amd-sev = ["blk", "tee"]
+tdx = ["blk", "tee"]
+net = []
+blk = []
+efi = ["blk", "net"]
+gpu = ["rutabaga_gfx", "thiserror", "zerocopy", "krun_display"]
+snd = ["pw", "thiserror"]
+input = ["zerocopy", "krun_input"]
+virgl_resource_map2 = []
+aws-nitro = []
+test_utils = []
+
+[dependencies]
+bitflags = "1.2.0"
+crossbeam-channel = ">=0.5.15"
+libc = ">=0.2.39"
+libloading = "0.8"
+log = "0.4.0"
+nix = { version = "0.30.1", features = ["ioctl", "net", "poll", "socket", "fs"] }
+pw = { package = "pipewire", version = "0.8.0", optional = true }
+rand = "0.9.2"
+thiserror = { version = "2.0", optional = true }
+virtio-bindings = "0.2.0"
+vm-memory = { package = "msb-vm-memory", version = "=0.18.0-msb.1", default-features = false, features = ["backend-mmap"] }
+zerocopy = { version = "0.8.26", optional = true, features = ["derive"] }
+krun_display = { package = "msb_krun_display", version = "0.1.32", path = "../krun_display", optional = true, features = ["bindgen_clang_runtime"] }
+krun_input = { package = "msb_krun_input", version = "0.1.32", path = "../krun_input", features = ["bindgen_clang_runtime"], optional = true }
+
+arch = { package = "msb_krun_arch", version = "0.1.32", path = "../arch" }
+utils = { package = "msb_krun_utils", version = "0.1.32", path = "../utils" }
+polly = { package = "msb_krun_polly", version = "0.1.32", path = "../polly" }
+rutabaga_gfx = { package = "msb_krun_rutabaga_gfx", version = "0.1.32", path = "../rutabaga_gfx", features = ["virgl_renderer", "virgl_renderer_next"], optional = true }
+imago = { package = "msb-imago", version = "0.1.5", features = ["sync-wrappers", "vm-memory"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+hvf = { package = "msb_krun_hvf", version = "0.1.32", path = "../hvf" }
+lru = ">=0.9"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rutabaga_gfx = { package = "msb_krun_rutabaga_gfx", version = "0.1.32", path = "../rutabaga_gfx", features = ["x"], optional = true }
+capng = "0.2.3"
+caps = "0.5.5"
+kvm-bindings = { version = ">=0.11", features = ["fam-wrappers"] }
+kvm-ioctls = ">=0.21"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+tokio = { version = "1", features = ["rt"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Memory", "Win32_System_Pipes", "Win32_System_SystemInformation", "Win32_System_Threading"] }
+
+[target.'cfg(any(target_arch = "aarch64", target_arch = "riscv64"))'.dependencies]
+vm-fdt = ">= 0.2.0"
