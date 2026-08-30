@@ -1,11 +1,7 @@
-//! Scanout sinks for the experimental virtio-gpu device.
-//!
-//! The VMM hands every flushed scanout frame to a `krun_display` backend on
-//! the gpu worker thread. `FrameDumpBackend` is the debugging sink: it keeps
-//! the latest frame of each scanout in `<dir>/scanout<N>.raw` (tightly packed
-//! 32-bit pixels in the guest's format) next to a one-line `scanout<N>.txt`
-//! describing it, so the host side of the display path can be verified
-//! without a window.
+//! Debug scanout sink: keeps the latest frame of each scanout in
+//! `<dir>/scanout<N>.raw` (tightly packed 32-bit pixels in the guest's
+//! format) next to a one-line `scanout<N>.txt` describing it, so the host
+//! side of the display path can be verified without a window.
 
 use std::fs;
 use std::path::{Path, PathBuf};

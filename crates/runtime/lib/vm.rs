@@ -1929,6 +1929,27 @@ fn build_vm(
     // Console — ring-buffer-based custom backend for agent protocol, plus
     // console output routed to kernel.log for kernel/init logs.
     let kernel_log_path = config.log_dir.join("kernel.log");
+    // Frames go to `display.sock` next to the agent socket; the viewer maps
+    // the frame files from the runtime directory.
+    #[cfg(unix)]
+    let mut display_server = if gpu_virgl_flags_from_env().is_some()
+        && std::env::var_os("MSB_GPU_DUMP").is_none()
+    {
+        let socket = crate::ipc::display_socket_path_for(&config.agent_sock_path);
+        match crate::gpu_display::DisplayServer::start(
+            &config.sandbox_name,
+            &config.runtime_dir.join("display"),
+            &socket,
+        ) {
+            Ok(server) => Some(server),
+            Err(e) => {
+                tracing::warn!(error = %e, "gpu display: server not started");
+                None
+            }
+        }
+    } else {
+        None
+    };
     #[cfg(unix)]
     {
         builder = builder.console(|c| {
@@ -1945,11 +1966,24 @@ fn build_vm(
                         .gpu_virgl_flags(flags)
                         .gpu_shm_size(GPU_SHM_SIZE)
                         .gpu_display(width, height);
-                    // MSB_GPU_DUMP=<dir>: keep the latest scanout frame on disk.
-                    match std::env::var_os("MSB_GPU_DUMP") {
-                        Some(dir) => c.gpu_display_backend(
-                            crate::gpu_display::frame_dump_backend(std::path::Path::new(&dir)),
-                        ),
+                    // MSB_GPU_DUMP=<dir>: keep the latest scanout frame on disk
+                    // instead of serving it to `msb display`.
+                    if let Some(dir) = std::env::var_os("MSB_GPU_DUMP") {
+                        return c.gpu_display_backend(crate::gpu_display::frame_dump_backend(
+                            std::path::Path::new(&dir),
+                        ));
+                    }
+                    match &mut display_server {
+                        Some(server) => {
+                            let mut c = c.gpu_display_backend(server.display_backend());
+                            if let Some((config, events)) = server.take_keyboard() {
+                                c = c.input_device(config, events);
+                            }
+                            if let Some((config, events)) = server.take_pointer() {
+                                c = c.input_device(config, events);
+                            }
+                            c
+                        }
                         None => c,
                     }
                 }

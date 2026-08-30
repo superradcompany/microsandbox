@@ -13,6 +13,7 @@ pub mod completion;
 pub mod context;
 pub mod copy;
 pub mod create;
+pub mod display;
 pub mod exec;
 pub mod image;
 pub mod inspect;

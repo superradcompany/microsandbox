@@ -6,7 +6,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 use console::style;
 use microsandbox_cli::{
     commands::{
-        completion, context, copy, create, exec, image, inspect, install, list, logs, metrics,
+        completion, context, copy, create, display, exec, image, inspect, install, list, logs, metrics,
         modify, ping, ps, pull, registry, remove, restart, run, self_cmd, snapshot, start, stop,
         touch, uninstall, volume,
     },
@@ -113,6 +113,9 @@ enum Commands {
 
     /// Check whether one or more sandbox agents are reachable.
     Ping(ping::PingArgs),
+
+    /// Show a running sandbox's display in a native window (macOS).
+    Display(display::DisplayArgs),
 
     /// Refresh idle activity for one or more running sandboxes.
     Touch(touch::TouchArgs),
@@ -319,6 +322,8 @@ fn main() {
             log_args::init_tracing(sandbox_level, false);
             sandbox_cmd::run(args); // returns `!`
         }
+        // The window event loop owns the main thread; no Tokio needed.
+        Commands::Display(args) => display::run(args),
         command => {
             // CLI commands write tracing to the user's terminal.
             // Honor TTY detection + NO_COLOR; we set `ansi` explicitly
@@ -656,6 +661,7 @@ fn run_async_command_anyhow(
 
         match command {
             Commands::Sandbox(_) => unreachable!("handled before Tokio starts"),
+            Commands::Display(_) => unreachable!("handled before Tokio starts"),
             Commands::SchemaBaseline(_) => unreachable!("handled before backend resolution"),
             Commands::Context(args) => context::run(args),
             #[cfg(windows)]
