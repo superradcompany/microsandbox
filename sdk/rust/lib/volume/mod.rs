@@ -35,16 +35,12 @@ use crate::backend::{
     Backend, BackendKind, VolumeCloudState, VolumeHandleCloudState, VolumeHandleInner,
     VolumeHandleLocalState, VolumeInner, VolumeLocalState,
 };
-use crate::{
-    MicrosandboxError, MicrosandboxResult,
-    error::Operation,
-    sandbox::{SandboxConfig, SandboxStatus, VolumeMount},
-    size::Mebibytes,
-};
+use crate::{MicrosandboxError, MicrosandboxResult, error::Operation, size::Mebibytes};
 #[cfg(feature = "local")]
 use crate::{
     backend::LocalBackend,
     db::entity::{sandbox as sandbox_entity, volume as volume_entity},
+    sandbox::{SandboxConfig, SandboxStatus, VolumeMount},
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -145,6 +141,7 @@ impl Volume {
 
 impl Volume {
     /// Build an outer `Volume` from local-variant inner state.
+    #[cfg(feature = "local")]
     pub(crate) fn from_local(
         backend: Arc<dyn Backend>,
         local: VolumeLocalState,
@@ -159,6 +156,7 @@ impl Volume {
     }
 
     /// Build an outer `Volume` from cloud-variant inner state.
+    #[cfg(feature = "cloud")]
     pub(crate) fn from_cloud(
         backend: Arc<dyn Backend>,
         cloud: VolumeCloudState,
@@ -319,6 +317,7 @@ impl VolumeHandle {
     ///
     /// The org's shared default volume has no name and carries an empty one
     /// here; it is addressed by kind, not name.
+    #[cfg(feature = "cloud")]
     pub(crate) fn from_cloud(
         backend: Arc<dyn Backend>,
         cloud: VolumeHandleCloudState,
@@ -946,19 +945,25 @@ pub(crate) fn validate_volume_name(name: &str) -> MicrosandboxResult<()> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "cloud")]
     use std::sync::Arc;
 
+    #[cfg(feature = "local")]
     use sea_orm::{ActiveModelTrait, Set};
 
+    #[cfg(feature = "local")]
+    use crate::backend::LocalBackend;
+    #[cfg(feature = "cloud")]
     use crate::backend::{
-        Backend, CloudBackend, CloudVolumeKind, CloudVolumeStatus, LocalBackend,
-        VolumeHandleCloudState,
+        Backend, CloudBackend, CloudVolumeKind, CloudVolumeStatus, VolumeHandleCloudState,
     };
+    #[cfg(feature = "local")]
     use crate::sandbox::{HostPermissions, MountOptions, SandboxStatus, StatVirtualization};
 
     use super::*;
 
     #[test]
+    #[cfg(feature = "cloud")]
     fn cloud_managed_volume_reports_directory_storage_kind() {
         let backend: Arc<dyn Backend> =
             Arc::new(CloudBackend::new("https://msb.example.com", "msb_test_abc").unwrap());
@@ -984,6 +989,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "cloud")]
     async fn cloud_default_volume_is_identified_and_cannot_be_removed() {
         let backend: Arc<dyn Backend> =
             Arc::new(CloudBackend::new("https://msb.example.com", "msb_test_abc").unwrap());
@@ -1012,6 +1018,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "local")]
     async fn test_remove_local_rejects_active_named_volume_reference() {
         let temp = tempfile::tempdir().unwrap();
         let local = Arc::new(

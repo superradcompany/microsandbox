@@ -443,7 +443,7 @@ impl VolumeBackend for LocalBackend {
 // Tests
 //--------------------------------------------------------------------------------------------------
 
-#[cfg(test)]
+#[cfg(all(test, feature = "local"))]
 mod tests {
     use super::*;
     use crate::MicrosandboxError;

@@ -466,7 +466,7 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 // Tests
 //--------------------------------------------------------------------------------------------------
 
-#[cfg(test)]
+#[cfg(all(test, feature = "local"))]
 mod tests {
     use super::*;
 

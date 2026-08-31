@@ -122,6 +122,7 @@ microsandbox-filesystem = { workspace = true, optional = true }
 ipnetwork.workspace = true
 microsandbox-network.workspace = true
 rcgen.workspace = true
+rustls.workspace = true
 tempfile.workspace = true
 test-utils.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

@@ -499,12 +499,14 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "cloud")]
     fn api_key_ref_inline() {
         let key = resolve_api_key_ref("p", "inline:msb_live_abc").unwrap();
         assert_eq!(key, "msb_live_abc");
     }
 
     #[test]
+    #[cfg(feature = "cloud")]
     fn api_key_ref_inline_trims_and_rejects_empty() {
         let key = resolve_api_key_ref("p", "inline:  msb_live_abc  ").unwrap();
         assert_eq!(key, "msb_live_abc");
@@ -512,6 +514,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "cloud")]
     fn api_key_ref_env_when_set() {
         let _env_guard = crate::test_support::lock_env();
         // SAFETY: every environment-mutating SDK unit test holds the shared lock.
@@ -522,6 +525,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "cloud")]
     fn api_key_ref_env_rejects_empty_value() {
         let _env_guard = crate::test_support::lock_env();
         // SAFETY: every environment-mutating SDK unit test holds the shared lock.
@@ -531,6 +535,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "cloud")]
     fn api_key_ref_env_missing() {
         let _env_guard = crate::test_support::lock_env();
         // SAFETY: every environment-mutating SDK unit test holds the shared lock.
@@ -539,12 +544,14 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "cloud")]
     fn api_key_ref_rejects_unknown_scheme() {
         assert!(resolve_api_key_ref("p", "vault:foo").is_err());
         assert!(resolve_api_key_ref("p", "plaintext").is_err());
     }
 
     #[test]
+    #[cfg(feature = "cloud")]
     fn api_key_ref_keyring_returns_explicit_error_for_now() {
         // Keyring path is parsed (validates the format) but signals "not yet wired".
         let err = resolve_api_key_ref("p", "keyring:msb:prod").unwrap_err();
@@ -552,6 +559,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "local")]
     fn backend_from_local_profile() {
         let p = Profile {
             backend: ProfileBackend::Local,
@@ -565,6 +573,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "cloud")]
     fn backend_from_cloud_profile_inline_key() {
         let p = Profile {
             backend: ProfileBackend::Cloud,
@@ -578,6 +587,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "cloud")]
     fn direct_cloud_env_uses_default_url_with_api_key_only() {
         let cloud = direct_cloud_backend(None, Some(" msb_live_abc ".into()))
             .unwrap()
@@ -586,6 +596,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "cloud")]
     fn direct_cloud_env_does_not_dispatch_from_url_alone() {
         assert!(
             direct_cloud_backend(Some("https://msb.example.com".into()), None)
@@ -672,6 +683,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "cloud")]
     fn cloud_backend_from_profile_parts_rejects_local_profile() {
         let p = Profile {
             backend: ProfileBackend::Local,
@@ -682,6 +694,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "local")]
     fn resolve_default_backend_honors_explicit_local_over_cloud_env() {
         let _env_guard = crate::test_support::lock_env();
         // SAFETY: every environment-mutating SDK unit test holds the shared lock.
@@ -728,6 +741,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "cloud")]
     fn backend_from_cloud_profile_missing_url_uses_default() {
         let p = Profile {
             backend: ProfileBackend::Cloud,
@@ -739,6 +753,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "cloud")]
     fn backend_from_cloud_profile_missing_key_ref() {
         let p = Profile {
             backend: ProfileBackend::Cloud,

@@ -500,7 +500,7 @@ fn classify_state(live: &LiveMetric, config: Option<&SandboxConfig>) -> SandboxM
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "local"))]
 mod tests {
     use super::is_missing_registry_io_error;
 

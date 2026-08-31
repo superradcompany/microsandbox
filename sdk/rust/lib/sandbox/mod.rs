@@ -33,7 +33,10 @@ mod types;
 #[cfg(feature = "local")]
 pub(crate) mod upper;
 
-use std::{collections::BTreeMap, path::Path, process::ExitStatus, sync::Arc};
+use std::{collections::BTreeMap, process::ExitStatus, sync::Arc};
+
+#[cfg(feature = "local")]
+use std::path::Path;
 
 #[cfg(feature = "local")]
 use microsandbox_db::DbReadConnection;
@@ -49,15 +52,12 @@ use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder};
 #[cfg(feature = "local")]
 use microsandbox_image::progress_channel;
 
-use crate::{
-    MicrosandboxResult,
-    agent::AgentClient,
-    error::{Operation, UnsupportedReason},
-};
+use crate::{MicrosandboxResult, agent::AgentClient};
 #[cfg(feature = "local")]
 use crate::{
     backend::LocalBackend,
     db::entity::{run as run_entity, sandbox as sandbox_entity},
+    error::{Operation, UnsupportedReason},
     runtime::SpawnMode,
 };
 
@@ -513,6 +513,7 @@ impl Sandbox {
 
     /// Build an outer `Sandbox` from a [`CloudCreateSandboxResponse`](crate::backend::CloudCreateSandboxResponse)
     /// HTTP response plus the originating [`SandboxConfig`].
+    #[cfg(feature = "cloud")]
     pub(crate) fn from_cloud(
         backend: Arc<dyn crate::backend::Backend>,
         cloud: crate::backend::CloudCreateSandboxResponse,
@@ -530,6 +531,7 @@ impl Sandbox {
     /// [`SandboxHandle`]. Cloud agent operations establish their own
     /// authenticated WebSocket lazily, so reconnecting does not need to hold
     /// an eager agent client.
+    #[cfg(feature = "cloud")]
     pub(crate) fn from_cloud_state(
         backend: Arc<dyn crate::backend::Backend>,
         state: crate::backend::SandboxCloudState,
@@ -1693,7 +1695,7 @@ pub(super) async fn load_sandbox_record(
 // Tests
 //--------------------------------------------------------------------------------------------------
 
-#[cfg(test)]
+#[cfg(all(test, feature = "local"))]
 mod tests {
     use std::fs;
     #[cfg(unix)]

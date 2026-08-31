@@ -595,20 +595,10 @@ mod tests {
     async fn directory_install_publishes_the_complete_pair() {
         let source = tempfile::tempdir().unwrap();
         let home = tempfile::tempdir().unwrap();
-        fs::write(
-            source.path().join(microsandbox_utils::msb_binary_filename(
-                std::env::consts::OS,
-            )),
-            b"msb",
-        )
-        .unwrap();
-        fs::write(
-            source
-                .path()
-                .join(microsandbox_utils::libkrunfw_filename(std::env::consts::OS)),
-            b"libkrunfw",
-        )
-        .unwrap();
+        let msb_name = microsandbox_utils::msb_binary_filename(std::env::consts::OS);
+        let library_name = microsandbox_utils::libkrunfw_filename(std::env::consts::OS);
+        fs::write(source.path().join(&msb_name), b"msb").unwrap();
+        fs::write(source.path().join(&library_name), b"libkrunfw").unwrap();
         let config = LocalConfig {
             home: Some(home.path().to_path_buf()),
             ..Default::default()
@@ -626,8 +616,12 @@ mod tests {
         .unwrap();
 
         assert_eq!(runtime.origin, RuntimeOrigin::Installed);
-        assert!(runtime.msb_path.is_file());
-        assert!(runtime.libkrunfw_path.is_file());
+        let expected_msb = home.path().join(BIN_SUBDIR).join(msb_name);
+        let expected_library = home.path().join(LIB_SUBDIR).join(library_name);
+        assert_eq!(runtime.msb_path, expected_msb);
+        assert_eq!(runtime.libkrunfw_path, expected_library);
+        assert!(expected_msb.is_file());
+        assert!(expected_library.is_file());
     }
 
     #[tokio::test]
@@ -663,8 +657,12 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(fs::read(runtime.msb_path).unwrap(), b"new-msb");
-        assert_eq!(fs::read(runtime.libkrunfw_path).unwrap(), b"new-library");
+        let expected_msb = home.path().join(BIN_SUBDIR).join(msb_name);
+        let expected_library = home.path().join(LIB_SUBDIR).join(library_name);
+        assert_eq!(runtime.msb_path, expected_msb);
+        assert_eq!(runtime.libkrunfw_path, expected_library);
+        assert_eq!(fs::read(expected_msb).unwrap(), b"new-msb");
+        assert_eq!(fs::read(expected_library).unwrap(), b"new-library");
     }
 
     #[test]
@@ -743,7 +741,19 @@ mod tests {
         .unwrap();
 
         assert_eq!(runtime.origin, RuntimeOrigin::Installed);
-        assert!(runtime.msb_path.is_file());
-        assert!(runtime.libkrunfw_path.is_file());
+        let expected_msb =
+            home.path()
+                .join(BIN_SUBDIR)
+                .join(microsandbox_utils::msb_binary_filename(
+                    std::env::consts::OS,
+                ));
+        let expected_library = home
+            .path()
+            .join(LIB_SUBDIR)
+            .join(microsandbox_utils::libkrunfw_filename(std::env::consts::OS));
+        assert_eq!(runtime.msb_path, expected_msb);
+        assert_eq!(runtime.libkrunfw_path, expected_library);
+        assert!(expected_msb.is_file());
+        assert!(expected_library.is_file());
     }
 }

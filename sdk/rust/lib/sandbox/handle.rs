@@ -382,6 +382,9 @@ impl SandboxHandle {
         &self,
         timeout: std::time::Duration,
     ) -> MicrosandboxResult<Sandbox> {
+        #[cfg(not(feature = "local"))]
+        let _ = timeout;
+
         if !matches!(
             self.status_snapshot(),
             SandboxStatus::Running | SandboxStatus::Draining
@@ -425,9 +428,9 @@ impl SandboxHandle {
                 #[cfg(not(feature = "cloud"))]
                 {
                     let _ = cloud;
-                    return Err(MicrosandboxError::cloud_only(
+                    Err(MicrosandboxError::cloud_only(
                         Operation::SandboxHandleConnect,
-                    ));
+                    ))
                 }
                 #[cfg(feature = "cloud")]
                 {
@@ -754,7 +757,7 @@ impl std::fmt::Debug for SandboxHandle {
 // Tests
 //--------------------------------------------------------------------------------------------------
 
-#[cfg(test)]
+#[cfg(all(test, feature = "cloud"))]
 mod tests {
     use super::*;
     use crate::backend::{BackendKind, CloudBackend, CloudSandboxStatus};

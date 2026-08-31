@@ -17,7 +17,9 @@ use microsandbox_protocol::{HANDOFF_INIT_AUTO, HANDOFF_INIT_IMAGE_ENTRYPOINT_CAN
 use microsandbox_types::RegistryAuth;
 use typed_path::Utf8UnixPath;
 
-use super::types::{MountOptions, RootDisk, RootfsSource, VolumeMount};
+#[cfg(feature = "local")]
+use super::types::RootDisk;
+use super::types::{MountOptions, RootfsSource, VolumeMount};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -719,7 +721,7 @@ impl Default for SandboxConfig {
 // Tests
 //--------------------------------------------------------------------------------------------------
 
-#[cfg(test)]
+#[cfg(all(test, feature = "local"))]
 mod tests {
     use super::{SandboxConfig, merge_env};
     use crate::sandbox::{

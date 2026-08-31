@@ -28,10 +28,10 @@ use super::{
     },
 };
 #[cfg(feature = "local")]
+use crate::UnsupportedReason;
+#[cfg(feature = "local")]
 use crate::config::LocalConfig;
-use crate::{
-    LogLevel, MicrosandboxError, MicrosandboxResult, Operation, UnsupportedReason, size::Mebibytes,
-};
+use crate::{LogLevel, MicrosandboxError, MicrosandboxResult, Operation, size::Mebibytes};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -1769,7 +1769,7 @@ impl From<SandboxConfig> for SandboxBuilder {
 // Tests
 //--------------------------------------------------------------------------------------------------
 
-#[cfg(test)]
+#[cfg(all(test, feature = "local"))]
 mod tests {
     use super::SandboxBuilder;
     use crate::LogLevel;
