@@ -232,6 +232,7 @@ pub struct CpuControlState {
 
 /// Everything the control listener can reach: the VMM control handle plus the
 /// host network secrets layer when this build carries one.
+#[derive(Clone)]
 pub struct ControlContext {
     /// Single authority for reads and mutations.
     pub executor: std::sync::Arc<RuntimeControlExecutor>,
@@ -347,7 +348,23 @@ pub fn spawn_control_listener(pipe_name: PathBuf, context: ControlContext) -> st
                         }
                     }
 
-                    let payload = respond_to_line(line.trim(), &context);
+                    // Checkpoint capture and other host mutations are intentionally synchronous
+                    // under one executor lock. Run them outside the current-thread pipe reactor,
+                    // matching the dedicated blocking listener used on Unix and allowing capture
+                    // code to drive the separate VM runtime without nesting Tokio runtimes.
+                    let request = line.trim().to_owned();
+                    let request_context = context.clone();
+                    let payload = match tokio::task::spawn_blocking(move || {
+                        respond_to_line(&request, &request_context)
+                    })
+                    .await
+                    {
+                        Ok(payload) => payload,
+                        Err(error) => {
+                            tracing::error!(%error, "control: request executor failed");
+                            continue;
+                        }
+                    };
                     let mut server = reader.into_inner();
                     if let Err(e) = server.write_all(&payload).await {
                         tracing::debug!("control: response write error: {e}");

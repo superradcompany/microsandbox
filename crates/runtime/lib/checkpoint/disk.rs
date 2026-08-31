@@ -2,9 +2,12 @@
 
 use std::collections::BTreeSet;
 use std::fmt;
-use std::fs::{File, OpenOptions};
+use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+
+#[cfg(unix)]
+use std::fs::File;
 
 use microsandbox_image::checkpoint::{DiskGenerationManifest, DiskLayerRef, sparse_file_integrity};
 use serde::{Deserialize, Serialize};
