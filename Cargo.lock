@@ -4182,6 +4182,7 @@ dependencies = [
  "microsandbox-agent-client",
  "microsandbox-db",
  "microsandbox-filesystem",
+ "microsandbox-image",
  "microsandbox-metrics",
  "microsandbox-migration",
  "microsandbox-network",

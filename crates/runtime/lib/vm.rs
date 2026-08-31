@@ -512,7 +512,7 @@ pub fn enter(config: Config) -> ! {
     }
 }
 
-fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
+fn run(mut config: Config) -> RuntimeResult<std::convert::Infallible> {
     // Raise the fd limit before anything else: every guest-held open file on a virtiofs share pins one fd in this process, so the shell's default soft limit
     // (1024 on many distros) is nowhere near enough for real workloads. Reference virtiofsd raises its own limit for the same reason. Best-effort: failure is
     // not fatal, just a smaller fd budget.
@@ -550,6 +550,8 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
     // Set up runtime directory.
     std::fs::create_dir_all(&config.runtime_dir)?;
     std::fs::create_dir_all(config.runtime_dir.join("scripts"))?;
+    crate::checkpoint::recover_managed_upper(&config.runtime_dir, &mut config.vm)
+        .map_err(|error| RuntimeError::Custom(format!("recover managed root disk: {error}")))?;
     // Heartbeats are per boot, while the runtime directory persists across starts.
     heartbeat::clear_stale(&config.runtime_dir)?;
 
@@ -921,10 +923,7 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
     let exit_handle = vm.exit_handle();
     let upper_host_path = oci_upper_host_path(&config.vm);
 
-    // Serve host-side live control when this VM booted with reserved resize
-    // capacity or with secrets to live-reconfigure. Failure is non-fatal: the
-    // SDK treats a missing socket as "no live control capability" and
-    // classifies restart-required.
+    // Serve every host-side control operation through one runtime-owned executor and endpoint.
     {
         let control = vm.control_handle();
         #[cfg(feature = "net")]
@@ -939,6 +938,8 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
                 #[cfg(feature = "net")]
                 secrets,
                 &config.runtime_dir,
+                &config.vm,
+                tokio_rt.handle().clone(),
             );
             let context = crate::control::ControlContext {
                 executor: match executor {
