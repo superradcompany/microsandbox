@@ -384,12 +384,20 @@ fn configured_layers(vm: &VmConfig) -> Result<Vec<UpperLayerSpec>, String> {
 }
 
 fn prepare_backend(state: &RootDiskState) -> Result<msb_krun::PreparedBlockBackend, String> {
+    // Linux raw uppers use bounded buffered writeback. Their qcow2 successors must bypass the
+    // page cache because raw guest offsets cannot account for qcow2 metadata and allocation I/O.
+    let direct_io = cfg!(target_os = "linux")
+        && matches!(
+            state.layers.last().map(|layer| layer.format),
+            Some(RootDiskFormat::Qcow2)
+        );
     let layers = state
         .layers
         .iter()
         .map(|layer| msb_krun::BlockLayerSpec::new(&layer.path, layer.format.into()))
         .collect();
-    msb_krun::PreparedBlockBackend::open(&msb_krun::BlockBackendSpec::new(layers))
+    let backend = msb_krun::BlockBackendSpec::new(layers).direct_io(direct_io);
+    msb_krun::PreparedBlockBackend::open(&backend)
         .map_err(|error| format!("prepare managed root backend: {error}"))
 }
 
