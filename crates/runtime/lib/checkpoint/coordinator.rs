@@ -39,6 +39,7 @@ pub(crate) struct CheckpointCoordinator {
     store: LocalObjectStore,
     runtime: tokio::runtime::Handle,
     root_disk: Option<ManagedRootDisk>,
+    fs_resource_bindings: BTreeMap<String, BTreeMap<String, String>>,
     previous_memory: Option<MemoryManifest>,
 }
 
@@ -93,11 +94,13 @@ impl CheckpointCoordinator {
         let store = LocalObjectStore::open(runtime_dir.join("checkpoint-store"))
             .map_err(|error| error.to_string())?;
         let root_disk = ManagedRootDisk::open(runtime_dir, vm)?;
+        let fs_resource_bindings = runtime_owned_fs_bindings(root_disk.is_some());
         Ok(Self {
             root,
             store,
             runtime,
             root_disk,
+            fs_resource_bindings,
             previous_memory: None,
         })
     }
@@ -110,7 +113,8 @@ impl CheckpointCoordinator {
         intent: CaptureIntent,
     ) -> Result<CheckpointResult, CheckpointFailure> {
         validate_checkpoint_id(checkpoint_id).map_err(CheckpointFailure::before_pause)?;
-        let admitted = admit_resources(vm).map_err(CheckpointFailure::before_pause)?;
+        let admitted = admit_resources(vm, &self.fs_resource_bindings)
+            .map_err(CheckpointFailure::before_pause)?;
         let final_path = self.root.join(checkpoint_id);
         if final_path.exists() {
             return Err(CheckpointFailure::before_pause(
@@ -495,7 +499,10 @@ impl MemoryCaptureSink for MemoryObjectSink<'_> {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-fn admit_resources(vm: &msb_krun::VmControl) -> Result<AdmittedResources, String> {
+fn admit_resources(
+    vm: &msb_krun::VmControl,
+    fs_resource_bindings: &BTreeMap<String, BTreeMap<String, String>>,
+) -> Result<AdmittedResources, String> {
     let inventory = vm
         .virtio_device_inventory()
         .map_err(|error| error.to_string())?;
@@ -509,11 +516,13 @@ fn admit_resources(vm: &msb_krun::VmControl) -> Result<AdmittedResources, String
                 "resource {device_id} (virtio type {device_type}) cannot quiesce"
             ));
         }
-        if *device_type == TYPE_FS && device_id != "/dev/root" {
-            return Err(format!(
-                "active virtio-fs resource {device_id} has no handle-state provider"
-            ));
-        }
+        let fs_binding = if *device_type == TYPE_FS {
+            Some(fs_resource_bindings.get(device_id).ok_or_else(|| {
+                format!("active virtio-fs resource {device_id} has no handle-state provider")
+            })?)
+        } else {
+            None
+        };
         if *device_type == TYPE_BLOCK && !matches!(device_id.as_str(), "vda" | "vdb") {
             return Err(format!(
                 "additional block resource {device_id} has no immutable-generation provider"
@@ -526,6 +535,9 @@ fn admit_resources(vm: &msb_krun::VmControl) -> Result<AdmittedResources, String
         };
         let mut binding = BTreeMap::new();
         binding.insert("device_id".into(), device_id.clone());
+        if let Some(fs_binding) = fs_binding {
+            binding.extend(fs_binding.clone());
+        }
         resources.push(ResourceDescriptor {
             id: format!("virtio:{device_type}:{device_id}"),
             kind: resource_kind(*device_type).into(),
@@ -537,6 +549,42 @@ fn admit_resources(vm: &msb_krun::VmControl) -> Result<AdmittedResources, String
         inventory,
         resources,
     })
+}
+
+/// Describe the two filesystem transports owned by the runtime itself.
+///
+/// libkrun exposes transport identifiers rather than FUSE mount tags in its
+/// device inventory. Microsandbox constructs filesystems in a fixed order:
+/// the root/bootstrap transport first and `msb_runtime` second. A managed
+/// block root may reconnect the first transport because it is only the
+/// discarded init trampoline. The runtime share is likewise an explicitly
+/// reconnectable host-control binding. Every later filesystem belongs to a
+/// user mount and remains ineligible until its provider can preserve live
+/// handles and object identity.
+fn runtime_owned_fs_bindings(
+    managed_block_root: bool,
+) -> BTreeMap<String, BTreeMap<String, String>> {
+    let mut bindings = BTreeMap::new();
+    if managed_block_root {
+        bindings.insert(
+            "virtio_fs0".into(),
+            BTreeMap::from([
+                ("guest_tag".into(), "/dev/root".into()),
+                ("role".into(), "bootstrap_trampoline".into()),
+            ]),
+        );
+    }
+    bindings.insert(
+        "virtio_fs1".into(),
+        BTreeMap::from([
+            (
+                "guest_tag".into(),
+                microsandbox_protocol::RUNTIME_FS_TAG.into(),
+            ),
+            ("role".into(), "runtime_control".into()),
+        ]),
+    );
+    bindings
 }
 
 fn overlay_extents(
@@ -695,7 +743,7 @@ fn sync_directory(path: &Path) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::overlay_extents;
+    use super::{overlay_extents, runtime_owned_fs_bindings};
 
     use microsandbox_image::checkpoint::{ContentRef, MemoryExtent, MemoryExtentContent, ObjectId};
 
@@ -734,5 +782,25 @@ mod tests {
             MemoryExtentContent::Object(content)
                 if content.object == original && content.object_offset == 8
         ));
+    }
+
+    #[test]
+    fn managed_root_admits_only_runtime_owned_filesystems() {
+        let bindings = runtime_owned_fs_bindings(true);
+
+        assert_eq!(bindings["virtio_fs0"]["guest_tag"], "/dev/root");
+        assert_eq!(
+            bindings["virtio_fs1"]["guest_tag"],
+            microsandbox_protocol::RUNTIME_FS_TAG
+        );
+        assert!(!bindings.contains_key("virtio_fs2"));
+    }
+
+    #[test]
+    fn passthrough_root_is_not_treated_as_a_reconnectable_trampoline() {
+        let bindings = runtime_owned_fs_bindings(false);
+
+        assert!(!bindings.contains_key("virtio_fs0"));
+        assert!(bindings.contains_key("virtio_fs1"));
     }
 }
