@@ -952,27 +952,24 @@ fn first_flight_is_http(buf: &[u8]) -> bool {
 /// HTTP methods recognized while a first line is still incomplete. A
 /// complete line is judged by its `HTTP/x.y` version instead, so custom
 /// methods still classify once the version arrives.
-const KNOWN_METHODS: [&str; 9] = [
-    "GET", "HEAD", "POST", "PUT", "DELETE", "CONNECT", "OPTIONS", "TRACE", "PATCH",
+const KNOWN_METHODS: [&str; 10] = [
+    "GET", "HEAD", "POST", "PUT", "DELETE", "CONNECT", "OPTIONS", "TRACE", "PATCH", "PRI",
 ];
 
 /// With no CRLF yet, an ASCII token alone is not proof of HTTP: a split SSH
 /// banner (`SSH-2.0-…`) or SMTP greeting (`EHLO …`) passes the token check
-/// and would be answered with HTTP bytes. Require the method-so-far to be a
-/// prefix of a known method, or — once space-terminated — exactly one. The
-/// HTTP/2 preface keeps its existing prefix handling.
+/// and would be answered with HTTP bytes. Require a complete, space-terminated
+/// known method. Complete lines keep the version-based check above, and the
+/// HTTP/2 prior-knowledge preface qualifies once its `PRI` method is complete.
 fn incomplete_first_line_has_known_method(buf: &[u8]) -> bool {
     let buf = skip_leading_empty_http_lines(buf);
     if buf.windows(2).any(|window| window == b"\r\n") {
         return true;
     }
-    if b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n".starts_with(buf) {
-        return true;
-    }
-    match buf.iter().position(|&b| b == b' ') {
-        Some(end) => KNOWN_METHODS.iter().any(|m| m.as_bytes() == &buf[..end]),
-        None => KNOWN_METHODS.iter().any(|m| m.as_bytes().starts_with(buf)),
-    }
+    let Some(end) = buf.iter().position(|&b| b == b' ') else {
+        return false;
+    };
+    KNOWN_METHODS.iter().any(|m| m.as_bytes() == &buf[..end])
 }
 
 fn denied_host_label(sni: Option<&str>, buf: &[u8], guest_dst: SocketAddr) -> String {
@@ -1225,12 +1222,10 @@ mod tests {
 
     #[test]
     fn first_flight_http_accepts_partial_and_complete_http() {
-        assert!(first_flight_is_http(b"GE"));
         assert!(first_flight_is_http(b"GET /index.html"));
         assert!(first_flight_is_http(b"GET /x HTTP/1.1\r\nHost: a\r\n"));
         assert!(first_flight_is_http(b"\r\nGET /x HTTP/1.0\r\n"));
-        // The HTTP/2 prior-knowledge preface, whole or split.
-        assert!(first_flight_is_http(b"PRI"));
+        // Prior-knowledge h2 is answerable once its PRI method is complete.
         assert!(first_flight_is_http(b"PRI * HTTP/2.0"));
         // A complete line is judged by its version, so custom methods pass.
         assert!(first_flight_is_http(b"QUERY /x HTTP/1.1\r\n"));
@@ -1242,6 +1237,8 @@ mod tests {
         assert!(!first_flight_is_http(&synthetic_client_hello(
             "example.com"
         )));
+        assert!(!first_flight_is_http(b"GE"));
+        assert!(!first_flight_is_http(b"PRI"));
         // Split before its first CRLF, an SSH banner or SMTP greeting is a
         // valid ASCII token but no HTTP method.
         assert!(!first_flight_is_http(b"SSH-2.0-OpenSSH_9.9"));
