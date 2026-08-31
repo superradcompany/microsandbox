@@ -777,6 +777,9 @@ fn publish_root_last(staging: &Path, final_path: &Path, bytes: &[u8]) -> Result<
     use std::io::Write as _;
     file.write_all(bytes).map_err(|error| error.to_string())?;
     file.sync_all().map_err(|error| error.to_string())?;
+    // Windows cannot rename a directory while a child file remains open without delete sharing.
+    // Close the durable root before atomically publishing its staging directory.
+    drop(file);
     sync_directory(staging).map_err(|error| error.to_string())?;
     std::fs::rename(staging, final_path).map_err(|error| error.to_string())?;
     sync_directory(
@@ -824,7 +827,7 @@ fn sync_directory(path: &Path) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{MemoryObjectSink, overlay_extents, runtime_owned_fs_bindings};
+    use super::{MemoryObjectSink, overlay_extents, publish_root_last, runtime_owned_fs_bindings};
 
     use microsandbox_image::checkpoint::{
         ContentRef, LocalObjectStore, MemoryExtent, MemoryExtentContent, ObjectId,
@@ -886,6 +889,22 @@ mod tests {
 
         assert!(!bindings.contains_key("virtio_fs0"));
         assert!(bindings.contains_key("virtio_fs1"));
+    }
+
+    #[test]
+    fn root_last_publication_closes_the_root_before_renaming() {
+        let temp = tempfile::tempdir().unwrap();
+        let staging = temp.path().join("checkpoint.staging");
+        let published = temp.path().join("checkpoint");
+        std::fs::create_dir(&staging).unwrap();
+
+        publish_root_last(&staging, &published, b"checkpoint-root").unwrap();
+
+        assert!(!staging.exists());
+        assert_eq!(
+            std::fs::read(published.join("checkpoint.json")).unwrap(),
+            b"checkpoint-root"
+        );
     }
 
     #[test]
