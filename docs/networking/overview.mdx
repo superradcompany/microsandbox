@@ -329,7 +329,7 @@ The `--net-ingress-*` flags mirror the egress flags for inbound traffic (`--net-
 When a domain rule denies a connection, the gateway never dials upstream. For plain HTTP, and for HTTPS on an intercepted port (see [TLS interception](/networking/tls)), the gateway answers the guest with `403 Forbidden` and a plain-text body instead of a bare connection reset. The default body is written for an agent running inside the sandbox:
 
 ```text
-This host is not allowed by the sandbox network policy.
+This host is not allowed by the sandbox network policy config.
 
 Note to agent: `example.com` is not in the allowed-host list. Ask the user to add it to the sandbox network allow list.
 ```

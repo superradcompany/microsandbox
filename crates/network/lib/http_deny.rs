@@ -13,7 +13,7 @@ pub const HOST_PLACEHOLDER: &str = "{host}";
 
 /// Default body shown to HTTP/HTTPS clients for a denied host.
 pub const DEFAULT_HTTP_DENY_MESSAGE: &str = "\
-This host is not allowed by the sandbox network policy.\n\
+This host is not allowed by the sandbox network policy config.\n\
 \n\
 Note to agent: `{host}` is not in the allowed-host list. Ask the user to add it to the sandbox network allow list.\n";
 
