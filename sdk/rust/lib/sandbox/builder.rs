@@ -39,6 +39,8 @@ pub struct SandboxBuilder {
     config: SandboxConfig,
     detached: bool,
     build_error: Option<crate::MicrosandboxError>,
+    cpus_explicit: bool,
+    memory_explicit: bool,
     max_cpus_explicit: bool,
     max_memory_explicit: bool,
     /// Raw script snippets supplied through construction patches. They are materialized only when
@@ -101,6 +103,8 @@ impl SandboxBuilder {
             config,
             detached: false,
             build_error: None,
+            cpus_explicit: false,
+            memory_explicit: false,
             max_cpus_explicit: false,
             max_memory_explicit: false,
             config_scripts: BTreeMap::new(),
@@ -302,6 +306,7 @@ impl SandboxBuilder {
     /// Allocate virtual CPUs for this sandbox (default: 1).
     pub fn cpus(mut self, count: u8) -> Self {
         self.config.spec.resources.cpus = count;
+        self.cpus_explicit = true;
         if !self.max_cpus_explicit || self.config.spec.resources.max_cpus < count {
             self.config.spec.resources.max_cpus = count;
         }
@@ -342,6 +347,7 @@ impl SandboxBuilder {
     pub fn memory(mut self, size: impl Into<Mebibytes>) -> Self {
         let memory_mib = size.into().as_u32();
         self.config.spec.resources.memory_mib = memory_mib;
+        self.memory_explicit = true;
         if !self.max_memory_explicit || self.config.spec.resources.max_memory_mib < memory_mib {
             self.config.spec.resources.max_memory_mib = memory_mib;
         }
@@ -1216,14 +1222,6 @@ impl SandboxBuilder {
         }
 
         let snap = crate::snapshot::Snapshot::open(&snapshot_ref).await?;
-        if snap.manifest().scope != crate::snapshot::SnapshotScope::Disk {
-            return Err(crate::MicrosandboxError::unsupported(
-                Operation::SnapshotOps,
-                UnsupportedReason::NotAvailable(
-                    "restoring non-disk snapshots requires resumable restore support".into(),
-                ),
-            ));
-        }
         let unsupported = snap.manifest().unsupported_requires();
         if !unsupported.is_empty() {
             return Err(crate::MicrosandboxError::unsupported(
@@ -1234,17 +1232,49 @@ impl SandboxBuilder {
                 )),
             ));
         }
+        let snap_ref = snap.manifest().image.reference.clone();
+        self.config.spec.image = RootfsSource::oci(snap_ref);
+        self.config.manifest_digest = Some(snap.manifest().image.manifest_digest.clone());
+
         let file_state = match &snap.manifest().state {
             crate::snapshot::SnapshotState::File(state) => state,
-            crate::snapshot::SnapshotState::Checkpoint(_) => {
-                return Err(crate::MicrosandboxError::unsupported(
-                    Operation::SnapshotOps,
-                    UnsupportedReason::NotAvailable(
-                        "checkpoint-state restore providers are not available".into(),
-                    ),
-                ));
+            crate::snapshot::SnapshotState::Checkpoint(state) => {
+                if snap.manifest().scope != crate::snapshot::SnapshotScope::Resumable {
+                    return Err(crate::MicrosandboxError::SnapshotIntegrity(
+                        "checkpoint state must use resumable snapshot scope".into(),
+                    ));
+                }
+                let expected = microsandbox_image::checkpoint::ObjectId::new(
+                    &state.checkpoint_root,
+                )
+                .map_err(|error| crate::MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+                let closure = snap.path().join(crate::snapshot::CHECKPOINT_DIRECTORY);
+                let opened = microsandbox_image::checkpoint::CheckpointClosure::open(
+                    &closure,
+                    Some(&expected),
+                )
+                .map_err(|error| crate::MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+                if opened.checkpoint().checkpoint_id != state.checkpoint_id {
+                    return Err(crate::MicrosandboxError::SnapshotIntegrity(
+                        "snapshot and checkpoint closure identities differ".into(),
+                    ));
+                }
+                self.apply_checkpoint_resources(state)?;
+                self.apply_checkpoint_network(&opened)?;
+                self.config.checkpoint_restore =
+                    Some(microsandbox_runtime::launch::CheckpointRestoreConfig {
+                        closure,
+                        checkpoint_root: state.checkpoint_root.clone(),
+                        checkpoint_id: state.checkpoint_id.clone(),
+                    });
+                return Ok(());
             }
         };
+        if snap.manifest().scope != crate::snapshot::SnapshotScope::Disk {
+            return Err(crate::MicrosandboxError::SnapshotIntegrity(
+                "file state must use disk snapshot scope".into(),
+            ));
+        }
         if file_state.disk_format != crate::snapshot::SnapshotFormat::Raw
             || file_state.filesystem != "ext4"
         {
@@ -1256,14 +1286,114 @@ impl SandboxBuilder {
                 )),
             ));
         }
-        let snap_ref = snap.manifest().image.reference.clone();
-
-        self.config.spec.image = RootfsSource::oci(snap_ref);
-        self.config.manifest_digest = Some(snap.manifest().image.manifest_digest.clone());
         let head = file_state
             .head_layer()
             .map_err(|e| crate::MicrosandboxError::SnapshotIntegrity(e.to_string()))?;
         self.config.snapshot_upper_source = Some(snap.layer_path(head));
+        Ok(())
+    }
+
+    fn apply_checkpoint_resources(
+        &mut self,
+        state: &crate::snapshot::CheckpointSnapshotState,
+    ) -> MicrosandboxResult<()> {
+        let vcpus = checkpoint_requirement_u64(state, "vcpus")?;
+        let max_vcpus = checkpoint_requirement_u64(state, "max_vcpus")?;
+        let memory_mib = checkpoint_requirement_u64(state, "memory_mib")?;
+        let max_memory_mib = checkpoint_requirement_u64(state, "max_memory_mib")?;
+        let vcpus = u8::try_from(vcpus).map_err(|_| {
+            MicrosandboxError::SnapshotIntegrity("checkpoint vCPU count exceeds u8".into())
+        })?;
+        let max_vcpus = u8::try_from(max_vcpus).map_err(|_| {
+            MicrosandboxError::SnapshotIntegrity("checkpoint maximum vCPU count exceeds u8".into())
+        })?;
+        let memory_mib = u32::try_from(memory_mib).map_err(|_| {
+            MicrosandboxError::SnapshotIntegrity("checkpoint memory exceeds u32 MiB".into())
+        })?;
+        let max_memory_mib = u32::try_from(max_memory_mib).map_err(|_| {
+            MicrosandboxError::SnapshotIntegrity("checkpoint maximum memory exceeds u32 MiB".into())
+        })?;
+
+        if (self.cpus_explicit && self.config.spec.resources.cpus != vcpus)
+            || (self.max_cpus_explicit && self.config.spec.resources.max_cpus != max_vcpus)
+            || (self.memory_explicit && self.config.spec.resources.memory_mib != memory_mib)
+            || (self.max_memory_explicit
+                && self.config.spec.resources.max_memory_mib != max_memory_mib)
+        {
+            return Err(MicrosandboxError::InvalidConfig(
+                "a resumable snapshot must restore with its captured CPU and memory geometry"
+                    .into(),
+            ));
+        }
+        self.config.spec.resources.cpus = vcpus;
+        self.config.spec.resources.max_cpus = max_vcpus;
+        self.config.spec.resources.memory_mib = memory_mib;
+        self.config.spec.resources.max_memory_mib = max_memory_mib;
+        Ok(())
+    }
+
+    fn apply_checkpoint_network(
+        &mut self,
+        closure: &microsandbox_image::checkpoint::CheckpointClosure,
+    ) -> MicrosandboxResult<()> {
+        let mut resources = closure
+            .checkpoint()
+            .resources
+            .iter()
+            .filter(|resource| resource.kind == "network");
+        let Some(resource) = resources.next() else {
+            if !self.config.spec.network.ports.is_empty() {
+                return Err(MicrosandboxError::InvalidConfig(
+                    "a checkpoint without a network device cannot restore published ports".into(),
+                ));
+            }
+            self.config.spec.network.enabled = false;
+            self.config.spec.network.interface = None;
+            return Ok(());
+        };
+        if resources.next().is_some() {
+            return Err(MicrosandboxError::SnapshotIntegrity(
+                "checkpoint contains more than one guest network resource".into(),
+            ));
+        }
+        if !self.config.spec.network.enabled {
+            return Err(MicrosandboxError::InvalidConfig(
+                "a checkpoint with a network device cannot restore with networking disabled".into(),
+            ));
+        }
+        let encoded = resource.binding.get("guest_network").ok_or_else(|| {
+            MicrosandboxError::SnapshotIntegrity(
+                "checkpoint network resource has no effective guest binding".into(),
+            )
+        })?;
+        let network: microsandbox_protocol::bootstrap::BootstrapNetwork =
+            serde_json::from_str(encoded).map_err(|error| {
+                MicrosandboxError::SnapshotIntegrity(format!(
+                    "checkpoint guest network binding is invalid: {error}"
+                ))
+            })?;
+        if network.interface != "eth0" {
+            return Err(MicrosandboxError::SnapshotIntegrity(format!(
+                "checkpoint guest network interface {:?} is unsupported",
+                network.interface
+            )));
+        }
+        let interface = microsandbox_types::InterfaceOverrides {
+            mac: Some(network.mac),
+            mtu: Some(network.mtu),
+            ipv4_address: network.ipv4.map(|ipv4| ipv4.address),
+            ipv4_pool: None,
+            ipv6_address: network.ipv6.map(|ipv6| ipv6.address),
+            ipv6_pool: None,
+        };
+        if let Some(requested) = self.config.spec.network.interface.as_ref()
+            && serde_json::to_value(requested)? != serde_json::to_value(&interface)?
+        {
+            return Err(MicrosandboxError::InvalidConfig(
+                "resumable restore cannot change the captured guest network identity".into(),
+            ));
+        }
+        self.config.spec.network.interface = Some(interface);
         Ok(())
     }
 
@@ -1459,6 +1589,11 @@ impl SandboxBuilder {
                 ));
             }
             _ => {}
+        }
+        if self.config.checkpoint_restore.is_some() && !self.config.spec.patches.is_empty() {
+            return Err(crate::MicrosandboxError::InvalidConfig(
+                "patches cannot be combined with resumable snapshot restore".into(),
+            ));
         }
 
         for rlimit in &self.config.spec.rlimits {
@@ -1718,6 +1853,21 @@ fn validate_config_script_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn checkpoint_requirement_u64(
+    state: &crate::snapshot::CheckpointSnapshotState,
+    key: &str,
+) -> MicrosandboxResult<u64> {
+    state
+        .requirements_summary
+        .get(key)
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| {
+            MicrosandboxError::SnapshotIntegrity(format!(
+                "checkpoint snapshot is missing numeric restore requirement {key:?}"
+            ))
+        })
+}
+
 fn wrap_config_script(shell: Option<&str>, body: &str) -> String {
     let shell = shell.unwrap_or("/bin/sh");
     let mut script = if shell.contains('/') {
@@ -1743,6 +1893,8 @@ impl From<SandboxConfig> for SandboxBuilder {
             config,
             detached: false,
             build_error: None,
+            cpus_explicit: true,
+            memory_explicit: true,
             max_cpus_explicit: true,
             max_memory_explicit: true,
             config_scripts: BTreeMap::new(),
@@ -1760,6 +1912,8 @@ impl From<SandboxConfig> for SandboxBuilder {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::SandboxBuilder;
     use crate::LogLevel;
     use crate::sandbox::{MAX_HOSTNAME_BYTES, MAX_SANDBOX_NAME_BYTES, RlimitResource};
@@ -1773,6 +1927,29 @@ mod tests {
     };
     #[cfg(feature = "net")]
     use std::net::{IpAddr, Ipv4Addr};
+
+    fn checkpoint_state_with_geometry(
+        vcpus: u8,
+        max_vcpus: u8,
+        memory_mib: u32,
+        max_memory_mib: u32,
+    ) -> crate::snapshot::CheckpointSnapshotState {
+        crate::snapshot::CheckpointSnapshotState {
+            checkpoint_id: "checkpoint_test".into(),
+            checkpoint_root:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            restore_intents: vec!["clone".into()],
+            requirements_summary: BTreeMap::from([
+                ("vcpus".into(), serde_json::Value::from(vcpus)),
+                ("max_vcpus".into(), serde_json::Value::from(max_vcpus)),
+                ("memory_mib".into(), serde_json::Value::from(memory_mib)),
+                (
+                    "max_memory_mib".into(),
+                    serde_json::Value::from(max_memory_mib),
+                ),
+            ]),
+        }
+    }
 
     #[test]
     fn deployment_profile_sets_sandbox_spec() {
@@ -2227,6 +2404,33 @@ mod tests {
             config.spec.image,
             crate::sandbox::RootfsSource::Oci(ref image) if image.reference.is_empty()
         ));
+    }
+
+    #[test]
+    fn checkpoint_restore_adopts_captured_vm_geometry() {
+        let mut builder = SandboxBuilder::new("restore");
+        let state = checkpoint_state_with_geometry(4, 8, 2048, 4096);
+
+        builder.apply_checkpoint_resources(&state).unwrap();
+
+        assert_eq!(builder.config.spec.resources.cpus, 4);
+        assert_eq!(builder.config.spec.resources.max_cpus, 8);
+        assert_eq!(builder.config.spec.resources.memory_mib, 2048);
+        assert_eq!(builder.config.spec.resources.max_memory_mib, 4096);
+    }
+
+    #[test]
+    fn checkpoint_restore_rejects_conflicting_explicit_geometry() {
+        let mut builder = SandboxBuilder::new("restore").cpus(2);
+        let state = checkpoint_state_with_geometry(4, 8, 2048, 4096);
+
+        let error = builder.apply_checkpoint_resources(&state).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("captured CPU and memory geometry")
+        );
     }
 
     #[tokio::test]

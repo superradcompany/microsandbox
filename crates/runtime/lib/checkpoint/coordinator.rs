@@ -12,6 +12,7 @@ use microsandbox_image::checkpoint::{
     MemoryCaptureMode, MemoryExtent, MemoryExtentContent, MemoryManifest, ResourceDescriptor,
     ResourceTreatment,
 };
+use microsandbox_protocol::bootstrap::GuestBootstrap;
 use microsandbox_protocol::core::{
     CoreError, Ready, WorkloadFreeze, WorkloadFrozen, WorkloadThaw, WorkloadThawed,
 };
@@ -48,6 +49,7 @@ pub(crate) struct CheckpointCoordinator {
     agent_sock: PathBuf,
     root_disk: Option<ManagedRootDisk>,
     fs_resource_bindings: BTreeMap<String, BTreeMap<String, String>>,
+    network_resource_binding: Option<String>,
     previous_memory: Option<MemoryManifest>,
 }
 
@@ -110,6 +112,7 @@ impl CheckpointCoordinator {
     pub(crate) fn open(
         runtime_dir: &Path,
         vm: &VmConfig,
+        guest_bootstrap: &GuestBootstrap,
         runtime: tokio::runtime::Handle,
         agent_sock: &Path,
     ) -> Result<Self, String> {
@@ -119,6 +122,12 @@ impl CheckpointCoordinator {
             .map_err(|error| error.to_string())?;
         let root_disk = ManagedRootDisk::open(runtime_dir, vm)?;
         let fs_resource_bindings = runtime_owned_fs_bindings(root_disk.is_some());
+        let network_resource_binding = guest_bootstrap
+            .network
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|error| format!("serialize effective guest network binding: {error}"))?;
         Ok(Self {
             root,
             store,
@@ -126,6 +135,7 @@ impl CheckpointCoordinator {
             agent_sock: agent_sock.to_path_buf(),
             root_disk,
             fs_resource_bindings,
+            network_resource_binding,
             previous_memory: None,
         })
     }
@@ -138,8 +148,12 @@ impl CheckpointCoordinator {
         intent: CaptureIntent,
     ) -> Result<CheckpointResult, CheckpointFailure> {
         validate_checkpoint_id(checkpoint_id).map_err(CheckpointFailure::before_pause)?;
-        let mut admitted = admit_resources(vm, &self.fs_resource_bindings)
-            .map_err(CheckpointFailure::before_pause)?;
+        let mut admitted = admit_resources(
+            vm,
+            &self.fs_resource_bindings,
+            self.network_resource_binding.as_deref(),
+        )
+        .map_err(CheckpointFailure::before_pause)?;
         let final_path = self.root.join(checkpoint_id);
         if final_path.exists() {
             return Err(CheckpointFailure::before_pause(
@@ -756,6 +770,7 @@ where
 fn admit_resources(
     vm: &msb_krun::VmControl,
     fs_resource_bindings: &BTreeMap<String, BTreeMap<String, String>>,
+    network_resource_binding: Option<&str>,
 ) -> Result<AdmittedResources, String> {
     let inventory = vm
         .virtio_device_inventory()
@@ -789,6 +804,12 @@ fn admit_resources(
         };
         let mut binding = BTreeMap::new();
         binding.insert("device_id".into(), device_id.clone());
+        if *device_type == TYPE_NET {
+            let network = network_resource_binding.ok_or_else(|| {
+                format!("active network resource {device_id} has no effective guest binding")
+            })?;
+            binding.insert("guest_network".into(), network.into());
+        }
         if let Some(fs_binding) = fs_binding {
             binding.extend(fs_binding.clone());
         }

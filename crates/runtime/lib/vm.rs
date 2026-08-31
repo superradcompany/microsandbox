@@ -428,6 +428,7 @@ type VmBuildOutput = (
     Option<NetworkSecretsHandle>,
     Option<NetworkActivationHandle>,
     Option<Vec<u8>>,
+    GuestBootstrap,
     BindIdentityMapRegistration,
     Option<crate::checkpoint::RestoredAgentState>,
 );
@@ -931,6 +932,7 @@ fn run(mut config: Config) -> RuntimeResult<std::convert::Infallible> {
         _network_secrets_handle,
         network_activation_handle,
         bootstrap_frame,
+        resolved_bootstrap,
         bind_identity_map,
         restored_agent,
     ) = match build_result {
@@ -995,6 +997,7 @@ fn run(mut config: Config) -> RuntimeResult<std::convert::Infallible> {
             secrets,
             &config.runtime_dir,
             &config.vm,
+            &resolved_bootstrap,
             tokio_rt.handle().clone(),
             &config.agent_sock_path,
         );
@@ -2048,6 +2051,7 @@ fn build_vm(
         network_secrets_handle,
         network_activation_handle,
         bootstrap_frame,
+        bootstrap,
         bind_identity_map,
         restored_agent,
     ))

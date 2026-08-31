@@ -199,4 +199,21 @@ pub struct RootfsConfig {
     /// root disks so the runner attaches with the right format.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upper_format: Option<String>,
+
+    /// Complete oldest-to-head writable upper chain for a restored managed root.
+    ///
+    /// This is mutually exclusive with `upper`/`upper_format`. Every path is child-owned before
+    /// the launch contract is published, and libkrun presents the chain as one virtio-blk device.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub upper_layers: Vec<RootfsUpperLayerConfig>,
+}
+
+/// One explicitly resolved member of a managed root upper chain.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RootfsUpperLayerConfig {
+    /// Exact child-owned host path.
+    pub path: PathBuf,
+    /// On-disk format (`raw` or `qcow2`).
+    pub format: String,
 }

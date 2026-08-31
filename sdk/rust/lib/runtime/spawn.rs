@@ -2526,6 +2526,7 @@ fn sandbox_cli_args(
             idle_timeout_secs: config.spec.lifecycle.idle_timeout_secs,
         },
         vsock: config.spec.vsock.routes.clone(),
+        checkpoint_restore: config.checkpoint_restore.clone(),
         #[cfg(feature = "net")]
         deployment_profile: config.spec.deployment_profile,
         bootstrap: GuestBootstrap {
@@ -2625,7 +2626,11 @@ fn sandbox_cli_args(
                 let block_root = match &oci.root_disk {
                     None | Some(RootDisk::Managed { .. }) => {
                         let sandbox_dir = local.sandboxes_dir().join(&config.spec.name);
-                        launch.rootfs.upper = Some(sandbox_dir.join("upper.ext4"));
+                        if config.snapshot_upper_layers.is_empty() {
+                            launch.rootfs.upper = Some(sandbox_dir.join("upper.ext4"));
+                        } else {
+                            launch.rootfs.upper_layers = config.snapshot_upper_layers.clone();
+                        }
                         BootstrapBlockRoot::OciErofs {
                             lower: "/dev/vda".to_string(),
                             upper: BootstrapBlockRootUpper::Device {
@@ -2895,7 +2900,9 @@ mod tests {
     use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
     use tempfile::tempdir;
 
-    use microsandbox_runtime::launch::LaunchConfig;
+    use microsandbox_runtime::launch::{
+        CheckpointRestoreConfig, LaunchConfig, RootfsUpperLayerConfig,
+    };
 
     #[cfg(target_os = "linux")]
     use super::{
@@ -3887,6 +3894,45 @@ mod tests {
         assert!(!rendered.contains(&"--rootfs-blk".to_string()));
         assert!(!rendered.contains(&"--rootfs-disk".to_string()));
         assert!(!rendered.iter().any(|a| a.starts_with("MSB_BLOCK_ROOT=")));
+    }
+
+    #[test]
+    fn test_sandbox_cli_args_preserve_checkpoint_root_chain_and_restore_source() {
+        let mut config = SandboxConfig::default();
+        config.spec.name = "restored".into();
+        config.spec.image = RootfsSource::oci("alpine");
+        config.manifest_digest =
+            Some("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into());
+        config.snapshot_upper_layers = vec![
+            RootfsUpperLayerConfig {
+                path: PathBuf::from("/tmp/upper.ext4"),
+                format: "raw".into(),
+            },
+            RootfsUpperLayerConfig {
+                path: PathBuf::from("/tmp/upper-active.qcow2"),
+                format: "qcow2".into(),
+            },
+        ];
+        config.checkpoint_restore = Some(CheckpointRestoreConfig {
+            closure: PathBuf::from("/tmp/checkpoint"),
+            checkpoint_root:
+                "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            checkpoint_id: "checkpoint_test".into(),
+        });
+
+        let launch = render_launch(&config);
+
+        assert!(launch.rootfs.upper.is_none());
+        assert_eq!(launch.rootfs.upper_layers.len(), 2);
+        assert_eq!(launch.rootfs.upper_layers[0].format, "raw");
+        assert_eq!(launch.rootfs.upper_layers[1].format, "qcow2");
+        assert_eq!(
+            launch
+                .checkpoint_restore
+                .as_ref()
+                .map(|restore| restore.checkpoint_id.as_str()),
+            Some("checkpoint_test")
+        );
     }
 
     #[tokio::test]

@@ -248,8 +248,8 @@ impl MemoryManifest {
 
 impl DiskGenerationManifest {
     fn validate_body(&self) -> ImageResult<()> {
-        if self.volume_id.is_empty() || self.generation == 0 || self.layers.is_empty() {
-            return manifest_error("disk generation is missing identity, generation, or layers");
+        if !portable_member_id(&self.volume_id) || self.generation == 0 || self.layers.is_empty() {
+            return manifest_error("disk generation has invalid identity, generation, or layers");
         }
         if self.layers.len() > 256 {
             return manifest_error("disk generation exceeds 256 layers");
@@ -258,8 +258,8 @@ impl DiskGenerationManifest {
             return manifest_error("disk head does not name the final layer");
         }
         for (index, layer) in self.layers.iter().enumerate() {
-            if layer.layer_id.is_empty() || layer.virtual_size == 0 {
-                return manifest_error("disk layer has empty identity or zero virtual size");
+            if !portable_member_id(&layer.layer_id) || layer.virtual_size == 0 {
+                return manifest_error("disk layer has invalid identity or zero virtual size");
             }
             validate_blake3_root(&layer.integrity_root)?;
             match (index, layer.format.as_str(), layer.predecessor.as_deref()) {
@@ -285,6 +285,16 @@ fn validate_blake3_root(root: &str) -> ImageResult<()> {
         return manifest_error("disk layer integrity has an invalid digest");
     }
     Ok(())
+}
+
+fn portable_member_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value != "."
+        && value != ".."
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
 }
 
 impl CheckpointManifest {
@@ -442,5 +452,25 @@ mod tests {
 
         let bytes = manifest.to_canonical_bytes().unwrap();
         assert_eq!(MemoryManifest::from_bytes(&bytes).unwrap(), manifest);
+    }
+
+    #[test]
+    fn disk_layer_identity_cannot_escape_the_closure_directory() {
+        let manifest = DiskGenerationManifest {
+            schema: "microsandbox.disk-generation/1".into(),
+            volume_id: "vol_test".into(),
+            generation: 1,
+            layers: vec![DiskLayerRef {
+                layer_id: "../outside".into(),
+                format: "raw".into(),
+                virtual_size: 4096,
+                predecessor: None,
+                integrity_root: format!("blake3:{}", "0".repeat(64)),
+            }],
+            head: "../outside".into(),
+            pause_generation: 1,
+        };
+
+        assert!(manifest.validate().is_err());
     }
 }

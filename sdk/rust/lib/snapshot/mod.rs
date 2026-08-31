@@ -17,6 +17,7 @@ mod create;
 pub mod downgrade;
 mod metadata;
 pub(crate) mod migration;
+mod restore;
 mod store;
 mod verify;
 
@@ -309,6 +310,10 @@ pub(crate) async fn materialize_archive_for_child(
 ) -> MicrosandboxResult<Manifest> {
     archive::materialize_archive_for_child(local, archive, child_stage).await
 }
+
+pub(crate) use restore::materialize_checkpoint_for_child;
+
+pub(crate) use create::CHECKPOINT_DIRECTORY;
 
 /// Lightweight handle backed by an index row.
 ///

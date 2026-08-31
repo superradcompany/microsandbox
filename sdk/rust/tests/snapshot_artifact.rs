@@ -662,7 +662,7 @@ async fn open_accepts_resumable_scope_artifact() {
 }
 
 #[tokio::test]
-async fn from_snapshot_rejects_resumable_scope_at_restore() {
+async fn from_snapshot_rejects_resumable_artifact_without_checkpoint_closure() {
     let tmp = TempDir::new().unwrap();
     let (dir, _) = make_artifact_with_scope(
         tmp.path(),
@@ -677,8 +677,12 @@ async fn from_snapshot_rejects_resumable_scope_at_restore() {
         .await
         .unwrap_err();
     assert!(
-        err.to_string().contains("non-disk"),
+        err.to_string().contains("snapshot"),
         "unexpected error: {err}"
+    );
+    assert!(
+        !err.to_string().contains("restoring non-disk snapshots"),
+        "resumable restore should reach closure validation: {err}"
     );
 }
 

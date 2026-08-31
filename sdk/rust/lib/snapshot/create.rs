@@ -278,6 +278,22 @@ async fn create_resumable_snapshot(
             "memory_bytes".into(),
             serde_json::Value::from(checkpoint.memory_logical_bytes),
         ),
+        (
+            "vcpus".into(),
+            serde_json::Value::from(sandbox_config.spec.resources.cpus),
+        ),
+        (
+            "max_vcpus".into(),
+            serde_json::Value::from(sandbox_config.spec.resources.max_cpus),
+        ),
+        (
+            "memory_mib".into(),
+            serde_json::Value::from(sandbox_config.spec.resources.memory_mib),
+        ),
+        (
+            "max_memory_mib".into(),
+            serde_json::Value::from(sandbox_config.spec.resources.max_memory_mib),
+        ),
     ]);
     let manifest = Manifest {
         schema: SCHEMA.into(),
@@ -689,7 +705,10 @@ fn validate_snapshot_name(name: &str) -> MicrosandboxResult<()> {
 /// The immutable root is copied last, so an interrupted copy never looks like a published
 /// checkpoint. Regular files are hard-linked when source and destination share a filesystem;
 /// cross-filesystem copies retain sparse/reflink optimizations through `fast_copy`.
-fn materialize_checkpoint_closure(source: &Path, destination: &Path) -> std::io::Result<()> {
+pub(crate) fn materialize_checkpoint_closure(
+    source: &Path,
+    destination: &Path,
+) -> std::io::Result<()> {
     let source_metadata = std::fs::symlink_metadata(source)?;
     if !source_metadata.file_type().is_dir() {
         return Err(std::io::Error::new(
@@ -747,7 +766,7 @@ fn copy_checkpoint_directory(source: &Path, destination: &Path) -> std::io::Resu
     sync_directory(destination)
 }
 
-fn copy_checkpoint_file(source: &Path, destination: &Path) -> std::io::Result<()> {
+pub(crate) fn copy_checkpoint_file(source: &Path, destination: &Path) -> std::io::Result<()> {
     let metadata = std::fs::symlink_metadata(source)?;
     if !metadata.file_type().is_file() {
         return Err(std::io::Error::new(

@@ -4,7 +4,10 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::num::NonZero;
 use std::path::PathBuf;
 
-use microsandbox_runtime::logging::LogLevel;
+use microsandbox_runtime::{
+    launch::{CheckpointRestoreConfig, RootfsUpperLayerConfig},
+    logging::LogLevel,
+};
 use microsandbox_types::{
     EnvVar, SandboxLogLevel, SandboxResources, SandboxRuntimeOptions, SandboxSpec,
     TransparentHugePagePolicy,
@@ -177,6 +180,17 @@ pub struct SandboxConfig {
     #[serde(skip)]
     pub(crate) snapshot_archive_source: Option<PathBuf>,
 
+    /// Child-owned checkpoint closure used only for this process construction.
+    ///
+    /// The builder initially points this at an installed snapshot. The local create path copies
+    /// the closure into child staging and rewrites the path before spawning the runtime.
+    #[serde(skip)]
+    pub(crate) checkpoint_restore: Option<CheckpointRestoreConfig>,
+
+    /// Child-owned oldest-to-head upper chain prepared for checkpoint restore.
+    #[serde(skip)]
+    pub(crate) snapshot_upper_layers: Vec<RootfsUpperLayerConfig>,
+
     /// Transient process-launch intent for the current create operation.
     #[serde(skip)]
     pub(crate) launch_intent: LaunchIntent,
@@ -213,6 +227,8 @@ impl SandboxConfig {
     /// transient launch markers and any workload argv routed through an inherited init are removed.
     pub(crate) fn clone_for_persistence(&self) -> Self {
         let mut config = self.clone();
+        config.checkpoint_restore = None;
+        config.snapshot_upper_layers.clear();
         config.launch_intent = LaunchIntent::None;
         config.init_owns_workload = false;
         if config.init_workload_arg_count > 0 {
@@ -711,6 +727,8 @@ impl Default for SandboxConfig {
             manifest_digest: None,
             snapshot_upper_source: None,
             snapshot_archive_source: None,
+            checkpoint_restore: None,
+            snapshot_upper_layers: Vec::new(),
             launch_intent: LaunchIntent::None,
             init_owns_workload: false,
             init_workload_arg_count: 0,

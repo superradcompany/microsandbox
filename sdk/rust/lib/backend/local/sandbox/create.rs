@@ -64,7 +64,7 @@ struct ResolvedOciImage {
 }
 
 /// Removes direct archive staging unless creation reaches durable sandbox state.
-struct ArchiveChildStageGuard {
+struct ChildStageGuard {
     path: PathBuf,
     armed: bool,
 }
@@ -73,7 +73,7 @@ struct ArchiveChildStageGuard {
 // Methods
 //--------------------------------------------------------------------------------------------------
 
-impl ArchiveChildStageGuard {
+impl ChildStageGuard {
     fn new(path: PathBuf) -> Self {
         Self { path, armed: true }
     }
@@ -87,7 +87,7 @@ impl ArchiveChildStageGuard {
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
 
-impl Drop for ArchiveChildStageGuard {
+impl Drop for ChildStageGuard {
     fn drop(&mut self) {
         if self.armed
             && let Err(error) = remove_dir_if_exists(&self.path)
@@ -151,13 +151,13 @@ impl LocalBackend {
         let db = self.db().await?;
         let sandbox_dir = self.sandboxes_dir().join(&config.spec.name);
         Self::prepare_create_target(db, &config, &sandbox_dir, &self.config().run_dir()).await?;
-        let mut archive_stage_guard = None;
+        let mut child_stage_guard = None;
 
         // A direct archive restore streams its layer into the ordinary child
         // staging location before image resolution. The archive supplies the
         // pinned image identity; no installed snapshot artifact is created.
         if let Some(archive) = config.snapshot_archive_source.take() {
-            archive_stage_guard = Some(ArchiveChildStageGuard::new(sandbox_dir.clone()));
+            child_stage_guard = Some(ChildStageGuard::new(sandbox_dir.clone()));
             let manifest =
                 crate::snapshot::materialize_archive_for_child(self, &archive, &sandbox_dir)
                     .await?;
@@ -166,13 +166,24 @@ impl LocalBackend {
             config.snapshot_upper_source = Some(sandbox_dir.join("upper.ext4"));
         }
 
+        // Installed resumable snapshots likewise become child-owned before image resolution. The
+        // closure is retained only through eager construction; the disk layers and fresh writable
+        // head remain under the ordinary sandbox directory and root-disk journal.
+        if let Some(source) = config.checkpoint_restore.take() {
+            child_stage_guard = Some(ChildStageGuard::new(sandbox_dir.clone()));
+            let materialized =
+                crate::snapshot::materialize_checkpoint_for_child(&source, &sandbox_dir).await?;
+            config.checkpoint_restore = Some(materialized.restore);
+            config.snapshot_upper_layers = materialized.upper_layers;
+        }
+
         // Resolve OCI images before spawning the sandbox process.
         if let RootfsSource::Oci(oci) = config.spec.image.clone() {
             let reference = oci.reference;
-            let expected_snapshot_manifest_digest = config
-                .snapshot_upper_source
-                .as_ref()
-                .and(config.manifest_digest.clone());
+            let expected_snapshot_manifest_digest = (config.snapshot_upper_source.is_some()
+                || config.checkpoint_restore.is_some())
+            .then(|| config.manifest_digest.clone())
+            .flatten();
             let root_disk = oci
                 .root_disk
                 .unwrap_or(RootDisk::Managed { size_mib: None });
@@ -320,6 +331,12 @@ impl LocalBackend {
                 {
                     *size_mib = Some(target_mib);
                 }
+            } else if !config.snapshot_upper_layers.is_empty() {
+                if upper_tree.is_some() {
+                    return Err(crate::MicrosandboxError::InvalidConfig(
+                        "patches cannot be combined with resumable snapshot restore".into(),
+                    ));
+                }
             } else if let Some(snap_upper) = config.snapshot_upper_source.take() {
                 // Booting from a snapshot: copy the captured upper into
                 // place, preserving sparseness. Patches are not
@@ -422,7 +439,7 @@ impl LocalBackend {
                 return Err(err);
             }
         };
-        if let Some(guard) = archive_stage_guard.as_mut() {
+        if let Some(guard) = child_stage_guard.as_mut() {
             // The database row now owns the fully materialized child storage;
             // later failures intentionally follow ordinary sandbox cleanup.
             guard.disarm();
@@ -431,10 +448,23 @@ impl LocalBackend {
 
         // Spawn the sandbox process and create the bridge. On failure, mark the sandbox
         // as stopped so it doesn't appear as a phantom "Running" entry.
-        let (local_state, returned_config) = match self
+        let restore_closure = config
+            .checkpoint_restore
+            .as_ref()
+            .map(|restore| restore.closure.clone());
+        let created = self
             .create_sandbox_inner(config, sandbox_id, mode, None)
-            .await
+            .await;
+        if let Some(closure) = restore_closure
+            && let Err(error) = remove_dir_if_exists(&closure)
         {
+            tracing::warn!(
+                error = %error,
+                path = %closure.display(),
+                "failed to remove consumed eager checkpoint closure"
+            );
+        }
+        let (local_state, mut returned_config) = match created {
             Ok(pair) => pair,
             Err(e) => {
                 if created_named_volumes.is_empty() {
@@ -448,6 +478,8 @@ impl LocalBackend {
                 return Err(e);
             }
         };
+        returned_config.checkpoint_restore = None;
+        returned_config.snapshot_upper_layers.clear();
         let sandbox = Sandbox::from_local(backend.clone(), local_state, returned_config);
         if let Err(err) = Self::update_sandbox_active_config(
             write_db,
@@ -1406,7 +1438,7 @@ mod tests {
 
     #[cfg(unix)]
     use super::sandbox_runtime_endpoint_is_live;
-    use super::{ArchiveChildStageGuard, sandbox_entity, sandbox_label_entity};
+    use super::{ChildStageGuard, sandbox_entity, sandbox_label_entity};
     use crate::backend::{Backend, LocalBackend};
     use crate::runtime::SpawnMode;
     use crate::sandbox::{
@@ -1438,7 +1470,7 @@ mod tests {
         fs::create_dir_all(&stage).unwrap();
         fs::write(stage.join("partial.raw"), b"partial").unwrap();
 
-        drop(ArchiveChildStageGuard::new(stage.clone()));
+        drop(ChildStageGuard::new(stage.clone()));
 
         assert!(!stage.exists());
     }
@@ -1448,7 +1480,7 @@ mod tests {
         let directory = tempdir().unwrap();
         let stage = directory.path().join("child");
         fs::create_dir_all(&stage).unwrap();
-        let mut guard = ArchiveChildStageGuard::new(stage.clone());
+        let mut guard = ChildStageGuard::new(stage.clone());
 
         guard.disarm();
         drop(guard);
