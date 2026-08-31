@@ -2,6 +2,7 @@
 
 mod coordinator;
 mod disk;
+mod restore;
 
 //--------------------------------------------------------------------------------------------------
 // Re-Exports
@@ -9,6 +10,7 @@ mod disk;
 
 pub(crate) use coordinator::{CheckpointCoordinator, CheckpointResult};
 pub(crate) use disk::recover_managed_upper;
+pub(crate) use restore::PreparedCheckpointRestore;
 
 //--------------------------------------------------------------------------------------------------
 // Functions

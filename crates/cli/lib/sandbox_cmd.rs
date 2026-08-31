@@ -257,6 +257,7 @@ pub fn run(args: SandboxArgs) -> ! {
         deployment_profile: launch.deployment_profile,
         #[cfg(feature = "net")]
         sandbox_slot: launch.sandbox_slot,
+        checkpoint_restore: launch.checkpoint_restore,
     };
 
     let config = Config {

@@ -372,6 +372,9 @@ pub struct VmConfig {
     /// Sandbox slot for deterministic network address derivation.
     #[cfg(feature = "net")]
     pub sandbox_slot: u64,
+
+    /// Construction-only checkpoint restore source for clone/rollback activation.
+    pub checkpoint_restore: Option<crate::launch::CheckpointRestoreConfig>,
 }
 
 /// JSON structure written to stdout on startup.
@@ -471,6 +474,7 @@ impl std::fmt::Debug for VmConfig {
             .field("bootstrap", &self.bootstrap)
             .field("exec_path", &self.exec_path)
             .field("exec_args", &self.exec_args)
+            .field("checkpoint_restore", &self.checkpoint_restore)
             .finish()
     }
 }
@@ -1926,9 +1930,17 @@ fn build_vm(
     // Exit observer — runs synchronously before _exit() for DB cleanup.
     builder = builder.on_placement(on_placement).on_exit(on_exit);
 
-    let vm = builder
+    let mut vm = builder
         .build()
         .map_err(|e| RuntimeError::Custom(format!("build VM: {e}")))?;
+    if let Some(restore) = &config.vm.checkpoint_restore {
+        let prepared = crate::checkpoint::PreparedCheckpointRestore::open(
+            restore.closure.clone(),
+            &restore.checkpoint_root,
+        )
+        .map_err(|error| RuntimeError::Custom(format!("prepare checkpoint restore: {error}")))?;
+        prepared.install(&mut vm);
+    }
 
     let bootstrap_frame = encode_bootstrap_frame(&bootstrap)?;
 

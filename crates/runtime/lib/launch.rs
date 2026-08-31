@@ -128,6 +128,22 @@ pub struct LaunchConfig {
     /// Host Unix sockets exposed through virtio-vsock.
     #[serde(default)]
     pub vsock: Vec<VsockRouteSpec>,
+
+    /// Construction-only checkpoint restore source, if this launch is a clone/rollback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint_restore: Option<CheckpointRestoreConfig>,
+}
+
+/// Pinned child-owned checkpoint closure delivered to the sandbox process.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CheckpointRestoreConfig {
+    /// Path to the complete eager checkpoint closure.
+    pub closure: PathBuf,
+    /// Expected algorithm-qualified composite checkpoint root.
+    pub checkpoint_root: String,
+    /// Stable source checkpoint identifier retained for diagnostics.
+    pub checkpoint_id: String,
 }
 
 /// Lifetime bounds for the sandbox.

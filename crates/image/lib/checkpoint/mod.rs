@@ -5,6 +5,7 @@
 
 mod manifest;
 mod qcow;
+mod resolver;
 mod store;
 
 //--------------------------------------------------------------------------------------------------
@@ -17,4 +18,5 @@ pub use manifest::{
     ResourceDescriptor, ResourceTreatment,
 };
 pub use qcow::create_qcow2_overlay;
+pub use resolver::CheckpointClosure;
 pub use store::{LocalObjectStore, ObjectId, SparseFileIntegrity, sparse_file_integrity};
