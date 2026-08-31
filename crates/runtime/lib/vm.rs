@@ -936,6 +936,7 @@ fn run(mut config: Config) -> RuntimeResult<std::convert::Infallible> {
                 &config.runtime_dir,
                 &config.vm,
                 tokio_rt.handle().clone(),
+                &config.agent_sock_path,
             );
             let context = crate::control::ControlContext {
                 executor: match executor {

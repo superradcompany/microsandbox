@@ -127,11 +127,12 @@ impl RuntimeControlExecutor {
         runtime_dir: &Path,
         vm_config: &VmConfig,
         runtime: tokio::runtime::Handle,
+        agent_sock: &Path,
     ) -> Result<Self, String> {
         let runtime_boot_id = new_runtime_boot_id();
         persist_runtime_boot_id(runtime_dir, &runtime_boot_id)
             .map_err(|error| error.to_string())?;
-        let checkpoint = CheckpointCoordinator::open(runtime_dir, vm_config, runtime)?;
+        let checkpoint = CheckpointCoordinator::open(runtime_dir, vm_config, runtime, agent_sock)?;
         Ok(Self {
             vm,
             #[cfg(feature = "net")]

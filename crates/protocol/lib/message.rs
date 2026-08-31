@@ -9,7 +9,7 @@ use crate::error::ProtocolResult;
 //--------------------------------------------------------------------------------------------------
 
 /// Current protocol version.
-pub const PROTOCOL_VERSION: u8 = 7;
+pub const PROTOCOL_VERSION: u8 = 8;
 
 /// Frame flag: this is the last message for the given correlation ID.
 ///
@@ -133,6 +133,22 @@ pub enum MessageType {
     /// Guest confirms that sandbox activity was recorded.
     #[strum(serialize = "core.touched")]
     Touched,
+
+    /// Host asks agentd to freeze all agent-managed workload processes.
+    #[strum(serialize = "core.workload.freeze")]
+    WorkloadFreeze,
+
+    /// Guest confirms that every agent-managed workload process is frozen.
+    #[strum(serialize = "core.workload.frozen")]
+    WorkloadFrozen,
+
+    /// Host asks agentd to release a previously established workload freeze.
+    #[strum(serialize = "core.workload.thaw")]
+    WorkloadThaw,
+
+    /// Guest confirms that agent-managed workload processes may run again.
+    #[strum(serialize = "core.workload.thawed")]
+    WorkloadThawed,
 
     /// Peer reports a recoverable protocol-level error.
     #[strum(serialize = "core.error")]
@@ -275,6 +291,8 @@ impl MessageType {
         match self {
             Self::Pong
             | Self::Touched
+            | Self::WorkloadFrozen
+            | Self::WorkloadThawed
             | Self::CoreError
             | Self::ExecExited
             | Self::ExecFailed
@@ -329,6 +347,10 @@ impl MessageType {
             Self::CoreError => 5,
             Self::Ping | Self::Pong | Self::Touch | Self::Touched => 6,
             Self::Bootstrap => 7,
+            Self::WorkloadFreeze
+            | Self::WorkloadFrozen
+            | Self::WorkloadThaw
+            | Self::WorkloadThawed => 8,
             Self::TcpConnect
             | Self::TcpConnected
             | Self::TcpData
@@ -415,6 +437,10 @@ mod tests {
             (MessageType::Pong, "core.pong"),
             (MessageType::Touch, "core.touch"),
             (MessageType::Touched, "core.touched"),
+            (MessageType::WorkloadFreeze, "core.workload.freeze"),
+            (MessageType::WorkloadFrozen, "core.workload.frozen"),
+            (MessageType::WorkloadThaw, "core.workload.thaw"),
+            (MessageType::WorkloadThawed, "core.workload.thawed"),
             (MessageType::CoreError, "core.error"),
             (MessageType::ExecRequest, "core.exec.request"),
             (MessageType::ExecStarted, "core.exec.started"),
@@ -458,6 +484,10 @@ mod tests {
             MessageType::Pong,
             MessageType::Touch,
             MessageType::Touched,
+            MessageType::WorkloadFreeze,
+            MessageType::WorkloadFrozen,
+            MessageType::WorkloadThaw,
+            MessageType::WorkloadThawed,
             MessageType::CoreError,
             MessageType::ExecRequest,
             MessageType::ExecStarted,
@@ -518,6 +548,8 @@ mod tests {
         assert_eq!(MessageType::TcpFailed.flags(), FLAG_TERMINAL);
         assert_eq!(MessageType::Pong.flags(), FLAG_TERMINAL);
         assert_eq!(MessageType::Touched.flags(), FLAG_TERMINAL);
+        assert_eq!(MessageType::WorkloadFrozen.flags(), FLAG_TERMINAL);
+        assert_eq!(MessageType::WorkloadThawed.flags(), FLAG_TERMINAL);
         assert_eq!(MessageType::ExecRequest.flags(), FLAG_SESSION_START);
         assert_eq!(MessageType::FsRequest.flags(), FLAG_SESSION_START);
         assert_eq!(MessageType::TcpConnect.flags(), FLAG_SESSION_START);
@@ -529,6 +561,8 @@ mod tests {
         assert_eq!(MessageType::ClockSync.flags(), 0);
         assert_eq!(MessageType::Ping.flags(), 0);
         assert_eq!(MessageType::Touch.flags(), 0);
+        assert_eq!(MessageType::WorkloadFreeze.flags(), 0);
+        assert_eq!(MessageType::WorkloadThaw.flags(), 0);
         assert_eq!(MessageType::ExecStarted.flags(), 0);
         assert_eq!(MessageType::ExecStdin.flags(), 0);
         assert_eq!(MessageType::ExecStdout.flags(), 0);
@@ -594,6 +628,9 @@ mod tests {
         // Bootstrap is internal to generation-7 host/agent boot.
         assert!(!MessageType::Bootstrap.is_available_at(6));
         assert!(MessageType::Bootstrap.is_available_at(PROTOCOL_VERSION));
+        // Workload latching is generation 8 and remains independently gated.
+        assert!(!MessageType::WorkloadFreeze.is_available_at(7));
+        assert!(MessageType::WorkloadFreeze.is_available_at(PROTOCOL_VERSION));
     }
 
     #[test]
@@ -642,6 +679,15 @@ mod tests {
         }
 
         assert_eq!(MessageType::Bootstrap.min_protocol_version(), 7);
+
+        for mt in [
+            MessageType::WorkloadFreeze,
+            MessageType::WorkloadFrozen,
+            MessageType::WorkloadThaw,
+            MessageType::WorkloadThawed,
+        ] {
+            assert_eq!(mt.min_protocol_version(), 8, "{mt:?} should require gen 8");
+        }
 
         // Every current type must be sendable to a current peer.
         assert!(MessageType::FsRequest.min_protocol_version() <= PROTOCOL_VERSION);

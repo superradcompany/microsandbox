@@ -4,12 +4,18 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
+use microsandbox_agent_client::AgentClient;
 use microsandbox_image::checkpoint::{
     CaptureIntent, CheckpointManifest, ContentRef, DeviceStateRef, LocalObjectStore,
     MemoryCaptureMode, MemoryExtent, MemoryExtentContent, MemoryManifest, ResourceDescriptor,
     ResourceTreatment,
 };
+use microsandbox_protocol::core::{
+    CoreError, WorkloadFreeze, WorkloadFrozen, WorkloadThaw, WorkloadThawed,
+};
+use microsandbox_protocol::message::{Message, MessageType};
 use msb_krun::{
     GuestMemoryRange, IncrementalCaptureDecision, MemoryCaptureOptions, MemoryCapturePlan,
     MemoryCaptureSink,
@@ -28,6 +34,7 @@ const TYPE_RNG: u32 = 4;
 const TYPE_VSOCK: u32 = 19;
 const TYPE_FS: u32 = 26;
 const MEMORY_CHUNK_SIZE: usize = 2 * 1024 * 1024;
+const WORKLOAD_CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -38,6 +45,7 @@ pub(crate) struct CheckpointCoordinator {
     root: PathBuf,
     store: LocalObjectStore,
     runtime: tokio::runtime::Handle,
+    agent_sock: PathBuf,
     root_disk: Option<ManagedRootDisk>,
     fs_resource_bindings: BTreeMap<String, BTreeMap<String, String>>,
     previous_memory: Option<MemoryManifest>,
@@ -73,6 +81,11 @@ struct PausedCapture {
     memory_manifest: MemoryManifest,
 }
 
+struct FrozenWorkload {
+    client: AgentClient,
+    attempt_id: String,
+}
+
 struct MemoryObjectSink<'a> {
     store: &'a LocalObjectStore,
     updates: Vec<MemoryExtent>,
@@ -96,6 +109,7 @@ impl CheckpointCoordinator {
         runtime_dir: &Path,
         vm: &VmConfig,
         runtime: tokio::runtime::Handle,
+        agent_sock: &Path,
     ) -> Result<Self, String> {
         let root = runtime_dir.join("checkpoints");
         std::fs::create_dir_all(&root).map_err(|error| error.to_string())?;
@@ -107,6 +121,7 @@ impl CheckpointCoordinator {
             root,
             store,
             runtime,
+            agent_sock: agent_sock.to_path_buf(),
             root_disk,
             fs_resource_bindings,
             previous_memory: None,
@@ -135,11 +150,27 @@ impl CheckpointCoordinator {
         ));
         std::fs::create_dir(&staging).map_err(CheckpointFailure::before_pause)?;
 
+        // The guest latch is acquired while vCPUs can still service agentd.
+        // It remains held in captured guest memory so a restored child cannot
+        // run application code before VM Generation ID activation completes.
+        let workload = match self.freeze_workload(checkpoint_id) {
+            Ok(workload) => workload,
+            Err(error) => {
+                let _ = std::fs::remove_dir_all(&staging);
+                return Err(CheckpointFailure::before_pause(error));
+            }
+        };
+
         let pause = match vm.pause() {
             Ok(pause) => pause,
             Err(error) => {
                 let _ = std::fs::remove_dir_all(&staging);
-                return Err(CheckpointFailure::paused(error));
+                return match self.thaw_workload(&workload) {
+                    Ok(()) => Err(CheckpointFailure::before_pause(error)),
+                    Err(thaw_error) => Err(CheckpointFailure::paused(format!(
+                        "VM pause failed: {error}; workload thaw failed: {thaw_error}"
+                    ))),
+                };
             }
         };
         let paused = self.capture_paused(
@@ -160,6 +191,17 @@ impl CheckpointCoordinator {
                 {
                     failure.keep_paused = true;
                     failure.message = format!("{}; source resume failed: {error}", failure.message);
+                } else if !failure.keep_paused
+                    && let Err(error) = self.thaw_workload(&workload)
+                {
+                    failure.keep_paused = true;
+                    failure.message = format!("{}; workload thaw failed: {error}", failure.message);
+                    if let Err(pause_error) = vm.pause() {
+                        failure.message = format!(
+                            "{}; fail-closed VM re-pause failed: {pause_error}",
+                            failure.message
+                        );
+                    }
                 }
                 if failure.published.is_none() {
                     let _ = std::fs::remove_dir_all(&staging);
@@ -183,12 +225,83 @@ impl CheckpointCoordinator {
                 published: Some(Box::new(captured.result)),
             });
         }
+        if let Err(error) = self.thaw_workload(&workload) {
+            let repause = vm.pause().err();
+            let message = match repause {
+                Some(pause_error) => format!(
+                    "checkpoint published but workload thaw failed: {error}; fail-closed VM re-pause failed: {pause_error}"
+                ),
+                None => format!("checkpoint published but workload thaw failed: {error}"),
+            };
+            return Err(CheckpointFailure {
+                message,
+                keep_paused: true,
+                published: Some(Box::new(captured.result)),
+            });
+        }
         if baseline_published {
             self.previous_memory = Some(captured.memory_manifest);
         } else {
             self.previous_memory = None;
         }
         Ok(captured.result)
+    }
+
+    fn freeze_workload(&self, attempt_id: &str) -> Result<FrozenWorkload, String> {
+        let client = self
+            .runtime
+            .block_on(AgentClient::connect_with_timeout(
+                &self.agent_sock,
+                WORKLOAD_CONTROL_TIMEOUT,
+            ))
+            .map_err(|error| format!("connect workload latch: {error}"))?;
+        let request = WorkloadFreeze {
+            attempt_id: attempt_id.to_string(),
+        };
+        let reply = self
+            .runtime
+            .block_on(async {
+                tokio::time::timeout(
+                    WORKLOAD_CONTROL_TIMEOUT,
+                    client.request(MessageType::WorkloadFreeze, &request),
+                )
+                .await
+            })
+            .map_err(|_| "workload freeze timed out".to_string())?
+            .map_err(|error| format!("request workload freeze: {error}"))?;
+        validate_workload_reply::<WorkloadFrozen>(
+            reply,
+            MessageType::WorkloadFrozen,
+            attempt_id,
+            |payload| &payload.attempt_id,
+        )?;
+        Ok(FrozenWorkload {
+            client,
+            attempt_id: attempt_id.to_string(),
+        })
+    }
+
+    fn thaw_workload(&self, workload: &FrozenWorkload) -> Result<(), String> {
+        let request = WorkloadThaw {
+            attempt_id: workload.attempt_id.clone(),
+        };
+        let reply = self
+            .runtime
+            .block_on(async {
+                tokio::time::timeout(
+                    WORKLOAD_CONTROL_TIMEOUT,
+                    workload.client.request(MessageType::WorkloadThaw, &request),
+                )
+                .await
+            })
+            .map_err(|_| "workload thaw timed out".to_string())?
+            .map_err(|error| format!("request workload thaw: {error}"))?;
+        validate_workload_reply::<WorkloadThawed>(
+            reply,
+            MessageType::WorkloadThawed,
+            &workload.attempt_id,
+            |payload| &payload.attempt_id,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -580,6 +693,37 @@ impl MemoryCaptureSink for MemoryObjectSink<'_> {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
+fn validate_workload_reply<T>(
+    reply: Message,
+    expected_type: MessageType,
+    expected_attempt: &str,
+    attempt_id: impl for<'a> Fn(&'a T) -> &'a str,
+) -> Result<(), String>
+where
+    T: serde::de::DeserializeOwned,
+{
+    if reply.t == MessageType::CoreError {
+        let error = reply
+            .payload::<CoreError>()
+            .map_err(|decode| format!("decode workload control error: {decode}"))?;
+        return Err(format!("workload control rejected: {}", error.message));
+    }
+    if reply.t != expected_type {
+        return Err(format!(
+            "unexpected workload control reply {} (expected {})",
+            reply.t.as_str(),
+            expected_type.as_str()
+        ));
+    }
+    let payload = reply
+        .payload::<T>()
+        .map_err(|error| format!("decode {}: {error}", expected_type.as_str()))?;
+    if attempt_id(&payload) != expected_attempt {
+        return Err("workload control reply belongs to another checkpoint attempt".into());
+    }
+    Ok(())
+}
+
 fn admit_resources(
     vm: &msb_krun::VmControl,
     fs_resource_bindings: &BTreeMap<String, BTreeMap<String, String>>,
@@ -827,11 +971,16 @@ fn sync_directory(path: &Path) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{MemoryObjectSink, overlay_extents, publish_root_last, runtime_owned_fs_bindings};
+    use super::{
+        MemoryObjectSink, overlay_extents, publish_root_last, runtime_owned_fs_bindings,
+        validate_workload_reply,
+    };
 
     use microsandbox_image::checkpoint::{
         ContentRef, LocalObjectStore, MemoryExtent, MemoryExtentContent, ObjectId,
     };
+    use microsandbox_protocol::core::{CoreError, CoreErrorKind, WorkloadFrozen};
+    use microsandbox_protocol::message::{Message, MessageType};
     use msb_krun::{GuestMemoryRange, MemoryCaptureSink};
 
     #[test]
@@ -942,5 +1091,66 @@ mod tests {
             std::fs::read(store.object_path(&first.object)).unwrap(),
             b"abcde"
         );
+    }
+
+    #[test]
+    fn workload_reply_must_confirm_the_exact_attempt() {
+        let reply = Message::with_payload(
+            MessageType::WorkloadFrozen,
+            7,
+            &WorkloadFrozen {
+                attempt_id: "checkpoint-42".into(),
+            },
+        )
+        .unwrap();
+
+        validate_workload_reply::<WorkloadFrozen>(
+            reply,
+            MessageType::WorkloadFrozen,
+            "checkpoint-42",
+            |payload| &payload.attempt_id,
+        )
+        .unwrap();
+
+        let stale = Message::with_payload(
+            MessageType::WorkloadFrozen,
+            7,
+            &WorkloadFrozen {
+                attempt_id: "checkpoint-41".into(),
+            },
+        )
+        .unwrap();
+        assert!(
+            validate_workload_reply::<WorkloadFrozen>(
+                stale,
+                MessageType::WorkloadFrozen,
+                "checkpoint-42",
+                |payload| &payload.attempt_id,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn workload_core_error_preserves_guest_diagnostic() {
+        let reply = Message::with_payload(
+            MessageType::CoreError,
+            7,
+            &CoreError {
+                kind: CoreErrorKind::CapabilityUnavailable,
+                message: "freezer unavailable".into(),
+                offending_type: Some(MessageType::WorkloadFreeze.as_str().into()),
+            },
+        )
+        .unwrap();
+
+        let error = validate_workload_reply::<WorkloadFrozen>(
+            reply,
+            MessageType::WorkloadFrozen,
+            "checkpoint-42",
+            |payload| &payload.attempt_id,
+        )
+        .unwrap_err();
+        assert!(error.contains("freezer unavailable"));
     }
 }
