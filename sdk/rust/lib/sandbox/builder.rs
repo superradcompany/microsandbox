@@ -1141,9 +1141,8 @@ impl SandboxBuilder {
     /// and [`image_with`](Self::image_with). The snapshot is structurally
     /// opened at `create()` time; content verification stays explicit.
     ///
-    /// `path_or_name` accepts either a path to a snapshot artifact
-    /// directory (or a bare name resolved under the default snapshots
-    /// directory).
+    /// `path_or_name` accepts a snapshot artifact directory, an archive
+    /// file, or a bare name resolved under the default snapshots directory.
     pub fn from_snapshot(mut self, path_or_name: impl Into<String>) -> Self {
         self.pending_snapshot = Some(path_or_name.into());
         self.pending_snapshot_from_config = false;
@@ -1231,6 +1230,12 @@ impl SandboxBuilder {
             ));
         }
 
+        let snapshot_path = std::path::Path::new(&snapshot_ref);
+        if snapshot_path.is_file() {
+            self.config.snapshot_archive_source = Some(snapshot_path.to_path_buf());
+            return Ok(());
+        }
+
         let snap = crate::snapshot::Snapshot::open(&snapshot_ref).await?;
         if snap.manifest().scope != crate::snapshot::SnapshotScope::Disk {
             return Err(crate::MicrosandboxError::unsupported(
@@ -1261,13 +1266,14 @@ impl SandboxBuilder {
                 ));
             }
         };
-        if file_state.format != crate::snapshot::SnapshotFormat::Raw || file_state.fstype != "ext4"
+        if file_state.disk_format != crate::snapshot::SnapshotFormat::Raw
+            || file_state.filesystem != "ext4"
         {
             return Err(crate::MicrosandboxError::unsupported(
                 Operation::SnapshotOps,
                 UnsupportedReason::NotAvailable(format!(
                     "snapshot file state {:?}/{} is not qualified for restore",
-                    file_state.format, file_state.fstype
+                    file_state.disk_format, file_state.filesystem
                 )),
             ));
         }
@@ -1275,7 +1281,10 @@ impl SandboxBuilder {
 
         self.config.spec.image = RootfsSource::oci(snap_ref);
         self.config.manifest_digest = Some(snap.manifest().image.manifest_digest.clone());
-        self.config.snapshot_upper_source = Some(snap.path().join(&file_state.upper.file));
+        let head = file_state
+            .head_layer()
+            .map_err(|e| crate::MicrosandboxError::SnapshotIntegrity(e.to_string()))?;
+        self.config.snapshot_upper_source = Some(snap.layer_path(head));
         Ok(())
     }
 
@@ -1445,8 +1454,18 @@ impl SandboxBuilder {
             )));
         }
 
-        // Check that image is set (non-empty OCI string or Bind path).
+        // Check that image is set (non-empty OCI string or Bind path). A direct
+        // archive restore resolves its pinned image while the local backend
+        // authenticates and streams the archive into child-owned staging. Keep
+        // that path single-pass instead of scanning the archive once here and
+        // then reading the payload again during creation.
         match &self.config.spec.image {
+            RootfsSource::Oci(oci)
+                if oci.reference.is_empty() && self.config.snapshot_archive_source.is_some() =>
+            {
+                // The archive source is transient and cloud conversion rejects
+                // it explicitly, so only the local backend may defer this field.
+            }
             RootfsSource::Oci(oci) if oci.reference.is_empty() => {
                 return Err(crate::MicrosandboxError::InvalidConfig(
                     "image source is required".into(),
@@ -1640,7 +1659,9 @@ impl SandboxBuilder {
                         "patches require a managed root disk (they are baked into the upper at create time)".into(),
                     ));
                 }
-                if self.config.snapshot_upper_source.is_some() {
+                if self.config.snapshot_upper_source.is_some()
+                    || self.config.snapshot_archive_source.is_some()
+                {
                     return Err(crate::MicrosandboxError::InvalidConfig(
                         "from_snapshot requires a managed root disk".into(),
                     ));
@@ -1658,7 +1679,9 @@ impl SandboxBuilder {
                         "patches require a managed root disk (they are baked into the upper at create time)".into(),
                     ));
                 }
-                if self.config.snapshot_upper_source.is_some() {
+                if self.config.snapshot_upper_source.is_some()
+                    || self.config.snapshot_archive_source.is_some()
+                {
                     return Err(crate::MicrosandboxError::InvalidConfig(
                         "from_snapshot requires a managed root disk".into(),
                     ));
@@ -1683,7 +1706,9 @@ impl SandboxBuilder {
                         "patches are not yet compatible with flat OCI rootfs".into(),
                     ));
                 }
-                if self.config.snapshot_upper_source.is_some() {
+                if self.config.snapshot_upper_source.is_some()
+                    || self.config.snapshot_archive_source.is_some()
+                {
                     return Err(crate::MicrosandboxError::InvalidConfig(
                         "from_snapshot is not yet compatible with flat OCI rootfs".into(),
                     ));
@@ -2201,6 +2226,28 @@ mod tests {
             err.to_string()
                 .contains("from_snapshot is mutually exclusive")
         );
+    }
+
+    #[tokio::test]
+    async fn test_builder_accepts_archive_as_deferred_image_source() {
+        let directory = tempfile::tempdir().unwrap();
+        let archive = directory.path().join("snapshot.tar.zst");
+        std::fs::write(&archive, b"validated by the local backend").unwrap();
+
+        let config = SandboxBuilder::new("test")
+            .from_snapshot(archive.to_string_lossy())
+            .build()
+            .await
+            .unwrap();
+
+        assert_eq!(
+            config.snapshot_archive_source.as_deref(),
+            Some(archive.as_path())
+        );
+        assert!(matches!(
+            config.spec.image,
+            crate::sandbox::RootfsSource::Oci(ref image) if image.reference.is_empty()
+        ));
     }
 
     #[tokio::test]

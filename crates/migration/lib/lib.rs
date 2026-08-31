@@ -24,6 +24,7 @@ mod m20260808_000001_create_memory_allocation_nodes;
 mod m20260810_000001_rebuild_sandbox_labels;
 mod m20260813_000001_share_cpu_allocations;
 mod m20260824_000001_mount_owner_config;
+mod m20260829_000001_split_snapshot_identity;
 pub mod schema_metadata;
 
 use sea_orm_migration::prelude::*;
@@ -73,6 +74,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260810_000001_rebuild_sandbox_labels::Migration),
             Box::new(m20260813_000001_share_cpu_allocations::Migration),
             Box::new(m20260824_000001_mount_owner_config::Migration),
+            Box::new(m20260829_000001_split_snapshot_identity::Migration),
         ]
     }
 }

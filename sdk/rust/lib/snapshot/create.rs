@@ -1,12 +1,13 @@
 //! Snapshot creation from a stopped sandbox.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use chrono::Utc;
 use microsandbox_image::snapshot::{
-    DEFAULT_UPPER_FILE, DESCRIPTOR_FILENAME, FileSnapshotState, ImageRef, Manifest, SCHEMA_VERSION,
-    SNAPSHOT_ARTIFACT_KIND, SnapshotFormat, SnapshotScope, SnapshotState, UpperLayer,
+    DESCRIPTOR_FILENAME, DiskLayer, DiskLayerId, FileSnapshotState, ImageRef, LayerFileKind,
+    LayerPayload, Manifest, SCHEMA, SnapshotCapture, SnapshotConsistency, SnapshotFormat,
+    SnapshotId, SnapshotScope, SnapshotState, layer_path,
 };
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
@@ -16,7 +17,7 @@ use crate::sandbox::{RootDisk, SandboxConfig, SandboxStatus};
 use crate::{MicrosandboxError, MicrosandboxResult, Operation, UnsupportedReason};
 
 use super::store::index_upsert;
-use super::{Snapshot, SnapshotConfig};
+use super::{Snapshot, SnapshotArchive, SnapshotConfig};
 
 //--------------------------------------------------------------------------------------------------
 // Functions
@@ -72,7 +73,31 @@ pub(super) async fn create_snapshot(
         ));
     }
 
-    let sandbox_config: SandboxConfig = serde_json::from_str(&model.config)?;
+    // Reuse the runtime's existing lifecycle ownership lock so start,
+    // replacement, and removal cannot race the upper copy.
+    let _lifecycle_guard = crate::runtime::acquire_sandbox_lifecycle_guard(
+        &local.config().run_dir(),
+        &source_sandbox,
+        std::time::Duration::from_secs(5),
+    )
+    .await?;
+    let current = sandbox_entity::Entity::find()
+        .filter(sandbox_entity::Column::Name.eq(&source_sandbox))
+        .one(local.db().await?.read())
+        .await?
+        .ok_or_else(|| MicrosandboxError::SandboxNotFound(source_sandbox.clone()))?;
+    if current.id != model.id
+        || matches!(
+            current.status,
+            SandboxStatus::Running | SandboxStatus::Draining | SandboxStatus::Paused
+        )
+    {
+        return Err(MicrosandboxError::SnapshotSandboxRunning(
+            source_sandbox.clone(),
+        ));
+    }
+
+    let sandbox_config: SandboxConfig = serde_json::from_str(&current.config)?;
 
     // Only OCI-rooted sandboxes can be snapshotted today; non-OCI
     // rootfs (passthrough, disk-image-rootfs) are out of scope.
@@ -115,10 +140,11 @@ pub(super) async fn create_snapshot(
     }
     tokio::fs::create_dir_all(&staging_dir).await?;
 
+    let labels: BTreeMap<_, _> = labels.into_iter().collect();
     let built = build_artifact(
         &staging_dir,
         &src_upper,
-        labels,
+        &labels,
         image_reference,
         manifest_digest_str,
         &source_sandbox,
@@ -148,7 +174,123 @@ pub(super) async fn create_snapshot(
         tracing::warn!(error = %e, snapshot = %digest, "snapshot_index upsert failed");
     }
 
-    Ok(Snapshot::from_parts(dest_dir, digest, manifest))
+    Ok(Snapshot::from_parts(dest_dir, digest, manifest, labels))
+}
+
+/// Capture directly from a stopped sandbox into an archive without creating
+/// an installed artifact directory or index row.
+pub(super) async fn create_snapshot_archive(
+    local: &LocalBackend,
+    config: SnapshotConfig,
+    out: &Path,
+    plain_tar: bool,
+) -> MicrosandboxResult<SnapshotArchive> {
+    let SnapshotConfig {
+        name,
+        dest_dir,
+        source_sandbox,
+        labels,
+        force,
+        record_integrity,
+        resumable,
+    } = config;
+    if dest_dir.is_some() {
+        return Err(MicrosandboxError::InvalidConfig(
+            "direct archive capture is mutually exclusive with dest_dir".into(),
+        ));
+    }
+    validate_snapshot_name(&name)?;
+    if resumable {
+        return Err(MicrosandboxError::unsupported(
+            Operation::SnapshotOps,
+            UnsupportedReason::NotAvailable(
+                "resumable snapshots require VM pause/resume restore support".into(),
+            ),
+        ));
+    }
+
+    let db = local.db().await?.read();
+    let model = sandbox_entity::Entity::find()
+        .filter(sandbox_entity::Column::Name.eq(&source_sandbox))
+        .one(db)
+        .await?
+        .ok_or_else(|| MicrosandboxError::SandboxNotFound(source_sandbox.clone()))?;
+    if matches!(
+        model.status,
+        SandboxStatus::Running | SandboxStatus::Draining | SandboxStatus::Paused
+    ) {
+        return Err(MicrosandboxError::SnapshotSandboxRunning(source_sandbox));
+    }
+    let _lifecycle_guard = crate::runtime::acquire_sandbox_lifecycle_guard(
+        &local.config().run_dir(),
+        &source_sandbox,
+        std::time::Duration::from_secs(5),
+    )
+    .await?;
+    let current = sandbox_entity::Entity::find()
+        .filter(sandbox_entity::Column::Name.eq(&source_sandbox))
+        .one(local.db().await?.read())
+        .await?
+        .ok_or_else(|| MicrosandboxError::SandboxNotFound(source_sandbox.clone()))?;
+    if current.id != model.id
+        || matches!(
+            current.status,
+            SandboxStatus::Running | SandboxStatus::Draining | SandboxStatus::Paused
+        )
+    {
+        return Err(MicrosandboxError::SnapshotSandboxRunning(source_sandbox));
+    }
+    let sandbox_config: SandboxConfig = serde_json::from_str(&current.config)?;
+    let manifest_digest = sandbox_config.manifest_digest.clone().ok_or_else(|| {
+        MicrosandboxError::InvalidConfig(
+            "only OCI-rooted sandboxes with a pinned image can be snapshotted".into(),
+        )
+    })?;
+    let image_reference = oci_reference_string(&sandbox_config)?;
+    ensure_snapshottable_root_disk(sandbox_config.spec.image.oci_root_disk(), &source_sandbox)?;
+    let source_layer = local
+        .sandboxes_dir()
+        .join(&source_sandbox)
+        .join("upper.ext4");
+    let metadata = tokio::fs::symlink_metadata(&source_layer).await?;
+    if !metadata.file_type().is_file() {
+        return Err(MicrosandboxError::SnapshotIntegrity(format!(
+            "snapshot source is not a regular file: {}",
+            source_layer.display()
+        )));
+    }
+    let integrity = if record_integrity {
+        Some(super::verify::compute_merkle_integrity(&source_layer).await?)
+    } else {
+        None
+    };
+    let labels: BTreeMap<_, _> = labels.into_iter().collect();
+    let manifest = new_file_manifest(
+        metadata.len(),
+        integrity,
+        image_reference,
+        manifest_digest,
+        &source_sandbox,
+    )?;
+    let digest = manifest
+        .digest()
+        .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+    super::archive::save_direct_file_snapshot(
+        &manifest,
+        &labels,
+        &name,
+        &source_layer,
+        out,
+        plain_tar,
+        force,
+    )
+    .await?;
+    Ok(SnapshotArchive::from_parts(
+        out.to_path_buf(),
+        digest,
+        manifest,
+        labels,
+    ))
 }
 
 /// Build the artifact contents (upper copy, integrity, descriptor) into
@@ -156,14 +298,25 @@ pub(super) async fn create_snapshot(
 async fn build_artifact(
     dir: &std::path::Path,
     src_upper: &std::path::Path,
-    labels: Vec<(String, String)>,
+    labels: &BTreeMap<String, String>,
     image_reference: String,
     manifest_digest_str: String,
     source_sandbox: &str,
     record_integrity: bool,
 ) -> MicrosandboxResult<(String, Manifest)> {
     // Copy the upper layer (sparse-aware, see microsandbox_utils::copy).
-    let dst_upper = dir.join(DEFAULT_UPPER_FILE);
+    let snapshot_id = SnapshotId::new(format!("snap_{:032x}", rand::random::<u128>()))
+        .map_err(|e| MicrosandboxError::SnapshotIntegrity(e.to_string()))?;
+    let layer_id = DiskLayerId::new(format!("layer_{:032x}", rand::random::<u128>()))
+        .map_err(|e| MicrosandboxError::SnapshotIntegrity(e.to_string()))?;
+    let relative_layer_path = layer_path(&layer_id, SnapshotFormat::Raw);
+    let dst_upper = dir.join(&relative_layer_path);
+    tokio::fs::create_dir_all(
+        dst_upper
+            .parent()
+            .expect("canonical layer path always has a parent"),
+    )
+    .await?;
     let src_upper_clone = src_upper.to_path_buf();
     let dst_upper_clone = dst_upper.clone();
     let copied_len = tokio::task::spawn_blocking(move || {
@@ -193,35 +346,42 @@ async fn build_artifact(
         None
     };
 
-    // Build the manifest.
-    let mut label_map: BTreeMap<String, String> = BTreeMap::new();
-    for (k, v) in labels {
-        label_map.insert(k, v);
-    }
-
+    // Labels are local presentation metadata. Persist them before the
+    // descriptor is published so they never alter snapshot identity.
+    super::metadata::write(dir, labels).await?;
     let manifest = Manifest {
-        schema: SCHEMA_VERSION,
-        artifact: SNAPSHOT_ARTIFACT_KIND.into(),
+        schema: SCHEMA.into(),
+        snapshot_id,
         scope: SnapshotScope::Disk,
-        created_at: Utc::now().to_rfc3339(),
-        parent: None,
+        state: SnapshotState::File(FileSnapshotState {
+            disk_format: SnapshotFormat::Raw,
+            filesystem: "ext4".into(),
+            virtual_size: copied_len,
+            head: layer_id.clone(),
+            layers: vec![DiskLayer {
+                layer_id,
+                format: SnapshotFormat::Raw,
+                virtual_size: copied_len,
+                backing: None,
+                payload: LayerPayload {
+                    file_kind: LayerFileKind::Regular,
+                    integrity,
+                },
+            }],
+        }),
+        capture: SnapshotCapture {
+            created_at: Utc::now().to_rfc3339(),
+            source_lineage: Some(source_sandbox.to_string()),
+            source_checkpoint: None,
+            consistency: SnapshotConsistency::CrashConsistent,
+        },
         image: ImageRef {
             reference: image_reference,
             manifest_digest: manifest_digest_str,
         },
-        source_sandbox: Some(source_sandbox.to_string()),
-        state: SnapshotState::File(FileSnapshotState {
-            format: SnapshotFormat::Raw,
-            fstype: "ext4".into(),
-            upper: UpperLayer {
-                file: DEFAULT_UPPER_FILE.into(),
-                size_bytes: copied_len,
-                integrity,
-            },
-        }),
-        labels: label_map,
-        extensions: BTreeMap::new(),
+        parent: None,
         requires: Vec::new(),
+        extensions: BTreeMap::new(),
     };
     manifest.validate()?;
     let canonical = manifest
@@ -249,6 +409,57 @@ async fn build_artifact(
     tokio::fs::rename(&tmp_path, &manifest_path).await?;
 
     Ok((digest, manifest))
+}
+
+fn new_file_manifest(
+    size_bytes: u64,
+    integrity: Option<microsandbox_image::snapshot::UpperIntegrity>,
+    image_reference: String,
+    manifest_digest: String,
+    source_sandbox: &str,
+) -> MicrosandboxResult<Manifest> {
+    let snapshot_id = SnapshotId::new(format!("snap_{:032x}", rand::random::<u128>()))
+        .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+    let layer_id = DiskLayerId::new(format!("layer_{:032x}", rand::random::<u128>()))
+        .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+    let manifest = Manifest {
+        schema: SCHEMA.into(),
+        snapshot_id,
+        scope: SnapshotScope::Disk,
+        state: SnapshotState::File(FileSnapshotState {
+            disk_format: SnapshotFormat::Raw,
+            filesystem: "ext4".into(),
+            virtual_size: size_bytes,
+            head: layer_id.clone(),
+            layers: vec![DiskLayer {
+                layer_id,
+                format: SnapshotFormat::Raw,
+                virtual_size: size_bytes,
+                backing: None,
+                payload: LayerPayload {
+                    file_kind: LayerFileKind::Regular,
+                    integrity,
+                },
+            }],
+        }),
+        capture: SnapshotCapture {
+            created_at: Utc::now().to_rfc3339(),
+            source_lineage: Some(source_sandbox.to_string()),
+            source_checkpoint: None,
+            consistency: SnapshotConsistency::CrashConsistent,
+        },
+        image: ImageRef {
+            reference: image_reference,
+            manifest_digest,
+        },
+        parent: None,
+        requires: Vec::new(),
+        extensions: BTreeMap::new(),
+    };
+    manifest
+        .validate()
+        .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+    Ok(manifest)
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -290,9 +501,19 @@ fn resolve_destination(
     name: &str,
     dest_dir: Option<PathBuf>,
 ) -> MicrosandboxResult<PathBuf> {
+    validate_snapshot_name(name)?;
+    Ok(dest_dir.unwrap_or_else(|| local.snapshots_dir()).join(name))
+}
+
+fn validate_snapshot_name(name: &str) -> MicrosandboxResult<()> {
     if name.is_empty() {
         return Err(MicrosandboxError::InvalidConfig(
             "snapshot name must not be empty".into(),
+        ));
+    }
+    if name.len() > 255 {
+        return Err(MicrosandboxError::InvalidConfig(
+            "snapshot name must not exceed 255 bytes".into(),
         ));
     }
     // Reject names the open/get/remove resolvers would misread: leading '.'
@@ -308,7 +529,7 @@ fn resolve_destination(
             "snapshot name must be a bare identifier, not a path: '{name}' (use dest_dir to choose a parent directory)"
         )));
     }
-    Ok(dest_dir.unwrap_or_else(|| local.snapshots_dir()).join(name))
+    Ok(())
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -388,7 +609,7 @@ mod tests {
         let (_, without) = build_artifact(
             &without_dir,
             &source,
-            Vec::new(),
+            &BTreeMap::new(),
             "docker.io/library/alpine:3.20".into(),
             "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
             "box",
@@ -396,14 +617,17 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(without.state.as_file().unwrap().upper.integrity, None);
+        assert_eq!(
+            without.state.as_file().unwrap().layers[0].payload.integrity,
+            None
+        );
 
         let with_dir = temp.path().join("with");
         std::fs::create_dir(&with_dir).unwrap();
         let (_, with) = build_artifact(
             &with_dir,
             &source,
-            Vec::new(),
+            &BTreeMap::new(),
             "docker.io/library/alpine:3.20".into(),
             "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
             "box",
@@ -412,7 +636,7 @@ mod tests {
         .await
         .unwrap();
         assert!(matches!(
-            &with.state.as_file().unwrap().upper.integrity,
+            &with.state.as_file().unwrap().layers[0].payload.integrity,
             Some(microsandbox_image::snapshot::UpperIntegrity::FileMerkleBlake3V1 { .. })
         ));
     }

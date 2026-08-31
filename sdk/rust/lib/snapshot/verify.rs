@@ -122,7 +122,18 @@ pub(super) async fn verify_snapshot(snap: &Snapshot) -> MicrosandboxResult<Snaps
             ),
         ));
     };
-    let Some(expected) = file_state.upper.integrity.as_ref() else {
+    if file_state.layers.len() != 1 {
+        return Err(MicrosandboxError::unsupported(
+            crate::Operation::SnapshotOps,
+            crate::UnsupportedReason::NotAvailable(
+                "multi-layer verification requires the managed qcow implementation".into(),
+            ),
+        ));
+    }
+    let layer = file_state
+        .head_layer()
+        .map_err(|e| MicrosandboxError::SnapshotIntegrity(format!("invalid file closure: {e}")))?;
+    let Some(expected) = layer.payload.integrity.as_ref() else {
         return Ok(SnapshotVerifyReport {
             digest: snap.digest().to_string(),
             path: snap.path().to_path_buf(),
@@ -130,7 +141,7 @@ pub(super) async fn verify_snapshot(snap: &Snapshot) -> MicrosandboxResult<Snaps
         });
     };
 
-    let upper_path = snap.path().join(&file_state.upper.file);
+    let upper_path = snap.layer_path(layer);
     let payload = open_verification_source(&upper_path)?;
     let before = verification_source_identity(&payload.metadata()?);
     let actual = match expected {

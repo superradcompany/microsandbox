@@ -17,6 +17,8 @@ const READ_ONLY_MSG =
  */
 export class SnapshotHandle {
   private readonly inner: NapiSnapshotHandle | NapiSnapshotInfo;
+  /** Stable opaque snapshot identity. */
+  readonly id: string;
   /** Manifest digest (`sha256:hex`) — canonical identity. */
   readonly digest: string;
   /** Convenience name. `null` for digest-only entries. */
@@ -53,6 +55,7 @@ export class SnapshotHandle {
   /** @internal */
   constructor(inner: NapiSnapshotHandle | NapiSnapshotInfo) {
     this.inner = inner;
+    this.id = inner.id;
     this.digest = inner.digest;
     this.name = (inner.name ?? null) as string | null;
     this.parentDigest = (inner.parentDigest ?? null) as string | null;

@@ -15,6 +15,7 @@ mod archive;
 mod create;
 #[doc(hidden)]
 pub mod downgrade;
+mod metadata;
 pub(crate) mod migration;
 mod store;
 mod verify;
@@ -23,6 +24,7 @@ mod verify;
 // Types
 //--------------------------------------------------------------------------------------------------
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::error::Operation;
@@ -38,6 +40,18 @@ pub struct Snapshot {
     path: PathBuf,
     digest: String,
     manifest: Manifest,
+    labels: BTreeMap<String, String>,
+}
+
+/// Result of direct sandbox-to-archive capture.
+///
+/// No installed snapshot directory or index row is created.
+#[derive(Debug, Clone)]
+pub struct SnapshotArchive {
+    path: PathBuf,
+    digest: String,
+    manifest: Manifest,
+    labels: BTreeMap<String, String>,
 }
 
 /// Builder for [`SnapshotConfig`].
@@ -97,6 +111,17 @@ impl Snapshot {
         create::create_snapshot(local, config).await
     }
 
+    /// Capture a stopped sandbox directly into an archive.
+    pub async fn create_archive(
+        config: SnapshotConfig,
+        out: impl AsRef<Path>,
+        plain_tar: bool,
+    ) -> MicrosandboxResult<SnapshotArchive> {
+        let backend = crate::backend::default_backend();
+        let local = backend.as_local().ok_or_else(snapshots_require_local)?;
+        create::create_snapshot_archive(local, config, out.as_ref(), plain_tar).await
+    }
+
     /// Open an existing snapshot artifact by path or bare name.
     ///
     /// Bare names (no path separator) resolve under the default
@@ -121,8 +146,12 @@ impl Snapshot {
         &self.path
     }
 
-    /// Canonical content digest of this snapshot's manifest
-    /// (`sha256:hex`). This is the snapshot's identity.
+    /// Stable opaque snapshot identity.
+    pub fn id(&self) -> &SnapshotId {
+        &self.manifest.snapshot_id
+    }
+
+    /// SHA-256 digest of the canonical descriptor bytes.
     pub fn digest(&self) -> &str {
         &self.digest
     }
@@ -132,17 +161,44 @@ impl Snapshot {
         &self.manifest
     }
 
+    /// Mutable local labels, which do not participate in descriptor identity.
+    pub fn labels(&self) -> &BTreeMap<String, String> {
+        &self.labels
+    }
+
     /// Apparent size of a file-state upper layer in bytes.
     pub fn size_bytes(&self) -> Option<u64> {
         self.manifest
             .state
             .as_file()
-            .map(|state| state.upper.size_bytes)
+            .map(|state| state.virtual_size)
     }
 
     /// Closed state variant carried by the descriptor.
     pub fn state(&self) -> &SnapshotState {
         &self.manifest.state
+    }
+
+    /// Resolve a physical layer through the final layout or the exact
+    /// released flat-artifact compatibility binding.
+    pub(crate) fn layer_path(&self, layer: &DiskLayer) -> PathBuf {
+        let canonical = self.path.join(microsandbox_image::snapshot::layer_path(
+            &layer.layer_id,
+            layer.format,
+        ));
+        if canonical.exists() {
+            canonical
+        } else if self
+            .manifest
+            .state
+            .as_file()
+            .is_some_and(|file| file.layers.len() == 1)
+            && self.path.join("upper.ext4").exists()
+        {
+            self.path.join("upper.ext4")
+        } else {
+            canonical
+        }
     }
 
     /// Get a handle by digest, name, or path from the local index.
@@ -213,10 +269,45 @@ impl Snapshot {
     }
 }
 
+impl SnapshotArchive {
+    /// Stable identity of the archived snapshot.
+    pub fn id(&self) -> &SnapshotId {
+        &self.manifest.snapshot_id
+    }
+
+    /// SHA-256 digest of the canonical descriptor.
+    pub fn descriptor_digest(&self) -> &str {
+        &self.digest
+    }
+
+    /// Published archive path.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Parsed snapshot descriptor.
+    pub fn manifest(&self) -> &Manifest {
+        &self.manifest
+    }
+
+    /// Labels stored alongside the archived descriptor.
+    pub fn labels(&self) -> &BTreeMap<String, String> {
+        &self.labels
+    }
+}
+
 /// Build an `Unsupported` error for snapshot ops that aren't wired through
 /// the cloud trait yet. Snapshots are local-only today.
 fn snapshots_require_local() -> MicrosandboxError {
     MicrosandboxError::local_only(Operation::SnapshotOps)
+}
+
+pub(crate) async fn materialize_archive_for_child(
+    local: &crate::backend::LocalBackend,
+    archive: &Path,
+    child_stage: &Path,
+) -> MicrosandboxResult<Manifest> {
+    archive::materialize_archive_for_child(local, archive, child_stage).await
 }
 
 /// Lightweight handle backed by an index row.
@@ -226,6 +317,7 @@ fn snapshots_require_local() -> MicrosandboxError {
 /// content verification.
 #[derive(Debug, Clone)]
 pub struct SnapshotHandle {
+    pub(crate) snapshot_id: String,
     pub(crate) digest: String,
     pub(crate) name: Option<String>,
     pub(crate) parent_digest: Option<String>,
@@ -245,7 +337,12 @@ pub struct SnapshotHandle {
 }
 
 impl SnapshotHandle {
-    /// Manifest digest (`sha256:hex`) — canonical identity.
+    /// Stable opaque snapshot identity.
+    pub fn id(&self) -> &str {
+        &self.snapshot_id
+    }
+
+    /// SHA-256 digest of the canonical descriptor.
     pub fn digest(&self) -> &str {
         &self.digest
     }
@@ -404,6 +501,15 @@ impl SnapshotBuilder {
     pub async fn create(self) -> MicrosandboxResult<Snapshot> {
         Snapshot::create(self.build()?).await
     }
+
+    /// Capture directly to `out` without installing an intermediate artifact.
+    pub async fn create_archive(
+        self,
+        out: impl AsRef<Path>,
+        plain_tar: bool,
+    ) -> MicrosandboxResult<SnapshotArchive> {
+        Snapshot::create_archive(self.build()?, out, plain_tar).await
+    }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -414,8 +520,10 @@ pub use archive::SaveOpts;
 #[cfg(feature = "fuzzing")]
 pub use archive::fuzz_unpack_archive;
 pub use microsandbox_image::snapshot::{
-    CheckpointSnapshotState, DESCRIPTOR_FILENAME, FileSnapshotState, ImageRef, Manifest,
-    SnapshotDescriptor, SnapshotFormat, SnapshotScope, SnapshotState, UpperIntegrity, UpperLayer,
+    CheckpointSnapshotState, DESCRIPTOR_FILENAME, DiskLayer, DiskLayerId, FileSnapshotState,
+    ImageRef, LayerFileKind, LayerPayload, Manifest, SnapshotCapture, SnapshotConsistency,
+    SnapshotDescriptor, SnapshotFormat, SnapshotId, SnapshotScope, SnapshotState, UpperIntegrity,
+    UpperLayer,
 };
 pub use microsandbox_types::{SnapshotSpec, SnapshotSpec as SnapshotConfig};
 pub use verify::{SnapshotVerifyReport, UpperVerifyStatus};
@@ -425,11 +533,33 @@ pub use verify::{SnapshotVerifyReport, UpperVerifyStatus};
 //--------------------------------------------------------------------------------------------------
 
 impl Snapshot {
-    pub(crate) fn from_parts(path: PathBuf, digest: String, manifest: Manifest) -> Self {
+    pub(crate) fn from_parts(
+        path: PathBuf,
+        digest: String,
+        manifest: Manifest,
+        labels: BTreeMap<String, String>,
+    ) -> Self {
         Self {
             path,
             digest,
             manifest,
+            labels,
+        }
+    }
+}
+
+impl SnapshotArchive {
+    pub(crate) fn from_parts(
+        path: PathBuf,
+        digest: String,
+        manifest: Manifest,
+        labels: BTreeMap<String, String>,
+    ) -> Self {
+        Self {
+            path,
+            digest,
+            manifest,
+            labels,
         }
     }
 }

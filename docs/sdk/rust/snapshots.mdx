@@ -54,7 +54,7 @@ let snap = Snapshot::builder("baseline")
 async fn create(config: SnapshotConfig) -> MicrosandboxResult<Snapshot>
 ```
 
-Create a snapshot artifact from a stopped sandbox. Writes the `snapshot.json` descriptor and the captured `upper.ext4` into the artifact directory atomically (the descriptor is renamed into place last), then best-effort upserts a row into the local index. Index failures are logged but do not fail the call; the artifact is the source of truth. Most callers use the [builder](#snapshotbuilder)'s [`create()`](#create) instead of constructing a [`SnapshotConfig`](#snapshotconfig) by hand.
+Create a snapshot artifact from a stopped sandbox. Writes the `snapshot.json` descriptor, optional `metadata.json`, and the captured raw layer under `layers/` into the artifact directory atomically, then best-effort upserts a row into the local index. Index failures are logged but do not fail the call; the artifact is the source of truth. Most callers use the [builder](#snapshotbuilder)'s [`create()`](#create) instead of constructing a [`SnapshotConfig`](#snapshotconfig) by hand.
 
 <p className="msb-label">Parameters</p>
 
@@ -83,6 +83,29 @@ let snap = Snapshot::create(
 ```
 
 </Accordion>
+
+---
+
+#### <span className="msb-recv">Snapshot::</span><span className="msb-hn">create_archive()</span>
+
+```rust
+async fn create_archive(
+    config: SnapshotConfig,
+    out: impl AsRef<Path>,
+    plain_tar: bool,
+) -> MicrosandboxResult<SnapshotArchive>
+```
+
+Capture a stopped sandbox directly into an archive. The operation creates no installed snapshot directory and no index row.
+
+```rust
+let archive = Snapshot::create_archive(
+    Snapshot::builder("baseline").from_sandbox("api").build()?,
+    "/tmp/baseline.tar.zst",
+    false,
+).await?;
+println!("{} {}", archive.id(), archive.path().display());
+```
 
 ---
 
@@ -386,13 +409,21 @@ println!("loaded {}", h.digest());
 
 Methods on an opened [`Snapshot`](#snapshotopen) artifact.
 
+#### <span className="msb-recv">snap.</span><span className="msb-hn">id()</span>
+
+```rust
+fn id(&self) -> &SnapshotId
+```
+
+Stable opaque `snap_...` identity. Copying, archiving, or relabeling the snapshot preserves this value.
+
 #### <span className="msb-recv">snap.</span><span className="msb-hn">digest()</span>
 
 ```rust
 fn digest(&self) -> &str
 ```
 
-Canonical content digest of this snapshot's manifest (`sha256:hex`). This is the snapshot's identity.
+SHA-256 digest of the canonical descriptor bytes. This detects descriptor conflicts but is separate from the stable snapshot ID.
 
 <p className="msb-label">Returns</p>
 
@@ -409,7 +440,7 @@ Canonical content digest of this snapshot's manifest (`sha256:hex`). This is the
 fn path(&self) -> &Path
 ```
 
-Path to the artifact directory holding the canonical `snapshot.json` descriptor and the captured upper file.
+Path to the artifact directory holding `snapshot.json`, optional `metadata.json`, and the captured physical layer closure.
 
 <p className="msb-label">Returns</p>
 
@@ -436,7 +467,7 @@ println!("{} @ {}", m.image.reference, m.image.manifest_digest);
 
 </Accordion>
 
-The parsed [`Manifest`](#manifest): schema, format, fstype, image reference, parent, creation time, labels, and upper-layer metadata.
+The parsed [`Manifest`](#manifest): stable identity, state closure, capture provenance, pinned image, parent identity, and extensions. Mutable labels are exposed by `labels()` and are not part of this descriptor.
 
 <p className="msb-label">Returns</p>
 
@@ -670,7 +701,7 @@ let sb = Sandbox::builder("api-restored")
 <div className="msb-params">
   <div className="msb-param">
     <div className="msb-param-key"><code>path_or_name</code><span className="msb-type">impl Into&lt;String&gt;</span></div>
-    <div className="msb-param-desc">Bare name resolved under the default snapshots directory, or a path to an artifact directory.</div>
+    <div className="msb-param-desc">Bare name resolved under the default snapshots directory, or a path to an artifact directory or archive file.</div>
   </div>
 </div>
 
@@ -929,21 +960,19 @@ Upper-layer content verification result.
 
 <p className="msb-backref">Returned by <a href="#snap-manifest">manifest()</a></p>
 
-The snapshot artifact manifest, the source of truth for an artifact, serialized as the `snapshot.json` descriptor (`DESCRIPTOR_FILENAME`). Re-exported as `microsandbox::snapshot::Manifest`. Its SHA-256 digest over the canonical byte form is the snapshot's identity. Field order is load-bearing (it determines the canonical byte layout) and must not be reordered.
+The snapshot artifact descriptor, serialized as `snapshot.json` (`DESCRIPTOR_FILENAME`) and re-exported as `microsandbox::snapshot::Manifest`. Its SHA-256 digest is computed over RFC 8785 canonical JSON. Stable lineage identity is the separate `snapshot_id` field.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| schema | `u32` | Manifest schema version; readers reject unknown values |
-| artifact | `String` | Artifact kind; always `"snapshot"` |
-| scope | [`SnapshotScope`](#snapshotscope) | Payload scope; only disk snapshots are created today |
-| format | [`SnapshotFormat`](#snapshotformat) | On-disk format of the upper layer |
-| fstype | `String` | Filesystem type inside the upper (e.g. `ext4`) |
+| schema | `String` | Exactly `microsandbox.snapshot/1` |
+| snapshot_id | `SnapshotId` | Stable opaque snapshot identity |
+| scope | [`SnapshotScope`](#snapshotscope) | File or checkpoint state family |
+| state | `SnapshotState` | Closed file-layer or checkpoint representation |
+| capture | `SnapshotCapture` | Immutable capture time, lineage, source checkpoint, and consistency |
 | image | [`ImageRef`](#imageref) | Image the snapshot was taken from |
-| parent | `Option<String>` | Parent snapshot digest, or `None` for a root |
-| created_at | `String` | RFC 3339 creation timestamp |
-| labels | `BTreeMap<String, String>` | User-supplied labels, sorted by key in canonical form |
-| upper | [`UpperLayer`](#upperlayer) | The captured upper layer |
-| source_sandbox | `Option<String>` | Best-effort name of the source sandbox (informational) |
+| parent | `Option<SnapshotId>` | Logical parent identity, or `None` for a root |
+| requires | `Vec<String>` | Sorted must-understand extension names |
+| extensions | `BTreeMap<String, Value>` | Namespaced additive descriptor fields |
 
 ### ImageRef
 
@@ -956,21 +985,24 @@ Reference to the OCI image the snapshot was taken from. Re-exported as `microsan
 | reference | `String` | Human-readable image reference (e.g. `docker.io/library/python:3.12`) |
 | manifest_digest | `String` | Digest of the OCI manifest, in `sha256:hex` form |
 
-### UpperLayer
+### DiskLayer
 
 <p className="msb-backref">Used by <a href="#manifest">Manifest.upper</a></p>
 
-Captured upper-layer file metadata. Re-exported as `microsandbox::snapshot::UpperLayer`.
+One member of the complete oldest-first file-layer closure. Re-exported as `microsandbox::snapshot::DiskLayer`; `UpperLayer` remains a source-compatibility alias.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| file | `String` | Filename inside the artifact directory (e.g. `upper.ext4`) |
-| size_bytes | `u64` | Apparent size in bytes (ext4 virtual size; sparse on disk) |
+| layer_id | `DiskLayerId` | Stable opaque physical-member identity |
+| format | `SnapshotFormat` | `raw` or `qcow2` |
+| virtual_size | `u64` | Guest-visible size in bytes |
+| backing | `Option<DiskLayerId>` | Immediate predecessor; raw layers cannot have one |
+| payload.file_kind | `LayerFileKind` | `regular` |
 | integrity | `Option<`[`UpperIntegrity`](#upperintegrity)`>` | Optional content integrity descriptor; `None` on local hot paths |
 
 ### UpperIntegrity
 
-<p className="msb-backref">Used by <a href="#upperlayer">UpperLayer.integrity</a></p>
+<p className="msb-backref">Used by <a href="#disklayer">DiskLayer.payload.integrity</a></p>
 
 Content integrity descriptor for the captured upper layer.
 

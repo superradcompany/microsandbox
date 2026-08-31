@@ -35,6 +35,25 @@ type SnapshotSaveOptions struct {
 	PlainTar    bool
 }
 
+// SnapshotArchiveOptions configures direct sandbox-to-archive capture.
+type SnapshotArchiveOptions struct {
+	SnapshotCreateOptions
+	ArchivePath string
+	PlainTar    bool
+}
+
+// SnapshotArchive identifies a directly captured archive. It does not
+// represent an installed snapshot artifact or index row.
+type SnapshotArchive struct {
+	id               string
+	descriptorDigest string
+	path             string
+}
+
+func (a *SnapshotArchive) ID() string               { return a.id }
+func (a *SnapshotArchive) DescriptorDigest() string { return a.descriptorDigest }
+func (a *SnapshotArchive) Path() string             { return a.path }
+
 // Snapshot payload scope values, as reported by SnapshotArtifact.Scope
 // and SnapshotHandle.Scope.
 const (
@@ -87,6 +106,7 @@ type SnapshotIntegrity struct {
 
 // SnapshotArtifact is a snapshot artifact on disk.
 type SnapshotArtifact struct {
+	id                  string
 	path                string
 	digest              string
 	sizeBytes           *uint64
@@ -102,6 +122,7 @@ type SnapshotArtifact struct {
 
 func snapshotFromInfo(info *ffi.SnapshotInfo) *SnapshotArtifact {
 	return &SnapshotArtifact{
+		id:                  info.ID,
 		path:                info.Path,
 		digest:              info.Digest,
 		sizeBytes:           info.SizeBytes,
@@ -117,6 +138,7 @@ func snapshotFromInfo(info *ffi.SnapshotInfo) *SnapshotArtifact {
 }
 
 func (s *SnapshotArtifact) Path() string                { return s.path }
+func (s *SnapshotArtifact) ID() string                  { return s.id }
 func (s *SnapshotArtifact) Digest() string              { return s.digest }
 func (s *SnapshotArtifact) SizeBytes() *uint64          { return cloneUint64Ptr(s.sizeBytes) }
 func (s *SnapshotArtifact) ImageRef() string            { return s.imageRef }
@@ -151,6 +173,7 @@ func (s *SnapshotArtifact) Verify(ctx context.Context) (*SnapshotVerifyReport, e
 
 // SnapshotHandle is a lightweight handle backed by the snapshot index.
 type SnapshotHandle struct {
+	id                       string
 	digest                   string
 	name                     *string
 	parentDigest             *string
@@ -171,6 +194,7 @@ type SnapshotHandle struct {
 
 func snapshotHandleFromInfo(info *ffi.SnapshotHandleInfo) *SnapshotHandle {
 	return &SnapshotHandle{
+		id:                       info.ID,
 		digest:                   info.Digest,
 		name:                     info.Name,
 		parentDigest:             info.ParentDigest,
@@ -190,6 +214,7 @@ func snapshotHandleFromInfo(info *ffi.SnapshotHandleInfo) *SnapshotHandle {
 	}
 }
 
+func (h *SnapshotHandle) ID() string            { return h.id }
 func (h *SnapshotHandle) Digest() string        { return h.digest }
 func (h *SnapshotHandle) Name() *string         { return cloneStringPtr(h.name) }
 func (h *SnapshotHandle) ParentDigest() *string { return cloneStringPtr(h.parentDigest) }
@@ -236,6 +261,37 @@ func (snapshotFactory) Create(ctx context.Context, opts SnapshotCreateOptions) (
 		return nil, wrapFFI(err)
 	}
 	return snapshotFromInfo(info), nil
+}
+
+// CreateArchive captures a stopped sandbox directly into one archive file.
+// It does not create an installed snapshot directory or index row.
+func (snapshotFactory) CreateArchive(ctx context.Context, opts SnapshotArchiveOptions) (*SnapshotArchive, error) {
+	if opts.Name == "" {
+		return nil, &Error{Kind: ErrInvalidConfig, Message: "snapshot archive create requires a non-empty Name"}
+	}
+	if opts.FromSandbox == "" {
+		return nil, &Error{Kind: ErrInvalidConfig, Message: "snapshot archive create requires a source sandbox (FromSandbox)"}
+	}
+	if opts.ArchivePath == "" {
+		return nil, &Error{Kind: ErrInvalidConfig, Message: "snapshot archive create requires ArchivePath"}
+	}
+	create := opts.SnapshotCreateOptions
+	create.DestDir = ""
+	info, err := ffi.SnapshotCreateArchive(ctx, opts.FromSandbox, opts.ArchivePath, ffi.SnapshotCreateOptions{
+		Name:            create.Name,
+		Labels:          create.Labels,
+		Force:           create.Force,
+		RecordIntegrity: create.RecordIntegrity,
+		Resumable:       create.Resumable,
+	}, opts.PlainTar)
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	return &SnapshotArchive{
+		id:               info.ID,
+		descriptorDigest: info.DescriptorDigest,
+		path:             info.Path,
+	}, nil
 }
 
 func (snapshotFactory) Open(ctx context.Context, pathOrName string) (*SnapshotArtifact, error) {

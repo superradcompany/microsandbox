@@ -68,7 +68,7 @@ Boot a fresh sandbox from a snapshot artifact by passing `from_snapshot=` as a p
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>from_snapshot</code><span className="msb-type">str | os.PathLike | None</span></div>
-    <div className="msb-param-desc">Snapshot bare name or artifact path to boot from instead of <code>image=</code>.</div>
+    <div className="msb-param-desc">Snapshot bare name, artifact directory, or archive file to boot from instead of <code>image=</code>.</div>
   </div>
 </div>
 
@@ -102,6 +102,12 @@ sb = await Sandbox.create("worker", image="python:3.12")
 <p className="msb-backref">Returned by <a href="#handle-snapshot">snapshot()</a> · <a href="#snapshot-create">Snapshot.create()</a> · <a href="#snapshot-open">Snapshot.open()</a> · <a href="#snapshot-list_dir">Snapshot.list_dir()</a> · <a href="#handle-open">handle.open()</a></p>
 
 A fully-parsed snapshot artifact. Properties are read-only attributes (not async).
+
+#### <span className="msb-recv">snapshot.</span><span className="msb-hn">id</span>
+
+`str`
+
+Stable opaque `snap_...` identity
 
 #### <span className="msb-recv">snapshot.</span><span className="msb-hn">path</span>
 
@@ -228,7 +234,7 @@ Create a snapshot from a stopped or crashed sandbox. `name` is resolved under th
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>labels</code><span className="msb-type">dict[str, str] | None</span></div>
-    <div className="msb-param-desc">User-supplied labels stored in the manifest.</div>
+    <div className="msb-param-desc">User-supplied local labels stored outside the identity-bearing descriptor.</div>
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>force</code><span className="msb-type">bool</span></div>
@@ -265,6 +271,35 @@ snap = await Snapshot.create(
 ```
 
 </Accordion>
+
+---
+
+#### <span className="msb-recv">Snapshot.</span><span className="msb-hn">create_archive()</span>
+
+```python
+@staticmethod
+async def create_archive(
+    name: str,
+    archive: str | os.PathLike[str],
+    *,
+    from_sandbox: str,
+    labels: dict[str, str] | None = None,
+    force: bool = False,
+    record_integrity: bool = False,
+    resumable: bool = False,
+    plain_tar: bool = False,
+) -> SnapshotArchive
+```
+
+Capture directly into an archive without installing a snapshot directory or index row.
+
+```python
+archive = await Snapshot.create_archive(
+    "after-pip-install",
+    "/tmp/after-pip-install.tar.zst",
+    from_sandbox="baseline",
+)
+```
 
 ---
 

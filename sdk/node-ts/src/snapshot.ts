@@ -2,6 +2,7 @@ import { withMappedErrors } from "./internal/error-mapping.js";
 import {
   napi,
   type NapiSnapshot,
+  type NapiSnapshotArchive,
   type NapiSnapshotBuilderSetters,
   type NapiSnapshotInfo,
   type NapiSnapshotVerifyReport,
@@ -85,6 +86,25 @@ export type SnapshotVerifyReport =
  */
 export interface SnapshotBuilder extends NapiSnapshotBuilderSetters {
   create(): Promise<Snapshot>;
+  createArchive(out: string, plainTar?: boolean): Promise<SnapshotArchive>;
+}
+
+/** Result of direct sandbox-to-archive capture. */
+export class SnapshotArchive {
+  /** @internal */
+  constructor(readonly inner: NapiSnapshotArchive) {}
+
+  get id(): string {
+    return this.inner.id;
+  }
+
+  get descriptorDigest(): string {
+    return this.inner.descriptorDigest;
+  }
+
+  get path(): string {
+    return this.inner.path;
+  }
 }
 
 /**
@@ -212,6 +232,11 @@ export class Snapshot {
   }
 
   /** Canonical content digest (`sha256:hex`). The snapshot's identity. */
+  get id(): string {
+    return this.inner.id;
+  }
+
+  /** SHA-256 digest of the canonical descriptor. */
   get digest(): string {
     return this.inner.digest;
   }
@@ -367,9 +392,18 @@ export class Snapshot {
 /** @internal */
 function wrapBuilder(nb: InstanceType<typeof napi.SnapshotBuilder>): SnapshotBuilder {
   const origCreate = nb.create.bind(nb);
+  const origCreateArchive = nb.createArchive.bind(nb);
   (nb as unknown as { create: () => Promise<Snapshot> }).create = async () => {
     const inner = await withMappedErrors(() => origCreate());
     return new Snapshot(inner);
+  };
+  (
+    nb as unknown as {
+      createArchive: (out: string, plainTar?: boolean) => Promise<SnapshotArchive>;
+    }
+  ).createArchive = async (out: string, plainTar?: boolean) => {
+    const inner = await withMappedErrors(() => origCreateArchive(out, plainTar));
+    return new SnapshotArchive(inner);
   };
   return nb as unknown as SnapshotBuilder;
 }

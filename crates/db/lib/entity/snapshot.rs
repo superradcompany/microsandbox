@@ -14,9 +14,13 @@ use sea_orm::entity::prelude::*;
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
 #[sea_orm(table_name = "snapshot_index")]
 pub struct Model {
-    /// Manifest digest (`sha256:hex`). Canonical snapshot identity.
+    /// Released descriptor-digest primary key retained for database compatibility.
     #[sea_orm(primary_key, auto_increment = false)]
     pub digest: String,
+    /// Stable opaque snapshot identity.
+    pub snapshot_id: Option<String>,
+    /// SHA-256 of canonical descriptor bytes.
+    pub descriptor_digest: Option<String>,
     /// Convenience name (unique when present). NULL for digest-only entries.
     pub name: Option<String>,
     /// Manifest digest of the parent snapshot, or NULL for a root.

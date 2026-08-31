@@ -220,6 +220,11 @@ struct DowngradeOperation {
     journal: DowngradeOperationJournal,
 }
 
+enum SnapshotArtifactDowngradePlan {
+    V066(microsandbox::snapshot::downgrade::DowngradePlan),
+    ReleasedFlat(microsandbox::snapshot::downgrade::ReleasedFlatDowngradePlan),
+}
+
 /// Durable Windows-only handoff from a self-management command to its retryable
 /// activation helper. Task Scheduler keeps invoking the helper until target
 /// verification and command-specific cleanup both succeed.
@@ -1097,18 +1102,32 @@ async fn run_downgrade_with_db(
         }
 
         if ctx.operation.phase() < DowngradePhase::DatabaseReverted {
-            let reverses_snapshots = fresh_plan.rollback.iter().any(|migration| {
+            let reverses_legacy_snapshots = fresh_plan.rollback.iter().any(|migration| {
                 migration.id == schema_metadata::SNAPSHOT_ARTIFACT_TRANSITION_MIGRATION_ID
             });
-            let snapshot_plan = if reverses_snapshots
+            let reverses_final_snapshots = fresh_plan
+                .rollback
+                .iter()
+                .any(|migration| migration.id == schema_metadata::SNAPSHOT_IDENTITY_MIGRATION_ID);
+            let snapshot_plan = if (reverses_legacy_snapshots || reverses_final_snapshots)
                 && ctx.operation.phase() < DowngradePhase::ArtifactsReverted
             {
                 let spinner = ui::Spinner::start("Checking", "retained snapshot graph");
-                let result = microsandbox::snapshot::downgrade::preflight_managed_v066(
-                    ctx.db.inner(),
-                    ctx.snapshots_dir,
-                )
-                .await;
+                let result = if reverses_legacy_snapshots {
+                    microsandbox::snapshot::downgrade::preflight_managed_v066(
+                        ctx.db.inner(),
+                        ctx.snapshots_dir,
+                    )
+                    .await
+                    .map(SnapshotArtifactDowngradePlan::V066)
+                } else {
+                    microsandbox::snapshot::downgrade::preflight_managed_released_flat(
+                        ctx.db.inner(),
+                        ctx.snapshots_dir,
+                    )
+                    .await
+                    .map(SnapshotArtifactDowngradePlan::ReleasedFlat)
+                };
                 match result {
                     Ok(plan) => {
                         spinner.finish_success("Checked");
@@ -1175,13 +1194,25 @@ async fn run_downgrade_with_db(
                     .set_phase(DowngradePhase::ArtifactsReverting)?;
                 if let Some(plan) = snapshot_plan {
                     let spinner = ui::Spinner::start("Reverting", "snapshot artifacts");
-                    match microsandbox::snapshot::downgrade::execute_managed_v066(
-                        ctx.db.inner(),
-                        ctx.operation.recovery_dir(),
-                        plan,
-                    )
-                    .await
-                    {
+                    let result = match plan {
+                        SnapshotArtifactDowngradePlan::V066(plan) => {
+                            microsandbox::snapshot::downgrade::execute_managed_v066(
+                                ctx.db.inner(),
+                                ctx.operation.recovery_dir(),
+                                plan,
+                            )
+                            .await
+                        }
+                        SnapshotArtifactDowngradePlan::ReleasedFlat(plan) => {
+                            microsandbox::snapshot::downgrade::execute_managed_released_flat(
+                                ctx.db.inner(),
+                                ctx.operation.recovery_dir(),
+                                plan,
+                            )
+                            .await
+                        }
+                    };
+                    match result {
                         Ok(report) => {
                             spinner.finish_success(&format!("Reverted {}", report.artifacts,))
                         }
@@ -3478,6 +3509,35 @@ mod tests {
         .await
         .unwrap();
         Migrator::up(db.inner(), None).await.unwrap();
+
+        // Stable snapshot identity is the newest migration. With no snapshot
+        // artifacts to translate, rollback removes its two rebuildable index
+        // projections and leaves the earlier compatibility marker applied.
+        rollback_schema(db.inner(), 1).await.unwrap();
+
+        let rows = db
+            .query_all_raw(Statement::from_sql_and_values(
+                DatabaseBackend::Sqlite,
+                "SELECT version FROM seaql_migrations WHERE version = ?",
+                [schema_metadata::SNAPSHOT_IDENTITY_MIGRATION_ID.into()],
+            ))
+            .await
+            .unwrap();
+        assert!(rows.is_empty(), "snapshot identity should be rolled back");
+
+        let columns = db
+            .query_all_raw(Statement::from_string(
+                DatabaseBackend::Sqlite,
+                "PRAGMA table_info(snapshot_index)",
+            ))
+            .await
+            .unwrap();
+        assert!(!columns.iter().any(|row| {
+            matches!(
+                row.try_get_by_index::<String>(1).unwrap().as_str(),
+                "snapshot_id" | "descriptor_digest"
+            )
+        }));
 
         // The newest owner-compatibility marker has no schema objects of its
         // own. With no persisted sandboxes, its preflight permits rollback and

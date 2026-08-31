@@ -216,6 +216,7 @@ typedef char *(*msb_image_save_fn)(uint64_t cancel_id, const char *references_js
 
 typedef char *(*msb_sandbox_handle_snapshot_fn)(uint64_t cancel_id, const char *sandbox_name, const char *snapshot_name, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_snapshot_create_fn)(uint64_t cancel_id, const char *source_sandbox, const char *opts_json, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_snapshot_create_archive_fn)(uint64_t cancel_id, const char *source_sandbox, const char *archive_path, const char *opts_json, bool plain_tar, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_snapshot_open_fn)(uint64_t cancel_id, const char *path_or_name, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_snapshot_verify_fn)(uint64_t cancel_id, const char *path_or_name, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_snapshot_get_fn)(uint64_t cancel_id, const char *name_or_digest, uint8_t *buf, size_t buf_len);
@@ -372,6 +373,7 @@ static msb_image_load_fn           ptr_msb_image_load           = NULL;
 static msb_image_save_fn           ptr_msb_image_save           = NULL;
 static msb_sandbox_handle_snapshot_fn ptr_msb_sandbox_handle_snapshot = NULL;
 static msb_snapshot_create_fn      ptr_msb_snapshot_create      = NULL;
+static msb_snapshot_create_archive_fn ptr_msb_snapshot_create_archive = NULL;
 static msb_snapshot_open_fn        ptr_msb_snapshot_open        = NULL;
 static msb_snapshot_verify_fn      ptr_msb_snapshot_verify      = NULL;
 static msb_snapshot_get_fn         ptr_msb_snapshot_get         = NULL;
@@ -547,6 +549,7 @@ const char *load_microsandbox(const char *path) {
 	RESOLVE(msb_image_save);
 	RESOLVE(msb_sandbox_handle_snapshot);
 	RESOLVE(msb_snapshot_create);
+	RESOLVE(msb_snapshot_create_archive);
 	RESOLVE(msb_snapshot_open);
 	RESOLVE(msb_snapshot_verify);
 	RESOLVE(msb_snapshot_get);
@@ -944,6 +947,9 @@ char *call_msb_sandbox_handle_snapshot(uint64_t cancel_id, const char *sandbox_n
 }
 char *call_msb_snapshot_create(uint64_t cancel_id, const char *source_sandbox, const char *opts_json, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_snapshot_create ? ptr_msb_snapshot_create(cancel_id, source_sandbox, opts_json, buf, buf_len) : NULL;
+}
+char *call_msb_snapshot_create_archive(uint64_t cancel_id, const char *source_sandbox, const char *archive_path, const char *opts_json, bool plain_tar, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_snapshot_create_archive ? ptr_msb_snapshot_create_archive(cancel_id, source_sandbox, archive_path, opts_json, plain_tar, buf, buf_len) : NULL;
 }
 char *call_msb_snapshot_open(uint64_t cancel_id, const char *path_or_name, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_snapshot_open ? ptr_msb_snapshot_open(cancel_id, path_or_name, buf, buf_len) : NULL;
@@ -4580,6 +4586,7 @@ func ImageSave(ctx context.Context, references []string, outputPath string, form
 // ---------------------------------------------------------------------------
 
 type SnapshotInfo struct {
+	ID                        string            `json:"id"`
 	Path                      string            `json:"path"`
 	Digest                    string            `json:"digest"`
 	SizeBytes                 *uint64           `json:"size_bytes"`
@@ -4603,7 +4610,14 @@ type SnapshotInfo struct {
 	SourceSandbox             *string           `json:"source_sandbox"`
 }
 
+type SnapshotArchiveInfo struct {
+	ID               string `json:"id"`
+	DescriptorDigest string `json:"descriptor_digest"`
+	Path             string `json:"path"`
+}
+
 type SnapshotHandleInfo struct {
+	ID                       string  `json:"id"`
 	Digest                   string  `json:"digest"`
 	Name                     *string `json:"name"`
 	ParentDigest             *string `json:"parent_digest"`
@@ -4689,6 +4703,33 @@ func SnapshotCreate(ctx context.Context, sourceSandbox string, opts SnapshotCrea
 	var info SnapshotInfo
 	if err := json.Unmarshal([]byte(out), &info); err != nil {
 		return nil, fmt.Errorf("parse snapshot create: %w", err)
+	}
+	return &info, nil
+}
+
+func SnapshotCreateArchive(ctx context.Context, sourceSandbox, archivePath string, opts SnapshotCreateOptions, plainTar bool) (*SnapshotArchiveInfo, error) {
+	if err := ensureLoaded(); err != nil {
+		return nil, err
+	}
+	payload, err := json.Marshal(opts)
+	if err != nil {
+		return nil, err
+	}
+	cSource := C.CString(sourceSandbox)
+	defer C.free(unsafe.Pointer(cSource))
+	cArchive := C.CString(archivePath)
+	defer C.free(unsafe.Pointer(cArchive))
+	cOpts := C.CString(string(payload))
+	defer C.free(unsafe.Pointer(cOpts))
+	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_snapshot_create_archive(cancelID, cSource, cArchive, cOpts, C.bool(plainTar), buf, bufLen)
+	})
+	if err != nil {
+		return nil, err
+	}
+	var info SnapshotArchiveInfo
+	if err := json.Unmarshal([]byte(out), &info); err != nil {
+		return nil, fmt.Errorf("parse direct snapshot archive: %w", err)
 	}
 	return &info, nil
 }

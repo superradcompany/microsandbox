@@ -12,14 +12,24 @@ use std::os::fd::AsRawFd;
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
+#[cfg(windows)]
+use std::{iter, os::windows::ffi::OsStrExt};
 
 use chrono::Utc;
 use microsandbox_image::snapshot::migration::{
-    V066_BACKUP_FILENAME, V066_DESCRIPTOR_FILENAME, inspect_v066_source, translate_v066_reverse,
+    V066_BACKUP_FILENAME, V066_DESCRIPTOR_FILENAME, inspect_v066_source,
+    translate_released_flat_forward, translate_released_flat_reverse, translate_v066_reverse,
 };
-use microsandbox_image::snapshot::{DESCRIPTOR_FILENAME, Manifest, SnapshotState, UpperIntegrity};
+use microsandbox_image::snapshot::{
+    DEFAULT_UPPER_FILE, DESCRIPTOR_FILENAME, Manifest, SnapshotState, UpperIntegrity,
+};
 use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, Statement, TransactionTrait};
 use serde::Serialize;
+use sha2::{Digest as _, Sha256};
+#[cfg(windows)]
+use windows_sys::Win32::Storage::FileSystem::{
+    MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+};
 
 use crate::{MicrosandboxError, MicrosandboxResult};
 
@@ -53,6 +63,12 @@ pub struct DowngradePlan {
     candidates: Vec<Candidate>,
 }
 
+/// Complete preflight for downgrading final schema-1 artifacts to the flat
+/// descriptor consumed by v0.6.7-v0.6.16.
+pub struct ReleasedFlatDowngradePlan {
+    candidates: Vec<ReleasedFlatCandidate>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TranslationSource {
     ExactBackup,
@@ -83,6 +99,20 @@ struct Candidate {
     target_integrity: Option<UpperIntegrity>,
     translation_source: TranslationSource,
     recovery_member: Option<String>,
+    _lock: ArtifactLock,
+}
+
+struct ReleasedFlatCandidate {
+    path: PathBuf,
+    indexed: bool,
+    current_id: String,
+    current_parent: Option<String>,
+    source_bytes: Option<Vec<u8>>,
+    source: Option<Manifest>,
+    source_layer: PathBuf,
+    target_bytes: Option<Vec<u8>>,
+    target_digest: Option<String>,
+    target_parent_digest: Option<String>,
     _lock: ArtifactLock,
 }
 
@@ -225,6 +255,197 @@ pub async fn execute_managed_v066(
     })
 }
 
+/// Preflight every managed artifact for a downgrade to the released flat
+/// `snapshot.json` family used by v0.6.7-v0.6.16.
+pub async fn preflight_managed_released_flat(
+    db: &DatabaseConnection,
+    snapshots_dir: &Path,
+) -> MicrosandboxResult<ReleasedFlatDowngradePlan> {
+    let indexed_paths: HashSet<PathBuf> = db
+        .query_all_raw(Statement::from_string(
+            DatabaseBackend::Sqlite,
+            "SELECT artifact_path FROM snapshot_index",
+        ))
+        .await?
+        .into_iter()
+        .map(|row| row.try_get_by_index::<String>(0).map(PathBuf::from))
+        .collect::<Result<_, _>>()?;
+    let paths = discover_paths(db, snapshots_dir).await?;
+    let mut candidates = Vec::with_capacity(paths.len());
+    for path in paths {
+        let lock = ArtifactLock::acquire(&path)?;
+        let descriptor_path = path.join(DESCRIPTOR_FILENAME);
+        let descriptor_bytes = read_regular_bounded(&descriptor_path, "snapshot descriptor")?;
+        let indexed = indexed_paths.contains(&path);
+        match Manifest::from_bytes(&descriptor_bytes) {
+            Ok(source) => {
+                let file =
+                    source
+                        .state
+                        .as_file()
+                        .ok_or_else(|| MicrosandboxError::SnapshotMigration {
+                            code: "snapshot_downgrade_unrepresentable".into(),
+                            phase: "preflight".into(),
+                            artifact: path.display().to_string(),
+                            detail: "checkpoint state is not representable by v0.6.7-v0.6.16"
+                                .into(),
+                        })?;
+                let layer =
+                    file.head_layer()
+                        .map_err(|error| MicrosandboxError::SnapshotMigration {
+                            code: "snapshot_downgrade_unrepresentable".into(),
+                            phase: "preflight".into(),
+                            artifact: path.display().to_string(),
+                            detail: error.to_string(),
+                        })?;
+                let canonical = path.join(file.layer_path(layer));
+                let source_layer = if canonical.exists() {
+                    canonical
+                } else {
+                    path.join(DEFAULT_UPPER_FILE)
+                };
+                validate_released_flat_payload(&path, &source_layer, layer.virtual_size)?;
+                candidates.push(ReleasedFlatCandidate {
+                    path,
+                    indexed,
+                    current_id: source.snapshot_id.to_string(),
+                    current_parent: source.parent.as_ref().map(ToString::to_string),
+                    source_bytes: Some(descriptor_bytes),
+                    source: Some(source),
+                    source_layer,
+                    target_bytes: None,
+                    target_digest: None,
+                    target_parent_digest: None,
+                    _lock: lock,
+                });
+            }
+            Err(final_error) => {
+                let released = translate_released_flat_forward(&descriptor_bytes).map_err(
+                    |error| MicrosandboxError::SnapshotMigration {
+                        code: "snapshot_downgrade_unrepresentable".into(),
+                        phase: "preflight".into(),
+                        artifact: path.display().to_string(),
+                        detail: format!(
+                            "descriptor is neither final nor released flat: {final_error}; {error}"
+                        ),
+                    },
+                )?;
+                let source_layer = path.join(&released.upper_file);
+                validate_released_flat_payload(&path, &source_layer, released.size_bytes)?;
+                candidates.push(ReleasedFlatCandidate {
+                    path,
+                    indexed,
+                    current_id: released.target.snapshot_id.to_string(),
+                    current_parent: released.target.parent.as_ref().map(ToString::to_string),
+                    source_bytes: None,
+                    source: None,
+                    source_layer,
+                    target_bytes: Some(descriptor_bytes),
+                    target_digest: Some(released.source_digest),
+                    target_parent_digest: released.source_parent_digest,
+                    _lock: lock,
+                });
+            }
+        }
+    }
+    plan_released_flat_graph(&mut candidates)?;
+    let unique_targets: HashSet<_> = candidates
+        .iter()
+        .filter_map(|candidate| candidate.target_digest.as_ref())
+        .collect();
+    if unique_targets.len() != candidates.len() {
+        return Err(MicrosandboxError::SnapshotMigration {
+            code: "snapshot_downgrade_unrepresentable".into(),
+            phase: "preflight".into(),
+            artifact: snapshots_dir.display().to_string(),
+            detail: "released descriptor identities collide".into(),
+        });
+    }
+    Ok(ReleasedFlatDowngradePlan { candidates })
+}
+
+/// Publish a preflighted v0.6.7-v0.6.16 descriptor graph and index projection.
+pub async fn execute_managed_released_flat(
+    db: &DatabaseConnection,
+    recovery_dir: &Path,
+    plan: ReleasedFlatDowngradePlan,
+) -> MicrosandboxResult<DowngradeReport> {
+    let candidates = plan.candidates;
+    std::fs::create_dir_all(recovery_dir)?;
+    #[cfg(unix)]
+    std::fs::set_permissions(
+        recovery_dir,
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )?;
+
+    for candidate in &candidates {
+        if let Some(source_bytes) = candidate.source_bytes.as_deref() {
+            let member = format!("{}.snapshot.json", candidate.current_id);
+            write_create_new_or_validate(&recovery_dir.join(member), source_bytes)?;
+        }
+    }
+    sync_directory(recovery_dir)?;
+
+    for candidate in &candidates {
+        expose_released_flat_upper(candidate)?;
+        let Some(target_bytes) = candidate.target_bytes.as_deref() else {
+            return downgrade_error(&candidate.path, "publication", "missing target descriptor");
+        };
+        if candidate.source.is_some() {
+            let temporary = candidate.path.join(format!(
+                ".snapshot.json.released-downgrade.{}",
+                std::process::id()
+            ));
+            write_create_new_or_validate(&temporary, target_bytes)?;
+            replace_file(&temporary, &candidate.path.join(DESCRIPTOR_FILENAME))?;
+            sync_directory(&candidate.path)?;
+        }
+    }
+
+    let transaction = db.begin().await?;
+    for candidate in &candidates {
+        if candidate.indexed {
+            transaction
+                .execute_raw(Statement::from_sql_and_values(
+                    DatabaseBackend::Sqlite,
+                    "UPDATE snapshot_index SET digest = ?, parent_digest = NULL WHERE artifact_path = ?",
+                    [
+                        format!("released-reverse:{}", candidate.current_id).into(),
+                        candidate.path.display().to_string().into(),
+                    ],
+                ))
+                .await?;
+        }
+    }
+    for candidate in &candidates {
+        if candidate.indexed {
+            transaction
+                .execute_raw(Statement::from_sql_and_values(
+                    DatabaseBackend::Sqlite,
+                    "UPDATE snapshot_index SET digest = ?, snapshot_id = ?, descriptor_digest = ?, parent_digest = ?, migration_state = 'reverse_complete', migration_error_code = NULL WHERE artifact_path = ?",
+                    [
+                        candidate.target_digest.clone().into(),
+                        candidate.target_digest.clone().into(),
+                        candidate.target_digest.clone().into(),
+                        candidate.target_parent_digest.clone().into(),
+                        candidate.path.display().to_string().into(),
+                    ],
+                ))
+                .await?;
+        }
+    }
+    transaction
+        .execute_unprepared(
+            "UPDATE snapshot_index SET child_count = (SELECT COUNT(*) FROM snapshot_index child WHERE child.parent_digest = snapshot_index.digest)",
+        )
+        .await?;
+    transaction.commit().await?;
+
+    Ok(DowngradeReport {
+        artifacts: candidates.len(),
+    })
+}
+
 async fn discover_paths(
     db: &DatabaseConnection,
     snapshots_dir: &Path,
@@ -298,89 +519,90 @@ async fn load_candidate(db: &DatabaseConnection, path: PathBuf) -> MicrosandboxR
         }
 
         let forward = forward_journal(db, &path).await?;
-        let (translation_source, target_bytes, target_digest, target_parent_digest) =
-            if backup_path.exists() {
-                let backup = read_regular_bounded(&backup_path, "legacy backup")?;
-                let info = inspect_v066_source(&backup).map_err(|error| {
-                    MicrosandboxError::SnapshotMigration {
-                        code: "snapshot_downgrade_recovery_required".into(),
-                        phase: "preflight".into(),
-                        artifact: path.display().to_string(),
-                        detail: error.to_string(),
-                    }
-                })?;
-                let Some(forward) = forward else {
-                    return downgrade_error(
-                        &path,
-                        "preflight",
-                        "legacy backup is not covered by a completed forward journal",
-                    );
-                };
-                if forward.phase != "complete"
-                    || forward.source_digest != info.source_digest
-                    || forward.target_digest != source_digest
-                    || forward.source_parent_digest != info.parent_digest
-                    || forward.target_parent_digest != source.parent
-                {
-                    return downgrade_error(
-                        &path,
-                        "preflight",
-                        "legacy backup does not match the completed forward journal",
-                    );
+        let (translation_source, target_bytes, target_digest, target_parent_digest) = if backup_path
+            .exists()
+        {
+            let backup = read_regular_bounded(&backup_path, "legacy backup")?;
+            let info = inspect_v066_source(&backup).map_err(|error| {
+                MicrosandboxError::SnapshotMigration {
+                    code: "snapshot_downgrade_recovery_required".into(),
+                    phase: "preflight".into(),
+                    artifact: path.display().to_string(),
+                    detail: error.to_string(),
                 }
-                (
-                    TranslationSource::ExactBackup,
-                    Some(backup),
-                    Some(info.source_digest),
-                    info.parent_digest,
-                )
-            } else if legacy_path.exists() {
-                let Some(reverse) = reverse.as_ref() else {
-                    return downgrade_error(
-                        &path,
-                        "preflight",
-                        "manifest.json is visible beside snapshot.json without a reverse journal",
-                    );
-                };
-                let legacy = read_regular_bounded(&legacy_path, "legacy descriptor")?;
-                let info = inspect_v066_source(&legacy).map_err(|error| {
-                    MicrosandboxError::SnapshotMigration {
-                        code: "snapshot_downgrade_recovery_required".into(),
-                        phase: "preflight".into(),
-                        artifact: path.display().to_string(),
-                        detail: error.to_string(),
-                    }
-                })?;
-                if reverse.source_digest.as_deref() != Some(source_digest.as_str())
-                    || reverse.target_digest.as_deref() != Some(info.source_digest.as_str())
-                    || reverse.target_parent_digest != info.parent_digest
-                {
-                    return downgrade_error(
-                        &path,
-                        "preflight",
-                        "published legacy descriptor does not match its reverse journal",
-                    );
-                }
-                let source = match reverse.translation_source.as_deref() {
-                    Some("exact_backup") => TranslationSource::ExactBackup,
-                    Some("native_final") => TranslationSource::Native,
-                    _ => {
-                        return downgrade_error(
-                            &path,
-                            "preflight",
-                            "reverse journal has an unknown translation source",
-                        );
-                    }
-                };
-                (
-                    source,
-                    Some(legacy),
-                    Some(info.source_digest),
-                    info.parent_digest,
-                )
-            } else {
-                (TranslationSource::Native, None, None, None)
+            })?;
+            let Some(forward) = forward else {
+                return downgrade_error(
+                    &path,
+                    "preflight",
+                    "legacy backup is not covered by a completed forward journal",
+                );
             };
+            if forward.phase != "complete"
+                || forward.source_digest != info.source_digest
+                || forward.target_digest != source_digest
+                || forward.source_parent_digest != info.parent_digest
+                || forward.target_parent_digest != source.parent.as_ref().map(ToString::to_string)
+            {
+                return downgrade_error(
+                    &path,
+                    "preflight",
+                    "legacy backup does not match the completed forward journal",
+                );
+            }
+            (
+                TranslationSource::ExactBackup,
+                Some(backup),
+                Some(info.source_digest),
+                info.parent_digest,
+            )
+        } else if legacy_path.exists() {
+            let Some(reverse) = reverse.as_ref() else {
+                return downgrade_error(
+                    &path,
+                    "preflight",
+                    "manifest.json is visible beside snapshot.json without a reverse journal",
+                );
+            };
+            let legacy = read_regular_bounded(&legacy_path, "legacy descriptor")?;
+            let info = inspect_v066_source(&legacy).map_err(|error| {
+                MicrosandboxError::SnapshotMigration {
+                    code: "snapshot_downgrade_recovery_required".into(),
+                    phase: "preflight".into(),
+                    artifact: path.display().to_string(),
+                    detail: error.to_string(),
+                }
+            })?;
+            if reverse.source_digest.as_deref() != Some(source_digest.as_str())
+                || reverse.target_digest.as_deref() != Some(info.source_digest.as_str())
+                || reverse.target_parent_digest != info.parent_digest
+            {
+                return downgrade_error(
+                    &path,
+                    "preflight",
+                    "published legacy descriptor does not match its reverse journal",
+                );
+            }
+            let source = match reverse.translation_source.as_deref() {
+                Some("exact_backup") => TranslationSource::ExactBackup,
+                Some("native_final") => TranslationSource::Native,
+                _ => {
+                    return downgrade_error(
+                        &path,
+                        "preflight",
+                        "reverse journal has an unknown translation source",
+                    );
+                }
+            };
+            (
+                source,
+                Some(legacy),
+                Some(info.source_digest),
+                info.parent_digest,
+            )
+        } else {
+            (TranslationSource::Native, None, None, None)
+        };
 
         let recovery_member = Some(format!(
             "{}.snapshot.json",
@@ -392,7 +614,7 @@ async fn load_candidate(db: &DatabaseConnection, path: PathBuf) -> MicrosandboxR
             path,
             indexed_digest,
             source_digest,
-            source_parent_digest: source.parent.clone(),
+            source_parent_digest: source.parent.as_ref().map(ToString::to_string),
             source_bytes: Some(source_bytes),
             source: Some(source),
             target_bytes,
@@ -576,10 +798,12 @@ fn visit_candidate(
     match candidates[index].translation_source {
         TranslationSource::Native => {
             if let Some(source) = candidates[index].source.as_ref() {
+                let labels = super::metadata::read_sync(&candidates[index].path, source, None)?;
                 let translated = translate_v066_reverse(
                     source,
                     mapped_parent.clone(),
                     candidates[index].target_integrity.clone(),
+                    labels,
                 )
                 .map_err(|error| MicrosandboxError::SnapshotMigration {
                     code: "snapshot_downgrade_unrepresentable".into(),
@@ -738,6 +962,11 @@ async fn publish_legacy_descriptors(
     candidates: &[Candidate],
 ) -> MicrosandboxResult<()> {
     for candidate in candidates {
+        // v0.6.6 resolves the payload exclusively through root upper.ext4.
+        // Publish that binding before manifest.json so a crash can leave at
+        // most an extra compatibility hardlink, never a visible descriptor
+        // whose payload is missing.
+        expose_v066_upper(candidate)?;
         let target = candidate
             .target_bytes
             .as_deref()
@@ -951,7 +1180,26 @@ async fn validate_payload(
             "checkpoint state is not representable by v0.6.6",
         );
     };
-    let payload_path = path.join(&file.upper.file);
+    if file.layers.len() != 1 {
+        return downgrade_error(
+            path,
+            "preflight",
+            "multi-layer file state must be flattened before legacy downgrade",
+        );
+    }
+    let layer = file.head_layer().map_err(|error| {
+        MicrosandboxError::SnapshotIntegrity(format!("invalid file closure: {error}"))
+    })?;
+    let canonical_payload = path.join(file.layer_path(layer));
+    let payload_path = if canonical_payload.exists() {
+        canonical_payload
+    } else if path.join(DEFAULT_UPPER_FILE).exists() {
+        // Final descriptors produced while the released flat layout was
+        // still in use remain valid downgrade sources.
+        path.join(DEFAULT_UPPER_FILE)
+    } else {
+        canonical_payload
+    };
     let metadata = std::fs::symlink_metadata(&payload_path).map_err(|error| {
         MicrosandboxError::SnapshotMigration {
             code: "snapshot_downgrade_unrepresentable".into(),
@@ -963,13 +1211,13 @@ async fn validate_payload(
     if !metadata.is_file() || metadata.file_type().is_symlink() {
         return downgrade_error(path, "preflight", "payload is not a confined regular file");
     }
-    if metadata.len() != file.upper.size_bytes {
+    if metadata.len() != layer.virtual_size {
         return downgrade_error(
             path,
             "preflight",
             format!(
                 "payload size changed: descriptor={}, file={}",
-                file.upper.size_bytes,
+                layer.virtual_size,
                 metadata.len()
             ),
         );
@@ -977,7 +1225,7 @@ async fn validate_payload(
     let mut payload = super::verify::open_verification_source(&payload_path)?;
     let before = super::verify::verification_source_identity(&payload.metadata()?);
     let identity = super::migration::inspect_payload(&mut payload)?;
-    let target_integrity = match &file.upper.integrity {
+    let target_integrity = match &layer.payload.integrity {
         Some(expected @ UpperIntegrity::FileMerkleBlake3V1 { .. }) if convert_current_integrity => {
             let actual =
                 super::verify::compute_merkle_integrity_from_file(payload.try_clone()?).await?;
@@ -1003,7 +1251,7 @@ async fn validate_payload(
             detail: "payload changed during downgrade preflight".into(),
         },
     )?;
-    if identity.size_bytes != file.upper.size_bytes {
+    if identity.size_bytes != layer.virtual_size {
         return downgrade_error(
             path,
             "preflight",
@@ -1030,6 +1278,273 @@ fn read_regular_bounded(path: &Path, label: &str) -> MicrosandboxResult<Vec<u8>>
     let mut bytes = Vec::with_capacity(metadata.len() as usize);
     File::open(path)?.read_to_end(&mut bytes)?;
     Ok(bytes)
+}
+
+fn validate_released_flat_payload(
+    artifact: &Path,
+    payload: &Path,
+    expected_size: u64,
+) -> MicrosandboxResult<()> {
+    let metadata = std::fs::symlink_metadata(payload).map_err(|error| {
+        MicrosandboxError::SnapshotMigration {
+            code: "snapshot_downgrade_unrepresentable".into(),
+            phase: "preflight".into(),
+            artifact: artifact.display().to_string(),
+            detail: format!("missing snapshot payload {}: {error}", payload.display()),
+        }
+    })?;
+    if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+        return downgrade_error(
+            artifact,
+            "preflight",
+            "snapshot payload is not a regular file",
+        );
+    }
+    if metadata.len() != expected_size {
+        return downgrade_error(
+            artifact,
+            "preflight",
+            "snapshot payload size does not match its descriptor",
+        );
+    }
+    Ok(())
+}
+
+fn plan_released_flat_graph(candidates: &mut [ReleasedFlatCandidate]) -> MicrosandboxResult<()> {
+    let mut by_id = HashMap::new();
+    for (index, candidate) in candidates.iter().enumerate() {
+        if by_id.insert(candidate.current_id.clone(), index).is_some() {
+            return downgrade_error(
+                &candidate.path,
+                "preflight",
+                "duplicate stable snapshot identity in retained graph",
+            );
+        }
+    }
+    let mut visiting = HashSet::new();
+    let mut complete = HashSet::new();
+    for index in 0..candidates.len() {
+        visit_released_flat_candidate(index, candidates, &by_id, &mut visiting, &mut complete, 0)?;
+    }
+    Ok(())
+}
+
+fn visit_released_flat_candidate(
+    index: usize,
+    candidates: &mut [ReleasedFlatCandidate],
+    by_id: &HashMap<String, usize>,
+    visiting: &mut HashSet<usize>,
+    complete: &mut HashSet<usize>,
+    depth: usize,
+) -> MicrosandboxResult<String> {
+    if complete.contains(&index) {
+        return Ok(candidates[index]
+            .target_digest
+            .clone()
+            .expect("completed released candidate has a target digest"));
+    }
+    if depth > MAX_PARENT_DEPTH {
+        return downgrade_error(
+            &candidates[index].path,
+            "preflight",
+            "snapshot parent graph exceeds the traversal limit",
+        );
+    }
+    if !visiting.insert(index) {
+        return downgrade_error(
+            &candidates[index].path,
+            "preflight",
+            "snapshot parent graph contains a cycle",
+        );
+    }
+    let mapped_parent = match candidates[index].current_parent.clone() {
+        None => None,
+        Some(parent) => {
+            let parent_index = by_id.get(&parent).copied().ok_or_else(|| {
+                MicrosandboxError::SnapshotMigration {
+                    code: "snapshot_downgrade_unrepresentable".into(),
+                    phase: "preflight".into(),
+                    artifact: candidates[index].path.display().to_string(),
+                    detail: format!("retained parent {parent} is missing from the managed graph"),
+                }
+            })?;
+            Some(visit_released_flat_candidate(
+                parent_index,
+                candidates,
+                by_id,
+                visiting,
+                complete,
+                depth + 1,
+            )?)
+        }
+    };
+
+    if let Some(source) = candidates[index].source.as_ref() {
+        let labels = super::metadata::read_sync(&candidates[index].path, source, None)?;
+        let translated = translate_released_flat_reverse(source, mapped_parent.clone(), labels)
+            .map_err(|error| MicrosandboxError::SnapshotMigration {
+                code: "snapshot_downgrade_unrepresentable".into(),
+                phase: "preflight".into(),
+                artifact: candidates[index].path.display().to_string(),
+                detail: error.to_string(),
+            })?;
+        candidates[index].target_bytes = Some(translated.target_bytes);
+        candidates[index].target_digest = Some(translated.target_digest);
+        candidates[index].target_parent_digest = mapped_parent;
+    } else if candidates[index].target_parent_digest != mapped_parent {
+        return downgrade_error(
+            &candidates[index].path,
+            "preflight",
+            "released descriptor parent does not match the retained graph",
+        );
+    }
+
+    visiting.remove(&index);
+    complete.insert(index);
+    Ok(candidates[index]
+        .target_digest
+        .clone()
+        .expect("planned released candidate has a target digest"))
+}
+
+fn expose_released_flat_upper(candidate: &ReleasedFlatCandidate) -> MicrosandboxResult<()> {
+    expose_upper_at_root(
+        &candidate.path,
+        &candidate.source_layer,
+        "released downgrade",
+    )
+}
+
+fn expose_v066_upper(candidate: &Candidate) -> MicrosandboxResult<()> {
+    let Some(source) = candidate.source.as_ref() else {
+        // Already-legacy artifacts have no canonical descriptor to resolve.
+        // Their manifest was validated when the candidate was loaded and the
+        // existing root payload remains authoritative.
+        return Ok(());
+    };
+    let file = source
+        .state
+        .as_file()
+        .ok_or_else(|| MicrosandboxError::SnapshotMigration {
+            code: "snapshot_downgrade_unrepresentable".into(),
+            phase: "publication".into(),
+            artifact: candidate.path.display().to_string(),
+            detail: "checkpoint state is not representable by v0.6.6".into(),
+        })?;
+    let layer = file
+        .head_layer()
+        .map_err(|error| MicrosandboxError::SnapshotMigration {
+            code: "snapshot_downgrade_unrepresentable".into(),
+            phase: "publication".into(),
+            artifact: candidate.path.display().to_string(),
+            detail: error.to_string(),
+        })?;
+    let canonical = candidate.path.join(file.layer_path(layer));
+    let source_layer = if canonical.exists() {
+        canonical
+    } else {
+        // Forward-migrated legacy artifacts may intentionally retain their
+        // payload at the released root path instead of canonical layers/.
+        candidate.path.join(DEFAULT_UPPER_FILE)
+    };
+    expose_upper_at_root(&candidate.path, &source_layer, "v0.6.6 downgrade")
+}
+
+fn expose_upper_at_root(
+    artifact: &Path,
+    source_layer: &Path,
+    operation: &str,
+) -> MicrosandboxResult<()> {
+    let target = artifact.join(DEFAULT_UPPER_FILE);
+    if source_layer == target {
+        return Ok(());
+    }
+    if target.exists() {
+        let source = std::fs::symlink_metadata(source_layer)?;
+        let existing = std::fs::symlink_metadata(&target)?;
+        if !source.is_file()
+            || source.file_type().is_symlink()
+            || !existing.is_file()
+            || existing.file_type().is_symlink()
+        {
+            return downgrade_error(
+                artifact,
+                "publication",
+                format!("a non-regular upper.ext4 blocks {operation}"),
+            );
+        }
+        if source.len() == existing.len()
+            && file_sha256_sync(source_layer)? == file_sha256_sync(&target)?
+        {
+            return Ok(());
+        }
+        return downgrade_error(
+            artifact,
+            "publication",
+            format!("an incompatible upper.ext4 blocks {operation}"),
+        );
+    }
+    let temporary = artifact.join(format!(".upper.ext4.downgrade.{}", std::process::id()));
+    match std::fs::hard_link(source_layer, &temporary) {
+        Ok(()) => {}
+        Err(_) => {
+            microsandbox_utils::copy::fast_copy(source_layer, &temporary)?;
+        }
+    }
+    // FlushFileBuffers requires a write-capable handle on Windows even when
+    // the payload bytes are already complete.
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&temporary)?
+        .sync_all()?;
+    std::fs::rename(&temporary, &target)?;
+    sync_directory(artifact)
+}
+
+fn file_sha256_sync(path: &Path) -> MicrosandboxResult<[u8; 32]> {
+    let mut file = File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hasher.finalize().into())
+}
+
+fn replace_file(source: &Path, destination: &Path) -> MicrosandboxResult<()> {
+    #[cfg(windows)]
+    {
+        let source_wide = source
+            .as_os_str()
+            .encode_wide()
+            .chain(iter::once(0))
+            .collect::<Vec<_>>();
+        let destination_wide = destination
+            .as_os_str()
+            .encode_wide()
+            .chain(iter::once(0))
+            .collect::<Vec<_>>();
+        // SAFETY: Both buffers are live, NUL-terminated UTF-16 paths for the
+        // duration of this call and name files in the same artifact directory.
+        if unsafe {
+            MoveFileExW(
+                source_wide.as_ptr(),
+                destination_wide.as_ptr(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+        } == 0
+        {
+            return Err(std::io::Error::last_os_error().into());
+        }
+    }
+    #[cfg(not(windows))]
+    std::fs::rename(source, destination)?;
+    Ok(())
 }
 
 fn write_create_new_or_validate(path: &Path, bytes: &[u8]) -> MicrosandboxResult<()> {
@@ -1087,7 +1602,69 @@ mod tests {
 
     use super::*;
 
-    const LEGACY: &[u8] = br#"{"schema":1,"format":"raw","fstype":"ext4","image":{"ref":"docker.io/library/alpine:3.20","manifest_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"parent":null,"created_at":"2026-07-01T10:00:00Z","labels":{},"upper":{"file":"upper.ext4","size_bytes":5,"integrity":null},"source_sandbox":"box"}"#;
+    const LEGACY: &[u8] = br#"{"schema":1,"format":"raw","fstype":"ext4","image":{"ref":"docker.io/library/alpine:3.20","manifest_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"parent":null,"created_at":"2026-07-01T10:00:00Z","labels":{"stage":"legacy"},"upper":{"file":"upper.ext4","size_bytes":5,"integrity":null},"source_sandbox":"box"}"#;
+
+    #[tokio::test]
+    async fn final_single_raw_layer_downgrades_to_released_flat_descriptor() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("msb.db");
+        let snapshots = temp.path().join("snapshots");
+        let artifact = snapshots.join("snapshot");
+        let recovery = temp.path().join("recovery");
+        std::fs::create_dir_all(&artifact).unwrap();
+        std::fs::write(artifact.join(DEFAULT_UPPER_FILE), b"hello").unwrap();
+        std::fs::write(artifact.join(V066_DESCRIPTOR_FILENAME), LEGACY).unwrap();
+
+        let pools = DbPools::open(&db_path, 2, Duration::from_secs(5), Duration::from_secs(5))
+            .await
+            .unwrap();
+        Migrator::up(pools.write().inner(), None).await.unwrap();
+        crate::snapshot::migration::reconcile_managed(&pools, &snapshots)
+            .await
+            .unwrap();
+
+        let plan = preflight_managed_released_flat(pools.write().inner(), &snapshots)
+            .await
+            .unwrap();
+        let report = execute_managed_released_flat(pools.write().inner(), &recovery, plan)
+            .await
+            .unwrap();
+
+        assert_eq!(report.artifacts, 1);
+        let released_bytes = std::fs::read(artifact.join(DESCRIPTOR_FILENAME)).unwrap();
+        let released = translate_released_flat_forward(&released_bytes).unwrap();
+        assert_eq!(released.upper_file, DEFAULT_UPPER_FILE);
+        assert_eq!(
+            released.labels.get("stage").map(String::as_str),
+            Some("legacy")
+        );
+        assert_eq!(
+            std::fs::read(artifact.join(DEFAULT_UPPER_FILE)).unwrap(),
+            b"hello"
+        );
+        let row = pools
+            .write()
+            .inner()
+            .query_one_raw(Statement::from_string(
+                DatabaseBackend::Sqlite,
+                "SELECT digest, snapshot_id, descriptor_digest FROM snapshot_index",
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            row.try_get_by_index::<String>(0).unwrap(),
+            released.source_digest
+        );
+        assert_eq!(
+            row.try_get_by_index::<String>(1).unwrap(),
+            released.source_digest
+        );
+        assert_eq!(
+            row.try_get_by_index::<String>(2).unwrap(),
+            released.source_digest
+        );
+    }
 
     #[tokio::test]
     async fn completed_forward_artifact_restores_exact_v066_bytes_and_index() {
@@ -1309,7 +1886,7 @@ mod tests {
         let SnapshotState::File(file) = &mut manifest.state else {
             panic!("fixture must contain file state");
         };
-        file.upper.integrity = Some(
+        file.layers[0].payload.integrity = Some(
             super::super::verify::compute_merkle_integrity(&artifact.join("upper.ext4"))
                 .await
                 .unwrap(),
@@ -1357,7 +1934,7 @@ mod tests {
         let SnapshotState::File(file) = &mut manifest.state else {
             unreachable!()
         };
-        file.upper.integrity = Some(UpperIntegrity::FileMerkleBlake3V1 {
+        file.layers[0].payload.integrity = Some(UpperIntegrity::FileMerkleBlake3V1 {
             root: format!("blake3:{}", "b".repeat(64)),
             logical_size: 5,
             leaf_size: microsandbox_image::snapshot::FILE_MERKLE_BLAKE3_LEAF_SIZE,
@@ -1366,5 +1943,65 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.to_string().contains("recorded BLAKE3 integrity"));
+    }
+
+    #[tokio::test]
+    async fn native_layer_only_artifact_publishes_v066_root_upper_idempotently() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("msb.db");
+        let snapshots = temp.path().join("snapshots");
+        let artifact = snapshots.join("native");
+        let recovery = temp.path().join("recovery");
+        std::fs::create_dir_all(&artifact).unwrap();
+        std::fs::write(artifact.join(DEFAULT_UPPER_FILE), b"hello").unwrap();
+        std::fs::write(artifact.join(V066_DESCRIPTOR_FILENAME), LEGACY).unwrap();
+
+        let pools = DbPools::open(&db_path, 2, Duration::from_secs(5), Duration::from_secs(5))
+            .await
+            .unwrap();
+        Migrator::up(pools.write().inner(), None).await.unwrap();
+        crate::snapshot::migration::reconcile_managed(&pools, &snapshots)
+            .await
+            .unwrap();
+
+        // Model a freshly-created schema-1 artifact: the descriptor and its
+        // payload are canonical, with no legacy backup or root upper.ext4.
+        std::fs::remove_file(artifact.join(V066_BACKUP_FILENAME)).unwrap();
+        pools
+            .write()
+            .inner()
+            .execute_raw(Statement::from_string(
+                DatabaseBackend::Sqlite,
+                "DELETE FROM snapshot_artifact_migration",
+            ))
+            .await
+            .unwrap();
+        let manifest =
+            Manifest::from_bytes(&std::fs::read(artifact.join(DESCRIPTOR_FILENAME)).unwrap())
+                .unwrap();
+        let file = manifest.state.as_file().unwrap();
+        let layer = file.head_layer().unwrap();
+        let canonical_layer = artifact.join(file.layer_path(layer));
+        std::fs::create_dir_all(canonical_layer.parent().unwrap()).unwrap();
+        std::fs::rename(artifact.join(DEFAULT_UPPER_FILE), &canonical_layer).unwrap();
+
+        let plan = preflight_managed_v066(pools.write().inner(), &snapshots)
+            .await
+            .unwrap();
+        // Publication can be retried after a crash between exposing the root
+        // payload and making manifest.json visible.
+        expose_v066_upper(&plan.candidates[0]).unwrap();
+        expose_v066_upper(&plan.candidates[0]).unwrap();
+        execute_managed_v066(pools.write().inner(), &recovery, plan)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read(artifact.join(DEFAULT_UPPER_FILE)).unwrap(),
+            b"hello"
+        );
+        assert_eq!(std::fs::read(&canonical_layer).unwrap(), b"hello");
+        assert!(artifact.join(V066_DESCRIPTOR_FILENAME).exists());
+        assert!(!artifact.join(DESCRIPTOR_FILENAME).exists());
     }
 }

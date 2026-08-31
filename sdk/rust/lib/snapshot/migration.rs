@@ -1,6 +1,6 @@
 //! Automatic adjacent-release snapshot artifact migration.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::File;
 #[cfg(not(unix))]
 use std::fs::OpenOptions;
@@ -85,7 +85,8 @@ struct PlannedCandidate {
     target: Manifest,
     target_bytes: Vec<u8>,
     target_digest: String,
-    target_parent_digest: Option<String>,
+    target_parent_id: Option<String>,
+    labels: BTreeMap<String, String>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -164,7 +165,7 @@ pub(crate) async fn normalize_staged(
                 })??,
         );
     }
-    let canonical = indexed_canonical_digests(pools.write().inner()).await?;
+    let canonical = indexed_canonical_parents(pools.write().inner()).await?;
     let (planned, failures) = plan_graph(inspected, &canonical);
     if let Some((_, error)) = failures.into_iter().next() {
         return Err(error);
@@ -238,8 +239,8 @@ async fn reconcile_paths(
         }
     }
 
-    let canonical_digests = indexed_canonical_digests(db).await?;
-    let (planned, graph_failures) = plan_graph(inspected, &canonical_digests);
+    let canonical_parents = indexed_canonical_parents(db).await?;
+    let (planned, graph_failures) = plan_graph(inspected, &canonical_parents);
     for (path, error) in graph_failures {
         report.blocked += 1;
         record_blocked_path(db, &path, &error).await?;
@@ -418,7 +419,7 @@ fn inspect_candidate(mut candidate: PinnedCandidate) -> MicrosandboxResult<Inspe
 
 fn plan_graph(
     candidates: Vec<InspectedCandidate>,
-    canonical_digests: &HashSet<String>,
+    canonical_parents: &HashMap<String, String>,
 ) -> (Vec<PlannedCandidate>, Vec<(PathBuf, MicrosandboxError)>) {
     let mut by_source = HashMap::new();
     let mut failures = Vec::new();
@@ -455,7 +456,7 @@ fn plan_graph(
             index,
             &candidates,
             &by_source,
-            canonical_digests,
+            canonical_parents,
             &mut visiting,
             &mut translated,
             &mut order,
@@ -477,14 +478,14 @@ fn visit_candidate(
     index: usize,
     candidates: &[InspectedCandidate],
     by_source: &HashMap<String, usize>,
-    canonical_digests: &HashSet<String>,
+    canonical_parents: &HashMap<String, String>,
     visiting: &mut HashSet<usize>,
     translated: &mut HashMap<usize, PlannedCandidate>,
     order: &mut Vec<usize>,
     depth: usize,
 ) -> MicrosandboxResult<String> {
     if let Some(candidate) = translated.get(&index) {
-        return Ok(candidate.target_digest.clone());
+        return Ok(candidate.target.snapshot_id.to_string());
     }
     if depth > MAX_PARENT_DEPTH {
         return migration_error(
@@ -503,7 +504,7 @@ fn visit_candidate(
         );
     }
 
-    let target_parent_digest = match candidates[index].pinned.source.parent_digest.as_ref() {
+    let target_parent_id = match candidates[index].pinned.source.parent_digest.as_ref() {
         None => None,
         Some(parent) => {
             if let Some(parent_index) = by_source.get(parent) {
@@ -511,7 +512,7 @@ fn visit_candidate(
                     *parent_index,
                     candidates,
                     by_source,
-                    canonical_digests,
+                    canonical_parents,
                     visiting,
                     translated,
                     order,
@@ -524,8 +525,8 @@ fn visit_candidate(
                         return Err(error);
                     }
                 }
-            } else if canonical_digests.contains(parent) {
-                Some(parent.clone())
+            } else if let Some(parent_id) = canonical_parents.get(parent) {
+                Some(parent_id.clone())
             } else {
                 visiting.remove(&index);
                 return migration_error(
@@ -541,7 +542,7 @@ fn visit_candidate(
     let translation = translate_v066_forward(
         &candidates[index].pinned.source_bytes,
         &candidates[index].payload,
-        target_parent_digest.clone(),
+        target_parent_id.clone(),
     )
     .map_err(|error| MicrosandboxError::SnapshotMigration {
         code: classify_legacy_error(&error.to_string()).into(),
@@ -572,6 +573,7 @@ fn visit_candidate(
         }
     };
     let target_digest = translation.target_digest.clone();
+    let target_snapshot_id = translation.target.snapshot_id.to_string();
     translated.insert(
         index,
         PlannedCandidate {
@@ -582,12 +584,13 @@ fn visit_candidate(
             target: translation.target,
             target_bytes,
             target_digest: target_digest.clone(),
-            target_parent_digest,
+            target_parent_id,
+            labels: translation.labels,
         },
     );
     visiting.remove(&index);
     order.push(index);
-    Ok(target_digest)
+    Ok(target_snapshot_id)
 }
 
 fn clone_pinned_for_plan(candidate: &InspectedCandidate) -> MicrosandboxResult<PinnedCandidate> {
@@ -605,6 +608,9 @@ fn clone_pinned_for_plan(candidate: &InspectedCandidate) -> MicrosandboxResult<P
 }
 
 fn publish_descriptor(candidate: &PlannedCandidate) -> MicrosandboxResult<()> {
+    // Publish mutable labels before the descriptor. A visible final
+    // descriptor therefore never points at a partially migrated artifact.
+    super::metadata::write_sync(&candidate.inspected.pinned.path, &candidate.labels)?;
     #[cfg(unix)]
     {
         if let Ok(mut existing) = openat_file(
@@ -740,22 +746,32 @@ async fn indexed_artifact_paths(db: &DatabaseConnection) -> MicrosandboxResult<B
     Ok(paths)
 }
 
-async fn indexed_canonical_digests(db: &DatabaseConnection) -> MicrosandboxResult<HashSet<String>> {
+async fn indexed_canonical_parents(
+    db: &DatabaseConnection,
+) -> MicrosandboxResult<HashMap<String, String>> {
     let rows = db
         .query_all_raw(Statement::from_string(
             DatabaseBackend::Sqlite,
-            "SELECT digest, artifact_path FROM snapshot_index",
+            "SELECT digest, snapshot_id, descriptor_digest, artifact_path FROM snapshot_index",
         ))
         .await?;
-    let mut digests = HashSet::new();
+    let mut identities = HashMap::new();
     for row in rows {
         let digest = row.try_get_by_index::<String>(0)?;
-        let path = PathBuf::from(row.try_get_by_index::<String>(1)?);
+        let snapshot_id = row
+            .try_get_by_index::<Option<String>>(1)?
+            .unwrap_or_else(|| digest.clone());
+        let descriptor_digest = row.try_get_by_index::<Option<String>>(2)?;
+        let path = PathBuf::from(row.try_get_by_index::<String>(3)?);
         if path.join(DESCRIPTOR_FILENAME).exists() {
-            digests.insert(digest);
+            identities.insert(digest, snapshot_id.clone());
+            identities.insert(snapshot_id.clone(), snapshot_id.clone());
+            if let Some(descriptor_digest) = descriptor_digest {
+                identities.insert(descriptor_digest, snapshot_id.clone());
+            }
         }
     }
-    Ok(digests)
+    Ok(identities)
 }
 
 async fn preflight_target_collisions(
@@ -843,7 +859,7 @@ async fn publish_index_component(
     }
     transaction
         .execute_unprepared(
-            "UPDATE snapshot_index SET child_count = (SELECT COUNT(*) FROM snapshot_index child WHERE child.parent_digest = snapshot_index.digest)",
+            "UPDATE snapshot_index SET child_count = (SELECT COUNT(*) FROM snapshot_index child WHERE child.parent_digest = snapshot_index.snapshot_id)",
         )
         .await?;
     transaction.commit().await?;
@@ -910,7 +926,7 @@ async fn insert_canonical_index_row<C>(
 where
     C: ConnectionTrait,
 {
-    let created_at = chrono::DateTime::parse_from_rfc3339(&candidate.target.created_at)
+    let created_at = chrono::DateTime::parse_from_rfc3339(&candidate.target.capture.created_at)
         .map_err(|error| MicrosandboxError::SnapshotMigration {
             code: "legacy_descriptor_malformed".into(),
             phase: "index_published".into(),
@@ -921,7 +937,7 @@ where
     let SnapshotState::File(file) = &candidate.target.state else {
         unreachable!("v0.6.6 translation always produces file state")
     };
-    let format = match file.format {
+    let format = match file.disk_format {
         microsandbox_image::snapshot::SnapshotFormat::Raw => "raw",
         microsandbox_image::snapshot::SnapshotFormat::Qcow2 => "qcow2",
     };
@@ -934,17 +950,19 @@ where
         .map(str::to_string);
     db.execute_raw(Statement::from_sql_and_values(
         DatabaseBackend::Sqlite,
-        "INSERT INTO snapshot_index (digest, name, parent_digest, scope, state_kind, image_ref, image_manifest_digest, format, fstype, checkpoint_manifest_digest, artifact_path, size_bytes, locality, storage_binding_id, availability, migration_state, migration_error_code, created_at, indexed_at, child_count) VALUES (?, ?, ?, 'disk', 'file', ?, ?, ?, ?, NULL, ?, ?, 'embedded', NULL, 'ready', 'complete', NULL, ?, ?, 0)",
+        "INSERT INTO snapshot_index (digest, snapshot_id, descriptor_digest, name, parent_digest, scope, state_kind, image_ref, image_manifest_digest, format, fstype, checkpoint_manifest_digest, artifact_path, size_bytes, locality, storage_binding_id, availability, migration_state, migration_error_code, created_at, indexed_at, child_count) VALUES (?, ?, ?, ?, ?, 'disk', 'file', ?, ?, ?, ?, NULL, ?, ?, 'embedded', NULL, 'ready', 'complete', NULL, ?, ?, 0)",
         [
             candidate.target_digest.clone().into(),
+            candidate.target.snapshot_id.to_string().into(),
+            candidate.target_digest.clone().into(),
             name.into(),
-            candidate.target_parent_digest.clone().into(),
+            candidate.target_parent_id.clone().into(),
             candidate.target.image.reference.clone().into(),
             candidate.target.image.manifest_digest.clone().into(),
             format.into(),
-            file.fstype.clone().into(),
+            file.filesystem.clone().into(),
             candidate.inspected.pinned.path.display().to_string().into(),
-            i64::try_from(file.upper.size_bytes)
+            i64::try_from(file.virtual_size)
                 .map_err(|_| MicrosandboxError::SnapshotIntegrity("snapshot size does not fit SQLite".into()))?
                 .into(),
             created_at.into(),
@@ -986,14 +1004,15 @@ async fn journal_planned(
         .target
         .state
         .as_file()
-        .and_then(|file| file.upper.integrity.as_ref())
+        .and_then(|file| file.layers.last())
+        .and_then(|layer| layer.payload.integrity.as_ref())
         .map(|integrity| integrity.value().to_string());
     db.execute_raw(Statement::from_sql_and_values(
         DatabaseBackend::Sqlite,
         "UPDATE snapshot_artifact_migration SET target_digest = ?, target_parent_digest = ?, payload_integrity = ?, payload_size = ?, payload_file_identity = ?, phase = 'planned', updated_at = ?, error_code = NULL, error_detail = NULL WHERE kind = ? AND artifact_path = ?",
         [
             candidate.target_digest.clone().into(),
-            candidate.target_parent_digest.clone().into(),
+            candidate.target_parent_id.clone().into(),
             payload_integrity.into(),
             i64::try_from(candidate.inspected.payload.size_bytes)
                 .map_err(|_| MicrosandboxError::SnapshotIntegrity("snapshot size does not fit SQLite".into()))?

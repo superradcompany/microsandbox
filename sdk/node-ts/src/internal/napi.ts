@@ -562,9 +562,17 @@ export interface NapiSnapshotBuilderSetters {
 
 export interface NapiSnapshotBuilder extends NapiSnapshotBuilderSetters {
   create(): Promise<NapiSnapshot>;
+  createArchive(out: string, plainTar?: boolean): Promise<NapiSnapshotArchive>;
+}
+
+export interface NapiSnapshotArchive {
+  readonly id: string;
+  readonly descriptorDigest: string;
+  readonly path: string;
 }
 
 export interface NapiSnapshot {
+  readonly id: string;
   readonly path: string;
   readonly digest: string;
   readonly sizeBytes: bigint | null | undefined;
@@ -589,6 +597,7 @@ export interface NapiSnapshot {
 }
 
 export interface NapiSnapshotHandle {
+  readonly id: string;
   readonly digest: string;
   readonly name: string | null | undefined;
   readonly parentDigest: string | null | undefined;
@@ -610,6 +619,7 @@ export interface NapiSnapshotHandle {
 }
 
 export interface NapiSnapshotInfo {
+  readonly id: string;
   readonly digest: string;
   readonly name: string | null | undefined;
   readonly parentDigest: string | null | undefined;

@@ -49,6 +49,9 @@ pub const SHARED_CPU_ALLOCATION_MIGRATION_ID: &str = "m20260813_000001_share_cpu
 /// Migration that prevents old binaries from discarding persisted mount ownership.
 pub const MOUNT_OWNER_CONFIG_MIGRATION_ID: &str = "m20260824_000001_mount_owner_config";
 
+/// Migration that separates stable snapshot identity from descriptor integrity.
+pub const SNAPSHOT_IDENTITY_MIGRATION_ID: &str = "m20260829_000001_split_snapshot_identity";
+
 /// Frozen migration baseline for the transitional 0.6.0 release.
 ///
 /// The released 0.6.0 binary predates `msb __schema-baseline --json`, so
@@ -241,6 +244,13 @@ pub const MIGRATION_METADATA: &[MigrationMetadata] = &[
         affects_user_data: false,
         summary: "remove the compatibility marker after confirming no persisted mount ownership",
     },
+    MigrationMetadata {
+        id: SNAPSHOT_IDENTITY_MIGRATION_ID,
+        reversible: true,
+        affects_cache: true,
+        affects_user_data: true,
+        summary: "reverse final snapshot descriptors before dropping identity projections",
+    },
 ];
 
 //--------------------------------------------------------------------------------------------------
@@ -327,6 +337,7 @@ mod tests {
     #[test]
     fn canonical_applied_prefix_uses_metadata_order() {
         let applied = [
+            SNAPSHOT_IDENTITY_MIGRATION_ID,
             MOUNT_OWNER_CONFIG_MIGRATION_ID,
             SHARED_CPU_ALLOCATION_MIGRATION_ID,
             SANDBOX_LABEL_REBUILD_MIGRATION_ID,

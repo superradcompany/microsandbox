@@ -6,9 +6,9 @@ use pyo3::types::PyDict;
 
 use microsandbox::snapshot::SaveOpts as RustSaveOpts;
 use microsandbox::{
-    Snapshot as RustSnapshot, SnapshotFormat as RustSnapshotFormat,
-    SnapshotHandle as RustSnapshotHandle, SnapshotScope as RustSnapshotScope,
-    UpperVerifyStatus as RustUpperVerifyStatus,
+    Snapshot as RustSnapshot, SnapshotArchive as RustSnapshotArchive,
+    SnapshotFormat as RustSnapshotFormat, SnapshotHandle as RustSnapshotHandle,
+    SnapshotScope as RustSnapshotScope, UpperVerifyStatus as RustUpperVerifyStatus,
 };
 
 use crate::error::to_py_err;
@@ -22,6 +22,12 @@ use crate::helpers::str_enum_member;
 #[pyclass(name = "Snapshot")]
 pub struct PySnapshot {
     inner: RustSnapshot,
+}
+
+/// Result of direct sandbox-to-archive capture.
+#[pyclass(name = "SnapshotArchive")]
+pub struct PySnapshotArchive {
+    inner: RustSnapshotArchive,
 }
 
 /// Lightweight snapshot handle from the local index.
@@ -84,6 +90,55 @@ impl PySnapshot {
             }
             let snap = builder.create().await.map_err(to_py_err)?;
             Ok(PySnapshot::from_rust(snap))
+        })
+    }
+
+    /// Capture a sandbox directly into an archive without installing a snapshot artifact.
+    #[allow(clippy::too_many_arguments)]
+    #[staticmethod]
+    #[pyo3(signature = (
+        name,
+        archive,
+        *,
+        from_sandbox,
+        labels = None,
+        force = false,
+        record_integrity = false,
+        resumable = false,
+        plain_tar = false,
+    ))]
+    fn create_archive<'py>(
+        py: Python<'py>,
+        name: String,
+        archive: PathBuf,
+        from_sandbox: String,
+        labels: Option<HashMap<String, String>>,
+        force: bool,
+        record_integrity: bool,
+        resumable: bool,
+        plain_tar: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let mut builder = RustSnapshot::builder(name).from_sandbox(from_sandbox);
+            if let Some(labels) = labels {
+                for (key, value) in labels {
+                    builder = builder.label(key, value);
+                }
+            }
+            if force {
+                builder = builder.force();
+            }
+            if record_integrity {
+                builder = builder.record_integrity();
+            }
+            if resumable {
+                builder = builder.resumable();
+            }
+            let archive = builder
+                .create_archive(archive, plain_tar)
+                .await
+                .map_err(to_py_err)?;
+            Ok(PySnapshotArchive { inner: archive })
         })
     }
 
@@ -235,6 +290,12 @@ impl PySnapshot {
 
     /// Canonical content digest (`sha256:hex`). The snapshot's identity.
     #[getter]
+    fn id(&self) -> &str {
+        self.inner.id().as_str()
+    }
+
+    /// SHA-256 digest of the canonical descriptor.
+    #[getter]
     fn digest(&self) -> &str {
         self.inner.digest()
     }
@@ -270,7 +331,7 @@ impl PySnapshot {
             .manifest()
             .state
             .as_file()
-            .map(|state| format_str(state.format))
+            .map(|state| format_str(state.disk_format))
             .map(|format| str_enum_member(py, "SnapshotFormat", format))
             .transpose()
     }
@@ -282,7 +343,7 @@ impl PySnapshot {
             .manifest()
             .state
             .as_file()
-            .map(|state| state.fstype.as_str())
+            .map(|state| state.filesystem.as_str())
     }
 
     /// Checkpoint id for checkpoint state.
@@ -302,13 +363,17 @@ impl PySnapshot {
             .manifest()
             .state
             .as_checkpoint()
-            .map(|state| state.manifest.as_str())
+            .map(|state| state.checkpoint_root.as_str())
     }
 
     /// Manifest digest of the parent snapshot, or `None` for a root.
     #[getter]
     fn parent(&self) -> Option<&str> {
-        self.inner.manifest().parent.as_deref()
+        self.inner
+            .manifest()
+            .parent
+            .as_ref()
+            .map(|parent| parent.as_str())
     }
 
     /// Snapshot payload scope as a `SnapshotScope` member (`DISK` today).
@@ -324,24 +389,23 @@ impl PySnapshot {
     /// RFC 3339 timestamp when the snapshot was created.
     #[getter]
     fn created_at(&self) -> &str {
-        &self.inner.manifest().created_at
+        &self.inner.manifest().capture.created_at
     }
 
     /// User-supplied labels.
     #[getter]
     fn labels(&self) -> HashMap<String, String> {
         self.inner
-            .manifest()
-            .labels
+            .labels()
             .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
+            .map(|(key, value)| (key.clone(), value.clone()))
             .collect()
     }
 
     /// Best-effort source-sandbox name, if recorded.
     #[getter]
     fn source_sandbox(&self) -> Option<&str> {
-        self.inner.manifest().source_sandbox.as_deref()
+        self.inner.manifest().capture.source_lineage.as_deref()
     }
 
     /// Verify recorded content integrity.
@@ -374,6 +438,28 @@ impl PySnapshot {
     }
 }
 
+//--------------------------------------------------------------------------------------------------
+// Methods: SnapshotArchive
+//--------------------------------------------------------------------------------------------------
+
+#[pymethods]
+impl PySnapshotArchive {
+    #[getter]
+    fn id(&self) -> &str {
+        self.inner.id().as_str()
+    }
+
+    #[getter]
+    fn descriptor_digest(&self) -> &str {
+        self.inner.descriptor_digest()
+    }
+
+    #[getter]
+    fn path(&self) -> String {
+        self.inner.path().display().to_string()
+    }
+}
+
 impl PySnapshot {
     pub fn from_rust(inner: RustSnapshot) -> Self {
         Self { inner }
@@ -386,6 +472,11 @@ impl PySnapshot {
 
 #[pymethods]
 impl PySnapshotHandle {
+    #[getter]
+    fn id(&self) -> &str {
+        self.inner.id()
+    }
+
     #[getter]
     fn digest(&self) -> &str {
         self.inner.digest()

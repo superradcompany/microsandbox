@@ -717,6 +717,14 @@ char *msb_snapshot_create(uint64_t cancel_id,
                           unsigned char *buf,
                           uintptr_t buf_len);
 
+char *msb_snapshot_create_archive(uint64_t cancel_id,
+                                  const char *source_sandbox,
+                                  const char *archive_path,
+                                  const char *opts_json,
+                                  bool plain_tar,
+                                  unsigned char *buf,
+                                  uintptr_t buf_len);
+
 char *msb_snapshot_open(uint64_t cancel_id,
                         const char *path_or_name,
                         unsigned char *buf,

@@ -1485,6 +1485,7 @@ export declare class Snapshot {
    */
   static save(nameOrPath: string, out: string, opts?: SaveOpts | undefined | null): Promise<void>
   static load(archive: string, dest?: string | undefined | null): Promise<SnapshotHandle>
+  get id(): string
   get path(): string
   get digest(): string
   get sizeBytes(): bigint | null
@@ -1508,6 +1509,13 @@ export declare class Snapshot {
   verify(): Promise<SnapshotVerifyReport>
 }
 export type JsSnapshot = Snapshot
+
+/** Result of direct sandbox-to-archive capture. */
+export declare class SnapshotArchive {
+  get id(): string
+  get descriptorDigest(): string
+  get path(): string
+}
 
 /**
  * Fluent builder for a snapshot. Returned by `Snapshot.builder(name)`.
@@ -1542,11 +1550,14 @@ export declare class SnapshotBuilder {
    * `create(): Promise<Snapshot>`.
    */
   create(): Promise<Snapshot>
+  /** Capture directly to an archive without installing a snapshot artifact. */
+  createArchive(out: string, plainTar?: boolean | undefined | null): Promise<SnapshotArchive>
 }
 export type JsSnapshotBuilder = SnapshotBuilder
 
 /** Lightweight snapshot handle from the local index. */
 export declare class SnapshotHandle {
+  get id(): string
   get digest(): string
   get name(): string | null
   get parentDigest(): string | null
@@ -2313,6 +2324,7 @@ export interface SnapshotConfig {
 
 /** Snapshot index info from the local DB cache. */
 export interface SnapshotInfo {
+  id: string
   digest: string
   name?: string
   parentDigest?: string

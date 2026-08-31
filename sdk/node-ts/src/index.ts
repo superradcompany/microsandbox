@@ -98,7 +98,7 @@ export {
 } from "./volume-fs.js";
 
 // Snapshots
-export { Snapshot } from "./snapshot.js";
+export { Snapshot, SnapshotArchive } from "./snapshot.js";
 import { Snapshot as _Snapshot, type SnapshotBuilder as _SnapBT } from "./snapshot.js";
 /**
  * Native fluent builder for a snapshot. `new SnapshotBuilder(name)`

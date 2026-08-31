@@ -56,6 +56,26 @@ snap, err := m.Snapshot.Create(ctx, m.SnapshotCreateOptions{
 
 ---
 
+#### <span className="msb-recv">Snapshot.</span><span className="msb-hn">CreateArchive()</span>
+
+```go
+func (snapshotFactory) CreateArchive(ctx context.Context, opts SnapshotArchiveOptions) (*SnapshotArchive, error)
+```
+
+Capture directly into an archive without installing a snapshot directory or index row.
+
+```go
+archive, err := m.Snapshot.CreateArchive(ctx, m.SnapshotArchiveOptions{
+    SnapshotCreateOptions: m.SnapshotCreateOptions{
+        Name:        "after-pip-install",
+        FromSandbox: "baseline",
+    },
+    ArchivePath: "/tmp/after-pip-install.tar.zst",
+})
+```
+
+---
+
 #### <span className="msb-recv">Snapshot.</span><span className="msb-hn">Open()</span>
 
 ```go
@@ -410,6 +430,14 @@ snap, err := h.Snapshot(ctx, "after-pip-install")
 <p className="msb-backref">Returned by <a href="#snapshot-create">Snapshot.Create()</a> · <a href="#snapshot-open">Snapshot.Open()</a> · <a href="#snapshot-listdir">Snapshot.ListDir()</a> · <a href="#h-snapshot">h.Snapshot()</a> · <a href="#h-open">h.Open()</a></p>
 
 A snapshot artifact on disk.
+
+#### <span className="msb-recv">s.</span><span className="msb-hn">ID()</span>
+
+```go
+func (s *SnapshotArtifact) ID() string
+```
+
+Stable opaque `snap_...` identity.
 
 #### <span className="msb-recv">s.</span><span className="msb-hn">Verify()</span>
 
