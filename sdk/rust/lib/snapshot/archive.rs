@@ -516,7 +516,7 @@ where
 
     let file = manifest.state.as_file().expect("validated file descriptor");
     let layer = file.layers.first().expect("validated nonempty closure");
-    let layer_path = file.layer_path(layer).to_string_lossy().to_string();
+    let layer_path = portable_archive_path(&file.layer_path(layer))?;
     let layer_transport =
         append_artifact_file(builder, source_layer, &layer_path, "file-payload").await?;
     let layer_encoded_size = archive_encoded_size(source_layer).await?;
@@ -942,7 +942,7 @@ where
         }
         if let SnapshotState::File(file) = &snapshot.manifest().state {
             for layer in &file.layers {
-                let payload_name = file.layer_path(layer).to_string_lossy().to_string();
+                let payload_name = portable_archive_path(&file.layer_path(layer))?;
                 let written = append_artifact_file(
                     builder,
                     &snapshot.layer_path(layer),
@@ -1048,7 +1048,7 @@ async fn build_archive_inventory(
         if let SnapshotState::File(file) = &snapshot.manifest().state {
             for layer in &file.layers {
                 let path = snapshot.layer_path(layer);
-                let archive_path = file.layer_path(layer).to_string_lossy().to_string();
+                let archive_path = portable_archive_path(&file.layer_path(layer))?;
                 let encoded_size = archive_encoded_size(&path).await?;
                 require_json_safe_size(encoded_size, &archive_path)?;
                 require_json_safe_size(layer.virtual_size, &archive_path)?;
@@ -1542,7 +1542,10 @@ where
             }
         };
 
-        let archive_path = path_in_archive.to_string_lossy().into_owned();
+        // Tar member names are portable paths. Re-encode their parsed components
+        // instead of displaying a native Path, which would put `\\` into the
+        // inventory key on Windows.
+        let archive_path = portable_archive_path(&path_in_archive)?;
         if observed_files.contains_key(&archive_path) {
             return Err(MicrosandboxError::Custom(format!(
                 "archive contains duplicate entry: {archive_path}"
@@ -2545,10 +2548,13 @@ fn validate_inventory_snapshot_bindings(
                         "checkpoint snapshot has a file payload entry: {owner}"
                     )));
                 };
-                let matching_layer = file
-                    .layers
-                    .iter()
-                    .find(|layer| file.layer_path(layer).to_string_lossy() == entry.path);
+                let mut matching_layer = None;
+                for layer in &file.layers {
+                    if portable_archive_path(&file.layer_path(layer))? == entry.path {
+                        matching_layer = Some(layer);
+                        break;
+                    }
+                }
                 if matching_layer.is_none()
                     || matching_layer.and_then(|layer| layer.payload.integrity.as_ref())
                         != entry.integrity.as_ref()
@@ -2610,6 +2616,22 @@ fn normal_utf8_components(path: &Path) -> MicrosandboxResult<Vec<&str>> {
         }
     }
     Ok(components)
+}
+
+/// Encode a logical archive path independently of the host path separator.
+fn portable_archive_path(path: &Path) -> MicrosandboxResult<String> {
+    let components = normal_utf8_components(path)?;
+    if components.is_empty()
+        || components
+            .iter()
+            .any(|component| component.is_empty() || component.contains(['/', '\\']))
+    {
+        return Err(MicrosandboxError::Custom(format!(
+            "archive path is not portable: {}",
+            path.display()
+        )));
+    }
+    Ok(components.join("/"))
 }
 
 fn is_supported_cache_dir(kind: &str) -> bool {
@@ -3132,6 +3154,16 @@ mod tests {
         let entry: ReleasedArchiveEntry = serde_json::from_slice(released).unwrap();
         assert_eq!(entry.transport_integrity, None);
         assert_eq!(serde_json::to_vec(&entry).unwrap(), released);
+    }
+
+    #[test]
+    fn archive_paths_always_use_portable_separators() {
+        let path = PathBuf::from("layers").join("layer_00000000000000000000000000000001.raw");
+
+        assert_eq!(
+            portable_archive_path(&path).unwrap(),
+            "layers/layer_00000000000000000000000000000001.raw"
+        );
     }
 
     #[tokio::test]

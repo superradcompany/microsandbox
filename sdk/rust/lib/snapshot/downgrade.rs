@@ -962,6 +962,11 @@ async fn publish_legacy_descriptors(
     candidates: &[Candidate],
 ) -> MicrosandboxResult<()> {
     for candidate in candidates {
+        // v0.6.6 resolves the payload exclusively through root upper.ext4.
+        // Publish that binding before manifest.json so a crash can leave at
+        // most an extra compatibility hardlink, never a visible descriptor
+        // whose payload is missing.
+        expose_v066_upper(candidate)?;
         let target = candidate
             .target_bytes
             .as_deref()
@@ -1403,37 +1408,98 @@ fn visit_released_flat_candidate(
 }
 
 fn expose_released_flat_upper(candidate: &ReleasedFlatCandidate) -> MicrosandboxResult<()> {
-    let target = candidate.path.join(DEFAULT_UPPER_FILE);
-    if candidate.source_layer == target {
+    expose_upper_at_root(
+        &candidate.path,
+        &candidate.source_layer,
+        "released downgrade",
+    )
+}
+
+fn expose_v066_upper(candidate: &Candidate) -> MicrosandboxResult<()> {
+    let Some(source) = candidate.source.as_ref() else {
+        // Already-legacy artifacts have no canonical descriptor to resolve.
+        // Their manifest was validated when the candidate was loaded and the
+        // existing root payload remains authoritative.
+        return Ok(());
+    };
+    let file = source
+        .state
+        .as_file()
+        .ok_or_else(|| MicrosandboxError::SnapshotMigration {
+            code: "snapshot_downgrade_unrepresentable".into(),
+            phase: "publication".into(),
+            artifact: candidate.path.display().to_string(),
+            detail: "checkpoint state is not representable by v0.6.6".into(),
+        })?;
+    let layer = file
+        .head_layer()
+        .map_err(|error| MicrosandboxError::SnapshotMigration {
+            code: "snapshot_downgrade_unrepresentable".into(),
+            phase: "publication".into(),
+            artifact: candidate.path.display().to_string(),
+            detail: error.to_string(),
+        })?;
+    let canonical = candidate.path.join(file.layer_path(layer));
+    let source_layer = if canonical.exists() {
+        canonical
+    } else {
+        // Forward-migrated legacy artifacts may intentionally retain their
+        // payload at the released root path instead of canonical layers/.
+        candidate.path.join(DEFAULT_UPPER_FILE)
+    };
+    expose_upper_at_root(&candidate.path, &source_layer, "v0.6.6 downgrade")
+}
+
+fn expose_upper_at_root(
+    artifact: &Path,
+    source_layer: &Path,
+    operation: &str,
+) -> MicrosandboxResult<()> {
+    let target = artifact.join(DEFAULT_UPPER_FILE);
+    if source_layer == target {
         return Ok(());
     }
     if target.exists() {
-        let source = std::fs::metadata(&candidate.source_layer)?;
-        let existing = std::fs::metadata(&target)?;
+        let source = std::fs::symlink_metadata(source_layer)?;
+        let existing = std::fs::symlink_metadata(&target)?;
+        if !source.is_file()
+            || source.file_type().is_symlink()
+            || !existing.is_file()
+            || existing.file_type().is_symlink()
+        {
+            return downgrade_error(
+                artifact,
+                "publication",
+                format!("a non-regular upper.ext4 blocks {operation}"),
+            );
+        }
         if source.len() == existing.len()
-            && file_sha256_sync(&candidate.source_layer)? == file_sha256_sync(&target)?
+            && file_sha256_sync(source_layer)? == file_sha256_sync(&target)?
         {
             return Ok(());
         }
         return downgrade_error(
-            &candidate.path,
+            artifact,
             "publication",
-            "an incompatible upper.ext4 blocks released downgrade",
+            format!("an incompatible upper.ext4 blocks {operation}"),
         );
     }
-    let temporary = candidate.path.join(format!(
-        ".upper.ext4.released-downgrade.{}",
-        std::process::id()
-    ));
-    match std::fs::hard_link(&candidate.source_layer, &temporary) {
+    let temporary = artifact.join(format!(".upper.ext4.downgrade.{}", std::process::id()));
+    match std::fs::hard_link(source_layer, &temporary) {
         Ok(()) => {}
         Err(_) => {
-            microsandbox_utils::copy::fast_copy(&candidate.source_layer, &temporary)?;
+            microsandbox_utils::copy::fast_copy(source_layer, &temporary)?;
         }
     }
-    File::open(&temporary)?.sync_all()?;
+    // FlushFileBuffers requires a write-capable handle on Windows even when
+    // the payload bytes are already complete.
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&temporary)?
+        .sync_all()?;
     std::fs::rename(&temporary, &target)?;
-    sync_directory(&candidate.path)
+    sync_directory(artifact)
 }
 
 fn file_sha256_sync(path: &Path) -> MicrosandboxResult<[u8; 32]> {
@@ -1877,5 +1943,65 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.to_string().contains("recorded BLAKE3 integrity"));
+    }
+
+    #[tokio::test]
+    async fn native_layer_only_artifact_publishes_v066_root_upper_idempotently() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("msb.db");
+        let snapshots = temp.path().join("snapshots");
+        let artifact = snapshots.join("native");
+        let recovery = temp.path().join("recovery");
+        std::fs::create_dir_all(&artifact).unwrap();
+        std::fs::write(artifact.join(DEFAULT_UPPER_FILE), b"hello").unwrap();
+        std::fs::write(artifact.join(V066_DESCRIPTOR_FILENAME), LEGACY).unwrap();
+
+        let pools = DbPools::open(&db_path, 2, Duration::from_secs(5), Duration::from_secs(5))
+            .await
+            .unwrap();
+        Migrator::up(pools.write().inner(), None).await.unwrap();
+        crate::snapshot::migration::reconcile_managed(&pools, &snapshots)
+            .await
+            .unwrap();
+
+        // Model a freshly-created schema-1 artifact: the descriptor and its
+        // payload are canonical, with no legacy backup or root upper.ext4.
+        std::fs::remove_file(artifact.join(V066_BACKUP_FILENAME)).unwrap();
+        pools
+            .write()
+            .inner()
+            .execute_raw(Statement::from_string(
+                DatabaseBackend::Sqlite,
+                "DELETE FROM snapshot_artifact_migration",
+            ))
+            .await
+            .unwrap();
+        let manifest =
+            Manifest::from_bytes(&std::fs::read(artifact.join(DESCRIPTOR_FILENAME)).unwrap())
+                .unwrap();
+        let file = manifest.state.as_file().unwrap();
+        let layer = file.head_layer().unwrap();
+        let canonical_layer = artifact.join(file.layer_path(layer));
+        std::fs::create_dir_all(canonical_layer.parent().unwrap()).unwrap();
+        std::fs::rename(artifact.join(DEFAULT_UPPER_FILE), &canonical_layer).unwrap();
+
+        let plan = preflight_managed_v066(pools.write().inner(), &snapshots)
+            .await
+            .unwrap();
+        // Publication can be retried after a crash between exposing the root
+        // payload and making manifest.json visible.
+        expose_v066_upper(&plan.candidates[0]).unwrap();
+        expose_v066_upper(&plan.candidates[0]).unwrap();
+        execute_managed_v066(pools.write().inner(), &recovery, plan)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read(artifact.join(DEFAULT_UPPER_FILE)).unwrap(),
+            b"hello"
+        );
+        assert_eq!(std::fs::read(&canonical_layer).unwrap(), b"hello");
+        assert!(artifact.join(V066_DESCRIPTOR_FILENAME).exists());
+        assert!(!artifact.join(DESCRIPTOR_FILENAME).exists());
     }
 }

@@ -163,7 +163,11 @@ An explicit archive path can also be used directly as the source of a new sandbo
 msb run --name worker --from-snapshot ./after-pip-install.tar.zst -- python -V
 ```
 
-The archive is unpacked into child-owned staging and then discarded from that operation; no intermediate installed snapshot is loaded into `~/.microsandbox/snapshots`.
+The same archive path works with the SDK restore methods shown below. The archive is unpacked into child-owned staging, so no intermediate installed snapshot is loaded into `~/.microsandbox/snapshots`.
+
+<Note>
+Direct capture records the pinned image identity, but does not bundle the cached OCI image. The target must already have that image or be able to pull it. For an offline target, create an installed snapshot and use `msb snapshot save --with-image` instead.
+</Note>
 
 ## Boot from a snapshot
 

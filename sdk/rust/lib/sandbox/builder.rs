@@ -1120,9 +1120,8 @@ impl SandboxBuilder {
     /// and [`image_with`](Self::image_with). The snapshot is structurally
     /// opened at `create()` time; content verification stays explicit.
     ///
-    /// `path_or_name` accepts either a path to a snapshot artifact
-    /// directory (or a bare name resolved under the default snapshots
-    /// directory).
+    /// `path_or_name` accepts a snapshot artifact directory, an archive
+    /// file, or a bare name resolved under the default snapshots directory.
     pub fn from_snapshot(mut self, path_or_name: impl Into<String>) -> Self {
         self.pending_snapshot = Some(path_or_name.into());
         self.pending_snapshot_from_config = false;
@@ -1434,8 +1433,18 @@ impl SandboxBuilder {
             )));
         }
 
-        // Check that image is set (non-empty OCI string or Bind path).
+        // Check that image is set (non-empty OCI string or Bind path). A direct
+        // archive restore resolves its pinned image while the local backend
+        // authenticates and streams the archive into child-owned staging. Keep
+        // that path single-pass instead of scanning the archive once here and
+        // then reading the payload again during creation.
         match &self.config.spec.image {
+            RootfsSource::Oci(oci)
+                if oci.reference.is_empty() && self.config.snapshot_archive_source.is_some() =>
+            {
+                // The archive source is transient and cloud conversion rejects
+                // it explicitly, so only the local backend may defer this field.
+            }
             RootfsSource::Oci(oci) if oci.reference.is_empty() => {
                 return Err(crate::MicrosandboxError::InvalidConfig(
                     "image source is required".into(),
@@ -2196,6 +2205,28 @@ mod tests {
             err.to_string()
                 .contains("from_snapshot is mutually exclusive")
         );
+    }
+
+    #[tokio::test]
+    async fn test_builder_accepts_archive_as_deferred_image_source() {
+        let directory = tempfile::tempdir().unwrap();
+        let archive = directory.path().join("snapshot.tar.zst");
+        std::fs::write(&archive, b"validated by the local backend").unwrap();
+
+        let config = SandboxBuilder::new("test")
+            .from_snapshot(archive.to_string_lossy())
+            .build()
+            .await
+            .unwrap();
+
+        assert_eq!(
+            config.snapshot_archive_source.as_deref(),
+            Some(archive.as_path())
+        );
+        assert!(matches!(
+            config.spec.image,
+            crate::sandbox::RootfsSource::Oci(ref image) if image.reference.is_empty()
+        ));
     }
 
     #[tokio::test]

@@ -1083,14 +1083,14 @@ Use a disk image as the root filesystem and optionally provide the inner filesys
 func WithFromSnapshot(pathOrName string) SandboxOption
 ```
 
-Boot from a snapshot artifact by bare name or filesystem path. Mutually exclusive with [`WithImage`](#withimage). See [Snapshots](/sdk/go/snapshots).
+Boot from a snapshot artifact by bare name, artifact directory, or archive file. Mutually exclusive with [`WithImage`](#withimage). See [Snapshots](/sdk/go/snapshots).
 
 <p className="msb-label">Parameters</p>
 
 <div className="msb-params">
   <div className="msb-param">
     <div className="msb-param-key"><code>pathOrName</code><span className="msb-type">string</span></div>
-    <div className="msb-param-desc">Snapshot artifact path or bare name.</div>
+    <div className="msb-param-desc">Snapshot bare name, artifact directory, or archive file.</div>
   </div>
 </div>
 
