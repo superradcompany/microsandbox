@@ -1105,6 +1105,50 @@ async fn classify_first_flight(
     }
 }
 
+/// Buffer a denied plaintext first flight until HTTP classification is
+/// decisive, or until the shared peek budget/cap is exhausted.
+///
+/// Unlike [`peek_for_sni`], this does not return on the first non-TLS chunk:
+/// a request method may be split across chunks (`GE` then `T / ...`). It stops
+/// once a complete first line, a known method plus space, or a conclusively
+/// non-HTTP prefix is available. No upstream connection exists on this path.
+pub(crate) async fn peek_for_http_request(
+    rx: &mut mpsc::Receiver<Bytes>,
+    max: usize,
+    budget: Duration,
+) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(PEEK_BUF_SIZE.min(8192));
+    let timeout_fut = tokio::time::sleep(budget);
+    tokio::pin!(timeout_fut);
+
+    loop {
+        tokio::select! {
+            biased;
+            _ = &mut timeout_fut => break,
+            data = rx.recv() => match data {
+                Some(bytes) => {
+                    buf.extend_from_slice(&bytes);
+                    if plaintext_http_classification_ready(&buf) || buf.len() >= max {
+                        break;
+                    }
+                }
+                None => break,
+            }
+        }
+    }
+    buf
+}
+
+fn plaintext_http_classification_ready(buf: &[u8]) -> bool {
+    if buf.first() == Some(&0x16) {
+        return true;
+    }
+    let first_line = skip_leading_empty_http_lines(buf);
+    first_line.windows(2).any(|window| window == b"\r\n")
+        || !looks_like_http_request_prefix(buf)
+        || incomplete_first_line_has_known_method(buf)
+}
+
 /// Buffer the first flight until SNI can be extracted, or until one
 /// of the bail-out conditions hits (channel close, buffer cap,
 /// timeout). Never errors; non-TLS / slow / malformed input all
@@ -1304,6 +1348,34 @@ mod tests {
         assert!(!connect_response_is_success(b"HTTP/1.1 2000 Weird\r\n\r\n"));
         assert!(!connect_response_is_success(b"HTTP/1.1 199 Nope\r\n\r\n"));
         assert!(!connect_response_is_success(b"NOTHTTP 200 OK\r\n\r\n"));
+    }
+
+    #[tokio::test]
+    async fn peek_for_http_request_joins_a_fragmented_method() {
+        let (tx, mut rx) = mpsc::channel(4);
+        tx.send(Bytes::from_static(b"GE")).await.unwrap();
+        tx.send(Bytes::from_static(b"T / HTTP/1.1\r\nHost: x\r\n\r\n"))
+            .await
+            .unwrap();
+        drop(tx);
+
+        let buf = peek_for_http_request(&mut rx, PEEK_BUF_SIZE, PEEK_BUDGET).await;
+        assert_eq!(buf, b"GET / HTTP/1.1\r\nHost: x\r\n\r\n");
+        assert!(first_flight_is_http(&buf));
+    }
+
+    #[tokio::test]
+    async fn peek_for_http_request_joins_a_fragmented_non_http_line() {
+        let (tx, mut rx) = mpsc::channel(4);
+        tx.send(Bytes::from_static(b"EH")).await.unwrap();
+        tx.send(Bytes::from_static(b"LO mail.example.com\r\n"))
+            .await
+            .unwrap();
+        drop(tx);
+
+        let buf = peek_for_http_request(&mut rx, PEEK_BUF_SIZE, PEEK_BUDGET).await;
+        assert_eq!(buf, b"EHLO mail.example.com\r\n");
+        assert!(!first_flight_is_http(&buf));
     }
 
     #[tokio::test]

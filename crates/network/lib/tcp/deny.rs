@@ -11,7 +11,7 @@ use bytes::Bytes;
 use tokio::sync::mpsc;
 
 use super::connection::ProxyConnectState;
-use super::proxy::{PEEK_BUDGET, PEEK_BUF_SIZE, deny_http_or_close, peek_for_sni};
+use super::proxy::{PEEK_BUDGET, PEEK_BUF_SIZE, deny_http_or_close, peek_for_http_request};
 use crate::netstack::shared::SharedState;
 use crate::tls::proxy::{extract_sni_from_channel, serve_tls_deny};
 use crate::tls::state::TlsState;
@@ -75,10 +75,11 @@ async fn respond(
 
     let Some(tls) = intercepted else {
         // Plain port: peek the first flight and answer if it is HTTP.
-        let (initial_buf, sni) = peek_for_sni(&mut from_smoltcp, PEEK_BUF_SIZE, PEEK_BUDGET).await;
+        let initial_buf =
+            peek_for_http_request(&mut from_smoltcp, PEEK_BUF_SIZE, PEEK_BUDGET).await;
         return deny_http_or_close(
             guest_dst,
-            sni.as_deref(),
+            None,
             &initial_buf,
             to_smoltcp,
             shared,
