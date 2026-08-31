@@ -161,7 +161,17 @@ impl LocalObjectStore {
             Ok(()) => {}
             Err(_) => {
                 std::fs::copy(&source, &target)?;
-                File::open(&target)?.sync_all()?;
+                // `FlushFileBuffers`, used by `sync_all` on Windows, requires a handle opened
+                // with write access even though the immutable bytes are already complete.
+                let sync_result = OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&target)
+                    .and_then(|file| file.sync_all());
+                if let Err(error) = sync_result {
+                    let _ = std::fs::remove_file(&target);
+                    return Err(error.into());
+                }
             }
         }
         sync_directories_through(parent, closure_root)?;
