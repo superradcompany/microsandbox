@@ -1,6 +1,6 @@
 //! Same-epoch checkpoint capture and root-last publication.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -76,6 +76,14 @@ struct PausedCapture {
 struct MemoryObjectSink<'a> {
     store: &'a LocalObjectStore,
     updates: Vec<MemoryExtent>,
+    pending_bytes: Vec<u8>,
+    pending_extents: Vec<PendingMemoryExtent>,
+}
+
+struct PendingMemoryExtent {
+    start: u64,
+    length: u64,
+    object_offset: u64,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -294,6 +302,8 @@ impl CheckpointCoordinator {
         let mut sink = MemoryObjectSink {
             store: &self.store,
             updates: Vec::new(),
+            pending_bytes: Vec::with_capacity(MEMORY_CHUNK_SIZE),
+            pending_extents: Vec::new(),
         };
         let stats = match vm.capture_memory(
             &memory_plan,
@@ -307,7 +317,14 @@ impl CheckpointCoordinator {
                 return Err(CheckpointFailure::resumable(error));
             }
         };
-        let extents = match overlay_extents(base_extents, sink.updates) {
+        let updates = match sink.finish() {
+            Ok(updates) => updates,
+            Err(error) => {
+                let _ = vm.abandon_memory_capture(&memory_plan);
+                return Err(CheckpointFailure::resumable(error));
+            }
+        };
+        let extents = match overlay_extents(base_extents, updates) {
             Ok(extents) => extents,
             Err(error) => {
                 let _ = vm.abandon_memory_capture(&memory_plan);
@@ -331,8 +348,12 @@ impl CheckpointCoordinator {
                 return Err(CheckpointFailure::resumable(error));
             }
         };
+        // Packed sparse ranges can reference the same object many times. Link each immutable
+        // object once so closure construction never rehashes or relinks it per guest extent.
+        let mut linked_memory_objects = BTreeSet::new();
         for extent in &memory_manifest.extents {
             if let MemoryExtentContent::Object(content) = &extent.content
+                && linked_memory_objects.insert(content.object.clone())
                 && let Err(error) = self.store.link_into(&content.object, staging)
             {
                 let _ = vm.abandon_memory_capture(&memory_plan);
@@ -462,6 +483,41 @@ impl CheckpointFailure {
     }
 }
 
+impl MemoryObjectSink<'_> {
+    /// Publish the final partial content pack and return its exact guest-address projection.
+    fn finish(mut self) -> io::Result<Vec<MemoryExtent>> {
+        self.flush_pending()?;
+        Ok(self.updates)
+    }
+
+    /// Store up to one bounded chunk containing bytes from multiple sparse guest ranges.
+    fn flush_pending(&mut self) -> io::Result<()> {
+        if self.pending_bytes.is_empty() {
+            return Ok(());
+        }
+        let bytes = std::mem::take(&mut self.pending_bytes);
+        let object = self
+            .store
+            .put_bytes(&bytes)
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        self.updates
+            .extend(self.pending_extents.drain(..).map(|extent| MemoryExtent {
+                start: extent.start,
+                length: extent.length,
+                content: MemoryExtentContent::Object(ContentRef {
+                    object: object.clone(),
+                    object_offset: extent.object_offset,
+                }),
+            }));
+        self.pending_bytes = Vec::with_capacity(MEMORY_CHUNK_SIZE);
+        Ok(())
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Trait Implementations
+//--------------------------------------------------------------------------------------------------
+
 impl fmt::Display for CheckpointFailure {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.message.fmt(formatter)
@@ -478,17 +534,34 @@ impl MemoryCaptureSink for MemoryObjectSink<'_> {
                 "memory sink range length does not match bytes",
             ));
         }
-        let object = self
-            .store
-            .put_bytes(bytes)
-            .map_err(|error| io::Error::other(error.to_string()))?;
-        self.updates.push(MemoryExtent {
+
+        if !self.pending_bytes.is_empty()
+            && self.pending_bytes.len().saturating_add(bytes.len()) > MEMORY_CHUNK_SIZE
+        {
+            self.flush_pending()?;
+        }
+        if bytes.len() > MEMORY_CHUNK_SIZE {
+            let object = self
+                .store
+                .put_bytes(bytes)
+                .map_err(|error| io::Error::other(error.to_string()))?;
+            self.updates.push(MemoryExtent {
+                start: range.start(),
+                length: range.length(),
+                content: MemoryExtentContent::Object(ContentRef {
+                    object,
+                    object_offset: 0,
+                }),
+            });
+            return Ok(());
+        }
+
+        let object_offset = self.pending_bytes.len() as u64;
+        self.pending_bytes.extend_from_slice(bytes);
+        self.pending_extents.push(PendingMemoryExtent {
             start: range.start(),
             length: range.length(),
-            content: MemoryExtentContent::Object(ContentRef {
-                object,
-                object_offset: 0,
-            }),
+            object_offset,
         });
         Ok(())
     }
@@ -751,9 +824,12 @@ fn sync_directory(path: &Path) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{overlay_extents, runtime_owned_fs_bindings};
+    use super::{MemoryObjectSink, overlay_extents, runtime_owned_fs_bindings};
 
-    use microsandbox_image::checkpoint::{ContentRef, MemoryExtent, MemoryExtentContent, ObjectId};
+    use microsandbox_image::checkpoint::{
+        ContentRef, LocalObjectStore, MemoryExtent, MemoryExtentContent, ObjectId,
+    };
+    use msb_krun::{GuestMemoryRange, MemoryCaptureSink};
 
     #[test]
     fn incremental_updates_split_and_reuse_unchanged_object_ranges() {
@@ -810,5 +886,42 @@ mod tests {
 
         assert!(!bindings.contains_key("virtio_fs0"));
         assert!(bindings.contains_key("virtio_fs1"));
+    }
+
+    #[test]
+    fn sparse_memory_ranges_share_one_bounded_content_object() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = LocalObjectStore::open(temp.path()).unwrap();
+        let mut sink = MemoryObjectSink {
+            store: &store,
+            updates: Vec::new(),
+            pending_bytes: Vec::new(),
+            pending_extents: Vec::new(),
+        };
+
+        sink.write_bytes(GuestMemoryRange::new(0x1000, 3).unwrap(), b"abc")
+            .unwrap();
+        sink.write_zero(GuestMemoryRange::new(0x2000, 4).unwrap())
+            .unwrap();
+        sink.write_bytes(GuestMemoryRange::new(0x3000, 2).unwrap(), b"de")
+            .unwrap();
+        let mut extents = sink.finish().unwrap();
+        extents.sort_by_key(|extent| extent.start);
+
+        assert_eq!(extents.len(), 3);
+        let MemoryExtentContent::Object(first) = &extents[0].content else {
+            panic!("first range must reference packed bytes");
+        };
+        assert_eq!(first.object_offset, 0);
+        assert!(matches!(extents[1].content, MemoryExtentContent::Zero));
+        let MemoryExtentContent::Object(second) = &extents[2].content else {
+            panic!("second range must reference packed bytes");
+        };
+        assert_eq!(second.object, first.object);
+        assert_eq!(second.object_offset, 3);
+        assert_eq!(
+            std::fs::read(store.object_path(&first.object)).unwrap(),
+            b"abcde"
+        );
     }
 }
