@@ -27,3 +27,7 @@ The [live-tested SDK surface](/sandboxes/lifecycle#live-tested-sdk-surface) mark
 Live sandboxes and metadata handles now expose an opaque stable ID backed by the existing local database row ID or cloud sandbox UUID. Receiver lifecycle calls remain bound to that identity, so removing a sandbox and recreating its name cannot redirect an old handle toward the replacement. Rust, TypeScript, Python, and Go expose typed stale-identity errors; Ruby reports the same refusal through `Microsandbox::Error`.
 
 This change requires no persistence migration or guest wire-protocol update. See [Identity-safe receivers](/sandboxes/lifecycle#identity-safe-receivers) and [Error handling](/sdk/errors#stale-receiver-identities).
+
+**Readable denials for HTTP and HTTPS**
+
+When a domain rule denies egress, the gateway now answers plain-HTTP clients, and HTTPS clients on TLS-intercepted ports, with `403 Forbidden` and a plain-text body instead of a bare connection reset. The default body is written for an agent running inside the sandbox and names the blocked host; `http_deny_message` (`httpDenyMessage` in TypeScript, `HTTPDenyMessage` in Go) replaces it, with `{host}` substituted. Denials that happen at DNS, on non-intercepted TLS, or on non-HTTP TCP are unchanged. See [What a denied HTTP request sees](/networking/overview#what-a-denied-http-request-sees).

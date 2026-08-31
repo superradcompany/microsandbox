@@ -335,6 +335,7 @@ func buildFFINetwork(n *NetworkConfig) *ffi.NetworkOptions {
 		RateLimiter:         buildFFINetworkRateLimiter(n.RateLimiter),
 		OnSecretViolation:   string(n.OnSecretViolation),
 		TrustHostCAs:        n.TrustHostCAs,
+		HTTPDenyMessage:     n.HTTPDenyMessage,
 	}
 
 	if len(n.Rules) > 0 || n.DefaultEgress != "" || n.DefaultIngress != "" {

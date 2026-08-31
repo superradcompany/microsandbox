@@ -100,4 +100,10 @@ export interface NetworkConfig {
     readonly mtu?: number | null;
   };
   readonly trustHostCAs: boolean;
+  /**
+   * Body returned to HTTP/HTTPS clients when egress is denied by policy;
+   * `{host}` is replaced with the blocked hostname. `null` uses the
+   * engine default.
+   */
+  readonly httpDenyMessage?: string | null;
 }

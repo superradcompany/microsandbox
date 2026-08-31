@@ -31,7 +31,9 @@ use crate::icmp::relay::IcmpRelay;
 use crate::policy::{EgressEvaluation, HostnameSource, NetworkPolicy, Protocol};
 use crate::ports::PortPublisher;
 use crate::secrets::handle::SecretsHandle;
-use crate::tcp::{connection::ConnectionTracker, proxy::TcpProxy, upstream::UpstreamTcpTarget};
+use crate::tcp::{
+    connection::ConnectionTracker, deny as tcp_deny, proxy::TcpProxy, upstream::UpstreamTcpTarget,
+};
 use crate::tls::{proxy::TlsProxy, state::TlsState};
 use crate::udp::fragments::{
     Ipv4UdpFragmentReassembler, Ipv6UdpFragmentReassembler, ReassembledUdpDatagram,
@@ -354,6 +356,10 @@ pub fn smoltcp_poll_loop(
 
             match classify_frame(frame) {
                 FrameAction::TcpSyn { src, dst } => {
+                    // Set when the tenant policy denies only by default (no
+                    // rule matched) on an HTTP-answerable port: accept the
+                    // handshake so the client gets 403 instead of RST.
+                    let mut answer_deny = false;
                     let allow = match DnsPortType::from_tcp(dst.port()) {
                         // Plain DNS: the interceptor enforces policy at
                         // the application layer (block list + rebind
@@ -392,7 +398,7 @@ pub fn smoltcp_poll_loop(
                                     .evaluate_egress(dst, Protocol::Tcp, &shared)
                                     .is_allow()
                             });
-                            platform_allows
+                            let tenant_allows = platform_allows
                                 && matches!(
                                     network_policy.evaluate_egress_with_source(
                                         dst,
@@ -401,11 +407,27 @@ pub fn smoltcp_poll_loop(
                                         HostnameSource::Deferred,
                                     ),
                                     EgressEvaluation::Allow | EgressEvaluation::DeferUntilHostname
-                                )
+                                );
+                            // Platform denies and explicit deny rules stay a
+                            // reset; only "not on the allow list" is answered.
+                            answer_deny = platform_allows
+                                && !tenant_allows
+                                && tcp_deny::answers_denied_http(dst.port(), tls_state.as_deref())
+                                && network_policy.egress_denied_by_default(
+                                    dst,
+                                    Protocol::Tcp,
+                                    &shared,
+                                    HostnameSource::Deferred,
+                                );
+                            tenant_allows
                         }
                     };
-                    if allow && !conn_tracker.has_socket_for(&src, &dst) {
-                        conn_tracker.create_tcp_socket(src, dst, &mut sockets);
+                    if !conn_tracker.has_socket_for(&src, &dst) {
+                        if allow {
+                            conn_tracker.create_tcp_socket(src, dst, &mut sockets);
+                        } else if answer_deny {
+                            conn_tracker.create_policy_denied_tcp_socket(src, dst, &mut sockets);
+                        }
                     }
                     // Let smoltcp process — matching socket completes
                     // handshake, no socket means auto-RST.
@@ -515,6 +537,19 @@ pub fn smoltcp_poll_loop(
         // Detect newly-established connections and spawn proxy tasks.
         let new_conns = conn_tracker.take_new_connections(&mut sockets);
         for conn in new_conns {
+            if conn.policy_denied {
+                // Accepted only to answer 403; never dials upstream.
+                tcp_deny::spawn_deny_responder(
+                    &tokio_handle,
+                    conn.dst,
+                    conn.from_smoltcp,
+                    conn.to_smoltcp,
+                    shared.clone(),
+                    tls_state.clone(),
+                    conn.proxy_connect,
+                );
+                continue;
+            }
             if let Some(ref tls_state) = tls_state
                 && tls_state
                     .config

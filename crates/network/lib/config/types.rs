@@ -80,6 +80,14 @@ pub struct NetworkConfig {
     /// this is explicitly enabled. Default: false.
     #[serde(default)]
     pub trust_host_cas: bool,
+
+    /// Body template returned to HTTP/HTTPS clients when egress is denied.
+    ///
+    /// `{host}` is replaced with the blocked hostname. `None` uses
+    /// [`crate::http_deny::DEFAULT_HTTP_DENY_MESSAGE`]. Non-HTTP TCP is
+    /// still closed without a response.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http_deny_message: Option<String>,
 }
 
 /// Optional overrides for the guest interface.
@@ -181,6 +189,7 @@ impl Default for NetworkConfig {
             max_connections: None,
             rate_limiter: None,
             trust_host_cas: false,
+            http_deny_message: None,
         }
     }
 }

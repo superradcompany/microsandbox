@@ -252,6 +252,9 @@ impl SmoltcpNetwork {
             .unwrap_or(DEFAULT_QUEUE_CAPACITY)
             .max(DEFAULT_QUEUE_CAPACITY);
         let shared = Arc::new(SharedState::new(queue_capacity));
+        if let Some(message) = config.http_deny_message.as_deref() {
+            shared.set_http_deny_message(message);
+        }
         // Every write path validates rate limiters (`NetworkBuilder::build`),
         // but a stored config bypasses the builder: fail startup cleanly
         // instead of panicking on a corrupted spec.

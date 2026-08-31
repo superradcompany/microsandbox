@@ -1307,6 +1307,11 @@ fn apply_network(
         builder = builder.network(move |n| n.trust_host_cas(trust));
     }
 
+    // Body returned to HTTP/HTTPS clients when egress is denied.
+    if let Some(message) = extract_opt::<String>(net, "http_deny_message")? {
+        builder = builder.network(move |n| n.http_deny_message(message));
+    }
+
     // Secret violation action (sandbox-level, not per-secret).
     if let Some(violation_obj) = net.get_item("on_secret_violation")?
         && !violation_obj.is_none()

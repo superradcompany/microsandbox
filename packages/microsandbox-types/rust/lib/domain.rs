@@ -589,6 +589,12 @@ pub struct NetworkSpec {
 
     /// Whether to copy trusted host CAs into the guest at boot.
     pub trust_host_cas: bool,
+
+    /// Body template returned to HTTP/HTTPS clients when egress is denied.
+    /// `{host}` is replaced with the blocked hostname. Missing uses the
+    /// engine default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub http_deny_message: Option<String>,
 }
 
 /// A published port mapping between host and guest.
@@ -1659,6 +1665,7 @@ impl Default for NetworkSpec {
             max_connections: None,
             rate_limiter: None,
             trust_host_cas: false,
+            http_deny_message: None,
         }
     }
 }

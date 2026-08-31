@@ -378,6 +378,7 @@ type NetworkConfig struct {
     RateLimiter              *NetworkRateLimiterConfig
     OnSecretViolation        ViolationAction
     TrustHostCAs             *bool
+    HTTPDenyMessage          string
 }
 ```
 
@@ -401,6 +402,7 @@ The full network stack configuration passed via [`WithNetwork`](#m-withnetwork).
 | RateLimiter | [`*NetworkRateLimiterConfig`](#networkratelimiterconfig) | Rate limits grouped by direction. `nil` means unlimited |
 | OnSecretViolation | [`ViolationAction`](/sdk/go/secrets#violationaction) | Sandbox-wide action when a secret is sent to a disallowed host. Per-secret overrides via `SecretEntry.OnViolation` |
 | TrustHostCAs | `*bool` | Ship the host's extra CA bundles into the guest. Opt-in for corporate MITM proxies whose gateway CA is unknown to the guest's stock bundle |
+| HTTPDenyMessage | `string` | Body for the `403 Forbidden` the gateway returns on denied HTTP/HTTPS. `{host}` is substituted. Empty uses the default agent-facing message |
 
 ### PolicyRule
 

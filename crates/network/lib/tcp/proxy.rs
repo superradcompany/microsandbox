@@ -18,6 +18,7 @@ use tokio::sync::mpsc;
 
 use super::connection::ProxyConnectState;
 use super::upstream::UpstreamTcpTarget;
+use crate::http_deny::http_forbidden_response;
 use crate::netstack::shared::SharedState;
 use crate::policy::{EgressEvaluation, HostnameSource, NetworkPolicy, Protocol};
 use crate::secrets::config::{SecretsConfig, SecretsConfigExt, ViolationAction};
@@ -39,11 +40,11 @@ const SERVER_READ_BUF_SIZE: usize = 16384;
 const CONNECT_RESP_LIMIT: usize = 8192;
 
 /// Max bytes to buffer while peeking for the ClientHello's SNI.
-const PEEK_BUF_SIZE: usize = 16384;
+pub(crate) const PEEK_BUF_SIZE: usize = 16384;
 
 /// Upper bound on time spent buffering the first flight before
 /// falling back to a cache-only egress decision.
-const PEEK_BUDGET: Duration = Duration::from_secs(5);
+pub(crate) const PEEK_BUDGET: Duration = Duration::from_secs(5);
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -215,15 +216,27 @@ impl TcpProxy {
                         source = source.label(),
                         "TCP egress denied by domain policy",
                     );
-                    proxy_connect.mark_policy_denied();
-                    shared.proxy_wake.wake();
-                    return Ok(());
+                    return deny_http_or_close(
+                        guest_dst,
+                        sni.as_deref(),
+                        &initial_buf,
+                        to_smoltcp,
+                        &shared,
+                        &proxy_connect,
+                    )
+                    .await;
                 }
                 EgressEvaluation::DeferUntilHostname => {
                     debug_assert!(false, "DeferUntilHostname leaked into TCP proxy task");
-                    proxy_connect.mark_policy_denied();
-                    shared.proxy_wake.wake();
-                    return Ok(());
+                    return deny_http_or_close(
+                        guest_dst,
+                        sni.as_deref(),
+                        &initial_buf,
+                        to_smoltcp,
+                        &shared,
+                        &proxy_connect,
+                    )
+                    .await;
                 }
             }
         }
@@ -891,6 +904,54 @@ fn connect_response_is_success(headers: &[u8]) -> bool {
             .is_ok_and(|code| (200..300).contains(&code))
 }
 
+/// Close a denied TCP connection, answering HTTP clients with 403.
+///
+/// TLS first-flights stay silent: injecting plaintext HTTP into a TLS
+/// stream is worse than a reset, and intercepted HTTPS is handled by
+/// [`crate::tls::proxy`].
+pub(crate) async fn deny_http_or_close(
+    guest_dst: SocketAddr,
+    sni: Option<&str>,
+    initial_buf: &[u8],
+    to_smoltcp: mpsc::Sender<Bytes>,
+    shared: &SharedState,
+    proxy_connect: &ProxyConnectState,
+) -> io::Result<()> {
+    // Port 80 with nothing buffered (peek budget elapsed) is still
+    // answered: HTTP clients speak first, so silence means a slow client,
+    // not a different protocol. A TLS record is never answered in clear.
+    let answer = first_flight_is_http(initial_buf)
+        || (guest_dst.port() == 80 && initial_buf.first() != Some(&0x16));
+    if answer {
+        let host = denied_host_label(sni, initial_buf, guest_dst);
+        let body = shared.http_deny_body(&host);
+        let _ = to_smoltcp
+            .send(Bytes::from(http_forbidden_response(&body)))
+            .await;
+        shared.proxy_wake.wake();
+    }
+    proxy_connect.mark_policy_denied();
+    shared.proxy_wake.wake();
+    Ok(())
+}
+
+fn first_flight_is_http(buf: &[u8]) -> bool {
+    if buf.is_empty() || buf.first() == Some(&0x16) {
+        return false;
+    }
+    looks_like_http_request_prefix(buf) && !first_line_is_not_http_request(buf)
+}
+
+fn denied_host_label(sni: Option<&str>, buf: &[u8], guest_dst: SocketAddr) -> String {
+    if let Some(name) = sni.filter(|name| !name.is_empty()) {
+        return name.to_string();
+    }
+    if let Some(host) = extract_http_host(buf) {
+        return host;
+    }
+    guest_dst.ip().to_string()
+}
+
 /// Extract the `Host:` header value from an already-buffered HTTP header block.
 ///
 /// Returns `None` if:
@@ -1023,7 +1084,7 @@ async fn classify_first_flight(
 /// for byte-equal matching against rule destinations. The returned
 /// buffer must be replayed verbatim to upstream before the caller
 /// starts its relay loop.
-async fn peek_for_sni(
+pub(crate) async fn peek_for_sni(
     rx: &mut mpsc::Receiver<Bytes>,
     max: usize,
     budget: Duration,

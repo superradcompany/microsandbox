@@ -513,6 +513,11 @@ export declare class NetworkBuilder {
   /** Trust the host's root CAs inside the guest. Default: false. */
   trustHostCAs(enabled: boolean): this
   /**
+   * Body returned to HTTP/HTTPS clients when egress is denied by
+   * policy. `{host}` is replaced with the blocked hostname.
+   */
+  httpDenyMessage(message: string): this
+  /**
    * Configure local egress and ingress rate limits. Applies on the next
    * sandbox start.
    *

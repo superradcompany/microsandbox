@@ -276,6 +276,15 @@ impl JsNetworkBuilder {
         self
     }
 
+    /// Body returned to HTTP/HTTPS clients when egress is denied by
+    /// policy. `{host}` is replaced with the blocked hostname.
+    #[napi(js_name = "httpDenyMessage")]
+    pub fn http_deny_message(&mut self, message: String) -> &Self {
+        let prev = self.take_inner();
+        self.inner = Some(prev.http_deny_message(message));
+        self
+    }
+
     /// Configure local egress and ingress rate limits. Applies on the next
     /// sandbox start.
     ///
