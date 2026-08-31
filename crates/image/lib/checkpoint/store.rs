@@ -127,7 +127,7 @@ impl LocalObjectStore {
                 return Err(error.into());
             }
         }
-        sync_parent(parent)?;
+        sync_directories_through(parent, &self.root)?;
         Ok(id)
     }
 
@@ -152,6 +152,7 @@ impl LocalObjectStore {
             .join(&encoded[..2])
             .join(encoded);
         if target.exists() {
+            self.verify_existing(id, &target)?;
             return Ok(target);
         }
         let parent = target.parent().expect("closure object has a parent");
@@ -163,6 +164,7 @@ impl LocalObjectStore {
                 File::open(&target)?.sync_all()?;
             }
         }
+        sync_directories_through(parent, closure_root)?;
         Ok(target)
     }
 
@@ -247,11 +249,20 @@ impl From<ObjectId> for String {
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
 
-fn sync_parent(path: &Path) -> ImageResult<()> {
+fn sync_directories_through(path: &Path, stop: &Path) -> ImageResult<()> {
     #[cfg(unix)]
-    File::open(path)?.sync_all()?;
+    {
+        let mut current = Some(path);
+        while let Some(directory) = current {
+            File::open(directory)?.sync_all()?;
+            if directory == stop {
+                break;
+            }
+            current = directory.parent();
+        }
+    }
     #[cfg(not(unix))]
-    let _ = path;
+    let _ = (path, stop);
     Ok(())
 }
 

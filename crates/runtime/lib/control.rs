@@ -71,6 +71,27 @@ pub enum ControlRequest {
         /// Ordered changes to apply. The first failure aborts the batch.
         changes: Vec<SecretLiveChange>,
     },
+
+    /// Produce one same-epoch resumable checkpoint and return the source to its prior running
+    /// state after root-last publication.
+    CheckpointCreate {
+        /// Caller-selected safe checkpoint identity.
+        checkpoint_id: String,
+        /// Why this checkpoint is being captured.
+        intent: CheckpointCaptureIntent,
+    },
+}
+
+/// Purpose of a runtime checkpoint capture.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckpointCaptureIntent {
+    /// User-requested resumable snapshot.
+    ResumableSnapshot,
+    /// Local idle/park continuation.
+    Park,
+    /// Transparent continuity operation.
+    TransparentTransfer,
 }
 
 /// One live secret change carried by [`ControlRequest::SecretsUpdate`].
@@ -133,6 +154,28 @@ pub struct ControlResponse {
     /// Supported operations, present for capability requests.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capabilities: Option<ControlCapabilities>,
+
+    /// Published checkpoint result, present for checkpoint operations and for a post-publication
+    /// failure such as an unsuccessful source resume.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint: Option<CheckpointControlState>,
+}
+
+/// Published checkpoint information returned by the runtime control executor.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CheckpointControlState {
+    /// Stable checkpoint identity.
+    pub checkpoint_id: String,
+    /// Content-addressed composite checkpoint root.
+    pub checkpoint_root: String,
+    /// Runtime-local installed closure path.
+    pub path: PathBuf,
+    /// Whether capture emitted a complete or incremental physical memory generation.
+    pub memory_mode: String,
+    /// Logical memory bytes represented by the capture.
+    pub memory_logical_bytes: u64,
+    /// Non-zero memory bytes written during this capture.
+    pub memory_emitted_bytes: u64,
 }
 
 /// Live-control operations supported by this sandbox process, carried in
@@ -149,6 +192,10 @@ pub struct ControlCapabilities {
 
     /// Live secret rotation, removal, and allowed-host updates are available.
     pub secrets_update: bool,
+
+    /// Same-epoch composite checkpoint capture is available.
+    #[serde(default)]
+    pub checkpoint_create: bool,
 }
 
 /// Memory sizing carried in [`ControlResponse`], all in MiB.
@@ -408,6 +455,25 @@ mod tests {
     }
 
     #[test]
+    fn checkpoint_request_round_trips_through_json() {
+        let request = ControlRequest::CheckpointCreate {
+            checkpoint_id: "checkpoint_0123456789abcdef".into(),
+            intent: CheckpointCaptureIntent::ResumableSnapshot,
+        };
+
+        let json = serde_json::to_string(&request).unwrap();
+        let parsed: ControlRequest = serde_json::from_str(&json).unwrap();
+
+        assert!(matches!(
+            parsed,
+            ControlRequest::CheckpointCreate {
+                checkpoint_id,
+                intent: CheckpointCaptureIntent::ResumableSnapshot,
+            } if checkpoint_id == "checkpoint_0123456789abcdef"
+        ));
+    }
+
+    #[test]
     fn capabilities_response_serializes_flags() {
         let response = ControlResponse {
             ok: true,
@@ -415,6 +481,7 @@ mod tests {
                 cpu_resize: true,
                 memory_resize: false,
                 secrets_update: true,
+                checkpoint_create: true,
             }),
             ..Default::default()
         };

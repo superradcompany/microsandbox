@@ -11,9 +11,11 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
 use super::{
-    ControlCapabilities, ControlRequest, ControlResponse, CpuControlState, MemoryControlState,
-    SecretLiveChange,
+    CheckpointCaptureIntent, CheckpointControlState, ControlCapabilities, ControlRequest,
+    ControlResponse, CpuControlState, MemoryControlState, SecretLiveChange,
 };
+use crate::checkpoint::{CheckpointCoordinator, CheckpointResult};
+use crate::vm::VmConfig;
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -99,6 +101,7 @@ struct ExecutorState {
     lifecycle: RuntimeLifecycle,
     dedup: BTreeMap<String, DedupEntry>,
     dedup_order: VecDeque<String>,
+    checkpoint: CheckpointCoordinator,
 }
 
 #[derive(Clone)]
@@ -119,9 +122,13 @@ impl RuntimeControlExecutor {
             microsandbox_network::secrets::handle::SecretsHandle,
         >,
         runtime_dir: &Path,
-    ) -> std::io::Result<Self> {
+        vm_config: &VmConfig,
+        runtime: tokio::runtime::Handle,
+    ) -> Result<Self, String> {
         let runtime_boot_id = new_runtime_boot_id();
-        persist_runtime_boot_id(runtime_dir, &runtime_boot_id)?;
+        persist_runtime_boot_id(runtime_dir, &runtime_boot_id)
+            .map_err(|error| error.to_string())?;
+        let checkpoint = CheckpointCoordinator::open(runtime_dir, vm_config, runtime)?;
         Ok(Self {
             vm,
             #[cfg(feature = "net")]
@@ -132,6 +139,7 @@ impl RuntimeControlExecutor {
                 lifecycle: RuntimeLifecycle::Running,
                 dedup: BTreeMap::new(),
                 dedup_order: VecDeque::new(),
+                checkpoint,
             }),
         })
     }
@@ -227,6 +235,7 @@ impl RuntimeControlExecutor {
             ControlRequest::MemoryTarget { .. }
                 | ControlRequest::CpuTarget { .. }
                 | ControlRequest::SecretsUpdate { .. }
+                | ControlRequest::CheckpointCreate { .. }
         );
         if mutation && state.lifecycle != RuntimeLifecycle::Running {
             return control_error(
@@ -235,7 +244,48 @@ impl RuntimeControlExecutor {
             );
         }
 
-        let response = self.handle_request(request);
+        let response = match request {
+            ControlRequest::CheckpointCreate {
+                checkpoint_id,
+                intent,
+            } => {
+                state.lifecycle = RuntimeLifecycle::Quiescing;
+                match state.checkpoint.capture(
+                    &self.vm,
+                    &checkpoint_id,
+                    match intent {
+                        CheckpointCaptureIntent::ResumableSnapshot => {
+                            microsandbox_image::checkpoint::CaptureIntent::ResumableSnapshot
+                        }
+                        CheckpointCaptureIntent::Park => {
+                            microsandbox_image::checkpoint::CaptureIntent::Park
+                        }
+                        CheckpointCaptureIntent::TransparentTransfer => {
+                            microsandbox_image::checkpoint::CaptureIntent::TransparentTransfer
+                        }
+                    },
+                ) {
+                    Ok(result) => {
+                        state.lifecycle = RuntimeLifecycle::Running;
+                        checkpoint_response(Some(result), true, None, None)
+                    }
+                    Err(error) => {
+                        state.lifecycle = if error.keep_paused {
+                            RuntimeLifecycle::Quiesced
+                        } else {
+                            RuntimeLifecycle::Running
+                        };
+                        checkpoint_response(
+                            error.published.as_deref().cloned(),
+                            false,
+                            Some("checkpoint_failed".into()),
+                            Some(error.to_string()),
+                        )
+                    }
+                }
+            }
+            request => self.handle_request(request),
+        };
         if mutation && response.ok {
             match state.revision.checked_add(1) {
                 Some(revision) => state.revision = revision,
@@ -292,6 +342,7 @@ impl RuntimeControlExecutor {
                     cpu_resize: self.vm.cpu_resize_supported(),
                     memory_resize: self.vm.memory_resize_supported(),
                     secrets_update: self.secrets_update_supported(),
+                    checkpoint_create: true,
                 }),
                 ..Default::default()
             },
@@ -310,6 +361,9 @@ impl RuntimeControlExecutor {
             }
             ControlRequest::CpuState => cpu(self.vm.cpu_state()),
             ControlRequest::SecretsUpdate { changes } => self.handle_secrets_update(changes),
+            ControlRequest::CheckpointCreate { .. } => {
+                unreachable!("checkpoint requests are handled by the executor lifecycle path")
+            }
         }
     }
 
@@ -374,6 +428,33 @@ fn new_runtime_boot_id() -> String {
     format!("boot_{}", hex::encode(bytes))
 }
 
+fn checkpoint_response(
+    result: Option<CheckpointResult>,
+    ok: bool,
+    error_code: Option<String>,
+    error: Option<String>,
+) -> ControlResponse {
+    let checkpoint = result.map(|result| CheckpointControlState {
+        checkpoint_id: result.checkpoint_id,
+        checkpoint_root: result.checkpoint_root,
+        path: result.path,
+        memory_mode: match result.memory_mode {
+            microsandbox_image::checkpoint::MemoryCaptureMode::Full => "full",
+            microsandbox_image::checkpoint::MemoryCaptureMode::Incremental => "incremental",
+        }
+        .into(),
+        memory_logical_bytes: result.memory_logical_bytes,
+        memory_emitted_bytes: result.memory_emitted_bytes,
+    });
+    ControlResponse {
+        ok,
+        error,
+        error_code,
+        checkpoint,
+        ..Default::default()
+    }
+}
+
 fn persist_runtime_boot_id(runtime_dir: &Path, boot_id: &str) -> std::io::Result<()> {
     std::fs::create_dir_all(runtime_dir)?;
     let target = runtime_dir.join(RUNTIME_BOOT_ID_FILE);
@@ -386,7 +467,7 @@ fn persist_runtime_boot_id(runtime_dir: &Path, boot_id: &str) -> std::io::Result
     file.write_all(b"\n")?;
     file.sync_all()?;
     drop(file);
-    std::fs::rename(&temporary, target)?;
+    crate::checkpoint::replace_file(&temporary, &target)?;
     #[cfg(unix)]
     File::open(runtime_dir)?.sync_all()?;
     Ok(())

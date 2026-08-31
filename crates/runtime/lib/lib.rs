@@ -6,6 +6,7 @@
 
 #[cfg(windows)]
 mod bootstrap_fs;
+pub(crate) mod checkpoint;
 mod clock;
 mod error;
 
