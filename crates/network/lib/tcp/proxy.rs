@@ -919,9 +919,9 @@ pub(crate) async fn deny_http_or_close(
 ) -> io::Result<()> {
     // Port 80 with nothing buffered (peek budget elapsed) is still
     // answered: HTTP clients speak first, so silence means a slow client,
-    // not a different protocol. A TLS record is never answered in clear.
-    let answer = first_flight_is_http(initial_buf)
-        || (guest_dst.port() == 80 && initial_buf.first() != Some(&0x16));
+    // not a different protocol. A TLS record, and any other non-HTTP
+    // first flight, is never answered in clear.
+    let answer = should_send_http_403(guest_dst, initial_buf);
     if answer {
         let host = denied_host_label(sni, initial_buf, guest_dst);
         let body = shared.http_deny_body(&host);
@@ -933,6 +933,10 @@ pub(crate) async fn deny_http_or_close(
     proxy_connect.mark_policy_denied();
     shared.proxy_wake.wake();
     Ok(())
+}
+
+fn should_send_http_403(guest_dst: SocketAddr, initial_buf: &[u8]) -> bool {
+    first_flight_is_http(initial_buf) || (guest_dst.port() == 80 && initial_buf.is_empty())
 }
 
 fn first_flight_is_http(buf: &[u8]) -> bool {
@@ -1593,6 +1597,21 @@ mod tests {
     fn extract_http_host_tls_first_byte() {
         let buf = [0x16u8, 0x03, 0x01, 0x00, 0x01];
         assert_eq!(extract_http_host(&buf), None);
+    }
+
+    fn addr(port: u16) -> SocketAddr {
+        SocketAddr::from(([203, 0, 113, 1], port))
+    }
+
+    #[test]
+    fn http_403_answers_http_and_silent_port80_not_other_protocols() {
+        let get = b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n";
+        assert!(should_send_http_403(addr(80), get));
+        assert!(should_send_http_403(addr(8080), get));
+        assert!(should_send_http_403(addr(80), b""));
+        assert!(!should_send_http_403(addr(443), b""));
+        assert!(!should_send_http_403(addr(80), &[0x16, 0x03, 0x01]));
+        assert!(!should_send_http_403(addr(80), b"\x00\x01binary"));
     }
 
     #[test]
