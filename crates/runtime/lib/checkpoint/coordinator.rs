@@ -255,11 +255,19 @@ impl CheckpointCoordinator {
                             ))
                         })
                     })
-                    .map_err(CheckpointFailure::resumable)?
+                    .map_err(|error| {
+                        CheckpointFailure::resumable(format!(
+                            "capture block device {device_id}: {error}"
+                        ))
+                    })?
             } else {
                 let state = vm
                     .capture_virtio_device_state(*device_type, device_id)
-                    .map_err(CheckpointFailure::resumable)?;
+                    .map_err(|error| {
+                        CheckpointFailure::resumable(format!(
+                            "capture virtio device {device_id} (type {device_type}): {error}"
+                        ))
+                    })?;
                 if state.pause_generation != pause_generation {
                     return Err(CheckpointFailure::resumable(
                         "virtio state belongs to another pause generation",
