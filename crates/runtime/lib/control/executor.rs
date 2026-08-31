@@ -1,10 +1,13 @@
 //! Runtime-owned serialization and fencing for host control mutations.
 
 use std::collections::{BTreeMap, VecDeque};
-use std::fs::{File, OpenOptions};
+use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+
+#[cfg(unix)]
+use std::fs::File;
 
 use rand::Rng as _;
 use serde::{Deserialize, Serialize};
