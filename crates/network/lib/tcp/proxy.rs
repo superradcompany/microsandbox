@@ -24,6 +24,7 @@ use crate::policy::{EgressEvaluation, HostnameSource, NetworkPolicy, Protocol};
 use crate::secrets::config::{SecretsConfig, SecretsConfigExt, ViolationAction};
 use crate::secrets::handler::{
     SecretsHandler, first_line_is_not_http_request, looks_like_http_request_prefix,
+    skip_leading_empty_http_lines,
 };
 use crate::tls::proxy::TlsProxy;
 use crate::tls::sni;
@@ -943,7 +944,35 @@ fn first_flight_is_http(buf: &[u8]) -> bool {
     if buf.is_empty() || buf.first() == Some(&0x16) {
         return false;
     }
-    looks_like_http_request_prefix(buf) && !first_line_is_not_http_request(buf)
+    if !looks_like_http_request_prefix(buf) || first_line_is_not_http_request(buf) {
+        return false;
+    }
+    incomplete_first_line_has_known_method(buf)
+}
+/// HTTP methods recognized while a first line is still incomplete. A
+/// complete line is judged by its `HTTP/x.y` version instead, so custom
+/// methods still classify once the version arrives.
+const KNOWN_METHODS: [&str; 9] = [
+    "GET", "HEAD", "POST", "PUT", "DELETE", "CONNECT", "OPTIONS", "TRACE", "PATCH",
+];
+
+/// With no CRLF yet, an ASCII token alone is not proof of HTTP: a split SSH
+/// banner (`SSH-2.0-…`) or SMTP greeting (`EHLO …`) passes the token check
+/// and would be answered with HTTP bytes. Require the method-so-far to be a
+/// prefix of a known method, or — once space-terminated — exactly one. The
+/// HTTP/2 preface keeps its existing prefix handling.
+fn incomplete_first_line_has_known_method(buf: &[u8]) -> bool {
+    let buf = skip_leading_empty_http_lines(buf);
+    if buf.windows(2).any(|window| window == b"\r\n") {
+        return true;
+    }
+    if b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n".starts_with(buf) {
+        return true;
+    }
+    match buf.iter().position(|&b| b == b' ') {
+        Some(end) => KNOWN_METHODS.iter().any(|m| m.as_bytes() == &buf[..end]),
+        None => KNOWN_METHODS.iter().any(|m| m.as_bytes().starts_with(buf)),
+    }
 }
 
 fn denied_host_label(sni: Option<&str>, buf: &[u8], guest_dst: SocketAddr) -> String {
@@ -1192,6 +1221,32 @@ mod tests {
         assert!(could_be_connect_request(b"CONNECT example.com:443"));
         assert!(!could_be_connect_request(b"CLIENT"));
         assert!(!could_be_connect_request(b"GET / HTTP/1.1\r\n"));
+    }
+
+    #[test]
+    fn first_flight_http_accepts_partial_and_complete_http() {
+        assert!(first_flight_is_http(b"GE"));
+        assert!(first_flight_is_http(b"GET /index.html"));
+        assert!(first_flight_is_http(b"GET /x HTTP/1.1\r\nHost: a\r\n"));
+        assert!(first_flight_is_http(b"\r\nGET /x HTTP/1.0\r\n"));
+        // The HTTP/2 prior-knowledge preface, whole or split.
+        assert!(first_flight_is_http(b"PRI"));
+        assert!(first_flight_is_http(b"PRI * HTTP/2.0"));
+        // A complete line is judged by its version, so custom methods pass.
+        assert!(first_flight_is_http(b"QUERY /x HTTP/1.1\r\n"));
+    }
+
+    #[test]
+    fn first_flight_http_rejects_split_non_http_banners() {
+        assert!(!first_flight_is_http(b""));
+        assert!(!first_flight_is_http(&synthetic_client_hello(
+            "example.com"
+        )));
+        // Split before its first CRLF, an SSH banner or SMTP greeting is a
+        // valid ASCII token but no HTTP method.
+        assert!(!first_flight_is_http(b"SSH-2.0-OpenSSH_9.9"));
+        assert!(!first_flight_is_http(b"EHLO mail.example.com"));
+        assert!(!first_flight_is_http(b"QUERY /x"));
     }
 
     #[tokio::test]
