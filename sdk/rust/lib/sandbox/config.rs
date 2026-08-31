@@ -47,7 +47,7 @@ pub const DEFAULT_REPLACE_TIMEOUT: std::time::Duration = std::time::Duration::fr
 
 // Compile-time defaults for `SandboxConfig` serde. Serde's `#[serde(default
 // = "fn")]` attribute can't take parameters, so these can't consult a
-// `LocalBackend`. They intentionally mirror `LocalConfig::default()` /
+// `LocalBackend`. They intentionally mirror `GlobalConfig::default()` /
 // `SandboxDefaults::default()` for the same fields, so DB-row
 // deserialization (and `sandbox_config_from_cloud`) are side-effect-free.
 // A `LocalBackend` with non-default sandbox defaults applies them through
@@ -1741,6 +1741,22 @@ mod tests {
         config.apply_runtime_defaults();
 
         assert!(config.spec.mounts.is_empty());
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn unspecified_network_policy_uses_engine_public_default() {
+        use microsandbox_network::policy::{NetworkPolicy, NetworkProfile};
+
+        let config = SandboxConfig::default();
+        assert!(config.spec.network.policy.is_none());
+
+        let actual = config.local_network_config().unwrap().policy;
+        let expected = NetworkPolicy::from_profiles([NetworkProfile::Public]);
+        assert_eq!(
+            serde_json::to_value(actual).unwrap(),
+            serde_json::to_value(expected).unwrap()
+        );
     }
 
     //----------------------------------------------------------------------------------------------

@@ -24,6 +24,10 @@ pip install microsandbox
 ```bash Go
 go get github.com/superradcompany/microsandbox/sdk/go
 ```
+
+```bash Ruby
+gem install microsandbox
+```
 </CodeGroup>
 
 For explicit runtime installation, verification, custom install locations, and environment overrides, see [Runtime setup](/sdk/setup).
@@ -115,6 +119,20 @@ func main() {
 }
 ```
 
+```ruby Ruby
+require "microsandbox"
+
+Microsandbox.install unless Microsandbox.installed?
+
+Microsandbox::Sandbox.with(
+  "hello",
+  image: "python"
+) do |sandbox|
+  output = sandbox.exec("python", ["-c", "print('Hello, World!')"])
+  puts output.stdout
+end
+```
+
 </CodeGroup>
 
 ## Reference
@@ -125,5 +143,6 @@ Choose the SDK for your language:
 - [TypeScript SDK](/sdk/typescript/sandbox)
 - [Python SDK](/sdk/python/sandbox)
 - [Go SDK](/sdk/go/sandbox)
+- [Ruby SDK](/sdk/ruby/sandbox)
 
 For low-level protocol integrations, see the Agent Client references for [Rust](/sdk/rust/agent-client), [TypeScript](/sdk/typescript/agent-client), [Python](/sdk/python/agent-client), and [Go](/sdk/go/agent-client). See also [error handling](/sdk/errors).

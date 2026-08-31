@@ -29,7 +29,13 @@ import {
   logReadOptionsToNapi,
   logStreamOptionsToNapi,
 } from "./logs.js";
-import { SandboxHandle, type SandboxStopResult } from "./sandbox-handle.js";
+import {
+  SandboxHandle,
+  type DestroyOptions,
+  type RestartOptions,
+  type SandboxStopResult,
+} from "./sandbox-handle.js";
+import type { SandboxStatus } from "./sandbox-status.js";
 import type { SandboxMetrics } from "./metrics.js";
 import { metricsFromNapi } from "./internal/metrics.js";
 import { MetricsStream } from "./metrics-stream.js";
@@ -59,7 +65,13 @@ export type SandboxConfig = NapiSandboxConfig;
 export type CpuPlacement = "inherit" | "auto" | "spread" | "compact";
 
 export interface SandboxBuilder extends NapiSandboxBuilderSetters {
+  /** Create a new sandbox, preserving strict name-conflict behavior. */
   create(): Promise<Sandbox>;
+  /**
+   * Connect to and run the persisted sandbox with this name, or create it if absent.
+   * Builder options are used only for creation; existing configuration wins.
+   */
+  connectOrCreate(): Promise<Sandbox>;
   createWithPullProgress(): Promise<PullProgressCreate>;
 }
 
@@ -165,14 +177,21 @@ export class Sandbox implements AsyncDisposable {
   readonly inner: NapiSandbox;
   /** Sandbox name. Names are limited to 128 UTF-8 bytes. */
   readonly name: string;
+  /** Stable identity that changes when this name is removed and recreated. */
+  readonly id: string;
   readonly ownsLifecycle: boolean;
   /** Backend retained by this sandbox. */
   readonly backendKind: "local" | "cloud";
 
   /** @internal use `Sandbox.builder(name).create()` */
-  constructor(inner: NapiSandbox, name: string, ownsLifecycle = true) {
+  constructor(
+    inner: NapiSandbox,
+    name: string,
+    ownsLifecycle = inner.ownsLifecycle,
+  ) {
     this.inner = inner;
     this.name = name;
+    this.id = inner.id;
     this.ownsLifecycle = ownsLifecycle;
     this.backendKind = inner.backendKind;
   }
@@ -185,6 +204,7 @@ export class Sandbox implements AsyncDisposable {
     let detached = false;
     const origDetached = nb.detached.bind(nb);
     const origCreate = nb.create.bind(nb);
+    const origConnectOrCreate = nb.connectOrCreate.bind(nb);
     const origCreateWithPP = nb.createWithPullProgress.bind(nb);
     const wrapped = nb as unknown as {
       detached: (enabled: boolean) => SandboxBuilder;
@@ -198,6 +218,14 @@ export class Sandbox implements AsyncDisposable {
     (nb as unknown as { create: () => Promise<Sandbox> }).create = async () => {
       const inner = await withMappedErrors(() => origCreate());
       return new Sandbox(inner, name, /*ownsLifecycle*/ !detached);
+    };
+    (
+      nb as unknown as { connectOrCreate: () => Promise<Sandbox> }
+    ).connectOrCreate = async () => {
+      const inner = await withMappedErrors(() => origConnectOrCreate());
+      // An existing running sandbox is connected without taking ownership,
+      // while a newly created or restarted sandbox follows detached mode.
+      return new Sandbox(inner, name);
     };
     (
       nb as unknown as {
@@ -500,6 +528,38 @@ export class Sandbox implements AsyncDisposable {
 
   async requestDrain(): Promise<void> {
     await withMappedErrors(() => this.inner.requestDrain());
+  }
+
+  /**
+   * Wait until this exact persisted sandbox reaches `status`.
+   *
+   * This method has no built-in timeout. A same-name replacement is rejected
+   * instead of silently redirecting the wait to the new identity.
+   */
+  async waitForStatus(status: SandboxStatus): Promise<SandboxHandle> {
+    const raw = await withMappedErrors(() => this.inner.waitForStatus(status));
+    return new SandboxHandle(raw);
+  }
+
+  /**
+   * Stop and start this exact persisted sandbox.
+   *
+   * Graceful shutdown and a ten-second convergence timeout are the defaults.
+   * A created, stopped, or crashed sandbox starts directly.
+   */
+  async restart(options?: RestartOptions): Promise<Sandbox> {
+    const raw = await withMappedErrors(() => this.inner.restart(options));
+    return new Sandbox(raw, this.name);
+  }
+
+  /**
+   * Stop and remove this exact persisted sandbox.
+   *
+   * Graceful shutdown and a ten-second convergence timeout are the defaults.
+   * The identity check refuses to remove a same-name replacement.
+   */
+  async destroy(options?: DestroyOptions): Promise<void> {
+    await withMappedErrors(() => this.inner.destroy(options));
   }
 
   async waitUntilStopped(): Promise<SandboxStopResult> {

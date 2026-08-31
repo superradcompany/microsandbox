@@ -11,7 +11,12 @@
 //! (the host process lacks `CAP_CHOWN`). Size changes use real `ftruncate`, and timestamp
 //! changes use real `futimens`.
 
-use std::{io, os::fd::AsRawFd, time::Duration};
+use std::{
+    fs::File,
+    io,
+    os::fd::{AsRawFd, FromRawFd},
+    time::Duration,
+};
 
 use super::host_mode::{fchmod_mirror, fchmod_raw, host_strip_priv_bits, mirror_eligible_type};
 use super::{PassthroughFs, inode};
@@ -49,7 +54,7 @@ pub(crate) fn do_setattr(
     _ctx: Context,
     ino: u64,
     attr: stat64,
-    _handle: Option<u64>,
+    handle: Option<u64>,
     valid: SetattrValid,
 ) -> io::Result<(stat64, Duration)> {
     if fs.is_virtual_init_inode(ino) {
@@ -66,7 +71,13 @@ pub(crate) fn do_setattr(
     }
 
     #[cfg(target_os = "macos")]
-    let guest_file_type = platform::mode_file_type(inode::stat_inode(fs, ino)?.st_mode);
+    let guest_file_type = platform::mode_file_type(
+        match handle {
+            Some(handle) => stat_handle(fs, handle)?,
+            None => inode::stat_inode(fs, ino)?,
+        }
+        .st_mode,
+    );
 
     #[cfg(target_os = "macos")]
     if guest_file_type == platform::MODE_LNK && valid.contains(SetattrValid::SIZE) {
@@ -82,18 +93,27 @@ pub(crate) fn do_setattr(
         libc::O_RDONLY
     };
 
-    #[cfg(target_os = "linux")]
-    let fd = inode::open_inode_fd(fs, ino, open_flags)?;
+    let file = match handle {
+        // A supplied FUSE handle is the authoritative object. In particular,
+        // it remains valid after an atomic host replacement detaches the inode
+        // from the namespace, when reopening by inode can no longer succeed.
+        Some(handle) => clone_handle_file(fs, handle)?,
+        None => {
+            #[cfg(target_os = "linux")]
+            let fd = inode::open_inode_fd(fs, ino, open_flags)?;
 
-    #[cfg(target_os = "macos")]
-    let fd = if guest_file_type == platform::MODE_LNK {
-        open_symlink_inode_fd_macos(fs, ino)?
-    } else {
-        inode::open_inode_fd(fs, ino, open_flags)?
+            #[cfg(target_os = "macos")]
+            let fd = if guest_file_type == platform::MODE_LNK {
+                open_symlink_inode_fd_macos(fs, ino)?
+            } else {
+                inode::open_inode_fd(fs, ino, open_flags)?
+            };
+
+            // SAFETY: each open helper returns a newly owned descriptor.
+            unsafe { File::from_raw_fd(fd) }
+        }
     };
-    let close_fd = scopeguard::guard(fd, |fd| unsafe {
-        libc::close(fd);
-    });
+    let fd = file.as_raw_fd();
 
     // FUSE expects setattr-triggered truncate/chown to clear suid/sgid when
     // requested. UID/GID changes always clear them; SIZE changes only do so
@@ -107,15 +127,12 @@ pub(crate) fn do_setattr(
     //   - kill_priv            : kernel asked us to clear setuid/setgid
     if valid.intersects(SetattrValid::UID | SetattrValid::GID | SetattrValid::MODE) || kill_priv {
         if fs.cfg.xattr_enabled() {
-            let current = stat_override::get_override(
-                *close_fd,
-                fs.cfg.xattr_enabled(),
-                fs.cfg.strict_enabled(),
-            )?;
+            let current =
+                stat_override::get_override(fd, fs.cfg.xattr_enabled(), fs.cfg.strict_enabled())?;
             let (cur_uid, cur_gid, cur_mode, cur_rdev) = match current {
                 Some(ovr) => (ovr.uid, ovr.gid, ovr.mode, ovr.rdev),
                 None => {
-                    let mut st = platform::fstat(*close_fd)?;
+                    let mut st = platform::fstat(fd)?;
                     stat_override::apply_bind_identity_map(
                         &mut st,
                         fs.cfg.bind_identity_map.as_ref(),
@@ -153,10 +170,10 @@ pub(crate) fn do_setattr(
                 && valid.contains(SetattrValid::MODE)
                 && mirror_eligible_type(new_mode & platform::MODE_TYPE_MASK)
             {
-                fchmod_mirror(*close_fd, new_mode, new_mode & platform::MODE_TYPE_MASK)?;
+                fchmod_mirror(fd, new_mode, new_mode & platform::MODE_TYPE_MASK)?;
             }
 
-            stat_override::set_override(*close_fd, new_uid, new_gid, new_mode, cur_rdev)?;
+            stat_override::set_override(fd, new_uid, new_gid, new_mode, cur_rdev)?;
         } else if valid.contains(SetattrValid::MODE) {
             // xattr off: guest sees real host stat. Apply chmod directly.
             // For REG/DIR we keep the owner-access floor so the host process
@@ -164,22 +181,22 @@ pub(crate) fn do_setattr(
             // symlinks) we pass the raw perms because clamping symlink mode
             // bits would silently corrupt link state.
             let attr_mode = platform::mode_u32(attr.st_mode);
-            let host_st = platform::fstat(*close_fd)?;
+            let host_st = platform::fstat(fd)?;
             let file_type = platform::mode_u32(host_st.st_mode) & platform::MODE_TYPE_MASK;
             let mut perms = attr_mode & 0o7777;
             if kill_priv {
                 perms &= !(platform::MODE_SETUID | platform::MODE_SETGID);
             }
             if mirror_eligible_type(file_type) {
-                fchmod_mirror(*close_fd, perms, file_type)?;
+                fchmod_mirror(fd, perms, file_type)?;
             } else {
-                fchmod_raw(*close_fd, perms)?;
+                fchmod_raw(fd, perms)?;
             }
         } else if kill_priv {
             // xattr off + kill_priv with no MODE bit (typical: SIZE truncate
             // of a setuid binary). Strip setuid/setgid on the host inode so
             // we honor HANDLE_KILLPRIV_V2 semantics for `Off` mounts too.
-            host_strip_priv_bits(*close_fd)?;
+            host_strip_priv_bits(fd)?;
         }
     }
 
@@ -192,9 +209,9 @@ pub(crate) fn do_setattr(
 
         // Quota: an extending truncate grows the file. Charge the growth past
         // EOF before ftruncate (a shrinking truncate charges nothing).
-        fs.quota_charge_to(*close_fd, attr.st_size.max(0) as u64)?;
+        fs.quota_charge_to(fd, attr.st_size.max(0) as u64)?;
 
-        let ret = unsafe { libc::ftruncate(*close_fd, attr.st_size) };
+        let ret = unsafe { libc::ftruncate(fd, attr.st_size) };
         if ret < 0 {
             return Err(platform::linux_error(io::Error::last_os_error()));
         }
@@ -208,7 +225,7 @@ pub(crate) fn do_setattr(
         if guest_file_type == platform::MODE_LNK {
             set_symlink_times_macos(fs, ino, &times)?;
         } else {
-            let ret = unsafe { libc::futimens(*close_fd, times.as_ptr()) };
+            let ret = unsafe { libc::futimens(fd, times.as_ptr()) };
             if ret < 0 {
                 return Err(platform::linux_error(io::Error::last_os_error()));
             }
@@ -216,17 +233,20 @@ pub(crate) fn do_setattr(
 
         #[cfg(target_os = "linux")]
         {
-            let ret = unsafe { libc::futimens(*close_fd, times.as_ptr()) };
+            let ret = unsafe { libc::futimens(fd, times.as_ptr()) };
             if ret < 0 {
                 return Err(platform::linux_error(io::Error::last_os_error()));
             }
         }
     }
 
-    drop(close_fd);
+    drop(file);
 
     // Return updated attributes.
-    let st = inode::stat_inode(fs, ino)?;
+    let st = match handle {
+        Some(handle) => stat_handle(fs, handle)?,
+        None => inode::stat_inode(fs, ino)?,
+    };
     Ok((st, fs.cfg.attr_timeout))
 }
 
@@ -307,6 +327,13 @@ fn stat_handle(fs: &PassthroughFs, handle: u64) -> io::Result<stat64> {
         fs.cfg.strict_enabled(),
         fs.cfg.bind_identity_map.as_ref(),
     )
+}
+
+fn clone_handle_file(fs: &PassthroughFs, handle: u64) -> io::Result<File> {
+    let handles = fs.handles.read().unwrap();
+    let data = handles.get(&handle).ok_or_else(platform::ebadf)?;
+    let file = data.file.read().unwrap();
+    file.try_clone().map_err(platform::linux_error)
 }
 
 #[cfg(target_os = "macos")]

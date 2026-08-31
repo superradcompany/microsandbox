@@ -217,6 +217,7 @@ pub async fn run_sandbox_lifecycle_maintenance(
     // runtime died (dead PID) as terminal.
     let active = sandbox_entity::Entity::find()
         .filter(sandbox_entity::Column::Status.is_in([
+            sandbox_entity::SandboxStatus::Starting,
             sandbox_entity::SandboxStatus::Running,
             sandbox_entity::SandboxStatus::Draining,
         ]))
@@ -726,7 +727,9 @@ async fn reconcile_stale_active(
     };
     if !matches!(
         sandbox.status,
-        sandbox_entity::SandboxStatus::Running | sandbox_entity::SandboxStatus::Draining
+        sandbox_entity::SandboxStatus::Starting
+            | sandbox_entity::SandboxStatus::Running
+            | sandbox_entity::SandboxStatus::Draining
     ) {
         return Ok(false);
     }
@@ -738,8 +741,7 @@ async fn reconcile_stale_active(
         .one(db)
         .await?;
 
-    // No active run yet while Running means the sandbox is still starting
-    // (its runtime has not inserted a run row). Draining with no active run
+    // No active run yet while Starting means the runtime has not inserted a run row. Draining with no active run
     // means the stop request already reached a terminal run state, so repair
     // the sandbox status instead of leaving future stop callers polling.
     let Some(run) = run else {
@@ -752,6 +754,10 @@ async fn reconcile_stale_active(
                 .col_expr(
                     sandbox_entity::Column::ActiveConfig,
                     Expr::value(Option::<String>::None),
+                )
+                .col_expr(
+                    sandbox_entity::Column::NetworkSlot,
+                    Expr::value(Option::<u16>::None),
                 )
                 .col_expr(sandbox_entity::Column::UpdatedAt, Expr::value(now))
                 .filter(sandbox_entity::Column::Id.eq(sandbox.id))
@@ -803,9 +809,14 @@ async fn reconcile_stale_active(
             sandbox_entity::Column::ActiveConfig,
             Expr::value(Option::<String>::None),
         )
+        .col_expr(
+            sandbox_entity::Column::NetworkSlot,
+            Expr::value(Option::<u16>::None),
+        )
         .col_expr(sandbox_entity::Column::UpdatedAt, Expr::value(now))
         .filter(sandbox_entity::Column::Id.eq(sandbox.id))
         .filter(sandbox_entity::Column::Status.is_in([
+            sandbox_entity::SandboxStatus::Starting,
             sandbox_entity::SandboxStatus::Running,
             sandbox_entity::SandboxStatus::Draining,
         ]))
@@ -1275,6 +1286,22 @@ mod tests {
         #[cfg(unix)]
         let dead_sockets = seed_socket_artifacts(dir.path(), &run_dir, "dead");
 
+        // A booting sandbox whose runtime died before readiness should also become Crashed.
+        let starting = insert_sandbox(
+            &db,
+            "starting",
+            sandbox_entity::SandboxStatus::Starting,
+            false,
+        )
+        .await;
+        insert_run(
+            &db,
+            starting,
+            Some(DEAD_PID),
+            run_entity::RunStatus::Running,
+        )
+        .await;
+
         // Persistent Draining sandbox with a dead PID completed a requested stop.
         let draining = insert_sandbox(
             &db,
@@ -1318,11 +1345,15 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(report.reconciled, 3);
+        assert_eq!(report.reconciled, 4);
         assert_eq!(report.removed, 1);
         assert_eq!(report.errors, 0);
         assert_eq!(
             status_of(&db, dead).await,
+            Some(sandbox_entity::SandboxStatus::Crashed)
+        );
+        assert_eq!(
+            status_of(&db, starting).await,
             Some(sandbox_entity::SandboxStatus::Crashed)
         );
         assert_eq!(

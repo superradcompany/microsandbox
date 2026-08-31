@@ -761,6 +761,20 @@ impl JsSandboxBuilder {
         Ok(JsSandbox::from_rust(inner))
     }
 
+    /// Connect to the persisted sandbox with this name, or create it.
+    ///
+    /// # Safety
+    /// Same justification as `create`.
+    #[napi(js_name = "connectOrCreate")]
+    pub async unsafe fn connect_or_create(&mut self) -> Result<JsSandbox> {
+        let builder = self
+            .inner
+            .take()
+            .ok_or_else(|| napi::Error::from_reason("SandboxBuilder already consumed"))?;
+        let inner = builder.connect_or_create().await.map_err(to_napi_error)?;
+        Ok(JsSandbox::from_rust(inner))
+    }
+
     /// Create the sandbox with image-pull progress reporting. Returns
     /// a `PullProgressStream` of per-layer download/materialization
     /// events. The actual `Sandbox` is awaited via `.awaitSandbox()`

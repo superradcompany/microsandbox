@@ -3,8 +3,10 @@
 #[cfg(unix)]
 use std::ffi::{CStr, CString};
 use std::fmt::{self, Write as _};
+#[cfg(any(unix, windows))]
+use std::fs::File;
 #[cfg(unix)]
-use std::fs::{DirBuilder, File, OpenOptions};
+use std::fs::{DirBuilder, OpenOptions};
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 #[cfg(unix)]
@@ -50,10 +52,14 @@ pub struct SandboxSocketPaths {
 /// On Unix the guard is an advisory `flock` held by the underlying open file
 /// description. Launchers may duplicate the descriptor into the sandbox
 /// process; closing the launcher's copy then preserves ownership in the child
-/// until it exits, including after `SIGKILL`.
+/// until it exits, including after `SIGKILL`. On Windows the sandbox process
+/// acquires a `LockFileEx` byte-range lock itself and retains this file for its
+/// entire runtime generation.
 pub struct SandboxLifecycleGuard {
     #[cfg(unix)]
     file: File,
+    #[cfg(windows)]
+    _file: File,
 }
 
 impl fmt::Debug for SandboxLifecycleGuard {
@@ -105,7 +111,22 @@ pub fn acquire_lifecycle_guard(
         })
     }
 
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        let path = lifecycle_lock_path(run_dir, name);
+        let parent = path.parent().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("lifecycle lock has no parent: {}", path.display()),
+            )
+        })?;
+        std::fs::create_dir_all(parent)?;
+        let file = microsandbox_utils::process_lock::open_lock_file(&path)?;
+        microsandbox_utils::process_lock::lock_exclusive(&file)?;
+        Ok(SandboxLifecycleGuard { _file: file })
+    }
+
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = (run_dir, name);
         Ok(SandboxLifecycleGuard {})
@@ -122,7 +143,25 @@ pub fn try_acquire_lifecycle_guard(
         acquire_lifecycle_guard_unix(run_dir, name, true)
     }
 
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        let path = lifecycle_lock_path(run_dir, name);
+        let parent = path.parent().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("lifecycle lock has no parent: {}", path.display()),
+            )
+        })?;
+        std::fs::create_dir_all(parent)?;
+        let file = microsandbox_utils::process_lock::open_lock_file(&path)?;
+        if microsandbox_utils::process_lock::try_lock_exclusive(&file)? {
+            Ok(Some(SandboxLifecycleGuard { _file: file }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = (run_dir, name);
         Ok(Some(SandboxLifecycleGuard {}))
@@ -775,6 +814,27 @@ mod tests {
         assert_eq!(
             paths.legacy_agent,
             Path::new("/tmp/msb/run/agent/bc62d1b6b936c78dbbd0bbe5572e32d0.sock")
+        );
+    }
+
+    #[test]
+    fn lifecycle_guard_is_exclusive_and_reusable() {
+        let temp = tempfile::tempdir().unwrap();
+        let run_dir = temp.path().join("run");
+        let owner = acquire_lifecycle_guard(&run_dir, "worker").unwrap();
+
+        assert!(
+            try_acquire_lifecycle_guard(&run_dir, "worker")
+                .unwrap()
+                .is_none(),
+            "a second file handle must not acquire an owned runtime generation"
+        );
+        drop(owner);
+        assert!(
+            try_acquire_lifecycle_guard(&run_dir, "worker")
+                .unwrap()
+                .is_some(),
+            "dropping the runtime owner must release lifecycle ownership"
         );
     }
 

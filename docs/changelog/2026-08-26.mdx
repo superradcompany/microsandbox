@@ -1,0 +1,29 @@
+---
+title: "Week of August 26, 2026"
+description: "Convergent sandbox lifecycle APIs and stable receiver identities across every SDK."
+icon: "rotate"
+---
+
+## New features
+
+**Convergent named sandboxes**
+
+Every SDK now exposes a connect-or-create operation for reusable sandbox names: `connect_or_create` in Rust, Python, and Ruby, `connectOrCreate` in TypeScript, and `ConnectOrCreateSandbox` in Go. It connects to a running persisted sandbox, starts a created, stopped, or crashed sandbox, and creates only when the name is absent. Existing configuration wins, and concurrent callers converge on the same persisted identity.
+
+```python
+sb = await Sandbox.connect_or_create(
+    "worker",
+    image="python",
+    memory=1024,
+)
+```
+
+Metadata handles also gain `connect_or_start` and language-idiomatic equivalents, plus general wait-for-status, graceful restart, and stop-and-remove destroy operations. See [Sandbox lifecycle](/sandboxes/lifecycle#converge-on-a-named-sandbox).
+
+The [live-tested SDK surface](/sandboxes/lifecycle#live-tested-sdk-surface) marks the exact method spelling in Rust, TypeScript, Python, Go, and Ruby and records the shared lifecycle invariants exercised by the cross-SDK example.
+
+**Stable identity-safe receivers**
+
+Live sandboxes and metadata handles now expose an opaque stable ID backed by the existing local database row ID or cloud sandbox UUID. Receiver lifecycle calls remain bound to that identity, so removing a sandbox and recreating its name cannot redirect an old handle toward the replacement. Rust, TypeScript, Python, and Go expose typed stale-identity errors; Ruby reports the same refusal through `Microsandbox::Error`.
+
+This change requires no persistence migration or guest wire-protocol update. See [Identity-safe receivers](/sandboxes/lifecycle#identity-safe-receivers) and [Error handling](/sdk/errors#stale-receiver-identities).

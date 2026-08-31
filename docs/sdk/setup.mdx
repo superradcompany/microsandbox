@@ -45,6 +45,12 @@ if !m.IsInstalled() {
     }
 }
 ```
+
+```ruby Ruby
+require "microsandbox"
+
+Microsandbox.install unless Microsandbox.installed?
+```
 </CodeGroup>
 
 | SDK | Install | Check | Behavior |
@@ -53,10 +59,11 @@ if !m.IsInstalled() {
 | TypeScript | `install(): Promise<void>` | `isInstalled(): boolean` | Downloads the package's pinned runtime and verifies it. |
 | Python | `install() -> None` (async) | `is_installed() -> bool` | Installs and verifies the runtime; release wheels normally bundle matching files. |
 | Go | `EnsureInstalled(ctx, ...SetupOption) error` | `IsInstalled() bool` | Installs `msb` and `libkrunfw`; the Go FFI library is embedded separately. |
+| Ruby | `Microsandbox.install` | `Microsandbox.installed?` | Installs and verifies the runtime used by the native extension. |
 
 ## Customize installation
 
-Rust and TypeScript expose builders for custom install roots, versions, verification, and forced downloads. Go exposes `WithSkipDownload()` for pre-provisioned or air-gapped environments. Python's setup helper uses the default installation behavior.
+Rust and TypeScript expose builders for custom install roots, versions, verification, and forced downloads. Go exposes `WithSkipDownload()` for pre-provisioned or air-gapped environments. Python and Ruby setup helpers use the default installation behavior.
 
 <CodeGroup>
 ```rust Rust

@@ -10,7 +10,7 @@ use futures::future::BoxFuture;
 use super::CloudBackend;
 use crate::backend::{
     Backend,
-    sandbox::{LogStream, MetricsStream, SandboxBackend},
+    sandbox::{LogStream, MetricsStream, SandboxBackend, SandboxIdentity},
 };
 use crate::error::{Operation, UnsupportedReason};
 use crate::logs::{BootError, LogEntry, LogOptions, LogStreamOptions};
@@ -132,6 +132,31 @@ impl SandboxBackend for CloudBackend {
         })
     }
 
+    fn start_identified<'a>(
+        &'a self,
+        backend: Arc<dyn Backend>,
+        _name: &'a str,
+        identity: SandboxIdentity,
+    ) -> BoxFuture<'a, MicrosandboxResult<Sandbox>> {
+        Box::pin(async move {
+            let id = cloud_identity(identity)?;
+            let current = CloudBackend::get_sandbox_by_id(self, &id).await?;
+            let config = sandbox_config_from_cloud(&current);
+            let cloud = CloudBackend::start_sandbox_by_id(self, &id).await?;
+            ensure_cloud_sandbox_ready(&cloud)?;
+            Ok(Sandbox::from_cloud(backend, cloud, config))
+        })
+    }
+
+    fn start_detached_identified<'a>(
+        &'a self,
+        backend: Arc<dyn Backend>,
+        name: &'a str,
+        identity: SandboxIdentity,
+    ) -> BoxFuture<'a, MicrosandboxResult<Sandbox>> {
+        self.start_identified(backend, name, identity)
+    }
+
     fn get<'a>(
         &'a self,
         backend: Arc<dyn Backend>,
@@ -173,6 +198,18 @@ impl SandboxBackend for CloudBackend {
         })
     }
 
+    fn remove_identified<'a>(
+        &'a self,
+        _backend: Arc<dyn Backend>,
+        _name: &'a str,
+        identity: SandboxIdentity,
+    ) -> BoxFuture<'a, MicrosandboxResult<()>> {
+        Box::pin(async move {
+            CloudBackend::destroy_sandbox_by_id(self, &cloud_identity(identity)?).await?;
+            Ok(())
+        })
+    }
+
     fn stop<'a>(
         &'a self,
         _backend: Arc<dyn Backend>,
@@ -180,6 +217,18 @@ impl SandboxBackend for CloudBackend {
     ) -> BoxFuture<'a, MicrosandboxResult<()>> {
         Box::pin(async move {
             CloudBackend::stop_sandbox(self, name).await?;
+            Ok(())
+        })
+    }
+
+    fn stop_identified<'a>(
+        &'a self,
+        _backend: Arc<dyn Backend>,
+        _name: &'a str,
+        identity: SandboxIdentity,
+    ) -> BoxFuture<'a, MicrosandboxResult<()>> {
+        Box::pin(async move {
+            CloudBackend::stop_sandbox_by_id(self, &cloud_identity(identity)?).await?;
             Ok(())
         })
     }
@@ -391,6 +440,15 @@ impl TryFrom<SandboxConfig> for CloudCreateBody {
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
+
+fn cloud_identity(identity: SandboxIdentity) -> MicrosandboxResult<String> {
+    match identity {
+        SandboxIdentity::Cloud(id) => Ok(id),
+        SandboxIdentity::Local(id) => Err(MicrosandboxError::Runtime(format!(
+            "local sandbox identity {id} was routed to the cloud backend"
+        ))),
+    }
+}
 
 fn cloud_create_body_and_config(
     mut config: SandboxConfig,

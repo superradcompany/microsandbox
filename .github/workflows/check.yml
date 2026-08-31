@@ -1048,7 +1048,7 @@ jobs:
         run: |
           gem build microsandbox.gemspec
           mold -run gem install --local microsandbox-*.gem --no-document
-          ruby --disable-gems -e 'require "rubygems"; require "microsandbox"; abort unless Microsandbox.version == "0.6.15"'
+          ruby --disable-gems -e 'require "rubygems"; require "microsandbox"; abort unless Microsandbox.version == "0.6.16"'
 
       - name: Restore standalone Ruby lockfile
         if: always()
@@ -1792,16 +1792,6 @@ jobs:
           name: go-ffi-linux-x86_64
           path: build/
 
-      # -- Install msb + libkrunfw --
-      - name: Install msb
-        run: |
-          chmod +x build/msb
-          mkdir -p ~/.microsandbox/bin ~/.microsandbox/lib
-          install -m755 build/msb ~/.microsandbox/bin/msb
-          install -m644 build/libkrunfw.so.${{ env.LIBKRUNFW_VERSION }} ~/.microsandbox/lib/
-          ln -sf libkrunfw.so.${{ env.LIBKRUNFW_VERSION }} ~/.microsandbox/lib/libkrunfw.so.${{ env.LIBKRUNFW_ABI }}
-          ln -sf libkrunfw.so.${{ env.LIBKRUNFW_ABI }} ~/.microsandbox/lib/libkrunfw.so
-
       # -- Run integration tests --
       - name: Run Go integration tests
         working-directory: sdk/go
@@ -1821,13 +1811,23 @@ jobs:
           MSB_HOME=$(mktemp -d -p /tmp msb-go-${{ matrix.shard }}-XXXXXX)
           trap "rm -rf '$MSB_HOME'" EXIT
           export MSB_HOME
-          export PATH="$HOME/.microsandbox/bin:$PATH"
-          export LD_LIBRARY_PATH="${{ github.workspace }}/build:$HOME/.microsandbox/lib"
 
-          mapfile -t all_tests < <(
-            go test -tags "integration microsandbox_ffi_path" -list '^Test' ./integration \
-              | sed -n '/^Test/p'
-          )
+          # EnsureInstalled resolves the installation root from MSB_HOME. Seed
+          # that exact directory so bump PRs use local, unpublished artifacts.
+          mkdir -p "$MSB_HOME/bin" "$MSB_HOME/lib"
+          chmod +x "${{ github.workspace }}/build/msb"
+          install -m755 "${{ github.workspace }}/build/msb" "$MSB_HOME/bin/msb"
+          install -m644 "${{ github.workspace }}/build/libkrunfw.so.${{ env.LIBKRUNFW_VERSION }}" "$MSB_HOME/lib/"
+          ln -sf libkrunfw.so.${{ env.LIBKRUNFW_VERSION }} "$MSB_HOME/lib/libkrunfw.so.${{ env.LIBKRUNFW_ABI }}"
+          ln -sf libkrunfw.so.${{ env.LIBKRUNFW_ABI }} "$MSB_HOME/lib/libkrunfw.so"
+          export PATH="$MSB_HOME/bin:$PATH"
+          export LD_LIBRARY_PATH="${{ github.workspace }}/build:$MSB_HOME/lib"
+
+          if ! test_listing=$(go test -tags "integration microsandbox_ffi_path" -list '^Test' ./integration 2>&1); then
+            printf '%s\n' "$test_listing" >&2
+            exit 1
+          fi
+          mapfile -t all_tests < <(printf '%s\n' "$test_listing" | sed -n '/^Test/p')
           selected_tests=()
           for index in "${!all_tests[@]}"; do
             if (( index % ${{ matrix.total }} == ${{ matrix.shard }} )); then

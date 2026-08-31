@@ -46,6 +46,16 @@ impl PySandboxHandle {
         Ok(guard.name().to_string())
     }
 
+    /// Stable identity that changes when this name is removed and recreated.
+    #[getter]
+    fn id(&self) -> PyResult<String> {
+        let guard = self
+            .inner
+            .try_lock()
+            .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("handle is busy"))?;
+        Ok(guard.id().to_string())
+    }
+
     /// Current sandbox lifecycle status.
     #[getter]
     fn status(&self, py: Python<'_>) -> PyResult<PyObject> {
@@ -330,6 +340,30 @@ impl PySandboxHandle {
         })
     }
 
+    /// Connect when this exact sandbox is running, wait while it is starting, or
+    /// start it when it is created, stopped, or crashed.
+    ///
+    /// `detached` applies only when a start is required. A same-name replacement
+    /// is rejected instead of becoming the target of this handle.
+    #[pyo3(signature = (*, detached = false))]
+    fn connect_or_start<'py>(
+        &self,
+        py: Python<'py>,
+        detached: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let guard = inner.lock().await;
+            let sandbox = if detached {
+                guard.connect_or_start_detached().await
+            } else {
+                guard.connect_or_start().await
+            }
+            .map_err(to_py_err)?;
+            Ok(PySandbox::from_rust(sandbox))
+        })
+    }
+
     /// Stop the sandbox gracefully and wait until stopped.
     #[pyo3(signature = (timeout = None))]
     fn stop<'py>(&self, py: Python<'py>, timeout: Option<f64>) -> PyResult<Bound<'py, PyAny>> {
@@ -386,6 +420,72 @@ impl PySandboxHandle {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let guard = inner.lock().await;
             guard.request_drain().await.map_err(to_py_err)?;
+            Ok(())
+        })
+    }
+
+    /// Wait until this exact sandbox reaches `status` with no built-in timeout.
+    ///
+    /// A same-name replacement is rejected instead of silently redirecting the
+    /// wait to the new persisted identity.
+    fn wait_for_status<'py>(&self, py: Python<'py>, status: String) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        let status = parse_sandbox_status(&status)?;
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let guard = inner.lock().await;
+            let handle = guard.wait_for_status(status).await.map_err(to_py_err)?;
+            Ok(PySandboxHandle::from_rust(handle))
+        })
+    }
+
+    /// Stop and start this exact sandbox.
+    ///
+    /// Graceful shutdown and a ten-second convergence timeout are the defaults.
+    #[pyo3(signature = (*, force = false, timeout = None, detached = false))]
+    fn restart<'py>(
+        &self,
+        py: Python<'py>,
+        force: bool,
+        timeout: Option<f64>,
+        detached: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        let mut options = microsandbox::sandbox::RestartOptions {
+            force,
+            detached,
+            ..Default::default()
+        };
+        if let Some(timeout) = optional_duration(timeout)? {
+            options.timeout = timeout;
+        }
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let guard = inner.lock().await;
+            let sandbox = guard.restart_with(options).await.map_err(to_py_err)?;
+            Ok(PySandbox::from_rust(sandbox))
+        })
+    }
+
+    /// Stop and remove this exact sandbox.
+    ///
+    /// The identity check refuses to remove a same-name replacement.
+    #[pyo3(signature = (*, force = false, timeout = None))]
+    fn destroy<'py>(
+        &self,
+        py: Python<'py>,
+        force: bool,
+        timeout: Option<f64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        let mut options = microsandbox::sandbox::DestroyOptions {
+            force,
+            ..Default::default()
+        };
+        if let Some(timeout) = optional_duration(timeout)? {
+            options.timeout = timeout;
+        }
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let guard = inner.lock().await;
+            guard.destroy_with(options).await.map_err(to_py_err)?;
             Ok(())
         })
     }
@@ -457,5 +557,20 @@ pub(crate) fn json_value_to_py(py: Python<'_>, value: serde_json::Value) -> PyRe
             }
             Ok(dict.unbind().into())
         }
+    }
+}
+
+pub(crate) fn parse_sandbox_status(status: &str) -> PyResult<microsandbox::sandbox::SandboxStatus> {
+    match status {
+        "created" => Ok(microsandbox::sandbox::SandboxStatus::Created),
+        "starting" => Ok(microsandbox::sandbox::SandboxStatus::Starting),
+        "running" => Ok(microsandbox::sandbox::SandboxStatus::Running),
+        "draining" => Ok(microsandbox::sandbox::SandboxStatus::Draining),
+        "paused" => Ok(microsandbox::sandbox::SandboxStatus::Paused),
+        "stopped" => Ok(microsandbox::sandbox::SandboxStatus::Stopped),
+        "crashed" => Ok(microsandbox::sandbox::SandboxStatus::Crashed),
+        other => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "invalid sandbox status {other:?}"
+        ))),
     }
 }

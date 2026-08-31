@@ -256,6 +256,7 @@ mod tests {
             config: Set(config.clone()),
             active_config: Set(Some(config)),
             status: Set(sandbox::SandboxStatus::Running),
+            network_slot: Set(None),
             ephemeral: Set(false),
             created_at: Set(None),
             updated_at: Set(None),

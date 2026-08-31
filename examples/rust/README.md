@@ -22,10 +22,13 @@ cargo run -p net-basic
 cargo run -p fs-read-stream
 ```
 
+Configuration-focused examples intentionally replace their fixed-name sandbox so reruns match the source. `shell-attach` uses `connect_or_create` instead, preserving its interactive workspace and configuration across runs.
+
 ## Examples
 
 | Example | Command | Description |
 |---------|---------|-------------|
+| `lifecycle-convergence` | `cargo run -p lifecycle-convergence` | Live convergence and stale-handle identity-safety checks with timing metrics |
 | `cloud-backend` | `cargo run -p cloud-backend` | Cloud backend lifecycle and live logs |
 | `root-oci` | `cargo run -p root-oci` | OCI image rootfs |
 | `root-bind` | `cargo run -p root-bind` | Bind-mounted local directory |
@@ -37,7 +40,7 @@ cargo run -p fs-read-stream
 | `snapshot-fork` | `cargo run -p snapshot-fork` | Snapshot a stopped sandbox and boot a fresh one from it |
 | `fs-read-stream` | `cargo run -p fs-read-stream` | Streaming file read |
 | `metrics-stream` | `cargo run -p metrics-stream` | Streaming resource metrics |
-| `shell-attach` | `cargo run -p shell-attach` | Interactive shell attach |
+| `shell-attach` | `cargo run -p shell-attach` | Reusable interactive shell using `connect_or_create` |
 | `net-basic` | `cargo run -p net-basic` | Basic networking |
 | `net-dns` | `cargo run -p net-dns` | DNS filtering |
 | `net-policy` | `cargo run -p net-policy` | Network policies |

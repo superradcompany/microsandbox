@@ -1,8 +1,10 @@
 # Examples
 
-Examples showing how to use the microsandbox SDK in TypeScript, Rust, Python, and Go.
+Examples showing how to use the microsandbox SDK in TypeScript, Rust, Python, Go, and Ruby.
 
 Each language directory has its own README with setup and run instructions.
+
+Most configuration-focused examples intentionally replace their fixed-name sandbox so every run uses the image, resources, mounts, networking, and secrets shown in the source. The interactive `shell-attach` example instead uses connect-or-create because preserving its workspace across runs is useful. Examples that generate a unique name use strict creation.
 
 | Language | Directory | README |
 |----------|-----------|--------|
@@ -10,6 +12,7 @@ Each language directory has its own README with setup and run instructions.
 | Rust | [`rust/`](./rust/) | [rust/README.md](./rust/README.md) |
 | Python | [`python/`](./python/) | [python/README.md](./python/README.md) |
 | Go | [`../sdk/go/examples/`](../sdk/go/examples/) | [../sdk/go/examples/README.md](../sdk/go/examples/README.md) |
+| Ruby | [`../sdk/ruby/examples/`](../sdk/ruby/examples/) | [../sdk/ruby/README.md](../sdk/ruby/README.md) |
 
 ## Prerequisites
 
@@ -23,6 +26,7 @@ git submodule update --init --recursive
 
 | Example | Description |
 |---------|-------------|
+| `lifecycle-convergence` | Live convergence, restart, destroy, and stale-handle identity-safety checks |
 | `root-oci` | Create a sandbox from an OCI image (e.g. `alpine`) |
 | `root-bind` | Create a sandbox from a local bind-mounted directory |
 | `root-block` | Create a sandbox from a qcow2 disk image |
@@ -32,7 +36,7 @@ git submodule update --init --recursive
 | `volume-disk` | Mount raw / qcow2 disk images at arbitrary guest paths |
 | `fs-read-stream` | Stream a large file from the sandbox in chunks |
 | `metrics-stream` | Subscribe to streaming resource metrics |
-| `shell-attach` | Interactive terminal session inside a sandbox |
+| `shell-attach` | Reusable interactive terminal session using connect-or-create |
 | `net-basic` | DNS resolution, HTTP fetch, interface status |
 | `net-dns` | DNS filtering — block domains and suffixes |
 | `net-policy` | Network policies — public-only, allow-all, no-network |

@@ -252,6 +252,25 @@ impl PySandbox {
         })
     }
 
+    /// Connect to and run the persisted sandbox with this name, or create it if absent.
+    ///
+    /// Keyword arguments are used only when creation is necessary. An existing
+    /// sandbox retains its persisted configuration, and concurrent callers
+    /// converge on the winning identity.
+    #[staticmethod]
+    #[pyo3(signature = (name, **kwargs))]
+    fn connect_or_create<'py>(
+        py: Python<'py>,
+        name: String,
+        kwargs: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let builder = sandbox_builder_from_args(name, kwargs)?;
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let sandbox = builder.connect_or_create().await.map_err(to_py_err)?;
+            Ok(PySandbox::from_rust(sandbox))
+        })
+    }
+
     /// Start an existing stopped sandbox.
     ///
     /// Sandbox names are limited to 128 UTF-8 bytes.
@@ -388,6 +407,16 @@ impl PySandbox {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let name = Self::with_sandbox(&inner, |sb| sb.name().to_string()).await?;
             Ok(name)
+        })
+    }
+
+    /// Stable identity that changes when this name is removed and recreated.
+    #[getter]
+    fn id<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let id = Self::with_sandbox(&inner, |sandbox| sandbox.id().to_string()).await?;
+            Ok(id)
         })
     }
 
@@ -1012,6 +1041,74 @@ impl PySandbox {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let sandbox = Self::clone_sandbox(&inner).await?;
             sandbox.request_drain().await.map_err(to_py_err)?;
+            Ok(())
+        })
+    }
+
+    /// Wait until this exact sandbox reaches `status` with no built-in timeout.
+    ///
+    /// A same-name replacement is rejected instead of silently redirecting the
+    /// wait to the new persisted identity.
+    fn wait_for_status<'py>(&self, py: Python<'py>, status: String) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        let status = crate::sandbox_handle::parse_sandbox_status(&status)?;
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let sandbox = Self::clone_sandbox(&inner).await?;
+            let handle = sandbox.wait_for_status(status).await.map_err(to_py_err)?;
+            Ok(PySandboxHandle::from_rust(handle))
+        })
+    }
+
+    /// Stop and start this exact sandbox.
+    ///
+    /// Graceful shutdown and a ten-second convergence timeout are the defaults.
+    /// A created, stopped, or crashed sandbox starts directly.
+    #[pyo3(signature = (*, force = false, timeout = None, detached = false))]
+    fn restart<'py>(
+        &self,
+        py: Python<'py>,
+        force: bool,
+        timeout: Option<f64>,
+        detached: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        let mut options = microsandbox::sandbox::RestartOptions {
+            force,
+            detached,
+            ..Default::default()
+        };
+        if let Some(timeout) = optional_duration(timeout)? {
+            options.timeout = timeout;
+        }
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let sandbox = Self::clone_sandbox(&inner).await?;
+            let restarted = sandbox.restart_with(options).await.map_err(to_py_err)?;
+            Ok(PySandbox::from_rust(restarted))
+        })
+    }
+
+    /// Stop and remove this exact sandbox.
+    ///
+    /// Graceful shutdown and a ten-second convergence timeout are the defaults.
+    /// The identity check refuses to remove a same-name replacement.
+    #[pyo3(signature = (*, force = false, timeout = None))]
+    fn destroy<'py>(
+        &self,
+        py: Python<'py>,
+        force: bool,
+        timeout: Option<f64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        let mut options = microsandbox::sandbox::DestroyOptions {
+            force,
+            ..Default::default()
+        };
+        if let Some(timeout) = optional_duration(timeout)? {
+            options.timeout = timeout;
+        }
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let sandbox = Self::clone_sandbox(&inner).await?;
+            sandbox.destroy_with(options).await.map_err(to_py_err)?;
             Ok(())
         })
     }

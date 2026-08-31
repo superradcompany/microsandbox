@@ -9,14 +9,15 @@ from microsandbox import Sandbox
 
 
 async def main():
-    print("Creating sandbox (image=alpine)")
+    print("Connecting to or creating sandbox (image=alpine on first creation)")
 
-    sb = await Sandbox.create(
+    # An interactive workspace is useful across runs. Creation options seed only
+    # the first creation; later runs preserve its files and configuration.
+    sb = await Sandbox.connect_or_create(
         "attach-example",
         image="alpine",
         cpus=1,
         memory=512,
-        replace=True,
     )
 
     print("Attaching to shell (press Ctrl+] to detach)...")

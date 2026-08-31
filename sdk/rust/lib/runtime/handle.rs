@@ -13,7 +13,6 @@ use nix::{
     sys::signal::{self, Signal},
     unistd::Pid,
 };
-use tempfile::TempDir;
 use tokio::process::Child;
 #[cfg(windows)]
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
@@ -61,10 +60,6 @@ pub struct ProcessHandle {
     /// `Reserved` if the runtime exits before activation.
     metrics_reservation: Option<MetricsReservationCleanup>,
 
-    /// Ephemeral staging directory for file mounts. Dropped when the
-    /// process handle is dropped, which auto-removes all staged files.
-    _file_mounts_staging: Option<TempDir>,
-
     /// Open disk-image lock files. Kept for the process lifetime so disk
     /// images cannot be attached with incompatible write modes.
     _disk_locks: Vec<File>,
@@ -98,7 +93,6 @@ impl ProcessHandle {
         pid: u32,
         sandbox_name: String,
         child: Child,
-        file_mounts_staging: Option<TempDir>,
         disk_locks: Vec<File>,
         #[cfg(unix)] parent_watchdog: Option<OwnedFd>,
         #[cfg(windows)] job: Option<WindowsJob>,
@@ -109,7 +103,6 @@ impl ProcessHandle {
             sandbox_name,
             child,
             detached: false,
-            _file_mounts_staging: file_mounts_staging,
             _disk_locks: disk_locks,
             #[cfg(unix)]
             parent_watchdog,
@@ -187,9 +180,6 @@ impl ProcessHandle {
 
     /// Disarm the SIGTERM safety net so the sandbox keeps running after
     /// this handle is dropped. Used by detached sandbox flows.
-    ///
-    /// Also prevents the file-mounts staging directory from being deleted,
-    /// since the detached VM process still needs the backing files.
     pub fn disarm(&mut self) {
         self.detached = true;
 
@@ -204,12 +194,6 @@ impl ProcessHandle {
                     "failed to send parent-watch detach"
                 );
             }
-        }
-
-        // Consume the TempDir without deleting its contents — the detached
-        // VM process still reads from it via virtiofs.
-        if let Some(td) = self._file_mounts_staging.take() {
-            let _ = td.keep();
         }
     }
 

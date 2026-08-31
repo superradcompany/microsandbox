@@ -13,7 +13,7 @@ For the full API reference and longer guides, use the docs site:
 ## Features
 
 - Hardware VM isolation with a guest Linux kernel
-- ESM-first TypeScript API with generated native bindings
+- ESM-first API with CommonJS `require()` support and generated native bindings
 - Collected and streaming command execution
 - Guest filesystem read, write, list, copy, stat, and stream operations
 - Named volumes, bind mounts, tmpfs mounts, and disk-image mounts
@@ -28,10 +28,14 @@ For the full API reference and longer guides, use the docs site:
 - Linux with KVM, macOS with Apple Silicon, or Windows 11 with WHP enabled
 - Windows support is currently preview; see the [Windows troubleshooting guide](https://docs.microsandbox.dev/troubleshooting/windows) for WHP and runtime setup notes.
 
-The package root is ESM-only for normal imports:
+The package root supports both ESM imports and CommonJS `require()` on Node.js 22+:
 
 ```typescript
 import { Sandbox } from "microsandbox";
+```
+
+```javascript
+const { Sandbox } = require("microsandbox");
 ```
 
 ## Supported Platforms
@@ -69,6 +73,24 @@ console.log(output.stdout().trim());
 ```
 
 `await using` calls `Sandbox.stop()` when the handle leaves scope. Use a plain `const sandbox = ...` and call lifecycle methods yourself when you need finer control.
+
+### Reusable Lifecycle Convergence
+
+Use `connectOrCreate` when a stable name should converge on one persisted sandbox. Existing configuration wins; the builder is used only if creation is necessary. Handles retain a stable `id`, so lifecycle calls on stale receivers refuse to act on a replacement that reused the name.
+
+```typescript
+const sandbox = await Sandbox.builder("worker")
+  .image("python")
+  .memory(MiB(1024))
+  .connectOrCreate();
+
+console.log(`${sandbox.name}: ${sandbox.id}`);
+const running = await (await Sandbox.get("worker")).connectOrStart();
+await running.requestStop();
+const stopped = await running.waitForStatus("stopped");
+const restarted = await stopped.restart();
+await restarted.destroy();
+```
 
 ## Common Examples
 

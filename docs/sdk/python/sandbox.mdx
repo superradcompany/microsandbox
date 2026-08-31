@@ -7,6 +7,20 @@ Create and control a microVM sandbox: boot it from an image, run commands, strea
 
 For local runtime installation and verification, see [Runtime setup](/sdk/setup#install-and-verify).
 
+## Lifecycle convergence
+
+```python
+await Sandbox.connect_or_create(name, **kwargs) -> Sandbox
+await handle.connect_or_start(detached=False) -> Sandbox
+await handle.wait_for_status(status) -> SandboxHandle
+await handle.restart(force=False, timeout=None, detached=False) -> Sandbox
+await handle.destroy(force=False, timeout=None) -> None
+await sandbox.id -> str
+handle.id -> str
+```
+
+`connect_or_create` converges on the current persisted sandbox by name and uses creation arguments only when it creates. Receiver lifecycle operations are bound to the stable opaque `id`; a stale receiver raises `SandboxReplacedError` instead of acting on a replacement that reused the name. `Sandbox` also exposes `wait_for_status`, `restart`, and `destroy`. See [Lifecycle convergence and identity safety](/sandboxes/lifecycle#converge-on-a-named-sandbox) for state behavior and examples.
+
 ## Sandbox
 
 <p className="msb-member-group">Instance properties</p>
@@ -147,6 +161,24 @@ Same parameters as [`create()`](#sandbox-create) but returns a [`PullSession`](#
     <div className="msb-param-desc">Session for tracking pull progress and obtaining the final sandbox.</div>
   </div>
 </div>
+
+#### <span className="msb-recv">Sandbox.</span><span className="msb-hn">connect_or_create()</span>
+
+```python
+@staticmethod
+async def connect_or_create(name: str, **kwargs) -> Sandbox
+```
+
+Converge on the current persisted sandbox by name. The method connects when it is running, waits through `SandboxStatus.STARTING`, starts it when it is created, stopped, or crashed, and creates it only when the name is absent. Keyword arguments apply only to creation; an existing sandbox keeps its persisted configuration. Concurrent callers converge on the winning identity. Passing `replace=True` or `replace_with_timeout` raises an invalid-configuration error.
+
+<p className="msb-label">Parameters</p>
+
+- `name`: reusable sandbox name, up to 128 UTF-8 bytes.
+- `**kwargs`: the same creation fields accepted by [`Sandbox.create()`](#sandbox-create), used only if creation is necessary.
+
+<p className="msb-label">Returns</p>
+
+[`Sandbox`](#instance-methods)
 
 #### <span className="msb-recv">Sandbox.</span><span className="msb-hn">start()</span>
 
@@ -359,6 +391,14 @@ Return the sandbox name.
     <div className="msb-param-desc">Sandbox name, up to 128 UTF-8 bytes.</div>
   </div>
 </div>
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">id</span>
+
+```python
+identity: str = await sb.id
+```
+
+Await the opaque stable identity of this persisted sandbox. It remains unchanged across stop and restart and changes when the reusable name is removed and recreated. Use it for equality, logging, and correlation; do not parse it.
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">attach()</span>
 
@@ -1000,6 +1040,36 @@ Block until the sandbox is observed in a terminal non-running state, without tri
   </div>
 </div>
 
+#### <span className="msb-recv">sb.</span><span className="msb-hn">wait_for_status()</span>
+
+```python
+async def wait_for_status(self, status: SandboxStatus) -> SandboxHandle
+```
+
+Wait without a built-in timeout until this exact sandbox reaches `status`, returning a refreshed metadata handle. Raises `SandboxReplacedError` rather than following a reused name. Wrap the coroutine with `asyncio.wait_for()` when a deadline is required.
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">restart()</span>
+
+```python
+async def restart(
+    self,
+    *,
+    force: bool = False,
+    timeout: float | None = None,
+    detached: bool = False,
+) -> Sandbox
+```
+
+Restart this exact sandbox. Defaults to graceful shutdown, the SDK's ten-second timeout, and attached local start. A created, stopped, or crashed sandbox starts directly; a starting sandbox is observed until it settles. Set `force` to kill, `timeout` in seconds to change shutdown convergence, or `detached` for a local background start.
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">destroy()</span>
+
+```python
+async def destroy(self, *, force: bool = False, timeout: float | None = None) -> None
+```
+
+Stop and remove this exact sandbox. Defaults to graceful shutdown with the SDK's ten-second timeout. Raises `SandboxReplacedError` rather than deleting a same-name replacement.
+
 #### <span className="msb-recv">sb.</span><span className="msb-hn">detach()</span>
 
 ```python
@@ -1256,6 +1326,12 @@ A metadata and lifecycle handle for an existing sandbox.
 
 Sandbox name, up to 128 UTF-8 bytes
 
+#### <span className="msb-recv">handle.</span><span className="msb-hn">id</span>
+
+`str`
+
+Opaque stable identity captured by this metadata handle. Receiver lifecycle calls remain bound to this value and raise `SandboxReplacedError` when the reusable name now points to another sandbox.
+
 #### <span className="msb-recv">handle.</span><span className="msb-hn">status</span>
 
 [`SandboxStatus`](#sandboxstatus)
@@ -1359,6 +1435,44 @@ Connect to a running sandbox, optionally with an explicit timeout in seconds
 <p className="msb-label">Returns</p>
 
 `Awaitable[`[`Sandbox`](#instance-methods)`]`
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">connect_or_start()</span>
+
+```python
+async def connect_or_start(self, *, detached: bool = False) -> Sandbox
+```
+
+Connect when this exact sandbox is running, wait through `STARTING`, or start it when it is `CREATED`, `STOPPED`, or `CRASHED`. `DRAINING` and `PAUSED` are rejected. `detached=True` affects only a required local start; connecting to an already-running sandbox does not change ownership.
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">wait_for_status()</span>
+
+```python
+async def wait_for_status(self, status: SandboxStatus) -> SandboxHandle
+```
+
+Wait without a built-in timeout until this exact sandbox reaches `status`, returning a refreshed handle. Raises `SandboxReplacedError` rather than rebinding to a replacement.
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">restart()</span>
+
+```python
+async def restart(
+    self,
+    *,
+    force: bool = False,
+    timeout: float | None = None,
+    detached: bool = False,
+) -> Sandbox
+```
+
+Restart this exact sandbox with the same state and option semantics as [`sb.restart()`](#restart).
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">destroy()</span>
+
+```python
+async def destroy(self, *, force: bool = False, timeout: float | None = None) -> None
+```
+
+Stop and remove this exact sandbox. A stale handle cannot destroy a same-name replacement.
 
 #### <span className="msb-recv">handle.</span><span className="msb-hn">start()</span>
 

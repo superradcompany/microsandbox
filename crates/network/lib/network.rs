@@ -33,12 +33,6 @@ use crate::tls::state::{TlsState, TlsStateError};
 // Constants
 //--------------------------------------------------------------------------------------------------
 
-/// Maximum sandbox slot value. Limited by MAC/IPv6 encoding (16 bits = 65535).
-/// The default IPv4 pool (172.16.0.0/12 with /30 blocks) supports 262144 slots,
-/// but MAC and IPv6 derivation only encode the low 16 bits, so 65535 is the
-/// effective maximum.
-const MAX_SLOT: u64 = u16::MAX as u64;
-
 /// Hard ceiling for concurrent connections on shared, multi-tenant hosts.
 ///
 /// This matches the network engine's existing default, preventing a tenant
@@ -92,6 +86,24 @@ pub enum NetworkInitError {
         limit: usize,
     },
 
+    /// The configured IPv4 pool cannot provide a `/30` for this slot.
+    #[error("IPv4 pool {pool} cannot assign network slot {slot}")]
+    Ipv4PoolCapacity {
+        /// Configured IPv4 pool.
+        pool: Ipv4Network,
+        /// Requested sandbox slot.
+        slot: u16,
+    },
+
+    /// The configured IPv6 pool cannot provide a `/64` for this slot.
+    #[error("IPv6 pool {pool} cannot assign network slot {slot}")]
+    Ipv6PoolCapacity {
+        /// Configured IPv6 pool.
+        pool: Ipv6Network,
+        /// Requested sandbox slot.
+        slot: u16,
+    },
+
     /// TLS interception state failed to initialize.
     #[error("TLS initialization failed: {0}")]
     Tls(#[from] TlsStateError),
@@ -141,11 +153,7 @@ impl SmoltcpNetwork {
     /// Returns an error when network configuration would allocate unsafe
     /// resources or TLS interception cannot initialize.
     ///
-    /// # Panics
-    ///
-    /// Panics if `slot` exceeds the address pool capacity (65535 for MAC/IPv6,
-    /// 524287 for IPv4).
-    pub fn new(config: NetworkConfig, slot: u64) -> Result<Self, NetworkInitError> {
+    pub fn new(config: NetworkConfig, slot: u16) -> Result<Self, NetworkInitError> {
         Self::new_with_profile(config, slot, DeploymentProfile::SingleTenant)
     }
 
@@ -162,7 +170,7 @@ impl SmoltcpNetwork {
     /// unsafe resources or TLS interception cannot initialize.
     pub fn new_with_profile(
         mut config: NetworkConfig,
-        slot: u64,
+        slot: u16,
         deployment_profile: DeploymentProfile,
     ) -> Result<Self, NetworkInitError> {
         enforce_deployment_profile(&mut config, deployment_profile);
@@ -178,7 +186,7 @@ impl SmoltcpNetwork {
     #[cfg(test)]
     fn new_with_routes(
         config: NetworkConfig,
-        slot: u64,
+        slot: u16,
         host_has_ipv4: bool,
         host_has_ipv6: bool,
     ) -> Result<Self, NetworkInitError> {
@@ -193,15 +201,11 @@ impl SmoltcpNetwork {
 
     fn new_with_profile_and_routes(
         config: NetworkConfig,
-        slot: u64,
+        slot: u16,
         deployment_profile: DeploymentProfile,
         host_has_ipv4: bool,
         host_has_ipv6: bool,
     ) -> Result<Self, NetworkInitError> {
-        assert!(
-            slot <= MAX_SLOT,
-            "sandbox slot {slot} exceeds address pool capacity (max {MAX_SLOT})"
-        );
         if let Some(configured) = config.max_connections
             && configured > MAX_NETWORK_CONNECTIONS
         {
@@ -218,29 +222,29 @@ impl SmoltcpNetwork {
         let gateway_mac = derive_gateway_mac(slot);
         let mtu = config.interface.mtu.unwrap_or(1500);
 
-        let guest_ipv4 = config.interface.ipv4_address.or_else(|| {
-            host_has_ipv4.then(|| {
-                derive_guest_ipv4(
-                    config
-                        .interface
-                        .ipv4_pool
-                        .unwrap_or_else(default_guest_ipv4_pool),
-                    slot,
-                )
-            })
-        });
+        let guest_ipv4 = match config.interface.ipv4_address {
+            Some(address) => Some(address),
+            None if host_has_ipv4 => Some(derive_guest_ipv4(
+                config
+                    .interface
+                    .ipv4_pool
+                    .unwrap_or_else(default_guest_ipv4_pool),
+                slot,
+            )?),
+            None => None,
+        };
         let gateway_ipv4 = guest_ipv4.map(gateway_from_guest_ipv4);
-        let guest_ipv6 = config.interface.ipv6_address.or_else(|| {
-            host_has_ipv6.then(|| {
-                derive_guest_ipv6(
-                    config
-                        .interface
-                        .ipv6_pool
-                        .unwrap_or_else(default_guest_ipv6_pool),
-                    slot,
-                )
-            })
-        });
+        let guest_ipv6 = match config.interface.ipv6_address {
+            Some(address) => Some(address),
+            None if host_has_ipv6 => Some(derive_guest_ipv6(
+                config
+                    .interface
+                    .ipv6_pool
+                    .unwrap_or_else(default_guest_ipv6_pool),
+                slot,
+            )?),
+            None => None,
+        };
         let gateway_ipv6 = guest_ipv6.map(gateway_from_guest_ipv6);
 
         let queue_capacity = config
@@ -584,38 +588,35 @@ fn enforce_deployment_profile(config: &mut NetworkConfig, profile: DeploymentPro
 /// Derive a guest MAC address from the sandbox slot.
 ///
 /// Format: `02:ms:bx:SS:SS:02` where SS:SS encodes the slot.
-fn derive_guest_mac(slot: u64) -> [u8; 6] {
+fn derive_guest_mac(slot: u16) -> [u8; 6] {
     let s = slot.to_be_bytes();
-    [0x02, 0x6d, 0x73, s[6], s[7], 0x02]
+    [0x02, 0x6d, 0x73, s[0], s[1], 0x02]
 }
 
 /// Derive a gateway MAC address from the sandbox slot.
 ///
 /// Format: `02:ms:bx:SS:SS:01`.
-fn derive_gateway_mac(slot: u64) -> [u8; 6] {
+fn derive_gateway_mac(slot: u16) -> [u8; 6] {
     let s = slot.to_be_bytes();
-    [0x02, 0x6d, 0x73, s[6], s[7], 0x01]
+    [0x02, 0x6d, 0x73, s[0], s[1], 0x01]
 }
 
 /// Derive a guest IPv4 address from the sandbox slot.
 ///
 /// Pool: `172.16.0.0/12` by default. Each slot gets a `/30` block (4 IPs).
 /// Guest is at offset +2 in the block.
-fn derive_guest_ipv4(pool: Ipv4Network, slot: u64) -> Ipv4Addr {
-    assert!(
-        pool.prefix() <= 30,
-        "IPv4 pool {pool} must be large enough to contain at least one /30 block"
-    );
-
-    let capacity = 1u64 << (30 - pool.prefix());
-    assert!(
-        slot < capacity,
-        "sandbox slot {slot} exceeds IPv4 pool {pool} capacity ({capacity} /30 blocks)"
-    );
+fn derive_guest_ipv4(pool: Ipv4Network, slot: u16) -> Result<Ipv4Addr, NetworkInitError> {
+    let capacity = 30_u8
+        .checked_sub(pool.prefix())
+        .map(|host_bits| 1_u32 << host_bits)
+        .ok_or(NetworkInitError::Ipv4PoolCapacity { pool, slot })?;
+    if u32::from(slot) >= capacity {
+        return Err(NetworkInitError::Ipv4PoolCapacity { pool, slot });
+    }
 
     let base = u32::from(pool.network());
-    let offset = (slot as u32) * 4 + 2; // +2 = guest within /30
-    Ipv4Addr::from(base + offset)
+    let offset = u32::from(slot) * 4 + 2; // +2 = guest within /30
+    Ok(Ipv4Addr::from(base + offset))
 }
 
 /// Gateway IPv4 from guest IPv4: guest - 1 (offset +1 in the /30 block).
@@ -632,21 +633,18 @@ fn default_guest_ipv4_pool() -> Ipv4Network {
 ///
 /// Pool: `fd42:6d73:62::/48`. Each slot gets a `/64` prefix.
 /// Guest is `::2` in its prefix.
-fn derive_guest_ipv6(pool: Ipv6Network, slot: u64) -> Ipv6Addr {
-    assert!(
-        pool.prefix() <= 64,
-        "IPv6 pool {pool} must be large enough to contain at least one /64 prefix"
-    );
-
-    let capacity = 1u128 << (64 - pool.prefix());
-    assert!(
-        (slot as u128) < capacity,
-        "sandbox slot {slot} exceeds IPv6 pool {pool} capacity ({capacity} /64 prefixes)"
-    );
+fn derive_guest_ipv6(pool: Ipv6Network, slot: u16) -> Result<Ipv6Addr, NetworkInitError> {
+    let capacity = 64_u8
+        .checked_sub(pool.prefix())
+        .map(|host_bits| 1_u128 << host_bits)
+        .ok_or(NetworkInitError::Ipv6PoolCapacity { pool, slot })?;
+    if u128::from(slot) >= capacity {
+        return Err(NetworkInitError::Ipv6PoolCapacity { pool, slot });
+    }
 
     let base = u128::from(pool.network());
-    let offset = (slot as u128) << 64;
-    Ipv6Addr::from(base + offset + 2)
+    let offset = u128::from(slot) << 64;
+    Ok(Ipv6Addr::from(base + offset + 2))
 }
 
 /// Gateway IPv6 from guest IPv6: `::1` in the same prefix.
@@ -703,7 +701,7 @@ mod tests {
         assert_eq!(derive_guest_mac(0), [0x02, 0x6d, 0x73, 0x00, 0x00, 0x02]);
         assert_eq!(derive_gateway_mac(0), [0x02, 0x6d, 0x73, 0x00, 0x00, 0x01]);
         assert_eq!(
-            derive_guest_ipv4(default_guest_ipv4_pool(), 0),
+            derive_guest_ipv4(default_guest_ipv4_pool(), 0).unwrap(),
             Ipv4Addr::new(172, 16, 0, 2)
         );
         assert_eq!(
@@ -760,7 +758,7 @@ mod tests {
     #[test]
     fn derive_addresses_slot_1() {
         assert_eq!(
-            derive_guest_ipv4(default_guest_ipv4_pool(), 1),
+            derive_guest_ipv4(default_guest_ipv4_pool(), 1).unwrap(),
             Ipv4Addr::new(172, 16, 0, 6)
         );
         assert_eq!(
@@ -770,23 +768,57 @@ mod tests {
     }
 
     #[test]
+    fn derive_addresses_max_slot() {
+        assert_eq!(
+            derive_guest_mac(u16::MAX),
+            [0x02, 0x6d, 0x73, 0xff, 0xff, 0x02]
+        );
+        assert_eq!(
+            derive_guest_ipv4(default_guest_ipv4_pool(), u16::MAX).unwrap(),
+            Ipv4Addr::new(172, 19, 255, 254)
+        );
+        assert_eq!(
+            derive_guest_ipv6(default_guest_ipv6_pool(), u16::MAX).unwrap(),
+            "fd42:6d73:62:ffff::2".parse::<Ipv6Addr>().unwrap()
+        );
+    }
+
+    #[test]
     fn derive_addresses_custom_ipv4_pool() {
         let pool = "172.31.240.0/24".parse::<Ipv4Network>().unwrap();
-        assert_eq!(derive_guest_ipv4(pool, 0), Ipv4Addr::new(172, 31, 240, 2));
         assert_eq!(
-            derive_guest_ipv4(pool, 63),
+            derive_guest_ipv4(pool, 0).unwrap(),
+            Ipv4Addr::new(172, 31, 240, 2)
+        );
+        assert_eq!(
+            derive_guest_ipv4(pool, 63).unwrap(),
             Ipv4Addr::new(172, 31, 240, 254)
         );
     }
 
     #[test]
+    fn custom_ipv4_pool_capacity_is_a_typed_error() {
+        let pool = "172.31.240.0/24".parse::<Ipv4Network>().unwrap();
+        assert!(matches!(
+            derive_guest_ipv4(pool, 64),
+            Err(NetworkInitError::Ipv4PoolCapacity { slot: 64, .. })
+        ));
+
+        let pool = "172.31.240.0/31".parse::<Ipv4Network>().unwrap();
+        assert!(matches!(
+            derive_guest_ipv4(pool, 0),
+            Err(NetworkInitError::Ipv4PoolCapacity { slot: 0, .. })
+        ));
+    }
+
+    #[test]
     fn derive_ipv6_slot_0() {
         assert_eq!(
-            derive_guest_ipv6(default_guest_ipv6_pool(), 0),
+            derive_guest_ipv6(default_guest_ipv6_pool(), 0).unwrap(),
             "fd42:6d73:62:0::2".parse::<Ipv6Addr>().unwrap()
         );
         assert_eq!(
-            gateway_from_guest_ipv6(derive_guest_ipv6(default_guest_ipv6_pool(), 0)),
+            gateway_from_guest_ipv6(derive_guest_ipv6(default_guest_ipv6_pool(), 0).unwrap()),
             "fd42:6d73:62:0::1".parse::<Ipv6Addr>().unwrap()
         );
     }
@@ -795,13 +827,28 @@ mod tests {
     fn derive_addresses_custom_ipv6_pool() {
         let pool = "fd7a:115c:a1e0:100::/56".parse::<Ipv6Network>().unwrap();
         assert_eq!(
-            derive_guest_ipv6(pool, 0),
+            derive_guest_ipv6(pool, 0).unwrap(),
             "fd7a:115c:a1e0:100::2".parse::<Ipv6Addr>().unwrap()
         );
         assert_eq!(
-            derive_guest_ipv6(pool, 3),
+            derive_guest_ipv6(pool, 3).unwrap(),
             "fd7a:115c:a1e0:103::2".parse::<Ipv6Addr>().unwrap()
         );
+    }
+
+    #[test]
+    fn custom_ipv6_pool_capacity_is_a_typed_error() {
+        let pool = "fd7a:115c:a1e0:100::/62".parse::<Ipv6Network>().unwrap();
+        assert!(matches!(
+            derive_guest_ipv6(pool, 4),
+            Err(NetworkInitError::Ipv6PoolCapacity { slot: 4, .. })
+        ));
+
+        let pool = "fd7a:115c:a1e0:100::/65".parse::<Ipv6Network>().unwrap();
+        assert!(matches!(
+            derive_guest_ipv6(pool, 0),
+            Err(NetworkInitError::Ipv6PoolCapacity { slot: 0, .. })
+        ));
     }
 
     #[test]

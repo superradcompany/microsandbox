@@ -15,6 +15,7 @@ func TestErrorKindString(t *testing.T) {
 	}{
 		{ErrUnknown, "Unknown"},
 		{ErrSandboxNotFound, "SandboxNotFound"},
+		{ErrSandboxReplaced, "SandboxReplaced"},
 		{ErrSandboxStillRunning, "SandboxStillRunning"},
 		{ErrVolumeNotFound, "VolumeNotFound"},
 		{ErrVolumeAlreadyExists, "VolumeAlreadyExists"},
@@ -134,6 +135,7 @@ func TestKindFromFFIAllTags(t *testing.T) {
 	}{
 		{ffi.KindSandboxNotFound, ErrSandboxNotFound},
 		{ffi.KindSandboxAlreadyExists, ErrSandboxAlreadyExists},
+		{ffi.KindSandboxReplaced, ErrSandboxReplaced},
 		{ffi.KindSandboxStillRunning, ErrSandboxStillRunning},
 		{ffi.KindVolumeNotFound, ErrVolumeNotFound},
 		{ffi.KindVolumeAlreadyExists, ErrVolumeAlreadyExists},

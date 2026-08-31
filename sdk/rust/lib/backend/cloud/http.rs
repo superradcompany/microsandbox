@@ -149,6 +149,21 @@ impl CloudBackend {
         decode_json(resp, "GET /v1/sandboxes/by-name/:name").await
     }
 
+    /// `GET /v1/sandboxes/:id` for identity-safe receiver operations.
+    pub(in crate::backend) async fn get_sandbox_by_id(
+        &self,
+        id: &str,
+    ) -> MicrosandboxResult<CloudCreateSandboxResponse> {
+        let url = format!("{}/v1/sandboxes/{}", self.url, urlencoding(id));
+        let resp = self
+            .http
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| cloud_io_error("GET /v1/sandboxes/:id", e))?;
+        decode_json(resp, "GET /v1/sandboxes/:id").await
+    }
+
     /// `POST /v1/sandboxes/by-name/:name/start`, waiting for readiness.
     pub async fn start_sandbox(
         &self,
@@ -176,6 +191,29 @@ impl CloudBackend {
         decode_json(resp, "POST /v1/sandboxes/by-name/:name/start").await
     }
 
+    /// `POST /v1/sandboxes/:id/start`, waiting for readiness.
+    pub(in crate::backend) async fn start_sandbox_by_id(
+        &self,
+        id: &str,
+    ) -> MicrosandboxResult<CloudCreateSandboxResponse> {
+        let url = format!("{}/v1/sandboxes/{}/start", self.url, urlencoding(id));
+        let query = CloudSandboxWaitQuery {
+            start: None,
+            wait_for: "running",
+            wait_timeout: CLOUD_READY_WAIT_TIMEOUT_SECS,
+        };
+        let resp = self
+            .http
+            .post(&url)
+            .json(&serde_json::json!({}))
+            .query(&query)
+            .timeout(CLOUD_READY_HTTP_TIMEOUT)
+            .send()
+            .await
+            .map_err(|e| cloud_io_error("POST /v1/sandboxes/:id/start", e))?;
+        decode_json(resp, "POST /v1/sandboxes/:id/start").await
+    }
+
     /// `POST /v1/sandboxes/by-name/:name/stop`.
     pub async fn stop_sandbox(&self, name: &str) -> MicrosandboxResult<CloudCreateSandboxResponse> {
         let url = format!(
@@ -193,6 +231,22 @@ impl CloudBackend {
         decode_json(resp, "POST /v1/sandboxes/by-name/:name/stop").await
     }
 
+    /// `POST /v1/sandboxes/:id/stop` for identity-safe receiver operations.
+    pub(in crate::backend) async fn stop_sandbox_by_id(
+        &self,
+        id: &str,
+    ) -> MicrosandboxResult<CloudCreateSandboxResponse> {
+        let url = format!("{}/v1/sandboxes/{}/stop", self.url, urlencoding(id));
+        let resp = self
+            .http
+            .post(&url)
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .map_err(|e| cloud_io_error("POST /v1/sandboxes/:id/stop", e))?;
+        decode_json(resp, "POST /v1/sandboxes/:id/stop").await
+    }
+
     /// `DELETE /v1/sandboxes/by-name/:name`. Returns the typed `MessageResponse`
     /// msb-cloud emits.
     pub async fn destroy_sandbox(&self, name: &str) -> MicrosandboxResult<CloudMessageResponse> {
@@ -204,6 +258,21 @@ impl CloudBackend {
             .await
             .map_err(|e| cloud_io_error("DELETE /v1/sandboxes/by-name/:name", e))?;
         decode_json(resp, "DELETE /v1/sandboxes/by-name/:name").await
+    }
+
+    /// `DELETE /v1/sandboxes/:id` for identity-safe receiver operations.
+    pub(in crate::backend) async fn destroy_sandbox_by_id(
+        &self,
+        id: &str,
+    ) -> MicrosandboxResult<CloudMessageResponse> {
+        let url = format!("{}/v1/sandboxes/{}", self.url, urlencoding(id));
+        let resp = self
+            .http
+            .delete(&url)
+            .send()
+            .await
+            .map_err(|e| cloud_io_error("DELETE /v1/sandboxes/:id", e))?;
+        decode_json(resp, "DELETE /v1/sandboxes/:id").await
     }
 
     /// Stream logs from `GET /v1/sandboxes/:id/logs`.

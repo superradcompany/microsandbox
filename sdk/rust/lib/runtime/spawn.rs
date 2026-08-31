@@ -30,11 +30,9 @@ use std::{
 
 #[cfg(windows)]
 use rand::Rng;
-use rand::RngExt;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set};
 use serde::Deserialize;
 use sha2::{Digest as Sha2Digest, Sha256};
-use tempfile::TempDir;
 #[cfg(windows)]
 use tokio::net::windows::named_pipe::{NamedPipeServer, PipeMode, ServerOptions};
 use tokio::{
@@ -66,11 +64,13 @@ use microsandbox_protocol::{
     },
     exec::ExecRlimit,
 };
-use microsandbox_runtime::launch::{LaunchConfig, Lifecycle};
+use microsandbox_runtime::launch::{FileMountConfig, LaunchConfig, Lifecycle};
 use microsandbox_runtime::vm::{MetricsSlotHandoff, StartupCommand};
 use microsandbox_types::{CommandResolutionError, SandboxLogLevel, resolve_default_command};
 use microsandbox_utils::{DB_FILENAME, DB_SUBDIR};
 
+#[cfg(feature = "net")]
+use super::network_slot::NetworkSlot;
 #[cfg(not(target_os = "linux"))]
 use crate::error::{Operation, UnsupportedReason};
 use crate::runtime::handle::ProcessHandle;
@@ -380,10 +380,9 @@ pub async fn spawn_sandbox(
     #[cfg(windows)]
     ensure_agent_pipe_unclaimed(&agent_sock_path, &config.spec.name).await?;
 
-    // Stage file bind mounts: each file gets its own isolated directory so
-    // that virtio-fs (which requires directories) can share it without
-    // exposing adjacent files on the host.
-    let (staged_file_mounts, file_mounts_staging) = stage_file_mounts(config).await?;
+    // Resolve file mounts separately so the runtime can attach a synthetic
+    // one-entry filesystem instead of exporting the source's parent directory.
+    let file_mounts = resolve_file_mounts(config)?;
     let named_volumes = resolve_named_volumes(local, config).await?;
     let disk_locks = lock_disk_mounts(config, &named_volumes)?;
     let metrics_reservation = if config.effective_metrics_interval().is_some() {
@@ -447,6 +446,26 @@ pub async fn spawn_sandbox(
     #[cfg(windows)]
     let startup_pipe_name = startup_pipe.as_ref().map(|pipe| pipe.name.as_os_str());
 
+    let (writeback_limit_bytes, writeback_pool_bytes) =
+        match block_writeback_policy(&global.runtime) {
+            Ok(policy) => policy,
+            Err(err) => {
+                release_metrics_reservation(config, metrics_reservation.as_ref());
+                return Err(err);
+            }
+        };
+
+    // #1390: lease from active sandboxes instead of deriving the slot from the
+    // ever-increasing sandbox ID.
+    #[cfg(feature = "net")]
+    let network_slot = match NetworkSlot::lease(local, sandbox_id).await {
+        Ok(slot) => slot,
+        Err(err) => {
+            release_metrics_reservation(config, metrics_reservation.as_ref());
+            return Err(err);
+        }
+    };
+
     // Split the config: `visible` stays on argv, the typed `LaunchConfig` is
     // delivered over the config fd (keeps the network-config blob and
     // secret-bearing env off `ps` / `/proc/<pid>/cmdline` — see issue #997).
@@ -454,13 +473,15 @@ pub async fn spawn_sandbox(
         local,
         config,
         sandbox_id,
+        #[cfg(feature = "net")]
+        network_slot,
         &db_path,
         global.database.connect_timeout_secs,
         &log_dir,
         &runtime_dir,
         &agent_sock_path,
         &libkrunfw_path,
-        &staged_file_mounts,
+        &file_mounts,
         &named_volumes,
         metrics_reservation.as_ref(),
         parent_watchdog
@@ -477,7 +498,6 @@ pub async fn spawn_sandbox(
         #[cfg(windows)]
         startup_pipe_name,
     );
-    let (writeback_limit_bytes, writeback_pool_bytes) = block_writeback_policy(&global.runtime)?;
     tracing::debug!(
         per_disk_limit_bytes = ?writeback_limit_bytes,
         pool_bytes = ?writeback_pool_bytes,
@@ -713,7 +733,6 @@ pub async fn spawn_sandbox(
         startup.pid,
         config.spec.name.clone(),
         child,
-        file_mounts_staging,
         disk_locks,
         parent_watchdog.map(|pipe| pipe.write_fd),
         metrics_reservation.as_ref().map(|reservation| {
@@ -731,7 +750,6 @@ pub async fn spawn_sandbox(
         startup.pid,
         config.spec.name.clone(),
         child,
-        file_mounts_staging,
         disk_locks,
         child_job,
         metrics_reservation.as_ref().map(|reservation| {
@@ -2135,128 +2153,35 @@ async fn terminate_startup_process(
     child.wait().await.ok()
 }
 
-/// Scan `config.spec.mounts` for file bind mounts and stage each file in its own
-/// isolated directory inside an ephemeral [`TempDir`].
+/// Resolve bind mounts whose host source is a regular file.
 ///
-/// Returns a map from guest path to `(file_mount_dir, filename, tag)` for
-/// each staged file, plus the `TempDir` handle that must be kept alive for
-/// the VM's lifetime.
-async fn stage_file_mounts(
+/// The runtime opens the source directly through `SingleFileFs`; this map only
+/// carries the guest-visible filename and stable virtio-fs tag.
+fn resolve_file_mounts(
     config: &SandboxConfig,
-) -> MicrosandboxResult<(HashMap<String, (PathBuf, String, String)>, Option<TempDir>)> {
-    // Collect file bind mounts first so we can skip TempDir creation when
-    // there are none.
-    let file_mounts: Vec<_> = config
-        .spec
-        .mounts
-        .iter()
-        .filter_map(|m| match m {
-            VolumeMount::Bind {
-                host,
-                guest,
-                options,
-                ..
-            } if host.is_file() => Some((host, guest, options.readonly)),
-            _ => None,
-        })
-        .collect();
-
-    if file_mounts.is_empty() {
-        return Ok((HashMap::new(), None));
-    }
-
-    let tempdir = tempfile::tempdir()?;
-    let mut staged = HashMap::new();
-
-    for (host, guest, readonly) in file_mounts {
-        // Generate a random tag to avoid collisions.
-        let id: u32 = rand::rng().random();
-        let tag = format!("fm_{id:08x}");
-
-        let file_mount_dir = tempdir.path().join(&tag);
-        tokio::fs::create_dir_all(&file_mount_dir).await?;
-
-        // Canonicalize the staging directory so the mount root is symlink-free
-        // (the system temp dir often sits under a symlinked prefix, e.g. macOS
-        // `/var` -> `/private/var`). This resolves the one benign system symlink
-        // here in the trusted host context, so the mount stays under the default
-        // no-follow root protection instead of needing an exemption.
-        let file_mount_dir = tokio::fs::canonicalize(&file_mount_dir).await?;
-
-        let filename_os = host.file_name().ok_or_else(|| {
-            crate::MicrosandboxError::InvalidConfig(format!(
-                "file mount has no filename: {}",
-                host.display()
-            ))
-        })?;
-
-        let filename = filename_os.to_str().ok_or_else(|| {
-            crate::MicrosandboxError::InvalidConfig(format!(
-                "file mount filename is not valid UTF-8: {}",
-                host.display()
-            ))
-        })?;
-
-        let target = file_mount_dir.join(filename);
-
-        // Hard-link preserves the same inode — writes in the guest propagate
-        // to the host and vice-versa. Falls back to copy for cross-filesystem
-        // mounts (different device IDs).
-        match tokio::fs::hard_link(host, &target).await {
-            Ok(()) => {
-                tracing::debug!(
-                    host = %host.display(),
-                    file_mount_dir = %target.display(),
-                    "file mount: hard-linked"
-                );
-            }
-            Err(e) if is_cross_device_link_error(&e) => {
-                if !readonly {
-                    tracing::warn!(
-                        host = %host.display(),
-                        file_mount_dir = %target.display(),
-                        "file mount: cross-filesystem, falling back to copy \
-                         (guest writes will NOT propagate to host)"
-                    );
-                } else {
-                    tracing::debug!(
-                        host = %host.display(),
-                        file_mount_dir = %target.display(),
-                        "file mount: cross-filesystem, copying (read-only)"
-                    );
-                }
-                tokio::fs::copy(host, &target).await?;
-            }
-            Err(e) => return Err(e.into()),
+) -> MicrosandboxResult<HashMap<String, (String, String)>> {
+    let mut file_mounts = HashMap::new();
+    for mount in &config.spec.mounts {
+        let VolumeMount::Bind { host, guest, .. } = mount else {
+            continue;
+        };
+        if !host.is_file() {
+            continue;
         }
 
-        staged.insert(guest.clone(), (file_mount_dir, filename.to_string(), tag));
+        let filename = host
+            .file_name()
+            .and_then(OsStr::to_str)
+            .ok_or_else(|| {
+                MicrosandboxError::InvalidConfig(format!(
+                    "file mount has no valid UTF-8 filename: {}",
+                    host.display()
+                ))
+            })?
+            .to_string();
+        file_mounts.insert(guest.clone(), (filename, guest_mount_tag(guest)));
     }
-
-    Ok((staged, Some(tempdir)))
-}
-
-/// Return whether a host hard-link failed because the target is on another device.
-fn is_cross_device_link_error(error: &std::io::Error) -> bool {
-    error.kind() == std::io::ErrorKind::CrossesDevices || is_platform_cross_device_link_error(error)
-}
-
-#[cfg(unix)]
-fn is_platform_cross_device_link_error(error: &std::io::Error) -> bool {
-    error.raw_os_error() == Some(libc::EXDEV)
-}
-
-#[cfg(windows)]
-fn is_platform_cross_device_link_error(error: &std::io::Error) -> bool {
-    // CreateHardLinkW reports cross-volume links as ERROR_NOT_SAME_DEVICE.
-    const ERROR_NOT_SAME_DEVICE: i32 = 17;
-
-    error.raw_os_error() == Some(ERROR_NOT_SAME_DEVICE)
-}
-
-#[cfg(not(any(unix, windows)))]
-fn is_platform_cross_device_link_error(_error: &std::io::Error) -> bool {
-    false
+    Ok(file_mounts)
 }
 
 /// Push a `--mount tag:host_path[:ro]` arg pair.
@@ -2289,19 +2214,22 @@ fn push_dir_mount_arg(
     mounts.push(arg);
 }
 
-/// Collect a `fm_tag:file_mount_dir[:ro]` mount entry.
+/// Collect a typed host-file mount for the runtime's single-file backend.
+#[allow(clippy::too_many_arguments)]
 fn push_file_mount_arg(
-    mounts: &mut Vec<String>,
+    mounts: &mut Vec<FileMountConfig>,
     tag: &str,
-    file_mount_dir: &Path,
+    host_file: &Path,
+    filename: &str,
     options: MountOptions,
     stat_virtualization: StatVirtualization,
     host_permissions: HostPermissions,
+    quota_mib: u32,
 ) {
-    let mut arg = format!("{tag}:{}", file_mount_dir.display());
+    let mut arg = format!("{tag}:{}", host_file.display());
     let mut opts = mount_option_tokens(options);
-    // The staging directory is canonicalized at creation, so it is symlink-free
-    // and stays under the default no-follow root protection — no opt-out here.
+    // SingleFileFs canonicalizes the selected source and never exports its
+    // parent namespace, so file mounts do not need the directory-root opt-out.
     append_policy_options(
         &mut opts,
         stat_virtualization,
@@ -2310,8 +2238,12 @@ fn push_file_mount_arg(
         options.override_uid,
         options.override_gid,
     );
+    opts.push(format!("quota={quota_mib}"));
     append_option_block(&mut arg, opts);
-    mounts.push(arg);
+    mounts.push(FileMountConfig {
+        mount: arg,
+        filename: filename.to_string(),
+    });
 }
 
 /// Collect a `id:host_path:format[:ro]` disk entry.
@@ -2439,19 +2371,19 @@ fn guest_mount_tag(guest_path: &str) -> String {
     out
 }
 
-/// Build the `msb sandbox` CLI args for a sandbox.
 #[allow(clippy::too_many_arguments)]
 fn sandbox_cli_args(
     local: &LocalBackend,
     config: &SandboxConfig,
     sandbox_id: i32,
+    #[cfg(feature = "net")] network_slot: NetworkSlot,
     db_path: &Path,
     db_connect_timeout_secs: u64,
     log_dir: &Path,
     runtime_dir: &Path,
     agent_sock_path: &Path,
     libkrunfw_path: &Path,
-    staged_file_mounts: &HashMap<String, (PathBuf, String, String)>,
+    file_mounts: &HashMap<String, (String, String)>,
     named_volumes: &HashMap<String, ResolvedNamedVolume>,
     metrics_reservation: Option<&MetricsReservation>,
     parent_watch_fd: Option<i32>,
@@ -2690,14 +2622,19 @@ fn sandbox_cli_args(
                 follow_root_symlinks,
                 quota_mib,
             } => {
-                if let Some((file_mount_dir, filename, tag)) = staged_file_mounts.get(guest) {
+                if let Some((filename, tag)) = file_mounts.get(guest) {
+                    // File binds receive the same default-on host disk
+                    // protection as directory binds.
+                    let quota = quota_mib.unwrap_or(crate::sandbox::config::DEFAULT_BIND_QUOTA_MIB);
                     push_file_mount_arg(
-                        &mut launch.mounts,
+                        &mut launch.file_mounts,
                         tag,
-                        file_mount_dir,
+                        host,
+                        filename,
                         *options,
                         *stat_virtualization,
                         *host_permissions,
+                        quota,
                     );
                     launch.bootstrap.file_mounts.push(BootstrapFileMount {
                         tag: tag.clone(),
@@ -2824,7 +2761,7 @@ fn sandbox_cli_args(
                 .local_network_config()
                 .expect("sandbox network spec should decode to local network config"),
         );
-        launch.sandbox_slot = sandbox_id as u64;
+        launch.sandbox_slot = network_slot.get();
     }
 
     (visible, launch)
@@ -2897,6 +2834,8 @@ mod tests {
 
     use microsandbox_runtime::launch::LaunchConfig;
 
+    #[cfg(feature = "net")]
+    use super::NetworkSlot;
     #[cfg(target_os = "linux")]
     use super::{
         AUTO_BLOCK_WRITEBACK_LIMIT_BYTES, MIN_BLOCK_WRITEBACK_LIMIT_BYTES,
@@ -2981,6 +2920,11 @@ mod tests {
         LocalBackend::lazy()
     }
 
+    #[cfg(feature = "net")]
+    fn test_network_slot() -> NetworkSlot {
+        NetworkSlot::try_from(1).unwrap()
+    }
+
     /// Return the typed launch payload generated for a sandbox configuration.
     fn render_launch(config: &SandboxConfig) -> LaunchConfig {
         let local = test_local_backend();
@@ -2988,6 +2932,8 @@ mod tests {
             &local,
             config,
             42,
+            #[cfg(feature = "net")]
+            test_network_slot(),
             Path::new("/tmp/msb.db"),
             30,
             Path::new("/tmp/logs"),
@@ -3081,6 +3027,9 @@ mod tests {
         }
         for m in &launch.mounts {
             pair(&mut out, "--mount", m.clone());
+        }
+        for m in &launch.file_mounts {
+            pair(&mut out, "--file-mount", m.mount.clone());
         }
         for d in &launch.disks {
             pair(&mut out, "--disk", d.clone());
@@ -3231,6 +3180,8 @@ mod tests {
             &local,
             config,
             42,
+            #[cfg(feature = "net")]
+            test_network_slot(),
             Path::new("/tmp/msb.db"),
             30,
             Path::new("/tmp/logs"),
@@ -3313,6 +3264,18 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "net")]
+    #[tokio::test]
+    async fn sandbox_cli_args_uses_the_supplied_network_slot() {
+        let config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .build()
+            .await
+            .unwrap();
+
+        assert_eq!(render_launch(&config).sandbox_slot, 1);
+    }
+
     /// Render only the `visible` argv (what shows up in `ps`).
     fn render_visible_args(config: &SandboxConfig) -> Vec<String> {
         let local = test_local_backend();
@@ -3320,6 +3283,8 @@ mod tests {
             &local,
             config,
             42,
+            #[cfg(feature = "net")]
+            test_network_slot(),
             Path::new("/tmp/msb.db"),
             30,
             Path::new("/tmp/logs"),
@@ -3341,20 +3306,22 @@ mod tests {
 
     fn render_args_with_file_mounts(
         config: &SandboxConfig,
-        staged_file_mounts: &HashMap<String, (PathBuf, String, String)>,
+        file_mounts: &HashMap<String, (String, String)>,
     ) -> Vec<String> {
         let local = test_local_backend();
         let (visible, launch) = sandbox_cli_args(
             &local,
             config,
             42,
+            #[cfg(feature = "net")]
+            test_network_slot(),
             Path::new("/tmp/msb.db"),
             30,
             Path::new("/tmp/logs"),
             Path::new("/tmp/runtime"),
             Path::new("/tmp/agent.sock"),
             Path::new("/tmp/libkrunfw.dylib"),
-            staged_file_mounts,
+            file_mounts,
             &HashMap::new(),
             None,
             None,
@@ -3430,6 +3397,8 @@ mod tests {
             &local,
             &config,
             42,
+            #[cfg(feature = "net")]
+            test_network_slot(),
             Path::new("/tmp/msb.db"),
             30,
             Path::new("/tmp/logs"),
@@ -3505,6 +3474,8 @@ mod tests {
             &local,
             &config,
             42,
+            #[cfg(feature = "net")]
+            test_network_slot(),
             Path::new("/tmp/msb.db"),
             30,
             Path::new("/tmp/logs"),
@@ -4044,23 +4015,20 @@ mod tests {
             .await
             .unwrap();
 
-        let mut staged_file_mounts = HashMap::new();
-        staged_file_mounts.insert(
+        let mut file_mounts = HashMap::new();
+        file_mounts.insert(
             "/guest/config.txt".to_string(),
-            (
-                PathBuf::from("/tmp/staging/fm_aabbccdd"),
-                "config.txt".to_string(),
-                "fm_aabbccdd".to_string(),
-            ),
+            ("config.txt".to_string(), "fm_aabbccdd".to_string()),
         );
 
-        let rendered = render_args_with_file_mounts(&config, &staged_file_mounts);
+        let rendered = render_args_with_file_mounts(&config, &file_mounts);
 
-        // File mount should use staging dir in --mount. The staging dir is
-        // canonicalized at creation so it stays under the no-follow default;
-        // the spec carries no opt-out token.
-        assert!(rendered.windows(2).any(|pair| pair[0] == "--mount"
-            && pair[1] == "fm_aabbccdd:/tmp/staging/fm_aabbccdd:ro,noexec"));
+        assert!(rendered.windows(2).any(|pair| pair[0] == "--file-mount"
+            && pair[1]
+                == format!(
+                    "fm_aabbccdd:/host/config.txt:ro,noexec,quota={}",
+                    crate::sandbox::config::DEFAULT_BIND_QUOTA_MIB
+                )));
         // MSB_FILE_MOUNTS should contain the spec.
         assert!(rendered.contains(
             &"MSB_FILE_MOUNTS=fm_aabbccdd:config.txt:/guest/config.txt:ro,noexec".to_string()
@@ -4079,17 +4047,13 @@ mod tests {
             .await
             .unwrap();
 
-        let mut staged_file_mounts = HashMap::new();
-        staged_file_mounts.insert(
+        let mut file_mounts = HashMap::new();
+        file_mounts.insert(
             "/guest/file.txt".to_string(),
-            (
-                PathBuf::from("/tmp/staging/fm_11223344"),
-                "file.txt".to_string(),
-                "fm_11223344".to_string(),
-            ),
+            ("file.txt".to_string(), "fm_11223344".to_string()),
         );
 
-        let rendered = render_args_with_file_mounts(&config, &staged_file_mounts);
+        let rendered = render_args_with_file_mounts(&config, &file_mounts);
 
         // Directory mount in MSB_DIR_MOUNTS.
         let data_tag = super::guest_mount_tag("/data");
@@ -4120,6 +4084,28 @@ mod tests {
                 .windows(2)
                 .any(|pair| pair[0] == "--mount" && pair[1] == expected),
             "missing default-quota --mount arg in {rendered:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sandbox_cli_args_file_mount_quota_override() {
+        let config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .volume("/guest/file.txt", |m| m.bind("/host/file.txt").quota(32u32))
+            .build()
+            .await
+            .unwrap();
+
+        let mut file_mounts = HashMap::new();
+        file_mounts.insert(
+            "/guest/file.txt".to_string(),
+            ("file.txt".to_string(), "fm_11223344".to_string()),
+        );
+        let rendered = render_args_with_file_mounts(&config, &file_mounts);
+
+        assert!(
+            rendered.windows(2).any(|pair| pair[0] == "--file-mount"
+                && pair[1] == "fm_11223344:/host/file.txt:quota=32")
         );
     }
 
@@ -4265,20 +4251,20 @@ mod tests {
             .await
             .unwrap();
 
-        let mut staged_file_mounts = HashMap::new();
-        staged_file_mounts.insert(
+        let mut file_mounts = HashMap::new();
+        file_mounts.insert(
             "/guest/config.txt".to_string(),
-            (
-                PathBuf::from(r"C:\Users\Stephen\AppData\Local\Temp\msb\fm_deadbeef"),
-                "config.txt".to_string(),
-                "fm_deadbeef".to_string(),
-            ),
+            ("config.txt".to_string(), "fm_deadbeef".to_string()),
         );
 
-        let rendered = render_args_with_file_mounts(&config, &staged_file_mounts);
+        let rendered = render_args_with_file_mounts(&config, &file_mounts);
 
-        assert!(rendered.windows(2).any(|pair| pair[0] == "--mount"
-            && pair[1] == r"fm_deadbeef:C:\Users\Stephen\AppData\Local\Temp\msb\fm_deadbeef:ro"));
+        assert!(rendered.windows(2).any(|pair| pair[0] == "--file-mount"
+            && pair[1]
+                == format!(
+                    r"fm_deadbeef:C:\Users\Stephen\config.txt:ro,quota={}",
+                    crate::sandbox::config::DEFAULT_BIND_QUOTA_MIB
+                )));
         assert!(
             rendered.contains(
                 &"MSB_FILE_MOUNTS=fm_deadbeef:config.txt:/guest/config.txt:ro".to_string()

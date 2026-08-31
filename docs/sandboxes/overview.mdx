@@ -164,7 +164,7 @@ See [Images](/images/overview) and [Disk Images](/images/disk-images) for the fu
 
 <Tooltip tip="Replace-on-create is not available on microsandbox cloud; remove the existing sandbox first, then create the replacement."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
-Creating a sandbox fails if another sandbox already has the same name. Use replace when you want a fresh sandbox with that name:
+Creating a sandbox fails if another sandbox already has the same name. Use [`connect_or_create`](/sandboxes/lifecycle#converge-on-a-named-sandbox) when you want to reuse the current persisted identity and its configuration. Use replace when you explicitly want a fresh sandbox with that name:
 
 <CodeGroup>
 ```rust Rust
@@ -191,6 +191,10 @@ sb, err := m.CreateSandbox(ctx, "worker",
     m.WithImage("python"),
     m.WithReplace(),
 )
+```
+
+```ruby Ruby
+sb = Microsandbox::Sandbox.create("worker", image: "python", replace: true)
 ```
 
 ```bash CLI

@@ -60,7 +60,11 @@ export type {
   SecretModifySpec,
   SecretPlannedChange,
 } from "./modify.js";
-export { SandboxHandle } from "./sandbox-handle.js";
+export {
+  SandboxHandle,
+  type DestroyOptions,
+  type RestartOptions,
+} from "./sandbox-handle.js";
 export { ExecHandle, ExecOutput, ExecSink } from "./exec.js";
 
 // SSH
@@ -430,6 +434,8 @@ export {
   SandboxFsOpsError,
   SandboxAlreadyExistsError,
   SandboxNotFoundError,
+  SandboxNotRunningError,
+  SandboxReplacedError,
   SandboxStillRunningError,
   TerminalError,
   UnsupportedOperationError,

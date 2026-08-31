@@ -12,7 +12,9 @@ use crate::error::to_napi_error;
 use crate::exec::{ExecOutput, JsExecHandle};
 use crate::exec_options_builder::JsExecOptionsBuilder;
 use crate::fs::JsSandboxFs;
-use crate::sandbox_handle::JsSandboxHandle;
+use crate::sandbox_handle::{
+    JsSandboxHandle, SandboxDestroyOptions, SandboxRestartOptions, destroy_options, restart_options,
+};
 use crate::ssh::{JsSshClient, JsSshServer, apply_client_options, apply_server_options};
 use crate::types::*;
 
@@ -28,6 +30,8 @@ use crate::types::*;
 pub struct Sandbox {
     inner: Arc<Mutex<Option<microsandbox::sandbox::Sandbox>>>,
     backend_kind: &'static str,
+    id: String,
+    owns_lifecycle: bool,
 }
 
 /// One page returned by `Sandbox.list` / `Sandbox.listWith`.
@@ -72,9 +76,13 @@ pub struct JsLogStream {
 impl Sandbox {
     pub fn from_rust(inner: microsandbox::sandbox::Sandbox) -> Self {
         let backend_kind = inner.backend_kind().as_str();
+        let id = inner.id().to_string();
+        let owns_lifecycle = inner.owns_lifecycle();
         Sandbox {
             inner: Arc::new(Mutex::new(Some(inner))),
             backend_kind,
+            id,
+            owns_lifecycle,
         }
     }
 }
@@ -180,12 +188,16 @@ impl Sandbox {
         Ok(sb.name().to_string())
     }
 
+    /// Stable backend-assigned identity for this persisted sandbox.
+    #[napi(getter)]
+    pub fn id(&self) -> String {
+        self.id.clone()
+    }
+
     /// Whether this handle owns the sandbox lifecycle (attached mode).
     #[napi(getter)]
-    pub async fn owns_lifecycle(&self) -> Result<bool> {
-        let guard = self.inner.lock().await;
-        let sb = guard.as_ref().ok_or_else(consumed_error)?;
-        Ok(sb.owns_lifecycle())
+    pub fn owns_lifecycle(&self) -> bool {
+        self.owns_lifecycle
     }
 
     /// Get the full configuration this sandbox was created with
@@ -584,6 +596,55 @@ impl Sandbox {
         let guard = self.inner.lock().await;
         let sb = guard.as_ref().ok_or_else(consumed_error)?;
         sb.request_drain().await.map_err(to_napi_error)
+    }
+
+    /// Wait until this exact sandbox reaches the requested status.
+    #[napi(js_name = "waitForStatus")]
+    pub async fn wait_for_status(&self, status: String) -> Result<JsSandboxHandle> {
+        let guard = self.inner.lock().await;
+        let sandbox = guard.as_ref().ok_or_else(consumed_error)?;
+        let status = match status.as_str() {
+            "created" => microsandbox::sandbox::SandboxStatus::Created,
+            "starting" => microsandbox::sandbox::SandboxStatus::Starting,
+            "running" => microsandbox::sandbox::SandboxStatus::Running,
+            "draining" => microsandbox::sandbox::SandboxStatus::Draining,
+            "paused" => microsandbox::sandbox::SandboxStatus::Paused,
+            "stopped" => microsandbox::sandbox::SandboxStatus::Stopped,
+            "crashed" => microsandbox::sandbox::SandboxStatus::Crashed,
+            other => {
+                return Err(napi::Error::from_reason(format!(
+                    "invalid sandbox status {other:?}"
+                )));
+            }
+        };
+        let handle = sandbox
+            .wait_for_status(status)
+            .await
+            .map_err(to_napi_error)?;
+        Ok(JsSandboxHandle::from_rust(handle))
+    }
+
+    /// Stop and start this exact sandbox.
+    #[napi]
+    pub async fn restart(&self, options: Option<SandboxRestartOptions>) -> Result<Sandbox> {
+        let guard = self.inner.lock().await;
+        let sandbox = guard.as_ref().ok_or_else(consumed_error)?;
+        let restarted = sandbox
+            .restart_with(restart_options(options))
+            .await
+            .map_err(to_napi_error)?;
+        Ok(Sandbox::from_rust(restarted))
+    }
+
+    /// Stop and remove this exact sandbox.
+    #[napi]
+    pub async fn destroy(&self, options: Option<SandboxDestroyOptions>) -> Result<()> {
+        let guard = self.inner.lock().await;
+        let sandbox = guard.as_ref().ok_or_else(consumed_error)?;
+        sandbox
+            .destroy_with(destroy_options(options))
+            .await
+            .map_err(to_napi_error)
     }
 
     /// Wait until the sandbox is observed in a terminal non-running state.

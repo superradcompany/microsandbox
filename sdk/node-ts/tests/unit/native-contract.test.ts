@@ -13,6 +13,9 @@ describe("native Sandbox lifecycle contract", () => {
       "requestKill",
       "killWithTimeout",
       "requestDrain",
+      "waitForStatus",
+      "restart",
+      "destroy",
       "waitUntilStopped",
       "ping",
       "touch",
@@ -28,15 +31,24 @@ describe("native Sandbox lifecycle contract", () => {
     }
   });
 
-  it("exports the durable CMD builder setter", () => {
+  it("exports the durable CMD setter and convergent terminal", () => {
     const proto = napi.SandboxBuilder.prototype as Record<string, unknown>;
     expect(typeof proto.cmd).toBe("function");
+    expect(typeof proto.connectOrCreate).toBe("function");
   });
 
   it("exports the handle health methods used by the TS wrapper", () => {
     const proto = napi.SandboxHandle.prototype as Record<string, unknown>;
 
-    for (const method of ["ping", "touch", "modify"]) {
+    for (const method of [
+      "ping",
+      "touch",
+      "modify",
+      "connectOrStart",
+      "waitForStatus",
+      "restart",
+      "destroy",
+    ]) {
       expect(typeof proto[method], method).toBe("function");
     }
   });
