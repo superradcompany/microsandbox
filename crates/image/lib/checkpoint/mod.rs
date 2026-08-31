@@ -4,6 +4,7 @@
 //! operation progress, runtime ownership, and provider locations deliberately live elsewhere.
 
 mod manifest;
+mod qcow;
 mod store;
 
 //--------------------------------------------------------------------------------------------------
@@ -15,4 +16,5 @@ pub use manifest::{
     DiskLayerRef, MemoryCaptureMode, MemoryExtent, MemoryExtentContent, MemoryManifest,
     ResourceDescriptor, ResourceTreatment,
 };
+pub use qcow::create_qcow2_overlay;
 pub use store::{LocalObjectStore, ObjectId, SparseFileIntegrity, sparse_file_integrity};

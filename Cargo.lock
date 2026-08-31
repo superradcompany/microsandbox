@@ -3997,6 +3997,7 @@ dependencies = [
  "hex",
  "libc",
  "microsandbox-utils",
+ "msb-imago",
  "oci-client",
  "oci-spec 0.10.0",
  "rand 0.10.2",
