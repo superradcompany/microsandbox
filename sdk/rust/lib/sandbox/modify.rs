@@ -690,6 +690,22 @@ async fn control_request(
     name: &str,
     request: String,
 ) -> MicrosandboxResult<microsandbox_runtime::control::ControlResponse> {
+    let response = control_request_raw(name, request).await?;
+    if !response.ok {
+        return Err(crate::MicrosandboxError::Runtime(format!(
+            "live update refused: {}",
+            response
+                .error
+                .unwrap_or_else(|| "unknown error".to_string())
+        )));
+    }
+    Ok(response)
+}
+
+async fn control_request_raw(
+    name: &str,
+    request: String,
+) -> MicrosandboxResult<microsandbox_runtime::control::ControlResponse> {
     #[cfg(unix)]
     {
         let stream = connect_control_socket(control_socket_path_candidates(name))
@@ -755,15 +771,50 @@ where
         .map_err(|e| crate::MicrosandboxError::Runtime(format!("control response failed: {e}")))?;
     let response: microsandbox_runtime::control::ControlResponse =
         serde_json::from_str(line.trim())?;
-    if !response.ok {
-        return Err(crate::MicrosandboxError::Runtime(format!(
-            "live update refused: {}",
-            response
-                .error
-                .unwrap_or_else(|| "unknown error".to_string())
-        )));
-    }
     Ok(response)
+}
+
+/// Capture one resumable checkpoint through the running sandbox's existing control endpoint.
+///
+/// A post-publication source-resume failure still returns the immutable checkpoint so the caller
+/// can finish publishing the requested snapshot. The runtime diagnostic is logged and the source
+/// remains visibly non-running rather than losing the completed capture.
+pub(crate) async fn control_checkpoint_create(
+    name: &str,
+    checkpoint_id: String,
+) -> MicrosandboxResult<microsandbox_runtime::control::CheckpointControlState> {
+    let capabilities = control_capabilities(name).await?;
+    if !capabilities.checkpoint_create {
+        return Err(crate::MicrosandboxError::unsupported(
+            Operation::SnapshotOps,
+            UnsupportedReason::NotAvailable(
+                "this running sandbox does not support resumable checkpoint capture".into(),
+            ),
+        ));
+    }
+    let request = microsandbox_runtime::control::ControlRequest::CheckpointCreate {
+        checkpoint_id,
+        intent: microsandbox_runtime::control::CheckpointCaptureIntent::ResumableSnapshot,
+    };
+    let mut line = serde_json::to_string(&request)?;
+    line.push('\n');
+    let response = control_request_raw(name, line).await?;
+    if let Some(checkpoint) = response.checkpoint {
+        if !response.ok {
+            tracing::warn!(
+                sandbox = name,
+                error = response.error.as_deref().unwrap_or("source resume failed"),
+                "checkpoint published but the source runtime did not return to running"
+            );
+        }
+        return Ok(checkpoint);
+    }
+    Err(crate::MicrosandboxError::Runtime(format!(
+        "resumable checkpoint refused: {}",
+        response
+            .error
+            .unwrap_or_else(|| "control response omitted checkpoint state".into())
+    )))
 }
 
 /// Send the value-bearing live secret batch to the sandbox process. The

@@ -4,10 +4,11 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
+use microsandbox_image::checkpoint::{CheckpointClosure, ObjectId};
 use microsandbox_image::snapshot::{
-    DESCRIPTOR_FILENAME, DiskLayer, DiskLayerId, FileSnapshotState, ImageRef, LayerFileKind,
-    LayerPayload, Manifest, SCHEMA, SnapshotCapture, SnapshotConsistency, SnapshotFormat,
-    SnapshotId, SnapshotScope, SnapshotState, layer_path,
+    CheckpointSnapshotState, DESCRIPTOR_FILENAME, DiskLayer, DiskLayerId, FileSnapshotState,
+    ImageRef, LayerFileKind, LayerPayload, Manifest, SCHEMA, SnapshotCapture, SnapshotConsistency,
+    SnapshotFormat, SnapshotId, SnapshotScope, SnapshotState, layer_path,
 };
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
@@ -18,6 +19,12 @@ use crate::{MicrosandboxError, MicrosandboxResult, Operation, UnsupportedReason}
 
 use super::store::index_upsert;
 use super::{Snapshot, SnapshotArchive, SnapshotConfig};
+
+//--------------------------------------------------------------------------------------------------
+// Constants
+//--------------------------------------------------------------------------------------------------
+
+pub(crate) const CHECKPOINT_DIRECTORY: &str = "checkpoint";
 
 //--------------------------------------------------------------------------------------------------
 // Functions
@@ -37,15 +44,6 @@ pub(super) async fn create_snapshot(
         resumable,
     } = config;
 
-    if resumable {
-        return Err(MicrosandboxError::unsupported(
-            Operation::SnapshotOps,
-            UnsupportedReason::NotAvailable(
-                "resumable snapshots require VM pause/resume restore support".into(),
-            ),
-        ));
-    }
-
     // Validate the destination before anything else so name errors surface
     // ahead of sandbox lookups and no work happens for an invalid target.
     let dest_dir = resolve_destination(local, &name, dest_dir)?;
@@ -63,6 +61,19 @@ pub(super) async fn create_snapshot(
         .one(db)
         .await?
         .ok_or_else(|| MicrosandboxError::SandboxNotFound(source_sandbox.clone()))?;
+
+    if resumable {
+        return create_resumable_snapshot(
+            local,
+            &name,
+            &dest_dir,
+            &source_sandbox,
+            labels,
+            force,
+            model,
+        )
+        .await;
+    }
 
     if matches!(
         model.status,
@@ -134,10 +145,7 @@ pub(super) async fn create_snapshot(
         })?
         .to_path_buf();
     tokio::fs::create_dir_all(&parent_dir).await?;
-    let staging_dir = parent_dir.join(format!(".{name}.staging"));
-    if staging_dir.exists() {
-        tokio::fs::remove_dir_all(&staging_dir).await?;
-    }
+    let staging_dir = parent_dir.join(format!(".{name}.{:016x}.staging", rand::random::<u64>()));
     tokio::fs::create_dir_all(&staging_dir).await?;
 
     let labels: BTreeMap<_, _> = labels.into_iter().collect();
@@ -159,14 +167,7 @@ pub(super) async fn create_snapshot(
         }
     };
 
-    // Promote the staged artifact into place.
-    if dest_dir.exists() {
-        tokio::fs::remove_dir_all(&dest_dir).await?;
-    }
-    if let Err(e) = tokio::fs::rename(&staging_dir, &dest_dir).await {
-        let _ = tokio::fs::remove_dir_all(&staging_dir).await;
-        return Err(e.into());
-    }
+    promote_snapshot_directory(&staging_dir, &dest_dir, force).await?;
 
     // Best-effort index upsert. Failures are logged, not propagated —
     // the artifact on disk is the source of truth.
@@ -175,6 +176,157 @@ pub(super) async fn create_snapshot(
     }
 
     Ok(Snapshot::from_parts(dest_dir, digest, manifest, labels))
+}
+
+/// Capture one running sandbox into an installed composite-checkpoint snapshot.
+async fn create_resumable_snapshot(
+    local: &LocalBackend,
+    name: &str,
+    dest_dir: &Path,
+    source_sandbox: &str,
+    labels: Vec<(String, String)>,
+    force: bool,
+    model: sandbox_entity::Model,
+) -> MicrosandboxResult<Snapshot> {
+    if model.status != SandboxStatus::Running {
+        return Err(MicrosandboxError::unsupported(
+            Operation::SnapshotOps,
+            UnsupportedReason::NotAvailable("resumable snapshots require a running sandbox".into()),
+        ));
+    }
+    let sandbox_config: SandboxConfig = serde_json::from_str(&model.config)?;
+    let manifest_digest = sandbox_config.manifest_digest.clone().ok_or_else(|| {
+        MicrosandboxError::InvalidConfig(format!(
+            "sandbox '{source_sandbox}' has no OCI image pinned; resumable snapshots currently require a managed OCI root"
+        ))
+    })?;
+    let image_reference = oci_reference_string(&sandbox_config)?;
+    ensure_snapshottable_root_disk(sandbox_config.spec.image.oci_root_disk(), source_sandbox)?;
+
+    let parent_dir = dest_dir
+        .parent()
+        .ok_or_else(|| {
+            MicrosandboxError::InvalidConfig(format!(
+                "snapshot destination has no parent directory: {}",
+                dest_dir.display()
+            ))
+        })?
+        .to_path_buf();
+    tokio::fs::create_dir_all(&parent_dir).await?;
+    let staging_dir = parent_dir.join(format!(".{name}.{:016x}.staging", rand::random::<u64>()));
+    tokio::fs::create_dir_all(&staging_dir).await?;
+
+    let checkpoint_id = format!("checkpoint_{:032x}", rand::random::<u128>());
+    let checkpoint = match crate::sandbox::control_checkpoint_create(
+        source_sandbox,
+        checkpoint_id.clone(),
+    )
+    .await
+    {
+        Ok(checkpoint) => checkpoint,
+        Err(error) => {
+            let _ = tokio::fs::remove_dir_all(&staging_dir).await;
+            return Err(error);
+        }
+    };
+    if checkpoint.checkpoint_id != checkpoint_id {
+        let _ = tokio::fs::remove_dir_all(&staging_dir).await;
+        return Err(MicrosandboxError::SnapshotIntegrity(
+            "runtime returned a checkpoint for another capture attempt".into(),
+        ));
+    }
+    let checkpoint_root = ObjectId::new(&checkpoint.checkpoint_root)
+        .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+    let closure = CheckpointClosure::open(&checkpoint.path, Some(&checkpoint_root))
+        .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+    if closure.checkpoint().checkpoint_id != checkpoint_id {
+        let _ = tokio::fs::remove_dir_all(&staging_dir).await;
+        return Err(MicrosandboxError::SnapshotIntegrity(
+            "runtime checkpoint closure has another capture identity".into(),
+        ));
+    }
+
+    let checkpoint_source = checkpoint.path.clone();
+    let checkpoint_destination = staging_dir.join(CHECKPOINT_DIRECTORY);
+    let checkpoint_destination_for_copy = checkpoint_destination.clone();
+    let materialized = tokio::task::spawn_blocking(move || {
+        materialize_checkpoint_closure(&checkpoint_source, &checkpoint_destination_for_copy)
+    })
+    .await
+    .map_err(|error| MicrosandboxError::Custom(format!("checkpoint copy task: {error}")))?;
+    if let Err(error) = materialized {
+        let _ = tokio::fs::remove_dir_all(&staging_dir).await;
+        return Err(error.into());
+    }
+    CheckpointClosure::open(&checkpoint_destination, Some(&checkpoint_root))
+        .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+
+    let snapshot_id = SnapshotId::new(format!("snap_{:032x}", rand::random::<u128>()))
+        .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+    let labels: BTreeMap<_, _> = labels.into_iter().collect();
+    super::metadata::write(&staging_dir, &labels).await?;
+    let requirements_summary = BTreeMap::from([
+        (
+            "architecture".into(),
+            serde_json::Value::String(closure.checkpoint().architecture.clone()),
+        ),
+        (
+            "device_count".into(),
+            serde_json::Value::from(closure.checkpoint().devices.len() as u64),
+        ),
+        (
+            "memory_bytes".into(),
+            serde_json::Value::from(checkpoint.memory_logical_bytes),
+        ),
+    ]);
+    let manifest = Manifest {
+        schema: SCHEMA.into(),
+        snapshot_id,
+        scope: SnapshotScope::Resumable,
+        state: SnapshotState::Checkpoint(CheckpointSnapshotState {
+            checkpoint_id: checkpoint_id.clone(),
+            checkpoint_root: checkpoint.checkpoint_root,
+            restore_intents: vec!["clone".into(), "resume".into()],
+            requirements_summary,
+        }),
+        capture: SnapshotCapture {
+            created_at: Utc::now().to_rfc3339(),
+            source_lineage: Some(source_sandbox.into()),
+            source_checkpoint: Some(checkpoint_id),
+            consistency: SnapshotConsistency::ApplicationConsistent,
+        },
+        image: ImageRef {
+            reference: image_reference,
+            manifest_digest,
+        },
+        parent: None,
+        requires: Vec::new(),
+        extensions: BTreeMap::new(),
+    };
+    manifest
+        .validate()
+        .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+    let descriptor = manifest
+        .to_canonical_bytes()
+        .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+    let digest = manifest
+        .digest()
+        .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+    if let Err(error) = write_descriptor(&staging_dir, &descriptor).await {
+        let _ = tokio::fs::remove_dir_all(&staging_dir).await;
+        return Err(error);
+    }
+
+    promote_snapshot_directory(&staging_dir, dest_dir, force).await?;
+    if let Err(error) = index_upsert(local, dest_dir, &digest, &manifest).await {
+        tracing::warn!(error = %error, snapshot = %digest, "snapshot_index upsert failed");
+    }
+    Ok(Snapshot::from_parts(
+        dest_dir.to_path_buf(),
+        digest,
+        manifest,
+        labels,
+    ))
 }
 
 /// Capture directly from a stopped sandbox into an archive without creating
@@ -532,6 +684,211 @@ fn validate_snapshot_name(name: &str) -> MicrosandboxResult<()> {
     Ok(())
 }
 
+/// Materialize only the members of a published checkpoint closure.
+///
+/// The immutable root is copied last, so an interrupted copy never looks like a published
+/// checkpoint. Regular files are hard-linked when source and destination share a filesystem;
+/// cross-filesystem copies retain sparse/reflink optimizations through `fast_copy`.
+fn materialize_checkpoint_closure(source: &Path, destination: &Path) -> std::io::Result<()> {
+    let source_metadata = std::fs::symlink_metadata(source)?;
+    if !source_metadata.file_type().is_dir() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "checkpoint source is not a directory",
+        ));
+    }
+    std::fs::create_dir_all(destination)?;
+
+    for member in ["objects", "layers"] {
+        let source_member = source.join(member);
+        match std::fs::symlink_metadata(&source_member) {
+            Ok(metadata) if metadata.file_type().is_dir() => {
+                copy_checkpoint_directory(&source_member, &destination.join(member))?;
+            }
+            Ok(_) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("checkpoint member {member:?} is not a directory"),
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+
+    copy_checkpoint_file(
+        &source.join("checkpoint.json"),
+        &destination.join("checkpoint.json"),
+    )?;
+    sync_directory(destination)
+}
+
+fn copy_checkpoint_directory(source: &Path, destination: &Path) -> std::io::Result<()> {
+    std::fs::create_dir(destination)?;
+    for entry in std::fs::read_dir(source)? {
+        let entry = entry?;
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        let metadata = std::fs::symlink_metadata(&source_path)?;
+        if metadata.file_type().is_dir() {
+            copy_checkpoint_directory(&source_path, &destination_path)?;
+        } else if metadata.file_type().is_file() {
+            copy_checkpoint_file(&source_path, &destination_path)?;
+        } else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "checkpoint member is not a regular file or directory: {}",
+                    source_path.display()
+                ),
+            ));
+        }
+    }
+    sync_directory(destination)
+}
+
+fn copy_checkpoint_file(source: &Path, destination: &Path) -> std::io::Result<()> {
+    let metadata = std::fs::symlink_metadata(source)?;
+    if !metadata.file_type().is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "checkpoint member is not a regular file: {}",
+                source.display()
+            ),
+        ));
+    }
+    match std::fs::hard_link(source, destination) {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            microsandbox_utils::copy::fast_copy(source, destination)?;
+            // FlushFileBuffers on Windows requires write access even though the bytes are now
+            // immutable. Open read/write consistently on every platform for the same contract.
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(destination)?
+                .sync_all()
+        }
+    }
+}
+
+async fn write_descriptor(directory: &Path, canonical: &[u8]) -> MicrosandboxResult<()> {
+    let directory = directory.to_path_buf();
+    let canonical = canonical.to_vec();
+    tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+        use std::io::Write;
+
+        let manifest_path = directory.join(DESCRIPTOR_FILENAME);
+        let temporary = directory.join(format!(
+            ".{DESCRIPTOR_FILENAME}.{:016x}.tmp",
+            rand::random::<u64>()
+        ));
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)?;
+        file.write_all(&canonical)?;
+        file.sync_all()?;
+        drop(file);
+        if let Err(error) = std::fs::rename(&temporary, &manifest_path) {
+            let _ = std::fs::remove_file(&temporary);
+            return Err(error);
+        }
+        sync_directory(&directory)
+    })
+    .await
+    .map_err(|error| MicrosandboxError::Custom(format!("snapshot descriptor task: {error}")))??;
+    Ok(())
+}
+
+/// Atomically replace an installed snapshot while retaining the previous artifact until the new
+/// staging directory is in place. If promotion fails, the previous destination is restored.
+async fn promote_snapshot_directory(
+    staging: &Path,
+    destination: &Path,
+    force: bool,
+) -> MicrosandboxResult<()> {
+    let parent = destination.parent().ok_or_else(|| {
+        MicrosandboxError::InvalidConfig(format!(
+            "snapshot destination has no parent directory: {}",
+            destination.display()
+        ))
+    })?;
+    if staging.parent() != Some(parent) {
+        return Err(MicrosandboxError::InvalidConfig(
+            "snapshot staging and destination must share a parent directory".into(),
+        ));
+    }
+
+    if !destination.exists() {
+        tokio::fs::rename(staging, destination).await?;
+        sync_directory_async(parent).await?;
+        return Ok(());
+    }
+    if !force {
+        return Err(MicrosandboxError::SnapshotAlreadyExists(
+            destination.display().to_string(),
+        ));
+    }
+
+    let file_name = destination
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("snapshot");
+    let backup = parent.join(format!(
+        ".{file_name}.{:016x}.replaced",
+        rand::random::<u64>()
+    ));
+    tokio::fs::rename(destination, &backup).await?;
+    if let Err(promote_error) = tokio::fs::rename(staging, destination).await {
+        match tokio::fs::rename(&backup, destination).await {
+            Ok(()) => {
+                let _ = sync_directory_async(parent).await;
+                return Err(promote_error.into());
+            }
+            Err(rollback_error) => {
+                return Err(MicrosandboxError::Custom(format!(
+                    "failed to publish snapshot ({promote_error}) and failed to restore the previous artifact from {} ({rollback_error})",
+                    backup.display()
+                )));
+            }
+        }
+    }
+    sync_directory_async(parent).await?;
+    remove_path(&backup).await?;
+    sync_directory_async(parent).await?;
+    Ok(())
+}
+
+async fn remove_path(path: &Path) -> std::io::Result<()> {
+    let metadata = tokio::fs::symlink_metadata(path).await?;
+    if metadata.file_type().is_dir() {
+        tokio::fs::remove_dir_all(path).await
+    } else {
+        tokio::fs::remove_file(path).await
+    }
+}
+
+async fn sync_directory_async(path: &Path) -> std::io::Result<()> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || sync_directory(&path))
+        .await
+        .map_err(std::io::Error::other)?
+}
+
+#[cfg(unix)]
+fn sync_directory(path: &Path) -> std::io::Result<()> {
+    std::fs::File::open(path)?.sync_all()
+}
+
+#[cfg(windows)]
+fn sync_directory(_path: &Path) -> std::io::Result<()> {
+    // Directory handles require platform-specific flags and directory renames already provide the
+    // atomic visibility guarantee used here. File payloads and descriptors are still flushed.
+    Ok(())
+}
+
 //--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
@@ -639,5 +996,100 @@ mod tests {
             &with.state.as_file().unwrap().layers[0].payload.integrity,
             Some(microsandbox_image::snapshot::UpperIntegrity::FileMerkleBlake3V1 { .. })
         ));
+    }
+
+    #[test]
+    fn checkpoint_materialization_copies_only_the_published_closure_shape() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let destination = temp.path().join("destination");
+        std::fs::create_dir_all(source.join("objects/sha256/aa")).unwrap();
+        std::fs::create_dir_all(source.join("layers")).unwrap();
+        std::fs::write(source.join("objects/sha256/aa/object"), b"memory").unwrap();
+        std::fs::write(source.join("layers/layer.qcow2"), b"disk").unwrap();
+        std::fs::write(source.join("checkpoint.json"), b"root").unwrap();
+        std::fs::write(source.join("runtime-private.json"), b"ignored").unwrap();
+
+        materialize_checkpoint_closure(&source, &destination).unwrap();
+
+        assert_eq!(
+            std::fs::read(destination.join("objects/sha256/aa/object")).unwrap(),
+            b"memory"
+        );
+        assert_eq!(
+            std::fs::read(destination.join("layers/layer.qcow2")).unwrap(),
+            b"disk"
+        );
+        assert_eq!(
+            std::fs::read(destination.join("checkpoint.json")).unwrap(),
+            b"root"
+        );
+        assert!(!destination.join("runtime-private.json").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn checkpoint_materialization_rejects_symlink_members() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let destination = temp.path().join("destination");
+        std::fs::create_dir_all(source.join("objects")).unwrap();
+        std::fs::write(source.join("outside"), b"outside").unwrap();
+        symlink(source.join("outside"), source.join("objects/member")).unwrap();
+        std::fs::write(source.join("checkpoint.json"), b"root").unwrap();
+
+        let error = materialize_checkpoint_closure(&source, &destination).unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[tokio::test]
+    async fn snapshot_promotion_replaces_only_after_staging_is_complete() {
+        let temp = tempfile::tempdir().unwrap();
+        let destination = temp.path().join("snapshot");
+        let staging = temp.path().join(".snapshot.staging");
+        std::fs::create_dir(&destination).unwrap();
+        std::fs::write(destination.join("payload"), b"old").unwrap();
+        std::fs::create_dir(&staging).unwrap();
+        std::fs::write(staging.join("payload"), b"new").unwrap();
+
+        promote_snapshot_directory(&staging, &destination, true)
+            .await
+            .unwrap();
+
+        assert_eq!(std::fs::read(destination.join("payload")).unwrap(), b"new");
+        assert!(!staging.exists());
+        let hidden_entries = std::fs::read_dir(temp.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".snapshot.")
+            })
+            .count();
+        assert_eq!(hidden_entries, 0);
+    }
+
+    #[tokio::test]
+    async fn snapshot_promotion_without_force_preserves_both_artifacts() {
+        let temp = tempfile::tempdir().unwrap();
+        let destination = temp.path().join("snapshot");
+        let staging = temp.path().join(".snapshot.staging");
+        std::fs::create_dir(&destination).unwrap();
+        std::fs::write(destination.join("payload"), b"old").unwrap();
+        std::fs::create_dir(&staging).unwrap();
+        std::fs::write(staging.join("payload"), b"new").unwrap();
+
+        let error = promote_snapshot_directory(&staging, &destination, false)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, MicrosandboxError::SnapshotAlreadyExists(_)));
+        assert_eq!(std::fs::read(destination.join("payload")).unwrap(), b"old");
+        assert_eq!(std::fs::read(staging.join("payload")).unwrap(), b"new");
     }
 }
