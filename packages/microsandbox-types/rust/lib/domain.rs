@@ -631,6 +631,11 @@ pub struct NetworkSpec {
     /// Whether to copy trusted host CAs into the guest at boot.
     pub trust_host_cas: bool,
 
+    /// Body template returned to HTTP/HTTPS clients when egress is denied.
+    /// `{host}` is replaced with the blocked hostname. Missing uses the
+    /// engine default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub http_deny_message: Option<String>,
     /// Proxy used for outbound sandbox connections and supported datagram flows.
     ///
     /// In Rust SDK creation from a concrete `SandboxConfig`, `None` inherits defaults; use a sparse patch to clear.
@@ -1812,6 +1817,7 @@ impl Default for NetworkSpec {
             rate_limiter: None,
             trust_host_cas: false,
             outbound_proxy: None,
+            http_deny_message: None,
         }
     }
 }

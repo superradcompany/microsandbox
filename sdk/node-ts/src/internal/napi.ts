@@ -1109,6 +1109,7 @@ export interface NapiNetworkBuilder {
   ipv4Pool(pool: string): this;
   ipv6Pool(pool: string): this;
   trustHostCAs(enabled: boolean): this;
+  httpDenyMessage(message: string): this;
   rateLimiter(
     configure: (b: NapiNetworkRateLimiterBuilder) => NapiNetworkRateLimiterBuilder,
   ): this;

@@ -92,6 +92,11 @@ pub struct NetworkConfig {
     #[serde(default)]
     pub trust_host_cas: bool,
 
+    /// Body template returned to HTTP/HTTPS clients when egress is denied.
+    /// `{host}` is replaced with the blocked hostname. Omission uses the default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http_deny_message: Option<String>,
+
     /// Proxy that all outbound sandbox connections are dialed through.
     ///
     /// Applies to TLS-intercepted and bypassed/plain TCP traffic. SOCKS5 also
@@ -280,6 +285,7 @@ impl Default for NetworkConfig {
             max_udp_connections: None,
             rate_limiter: None,
             trust_host_cas: false,
+            http_deny_message: None,
             outbound_proxy: None,
         }
     }

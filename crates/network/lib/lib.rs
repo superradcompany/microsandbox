@@ -24,6 +24,8 @@ pub(crate) use engine::addr;
 #[cfg(feature = "engine")]
 pub use engine::{icmp, netstack, network, ports, tcp, udp};
 pub use model::{config, dns, policy, secrets, tls};
+#[cfg(feature = "engine")]
+pub mod http_deny;
 
 //--------------------------------------------------------------------------------------------------
 // Constants
