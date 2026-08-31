@@ -420,9 +420,18 @@ type VmBuildOutput = (
     Option<NetworkTerminationHandle>,
     Option<NetworkMetricsHandle>,
     Option<NetworkSecretsHandle>,
-    Vec<u8>,
+    Option<Vec<u8>>,
     BindIdentityMapRegistration,
+    Option<crate::checkpoint::RestoredAgentState>,
 );
+
+/// Public runtime endpoints held back until a restored guest is activated.
+struct RestoreEndpointPublication {
+    agent_sock_path: PathBuf,
+    run_dir: PathBuf,
+    sandbox_name: String,
+    control: crate::control::ControlContext,
+}
 
 //--------------------------------------------------------------------------------------------------
 // Methods
@@ -436,6 +445,35 @@ impl BindIdentityMapRegistration {
             #[cfg(unix)]
             mount_count: 0,
         }
+    }
+}
+
+impl RestoreEndpointPublication {
+    fn publish(self, relay: &mut AgentRelay) -> RuntimeResult<()> {
+        relay.bind_public_endpoint()?;
+
+        #[cfg(unix)]
+        if let Err(error) = crate::ipc::publish_legacy_agent_link(
+            &self.run_dir,
+            &self.sandbox_name,
+            &self.agent_sock_path,
+        ) {
+            let _ =
+                crate::ipc::remove_canonical_socket_artifacts(&self.run_dir, &self.sandbox_name);
+            return Err(error.into());
+        }
+
+        if let Err(error) = publish_control_endpoint(
+            crate::control::control_socket_path_for(&self.agent_sock_path),
+            self.control,
+            &self.run_dir,
+            &self.sandbox_name,
+        ) {
+            let _ =
+                crate::ipc::remove_canonical_socket_artifacts(&self.run_dir, &self.sandbox_name);
+            return Err(error);
+        }
+        Ok(())
     }
 }
 
@@ -564,7 +602,16 @@ fn run(mut config: Config) -> RuntimeResult<std::convert::Infallible> {
 
     // Create the relay and persist the run record with a single runtime hop.
     let (mut relay, db, run_db_id) = tokio_rt.block_on(async {
-        let relay = AgentRelay::new(&config.agent_sock_path, Arc::clone(&shared));
+        let relay = async {
+            if config.vm.checkpoint_restore.is_some() {
+                Ok(AgentRelay::new_deferred(
+                    &config.agent_sock_path,
+                    Arc::clone(&shared),
+                ))
+            } else {
+                AgentRelay::new(&config.agent_sock_path, Arc::clone(&shared)).await
+            }
+        };
         let db = connect_db(
             &config.sandbox_db_path,
             config.sandbox_db_connect_timeout_secs,
@@ -629,11 +676,13 @@ fn run(mut config: Config) -> RuntimeResult<std::convert::Infallible> {
     }
 
     #[cfg(unix)]
-    if let Err(error) = crate::ipc::publish_legacy_agent_link(
-        &config.run_dir,
-        &config.sandbox_name,
-        &config.agent_sock_path,
-    ) {
+    if config.vm.checkpoint_restore.is_none()
+        && let Err(error) = crate::ipc::publish_legacy_agent_link(
+            &config.run_dir,
+            &config.sandbox_name,
+            &config.agent_sock_path,
+        )
+    {
         if let Err(release_error) = tokio_rt.block_on(writeback_guard.release(&db)) {
             tracing::warn!(%release_error, "release writeback admission after legacy endpoint publication failure");
         }
@@ -875,6 +924,7 @@ fn run(mut config: Config) -> RuntimeResult<std::convert::Infallible> {
         _network_secrets_handle,
         bootstrap_frame,
         bind_identity_map,
+        restored_agent,
     ) = match build_result {
         Ok(vm) => vm,
         Err(e) => {
@@ -904,7 +954,9 @@ fn run(mut config: Config) -> RuntimeResult<std::convert::Infallible> {
     // This must be the first host-to-guest frame. It is queued before the
     // watchdog and relay tasks can produce shutdown or init-ack messages, and
     // remains buffered until agentd opens the console during early boot.
-    relay::push_guest_frame_blocking(&shared, bootstrap_frame)?;
+    if let Some(bootstrap_frame) = bootstrap_frame {
+        relay::push_guest_frame_blocking(&shared, bootstrap_frame)?;
+    }
 
     #[cfg(unix)]
     {
@@ -920,69 +972,61 @@ fn run(mut config: Config) -> RuntimeResult<std::convert::Infallible> {
     let upper_host_path = oci_upper_host_path(&config.vm);
 
     // Serve every host-side control operation through one runtime-owned executor and endpoint.
-    {
+    // Restore constructs the executor now but withholds both public endpoints until the guest has
+    // crossed its VMGenID/workload activation barrier.
+    let restore_endpoint_publication = {
         let control = vm.control_handle();
         #[cfg(feature = "net")]
         let secrets = _network_secrets_handle.clone();
         #[cfg(not(feature = "net"))]
         let secrets: Option<()> = None;
-        {
-            let control_sock_path =
-                crate::control::control_socket_path_for(&config.agent_sock_path);
-            let executor = crate::control::RuntimeControlExecutor::new(
-                control,
-                #[cfg(feature = "net")]
-                secrets,
-                &config.runtime_dir,
-                &config.vm,
-                tokio_rt.handle().clone(),
-                &config.agent_sock_path,
-            );
-            let context = crate::control::ControlContext {
-                executor: match executor {
-                    Ok(executor) => Arc::new(executor),
-                    Err(error) => {
-                        let _ = tokio_rt.block_on(mark_run_failed(&db, run_db_id));
-                        return Err(RuntimeError::Custom(format!(
-                            "publish runtime control identity: {error}"
-                        )));
-                    }
-                },
-            };
-            match crate::control::spawn_control_listener(control_sock_path.clone(), context) {
-                Ok(()) => {
-                    #[cfg(unix)]
-                    if let Err(error) = crate::ipc::publish_legacy_control_link(
-                        &config.run_dir,
-                        &config.sandbox_name,
-                        &control_sock_path,
-                    ) {
-                        if error.kind() == std::io::ErrorKind::InvalidInput {
-                            tracing::warn!(
-                                "legacy runtime control endpoint is unavailable for {}: {error}",
-                                config.sandbox_name
-                            );
-                        } else {
-                            let _ = tokio_rt.block_on(mark_run_failed(&db, run_db_id));
-                            // Preserve the colliding compatibility entry. It
-                            // may belong to a still-live older runtime.
-                            let _ = crate::ipc::remove_canonical_socket_artifacts(
-                                &config.run_dir,
-                                &config.sandbox_name,
-                            );
-                            return Err(error.into());
-                        }
-                    }
+        let control_sock_path = crate::control::control_socket_path_for(&config.agent_sock_path);
+        let executor = crate::control::RuntimeControlExecutor::new(
+            control,
+            #[cfg(feature = "net")]
+            secrets,
+            &config.runtime_dir,
+            &config.vm,
+            tokio_rt.handle().clone(),
+            &config.agent_sock_path,
+        );
+        let context = crate::control::ControlContext {
+            executor: match executor {
+                Ok(executor) => Arc::new(executor),
+                Err(error) => {
+                    let _ = tokio_rt.block_on(mark_run_failed(&db, run_db_id));
+                    return Err(RuntimeError::Custom(format!(
+                        "publish runtime control identity: {error}"
+                    )));
                 }
-                Err(e) => {
-                    tracing::warn!(
-                        "failed to start runtime control listener at {}: {e}",
-                        control_sock_path.display()
-                    );
-                }
+            },
+        };
+        if restored_agent.is_some() {
+            Some(RestoreEndpointPublication {
+                agent_sock_path: config.agent_sock_path.clone(),
+                run_dir: config.run_dir.clone(),
+                sandbox_name: config.sandbox_name.clone(),
+                control: context,
+            })
+        } else {
+            if let Err(error) = publish_control_endpoint(
+                control_sock_path,
+                context,
+                &config.run_dir,
+                &config.sandbox_name,
+            ) {
+                let _ = tokio_rt.block_on(mark_run_failed(&db, run_db_id));
+                // Preserve the colliding compatibility entry. It may belong
+                // to a still-live older runtime.
+                let _ = crate::ipc::remove_canonical_socket_artifacts(
+                    &config.run_dir,
+                    &config.sandbox_name,
+                );
+                return Err(error);
             }
+            None
         }
-    }
+    };
 
     #[cfg(unix)]
     {
@@ -1089,12 +1133,34 @@ fn run(mut config: Config) -> RuntimeResult<std::convert::Infallible> {
     // so it runs on a background thread, not blocking the main thread.
     let relay_exit_handle = exit_handle.clone();
     let relay_exit_reason = Arc::clone(&exit_reason);
+    let restore_control = restored_agent.as_ref().map(|_| vm.control_handle());
+    let restore_runtime_dir = config.runtime_dir.clone();
     tokio_rt.spawn(async move {
-        let ready_result =
-            tokio::task::spawn_blocking(move || relay.wait_ready().map(|()| relay)).await;
+        let ready_result = tokio::task::spawn_blocking(move || {
+            if let (Some(restored), Some(control)) =
+                (restored_agent.as_ref(), restore_control.as_ref())
+            {
+                relay.activate_restored(control, restored, &restore_runtime_dir)?;
+            } else {
+                relay.wait_ready()?;
+            }
+            Ok::<_, RuntimeError>(relay)
+        })
+        .await;
 
         match ready_result {
-            Ok(Ok(relay)) => {
+            Ok(Ok(mut relay)) => {
+                if let Some(publication) = restore_endpoint_publication
+                    && let Err(error) = publication.publish(&mut relay)
+                {
+                    tracing::error!(%error, "publish restored runtime endpoints");
+                    relay_exit_reason.store(
+                        EXIT_REASON_AGENT_UNRESPONSIVE,
+                        std::sync::atomic::Ordering::SeqCst,
+                    );
+                    relay_exit_handle.trigger();
+                    return;
+                }
                 if let Some((
                     writer,
                     interval_ms,
@@ -1934,16 +2000,22 @@ fn build_vm(
     let mut vm = builder
         .build()
         .map_err(|e| RuntimeError::Custom(format!("build VM: {e}")))?;
-    if let Some(restore) = &config.vm.checkpoint_restore {
+    let restored_agent = if let Some(restore) = &config.vm.checkpoint_restore {
         let prepared = crate::checkpoint::PreparedCheckpointRestore::open(
             restore.closure.clone(),
             &restore.checkpoint_root,
         )
         .map_err(|error| RuntimeError::Custom(format!("prepare checkpoint restore: {error}")))?;
-        prepared.install(&mut vm);
-    }
+        Some(prepared.install(&mut vm))
+    } else {
+        None
+    };
 
-    let bootstrap_frame = encode_bootstrap_frame(&bootstrap)?;
+    let bootstrap_frame = if restored_agent.is_none() {
+        Some(encode_bootstrap_frame(&bootstrap)?)
+    } else {
+        None
+    };
 
     Ok((
         vm,
@@ -1952,6 +2024,7 @@ fn build_vm(
         network_secrets_handle,
         bootstrap_frame,
         bind_identity_map,
+        restored_agent,
     ))
 }
 
@@ -1967,6 +2040,39 @@ fn encode_bootstrap_frame(bootstrap: &GuestBootstrap) -> RuntimeResult<Vec<u8>> 
 //--------------------------------------------------------------------------------------------------
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
+
+fn publish_control_endpoint(
+    control_sock_path: PathBuf,
+    context: crate::control::ControlContext,
+    run_dir: &Path,
+    sandbox_name: &str,
+) -> RuntimeResult<()> {
+    match crate::control::spawn_control_listener(control_sock_path.clone(), context) {
+        Ok(()) => {
+            #[cfg(unix)]
+            if let Err(error) =
+                crate::ipc::publish_legacy_control_link(run_dir, sandbox_name, &control_sock_path)
+            {
+                if error.kind() == std::io::ErrorKind::InvalidInput {
+                    tracing::warn!(
+                        "legacy runtime control endpoint is unavailable for {sandbox_name}: {error}"
+                    );
+                } else {
+                    return Err(error.into());
+                }
+            }
+        }
+        Err(error) => {
+            // Live control has historically been an optional capability. Keep
+            // ordinary launches running when the listener itself is unavailable.
+            tracing::warn!(
+                "failed to start runtime control listener at {}: {error}",
+                control_sock_path.display()
+            );
+        }
+    }
+    Ok(())
+}
 
 #[cfg(feature = "net")]
 fn to_krun_network_rate_limiters(

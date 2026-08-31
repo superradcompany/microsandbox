@@ -18,7 +18,9 @@ use bytes::{Bytes, BytesMut};
 #[cfg(unix)]
 use microsandbox_filesystem::{BindIdentityMap, BindIdentityMapHandle};
 use microsandbox_protocol::codec::{self, MAX_FRAME_SIZE};
-use microsandbox_protocol::core::{InitAck, InitResolved, RelayClientDisconnected};
+use microsandbox_protocol::core::{
+    CoreError, InitAck, InitResolved, RelayClientDisconnected, WorkloadThaw, WorkloadThawed,
+};
 use microsandbox_protocol::exec::{ExecRequest, ExecSignal, ExecStderr, ExecStdout};
 use microsandbox_protocol::message::{
     FLAG_SESSION_START, FLAG_SHUTDOWN, FLAG_TERMINAL, FRAME_HEADER_SIZE, Message, MessageType,
@@ -33,6 +35,7 @@ use tokio::net::UnixListener;
 use tokio::net::windows::named_pipe::{NamedPipeServer, PipeMode, ServerOptions};
 use tokio::sync::{Mutex, mpsc, watch};
 
+use crate::checkpoint::RestoredAgentState;
 use crate::clock::spawn_clock_sync_task;
 use crate::console::ConsoleSharedState;
 use crate::exec_log::{LogSource, LogWriter};
@@ -74,6 +77,8 @@ const LEN_PREFIX_SIZE: usize = 4;
 
 /// Capacity of the per-client write channel.
 const CLIENT_WRITE_CHANNEL_CAPACITY: usize = 64;
+const RESTORE_ACTIVATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const RESTORE_CONTROL_ID: u32 = u32::MAX;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -98,7 +103,7 @@ pub struct AgentRelay {
     /// Shared ring buffers + wake pipes for console backend communication.
     shared: Arc<ConsoleSharedState>,
     /// Local IPC listener for client connections.
-    listener: AgentListener,
+    listener: Option<AgentListener>,
     /// Local IPC endpoint address.
     endpoint: PathBuf,
     /// Cached `core.ready` frame bytes (length-prefixed wire format).
@@ -140,6 +145,13 @@ struct RawFrame {
     id: u32,
     /// The flags byte extracted from the frame header.
     flags: u8,
+}
+
+#[derive(serde::Serialize)]
+struct RestoreActivationRecord<'a> {
+    attempt_id: &'a str,
+    vm_generation_id: String,
+    state: &'a str,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -227,7 +239,7 @@ impl AgentRelay {
 
         Ok(Self {
             shared,
-            listener,
+            listener: Some(listener),
             endpoint: agent_sock_path.to_path_buf(),
             ready_frame: None,
             log_writer: None,
@@ -236,6 +248,38 @@ impl AgentRelay {
             #[cfg(unix)]
             bind_identity_map_mount_count: 0,
         })
+    }
+
+    /// Construct a relay without publishing its client endpoint.
+    ///
+    /// Checkpoint restore uses the console rings privately while the VM is at
+    /// its activation barrier. The listener is bound only after VMGenID has
+    /// been acknowledged and the captured workload latch has been released.
+    pub(crate) fn new_deferred(agent_sock_path: &Path, shared: Arc<ConsoleSharedState>) -> Self {
+        Self {
+            shared,
+            listener: None,
+            endpoint: agent_sock_path.to_path_buf(),
+            ready_frame: None,
+            log_writer: None,
+            #[cfg(unix)]
+            bind_identity_map: None,
+            #[cfg(unix)]
+            bind_identity_map_mount_count: 0,
+        }
+    }
+
+    /// Publish a relay that was constructed behind an activation barrier.
+    pub(crate) fn bind_public_endpoint(&mut self) -> RuntimeResult<()> {
+        if self.listener.is_some() {
+            return Ok(());
+        }
+        self.listener = Some(AgentListener::bind(&self.endpoint)?);
+        tracing::info!(
+            "agent relay listening on {} after restore activation",
+            self.endpoint.display()
+        );
+        Ok(())
     }
 
     /// Attach a log writer for `exec.log` capture.
@@ -397,6 +441,162 @@ impl AgentRelay {
         }
     }
 
+    /// Activate a construction-paused checkpoint before serving public clients.
+    ///
+    /// The restored agent does not reboot and therefore does not emit another
+    /// `core.ready`. This path resumes only the kernel and agentd, waits for the
+    /// exact VM Generation ID acknowledgement, releases the captured workload
+    /// latch over the private console path, and only then installs the cached
+    /// ready frame used by ordinary client handshakes.
+    pub(crate) fn activate_restored(
+        &mut self,
+        vm: &msb_krun::VmControl,
+        restored: &RestoredAgentState,
+        runtime_dir: &Path,
+    ) -> RuntimeResult<()> {
+        let paused = vm
+            .wait_until_paused(RESTORE_ACTIVATION_TIMEOUT)
+            .map_err(|error| {
+                RuntimeError::Custom(format!("wait for restored VM pause: {error}"))
+            })?;
+        let msb_krun::VmExecutionState::Paused(pause_generation) = paused else {
+            return Err(RuntimeError::Custom(
+                "restored VM did not reach its construction pause".into(),
+            ));
+        };
+
+        let generation_bytes: [u8; 16] = rand::random();
+        persist_restore_activation(
+            runtime_dir,
+            &restored.attempt_id,
+            generation_bytes,
+            "prepared",
+        )?;
+        let request = vm
+            .install_vm_generation_id(generation_bytes.into())
+            .ok_or_else(|| {
+                RuntimeError::Custom("restored VM has no usable VM Generation ID transport".into())
+            })?;
+        vm.resume(pause_generation).map_err(|error| {
+            RuntimeError::Custom(format!("resume restored VM for activation: {error}"))
+        })?;
+
+        match vm.wait_vm_generation_processed(request, RESTORE_ACTIVATION_TIMEOUT) {
+            Some(msb_krun::VmGenerationWaitOutcome::Processed) => {}
+            Some(msb_krun::VmGenerationWaitOutcome::Superseded) => {
+                return Err(RuntimeError::Custom(
+                    "restored VM Generation ID request was superseded".into(),
+                ));
+            }
+            Some(msb_krun::VmGenerationWaitOutcome::TimedOut) => {
+                return Err(RuntimeError::Custom(
+                    "restored VM Generation ID acknowledgement timed out".into(),
+                ));
+            }
+            None => {
+                return Err(RuntimeError::Custom(
+                    "restored VM Generation ID transport disappeared".into(),
+                ));
+            }
+        }
+
+        self.thaw_restored_workload(restored)?;
+        self.install_restored_ready(restored)?;
+        persist_restore_activation(
+            runtime_dir,
+            &restored.attempt_id,
+            generation_bytes,
+            "activated",
+        )?;
+        if let Some(ref writer) = self.log_writer {
+            writer.write_system("--- sandbox restored ---");
+        }
+        Ok(())
+    }
+
+    fn thaw_restored_workload(&self, restored: &RestoredAgentState) -> RuntimeResult<()> {
+        let mut request = Message::with_payload(
+            MessageType::WorkloadThaw,
+            RESTORE_CONTROL_ID,
+            &WorkloadThaw {
+                attempt_id: restored.attempt_id.clone(),
+            },
+        )
+        .map_err(|error| RuntimeError::Custom(format!("encode restored workload thaw: {error}")))?;
+        request.v = restored.protocol_generation;
+        let mut frame = Vec::new();
+        codec::encode_to_buf(&request, &mut frame).map_err(|error| {
+            RuntimeError::Custom(format!("encode restored workload thaw frame: {error}"))
+        })?;
+        push_guest_frame_until(&self.shared, frame, RESTORE_ACTIVATION_TIMEOUT)?;
+
+        let deadline = std::time::Instant::now() + RESTORE_ACTIVATION_TIMEOUT;
+        let mut input = BytesMut::new();
+        loop {
+            self.shared.tx_wake.drain();
+            while let Some(chunk) = self.shared.tx_ring.pop() {
+                input.extend_from_slice(&chunk);
+            }
+            while let Some(frame) = try_extract_frame(&mut input) {
+                let message = decode_frame(frame.data.as_ref())?;
+                if message.id != RESTORE_CONTROL_ID {
+                    tracing::debug!(
+                        message_type = message.t.as_str(),
+                        id = message.id,
+                        "discarding pre-activation restored-agent frame"
+                    );
+                    continue;
+                }
+                if message.t == MessageType::CoreError {
+                    let error = message.payload::<CoreError>().map_err(|decode| {
+                        RuntimeError::Custom(format!(
+                            "decode restored workload thaw error: {decode}"
+                        ))
+                    })?;
+                    return Err(RuntimeError::Custom(format!(
+                        "restored workload thaw rejected: {}",
+                        error.message
+                    )));
+                }
+                if message.t != MessageType::WorkloadThawed {
+                    return Err(RuntimeError::Custom(format!(
+                        "unexpected restored workload reply {}",
+                        message.t.as_str()
+                    )));
+                }
+                let thawed = message.payload::<WorkloadThawed>().map_err(|error| {
+                    RuntimeError::Custom(format!("decode restored workload thaw: {error}"))
+                })?;
+                if thawed.attempt_id != restored.attempt_id {
+                    return Err(RuntimeError::Custom(
+                        "restored workload thaw belongs to another checkpoint attempt".into(),
+                    ));
+                }
+                return Ok(());
+            }
+
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(RuntimeError::Custom(
+                    "restored workload thaw timed out".into(),
+                ));
+            }
+            let _ = self.shared.tx_wake.wait_timeout(remaining);
+        }
+    }
+
+    fn install_restored_ready(&mut self, restored: &RestoredAgentState) -> RuntimeResult<()> {
+        let mut ready = Message::with_payload(MessageType::Ready, 0, &restored.ready)
+            .map_err(|error| RuntimeError::Custom(format!("encode restored ready: {error}")))?;
+        ready.v = restored.protocol_generation;
+        let mut frame = Vec::new();
+        codec::encode_to_buf(&ready, &mut frame).map_err(|error| {
+            RuntimeError::Custom(format!("encode restored ready frame: {error}"))
+        })?;
+        self.ready_frame = Some(frame);
+        Ok(())
+    }
+
     /// Run the main relay loop.
     ///
     /// Accepts client connections, relays frames between clients and the
@@ -415,6 +615,9 @@ impl AgentRelay {
     ) -> RuntimeResult<()> {
         let ready_frame = self.ready_frame.ok_or_else(|| {
             RuntimeError::Custom("agent relay: run() called before wait_ready()".into())
+        })?;
+        let mut listener = self.listener.take().ok_or_else(|| {
+            RuntimeError::Custom("agent relay: run() called before endpoint publication".into())
         })?;
 
         // Shared state: map from client slot index to client state.
@@ -463,7 +666,7 @@ impl AgentRelay {
         // Accept loop.
         loop {
             tokio::select! {
-                accept_result = self.listener.accept() => {
+                accept_result = listener.accept() => {
                     match accept_result {
                         Ok(stream) => {
                             // Allocate a client slot.
@@ -577,7 +780,7 @@ impl AgentRelay {
         // double-write it here.
 
         // Clean up the local IPC endpoint.
-        self.listener.cleanup(&self.endpoint);
+        listener.cleanup(&self.endpoint);
 
         // Abort background tasks.
         clock_sync_handle.abort();
@@ -597,6 +800,38 @@ pub(crate) fn push_guest_frame_blocking(
     frame: Vec<u8>,
 ) -> RuntimeResult<()> {
     push_guest_frame_until(shared, frame, std::time::Duration::from_secs(60))
+}
+
+fn persist_restore_activation(
+    runtime_dir: &Path,
+    attempt_id: &str,
+    generation_id: [u8; 16],
+    state: &str,
+) -> RuntimeResult<()> {
+    use std::io::Write as _;
+
+    let target = runtime_dir.join("restore-activation.json");
+    let temporary = runtime_dir.join(format!(".restore-activation.{}.tmp", rand::random::<u64>()));
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)?;
+    serde_json::to_writer(
+        &mut file,
+        &RestoreActivationRecord {
+            attempt_id,
+            vm_generation_id: hex::encode(generation_id),
+            state,
+        },
+    )
+    .map_err(|error| RuntimeError::Custom(format!("encode restore activation: {error}")))?;
+    file.write_all(b"\n")?;
+    file.sync_all()?;
+    drop(file);
+    crate::checkpoint::replace_file(&temporary, &target)?;
+    #[cfg(unix)]
+    std::fs::File::open(runtime_dir)?.sync_all()?;
+    Ok(())
 }
 
 pub(crate) fn push_guest_frame_until(
@@ -1166,6 +1401,19 @@ mod tests {
         frame
     }
 
+    fn restored_agent(attempt_id: &str) -> RestoredAgentState {
+        RestoredAgentState {
+            protocol_generation: microsandbox_protocol::message::PROTOCOL_VERSION,
+            ready: Ready {
+                boot_time_ns: 11,
+                init_time_ns: 22,
+                ready_time_ns: 33,
+                agent_version: "test-agent".into(),
+            },
+            attempt_id: attempt_id.into(),
+        }
+    }
+
     #[test]
     fn client_frame_validation_allows_ids_in_assigned_range() {
         assert!(is_client_frame_allowed(10, 0, 10, 20));
@@ -1297,6 +1545,116 @@ mod tests {
         assert!(
             shared.rx_ring.pop().is_none(),
             "no init context means no ack should be sent"
+        );
+    }
+
+    #[tokio::test]
+    async fn restored_workload_thaw_uses_private_attempt_scoped_exchange() {
+        let shared = Arc::new(ConsoleSharedState::with_capacity(8));
+        let sock_path = test_agent_endpoint("restore-thaw");
+        let relay = AgentRelay::new(&sock_path, Arc::clone(&shared))
+            .await
+            .unwrap();
+        let restored = restored_agent("checkpoint-attempt");
+
+        let guest_shared = Arc::clone(&shared);
+        let guest = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            let request = loop {
+                if let Some(frame) = guest_shared.rx_ring.pop() {
+                    break codec::decode_message_frame(&frame).unwrap();
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "host did not send the private thaw request"
+                );
+                let _ = guest_shared
+                    .rx_wake
+                    .wait_timeout(std::time::Duration::from_millis(10));
+            };
+
+            assert_eq!(request.id, RESTORE_CONTROL_ID);
+            assert_eq!(request.t, MessageType::WorkloadThaw);
+            assert_eq!(
+                request.payload::<WorkloadThaw>().unwrap().attempt_id,
+                "checkpoint-attempt"
+            );
+
+            let mut response = Message::with_payload(
+                MessageType::WorkloadThawed,
+                RESTORE_CONTROL_ID,
+                &WorkloadThawed {
+                    attempt_id: "checkpoint-attempt".into(),
+                },
+            )
+            .unwrap();
+            response.v = request.v;
+            let mut frame = Vec::new();
+            codec::encode_to_buf(&response, &mut frame).unwrap();
+            guest_shared.tx_ring.push(frame).unwrap();
+            guest_shared.tx_wake.wake();
+        });
+
+        relay.thaw_restored_workload(&restored).unwrap();
+        guest.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn restored_ready_preserves_captured_agent_identity() {
+        let shared = Arc::new(ConsoleSharedState::with_capacity(8));
+        let sock_path = test_agent_endpoint("restore-ready");
+        let mut relay = AgentRelay::new(&sock_path, shared).await.unwrap();
+        let restored = restored_agent("ready-attempt");
+
+        relay.install_restored_ready(&restored).unwrap();
+
+        let message = codec::decode_message_frame(relay.ready_frame.as_ref().unwrap()).unwrap();
+        let ready = message.payload::<Ready>().unwrap();
+        assert_eq!(message.v, restored.protocol_generation);
+        assert_eq!(message.t, MessageType::Ready);
+        assert_eq!(ready.boot_time_ns, 11);
+        assert_eq!(ready.init_time_ns, 22);
+        assert_eq!(ready.ready_time_ns, 33);
+        assert_eq!(ready.agent_version, "test-agent");
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn restored_relay_defers_public_endpoint_binding() {
+        let shared = Arc::new(ConsoleSharedState::with_capacity(8));
+        let sock_path = test_agent_endpoint("restore-deferred-endpoint");
+        let mut relay = AgentRelay::new_deferred(&sock_path, shared);
+
+        assert!(!sock_path.exists());
+        relay.bind_public_endpoint().unwrap();
+        assert!(sock_path.exists());
+
+        relay.listener.as_ref().unwrap().cleanup(&sock_path);
+    }
+
+    #[test]
+    fn restore_activation_record_replaces_prepared_state_atomically() {
+        let directory = tempfile::tempdir().unwrap();
+        let generation = [0xabu8; 16];
+
+        persist_restore_activation(directory.path(), "attempt-7", generation, "prepared").unwrap();
+        persist_restore_activation(directory.path(), "attempt-7", generation, "activated").unwrap();
+
+        let value: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(directory.path().join("restore-activation.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(value["attempt_id"], "attempt-7");
+        assert_eq!(value["vm_generation_id"], hex::encode(generation));
+        assert_eq!(value["state"], "activated");
+        assert_eq!(
+            std::fs::read_dir(directory.path())
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_name().to_string_lossy().starts_with('.'))
+                .count(),
+            0,
+            "atomic publication must not leave temporary activation records"
         );
     }
 }

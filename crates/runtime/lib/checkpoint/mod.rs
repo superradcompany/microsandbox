@@ -10,7 +10,7 @@ mod restore;
 
 pub(crate) use coordinator::{CheckpointCoordinator, CheckpointResult};
 pub(crate) use disk::recover_managed_upper;
-pub(crate) use restore::PreparedCheckpointRestore;
+pub(crate) use restore::{PreparedCheckpointRestore, RestoredAgentState};
 
 //--------------------------------------------------------------------------------------------------
 // Functions

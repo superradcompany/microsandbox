@@ -13,7 +13,7 @@ use microsandbox_image::checkpoint::{
     ResourceTreatment,
 };
 use microsandbox_protocol::core::{
-    CoreError, WorkloadFreeze, WorkloadFrozen, WorkloadThaw, WorkloadThawed,
+    CoreError, Ready, WorkloadFreeze, WorkloadFrozen, WorkloadThaw, WorkloadThawed,
 };
 use microsandbox_protocol::message::{Message, MessageType};
 use msb_krun::{
@@ -84,6 +84,8 @@ struct PausedCapture {
 struct FrozenWorkload {
     client: AgentClient,
     attempt_id: String,
+    protocol_generation: u8,
+    ready: Ready,
 }
 
 struct MemoryObjectSink<'a> {
@@ -136,7 +138,7 @@ impl CheckpointCoordinator {
         intent: CaptureIntent,
     ) -> Result<CheckpointResult, CheckpointFailure> {
         validate_checkpoint_id(checkpoint_id).map_err(CheckpointFailure::before_pause)?;
-        let admitted = admit_resources(vm, &self.fs_resource_bindings)
+        let mut admitted = admit_resources(vm, &self.fs_resource_bindings)
             .map_err(CheckpointFailure::before_pause)?;
         let final_path = self.root.join(checkpoint_id);
         if final_path.exists() {
@@ -160,6 +162,7 @@ impl CheckpointCoordinator {
                 return Err(CheckpointFailure::before_pause(error));
             }
         };
+        admitted.resources.push(workload.resource_descriptor());
 
         let pause = match vm.pause() {
             Ok(pause) => pause,
@@ -275,9 +278,15 @@ impl CheckpointCoordinator {
             attempt_id,
             |payload| &payload.attempt_id,
         )?;
+        let protocol_generation = client.negotiated_version();
+        let ready = client
+            .ready()
+            .map_err(|error| format!("read workload-agent identity: {error}"))?;
         Ok(FrozenWorkload {
             client,
             attempt_id: attempt_id.to_string(),
+            protocol_generation,
+            ready,
         })
     }
 
@@ -593,6 +602,26 @@ impl CheckpointFailure {
 
     fn resumable(error: impl fmt::Display) -> Self {
         Self::before_pause(error)
+    }
+}
+
+impl FrozenWorkload {
+    fn resource_descriptor(&self) -> ResourceDescriptor {
+        ResourceDescriptor {
+            id: "guest:agentd".into(),
+            kind: "agent".into(),
+            treatment: ResourceTreatment::Serialize,
+            binding: BTreeMap::from([
+                (
+                    "protocol_generation".into(),
+                    self.protocol_generation.to_string(),
+                ),
+                ("agent_version".into(), self.ready.agent_version.clone()),
+                ("boot_time_ns".into(), self.ready.boot_time_ns.to_string()),
+                ("init_time_ns".into(), self.ready.init_time_ns.to_string()),
+                ("ready_time_ns".into(), self.ready.ready_time_ns.to_string()),
+            ]),
+        }
     }
 }
 

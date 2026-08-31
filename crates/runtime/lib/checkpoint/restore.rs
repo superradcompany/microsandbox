@@ -4,7 +4,11 @@ use std::collections::BTreeMap;
 use std::io;
 use std::path::PathBuf;
 
-use microsandbox_image::checkpoint::{CheckpointClosure, MemoryExtentContent, ObjectId};
+use microsandbox_image::checkpoint::{
+    CheckpointClosure, MemoryExtentContent, ObjectId, ResourceDescriptor, ResourceTreatment,
+};
+use microsandbox_protocol::core::Ready;
+use microsandbox_protocol::message::{MessageType, PROTOCOL_VERSION};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -23,6 +27,17 @@ pub(crate) struct PreparedCheckpointRestore {
     execution: msb_krun::ExecutionState,
     devices: Vec<PreparedDeviceRestore>,
     memory: CheckpointMemoryRestore,
+    agent: RestoredAgentState,
+}
+
+/// Agent identity and latch attempt restored with the guest memory image.
+pub(crate) struct RestoredAgentState {
+    /// Protocol generation spoken by the captured agent.
+    pub(crate) protocol_generation: u8,
+    /// Cached ready payload used for post-activation client handshakes.
+    pub(crate) ready: Ready,
+    /// Checkpoint attempt that owns the captured workload freeze.
+    pub(crate) attempt_id: String,
 }
 
 enum PreparedDeviceRestore {
@@ -48,6 +63,7 @@ impl PreparedCheckpointRestore {
         let closure = CheckpointClosure::open(root, Some(&expected))
             .map_err(|error| format!("validate checkpoint closure: {error}"))?;
         let pause_generation = closure.checkpoint().pause_generation;
+        let agent = parse_restored_agent(&closure)?;
 
         let execution_bytes = closure
             .read_object(
@@ -105,11 +121,12 @@ impl PreparedCheckpointRestore {
             execution,
             devices,
             memory: CheckpointMemoryRestore { closure },
+            agent,
         })
     }
 
     /// Install all restore sources and leave the VM at an explicit activation gate.
-    pub(crate) fn install(self, vm: &mut msb_krun::Vm) {
+    pub(crate) fn install(self, vm: &mut msb_krun::Vm) -> RestoredAgentState {
         vm.set_execution_restore(self.execution);
         vm.set_memory_restore(self.memory);
         for device in self.devices {
@@ -121,6 +138,7 @@ impl PreparedCheckpointRestore {
             }
         }
         vm.set_start_paused(true);
+        self.agent
     }
 }
 
@@ -177,5 +195,124 @@ impl msb_krun::VmMemoryRestoreSource for CheckpointMemoryRestore {
             }
         }
         Ok(())
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Functions
+//--------------------------------------------------------------------------------------------------
+
+fn parse_restored_agent(closure: &CheckpointClosure) -> Result<RestoredAgentState, String> {
+    let resource = closure
+        .checkpoint()
+        .resources
+        .iter()
+        .find(|resource| resource.id == "guest:agentd")
+        .ok_or_else(|| "checkpoint has no serialized guest agent identity".to_string())?;
+    parse_restored_agent_resource(resource, &closure.checkpoint().checkpoint_id)
+}
+
+fn parse_restored_agent_resource(
+    resource: &ResourceDescriptor,
+    checkpoint_id: &str,
+) -> Result<RestoredAgentState, String> {
+    if resource.kind != "agent" || resource.treatment != ResourceTreatment::Serialize {
+        return Err("checkpoint guest agent has an incompatible resource treatment".into());
+    }
+    let value = |key: &str| {
+        resource
+            .binding
+            .get(key)
+            .ok_or_else(|| format!("checkpoint guest agent is missing {key}"))
+    };
+    let parse_u64 = |key: &str| {
+        value(key)?
+            .parse::<u64>()
+            .map_err(|error| format!("checkpoint guest agent has invalid {key}: {error}"))
+    };
+    let protocol_generation = value("protocol_generation")?
+        .parse::<u8>()
+        .map_err(|error| {
+            format!("checkpoint guest agent has invalid protocol generation: {error}")
+        })?;
+    if protocol_generation > PROTOCOL_VERSION
+        || !MessageType::WorkloadThaw.is_available_at(protocol_generation)
+    {
+        return Err(format!(
+            "checkpoint guest agent protocol generation {protocol_generation} is unsupported"
+        ));
+    }
+
+    Ok(RestoredAgentState {
+        protocol_generation,
+        ready: Ready {
+            boot_time_ns: parse_u64("boot_time_ns")?,
+            init_time_ns: parse_u64("init_time_ns")?,
+            ready_time_ns: parse_u64("ready_time_ns")?,
+            agent_version: value("agent_version")?.clone(),
+        },
+        attempt_id: checkpoint_id.into(),
+    })
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn agent_resource(protocol_generation: u8) -> ResourceDescriptor {
+        ResourceDescriptor {
+            id: "guest:agentd".into(),
+            kind: "agent".into(),
+            treatment: ResourceTreatment::Serialize,
+            binding: BTreeMap::from([
+                (
+                    "protocol_generation".into(),
+                    protocol_generation.to_string(),
+                ),
+                ("agent_version".into(), "0.6.16-test".into()),
+                ("boot_time_ns".into(), "10".into()),
+                ("init_time_ns".into(), "20".into()),
+                ("ready_time_ns".into(), "30".into()),
+            ]),
+        }
+    }
+
+    #[test]
+    fn parses_attempt_scoped_agent_restore_identity() {
+        let restored =
+            parse_restored_agent_resource(&agent_resource(PROTOCOL_VERSION), "checkpoint-attempt")
+                .unwrap();
+
+        assert_eq!(restored.protocol_generation, PROTOCOL_VERSION);
+        assert_eq!(restored.attempt_id, "checkpoint-attempt");
+        assert_eq!(restored.ready.agent_version, "0.6.16-test");
+        assert_eq!(restored.ready.boot_time_ns, 10);
+        assert_eq!(restored.ready.init_time_ns, 20);
+        assert_eq!(restored.ready.ready_time_ns, 30);
+    }
+
+    #[test]
+    fn rejects_agent_generation_without_workload_thaw() {
+        let error = parse_restored_agent_resource(&agent_resource(7), "checkpoint-attempt")
+            .err()
+            .unwrap();
+
+        assert!(error.contains("protocol generation 7 is unsupported"));
+    }
+
+    #[test]
+    fn rejects_reconstructed_agent_resource() {
+        let mut resource = agent_resource(PROTOCOL_VERSION);
+        resource.treatment = ResourceTreatment::Reconnect;
+
+        let error = parse_restored_agent_resource(&resource, "checkpoint-attempt")
+            .err()
+            .unwrap();
+
+        assert!(error.contains("incompatible resource treatment"));
     }
 }
