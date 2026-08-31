@@ -1555,12 +1555,20 @@ fn build_vm(
             let layers = validate_upper_layers(spec)?;
             let format = layers.last().expect("validated non-empty chain").format;
             let read_only = spec.read_only;
+            // Keep restart behavior identical to in-process rollover: formatted Linux heads use
+            // direct I/O instead of the raw-only bounded writeback controller.
+            let direct_io =
+                cfg!(target_os = "linux") && matches!(format, msb_krun::DiskImageFormat::Qcow2);
             let writeback_limit = writeback_limit.cloned();
             builder = builder.disk(move |d| {
                 let layers = layers
                     .into_iter()
                     .map(|layer| msb_krun::DiskLayer::new(layer.path, layer.format));
-                let d = d.layers(layers).format(format).read_only(read_only);
+                let d = d
+                    .layers(layers)
+                    .format(format)
+                    .read_only(read_only)
+                    .direct_io(direct_io);
                 apply_block_writeback_limit(d, format, read_only, writeback_limit.as_ref())
             });
         } else if let Some(ref upper) = vm.rootfs_upper {
