@@ -75,7 +75,17 @@ pub async fn create_qcow2_overlay(
         let _ = std::fs::remove_file(&temporary);
         return Err(error.into());
     }
-    std::fs::File::open(&temporary)?.sync_all()?;
+    // Windows requires write access for `FlushFileBuffers`, which backs `sync_all`. Reopen the
+    // completed image read-write so the same durability fence works on every supported host.
+    let sync_result = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&temporary)
+        .and_then(|file| file.sync_all());
+    if let Err(error) = sync_result {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error.into());
+    }
     if let Err(error) = std::fs::rename(&temporary, destination) {
         let _ = std::fs::remove_file(&temporary);
         return Err(error.into());
