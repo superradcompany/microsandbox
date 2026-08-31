@@ -929,14 +929,25 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
         let secrets = _network_secrets_handle.clone();
         #[cfg(not(feature = "net"))]
         let secrets: Option<()> = None;
-        if control.memory_resize_supported() || control.cpu_resize_supported() || secrets.is_some()
         {
             let control_sock_path =
                 crate::control::control_socket_path_for(&config.agent_sock_path);
-            let context = crate::control::ControlContext {
-                vm: control,
+            let executor = crate::control::RuntimeControlExecutor::new(
+                control,
                 #[cfg(feature = "net")]
                 secrets,
+                &config.runtime_dir,
+            );
+            let context = crate::control::ControlContext {
+                executor: match executor {
+                    Ok(executor) => Arc::new(executor),
+                    Err(error) => {
+                        let _ = tokio_rt.block_on(mark_run_failed(&db, run_db_id));
+                        return Err(RuntimeError::Custom(format!(
+                            "publish runtime control identity: {error}"
+                        )));
+                    }
+                },
             };
             match crate::control::spawn_control_listener(control_sock_path.clone(), context) {
                 Ok(()) => {

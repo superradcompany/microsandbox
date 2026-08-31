@@ -123,6 +123,12 @@ impl NetBackend for SmoltcpBackend {
         Ok(())
     }
 
+    /// The lock-free ring backend never blocks inside a frame operation and owns no helper thread
+    /// beyond the separately coordinated smoltcp participant.
+    fn supports_quiesce(&self) -> bool {
+        true
+    }
+
     /// File descriptor for NetWorker's epoll. Becomes readable when
     /// `rx_ring` has frames for the guest (i.e. when smoltcp's
     /// `SmoltcpDevice::transmit()` pushes a frame and wakes `rx_wake`).
