@@ -305,7 +305,7 @@ fn serve_connection(
 /// probes from the SDK open and immediately close the pipe.
 #[cfg(windows)]
 pub fn spawn_control_listener(pipe_name: PathBuf, context: ControlContext) -> std::io::Result<()> {
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncBufReadExt, BufReader};
     use tokio::net::windows::named_pipe::{PipeMode, ServerOptions};
 
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -365,20 +365,32 @@ pub fn spawn_control_listener(pipe_name: PathBuf, context: ControlContext) -> st
                             continue;
                         }
                     };
-                    let mut server = reader.into_inner();
-                    if let Err(e) = server.write_all(&payload).await {
+                    let server = reader.into_inner();
+                    if let Err(e) = write_windows_control_response(server, &payload).await {
                         tracing::debug!("control: response write error: {e}");
                         continue;
                     }
-                    // Flush before this instance drops, or the client can
-                    // lose the unread reply when the handle closes.
-                    let _ = server.flush().await;
-                    let _ = server.disconnect();
                 }
             });
         })?;
 
     Ok(())
+}
+
+/// Write one Windows control response and close the connected pipe instance.
+///
+/// `NamedPipeServer::disconnect` discards unread pipe data, so calling it immediately after an
+/// asynchronous flush can erase a fast response before the client consumes it. Dropping the
+/// connected handle preserves the written bytes while the listener creates a fresh instance.
+#[cfg(windows)]
+async fn write_windows_control_response(
+    mut server: tokio::net::windows::named_pipe::NamedPipeServer,
+    payload: &[u8],
+) -> std::io::Result<()> {
+    use tokio::io::AsyncWriteExt;
+
+    server.write_all(payload).await?;
+    server.flush().await
 }
 
 /// Parse one request line and produce the newline-terminated JSON reply.
@@ -424,6 +436,41 @@ fn respond_to_line(line: &str, context: &ControlContext) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn immediate_windows_control_response_survives_server_close() {
+        use std::time::Duration;
+
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        use tokio::net::windows::named_pipe::{ClientOptions, PipeMode, ServerOptions};
+
+        let pipe_name = format!(r"\\.\pipe\msb-control-response-test-{}", std::process::id());
+        let server = ServerOptions::new()
+            .first_pipe_instance(true)
+            .pipe_mode(PipeMode::Byte)
+            .create(&pipe_name)
+            .unwrap();
+        let client = ClientOptions::new().open(&pipe_name).unwrap();
+
+        let writer = tokio::spawn(async move {
+            server.connect().await.unwrap();
+            write_windows_control_response(server, b"{\"ok\":false}\n")
+                .await
+                .unwrap();
+        });
+        let mut line = String::new();
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            BufReader::new(client).read_line(&mut line),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        writer.await.unwrap();
+
+        assert_eq!(line, "{\"ok\":false}\n");
+    }
 
     #[test]
     fn secret_value_debug_is_redacted() {
