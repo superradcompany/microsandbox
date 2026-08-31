@@ -17,6 +17,7 @@ blake3.workspace = true
 chrono.workspace = true
 futures.workspace = true
 hex.workspace = true
+imago.workspace = true
 libc.workspace = true
 microsandbox-utils.workspace = true
 oci-client.workspace = true
