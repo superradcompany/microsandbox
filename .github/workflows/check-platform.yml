@@ -114,7 +114,7 @@ jobs:
 
       - name: Build msb
         run: |
-          cargo build --profile ci --no-default-features --features net,ssh -p microsandbox-cli
+          cargo build --profile ci --no-default-features --features embed-binaries,net,ssh -p microsandbox-cli
           cp target/ci/msb build/msb
 
       - name: Codesign msb (macOS)

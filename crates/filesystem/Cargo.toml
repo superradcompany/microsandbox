@@ -11,16 +11,20 @@ edition.workspace = true
 path = "lib/lib.rs"
 
 [dependencies]
+hex.workspace = true
 libc.workspace = true
 microsandbox-utils.workspace = true
 msb_krun.workspace = true
+sha2.workspace = true
 scopeguard.workspace = true
 tempfile.workspace = true
+thiserror.workspace = true
 tracing.workspace = true
 
 [features]
-default = ["prebuilt"]
-prebuilt = ["microsandbox-utils/http-client"]
+default = ["download-binaries", "embed-binaries"]
+download-binaries = ["embed-binaries", "microsandbox-utils/http-client"]
+embed-binaries = []
 
 [build-dependencies]
 microsandbox-utils.workspace = true

@@ -624,7 +624,7 @@ export declare class PullProgressCreate {
    * Await the sandbox. Resolves once the pull + boot finishes.
    * Calling more than once errors.
    */
-  awaitSandbox(): Promise<JsSandbox>
+  awaitSandbox(): Promise<Sandbox>
 }
 export type JsPullProgressCreate = PullProgressCreate
 
@@ -945,7 +945,7 @@ export declare class Sandbox {
   /** Execute a shell command with streaming I/O. */
   shellStream(script: string): Promise<ExecHandle>
   /** Get a filesystem handle for operations on the running sandbox. */
-  fs(): JsSandboxFs
+  fs(): SandboxFsOps
   /** Connect a native in-process SSH client to this sandbox. */
   sshConnect(options?: SshClientOptions | undefined | null): Promise<JsSshClient>
   /** Prepare a reusable SSH server endpoint for this sandbox. */
@@ -1234,7 +1234,7 @@ export declare class SandboxBuilder {
    * synchronously before awaiting; napi-rs requires the `unsafe` tag
    * regardless. JS callers see `create(): Promise<Sandbox>`.
    */
-  create(): Promise<JsSandbox>
+  create(): Promise<Sandbox>
   /**
    * Create the sandbox with image-pull progress reporting. Returns
    * a `PullProgressStream` of per-layer download/materialization
@@ -1723,7 +1723,7 @@ export interface AttachOptions {
   user?: string
   env: Record<string, string>
   detachKeys?: string
-  rlimits: Array<JsRlimit>
+  rlimits: Array<Rlimit>
 }
 
 /** Return secret-safe information about the active default backend. */
@@ -2251,15 +2251,8 @@ export interface SecretEntry {
   passthroughHosts: Array<string>
   /** Require verified TLS identity before substituting (default: true). */
   requireTlsIdentity: boolean
-  /** Where the placeholder may be substituted. */
+  /** Where the secret may be injected into requests. */
   substitution: SecretSubstitution
-}
-
-/** Substitution sites for a secret value. */
-export interface SecretSubstitution {
-  headers: boolean
-  query: boolean
-  body: boolean
 }
 
 /**
@@ -2274,6 +2267,13 @@ export interface SecretModifySpec {
   store?: string
   placeholder?: string
   allowedHosts?: Array<string>
+}
+
+/** Injection sites for a secret value. */
+export interface SecretSubstitution {
+  headers: boolean
+  query: boolean
+  body: boolean
 }
 
 /**
@@ -2305,7 +2305,7 @@ export interface SnapshotConfig {
   name: string
   sourceSandbox?: string
   destDir?: string
-  labels: Array<JsSnapshotLabel>
+  labels: Array<SnapshotLabel>
   force: boolean
   recordIntegrity: boolean
   resumable: boolean
@@ -2419,8 +2419,8 @@ export interface TlsConfig {
   interceptedPorts: Array<number>
   blockQuic: boolean
   upstreamCaCertPaths: Array<string>
-  scopedUpstreamCaCerts: Array<JsScopedUpstreamCaCert>
-  scopedVerifyUpstream: Array<JsScopedVerifyUpstream>
+  scopedUpstreamCaCerts: Array<ScopedUpstreamCaCert>
+  scopedVerifyUpstream: Array<ScopedVerifyUpstream>
   interceptCaCertPath?: string
   interceptCaKeyPath?: string
 }

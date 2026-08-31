@@ -21,6 +21,7 @@ microsandbox reads its global configuration from `~/.microsandbox/config.json`. 
   "paths": {
     "msb": "/usr/local/bin/msb",
     "libkrunfw": "/usr/local/lib/libkrunfw.so",
+    "agentd": "/usr/local/libexec/microsandbox/agentd",
     "cache": "/mnt/fast/msb-cache",
     "sandboxes": null,
     "volumes": null,
@@ -153,8 +154,9 @@ On Windows, the default `home` is `%USERPROFILE%\.microsandbox`. JSON strings ca
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `msb` | `{home}/bin/msb` | `msb` binary. Resolved via: `MSB_PATH` env, SDK-provided runtime path, this field, debug workspace build paths, default install path, then `PATH` |
-| `libkrunfw` | `{home}/lib/libkrunfw` | Path to a custom VM kernel (`.so` on Linux, `.dylib` on macOS, `.dll` on Windows). Resolved via: `MSB_LIBKRUNFW_PATH` env, SDK-provided runtime path, this field, paths next to the resolved `msb` binary, then default install path |
+| `msb` | `{home}/bin/msb` | `msb` binary. Set this together with `libkrunfw`; runtime resolution returns a matched pair or fails closed. |
+| `libkrunfw` | `{home}/lib/libkrunfw` | Matching libkrunfw shared library (`.so` on Linux, `.dylib` on macOS, `.dll` on Windows). Set this together with `msb`. |
+| `agentd` | embedded when enabled | Linux guest Agentd executable. Normal release builds embed it in `msb`; custom builds without `embed-binaries` must provide this field or `MSB_AGENTD_PATH`. The environment variable takes precedence, and an explicitly configured missing or invalid file fails closed. |
 | `cache` | `{home}/cache` | Image layer cache |
 | `sandboxes` | `{home}/sandboxes` | Per-sandbox state |
 | `volumes` | `{home}/volumes` | Named volumes |
@@ -168,8 +170,9 @@ Rust callers can inspect the active config and resolve runtime paths with the sa
 
 ```rust
 let cfg = microsandbox::config::config()?;
-let msb = cfg.resolve_msb_path()?;
-let libkrunfw = cfg.resolve_libkrunfw_path()?;
+let runtime = microsandbox::setup::resolve_runtime(&cfg)?;
+let msb = &runtime.msb_path;
+let libkrunfw = &runtime.libkrunfw_path;
 ```
 
 When your code owns an explicit local backend, prefer the backend-owned config:
@@ -183,7 +186,7 @@ let backend = LocalBackend::builder()
     .await?;
 
 let cfg = backend.config();
-let msb = cfg.resolve_msb_path()?;
+let runtime = microsandbox::setup::resolve_runtime(&cfg)?;
 ```
 
 `LocalBackend` has two plain constructors alongside the builder. `LocalBackend::lazy()` is synchronous and defers opening (and migrating) the local sandbox database until the first operation; it is what backend resolution uses when no backend is set explicitly. `LocalBackend::new().await?` opens the database up front, so startup fails fast if the database is unusable.

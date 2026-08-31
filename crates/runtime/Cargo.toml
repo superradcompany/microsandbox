@@ -12,36 +12,52 @@ name = "microsandbox_runtime"
 path = "lib/lib.rs"
 
 [features]
-default = ["prebuilt", "net"]
-prebuilt = ["microsandbox-filesystem/prebuilt"]
-net = ["dep:microsandbox-network", "msb_krun/net"]
+default = ["download-binaries", "embed-binaries", "net", "runner"]
+client = []
+runner = [
+    "client",
+    "dep:bytes",
+    "dep:crossbeam-queue",
+    "dep:microsandbox-agent-client",
+    "dep:microsandbox-filesystem",
+    "dep:microsandbox-metrics",
+    "dep:microsandbox-vsock",
+    "dep:msb_krun",
+    "dep:rand",
+    "dep:rustls",
+    "dep:tempfile",
+    "dep:tokio",
+    "microsandbox-network?/engine",
+]
+download-binaries = ["runner", "microsandbox-filesystem/download-binaries"]
+embed-binaries = ["runner", "microsandbox-filesystem/embed-binaries"]
+net = ["dep:microsandbox-network", "msb_krun?/net"]
 
 [dependencies]
-bytes = { workspace = true }
+bytes = { workspace = true, optional = true }
 chrono.workspace = true
-clap = { workspace = true, features = ["derive"] }
-crossbeam-queue = { workspace = true }
+crossbeam-queue = { workspace = true, optional = true }
 libc.workspace = true
-microsandbox-agent-client.workspace = true
+microsandbox-agent-client = { workspace = true, optional = true }
 microsandbox-db.workspace = true
-microsandbox-filesystem.workspace = true
-microsandbox-metrics.workspace = true
-microsandbox-network = { workspace = true, optional = true }
+microsandbox-filesystem = { workspace = true, optional = true }
+microsandbox-metrics = { workspace = true, optional = true }
+microsandbox-network = { workspace = true, default-features = false, optional = true }
 microsandbox-protocol.workspace = true
 microsandbox-types.workspace = true
 microsandbox-utils.workspace = true
-microsandbox-vsock.workspace = true
-msb_krun = { workspace = true, features = ["blk"] }
+microsandbox-vsock = { workspace = true, optional = true }
+msb_krun = { workspace = true, features = ["blk"], optional = true }
 nix = { workspace = true, features = ["process", "signal"] }
-rand.workspace = true
-rustls = { workspace = true }
+rand = { workspace = true, optional = true }
+rustls = { workspace = true, optional = true }
 sea-orm.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-tempfile.workspace = true
+tempfile = { workspace = true, optional = true }
 thiserror.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, optional = true }
 tracing.workspace = true
 zeroize.workspace = true
 
@@ -49,11 +65,12 @@ zeroize.workspace = true
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Kernel", "Win32_System_SystemInformation", "Win32_System_Threading"] }
 
 [target.'cfg(unix)'.dependencies]
-microsandbox-agent-client = { workspace = true, features = ["uds"] }
+microsandbox-agent-client = { workspace = true, features = ["uds"], optional = true }
 
 [target.'cfg(windows)'.dependencies.microsandbox-agent-client]
 workspace = true
 features = ["named-pipe"]
+optional = true
 
 [dev-dependencies]
 microsandbox-migration.workspace = true

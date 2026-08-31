@@ -189,14 +189,14 @@ build-libkrunfw:
 # Build the msb CLI binary.
 [linux]
 build-msb mode="debug": build-agentd
-    cargo build {{ if mode == "release" { "--release" } else { "" } }} --no-default-features --features net,ssh -p microsandbox-cli
+    cargo build {{ if mode == "release" { "--release" } else { "" } }} --no-default-features --features embed-binaries,net,ssh -p microsandbox-cli
     mkdir -p build
     cp target/{{ mode }}/msb build/msb
 
 # Build and sign the msb CLI binary.
 [macos]
 build-msb mode="debug": build-agentd
-    cargo build {{ if mode == "release" { "--release" } else { "" } }} --no-default-features --features net,ssh -p microsandbox-cli
+    cargo build {{ if mode == "release" { "--release" } else { "" } }} --no-default-features --features embed-binaries,net,ssh -p microsandbox-cli
     mkdir -p build
     cp target/{{ mode }}/msb build/msb
     codesign --entitlements msb-entitlements.plist --force -s - build/msb

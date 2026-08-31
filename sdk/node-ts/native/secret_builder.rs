@@ -29,6 +29,8 @@ pub struct JsSecretEntry {
     /// Require verified TLS identity before substituting (default: true).
     pub require_tls_identity: bool,
     /// Where the secret may be injected into requests.
+    // Keep the public name stable when napi-rs renders this renamed nested object.
+    #[napi(ts_type = "SecretSubstitution")]
     pub substitution: JsSecretSubstitution,
 }
 

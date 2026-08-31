@@ -17,7 +17,9 @@ use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use futures::future::BoxFuture;
 
-use super::{Backend, LocalBackend};
+use super::Backend;
+#[cfg(feature = "local")]
+use super::LocalBackend;
 use crate::MicrosandboxResult;
 use crate::sandbox::fs::{FsEntry, FsMetadata};
 use crate::volume::{
@@ -291,6 +293,7 @@ pub trait VolumeBackend: Send + Sync {
 // Trait Implementations: LocalBackend
 //--------------------------------------------------------------------------------------------------
 
+#[cfg(feature = "local")]
 impl VolumeBackend for LocalBackend {
     fn create<'a>(
         &'a self,
@@ -440,7 +443,7 @@ impl VolumeBackend for LocalBackend {
 // Tests
 //--------------------------------------------------------------------------------------------------
 
-#[cfg(test)]
+#[cfg(all(test, feature = "local"))]
 mod tests {
     use super::*;
     use crate::MicrosandboxError;

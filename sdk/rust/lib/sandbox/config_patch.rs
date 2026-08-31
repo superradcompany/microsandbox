@@ -3,11 +3,11 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use microsandbox_image::RegistryAuth;
 #[cfg(feature = "net")]
 use microsandbox_network::dns::Nameserver;
 #[cfg(feature = "net")]
 use microsandbox_network::policy::{Action, NetworkPolicy, Rule};
+use microsandbox_types::RegistryAuth;
 #[cfg(feature = "net")]
 use microsandbox_types::{HostPattern, SecretSource, SecretSubstitution, SecretViolationAction};
 use microsandbox_types::{PullPolicy, Rlimit, SecurityProfile};

@@ -29,6 +29,7 @@ pub struct AgentClient(microsandbox_agent_client::AgentClient);
 ///
 /// The socket lives under the SDK's configured runtime directory at a short,
 /// name-derived path. Sandbox names are limited to 128 UTF-8 bytes.
+#[cfg(feature = "local")]
 pub async fn connect_sandbox(name: &str) -> AgentClientResult<AgentClient> {
     connect_sandbox_with_timeout(name, Duration::from_secs(10)).await
 }
@@ -37,6 +38,7 @@ pub async fn connect_sandbox(name: &str) -> AgentClientResult<AgentClient> {
 /// handshake timeout.
 ///
 /// Sandbox names are limited to 128 UTF-8 bytes.
+#[cfg(feature = "local")]
 pub async fn connect_sandbox_with_timeout(
     name: &str,
     timeout: Duration,
@@ -63,12 +65,12 @@ pub async fn connect_sandbox_with_timeout(
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(feature = "local", unix))]
 fn agent_endpoint_may_exist(path: &Path) -> bool {
     path.exists()
 }
 
-#[cfg(windows)]
+#[cfg(all(feature = "local", windows))]
 fn agent_endpoint_may_exist(_path: &Path) -> bool {
     true
 }
@@ -125,12 +127,14 @@ impl AgentClient {
     }
 
     /// Resolve a sandbox name to its agent socket path and connect.
+    #[cfg(feature = "local")]
     pub async fn connect_sandbox(name: &str) -> AgentClientResult<Self> {
         connect_sandbox(name).await
     }
 
     /// Resolve a sandbox name to its agent socket path and connect with an
     /// explicit handshake timeout.
+    #[cfg(feature = "local")]
     pub async fn connect_sandbox_with_timeout(
         name: &str,
         timeout: Duration,
@@ -147,6 +151,7 @@ impl AgentClient {
     /// Useful for talking to `agentd` over a raw byte transport (e.g. a
     /// transparent relay that splices bytes to/from the socket) instead of
     /// this frame client. The sandbox need not be running.
+    #[cfg(feature = "local")]
     pub fn socket_path(name: &str) -> crate::MicrosandboxResult<std::path::PathBuf> {
         crate::runtime::agent_socket_path(name)
     }

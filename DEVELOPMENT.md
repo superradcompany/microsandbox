@@ -94,21 +94,17 @@ just build release && just install
 | `just uninstall` | Remove installed binaries |
 | `just clean` | Remove `build/` artifacts and clean libkrunfw |
 
-### Using a Prebuilt agentd Binary
+### Selecting Embedded Binaries
 
-With the default `prebuilt` feature enabled, downstream consumers of
-`microsandbox-filesystem` can set `MSB_AGENTD_PATH` to an existing guest
-`agentd` binary.
+`microsandbox-filesystem` enables both `download-binaries` and `embed-binaries` by default. `download-binaries` permits Cargo build scripts to fetch missing official artifacts and implies `embed-binaries`; `embed-binaries` controls whether Agentd bytes are compiled into the host binary.
 
-The repository-local `build/agentd` takes precedence. Otherwise, the supplied
-binary is copied into Cargo's `OUT_DIR` instead of downloading the release
-artifact. If no repository-local `build/agentd` exists and `MSB_AGENTD_PATH` is
-set, it must point to an existing file or the build fails.
-The variable is ignored when the `prebuilt` feature is disabled.
+Set `MSB_EMBED_ARTIFACTS_DIR` at build time to an unpacked directory containing `agentd`, `msb`, and the platform `libkrunfw` filename. The repository-local `build/` directory is the next source, followed by an official download when `download-binaries` is enabled. The Rust SDK also accepts `MSB_EMBED_RUNTIME_BUNDLE_PATH` as an exact compressed `msb` plus `libkrunfw` archive when its `embed-binaries` feature is enabled.
 
 ```bash
-MSB_AGENTD_PATH=/path/to/agentd cargo build
+MSB_EMBED_ARTIFACTS_DIR=/path/to/artifacts cargo build
 ```
+
+At runtime, `MSB_AGENTD_PATH` selects an external Agentd executable instead of global `paths.agentd` or the embedded fallback. The file is eagerly read and validated before VM construction; it is never downloaded or copied into `MSB_HOME`.
 
 ## Project Structure
 

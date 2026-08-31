@@ -138,7 +138,7 @@ impl PassthroughFs {
 
         let init_file = if cfg.inject_init {
             let mut file = tempfile::tempfile().map_err(host_error)?;
-            file.write_all(AGENTD_BYTES).map_err(host_error)?;
+            file.write_all(agentd_bytes()).map_err(host_error)?;
             file.sync_data().map_err(host_error)?;
             Some(Mutex::new(file))
         } else {

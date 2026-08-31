@@ -298,7 +298,7 @@ jobs:
 
       - name: Build msb
         run: |
-          cargo build --profile ci --no-default-features --features net,ssh -p microsandbox-cli
+          cargo build --profile ci --no-default-features --features embed-binaries,net,ssh -p microsandbox-cli
           cp target/ci/msb build/msb
 
       # Upload immediately. All KVM lanes can begin while independent quality
@@ -390,10 +390,10 @@ jobs:
           chmod +x build/agentd
           mkdir -p artifacts
           # The target KVM job installs the freshly built runtime separately.
-          # Omitting `prebuilt` here avoids waiting for that artifact solely to
-          # satisfy SDK build scripts; the downloaded current agentd is embedded.
+          # The KVM job supplies both the host runtime and Agentd explicitly,
+          # so this archive needs neither download nor embedded binary features.
           mold -run cargo nextest archive -p microsandbox --tests \
-            --no-default-features --features keyring,net \
+            --no-default-features --features keyring,local,net \
             --archive-file artifacts/rust-integration-tests.tar.zst
 
       - name: Upload nextest archive
@@ -460,6 +460,9 @@ jobs:
     timeout-minutes: 45
     env:
       CARGO_INCREMENTAL: "0"
+      # This lane intentionally disables embedding and exercises the downloaded
+      # target-matched guest payload through the runtime override instead.
+      MSB_AGENTD_PATH: ${{ github.workspace }}/build/agentd
     strategy:
       fail-fast: false
       matrix:
@@ -545,7 +548,7 @@ jobs:
           $ErrorActionPreference = "Stop"
           . "$env:GITHUB_WORKSPACE\vendor\libkrunfw\scripts\msvc-env.ps1"
           Set-MsvcEnvironment -Architecture ${{ matrix.vs_arch }} -HostArchitecture ${{ matrix.vs_host_arch }}
-          cargo +stable test --no-default-features --features net -p microsandbox-runtime --lib --target ${{ matrix.rust_target }} test_bind_rootfs_backend_exposes_host_file_and_init
+          cargo +stable test --no-default-features --features net,runner -p microsandbox-runtime --lib --target ${{ matrix.rust_target }} test_bind_rootfs_backend_exposes_host_file_and_init
 
       - name: Test bind rootfs patches
         shell: pwsh
@@ -553,7 +556,7 @@ jobs:
           $ErrorActionPreference = "Stop"
           . "$env:GITHUB_WORKSPACE\vendor\libkrunfw\scripts\msvc-env.ps1"
           Set-MsvcEnvironment -Architecture ${{ matrix.vs_arch }} -HostArchitecture ${{ matrix.vs_host_arch }}
-          cargo +stable test --no-default-features --features net -p microsandbox --lib --target ${{ matrix.rust_target }} sandbox::patch::tests::bind_patch_
+          cargo +stable test --no-default-features --features local,net -p microsandbox --lib --target ${{ matrix.rust_target }} sandbox::patch::tests::bind_patch_
 
       - name: Test Windows DNS resolver
         shell: pwsh
@@ -664,7 +667,7 @@ jobs:
           $ErrorActionPreference = "Stop"
           . "$env:GITHUB_WORKSPACE\vendor\libkrunfw\scripts\msvc-env.ps1"
           Set-MsvcEnvironment -Architecture ${{ matrix.vs_arch }} -HostArchitecture ${{ matrix.vs_host_arch }}
-          cargo +stable build --profile ci --no-default-features --features net,ssh -p microsandbox-cli --target ${{ matrix.rust_target }}
+          cargo +stable build --profile ci --no-default-features --features embed-binaries,net,ssh -p microsandbox-cli --target ${{ matrix.rust_target }}
 
       - name: Build Go FFI cdylib
         if: matrix.component == 'Go'
@@ -746,6 +749,13 @@ jobs:
 
       - name: Clippy
         run: cargo +stable clippy --workspace --exclude microsandbox-agentd -- -D warnings
+
+      - name: Check Rust SDK feature surfaces
+        run: |
+          cargo +stable check -p microsandbox --no-default-features --features cloud,net
+          cargo +stable check -p microsandbox --no-default-features --features local,net
+          cargo +stable check -p microsandbox-runtime --no-default-features --features client,net
+          cargo +stable check -p microsandbox-network --no-default-features
 
       - name: Docs
         env:
@@ -1460,6 +1470,7 @@ jobs:
       - name: Run integration tests
         env:
           MSB_TEST_ISOLATE_HOME: "1"
+          MSB_AGENTD_PATH: ${{ github.workspace }}/build/agentd
         run: |
           export PATH="$HOME/.microsandbox/bin:$PATH"
           export LD_LIBRARY_PATH="${{ github.workspace }}/build:$HOME/.microsandbox/lib"

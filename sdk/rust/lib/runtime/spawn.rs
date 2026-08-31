@@ -286,12 +286,22 @@ pub async fn spawn_sandbox(
     #[cfg(feature = "net")]
     let config = resolved_config.as_ref().unwrap_or(config);
 
-    // libkrunfw is process-level (one dylib per process address space). The
-    // resolver consults MSB_LIBKRUNFW_PATH env, then SDK_LIBKRUNFW_PATH static,
-    // then config.paths.libkrunfw, then filesystem fallbacks.
+    // Resolve msb and libkrunfw as one pair so a partial or mixed-version
+    // installation cannot reach process launch.
     let global = local.config();
-    let msb_path = global.resolve_msb_path()?;
-    let libkrunfw_path = global.resolve_libkrunfw_path()?;
+    #[cfg(feature = "embed-binaries")]
+    let resolved_runtime = crate::setup::ensure_runtime(
+        global,
+        crate::setup::InstallOptions {
+            source: crate::setup::InstallSource::EmbeddedArchive,
+            ..Default::default()
+        },
+    )
+    .await?;
+    #[cfg(not(feature = "embed-binaries"))]
+    let resolved_runtime = crate::setup::resolve_runtime(global)?;
+    let msb_path = resolved_runtime.msb_path;
+    let libkrunfw_path = resolved_runtime.libkrunfw_path;
     #[cfg(windows)]
     crate::setup::verify_windows_host_prerequisites()?;
     tracing::debug!(
@@ -529,6 +539,17 @@ pub async fn spawn_sandbox(
         cmd.creation_flags(flags);
     }
     cmd.args(visible);
+
+    // Agentd selection is process-wide for the VMM. Forward the explicit
+    // environment override first, otherwise map the backend-owned global
+    // config into the child environment. The child validates and eagerly
+    // reads the selected payload before constructing any filesystem.
+    if let Some(path) = agentd_path_override(
+        std::env::var_os("MSB_AGENTD_PATH"),
+        global.paths.agentd.as_deref(),
+    ) {
+        cmd.env("MSB_AGENTD_PATH", path);
+    }
 
     // Prevent the sandbox process from inheriting the parent's terminal on
     // stdin — the VMM's implicit console auto-detects terminals and sets raw
@@ -2399,6 +2420,14 @@ fn append_option_block(spec: &mut String, opts: Vec<String>) {
     spec.push_str(&opts.join(","));
 }
 
+/// Resolve the process-wide Agentd path without consulting the filesystem.
+fn agentd_path_override(
+    environment: Option<OsString>,
+    configured: Option<&Path>,
+) -> Option<OsString> {
+    environment.or_else(|| configured.map(Path::as_os_str).map(OsString::from))
+}
+
 /// Derive a stable, collision-resistant identifier from a guest mount path.
 ///
 /// Used for virtiofs tags and for virtio-blk `serial` fields (the block id
@@ -2902,7 +2931,7 @@ mod tests {
         AUTO_BLOCK_WRITEBACK_LIMIT_BYTES, MIN_BLOCK_WRITEBACK_LIMIT_BYTES,
         auto_block_writeback_pool_bytes, resolve_linux_block_writeback_policy,
     };
-    use super::{block_writeback_policy, sandbox_cli_args};
+    use super::{agentd_path_override, block_writeback_policy, sandbox_cli_args};
     use crate::{
         LogLevel,
         backend::LocalBackend,
@@ -3002,6 +3031,25 @@ mod tests {
             None,
         );
         launch
+    }
+
+    #[test]
+    fn agentd_environment_override_wins_over_global_config() {
+        assert_eq!(
+            agentd_path_override(
+                Some(OsString::from("/from/environment")),
+                Some(Path::new("/from/config")),
+            ),
+            Some(OsString::from("/from/environment"))
+        );
+    }
+
+    #[test]
+    fn agentd_global_config_is_used_without_environment_override() {
+        assert_eq!(
+            agentd_path_override(None, Some(Path::new("/from/config"))),
+            Some(OsString::from("/from/config"))
+        );
     }
 
     /// Re-expand a [`LaunchConfig`] into the historical `--flag value` token

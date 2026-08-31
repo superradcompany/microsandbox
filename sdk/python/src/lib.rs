@@ -199,10 +199,8 @@ fn resolved_msb_path() -> PyResult<String> {
     let local = backend
         .as_local()
         .ok_or_else(|| error::local_only("resolved_msb_path"))?;
-    local
-        .config()
-        .resolve_msb_path()
-        .map(|path| path.to_string_lossy().into_owned())
+    microsandbox::setup::resolve_runtime(local.config())
+        .map(|runtime| runtime.msb_path.to_string_lossy().into_owned())
         .map_err(error::to_py_err)
 }
 

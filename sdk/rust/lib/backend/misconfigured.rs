@@ -396,6 +396,7 @@ mod tests {
                 .to_string()
                 .contains("MSB_BACKEND=cloud")
         );
+        #[cfg(feature = "local")]
         assert!(backend.as_local().is_none());
     }
 }

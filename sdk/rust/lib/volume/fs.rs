@@ -9,13 +9,19 @@
 //! parent volume's `Arc<dyn Backend>` + name and dispatches through the
 //! [`VolumeBackend`](crate::backend::VolumeBackend) trait.
 
-use std::pin::Pin;
 use std::sync::Arc;
 
+#[cfg(feature = "cloud")]
+use std::pin::Pin;
+
 use bytes::Bytes;
+#[cfg(feature = "cloud")]
 use futures::{Stream, StreamExt};
+#[cfg(feature = "local")]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+#[cfg(feature = "cloud")]
 use tokio::sync::mpsc;
+#[cfg(feature = "cloud")]
 use tokio::task::JoinHandle;
 
 use crate::backend::Backend;
@@ -51,12 +57,15 @@ pub struct VolumeFsReadStream {
 }
 
 enum VolumeFsReadStreamInner {
+    #[cfg(feature = "local")]
     Local { file: tokio::fs::File, buf: Vec<u8> },
+    #[cfg(feature = "cloud")]
     Cloud(Pin<Box<dyn Stream<Item = MicrosandboxResult<Bytes>> + Send>>),
 }
 
 impl VolumeFsReadStream {
     /// Construct from an already-opened file. Local impl only.
+    #[cfg(feature = "local")]
     pub(crate) fn from_file(file: tokio::fs::File) -> Self {
         Self {
             inner: VolumeFsReadStreamInner::Local {
@@ -67,6 +76,7 @@ impl VolumeFsReadStream {
     }
 
     /// Construct from a cloud HTTP response stream.
+    #[cfg(feature = "cloud")]
     pub(crate) fn from_stream(
         stream: Pin<Box<dyn Stream<Item = MicrosandboxResult<Bytes>> + Send>>,
     ) -> Self {
@@ -82,7 +92,9 @@ pub struct VolumeFsWriteSink {
 }
 
 enum VolumeFsWriteSinkInner {
+    #[cfg(feature = "local")]
     Local(tokio::fs::File),
+    #[cfg(feature = "cloud")]
     Cloud {
         tx: mpsc::Sender<Bytes>,
         completion: JoinHandle<MicrosandboxResult<()>>,
@@ -91,6 +103,7 @@ enum VolumeFsWriteSinkInner {
 
 impl VolumeFsWriteSink {
     /// Construct from an already-opened file. Local impl only.
+    #[cfg(feature = "local")]
     pub(crate) fn from_file(file: tokio::fs::File) -> Self {
         Self {
             inner: VolumeFsWriteSinkInner::Local(file),
@@ -98,6 +111,7 @@ impl VolumeFsWriteSink {
     }
 
     /// Construct from a channel-backed cloud upload.
+    #[cfg(feature = "cloud")]
     pub(crate) fn from_channel(
         tx: mpsc::Sender<Bytes>,
         completion: JoinHandle<MicrosandboxResult<()>>,
@@ -251,6 +265,7 @@ impl VolumeFsReadStream {
     /// Returns `None` at EOF.
     pub async fn recv(&mut self) -> MicrosandboxResult<Option<Bytes>> {
         match &mut self.inner {
+            #[cfg(feature = "local")]
             VolumeFsReadStreamInner::Local { file, buf } => {
                 let n = file.read(buf).await?;
                 if n == 0 {
@@ -259,6 +274,7 @@ impl VolumeFsReadStream {
                     Ok(Some(Bytes::copy_from_slice(&buf[..n])))
                 }
             }
+            #[cfg(feature = "cloud")]
             VolumeFsReadStreamInner::Cloud(stream) => stream.next().await.transpose(),
         }
     }
@@ -281,10 +297,12 @@ impl VolumeFsWriteSink {
     /// Write a chunk of data to the file.
     pub async fn write(&mut self, data: impl AsRef<[u8]>) -> MicrosandboxResult<()> {
         match &mut self.inner {
+            #[cfg(feature = "local")]
             VolumeFsWriteSinkInner::Local(file) => {
                 file.write_all(data.as_ref()).await?;
                 Ok(())
             }
+            #[cfg(feature = "cloud")]
             VolumeFsWriteSinkInner::Cloud { tx, .. } => tx
                 .send(Bytes::copy_from_slice(data.as_ref()))
                 .await
@@ -295,10 +313,12 @@ impl VolumeFsWriteSink {
     /// Flush and close the file.
     pub async fn close(self) -> MicrosandboxResult<()> {
         match self.inner {
+            #[cfg(feature = "local")]
             VolumeFsWriteSinkInner::Local(mut file) => {
                 file.flush().await?;
                 Ok(())
             }
+            #[cfg(feature = "cloud")]
             VolumeFsWriteSinkInner::Cloud { tx, completion } => {
                 drop(tx);
                 completion.await.map_err(|error| {
@@ -313,6 +333,7 @@ impl VolumeFsWriteSink {
 // Module: local (free fn impls called by LocalBackend's VolumeBackend impl)
 //--------------------------------------------------------------------------------------------------
 
+#[cfg(feature = "local")]
 pub(crate) mod local {
     //! Local FS ops keyed by `(volume_name, rel_path)`.
     //!
@@ -725,7 +746,7 @@ pub(crate) mod local {
 // Tests
 //--------------------------------------------------------------------------------------------------
 
-#[cfg(test)]
+#[cfg(all(test, feature = "local"))]
 mod tests {
     use super::*;
     use crate::backend::LocalBackend;

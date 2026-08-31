@@ -62,7 +62,7 @@ jobs:
 
       - name: Build local runtime placeholders for cargo check
         run: |
-          cargo build --no-default-features --features net,ssh -p microsandbox-cli
+          cargo build --no-default-features --features embed-binaries,net,ssh -p microsandbox-cli
           mkdir -p build
           cp target/debug/msb build/msb
           touch "build/libkrunfw.so.${LIBKRUNFW_VERSION}"

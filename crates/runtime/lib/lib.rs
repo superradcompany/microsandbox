@@ -1,33 +1,33 @@
-//! `microsandbox-runtime` provides the runtime library for the sandbox
-//! process entry point. This crate contains the unified VM + relay logic
-//! that runs inside the single sandbox process.
+//! Shared host-runtime contracts and the optional sandbox VM runner.
+//!
+//! The `client` feature exposes launch, IPC, control, logging, and maintenance
+//! contracts used by SDKs. The `runner` feature adds the VM, relay, metrics,
+//! console, and host-control implementation linked into the `msb` process.
 
 #![warn(missing_docs)]
 
-#[cfg(windows)]
-mod bootstrap_fs;
-mod clock;
+#[cfg(feature = "client")]
+mod client;
 mod error;
+#[cfg(feature = "runner")]
+mod runner;
 
 //--------------------------------------------------------------------------------------------------
 // Exports
 //--------------------------------------------------------------------------------------------------
 
-pub mod boot_error;
-pub mod console;
-pub mod control;
-pub mod cpu;
-pub mod exec_log;
-pub mod heartbeat;
-pub mod ipc;
-pub mod launch;
-pub mod logging;
-pub mod maintenance;
-pub mod metrics;
-pub mod policy;
-pub mod relay;
-mod startup;
-pub mod vm;
-pub(crate) mod writeback;
+#[cfg(feature = "client")]
+pub use client::{boot_error, control, ipc, launch, logging, maintenance};
+#[cfg(feature = "runner")]
+pub use runner::{console, cpu, exec_log, heartbeat, metrics, policy, relay, vm};
+#[cfg(all(feature = "client", not(feature = "runner")))]
+/// Backward-compatible access to the process-launch contract without the VM runner.
+pub mod vm {
+    pub use crate::launch::*;
+}
+#[cfg(all(feature = "runner", windows))]
+pub(crate) use runner::bootstrap_fs;
+#[cfg(feature = "runner")]
+pub(crate) use runner::{clock, startup, writeback};
 
 pub use error::*;
