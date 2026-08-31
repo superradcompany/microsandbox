@@ -5,8 +5,9 @@
 //! network layer) cannot go through agentd: the guest is untrusted and the
 //! knobs live host-side. The sandbox process serves them instead next to the
 //! agent endpoint — a unix socket on unix hosts, a named pipe on Windows.
-//! The protocol is deliberately tiny: one JSON request line in, one JSON
-//! response line out, per connection.
+//! Existing one-line JSON clients remain supported. New callers may use a
+//! versioned request envelope carrying boot identity, revision fencing, and
+//! request correlation; both paths enter one runtime-owned executor.
 //!
 //! Secret requests may carry raw secret values (rotation needs the new
 //! material), so request lines are never logged and [`SecretValue`] redacts
@@ -17,6 +18,13 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+
+mod executor;
+
+pub use executor::{
+    CONTROL_PROTOCOL_VERSION, ControlEnvelope, ControlEnvelopeResponse, RuntimeControlExecutor,
+    RuntimeControlState, RuntimeLifecycle,
+};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -31,7 +39,7 @@ pub const CONTROL_SOCKET_EXTENSION: &str = "control.sock";
 //--------------------------------------------------------------------------------------------------
 
 /// A control request from the SDK.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum ControlRequest {
     /// Report which live-control operations this sandbox process supports.
@@ -101,7 +109,7 @@ pub enum SecretLiveChange {
 pub struct SecretValue(pub String);
 
 /// The reply to any control request.
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ControlResponse {
     /// Whether the request was accepted.
     pub ok: bool,
@@ -109,6 +117,10 @@ pub struct ControlResponse {
     /// Failure detail when `ok` is false.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+
+    /// Stable machine-readable failure class.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
 
     /// Memory sizing, present for memory requests.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -174,30 +186,8 @@ pub struct CpuControlState {
 /// Everything the control listener can reach: the VMM control handle plus the
 /// host network secrets layer when this build carries one.
 pub struct ControlContext {
-    /// Live VM resource control handle.
-    pub vm: msb_krun::VmControl,
-
-    /// Live secrets view of the sandbox's network stack, when networking is
-    /// enabled and the sandbox booted with secrets.
-    #[cfg(feature = "net")]
-    pub secrets: Option<microsandbox_network::secrets::handle::SecretsHandle>,
-}
-
-//--------------------------------------------------------------------------------------------------
-// Methods
-//--------------------------------------------------------------------------------------------------
-
-impl ControlContext {
-    fn secrets_update_supported(&self) -> bool {
-        #[cfg(feature = "net")]
-        {
-            self.secrets.is_some()
-        }
-        #[cfg(not(feature = "net"))]
-        {
-            false
-        }
-    }
+    /// Single authority for reads and mutations.
+    pub executor: std::sync::Arc<RuntimeControlExecutor>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -329,142 +319,38 @@ pub fn spawn_control_listener(pipe_name: PathBuf, context: ControlContext) -> st
 
 /// Parse one request line and produce the newline-terminated JSON reply.
 fn respond_to_line(line: &str, context: &ControlContext) -> Vec<u8> {
-    let response = match serde_json::from_str::<ControlRequest>(line) {
-        Ok(request) => handle_request(request, context),
-        Err(e) => ControlResponse {
-            ok: false,
-            error: Some(format!("invalid control request: {e}")),
-            ..Default::default()
+    let value = serde_json::from_str::<serde_json::Value>(line);
+    let mut payload = match value {
+        Ok(value) if value.get("protocol_version").is_some() => {
+            match serde_json::from_value::<ControlEnvelope>(value) {
+                Ok(envelope) => serde_json::to_vec(&context.executor.execute(envelope)),
+                Err(error) => serde_json::to_vec(&ControlResponse {
+                    ok: false,
+                    error_code: Some("invalid_envelope".into()),
+                    error: Some(format!("invalid control envelope: {error}")),
+                    ..Default::default()
+                }),
+            }
+        }
+        Ok(value) => match serde_json::from_value::<ControlRequest>(value) {
+            Ok(request) => serde_json::to_vec(&context.executor.execute_legacy(request)),
+            Err(error) => serde_json::to_vec(&ControlResponse {
+                ok: false,
+                error_code: Some("invalid_request".into()),
+                error: Some(format!("invalid control request: {error}")),
+                ..Default::default()
+            }),
         },
-    };
-
-    let mut payload = serde_json::to_vec(&response).unwrap_or_default();
+        Err(error) => serde_json::to_vec(&ControlResponse {
+            ok: false,
+            error_code: Some("invalid_json".into()),
+            error: Some(format!("invalid control request: {error}")),
+            ..Default::default()
+        }),
+    }
+    .unwrap_or_default();
     payload.push(b'\n');
     payload
-}
-
-fn handle_request(request: ControlRequest, context: &ControlContext) -> ControlResponse {
-    let control = &context.vm;
-    let memory = |state: Option<msb_krun::VmMemoryState>| match state {
-        Some(state) => ControlResponse {
-            ok: true,
-            memory: Some(MemoryControlState {
-                boot_mib: state.boot_mib,
-                target_mib: state.target_mib,
-                current_mib: state.current_mib,
-                max_mib: state.max_mib,
-            }),
-            ..Default::default()
-        },
-        None => ControlResponse {
-            ok: false,
-            error: Some("this VM booted without memory hotplug capacity".to_string()),
-            ..Default::default()
-        },
-    };
-    let cpu = |state: Option<msb_krun::VmCpuState>| match state {
-        Some(state) => ControlResponse {
-            ok: true,
-            cpu: Some(CpuControlState {
-                possible: state.possible,
-                requested_online: state.requested_online,
-                actual_online: state.actual_online,
-                enforced: state.enforced,
-            }),
-            ..Default::default()
-        },
-        None => ControlResponse {
-            ok: false,
-            error: Some("this VM booted without CPU capacity".to_string()),
-            ..Default::default()
-        },
-    };
-
-    match request {
-        ControlRequest::Capabilities => ControlResponse {
-            ok: true,
-            capabilities: Some(ControlCapabilities {
-                cpu_resize: control.cpu_resize_supported(),
-                memory_resize: control.memory_resize_supported(),
-                secrets_update: context.secrets_update_supported(),
-            }),
-            ..Default::default()
-        },
-        ControlRequest::MemoryTarget { total_mib } => {
-            if control.set_memory_target_mib(total_mib).is_none() {
-                return memory(None);
-            }
-            memory(control.memory_state())
-        }
-        ControlRequest::MemoryState => memory(control.memory_state()),
-        ControlRequest::CpuTarget { online } => {
-            if control.set_cpu_target(online).is_none() {
-                return cpu(None);
-            }
-            cpu(control.cpu_state())
-        }
-        ControlRequest::CpuState => cpu(control.cpu_state()),
-        ControlRequest::SecretsUpdate { changes } => handle_secrets_update(context, changes),
-    }
-}
-
-#[cfg(feature = "net")]
-fn handle_secrets_update(
-    context: &ControlContext,
-    changes: Vec<SecretLiveChange>,
-) -> ControlResponse {
-    let Some(secrets) = &context.secrets else {
-        return ControlResponse {
-            ok: false,
-            error: Some(
-                "live secret reconfiguration is not available for this sandbox".to_string(),
-            ),
-            ..Default::default()
-        };
-    };
-
-    for change in changes {
-        let result = match change {
-            // `value` owns its plaintext and zeroizes on drop; clone the inner
-            // string into the rotation call (the wrapper cannot be moved out of
-            // a `Drop` type) and let the original wipe itself at arm's end.
-            SecretLiveChange::Rotate { name, value } => {
-                secrets.rotate_value(&name, value.0.clone())
-            }
-            SecretLiveChange::Remove { name } => {
-                secrets.remove(&name);
-                Ok(())
-            }
-            SecretLiveChange::SetAllowedHosts { name, hosts } => {
-                secrets.set_allowed_hosts(&name, &hosts)
-            }
-        };
-        if let Err(e) = result {
-            // SecretsUpdateError carries secret names only, never values.
-            return ControlResponse {
-                ok: false,
-                error: Some(e.to_string()),
-                ..Default::default()
-            };
-        }
-    }
-
-    ControlResponse {
-        ok: true,
-        ..Default::default()
-    }
-}
-
-#[cfg(not(feature = "net"))]
-fn handle_secrets_update(
-    _context: &ControlContext,
-    _changes: Vec<SecretLiveChange>,
-) -> ControlResponse {
-    ControlResponse {
-        ok: false,
-        error: Some("this runtime was built without network support".to_string()),
-        ..Default::default()
-    }
 }
 
 //--------------------------------------------------------------------------------------------------

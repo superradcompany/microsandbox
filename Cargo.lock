@@ -4002,6 +4002,7 @@ version = "0.6.16"
 dependencies = [
  "astral-tokio-tar",
  "async-compression",
+ "blake3",
  "chrono",
  "futures",
  "hex",
@@ -4009,6 +4010,7 @@ dependencies = [
  "microsandbox-utils",
  "oci-client",
  "oci-spec 0.10.0",
+ "rand 0.10.2",
  "rcgen",
  "rustls-pki-types",
  "scopeguard",
@@ -4174,6 +4176,7 @@ dependencies = [
  "chrono",
  "clap",
  "crossbeam-queue",
+ "hex",
  "libc",
  "microsandbox-agent-client",
  "microsandbox-db",
