@@ -56,29 +56,29 @@ jobs:
             -f head_sha="$COMMIT" \
             -f status=success \
             -f per_page=100)
-          run_id=$(jq -r \
+          run_id=""
+          while IFS= read -r candidate_run_id; do
+            artifacts=$(gh api --paginate \
+              "repos/$GITHUB_REPOSITORY/actions/runs/$candidate_run_id/artifacts?per_page=100" \
+              --jq '.artifacts[] | select(.expired == false) | .name')
+            if grep -Fxq msb-linux-x86_64 <<<"$artifacts" &&
+              grep -Fxq msb-linux-aarch64 <<<"$artifacts"; then
+              run_id=$candidate_run_id
+              break
+            fi
+          done < <(jq -r \
             --arg commit "$COMMIT" \
             --arg repository "$GITHUB_REPOSITORY" \
             '[.workflow_runs[] | select(
               .head_sha == $commit and
               .conclusion == "success" and
               .head_repository.full_name == $repository
-            )] | sort_by(.run_number) | last | .id // empty' <<<"$runs")
+            )] | sort_by(.run_number) | reverse | .[].id' <<<"$runs")
 
           if [[ -z "$run_id" ]]; then
-            echo "::error::No successful Check run from this repository found for $COMMIT."
+            echo "::error::No successful Check run with both runtime artifacts found for $COMMIT."
             exit 1
           fi
-
-          artifacts=$(gh api --paginate \
-            "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/artifacts?per_page=100" \
-            --jq '.artifacts[] | select(.expired == false) | .name')
-          for artifact in msb-linux-x86_64 msb-linux-aarch64; do
-            if ! grep -Fxq "$artifact" <<<"$artifacts"; then
-              echo "::error::$artifact is missing or expired in Check run $run_id."
-              exit 1
-            fi
-          done
 
           echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
           echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
@@ -131,7 +131,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: main
+          ref: ${{ github.sha }}
           persist-credentials: false
 
       - name: Download runtime artifact
