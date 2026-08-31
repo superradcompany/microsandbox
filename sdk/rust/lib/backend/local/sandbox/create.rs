@@ -158,12 +158,43 @@ impl LocalBackend {
         // pinned image identity; no installed snapshot artifact is created.
         if let Some(archive) = config.snapshot_archive_source.take() {
             child_stage_guard = Some(ChildStageGuard::new(sandbox_dir.clone()));
-            let manifest =
+            let materialized =
                 crate::snapshot::materialize_archive_for_child(self, &archive, &sandbox_dir)
                     .await?;
-            config.spec.image = RootfsSource::oci(manifest.image.reference);
-            config.manifest_digest = Some(manifest.image.manifest_digest);
-            config.snapshot_upper_source = Some(sandbox_dir.join("upper.ext4"));
+            config.spec.image = RootfsSource::oci(materialized.manifest.image.reference.clone());
+            config.manifest_digest = Some(materialized.manifest.image.manifest_digest.clone());
+            if let Some(restore) = materialized.checkpoint_restore {
+                let state = match &materialized.manifest.state {
+                    crate::snapshot::SnapshotState::Checkpoint(state) => state,
+                    crate::snapshot::SnapshotState::File(_) => {
+                        return Err(crate::MicrosandboxError::SnapshotIntegrity(
+                            "archive produced checkpoint construction state for file snapshot"
+                                .into(),
+                        ));
+                    }
+                };
+                let expected =
+                    microsandbox_image::checkpoint::ObjectId::new(&restore.checkpoint_root)
+                        .map_err(|error| {
+                            crate::MicrosandboxError::SnapshotIntegrity(error.to_string())
+                        })?;
+                let closure = microsandbox_image::checkpoint::CheckpointClosure::open(
+                    &restore.closure,
+                    Some(&expected),
+                )
+                .map_err(|error| crate::MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+                let overrides = config.restore_overrides;
+                crate::sandbox::apply_checkpoint_restore_constraints(
+                    &mut config,
+                    state,
+                    &closure,
+                    overrides,
+                )?;
+                config.checkpoint_restore = Some(restore);
+                config.snapshot_upper_layers = materialized.upper_layers;
+            } else {
+                config.snapshot_upper_source = Some(sandbox_dir.join("upper.ext4"));
+            }
         }
 
         // Installed resumable snapshots likewise become child-owned before image resolution. The

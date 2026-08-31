@@ -307,11 +307,11 @@ pub(crate) async fn materialize_archive_for_child(
     local: &crate::backend::LocalBackend,
     archive: &Path,
     child_stage: &Path,
-) -> MicrosandboxResult<Manifest> {
+) -> MicrosandboxResult<archive::ArchiveChildMaterialization> {
     archive::materialize_archive_for_child(local, archive, child_stage).await
 }
 
-pub(crate) use restore::materialize_checkpoint_for_child;
+pub(crate) use restore::{materialize_checkpoint_child_state, materialize_checkpoint_for_child};
 
 pub(crate) use create::CHECKPOINT_DIRECTORY;
 

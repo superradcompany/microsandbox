@@ -101,6 +101,15 @@ pub(crate) enum LaunchIntent {
     Background,
 }
 
+/// Explicit resource choices that must not be silently replaced during deferred archive restore.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct RestoreOverrideIntent {
+    pub(crate) cpus: bool,
+    pub(crate) max_cpus: bool,
+    pub(crate) memory: bool,
+    pub(crate) max_memory: bool,
+}
+
 /// Configuration for a sandbox.
 ///
 /// The durable task description lives in [`SandboxSpec`]. This type keeps
@@ -191,6 +200,10 @@ pub struct SandboxConfig {
     #[serde(skip)]
     pub(crate) snapshot_upper_layers: Vec<RootfsUpperLayerConfig>,
 
+    /// Explicit builder choices retained until a deferred archive descriptor is available.
+    #[serde(skip)]
+    pub(crate) restore_overrides: RestoreOverrideIntent,
+
     /// Transient process-launch intent for the current create operation.
     #[serde(skip)]
     pub(crate) launch_intent: LaunchIntent,
@@ -229,6 +242,7 @@ impl SandboxConfig {
         let mut config = self.clone();
         config.checkpoint_restore = None;
         config.snapshot_upper_layers.clear();
+        config.restore_overrides = RestoreOverrideIntent::default();
         config.launch_intent = LaunchIntent::None;
         config.init_owns_workload = false;
         if config.init_workload_arg_count > 0 {
@@ -729,6 +743,7 @@ impl Default for SandboxConfig {
             snapshot_archive_source: None,
             checkpoint_restore: None,
             snapshot_upper_layers: Vec::new(),
+            restore_overrides: RestoreOverrideIntent::default(),
             launch_intent: LaunchIntent::None,
             init_owns_workload: false,
             init_workload_arg_count: 0,

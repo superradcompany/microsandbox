@@ -65,8 +65,44 @@ pub(crate) async fn materialize_checkpoint_for_child(
     .await
     .map_err(|error| MicrosandboxError::Custom(format!("checkpoint child copy task: {error}")))??;
 
-    let child_closure = CheckpointClosure::open(&closure_destination, Some(&expected))
+    materialize_checkpoint_child_state(
+        &closure_destination,
+        &source.checkpoint_root,
+        &source.checkpoint_id,
+        child_stage,
+    )
+    .await
+}
+
+/// Adopt an already child-owned closure and create its private disk successor.
+///
+/// Direct archive restore extracts the closure inside child staging, then renames it to the final
+/// eager-restore location. Keeping disk-chain construction separate avoids copying the closure a
+/// second time.
+pub(crate) async fn materialize_checkpoint_child_state(
+    closure_destination: &Path,
+    checkpoint_root: &str,
+    checkpoint_id: &str,
+    child_stage: &Path,
+) -> MicrosandboxResult<CheckpointChildMaterialization> {
+    let expected = ObjectId::new(checkpoint_root)
         .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+    let child_closure = CheckpointClosure::open(closure_destination, Some(&expected))
+        .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+    if child_closure.checkpoint().checkpoint_id != checkpoint_id {
+        return Err(MicrosandboxError::SnapshotIntegrity(
+            "checkpoint restore source has another identity".into(),
+        ));
+    }
+    if child_closure.disks().len() != 1 {
+        return Err(MicrosandboxError::unsupported(
+            Operation::SnapshotOps,
+            UnsupportedReason::NotAvailable(
+                "resumable restore currently requires exactly one managed root disk generation"
+                    .into(),
+            ),
+        ));
+    }
     let disk = &child_closure.disks()[0];
     let mut upper_layers = Vec::with_capacity(disk.layers.len() + 1);
     for (index, layer) in disk.layers.iter().enumerate() {
@@ -127,9 +163,9 @@ pub(crate) async fn materialize_checkpoint_for_child(
 
     Ok(CheckpointChildMaterialization {
         restore: CheckpointRestoreConfig {
-            closure: closure_destination,
-            checkpoint_root: source.checkpoint_root.clone(),
-            checkpoint_id: source.checkpoint_id.clone(),
+            closure: closure_destination.to_path_buf(),
+            checkpoint_root: checkpoint_root.to_string(),
+            checkpoint_id: checkpoint_id.to_string(),
         },
         upper_layers,
     })

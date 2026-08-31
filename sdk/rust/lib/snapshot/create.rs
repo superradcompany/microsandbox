@@ -27,6 +27,17 @@ use super::{Snapshot, SnapshotArchive, SnapshotConfig};
 pub(crate) const CHECKPOINT_DIRECTORY: &str = "checkpoint";
 
 //--------------------------------------------------------------------------------------------------
+// Types
+//--------------------------------------------------------------------------------------------------
+
+struct CapturedResumableSnapshot {
+    checkpoint_path: PathBuf,
+    checkpoint_root: ObjectId,
+    manifest: Manifest,
+    labels: BTreeMap<String, String>,
+}
+
+//--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
 
@@ -188,21 +199,6 @@ async fn create_resumable_snapshot(
     force: bool,
     model: sandbox_entity::Model,
 ) -> MicrosandboxResult<Snapshot> {
-    if model.status != SandboxStatus::Running {
-        return Err(MicrosandboxError::unsupported(
-            Operation::SnapshotOps,
-            UnsupportedReason::NotAvailable("resumable snapshots require a running sandbox".into()),
-        ));
-    }
-    let sandbox_config: SandboxConfig = serde_json::from_str(&model.config)?;
-    let manifest_digest = sandbox_config.manifest_digest.clone().ok_or_else(|| {
-        MicrosandboxError::InvalidConfig(format!(
-            "sandbox '{source_sandbox}' has no OCI image pinned; resumable snapshots currently require a managed OCI root"
-        ))
-    })?;
-    let image_reference = oci_reference_string(&sandbox_config)?;
-    ensure_snapshottable_root_disk(sandbox_config.spec.image.oci_root_disk(), source_sandbox)?;
-
     let parent_dir = dest_dir
         .parent()
         .ok_or_else(|| {
@@ -215,38 +211,14 @@ async fn create_resumable_snapshot(
     tokio::fs::create_dir_all(&parent_dir).await?;
     let staging_dir = parent_dir.join(format!(".{name}.{:016x}.staging", rand::random::<u64>()));
     tokio::fs::create_dir_all(&staging_dir).await?;
-
-    let checkpoint_id = format!("checkpoint_{:032x}", rand::random::<u128>());
-    let checkpoint = match crate::sandbox::control_checkpoint_create(
-        source_sandbox,
-        checkpoint_id.clone(),
-    )
-    .await
-    {
-        Ok(checkpoint) => checkpoint,
+    let captured = match capture_resumable_snapshot(source_sandbox, labels, model).await {
+        Ok(captured) => captured,
         Err(error) => {
             let _ = tokio::fs::remove_dir_all(&staging_dir).await;
             return Err(error);
         }
     };
-    if checkpoint.checkpoint_id != checkpoint_id {
-        let _ = tokio::fs::remove_dir_all(&staging_dir).await;
-        return Err(MicrosandboxError::SnapshotIntegrity(
-            "runtime returned a checkpoint for another capture attempt".into(),
-        ));
-    }
-    let checkpoint_root = ObjectId::new(&checkpoint.checkpoint_root)
-        .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
-    let closure = CheckpointClosure::open(&checkpoint.path, Some(&checkpoint_root))
-        .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
-    if closure.checkpoint().checkpoint_id != checkpoint_id {
-        let _ = tokio::fs::remove_dir_all(&staging_dir).await;
-        return Err(MicrosandboxError::SnapshotIntegrity(
-            "runtime checkpoint closure has another capture identity".into(),
-        ));
-    }
-
-    let checkpoint_source = checkpoint.path.clone();
+    let checkpoint_source = captured.checkpoint_path.clone();
     let checkpoint_destination = staging_dir.join(CHECKPOINT_DIRECTORY);
     let checkpoint_destination_for_copy = checkpoint_destination.clone();
     let materialized = tokio::task::spawn_blocking(move || {
@@ -258,74 +230,15 @@ async fn create_resumable_snapshot(
         let _ = tokio::fs::remove_dir_all(&staging_dir).await;
         return Err(error.into());
     }
-    CheckpointClosure::open(&checkpoint_destination, Some(&checkpoint_root))
+    CheckpointClosure::open(&checkpoint_destination, Some(&captured.checkpoint_root))
         .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
-
-    let snapshot_id = SnapshotId::new(format!("snap_{:032x}", rand::random::<u128>()))
-        .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
-    let labels: BTreeMap<_, _> = labels.into_iter().collect();
-    super::metadata::write(&staging_dir, &labels).await?;
-    let requirements_summary = BTreeMap::from([
-        (
-            "architecture".into(),
-            serde_json::Value::String(closure.checkpoint().architecture.clone()),
-        ),
-        (
-            "device_count".into(),
-            serde_json::Value::from(closure.checkpoint().devices.len() as u64),
-        ),
-        (
-            "memory_bytes".into(),
-            serde_json::Value::from(checkpoint.memory_logical_bytes),
-        ),
-        (
-            "vcpus".into(),
-            serde_json::Value::from(sandbox_config.spec.resources.cpus),
-        ),
-        (
-            "max_vcpus".into(),
-            serde_json::Value::from(sandbox_config.spec.resources.max_cpus),
-        ),
-        (
-            "memory_mib".into(),
-            serde_json::Value::from(sandbox_config.spec.resources.memory_mib),
-        ),
-        (
-            "max_memory_mib".into(),
-            serde_json::Value::from(sandbox_config.spec.resources.max_memory_mib),
-        ),
-    ]);
-    let manifest = Manifest {
-        schema: SCHEMA.into(),
-        snapshot_id,
-        scope: SnapshotScope::Resumable,
-        state: SnapshotState::Checkpoint(CheckpointSnapshotState {
-            checkpoint_id: checkpoint_id.clone(),
-            checkpoint_root: checkpoint.checkpoint_root,
-            restore_intents: vec!["clone".into(), "resume".into()],
-            requirements_summary,
-        }),
-        capture: SnapshotCapture {
-            created_at: Utc::now().to_rfc3339(),
-            source_lineage: Some(source_sandbox.into()),
-            source_checkpoint: Some(checkpoint_id),
-            consistency: SnapshotConsistency::ApplicationConsistent,
-        },
-        image: ImageRef {
-            reference: image_reference,
-            manifest_digest,
-        },
-        parent: None,
-        requires: Vec::new(),
-        extensions: BTreeMap::new(),
-    };
-    manifest
-        .validate()
-        .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
-    let descriptor = manifest
+    super::metadata::write(&staging_dir, &captured.labels).await?;
+    let descriptor = captured
+        .manifest
         .to_canonical_bytes()
         .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
-    let digest = manifest
+    let digest = captured
+        .manifest
         .digest()
         .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
     if let Err(error) = write_descriptor(&staging_dir, &descriptor).await {
@@ -334,14 +247,14 @@ async fn create_resumable_snapshot(
     }
 
     promote_snapshot_directory(&staging_dir, dest_dir, force).await?;
-    if let Err(error) = index_upsert(local, dest_dir, &digest, &manifest).await {
+    if let Err(error) = index_upsert(local, dest_dir, &digest, &captured.manifest).await {
         tracing::warn!(error = %error, snapshot = %digest, "snapshot_index upsert failed");
     }
     Ok(Snapshot::from_parts(
         dest_dir.to_path_buf(),
         digest,
-        manifest,
-        labels,
+        captured.manifest,
+        captured.labels,
     ))
 }
 
@@ -368,21 +281,35 @@ pub(super) async fn create_snapshot_archive(
         ));
     }
     validate_snapshot_name(&name)?;
-    if resumable {
-        return Err(MicrosandboxError::unsupported(
-            Operation::SnapshotOps,
-            UnsupportedReason::NotAvailable(
-                "resumable snapshots require VM pause/resume restore support".into(),
-            ),
-        ));
-    }
-
     let db = local.db().await?.read();
     let model = sandbox_entity::Entity::find()
         .filter(sandbox_entity::Column::Name.eq(&source_sandbox))
         .one(db)
         .await?
         .ok_or_else(|| MicrosandboxError::SandboxNotFound(source_sandbox.clone()))?;
+    if resumable {
+        let captured = capture_resumable_snapshot(&source_sandbox, labels, model).await?;
+        let digest = captured
+            .manifest
+            .digest()
+            .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+        super::archive::save_direct_checkpoint_snapshot(
+            &captured.manifest,
+            &captured.labels,
+            &name,
+            &captured.checkpoint_path,
+            out,
+            plain_tar,
+            force,
+        )
+        .await?;
+        return Ok(SnapshotArchive::from_parts(
+            out.to_path_buf(),
+            digest,
+            captured.manifest,
+            captured.labels,
+        ));
+    }
     if matches!(
         model.status,
         SandboxStatus::Running | SandboxStatus::Draining | SandboxStatus::Paused
@@ -459,6 +386,115 @@ pub(super) async fn create_snapshot_archive(
         manifest,
         labels,
     ))
+}
+
+/// Capture and validate runtime-owned checkpoint state without choosing its final representation.
+///
+/// Installed snapshots and direct archives share this boundary so both publish byte-for-byte the
+/// same descriptor and checkpoint closure.
+async fn capture_resumable_snapshot(
+    source_sandbox: &str,
+    labels: Vec<(String, String)>,
+    model: sandbox_entity::Model,
+) -> MicrosandboxResult<CapturedResumableSnapshot> {
+    if model.status != SandboxStatus::Running {
+        return Err(MicrosandboxError::unsupported(
+            Operation::SnapshotOps,
+            UnsupportedReason::NotAvailable("resumable snapshots require a running sandbox".into()),
+        ));
+    }
+    let sandbox_config: SandboxConfig = serde_json::from_str(&model.config)?;
+    let manifest_digest = sandbox_config.manifest_digest.clone().ok_or_else(|| {
+        MicrosandboxError::InvalidConfig(format!(
+            "sandbox '{source_sandbox}' has no OCI image pinned; resumable snapshots currently require a managed OCI root"
+        ))
+    })?;
+    let image_reference = oci_reference_string(&sandbox_config)?;
+    ensure_snapshottable_root_disk(sandbox_config.spec.image.oci_root_disk(), source_sandbox)?;
+
+    let checkpoint_id = format!("checkpoint_{:032x}", rand::random::<u128>());
+    let checkpoint =
+        crate::sandbox::control_checkpoint_create(source_sandbox, checkpoint_id.clone()).await?;
+    if checkpoint.checkpoint_id != checkpoint_id {
+        return Err(MicrosandboxError::SnapshotIntegrity(
+            "runtime returned a checkpoint for another capture attempt".into(),
+        ));
+    }
+    let checkpoint_root = ObjectId::new(&checkpoint.checkpoint_root)
+        .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+    let closure = CheckpointClosure::open(&checkpoint.path, Some(&checkpoint_root))
+        .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+    if closure.checkpoint().checkpoint_id != checkpoint_id {
+        return Err(MicrosandboxError::SnapshotIntegrity(
+            "runtime checkpoint closure has another capture identity".into(),
+        ));
+    }
+
+    let snapshot_id = SnapshotId::new(format!("snap_{:032x}", rand::random::<u128>()))
+        .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+    let requirements_summary = BTreeMap::from([
+        (
+            "architecture".into(),
+            serde_json::Value::String(closure.checkpoint().architecture.clone()),
+        ),
+        (
+            "device_count".into(),
+            serde_json::Value::from(closure.checkpoint().devices.len() as u64),
+        ),
+        (
+            "memory_bytes".into(),
+            serde_json::Value::from(checkpoint.memory_logical_bytes),
+        ),
+        (
+            "vcpus".into(),
+            serde_json::Value::from(sandbox_config.spec.resources.cpus),
+        ),
+        (
+            "max_vcpus".into(),
+            serde_json::Value::from(sandbox_config.spec.resources.max_cpus),
+        ),
+        (
+            "memory_mib".into(),
+            serde_json::Value::from(sandbox_config.spec.resources.memory_mib),
+        ),
+        (
+            "max_memory_mib".into(),
+            serde_json::Value::from(sandbox_config.spec.resources.max_memory_mib),
+        ),
+    ]);
+    let manifest = Manifest {
+        schema: SCHEMA.into(),
+        snapshot_id,
+        scope: SnapshotScope::Resumable,
+        state: SnapshotState::Checkpoint(CheckpointSnapshotState {
+            checkpoint_id: checkpoint_id.clone(),
+            checkpoint_root: checkpoint.checkpoint_root,
+            restore_intents: vec!["clone".into(), "resume".into()],
+            requirements_summary,
+        }),
+        capture: SnapshotCapture {
+            created_at: Utc::now().to_rfc3339(),
+            source_lineage: Some(source_sandbox.into()),
+            source_checkpoint: Some(checkpoint_id),
+            consistency: SnapshotConsistency::ApplicationConsistent,
+        },
+        image: ImageRef {
+            reference: image_reference,
+            manifest_digest,
+        },
+        parent: None,
+        requires: Vec::new(),
+        extensions: BTreeMap::new(),
+    };
+    manifest
+        .validate()
+        .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+    Ok(CapturedResumableSnapshot {
+        checkpoint_path: checkpoint.path,
+        checkpoint_root,
+        manifest,
+        labels: labels.into_iter().collect(),
+    })
 }
 
 /// Build the artifact contents (upper copy, integrity, descriptor) into
