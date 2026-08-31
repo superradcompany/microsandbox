@@ -415,11 +415,18 @@ type NetworkSecretsHandle = microsandbox_network::secrets::handle::SecretsHandle
 #[cfg(not(feature = "net"))]
 type NetworkSecretsHandle = ();
 
+#[cfg(feature = "net")]
+type NetworkActivationHandle = microsandbox_network::network::NetworkActivationHandle;
+
+#[cfg(not(feature = "net"))]
+type NetworkActivationHandle = ();
+
 type VmBuildOutput = (
     msb_krun::Vm,
     Option<NetworkTerminationHandle>,
     Option<NetworkMetricsHandle>,
     Option<NetworkSecretsHandle>,
+    Option<NetworkActivationHandle>,
     Option<Vec<u8>>,
     BindIdentityMapRegistration,
     Option<crate::checkpoint::RestoredAgentState>,
@@ -922,6 +929,7 @@ fn run(mut config: Config) -> RuntimeResult<std::convert::Infallible> {
         _network_termination_handle,
         network_metrics_handle,
         _network_secrets_handle,
+        network_activation_handle,
         bootstrap_frame,
         bind_identity_map,
         restored_agent,
@@ -1161,6 +1169,14 @@ fn run(mut config: Config) -> RuntimeResult<std::convert::Infallible> {
                     relay_exit_handle.trigger();
                     return;
                 }
+                #[cfg(feature = "net")]
+                if let Some(network_activation) = network_activation_handle {
+                    // Published-port listeners and all packet processing start only after the
+                    // restored workload and local control surfaces are ready.
+                    network_activation.activate();
+                }
+                #[cfg(not(feature = "net"))]
+                let _ = network_activation_handle;
                 if let Some((
                     writer,
                     interval_ms,
@@ -1807,6 +1823,10 @@ fn build_vm(
     let mut network_termination_handle = None;
     let mut network_metrics_handle = None;
     let mut network_secrets_handle = None;
+    #[cfg(feature = "net")]
+    let mut network_activation_handle = None;
+    #[cfg(not(feature = "net"))]
+    let network_activation_handle: Option<NetworkActivationHandle> = None;
 
     // Vsock routes are independent of virtio-net. Microsandbox owns the host
     // local IPC endpoints while libkrun retains framing, queues and credits.
@@ -1924,6 +1944,10 @@ fn build_vm(
             network_secrets_handle = Some(network.secrets_handle());
         }
 
+        if vm.checkpoint_restore.is_some() {
+            network_activation_handle = Some(network.defer_activation());
+        }
+
         network.start(tokio_handle.clone());
 
         let guest_mac = network.guest_mac();
@@ -2022,6 +2046,7 @@ fn build_vm(
         network_termination_handle,
         network_metrics_handle,
         network_secrets_handle,
+        network_activation_handle,
         bootstrap_frame,
         bind_identity_map,
         restored_agent,
