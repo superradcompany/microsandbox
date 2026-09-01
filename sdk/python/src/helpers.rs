@@ -215,6 +215,16 @@ pub fn sandbox_builder_from_args(
                 "from_snapshot must be str or os.PathLike",
             ));
         };
+        // Preserve Python's established immediate missing-artifact error before constructing an
+        // awaitable. Descriptor parsing and disk/full admission remain deferred to the shared Rust
+        // resolver so installed directories and direct archives follow exactly the same path.
+        let snapshot_path = resolve_snapshot_path(&snap_str);
+        if !snapshot_path.exists() {
+            return Err(pyo3::exceptions::PyFileNotFoundError::new_err(format!(
+                "snapshot artifact not found: {}",
+                snapshot_path.display()
+            )));
+        }
         // Resolution stays deferred until the async build so installed and direct-archive sources
         // share the same disk/full admission path.
         builder = builder.from_snapshot(snap_str);
@@ -1995,4 +2005,38 @@ fn extract_required<'py, T: FromPyObject<'py>>(
     dict.get_item(key)?
         .ok_or_else(|| pyo3::exceptions::PyValueError::new_err(format!("{key} is required")))?
         .extract()
+}
+
+/// Resolve a snapshot reference only far enough to preserve synchronous Python path validation.
+fn resolve_snapshot_path(reference: &str) -> std::path::PathBuf {
+    if snapshot_ref_looks_like_path(reference) {
+        std::path::PathBuf::from(reference)
+    } else {
+        microsandbox::backend::default_backend()
+            .as_local()
+            .map(|local| local.snapshots_dir().join(reference))
+            .unwrap_or_else(|| std::path::PathBuf::from(reference))
+    }
+}
+
+/// Match the Rust snapshot resolver's bare-name versus filesystem-path boundary.
+fn snapshot_ref_looks_like_path(reference: &str) -> bool {
+    if reference.contains('/') || reference.starts_with('.') || reference.starts_with('~') {
+        return true;
+    }
+
+    #[cfg(windows)]
+    {
+        use typed_path::{Utf8WindowsComponent, Utf8WindowsPath};
+
+        reference.contains('\\')
+            || matches!(
+                Utf8WindowsPath::new(reference).components().next(),
+                Some(Utf8WindowsComponent::Prefix(_))
+            )
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
 }

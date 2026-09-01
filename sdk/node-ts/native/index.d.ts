@@ -1066,6 +1066,7 @@ export declare class SandboxBuilder {
    * snapshot already pins the image reference and digest.
    */
   fromSnapshot(pathOrName: string): this
+  /** Cold-boot only the disk state carried by a full snapshot. */
   diskOnly(): this
   /** Number of virtual CPUs. */
   cpus(count: number): this
@@ -1488,8 +1489,8 @@ export declare class Snapshot {
    */
   static save(nameOrPath: string, out: string, opts?: SaveOpts | undefined | null): Promise<void>
   static load(archive: string, dest?: string | undefined | null): Promise<SnapshotHandle>
-  get id(): string
   get path(): string
+  get id(): string
   get digest(): string
   get sizeBytes(): bigint | null
   get imageRef(): string
@@ -1519,6 +1520,7 @@ export declare class SnapshotArchive {
   get descriptorDigest(): string
   get path(): string
 }
+export type JsSnapshotArchive = SnapshotArchive
 
 /**
  * Fluent builder for a snapshot. Returned by `Snapshot.builder(name)`.
@@ -2387,6 +2389,7 @@ export interface SnapshotVerifyReport {
   upperKind: string
   upperAlgorithm?: string
   upperDigest?: string
+  /** Verified composite-checkpoint root, when the artifact is full. */
   checkpointRoot?: string
 }
 
