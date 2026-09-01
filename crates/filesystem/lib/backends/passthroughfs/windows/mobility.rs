@@ -126,7 +126,7 @@ pub(super) fn capture(fs: &PassthroughFs) -> io::Result<Vec<u8>> {
             inode: data.inode,
             flags: data.flags,
         })
-        .collect();
+        .collect::<Vec<_>>();
     let dirs = fs
         .dir_handles
         .read()
