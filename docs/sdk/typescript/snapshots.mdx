@@ -5,7 +5,7 @@ description: TypeScript SDK - Snapshot API reference
 
 <Tooltip tip="Snapshot creation, restore, import, and export use local disk artifacts and are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
-Create and manage disk-only snapshots of stopped sandboxes. See [Snapshots](/sandboxes/snapshots) for usage and lifecycle concepts.
+Create disk snapshots of stopped sandboxes and resumable checkpoints of running sandboxes. See [Snapshots](/sandboxes/snapshots) for usage and lifecycle concepts.
 
 ## SandboxBuilder
 
@@ -156,7 +156,7 @@ On-disk format of the upper layer.
 get scope(): SnapshotScope
 ```
 
-Snapshot scope: `"disk"` for a disk-only snapshot, `"resumable"` once resumable snapshots land. Always `"disk"` today. See [`SnapshotScope`](#snapshotscope-type).
+Snapshot scope: `"disk"` for a disk-only snapshot or `"resumable"` for disk plus VM execution state. See [`SnapshotScope`](#snapshotscope-type).
 
 #### <span className="msb-recv">snap.</span><span className="msb-hn">fstype</span>
 
@@ -546,7 +546,7 @@ if (report.upper.kind === "verified") {
 
 </Accordion>
 
-Recompute the upper layer's recorded content integrity and compare against the descriptor. Current BLAKE3 Merkle integrity skips known all-hole subtrees and hashes allocated leaves in batches; released SHA descriptors retain their exact, potentially O(logical size), verifier. The report's `upper.kind` is `"notRecorded"` when no integrity was recorded.
+Verify the snapshot's complete state closure. File state recomputes recorded upper-layer integrity. Checkpoint state validates the complete checkpoint closure and returns its root in `report.checkpoint`.
 
 <p className="msb-label">Returns</p>
 
@@ -732,7 +732,7 @@ Compute and record a content-integrity hash of the upper layer at creation time,
 resumable(): this
 ```
 
-Request a `"resumable"` snapshot (disk plus VM state). Accepted by the builder, but [`.create()`](#create) currently returns an `Unsupported` error; resumable snapshots have not landed yet.
+Capture disk, memory, execution, and device state from a running sandbox. The runtime briefly quiesces the VM and returns the source to running state after publication.
 
 ---
 
@@ -795,7 +795,7 @@ type SnapshotScope = "disk" | "resumable";
 
 ### SnapshotVerifyReport <span className="msb-tag is-type">union</span>
 
-Result of [`snap.verify()`](#snap-verify). The `upper` discriminant is `"notRecorded"` when no integrity hash was stored at create time, or `"verified"` when the recorded hash matched the recomputed one.
+Result of [`snap.verify()`](#snap-verify). Checkpoint snapshots add `checkpoint: { kind: "verified", root: string }`; the existing `upper` projection stays intact for disk-snapshot compatibility.
 
 <p className="msb-backref">Returned by <a href="#snap-verify">snap.verify()</a></p>
 
@@ -805,6 +805,7 @@ type SnapshotVerifyReport =
       readonly digest: string;
       readonly path: string;
       readonly upper: { readonly kind: "notRecorded" };
+      readonly checkpoint?: { readonly kind: "verified"; readonly root: string };
     }
   | {
       readonly digest: string;
@@ -814,6 +815,7 @@ type SnapshotVerifyReport =
         readonly algorithm: string;
         readonly digest: string;
       };
+      readonly checkpoint?: { readonly kind: "verified"; readonly root: string };
     };
 ```
 
@@ -823,4 +825,5 @@ type SnapshotVerifyReport =
 | `path` | `string` | Artifact directory path. |
 | `upper.kind` | `"notRecorded" \| "verified"` | Whether an integrity hash was recorded and checked. |
 | `upper.algorithm` | `string` | Hash algorithm (`"verified"` only). |
+| `checkpoint` | `{ kind: "verified"; root: string }` | Verified checkpoint closure identity when state is resumable. |
 | `upper.digest` | `string` | Recomputed upper-layer digest (`"verified"` only). |

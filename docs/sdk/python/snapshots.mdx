@@ -5,7 +5,7 @@ description: Python SDK - Snapshot API reference
 
 <Tooltip tip="Snapshot creation, restore, import, and export use local disk artifacts and are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
-Create and manage disk-only snapshots of stopped sandboxes. See [Snapshots](/sandboxes/snapshots) for usage and lifecycle concepts.
+Create disk snapshots of stopped sandboxes and resumable checkpoints of running sandboxes. See [Snapshots](/sandboxes/snapshots) for usage and lifecycle concepts.
 
 ## SandboxHandle
 
@@ -215,7 +215,7 @@ async def create(
 ) -> Snapshot
 ```
 
-Create a snapshot from a stopped or crashed sandbox. `name` is resolved under the default snapshots directory (`~/.microsandbox/snapshots/<name>/`), or under `dest_dir=` when given; `from_sandbox=` names the sandbox to capture and is required.
+Create a disk snapshot from a stopped or crashed sandbox, or set `resumable=True` to checkpoint a running sandbox. `name` is resolved under the default snapshots directory (`~/.microsandbox/snapshots/<name>/`), or under `dest_dir=` when given; `from_sandbox=` names the sandbox to capture and is required.
 
 <p className="msb-label">Parameters</p>
 
@@ -246,7 +246,7 @@ Create a snapshot from a stopped or crashed sandbox. `name` is resolved under th
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>resumable</code><span className="msb-type">bool</span></div>
-    <div className="msb-param-desc">Request a <code>"resumable"</code> snapshot (disk plus VM state). Accepted, but currently fails with an <code>Unsupported</code> error; resumable snapshots have not landed yet. Default <code>False</code>.</div>
+    <div className="msb-param-desc">Capture disk, memory, execution, and device state from a running sandbox. Default <code>False</code> selects stopped-sandbox disk capture.</div>
   </div>
 </div>
 
@@ -645,7 +645,7 @@ else:
 
 </Accordion>
 
-Recompute the upper layer's recorded content integrity and compare against the descriptor. Current BLAKE3 Merkle integrity skips known all-hole subtrees and hashes allocated leaves in batches; released SHA descriptors retain their exact, potentially O(logical size), verifier. Returns `not_recorded` without reading payload contents when no integrity was stored.
+Verify the snapshot's complete state closure. File state recomputes recorded upper-layer integrity. Checkpoint state validates the complete checkpoint closure and returns `checkpoint={"kind": "verified", "root": ...}` in the report.
 
 <p className="msb-label">Returns</p>
 

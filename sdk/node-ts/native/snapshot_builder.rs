@@ -112,7 +112,7 @@ impl JsSnapshotBuilder {
         self
     }
 
-    /// Request a future resumable snapshot.
+    /// Capture disk, memory, execution, and device state from a running sandbox.
     #[napi]
     pub fn resumable(&mut self) -> &Self {
         let prev = self.take_inner();

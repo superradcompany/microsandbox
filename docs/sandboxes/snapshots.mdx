@@ -1,26 +1,25 @@
 ---
 title: Snapshots
-description: Capture a sandbox's writable layer as a portable artifact
+description: Capture a sandbox's disk or resumable execution state as a portable artifact
 icon: "code-branch"
 ---
 
 <Tooltip tip="Disk snapshots are local-only. On microsandbox cloud, use a named volume for state that must survive sandbox replacement."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
-A snapshot is a portable, on-disk capture of a sandbox's writable filesystem. Move it with `scp`, archive it as `.tar.zst`, or boot fresh sandboxes from it.
+A snapshot is a portable artifact that can hold either a sandbox's writable disk state or a resumable checkpoint of a running sandbox. Move it with `scp`, archive it as `.tar.zst`, or create a child sandbox from it.
 
 <Note>
-Snapshots are **disk-only** and require a sandbox that is not running. Stopped and crashed sandboxes can be snapshotted; running, draining, and paused sandboxes are rejected.
+Disk snapshots capture stopped or crashed sandboxes. Resumable snapshots use `--resumable` and capture a running sandbox without requiring the user to pause it first.
 </Note>
 
 ## What gets captured
 
-| Captured | Not captured |
-| -------- | ------------ |
-| Writable filesystem changes | Memory contents |
-| Pinned image identity | Running processes |
-| Optional labels and integrity metadata | Network state |
+| Mode | Source | Captured state | Restore behavior |
+| ---- | ------ | -------------- | ---------------- |
+| Disk (default) | Stopped or crashed sandbox | Writable disk closure and pinned image | Cold-boots a fresh VM |
+| Resumable | Running sandbox | Disk, memory, vCPU, device, and admitted resource state | Eagerly resumes the captured execution in a child VM |
 
-Booting from a snapshot is a cold boot of a fresh VM that starts from the captured filesystem changes.
+Both modes produce the same schema-1 `snapshot.json` descriptor. Its closed `state.kind` is either `file` or `checkpoint`; checkpoint payloads live in a content-addressed closure rather than an `upper.ext4` file.
 
 ## Quick start
 
@@ -104,7 +103,52 @@ msb snapshot create after-pip-install --from baseline --dest-dir /mnt/big
 
 </CodeGroup>
 
-The sandbox must be stopped or crashed; running sandboxes are rejected.
+The default disk mode requires a stopped or crashed sandbox; running sandboxes are rejected.
+
+## Capture a running sandbox
+
+Use resumable mode when the child must continue the captured processes and memory instead of cold-booting from disk state:
+
+<CodeGroup>
+```rust Rust
+let snap = Snapshot::builder("worker-checkpoint")
+    .from_sandbox("worker")
+    .resumable()
+    .create()
+    .await?;
+```
+
+```typescript TypeScript
+const snap = await Snapshot.builder("worker-checkpoint")
+  .fromSandbox("worker")
+  .resumable()
+  .create();
+```
+
+```python Python
+snap = await Snapshot.create(
+    "worker-checkpoint",
+    from_sandbox="worker",
+    resumable=True,
+)
+```
+
+```go Go
+snap, err := m.Snapshot.Create(ctx, m.SnapshotCreateOptions{
+    Name:        "worker-checkpoint",
+    FromSandbox: "worker",
+    Resumable:   true,
+})
+```
+
+```bash CLI
+msb snapshot create worker-checkpoint --from worker --resumable
+```
+</CodeGroup>
+
+Capture briefly quiesces the VM, publishes one same-epoch checkpoint, and returns the source to running state. The first capture records a full memory generation; later captures may reuse unchanged objects through retained dirty tracking while every published manifest still describes complete logical memory.
+
+Creating a sandbox from the resulting snapshot restores into a child-owned disk generation, installs a fresh VM Generation ID, waits for the guest freshness acknowledgement, thaws the captured workload, and publishes network access last. Restore is eager: the archive or installed artifact is no longer needed after construction succeeds.
 
 ## Capture directly to an archive
 
@@ -155,7 +199,7 @@ msb snapshot create after-pip-install \
 ```
 </CodeGroup>
 
-Direct capture publishes only the archive and returns its snapshot ID and path. It creates no intermediate snapshot directory and no local index row. Add `--plain-tar` or the corresponding SDK option to skip zstd compression.
+Direct capture publishes only the archive and returns its snapshot ID and path. It creates no intermediate snapshot directory and no local index row. Add `--resumable` to capture a running sandbox directly to the same archive, or `--plain-tar` to skip zstd compression.
 
 An explicit archive path can also be used directly as the source of a new sandbox:
 
@@ -210,7 +254,7 @@ msb run --name worker --from-snapshot after-pip-install -- python -V
 
 </CodeGroup>
 
-Booting validates the snapshot, resolves the pinned image, and gives the new sandbox its own writable copy.
+For disk state, creation cold-boots from a child-owned writable copy. For checkpoint state, creation eagerly restores the captured execution into child-owned state.
 
 ## List, inspect, and remove
 

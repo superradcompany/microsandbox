@@ -115,10 +115,9 @@ export class SnapshotArchive {
  * Returned by `Snapshot.builder(name).create()`, `Snapshot.open(...)`,
  * and `SandboxHandle.snapshot(name)`.
  *
- * The artifact is a directory containing `snapshot.json` and the
- * captured `upper.ext4`. The directory is the source of truth; the
- * local DB index (used for queries like `Snapshot.list()`) is just a
- * cache and is rebuildable via `Snapshot.reindex()`.
+ * The artifact is a directory containing `snapshot.json` and either a disk
+ * layer closure or a resumable checkpoint closure. The directory is the
+ * source of truth; the local DB index is rebuildable via `Snapshot.reindex()`.
  */
 export class Snapshot {
   /** @internal */

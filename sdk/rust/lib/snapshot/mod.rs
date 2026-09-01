@@ -1,15 +1,9 @@
-//! Disk snapshot creation, inspection, and consumption.
+//! Disk and resumable snapshot creation, inspection, and consumption.
 //!
-//! A snapshot is a self-describing, content-addressed directory on
-//! disk. It captures a stopped sandbox's writable upper layer plus
-//! the metadata needed to pin the immutable lower (image). The
-//! artifact is the source of truth; the local DB index is just a
-//! cache of "snapshots I happen to know about on this machine."
-//!
-//! See `planning/microsandbox/implementation/snapshot-api-resumable-cloning.md` for the
-//! full design. Today snapshots are stopped-sandbox / raw-format only;
-//! the manifest schema and DB columns are forward-compatible with
-//! qcow2 backing chains landing later.
+//! A snapshot is a self-describing, content-addressed artifact on disk. A disk snapshot captures
+//! the writable root closure for a cold boot. A resumable snapshot captures one running sandbox's
+//! disk, memory, execution, and device state for eager restore. The artifact is the source of
+//! truth; the local DB index is a rebuildable cache.
 
 mod archive;
 mod create;
@@ -99,20 +93,18 @@ impl Snapshot {
         }
     }
 
-    /// Create a snapshot artifact from a stopped sandbox.
+    /// Create an installed disk or resumable snapshot artifact.
     ///
-    /// Writes `snapshot.json` and the captured `upper.ext4` into the
-    /// destination directory atomically (manifest renamed last). On
-    /// success, also upserts a row into the local `snapshot_index`
-    /// cache; index failures are logged but do not fail the call —
-    /// the artifact is the source of truth.
+    /// Disk capture requires a stopped or crashed sandbox. A builder configured with
+    /// [`resumable`](SnapshotBuilder::resumable) captures a running sandbox's checkpoint closure.
+    /// Publication is atomic and the local index remains a rebuildable cache.
     pub async fn create(config: SnapshotConfig) -> MicrosandboxResult<Self> {
         let backend = crate::backend::default_backend();
         let local = backend.as_local().ok_or_else(snapshots_require_local)?;
         create::create_snapshot(local, config).await
     }
 
-    /// Capture a stopped sandbox directly into an archive.
+    /// Capture a disk or resumable snapshot directly into an archive.
     pub async fn create_archive(
         config: SnapshotConfig,
         out: impl AsRef<Path>,
@@ -475,10 +467,7 @@ impl SnapshotBuilder {
         self
     }
 
-    /// Request a future resumable snapshot.
-    ///
-    /// The builder accepts this stable option now, but creation returns
-    /// `Unsupported` until VM pause/resume capture is implemented.
+    /// Capture disk, memory, execution, and device state from a running sandbox.
     pub fn resumable(mut self) -> Self {
         self.resumable = true;
         self

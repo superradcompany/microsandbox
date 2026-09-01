@@ -5,7 +5,7 @@ description: Rust SDK - Snapshot API reference
 
 <Tooltip tip="Snapshot creation, restore, import, and export use local disk artifacts and are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
-Create and manage disk-only snapshots of stopped sandboxes. See [Snapshots](/sandboxes/snapshots) for usage and lifecycle concepts.
+Create disk snapshots of stopped sandboxes and resumable checkpoints of running sandboxes. See [Snapshots](/sandboxes/snapshots) for usage and lifecycle concepts.
 
 ## Snapshot
 
@@ -54,7 +54,7 @@ let snap = Snapshot::builder("baseline")
 async fn create(config: SnapshotConfig) -> MicrosandboxResult<Snapshot>
 ```
 
-Create a snapshot artifact from a stopped sandbox. Writes the `snapshot.json` descriptor, optional `metadata.json`, and the captured raw layer under `layers/` into the artifact directory atomically, then best-effort upserts a row into the local index. Index failures are logged but do not fail the call; the artifact is the source of truth. Most callers use the [builder](#snapshotbuilder)'s [`create()`](#create) instead of constructing a [`SnapshotConfig`](#snapshotconfig) by hand.
+Create an installed snapshot artifact atomically, then best-effort update the rebuildable local index. Disk mode captures a stopped or crashed sandbox; resumable mode captures a running sandbox's checkpoint closure. Most callers use the [builder](#snapshotbuilder)'s [`create()`](#create) instead of constructing a [`SnapshotConfig`](#snapshotconfig) by hand.
 
 <p className="msb-label">Parameters</p>
 
@@ -96,7 +96,7 @@ async fn create_archive(
 ) -> MicrosandboxResult<SnapshotArchive>
 ```
 
-Capture a stopped sandbox directly into an archive. The operation creates no installed snapshot directory and no index row.
+Capture a disk or resumable snapshot directly into an archive. The operation creates no installed snapshot directory and no index row.
 
 ```rust
 let archive = Snapshot::create_archive(
@@ -515,7 +515,7 @@ match snap.verify().await?.upper {
 
 </Accordion>
 
-Recompute the upper layer's recorded content integrity and compare it against the descriptor. Current BLAKE3 Merkle integrity skips known all-hole subtrees and hashes allocated leaves in batches. Released SHA algorithms retain their exact verifier and may still cost O(logical size). Returns `NotRecorded` without reading payload contents when the descriptor has `integrity: null`; errors with `SnapshotIntegrity` on mismatch.
+Verify the snapshot's complete state closure. File state recomputes recorded upper-layer integrity and returns `NotRecorded` without reading the payload when integrity is absent. Checkpoint state validates the root, manifests, disk layers, device/execution objects, and every referenced memory object, then returns the verified checkpoint root.
 
 <p className="msb-label">Returns</p>
 
@@ -567,7 +567,7 @@ The parent snapshot's digest, or `None` for a root. Always `None` today; populat
 fn scope(&self) -> SnapshotScope
 ```
 
-Snapshot payload scope: [`SnapshotScope::Disk`](#snapshotscope) for a disk-only snapshot, `Resumable` once resumable snapshots land. Always `Disk` today.
+Snapshot payload scope: [`SnapshotScope::Disk`](#snapshotscope) for a disk-only snapshot or `Resumable` for disk plus VM execution state.
 
 ---
 
@@ -841,7 +841,7 @@ Compute and record sparse-aware BLAKE3 Merkle integrity during creation. [`verif
 fn resumable(self) -> Self
 ```
 
-Request a resumable snapshot (disk plus VM state). Accepted by the builder, but [`create()`](#create) currently fails with `Unsupported`; resumable snapshots have not landed yet.
+Capture disk, memory, execution, and device state from a running sandbox. The runtime briefly quiesces the VM and returns the source to running state after checkpoint publication.
 
 #### <span className="msb-recv">snapshot_builder.</span><span className="msb-hn">build()</span>
 
@@ -893,7 +893,7 @@ Inputs to create a snapshot. A type alias for `SnapshotSpec`. Usually built via 
 | labels | `Vec<(String, String)>` | User-supplied labels |
 | force | `bool` | Overwrite an existing artifact with the same name |
 | record_integrity | `bool` | Compute and record upper-layer integrity at creation |
-| resumable | `bool` | Request a resumable snapshot; returns an unsupported-feature error today |
+| resumable | `bool` | Capture a running sandbox's resumable checkpoint instead of a stopped-sandbox disk snapshot |
 
 ### SnapshotFormat
 
@@ -943,7 +943,8 @@ Result of explicit snapshot verification.
 |-------|------|-------------|
 | digest | `String` | Snapshot manifest digest |
 | path | `PathBuf` | Artifact directory |
-| upper | [`UpperVerifyStatus`](#upperverifystatus) | Upper-layer content verification result |
+| upper | [`UpperVerifyStatus`](#upperverifystatus) | Upper-layer result; retained as `NotRecorded` for checkpoint state |
+| checkpoint | `Option<CheckpointVerifyStatus>` | Verified checkpoint root for resumable state |
 
 ### UpperVerifyStatus
 

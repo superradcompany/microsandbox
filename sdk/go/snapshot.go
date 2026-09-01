@@ -270,7 +270,7 @@ func (snapshotFactory) Create(ctx context.Context, opts SnapshotCreateOptions) (
 	return snapshotFromInfo(info), nil
 }
 
-// CreateArchive captures a stopped sandbox directly into one archive file.
+// CreateArchive captures a disk or resumable snapshot directly into one archive file.
 // It does not create an installed snapshot directory or index row.
 func (snapshotFactory) CreateArchive(ctx context.Context, opts SnapshotArchiveOptions) (*SnapshotArchive, error) {
 	if opts.Name == "" {
