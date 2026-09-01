@@ -1022,7 +1022,8 @@ async fn dense_upper_keeps_regular_entry() {
     assert_eq!(upper_entry_type, Some(EntryType::Regular));
 }
 
-/// The load walker's grammar is closed: GNU long-name entries (which our save path never produces; archive names are two short components) must be rejected, not resolved.
+/// GNU long-name entries may be decoded for checkpoint members, but the resolved path must still
+/// pass the snapshot archive's closed path grammar.
 #[tokio::test]
 async fn load_rejects_long_name_entries() {
     let tmp = TempDir::new().unwrap();
@@ -1049,10 +1050,7 @@ async fn load_rejects_long_name_entries() {
         .await
         .unwrap_err()
         .to_string();
-    assert!(
-        err.contains("unsupported entry type"),
-        "expected long-name rejection, got: {err}"
-    );
+    assert!(err.contains("unsupported path"), "unexpected error: {err}");
 }
 
 /// A header whose recorded checksum disagrees with its bytes is corruption, not something to unpack around.
@@ -1560,16 +1558,20 @@ async fn manifest_digest_is_stable_across_processes() {
 #[tokio::test]
 async fn load_streams_large_archive_without_buffering() {
     let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    let backend = isolated_backend(&home).await;
     let archive = tmp.path().join("sparse.tar");
 
     let file = std::fs::File::create(&archive).unwrap();
     file.set_len(4 * 1024 * 1024 * 1024).unwrap();
     drop(file);
 
-    let dest = tmp.path().join("dest");
-    let err = Snapshot::load(&archive, Some(&dest))
-        .await
-        .expect_err("expected import of sparse archive to fail");
+    let err = microsandbox::with_backend(backend, async {
+        Snapshot::load(&archive, Some(&tmp.path().join("dest")))
+            .await
+            .expect_err("expected import of sparse archive to fail")
+    })
+    .await;
 
     let msg = err.to_string();
     assert!(
@@ -1579,7 +1581,7 @@ async fn load_streams_large_archive_without_buffering() {
 }
 
 #[tokio::test]
-async fn create_rejects_full_before_touching_anything() {
+async fn create_full_resolves_source_before_touching_anything() {
     let tmp = TempDir::new().unwrap();
     let home = tmp.path().join("home");
     let backend = isolated_backend(&home).await;
@@ -1591,10 +1593,7 @@ async fn create_rejects_full_before_touching_anything() {
             .create()
             .await
             .unwrap_err();
-        assert!(
-            matches!(&err, microsandbox::MicrosandboxError::Unsupported { .. }),
-            "unexpected error: {err}"
-        );
+        assert!(matches!(&err, microsandbox::MicrosandboxError::SandboxNotFound(_)));
     })
     .await;
 
