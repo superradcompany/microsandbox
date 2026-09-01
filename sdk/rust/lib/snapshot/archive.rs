@@ -180,6 +180,8 @@ struct ObservedArchiveEntry {
 }
 
 struct WrittenArchiveMember {
+    encoded_size: u64,
+    apparent_size: u64,
     transport_integrity: ArchiveTransportIntegrity,
     sparse_ranges: Vec<[u64; 2]>,
 }
@@ -619,7 +621,6 @@ where
     let layer_path = portable_archive_path(&file.layer_path(layer))?;
     let layer_transport =
         append_artifact_file(builder, source_layer, &layer_path, "file-payload").await?;
-    let layer_encoded_size = archive_encoded_size(source_layer).await?;
 
     let mut entries = vec![
         ArchiveEntry {
@@ -640,8 +641,8 @@ where
             owner_snapshot: Some(manifest.snapshot_id.to_string()),
             kind: "file-payload".into(),
             included: true,
-            encoded_size: layer_encoded_size,
-            apparent_size: layer.virtual_size,
+            encoded_size: layer_transport.encoded_size,
+            apparent_size: layer_transport.apparent_size,
             integrity: layer.payload.integrity.clone(),
             sparse_ranges: layer_transport.sparse_ranges,
             transport_integrity: Some(layer_transport.transport_integrity),
@@ -752,7 +753,6 @@ where
         checkpoint_closure,
         &state.checkpoint_root,
     )? {
-        let encoded_size = archive_encoded_size(&member.source).await?;
         let written =
             append_artifact_file(builder, &member.source, &member.archive_path, member.kind)
                 .await?;
@@ -761,8 +761,8 @@ where
             owner_snapshot: Some(manifest.snapshot_id.to_string()),
             kind: member.kind.into(),
             included: true,
-            encoded_size,
-            apparent_size: member.apparent_size,
+            encoded_size: written.encoded_size,
+            apparent_size: written.apparent_size,
             sparse_ranges: written.sparse_ranges,
             integrity: None,
             transport_integrity: Some(written.transport_integrity),
@@ -1218,6 +1218,8 @@ where
                 &mut inventory,
                 &metadata_name,
                 WrittenArchiveMember {
+                    encoded_size: metadata_bytes.len() as u64,
+                    apparent_size: metadata_bytes.len() as u64,
                     transport_integrity: finish_archive_transport(hasher),
                     sparse_ranges: Vec::new(),
                 },
@@ -1530,17 +1532,48 @@ fn set_archive_transport(
     path: &str,
     written: WrittenArchiveMember,
 ) -> MicrosandboxResult<()> {
-    let entry = inventory
+    let entry_index = inventory
         .entries
-        .iter_mut()
-        .find(|entry| entry.path == path)
+        .iter()
+        .position(|entry| entry.path == path)
         .ok_or_else(|| {
             MicrosandboxError::Custom(format!(
                 "archive writer produced an uninventoried member: {path}"
             ))
         })?;
-    entry.transport_integrity = Some(written.transport_integrity);
+    // The writer is authoritative for the transport representation. A sparse
+    // pre-scan can become stale before the source is consumed, and a path that
+    // needs a GNU long-name record deliberately falls back to a dense member.
+    let old_encoded_size = inventory.entries[entry_index].encoded_size;
+    let old_apparent_size = inventory.entries[entry_index].apparent_size;
+    let new_encoded_size = written.encoded_size;
+    let new_apparent_size = written.apparent_size;
+    let encoded_bytes = inventory
+        .limits
+        .encoded_bytes
+        .checked_sub(old_encoded_size)
+        .and_then(|remaining| remaining.checked_add(new_encoded_size))
+        .ok_or_else(|| {
+            MicrosandboxError::Custom("archive encoded size limit invariant failed".into())
+        })?;
+    let apparent_bytes = inventory
+        .limits
+        .apparent_bytes
+        .checked_sub(old_apparent_size)
+        .and_then(|remaining| remaining.checked_add(new_apparent_size))
+        .ok_or_else(|| {
+            MicrosandboxError::Custom("archive apparent size limit invariant failed".into())
+        })?;
+
+    // Commit the member and aggregate replacements together only after every checked calculation
+    // succeeds, so an invalid precomputed inventory cannot leave a partially updated descriptor.
+    let entry = &mut inventory.entries[entry_index];
+    entry.encoded_size = new_encoded_size;
+    entry.apparent_size = new_apparent_size;
     entry.sparse_ranges = written.sparse_ranges;
+    entry.transport_integrity = Some(written.transport_integrity);
+    inventory.limits.encoded_bytes = encoded_bytes;
+    inventory.limits.apparent_bytes = apparent_bytes;
     Ok(())
 }
 
@@ -1659,6 +1692,8 @@ where
         )));
     }
     Ok(WrittenArchiveMember {
+        encoded_size: size,
+        apparent_size: size,
         transport_integrity: finish_archive_transport(source.hasher),
         sparse_ranges: Vec::new(),
     })
@@ -1766,6 +1801,8 @@ where
             .await?;
     }
     Ok(Some(WrittenArchiveMember {
+        encoded_size: map.archived,
+        apparent_size: map.len,
         transport_integrity: finish_archive_transport(transport),
         sparse_ranges: map
             .entries()
@@ -2226,6 +2263,8 @@ where
     let TransportHashingReader { hasher, .. } = source;
     discard_exact(reader, tar_pad(size)).await?;
     Ok(WrittenArchiveMember {
+        encoded_size: size,
+        apparent_size: size,
         transport_integrity: finish_archive_transport(hasher),
         sparse_ranges: Vec::new(),
     })
@@ -2376,6 +2415,8 @@ where
     }
 
     Ok(WrittenArchiveMember {
+        encoded_size: archived,
+        apparent_size: realsize,
         transport_integrity: finish_archive_transport(transport),
         sparse_ranges: map
             .into_iter()
@@ -3864,6 +3905,8 @@ mod tests {
 
     #[tokio::test]
     async fn checkpoint_archive_round_trips_without_an_installed_intermediate() {
+        use std::io::{Seek, Write};
+
         let directory = tempfile::tempdir().unwrap();
         let home = directory.path().join("home");
         let source = directory.path().join("checkpoint-source");
@@ -3895,22 +3938,56 @@ mod tests {
         let execution_id = store.put_bytes(b"execution").unwrap();
         let layers = source.join("layers");
         std::fs::create_dir(&layers).unwrap();
-        let source_layer = layers.join("layer_base.raw");
-        let layer_file = std::fs::File::create(&source_layer).unwrap();
+        let layer_id = "layer_00000000000000000000000000000001";
+        let source_layer = layers.join(format!("{layer_id}.qcow2"));
+        let mut layer_file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&source_layer)
+            .unwrap();
+        microsandbox_utils::extent::mark_sparse(&layer_file).unwrap();
         layer_file.set_len(4 * 1024 * 1024).unwrap();
+        layer_file.write_all(b"QFI\xfbcheckpoint-head").unwrap();
+        layer_file
+            .seek(std::io::SeekFrom::Start(2 * 1024 * 1024))
+            .unwrap();
+        layer_file.write_all(b"allocated-data").unwrap();
+        layer_file.sync_all().unwrap();
+        microsandbox_utils::extent::punch_hole_aligned(&layer_file, 4096, 2 * 1024 * 1024 - 4096)
+            .unwrap();
+        microsandbox_utils::extent::punch_hole_aligned(
+            &layer_file,
+            2 * 1024 * 1024 + 4096,
+            2 * 1024 * 1024 - 4096,
+        )
+        .unwrap();
+        layer_file.sync_all().unwrap();
+        drop(layer_file);
+
+        // The canonical checkpoint qcow member is one byte too long for the
+        // fixed GNU header path field. It therefore exercises dense long-name
+        // fallback even though the source itself has a sparse extent map.
+        let archive_layer_path =
+            format!("checkpoints/snap_00000000000000000000000000000002/layers/{layer_id}.qcow2");
+        assert_eq!(archive_layer_path.len(), 101);
+        assert!(
+            archive_encoded_size(&source_layer).await.unwrap() < 4 * 1024 * 1024,
+            "test source must remain sparse so dense fallback changes the encoded size"
+        );
         let layer_integrity = sparse_file_integrity(&source_layer).unwrap();
         let disk = DiskGenerationManifest {
             schema: "microsandbox.disk-generation/1".into(),
             volume_id: "vol_test".into(),
             generation: 1,
             layers: vec![DiskLayerRef {
-                layer_id: "layer_base".into(),
-                format: "raw".into(),
+                layer_id: layer_id.into(),
+                format: "qcow2".into(),
                 virtual_size: 4 * 1024 * 1024,
                 predecessor: None,
                 integrity_root: layer_integrity.root,
             }],
-            head: "layer_base".into(),
+            head: layer_id.into(),
             pause_generation: 11,
         };
         let disk_id = store
