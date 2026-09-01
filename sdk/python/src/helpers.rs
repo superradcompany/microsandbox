@@ -1570,17 +1570,34 @@ fn apply_secret(
     let placeholder: Option<String> = extract_opt(secret, "placeholder")?;
     let require_tls: Option<bool> = extract_opt(secret, "require_tls")?;
 
-    let (inject_headers, inject_basic_auth, inject_query_params, inject_body) =
+    let (inject_headers, inject_basic_auth, exact_headers, inject_query_params, inject_body) =
         if let Some(injection_obj) = secret.get_item("injection")? {
             let injection: Bound<'_, PyDict> = injection_obj.downcast::<PyDict>()?.clone();
+            let exact_headers =
+                if let Some(exact_headers_obj) = injection.get_item("exact_headers")? {
+                    let exact_headers = exact_headers_obj.cast::<PyList>()?;
+                    exact_headers
+                        .iter()
+                        .map(|item| {
+                            let header = as_dict(&item)?;
+                            Ok((
+                                extract_required::<String>(&header, "name")?,
+                                extract_opt::<String>(&header, "scheme")?,
+                            ))
+                        })
+                        .collect::<PyResult<Vec<_>>>()?
+                } else {
+                    Vec::new()
+                };
             (
                 extract_opt::<bool>(&injection, "headers")?,
                 extract_opt::<bool>(&injection, "basic_auth")?,
+                exact_headers,
                 extract_opt::<bool>(&injection, "query_params")?,
                 extract_opt::<bool>(&injection, "body")?,
             )
         } else {
-            (None, None, None, None)
+            (None, None, Vec::new(), None, None)
         };
 
     Ok(builder.secret(|s| {
@@ -1607,6 +1624,9 @@ fn apply_secret(
         }
         if let Some(v) = inject_basic_auth {
             s = s.inject_basic_auth(v);
+        }
+        for (name, scheme) in exact_headers {
+            s = s.exact_header(name, scheme);
         }
         if let Some(v) = inject_query_params {
             s = s.inject_query(v);

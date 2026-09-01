@@ -4,12 +4,18 @@ use microsandbox::Sandbox;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // `secret_env` auto-enables TLS interception; placeholder is `$MSB_API_KEY`.
+    // Exact-header-only placement auto-enables TLS interception; placeholder
+    // is `$MSB_API_KEY`.
     let sandbox = Sandbox::builder("net-secrets")
         .image("alpine")
         .cpus(1)
         .memory(512)
-        .secret_env("API_KEY", "sk-real-secret-123", "example.com")
+        .secret(|s| {
+            s.env("API_KEY")
+                .value("sk-real-secret-123")
+                .allow_host("example.com")
+                .exact_header("Authorization", Some("Bearer".into()))
+        })
         .replace()
         .create()
         .await?;
@@ -22,7 +28,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Allowed host: the TLS proxy substitutes the placeholder for the real
     // secret in-flight, so the request goes through.
     let output = sandbox
-        .shell("wget -q -O /dev/null --timeout=10 https://example.com && echo OK || echo FAIL")
+        .shell(concat!(
+            "wget -q -O /dev/null --timeout=10 ",
+            "--header='Authorization: Bearer $MSB_API_KEY' ",
+            "https://example.com && echo OK || echo FAIL",
+        ))
         .await?;
     println!(
         "HTTPS to example.com (allowed): {}",

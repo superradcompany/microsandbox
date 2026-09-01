@@ -1,12 +1,18 @@
 import { Sandbox } from "microsandbox";
 
-// Secret with placeholder substitution and host allowlist. The 3-arg
-// shorthand auto-generates the placeholder as `$MSB_API_KEY`.
+// Exact-header-only secret with a host allowlist. The placeholder is
+// auto-generated as `$MSB_API_KEY`.
 await using sandbox = await Sandbox.builder("net-secrets")
   .image("alpine")
   .cpus(1)
   .memory(512)
-  .secretEnv("API_KEY", "sk-real-secret-123", "example.com")
+  .secret((s) =>
+    s
+      .env("API_KEY")
+      .value("sk-real-secret-123")
+      .allowHost("example.com")
+      .exactHeader("Authorization", "Bearer"),
+  )
   .replace()
   .create();
 
@@ -16,7 +22,7 @@ console.log(`Guest env: API_KEY=${env.stdout().trim()}`);
 
 // 2. HTTPS to allowed host — proxy substitutes secret, request succeeds.
 const allowed = await sandbox.shell(
-  "wget -q -O /dev/null --timeout=10 https://example.com && echo OK || echo FAIL",
+  "wget -q -O /dev/null --timeout=10 --header='Authorization: Bearer $MSB_API_KEY' https://example.com && echo OK || echo FAIL",
 );
 console.log(`HTTPS to example.com (allowed): ${allowed.stdout().trim()}`);
 

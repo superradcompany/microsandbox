@@ -39,10 +39,10 @@ pub use domain::{
     RootDisk, RootfsSource, Rule, SandboxConfigPatch, SandboxLogLevel, SandboxPolicy,
     SandboxPolicyPatch, SandboxResources, SandboxResourcesPatch, SandboxRuntimeOptions,
     SandboxRuntimeOptionsPatch, SandboxSpec, ScopedUpstreamCaCert, ScopedVerifyUpstream,
-    SecretConfigError, SecretEntry, SecretInjection, SecretsConfig, SecretsConfigPatch,
-    SecurityProfile, SnapshotSpec, StatVirtualization, TlsConfig, TlsConfigPatch,
-    TokenBucketConfig, TransparentHugePagePolicy, ViolationAction, VolumeKind, VolumeMount,
-    VolumeSpec, VsockRouteSpec, VsockSocketType, VsockSpec, VsockSpecPatch,
+    SecretConfigError, SecretEntry, SecretExactHeader, SecretInjection, SecretsConfig,
+    SecretsConfigPatch, SecurityProfile, SnapshotSpec, StatVirtualization, TlsConfig,
+    TlsConfigPatch, TokenBucketConfig, TransparentHugePagePolicy, ViolationAction, VolumeKind,
+    VolumeMount, VolumeSpec, VsockRouteSpec, VsockSocketType, VsockSpec, VsockSpecPatch,
     canonicalize_volume_mounts,
 };
 pub use error::{TypesError, TypesResult};

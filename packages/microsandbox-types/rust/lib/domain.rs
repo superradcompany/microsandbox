@@ -2151,6 +2151,24 @@ pub enum HostPattern {
     Any,
 }
 
+/// One provider-neutral exact request-header placement for a secret.
+///
+/// The header value must consist of optional leading SP/HTAB, the optional
+/// case-insensitive HTTP authentication scheme followed by exactly one SP,
+/// and the complete placeholder. No trailing bytes are allowed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct SecretExactHeader {
+    /// HTTP field name, compared ASCII case-insensitively.
+    pub name: String,
+
+    /// Optional HTTP authentication scheme, compared ASCII
+    /// case-insensitively. For example, `Bearer`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheme: Option<String>,
+}
+
 /// Where in the HTTP request a secret can be injected.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
@@ -2163,6 +2181,14 @@ pub struct SecretInjection {
     /// Substitute in HTTP Basic Auth (default: true).
     #[serde(default = "default_true")]
     pub basic_auth: bool,
+
+    /// Additional exact request-header placements.
+    ///
+    /// This is additive so existing serialized configurations and SDK calls
+    /// keep their behavior. For a strict exact-header-only secret, disable
+    /// `headers` and `basic_auth` and configure one exact header.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exact_headers: Vec<SecretExactHeader>,
 
     /// Substitute in URL query parameters (default: false).
     #[serde(default)]
@@ -2264,6 +2290,26 @@ pub enum SecretConfigError {
         /// Index of the invalid secret entry.
         secret_index: usize,
     },
+
+    /// An exact-header field name is not a valid HTTP token.
+    #[error("secret #{secret_index}: exact header #{header_index} name must be a valid HTTP token")]
+    InvalidExactHeaderName {
+        /// Index of the invalid secret entry.
+        secret_index: usize,
+        /// Index of the invalid exact-header rule.
+        header_index: usize,
+    },
+
+    /// An exact-header scheme is not a valid HTTP token.
+    #[error(
+        "secret #{secret_index}: exact header #{header_index} scheme must be a valid HTTP token"
+    )]
+    InvalidExactHeaderScheme {
+        /// Index of the invalid secret entry.
+        secret_index: usize,
+        /// Index of the invalid exact-header rule.
+        header_index: usize,
+    },
 }
 
 impl SecretsConfig {
@@ -2285,7 +2331,22 @@ impl SecretEntry {
             return Err(SecretConfigError::MissingAllowedHosts { secret_index });
         }
 
-        validate_placeholder(&self.placeholder, secret_index)
+        validate_placeholder(&self.placeholder, secret_index)?;
+        for (header_index, header) in self.injection.exact_headers.iter().enumerate() {
+            if !is_http_token(&header.name) {
+                return Err(SecretConfigError::InvalidExactHeaderName {
+                    secret_index,
+                    header_index,
+                });
+            }
+            if header.scheme.as_deref().is_some_and(|s| !is_http_token(s)) {
+                return Err(SecretConfigError::InvalidExactHeaderScheme {
+                    secret_index,
+                    header_index,
+                });
+            }
+        }
+        Ok(())
     }
 }
 
@@ -2346,6 +2407,7 @@ impl Default for SecretInjection {
         Self {
             headers: true,
             basic_auth: true,
+            exact_headers: Vec::new(),
             query_params: false,
             body: false,
         }
@@ -2391,6 +2453,30 @@ fn validate_placeholder(placeholder: &str, secret_index: usize) -> Result<(), Se
     }
 
     Ok(())
+}
+
+fn is_http_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(
+                    byte,
+                    b'!' | b'#'
+                        | b'$'
+                        | b'%'
+                        | b'&'
+                        | b'\''
+                        | b'*'
+                        | b'+'
+                        | b'-'
+                        | b'.'
+                        | b'^'
+                        | b'_'
+                        | b'`'
+                        | b'|'
+                        | b'~'
+                )
+        })
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -3106,6 +3192,79 @@ mod tests {
             serde_json::from_str(r#"{"max_duration_secs":60,"idle_timeout_secs":null}"#).unwrap();
         assert!(!decoded.ephemeral);
         assert_eq!(decoded.max_duration_secs, Some(60));
+    }
+
+    #[test]
+    fn secret_injection_preserves_legacy_defaults_and_round_trips_exact_headers() {
+        let defaulted: SecretInjection = serde_json::from_str("{}").unwrap();
+        assert!(defaulted.headers);
+        assert!(defaulted.basic_auth);
+        assert!(defaulted.exact_headers.is_empty());
+
+        let legacy: SecretInjection =
+            serde_json::from_str(r#"{"headers":false,"basic_auth":true}"#).unwrap();
+        assert!(!legacy.headers);
+        assert!(legacy.basic_auth);
+        assert!(legacy.exact_headers.is_empty());
+
+        let injection = SecretInjection {
+            headers: false,
+            basic_auth: false,
+            exact_headers: vec![SecretExactHeader {
+                name: "Authorization".into(),
+                scheme: Some("Bearer".into()),
+            }],
+            query_params: false,
+            body: false,
+        };
+        let json = serde_json::to_value(&injection).unwrap();
+        assert_eq!(json["exact_headers"][0]["name"], "Authorization");
+        assert_eq!(json["exact_headers"][0]["scheme"], "Bearer");
+        assert_eq!(
+            serde_json::from_value::<SecretInjection>(json)
+                .unwrap()
+                .exact_headers,
+            injection.exact_headers
+        );
+    }
+
+    #[test]
+    fn secret_exact_header_rejects_invalid_http_tokens() {
+        let entry = |name: &str, scheme: Option<&str>| SecretEntry {
+            env_var: "API_KEY".into(),
+            value: Zeroizing::new("secret".into()),
+            source: None,
+            placeholder: "$API_KEY".into(),
+            allowed_hosts: vec![HostPattern::Exact("api.example.com".into())],
+            injection: SecretInjection {
+                headers: false,
+                basic_auth: false,
+                exact_headers: vec![SecretExactHeader {
+                    name: name.into(),
+                    scheme: scheme.map(str::to_owned),
+                }],
+                query_params: false,
+                body: false,
+            },
+            on_violation: None,
+            require_tls_identity: true,
+        };
+
+        assert_eq!(
+            entry("X Bad Header", None).validate(0),
+            Err(SecretConfigError::InvalidExactHeaderName {
+                secret_index: 0,
+                header_index: 0,
+            })
+        );
+        assert_eq!(
+            entry("Authorization", Some("Not A Scheme")).validate(0),
+            Err(SecretConfigError::InvalidExactHeaderScheme {
+                secret_index: 0,
+                header_index: 0,
+            })
+        );
+        assert!(entry("X-Api-Key", Some("Token")).validate(0).is_ok());
     }
 
     #[test]

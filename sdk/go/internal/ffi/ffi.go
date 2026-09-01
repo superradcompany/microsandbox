@@ -1753,13 +1753,22 @@ type ScopedVerifyUpstream struct {
 
 // SecretOptions is the JSON representation of a single credential.
 type SecretOptions struct {
-	EnvVar            string   `json:"env_var"`
-	Value             string   `json:"value"`
-	AllowHosts        []string `json:"allow_hosts,omitempty"`
-	AllowHostPatterns []string `json:"allow_host_patterns,omitempty"`
-	Placeholder       string   `json:"placeholder,omitempty"`
-	RequireTLS        *bool    `json:"require_tls,omitempty"`
-	OnViolation       string   `json:"on_violation,omitempty"`
+	EnvVar            string                     `json:"env_var"`
+	Value             string                     `json:"value"`
+	AllowHosts        []string                   `json:"allow_hosts,omitempty"`
+	AllowHostPatterns []string                   `json:"allow_host_patterns,omitempty"`
+	Placeholder       string                     `json:"placeholder,omitempty"`
+	RequireTLS        *bool                      `json:"require_tls,omitempty"`
+	InjectHeaders     *bool                      `json:"inject_headers,omitempty"`
+	InjectBasicAuth   *bool                      `json:"inject_basic_auth,omitempty"`
+	ExactHeaders      []SecretExactHeaderOptions `json:"exact_headers,omitempty"`
+	OnViolation       string                     `json:"on_violation,omitempty"`
+}
+
+// SecretExactHeaderOptions is one exact request-header wire rule.
+type SecretExactHeaderOptions struct {
+	Name   string `json:"name"`
+	Scheme string `json:"scheme,omitempty"`
 }
 
 // PatchOptions is the JSON representation of a single rootfs patch.

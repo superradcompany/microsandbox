@@ -395,6 +395,10 @@ export const RateLimiterBuilder = napi.RateLimiterBuilder;
 export type RateLimiterBuilder = NapiRateLimiterBuilder;
 export type PullProgressEvent = NapiPullProgressEvent;
 export type PullProgressStream = NapiPullProgressStream;
+export type {
+  SecretExactHeader,
+  SecretInjection,
+} from "./network-config.js";
 
 // Setup + module-level helpers
 export { Setup, install, isInstalled, setup } from "./setup.js";

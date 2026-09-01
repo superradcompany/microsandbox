@@ -21,7 +21,7 @@ use crate::config::{
 use crate::dns::Nameserver;
 use crate::policy::{BuildError, NetworkPolicy};
 use crate::secrets::config::{
-    HostPattern, SecretEntry, SecretInjection, SecretSource, ViolationAction,
+    HostPattern, SecretEntry, SecretExactHeader, SecretInjection, SecretSource, ViolationAction,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -639,6 +639,23 @@ impl SecretBuilder {
         self
     }
 
+    /// Restrict this secret to a provider-neutral exact request-header placement.
+    ///
+    /// Set `scheme` to `Some("Bearer")` for
+    /// `Authorization: Bearer <placeholder>`, or `None` for a header whose
+    /// complete value is the placeholder. This disables broad header and
+    /// Basic Auth injection. Configure [`SecretInjection`] directly when an
+    /// exact-header rule should be additive to those legacy modes.
+    pub fn exact_header(mut self, name: impl Into<String>, scheme: Option<String>) -> Self {
+        self.injection.headers = false;
+        self.injection.basic_auth = false;
+        self.injection.exact_headers.push(SecretExactHeader {
+            name: name.into(),
+            scheme,
+        });
+        self
+    }
+
     /// Configure query parameter injection (default: false).
     pub fn inject_query(mut self, enabled: bool) -> Self {
         self.injection.query_params = enabled;
@@ -1106,6 +1123,26 @@ mod tests {
         // Serialized durable form carries the reference, not a value.
         let json = serde_json::to_string(&secret).unwrap();
         assert!(json.contains("\"var\":\"HOST_API_KEY\""));
+    }
+
+    #[test]
+    fn secret_builder_exact_header_disables_broad_header_modes() {
+        let secret = SecretBuilder::new()
+            .env("API_KEY")
+            .value("secret-value")
+            .allow_host("api.example.com")
+            .exact_header("Proxy-Authorization", Some("Token".into()))
+            .build();
+
+        assert!(!secret.injection.headers);
+        assert!(!secret.injection.basic_auth);
+        assert_eq!(
+            secret.injection.exact_headers,
+            vec![SecretExactHeader {
+                name: "Proxy-Authorization".into(),
+                scheme: Some("Token".into()),
+            }]
+        );
     }
 
     #[test]

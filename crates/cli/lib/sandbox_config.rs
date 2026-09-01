@@ -1754,6 +1754,7 @@ fn materialize_secrets(
         let injection = SecretInjection {
             headers: injection_scopes.contains(&SecretInjectionInput::Headers),
             basic_auth: injection_scopes.contains(&SecretInjectionInput::BasicAuth),
+            exact_headers: Vec::new(),
             query_params: injection_scopes.contains(&SecretInjectionInput::QueryParams),
             body: false,
         };

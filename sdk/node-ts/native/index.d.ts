@@ -1440,6 +1440,8 @@ export declare class SecretBuilder {
   injectHeaders(enabled: boolean): this
   /** Configure Basic Auth injection (default: true). */
   injectBasicAuth(enabled: boolean): this
+  /** Add one provider-neutral exact request-header placement. */
+  exactHeader(name: string, scheme?: string | undefined | null): this
   /** Configure URL query parameter injection (default: false). */
   injectQuery(enabled: boolean): this
   /** Configure request body injection (default: false). */
@@ -2318,8 +2320,15 @@ export interface SecretEntry {
 export interface SecretInjection {
   headers: boolean
   basicAuth: boolean
+  exactHeaders?: Array<SecretExactHeader>
   queryParams: boolean
   body: boolean
+}
+
+/** One provider-neutral exact request-header placement. */
+export interface SecretExactHeader {
+  name: string
+  scheme?: string
 }
 
 /**

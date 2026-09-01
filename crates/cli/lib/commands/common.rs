@@ -555,6 +555,19 @@ pub struct SandboxOpts {
     #[arg(long)]
     pub secret: Vec<String>,
 
+    /// Inject a secret only as one exact request-header credential.
+    ///
+    /// Format:
+    /// `ENV@HOST[,HOST...];header=NAME[;scheme=SCHEME]`.
+    /// The optional scheme is followed by exactly one space before the
+    /// placeholder. This option is available only while creating a sandbox.
+    #[cfg(feature = "net")]
+    #[arg(
+        long = "secret-exact-header",
+        value_name = "ENV@HOST;header=NAME[;scheme=SCHEME]"
+    )]
+    pub secret_exact_header: Vec<String>,
+
     /// Action when a secret is sent to a disallowed host (block, block-and-log, block-and-terminate, passthrough).
     #[cfg(feature = "net")]
     #[arg(long)]
@@ -690,6 +703,7 @@ impl SandboxOpts {
             || !self.tls_upstream_ca_cert_for.is_empty()
             || !self.tls_no_verify_upstream_for.is_empty()
             || !self.secret.is_empty()
+            || !self.secret_exact_header.is_empty()
             || self.on_secret_violation.is_some();
 
         #[cfg(not(feature = "net"))]
@@ -2014,23 +2028,38 @@ fn apply_network_opts(
     // Secrets. `create` persists a host-side source reference, not the raw
     // value: the plaintext is read from the host environment at spawn time so
     // the durable config never stores secret material at rest.
-    let mut secret_specs: Vec<(String, Vec<String>)> = Vec::new();
+    type SecretSpec = (String, Vec<String>, Option<(String, Option<String>)>);
+    let mut secret_specs: Vec<SecretSpec> = Vec::new();
     for secret_str in &opts.secret {
         let (env_var, hosts) = parse_secret(secret_str, "create")?;
         match secret_specs
             .iter_mut()
-            .find(|(existing, _)| *existing == env_var)
+            .find(|(existing, _, _)| *existing == env_var)
         {
-            Some((_, existing_hosts)) => existing_hosts.extend(hosts),
-            None => secret_specs.push((env_var, hosts)),
+            Some((_, existing_hosts, None)) => existing_hosts.extend(hosts),
+            Some((_, _, Some(_))) => unreachable!("exact-header secrets are parsed afterwards"),
+            None => secret_specs.push((env_var, hosts, None)),
         }
     }
-    for (env_var, hosts) in secret_specs {
+    for secret_str in &opts.secret_exact_header {
+        let (env_var, hosts, name, scheme) = parse_secret_exact_header(secret_str)?;
+        if secret_specs
+            .iter()
+            .any(|(existing, _, _)| *existing == env_var)
+        {
+            anyhow::bail!("secret {env_var:?} cannot mix or repeat exact-header declarations");
+        }
+        secret_specs.push((env_var, hosts, Some((name, scheme))));
+    }
+    for (env_var, hosts, exact_header) in secret_specs {
         let source = microsandbox::sandbox::SecretSource::Env {
             var: env_var.clone(),
         };
         builder = builder.secret(|mut s| {
             s = s.env(&env_var).source(source);
+            if let Some((name, scheme)) = exact_header {
+                s = s.exact_header(name, scheme);
+            }
             for host in hosts {
                 s = allow_secret_host(s, &host);
             }
@@ -2574,7 +2603,7 @@ pub(crate) fn parse_port_mapping(spec: &str) -> anyhow::Result<(std::net::IpAddr
 }
 
 /// Parse a `--secret ENV@HOST[,HOST...]` spec into `(env_var, hosts)` for
-/// `command` (`create` or `modify`).
+/// `context` (the command or option that accepted the declaration).
 ///
 /// The value is NOT read here: the CLI records a host-side source reference
 /// (`{kind: env, var: ENV}`) that is resolved from the host environment when
@@ -2584,11 +2613,11 @@ pub(crate) fn parse_port_mapping(spec: &str) -> anyhow::Result<(std::net::IpAddr
 /// The inline `ENV=VALUE@HOST` form is rejected loudly: the shell would leak
 /// the value regardless, so the value path is SDK-only. Users are pointed at
 /// the `ENV@HOST[,HOST...]` env-var form instead.
-pub(crate) fn parse_secret(spec: &str, command: &str) -> anyhow::Result<(String, Vec<String>)> {
+pub(crate) fn parse_secret(spec: &str, context: &str) -> anyhow::Result<(String, Vec<String>)> {
     if let Some(eq_pos) = spec.find('=') {
         let env_var = &spec[..eq_pos];
         anyhow::bail!(
-            "inline secret values (`{env_var}=VALUE@HOST`) are not supported by `{command}`: \
+            "inline secret values (`{env_var}=VALUE@HOST`) are not supported by `{context}`: \
              the value would be stored in the sandbox config at rest. Export the value as a \
              host environment variable and reference it with `{env_var}@HOST` instead, which \
              is resolved from the environment at start time."
@@ -2611,6 +2640,47 @@ pub(crate) fn parse_secret(spec: &str, command: &str) -> anyhow::Result<(String,
     }
 
     Ok((env_var, hosts))
+}
+
+/// Parse a provider-neutral exact-header secret declaration:
+/// `ENV@HOST[,HOST...];header=NAME[;scheme=SCHEME]`.
+#[cfg(feature = "net")]
+fn parse_secret_exact_header(
+    spec: &str,
+) -> anyhow::Result<(String, Vec<String>, String, Option<String>)> {
+    let mut parts = spec.split(';');
+    let secret = parts.next().unwrap_or_default();
+    let (env_var, hosts) = parse_secret(secret, "--secret-exact-header")?;
+    let mut header = None;
+    let mut scheme = None;
+
+    for part in parts {
+        let (key, value) = part.split_once('=').ok_or_else(|| {
+            anyhow::anyhow!(
+                "exact-header secret options must use key=value in \
+                 ENV@HOST;header=NAME[;scheme=SCHEME]"
+            )
+        })?;
+        if value.is_empty() {
+            anyhow::bail!("exact-header secret {key} must not be empty");
+        }
+        match key {
+            "header" if header.is_none() => header = Some(value.to_string()),
+            "scheme" if scheme.is_none() => scheme = Some(value.to_string()),
+            "header" | "scheme" => {
+                anyhow::bail!("exact-header secret option {key:?} is declared more than once")
+            }
+            _ => anyhow::bail!("unknown exact-header secret option {key:?}"),
+        }
+    }
+
+    let header = header.ok_or_else(|| {
+        anyhow::anyhow!(
+            "exact-header secret must include header=NAME in \
+             ENV@HOST;header=NAME[;scheme=SCHEME]"
+        )
+    })?;
+    Ok((env_var, hosts, header, scheme))
 }
 
 #[cfg(feature = "net")]
@@ -3242,6 +3312,9 @@ mod tests {
 
         assert_eq!(secrets.len(), 1);
         assert_eq!(secrets[0].env_var, "API_KEY");
+        assert!(secrets[0].injection.headers);
+        assert!(secrets[0].injection.basic_auth);
+        assert!(secrets[0].injection.exact_headers.is_empty());
         assert_eq!(
             secrets[0].allowed_hosts,
             vec![
@@ -3250,6 +3323,111 @@ mod tests {
                 HostPattern::Any,
             ]
         );
+    }
+
+    #[cfg(feature = "net")]
+    #[tokio::test]
+    async fn apply_sandbox_opts_builds_source_backed_exact_header_secret() {
+        use microsandbox::sandbox::SecretSource;
+
+        let opts = SandboxOpts {
+            secret_exact_header: vec![
+                "API_KEY@api.example.com;header=Authorization;scheme=Bearer".into(),
+            ],
+            ..Default::default()
+        };
+        let config = apply_sandbox_opts(SandboxBuilder::new("test").image("alpine"), &opts)
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+        let secret = &config
+            .spec
+            .network
+            .secrets
+            .expect("network secrets")
+            .secrets[0];
+
+        assert!(secret.value.is_empty());
+        assert_eq!(
+            secret.source,
+            Some(SecretSource::Env {
+                var: "API_KEY".into()
+            })
+        );
+        assert!(!secret.injection.headers);
+        assert!(!secret.injection.basic_auth);
+        assert_eq!(secret.injection.exact_headers.len(), 1);
+        assert_eq!(secret.injection.exact_headers[0].name, "Authorization");
+        assert_eq!(
+            secret.injection.exact_headers[0].scheme.as_deref(),
+            Some("Bearer")
+        );
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn apply_sandbox_opts_rejects_duplicate_or_mixed_exact_header_declarations() {
+        for opts in [
+            SandboxOpts {
+                secret: vec!["API_KEY@api.example.com".into()],
+                secret_exact_header: vec!["API_KEY@api2.example.com;header=X-Api-Key".into()],
+                ..Default::default()
+            },
+            SandboxOpts {
+                secret_exact_header: vec![
+                    "API_KEY@api.example.com;header=X-Api-Key".into(),
+                    "API_KEY@api2.example.com;header=X-Api-Key".into(),
+                ],
+                ..Default::default()
+            },
+        ] {
+            let err = match apply_sandbox_opts(SandboxBuilder::new("test").image("alpine"), &opts) {
+                Ok(_) => panic!("duplicate secret declaration should fail"),
+                Err(err) => err.to_string(),
+            };
+            assert!(err.contains("cannot mix or repeat"), "{err}");
+        }
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn parse_secret_exact_header_is_general_and_rejects_ambiguous_options() {
+        assert_eq!(
+            parse_secret_exact_header(
+                "API_KEY@api.example.com;header=Proxy-Authorization;scheme=Token"
+            )
+            .unwrap(),
+            (
+                "API_KEY".into(),
+                vec!["api.example.com".into()],
+                "Proxy-Authorization".into(),
+                Some("Token".into()),
+            )
+        );
+        assert_eq!(
+            parse_secret_exact_header("API_KEY@api.example.com;header=X-Api-Key").unwrap(),
+            (
+                "API_KEY".into(),
+                vec!["api.example.com".into()],
+                "X-Api-Key".into(),
+                None,
+            )
+        );
+        let inline = parse_secret_exact_header("API_KEY=value@api.example.com;header=X-Api-Key")
+            .unwrap_err()
+            .to_string();
+        assert!(inline.contains("`--secret-exact-header`"), "{inline}");
+        assert!(!inline.contains("`create`"), "{inline}");
+
+        for invalid in [
+            "API_KEY@api.example.com",
+            "API_KEY@api.example.com;scheme=Bearer",
+            "API_KEY@api.example.com;header=X-Key;header=X-Other",
+            "API_KEY@api.example.com;header=X-Key;unknown=value",
+        ] {
+            assert!(parse_secret_exact_header(invalid).is_err(), "{invalid}");
+        }
     }
 
     #[cfg(feature = "net")]
