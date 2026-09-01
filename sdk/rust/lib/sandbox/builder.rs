@@ -1871,8 +1871,12 @@ pub(crate) fn apply_checkpoint_restore_constraints(
         ipv6_address: network.ipv6.map(|ipv6| ipv6.address),
         ipv6_pool: None,
     };
-    if let Some(requested) = config.spec.network.interface.as_ref()
-        && serde_json::to_value(requested)? != serde_json::to_value(&interface)?
+    if config
+        .spec
+        .network
+        .interface
+        .as_ref()
+        .is_some_and(|requested| checkpoint_network_override_conflicts(requested, &interface))
     {
         return Err(MicrosandboxError::InvalidConfig(
             "full snapshot restore cannot change the captured guest network identity".into(),
@@ -1880,6 +1884,29 @@ pub(crate) fn apply_checkpoint_restore_constraints(
     }
     config.spec.network.interface = Some(interface);
     Ok(())
+}
+
+/// Return whether an explicitly populated guest-interface field conflicts with the captured
+/// effective identity. An empty `InterfaceOverrides` is the normal result of round-tripping local
+/// network defaults through the shared spec and must not be mistaken for an explicit override.
+fn checkpoint_network_override_conflicts(
+    requested: &microsandbox_types::InterfaceOverrides,
+    captured: &microsandbox_types::InterfaceOverrides,
+) -> bool {
+    requested.mac.is_some_and(|value| Some(value) != captured.mac)
+        || requested
+            .mtu
+            .is_some_and(|value| Some(value) != captured.mtu)
+        || requested
+            .ipv4_address
+            .is_some_and(|value| Some(value) != captured.ipv4_address)
+        || requested
+            .ipv6_address
+            .is_some_and(|value| Some(value) != captured.ipv6_address)
+        // Pools derive an identity from the destination slot, which cannot be substituted for the
+        // effective address already present in the restored guest and device state.
+        || requested.ipv4_pool.is_some()
+        || requested.ipv6_pool.is_some()
 }
 
 fn apply_checkpoint_resources(
@@ -1979,7 +2006,9 @@ impl From<SandboxConfig> for SandboxBuilder {
 mod tests {
     use std::collections::BTreeMap;
 
-    use super::{SandboxBuilder, apply_checkpoint_resources};
+    use super::{
+        SandboxBuilder, apply_checkpoint_resources, checkpoint_network_override_conflicts,
+    };
     use crate::LogLevel;
     use crate::sandbox::config::RestoreOverrideIntent;
     use crate::sandbox::{MAX_HOSTNAME_BYTES, MAX_SANDBOX_NAME_BYTES, RlimitResource};
@@ -2522,6 +2551,42 @@ mod tests {
                 .to_string()
                 .contains("captured CPU and memory geometry")
         );
+    }
+
+    #[test]
+    fn checkpoint_restore_accepts_default_and_matching_network_fields() {
+        let captured = microsandbox_types::InterfaceOverrides {
+            mac: Some([0x02, 0x4d, 0x53, 0x42, 0x00, 0x01]),
+            mtu: Some(1500),
+            ..Default::default()
+        };
+
+        assert!(!checkpoint_network_override_conflicts(
+            &microsandbox_types::InterfaceOverrides::default(),
+            &captured,
+        ));
+        assert!(!checkpoint_network_override_conflicts(
+            &microsandbox_types::InterfaceOverrides {
+                mtu: Some(1500),
+                ..Default::default()
+            },
+            &captured,
+        ));
+    }
+
+    #[test]
+    fn checkpoint_restore_rejects_conflicting_network_fields() {
+        let captured = microsandbox_types::InterfaceOverrides {
+            mac: Some([0x02, 0x4d, 0x53, 0x42, 0x00, 0x01]),
+            mtu: Some(1500),
+            ..Default::default()
+        };
+        let requested = microsandbox_types::InterfaceOverrides {
+            mtu: Some(1400),
+            ..Default::default()
+        };
+
+        assert!(checkpoint_network_override_conflicts(&requested, &captured,));
     }
 
     #[tokio::test]

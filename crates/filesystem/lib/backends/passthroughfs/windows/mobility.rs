@@ -12,8 +12,9 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 use super::{
-    DirHandle, DirSnapshotEntry, HandleData, InodeData, InodeTable, PassthroughFs, host_error,
-    inode::VirtualMetadata, is_reserved_name, open_options_from_flags, reject_reparse_metadata,
+    DirHandle, DirSnapshotEntry, HandleData, InodeData, InodeTable, LINUX_O_ACCMODE, PassthroughFs,
+    host_error, inode::VirtualMetadata, is_reserved_name, open_options_from_flags,
+    reject_reparse_metadata,
 };
 use crate::backends::{mobility, passthroughfs::quota::QuotaState};
 
