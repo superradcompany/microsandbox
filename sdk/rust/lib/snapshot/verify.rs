@@ -205,7 +205,7 @@ async fn verify_checkpoint_closure(
     tokio::task::spawn_blocking(move || {
         let expected = ObjectId::new(&expected_root)
             .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
-        let closure = CheckpointClosure::open(closure_path, Some(&expected))
+        let closure = CheckpointClosure::open_portable(closure_path, Some(&expected))
             .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
         closure
             .verify_memory_objects()

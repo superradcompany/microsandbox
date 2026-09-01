@@ -1438,7 +1438,7 @@ fn checkpoint_archive_members(
 ) -> MicrosandboxResult<Vec<CheckpointArchiveMember>> {
     let expected = ObjectId::new(checkpoint_root)
         .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
-    let closure = CheckpointClosure::open(closure_root, Some(&expected))
+    let closure = CheckpointClosure::open_portable(closure_root, Some(&expected))
         .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
     let prefix = format!("checkpoints/{snapshot_id}");
     let checkpoint_path = closure_root.join("checkpoint.json");

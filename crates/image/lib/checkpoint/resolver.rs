@@ -45,9 +45,27 @@ pub struct CheckpointClosure {
 //--------------------------------------------------------------------------------------------------
 
 impl CheckpointClosure {
-    /// Open and validate a published checkpoint closure.
+    /// Open and validate a checkpoint closure for restore on this host architecture.
     pub fn open(root: impl Into<PathBuf>, expected_root: Option<&ObjectId>) -> ImageResult<Self> {
-        let root = root.into();
+        Self::open_inner(root.into(), expected_root, true)
+    }
+
+    /// Open and validate a checkpoint closure without requiring host architecture compatibility.
+    ///
+    /// Inspection, verification, and archive transport use this path. Construction must use
+    /// [`open`](Self::open) so an incompatible checkpoint cannot reach restore.
+    pub fn open_portable(
+        root: impl Into<PathBuf>,
+        expected_root: Option<&ObjectId>,
+    ) -> ImageResult<Self> {
+        Self::open_inner(root.into(), expected_root, false)
+    }
+
+    fn open_inner(
+        root: PathBuf,
+        expected_root: Option<&ObjectId>,
+        require_host_architecture: bool,
+    ) -> ImageResult<Self> {
         let metadata = std::fs::symlink_metadata(&root)?;
         if !metadata.file_type().is_dir() {
             return checkpoint_error("checkpoint root is not a directory");
@@ -64,7 +82,7 @@ impl CheckpointClosure {
             });
         }
         let checkpoint = CheckpointManifest::from_bytes(&root_bytes)?;
-        if checkpoint.architecture != std::env::consts::ARCH {
+        if require_host_architecture && checkpoint.architecture != std::env::consts::ARCH {
             return checkpoint_error(format!(
                 "checkpoint architecture {} cannot restore on {}",
                 checkpoint.architecture,
@@ -377,6 +395,29 @@ mod tests {
 
         assert_eq!(closure.root_id(), &expected);
         assert_eq!(closure.memory().pause_generation, 7);
+    }
+
+    #[test]
+    fn portable_open_separates_integrity_from_restore_architecture() {
+        let (directory, _expected) = fixture();
+        let root_path = directory.path().join(CHECKPOINT_ROOT_FILE);
+        let mut checkpoint =
+            CheckpointManifest::from_bytes(&std::fs::read(&root_path).unwrap()).unwrap();
+        checkpoint.architecture = "another-architecture".into();
+        let memory_path = object_path(directory.path(), &checkpoint.memory);
+        let mut memory = MemoryManifest::from_bytes(&std::fs::read(&memory_path).unwrap()).unwrap();
+        memory.architecture = checkpoint.architecture.clone();
+        let store = super::super::LocalObjectStore::open(directory.path()).unwrap();
+        checkpoint.memory = store
+            .put_bytes(&memory.to_canonical_bytes().unwrap())
+            .unwrap();
+        let root_bytes = checkpoint.to_canonical_bytes().unwrap();
+        let expected = ObjectId::from_bytes(&root_bytes).unwrap();
+        std::fs::write(root_path, root_bytes).unwrap();
+
+        CheckpointClosure::open_portable(directory.path(), Some(&expected)).unwrap();
+        let error = CheckpointClosure::open(directory.path(), Some(&expected)).unwrap_err();
+        assert!(error.to_string().contains("cannot restore"));
     }
 
     #[test]
