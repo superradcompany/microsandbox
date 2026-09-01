@@ -4636,6 +4636,10 @@ type SnapshotVerifyReport struct {
 		Algorithm string `json:"algorithm,omitempty"`
 		Digest    string `json:"digest,omitempty"`
 	} `json:"upper"`
+	Checkpoint *struct {
+		Kind string `json:"kind"`
+		Root string `json:"root"`
+	} `json:"checkpoint,omitempty"`
 }
 
 type SnapshotCreateOptions struct {

@@ -5,6 +5,8 @@ use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
+use sha2::{Digest as _, Sha256};
+
 use super::{
     CheckpointManifest, DiskGenerationManifest, DiskLayerRef, MemoryExtentContent, MemoryManifest,
     ObjectId, sparse_file_integrity,
@@ -145,6 +147,23 @@ impl CheckpointClosure {
             .join("layers")
             .join(format!("{}.{}", layer.layer_id, layer.format))
     }
+
+    /// Stream and verify every immutable memory payload referenced by the logical generation.
+    ///
+    /// Restore normally fuses this check with copying bytes into guest memory. Explicit artifact
+    /// verification uses this method when no restore read is available to amortize the work.
+    pub fn verify_memory_objects(&self) -> ImageResult<()> {
+        let mut verified = BTreeSet::new();
+        for extent in &self.memory.extents {
+            let MemoryExtentContent::Object(content) = &extent.content else {
+                continue;
+            };
+            if verified.insert(content.object.clone()) {
+                verify_object_streaming(&self.root, &content.object)?;
+            }
+        }
+        Ok(())
+    }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -216,6 +235,28 @@ fn read_object_verified(root: &Path, id: &ObjectId, max_len: u64) -> ImageResult
         });
     }
     Ok(bytes)
+}
+
+fn verify_object_streaming(root: &Path, id: &ObjectId) -> ImageResult<()> {
+    let mut file = open_regular(&object_path(root, id))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0u8; 1024 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    let actual = format!("sha256:{}", hex::encode(hasher.finalize()));
+    if actual != id.as_str() {
+        return Err(ImageError::DigestMismatch {
+            digest: id.to_string(),
+            expected: id.to_string(),
+            actual,
+        });
+    }
+    Ok(())
 }
 
 fn read_regular_bounded(path: &Path, max_len: u64) -> ImageResult<Vec<u8>> {
@@ -359,6 +400,20 @@ mod tests {
         let error = closure
             .read_object(&content.object, MAX_MANIFEST_BYTES)
             .unwrap_err();
+
+        assert!(matches!(error, ImageError::DigestMismatch { .. }));
+    }
+
+    #[test]
+    fn explicit_verification_detects_replaced_memory_object() {
+        let (directory, expected) = fixture();
+        let closure = CheckpointClosure::open(directory.path(), Some(&expected)).unwrap();
+        let MemoryExtentContent::Object(content) = &closure.memory().extents[0].content else {
+            panic!("fixture uses object memory");
+        };
+        std::fs::write(object_path(directory.path(), &content.object), b"changed").unwrap();
+
+        let error = closure.verify_memory_objects().unwrap_err();
 
         assert!(matches!(error, ImageError::DigestMismatch { .. }));
     }

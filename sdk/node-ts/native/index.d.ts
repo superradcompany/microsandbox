@@ -2386,6 +2386,7 @@ export interface SnapshotVerifyReport {
   upperKind: string
   upperAlgorithm?: string
   upperDigest?: string
+  checkpointRoot?: string
 }
 
 /** Options accepted by `SshClient.attach()`. */

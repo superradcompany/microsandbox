@@ -63,9 +63,16 @@ const (
 
 // SnapshotVerifyReport is returned by SnapshotArtifact.Verify.
 type SnapshotVerifyReport struct {
-	Digest string
-	Path   string
-	Upper  SnapshotUpperVerifyStatus
+	Digest     string
+	Path       string
+	Upper      SnapshotUpperVerifyStatus
+	Checkpoint *SnapshotCheckpointVerifyStatus
+}
+
+// SnapshotCheckpointVerifyStatus identifies a fully verified checkpoint closure.
+type SnapshotCheckpointVerifyStatus struct {
+	Kind string
+	Root string
 }
 
 type SnapshotUpperVerifyStatus struct {
@@ -367,7 +374,7 @@ func normalizeSnapshotScope(scope string) string {
 }
 
 func snapshotVerifyReportFromInfo(info *ffi.SnapshotVerifyReport) *SnapshotVerifyReport {
-	return &SnapshotVerifyReport{
+	report := &SnapshotVerifyReport{
 		Digest: info.Digest,
 		Path:   info.Path,
 		Upper: SnapshotUpperVerifyStatus{
@@ -376,6 +383,13 @@ func snapshotVerifyReportFromInfo(info *ffi.SnapshotVerifyReport) *SnapshotVerif
 			Digest:    info.Upper.Digest,
 		},
 	}
+	if info.Checkpoint != nil {
+		report.Checkpoint = &SnapshotCheckpointVerifyStatus{
+			Kind: info.Checkpoint.Kind,
+			Root: info.Checkpoint.Root,
+		}
+	}
+	return report
 }
 
 func snapshotStateFromInfo(info *ffi.SnapshotInfo) SnapshotState {

@@ -432,6 +432,14 @@ impl PySnapshot {
                 out.set_item("digest", report.digest)?;
                 out.set_item("path", report.path.display().to_string())?;
                 out.set_item("upper", upper)?;
+                if let Some(checkpoint) = report.checkpoint {
+                    let checkpoint_out = PyDict::new(py);
+                    checkpoint_out.set_item("kind", "verified")?;
+                    checkpoint_out.set_item("root", checkpoint.root)?;
+                    out.set_item("checkpoint", checkpoint_out)?;
+                } else {
+                    out.set_item("checkpoint", py.None())?;
+                }
                 Ok(out.into())
             })
         })

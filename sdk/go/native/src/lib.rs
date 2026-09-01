@@ -5763,10 +5763,14 @@ fn verify_report_json(report: microsandbox::snapshot::SnapshotVerifyReport) -> s
             serde_json::json!({"kind":"verified","algorithm":algorithm,"digest":digest})
         }
     };
+    let checkpoint = report
+        .checkpoint
+        .map(|checkpoint| serde_json::json!({"kind":"verified","root":checkpoint.root}));
     serde_json::json!({
         "digest": report.digest,
         "path": report.path.display().to_string(),
         "upper": upper,
+        "checkpoint": checkpoint,
     })
 }
 

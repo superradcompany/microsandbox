@@ -531,7 +531,7 @@ pub use microsandbox_image::snapshot::{
     UpperLayer,
 };
 pub use microsandbox_types::{SnapshotSpec, SnapshotSpec as SnapshotConfig};
-pub use verify::{SnapshotVerifyReport, UpperVerifyStatus};
+pub use verify::{CheckpointVerifyStatus, SnapshotVerifyReport, UpperVerifyStatus};
 
 //--------------------------------------------------------------------------------------------------
 // Internal — used by submodules

@@ -655,6 +655,7 @@ export interface NapiSnapshotVerifyReport {
   readonly upperKind: string; // "notRecorded" | "verified"
   readonly upperAlgorithm: string | null | undefined;
   readonly upperDigest: string | null | undefined;
+  readonly checkpointRoot: string | null | undefined;
 }
 
 export interface NapiImageHandle {

@@ -402,7 +402,11 @@ async fn verify(args: SnapshotVerifyArgs) -> anyhow::Result<()> {
     let report = snap.verify().await?;
     ui::detail_kv("Digest", &report.digest);
     ui::detail_kv("Path", &report.path.display().to_string());
-    ui::detail_kv("Verification", &format_verify_status(&report.upper));
+    if let Some(checkpoint) = report.checkpoint {
+        ui::detail_kv("Checkpoint", &format!("verified ({})", checkpoint.root));
+    } else {
+        ui::detail_kv("Verification", &format_verify_status(&report.upper));
+    }
     Ok(())
 }
 

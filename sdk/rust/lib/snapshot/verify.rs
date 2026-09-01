@@ -8,11 +8,13 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use crate::{MicrosandboxError, MicrosandboxResult, Operation, UnsupportedReason};
+use microsandbox_image::checkpoint::{CheckpointClosure, ObjectId};
 use microsandbox_image::snapshot::{FILE_MERKLE_BLAKE3_LEAF_SIZE, SnapshotState, UpperIntegrity};
 use microsandbox_utils::extent::ExtentMap;
 use rayon::prelude::*;
 use sha2::{Digest as _, Sha256};
+
+use crate::{MicrosandboxError, MicrosandboxResult};
 
 use super::Snapshot;
 
@@ -38,6 +40,15 @@ pub struct SnapshotVerifyReport {
     pub path: PathBuf,
     /// Upper-layer content verification result.
     pub upper: UpperVerifyStatus,
+    /// Composite-checkpoint closure verification result, when this is a resumable snapshot.
+    pub checkpoint: Option<CheckpointVerifyStatus>,
+}
+
+/// Verified identity of a composite-checkpoint closure.
+#[derive(Debug, Clone)]
+pub struct CheckpointVerifyStatus {
+    /// SHA-256 identity of the canonical checkpoint root manifest.
+    pub root: String,
 }
 
 /// Upper-layer content verification result.
@@ -115,12 +126,22 @@ impl MerkleAccumulator {
 
 pub(super) async fn verify_snapshot(snap: &Snapshot) -> MicrosandboxResult<SnapshotVerifyReport> {
     let SnapshotState::File(file_state) = &snap.manifest().state else {
-        return Err(MicrosandboxError::unsupported(
-            Operation::SnapshotOps,
-            UnsupportedReason::NotAvailable(
-                "checkpoint-state snapshot verification is not available".into(),
-            ),
-        ));
+        let SnapshotState::Checkpoint(checkpoint_state) = &snap.manifest().state else {
+            unreachable!("snapshot state is a closed enum")
+        };
+        let checkpoint = verify_checkpoint_closure(
+            snap.path().join(super::create::CHECKPOINT_DIRECTORY),
+            checkpoint_state.checkpoint_root.clone(),
+        )
+        .await?;
+        return Ok(SnapshotVerifyReport {
+            digest: snap.digest().to_string(),
+            path: snap.path().to_path_buf(),
+            // Keep the released disk-snapshot projection stable. Checkpoint callers use the
+            // explicit checkpoint result below instead of overloading upper-layer terminology.
+            upper: UpperVerifyStatus::NotRecorded,
+            checkpoint: Some(checkpoint),
+        });
     };
     if file_state.layers.len() != 1 {
         return Err(MicrosandboxError::unsupported(
@@ -138,6 +159,7 @@ pub(super) async fn verify_snapshot(snap: &Snapshot) -> MicrosandboxResult<Snaps
             digest: snap.digest().to_string(),
             path: snap.path().to_path_buf(),
             upper: UpperVerifyStatus::NotRecorded,
+            checkpoint: None,
         });
     };
 
@@ -172,7 +194,28 @@ pub(super) async fn verify_snapshot(snap: &Snapshot) -> MicrosandboxResult<Snaps
             algorithm: expected.algorithm().into(),
             digest: actual.value().into(),
         },
+        checkpoint: None,
     })
+}
+
+async fn verify_checkpoint_closure(
+    closure_path: PathBuf,
+    expected_root: String,
+) -> MicrosandboxResult<CheckpointVerifyStatus> {
+    tokio::task::spawn_blocking(move || {
+        let expected = ObjectId::new(&expected_root)
+            .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+        let closure = CheckpointClosure::open(closure_path, Some(&expected))
+            .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+        closure
+            .verify_memory_objects()
+            .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+        Ok(CheckpointVerifyStatus {
+            root: closure.root_id().to_string(),
+        })
+    })
+    .await
+    .map_err(|error| MicrosandboxError::Custom(format!("checkpoint verify task: {error}")))?
 }
 
 pub(super) async fn compute_merkle_integrity(path: &Path) -> MicrosandboxResult<UpperIntegrity> {

@@ -31,6 +31,7 @@ function projectedSnapshot(
       upperKind: "verified",
       upperAlgorithm: "msb-sparse-sha256-v1",
       upperDigest: `sha256:${"c".repeat(64)}`,
+      checkpointRoot: null,
     }),
     ...overrides,
   };
@@ -155,6 +156,27 @@ describe("Snapshot native projections", () => {
     });
     await expect(snapshot.verify()).resolves.toMatchObject({
       upper: { kind: "notRecorded" },
+    });
+  });
+
+  it("projects verified checkpoint closures without overloading upper integrity", async () => {
+    const root = `sha256:${"d".repeat(64)}`;
+    const snapshot = projectedSnapshot({
+      verify: async () => ({
+        digest: `sha256:${"a".repeat(64)}`,
+        path: "/snapshots/example",
+        upperKind: "notRecorded",
+        upperAlgorithm: null,
+        upperDigest: null,
+        checkpointRoot: root,
+      }),
+    });
+
+    await expect(snapshot.verify()).resolves.toEqual({
+      digest: `sha256:${"a".repeat(64)}`,
+      path: "/snapshots/example",
+      upper: { kind: "notRecorded" },
+      checkpoint: { kind: "verified", root },
     });
   });
 });

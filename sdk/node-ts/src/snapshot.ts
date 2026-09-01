@@ -66,6 +66,7 @@ export type SnapshotVerifyReport =
       readonly digest: string;
       readonly path: string;
       readonly upper: { readonly kind: "notRecorded" };
+      readonly checkpoint?: { readonly kind: "verified"; readonly root: string };
     }
   | {
       readonly digest: string;
@@ -75,6 +76,7 @@ export type SnapshotVerifyReport =
         readonly algorithm: string;
         readonly digest: string;
       };
+      readonly checkpoint?: { readonly kind: "verified"; readonly root: string };
     };
 
 /**
@@ -410,11 +412,16 @@ function wrapBuilder(nb: InstanceType<typeof napi.SnapshotBuilder>): SnapshotBui
 
 /** @internal */
 function verifyReportToTs(r: NapiSnapshotVerifyReport): SnapshotVerifyReport {
+  const checkpoint =
+    typeof r.checkpointRoot === "string"
+      ? { kind: "verified" as const, root: r.checkpointRoot }
+      : undefined;
   if (r.upperKind === "notRecorded") {
     return {
       digest: r.digest,
       path: r.path,
       upper: { kind: "notRecorded" },
+      ...(checkpoint === undefined ? {} : { checkpoint }),
     };
   }
   if (r.upperKind === "verified") {
@@ -429,6 +436,7 @@ function verifyReportToTs(r: NapiSnapshotVerifyReport): SnapshotVerifyReport {
         ),
         digest: requiredProjectionString(r.upperDigest, "verify.upperDigest"),
       },
+      ...(checkpoint === undefined ? {} : { checkpoint }),
     };
   }
   throw invalidProjection(`unknown verification kind ${r.upperKind}`);

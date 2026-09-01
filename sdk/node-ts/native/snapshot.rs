@@ -58,6 +58,8 @@ pub struct JsSnapshotVerifyReport {
     pub upper_kind: String,
     pub upper_algorithm: Option<String>,
     pub upper_digest: Option<String>,
+    /// Verified composite-checkpoint root, when the artifact is resumable.
+    pub checkpoint_root: Option<String>,
 }
 
 /// Options for `Snapshot.remove()` (instance and static).
@@ -542,6 +544,7 @@ fn snapshot_handle_to_info(h: &RustSnapshotHandle) -> JsSnapshotInfo {
 fn verify_report_to_js(
     report: microsandbox::snapshot::SnapshotVerifyReport,
 ) -> JsSnapshotVerifyReport {
+    let checkpoint_root = report.checkpoint.map(|checkpoint| checkpoint.root);
     let (kind, algorithm, digest) = match report.upper {
         RustUpperVerifyStatus::NotRecorded => ("notRecorded".to_string(), None, None),
         RustUpperVerifyStatus::Verified { algorithm, digest } => {
@@ -554,6 +557,7 @@ fn verify_report_to_js(
         upper_kind: kind,
         upper_algorithm: algorithm,
         upper_digest: digest,
+        checkpoint_root,
     }
 }
 
