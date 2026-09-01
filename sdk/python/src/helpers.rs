@@ -50,6 +50,7 @@ const KNOWN_CREATE_KWARGS: &[&str] = &[
     "ports",
     "vsock",
     "network",
+    "proxy",
     "secrets",
     "on_secret_violation",
     "detached",
@@ -566,6 +567,33 @@ pub fn sandbox_builder_from_args(
     if let Some(network) = kwargs.get_item("network")?.filter(|v| !v.is_none()) {
         let net_dict = config_dict(&network, "Network")?;
         builder = apply_network(builder, &net_dict)?;
+    }
+
+    // Outbound proxy.
+    if let Some(proxy) = kwargs.get_item("proxy")?
+        && !proxy.is_none()
+    {
+        let proxy = config_dict(&proxy, "OutboundProxy")?;
+        let protocol = extract_required::<String>(&proxy, "protocol")?;
+        let address = extract_required::<String>(&proxy, "address")?;
+        builder = match protocol.as_str() {
+            "socks4" => {
+                let user_id = extract_opt::<String>(&proxy, "user_id")?;
+                builder.proxy(move |p| {
+                    let proxy = p.socks4(address);
+                    match user_id {
+                        Some(user_id) => proxy.user_id(user_id),
+                        None => proxy,
+                    }
+                })
+            }
+            "socks5" => builder.proxy(move |p| p.socks5(address)),
+            _ => {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "unsupported outbound proxy protocol {protocol:?}"
+                )));
+            }
+        };
     }
 
     // Secrets.

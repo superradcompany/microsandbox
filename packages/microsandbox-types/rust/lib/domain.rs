@@ -590,11 +590,39 @@ pub struct NetworkSpec {
     /// Whether to copy trusted host CAs into the guest at boot.
     pub trust_host_cas: bool,
 
+    /// Proxy that all outbound sandbox connections are dialed through.
+    ///
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outbound_proxy: Option<OutboundProxy>,
+
     /// Body template returned to HTTP/HTTPS clients when egress is denied.
     /// `{host}` is replaced with the blocked hostname. Missing uses the
     /// engine default.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub http_deny_message: Option<String>,
+}
+
+/// Proxy configuration for outbound sandbox connections.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(tag = "protocol", rename_all = "lowercase")]
+#[non_exhaustive]
+pub enum OutboundProxy {
+    /// A SOCKS4 proxy at the given `IP:port` address.
+    Socks4 {
+        /// Proxy socket address.
+        address: String,
+        /// Optional user ID sent during the SOCKS4 handshake.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        user_id: Option<String>,
+    },
+
+    /// A SOCKS5 proxy at the given `IP:port` address.
+    Socks5 {
+        /// Proxy socket address.
+        address: String,
+    },
 }
 
 /// A published port mapping between host and guest.
@@ -1665,6 +1693,7 @@ impl Default for NetworkSpec {
             max_connections: None,
             rate_limiter: None,
             trust_host_cas: false,
+            outbound_proxy: None,
             http_deny_message: None,
         }
     }

@@ -74,6 +74,7 @@ type SandboxConfig struct {
 	PortBindings        []PortBinding     // explicit bind address host→guest ports
 	Vsock               []VsockRoute      // host local IPC → guest host-CID port
 	Network             *NetworkConfig
+	Proxy               *OutboundProxy
 	Secrets             []SecretEntry
 	Patches             []PatchConfig
 	Volumes             map[string]MountConfig // guest path → mount config
@@ -979,6 +980,11 @@ func WithNetwork(net *NetworkConfig) SandboxOption {
 	return func(o *SandboxConfig) { o.Network = net }
 }
 
+// WithProxy sets the single proxy used for outbound sandbox connections.
+func WithProxy(proxy *OutboundProxy) SandboxOption {
+	return func(o *SandboxConfig) { o.Proxy = proxy }
+}
+
 // WithSecrets appends credential secrets to the sandbox. Secrets never enter
 // the VM; the network proxy substitutes them at the transport layer.
 func WithSecrets(secrets ...SecretEntry) SandboxOption {
@@ -1039,6 +1045,34 @@ type RegistryAuth struct {
 // ---------------------------------------------------------------------------
 // Network
 // ---------------------------------------------------------------------------
+
+// OutboundProxy configures the single proxy used for outbound connections.
+// Construct one with a protocol-specific function such as SOCKS5Proxy.
+type OutboundProxy struct {
+	protocol string
+	address  string
+	userID   string
+}
+
+// SOCKS4ProxyOptions configures optional SOCKS4 handshake fields.
+type SOCKS4ProxyOptions struct {
+	// UserID is the optional user ID sent during the SOCKS4 handshake.
+	UserID string
+}
+
+// SOCKS4Proxy configures a SOCKS4 outbound proxy at address.
+func SOCKS4Proxy(address string, options ...SOCKS4ProxyOptions) *OutboundProxy {
+	proxy := &OutboundProxy{protocol: "socks4", address: address}
+	if len(options) > 0 {
+		proxy.userID = options[0].UserID
+	}
+	return proxy
+}
+
+// SOCKS5Proxy configures a SOCKS5 outbound proxy at address.
+func SOCKS5Proxy(address string) *OutboundProxy {
+	return &OutboundProxy{protocol: "socks5", address: address}
+}
 
 // NetworkConfig configures the sandbox network stack.
 type NetworkConfig struct {

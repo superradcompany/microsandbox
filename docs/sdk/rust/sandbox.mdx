@@ -1298,6 +1298,16 @@ Configure networking. See [Networking](/sdk/rust/networking) for the full builde
   </div>
 </div>
 
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">proxy()</span>
+
+```rust
+fn proxy<P>(self, configure: impl FnOnce(OutboundProxyBuilder) -> P) -> Self
+where
+    P: OutboundProxyConfig
+```
+
+Configure the single proxy used for outbound sandbox connections. See [Proxies](/sdk/rust/proxies) for the protocol builders and examples.
+
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">patch()</span>
 
 ```rust

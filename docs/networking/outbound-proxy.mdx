@@ -1,0 +1,140 @@
+---
+title: Outbound proxy
+description: Route external outbound sandbox TCP traffic through a SOCKS proxy
+icon: "route"
+---
+
+Point a sandbox's external outbound TCP traffic at a SOCKS4 or SOCKS5 proxy, without the guest knowing a proxy exists. The guest keeps dialing its normal destinations; the host, on its side of the boundary, dials the configured proxy and asks it to `CONNECT` to the real destination instead of connecting directly.
+
+<Note>This setting is available for local sandboxes. Cloud sandbox specs do not expose user-configured egress proxies.</Note>
+
+The API models this as one optional outbound proxy. SOCKS4 and SOCKS5 are supported and mutually exclusive.
+
+This is the same mechanism inspection tools like [mitmproxy](https://mitmproxy.org) expose via `--mode socks5`: select a SOCKS5 outbound proxy and every sandbox connection flows through mitmproxy for logging or debugging, with zero guest-side proxy configuration.
+
+## How it works
+
+Every outbound TCP connection a sandbox opens is proxied by the host regardless of whether `outbound_proxy` is set — normally the host dials the real destination directly. When an outbound proxy is configured, that final dial is replaced with a SOCKS handshake to the configured proxy, which is then asked to `CONNECT` to the real destination on the sandbox's behalf.
+
+Everything upstream of that dial is unaffected:
+
+- Network policy (allow/deny rules, domain matching, SNI-based re-evaluation) is still evaluated against the real destination before the host dials anywhere.
+- [TLS interception](/networking/tls) still terminates and re-encrypts as configured — the outbound proxy changes how the host reaches the upstream server, not whether the host can see inside the connection.
+- [Secret injection](/security/secrets) still applies to traffic that flows through the host.
+
+## Enabling it
+
+<CodeGroup>
+```rust Rust
+use microsandbox::Sandbox;
+
+let sb = Sandbox::builder("inspected")
+    .image("python")
+    .proxy(|p| p.socks5("127.0.0.1:8080"))
+    .create()
+    .await?;
+```
+
+```typescript TypeScript
+import { Sandbox } from "microsandbox";
+
+await using sb = await Sandbox.builder("inspected")
+    .image("python")
+    .proxy((p) => p.socks5("127.0.0.1:8080"))
+    .create();
+```
+
+```python Python
+from microsandbox import OutboundProxy, Sandbox
+
+sb = await Sandbox.create(
+    "inspected",
+    image="python",
+    proxy=OutboundProxy.socks5("127.0.0.1:8080"),
+)
+```
+
+```go Go
+sb, err := m.CreateSandbox(ctx, "inspected",
+    m.WithImage("python"),
+    m.WithProxy(m.SOCKS5Proxy("127.0.0.1:8080")),
+)
+```
+
+```bash CLI
+msb create python --name inspected --proxy socks5://127.0.0.1:8080
+```
+</CodeGroup>
+
+SDKs use typed protocol-specific configuration. The CLI accepts `socks4://IP:port` and `socks5://IP:port` because a string flag needs a protocol discriminator. User info, paths, query parameters, and fragments are not supported in CLI proxy URIs.
+
+## SOCKS4 user IDs
+
+SOCKS4 can include an optional user ID in its handshake. Configure it through the SDK API:
+
+<CodeGroup>
+```rust Rust
+.proxy(|p| p.socks4("127.0.0.1:1080").user_id("sandbox"))
+```
+
+```typescript TypeScript
+.proxy((p) => p.socks4("127.0.0.1:1080").userId("sandbox"))
+```
+
+```python Python
+proxy=OutboundProxy.socks4("127.0.0.1:1080", user_id="sandbox")
+```
+
+```go Go
+m.WithProxy(m.SOCKS4Proxy(
+    "127.0.0.1:1080",
+    m.SOCKS4ProxyOptions{UserID: "sandbox"},
+))
+```
+</CodeGroup>
+
+The user ID is an identifier, not a password. The CLI currently creates SOCKS4 connections with no user ID.
+
+## Inspecting traffic with mitmproxy
+
+Run mitmproxy in SOCKS5 mode and point sandboxes at it:
+
+```bash
+mitmproxy --mode socks5 --listen-port 8080
+```
+
+```bash
+msb create python --name inspected --proxy socks5://127.0.0.1:8080
+```
+
+Every outbound TCP connection the sandbox opens shows up in mitmproxy's UI. To decrypt HTTPS, the TLS client must also trust mitmproxy's CA:
+
+- **Let mitmproxy intercept guest TLS directly.** Leave microsandbox TLS interception disabled and install `~/.mitmproxy/mitmproxy-ca-cert.pem` in the guest trust store. One option is to add that CA to the host trust store and enable [`--trust-host-cas`](/networking/tls#trusting-host-cas).
+- **Keep microsandbox TLS interception enabled.** Microsandbox decrypts guest traffic and opens a new TLS connection through mitmproxy. Trust mitmproxy's CA for that upstream connection:
+
+```bash
+msb create python --name inspected \
+  --proxy socks5://127.0.0.1:8080 \
+  --tls-intercept \
+  --tls-upstream-ca-cert ~/.mitmproxy/mitmproxy-ca-cert.pem
+```
+
+Without one of these CA configurations, mitmproxy can record the TCP connection but cannot transparently decrypt HTTPS.
+
+<Frame>
+  <img src="/images/networking/mitmproxy-socks5.png" alt="mitmproxy's flow list in SOCKS5 mode, showing intercepted HTTPS requests from a sandbox" />
+</Frame>
+
+## Limits
+
+- **TCP only.** UDP traffic (including plain DNS on port 53) is not routed through the proxy. SOCKS5's `UDP ASSOCIATE` command isn't used here; SOCKS4 has no UDP relay command.
+- **DNS resolution bypasses it too.** DNS-over-TCP and DNS-over-TLS both go through microsandbox's own DNS forwarder, not the configured proxy, regardless of protocol.
+- **Host-local connections bypass it.** Connections to `host.microsandbox.internal` still target the microsandbox host directly. Sending their rewritten loopback address through a remote SOCKS proxy would target the proxy host instead.
+- **SOCKS4 destinations must be IPv4.** SOCKS4 cannot carry IPv6 destination addresses, and microsandbox does not use the SOCKS4a domain-name extension.
+- **One proxy connection per sandbox connection.** Each guest TCP connection opens a new TCP connection and handshake to the proxy; connections are not multiplexed.
+- **No SOCKS5 authentication.** Only the no-auth SOCKS5 handshake is supported; point this at a local or otherwise trusted proxy. A SOCKS4 user ID is not password authentication.
+
+## See also
+
+- [TLS interception](/networking/tls): configure microsandbox TLS interception and upstream CA trust
+- [Network overview](/networking/overview): policy rules, profiles, and port mapping

@@ -59,6 +59,7 @@ thiserror = { workspace = true }
 time = { workspace = true }
 tokio = { workspace = true }
 tokio-rustls = { workspace = true }
+tokio-socks = { workspace = true }
 tracing = { workspace = true }
 zeroize = { workspace = true }
 

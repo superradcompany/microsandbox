@@ -86,6 +86,13 @@ pub enum BuildError {
     #[error("invalid IPv6 pool `{raw}`: prefix must be /64 or shorter")]
     InvalidIpv6Pool { raw: String },
 
+    /// An outbound proxy builder received an invalid configuration.
+    #[error("invalid outbound proxy: {reason}")]
+    InvalidOutboundProxy {
+        /// Protocol-specific builder error.
+        reason: String,
+    },
+
     /// The configured connection limit is above the network stack's hard cap.
     #[error("max_connections {configured} exceeds hard limit {limit}")]
     MaxConnectionsExceeded {

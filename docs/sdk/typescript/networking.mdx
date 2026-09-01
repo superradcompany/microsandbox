@@ -1938,6 +1938,7 @@ Built network configuration produced by `NetworkBuilder.build()`. Keys are camel
 | rateLimiter | [`NetworkRateLimiterConfig`](#networkratelimiterconfig) ` \| null` | Local rate limits grouped by direction |
 | interface | `{ ipv4Pool?, ipv6Pool?, ipv4Address?, ipv6Address?, mac?, mtu? }` | Optional interface overrides |
 | trustHostCAs | `boolean` | Ship host CAs into the guest |
+| outboundProxy | [`OutboundProxy`](/sdk/typescript/proxies#outboundproxy)` \| null` | Canonical outbound proxy configuration stored in the sandbox network spec; `null` when unset |
 | httpDenyMessage | `string \| null` | Body for `403 Forbidden` on denied HTTP/HTTPS; `null` uses the default |
 
 ### NetworkProfile

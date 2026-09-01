@@ -68,7 +68,7 @@ jobs:
 
       - name: Set up mold (Linux host link)
         if: inputs.os == 'linux'
-        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # 2.41.0
+        uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # 2.41.0
 
       - name: Test workspace
         run: cargo +stable test --workspace --exclude microsandbox-agentd

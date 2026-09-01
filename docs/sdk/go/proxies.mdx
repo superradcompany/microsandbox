@@ -1,0 +1,62 @@
+---
+title: Proxies
+description: Go SDK - Proxy API reference
+---
+
+Configure one SOCKS4 or SOCKS5 proxy for outbound sandbox connections with [`WithProxy`](#m-withproxy). Proxy protocols are mutually exclusive.
+
+See [Outbound proxy](/networking/outbound-proxy) for runtime behavior, security considerations, and current transport limitations.
+
+## Typical flow
+
+```go
+sb, err := m.CreateSandbox(ctx, "worker",
+    m.WithImage("python"),
+    m.WithProxy(m.SOCKS5Proxy("127.0.0.1:1080")),
+)
+```
+
+## Functions
+
+### <span className="msb-recv" id="m-withproxy">m.</span><span className="msb-hn">WithProxy()</span>
+
+```go
+func WithProxy(proxy *OutboundProxy) SandboxOption
+```
+
+Set the single proxy used for outbound sandbox connections.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>proxy</code><a className="msb-type" href="#outboundproxy">*OutboundProxy</a></div>
+    <div className="msb-param-desc">Protocol-specific outbound proxy configuration.</div>
+  </div>
+</div>
+
+### <span className="msb-recv">m.</span><span className="msb-hn">SOCKS4Proxy()</span>
+
+```go
+func SOCKS4Proxy(address string, options ...SOCKS4ProxyOptions) *OutboundProxy
+```
+
+Construct a SOCKS4 proxy at `IP:port` for [`WithProxy`](#m-withproxy). Pass `SOCKS4ProxyOptions{UserID: "sandbox"}` to include the optional SOCKS4 user ID. It must contain 1–255 bytes and no null byte; it is an identifier, not a password.
+
+### <span className="msb-recv">m.</span><span className="msb-hn">SOCKS5Proxy()</span>
+
+```go
+func SOCKS5Proxy(address string) *OutboundProxy
+```
+
+Construct a SOCKS5 proxy at `IP:port` for [`WithProxy`](#m-withproxy).
+
+## OutboundProxy
+
+Opaque outbound proxy configuration constructed with a protocol-specific function. Pass it to [`WithProxy`](#m-withproxy).
+
+## SOCKS4ProxyOptions
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `UserID` | `string` | `""` | Optional user ID sent during the SOCKS4 handshake |

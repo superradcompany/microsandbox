@@ -1598,6 +1598,7 @@ Errors surfaced by the builders' `build()` methods. The same enum covers [`Netwo
 | `InvalidCidr { rule_index, raw }` | `.cidr(&str)` got an unparseable value |
 | `InvalidIpv4Pool { raw }` | `ipv4_pool()` got a pool that can't hold a `/30` sandbox subnet |
 | `InvalidIpv6Pool { raw }` | `ipv6_pool()` got a pool that can't hold a `/64` sandbox prefix |
+| `InvalidOutboundProxy { reason }` | [`SandboxBuilder::proxy()`](/sdk/rust/proxies#proxy) got an invalid proxy configuration |
 | `InvalidDomain { rule_index, raw, source }` | `.domain` / `.domain_suffix` got a value that failed `DomainName` parse |
 | `InvalidPortRange { rule_index, lo, hi }` | `.port_range(lo, hi)` had `lo > hi` |
 | `IngressDoesNotSupportIcmp { rule_index }` | ICMP protocol on a non-egress rule |

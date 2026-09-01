@@ -80,6 +80,18 @@ export interface SecretEntry {
   readonly injection: SecretInjection;
 }
 
+/** Proxy used for outbound sandbox connections. */
+export type OutboundProxy =
+  | {
+      readonly protocol: "socks4";
+      readonly address: string;
+      readonly userId?: string;
+    }
+  | {
+      readonly protocol: "socks5";
+      readonly address: string;
+    };
+
 /** Built network configuration produced by `NetworkBuilder.build()`. */
 export interface NetworkConfig {
   readonly enabled: boolean;
@@ -100,6 +112,9 @@ export interface NetworkConfig {
     readonly mtu?: number | null;
   };
   readonly trustHostCAs: boolean;
+  /** Canonical proxy configuration for outbound connections. */
+  readonly outboundProxy: OutboundProxy | null;
+
   /**
    * Body returned to HTTP/HTTPS clients when egress is denied by policy;
    * `{host}` is replaced with the blocked hostname. `null` uses the

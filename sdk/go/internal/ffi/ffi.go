@@ -1588,15 +1588,16 @@ type CreateOptions struct {
 	RegistryInsecure bool `json:"registry_insecure,omitempty"`
 	// RegistryCACerts holds PEM-encoded CA root certificate bundles trusted
 	// when pulling.
-	RegistryCACerts []string             `json:"registry_ca_certs,omitempty"`
-	Ports           map[uint16]uint16    `json:"ports,omitempty"`
-	PortsUDP        map[uint16]uint16    `json:"ports_udp,omitempty"`
-	PortBindings    []PortBindingOptions `json:"port_bindings,omitempty"`
-	Vsock           []VsockRouteOptions  `json:"vsock,omitempty"`
-	Network         *NetworkOptions      `json:"network,omitempty"`
-	Secrets         []SecretOptions      `json:"secrets,omitempty"`
-	Patches         []PatchOptions       `json:"patches,omitempty"`
-	Volumes         map[string]MountSpec `json:"volumes,omitempty"`
+	RegistryCACerts []string              `json:"registry_ca_certs,omitempty"`
+	Ports           map[uint16]uint16     `json:"ports,omitempty"`
+	PortsUDP        map[uint16]uint16     `json:"ports_udp,omitempty"`
+	PortBindings    []PortBindingOptions  `json:"port_bindings,omitempty"`
+	Vsock           []VsockRouteOptions   `json:"vsock,omitempty"`
+	Network         *NetworkOptions       `json:"network,omitempty"`
+	Proxy           *OutboundProxyOptions `json:"proxy,omitempty"`
+	Secrets         []SecretOptions       `json:"secrets,omitempty"`
+	Patches         []PatchOptions        `json:"patches,omitempty"`
+	Volumes         map[string]MountSpec  `json:"volumes,omitempty"`
 }
 
 // InitOptions describes a guest PID-1 init handoff.
@@ -1683,6 +1684,13 @@ type TokenBucketOptions struct {
 	Size         uint64 `json:"size"`
 	RefillTimeMs uint64 `json:"refill_time_ms"`
 	OneTimeBurst uint64 `json:"one_time_burst,omitempty"`
+}
+
+// OutboundProxyOptions is the JSON representation of an outbound proxy.
+type OutboundProxyOptions struct {
+	Protocol string `json:"protocol"`
+	Address  string `json:"address"`
+	UserID   string `json:"user_id,omitempty"`
 }
 
 // PortBindingOptions publishes a host port on a specific host bind address.

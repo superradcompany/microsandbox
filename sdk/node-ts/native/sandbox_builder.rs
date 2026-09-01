@@ -7,8 +7,9 @@ use napi_derive::napi;
 use microsandbox::sandbox::LogLevel as RustLogLevel;
 use microsandbox::sandbox::{
     CpuPlacement as RustCpuPlacement, DeploymentProfile as RustDeploymentProfile,
-    PullPolicy as RustPullPolicy, Sandbox as RustSandbox, SandboxBuilder as RustSandboxBuilder,
-    SecurityProfile as RustSecurityProfile, TransparentHugePagePolicy as RustThpPolicy,
+    OutboundProxy as RustOutboundProxy, PullPolicy as RustPullPolicy, Sandbox as RustSandbox,
+    SandboxBuilder as RustSandboxBuilder, SecurityProfile as RustSecurityProfile,
+    TransparentHugePagePolicy as RustThpPolicy,
 };
 use microsandbox::size::Mebibytes;
 
@@ -19,6 +20,9 @@ use crate::image_builder::JsImageBuilder;
 use crate::init_options_builder::JsInitOptionsBuilder;
 use crate::mount_builder::JsMountBuilder;
 use crate::network_builder::JsNetworkBuilder;
+use crate::outbound_proxy_builder::{
+    JsOutboundProxyBuilder, JsSocks4ProxyBuilder, JsSocks5ProxyBuilder, take_selected_proxy,
+};
 use crate::patch_builder::JsPatchBuilder;
 use crate::pull_progress::JsPullProgressStream;
 use crate::registry_builder::JsRegistryConfigBuilder;
@@ -31,7 +35,14 @@ use crate::tls_builder::JsTlsBuilder;
 // re-emit references to these classes (otherwise they'd appear as
 // the Rust struct names in `index.d.ts`).
 #[allow(dead_code)]
-type _NapiHints = (JsDnsBuilder, JsTlsBuilder, JsSecretBuilder);
+type _NapiHints = (
+    JsDnsBuilder,
+    JsTlsBuilder,
+    JsSecretBuilder,
+    JsOutboundProxyBuilder,
+    JsSocks4ProxyBuilder,
+    JsSocks5ProxyBuilder,
+);
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -46,6 +57,7 @@ type _NapiHints = (JsDnsBuilder, JsTlsBuilder, JsSecretBuilder);
 #[napi(js_name = "SandboxBuilder")]
 pub struct JsSandboxBuilder {
     inner: Option<RustSandboxBuilder>,
+    outbound_proxy: Option<RustOutboundProxy>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -59,6 +71,7 @@ impl JsSandboxBuilder {
     pub fn new(name: String) -> Self {
         Self {
             inner: Some(microsandbox::Sandbox::builder(name)),
+            outbound_proxy: None,
         }
     }
 
@@ -499,7 +512,31 @@ impl JsSandboxBuilder {
         let mut returned = configure.call(initial)?;
         let net_builder = returned.take_inner_builder()?;
         let prev = self.take_inner();
-        self.inner = Some(prev.network(|_default| net_builder));
+        let mut next = prev.network(|_default| net_builder);
+        if let Some(proxy) = self.outbound_proxy.clone() {
+            next = next.proxy(|_| proxy);
+        }
+        self.inner = Some(next);
+        Ok(self)
+    }
+
+    /// Configure the single proxy used for outbound sandbox connections.
+    #[napi(
+        ts_args_type = "configure: (arg: OutboundProxyBuilder) => Socks4ProxyBuilder | Socks5ProxyBuilder"
+    )]
+    pub fn proxy(
+        &mut self,
+        env: &Env,
+        configure: Function<ClassInstance<JsOutboundProxyBuilder>, Unknown<'_>>,
+    ) -> Result<&Self> {
+        let selector = JsOutboundProxyBuilder::new();
+        let selection = selector.selection();
+        let initial = selector.into_instance(env)?;
+        configure.call(initial)?;
+        let proxy = take_selected_proxy(&selection)?;
+        let prev = self.take_inner();
+        self.inner = Some(prev.proxy(|_| proxy.clone()));
+        self.outbound_proxy = Some(proxy);
         Ok(self)
     }
 

@@ -753,6 +753,7 @@ func TestFFIWireShape_NetworkCustomRules(t *testing.T) {
 			IPv4Pool: "172.31.240.0/24",
 			IPv6Pool: "fd7a:115c:a1e0:100::/56",
 		}),
+		WithProxy(SOCKS5Proxy("127.0.0.1:1080")),
 	)
 	net := mustField(t, got, "network").(map[string]any)
 
@@ -784,6 +785,21 @@ func TestFFIWireShape_NetworkCustomRules(t *testing.T) {
 	ns := dns["nameservers"].([]any)
 	if len(ns) != 1 || ns[0] != "1.1.1.1:53" {
 		t.Fatalf("dns.nameservers = %v", ns)
+	}
+	proxy := mustField(t, got, "proxy").(map[string]any)
+	if proxy["protocol"] != "socks5" || proxy["address"] != "127.0.0.1:1080" {
+		t.Fatalf("proxy = %#v", proxy)
+	}
+}
+
+func TestFFIWireShape_SOCKS4Proxy(t *testing.T) {
+	got := marshalCreateOptions(t,
+		WithImage("alpine"),
+		WithProxy(SOCKS4Proxy("127.0.0.1:1080", SOCKS4ProxyOptions{UserID: "sandbox"})),
+	)
+	proxy := mustField(t, got, "proxy").(map[string]any)
+	if proxy["protocol"] != "socks4" || proxy["address"] != "127.0.0.1:1080" || proxy["user_id"] != "sandbox" {
+		t.Fatalf("proxy = %#v", proxy)
 	}
 }
 
@@ -914,7 +930,7 @@ func TestFFIWireShape_EmptyConfigOmitsOptionalFields(t *testing.T) {
 		"thp",
 		"hostname", "user", "replace", "detached", "env", "scripts",
 		"ports", "ports_udp", "vsock", "network", "secrets", "patches", "volumes",
-		"init", "registry_auth", "registry_insecure", "registry_ca_certs", "root_disk",
+		"proxy", "init", "registry_auth", "registry_insecure", "registry_ca_certs", "root_disk",
 	} {
 		if _, present := got[key]; present {
 			body, _ := json.Marshal(got)

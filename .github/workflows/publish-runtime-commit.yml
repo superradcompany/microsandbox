@@ -1,0 +1,252 @@
+name: Publish Runtime Commit
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: Full Microsandbox commit SHA to publish.
+        required: true
+        type: string
+
+concurrency:
+  group: publish-runtime-${{ inputs.commit }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/superradcompany/microsandbox
+
+jobs:
+  resolve:
+    name: Resolve CI artifacts
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+      packages: read
+    outputs:
+      commit: ${{ steps.resolve.outputs.commit }}
+      run_id: ${{ steps.resolve.outputs.run_id }}
+    steps:
+      - name: Resolve successful Check run
+        id: resolve
+        env:
+          COMMIT: ${{ inputs.commit }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then
+            echo "::error::Run this workflow from the main branch."
+            exit 1
+          fi
+
+          if [[ ! "$COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::commit must be a full, lowercase 40-character SHA."
+            exit 1
+          fi
+
+          resolved_commit=$(gh api "repos/$GITHUB_REPOSITORY/commits/$COMMIT" --jq .sha)
+          if [[ "$resolved_commit" != "$COMMIT" ]]; then
+            echo "::error::commit did not resolve to the requested SHA."
+            exit 1
+          fi
+
+          runs=$(gh api -X GET "repos/$GITHUB_REPOSITORY/actions/workflows/check.yml/runs" \
+            -f head_sha="$COMMIT" \
+            -f status=success \
+            -f per_page=100)
+          run_id=""
+          while IFS= read -r candidate_run_id; do
+            artifacts=$(gh api --paginate \
+              "repos/$GITHUB_REPOSITORY/actions/runs/$candidate_run_id/artifacts?per_page=100" \
+              --jq '.artifacts[] | select(.expired == false) | .name')
+            if grep -Fxq msb-linux-x86_64 <<<"$artifacts" &&
+              grep -Fxq msb-linux-aarch64 <<<"$artifacts"; then
+              run_id=$candidate_run_id
+              break
+            fi
+          done < <(jq -r \
+            --arg commit "$COMMIT" \
+            --arg repository "$GITHUB_REPOSITORY" \
+            '[.workflow_runs[] | select(
+              .head_sha == $commit and
+              .conclusion == "success" and
+              .head_repository.full_name == $repository
+            )] | sort_by(.run_number) | reverse | .[].id' <<<"$runs")
+
+          if [[ -z "$run_id" ]]; then
+            echo "::error::No successful Check run with both runtime artifacts found for $COMMIT."
+            exit 1
+          fi
+
+          echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
+          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+          echo "Using Check run $run_id for $COMMIT."
+
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Refuse an existing commit tag
+        env:
+          COMMIT: ${{ steps.resolve.outputs.commit }}
+        run: |
+          set -euo pipefail
+
+          error_file=$(mktemp)
+          if docker buildx imagetools inspect "$IMAGE:$COMMIT" >/dev/null 2>"$error_file"; then
+            echo "::error::$IMAGE:$COMMIT already exists and will not be overwritten."
+            exit 1
+          fi
+
+          if ! grep -Eqi 'not found|manifest unknown' "$error_file"; then
+            cat "$error_file" >&2
+            echo "::error::Unable to determine whether $IMAGE:$COMMIT already exists."
+            exit 1
+          fi
+
+  build:
+    name: Package runtime (${{ matrix.arch }})
+    needs: resolve
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+            artifact: msb-linux-x86_64
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            artifact: msb-linux-aarch64
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Download runtime artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ matrix.artifact }}
+          path: runtime
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ needs.resolve.outputs.run_id }}
+
+      - name: Stage runtime
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+
+          mapfile -t firmware < <(find runtime -maxdepth 1 -type f \
+            -name 'libkrunfw.so.*.*.*' -print)
+          if [[ ! -f runtime/msb || ${#firmware[@]} -ne 1 ]]; then
+            echo "::error::Runtime artifact does not contain msb and one versioned libkrunfw."
+            exit 1
+          fi
+
+          destination="packaging/docker/build/$ARCH"
+          mkdir -p "$destination"
+          install -m 755 runtime/msb "$destination/msb"
+          install -m 644 "${firmware[0]}" "$destination/$(basename "${firmware[0]}")"
+
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push runtime image by digest
+        id: push
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: packaging/docker
+          platforms: linux/${{ matrix.arch }}
+          labels: org.opencontainers.image.revision=${{ needs.resolve.outputs.commit }}
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+
+      - name: Export image digest
+        env:
+          ARCH: ${{ matrix.arch }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          mkdir -p digests
+          echo "$DIGEST" > "digests/$ARCH.txt"
+
+      - name: Upload image digest
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: runtime-digest-${{ matrix.arch }}
+          path: digests/${{ matrix.arch }}.txt
+
+  publish:
+    name: Publish commit tag
+    needs: [resolve, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      packages: write
+    steps:
+      - name: Download image digests
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: digests
+          pattern: runtime-digest-*
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create immutable commit manifest
+        env:
+          COMMIT: ${{ needs.resolve.outputs.commit }}
+        run: |
+          set -euo pipefail
+
+          if docker buildx imagetools inspect "$IMAGE:$COMMIT" >/dev/null 2>&1; then
+            echo "::error::$IMAGE:$COMMIT was created while this workflow was running."
+            exit 1
+          fi
+
+          amd64_digest=$(cat digests/amd64.txt)
+          arm64_digest=$(cat digests/arm64.txt)
+          docker buildx imagetools create \
+            -t "$IMAGE:$COMMIT" \
+            "$IMAGE@$amd64_digest" \
+            "$IMAGE@$arm64_digest"
+
+          inspection=$(docker buildx imagetools inspect "$IMAGE:$COMMIT")
+          digest=$(awk '$1 == "Digest:" { print $2; exit }' <<<"$inspection")
+          if [[ -z "$digest" ]] ||
+            ! grep -Fq 'linux/amd64' <<<"$inspection" ||
+            ! grep -Fq 'linux/arm64' <<<"$inspection"; then
+            echo "$inspection"
+            echo "::error::Published manifest did not contain both expected platforms."
+            exit 1
+          fi
+
+          {
+            echo "## Runtime published"
+            echo
+            echo "- Image: \`$IMAGE:$COMMIT\`"
+            echo "- Digest: \`$digest\`"
+            echo "- Check run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ needs.resolve.outputs.run_id }}"
+          } >> "$GITHUB_STEP_SUMMARY"

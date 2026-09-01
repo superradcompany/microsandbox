@@ -4,13 +4,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use clap::{Arg, ArgAction, ArgMatches, Args, Command, FromArgMatches};
-use microsandbox::VolumeKind;
 use microsandbox::backend::{Backend, LocalBackend};
 use microsandbox::sandbox::{
     CpuPlacement, DeploymentProfile, DiskImageFormat, FlatClone, MountBuilder, Patch,
     RootDiskBuilder, Sandbox, SandboxBuilder, SandboxHandle, SecurityProfile,
     TransparentHugePagePolicy, VolumeMount, VsockSocketType,
 };
+use microsandbox::{OutboundProxy, VolumeKind};
 #[cfg(feature = "net")]
 use microsandbox_types::NetworkRateLimitDirection;
 
@@ -496,6 +496,12 @@ pub struct SandboxOpts {
     #[arg(long)]
     pub trust_host_cas: bool,
 
+    /// Dial all outbound sandbox connections through this proxy.
+    /// Supports the socks4:// and socks5:// protocols.
+    #[cfg(feature = "net")]
+    #[arg(long, value_name = "socks[4|5]://IP:PORT")]
+    pub proxy: Option<String>,
+
     // --- TLS interception ---
     /// Intercept and inspect HTTPS traffic via a built-in TLS proxy.
     #[cfg(feature = "net")]
@@ -680,6 +686,7 @@ impl SandboxOpts {
             || self.net_ingress_ops_burst.is_some()
             || self.max_connections.is_some()
             || self.trust_host_cas
+            || self.proxy.is_some()
             || self.tls_intercept
             || !self.tls_intercept_port.is_empty()
             || !self.tls_bypass.is_empty()
@@ -2038,6 +2045,12 @@ fn apply_network_opts(
         });
     }
 
+    let proxy = opts
+        .proxy
+        .as_deref()
+        .map(str::parse::<OutboundProxy>)
+        .transpose()?;
+
     // DNS, TLS, and other network configuration.
     let has_network_config = opts.no_dns_rebind_protection
         || !opts.dns_nameserver.is_empty()
@@ -2245,6 +2258,10 @@ fn apply_network_opts(
 
             n
         });
+    }
+
+    if let Some(proxy) = proxy {
+        builder = builder.proxy(|_| proxy);
     }
 
     Ok(builder)

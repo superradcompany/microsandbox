@@ -347,6 +347,7 @@ impl SmoltcpNetwork {
         let published_ports = self.config.ports.clone();
         let max_connections = self.config.max_connections;
         let secrets = self.secrets.clone();
+        let outbound_proxy = self.config.outbound_proxy.clone().map(Arc::new);
 
         self.poll_handle = Some(
             std::thread::Builder::new()
@@ -363,6 +364,7 @@ impl SmoltcpNetwork {
                         max_connections,
                         tokio_handle,
                         secrets,
+                        outbound_proxy,
                     );
                 })
                 .expect("failed to spawn smoltcp poll thread"),
@@ -553,6 +555,7 @@ fn enforce_deployment_profile(config: &mut NetworkConfig, profile: DeploymentPro
     let had_custom_nameservers = !config.dns.nameservers.is_empty();
     let disabled_rebind_protection = !config.dns.rebind_protection;
     let trusted_host_cas = config.trust_host_cas;
+    let had_outbound_proxy = config.outbound_proxy.is_some();
     let connection_limit_clamped = config
         .max_connections
         .is_some_and(|limit| limit > MULTI_TENANT_MAX_CONNECTIONS);
@@ -562,6 +565,7 @@ fn enforce_deployment_profile(config: &mut NetworkConfig, profile: DeploymentPro
     config.dns.nameservers.clear();
     config.dns.rebind_protection = true;
     config.trust_host_cas = false;
+    config.outbound_proxy = None;
     config.max_connections = Some(
         config
             .max_connections
@@ -574,6 +578,7 @@ fn enforce_deployment_profile(config: &mut NetworkConfig, profile: DeploymentPro
         || had_custom_nameservers
         || disabled_rebind_protection
         || trusted_host_cas
+        || had_outbound_proxy
         || connection_limit_clamped
     {
         tracing::warn!(
@@ -582,6 +587,7 @@ fn enforce_deployment_profile(config: &mut NetworkConfig, profile: DeploymentPro
             had_custom_nameservers,
             disabled_rebind_protection,
             trusted_host_cas,
+            had_outbound_proxy,
             connection_limit_clamped,
             "multi-tenant deployment profile overrode unsafe network configuration"
         );
@@ -727,6 +733,9 @@ mod tests {
         config.dns.nameservers = vec!["10.0.0.53".parse::<Nameserver>().unwrap()];
         config.dns.rebind_protection = false;
         config.trust_host_cas = true;
+        config.outbound_proxy = Some(crate::outbound_proxy::OutboundProxy::Socks5 {
+            address: "127.0.0.1:1080".parse().unwrap(),
+        });
         config.max_connections = Some(MULTI_TENANT_MAX_CONNECTIONS + 1);
         config.policy = NetworkPolicy::allow_all();
 
@@ -738,6 +747,7 @@ mod tests {
         assert!(config.dns.nameservers.is_empty());
         assert!(config.dns.rebind_protection);
         assert!(!config.trust_host_cas);
+        assert!(config.outbound_proxy.is_none());
         assert_eq!(config.max_connections, Some(MULTI_TENANT_MAX_CONNECTIONS));
         // Tenant policy stays intact and is intersected with the platform
         // policy at evaluation time instead of being reordered or flattened.
@@ -750,12 +760,16 @@ mod tests {
         config.interface.mtu = Some(9000);
         config.dns.rebind_protection = false;
         config.trust_host_cas = true;
+        config.outbound_proxy = Some(crate::outbound_proxy::OutboundProxy::Socks5 {
+            address: "127.0.0.1:1080".parse().unwrap(),
+        });
 
         enforce_deployment_profile(&mut config, DeploymentProfile::SingleTenant);
 
         assert_eq!(config.interface.mtu, Some(9000));
         assert!(!config.dns.rebind_protection);
         assert!(config.trust_host_cas);
+        assert!(config.outbound_proxy.is_some());
     }
 
     #[test]

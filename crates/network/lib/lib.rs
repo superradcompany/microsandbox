@@ -12,6 +12,7 @@
 )]
 
 mod addr;
+mod outbound_proxy;
 
 pub mod config;
 pub mod dns;
@@ -39,6 +40,11 @@ pub(crate) const HOST_ALIAS: &str = "host.microsandbox.internal";
 //--------------------------------------------------------------------------------------------------
 // Re-Exports
 //--------------------------------------------------------------------------------------------------
+
+pub use outbound_proxy::{
+    OutboundProxy, OutboundProxyBuildError, OutboundProxyBuilder, OutboundProxyConfig,
+    OutboundProxyParseError, OutboundProxyProtocol, Socks4ProxyBuilder, Socks5ProxyBuilder,
+};
 
 pub use config::builder;
 pub use icmp::{error as icmp_error, relay as icmp_relay};

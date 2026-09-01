@@ -1,0 +1,79 @@
+---
+title: Proxies
+description: Rust SDK - Proxy API reference
+---
+
+Configure one SOCKS4 or SOCKS5 proxy for outbound sandbox connections with [`SandboxBuilder::proxy()`](#proxy). Proxy protocols are mutually exclusive.
+
+See [Outbound proxy](/networking/outbound-proxy) for runtime behavior, security considerations, and current transport limitations.
+
+## Typical flow
+
+```rust
+use microsandbox::Sandbox;
+
+let sandbox = Sandbox::builder("worker")
+    .image("python")
+    .proxy(|p| p.socks5("127.0.0.1:1080"))
+    .create()
+    .await?;
+```
+
+## SandboxBuilder
+
+### <span id="proxy">proxy()</span>
+
+```rust
+fn proxy<P>(self, configure: impl FnOnce(OutboundProxyBuilder) -> P) -> Self
+where
+    P: OutboundProxyConfig
+```
+
+Select and configure the single outbound proxy for the sandbox. The callback receives an [`OutboundProxyBuilder`](#outboundproxybuilder) and must return one protocol-specific builder.
+
+Invalid proxy configuration is retained by the sandbox builder and returned from `build()` or `create()` as `MicrosandboxError::NetworkBuilder(BuildError::InvalidOutboundProxy)`.
+
+## OutboundProxyBuilder
+
+Protocol selector passed to [`SandboxBuilder::proxy()`](#proxy).
+
+### <span id="socks4">socks4()</span>
+
+```rust
+fn socks4(self, address: impl Into<String>) -> Socks4ProxyBuilder
+```
+
+Select a SOCKS4 proxy at `IP:port`. The returned builder can optionally set a user ID.
+
+### <span id="socks5">socks5()</span>
+
+```rust
+fn socks5(self, address: impl Into<String>) -> Socks5ProxyBuilder
+```
+
+Select a SOCKS5 proxy at `IP:port`. The parent sandbox builder validates and materializes the returned [`Socks5ProxyBuilder`](#socks5proxybuilder).
+
+## Socks4ProxyBuilder
+
+Protocol-specific builder returned by [`OutboundProxyBuilder::socks4()`](#socks4).
+
+### user_id()
+
+```rust
+fn user_id(self, user_id: impl Into<String>) -> Self
+```
+
+Set the optional SOCKS4 user ID. It must contain 1–255 bytes and no null byte. A user ID identifies the caller; it is not a password.
+
+## Socks5ProxyBuilder
+
+Protocol-specific builder returned by [`OutboundProxyBuilder::socks5()`](#socks5). It carries the proxy address and is finalized when returned from the `.proxy()` callback.
+
+## OutboundProxy
+
+Materialized outbound proxy configuration stored in the sandbox's network spec.
+
+| Variant | Fields | Description |
+|---------|--------|-------------|
+| `Socks4` | `address: SocketAddr`, `user_id: Option<String>` | SOCKS4 proxy address and optional user ID |
+| `Socks5` | `address: SocketAddr` | SOCKS5 proxy address |
