@@ -235,6 +235,11 @@ impl LocalBackend {
                 }
             }
         }
+        // Archive descriptors are intentionally inspected only while streaming into child
+        // staging, after outer builder dispatch has selected its provisional mode. Re-evaluate
+        // ownership here, before process creation, so a discovered full restore never receives an
+        // attached parent watchdog or Windows kill-on-close job.
+        let mode = crate::sandbox::create_spawn_mode(&config, mode);
 
         // Resolve OCI images before spawning the sandbox process.
         if let RootfsSource::Oci(oci) = config.spec.image.clone() {

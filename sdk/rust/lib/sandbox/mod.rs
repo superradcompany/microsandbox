@@ -1372,7 +1372,7 @@ impl Sandbox {
 /// A full restore has no newly-created foreground command for the caller to own. It must enter the
 /// detached runtime path before process creation so Unix never installs a parent watchdog and
 /// Windows never assigns the runtime to a kill-on-close job.
-fn create_spawn_mode(config: &SandboxConfig, requested: SpawnMode) -> SpawnMode {
+pub(crate) fn create_spawn_mode(config: &SandboxConfig, requested: SpawnMode) -> SpawnMode {
     if config.resumed_from_full_snapshot() {
         SpawnMode::Detached
     } else {
