@@ -39,6 +39,7 @@ jobs:
     outputs:
       code: ${{ steps.filter.outputs.code }}
       ruby: ${{ steps.filter.outputs.ruby }}
+      ruby_binaries: ${{ steps.filter.outputs.ruby_binaries }}
       ruby_package: ${{ steps.filter.outputs.ruby_package }}
       ruby_platform: ${{ steps.filter.outputs.ruby_platform }}
     steps:
@@ -59,6 +60,9 @@ jobs:
               - 'scripts/ci/check-ruby-standalone-pin.sh'
               - 'sdk/ruby/**'
               - 'sdk/rust/**'
+            ruby_binaries:
+              - '.github/workflows/check.yml'
+              - 'sdk/ruby-binaries/**'
             ruby_package:
               - '.github/workflows/check.yml'
               - 'Cargo.lock'
@@ -1002,6 +1006,26 @@ jobs:
           # installed wheel instead of the adjacent Python source tree.
           uv run --project sdk/python --no-sync pytest sdk/python/tests
           uv run --project sdk/python --no-sync ruff check sdk/python
+
+  ruby-binaries:
+    name: Ruby binaries gem / fixture suite
+    needs: changes
+    if: needs.changes.outputs.ruby_binaries == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1
+        with:
+          ruby-version: "3.4"
+
+      - name: Install Ruby test dependencies
+        run: gem install rake test-unit --no-document
+
+      - name: Test fixture-only suite
+        working-directory: sdk/ruby-binaries
+        run: rake test
 
   ruby-sdk:
     name: Ruby ${{ matrix.ruby }} / Linux x86_64
@@ -2121,6 +2145,7 @@ jobs:
       - node-sdk-build
       - python-wheel-build
       - python-quality
+      - ruby-binaries
       - ruby-sdk
       - ruby-source-gem
       - ruby-standalone-pin
