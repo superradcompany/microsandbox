@@ -359,6 +359,10 @@ impl Backend for CloudBackend {
         self
     }
 
+    fn as_cloud(&self) -> Option<&CloudBackend> {
+        Some(self)
+    }
+
     /// Open an agent connection over `GET /v1/sandboxes/:id/agent`.
     ///
     /// The route upgrades to a WebSocket that pipes bytes to and from the

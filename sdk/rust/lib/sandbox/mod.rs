@@ -208,6 +208,7 @@ pub struct Sandbox {
     inner: Arc<crate::backend::SandboxInner>,
     name: String,
     config: SandboxConfig,
+    _cloud_port_bindings: Option<Arc<crate::backend::CloudPortBindings>>,
 }
 
 /// Result of observing a sandbox in a terminal non-running state.
@@ -476,6 +477,7 @@ impl Sandbox {
             inner: Arc::new(crate::backend::SandboxInner::Local(local)),
             name: config.spec.name.clone(),
             config,
+            _cloud_port_bindings: None,
         }
     }
 
@@ -509,7 +511,16 @@ impl Sandbox {
             inner: Arc::new(crate::backend::SandboxInner::Cloud(state)),
             name,
             config,
+            _cloud_port_bindings: None,
         }
+    }
+
+    pub(crate) fn with_cloud_port_bindings(
+        mut self,
+        bindings: Option<Arc<crate::backend::CloudPortBindings>>,
+    ) -> Self {
+        self._cloud_port_bindings = bindings;
+        self
     }
 }
 

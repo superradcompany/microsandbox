@@ -237,6 +237,13 @@ pub const MIGRATION_METADATA: &[MigrationMetadata] = &[
         summary: "restore exclusive logical CPU allocation rows",
     },
     MigrationMetadata {
+        id: MOUNT_OWNER_CONFIG_MIGRATION_ID,
+        reversible: true,
+        affects_cache: false,
+        affects_user_data: false,
+        summary: "remove the compatibility marker after confirming no persisted mount ownership",
+    },
+    MigrationMetadata {
         id: SANDBOX_NETWORK_SLOT_MIGRATION_ID,
         // The column is deliberately left in place on rollback (SQLite has
         // no DROP COLUMN on every supported version); `up` probes for it so a
@@ -245,13 +252,6 @@ pub const MIGRATION_METADATA: &[MigrationMetadata] = &[
         affects_cache: false,
         affects_user_data: false,
         summary: "retain the compatible sandbox network slot column",
-    },
-    MigrationMetadata {
-        id: MOUNT_OWNER_CONFIG_MIGRATION_ID,
-        reversible: true,
-        affects_cache: false,
-        affects_user_data: false,
-        summary: "remove the compatibility marker after confirming no persisted mount ownership",
     },
 ];
 
@@ -357,6 +357,26 @@ mod tests {
 
         let prefix = canonical_applied_prefix(all_applied).expect("valid unordered prefix");
         assert_eq!(prefix, MIGRATION_METADATA);
+    }
+
+    #[test]
+    fn released_mount_owner_schema_remains_a_valid_prefix() {
+        let through_mount_owner = MIGRATION_METADATA
+            .iter()
+            .take_while(|metadata| metadata.id != MOUNT_OWNER_CONFIG_MIGRATION_ID)
+            .chain(
+                MIGRATION_METADATA
+                    .iter()
+                    .find(|metadata| metadata.id == MOUNT_OWNER_CONFIG_MIGRATION_ID),
+            )
+            .map(|metadata| metadata.id);
+
+        let prefix = canonical_applied_prefix(through_mount_owner)
+            .expect("the released pre-network-slot schema must remain compatible");
+        assert_eq!(
+            prefix.last().map(|metadata| metadata.id),
+            Some(MOUNT_OWNER_CONFIG_MIGRATION_ID)
+        );
     }
 
     #[test]

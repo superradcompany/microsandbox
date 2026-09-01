@@ -73,8 +73,11 @@ impl MigratorTrait for Migrator {
             Box::new(m20260808_000001_create_memory_allocation_nodes::Migration),
             Box::new(m20260810_000001_rebuild_sandbox_labels::Migration),
             Box::new(m20260813_000001_share_cpu_allocations::Migration),
-            Box::new(m20260818_000001_sandbox_network_slot::Migration),
             Box::new(m20260824_000001_mount_owner_config::Migration),
+            // This migration was published after mount_owner_config despite
+            // its earlier date. Migration order is an append-only release
+            // contract; never insert it before an already released entry.
+            Box::new(m20260818_000001_sandbox_network_slot::Migration),
         ]
     }
 }

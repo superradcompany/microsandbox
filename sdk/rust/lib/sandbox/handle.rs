@@ -578,6 +578,18 @@ impl SandboxHandle {
                     ))
                 })?;
 
+                let bindings = crate::backend::activate_cloud_port_bindings(
+                    self.backend.as_cloud().ok_or_else(|| {
+                        MicrosandboxError::Runtime(
+                            "cloud handle has a non-cloud backend".to_string(),
+                        )
+                    })?,
+                    self.backend.clone(),
+                    self.name.clone(),
+                    &config,
+                )
+                .await?;
+
                 Ok(Sandbox::from_cloud_state(
                     self.backend.clone(),
                     SandboxCloudState {
@@ -587,7 +599,8 @@ impl SandboxHandle {
                     },
                     self.name.clone(),
                     config,
-                ))
+                )
+                .with_cloud_port_bindings(bindings))
             }
         }
     }
