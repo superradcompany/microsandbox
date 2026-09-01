@@ -153,6 +153,11 @@ impl LocalBackend {
         let sandbox_dir = self.sandboxes_dir().join(&config.spec.name);
         Self::prepare_create_target(db, &config, &sandbox_dir, &self.config().run_dir()).await?;
         let mut child_stage_guard = None;
+        // Preserve only the installed-snapshot source that existed on entry. Direct archive
+        // materialization below installs its checkpoint closure directly into child staging, so
+        // feeding that result through the installed-snapshot copier would copy the closure onto
+        // itself and destroy the eager restore source.
+        let installed_checkpoint_restore = config.checkpoint_restore.take();
 
         // A direct archive restore streams its layer into the ordinary child
         // staging location before image resolution. The archive supplies the
@@ -209,7 +214,7 @@ impl LocalBackend {
         // Installed full snapshots likewise become child-owned before image resolution. The
         // closure is retained only through eager construction; the disk layers and fresh writable
         // head remain under the ordinary sandbox directory and root-disk journal.
-        if let Some(source) = config.checkpoint_restore.take() {
+        if let Some(source) = installed_checkpoint_restore {
             child_stage_guard = Some(ChildStageGuard::new(sandbox_dir.clone()));
             match config.snapshot_restore_mode {
                 SnapshotRestoreMode::Full => {
