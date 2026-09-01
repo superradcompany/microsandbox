@@ -1382,8 +1382,12 @@ impl SandboxBuilder {
     )> {
         let (handle, sender) = microsandbox_image::progress_channel();
         let task = tokio::spawn(async move {
-            let detached = self.detached;
+            let requested_detached = self.detached;
             let config = self.build().await?;
+            // Resumed execution is not a new foreground command owned by this caller. Its runtime
+            // must be detached before spawn; disarming an attached parent watchdog after startup
+            // races the creator's exit and leaves Windows in a kill-on-close job.
+            let detached = requested_detached || config.resumed_from_full_snapshot();
             let backend = crate::backend::default_backend();
             match backend.kind() {
                 crate::backend::BackendKind::Local => {

@@ -10,12 +10,15 @@ use microsandbox_image::checkpoint::{
 use microsandbox_protocol::core::Ready;
 use microsandbox_protocol::message::{MessageType, PROTOCOL_VERSION};
 
+use super::coordinator::TYPE_FS;
+
 //--------------------------------------------------------------------------------------------------
 // Constants
 //--------------------------------------------------------------------------------------------------
 
 const MAX_EXECUTION_STATE_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_DEVICE_STATE_BYTES: u64 = 1024 * 1024;
+const MAX_FS_DEVICE_STATE_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_MEMORY_OBJECT_BYTES: u64 = 2 * 1024 * 1024;
 
 //--------------------------------------------------------------------------------------------------
@@ -79,8 +82,13 @@ impl PreparedCheckpointRestore {
 
         let mut devices = Vec::with_capacity(closure.checkpoint().devices.len());
         for device in &closure.checkpoint().devices {
+            let max_state_bytes = if device.device_type == TYPE_FS {
+                MAX_FS_DEVICE_STATE_BYTES
+            } else {
+                MAX_DEVICE_STATE_BYTES
+            };
             let bytes = closure
-                .read_object(&device.state, MAX_DEVICE_STATE_BYTES)
+                .read_object(&device.state, max_state_bytes)
                 .map_err(|error| format!("read checkpoint device {}: {error}", device.device_id))?;
             if device.device_type == 2 {
                 let state = msb_krun::BlockDeviceState::decode(&bytes).map_err(|error| {

@@ -33,7 +33,7 @@ const TYPE_NET: u32 = 1;
 const TYPE_BLOCK: u32 = 2;
 const TYPE_RNG: u32 = 4;
 const TYPE_VSOCK: u32 = 19;
-const TYPE_FS: u32 = 26;
+pub(super) const TYPE_FS: u32 = 26;
 const MEMORY_CHUNK_SIZE: usize = 2 * 1024 * 1024;
 const WORKLOAD_CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -148,6 +148,8 @@ impl CheckpointCoordinator {
         intent: CaptureIntent,
     ) -> Result<CheckpointResult, CheckpointFailure> {
         validate_checkpoint_id(checkpoint_id).map_err(CheckpointFailure::before_pause)?;
+        validate_vm_generation_state(vm.vm_generation_state())
+            .map_err(CheckpointFailure::before_pause)?;
         let mut admitted = admit_resources(
             vm,
             &self.fs_resource_bindings,
@@ -826,6 +828,23 @@ fn admit_resources(
     })
 }
 
+/// Require the guest-side generation driver before producing a checkpoint that promises full restore.
+///
+/// Merely attaching the host transport is insufficient: without a bound guest driver, a restored
+/// child cannot acknowledge the fresh generation that gates workload thaw.
+fn validate_vm_generation_state(state: Option<msb_krun::VmGenerationState>) -> Result<(), String> {
+    let state = state.ok_or_else(|| {
+        "VM Generation ID transport is unavailable for full checkpoints".to_string()
+    })?;
+    if state.driver_error {
+        return Err("guest VM Generation ID driver reported a protocol error".to_string());
+    }
+    if !state.driver_ready {
+        return Err("guest VM Generation ID driver is not ready for full checkpoints".to_string());
+    }
+    Ok(())
+}
+
 /// Describe the two filesystem transports owned by the runtime itself.
 ///
 /// libkrun exposes transport identifiers rather than FUSE mount tags in its
@@ -1023,7 +1042,7 @@ fn sync_directory(path: &Path) -> io::Result<()> {
 mod tests {
     use super::{
         MemoryObjectSink, overlay_extents, publish_root_last, runtime_owned_fs_bindings,
-        validate_workload_reply,
+        validate_vm_generation_state, validate_workload_reply,
     };
 
     use microsandbox_image::checkpoint::{
@@ -1080,6 +1099,38 @@ mod tests {
             microsandbox_protocol::RUNTIME_FS_TAG
         );
         assert!(!bindings.contains_key("virtio_fs2"));
+    }
+
+    #[test]
+    fn full_checkpoint_requires_a_ready_generation_driver() {
+        assert!(validate_vm_generation_state(None).is_err());
+        assert!(
+            validate_vm_generation_state(Some(msb_krun::VmGenerationState {
+                driver_ready: false,
+                driver_error: false,
+                requested: None,
+                processed: None,
+            }))
+            .is_err()
+        );
+        assert!(
+            validate_vm_generation_state(Some(msb_krun::VmGenerationState {
+                driver_ready: true,
+                driver_error: true,
+                requested: None,
+                processed: None,
+            }))
+            .is_err()
+        );
+        assert!(
+            validate_vm_generation_state(Some(msb_krun::VmGenerationState {
+                driver_ready: true,
+                driver_error: false,
+                requested: None,
+                processed: None,
+            }))
+            .is_ok()
+        );
     }
 
     #[test]

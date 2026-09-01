@@ -49,6 +49,8 @@ use std::{
     },
 };
 
+use serde::{Deserialize, Serialize};
+
 #[cfg(windows)]
 use std::fs::File;
 #[cfg(unix)]
@@ -78,11 +80,62 @@ pub(crate) struct DirQuota {
     used: AtomicU64,
 }
 
+/// Durable delta-accounting state for a configured directory quota.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct QuotaState {
+    pub baseline: Option<u64>,
+    pub used: u64,
+}
+
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
 
 impl DirQuota {
+    /// Capture quota accounting without forcing the lazy baseline.
+    pub(crate) fn capture_state(&self) -> QuotaState {
+        QuotaState {
+            baseline: self.baseline.get().copied(),
+            used: self.used.load(Ordering::Acquire),
+        }
+    }
+
+    /// Validate quota state against this destination's configured ceiling.
+    pub(crate) fn validate_state(&self, state: &QuotaState) -> io::Result<()> {
+        if state.used > self.limit {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "restored quota usage exceeds configured limit",
+            ));
+        }
+        if let (Some(existing), Some(restored)) = (self.baseline.get(), state.baseline)
+            && *existing != restored
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "restored quota baseline conflicts with destination state",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Restore validated accounting into a freshly constructed destination quota.
+    pub(crate) fn restore_state(&self, state: &QuotaState) -> io::Result<()> {
+        self.validate_state(state)?;
+        if let Some(baseline) = state.baseline
+            && self.baseline.get().is_none()
+        {
+            self.baseline.set(baseline).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "quota baseline was initialized concurrently",
+                )
+            })?;
+        }
+        self.used.store(state.used, Ordering::Release);
+        Ok(())
+    }
+
     /// Create a budget of `limit` guest-addable bytes over the subtree at `root`.
     ///
     /// Does not walk the directory — the baseline is captured lazily on the
@@ -311,6 +364,29 @@ mod tests {
         std::fs::write(dir.path().join("late"), vec![0u8; 800]).unwrap();
         q.ensure_baseline();
         assert_eq!(q.baseline(), 800);
+    }
+
+    #[test]
+    fn durable_state_preserves_remaining_allowance() {
+        let source_dir = tempfile::tempdir().unwrap();
+        let source = DirQuota::new(source_dir.path().to_path_buf(), 1024);
+        source.ensure_baseline();
+        source.charge(640).unwrap();
+        std::fs::write(source_dir.path().join("guest"), vec![0u8; 640]).unwrap();
+        let state = source.capture_state();
+
+        let destination_dir = tempfile::tempdir().unwrap();
+        std::fs::write(destination_dir.path().join("guest"), vec![0u8; 640]).unwrap();
+        let destination = DirQuota::new(destination_dir.path().to_path_buf(), 1024);
+        destination.restore_state(&state).unwrap();
+        assert_eq!(destination.capture_state(), state);
+        assert!(destination.charge(384).is_ok());
+        std::fs::write(destination_dir.path().join("guest"), vec![0u8; 1024]).unwrap();
+        assert_eq!(destination.used(), 1024);
+        assert_eq!(
+            destination.charge(1).unwrap_err().raw_os_error(),
+            enospc().raw_os_error()
+        );
     }
 
     #[test]

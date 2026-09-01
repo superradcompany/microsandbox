@@ -600,6 +600,9 @@ fn run(mut config: Config) -> RuntimeResult<std::convert::Infallible> {
         .map_err(|error| RuntimeError::Custom(format!("recover managed root disk: {error}")))?;
     // Heartbeats are per boot, while the runtime directory persists across starts.
     heartbeat::clear_stale(&config.runtime_dir)?;
+    if config.vm.checkpoint_restore.is_some() {
+        prepare_runtime_restore_namespace(&config.runtime_dir, config.vm.rootfs_vmdk.is_some())?;
+    }
 
     #[cfg(unix)]
     crate::ipc::prepare_canonical_socket_dir(
@@ -1604,17 +1607,8 @@ fn build_vm(
         // EROFS fsmerge OCI rootfs: VMDK (read-only) + upper.ext4 (writable).
         #[cfg(unix)]
         {
-            let empty_trampoline = tempfile::tempdir()?;
-            let trampoline_path = canonicalize_owned_mount_root(empty_trampoline.path())?;
-            let cfg = PassthroughConfig {
-                root_dir: trampoline_path,
-                no_symlink_root: true,
-                ..Default::default()
-            };
-            let backend = PassthroughFs::new(cfg)
-                .map_err(|e| RuntimeError::Custom(format!("trampoline rootfs: {e}")))?;
+            let backend = bootstrap_trampoline_backend()?;
             builder = builder.fs(move |fs| fs.tag("/dev/root").custom(Box::new(backend)));
-            let _ = empty_trampoline.keep();
         }
         #[cfg(windows)]
         {
@@ -1665,17 +1659,8 @@ fn build_vm(
     } else if let Some(ref disk_path) = vm.rootfs_disk {
         #[cfg(unix)]
         {
-            let empty_trampoline = tempfile::tempdir()?;
-            let trampoline_path = canonicalize_owned_mount_root(empty_trampoline.path())?;
-            let cfg = PassthroughConfig {
-                root_dir: trampoline_path,
-                no_symlink_root: true,
-                ..Default::default()
-            };
-            let backend = PassthroughFs::new(cfg)
-                .map_err(|e| RuntimeError::Custom(format!("trampoline rootfs: {e}")))?;
+            let backend = bootstrap_trampoline_backend()?;
             builder = builder.fs(move |fs| fs.tag("/dev/root").custom(Box::new(backend)));
-            let _ = empty_trampoline.keep();
         }
         #[cfg(windows)]
         {
@@ -2224,6 +2209,62 @@ fn macos_maxfilesperproc() -> Option<libc::rlim_t> {
         )
     };
     (ret == 0 && maxfiles > 0).then_some(maxfiles as libc::rlim_t)
+}
+
+/// Build the runtime-owned bootstrap filesystem used before a block root pivots.
+///
+/// Agentd creates these mountpoints before switching to the durable block root.
+/// A restored virtio-fs session retains their inode numbers, so the destination
+/// provider must recreate the same pathname namespace before backend restore.
+#[cfg(unix)]
+fn bootstrap_trampoline_backend() -> RuntimeResult<PassthroughFs> {
+    let trampoline = tempfile::tempdir()?;
+    for directory in ["dev", "sys", "proc", ".msb", "newroot"] {
+        std::fs::create_dir(trampoline.path().join(directory)).map_err(|error| {
+            RuntimeError::Custom(format!("create bootstrap mountpoint {directory}: {error}"))
+        })?;
+    }
+    let cfg = PassthroughConfig {
+        root_dir: canonicalize_owned_mount_root(trampoline.path())?,
+        no_symlink_root: true,
+        ..Default::default()
+    };
+    let backend = PassthroughFs::new(cfg)
+        .map_err(|error| RuntimeError::Custom(format!("trampoline rootfs: {error}")))?;
+    let _ = trampoline.keep();
+    Ok(backend)
+}
+
+/// Recreate runtime-owned paths whose guest-visible inode identities survive a full restore.
+///
+/// The runtime channel itself is fresh on the destination. Restored virtio-fs state reopens paths,
+/// not source host descriptors, so paths created by agentd before capture must exist before device
+/// restore. OCI roots use the two mountpoints while every restored agent session may retain the
+/// atomically published heartbeat pathname. Existing heartbeat contents are never truncated.
+fn prepare_runtime_restore_namespace(runtime_dir: &Path, oci_root: bool) -> RuntimeResult<()> {
+    if oci_root {
+        for directory in ["rootfs/lower", "rootfs/upperfs"] {
+            std::fs::create_dir_all(runtime_dir.join(directory)).map_err(|error| {
+                RuntimeError::Custom(format!(
+                    "create restored runtime mountpoint {directory}: {error}"
+                ))
+            })?;
+        }
+    }
+
+    let heartbeat = runtime_dir.join("heartbeat.json");
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&heartbeat)
+    {
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(error) => Err(RuntimeError::Custom(format!(
+            "create restored runtime heartbeat {}: {error}",
+            heartbeat.display()
+        ))),
+    }
 }
 
 /// Build the host-directory rootfs backend used for `RootfsSource::Bind`.
@@ -2948,14 +2989,15 @@ mod tests {
     #[cfg(unix)]
     use super::{
         BindIdentityMapRegistration, PARENT_WATCH_DETACH, ParentWatchdogSignal,
-        bind_identity_map_for_mount, read_parent_watchdog_signal,
+        bind_identity_map_for_mount, bootstrap_trampoline_backend, read_parent_watchdog_signal,
     };
     use super::{
         ConsoleSharedState, HostPermissions, StatVirtualization, UpperLayerSpec, UpperSpec,
         append_block_root_env, bind_rootfs_backend, encode_bootstrap_frame,
         guest_shutdown_flush_timeout, guest_shutdown_flush_timeout_with_override, parse_mount_spec,
-        prepend_scripts_path, request_guest_shutdown, request_guest_shutdown_with_timeout,
-        thp_kernel_cmdline, validate_disk_format, validate_upper_layers,
+        prepare_runtime_restore_namespace, prepend_scripts_path, request_guest_shutdown,
+        request_guest_shutdown_with_timeout, thp_kernel_cmdline, validate_disk_format,
+        validate_upper_layers,
     };
 
     use microsandbox_filesystem::{Context, DynFileSystem, FsOptions};
@@ -3122,6 +3164,45 @@ mod tests {
 
         assert_ne!(host.inode, init.inode);
         assert_eq!(init.inode, 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bootstrap_trampoline_recreates_agent_mountpoints() {
+        let fs = bootstrap_trampoline_backend().unwrap();
+        fs.init(FsOptions::empty()).unwrap();
+        for directory in ["dev", "sys", "proc", ".msb", "newroot"] {
+            fs.lookup(fs_context(), 1, &std::ffi::CString::new(directory).unwrap())
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn restored_runtime_namespace_matches_root_kind_and_preserves_heartbeat() {
+        let oci_runtime = tempfile::tempdir().unwrap();
+        prepare_runtime_restore_namespace(oci_runtime.path(), true).unwrap();
+        assert!(oci_runtime.path().join("rootfs/lower").is_dir());
+        assert!(oci_runtime.path().join("rootfs/upperfs").is_dir());
+        assert_eq!(
+            std::fs::read(oci_runtime.path().join("heartbeat.json")).unwrap(),
+            b""
+        );
+
+        std::fs::write(
+            oci_runtime.path().join("heartbeat.json"),
+            b"destination heartbeat",
+        )
+        .unwrap();
+        prepare_runtime_restore_namespace(oci_runtime.path(), true).unwrap();
+        assert_eq!(
+            std::fs::read(oci_runtime.path().join("heartbeat.json")).unwrap(),
+            b"destination heartbeat"
+        );
+
+        let disk_runtime = tempfile::tempdir().unwrap();
+        prepare_runtime_restore_namespace(disk_runtime.path(), false).unwrap();
+        assert!(!disk_runtime.path().join("rootfs").exists());
+        assert!(disk_runtime.path().join("heartbeat.json").is_file());
     }
 
     #[test]

@@ -1,5 +1,6 @@
 //! DynFileSystem callback table for the Windows passthrough backend.
 
+use super::dir_ops::snapshot_dir_entry;
 use super::*;
 
 //--------------------------------------------------------------------------------------------------
@@ -7,6 +8,18 @@ use super::*;
 //--------------------------------------------------------------------------------------------------
 
 impl DynFileSystem for PassthroughFs {
+    fn capture_state(&self) -> io::Result<Vec<u8>> {
+        mobility::capture(self)
+    }
+
+    fn validate_state(&self, state: &[u8]) -> io::Result<()> {
+        mobility::prepare(self, state).map(drop)
+    }
+
+    fn restore_state(&self, state: &[u8]) -> io::Result<()> {
+        mobility::restore(self, state)
+    }
+
     fn init(&self, _capable: FsOptions) -> io::Result<FsOptions> {
         self.insert_root()?;
         Ok(FsOptions::empty())
@@ -400,10 +413,14 @@ impl DynFileSystem for PassthroughFs {
         }
 
         let handle = self.next_handle.fetch_add(1, Ordering::Relaxed);
-        self.dir_handles
-            .write()
-            .unwrap()
-            .insert(handle, Arc::new(DirHandle { inode }));
+        self.dir_handles.write().unwrap().insert(
+            handle,
+            Arc::new(DirHandle {
+                inode,
+                flags,
+                snapshot: Mutex::new(None),
+            }),
+        );
         Ok((Some(handle), OpenOptions::empty()))
     }
 
@@ -415,21 +432,11 @@ impl DynFileSystem for PassthroughFs {
         _size: u32,
         offset: u64,
     ) -> io::Result<Vec<DirEntry<'static>>> {
-        let dir_handle = self
-            .dir_handles
-            .read()
-            .unwrap()
-            .get(&handle)
-            .filter(|data| data.inode == inode)
-            .cloned()
-            .ok_or_else(|| linux_error(LINUX_EBADF))?;
-        let _ = dir_handle;
-
         Ok(self
-            .dir_entries(inode)?
+            .dir_snapshot(inode, handle)?
             .into_iter()
-            .map(|(dir_entry, _)| dir_entry)
-            .skip(offset as usize)
+            .filter(|entry| entry.offset > offset)
+            .map(snapshot_dir_entry)
             .collect())
     }
 
@@ -442,17 +449,12 @@ impl DynFileSystem for PassthroughFs {
         offset: u64,
         add_entry: &mut AddDirEntry<'_>,
     ) -> io::Result<()> {
-        let dir_handle = self
-            .dir_handles
-            .read()
-            .unwrap()
-            .get(&handle)
-            .filter(|data| data.inode == inode)
-            .cloned()
-            .ok_or_else(|| linux_error(LINUX_EBADF))?;
-        let _ = dir_handle;
-
-        self.dir_entries_for_each(inode, offset, &mut |dir_entry, _entry| add_entry(dir_entry))
+        for entry in self.dir_snapshot(inode, handle)? {
+            if entry.offset > offset && add_entry(snapshot_dir_entry(entry))? == 0 {
+                break;
+            }
+        }
+        Ok(())
     }
 
     fn readdirplus(
@@ -463,21 +465,14 @@ impl DynFileSystem for PassthroughFs {
         _size: u32,
         offset: u64,
     ) -> io::Result<Vec<(DirEntry<'static>, Entry)>> {
-        let dir_handle = self
-            .dir_handles
-            .read()
-            .unwrap()
-            .get(&handle)
-            .filter(|data| data.inode == inode)
-            .cloned()
-            .ok_or_else(|| linux_error(LINUX_EBADF))?;
-        let _ = dir_handle;
-
-        Ok(self
-            .dir_entries(inode)?
+        self.dir_snapshot(inode, handle)?
             .into_iter()
-            .skip(offset as usize)
-            .collect())
+            .filter(|entry| entry.offset > offset)
+            .map(|entry| {
+                let full = self.snapshot_entry_attributes(&entry)?;
+                Ok((snapshot_dir_entry(entry), full))
+            })
+            .collect()
     }
 
     fn readdirplus_for_each(
@@ -489,17 +484,16 @@ impl DynFileSystem for PassthroughFs {
         offset: u64,
         add_entry: &mut AddDirEntryPlus<'_>,
     ) -> io::Result<()> {
-        let dir_handle = self
-            .dir_handles
-            .read()
-            .unwrap()
-            .get(&handle)
-            .filter(|data| data.inode == inode)
-            .cloned()
-            .ok_or_else(|| linux_error(LINUX_EBADF))?;
-        let _ = dir_handle;
-
-        self.dir_entries_for_each(inode, offset, add_entry)
+        for entry in self.dir_snapshot(inode, handle)? {
+            if entry.offset <= offset {
+                continue;
+            }
+            let full = self.snapshot_entry_attributes(&entry)?;
+            if add_entry(snapshot_dir_entry(entry), full)? == 0 {
+                break;
+            }
+        }
+        Ok(())
     }
 
     fn fsyncdir(&self, _ctx: Context, inode: u64, _datasync: bool, handle: u64) -> io::Result<()> {

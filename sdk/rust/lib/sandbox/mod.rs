@@ -275,6 +275,12 @@ impl Sandbox {
     /// libkrun runtime. The returned [`Sandbox`] always carries the backend it
     /// was created on; subsequent method calls keep using that backend.
     pub async fn create(config: SandboxConfig) -> MicrosandboxResult<Self> {
+        if create_spawn_mode(&config, SpawnMode::Attached) == SpawnMode::Detached {
+            // A full restore already owns its captured workload and has no new foreground exec
+            // session for this caller to own. Start it as a service-owned runtime from the outset
+            // so an exiting CLI/SDK process cannot reap the successfully restored VM.
+            return Self::create_detached(config).await;
+        }
         let backend = crate::backend::default_backend();
         backend
             .sandboxes()
@@ -328,13 +334,14 @@ impl Sandbox {
 
     fn create_with_pull_progress_and_mode(
         config: SandboxConfig,
-        mode: SpawnMode,
+        requested_mode: SpawnMode,
     ) -> (
         PullProgressHandle,
         tokio::task::JoinHandle<MicrosandboxResult<Self>>,
     ) {
         let (handle, sender) = progress_channel();
         let task = tokio::spawn(async move {
+            let mode = create_spawn_mode(&config, requested_mode);
             // Pull progress is local-only; ignore the channel on non-local
             // backends and dispatch through the trait without progress events.
             let backend = crate::backend::default_backend();
@@ -1360,6 +1367,19 @@ impl Sandbox {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
+/// Select lifecycle ownership after deferred snapshot resolution.
+///
+/// A full restore has no newly-created foreground command for the caller to own. It must enter the
+/// detached runtime path before process creation so Unix never installs a parent watchdog and
+/// Windows never assigns the runtime to a kill-on-close job.
+fn create_spawn_mode(config: &SandboxConfig, requested: SpawnMode) -> SpawnMode {
+    if config.resumed_from_full_snapshot() {
+        SpawnMode::Detached
+    } else {
+        requested
+    }
+}
+
 /// Build an `ExecRequest` by merging sandbox config with caller-provided overrides.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_exec_request(
@@ -1642,11 +1662,31 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        MAX_HOSTNAME_BYTES, MAX_SANDBOX_NAME_BYTES, SandboxStatus, ephemeral_cleanup_stop_result,
-        hostname_from_sandbox_name, remove_dir_if_exists, remove_local_persisted_sandbox,
-        sandbox_not_found_for_name, validate_hostname,
+        MAX_HOSTNAME_BYTES, MAX_SANDBOX_NAME_BYTES, SandboxStatus, create_spawn_mode,
+        ephemeral_cleanup_stop_result, hostname_from_sandbox_name, remove_dir_if_exists,
+        remove_local_persisted_sandbox, sandbox_not_found_for_name, validate_hostname,
     };
     use crate::backend::LocalBackend;
+    use crate::runtime::SpawnMode;
+
+    #[test]
+    fn full_restore_forces_detached_creation_before_spawn() {
+        let mut config = super::SandboxConfig::default();
+        assert_eq!(
+            create_spawn_mode(&config, SpawnMode::Attached),
+            SpawnMode::Attached
+        );
+        assert_eq!(
+            create_spawn_mode(&config, SpawnMode::Detached),
+            SpawnMode::Detached
+        );
+
+        config.suppress_launch_for_full_restore();
+        assert_eq!(
+            create_spawn_mode(&config, SpawnMode::Attached),
+            SpawnMode::Detached
+        );
+    }
 
     #[test]
     fn test_sandbox_not_found_for_name_requires_exact_match() {

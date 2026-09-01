@@ -29,11 +29,12 @@ mod dir_ops;
 mod file_ops;
 mod inode;
 mod metadata;
+mod mobility;
 mod ops;
 mod remove_ops;
 mod stat_store;
 
-use inode::{DirHandle, HandleData, InodeData, InodeTable};
+use inode::{DirHandle, DirSnapshotEntry, HandleData, InodeData, InodeTable};
 
 pub use builder::{HostPermissions, PassthroughConfig, StatVirtualization};
 
