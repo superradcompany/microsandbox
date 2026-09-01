@@ -1,0 +1,35 @@
+# frozen_string_literal: true
+
+require "rake/clean"
+require "rake/testtask"
+
+require_relative "tasks/package"
+
+CLEAN.include("libexec")
+CLOBBER.include("downloads", "pkg")
+
+Rake::TestTask.new do |test|
+  test.libs << "lib"
+  test.pattern = "test/**/*_test.rb"
+  test.verbose = true
+end
+
+desc "Download, verify, and build all platform gems for the lockstep runtime version"
+task :package, [:version] do |_task, args|
+  Microsandbox::Binaries::Package.package_all!(args[:version] || Microsandbox::Binaries::VERSION)
+end
+
+namespace :package do
+  Microsandbox::Binaries::Package::PLATFORMS.each_key do |platform|
+    task_name = platform.tr("-", "_")
+    desc "Download, verify, and build the #{platform} platform gem"
+    task task_name, [:version] do |_task, args|
+      Microsandbox::Binaries::Package.package_platform!(
+        platform,
+        args[:version] || Microsandbox::Binaries::VERSION
+      )
+    end
+  end
+end
+
+task default: :test
