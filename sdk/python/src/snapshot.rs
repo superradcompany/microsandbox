@@ -42,7 +42,7 @@ pub struct PySnapshotHandle {
 
 #[pymethods]
 impl PySnapshot {
-    /// Create a disk snapshot from a stopped sandbox or a resumable snapshot from a running one.
+    /// Create a disk snapshot from a stopped sandbox or a full snapshot from a running one.
     ///
     /// The artifact is created under `~/.microsandbox/snapshots/<name>/`,
     /// or under `dest_dir=` when given; move artifacts with `save`/`load`.
@@ -57,7 +57,7 @@ impl PySnapshot {
         labels = None,
         force = false,
         record_integrity = false,
-        resumable = false,
+        full = false,
     ))]
     fn create<'py>(
         py: Python<'py>,
@@ -67,7 +67,7 @@ impl PySnapshot {
         labels: Option<HashMap<String, String>>,
         force: bool,
         record_integrity: bool,
-        resumable: bool,
+        full: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let mut builder = RustSnapshot::builder(name).from_sandbox(&from_sandbox);
@@ -85,8 +85,8 @@ impl PySnapshot {
             if record_integrity {
                 builder = builder.record_integrity();
             }
-            if resumable {
-                builder = builder.resumable();
+            if full {
+                builder = builder.full();
             }
             let snap = builder.create().await.map_err(to_py_err)?;
             Ok(PySnapshot::from_rust(snap))
@@ -104,7 +104,7 @@ impl PySnapshot {
         labels = None,
         force = false,
         record_integrity = false,
-        resumable = false,
+        full = false,
         plain_tar = false,
     ))]
     fn create_archive<'py>(
@@ -115,7 +115,7 @@ impl PySnapshot {
         labels: Option<HashMap<String, String>>,
         force: bool,
         record_integrity: bool,
-        resumable: bool,
+        full: bool,
         plain_tar: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -131,8 +131,8 @@ impl PySnapshot {
             if record_integrity {
                 builder = builder.record_integrity();
             }
-            if resumable {
-                builder = builder.resumable();
+            if full {
+                builder = builder.full();
             }
             let archive = builder
                 .create_archive(archive, plain_tar)
@@ -609,6 +609,6 @@ fn format_str(f: RustSnapshotFormat) -> &'static str {
 fn format_scope(scope: RustSnapshotScope) -> &'static str {
     match scope {
         RustSnapshotScope::Disk => "disk",
-        RustSnapshotScope::Resumable => "resumable",
+        RustSnapshotScope::Full => "full",
     }
 }

@@ -27,6 +27,7 @@ type SandboxConfig struct {
 	OCIUpperSizeMiB   uint32
 	ociUpperSizeSet   bool
 	Snapshot          string
+	SnapshotDiskOnly  bool
 	MemoryMiB         uint32
 	CPUs              uint8
 	MaxMemoryMiB      uint32
@@ -657,10 +658,16 @@ func WithBindRootfs(path string) SandboxOption {
 	return func(o *SandboxConfig) { o.ImageBind = path }
 }
 
-// WithFromSnapshot boots from a snapshot artifact by bare name or filesystem path.
+// WithFromSnapshot creates from a snapshot artifact by bare name or filesystem path.
 // It is mutually exclusive with WithImage.
 func WithFromSnapshot(pathOrName string) SandboxOption {
 	return func(o *SandboxConfig) { o.Snapshot = pathOrName }
+}
+
+// WithSnapshotDiskOnly cold-boots only the disk state carried by a full snapshot.
+// It must be combined with WithFromSnapshot.
+func WithSnapshotDiskOnly() SandboxOption {
+	return func(o *SandboxConfig) { o.SnapshotDiskOnly = true }
 }
 
 // WithMemory sets the memory limit in MiB (default 512MiB).

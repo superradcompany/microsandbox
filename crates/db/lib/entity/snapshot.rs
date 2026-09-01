@@ -25,7 +25,7 @@ pub struct Model {
     pub name: Option<String>,
     /// Manifest digest of the parent snapshot, or NULL for a root.
     pub parent_digest: Option<String>,
-    /// Snapshot payload scope (`disk` today, `resumable` in the future).
+    /// Snapshot payload scope (`disk` or `full`).
     pub scope: String,
     /// Closed descriptor state discriminant (`file` or `checkpoint`).
     pub state_kind: String,

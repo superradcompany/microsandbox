@@ -374,7 +374,7 @@ class SnapshotFormat(StrEnum):
 
 class SnapshotScope(StrEnum):
     DISK = "disk"
-    RESUMABLE = "resumable"
+    FULL = "full"
 
 class RlimitResource(StrEnum):
     CPU = "cpu"

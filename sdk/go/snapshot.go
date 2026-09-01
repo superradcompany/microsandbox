@@ -25,7 +25,7 @@ type SnapshotCreateOptions struct {
 	Labels          map[string]string
 	Force           bool
 	RecordIntegrity bool
-	Resumable       bool
+	Full            bool
 }
 
 // SnapshotSaveOptions configures Snapshot.Save.
@@ -57,8 +57,8 @@ func (a *SnapshotArchive) Path() string             { return a.path }
 // Snapshot payload scope values, as reported by SnapshotArtifact.Scope
 // and SnapshotHandle.Scope.
 const (
-	SnapshotScopeDisk      = "disk"
-	SnapshotScopeResumable = "resumable"
+	SnapshotScopeDisk = "disk"
+	SnapshotScopeFull = "full"
 )
 
 // SnapshotVerifyReport is returned by SnapshotArtifact.Verify.
@@ -262,7 +262,7 @@ func (snapshotFactory) Create(ctx context.Context, opts SnapshotCreateOptions) (
 		Labels:          opts.Labels,
 		Force:           opts.Force,
 		RecordIntegrity: opts.RecordIntegrity,
-		Resumable:       opts.Resumable,
+		Full:            opts.Full,
 	})
 	if err != nil {
 		return nil, wrapFFI(err)
@@ -270,7 +270,7 @@ func (snapshotFactory) Create(ctx context.Context, opts SnapshotCreateOptions) (
 	return snapshotFromInfo(info), nil
 }
 
-// CreateArchive captures a disk or resumable snapshot directly into one archive file.
+// CreateArchive captures a disk or full snapshot directly into one archive file.
 // It does not create an installed snapshot directory or index row.
 func (snapshotFactory) CreateArchive(ctx context.Context, opts SnapshotArchiveOptions) (*SnapshotArchive, error) {
 	if opts.Name == "" {
@@ -289,7 +289,7 @@ func (snapshotFactory) CreateArchive(ctx context.Context, opts SnapshotArchiveOp
 		Labels:          create.Labels,
 		Force:           create.Force,
 		RecordIntegrity: create.RecordIntegrity,
-		Resumable:       create.Resumable,
+		Full:            create.Full,
 	}, opts.PlainTar)
 	if err != nil {
 		return nil, wrapFFI(err)

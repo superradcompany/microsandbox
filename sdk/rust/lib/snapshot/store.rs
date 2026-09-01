@@ -207,7 +207,7 @@ pub(super) async fn index_upsert(
     };
     let scope_str = match manifest.scope {
         SnapshotScope::Disk => "disk",
-        SnapshotScope::Resumable => "resumable",
+        SnapshotScope::Full => "full",
     };
 
     let row = snapshot_entity::ActiveModel {
@@ -480,7 +480,9 @@ fn handle_from_model(m: snapshot_entity::Model) -> SnapshotHandle {
     });
     let scope = match m.scope.as_str() {
         "disk" => SnapshotScope::Disk,
-        "resumable" => SnapshotScope::Resumable,
+        // `resumable` was the released index projection. The artifact is authoritative and the
+        // index is rebuildable, but accepting the old cache value keeps upgrades non-disruptive.
+        "full" | "resumable" => SnapshotScope::Full,
         other => {
             tracing::warn!(digest = %m.digest, scope = other, "unknown snapshot scope in index; treating as disk");
             SnapshotScope::Disk

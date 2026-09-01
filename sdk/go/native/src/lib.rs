@@ -1005,6 +1005,8 @@ struct SandboxCreateOpts {
     /// accepted so older Go SDK versions keep working against this dylib.
     oci_upper_size_mib: Option<u32>,
     snapshot: Option<String>,
+    #[serde(default)]
+    snapshot_disk_only: bool,
     memory_mib: Option<u32>,
     cpus: Option<u8>,
     max_memory_mib: Option<u32>,
@@ -1140,7 +1142,7 @@ struct SnapshotCreateOpts {
     #[serde(default)]
     record_integrity: bool,
     #[serde(default)]
-    resumable: bool,
+    full: bool,
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -2186,6 +2188,9 @@ pub unsafe extern "C" fn msb_sandbox_create(
             }
             if let Some(snapshot) = opts.snapshot {
                 builder = builder.from_snapshot(snapshot);
+            }
+            if opts.snapshot_disk_only {
+                builder = builder.disk_only();
             }
             if let Some(m) = opts.memory_mib {
                 builder = builder.memory(m);
@@ -5649,7 +5654,7 @@ fn snapshot_format_str(f: SnapshotFormat) -> &'static str {
 fn snapshot_scope_str(scope: SnapshotScope) -> &'static str {
     match scope {
         SnapshotScope::Disk => "disk",
-        SnapshotScope::Resumable => "resumable",
+        SnapshotScope::Full => "full",
     }
 }
 
@@ -5794,8 +5799,8 @@ fn snapshot_builder_from_opts(
     if opts.record_integrity {
         builder = builder.record_integrity();
     }
-    if opts.resumable {
-        builder = builder.resumable();
+    if opts.full {
+        builder = builder.full();
     }
     Ok(builder)
 }

@@ -23,8 +23,8 @@ const MAX_MEMORY_EXTENTS: usize = 4 * 1024 * 1024;
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum CaptureIntent {
-    /// A user-requested resumable snapshot.
-    ResumableSnapshot,
+    /// A user-requested full snapshot.
+    FullSnapshot,
     /// A local idle/park checkpoint.
     Park,
     /// A transparent continuity operation.

@@ -93,6 +93,7 @@ class Sandbox:
         *,
         image: str | os.PathLike[str] | ImageSource | None = None,
         from_snapshot: str | os.PathLike[str] | None = None,
+        disk_only: bool = False,
         memory: int | None = None,
         cpus: int | None = None,
         max_memory: int | None = None,
@@ -148,6 +149,7 @@ class Sandbox:
         *,
         image: str | os.PathLike[str] | ImageSource | None = None,
         from_snapshot: str | os.PathLike[str] | None = None,
+        disk_only: bool = False,
         memory: int | None = None,
         cpus: int | None = None,
         max_memory: int | None = None,
@@ -822,7 +824,7 @@ class Snapshot:
         labels: dict[str, str] | None = None,
         force: bool = False,
         record_integrity: bool = False,
-        resumable: bool = False,
+        full: bool = False,
     ) -> Snapshot: ...
     @staticmethod
     async def create_archive(
@@ -833,7 +835,7 @@ class Snapshot:
         labels: dict[str, str] | None = None,
         force: bool = False,
         record_integrity: bool = False,
-        resumable: bool = False,
+        full: bool = False,
         plain_tar: bool = False,
     ) -> SnapshotArchive: ...
     @staticmethod

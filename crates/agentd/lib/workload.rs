@@ -22,7 +22,7 @@ const MAX_ATTEMPT_ID_BYTES: usize = 128;
 /// Guest-side latch for processes launched through agentd.
 ///
 /// Failure to initialize the freezer does not affect ordinary execution. It
-/// only makes resumable checkpoint preparation unavailable.
+/// only makes full checkpoint preparation unavailable.
 pub(crate) struct WorkloadLatch {
     freezer: Option<Box<dyn FreezerControl>>,
     unavailable_reason: Option<String>,
@@ -100,7 +100,7 @@ impl WorkloadLatch {
         }
     }
 
-    /// Returns why resumable workload freezing is unavailable, if applicable.
+    /// Returns why full-checkpoint workload freezing is unavailable, if applicable.
     pub(crate) fn unavailable_reason(&self) -> Option<&str> {
         self.unavailable_reason.as_deref()
     }
@@ -139,6 +139,10 @@ impl WorkloadLatch {
         }
 
         self.freezer()?.set_frozen(true)?;
+        // Agentd itself remains outside the workload cgroup, so it can flush every mounted
+        // filesystem after user processes stop mutating them and before the host pauses the VM.
+        // `sync(2)` has no error return; completion is the durability boundary exposed by Linux.
+        unsafe { libc::sync() };
         self.state = LatchState::Frozen {
             attempt_id: attempt_id.to_string(),
         };

@@ -15,7 +15,7 @@ import {
 /**
  * Snapshot payload scope.
  */
-export type SnapshotScope = "disk" | "resumable";
+export type SnapshotScope = "disk" | "full";
 
 /** Canonical closed state family from schema-1 `snapshot.json`. */
 export type SnapshotState =
@@ -116,7 +116,7 @@ export class SnapshotArchive {
  * and `SandboxHandle.snapshot(name)`.
  *
  * The artifact is a directory containing `snapshot.json` and either a disk
- * layer closure or a resumable checkpoint closure. The directory is the
+ * layer closure or a full checkpoint closure. The directory is the
  * source of truth; the local DB index is rebuildable via `Snapshot.reindex()`.
  */
 export class Snapshot {

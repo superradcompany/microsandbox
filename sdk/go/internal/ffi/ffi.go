@@ -1550,6 +1550,7 @@ type CreateOptions struct {
 	ImageBind            string               `json:"image_bind,omitempty"`
 	RootDisk             *RootDiskSpec        `json:"root_disk,omitempty"`
 	Snapshot             string               `json:"snapshot,omitempty"`
+	SnapshotDiskOnly     bool                 `json:"snapshot_disk_only,omitempty"`
 	MemoryMiB            uint32               `json:"memory_mib,omitempty"`
 	CPUs                 uint8                `json:"cpus,omitempty"`
 	MaxMemoryMiB         uint32               `json:"max_memory_mib,omitempty"`
@@ -4648,7 +4649,7 @@ type SnapshotCreateOptions struct {
 	Labels          map[string]string `json:"labels,omitempty"`
 	Force           bool              `json:"force,omitempty"`
 	RecordIntegrity bool              `json:"record_integrity,omitempty"`
-	Resumable       bool              `json:"resumable,omitempty"`
+	Full            bool              `json:"full,omitempty"`
 }
 
 type SnapshotSaveOptions struct {

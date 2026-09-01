@@ -74,7 +74,7 @@ pub enum SnapshotScope {
     Disk,
     /// Composite checkpoint state.
     #[serde(rename = "checkpoint")]
-    Resumable,
+    Full,
 }
 
 /// Consistency guarantee of a capture.
@@ -420,7 +420,7 @@ impl Manifest {
                 validate_file_state(file)?;
             }
             SnapshotState::Checkpoint(checkpoint) => {
-                if self.scope != SnapshotScope::Resumable {
+                if self.scope != SnapshotScope::Full {
                     return descriptor_error("state.kind=checkpoint requires scope=checkpoint");
                 }
                 if checkpoint.checkpoint_id.is_empty() {

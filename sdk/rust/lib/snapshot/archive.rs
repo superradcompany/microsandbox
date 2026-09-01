@@ -428,7 +428,7 @@ pub(super) async fn save_direct_file_snapshot(
         return Err(MicrosandboxError::unsupported(
             Operation::SnapshotOps,
             UnsupportedReason::NotAvailable(
-                "direct checkpoint archives require resumable capture support".into(),
+                "direct checkpoint archives require full capture support".into(),
             ),
         ));
     };
@@ -503,7 +503,7 @@ pub(super) async fn save_direct_file_snapshot(
     Ok(())
 }
 
-/// Stream one freshly captured resumable checkpoint directly into an archive.
+/// Stream one freshly captured full checkpoint directly into an archive.
 ///
 /// The runtime-owned checkpoint closure is read as the archive payload. No installed snapshot
 /// artifact or snapshot-index row is created.
@@ -976,6 +976,7 @@ pub(crate) async fn materialize_archive_for_child(
     local: &LocalBackend,
     archive: &Path,
     child_stage: &Path,
+    disk_only: bool,
 ) -> MicrosandboxResult<ArchiveChildMaterialization> {
     tokio::fs::create_dir_all(child_stage).await?;
     let cache_dir = local.cache_dir();
@@ -1015,6 +1016,11 @@ pub(crate) async fn materialize_archive_for_child(
                 ),
             ));
         };
+        if disk_only {
+            return Err(MicrosandboxError::InvalidConfig(
+                "disk_only requires a full snapshot with checkpoint state".into(),
+            ));
+        }
         if file.layers.len() != 1
             || file.disk_format != super::SnapshotFormat::Raw
             || file.filesystem != "ext4"
@@ -1066,6 +1072,27 @@ pub(crate) async fn materialize_archive_for_child(
     if let SnapshotState::Checkpoint(state) = &manifest.state {
         let member_dir = child_stage.join(&member.snapshot_id);
         let extracted_closure = member_dir.join(CHECKPOINT_DIRECTORY);
+        if disk_only {
+            let materialized = super::materialize_checkpoint_child_disk_state(
+                &extracted_closure,
+                &state.checkpoint_root,
+                &state.checkpoint_id,
+                child_stage,
+            )
+            .await?;
+            install_staged_cache(cache_stage.path(), &cache_dir, &manifest).await?;
+            for member in &inventory.members {
+                let member_dir = child_stage.join(&member.snapshot_id);
+                if member_dir.exists() {
+                    tokio::fs::remove_dir_all(member_dir).await?;
+                }
+            }
+            return Ok(ArchiveChildMaterialization {
+                manifest,
+                checkpoint_restore: None,
+                upper_layers: materialized.upper_layers,
+            });
+        }
         let child_closure = child_stage.join(".checkpoint-restore");
         tokio::fs::rename(&extracted_closure, &child_closure).await?;
         let materialized = super::materialize_checkpoint_child_state(
@@ -1091,6 +1118,11 @@ pub(crate) async fn materialize_archive_for_child(
     let SnapshotState::File(file) = &manifest.state else {
         unreachable!("snapshot state is closed")
     };
+    if disk_only {
+        return Err(MicrosandboxError::InvalidConfig(
+            "disk_only requires a full snapshot with checkpoint state".into(),
+        ));
+    }
     if file.layers.len() != 1
         || file.disk_format != super::SnapshotFormat::Raw
         || file.filesystem != "ext4"
@@ -3817,7 +3849,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let restored = materialize_archive_for_child(&local, &archive, &child_stage)
+        let restored = materialize_archive_for_child(&local, &archive, &child_stage, false)
             .await
             .unwrap();
 
@@ -3887,7 +3919,7 @@ mod tests {
         let checkpoint = CheckpointManifest {
             schema: "microsandbox.checkpoint/1".into(),
             checkpoint_id: "checkpoint_archive".into(),
-            capture_intent: CaptureIntent::ResumableSnapshot,
+            capture_intent: CaptureIntent::FullSnapshot,
             architecture: std::env::consts::ARCH.into(),
             pause_generation: 11,
             execution_state: execution_id,
@@ -3904,7 +3936,7 @@ mod tests {
         let manifest = Manifest {
             schema: SCHEMA.into(),
             snapshot_id: snapshot_id.clone(),
-            scope: SnapshotScope::Resumable,
+            scope: SnapshotScope::Full,
             state: SnapshotState::Checkpoint(CheckpointSnapshotState {
                 checkpoint_id: checkpoint.checkpoint_id,
                 checkpoint_root: checkpoint_root.to_string(),
@@ -3945,7 +3977,7 @@ mod tests {
         .await
         .unwrap();
         std::fs::remove_dir_all(&source).unwrap();
-        let restored = materialize_archive_for_child(&local, &archive, &child_stage)
+        let restored = materialize_archive_for_child(&local, &archive, &child_stage, false)
             .await
             .unwrap();
 
@@ -3955,6 +3987,15 @@ mod tests {
         assert!(child_stage.join(".checkpoint-restore").exists());
         assert!(!child_stage.join(snapshot_id.as_str()).exists());
         assert!(!home.join("snapshots").join(snapshot_id.as_str()).exists());
+
+        let disk_child_stage = directory.path().join("disk-child");
+        let disk_restored =
+            materialize_archive_for_child(&local, &archive, &disk_child_stage, true)
+                .await
+                .unwrap();
+        assert!(disk_restored.checkpoint_restore.is_none());
+        assert_eq!(disk_restored.upper_layers.len(), 2);
+        assert!(!disk_child_stage.join(".checkpoint-restore").exists());
 
         let loaded = load_snapshot(&local, &archive, None).await.unwrap();
         assert_eq!(loaded.id(), snapshot_id.as_str());

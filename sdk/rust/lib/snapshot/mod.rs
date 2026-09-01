@@ -1,7 +1,7 @@
-//! Disk and resumable snapshot creation, inspection, and consumption.
+//! Disk and full snapshot creation, inspection, and consumption.
 //!
 //! A snapshot is a self-describing, content-addressed artifact on disk. A disk snapshot captures
-//! the writable root closure for a cold boot. A resumable snapshot captures one running sandbox's
+//! the writable root closure for a cold boot. A full snapshot captures one running sandbox's
 //! disk, memory, execution, and device state for eager restore. The artifact is the source of
 //! truth; the local DB index is a rebuildable cache.
 
@@ -61,7 +61,7 @@ pub struct SnapshotBuilder {
     labels: Vec<(String, String)>,
     force: bool,
     record_integrity: bool,
-    resumable: bool,
+    full: bool,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -89,14 +89,14 @@ impl Snapshot {
             labels: Vec::new(),
             force: false,
             record_integrity: false,
-            resumable: false,
+            full: false,
         }
     }
 
-    /// Create an installed disk or resumable snapshot artifact.
+    /// Create an installed disk or full snapshot artifact.
     ///
     /// Disk capture requires a stopped or crashed sandbox. A builder configured with
-    /// [`resumable`](SnapshotBuilder::resumable) captures a running sandbox's checkpoint closure.
+    /// [`full`](SnapshotBuilder::full) captures a running sandbox's checkpoint closure.
     /// Publication is atomic and the local index remains a rebuildable cache.
     pub async fn create(config: SnapshotConfig) -> MicrosandboxResult<Self> {
         let backend = crate::backend::default_backend();
@@ -104,7 +104,7 @@ impl Snapshot {
         create::create_snapshot(local, config).await
     }
 
-    /// Capture a disk or resumable snapshot directly into an archive.
+    /// Capture a disk or full snapshot directly into an archive.
     pub async fn create_archive(
         config: SnapshotConfig,
         out: impl AsRef<Path>,
@@ -299,11 +299,15 @@ pub(crate) async fn materialize_archive_for_child(
     local: &crate::backend::LocalBackend,
     archive: &Path,
     child_stage: &Path,
+    disk_only: bool,
 ) -> MicrosandboxResult<archive::ArchiveChildMaterialization> {
-    archive::materialize_archive_for_child(local, archive, child_stage).await
+    archive::materialize_archive_for_child(local, archive, child_stage, disk_only).await
 }
 
-pub(crate) use restore::{materialize_checkpoint_child_state, materialize_checkpoint_for_child};
+pub(crate) use restore::{
+    materialize_checkpoint_child_disk_state, materialize_checkpoint_child_state,
+    materialize_checkpoint_disk_for_child, materialize_checkpoint_for_child,
+};
 
 pub(crate) use create::CHECKPOINT_DIRECTORY;
 
@@ -468,8 +472,8 @@ impl SnapshotBuilder {
     }
 
     /// Capture disk, memory, execution, and device state from a running sandbox.
-    pub fn resumable(mut self) -> Self {
-        self.resumable = true;
+    pub fn full(mut self) -> Self {
+        self.full = true;
         self
     }
 
@@ -487,7 +491,7 @@ impl SnapshotBuilder {
             labels: self.labels,
             force: self.force,
             record_integrity: self.record_integrity,
-            resumable: self.resumable,
+            full: self.full,
         })
     }
 

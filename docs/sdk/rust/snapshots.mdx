@@ -5,7 +5,7 @@ description: Rust SDK - Snapshot API reference
 
 <Tooltip tip="Snapshot creation, restore, import, and export use local disk artifacts and are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
-Create disk snapshots of stopped sandboxes and resumable checkpoints of running sandboxes. See [Snapshots](/sandboxes/snapshots) for usage and lifecycle concepts.
+Create disk snapshots of stopped sandboxes and full checkpoints of running sandboxes. See [Snapshots](/sandboxes/snapshots) for usage and lifecycle concepts.
 
 ## Snapshot
 
@@ -54,7 +54,7 @@ let snap = Snapshot::builder("baseline")
 async fn create(config: SnapshotConfig) -> MicrosandboxResult<Snapshot>
 ```
 
-Create an installed snapshot artifact atomically, then best-effort update the rebuildable local index. Disk mode captures a stopped or crashed sandbox; resumable mode captures a running sandbox's checkpoint closure. Most callers use the [builder](#snapshotbuilder)'s [`create()`](#create) instead of constructing a [`SnapshotConfig`](#snapshotconfig) by hand.
+Create an installed snapshot artifact atomically, then best-effort update the rebuildable local index. Disk mode captures a stopped or crashed sandbox; full mode captures a running sandbox's checkpoint closure. Most callers use the [builder](#snapshotbuilder)'s [`create()`](#create) instead of constructing a [`SnapshotConfig`](#snapshotconfig) by hand.
 
 <p className="msb-label">Parameters</p>
 
@@ -96,7 +96,7 @@ async fn create_archive(
 ) -> MicrosandboxResult<SnapshotArchive>
 ```
 
-Capture a disk or resumable snapshot directly into an archive. The operation creates no installed snapshot directory and no index row.
+Capture a disk or full snapshot directly into an archive. The operation creates no installed snapshot directory and no index row.
 
 ```rust
 let archive = Snapshot::create_archive(
@@ -567,7 +567,7 @@ The parent snapshot's digest, or `None` for a root. Always `None` today; populat
 fn scope(&self) -> SnapshotScope
 ```
 
-Snapshot payload scope: [`SnapshotScope::Disk`](#snapshotscope) for a disk-only snapshot or `Resumable` for disk plus VM execution state.
+Snapshot payload scope: [`SnapshotScope::Disk`](#snapshotscope) for a disk-only snapshot or `Full` for disk plus VM execution state.
 
 ---
 
@@ -694,7 +694,7 @@ let sb = Sandbox::builder("api-restored")
 
 </Accordion>
 
-`SandboxBuilder` setter. Boot a fresh sandbox from a snapshot artifact. The snapshot already pins the image reference and digest, so this is mutually exclusive with [`image()`](/sdk/rust/sandbox#image) and [`image_with()`](/sdk/rust/sandbox#image_with). The artifact is structurally opened at [`create()`](/sdk/rust/sandbox#create) time; persistent payload integrity is checked only through explicit [`Snapshot::verify()`](#snap-verify).
+`SandboxBuilder` setter. Create a sandbox from a snapshot artifact. Disk snapshots cold-boot; full snapshots resume captured execution. The snapshot already pins the image reference and digest, so this is mutually exclusive with [`image()`](/sdk/rust/sandbox#image) and [`image_with()`](/sdk/rust/sandbox#image_with). The artifact is structurally opened at [`create()`](/sdk/rust/sandbox#create) time; persistent payload integrity is checked only through explicit [`Snapshot::verify()`](#snap-verify).
 
 <p className="msb-label">Parameters</p>
 
@@ -704,6 +704,14 @@ let sb = Sandbox::builder("api-restored")
     <div className="msb-param-desc">Bare name resolved under the default snapshots directory, or a path to an artifact directory or archive file.</div>
   </div>
 </div>
+
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">disk_only()</span>
+
+```rust
+fn disk_only(self) -> Self
+```
+
+Cold-boot only the disk state carried by a full snapshot. Chain after [`from_snapshot()`](#from_snapshot). Without it, a full snapshot resumes its captured execution and does not run the image CMD.
 
 ## SandboxHandle
 
@@ -834,11 +842,11 @@ Compute and record sparse-aware BLAKE3 Merkle integrity during creation. [`verif
 
 ---
 
-#### <span className="msb-recv">snapshot_builder.</span><span className="msb-hn">resumable()</span>
+#### <span className="msb-recv">snapshot_builder.</span><span className="msb-hn">full()</span>
 <div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```rust
-fn resumable(self) -> Self
+fn full(self) -> Self
 ```
 
 Capture disk, memory, execution, and device state from a running sandbox. The runtime briefly quiesces the VM and returns the source to running state after checkpoint publication.
@@ -893,7 +901,7 @@ Inputs to create a snapshot. A type alias for `SnapshotSpec`. Usually built via 
 | labels | `Vec<(String, String)>` | User-supplied labels |
 | force | `bool` | Overwrite an existing artifact with the same name |
 | record_integrity | `bool` | Compute and record upper-layer integrity at creation |
-| resumable | `bool` | Capture a running sandbox's resumable checkpoint instead of a stopped-sandbox disk snapshot |
+| full | `bool` | Capture a running sandbox's full checkpoint instead of a stopped-sandbox disk snapshot |
 
 ### SnapshotFormat
 
@@ -917,7 +925,7 @@ Snapshot payload scope. Parsing accepts every known scope so older runtimes can 
 | Value | Description |
 |-------|-------------|
 | `Disk` | Disk-only snapshot; captures the writable filesystem state |
-| `Resumable` | Reserved for future memory/device-state capture |
+| `Full` | Disk plus memory, execution, device, and admitted resource state |
 
 ### SaveOpts
 
@@ -944,7 +952,7 @@ Result of explicit snapshot verification.
 | digest | `String` | Snapshot manifest digest |
 | path | `PathBuf` | Artifact directory |
 | upper | [`UpperVerifyStatus`](#upperverifystatus) | Upper-layer result; retained as `NotRecorded` for checkpoint state |
-| checkpoint | `Option<CheckpointVerifyStatus>` | Verified checkpoint root for resumable state |
+| checkpoint | `Option<CheckpointVerifyStatus>` | Verified checkpoint root for full state |
 
 ### UpperVerifyStatus
 

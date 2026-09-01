@@ -774,7 +774,7 @@ where
     Ok(response)
 }
 
-/// Capture one resumable checkpoint through the running sandbox's existing control endpoint.
+/// Capture one full checkpoint through the running sandbox's existing control endpoint.
 ///
 /// A post-publication source-resume failure still returns the immutable checkpoint so the caller
 /// can finish publishing the requested snapshot. The runtime diagnostic is logged and the source
@@ -788,13 +788,13 @@ pub(crate) async fn control_checkpoint_create(
         return Err(crate::MicrosandboxError::unsupported(
             Operation::SnapshotOps,
             UnsupportedReason::NotAvailable(
-                "this running sandbox does not support resumable checkpoint capture".into(),
+                "this running sandbox does not support full checkpoint capture".into(),
             ),
         ));
     }
     let request = microsandbox_runtime::control::ControlRequest::CheckpointCreate {
         checkpoint_id,
-        intent: microsandbox_runtime::control::CheckpointCaptureIntent::ResumableSnapshot,
+        intent: microsandbox_runtime::control::CheckpointCaptureIntent::FullSnapshot,
     };
     let mut line = serde_json::to_string(&request)?;
     line.push('\n');
@@ -810,7 +810,7 @@ pub(crate) async fn control_checkpoint_create(
         return Ok(checkpoint);
     }
     Err(crate::MicrosandboxError::Runtime(format!(
-        "resumable checkpoint refused: {}",
+        "full checkpoint refused: {}",
         response
             .error
             .unwrap_or_else(|| "control response omitted checkpoint state".into())

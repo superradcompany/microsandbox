@@ -30,8 +30,9 @@ use crate::runtime::{
 };
 use crate::sandbox::{
     FsEntryKind, PullPolicy, RootDisk, RootfsSource, Sandbox, SandboxConfig, SandboxStatus,
-    apply_patches, build_upper_tree, remove_dir_if_exists, validate_env, validate_hostname,
-    validate_labels, validate_sandbox_name, validate_volume_mounts,
+    apply_patches, build_upper_tree, config::SnapshotRestoreMode, remove_dir_if_exists,
+    validate_env, validate_hostname, validate_labels, validate_sandbox_name,
+    validate_volume_mounts,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -158,9 +159,14 @@ impl LocalBackend {
         // pinned image identity; no installed snapshot artifact is created.
         if let Some(archive) = config.snapshot_archive_source.take() {
             child_stage_guard = Some(ChildStageGuard::new(sandbox_dir.clone()));
-            let materialized =
-                crate::snapshot::materialize_archive_for_child(self, &archive, &sandbox_dir)
-                    .await?;
+            let disk_only = config.snapshot_restore_mode == SnapshotRestoreMode::DiskOnly;
+            let materialized = crate::snapshot::materialize_archive_for_child(
+                self,
+                &archive,
+                &sandbox_dir,
+                disk_only,
+            )
+            .await?;
             config.spec.image = RootfsSource::oci(materialized.manifest.image.reference.clone());
             config.manifest_digest = Some(materialized.manifest.image.manifest_digest.clone());
             if let Some(restore) = materialized.checkpoint_restore {
@@ -192,27 +198,45 @@ impl LocalBackend {
                 )?;
                 config.checkpoint_restore = Some(restore);
                 config.snapshot_upper_layers = materialized.upper_layers;
+                config.suppress_launch_for_full_restore();
+            } else if !materialized.upper_layers.is_empty() {
+                config.snapshot_upper_layers = materialized.upper_layers;
             } else {
                 config.snapshot_upper_source = Some(sandbox_dir.join("upper.ext4"));
             }
         }
 
-        // Installed resumable snapshots likewise become child-owned before image resolution. The
+        // Installed full snapshots likewise become child-owned before image resolution. The
         // closure is retained only through eager construction; the disk layers and fresh writable
         // head remain under the ordinary sandbox directory and root-disk journal.
         if let Some(source) = config.checkpoint_restore.take() {
             child_stage_guard = Some(ChildStageGuard::new(sandbox_dir.clone()));
-            let materialized =
-                crate::snapshot::materialize_checkpoint_for_child(&source, &sandbox_dir).await?;
-            config.checkpoint_restore = Some(materialized.restore);
-            config.snapshot_upper_layers = materialized.upper_layers;
+            match config.snapshot_restore_mode {
+                SnapshotRestoreMode::Full => {
+                    let materialized =
+                        crate::snapshot::materialize_checkpoint_for_child(&source, &sandbox_dir)
+                            .await?;
+                    config.checkpoint_restore = Some(materialized.restore);
+                    config.snapshot_upper_layers = materialized.upper_layers;
+                    config.suppress_launch_for_full_restore();
+                }
+                SnapshotRestoreMode::DiskOnly => {
+                    let materialized = crate::snapshot::materialize_checkpoint_disk_for_child(
+                        &source,
+                        &sandbox_dir,
+                    )
+                    .await?;
+                    config.snapshot_upper_layers = materialized.upper_layers;
+                }
+            }
         }
 
         // Resolve OCI images before spawning the sandbox process.
         if let RootfsSource::Oci(oci) = config.spec.image.clone() {
             let reference = oci.reference;
             let expected_snapshot_manifest_digest = (config.snapshot_upper_source.is_some()
-                || config.checkpoint_restore.is_some())
+                || config.checkpoint_restore.is_some()
+                || !config.snapshot_upper_layers.is_empty())
             .then(|| config.manifest_digest.clone())
             .flatten();
             let root_disk = oci
@@ -365,7 +389,7 @@ impl LocalBackend {
             } else if !config.snapshot_upper_layers.is_empty() {
                 if upper_tree.is_some() {
                     return Err(crate::MicrosandboxError::InvalidConfig(
-                        "patches cannot be combined with resumable snapshot restore".into(),
+                        "patches cannot be combined with full snapshot restore".into(),
                     ));
                 }
             } else if let Some(snap_upper) = config.snapshot_upper_source.take() {

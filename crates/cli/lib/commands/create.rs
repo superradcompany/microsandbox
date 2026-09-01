@@ -16,7 +16,16 @@ pub struct CreateArgs {
     /// Image to use (e.g. alpine, python, ./rootfs, ./disk.qcow2).
     ///
     /// May be omitted when a config file supplies `image`.
+    #[arg(conflicts_with = "from_snapshot")]
     pub image: Option<String>,
+
+    /// Create from a snapshot artifact instead of an image.
+    #[arg(long = "from-snapshot", value_name = "PATH_OR_NAME")]
+    pub from_snapshot: Option<String>,
+
+    /// Cold-boot only the disk state when the source is a full snapshot.
+    #[arg(long, requires = "from_snapshot")]
+    pub disk_only: bool,
 
     /// Sandbox configuration options.
     #[command(flatten)]
@@ -42,9 +51,12 @@ pub async fn run(
     }
 
     let resolved = sandbox_config::resolve(&args.sandbox.config)?;
-    let image = resolved.image(args.image.as_deref(), None)?;
+    let image = resolved.image(args.image.as_deref(), args.from_snapshot.as_deref())?;
     let builder = resolved.apply(Sandbox::builder(&name))?;
-    let builder = image.apply(builder)?;
+    let mut builder = image.apply(builder)?;
+    if args.disk_only {
+        builder = builder.disk_only();
+    }
     let builder = if resolved.loaded() {
         apply_sandbox_opts_after_config(builder, &args.sandbox)?
     } else {

@@ -30,7 +30,7 @@ pub(crate) const CHECKPOINT_DIRECTORY: &str = "checkpoint";
 // Types
 //--------------------------------------------------------------------------------------------------
 
-struct CapturedResumableSnapshot {
+struct CapturedFullSnapshot {
     checkpoint_path: PathBuf,
     checkpoint_root: ObjectId,
     manifest: Manifest,
@@ -52,7 +52,7 @@ pub(super) async fn create_snapshot(
         labels,
         force,
         record_integrity,
-        resumable,
+        full,
     } = config;
 
     // Validate the destination before anything else so name errors surface
@@ -73,8 +73,8 @@ pub(super) async fn create_snapshot(
         .await?
         .ok_or_else(|| MicrosandboxError::SandboxNotFound(source_sandbox.clone()))?;
 
-    if resumable {
-        return create_resumable_snapshot(
+    if full {
+        return create_full_snapshot(
             local,
             &name,
             &dest_dir,
@@ -190,7 +190,7 @@ pub(super) async fn create_snapshot(
 }
 
 /// Capture one running sandbox into an installed composite-checkpoint snapshot.
-async fn create_resumable_snapshot(
+async fn create_full_snapshot(
     local: &LocalBackend,
     name: &str,
     dest_dir: &Path,
@@ -211,7 +211,7 @@ async fn create_resumable_snapshot(
     tokio::fs::create_dir_all(&parent_dir).await?;
     let staging_dir = parent_dir.join(format!(".{name}.{:016x}.staging", rand::random::<u64>()));
     tokio::fs::create_dir_all(&staging_dir).await?;
-    let captured = match capture_resumable_snapshot(source_sandbox, labels, model).await {
+    let captured = match capture_full_snapshot(source_sandbox, labels, model).await {
         Ok(captured) => captured,
         Err(error) => {
             let _ = tokio::fs::remove_dir_all(&staging_dir).await;
@@ -273,7 +273,7 @@ pub(super) async fn create_snapshot_archive(
         labels,
         force,
         record_integrity,
-        resumable,
+        full,
     } = config;
     if dest_dir.is_some() {
         return Err(MicrosandboxError::InvalidConfig(
@@ -287,8 +287,8 @@ pub(super) async fn create_snapshot_archive(
         .one(db)
         .await?
         .ok_or_else(|| MicrosandboxError::SandboxNotFound(source_sandbox.clone()))?;
-    if resumable {
-        let captured = capture_resumable_snapshot(&source_sandbox, labels, model).await?;
+    if full {
+        let captured = capture_full_snapshot(&source_sandbox, labels, model).await?;
         let digest = captured
             .manifest
             .digest()
@@ -392,21 +392,21 @@ pub(super) async fn create_snapshot_archive(
 ///
 /// Installed snapshots and direct archives share this boundary so both publish byte-for-byte the
 /// same descriptor and checkpoint closure.
-async fn capture_resumable_snapshot(
+async fn capture_full_snapshot(
     source_sandbox: &str,
     labels: Vec<(String, String)>,
     model: sandbox_entity::Model,
-) -> MicrosandboxResult<CapturedResumableSnapshot> {
+) -> MicrosandboxResult<CapturedFullSnapshot> {
     if model.status != SandboxStatus::Running {
         return Err(MicrosandboxError::unsupported(
             Operation::SnapshotOps,
-            UnsupportedReason::NotAvailable("resumable snapshots require a running sandbox".into()),
+            UnsupportedReason::NotAvailable("full snapshots require a running sandbox".into()),
         ));
     }
     let sandbox_config: SandboxConfig = serde_json::from_str(&model.config)?;
     let manifest_digest = sandbox_config.manifest_digest.clone().ok_or_else(|| {
         MicrosandboxError::InvalidConfig(format!(
-            "sandbox '{source_sandbox}' has no OCI image pinned; resumable snapshots currently require a managed OCI root"
+            "sandbox '{source_sandbox}' has no OCI image pinned; full snapshots currently require a managed OCI root"
         ))
     })?;
     let image_reference = oci_reference_string(&sandbox_config)?;
@@ -465,7 +465,7 @@ async fn capture_resumable_snapshot(
     let manifest = Manifest {
         schema: SCHEMA.into(),
         snapshot_id,
-        scope: SnapshotScope::Resumable,
+        scope: SnapshotScope::Full,
         state: SnapshotState::Checkpoint(CheckpointSnapshotState {
             checkpoint_id: checkpoint_id.clone(),
             checkpoint_root: checkpoint.checkpoint_root,
@@ -489,7 +489,7 @@ async fn capture_resumable_snapshot(
     manifest
         .validate()
         .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
-    Ok(CapturedResumableSnapshot {
+    Ok(CapturedFullSnapshot {
         checkpoint_path: checkpoint.path,
         checkpoint_root,
         manifest,
@@ -670,7 +670,7 @@ fn new_file_manifest(
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
 
-/// Snapshots capture the managed upper. The other root-disk kinds have nothing msb-owned on the host to capture: a tmpfs upper lives in guest RAM (until resumable snapshots
+/// Snapshots capture the managed upper. The other root-disk kinds have nothing msb-owned on the host to capture: a tmpfs upper lives in guest RAM (until full snapshots
 /// capture memory), and a disk-image upper is a user-owned file msb never copies into artifacts it owns.
 fn ensure_snapshottable_root_disk(
     root_disk: Option<&RootDisk>,

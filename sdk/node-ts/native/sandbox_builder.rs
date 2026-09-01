@@ -127,7 +127,7 @@ impl JsSandboxBuilder {
         Ok(self)
     }
 
-    /// Boot a fresh sandbox from a snapshot artifact (path or name).
+    /// Create a sandbox from a snapshot artifact (path or name).
     /// Mutually exclusive with `image()` / `imageWith()` — the
     /// snapshot already pins the image reference and digest.
     #[napi(js_name = "fromSnapshot")]
@@ -139,6 +139,14 @@ impl JsSandboxBuilder {
     pub fn from_snapshot(&mut self, path_or_name: String) -> &Self {
         let prev = self.take_inner();
         self.inner = Some(prev.from_snapshot(path_or_name));
+        self
+    }
+
+    /// Cold-boot only the disk state carried by a full snapshot.
+    #[napi(js_name = "diskOnly")]
+    pub fn disk_only(&mut self) -> &Self {
+        let prev = self.take_inner();
+        self.inner = Some(prev.disk_only());
         self
     }
 

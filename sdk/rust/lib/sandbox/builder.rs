@@ -17,7 +17,9 @@ use microsandbox_types::{PortProtocol, PublishedPortSpec};
 
 use super::{
     SandboxSpec,
-    config::{RestoreOverrideIntent, SandboxConfig, sandbox_log_level_from_runtime},
+    config::{
+        RestoreOverrideIntent, SandboxConfig, SnapshotRestoreMode, sandbox_log_level_from_runtime,
+    },
     exec::{Rlimit, RlimitResource},
     init::{HandoffInit, InitOptionsBuilder},
     types::{
@@ -1119,7 +1121,7 @@ impl SandboxBuilder {
         self
     }
 
-    /// Boot a fresh sandbox from a snapshot artifact.
+    /// Create a sandbox from a snapshot artifact.
     ///
     /// The snapshot already pins the image reference and digest, so
     /// this method is mutually exclusive with [`image`](Self::image)
@@ -1127,10 +1129,22 @@ impl SandboxBuilder {
     /// opened at `create()` time; content verification stays explicit.
     ///
     /// `path_or_name` accepts a snapshot artifact directory, an archive
-    /// file, or a bare name resolved under the default snapshots directory.
+    /// file, or a bare name resolved under the default snapshots directory. Disk snapshots cold
+    /// boot; full snapshots resume their captured execution unless [`disk_only`](Self::disk_only)
+    /// is selected.
     pub fn from_snapshot(mut self, path_or_name: impl Into<String>) -> Self {
         self.pending_snapshot = Some(path_or_name.into());
         self.pending_snapshot_from_config = false;
+        self
+    }
+
+    /// Cold-boot only the disk state carried by a full snapshot.
+    ///
+    /// This is a restore policy, not a different artifact kind. It must be combined with
+    /// [`from_snapshot`](Self::from_snapshot), and the selected artifact must contain checkpoint
+    /// state. Memory, execution, and device state are deliberately ignored.
+    pub fn disk_only(mut self) -> Self {
+        self.config.snapshot_restore_mode = SnapshotRestoreMode::DiskOnly;
         self
     }
 
@@ -1241,9 +1255,9 @@ impl SandboxBuilder {
         let file_state = match &snap.manifest().state {
             crate::snapshot::SnapshotState::File(state) => state,
             crate::snapshot::SnapshotState::Checkpoint(state) => {
-                if snap.manifest().scope != crate::snapshot::SnapshotScope::Resumable {
+                if snap.manifest().scope != crate::snapshot::SnapshotScope::Full {
                     return Err(crate::MicrosandboxError::SnapshotIntegrity(
-                        "checkpoint state must use resumable snapshot scope".into(),
+                        "checkpoint state must use full snapshot scope".into(),
                     ));
                 }
                 let expected = microsandbox_image::checkpoint::ObjectId::new(
@@ -1251,23 +1265,36 @@ impl SandboxBuilder {
                 )
                 .map_err(|error| crate::MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
                 let closure = snap.path().join(crate::snapshot::CHECKPOINT_DIRECTORY);
-                let opened = microsandbox_image::checkpoint::CheckpointClosure::open(
-                    &closure,
-                    Some(&expected),
-                )
+                let opened = match self.config.snapshot_restore_mode {
+                    SnapshotRestoreMode::Full => {
+                        microsandbox_image::checkpoint::CheckpointClosure::open(
+                            &closure,
+                            Some(&expected),
+                        )
+                    }
+                    SnapshotRestoreMode::DiskOnly => {
+                        microsandbox_image::checkpoint::CheckpointClosure::open_portable(
+                            &closure,
+                            Some(&expected),
+                        )
+                    }
+                }
                 .map_err(|error| crate::MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
                 if opened.checkpoint().checkpoint_id != state.checkpoint_id {
                     return Err(crate::MicrosandboxError::SnapshotIntegrity(
                         "snapshot and checkpoint closure identities differ".into(),
                     ));
                 }
-                let restore_overrides = self.restore_override_intent();
-                apply_checkpoint_restore_constraints(
-                    &mut self.config,
-                    state,
-                    &opened,
-                    restore_overrides,
-                )?;
+                if self.config.snapshot_restore_mode == SnapshotRestoreMode::Full {
+                    let restore_overrides = self.restore_override_intent();
+                    apply_checkpoint_restore_constraints(
+                        &mut self.config,
+                        state,
+                        &opened,
+                        restore_overrides,
+                    )?;
+                    self.config.suppress_launch_for_full_restore();
+                }
                 self.config.checkpoint_restore =
                     Some(microsandbox_runtime::launch::CheckpointRestoreConfig {
                         closure,
@@ -1277,6 +1304,11 @@ impl SandboxBuilder {
                 return Ok(());
             }
         };
+        if self.config.snapshot_restore_mode == SnapshotRestoreMode::DiskOnly {
+            return Err(crate::MicrosandboxError::InvalidConfig(
+                "disk_only requires a full snapshot with checkpoint state".into(),
+            ));
+        }
         if snap.manifest().scope != crate::snapshot::SnapshotScope::Disk {
             return Err(crate::MicrosandboxError::SnapshotIntegrity(
                 "file state must use disk snapshot scope".into(),
@@ -1502,9 +1534,17 @@ impl SandboxBuilder {
             }
             _ => {}
         }
+        if self.config.snapshot_restore_mode == SnapshotRestoreMode::DiskOnly
+            && self.config.snapshot_archive_source.is_none()
+            && self.config.checkpoint_restore.is_none()
+        {
+            return Err(crate::MicrosandboxError::InvalidConfig(
+                "disk_only must be combined with from_snapshot".into(),
+            ));
+        }
         if self.config.checkpoint_restore.is_some() && !self.config.spec.patches.is_empty() {
             return Err(crate::MicrosandboxError::InvalidConfig(
-                "patches cannot be combined with resumable snapshot restore".into(),
+                "patches cannot be combined with full snapshot restore".into(),
             ));
         }
 
@@ -1831,7 +1871,7 @@ pub(crate) fn apply_checkpoint_restore_constraints(
         && serde_json::to_value(requested)? != serde_json::to_value(&interface)?
     {
         return Err(MicrosandboxError::InvalidConfig(
-            "resumable restore cannot change the captured guest network identity".into(),
+            "full snapshot restore cannot change the captured guest network identity".into(),
         ));
     }
     config.spec.network.interface = Some(interface);
@@ -1864,7 +1904,7 @@ fn apply_checkpoint_resources(
         || (overrides.max_memory && config.spec.resources.max_memory_mib != max_memory_mib)
     {
         return Err(MicrosandboxError::InvalidConfig(
-            "a resumable snapshot must restore with its captured CPU and memory geometry".into(),
+            "a full snapshot must restore with its captured CPU and memory geometry".into(),
         ));
     }
     config.spec.resources.cpus = vcpus;
@@ -2404,6 +2444,18 @@ mod tests {
             err.to_string()
                 .contains("from_snapshot is mutually exclusive")
         );
+    }
+
+    #[tokio::test]
+    async fn test_builder_disk_only_requires_snapshot() {
+        let err = SandboxBuilder::new("test")
+            .image("alpine")
+            .disk_only()
+            .build()
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("disk_only must be combined"));
     }
 
     #[tokio::test]

@@ -311,12 +311,15 @@ func TestFFIWireShape_LegacyConfigFieldMapsToRootDisk(t *testing.T) {
 }
 
 func TestFFIWireShape_WithFromSnapshot(t *testing.T) {
-	got := marshalCreateOptions(t, WithFromSnapshot("after-pip-install"))
+	got := marshalCreateOptions(t, WithFromSnapshot("after-pip-install"), WithSnapshotDiskOnly())
 	if v := mustField(t, got, "snapshot"); v != "after-pip-install" {
 		t.Fatalf("snapshot = %v, want %q", v, "after-pip-install")
 	}
 	if _, present := got["image"]; present {
 		t.Fatal("image must not appear in payload when only snapshot is set")
+	}
+	if v := mustField(t, got, "snapshot_disk_only"); v != true {
+		t.Fatalf("snapshot_disk_only = %v, want true", v)
 	}
 }
 

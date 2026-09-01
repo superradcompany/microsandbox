@@ -362,7 +362,7 @@ mod tests {
         let checkpoint = CheckpointManifest {
             schema: "microsandbox.checkpoint/1".into(),
             checkpoint_id: "checkpoint".into(),
-            capture_intent: CaptureIntent::ResumableSnapshot,
+            capture_intent: CaptureIntent::FullSnapshot,
             architecture: std::env::consts::ARCH.into(),
             pause_generation: 7,
             execution_state: execution_id,

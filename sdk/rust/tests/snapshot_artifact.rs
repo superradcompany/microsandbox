@@ -52,7 +52,7 @@ fn make_artifact_with_scope(
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join(DEFAULT_UPPER_FILE), upper_bytes).unwrap();
 
-    let manifest = if scope == SnapshotScope::Resumable {
+    let manifest = if scope == SnapshotScope::Full {
         Manifest {
             scope,
             state: SnapshotState::Checkpoint(CheckpointSnapshotState {
@@ -646,30 +646,20 @@ async fn managed_v066_migration_rewrites_parent_to_stable_snapshot_id() {
 }
 
 #[tokio::test]
-async fn open_accepts_resumable_scope_artifact() {
+async fn open_accepts_full_scope_artifact() {
     let tmp = TempDir::new().unwrap();
-    let (dir, _) = make_artifact_with_scope(
-        tmp.path(),
-        "resumable-snap",
-        b"upper",
-        SnapshotScope::Resumable,
-    );
+    let (dir, _) = make_artifact_with_scope(tmp.path(), "full-snap", b"upper", SnapshotScope::Full);
 
     let snap = Snapshot::open(dir.to_string_lossy().as_ref())
         .await
         .unwrap();
-    assert_eq!(snap.manifest().scope, SnapshotScope::Resumable);
+    assert_eq!(snap.manifest().scope, SnapshotScope::Full);
 }
 
 #[tokio::test]
-async fn from_snapshot_rejects_resumable_artifact_without_checkpoint_closure() {
+async fn from_snapshot_rejects_full_artifact_without_checkpoint_closure() {
     let tmp = TempDir::new().unwrap();
-    let (dir, _) = make_artifact_with_scope(
-        tmp.path(),
-        "resumable-snap",
-        b"upper",
-        SnapshotScope::Resumable,
-    );
+    let (dir, _) = make_artifact_with_scope(tmp.path(), "full-snap", b"upper", SnapshotScope::Full);
 
     let err = microsandbox::Sandbox::builder("restore-scope-test")
         .from_snapshot(dir.to_string_lossy().to_string())
@@ -682,7 +672,7 @@ async fn from_snapshot_rejects_resumable_artifact_without_checkpoint_closure() {
     );
     assert!(
         !err.to_string().contains("restoring non-disk snapshots"),
-        "resumable restore should reach closure validation: {err}"
+        "full restore should reach closure validation: {err}"
     );
 }
 
@@ -1589,7 +1579,7 @@ async fn load_streams_large_archive_without_buffering() {
 }
 
 #[tokio::test]
-async fn create_rejects_resumable_before_touching_anything() {
+async fn create_rejects_full_before_touching_anything() {
     let tmp = TempDir::new().unwrap();
     let home = tmp.path().join("home");
     let backend = isolated_backend(&home).await;
@@ -1597,7 +1587,7 @@ async fn create_rejects_resumable_before_touching_anything() {
     microsandbox::with_backend(backend, async {
         let err = Snapshot::builder("warm")
             .from_sandbox("box")
-            .resumable()
+            .full()
             .create()
             .await
             .unwrap_err();

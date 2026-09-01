@@ -74,6 +74,7 @@ func buildFFICreateOptions(o SandboxConfig) ffi.CreateOptions {
 		ImageFstype:       o.ImageFstype,
 		ImageBind:         o.ImageBind,
 		Snapshot:          o.Snapshot,
+		SnapshotDiskOnly:  o.SnapshotDiskOnly,
 		MemoryMiB:         o.MemoryMiB,
 		CPUs:              o.CPUs,
 		MaxMemoryMiB:      o.MaxMemoryMiB,

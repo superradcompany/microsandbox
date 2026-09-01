@@ -1061,11 +1061,12 @@ export declare class SandboxBuilder {
    */
   rootDisk(sizeMibOrConfigure: number | ((d: RootDiskBuilder) => RootDiskBuilder)): this
   /**
-   * Boot a fresh sandbox from a snapshot artifact (path or name).
+   * Create a sandbox from a snapshot artifact (path or name).
    * Mutually exclusive with `image()` / `imageWith()` — the
    * snapshot already pins the image reference and digest.
    */
   fromSnapshot(pathOrName: string): this
+  diskOnly(): this
   /** Number of virtual CPUs. */
   cpus(count: number): this
   /** Boot-time maximum possible virtual CPUs. */
@@ -1504,7 +1505,7 @@ export declare class Snapshot {
   get checkpointId(): string | null
   get checkpointManifestDigest(): string | null
   get parent(): string | null
-  get scope(): 'disk' | 'resumable'
+  get scope(): 'disk' | 'full'
   get createdAt(): string
   get labels(): Record<string, string>
   get sourceSandbox(): string | null
@@ -1538,8 +1539,8 @@ export declare class SnapshotBuilder {
   force(): this
   /** Compute and record content integrity at create time. */
   recordIntegrity(): this
-  /** Request a future resumable snapshot. */
-  resumable(): this
+  /** Capture disk, memory, execution, and device state from a running sandbox. */
+  full(): this
   /** Snapshot the accumulated configuration. */
   build(): SnapshotConfig
   /**
@@ -1563,7 +1564,7 @@ export declare class SnapshotHandle {
   get digest(): string
   get name(): string | null
   get parentDigest(): string | null
-  get scope(): 'disk' | 'resumable'
+  get scope(): 'disk' | 'full'
   get imageRef(): string
   get stateKind(): string
   get format(): string | null
@@ -2338,7 +2339,7 @@ export interface SnapshotConfig {
   labels: Array<JsSnapshotLabel>
   force: boolean
   recordIntegrity: boolean
-  resumable: boolean
+  full: boolean
 }
 
 /** Snapshot index info from the local DB cache. */
@@ -2348,7 +2349,7 @@ export interface SnapshotInfo {
   name?: string
   parentDigest?: string
   imageRef: string
-  /** `"disk"` today; `"resumable"` once memory/device-state restore lands. */
+  /** `"disk"` for file state or `"full"` for a complete VM checkpoint. */
   scope: string
   /** `"raw"` or `"qcow2"`. */
   stateKind: string

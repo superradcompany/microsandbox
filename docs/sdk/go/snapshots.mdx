@@ -5,7 +5,7 @@ description: Go SDK - Snapshot API reference
 
 <Tooltip tip="Snapshot creation, restore, import, and export use local disk artifacts and are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
-Create disk snapshots of stopped sandboxes and resumable checkpoints of running sandboxes. See [Snapshots](/sandboxes/snapshots) for usage and lifecycle concepts.
+Create disk snapshots of stopped sandboxes and full checkpoints of running sandboxes. See [Snapshots](/sandboxes/snapshots) for usage and lifecycle concepts.
 
 ## Snapshot
 
@@ -17,7 +17,7 @@ Package-level helpers for snapshot artifacts. Access them through the exported `
 func (snapshotFactory) Create(ctx context.Context, opts SnapshotCreateOptions) (*SnapshotArtifact, error)
 ```
 
-Create a disk snapshot from a stopped or crashed sandbox, or set `Resumable` to checkpoint a running sandbox. [`SnapshotCreateOptions.Name`](#snapshotcreateoptionsstruct) and [`SnapshotCreateOptions.FromSandbox`](#snapshotcreateoptionsstruct) are both required.
+Create a disk snapshot from a stopped or crashed sandbox, or set `Full` to checkpoint a running sandbox. [`SnapshotCreateOptions.Name`](#snapshotcreateoptionsstruct) and [`SnapshotCreateOptions.FromSandbox`](#snapshotcreateoptionsstruct) are both required.
 
 <p className="msb-label">Parameters</p>
 
@@ -529,7 +529,7 @@ Upper-layer disk format: `"raw"` or `"qcow2"`.
 func (s *SnapshotArtifact) Scope() string
 ```
 
-Snapshot scope: `SnapshotScopeDisk` (`"disk"`) or `SnapshotScopeResumable` (`"resumable"`).
+Snapshot scope: `SnapshotScopeDisk` (`"disk"`) or `SnapshotScopeFull` (`"full"`).
 
 ---
 
@@ -685,7 +685,7 @@ Upper-layer disk format: `"raw"` or `"qcow2"`.
 func (h *SnapshotHandle) Scope() string
 ```
 
-Snapshot scope: `SnapshotScopeDisk` (`"disk"`) or `SnapshotScopeResumable` (`"resumable"`).
+Snapshot scope: `SnapshotScopeDisk` (`"disk"`) or `SnapshotScopeFull` (`"full"`).
 
 ---
 
@@ -719,12 +719,12 @@ Snapshot creation time, decoded from the index's Unix timestamp.
 
 <p className="msb-backref">Returned by <a href="#s-scope">s.Scope()</a> · <a href="#h-scope">h.Scope()</a></p>
 
-Scope of what a snapshot captures: disk-only or disk plus resumable VM state.
+Scope of what a snapshot captures: disk-only or disk plus complete VM state.
 
 | Constant | Value | Description |
 |----------|-------|-------------|
 | `SnapshotScopeDisk` | `"disk"` | Disk-only snapshot |
-| `SnapshotScopeResumable` | `"resumable"` | Disk plus VM state (not yet supported) |
+| `SnapshotScopeFull` | `"full"` | Disk plus complete VM execution state |
 
 ## Types
 
@@ -742,7 +742,7 @@ Configures [`Snapshot.Create`](#snapshot-create). `Name` and `FromSandbox` are b
 | Labels | `map[string]string` | Arbitrary user labels recorded in the manifest |
 | Force | `bool` | Overwrite an existing artifact with the same name |
 | RecordIntegrity | `bool` | Record content hashes so [`Verify`](#s-verify) can recompute them later |
-| Resumable | `bool` | Capture a running sandbox's resumable checkpoint instead of a stopped-sandbox disk snapshot |
+| Full | `bool` | Capture a running sandbox's full checkpoint instead of a stopped-sandbox disk snapshot |
 
 ### SnapshotSaveOptions<span className="msb-tag is-type" style={{marginLeft: "8px"}}>struct</span>
 
@@ -767,7 +767,7 @@ Result of [`Verify`](#s-verify).
 | Digest | `string` | Recomputed manifest digest |
 | Path | `string` | Artifact directory that was verified |
 | Upper | [`SnapshotUpperVerifyStatus`](#snapshotupperverifystatusstruct) | Upper-layer integrity status |
-| Checkpoint | `*SnapshotCheckpointVerifyStatus` | Verified checkpoint root for resumable state; otherwise `nil` |
+| Checkpoint | `*SnapshotCheckpointVerifyStatus` | Verified checkpoint root for full state; otherwise `nil` |
 
 ### SnapshotUpperVerifyStatus<span className="msb-tag is-type" style={{marginLeft: "8px"}}>struct</span>
 

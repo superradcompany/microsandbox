@@ -418,7 +418,7 @@ pub fn translate_released_flat_forward(source: &[u8]) -> ImageResult<ReleasedFla
         snapshot_id,
         scope: match legacy.scope {
             ReleasedSnapshotScope::Disk => SnapshotScope::Disk,
-            ReleasedSnapshotScope::Resumable => SnapshotScope::Resumable,
+            ReleasedSnapshotScope::Resumable => SnapshotScope::Full,
         },
         state,
         capture: SnapshotCapture {

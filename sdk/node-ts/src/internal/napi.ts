@@ -172,6 +172,7 @@ export type NapiSandboxBuilderCtor = new (name: string) => NapiSandboxBuilder;
 export interface NapiSandboxBuilderSetters {
   image(s: string): this;
   fromSnapshot(pathOrName: string): this;
+  diskOnly(): this;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   imageWith(configure: (b: any) => any): this;
   /** Managed root disk of the given size in MiB. Requires an OCI image. */
@@ -558,7 +559,7 @@ export interface NapiSnapshotBuilderSetters {
   label(key: string, value: string): this;
   force(): this;
   recordIntegrity(): this;
-  resumable(): this;
+  full(): this;
 }
 
 export interface NapiSnapshotBuilder extends NapiSnapshotBuilderSetters {
@@ -590,7 +591,7 @@ export interface NapiSnapshot {
   readonly checkpointId: string | null | undefined;
   readonly checkpointManifestDigest: string | null | undefined;
   readonly parent: string | null | undefined;
-  readonly scope: string; // "disk" | "resumable"
+  readonly scope: string; // "disk" | "full"
   readonly createdAt: string; // RFC 3339 UTC
   readonly labels: Record<string, string>;
   readonly sourceSandbox: string | null | undefined;
@@ -602,7 +603,7 @@ export interface NapiSnapshotHandle {
   readonly digest: string;
   readonly name: string | null | undefined;
   readonly parentDigest: string | null | undefined;
-  readonly scope: string; // "disk" | "resumable"
+  readonly scope: string; // "disk" | "full"
   readonly imageRef: string;
   readonly stateKind: string;
   readonly format: string | null | undefined;
@@ -624,7 +625,7 @@ export interface NapiSnapshotInfo {
   readonly digest: string;
   readonly name: string | null | undefined;
   readonly parentDigest: string | null | undefined;
-  readonly scope: string; // "disk" | "resumable"
+  readonly scope: string; // "disk" | "full"
   readonly imageRef: string;
   readonly stateKind: string;
   readonly format: string | null | undefined;

@@ -5,7 +5,7 @@ description: Python SDK - Snapshot API reference
 
 <Tooltip tip="Snapshot creation, restore, import, and export use local disk artifacts and are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
-Create disk snapshots of stopped sandboxes and resumable checkpoints of running sandboxes. See [Snapshots](/sandboxes/snapshots) for usage and lifecycle concepts.
+Create disk snapshots of stopped sandboxes and full checkpoints of running sandboxes. See [Snapshots](/sandboxes/snapshots) for usage and lifecycle concepts.
 
 ## SandboxHandle
 
@@ -54,10 +54,10 @@ print(snap.digest)
 
 ```python
 @staticmethod
-async def create(name: str, *, from_snapshot: str | os.PathLike | None = None, **kwargs) -> Sandbox
+async def create(name: str, *, from_snapshot: str | os.PathLike | None = None, disk_only: bool = False, **kwargs) -> Sandbox
 ```
 
-Boot a fresh sandbox from a snapshot artifact by passing `from_snapshot=` as a peer of `image=`. The two are mutually exclusive: pass exactly one. See [`Sandbox.create()`](/sdk/python/sandbox#sandbox-create) for the full set of configuration kwargs.
+Create a sandbox from a snapshot artifact by passing `from_snapshot=` as a peer of `image=`. Disk snapshots cold-boot; full snapshots resume captured execution. The two sources are mutually exclusive: pass exactly one. See [`Sandbox.create()`](/sdk/python/sandbox#sandbox-create) for the full set of configuration kwargs.
 
 <p className="msb-label">Parameters</p>
 
@@ -69,6 +69,10 @@ Boot a fresh sandbox from a snapshot artifact by passing `from_snapshot=` as a p
   <div className="msb-param">
     <div className="msb-param-key"><code>from_snapshot</code><span className="msb-type">str | os.PathLike | None</span></div>
     <div className="msb-param-desc">Snapshot bare name, artifact directory, or archive file to boot from instead of <code>image=</code>.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>disk_only</code><span className="msb-type">bool</span></div>
+    <div className="msb-param-desc">Cold-boot only the disk state carried by a full snapshot. Default <code>False</code> resumes full snapshot execution.</div>
   </div>
 </div>
 
@@ -211,11 +215,11 @@ async def create(
     labels: dict[str, str] | None = None,
     force: bool = False,
     record_integrity: bool = False,
-    resumable: bool = False,
+    full: bool = False,
 ) -> Snapshot
 ```
 
-Create a disk snapshot from a stopped or crashed sandbox, or set `resumable=True` to checkpoint a running sandbox. `name` is resolved under the default snapshots directory (`~/.microsandbox/snapshots/<name>/`), or under `dest_dir=` when given; `from_sandbox=` names the sandbox to capture and is required.
+Create a disk snapshot from a stopped or crashed sandbox, or set `full=True` to checkpoint a running sandbox. `name` is resolved under the default snapshots directory (`~/.microsandbox/snapshots/<name>/`), or under `dest_dir=` when given; `from_sandbox=` names the sandbox to capture and is required.
 
 <p className="msb-label">Parameters</p>
 
@@ -245,7 +249,7 @@ Create a disk snapshot from a stopped or crashed sandbox, or set `resumable=True
     <div className="msb-param-desc">Record an integrity hash in the manifest so the artifact can be verified later. Default <code>False</code>.</div>
   </div>
   <div className="msb-param">
-    <div className="msb-param-key"><code>resumable</code><span className="msb-type">bool</span></div>
+    <div className="msb-param-key"><code>full</code><span className="msb-type">bool</span></div>
     <div className="msb-param-desc">Capture disk, memory, execution, and device state from a running sandbox. Default <code>False</code> selects stopped-sandbox disk capture.</div>
   </div>
 </div>
@@ -286,7 +290,7 @@ async def create_archive(
     labels: dict[str, str] | None = None,
     force: bool = False,
     record_integrity: bool = False,
-    resumable: bool = False,
+    full: bool = False,
     plain_tar: bool = False,
 ) -> SnapshotArchive
 ```
@@ -857,7 +861,7 @@ Captured snapshot state scope.
 | Member | Value | Description |
 |--------|-------|-------------|
 | `SnapshotScope.DISK` | `"disk"` | Disk-only state |
-| `SnapshotScope.RESUMABLE` | `"resumable"` | Disk, memory, and device state |
+| `SnapshotScope.FULL` | `"full"` | Disk, memory, and device state |
 
 ```python
 from microsandbox import SnapshotFormat, SnapshotScope, SnapshotStateKind

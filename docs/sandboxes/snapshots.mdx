@@ -1,15 +1,15 @@
 ---
 title: Snapshots
-description: Capture a sandbox's disk or resumable execution state as a portable artifact
+description: Capture a sandbox's disk or full execution state as a portable artifact
 icon: "code-branch"
 ---
 
 <Tooltip tip="Disk snapshots are local-only. On microsandbox cloud, use a named volume for state that must survive sandbox replacement."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
-A snapshot is a portable artifact that can hold either a sandbox's writable disk state or a resumable checkpoint of a running sandbox. Move it with `scp`, archive it as `.tar.zst`, or create a child sandbox from it.
+A snapshot is a portable artifact that can hold either a sandbox's writable disk state or a full checkpoint of a running sandbox. Move it with `scp`, archive it as `.tar.zst`, or create a child sandbox from it.
 
 <Note>
-Disk snapshots capture stopped or crashed sandboxes. Resumable snapshots use `--resumable` and capture a running sandbox without requiring the user to pause it first.
+Disk snapshots capture stopped or crashed sandboxes. Full snapshots use `--full` and capture a running sandbox without requiring the user to pause it first.
 </Note>
 
 ## What gets captured
@@ -17,7 +17,7 @@ Disk snapshots capture stopped or crashed sandboxes. Resumable snapshots use `--
 | Mode | Source | Captured state | Restore behavior |
 | ---- | ------ | -------------- | ---------------- |
 | Disk (default) | Stopped or crashed sandbox | Writable disk closure and pinned image | Cold-boots a fresh VM |
-| Resumable | Running sandbox | Disk, memory, vCPU, device, and admitted resource state | Eagerly resumes the captured execution in a child VM |
+| Full | Running sandbox | Disk, memory, vCPU, device, and admitted resource state | Eagerly resumes the captured execution in a child VM |
 
 Both modes produce the same schema-1 `snapshot.json` descriptor. Its closed `state.kind` is either `file` or `checkpoint`; checkpoint payloads live in a content-addressed closure rather than an `upper.ext4` file.
 
@@ -107,13 +107,13 @@ The default disk mode requires a stopped or crashed sandbox; running sandboxes a
 
 ## Capture a running sandbox
 
-Use resumable mode when the child must continue the captured processes and memory instead of cold-booting from disk state:
+Use full mode when the child must continue the captured processes and memory instead of cold-booting from disk state:
 
 <CodeGroup>
 ```rust Rust
 let snap = Snapshot::builder("worker-checkpoint")
     .from_sandbox("worker")
-    .resumable()
+    .full()
     .create()
     .await?;
 ```
@@ -121,7 +121,7 @@ let snap = Snapshot::builder("worker-checkpoint")
 ```typescript TypeScript
 const snap = await Snapshot.builder("worker-checkpoint")
   .fromSandbox("worker")
-  .resumable()
+  .full()
   .create();
 ```
 
@@ -129,7 +129,7 @@ const snap = await Snapshot.builder("worker-checkpoint")
 snap = await Snapshot.create(
     "worker-checkpoint",
     from_sandbox="worker",
-    resumable=True,
+    full=True,
 )
 ```
 
@@ -137,12 +137,12 @@ snap = await Snapshot.create(
 snap, err := m.Snapshot.Create(ctx, m.SnapshotCreateOptions{
     Name:        "worker-checkpoint",
     FromSandbox: "worker",
-    Resumable:   true,
+    Full:   true,
 })
 ```
 
 ```bash CLI
-msb snapshot create worker-checkpoint --from worker --resumable
+msb snapshot create worker-checkpoint --from worker --full
 ```
 </CodeGroup>
 
@@ -199,7 +199,7 @@ msb snapshot create after-pip-install \
 ```
 </CodeGroup>
 
-Direct capture publishes only the archive and returns its snapshot ID and path. It creates no intermediate snapshot directory and no local index row. Add `--resumable` to capture a running sandbox directly to the same archive, or `--plain-tar` to skip zstd compression.
+Direct capture publishes only the archive and returns its snapshot ID and path. It creates no intermediate snapshot directory and no local index row. Add `--full` to capture a running sandbox directly to the same archive, or `--plain-tar` to skip zstd compression.
 
 An explicit archive path can also be used directly as the source of a new sandbox:
 
@@ -255,6 +255,48 @@ msb run --name worker --from-snapshot after-pip-install -- python -V
 </CodeGroup>
 
 For disk state, creation cold-boots from a child-owned writable copy. For checkpoint state, creation eagerly restores the captured execution into child-owned state.
+
+A full restore does not also run the image CMD: the processes in memory are already the workload. `msb run` publishes that restored sandbox in the background and prints its name because there is no new foreground command to attach. If the command includes arguments after `--`, they are ignored with a warning; run a separate command afterward with `msb exec`.
+
+To discard the captured execution and cold-boot only its filesystem state, select disk-only restore:
+
+<CodeGroup>
+```rust Rust
+let sb = Sandbox::builder("worker")
+    .from_snapshot("worker-checkpoint")
+    .disk_only()
+    .create()
+    .await?;
+```
+
+```typescript TypeScript
+const sb = await Sandbox.builder("worker")
+  .fromSnapshot("worker-checkpoint")
+  .diskOnly()
+  .create();
+```
+
+```python Python
+sb = await Sandbox.create(
+    "worker",
+    from_snapshot="worker-checkpoint",
+    disk_only=True,
+)
+```
+
+```go Go
+sb, err := m.CreateSandbox(ctx, "worker",
+    m.WithFromSnapshot("worker-checkpoint"),
+    m.WithSnapshotDiskOnly(),
+)
+```
+
+```bash CLI
+msb run --name worker --from-snapshot worker-checkpoint --disk-only
+```
+</CodeGroup>
+
+Disk-only restore copies only the checkpoint's disk chain, creates a fresh writable qcow2 head, and performs an ordinary boot. It does not require the destination to support the checkpoint's memory or execution codec. The full capture freezes workloads and syncs guest filesystems before pausing the VM, so this cold-boot view is filesystem-clean.
 
 ## List, inspect, and remove
 

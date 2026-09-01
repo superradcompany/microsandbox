@@ -72,7 +72,7 @@ pub enum ControlRequest {
         changes: Vec<SecretLiveChange>,
     },
 
-    /// Produce one same-epoch resumable checkpoint and return the source to its prior running
+    /// Produce one same-epoch full checkpoint and return the source to its prior running
     /// state after root-last publication.
     CheckpointCreate {
         /// Caller-selected safe checkpoint identity.
@@ -86,8 +86,8 @@ pub enum ControlRequest {
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CheckpointCaptureIntent {
-    /// User-requested resumable snapshot.
-    ResumableSnapshot,
+    /// User-requested full snapshot.
+    FullSnapshot,
     /// Local idle/park continuation.
     Park,
     /// Transparent continuity operation.
@@ -522,7 +522,7 @@ mod tests {
     fn checkpoint_request_round_trips_through_json() {
         let request = ControlRequest::CheckpointCreate {
             checkpoint_id: "checkpoint_0123456789abcdef".into(),
-            intent: CheckpointCaptureIntent::ResumableSnapshot,
+            intent: CheckpointCaptureIntent::FullSnapshot,
         };
 
         let json = serde_json::to_string(&request).unwrap();
@@ -532,7 +532,7 @@ mod tests {
             parsed,
             ControlRequest::CheckpointCreate {
                 checkpoint_id,
-                intent: CheckpointCaptureIntent::ResumableSnapshot,
+                intent: CheckpointCaptureIntent::FullSnapshot,
             } if checkpoint_id == "checkpoint_0123456789abcdef"
         ));
     }

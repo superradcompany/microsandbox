@@ -101,6 +101,17 @@ pub(crate) enum LaunchIntent {
     Background,
 }
 
+/// Materialization selected when a checkpoint snapshot is used as a sandbox source.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum SnapshotRestoreMode {
+    /// Restore disk, memory, execution, and device state.
+    #[default]
+    Full,
+
+    /// Use only the checkpoint's disk closure and perform an ordinary cold boot.
+    DiskOnly,
+}
+
 /// Explicit resource choices that must not be silently replaced during deferred archive restore.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct RestoreOverrideIntent {
@@ -196,6 +207,14 @@ pub struct SandboxConfig {
     #[serde(skip)]
     pub(crate) checkpoint_restore: Option<CheckpointRestoreConfig>,
 
+    /// Transient checkpoint materialization policy selected by the caller.
+    #[serde(skip)]
+    pub(crate) snapshot_restore_mode: SnapshotRestoreMode,
+
+    /// Whether this create operation resumed execution from a full snapshot.
+    #[serde(skip)]
+    pub(crate) resumed_from_full_snapshot: bool,
+
     /// Child-owned oldest-to-head upper chain prepared for checkpoint restore.
     #[serde(skip)]
     pub(crate) snapshot_upper_layers: Vec<RootfsUpperLayerConfig>,
@@ -207,6 +226,10 @@ pub struct SandboxConfig {
     /// Transient process-launch intent for the current create operation.
     #[serde(skip)]
     pub(crate) launch_intent: LaunchIntent,
+
+    /// Durable CMD before a detached one-shot command temporarily replaced it.
+    #[serde(skip)]
+    pub(crate) launch_cmd_before_override: Option<Option<Vec<String>>>,
 
     /// Whether image-init routing consumed the requested boot workload.
     #[serde(skip)]
@@ -241,9 +264,12 @@ impl SandboxConfig {
     pub(crate) fn clone_for_persistence(&self) -> Self {
         let mut config = self.clone();
         config.checkpoint_restore = None;
+        config.snapshot_restore_mode = SnapshotRestoreMode::Full;
+        config.resumed_from_full_snapshot = false;
         config.snapshot_upper_layers.clear();
         config.restore_overrides = RestoreOverrideIntent::default();
         config.launch_intent = LaunchIntent::None;
+        config.launch_cmd_before_override = None;
         config.init_owns_workload = false;
         if config.init_workload_arg_count > 0 {
             if let Some(init) = config.spec.init.as_mut() {
@@ -277,6 +303,9 @@ impl SandboxConfig {
     /// same OCI process.
     pub(crate) fn set_background_command(&mut self, command: Vec<String>) {
         if !command.is_empty() {
+            if self.launch_cmd_before_override.is_none() {
+                self.launch_cmd_before_override = Some(self.spec.runtime.cmd.clone());
+            }
             self.spec.runtime.cmd = Some(command);
         }
         self.launch_intent = LaunchIntent::Background;
@@ -290,12 +319,28 @@ impl SandboxConfig {
     /// Clear process-launch intent after another mechanism takes ownership of the command.
     pub(crate) fn clear_launch_intent(&mut self) {
         self.launch_intent = LaunchIntent::None;
+        self.launch_cmd_before_override = None;
+    }
+
+    /// Discard a requested startup command because restored execution already owns the workload.
+    pub(crate) fn suppress_launch_for_full_restore(&mut self) {
+        if let Some(previous) = self.launch_cmd_before_override.take() {
+            self.spec.runtime.cmd = previous;
+        }
+        self.launch_intent = LaunchIntent::None;
+        self.resumed_from_full_snapshot = true;
     }
 
     /// Return whether inherited image init routing owns this create operation's boot workload.
     #[doc(hidden)]
     pub fn init_owns_boot_workload(&self) -> bool {
         self.init_owns_workload
+    }
+
+    /// Return whether this create operation resumed execution from a full snapshot.
+    #[doc(hidden)]
+    pub fn resumed_from_full_snapshot(&self) -> bool {
+        self.resumed_from_full_snapshot
     }
 
     /// Apply OCI image config as defaults. User-provided values take precedence.
@@ -742,9 +787,12 @@ impl Default for SandboxConfig {
             snapshot_upper_source: None,
             snapshot_archive_source: None,
             checkpoint_restore: None,
+            snapshot_restore_mode: SnapshotRestoreMode::Full,
+            resumed_from_full_snapshot: false,
             snapshot_upper_layers: Vec::new(),
             restore_overrides: RestoreOverrideIntent::default(),
             launch_intent: LaunchIntent::None,
+            launch_cmd_before_override: None,
             init_owns_workload: false,
             init_workload_arg_count: 0,
         }
@@ -870,6 +918,27 @@ mod tests {
         );
         assert_eq!(config.spec.runtime.workdir, Some("/workspace".to_string()));
         assert_eq!(config.spec.runtime.user, Some("root".to_string()));
+    }
+
+    #[test]
+    fn full_restore_suppresses_transient_background_command() {
+        let mut config = SandboxConfig {
+            spec: SandboxSpec {
+                runtime: SandboxRuntimeOptions {
+                    cmd: Some(vec!["durable".to_string()]),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        config.set_background_command(vec!["ignored".to_string()]);
+        config.suppress_launch_for_full_restore();
+
+        assert_eq!(config.spec.runtime.cmd, Some(vec!["durable".to_string()]));
+        assert!(!config.should_launch_background_command());
+        assert!(config.resumed_from_full_snapshot());
     }
 
     #[test]

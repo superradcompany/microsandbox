@@ -40,7 +40,7 @@ pub struct SnapshotVerifyReport {
     pub path: PathBuf,
     /// Upper-layer content verification result.
     pub upper: UpperVerifyStatus,
-    /// Composite-checkpoint closure verification result, when this is a resumable snapshot.
+    /// Composite-checkpoint closure verification result, when this is a full snapshot.
     pub checkpoint: Option<CheckpointVerifyStatus>,
 }
 

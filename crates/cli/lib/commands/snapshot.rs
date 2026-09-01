@@ -20,7 +20,7 @@ pub struct SnapshotArgs {
 /// Snapshot subcommands.
 #[derive(Debug, Subcommand)]
 pub enum SnapshotCommands {
-    /// Create a disk snapshot from a stopped sandbox or a resumable snapshot from a running one.
+    /// Create a disk snapshot from a stopped sandbox or a full snapshot from a running one.
     Create(SnapshotCreateArgs),
 
     /// List indexed snapshots.
@@ -83,13 +83,9 @@ pub struct SnapshotCreateArgs {
     #[arg(long)]
     pub integrity: bool,
 
-    /// Request a resumable snapshot with memory/device state.
-    ///
-    /// This flag is reserved by the public contract. Current runtimes
-    /// return an unsupported-feature error instead of creating a
-    /// misleading disk-only artifact.
+    /// Capture disk, memory, execution, and device state from a running sandbox.
     #[arg(long)]
-    pub resumable: bool,
+    pub full: bool,
 
     /// Suppress output.
     #[arg(short, long)]
@@ -218,8 +214,8 @@ async fn create(args: SnapshotCreateArgs) -> anyhow::Result<()> {
     if args.integrity {
         builder = builder.record_integrity();
     }
-    if args.resumable {
-        builder = builder.resumable();
+    if args.full {
+        builder = builder.full();
     }
 
     let spinner = if args.quiet {
@@ -481,7 +477,7 @@ fn format_str(f: microsandbox::SnapshotFormat) -> &'static str {
 fn format_scope(scope: microsandbox::SnapshotScope) -> &'static str {
     match scope {
         microsandbox::SnapshotScope::Disk => "disk",
-        microsandbox::SnapshotScope::Resumable => "resumable",
+        microsandbox::SnapshotScope::Full => "full",
     }
 }
 
@@ -545,14 +541,14 @@ mod tests {
     }
 
     #[test]
-    fn create_parses_resumable_contract_flag() {
-        let args = parse_snapshot_args(&["create", "clean", "--from", "box", "--resumable"]);
+    fn create_parses_full_capture_flag() {
+        let args = parse_snapshot_args(&["create", "clean", "--from", "box", "--full"]);
         let SnapshotCommands::Create(args) = args.command else {
             panic!("expected create command");
         };
         assert_eq!(args.name, "clean");
         assert_eq!(args.from, "box");
-        assert!(args.resumable);
+        assert!(args.full);
     }
 
     #[test]

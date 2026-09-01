@@ -1,4 +1,4 @@
-//! Child-owned materialization for resumable snapshot restore.
+//! Child-owned materialization for full snapshot restore.
 
 use std::path::{Path, PathBuf};
 
@@ -27,6 +27,12 @@ pub(crate) struct CheckpointChildMaterialization {
     pub(crate) upper_layers: Vec<RootfsUpperLayerConfig>,
 }
 
+/// Child-owned disk state materialized without restoring checkpoint execution.
+pub(crate) struct CheckpointDiskMaterialization {
+    /// Complete root chain ending in a fresh child-private writable head.
+    pub(crate) upper_layers: Vec<RootfsUpperLayerConfig>,
+}
+
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
@@ -49,7 +55,7 @@ pub(crate) async fn materialize_checkpoint_for_child(
         return Err(MicrosandboxError::unsupported(
             Operation::SnapshotOps,
             UnsupportedReason::NotAvailable(
-                "resumable restore currently requires exactly one managed root disk generation"
+                "full snapshot restore currently requires exactly one managed root disk generation"
                     .into(),
             ),
         ));
@@ -74,6 +80,24 @@ pub(crate) async fn materialize_checkpoint_for_child(
     .await
 }
 
+/// Materialize only the disk closure from an installed full snapshot.
+///
+/// The source checkpoint is opened portably because memory and execution compatibility are
+/// irrelevant to a cold boot. Only referenced disk layers are copied into child staging.
+pub(crate) async fn materialize_checkpoint_disk_for_child(
+    source: &CheckpointRestoreConfig,
+    child_stage: &Path,
+) -> MicrosandboxResult<CheckpointDiskMaterialization> {
+    let expected = ObjectId::new(&source.checkpoint_root)
+        .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+    let source_closure = CheckpointClosure::open_portable(&source.closure, Some(&expected))
+        .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+    validate_checkpoint_identity(&source_closure, &source.checkpoint_id)?;
+    tokio::fs::create_dir_all(child_stage).await?;
+    let upper_layers = materialize_checkpoint_disk_layers(&source_closure, child_stage).await?;
+    Ok(CheckpointDiskMaterialization { upper_layers })
+}
+
 /// Adopt an already child-owned closure and create its private disk successor.
 ///
 /// Direct archive restore extracts the closure inside child staging, then renames it to the final
@@ -89,25 +113,69 @@ pub(crate) async fn materialize_checkpoint_child_state(
         .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
     let child_closure = CheckpointClosure::open(closure_destination, Some(&expected))
         .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
-    if child_closure.checkpoint().checkpoint_id != checkpoint_id {
+    validate_checkpoint_identity(&child_closure, checkpoint_id)?;
+    let upper_layers = materialize_checkpoint_disk_layers(&child_closure, child_stage).await?;
+
+    Ok(CheckpointChildMaterialization {
+        restore: CheckpointRestoreConfig {
+            closure: closure_destination.to_path_buf(),
+            checkpoint_root: checkpoint_root.to_string(),
+            checkpoint_id: checkpoint_id.to_string(),
+        },
+        upper_layers,
+    })
+}
+
+/// Adopt an extracted checkpoint closure only long enough to materialize its disk state.
+pub(crate) async fn materialize_checkpoint_child_disk_state(
+    closure: &Path,
+    checkpoint_root: &str,
+    checkpoint_id: &str,
+    child_stage: &Path,
+) -> MicrosandboxResult<CheckpointDiskMaterialization> {
+    let expected = ObjectId::new(checkpoint_root)
+        .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+    let child_closure = CheckpointClosure::open_portable(closure, Some(&expected))
+        .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+    validate_checkpoint_identity(&child_closure, checkpoint_id)?;
+    let upper_layers = materialize_checkpoint_disk_layers(&child_closure, child_stage).await?;
+    Ok(CheckpointDiskMaterialization { upper_layers })
+}
+
+//--------------------------------------------------------------------------------------------------
+// Functions: Helpers
+//--------------------------------------------------------------------------------------------------
+
+fn validate_checkpoint_identity(
+    closure: &CheckpointClosure,
+    checkpoint_id: &str,
+) -> MicrosandboxResult<()> {
+    if closure.checkpoint().checkpoint_id != checkpoint_id {
         return Err(MicrosandboxError::SnapshotIntegrity(
             "checkpoint restore source has another identity".into(),
         ));
     }
-    if child_closure.disks().len() != 1 {
+    if closure.disks().len() != 1 {
         return Err(MicrosandboxError::unsupported(
             Operation::SnapshotOps,
             UnsupportedReason::NotAvailable(
-                "resumable restore currently requires exactly one managed root disk generation"
+                "full snapshot restore currently requires exactly one managed root disk generation"
                     .into(),
             ),
         ));
     }
-    let disk = &child_closure.disks()[0];
+    Ok(())
+}
+
+async fn materialize_checkpoint_disk_layers(
+    closure: &CheckpointClosure,
+    child_stage: &Path,
+) -> MicrosandboxResult<Vec<RootfsUpperLayerConfig>> {
+    let disk = &closure.disks()[0];
     let mut upper_layers = Vec::with_capacity(disk.layers.len() + 1);
     for (index, layer) in disk.layers.iter().enumerate() {
         let target = checkpoint_layer_target(child_stage, index, &layer.format)?;
-        let source_layer = child_closure.disk_layer_path(layer);
+        let source_layer = closure.disk_layer_path(layer);
         let source_for_copy = source_layer.clone();
         let target_for_copy = target.clone();
         tokio::task::spawn_blocking(move || {
@@ -161,19 +229,8 @@ pub(crate) async fn materialize_checkpoint_child_state(
         format: "qcow2".into(),
     });
 
-    Ok(CheckpointChildMaterialization {
-        restore: CheckpointRestoreConfig {
-            closure: closure_destination.to_path_buf(),
-            checkpoint_root: checkpoint_root.to_string(),
-            checkpoint_id: checkpoint_id.to_string(),
-        },
-        upper_layers,
-    })
+    Ok(upper_layers)
 }
-
-//--------------------------------------------------------------------------------------------------
-// Functions: Helpers
-//--------------------------------------------------------------------------------------------------
 
 fn checkpoint_layer_target(
     child_stage: &Path,
@@ -258,7 +315,7 @@ mod tests {
         let checkpoint = CheckpointManifest {
             schema: "microsandbox.checkpoint/1".into(),
             checkpoint_id: "checkpoint_test".into(),
-            capture_intent: CaptureIntent::ResumableSnapshot,
+            capture_intent: CaptureIntent::FullSnapshot,
             architecture: std::env::consts::ARCH.into(),
             pause_generation: 7,
             execution_state: execution_id,
@@ -277,6 +334,13 @@ mod tests {
             checkpoint_id: checkpoint.checkpoint_id,
         };
         let child = temp.path().join("child");
+        let disk_child = temp.path().join("disk-child");
+
+        let disk_materialized = materialize_checkpoint_disk_for_child(&restore, &disk_child)
+            .await
+            .unwrap();
+        assert_eq!(disk_materialized.upper_layers.len(), 2);
+        assert!(!disk_child.join(CHILD_CHECKPOINT_DIRECTORY).exists());
 
         let materialized = materialize_checkpoint_for_child(&restore, &child)
             .await

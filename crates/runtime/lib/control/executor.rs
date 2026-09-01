@@ -266,8 +266,8 @@ impl RuntimeControlExecutor {
                     &self.vm,
                     &checkpoint_id,
                     match intent {
-                        CheckpointCaptureIntent::ResumableSnapshot => {
-                            microsandbox_image::checkpoint::CaptureIntent::ResumableSnapshot
+                        CheckpointCaptureIntent::FullSnapshot => {
+                            microsandbox_image::checkpoint::CaptureIntent::FullSnapshot
                         }
                         CheckpointCaptureIntent::Park => {
                             microsandbox_image::checkpoint::CaptureIntent::Park

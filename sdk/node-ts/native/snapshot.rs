@@ -58,7 +58,7 @@ pub struct JsSnapshotVerifyReport {
     pub upper_kind: String,
     pub upper_algorithm: Option<String>,
     pub upper_digest: Option<String>,
-    /// Verified composite-checkpoint root, when the artifact is resumable.
+    /// Verified composite-checkpoint root, when the artifact is full.
     pub checkpoint_root: Option<String>,
 }
 
@@ -77,7 +77,7 @@ pub struct JsSnapshotInfo {
     pub name: Option<String>,
     pub parent_digest: Option<String>,
     pub image_ref: String,
-    /// `"disk"` today; `"resumable"` once memory/device-state restore lands.
+    /// `"disk"` for file state or `"full"` for a complete VM checkpoint.
     pub scope: String,
     /// `"raw"` or `"qcow2"`.
     pub state_kind: String,
@@ -332,7 +332,7 @@ impl JsSnapshot {
             .map(ToString::to_string)
     }
 
-    #[napi(getter, ts_return_type = "'disk' | 'resumable'")]
+    #[napi(getter, ts_return_type = "'disk' | 'full'")]
     pub fn scope(&self) -> String {
         format_scope(self.inner.manifest().scope).into()
     }
@@ -417,7 +417,7 @@ impl JsSnapshotHandle {
         self.inner.parent_digest().map(|s| s.to_string())
     }
 
-    #[napi(getter, ts_return_type = "'disk' | 'resumable'")]
+    #[napi(getter, ts_return_type = "'disk' | 'full'")]
     pub fn scope(&self) -> String {
         format_scope(self.inner.scope()).into()
     }
@@ -515,7 +515,7 @@ fn format_str(f: RustSnapshotFormat) -> &'static str {
 fn format_scope(scope: RustSnapshotScope) -> &'static str {
     match scope {
         RustSnapshotScope::Disk => "disk",
-        RustSnapshotScope::Resumable => "resumable",
+        RustSnapshotScope::Full => "full",
     }
 }
 
