@@ -1593,7 +1593,10 @@ async fn create_full_resolves_source_before_touching_anything() {
             .create()
             .await
             .unwrap_err();
-        assert!(matches!(&err, microsandbox::MicrosandboxError::SandboxNotFound(_)));
+        assert!(matches!(
+            &err,
+            microsandbox::MicrosandboxError::SandboxNotFound(_)
+        ));
     })
     .await;
 

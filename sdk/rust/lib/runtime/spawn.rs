@@ -939,6 +939,13 @@ fn linux_u64_file(path: &str) -> MicrosandboxResult<u64> {
 
 /// Grow the sandbox-owned OCI root disk before boot when its persisted target increased.
 async fn prepare_oci_upper(config: &SandboxConfig, sandbox_dir: &Path) -> MicrosandboxResult<()> {
+    // A restored checkpoint chain already ends in a fresh writable qcow2 head. Its earlier layers
+    // are sealed capture state, even when the first layer retains the conventional `upper.ext4`
+    // filename, and must never pass through ordinary root-disk growth.
+    if !config.snapshot_upper_layers.is_empty() {
+        return Ok(());
+    }
+
     let RootfsSource::Oci(oci) = &config.spec.image else {
         return Ok(());
     };
@@ -3933,6 +3940,38 @@ mod tests {
                 .map(|restore| restore.checkpoint_id.as_str()),
             Some("checkpoint_test")
         );
+    }
+
+    #[tokio::test]
+    async fn test_checkpoint_root_chain_skips_ordinary_upper_growth() {
+        let temp = tempdir().unwrap();
+        let upper = temp.path().join("upper.ext4");
+        std::fs::File::create(&upper)
+            .unwrap()
+            .set_len(512 * 1024)
+            .unwrap();
+
+        let mut config = SandboxConfig::default();
+        config.spec.image = RootfsSource::Oci(OciRootfsSource {
+            reference: "alpine".into(),
+            root_disk: Some(microsandbox_types::RootDisk::managed(4096)),
+        });
+        config.snapshot_upper_layers = vec![
+            RootfsUpperLayerConfig {
+                path: upper.clone(),
+                format: "raw".into(),
+            },
+            RootfsUpperLayerConfig {
+                path: temp.path().join("upper-active.qcow2"),
+                format: "qcow2".into(),
+            },
+        ];
+
+        super::prepare_oci_upper(&config, temp.path())
+            .await
+            .unwrap();
+
+        assert_eq!(std::fs::metadata(upper).unwrap().len(), 512 * 1024);
     }
 
     #[tokio::test]

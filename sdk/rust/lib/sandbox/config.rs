@@ -498,7 +498,10 @@ impl SandboxConfig {
             ));
         }
 
-        if self.snapshot_upper_source.is_some() || self.snapshot_archive_source.is_some() {
+        if self.snapshot_upper_source.is_some()
+            || self.snapshot_archive_source.is_some()
+            || self.checkpoint_restore.is_some()
+        {
             return Ok(());
         }
 
@@ -805,7 +808,11 @@ impl Default for SandboxConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::{SandboxConfig, merge_env};
+    use std::path::PathBuf;
+
+    use microsandbox_runtime::launch::CheckpointRestoreConfig;
+
+    use super::{SandboxConfig, SnapshotRestoreMode, merge_env};
     use crate::sandbox::{
         HandoffInit, MountOptions, NamedVolumeMode, RootDisk, RootfsSource, StatVirtualization,
         VolumeMount,
@@ -1748,6 +1755,39 @@ mod tests {
             .unwrap();
 
         assert!(config.spec.image.oci_root_disk().is_none());
+    }
+
+    #[test]
+    fn test_apply_rootfs_defaults_skips_installed_checkpoint_restore() {
+        for restore_mode in [SnapshotRestoreMode::Full, SnapshotRestoreMode::DiskOnly] {
+            let mut config = SandboxConfig {
+                spec: SandboxSpec {
+                    image: RootfsSource::oci("python:3.12"),
+                    ..Default::default()
+                },
+                snapshot_restore_mode: restore_mode,
+                checkpoint_restore: Some(CheckpointRestoreConfig {
+                    closure: PathBuf::from("/tmp/checkpoint"),
+                    checkpoint_root:
+                        "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                            .into(),
+                    checkpoint_id: "checkpoint_test".into(),
+                }),
+                ..Default::default()
+            };
+
+            config
+                .apply_rootfs_defaults(&crate::config::OciSandboxDefaults {
+                    upper_size_mib: Some(8192),
+                    root_disk: None,
+                })
+                .unwrap();
+
+            assert!(
+                config.spec.image.oci_root_disk().is_none(),
+                "{restore_mode:?} restore inherited an ordinary root-disk default"
+            );
+        }
     }
 
     #[test]
