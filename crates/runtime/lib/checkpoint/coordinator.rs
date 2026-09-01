@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use microsandbox_agent_client::AgentClient;
 use microsandbox_image::checkpoint::{
@@ -81,6 +81,19 @@ struct PausedCapture {
     result: CheckpointResult,
     memory_plan: MemoryCapturePlan,
     memory_manifest: MemoryManifest,
+    timings: PausedCaptureTimings,
+}
+
+#[derive(Default)]
+struct PausedCaptureTimings {
+    execution_us: u128,
+    devices_us: u128,
+    managed_disk_us: u128,
+    memory_plan_us: u128,
+    memory_capture_us: u128,
+    extent_overlay_us: u128,
+    memory_manifest_us: u128,
+    checkpoint_publish_us: u128,
 }
 
 struct FrozenWorkload {
@@ -147,15 +160,19 @@ impl CheckpointCoordinator {
         checkpoint_id: &str,
         intent: CaptureIntent,
     ) -> Result<CheckpointResult, CheckpointFailure> {
+        let total_started = Instant::now();
         validate_checkpoint_id(checkpoint_id).map_err(CheckpointFailure::before_pause)?;
         validate_vm_generation_state(vm.vm_generation_state())
             .map_err(CheckpointFailure::before_pause)?;
+        let admission_started = Instant::now();
         let mut admitted = admit_resources(
             vm,
             &self.fs_resource_bindings,
             self.network_resource_binding.as_deref(),
         )
         .map_err(CheckpointFailure::before_pause)?;
+        let admission_us = admission_started.elapsed().as_micros();
+        let staging_started = Instant::now();
         let final_path = self.root.join(checkpoint_id);
         if final_path.exists() {
             return Err(CheckpointFailure::before_pause(
@@ -167,10 +184,13 @@ impl CheckpointCoordinator {
             rand::random::<u64>()
         ));
         std::fs::create_dir(&staging).map_err(CheckpointFailure::before_pause)?;
+        let staging_us = staging_started.elapsed().as_micros();
 
         // The guest latch is acquired while vCPUs can still service agentd.
         // It remains held in captured guest memory so a restored child cannot
         // run application code before VM Generation ID activation completes.
+        let workload_unavailable_started = Instant::now();
+        let freeze_started = Instant::now();
         let workload = match self.freeze_workload(checkpoint_id) {
             Ok(workload) => workload,
             Err(error) => {
@@ -178,8 +198,11 @@ impl CheckpointCoordinator {
                 return Err(CheckpointFailure::before_pause(error));
             }
         };
+        let freeze_us = freeze_started.elapsed().as_micros();
         admitted.resources.push(workload.resource_descriptor());
 
+        let vm_pause_window_started = Instant::now();
+        let pause_started = Instant::now();
         let pause = match vm.pause() {
             Ok(pause) => pause,
             Err(error) => {
@@ -192,6 +215,8 @@ impl CheckpointCoordinator {
                 };
             }
         };
+        let pause_barrier_us = pause_started.elapsed().as_micros();
+        let paused_capture_started = Instant::now();
         let paused = self.capture_paused(
             vm,
             checkpoint_id,
@@ -202,6 +227,7 @@ impl CheckpointCoordinator {
             &staging,
             &final_path,
         );
+        let paused_capture_us = paused_capture_started.elapsed().as_micros();
         let captured = match paused {
             Ok(captured) => captured,
             Err(mut failure) => {
@@ -229,6 +255,7 @@ impl CheckpointCoordinator {
             }
         };
 
+        let baseline_started = Instant::now();
         let baseline_published = match vm.publish_memory_capture(&captured.memory_plan) {
             Ok(_) => true,
             Err(error) => {
@@ -237,6 +264,8 @@ impl CheckpointCoordinator {
                 false
             }
         };
+        let baseline_publish_us = baseline_started.elapsed().as_micros();
+        let resume_started = Instant::now();
         if let Err(error) = vm.resume(pause) {
             return Err(CheckpointFailure {
                 message: format!("checkpoint published but source resume failed: {error}"),
@@ -244,6 +273,9 @@ impl CheckpointCoordinator {
                 published: Some(Box::new(captured.result)),
             });
         }
+        let resume_us = resume_started.elapsed().as_micros();
+        let vm_pause_window_us = vm_pause_window_started.elapsed().as_micros();
+        let thaw_started = Instant::now();
         if let Err(error) = self.thaw_workload(&workload) {
             let repause = vm.pause().err();
             let message = match repause {
@@ -258,11 +290,41 @@ impl CheckpointCoordinator {
                 published: Some(Box::new(captured.result)),
             });
         }
+        let thaw_us = thaw_started.elapsed().as_micros();
+        let workload_unavailable_us = workload_unavailable_started.elapsed().as_micros();
         if baseline_published {
             self.previous_memory = Some(captured.memory_manifest);
         } else {
             self.previous_memory = None;
         }
+        tracing::info!(
+            target: "microsandbox_checkpoint_timing",
+            operation = "capture",
+            checkpoint_id,
+            memory_mode = ?captured.result.memory_mode,
+            memory_logical_bytes = captured.result.memory_logical_bytes,
+            memory_emitted_bytes = captured.result.memory_emitted_bytes,
+            total_us = total_started.elapsed().as_micros(),
+            admission_us,
+            staging_us,
+            freeze_us,
+            pause_barrier_us,
+            paused_capture_us,
+            execution_us = captured.timings.execution_us,
+            devices_us = captured.timings.devices_us,
+            managed_disk_us = captured.timings.managed_disk_us,
+            memory_plan_us = captured.timings.memory_plan_us,
+            memory_capture_us = captured.timings.memory_capture_us,
+            extent_overlay_us = captured.timings.extent_overlay_us,
+            memory_manifest_us = captured.timings.memory_manifest_us,
+            checkpoint_publish_us = captured.timings.checkpoint_publish_us,
+            baseline_publish_us,
+            resume_us,
+            thaw_us,
+            vm_pause_window_us,
+            workload_unavailable_us,
+            "checkpoint capture timing"
+        );
         Ok(captured.result)
     }
 
@@ -341,6 +403,8 @@ impl CheckpointCoordinator {
         staging: &Path,
         final_path: &Path,
     ) -> Result<PausedCapture, CheckpointFailure> {
+        let mut timings = PausedCaptureTimings::default();
+        let execution_started = Instant::now();
         let execution = vm
             .capture_execution_state()
             .map_err(CheckpointFailure::resumable)?;
@@ -357,7 +421,9 @@ impl CheckpointCoordinator {
         self.store
             .link_into(&execution_id, staging)
             .map_err(CheckpointFailure::resumable)?;
+        timings.execution_us = execution_started.elapsed().as_micros();
 
+        let devices_started = Instant::now();
         let mut device_refs = Vec::with_capacity(inventory.len());
         let mut disk_roots = Vec::new();
         for (device_type, device_id) in inventory {
@@ -367,6 +433,7 @@ impl CheckpointCoordinator {
                         "managed root block device has no rollover provider",
                     )
                 })?;
+                let disk_started = Instant::now();
                 let rollover = disk
                     .rollover(vm, &self.runtime, staging, pause_generation)
                     .map_err(|error| CheckpointFailure {
@@ -374,6 +441,7 @@ impl CheckpointCoordinator {
                         keep_paused: error.keep_paused,
                         published: None,
                     })?;
+                timings.managed_disk_us += disk_started.elapsed().as_micros();
                 let manifest_bytes = rollover
                     .manifest
                     .to_canonical_bytes()
@@ -434,15 +502,19 @@ impl CheckpointCoordinator {
                 state: state_id,
             });
         }
+        timings.devices_us = devices_started.elapsed().as_micros();
 
+        let memory_plan_started = Instant::now();
         let (memory_plan, memory_mode, base_extents) =
             self.plan_memory(vm).map_err(CheckpointFailure::resumable)?;
+        timings.memory_plan_us = memory_plan_started.elapsed().as_micros();
         let mut sink = MemoryObjectSink {
             store: &self.store,
             updates: Vec::new(),
             pending_bytes: Vec::with_capacity(MEMORY_CHUNK_SIZE),
             pending_extents: Vec::new(),
         };
+        let memory_capture_started = Instant::now();
         let stats = match vm.capture_memory(
             &memory_plan,
             MemoryCaptureOptions::new(MEMORY_CHUNK_SIZE, true)
@@ -462,6 +534,8 @@ impl CheckpointCoordinator {
                 return Err(CheckpointFailure::resumable(error));
             }
         };
+        timings.memory_capture_us = memory_capture_started.elapsed().as_micros();
+        let extent_overlay_started = Instant::now();
         let extents = match overlay_extents(base_extents, updates) {
             Ok(extents) => extents,
             Err(error) => {
@@ -469,6 +543,8 @@ impl CheckpointCoordinator {
                 return Err(CheckpointFailure::resumable(error));
             }
         };
+        timings.extent_overlay_us = extent_overlay_started.elapsed().as_micros();
+        let memory_manifest_started = Instant::now();
         let memory_manifest = MemoryManifest {
             schema: "microsandbox.memory/1".into(),
             architecture: std::env::consts::ARCH.into(),
@@ -509,7 +585,9 @@ impl CheckpointCoordinator {
             let _ = vm.abandon_memory_capture(&memory_plan);
             return Err(CheckpointFailure::resumable(error));
         }
+        timings.memory_manifest_us = memory_manifest_started.elapsed().as_micros();
 
+        let checkpoint_publish_started = Instant::now();
         let checkpoint = CheckpointManifest {
             schema: "microsandbox.checkpoint/1".into(),
             checkpoint_id: checkpoint_id.into(),
@@ -545,6 +623,7 @@ impl CheckpointCoordinator {
             let _ = vm.abandon_memory_capture(&memory_plan);
             return Err(CheckpointFailure::resumable(error));
         }
+        timings.checkpoint_publish_us = checkpoint_publish_started.elapsed().as_micros();
 
         Ok(PausedCapture {
             result: CheckpointResult {
@@ -557,6 +636,7 @@ impl CheckpointCoordinator {
             },
             memory_plan,
             memory_manifest,
+            timings,
         })
     }
 

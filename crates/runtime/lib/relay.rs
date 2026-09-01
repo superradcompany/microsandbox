@@ -13,6 +13,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
 use bytes::{Bytes, BytesMut};
 #[cfg(unix)]
@@ -454,6 +455,8 @@ impl AgentRelay {
         restored: &RestoredAgentState,
         runtime_dir: &Path,
     ) -> RuntimeResult<()> {
+        let total_started = Instant::now();
+        let wait_paused_started = Instant::now();
         let paused = vm
             .wait_until_paused(RESTORE_ACTIVATION_TIMEOUT)
             .map_err(|error| {
@@ -464,23 +467,31 @@ impl AgentRelay {
                 "restored VM did not reach its construction pause".into(),
             ));
         };
+        let wait_paused_us = wait_paused_started.elapsed().as_micros();
 
         let generation_bytes: [u8; 16] = rand::random();
+        let prepared_persist_started = Instant::now();
         persist_restore_activation(
             runtime_dir,
             &restored.attempt_id,
             generation_bytes,
             "prepared",
         )?;
+        let prepared_persist_us = prepared_persist_started.elapsed().as_micros();
+        let generation_install_started = Instant::now();
         let request = vm
             .install_vm_generation_id(generation_bytes.into())
             .ok_or_else(|| {
                 RuntimeError::Custom("restored VM has no usable VM Generation ID transport".into())
             })?;
+        let generation_install_us = generation_install_started.elapsed().as_micros();
+        let resume_started = Instant::now();
         vm.resume(pause_generation).map_err(|error| {
             RuntimeError::Custom(format!("resume restored VM for activation: {error}"))
         })?;
+        let resume_us = resume_started.elapsed().as_micros();
 
+        let generation_ack_started = Instant::now();
         match vm.wait_vm_generation_processed(request, RESTORE_ACTIVATION_TIMEOUT) {
             Some(msb_krun::VmGenerationWaitOutcome::Processed) => {}
             Some(msb_krun::VmGenerationWaitOutcome::Superseded) => {
@@ -499,18 +510,40 @@ impl AgentRelay {
                 ));
             }
         }
+        let generation_ack_us = generation_ack_started.elapsed().as_micros();
 
+        let thaw_started = Instant::now();
         self.thaw_restored_workload(restored)?;
+        let thaw_us = thaw_started.elapsed().as_micros();
+        let ready_started = Instant::now();
         self.install_restored_ready(restored)?;
+        let ready_us = ready_started.elapsed().as_micros();
+        let activated_persist_started = Instant::now();
         persist_restore_activation(
             runtime_dir,
             &restored.attempt_id,
             generation_bytes,
             "activated",
         )?;
+        let activated_persist_us = activated_persist_started.elapsed().as_micros();
         if let Some(ref writer) = self.log_writer {
             writer.write_system("--- sandbox restored ---");
         }
+        tracing::info!(
+            target: "microsandbox_checkpoint_timing",
+            operation = "restore_activate",
+            checkpoint_id = restored.attempt_id,
+            total_us = total_started.elapsed().as_micros(),
+            wait_paused_us,
+            prepared_persist_us,
+            generation_install_us,
+            resume_us,
+            generation_ack_us,
+            thaw_us,
+            ready_us,
+            activated_persist_us,
+            "checkpoint restore activation timing"
+        );
         Ok(())
     }
 

@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use chrono::Utc;
 use microsandbox_image::checkpoint::{CheckpointClosure, ObjectId};
@@ -45,6 +46,7 @@ pub(super) async fn create_snapshot(
     local: &LocalBackend,
     config: SnapshotConfig,
 ) -> MicrosandboxResult<Snapshot> {
+    let total_started = Instant::now();
     let SnapshotConfig {
         name,
         dest_dir,
@@ -160,6 +162,7 @@ pub(super) async fn create_snapshot(
     tokio::fs::create_dir_all(&staging_dir).await?;
 
     let labels: BTreeMap<_, _> = labels.into_iter().collect();
+    let artifact_started = Instant::now();
     let built = build_artifact(
         &staging_dir,
         &src_upper,
@@ -177,14 +180,29 @@ pub(super) async fn create_snapshot(
             return Err(e);
         }
     };
+    let artifact_build_us = artifact_started.elapsed().as_micros();
 
+    let promote_started = Instant::now();
     promote_snapshot_directory(&staging_dir, &dest_dir, force).await?;
+    let promote_us = promote_started.elapsed().as_micros();
 
     // Best-effort index upsert. Failures are logged, not propagated —
     // the artifact on disk is the source of truth.
+    let index_started = Instant::now();
     if let Err(e) = index_upsert(local, &dest_dir, &digest, &manifest).await {
         tracing::warn!(error = %e, snapshot = %digest, "snapshot_index upsert failed");
     }
+    let index_us = index_started.elapsed().as_micros();
+    tracing::info!(
+        target: "microsandbox_checkpoint_timing",
+        operation = "snapshot_create_installed_stopped",
+        source_sandbox,
+        total_us = total_started.elapsed().as_micros(),
+        artifact_build_us,
+        promote_us,
+        index_us,
+        "stopped snapshot creation timing"
+    );
 
     Ok(Snapshot::from_parts(dest_dir, digest, manifest, labels))
 }
@@ -199,6 +217,7 @@ async fn create_full_snapshot(
     force: bool,
     model: sandbox_entity::Model,
 ) -> MicrosandboxResult<Snapshot> {
+    let total_started = Instant::now();
     let parent_dir = dest_dir
         .parent()
         .ok_or_else(|| {
@@ -211,6 +230,7 @@ async fn create_full_snapshot(
     tokio::fs::create_dir_all(&parent_dir).await?;
     let staging_dir = parent_dir.join(format!(".{name}.{:016x}.staging", rand::random::<u64>()));
     tokio::fs::create_dir_all(&staging_dir).await?;
+    let capture_started = Instant::now();
     let captured = match capture_full_snapshot(source_sandbox, labels, model).await {
         Ok(captured) => captured,
         Err(error) => {
@@ -218,9 +238,11 @@ async fn create_full_snapshot(
             return Err(error);
         }
     };
+    let capture_us = capture_started.elapsed().as_micros();
     let checkpoint_source = captured.checkpoint_path.clone();
     let checkpoint_destination = staging_dir.join(CHECKPOINT_DIRECTORY);
     let checkpoint_destination_for_copy = checkpoint_destination.clone();
+    let materialize_started = Instant::now();
     let materialized = tokio::task::spawn_blocking(move || {
         materialize_checkpoint_closure(&checkpoint_source, &checkpoint_destination_for_copy)
     })
@@ -230,8 +252,12 @@ async fn create_full_snapshot(
         let _ = tokio::fs::remove_dir_all(&staging_dir).await;
         return Err(error.into());
     }
+    let materialize_us = materialize_started.elapsed().as_micros();
+    let closure_verify_started = Instant::now();
     CheckpointClosure::open(&checkpoint_destination, Some(&captured.checkpoint_root))
         .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+    let closure_verify_us = closure_verify_started.elapsed().as_micros();
+    let metadata_started = Instant::now();
     super::metadata::write(&staging_dir, &captured.labels).await?;
     let descriptor = captured
         .manifest
@@ -245,11 +271,29 @@ async fn create_full_snapshot(
         let _ = tokio::fs::remove_dir_all(&staging_dir).await;
         return Err(error);
     }
+    let metadata_descriptor_us = metadata_started.elapsed().as_micros();
 
+    let promote_started = Instant::now();
     promote_snapshot_directory(&staging_dir, dest_dir, force).await?;
+    let promote_us = promote_started.elapsed().as_micros();
+    let index_started = Instant::now();
     if let Err(error) = index_upsert(local, dest_dir, &digest, &captured.manifest).await {
         tracing::warn!(error = %error, snapshot = %digest, "snapshot_index upsert failed");
     }
+    let index_us = index_started.elapsed().as_micros();
+    tracing::info!(
+        target: "microsandbox_checkpoint_timing",
+        operation = "snapshot_create_installed_full",
+        source_sandbox,
+        total_us = total_started.elapsed().as_micros(),
+        capture_us,
+        materialize_us,
+        closure_verify_us,
+        metadata_descriptor_us,
+        promote_us,
+        index_us,
+        "installed full snapshot creation timing"
+    );
     Ok(Snapshot::from_parts(
         dest_dir.to_path_buf(),
         digest,
@@ -266,6 +310,7 @@ pub(super) async fn create_snapshot_archive(
     out: &Path,
     plain_tar: bool,
 ) -> MicrosandboxResult<SnapshotArchive> {
+    let total_started = Instant::now();
     let SnapshotConfig {
         name,
         dest_dir,
@@ -288,11 +333,14 @@ pub(super) async fn create_snapshot_archive(
         .await?
         .ok_or_else(|| MicrosandboxError::SandboxNotFound(source_sandbox.clone()))?;
     if full {
+        let capture_started = Instant::now();
         let captured = capture_full_snapshot(&source_sandbox, labels, model).await?;
+        let capture_us = capture_started.elapsed().as_micros();
         let digest = captured
             .manifest
             .digest()
             .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+        let archive_started = Instant::now();
         super::archive::save_direct_checkpoint_snapshot(
             &captured.manifest,
             &captured.labels,
@@ -303,6 +351,17 @@ pub(super) async fn create_snapshot_archive(
             force,
         )
         .await?;
+        let archive_us = archive_started.elapsed().as_micros();
+        tracing::info!(
+            target: "microsandbox_checkpoint_timing",
+            operation = "snapshot_create_archive_full",
+            source_sandbox,
+            plain_tar,
+            total_us = total_started.elapsed().as_micros(),
+            capture_us,
+            archive_us,
+            "direct full snapshot archive timing"
+        );
         return Ok(SnapshotArchive::from_parts(
             out.to_path_buf(),
             digest,
@@ -354,11 +413,13 @@ pub(super) async fn create_snapshot_archive(
             source_layer.display()
         )));
     }
+    let integrity_started = Instant::now();
     let integrity = if record_integrity {
         Some(super::verify::compute_merkle_integrity(&source_layer).await?)
     } else {
         None
     };
+    let integrity_us = integrity_started.elapsed().as_micros();
     let labels: BTreeMap<_, _> = labels.into_iter().collect();
     let manifest = new_file_manifest(
         metadata.len(),
@@ -370,6 +431,7 @@ pub(super) async fn create_snapshot_archive(
     let digest = manifest
         .digest()
         .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+    let archive_started = Instant::now();
     super::archive::save_direct_file_snapshot(
         &manifest,
         &labels,
@@ -380,6 +442,19 @@ pub(super) async fn create_snapshot_archive(
         force,
     )
     .await?;
+    let archive_us = archive_started.elapsed().as_micros();
+    tracing::info!(
+        target: "microsandbox_checkpoint_timing",
+        operation = "snapshot_create_archive_stopped",
+        source_sandbox,
+        plain_tar,
+        record_integrity,
+        logical_bytes = metadata.len(),
+        total_us = total_started.elapsed().as_micros(),
+        integrity_us,
+        archive_us,
+        "direct stopped snapshot archive timing"
+    );
     Ok(SnapshotArchive::from_parts(
         out.to_path_buf(),
         digest,
@@ -508,6 +583,7 @@ async fn build_artifact(
     source_sandbox: &str,
     record_integrity: bool,
 ) -> MicrosandboxResult<(String, Manifest)> {
+    let total_started = Instant::now();
     // Copy the upper layer (sparse-aware, see microsandbox_utils::copy).
     let snapshot_id = SnapshotId::new(format!("snap_{:032x}", rand::random::<u128>()))
         .map_err(|e| MicrosandboxError::SnapshotIntegrity(e.to_string()))?;
@@ -523,12 +599,15 @@ async fn build_artifact(
     .await?;
     let src_upper_clone = src_upper.to_path_buf();
     let dst_upper_clone = dst_upper.clone();
+    let copy_started = Instant::now();
     let copied_len = tokio::task::spawn_blocking(move || {
         microsandbox_utils::copy::fast_copy(&src_upper_clone, &dst_upper_clone)
     })
     .await
     .map_err(|e| MicrosandboxError::Custom(format!("snapshot copy task: {e}")))??;
+    let copy_us = copy_started.elapsed().as_micros();
 
+    let payload_sync_started = Instant::now();
     let dst_upper_for_sync = dst_upper.clone();
     tokio::task::spawn_blocking(move || -> std::io::Result<()> {
         let f = std::fs::OpenOptions::new()
@@ -540,18 +619,22 @@ async fn build_artifact(
     })
     .await
     .map_err(|e| MicrosandboxError::Custom(format!("snapshot upper fsync task: {e}")))??;
+    let payload_sync_us = payload_sync_started.elapsed().as_micros();
 
     // Persistent payload integrity is deliberately opt-in: large allocated
     // uppers make any independent content pass observable. When requested,
     // the sparse-aware Merkle construction skips known all-hole subtrees.
+    let integrity_started = Instant::now();
     let integrity = if record_integrity {
         Some(super::verify::compute_merkle_integrity(&dst_upper).await?)
     } else {
         None
     };
+    let integrity_us = integrity_started.elapsed().as_micros();
 
     // Labels are local presentation metadata. Persist them before the
     // descriptor is published so they never alter snapshot identity.
+    let descriptor_started = Instant::now();
     super::metadata::write(dir, labels).await?;
     let manifest = Manifest {
         schema: SCHEMA.into(),
@@ -611,6 +694,20 @@ async fn build_artifact(
     .await
     .map_err(|e| MicrosandboxError::Custom(format!("snapshot fsync task: {e}")))??;
     tokio::fs::rename(&tmp_path, &manifest_path).await?;
+    let descriptor_us = descriptor_started.elapsed().as_micros();
+    tracing::info!(
+        target: "microsandbox_checkpoint_timing",
+        operation = "snapshot_build_file_artifact",
+        source_sandbox,
+        record_integrity,
+        logical_bytes = copied_len,
+        total_us = total_started.elapsed().as_micros(),
+        copy_us,
+        payload_sync_us,
+        integrity_us,
+        descriptor_us,
+        "stopped snapshot artifact build timing"
+    );
 
     Ok((digest, manifest))
 }

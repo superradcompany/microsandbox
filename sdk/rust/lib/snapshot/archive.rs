@@ -16,6 +16,7 @@ use std::os::windows::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
 use std::pin::Pin;
 use std::task::{Context, Poll};
+use std::time::Instant;
 
 use async_compression::tokio::bufread::ZstdDecoder;
 use async_compression::tokio::write::ZstdEncoder;
@@ -270,6 +271,8 @@ pub(super) async fn save_snapshot(
     out: &Path,
     opts: SaveOpts,
 ) -> MicrosandboxResult<()> {
+    let total_started = Instant::now();
+    let resolve_started = Instant::now();
     // Collect the artifact dirs we need to ship: the head snapshot
     // and (optionally) all ancestors via their stable snapshot IDs.
     let head = store::open_snapshot(local, name_or_path).await?;
@@ -340,6 +343,7 @@ pub(super) async fn save_snapshot(
             }
         }
     }
+    let resolve_us = resolve_started.elapsed().as_micros();
 
     // Write the archive.
     if let Some(parent) = out.parent()
@@ -354,6 +358,7 @@ pub(super) async fn save_snapshot(
         .create_new(true)
         .open(&temp_out)
         .await?;
+    let write_started = Instant::now();
     let write_result: MicrosandboxResult<()> = async {
         if opts.plain_tar {
             let mut builder = Builder::new(out_file);
@@ -390,6 +395,8 @@ pub(super) async fn save_snapshot(
         let _ = tokio::fs::remove_file(&temp_out).await;
         return Err(error);
     }
+    let write_us = write_started.elapsed().as_micros();
+    let durable_started = Instant::now();
     let durable = tokio::fs::OpenOptions::new()
         .read(true)
         // FlushFileBuffers requires a write-capable handle on Windows.
@@ -406,6 +413,24 @@ pub(super) async fn save_snapshot(
     if let Some(parent) = out.parent().filter(|parent| !parent.as_os_str().is_empty()) {
         std::fs::File::open(parent)?.sync_all()?;
     }
+    let durable_us = durable_started.elapsed().as_micros();
+    let archive_bytes = tokio::fs::metadata(out).await?.len();
+    tracing::info!(
+        target: "microsandbox_checkpoint_timing",
+        operation = "snapshot_save_archive",
+        source = name_or_path,
+        plain_tar = opts.plain_tar,
+        with_image = opts.with_image,
+        with_parents = opts.with_parents,
+        snapshot_count = snapshots.len(),
+        cache_file_count = cache_files.len(),
+        archive_bytes,
+        total_us = total_started.elapsed().as_micros(),
+        resolve_us,
+        write_us,
+        durable_us,
+        "snapshot archive save timing"
+    );
 
     Ok(())
 }
@@ -423,6 +448,7 @@ pub(super) async fn save_direct_file_snapshot(
     plain_tar: bool,
     force: bool,
 ) -> MicrosandboxResult<()> {
+    let total_started = Instant::now();
     manifest.validate().map_err(|error| {
         MicrosandboxError::SnapshotIntegrity(format!("invalid direct snapshot: {error}"))
     })?;
@@ -456,6 +482,7 @@ pub(super) async fn save_direct_file_snapshot(
         .create_new(true)
         .open(&temp_out)
         .await?;
+    let write_started = Instant::now();
     let write_result: MicrosandboxResult<()> = async {
         if plain_tar {
             let mut builder = Builder::new(out_file);
@@ -490,6 +517,8 @@ pub(super) async fn save_direct_file_snapshot(
         let _ = tokio::fs::remove_file(&temp_out).await;
         return Err(error);
     }
+    let write_us = write_started.elapsed().as_micros();
+    let durable_started = Instant::now();
     let durable = tokio::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -502,6 +531,18 @@ pub(super) async fn save_direct_file_snapshot(
     if let Some(parent) = out.parent().filter(|parent| !parent.as_os_str().is_empty()) {
         std::fs::File::open(parent)?.sync_all()?;
     }
+    let durable_us = durable_started.elapsed().as_micros();
+    let archive_bytes = tokio::fs::metadata(out).await?.len();
+    tracing::info!(
+        target: "microsandbox_checkpoint_timing",
+        operation = "snapshot_write_direct_file_archive",
+        plain_tar,
+        archive_bytes,
+        total_us = total_started.elapsed().as_micros(),
+        write_us,
+        durable_us,
+        "direct file snapshot archive write timing"
+    );
     Ok(())
 }
 
@@ -518,6 +559,7 @@ pub(super) async fn save_direct_checkpoint_snapshot(
     plain_tar: bool,
     force: bool,
 ) -> MicrosandboxResult<()> {
+    let total_started = Instant::now();
     manifest.validate().map_err(|error| {
         MicrosandboxError::SnapshotIntegrity(format!("invalid direct checkpoint: {error}"))
     })?;
@@ -540,6 +582,7 @@ pub(super) async fn save_direct_checkpoint_snapshot(
         .create_new(true)
         .open(&temp_out)
         .await?;
+    let write_started = Instant::now();
     let write_result: MicrosandboxResult<()> = async {
         if plain_tar {
             let mut builder = Builder::new(out_file);
@@ -574,6 +617,8 @@ pub(super) async fn save_direct_checkpoint_snapshot(
         let _ = tokio::fs::remove_file(&temp_out).await;
         return Err(error);
     }
+    let write_us = write_started.elapsed().as_micros();
+    let durable_started = Instant::now();
     let durable = tokio::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -586,6 +631,18 @@ pub(super) async fn save_direct_checkpoint_snapshot(
     if let Some(parent) = out.parent().filter(|parent| !parent.as_os_str().is_empty()) {
         std::fs::File::open(parent)?.sync_all()?;
     }
+    let durable_us = durable_started.elapsed().as_micros();
+    let archive_bytes = tokio::fs::metadata(out).await?.len();
+    tracing::info!(
+        target: "microsandbox_checkpoint_timing",
+        operation = "snapshot_write_direct_checkpoint_archive",
+        plain_tar,
+        archive_bytes,
+        total_us = total_started.elapsed().as_micros(),
+        write_us,
+        durable_us,
+        "direct checkpoint snapshot archive write timing"
+    );
     Ok(())
 }
 
@@ -833,6 +890,7 @@ pub(super) async fn load_snapshot(
     archive: &Path,
     dest: Option<&Path>,
 ) -> MicrosandboxResult<SnapshotHandle> {
+    let total_started = Instant::now();
     let snapshots_dir = match dest {
         Some(d) => d.to_path_buf(),
         None => local.snapshots_dir(),
@@ -859,6 +917,7 @@ pub(super) async fn load_snapshot(
         bytes.starts_with(&[0x28, 0xb5, 0x2f, 0xfd])
     };
 
+    let unpack_started = Instant::now();
     let unpacked = if is_zstd {
         let decoder = ZstdDecoder::new(buf);
         // The decoder and archive walker both carry sizeable buffers across
@@ -877,7 +936,9 @@ pub(super) async fn load_snapshot(
         ))
         .await?
     };
+    let unpack_us = unpack_started.elapsed().as_micros();
 
+    let validate_started = Instant::now();
     if unpacked.inventory.is_none() {
         super::migration::normalize_staged(local.db().await?, &unpacked.manifest_dirs).await?;
     } else if let Some(inventory) = unpacked.inventory.as_ref() {
@@ -906,7 +967,9 @@ pub(super) async fn load_snapshot(
         .to_path_buf();
     let head_manifest = imported[head_index].manifest().clone();
     let head_path = snapshots_dir.join(&head_relative);
+    let validate_us = validate_started.elapsed().as_micros();
 
+    let promote_started = Instant::now();
     ensure_promote_targets_available(snapshot_stage.path(), &snapshots_dir).await?;
     // Cache installation carries hashing buffers across await points. Keep
     // that future on the heap so the archive loader remains within Windows'
@@ -923,6 +986,7 @@ pub(super) async fn load_snapshot(
 
     // Index this and any sibling artifacts that landed in the dest dir.
     let _ = store::reindex_dir(local, &snapshots_dir).await;
+    let promote_index_us = promote_started.elapsed().as_micros();
 
     let (state_kind, format, fstype, checkpoint_manifest_digest, size_bytes) =
         match &snap.manifest().state {
@@ -941,7 +1005,7 @@ pub(super) async fn load_snapshot(
                 None,
             ),
         };
-    Ok(SnapshotHandle {
+    let handle = SnapshotHandle {
         snapshot_id: snap.id().to_string(),
         digest: snap.digest().to_string(),
         name: snap
@@ -965,7 +1029,20 @@ pub(super) async fn load_snapshot(
             .map(|d| d.naive_utc())
             .unwrap_or_else(|_| chrono::Utc::now().naive_utc()),
         artifact_path: snap.path().to_path_buf(),
-    })
+    };
+    let archive_bytes = tokio::fs::metadata(archive).await?.len();
+    tracing::info!(
+        target: "microsandbox_checkpoint_timing",
+        operation = "snapshot_load_archive",
+        zstd = is_zstd,
+        archive_bytes,
+        total_us = total_started.elapsed().as_micros(),
+        unpack_us,
+        validate_us,
+        promote_index_us,
+        "snapshot archive load timing"
+    );
+    Ok(handle)
 }
 
 /// Consume a current archive directly into a child sandbox's staging directory.
@@ -978,6 +1055,7 @@ pub(crate) async fn materialize_archive_for_child(
     child_stage: &Path,
     disk_only: bool,
 ) -> MicrosandboxResult<ArchiveChildMaterialization> {
+    let total_started = Instant::now();
     tokio::fs::create_dir_all(child_stage).await?;
     let cache_dir = local.cache_dir();
     let cache_tmp_dir = cache_dir.join("tmp");
@@ -992,6 +1070,7 @@ pub(crate) async fn materialize_archive_for_child(
         .fill_buf()
         .await?
         .starts_with(&[0x28, 0xb5, 0x2f, 0xfd]);
+    let unpack_started = Instant::now();
     let unpacked = if is_zstd {
         Box::pin(unpack_archive(
             ZstdDecoder::new(buffered),
@@ -1002,6 +1081,18 @@ pub(crate) async fn materialize_archive_for_child(
     } else {
         Box::pin(unpack_archive(buffered, child_stage, cache_stage.path())).await?
     };
+    let unpack_us = unpack_started.elapsed().as_micros();
+    let archive_bytes = tokio::fs::metadata(archive).await?.len();
+    tracing::info!(
+        target: "microsandbox_checkpoint_timing",
+        operation = "snapshot_materialize_child_unpack",
+        disk_only,
+        zstd = is_zstd,
+        archive_bytes,
+        total_us = total_started.elapsed().as_micros(),
+        unpack_us,
+        "direct archive child unpack timing"
+    );
     let Some(inventory) = unpacked.inventory else {
         super::migration::normalize_staged(local.db().await?, &unpacked.manifest_dirs).await?;
         let imported = verify_imported_snapshots(local, &unpacked.manifest_dirs).await?;

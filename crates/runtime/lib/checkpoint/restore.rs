@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::io;
 use std::path::PathBuf;
+use std::time::Instant;
 
 use microsandbox_image::checkpoint::{
     CheckpointClosure, MemoryExtentContent, ObjectId, ResourceDescriptor, ResourceTreatment,
@@ -62,12 +63,18 @@ struct CheckpointMemoryRestore {
 impl PreparedCheckpointRestore {
     /// Resolve and decode every construction-time state envelope before building the VM.
     pub(crate) fn open(root: PathBuf, expected_root: &str) -> Result<Self, String> {
+        let total_started = Instant::now();
         let expected = ObjectId::new(expected_root).map_err(|error| error.to_string())?;
+        let closure_started = Instant::now();
         let closure = CheckpointClosure::open(root, Some(&expected))
             .map_err(|error| format!("validate checkpoint closure: {error}"))?;
+        let closure_open_us = closure_started.elapsed().as_micros();
         let pause_generation = closure.checkpoint().pause_generation;
+        let agent_started = Instant::now();
         let agent = parse_restored_agent(&closure)?;
+        let agent_parse_us = agent_started.elapsed().as_micros();
 
+        let execution_started = Instant::now();
         let execution_bytes = closure
             .read_object(
                 &closure.checkpoint().execution_state,
@@ -79,7 +86,9 @@ impl PreparedCheckpointRestore {
         if execution.pause_generation() != pause_generation {
             return Err("execution state does not belong to the checkpoint epoch".into());
         }
+        let execution_us = execution_started.elapsed().as_micros();
 
+        let devices_started = Instant::now();
         let mut devices = Vec::with_capacity(closure.checkpoint().devices.len());
         for device in &closure.checkpoint().devices {
             let max_state_bytes = if device.device_type == TYPE_FS {
@@ -124,6 +133,20 @@ impl PreparedCheckpointRestore {
                 devices.push(PreparedDeviceRestore::Virtio(state));
             }
         }
+        let devices_us = devices_started.elapsed().as_micros();
+        tracing::info!(
+            target: "microsandbox_checkpoint_timing",
+            operation = "restore_prepare",
+            checkpoint_id = closure.checkpoint().checkpoint_id,
+            total_us = total_started.elapsed().as_micros(),
+            closure_open_us,
+            agent_parse_us,
+            execution_us,
+            devices_us,
+            device_count = devices.len(),
+            memory_extent_count = closure.memory().extents.len(),
+            "checkpoint restore preparation timing"
+        );
 
         Ok(Self {
             execution,
@@ -156,14 +179,28 @@ impl PreparedCheckpointRestore {
 
 impl msb_krun::VmMemoryRestoreSource for CheckpointMemoryRestore {
     fn restore(&mut self, target: &mut dyn msb_krun::VmMemoryRestoreTarget) -> io::Result<()> {
+        let total_started = Instant::now();
+        let mut zero_write_us = 0u128;
+        let mut zero_bytes = 0u64;
+        let mut object_read_us = 0u128;
+        let mut guest_write_us = 0u128;
+        let mut object_bytes = 0u64;
+        let mut guest_object_bytes = 0u64;
+        let mut object_extent_count = 0usize;
         let mut objects: BTreeMap<ObjectId, Vec<(msb_krun::GuestMemoryRange, u64)>> =
             BTreeMap::new();
         for extent in &self.closure.memory().extents {
             let range = msb_krun::GuestMemoryRange::new(extent.start, extent.length)
                 .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
             match &extent.content {
-                MemoryExtentContent::Zero => target.write_zero(range)?,
+                MemoryExtentContent::Zero => {
+                    let write_started = Instant::now();
+                    target.write_zero(range)?;
+                    zero_write_us += write_started.elapsed().as_micros();
+                    zero_bytes = zero_bytes.saturating_add(range.length());
+                }
                 MemoryExtentContent::Object(content) => {
+                    object_extent_count += 1;
                     objects
                         .entry(content.object.clone())
                         .or_default()
@@ -175,11 +212,15 @@ impl msb_krun::VmMemoryRestoreSource for CheckpointMemoryRestore {
         // Read and identity-check each packed object exactly once, write all of its referenced
         // guest ranges, then release the small object buffer. This fuses integrity with the
         // unavoidable restore pass without retaining a RAM-sized cache.
+        let object_count = objects.len();
         for (id, extents) in objects {
+            let read_started = Instant::now();
             let bytes = self
                 .closure
                 .read_object(&id, MAX_MEMORY_OBJECT_BYTES)
                 .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
+            object_read_us += read_started.elapsed().as_micros();
+            object_bytes = object_bytes.saturating_add(bytes.len() as u64);
             for (range, offset) in extents {
                 let start = usize::try_from(offset).map_err(|_| {
                     io::Error::new(
@@ -199,9 +240,26 @@ impl msb_krun::VmMemoryRestoreSource for CheckpointMemoryRestore {
                         "memory object slice exceeds verified bytes",
                     )
                 })?;
+                let write_started = Instant::now();
                 target.write_bytes(range, slice)?;
+                guest_write_us += write_started.elapsed().as_micros();
+                guest_object_bytes = guest_object_bytes.saturating_add(range.length());
             }
         }
+        tracing::info!(
+            target: "microsandbox_checkpoint_timing",
+            operation = "restore_memory",
+            total_us = total_started.elapsed().as_micros(),
+            object_read_us,
+            guest_write_us,
+            zero_write_us,
+            object_count,
+            object_extent_count,
+            object_bytes,
+            guest_object_bytes,
+            zero_bytes,
+            "checkpoint memory restore timing"
+        );
         Ok(())
     }
 }
