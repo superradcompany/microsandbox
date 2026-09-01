@@ -20,6 +20,18 @@ end
 # The base Error is defined natively; the typed subclasses reopen it.
 require_relative "microsandbox/errors"
 
+begin
+  require "microsandbox/binaries"
+rescue LoadError => error
+  raise if defined?(Gem) && Gem.loaded_specs.key?("microsandbox-binaries")
+  raise unless error.path == "microsandbox/binaries"
+else
+  msb_path = Microsandbox::Binaries.msb_path
+  libkrunfw_path = Microsandbox::Binaries.libkrunfw_path
+  Microsandbox.set_runtime_msb_path(msb_path)
+  Microsandbox.set_runtime_libkrunfw_path(libkrunfw_path)
+end
+
 module Microsandbox
   class SandboxBuilder
     %i[
