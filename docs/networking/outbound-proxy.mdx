@@ -1,45 +1,42 @@
 ---
-title: Outbound proxy
-description: Route external outbound sandbox TCP traffic through a SOCKS proxy
+title: Proxy
+description: Route outbound sandbox traffic through a SOCKS proxy
 icon: "route"
 ---
 
-Point a sandbox's external outbound TCP traffic at a SOCKS4 or SOCKS5 proxy, without the guest knowing a proxy exists. The guest keeps dialing its normal destinations; the host, on its side of the boundary, dials the configured proxy and asks it to `CONNECT` to the real destination instead of connecting directly.
+Configure one SOCKS4 or SOCKS5 proxy for outbound sandbox traffic. The guest connects to its normal destination; microsandbox routes eligible traffic through the proxy on the host.
 
-<Note>This setting is available for local sandboxes. Cloud sandbox specs do not expose user-configured egress proxies.</Note>
+<Note>Outbound proxies are local-only. Cloud sandbox creation rejects this setting.</Note>
 
-The API models this as one optional outbound proxy. SOCKS4 and SOCKS5 are supported and mutually exclusive.
+## Supported proxies
 
-This is the same mechanism inspection tools like [mitmproxy](https://mitmproxy.org) expose via `--mode socks5`: select a SOCKS5 outbound proxy and every sandbox connection flows through mitmproxy for logging or debugging, with zero guest-side proxy configuration.
+| Proxy | Authentication | Traffic | Availability |
+|-------|----------------|---------|--------------|
+| SOCKS4 | None | TCP | SDKs and CLI |
+| SOCKS4 | Optional user ID | TCP | SDKs and CLI |
+| SOCKS5 | None | TCP and non-DNS UDP | SDKs and CLI |
+| SOCKS5 | Optional username and password | TCP and non-DNS UDP | SDKs and CLI |
 
-## How it works
+Only one proxy can be configured for a sandbox. A SOCKS4 user ID identifies the caller; it is not a password.
 
-Every outbound TCP connection a sandbox opens is proxied by the host regardless of whether `outbound_proxy` is set — normally the host dials the real destination directly. When an outbound proxy is configured, that final dial is replaced with a SOCKS handshake to the configured proxy, which is then asked to `CONNECT` to the real destination on the sandbox's behalf.
-
-Everything upstream of that dial is unaffected:
-
-- Network policy (allow/deny rules, domain matching, SNI-based re-evaluation) is still evaluated against the real destination before the host dials anywhere.
-- [TLS interception](/networking/tls) still terminates and re-encrypts as configured — the outbound proxy changes how the host reaches the upstream server, not whether the host can see inside the connection.
-- [Secret injection](/security/secrets) still applies to traffic that flows through the host.
-
-## Enabling it
+## Configure a proxy
 
 <CodeGroup>
 ```typescript TypeScript
 import { Sandbox } from "microsandbox";
 
-await using sb = await Sandbox.builder("inspected")
-    .image("python")
-    .proxy((p) => p.socks5("127.0.0.1:8080"))
-    .create();
+await using sb = await Sandbox.builder("proxied")
+  .image("python")
+  .proxy((p) => p.socks5("127.0.0.1:1080"))
+  .create();
 ```
 
 ```rust Rust
 use microsandbox::Sandbox;
 
-let sb = Sandbox::builder("inspected")
+let sb = Sandbox::builder("proxied")
     .image("python")
-    .proxy(|p| p.socks5("127.0.0.1:8080"))
+    .proxy(|p| p.socks5("127.0.0.1:1080"))
     .create()
     .await?;
 ```
@@ -48,29 +45,31 @@ let sb = Sandbox::builder("inspected")
 from microsandbox import OutboundProxy, Sandbox
 
 sb = await Sandbox.create(
-    "inspected",
+    "proxied",
     image="python",
-    proxy=OutboundProxy.socks5("127.0.0.1:8080"),
+    proxy=OutboundProxy.socks5("127.0.0.1:1080"),
 )
 ```
 
 ```go Go
-sb, err := m.CreateSandbox(ctx, "inspected",
+sb, err := m.CreateSandbox(ctx, "proxied",
     m.WithImage("python"),
-    m.WithProxy(m.SOCKS5Proxy("127.0.0.1:8080")),
+    m.WithProxy(m.SOCKS5Proxy("127.0.0.1:1080")),
 )
 ```
 
 ```bash CLI
-msb create python --name inspected --proxy socks5://127.0.0.1:8080
+# Choose one:
+msb create python --name proxied --proxy socks4://127.0.0.1:1080
+msb create python --name proxied --proxy socks5://127.0.0.1:1080
 ```
 </CodeGroup>
 
-SDKs use typed protocol-specific configuration. The CLI accepts `socks4://IP:port` and `socks5://IP:port` because a string flag needs a protocol discriminator. User info, paths, query parameters, and fragments are not supported in CLI proxy URIs.
+SDK addresses use `IP:port`. The `msb run` and `msb create` commands accept `--proxy socks4://IP:port` or `--proxy socks5://IP:port`. Proxy URIs reject user information, paths, query parameters, and fragments; protocol-specific authentication uses separate CLI flags.
 
-## SOCKS4 user IDs
+## SOCKS4 user ID
 
-SOCKS4 can include an optional user ID in its handshake. Configure it through the SDK API:
+Add an optional user ID through an SDK or `--socks4-user-id` in the CLI.
 
 <CodeGroup>
 ```typescript TypeScript
@@ -91,50 +90,83 @@ m.WithProxy(m.SOCKS4Proxy(
     m.SOCKS4ProxyOptions{UserID: "sandbox"},
 ))
 ```
+
+```bash CLI
+msb run alpine \
+  --proxy socks4://127.0.0.1:1080 \
+  --socks4-user-id sandbox
+```
 </CodeGroup>
 
-The user ID is an identifier, not a password. The CLI currently creates SOCKS4 connections with no user ID.
+The user ID must contain 1–255 bytes and cannot contain a null byte. Omit it to use SOCKS4 without a user ID.
 
-## Inspecting traffic with mitmproxy
+## SOCKS5 credentials
 
-Run mitmproxy in SOCKS5 mode and point sandboxes at it:
+SOCKS5 supports optional username/password authentication. Passwords are loaded from a host environment variable rather than placed directly in configuration.
 
-```bash
-mitmproxy --mode socks5 --listen-port 8080
+<CodeGroup>
+```typescript TypeScript
+.proxy((proxy) =>
+  proxy.socks5("127.0.0.1:1080").credentials(
+    "sandbox",
+    SecretSource.env("SOCKS5_PASSWORD"),
+  ),
+)
 ```
 
-```bash
-msb create python --name inspected --proxy socks5://127.0.0.1:8080
+```rust Rust
+.proxy(|proxy| {
+    proxy.socks5("127.0.0.1:1080").credentials(
+        "sandbox",
+        SecretSource::env("SOCKS5_PASSWORD"),
+    )
+})
 ```
 
-Every outbound TCP connection the sandbox opens shows up in mitmproxy's UI. To decrypt HTTPS, the TLS client must also trust mitmproxy's CA:
-
-- **Let mitmproxy intercept guest TLS directly.** Leave microsandbox TLS interception disabled and install `~/.mitmproxy/mitmproxy-ca-cert.pem` in the guest trust store. One option is to add that CA to the host trust store and enable [`--trust-host-cas`](/networking/tls#trusting-host-cas).
-- **Keep microsandbox TLS interception enabled.** Microsandbox decrypts guest traffic and opens a new TLS connection through mitmproxy. Trust mitmproxy's CA for that upstream connection:
-
-```bash
-msb create python --name inspected \
-  --proxy socks5://127.0.0.1:8080 \
-  --tls-intercept \
-  --tls-upstream-ca-cert ~/.mitmproxy/mitmproxy-ca-cert.pem
+```python Python
+proxy = OutboundProxy.socks5("127.0.0.1:1080").credentials(
+    "sandbox",
+    SecretSource.env("SOCKS5_PASSWORD"),
+)
 ```
 
-Without one of these CA configurations, mitmproxy can record the TCP connection but cannot transparently decrypt HTTPS.
+```go Go
+proxy := m.SOCKS5Proxy("127.0.0.1:1080").Credentials(
+    "sandbox",
+    m.SecretSourceEnv("SOCKS5_PASSWORD"),
+)
+m.WithProxy(proxy)
+```
 
-<Frame>
-  <img src="/images/networking/mitmproxy-socks5.png" alt="mitmproxy's flow list in SOCKS5 mode, showing intercepted HTTPS requests from a sandbox" />
-</Frame>
+```bash CLI
+msb run alpine \
+  --proxy socks5://127.0.0.1:1080 \
+  --socks5-username sandbox \
+  --socks5-password-env SOCKS5_PASSWORD
+```
+</CodeGroup>
 
-## Limits
+Environment variables are currently the only supported password source. The password is read from the host environment once each time the sandbox starts and reused for that run. Changing the environment variable affects the next start, not a sandbox that is already running. The username and resolved password must each contain 1–255 bytes; startup fails if the environment variable is missing, empty, or invalid.
 
-- **TCP only.** UDP traffic (including plain DNS on port 53) is not routed through the proxy. SOCKS5's `UDP ASSOCIATE` command isn't used here; SOCKS4 has no UDP relay command.
-- **DNS resolution bypasses it too.** DNS-over-TCP and DNS-over-TLS both go through microsandbox's own DNS forwarder, not the configured proxy, regardless of protocol.
-- **Host-local connections bypass it.** Connections to `host.microsandbox.internal` still target the microsandbox host directly. Sending their rewritten loopback address through a remote SOCKS proxy would target the proxy host instead.
-- **SOCKS4 destinations must be IPv4.** SOCKS4 cannot carry IPv6 destination addresses, and microsandbox does not use the SOCKS4a domain-name extension.
-- **One proxy connection per sandbox connection.** Each guest TCP connection opens a new TCP connection and handshake to the proxy; connections are not multiplexed.
-- **No SOCKS5 authentication.** Only the no-auth SOCKS5 handshake is supported; point this at a local or otherwise trusted proxy. A SOCKS4 user ID is not password authentication.
+Durable configuration and the database store the environment-variable reference, such as `SOCKS5_PASSWORD`, but never the resolved password.
 
-## See also
+SOCKS5 authentication does not encrypt credentials on the wire. Use a trusted local or private proxy, or protect the connection at the transport layer.
 
-- [TLS interception](/networking/tls): configure microsandbox TLS interception and upstream CA trust
-- [Network overview](/networking/overview): policy rules, profiles, and port mapping
+## Behavior and limits
+
+- Network policy is evaluated against the sandbox's actual destination before the proxy connection is opened.
+- SOCKS4 supports TCP only and cannot reach IPv6 destinations. Non-DNS UDP is blocked while SOCKS4 is configured.
+- SOCKS5 uses `CONNECT` for TCP and `UDP ASSOCIATE` for non-DNS UDP.
+- DNS uses microsandbox's DNS forwarder instead of the configured proxy. This includes plain DNS, DNS-over-TCP, and DNS-over-TLS.
+- Connections to `host.microsandbox.internal` bypass the proxy and continue to target the microsandbox host.
+- Each TCP connection opens its own proxy connection and handshake. Each UDP flow opens its own SOCKS5 control connection and UDP association.
+- TLS interception and secret injection continue to work as configured.
+
+## Reference
+
+For exact proxy APIs, see [TypeScript](/sdk/typescript/proxies), [Rust](/sdk/rust/proxies), [Python](/sdk/python/proxies), or [Go](/sdk/go/proxies). For CLI flags, see [Sandbox commands](/cli/sandbox-commands#outbound-proxy).
+
+## Related
+
+- [TLS interception](/networking/tls)
+- [Network overview](/networking/overview)

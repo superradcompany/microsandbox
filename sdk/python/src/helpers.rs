@@ -1,6 +1,6 @@
 use microsandbox::sandbox::{
     CpuPlacement, DeploymentProfile, NetworkPolicy, Patch, PullPolicy, SandboxBuilder,
-    SecurityProfile, TransparentHugePagePolicy,
+    SecretSource, SecurityProfile, TransparentHugePagePolicy,
 };
 use microsandbox::{LogLevel, RegistryAuth};
 use microsandbox_network::dns::Nameserver;
@@ -587,7 +587,43 @@ pub fn sandbox_builder_from_args(
                     }
                 })
             }
-            "socks5" => builder.proxy(move |p| p.socks5(address)),
+            "socks5" => {
+                let credentials = proxy
+                    .get_item("credentials")?
+                    .filter(|value| !value.is_none())
+                    .map(|value| config_dict(&value, "SOCKS5 credentials"))
+                    .transpose()?;
+                let username = credentials
+                    .as_ref()
+                    .map(|value| extract_required::<String>(value, "username"))
+                    .transpose()?;
+                let password = credentials
+                    .as_ref()
+                    .map(|value| {
+                        let password = value.get_item("password")?.ok_or_else(|| {
+                            pyo3::exceptions::PyValueError::new_err(
+                                "SOCKS5 credentials requires password",
+                            )
+                        })?;
+                        let source = config_dict(&password, "SOCKS5 password source")?;
+                        let kind = extract_required::<String>(&source, "kind")?;
+                        if kind != "env" {
+                            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                                "unsupported SOCKS5 password source {kind:?}; only env is supported"
+                            )));
+                        }
+                        let var = extract_required::<String>(&source, "var")?;
+                        Ok(SecretSource::env(var))
+                    })
+                    .transpose()?;
+                builder.proxy(move |p| {
+                    let proxy = p.socks5(address);
+                    match (username, password) {
+                        (Some(username), Some(password)) => proxy.credentials(username, password),
+                        _ => proxy,
+                    }
+                })
+            }
             _ => {
                 return Err(pyo3::exceptions::PyValueError::new_err(format!(
                     "unsupported outbound proxy protocol {protocol:?}"

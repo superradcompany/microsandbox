@@ -195,9 +195,13 @@ TLS MITM covers configured ports, with port `443` enabled by default. TLS MITM a
 
 Use both when you need HTTPS inspection and also need raw TLS connections to trust corporate certificates. Raw TLS includes bypassed hosts, custom TLS ports, and protocols such as Postgres or Redis over TLS.
 
-## See also
+## Reference
+
+For exact TLS and network APIs, see [TypeScript](/sdk/typescript/networking#tlsbuilder), [Rust](/sdk/rust/networking#tlsbuilder), [Python](/sdk/python/networking#tlsconfig), or [Go](/sdk/go/networking#tlsconfig). For CLI fields and flags, see [Configuration file](/cli/configuration#network) and [Sandbox commands](/cli/sandbox-commands).
+
+## Related
 
 - [DNS](/networking/dns) explains DNS policy and DNS over TLS.
-- [Outbound proxy](/networking/outbound-proxy) explains routing outbound TCP through an external SOCKS proxy, including the CA trust required for HTTPS inspection.
+- [Proxy](/networking/outbound-proxy) explains routing outbound TCP and non-DNS UDP through an external SOCKS proxy.
 - [Network defenses](/security/network) explains SSRF protection.
 - [Secret handling](/security/secrets) explains credential injection.

@@ -40,10 +40,10 @@ pub use domain::{
     SandboxPolicy, SandboxPolicyPatch, SandboxResources, SandboxResourcesPatch,
     SandboxRuntimeOptions, SandboxRuntimeOptionsPatch, SandboxSpec, ScopedUpstreamCaCert,
     ScopedVerifyUpstream, SecretConfigError, SecretEntry, SecretInjection, SecretsConfig,
-    SecretsConfigPatch, SecurityProfile, SnapshotSpec, StatVirtualization, TlsConfig,
-    TlsConfigPatch, TokenBucketConfig, TransparentHugePagePolicy, ViolationAction, VolumeKind,
-    VolumeMount, VolumeSpec, VsockRouteSpec, VsockSocketType, VsockSpec, VsockSpecPatch,
-    canonicalize_volume_mounts,
+    SecretsConfigPatch, SecurityProfile, SnapshotSpec, Socks5Credentials, StatVirtualization,
+    TlsConfig, TlsConfigPatch, TokenBucketConfig, TransparentHugePagePolicy, ViolationAction,
+    VolumeKind, VolumeMount, VolumeSpec, VsockRouteSpec, VsockSocketType, VsockSpec,
+    VsockSpecPatch, canonicalize_volume_mounts,
 };
 pub use error::{TypesError, TypesResult};
 pub use modify::{

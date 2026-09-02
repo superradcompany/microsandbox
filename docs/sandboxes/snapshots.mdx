@@ -317,3 +317,7 @@ msb snapshot inspect after-pip-install --verify
 - **Portable scratch state.** Capture a sandbox after a long setup, hand the artifact to a teammate or push it to shared storage, and let them boot from the same starting point.
 - **Local fork-by-copy.** Multiple sandboxes from one snapshot are independent; each copy of the upper layer diverges on its own.
 - **Disaster recovery.** Snapshot a sandbox before a risky migration; if it goes wrong, `msb rm` the broken one and `msb run --from-snapshot` from the pre-migration artifact.
+
+## Reference
+
+For exact snapshot APIs, see [TypeScript](/sdk/typescript/snapshots), [Rust](/sdk/rust/snapshots), [Python](/sdk/python/snapshots), or [Go](/sdk/go/snapshots). The CLI examples above cover creating, inspecting, transferring, and verifying snapshots; run `msb snapshot --help` for the complete command surface.

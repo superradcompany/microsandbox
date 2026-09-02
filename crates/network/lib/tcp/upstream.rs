@@ -7,7 +7,7 @@ use tokio::net::TcpStream;
 
 use super::connection::ProxyConnectState;
 use crate::netstack::shared::SharedState;
-use crate::outbound_proxy::OutboundProxy;
+use crate::proxy::ResolvedOutboundProxy;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -55,7 +55,7 @@ impl UpstreamTcpTarget {
         self,
         proxy_connect: &ProxyConnectState,
         shared: &SharedState,
-        outbound_proxy: Option<&OutboundProxy>,
+        outbound_proxy: Option<&ResolvedOutboundProxy>,
     ) -> io::Result<TcpStream> {
         let result = match outbound_proxy {
             Some(proxy) => proxy.connect(self.primary).await,

@@ -1,0 +1,39 @@
+---
+title: VSock
+description: TypeScript SDK - VSock API reference
+---
+
+Expose a host Unix socket or local Windows named pipe to a sandbox over virtio-vsock. See [VSock](/networking/host-sockets) for guest connection details, platform support, and security considerations.
+
+<Note>VSock routes are local-only and unavailable with the multi-tenant deployment profile.</Note>
+
+## Typical flow
+
+```typescript
+import { Sandbox } from "microsandbox";
+
+await using sandbox = await Sandbox.builder("worker")
+  .image("alpine")
+  .vsock("/run/host-api.sock", 5000)
+  .create();
+```
+
+## SandboxBuilder
+
+### vsock()
+
+```typescript
+vsock(hostPath: string, port: number): this
+```
+
+Expose a host Unix stream socket or local Windows named pipe on host CID `2` at `port`.
+
+### vsockDgram()
+
+```typescript
+vsockDgram(hostPath: string, port: number): this
+```
+
+Expose a host Unix datagram socket while preserving datagram boundaries. Datagram routes are unavailable on Windows.
+
+Both methods can be called repeatedly to add routes. Host paths must be absolute, and each socket type and port pair must be unique.

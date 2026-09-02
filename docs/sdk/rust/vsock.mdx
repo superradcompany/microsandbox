@@ -1,0 +1,67 @@
+---
+title: VSock
+description: Rust SDK - VSock API reference
+---
+
+Expose a host Unix socket or local Windows named pipe to a sandbox over virtio-vsock. See [VSock](/networking/host-sockets) for guest connection details, platform support, and security considerations.
+
+<Note>VSock routes are local-only and unavailable with the multi-tenant deployment profile.</Note>
+
+## Typical flow
+
+```rust
+use microsandbox::Sandbox;
+
+let sandbox = Sandbox::builder("worker")
+    .image("alpine")
+    .vsock("/run/host-api.sock", 5000)
+    .create()
+    .await?;
+```
+
+## SandboxBuilder
+
+### vsock()
+
+```rust
+fn vsock(self, host_path: impl AsRef<Path>, port: u32) -> Self
+```
+
+Expose a host Unix stream socket or local Windows named pipe on host CID `2` at `port`.
+
+### vsock_dgram()
+
+```rust
+fn vsock_dgram(self, host_path: impl AsRef<Path>, port: u32) -> Self
+```
+
+Expose a host Unix datagram socket while preserving datagram boundaries. Datagram routes are unavailable on Windows.
+
+### vsock_route()
+
+```rust
+fn vsock_route(self, route: VsockRouteSpec) -> Self
+```
+
+Add a fully specified route using [`VsockRouteSpec`](#vsockroutespec).
+
+## VsockRouteSpec
+
+Import path: `microsandbox::sandbox::VsockRouteSpec`.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `host_socket` | `PathBuf` | Existing Unix socket or local Windows named-pipe path |
+| `port` | `u32` | Guest-facing port on host CID `2` |
+| `socket_type` | `VsockSocketType` | `Stream` or `Dgram` message semantics |
+
+Host paths must be absolute, and each socket type and port pair must be unique.
+
+## VsockSocketType
+
+Import path: `microsandbox::sandbox::VsockSocketType`.
+
+| Variant | Description |
+|---------|-------------|
+| `Stream` | Reliable, ordered byte stream; the default |
+| `Dgram` | Best-effort messages with preserved datagram boundaries |

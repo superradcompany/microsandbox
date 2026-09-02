@@ -1011,7 +1011,12 @@ export interface NapiSocks4ProxyBuilder {
   userId(userId: string): this;
 }
 
-export interface NapiSocks5ProxyBuilder {}
+export interface NapiSocks5ProxyBuilder {
+  credentials(
+    username: string,
+    password: { kind: "env"; var: string },
+  ): this;
+}
 
 export interface NapiRateLimiterBuilder {
   bandwidth(sizeBytes: number, refillTimeMs: number): this;

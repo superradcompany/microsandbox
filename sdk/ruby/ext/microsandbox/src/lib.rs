@@ -27,6 +27,7 @@ use microsandbox_core::{
         NetworkPolicy, PullPolicy, RestartOptions, RlimitResource, Sandbox as CoreSandbox,
         SandboxBuilder, SandboxFsOps, SandboxHandle as CoreSandboxHandle, SandboxMetrics,
         SandboxPage, SandboxPingResult, SandboxStatus, SandboxStopResult, SandboxTouchResult,
+        SecretSource,
     },
     snapshot::{Snapshot, SnapshotHandle},
     volume::{Volume, VolumeHandle, VolumeKind},
@@ -430,6 +431,39 @@ fn apply_secret_options(
     Ok(builder)
 }
 
+#[derive(Clone)]
+enum RubyOutboundProxyConfig {
+    Socks4 {
+        address: String,
+        user_id: Option<String>,
+    },
+    Socks5 {
+        address: String,
+        credentials: Option<(String, SecretSource)>,
+    },
+}
+
+fn apply_outbound_proxy(builder: SandboxBuilder, proxy: &RubyOutboundProxy) -> SandboxBuilder {
+    match proxy.inner.borrow().clone() {
+        RubyOutboundProxyConfig::Socks4 {
+            address,
+            user_id: Some(user_id),
+        } => builder.proxy(|proxy| proxy.socks4(address).user_id(user_id)),
+        RubyOutboundProxyConfig::Socks4 {
+            address,
+            user_id: None,
+        } => builder.proxy(|proxy| proxy.socks4(address)),
+        RubyOutboundProxyConfig::Socks5 {
+            address,
+            credentials: Some((username, password)),
+        } => builder.proxy(|proxy| proxy.socks5(address).credentials(username, password)),
+        RubyOutboundProxyConfig::Socks5 {
+            address,
+            credentials: None,
+        } => builder.proxy(|proxy| proxy.socks5(address)),
+    }
+}
+
 // -------------------------------------------------------------------------------------------------
 // Duration / timeout
 // -------------------------------------------------------------------------------------------------
@@ -567,6 +601,7 @@ fn apply_builder_options(
         "root_disk",
         "disable_network",
         "network",
+        "proxy",
         "secrets",
         "quiet_logs",
         "entrypoint",
@@ -644,6 +679,9 @@ fn apply_builder_options(
             let policy = restricted_network_policy(ruby, net)?;
             builder = builder.network(|n| n.policy(policy));
         }
+    }
+    if let Some(proxy) = keyword::<typed_data::Obj<RubyOutboundProxy>>(kwargs, "proxy")? {
+        builder = apply_outbound_proxy(builder, &proxy);
     }
     if let Some(v) = kwargs.get(symbol("secrets")) {
         builder = apply_secret_options(ruby, builder, v)?;
@@ -777,6 +815,16 @@ struct RubySandboxBuilder {
     inner: std::cell::RefCell<Option<SandboxBuilder>>,
 }
 
+#[magnus::wrap(class = "Microsandbox::OutboundProxy", free_immediately, size)]
+struct RubyOutboundProxy {
+    inner: std::cell::RefCell<RubyOutboundProxyConfig>,
+}
+
+#[magnus::wrap(class = "Microsandbox::SecretSource", free_immediately, size)]
+struct RubySecretSource {
+    inner: SecretSource,
+}
+
 #[magnus::wrap(class = "Microsandbox::ExecOutput", free_immediately, size)]
 struct RubyExecOutput {
     inner: ExecOutput,
@@ -906,6 +954,12 @@ impl RubySandboxBuilder {
     }
     fn init(this: typed_data::Obj<Self>, v: String) -> Result<(), Error> {
         put_builder(&this, |b| b.init(v))
+    }
+    fn proxy(
+        this: typed_data::Obj<Self>,
+        proxy: typed_data::Obj<RubyOutboundProxy>,
+    ) -> Result<(), Error> {
+        put_builder(&this, |builder| apply_outbound_proxy(builder, &proxy))
     }
     fn vsock(this: typed_data::Obj<Self>, host_path: String, port: u32) -> Result<(), Error> {
         put_builder(&this, |b| b.vsock(host_path, port))
@@ -1733,6 +1787,72 @@ fn sandbox_builder(name: String) -> RubySandboxBuilder {
     }
 }
 
+fn outbound_proxy_socks4(address: String) -> RubyOutboundProxy {
+    RubyOutboundProxy {
+        inner: std::cell::RefCell::new(RubyOutboundProxyConfig::Socks4 {
+            address,
+            user_id: None,
+        }),
+    }
+}
+
+fn outbound_proxy_socks5(address: String) -> RubyOutboundProxy {
+    RubyOutboundProxy {
+        inner: std::cell::RefCell::new(RubyOutboundProxyConfig::Socks5 {
+            address,
+            credentials: None,
+        }),
+    }
+}
+
+fn secret_source_env(ruby: &Ruby, variable: String) -> Result<RubySecretSource, Error> {
+    if variable.is_empty() {
+        return Err(argument_error(
+            ruby,
+            "secret source environment variable must not be empty",
+        ));
+    }
+    Ok(RubySecretSource {
+        inner: SecretSource::env(variable),
+    })
+}
+
+impl RubyOutboundProxy {
+    fn user_id(ruby: &Ruby, this: typed_data::Obj<Self>, user_id: String) -> Result<(), Error> {
+        match &mut *this.inner.borrow_mut() {
+            RubyOutboundProxyConfig::Socks4 {
+                user_id: configured,
+                ..
+            } => {
+                *configured = Some(user_id);
+                Ok(())
+            }
+            RubyOutboundProxyConfig::Socks5 { .. } => Err(argument_error(
+                ruby,
+                "user_id is only supported for SOCKS4 proxies",
+            )),
+        }
+    }
+
+    fn credentials(
+        ruby: &Ruby,
+        this: typed_data::Obj<Self>,
+        username: String,
+        password: typed_data::Obj<RubySecretSource>,
+    ) -> Result<(), Error> {
+        match &mut *this.inner.borrow_mut() {
+            RubyOutboundProxyConfig::Socks4 { .. } => Err(argument_error(
+                ruby,
+                "credentials are only supported for SOCKS5 proxies",
+            )),
+            RubyOutboundProxyConfig::Socks5 { credentials, .. } => {
+                *credentials = Some((username, password.inner.clone()));
+                Ok(())
+            }
+        }
+    }
+}
+
 fn sandbox_create(ruby: &Ruby, args: &[Value]) -> Result<RubySandbox, Error> {
     let parsed = scan_args::<(String,), (), (), (), RHash, ()>(args)?;
     let builder = apply_builder_options(
@@ -2185,6 +2305,16 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
         function!(set_default_backend_profile, 1),
     )?;
 
+    // -- Proxy ---------------------------------------------------------------
+    let secret_source = module.define_class("SecretSource", ruby.class_object())?;
+    secret_source.define_singleton_method("env", function!(secret_source_env, 1))?;
+
+    let outbound_proxy = module.define_class("OutboundProxy", ruby.class_object())?;
+    outbound_proxy.define_singleton_method("socks4", function!(outbound_proxy_socks4, 1))?;
+    outbound_proxy.define_singleton_method("socks5", function!(outbound_proxy_socks5, 1))?;
+    outbound_proxy.define_method("user_id!", method!(RubyOutboundProxy::user_id, 1))?;
+    outbound_proxy.define_method("credentials!", method!(RubyOutboundProxy::credentials, 2))?;
+
     // -- Sandbox -------------------------------------------------------------
     let sandbox = module.define_class("Sandbox", ruby.class_object())?;
     sandbox.define_singleton_method("builder", function!(sandbox_builder, 1))?;
@@ -2317,6 +2447,7 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     builder.define_method("quiet_logs!", method!(RubySandboxBuilder::quiet_logs, 0))?;
     builder.define_method("entrypoint!", method!(RubySandboxBuilder::entrypoint, 1))?;
     builder.define_method("init!", method!(RubySandboxBuilder::init, 1))?;
+    builder.define_method("proxy!", method!(RubySandboxBuilder::proxy, 1))?;
     builder.define_method("vsock!", method!(RubySandboxBuilder::vsock, 2))?;
     builder.define_method("vsock_dgram!", method!(RubySandboxBuilder::vsock_dgram, 2))?;
     builder.define_method("create", method!(RubySandboxBuilder::create, 0))?;

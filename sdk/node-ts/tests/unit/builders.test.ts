@@ -12,6 +12,7 @@ import {
   RootDiskBuilder,
   Sandbox,
   SecretBuilder,
+  SecretSource,
   Stdin,
 } from "../../dist/index.js";
 
@@ -394,6 +395,29 @@ describe("SandboxBuilder.build", () => {
         address: "127.0.0.1:1080",
       },
       maxConnections: 64,
+    });
+  });
+
+  it("renders SOCKS5 credentials in canonical form", async () => {
+    const cfg = await Sandbox.builder("x")
+      .image("alpine")
+      .proxy((p) =>
+        p
+          .socks5("127.0.0.1:1080")
+          .credentials("sandbox", SecretSource.env("SOCKS5_PASSWORD")),
+      )
+      .build();
+
+    expect(cfg.network?.outboundProxy).toEqual({
+      protocol: "socks5",
+      address: "127.0.0.1:1080",
+      credentials: {
+        username: "sandbox",
+        password: {
+          kind: "env",
+          var: "SOCKS5_PASSWORD",
+        },
+      },
     });
   });
 

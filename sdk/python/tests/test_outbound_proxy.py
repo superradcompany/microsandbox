@@ -2,7 +2,7 @@
 
 import pytest
 
-from microsandbox import OutboundProxy, Sandbox
+from microsandbox import OutboundProxy, Sandbox, SecretSource
 
 
 def test_socks5_proxy_serializes_as_structured_config() -> None:
@@ -11,6 +11,24 @@ def test_socks5_proxy_serializes_as_structured_config() -> None:
     assert proxy._to_dict() == {
         "protocol": "socks5",
         "address": "127.0.0.1:1080",
+    }
+
+
+def test_socks5_proxy_serializes_environment_backed_credentials() -> None:
+    proxy = OutboundProxy.socks5("127.0.0.1:1080").credentials(
+        "sandbox", SecretSource.env("SOCKS5_PASSWORD")
+    )
+
+    assert proxy._to_dict() == {
+        "protocol": "socks5",
+        "address": "127.0.0.1:1080",
+        "credentials": {
+            "username": "sandbox",
+            "password": {
+                "kind": "env",
+                "var": "SOCKS5_PASSWORD",
+            },
+        },
     }
 
 
@@ -31,6 +49,13 @@ def test_socks4_proxy_serializes_optional_user_id() -> None:
 def test_socks5_proxy_rejects_socks4_user_id() -> None:
     with pytest.raises(ValueError, match="only supported for SOCKS4"):
         OutboundProxy(protocol="socks5", address="127.0.0.1:1080", user_id="sandbox")
+
+
+def test_socks4_proxy_rejects_socks5_credentials() -> None:
+    with pytest.raises(ValueError, match="only supported for SOCKS5"):
+        OutboundProxy.socks4("127.0.0.1:1080").credentials(
+            "sandbox", SecretSource.env("SOCKS5_PASSWORD")
+        )
 
 
 def _native_create_error(**kwargs: object) -> Exception:

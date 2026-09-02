@@ -18,8 +18,8 @@ use tokio::sync::mpsc;
 use super::sni;
 use super::state::TlsState;
 use crate::netstack::shared::SharedState;
-use crate::outbound_proxy::OutboundProxy;
 use crate::policy::{EgressEvaluation, HostnameSource, NetworkPolicy, Protocol};
+use crate::proxy::ResolvedOutboundProxy;
 use crate::secrets::config::ViolationAction;
 use crate::secrets::handler::SecretsHandler;
 use crate::tcp::{connection::ProxyConnectState, upstream::UpstreamTcpTarget};
@@ -48,7 +48,7 @@ pub(crate) struct TlsProxy {
     tls_state: Arc<TlsState>,
     network_policy: Arc<NetworkPolicy>,
     proxy_connect: Arc<ProxyConnectState>,
-    outbound_proxy: Option<Arc<OutboundProxy>>,
+    outbound_proxy: Option<Arc<ResolvedOutboundProxy>>,
     /// Pre-connected upstream; when `Some`, skips dialing `connect_target`.
     upstream_stream: Option<TcpStream>,
     /// Hostname from a CONNECT authority that must match the ClientHello SNI.
@@ -75,7 +75,7 @@ impl TlsProxy {
         tls_state: Arc<TlsState>,
         network_policy: Arc<NetworkPolicy>,
         proxy_connect: Arc<ProxyConnectState>,
-        outbound_proxy: Option<Arc<OutboundProxy>>,
+        outbound_proxy: Option<Arc<ResolvedOutboundProxy>>,
     ) -> Self {
         Self {
             guest_dst,
@@ -243,7 +243,7 @@ async fn bypass_relay(
     shared: Arc<SharedState>,
     proxy_connect: Arc<ProxyConnectState>,
     upstream_stream: Option<TcpStream>,
-    outbound_proxy: Option<Arc<OutboundProxy>>,
+    outbound_proxy: Option<Arc<ResolvedOutboundProxy>>,
 ) -> io::Result<()> {
     let mut server = match upstream_stream {
         Some(s) => s,
@@ -306,7 +306,7 @@ pub(crate) async fn intercept_relay(
     tls_state: Arc<TlsState>,
     proxy_connect: Arc<ProxyConnectState>,
     upstream_stream: Option<TcpStream>,
-    outbound_proxy: Option<Arc<OutboundProxy>>,
+    outbound_proxy: Option<Arc<ResolvedOutboundProxy>>,
 ) -> io::Result<()> {
     // Per-connection snapshot: live secret updates apply to later connections.
     let secrets = tls_state.secrets.load();

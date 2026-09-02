@@ -690,8 +690,8 @@ impl SandboxBuilder {
 
     /// Configure the single proxy used for outbound sandbox connections.
     ///
-    /// Currently supports SOCKS4 and SOCKS5. The proxy applies uniformly to
-    /// TLS-intercepted and bypassed/plain TCP traffic.
+    /// Supports SOCKS4 for TCP and SOCKS5 for TCP and non-DNS UDP. The
+    /// proxy applies uniformly to TLS-intercepted and bypassed/plain TCP.
     #[cfg(feature = "net")]
     pub fn proxy<P>(mut self, configure: impl FnOnce(OutboundProxyBuilder) -> P) -> Self
     where
@@ -1781,12 +1781,12 @@ mod tests {
     use crate::sandbox::{MAX_HOSTNAME_BYTES, MAX_SANDBOX_NAME_BYTES, RlimitResource};
     #[cfg(feature = "net")]
     use microsandbox_network::secrets::config::{HostPattern, SecretEntry, SecretInjection};
-    #[cfg(feature = "net")]
-    use microsandbox_types::PortProtocol;
     use microsandbox_types::{
         CpuPlacement, DeploymentProfile, SandboxLogLevel, TransparentHugePagePolicy, VolumeMount,
         VsockSocketType,
     };
+    #[cfg(feature = "net")]
+    use microsandbox_types::{PortProtocol, SecretSource};
     #[cfg(feature = "net")]
     use std::net::{IpAddr, Ipv4Addr};
 
@@ -2502,6 +2502,7 @@ mod tests {
             network.outbound_proxy,
             Some(microsandbox_network::OutboundProxy::Socks5 {
                 address: "127.0.0.1:1080".parse().unwrap(),
+                credentials: None,
             })
         );
     }
@@ -2545,6 +2546,31 @@ mod tests {
         assert_eq!(bandwidth.one_time_burst, 512 * 1024);
         assert_eq!(egress.ops.as_ref().unwrap().one_time_burst, 500);
         assert!(rate_limiter.ingress.is_none());
+    }
+
+    #[cfg(feature = "net")]
+    #[tokio::test]
+    async fn test_builder_sets_socks5_credentials() {
+        let config = SandboxBuilder::new("test")
+            .image("alpine")
+            .proxy(|p| {
+                p.socks5("127.0.0.1:1080").credentials(
+                    "sandbox",
+                    SecretSource::Env {
+                        var: "SOCKS5_PASSWORD".into(),
+                    },
+                )
+            })
+            .build()
+            .await
+            .unwrap();
+
+        let network = config.local_network_config().unwrap();
+        let json = serde_json::to_value(network.outbound_proxy).unwrap();
+        assert_eq!(json["credentials"]["username"], "sandbox");
+        assert_eq!(json["credentials"]["password"]["kind"], "env");
+        assert_eq!(json["credentials"]["password"]["var"], "SOCKS5_PASSWORD");
+        assert!(json["credentials"].get("value").is_none());
     }
 
     #[cfg(feature = "net")]

@@ -1687,9 +1687,17 @@ type TokenBucketOptions struct {
 
 // OutboundProxyOptions is the JSON representation of an outbound proxy.
 type OutboundProxyOptions struct {
-	Protocol string `json:"protocol"`
-	Address  string `json:"address"`
-	UserID   string `json:"user_id,omitempty"`
+	Protocol       string               `json:"protocol"`
+	Address        string               `json:"address"`
+	UserID         string               `json:"user_id,omitempty"`
+	Username       *string              `json:"username,omitempty"`
+	PasswordSource *SecretSourceOptions `json:"password_source,omitempty"`
+}
+
+// SecretSourceOptions is the JSON representation of a host-side secret source.
+type SecretSourceOptions struct {
+	Kind string `json:"kind"`
+	Var  string `json:"var,omitempty"`
 }
 
 // PortBindingOptions publishes a host port on a specific host bind address.

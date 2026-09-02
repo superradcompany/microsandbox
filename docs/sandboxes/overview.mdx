@@ -205,14 +205,23 @@ msb create --replace python --name worker
 
 When replacing a running sandbox, microsandbox attempts graceful shutdown before force-killing it. Use `replace_with_timeout` or `--replace-with-timeout` when the workload needs a longer grace period.
 
+## Reference
+
+For the complete sandbox API, see [TypeScript](/sdk/typescript/sandbox), [Rust](/sdk/rust/sandbox), [Python](/sdk/python/sandbox), or [Go](/sdk/go/sandbox). For terminal and REST workflows, see [Sandbox commands](/cli/sandbox-commands) and the [Cloud API](/api-reference/overview).
+
 ## Where to go next
 
 - [Lifecycle](/sandboxes/lifecycle): start, stop, detach, wait, and remove sandboxes
+- [Commands](/sandboxes/commands): run commands and stream output
+- [Filesystem](/sandboxes/filesystem): read, write, and transfer files
+- [Secrets](/sandboxes/secrets): inject credentials without exposing values
+- [Images](/images/overview): choose OCI, directory, or disk-image roots
+- [Volumes](/sandboxes/volumes): persist or share data
+- [SSH](/sandboxes/ssh): connect with SSH and SFTP clients
+- [Snapshots](/sandboxes/snapshots): capture and reuse writable sandbox state
 - [Live Modify](/sandboxes/tuning): change settings after create
 - [Labels](/sandboxes/labels): organize, select, and attribute sandboxes
-- [Secrets](/sandboxes/secrets): inject credentials without exposing values
+- [Logs](/sandboxes/logs): inspect workload and runtime output
+- [Metrics](/sandboxes/metrics): monitor sandbox resource usage
 - [Bootstrap](/sandboxes/bootstrap): prepare scripts, patches, and PID 1
-- [Commands](/sandboxes/commands): run commands and stream output
-- [Volumes](/sandboxes/volumes): persist or share data
 - [Networking](/networking/overview): control egress, ingress, DNS, and ports
-- [SDK reference](/sdk/overview): per-language API details

@@ -1049,9 +1049,23 @@ type RegistryAuth struct {
 // OutboundProxy configures the single proxy used for outbound connections.
 // Construct one with a protocol-specific function such as SOCKS5Proxy.
 type OutboundProxy struct {
-	protocol string
-	address  string
-	userID   string
+	protocol       string
+	address        string
+	userID         string
+	username       string
+	password       SecretSource
+	hasCredentials bool
+}
+
+// SecretSource identifies a host-side source for secret material.
+type SecretSource struct {
+	kind    string
+	varName string
+}
+
+// SecretSourceEnv resolves secret material from a host environment variable.
+func SecretSourceEnv(variable string) SecretSource {
+	return SecretSource{kind: "env", varName: variable}
 }
 
 // SOCKS4ProxyOptions configures optional SOCKS4 handshake fields.
@@ -1072,6 +1086,19 @@ func SOCKS4Proxy(address string, options ...SOCKS4ProxyOptions) *OutboundProxy {
 // SOCKS5Proxy configures a SOCKS5 outbound proxy at address.
 func SOCKS5Proxy(address string) *OutboundProxy {
 	return &OutboundProxy{protocol: "socks5", address: address}
+}
+
+// Credentials returns a copy configured with SOCKS5 username authentication
+// and a host-side password source.
+func (p *OutboundProxy) Credentials(username string, password SecretSource) *OutboundProxy {
+	if p == nil {
+		return nil
+	}
+	proxy := *p
+	proxy.username = username
+	proxy.password = password
+	proxy.hasCredentials = true
+	return &proxy
 }
 
 // NetworkConfig configures the sandbox network stack.

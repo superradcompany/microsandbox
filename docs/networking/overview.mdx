@@ -341,9 +341,14 @@ msb create python --name devbox --net "public,host"
 
 `loopback` means the sandbox's own `127.0.0.1`, not your laptop's localhost. Use `host` for `host.microsandbox.internal`.
 
+## Reference
+
+For exact network APIs, see [TypeScript](/sdk/typescript/networking), [Rust](/sdk/rust/networking), [Python](/sdk/python/networking), or [Go](/sdk/go/networking). For CLI flags and configuration fields, see [Sandbox commands](/cli/sandbox-commands#network-profiles) and [Configuration file](/cli/configuration#network).
+
 ## Next
 
-- [DNS](/networking/dns): domain blocking, pinned nameservers, query timeouts
-- [TLS MITM](/networking/tls): HTTPS inspection with an auto-generated CA
-- [Outbound proxy](/networking/outbound-proxy): route outbound TCP through an external SOCKS4 or SOCKS5 proxy
-- [Security model](/security/overview): the trust boundary, and [network defenses](/security/network) for SSRF, rebinding, and metadata protection
+- [DNS](/networking/dns): domain blocking, pinned nameservers, and query timeouts
+- [Proxy](/networking/outbound-proxy): route outbound TCP and non-DNS UDP through an external SOCKS proxy
+- [TLS MITM](/networking/tls): inspect HTTPS with an auto-generated CA
+- [VSock](/networking/host-sockets): connect guest applications to local host IPC without opening a TCP port
+- [Security model](/security/overview): understand the trust boundary, and [network defenses](/security/network) for SSRF, rebinding, and metadata protection
