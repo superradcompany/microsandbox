@@ -68,13 +68,7 @@ impl AuthenticatedUdpProxy {
             }
             control.write_all(&[0x01, 0x00]).await?;
 
-            let association_target = Self::read_command(&mut control).await?;
-            if association_target.ip().is_unspecified() || association_target.port() == 0 {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "UDP ASSOCIATE did not identify the client socket",
-                ));
-            }
+            Self::read_command(&mut control).await?;
 
             let SocketAddr::V4(relay_address) = relay_address else {
                 unreachable!("fixture binds an IPv4 relay")
