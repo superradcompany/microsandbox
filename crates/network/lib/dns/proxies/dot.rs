@@ -466,7 +466,7 @@ mod tests {
             ipv4: Some("100.96.0.1".parse().unwrap()),
             ipv6: None,
         };
-        let forwarder = DnsForwarder::for_proxy_test(shared.clone(), gateway).await;
+        let forwarder = DnsForwarder::for_proxy_test(shared.clone(), gateway, None).await;
         let (guest_tls, mut client_tls) = connected_tls_pair();
         let (from_guest_tx, from_smoltcp) = mpsc::channel(1);
         let (to_smoltcp, mut to_guest_rx) = mpsc::channel(8);

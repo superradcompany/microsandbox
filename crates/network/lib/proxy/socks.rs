@@ -16,7 +16,6 @@ use super::types::{
     OutboundProxyProtocol, ResolvedOutboundProxy,
 };
 use crate::dns::forwarder::{DnsForwarder, DnsForwarderHandle};
-use crate::netstack::shared::ResolvedHostnameFamily;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -178,35 +177,30 @@ impl ResolvedOutboundProxy {
         Socks5Protocol::negotiate(&mut control, credentials.as_ref()).await?;
 
         let control_local = control.local_addr()?;
-        let udp_bind = SocketAddr::new(control_local.ip(), 0);
-        let socket = tokio::net::UdpSocket::bind(udp_bind).await?;
-        let relay = match Socks5Protocol::command(&mut control, 0x03, socket.local_addr()?).await? {
-            Socks5ReplyAddress::Socket(relay) => relay,
+        // The UDP endpoint is not known until the proxy returns its relay.
+        // RFC 1928 requires an all-zero endpoint in that case.
+        let request_address = match control_local.ip() {
+            IpAddr::V4(_) => SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
+            IpAddr::V6(_) => SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
+        };
+        let relays = match Socks5Protocol::command(&mut control, 0x03, request_address).await? {
+            Socks5ReplyAddress::Socket(relay) => vec![relay],
             Socks5ReplyAddress::Domain { name, port } => {
-                let family = match control_local.ip() {
-                    IpAddr::V4(_) => ResolvedHostnameFamily::Ipv4,
-                    IpAddr::V6(_) => ResolvedHostnameFamily::Ipv6,
-                };
                 let dns_forwarder = dns_forwarder.ok_or_else(|| {
                     io::Error::other("DNS forwarder is unavailable for SOCKS5 UDP relay resolution")
                 })?;
                 let forwarder = DnsForwarder::wait(dns_forwarder).await.ok_or_else(|| {
                     io::Error::other("DNS forwarder is unavailable for SOCKS5 UDP relay resolution")
                 })?;
-                SocketAddr::new(forwarder.resolve_proxy_domain(&name, family).await?, port)
+                forwarder
+                    .resolve_proxy_domain(&name)
+                    .await?
+                    .into_iter()
+                    .map(|address| SocketAddr::new(address, port))
+                    .collect()
             }
         };
-        let relay = if relay.ip().is_unspecified() {
-            SocketAddr::new(control.peer_addr()?.ip(), relay.port())
-        } else {
-            relay
-        };
-        socket.connect(relay).await?;
-
-        Ok(Socks5UdpAssociation {
-            _control: control,
-            socket,
-        })
+        Socks5UdpAssociation::connect(control, relays).await
     }
 }
 
@@ -302,6 +296,47 @@ impl Socks5Credentials {
 }
 
 impl Socks5UdpAssociation {
+    /// Connects a UDP socket to the first usable relay address.
+    async fn connect(control: TcpStream, relays: Vec<SocketAddr>) -> io::Result<Self> {
+        let peer_ip = control.peer_addr()?.ip();
+        let mut last_error = None;
+
+        for relay in relays {
+            let relay = if relay.ip().is_unspecified() {
+                SocketAddr::new(peer_ip, relay.port())
+            } else {
+                relay
+            };
+            let bind_address = match relay.ip() {
+                IpAddr::V4(_) => SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
+                IpAddr::V6(_) => SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
+            };
+            let socket = match tokio::net::UdpSocket::bind(bind_address).await {
+                Ok(socket) => socket,
+                Err(error) => {
+                    last_error = Some(error);
+                    continue;
+                }
+            };
+            match socket.connect(relay).await {
+                Ok(()) => {
+                    return Ok(Self {
+                        _control: control,
+                        socket,
+                    });
+                }
+                Err(error) => last_error = Some(error),
+            }
+        }
+
+        Err(last_error.unwrap_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::AddrNotAvailable,
+                "SOCKS5 proxy returned no usable UDP relay address",
+            )
+        }))
+    }
+
     /// Sends one payload to `destination` through the UDP association.
     pub(crate) async fn send_to(
         &self,
@@ -647,9 +682,13 @@ impl Socks5Protocol {
 
 #[cfg(test)]
 mod tests {
-    use std::net::SocketAddr;
+    use std::net::{Ipv6Addr, SocketAddr};
     use std::sync::Arc;
 
+    use hickory_net::proto::op::{Message, MessageType, OpCode};
+    use hickory_net::proto::rr::rdata::AAAA;
+    use hickory_net::proto::rr::{RData, Record, RecordType};
+    use hickory_net::proto::serialize::binary::{BinDecodable, BinEncodable};
     use microsandbox_types::SecretSource;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, UdpSocket};
@@ -662,6 +701,40 @@ mod tests {
     use crate::dns::forwarder::DnsForwarder;
     use crate::netstack::poll::GatewayIps;
     use crate::netstack::shared::SharedState;
+
+    async fn responding_dns_ipv6(answer: Ipv6Addr) -> SocketAddr {
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let address = socket.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut buffer = [0u8; 4096];
+            loop {
+                let Ok((length, source)) = socket.recv_from(&mut buffer).await else {
+                    continue;
+                };
+                let Ok(query) = Message::from_bytes(&buffer[..length]) else {
+                    continue;
+                };
+                let mut response =
+                    Message::new(query.metadata.id, MessageType::Response, OpCode::Query);
+                response.metadata.recursion_desired = query.metadata.recursion_desired;
+                response.metadata.recursion_available = true;
+                if let Some(question) = query.queries.first() {
+                    response.add_query(question.clone());
+                    if question.query_type() == RecordType::AAAA {
+                        response.add_answer(Record::from_rdata(
+                            question.name().clone(),
+                            60,
+                            RData::AAAA(AAAA::from(answer)),
+                        ));
+                    }
+                }
+                if let Ok(bytes) = response.to_bytes() {
+                    let _ = socket.send_to(&bytes, source).await;
+                }
+            }
+        });
+        address
+    }
 
     #[test]
     fn builder_creates_socks4_proxy_with_optional_user_id() {
@@ -1126,10 +1199,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn udp_association_resolves_domain_relay_through_dns_forwarder() {
+    async fn udp_association_supports_domain_relay_in_another_address_family() {
         let target: SocketAddr = "93.184.216.34:5353".parse().unwrap();
-        let relay = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let relay = UdpSocket::bind("[::1]:0").await.unwrap();
         let relay_addr = relay.local_addr().unwrap();
+        let dns_upstream = responding_dns_ipv6(Ipv6Addr::LOCALHOST).await;
         let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let proxy_addr = proxy_listener.local_addr().unwrap();
         let proxy_task = tokio::spawn(async move {
@@ -1143,7 +1217,7 @@ mod tests {
             control.read_exact(&mut request).await.unwrap();
             assert_eq!(request[1], 0x03, "UDP ASSOCIATE command");
 
-            let domain = b"host.microsandbox.internal";
+            let domain = b"relay.example.com";
             let mut response = vec![0x05, 0x00, 0x00, 0x03, domain.len() as u8];
             response.extend_from_slice(domain);
             response.extend_from_slice(&relay_addr.port().to_be_bytes());
@@ -1164,6 +1238,7 @@ mod tests {
                 ipv4: Some("127.0.0.1".parse().unwrap()),
                 ipv6: None,
             },
+            Some(dns_upstream),
         )
         .await;
         let (_dns_tx, dns_forwarder) = watch::channel(Some(forwarder));
