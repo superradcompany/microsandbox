@@ -26,10 +26,23 @@ rescue LoadError => error
   raise if defined?(Gem) && Gem.loaded_specs.key?("microsandbox-binaries")
   raise unless error.path == "microsandbox/binaries"
 else
-  msb_path = Microsandbox::Binaries.msb_path
-  libkrunfw_path = Microsandbox::Binaries.libkrunfw_path
-  Microsandbox.set_runtime_msb_path(msb_path)
-  Microsandbox.set_runtime_libkrunfw_path(libkrunfw_path)
+  # The SDK and runtime are only guaranteed compatible within one minor
+  # series, and the companion is not a gemspec dependency, so an installed
+  # microsandbox-binaries from another series is skipped rather than used.
+  # Resolution then falls through to the SDK's remaining runtime tiers.
+  sdk_series = Microsandbox::VERSION.split(".").first(2)
+  companion_series = Microsandbox::Binaries::VERSION.split(".").first(2)
+  if sdk_series == companion_series
+    msb_path = Microsandbox::Binaries.msb_path
+    libkrunfw_path = Microsandbox::Binaries.libkrunfw_path
+    Microsandbox.set_runtime_msb_path(msb_path)
+    Microsandbox.set_runtime_libkrunfw_path(libkrunfw_path)
+  else
+    warn "microsandbox #{Microsandbox::VERSION} is ignoring microsandbox-binaries " \
+         "#{Microsandbox::Binaries::VERSION}: the runtime companion must come from the " \
+         "#{sdk_series.join(".")}.x series; install a matching microsandbox-binaries " \
+         "or set MSB_PATH and MSB_LIBKRUNFW_PATH to a compatible runtime"
+  end
 end
 
 module Microsandbox

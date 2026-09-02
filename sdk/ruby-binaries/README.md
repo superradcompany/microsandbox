@@ -13,7 +13,8 @@ gem install microsandbox-binaries
 The main gem discovers this gem opportunistically and has no dependency on it,
 so cloud-only installations do not download runtime binaries. Explicit
 `MSB_PATH` and `MSB_LIBKRUNFW_PATH` environment variables retain precedence
-over the bundled files.
+over the bundled files. Keep this gem on the same minor series as
+`microsandbox`: the SDK warns and ignores a companion from another series.
 
 Runtime files are downloaded from the matching Microsandbox GitHub release and
 packaged as pure data for `arm64-darwin`, `x86_64-linux-gnu`, and

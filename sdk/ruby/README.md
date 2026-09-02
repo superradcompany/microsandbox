@@ -94,7 +94,10 @@ Microsandbox.install unless Microsandbox.installed?
 ```
 
 Explicit `MSB_PATH` and `MSB_LIBKRUNFW_PATH` environment variables override
-the companion gem paths.
+the companion gem paths. The SDK only uses a companion from its own minor
+series (for example `0.6.x` with `0.6.x`); a `microsandbox-binaries` from
+another series is skipped with a warning and resolution falls through to
+the SDK's remaining runtime tiers, such as the SDK-installed runtime.
 
 Local sandboxes require Apple Silicon virtualization on macOS or KVM on Linux. On Windows, use Windows 11 on x64 or ARM64 and enable WHP. Ruby CI currently covers Linux x86_64.
 
