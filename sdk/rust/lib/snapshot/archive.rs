@@ -3516,11 +3516,10 @@ fn validate_cached_metadata(
             manifest.image.manifest_digest, metadata.manifest_digest
         )));
     }
-    verify_sha256_digest(
-        metadata.raw_manifest_json.as_bytes(),
-        &metadata.manifest_digest,
-        "raw manifest",
-    )?;
+    // Registry metadata stores the selected platform manifest bytes, while `manifest_digest` can
+    // legitimately identify the parent OCI index used to pin a multi-platform image. The equality
+    // check above binds the cache entry to the snapshot; hashing these different objects against
+    // one another rejects valid `--with-image` archives.
     verify_sha256_digest(
         metadata.raw_config_json.as_bytes(),
         &metadata.config_digest,
@@ -3886,6 +3885,51 @@ mod tests {
     fn digest_hex_rejects_uppercase_identity() {
         let uppercase = format!("sha256:{}", "A".repeat(64));
         assert!(digest_hex(&uppercase).is_err());
+    }
+
+    #[test]
+    fn cached_platform_manifest_accepts_parent_index_digest() {
+        let index_digest = format!("sha256:{}", "a".repeat(64));
+        let raw_config_json = "{}".to_string();
+        let config_digest = format!(
+            "sha256:{}",
+            hex::encode(Sha256::digest(raw_config_json.as_bytes()))
+        );
+        let manifest = Manifest {
+            schema: SCHEMA.into(),
+            snapshot_id: SnapshotId::new("snap_00000000000000000000000000000001").unwrap(),
+            scope: SnapshotScope::Disk,
+            state: SnapshotState::File(FileSnapshotState {
+                disk_format: SnapshotFormat::Raw,
+                filesystem: "ext4".into(),
+                virtual_size: 0,
+                head: DiskLayerId::new("layer_00000000000000000000000000000001").unwrap(),
+                layers: Vec::new(),
+            }),
+            capture: SnapshotCapture {
+                created_at: "2026-09-02T00:00:00Z".into(),
+                source_lineage: None,
+                source_checkpoint: None,
+                consistency: SnapshotConsistency::CrashConsistent,
+            },
+            image: ImageRef {
+                reference: "docker.io/library/alpine:latest".into(),
+                manifest_digest: index_digest.clone(),
+            },
+            parent: None,
+            extensions: BTreeMap::new(),
+            requires: Vec::new(),
+        };
+        let metadata = microsandbox_image::CachedImageMetadata {
+            manifest_digest: index_digest,
+            config_digest,
+            raw_manifest_json: r#"{"schemaVersion":2,"layers":[]}"#.into(),
+            raw_config_json,
+            config: microsandbox_image::ImageConfig::default(),
+            layers: Vec::new(),
+        };
+
+        validate_cached_metadata(&manifest, &metadata).unwrap();
     }
 
     #[test]
