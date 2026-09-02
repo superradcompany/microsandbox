@@ -34,7 +34,11 @@ const TYPE_BLOCK: u32 = 2;
 const TYPE_RNG: u32 = 4;
 const TYPE_VSOCK: u32 = 19;
 pub(super) const TYPE_FS: u32 = 26;
-const MEMORY_CHUNK_SIZE: usize = 2 * 1024 * 1024;
+// Keep zero detection fine-grained so one live page does not force a large sparse range into the
+// object store. Independently pack non-zero ranges into larger immutable objects to amortize
+// hashing, fsync, directory publication, and restore-time object opens.
+const MEMORY_SCAN_CHUNK_SIZE: usize = 2 * 1024 * 1024;
+const MEMORY_OBJECT_PACK_SIZE: usize = 32 * 1024 * 1024;
 const WORKLOAD_CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
 
 //--------------------------------------------------------------------------------------------------
@@ -511,13 +515,13 @@ impl CheckpointCoordinator {
         let mut sink = MemoryObjectSink {
             store: &self.store,
             updates: Vec::new(),
-            pending_bytes: Vec::with_capacity(MEMORY_CHUNK_SIZE),
+            pending_bytes: Vec::with_capacity(MEMORY_OBJECT_PACK_SIZE),
             pending_extents: Vec::new(),
         };
         let memory_capture_started = Instant::now();
         let stats = match vm.capture_memory(
             &memory_plan,
-            MemoryCaptureOptions::new(MEMORY_CHUNK_SIZE, true)
+            MemoryCaptureOptions::new(MEMORY_SCAN_CHUNK_SIZE, true)
                 .map_err(CheckpointFailure::resumable)?,
             &mut sink,
         ) {
@@ -747,7 +751,7 @@ impl MemoryObjectSink<'_> {
                     object_offset: extent.object_offset,
                 }),
             }));
-        self.pending_bytes = Vec::with_capacity(MEMORY_CHUNK_SIZE);
+        self.pending_bytes = Vec::with_capacity(MEMORY_OBJECT_PACK_SIZE);
         Ok(())
     }
 }
@@ -774,11 +778,11 @@ impl MemoryCaptureSink for MemoryObjectSink<'_> {
         }
 
         if !self.pending_bytes.is_empty()
-            && self.pending_bytes.len().saturating_add(bytes.len()) > MEMORY_CHUNK_SIZE
+            && self.pending_bytes.len().saturating_add(bytes.len()) > MEMORY_OBJECT_PACK_SIZE
         {
             self.flush_pending()?;
         }
-        if bytes.len() > MEMORY_CHUNK_SIZE {
+        if bytes.len() > MEMORY_OBJECT_PACK_SIZE {
             let object = self
                 .store
                 .put_bytes(bytes)

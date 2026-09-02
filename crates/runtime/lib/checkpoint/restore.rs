@@ -20,7 +20,7 @@ use super::coordinator::TYPE_FS;
 const MAX_EXECUTION_STATE_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_DEVICE_STATE_BYTES: u64 = 1024 * 1024;
 const MAX_FS_DEVICE_STATE_BYTES: u64 = 8 * 1024 * 1024;
-const MAX_MEMORY_OBJECT_BYTES: u64 = 2 * 1024 * 1024;
+const MAX_MEMORY_OBJECT_BYTES: u64 = 32 * 1024 * 1024;
 
 //--------------------------------------------------------------------------------------------------
 // Types
