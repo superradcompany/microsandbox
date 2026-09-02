@@ -294,6 +294,7 @@ pub fn smoltcp_poll_loop(
         tokio_handle.clone(),
         outbound_proxy.clone(),
     );
+    udp_relay.attach_dns_forwarder(dns_forwarder_handle.clone());
     let mut udp_fragments = Ipv4UdpFragmentReassembler::new();
     let mut ipv6_udp_fragments = Ipv6UdpFragmentReassembler::new();
     let icmp_relay = IcmpRelay::new(

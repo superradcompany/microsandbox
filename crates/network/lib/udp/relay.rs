@@ -24,6 +24,7 @@ use tokio::io::Interest;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
+use crate::dns::forwarder::DnsForwarderHandle;
 use crate::icmp::error::{construct_packet_too_big, ethernet_ip_payload};
 use crate::netstack::shared::SharedState;
 use crate::proxy::ResolvedOutboundProxy;
@@ -100,6 +101,7 @@ pub struct UdpRelay {
     mtu: usize,
     tokio_handle: tokio::runtime::Handle,
     outbound_proxy: Option<Arc<ResolvedOutboundProxy>>,
+    dns_forwarder: Option<DnsForwarderHandle>,
 }
 
 /// Upstream transport selected for a UDP relay session.
@@ -148,6 +150,7 @@ impl UdpRelay {
     /// * `guest_mac` - MAC address stamped as the destination on synthesized response frames.
     /// * `mtu` - Guest IP-level MTU. Large UDP replies are fragmented to fit it.
     /// * `tokio_handle` - Runtime the per-session relay tasks are spawned on.
+    /// * `outbound_proxy` - Optional proxy used for external UDP sessions.
     pub fn new(
         shared: Arc<SharedState>,
         gateway_mac: [u8; 6],
@@ -164,7 +167,13 @@ impl UdpRelay {
             mtu,
             tokio_handle,
             outbound_proxy,
+            dns_forwarder: None,
         }
+    }
+
+    /// Attaches the policy-aware resolver used for domain-form SOCKS5 relay addresses.
+    pub(crate) fn attach_dns_forwarder(&mut self, dns_forwarder: DnsForwarderHandle) {
+        self.dns_forwarder = Some(dns_forwarder);
     }
 
     /// Relay an outbound UDP datagram from the guest.
@@ -309,6 +318,7 @@ impl UdpRelay {
         let gateway_mac = self.gateway_mac;
         let guest_mac = self.guest_mac;
         let mtu = self.mtu;
+        let dns_forwarder = self.dns_forwarder.clone();
         let task_queued_bytes = queued_bytes.clone();
         self.tokio_handle.spawn(async move {
             let result = match upstream {
@@ -324,6 +334,7 @@ impl UdpRelay {
                         guest_mac,
                         mtu,
                         outbound_proxy,
+                        dns_forwarder,
                     )
                     .await
                 }
@@ -594,8 +605,9 @@ impl UdpRelay {
         guest_mac: EthernetAddress,
         mtu: usize,
         outbound_proxy: Arc<ResolvedOutboundProxy>,
+        dns_forwarder: Option<DnsForwarderHandle>,
     ) -> io::Result<()> {
-        let association = outbound_proxy.associate_udp().await?;
+        let association = outbound_proxy.associate_udp(dns_forwarder).await?;
         let mut recv_buf = vec![0u8; RECV_BUF_SIZE];
 
         loop {

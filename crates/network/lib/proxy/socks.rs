@@ -15,6 +15,8 @@ use super::types::{
     OutboundProxy, OutboundProxyBuildError, OutboundProxyBuilder, OutboundProxyConfig,
     OutboundProxyProtocol, ResolvedOutboundProxy,
 };
+use crate::dns::forwarder::{DnsForwarder, DnsForwarderHandle};
+use crate::netstack::shared::ResolvedHostnameFamily;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -61,7 +63,7 @@ struct Socks5Protocol;
 /// Address returned by a SOCKS5 command reply.
 enum Socks5ReplyAddress {
     Socket(SocketAddr),
-    Domain,
+    Domain { name: String, port: u16 },
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -157,7 +159,10 @@ impl ResolvedOutboundProxy {
     }
 
     /// Opens a SOCKS5 UDP association for relaying datagrams.
-    pub(crate) async fn associate_udp(&self) -> io::Result<Socks5UdpAssociation> {
+    pub(crate) async fn associate_udp(
+        &self,
+        dns_forwarder: Option<DnsForwarderHandle>,
+    ) -> io::Result<Socks5UdpAssociation> {
         let Self::Socks5 {
             address,
             credentials,
@@ -177,10 +182,18 @@ impl ResolvedOutboundProxy {
         let socket = tokio::net::UdpSocket::bind(udp_bind).await?;
         let relay = match Socks5Protocol::command(&mut control, 0x03, socket.local_addr()?).await? {
             Socks5ReplyAddress::Socket(relay) => relay,
-            Socks5ReplyAddress::Domain => {
-                return Err(Socks5Protocol::invalid_response(
-                    "domain-form SOCKS5 UDP relay addresses are not supported",
-                ));
+            Socks5ReplyAddress::Domain { name, port } => {
+                let family = match control_local.ip() {
+                    IpAddr::V4(_) => ResolvedHostnameFamily::Ipv4,
+                    IpAddr::V6(_) => ResolvedHostnameFamily::Ipv6,
+                };
+                let dns_forwarder = dns_forwarder.ok_or_else(|| {
+                    io::Error::other("DNS forwarder is unavailable for SOCKS5 UDP relay resolution")
+                })?;
+                let forwarder = DnsForwarder::wait(dns_forwarder).await.ok_or_else(|| {
+                    io::Error::other("DNS forwarder is unavailable for SOCKS5 UDP relay resolution")
+                })?;
+                SocketAddr::new(forwarder.resolve_proxy_domain(&name, family).await?, port)
             }
         };
         let relay = if relay.ip().is_unspecified() {
@@ -525,9 +538,15 @@ impl Socks5Protocol {
                 let length = stream.read_u8().await? as usize;
                 let mut domain = vec![0u8; length];
                 stream.read_exact(&mut domain).await?;
+                let domain = String::from_utf8(domain).map_err(|_| {
+                    Self::invalid_response("SOCKS5 reply contains a non-UTF-8 domain")
+                })?;
                 let mut port = [0u8; 2];
                 stream.read_exact(&mut port).await?;
-                return Ok(Socks5ReplyAddress::Domain);
+                return Ok(Socks5ReplyAddress::Domain {
+                    name: domain,
+                    port: u16::from_be_bytes(port),
+                });
             }
             _ => return Err(Self::invalid_response("unsupported SOCKS5 address type")),
         };
@@ -629,15 +648,20 @@ impl Socks5Protocol {
 #[cfg(test)]
 mod tests {
     use std::net::SocketAddr;
+    use std::sync::Arc;
 
     use microsandbox_types::SecretSource;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, UdpSocket};
+    use tokio::sync::watch;
 
     use super::{
         OutboundProxy, OutboundProxyBuildError, OutboundProxyBuilder, OutboundProxyConfig,
         OutboundProxyProtocol, ResolvedOutboundProxy, ResolvedSocks5Credentials,
     };
+    use crate::dns::forwarder::DnsForwarder;
+    use crate::netstack::poll::GatewayIps;
+    use crate::netstack::shared::SharedState;
 
     #[test]
     fn builder_creates_socks4_proxy_with_optional_user_id() {
@@ -1091,7 +1115,7 @@ mod tests {
         let proxy = ResolvedOutboundProxy::build(Some(&configured), None)
             .unwrap()
             .unwrap();
-        let association = proxy.associate_udp().await.unwrap();
+        let association = proxy.associate_udp(None).await.unwrap();
         association.send_to(b"hello", target).await.unwrap();
         let mut response = [0u8; 64];
         let (received, source) = association.recv_from(&mut response).await.unwrap();
@@ -1102,7 +1126,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn udp_association_rejects_domain_relay_address() {
+    async fn udp_association_resolves_domain_relay_through_dns_forwarder() {
+        let target: SocketAddr = "93.184.216.34:5353".parse().unwrap();
+        let relay = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let relay_addr = relay.local_addr().unwrap();
         let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let proxy_addr = proxy_listener.local_addr().unwrap();
         let proxy_task = tokio::spawn(async move {
@@ -1116,27 +1143,36 @@ mod tests {
             control.read_exact(&mut request).await.unwrap();
             assert_eq!(request[1], 0x03, "UDP ASSOCIATE command");
 
-            let domain = b"does-not-resolve.invalid";
+            let domain = b"host.microsandbox.internal";
             let mut response = vec![0x05, 0x00, 0x00, 0x03, domain.len() as u8];
             response.extend_from_slice(domain);
-            response.extend_from_slice(&1080u16.to_be_bytes());
+            response.extend_from_slice(&relay_addr.port().to_be_bytes());
             control.write_all(&response).await.unwrap();
+
+            let mut datagram = [0u8; 64];
+            let (received, client) = relay.recv_from(&mut datagram).await.unwrap();
+            relay.send_to(&datagram[..received], client).await.unwrap();
         });
 
         let proxy = ResolvedOutboundProxy::Socks5 {
             address: proxy_addr,
             credentials: None,
         };
-        let error = match proxy.associate_udp().await {
-            Ok(_) => panic!("accepted a domain-form UDP relay address"),
-            Err(error) => error,
-        };
-        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
-        assert!(
-            error
-                .to_string()
-                .contains("domain-form SOCKS5 UDP relay addresses are not supported")
-        );
+        let forwarder = DnsForwarder::for_proxy_test(
+            Arc::new(SharedState::new(4)),
+            GatewayIps {
+                ipv4: Some("127.0.0.1".parse().unwrap()),
+                ipv6: None,
+            },
+        )
+        .await;
+        let (_dns_tx, dns_forwarder) = watch::channel(Some(forwarder));
+        let association = proxy.associate_udp(Some(dns_forwarder)).await.unwrap();
+        association.send_to(b"hello", target).await.unwrap();
+        let mut response = [0u8; 64];
+        let (received, source) = association.recv_from(&mut response).await.unwrap();
+        assert_eq!(source, target);
+        assert_eq!(&response[..received], b"hello");
 
         proxy_task.await.unwrap();
     }
