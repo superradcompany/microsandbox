@@ -635,7 +635,7 @@ impl UdpRelay {
 
                 result = association.recv_from(&mut recv_buf) => {
                     match result {
-                        Ok((received, source)) if source == host_dst => {
+                        Ok((received, sources)) if sources.contains(&host_dst) => {
                             if let Some(frames) = construct_udp_response_frames(
                                 guest_dst,
                                 guest_src,
@@ -654,10 +654,10 @@ impl UdpRelay {
                                 }
                             }
                         }
-                        Ok((_, source)) => {
+                        Ok((_, sources)) => {
                             tracing::debug!(
                                 expected = %host_dst,
-                                actual = %source,
+                                actual = ?sources,
                                 "SOCKS5 UDP relay dropped a response from an unexpected endpoint",
                             );
                         }

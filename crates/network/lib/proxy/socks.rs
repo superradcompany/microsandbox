@@ -54,6 +54,7 @@ pub struct Socks5ProxyBuilder {
 pub(crate) struct Socks5UdpAssociation {
     _control: TcpStream,
     socket: tokio::net::UdpSocket,
+    dns_forwarder: Option<DnsForwarderHandle>,
 }
 
 /// SOCKS5 wire protocol operations shared by TCP and UDP proxying.
@@ -186,21 +187,10 @@ impl ResolvedOutboundProxy {
         let relays = match Socks5Protocol::command(&mut control, 0x03, request_address).await? {
             Socks5ReplyAddress::Socket(relay) => vec![relay],
             Socks5ReplyAddress::Domain { name, port } => {
-                let dns_forwarder = dns_forwarder.ok_or_else(|| {
-                    io::Error::other("DNS forwarder is unavailable for SOCKS5 UDP relay resolution")
-                })?;
-                let forwarder = DnsForwarder::wait(dns_forwarder).await.ok_or_else(|| {
-                    io::Error::other("DNS forwarder is unavailable for SOCKS5 UDP relay resolution")
-                })?;
-                forwarder
-                    .resolve_proxy_domain(&name)
-                    .await?
-                    .into_iter()
-                    .map(|address| SocketAddr::new(address, port))
-                    .collect()
+                Socks5Protocol::resolve_domain(dns_forwarder.as_ref(), &name, port).await?
             }
         };
-        Socks5UdpAssociation::connect(control, relays).await
+        Socks5UdpAssociation::connect(control, relays, dns_forwarder).await
     }
 }
 
@@ -297,7 +287,11 @@ impl Socks5Credentials {
 
 impl Socks5UdpAssociation {
     /// Connects a UDP socket to the first usable relay address.
-    async fn connect(control: TcpStream, relays: Vec<SocketAddr>) -> io::Result<Self> {
+    async fn connect(
+        control: TcpStream,
+        relays: Vec<SocketAddr>,
+        dns_forwarder: Option<DnsForwarderHandle>,
+    ) -> io::Result<Self> {
         let peer_ip = control.peer_addr()?.ip();
         let mut last_error = None;
 
@@ -323,6 +317,7 @@ impl Socks5UdpAssociation {
                     return Ok(Self {
                         _control: control,
                         socket,
+                        dns_forwarder,
                     });
                 }
                 Err(error) => last_error = Some(error),
@@ -351,13 +346,22 @@ impl Socks5UdpAssociation {
         self.socket.send(&datagram).await.map(|_| payload.len())
     }
 
-    /// Receives one payload and returns the remote endpoint encoded by the proxy.
-    pub(crate) async fn recv_from(&self, buffer: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
+    /// Receives one payload and returns the remote endpoints encoded by the proxy.
+    pub(crate) async fn recv_from(
+        &self,
+        buffer: &mut [u8],
+    ) -> io::Result<(usize, Vec<SocketAddr>)> {
         let received = self.socket.recv(buffer).await?;
         let (header_len, source) = Socks5Protocol::decode_udp_header(&buffer[..received])?;
+        let sources = match source {
+            Socks5ReplyAddress::Socket(source) => vec![source],
+            Socks5ReplyAddress::Domain { name, port } => {
+                Socks5Protocol::resolve_domain(self.dns_forwarder.as_ref(), &name, port).await?
+            }
+        };
         let payload_len = received - header_len;
         buffer.copy_within(header_len..received, 0);
-        Ok((payload_len, source))
+        Ok((payload_len, sources))
     }
 }
 
@@ -463,6 +467,28 @@ impl OutboundProxyConfig for OutboundProxy {
 }
 
 impl Socks5Protocol {
+    /// Resolves a domain-form SOCKS5 endpoint through the internal DNS path.
+    async fn resolve_domain(
+        dns_forwarder: Option<&DnsForwarderHandle>,
+        name: &str,
+        port: u16,
+    ) -> io::Result<Vec<SocketAddr>> {
+        let dns_forwarder = dns_forwarder.ok_or_else(|| {
+            io::Error::other("DNS forwarder is unavailable for SOCKS5 UDP endpoint resolution")
+        })?;
+        let forwarder = DnsForwarder::wait(dns_forwarder.clone())
+            .await
+            .ok_or_else(|| {
+                io::Error::other("DNS forwarder is unavailable for SOCKS5 UDP endpoint resolution")
+            })?;
+        Ok(forwarder
+            .resolve_proxy_domain(name)
+            .await?
+            .into_iter()
+            .map(|address| SocketAddr::new(address, port))
+            .collect())
+    }
+
     /// Negotiates a SOCKS5 authentication method and performs username/password
     /// authentication when selected by the proxy.
     async fn negotiate(
@@ -619,7 +645,7 @@ impl Socks5Protocol {
     }
 
     /// Decodes a SOCKS5 UDP request header and returns its payload offset and endpoint.
-    fn decode_udp_header(datagram: &[u8]) -> io::Result<(usize, SocketAddr)> {
+    fn decode_udp_header(datagram: &[u8]) -> io::Result<(usize, Socks5ReplyAddress)> {
         if datagram.len() < 4 || datagram[..2] != [0x00, 0x00] {
             return Err(Self::invalid_response("invalid SOCKS5 UDP header"));
         }
@@ -629,30 +655,53 @@ impl Socks5Protocol {
             ));
         }
 
-        let (ip, port_offset) = match datagram[3] {
+        let (endpoint, port_offset) = match datagram[3] {
             0x01 if datagram.len() >= 10 => (
-                IpAddr::V4(Ipv4Addr::new(
-                    datagram[4],
-                    datagram[5],
-                    datagram[6],
-                    datagram[7],
+                Socks5ReplyAddress::Socket(SocketAddr::new(
+                    IpAddr::V4(Ipv4Addr::new(
+                        datagram[4],
+                        datagram[5],
+                        datagram[6],
+                        datagram[7],
+                    )),
+                    u16::from_be_bytes([datagram[8], datagram[9]]),
                 )),
                 8,
             ),
             0x04 if datagram.len() >= 22 => {
                 let mut octets = [0u8; 16];
                 octets.copy_from_slice(&datagram[4..20]);
-                (IpAddr::V6(Ipv6Addr::from(octets)), 20)
+                (
+                    Socks5ReplyAddress::Socket(SocketAddr::new(
+                        IpAddr::V6(Ipv6Addr::from(octets)),
+                        u16::from_be_bytes([datagram[20], datagram[21]]),
+                    )),
+                    20,
+                )
             }
-            0x03 => {
-                return Err(Self::invalid_response(
-                    "domain-form SOCKS5 UDP replies are not supported",
-                ));
+            0x03 if datagram.len() >= 7 => {
+                let length = datagram[4] as usize;
+                let port_offset = 5 + length;
+                if length == 0 || datagram.len() < port_offset + 2 {
+                    return Err(Self::invalid_response("invalid SOCKS5 UDP domain address"));
+                }
+                let name = std::str::from_utf8(&datagram[5..port_offset])
+                    .map_err(|_| Self::invalid_response("non-UTF-8 SOCKS5 UDP domain address"))?
+                    .to_owned();
+                (
+                    Socks5ReplyAddress::Domain {
+                        name,
+                        port: u16::from_be_bytes([
+                            datagram[port_offset],
+                            datagram[port_offset + 1],
+                        ]),
+                    },
+                    port_offset,
+                )
             }
             _ => return Err(Self::invalid_response("invalid SOCKS5 UDP address")),
         };
-        let port = u16::from_be_bytes([datagram[port_offset], datagram[port_offset + 1]]);
-        Ok((port_offset + 2, SocketAddr::new(ip, port)))
+        Ok((port_offset + 2, endpoint))
     }
 
     /// Converts a SOCKS5 reply code into a stable diagnostic.
@@ -682,11 +731,11 @@ impl Socks5Protocol {
 
 #[cfg(test)]
 mod tests {
-    use std::net::{Ipv6Addr, SocketAddr};
+    use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
     use std::sync::Arc;
 
     use hickory_net::proto::op::{Message, MessageType, OpCode};
-    use hickory_net::proto::rr::rdata::AAAA;
+    use hickory_net::proto::rr::rdata::{A, AAAA};
     use hickory_net::proto::rr::{RData, Record, RecordType};
     use hickory_net::proto::serialize::binary::{BinDecodable, BinEncodable};
     use microsandbox_types::SecretSource;
@@ -702,7 +751,7 @@ mod tests {
     use crate::netstack::poll::GatewayIps;
     use crate::netstack::shared::SharedState;
 
-    async fn responding_dns_ipv6(answer: Ipv6Addr) -> SocketAddr {
+    async fn responding_dns(relay_ipv6: Ipv6Addr, source_ipv4: Ipv4Addr) -> SocketAddr {
         let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let address = socket.local_addr().unwrap();
         tokio::spawn(async move {
@@ -720,11 +769,21 @@ mod tests {
                 response.metadata.recursion_available = true;
                 if let Some(question) = query.queries.first() {
                     response.add_query(question.clone());
-                    if question.query_type() == RecordType::AAAA {
+                    let domain = question.name().to_string();
+                    let answer = match (domain.trim_end_matches('.'), question.query_type()) {
+                        ("relay.example.com", RecordType::AAAA) => {
+                            Some(RData::AAAA(AAAA::from(relay_ipv6)))
+                        }
+                        ("source.example.com", RecordType::A) => {
+                            Some(RData::A(A::from(source_ipv4)))
+                        }
+                        _ => None,
+                    };
+                    if let Some(answer) = answer {
                         response.add_answer(Record::from_rdata(
                             question.name().clone(),
                             60,
-                            RData::AAAA(AAAA::from(answer)),
+                            answer,
                         ));
                     }
                 }
@@ -1191,8 +1250,8 @@ mod tests {
         let association = proxy.associate_udp(None).await.unwrap();
         association.send_to(b"hello", target).await.unwrap();
         let mut response = [0u8; 64];
-        let (received, source) = association.recv_from(&mut response).await.unwrap();
-        assert_eq!(source, target);
+        let (received, sources) = association.recv_from(&mut response).await.unwrap();
+        assert_eq!(sources, vec![target]);
         assert_eq!(&response[..received], b"hello");
 
         proxy_task.await.unwrap();
@@ -1203,7 +1262,8 @@ mod tests {
         let target: SocketAddr = "93.184.216.34:5353".parse().unwrap();
         let relay = UdpSocket::bind("[::1]:0").await.unwrap();
         let relay_addr = relay.local_addr().unwrap();
-        let dns_upstream = responding_dns_ipv6(Ipv6Addr::LOCALHOST).await;
+        let dns_upstream =
+            responding_dns(Ipv6Addr::LOCALHOST, Ipv4Addr::new(93, 184, 216, 34)).await;
         let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let proxy_addr = proxy_listener.local_addr().unwrap();
         let proxy_task = tokio::spawn(async move {
@@ -1224,8 +1284,13 @@ mod tests {
             control.write_all(&response).await.unwrap();
 
             let mut datagram = [0u8; 64];
-            let (received, client) = relay.recv_from(&mut datagram).await.unwrap();
-            relay.send_to(&datagram[..received], client).await.unwrap();
+            let (_, client) = relay.recv_from(&mut datagram).await.unwrap();
+            let source_domain = b"source.example.com";
+            let mut response = vec![0x00, 0x00, 0x00, 0x03, source_domain.len() as u8];
+            response.extend_from_slice(source_domain);
+            response.extend_from_slice(&target.port().to_be_bytes());
+            response.extend_from_slice(b"hello");
+            relay.send_to(&response, client).await.unwrap();
         });
 
         let proxy = ResolvedOutboundProxy::Socks5 {
@@ -1245,8 +1310,8 @@ mod tests {
         let association = proxy.associate_udp(Some(dns_forwarder)).await.unwrap();
         association.send_to(b"hello", target).await.unwrap();
         let mut response = [0u8; 64];
-        let (received, source) = association.recv_from(&mut response).await.unwrap();
-        assert_eq!(source, target);
+        let (received, sources) = association.recv_from(&mut response).await.unwrap();
+        assert_eq!(sources, vec![target]);
         assert_eq!(&response[..received], b"hello");
 
         proxy_task.await.unwrap();

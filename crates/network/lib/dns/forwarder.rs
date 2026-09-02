@@ -197,6 +197,14 @@ impl DnsForwarder {
     /// rebind protection, active guest address families, and the guest DNS
     /// cache do not apply here.
     pub(crate) async fn resolve_proxy_domain(&self, domain: &str) -> io::Result<Vec<IpAddr>> {
+        #[cfg(windows)]
+        if matches!(&self.configured, ConfiguredResolver::WindowsSystem(_)) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "proxy relay domain resolution requires an explicit DNS nameserver on Windows",
+            ));
+        }
+
         let name = Name::from_ascii(domain).map_err(|error| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
