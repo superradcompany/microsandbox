@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 use microsandbox_agent_client::AgentClient;
 use microsandbox_image::checkpoint::{
     CaptureIntent, CheckpointManifest, ContentRef, DeviceStateRef, LocalObjectStore,
-    MemoryCaptureMode, MemoryExtent, MemoryExtentContent, MemoryManifest, ResourceDescriptor,
-    ResourceTreatment,
+    MemoryCaptureMode, MemoryExtent, MemoryExtentContent, MemoryManifest, ObjectId,
+    ResourceDescriptor, ResourceTreatment,
 };
 use microsandbox_protocol::bootstrap::GuestBootstrap;
 use microsandbox_protocol::core::{
@@ -118,6 +118,12 @@ struct PendingMemoryExtent {
     start: u64,
     length: u64,
     object_offset: u64,
+}
+
+struct PendingDeviceState {
+    device_type: u32,
+    device_id: String,
+    bytes: Vec<u8>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -428,7 +434,7 @@ impl CheckpointCoordinator {
         timings.execution_us = execution_started.elapsed().as_micros();
 
         let devices_started = Instant::now();
-        let mut device_refs = Vec::with_capacity(inventory.len());
+        let mut pending_devices = Vec::with_capacity(inventory.len());
         let mut disk_roots = Vec::new();
         for (device_type, device_id) in inventory {
             let bytes = if *device_type == TYPE_BLOCK && device_id == "vdb" {
@@ -493,19 +499,14 @@ impl CheckpointCoordinator {
                 }
                 state.encode().map_err(CheckpointFailure::resumable)?
             };
-            let state_id = self
-                .store
-                .put_bytes(&bytes)
-                .map_err(CheckpointFailure::resumable)?;
-            self.store
-                .link_into(&state_id, staging)
-                .map_err(CheckpointFailure::resumable)?;
-            device_refs.push(DeviceStateRef {
+            pending_devices.push(PendingDeviceState {
                 device_type: *device_type,
                 device_id: device_id.clone(),
-                state: state_id,
+                bytes,
             });
         }
+        let device_refs = persist_device_states(&self.store, staging, &pending_devices)
+            .map_err(CheckpointFailure::resumable)?;
         timings.devices_us = devices_started.elapsed().as_micros();
 
         let memory_plan_started = Instant::now();
@@ -570,13 +571,17 @@ impl CheckpointCoordinator {
         // object once so closure construction never rehashes or relinks it per guest extent.
         let mut linked_memory_objects = BTreeSet::new();
         for extent in &memory_manifest.extents {
-            if let MemoryExtentContent::Object(content) = &extent.content
-                && linked_memory_objects.insert(content.object.clone())
-                && let Err(error) = self.store.link_into(&content.object, staging)
-            {
-                let _ = vm.abandon_memory_capture(&memory_plan);
-                return Err(CheckpointFailure::resumable(error));
+            if let MemoryExtentContent::Object(content) = &extent.content {
+                linked_memory_objects.insert(content.object.clone());
             }
+        }
+        if let Err(error) = parallel_link_objects(
+            &self.store,
+            staging,
+            &linked_memory_objects.into_iter().collect::<Vec<_>>(),
+        ) {
+            let _ = vm.abandon_memory_capture(&memory_plan);
+            return Err(CheckpointFailure::resumable(error));
         }
         let memory_id = match self.store.put_bytes(&memory_bytes) {
             Ok(id) => id,
@@ -1110,6 +1115,98 @@ fn resource_kind(device_type: u32) -> &'static str {
     }
 }
 
+/// Persist independent device envelopes concurrently after every device has reached the same
+/// paused epoch. Immutable-object publication is thread-safe, and the returned vector retains the
+/// inventory order required by the checkpoint manifest.
+fn persist_device_states(
+    store: &LocalObjectStore,
+    staging: &Path,
+    pending: &[PendingDeviceState],
+) -> Result<Vec<DeviceStateRef>, String> {
+    if pending.is_empty() {
+        return Ok(Vec::new());
+    }
+    let workers = parallel_worker_count(pending.len());
+    let chunk_size = pending.len().div_ceil(workers);
+    std::thread::scope(|scope| {
+        let handles = pending
+            .chunks(chunk_size)
+            .map(|chunk| {
+                scope.spawn(move || {
+                    chunk
+                        .iter()
+                        .map(|state| {
+                            let id = store.put_bytes(&state.bytes).map_err(|error| {
+                                format!("store device state {}: {error}", state.device_id)
+                            })?;
+                            store.link_into(&id, staging).map_err(|error| {
+                                format!("link device state {}: {error}", state.device_id)
+                            })?;
+                            Ok(DeviceStateRef {
+                                device_type: state.device_type,
+                                device_id: state.device_id.clone(),
+                                state: id,
+                            })
+                        })
+                        .collect::<Result<Vec<_>, String>>()
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut refs = Vec::with_capacity(pending.len());
+        for handle in handles {
+            refs.extend(
+                handle
+                    .join()
+                    .map_err(|_| "device-state persistence worker panicked".to_string())??,
+            );
+        }
+        Ok(refs)
+    })
+}
+
+/// Link independent immutable memory objects concurrently. Each object remains fully verified by
+/// `LocalObjectStore::link_into`; this only overlaps hashing and filesystem durability waits.
+fn parallel_link_objects(
+    store: &LocalObjectStore,
+    staging: &Path,
+    objects: &[ObjectId],
+) -> Result<(), String> {
+    if objects.is_empty() {
+        return Ok(());
+    }
+    let workers = parallel_worker_count(objects.len());
+    let chunk_size = objects.len().div_ceil(workers);
+    std::thread::scope(|scope| {
+        let handles = objects
+            .chunks(chunk_size)
+            .map(|chunk| {
+                scope.spawn(move || {
+                    for object in chunk {
+                        store
+                            .link_into(object, staging)
+                            .map_err(|error| format!("link memory object {object}: {error}"))?;
+                    }
+                    Ok::<(), String>(())
+                })
+            })
+            .collect::<Vec<_>>();
+        for handle in handles {
+            handle
+                .join()
+                .map_err(|_| "memory-object link worker panicked".to_string())??;
+        }
+        Ok(())
+    })
+}
+
+fn parallel_worker_count(items: usize) -> usize {
+    std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1)
+        .min(8)
+        .min(items.max(1))
+}
+
 fn sync_directory(path: &Path) -> io::Result<()> {
     #[cfg(unix)]
     std::fs::File::open(path)?.sync_all()?;
@@ -1125,8 +1222,9 @@ fn sync_directory(path: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        MemoryObjectSink, overlay_extents, publish_root_last, runtime_owned_fs_bindings,
-        validate_vm_generation_state, validate_workload_reply,
+        MemoryObjectSink, PendingDeviceState, overlay_extents, persist_device_states,
+        publish_root_last, runtime_owned_fs_bindings, validate_vm_generation_state,
+        validate_workload_reply,
     };
 
     use microsandbox_image::checkpoint::{
@@ -1276,6 +1374,33 @@ mod tests {
             std::fs::read(store.object_path(&first.object)).unwrap(),
             b"abcde"
         );
+    }
+
+    #[test]
+    fn parallel_device_persistence_preserves_inventory_order() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = LocalObjectStore::open(temp.path().join("store")).unwrap();
+        let staging = temp.path().join("checkpoint");
+        std::fs::create_dir(&staging).unwrap();
+        let pending = (0..16)
+            .map(|index| PendingDeviceState {
+                device_type: index,
+                device_id: format!("device-{index:02}"),
+                bytes: vec![index as u8; 4096],
+            })
+            .collect::<Vec<_>>();
+
+        let persisted = persist_device_states(&store, &staging, &pending).unwrap();
+
+        assert_eq!(persisted.len(), pending.len());
+        for (index, state) in persisted.iter().enumerate() {
+            assert_eq!(state.device_type, index as u32);
+            assert_eq!(state.device_id, format!("device-{index:02}"));
+            assert_eq!(
+                std::fs::read(store.object_path(&state.state)).unwrap(),
+                vec![index as u8; 4096]
+            );
+        }
     }
 
     #[test]
