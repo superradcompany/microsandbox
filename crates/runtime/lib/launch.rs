@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use microsandbox_types::TransparentHugePagePolicy;
 
 #[cfg(feature = "net")]
-use microsandbox_network::config::NetworkConfig;
+use microsandbox_network::ResolvedNetworkConfig;
 
 use crate::vm::{MetricsSlotHandoff, StartupCommand};
 
@@ -116,9 +116,9 @@ pub struct LaunchConfig {
     /// Arguments to pass to the executable.
     pub exec_args: Vec<String>,
 
-    /// Network configuration. Present only when the `net` feature is on.
+    /// Network launch configuration. Present only when the `net` feature is on.
     #[cfg(feature = "net")]
-    pub network: Option<NetworkConfig>,
+    pub network: Option<ResolvedNetworkConfig>,
 
     /// Host-runtime isolation profile enforced by backend implementations.
     #[cfg(feature = "net")]

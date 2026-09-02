@@ -1,6 +1,7 @@
 ---
 title: Snapshots
 description: Capture a sandbox's writable layer as a portable artifact
+keywords: ["sandbox snapshots", "checkpoint", "restore sandbox"]
 icon: "code-branch"
 ---
 
@@ -9,7 +10,7 @@ icon: "code-branch"
 A snapshot is a portable, on-disk capture of a sandbox's writable filesystem. Move it with `scp`, archive it as `.tar.zst`, or boot fresh sandboxes from it.
 
 <Note>
-Snapshots are **disk-only** and require a sandbox that is not running. Stopped and crashed sandboxes can be snapshotted; running, draining, and paused sandboxes are rejected.
+Snapshots are **disk-only** and require a sandbox that is not running. You can snapshot stopped and crashed sandboxes; microsandbox rejects running, draining, and paused sandboxes.
 </Note>
 
 ## What gets captured
@@ -49,17 +50,6 @@ By default, the snapshot lives at `~/.microsandbox/snapshots/after-pip-install/`
 Snapshot under a bare name, resolved to `~/.microsandbox/snapshots/<name>/` by default. The name is the snapshot's identity; pass a destination directory to create the artifact on a different volume (`DIR/<name>`). Either way the directory is the whole artifact; move it with save/load (or plain `mv`):
 
 <CodeGroup>
-```rust Rust
-use microsandbox::Sandbox;
-
-let h = Sandbox::get("baseline").await?;
-
-// Resolves under ~/.microsandbox/snapshots/<name>/
-let snap = h.snapshot("after-pip-install").await?;
-
-println!("{}", snap.digest()); // sha256:...
-```
-
 ```typescript TypeScript
 import { Sandbox } from "microsandbox";
 
@@ -69,6 +59,17 @@ const h = await Sandbox.get("baseline");
 const snap = await h.snapshot("after-pip-install");
 
 console.log(snap.digest); // sha256:...
+```
+
+```rust Rust
+use microsandbox::Sandbox;
+
+let h = Sandbox::get("baseline").await?;
+
+// Resolves under ~/.microsandbox/snapshots/<name>/
+let snap = h.snapshot("after-pip-install").await?;
+
+println!("{}", snap.digest()); // sha256:...
 ```
 
 ```python Python
@@ -104,13 +105,21 @@ msb snapshot create after-pip-install --from baseline --dest-dir /mnt/big
 
 </CodeGroup>
 
-The sandbox must be stopped or crashed; running sandboxes are rejected.
+The sandbox must be stopped or crashed; microsandbox rejects running sandboxes.
 
 ## Boot from a snapshot
 
 A snapshot already pins its image, so booting from one is mutually exclusive with the image source:
 
 <CodeGroup>
+```typescript TypeScript
+import { Sandbox } from "microsandbox";
+
+const sb = await Sandbox.builder("worker")
+    .fromSnapshot("after-pip-install")
+    .create();
+```
+
 ```rust Rust
 use microsandbox::Sandbox;
 
@@ -118,14 +127,6 @@ let sb = Sandbox::builder("worker")
     .from_snapshot("after-pip-install")
     .create()
     .await?;
-```
-
-```typescript TypeScript
-import { Sandbox } from "microsandbox";
-
-const sb = await Sandbox.builder("worker")
-    .fromSnapshot("after-pip-install")
-    .create();
 ```
 
 ```python Python
@@ -152,17 +153,6 @@ Booting validates the snapshot, resolves the pinned image, and gives the new san
 ## List, inspect, and remove
 
 <CodeGroup>
-```rust Rust
-use microsandbox::Snapshot;
-
-let all = Snapshot::list().await?; // Indexed snapshots
-let h = Snapshot::get("after-pip-install").await?; // By name, digest, or path
-println!("{} ({})", h.name().unwrap_or("-"), h.digest());
-
-Snapshot::remove("after-pip-install", false).await?;
-Snapshot::reindex("/data/snapshots").await?;
-```
-
 ```typescript TypeScript
 import { Snapshot } from "microsandbox";
 
@@ -172,6 +162,17 @@ console.log(`${h.name ?? "-"} (${h.digest})`);
 
 await Snapshot.remove("after-pip-install");
 await Snapshot.reindex();                               // Default snapshots directory
+```
+
+```rust Rust
+use microsandbox::Snapshot;
+
+let all = Snapshot::list().await?; // Indexed snapshots
+let h = Snapshot::get("after-pip-install").await?; // By name, digest, or path
+println!("{} ({})", h.name().unwrap_or("-"), h.digest());
+
+Snapshot::remove("after-pip-install", false).await?;
+Snapshot::reindex("/data/snapshots").await?;
 ```
 
 ```python Python
@@ -241,6 +242,19 @@ Archives default to `.tar.zst`. Pass `--plain-tar` for a plain `.tar`. SDKs expo
 By default, snapshot creation records structural metadata without hashing the writable layer. Opt in when you need a persistent content check. Current snapshots use a fixed 64 KiB-leaf BLAKE3 Merkle tree: known sparse holes collapse into precomputed zero subtrees, while allocated bytes are read and hashed.
 
 <CodeGroup>
+```typescript TypeScript
+import { Snapshot } from "microsandbox";
+
+// Compute and record an integrity hash at create time
+const snap = await Snapshot.builder("after-pip-install")
+  .fromSandbox("baseline")
+  .recordIntegrity()
+  .create();
+
+// Verify a snapshot's recorded integrity on demand
+const report = await snap.verify();
+```
+
 ```rust Rust
 use microsandbox::Snapshot;
 
@@ -254,19 +268,6 @@ let snap = Snapshot::builder("after-pip-install")
 // Verify a snapshot's recorded integrity on demand
 let report = snap.verify().await?;
 
-```
-
-```typescript TypeScript
-import { Snapshot } from "microsandbox";
-
-// Compute and record an integrity hash at create time
-const snap = await Snapshot.builder("after-pip-install")
-  .fromSandbox("baseline")
-  .recordIntegrity()
-  .create();
-
-// Verify a snapshot's recorded integrity on demand
-const report = await snap.verify();
 ```
 
 ```python Python
@@ -316,3 +317,7 @@ msb snapshot inspect after-pip-install --verify
 - **Portable scratch state.** Capture a sandbox after a long setup, hand the artifact to a teammate or push it to shared storage, and let them boot from the same starting point.
 - **Local fork-by-copy.** Multiple sandboxes from one snapshot are independent; each copy of the upper layer diverges on its own.
 - **Disaster recovery.** Snapshot a sandbox before a risky migration; if it goes wrong, `msb rm` the broken one and `msb run --from-snapshot` from the pre-migration artifact.
+
+## Reference
+
+For exact snapshot APIs, see [TypeScript](/sdk/typescript/snapshots), [Rust](/sdk/rust/snapshots), [Python](/sdk/python/snapshots), or [Go](/sdk/go/snapshots). The CLI examples above cover creating, inspecting, transferring, and verifying snapshots; run `msb snapshot --help` for the complete command surface.

@@ -25,15 +25,16 @@
 //! [`DnsInterceptor`]: super::interceptor::DnsInterceptor
 
 use std::collections::HashSet;
+use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
 use futures::StreamExt;
-use hickory_net::proto::op::{DnsRequest, Message, Query, ResponseCode};
+use hickory_net::proto::op::{DnsRequest, Edns, Message, MessageType, OpCode, Query, ResponseCode};
 use hickory_net::proto::rr::rdata::{A, AAAA, CNAME};
-use hickory_net::proto::rr::{RData, Record, RecordType};
+use hickory_net::proto::rr::{Name, RData, Record, RecordType};
 use hickory_net::proto::serialize::binary::{BinDecodable, BinEncodable};
 use hickory_net::xfer::DnsHandle;
 use tokio::sync::{OnceCell, watch};
@@ -180,6 +181,94 @@ impl DnsForwarder {
     /// for certificate verification. `None` falls back to the target
     /// IP as a string. UDP and plain TCP callers pass `None`.
     pub(crate) async fn forward(
+        &self,
+        raw_query: &[u8],
+        original_dst: Option<IpAddr>,
+        transport: Transport,
+        sni: Option<&str>,
+    ) -> Option<Bytes> {
+        self.forward_query(raw_query, original_dst, transport, sni)
+            .await
+    }
+
+    /// Resolves a proxy transport endpoint through the configured resolver.
+    ///
+    /// Proxy infrastructure is not guest traffic, so guest domain policy,
+    /// rebind protection, active guest address families, and the guest DNS
+    /// cache do not apply here.
+    pub(crate) async fn resolve_proxy_domain(&self, domain: &str) -> io::Result<Vec<IpAddr>> {
+        #[cfg(windows)]
+        if matches!(&self.configured, ConfiguredResolver::WindowsSystem(_)) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "proxy relay domain resolution requires an explicit DNS nameserver on Windows",
+            ));
+        }
+
+        let name = Name::from_ascii(domain).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("invalid proxy-supplied DNS name: {error}"),
+            )
+        })?;
+        let (ipv4, ipv6) = tokio::join!(
+            self.resolve_proxy_domain_family(domain, name.clone(), ResolvedHostnameFamily::Ipv4),
+            self.resolve_proxy_domain_family(domain, name, ResolvedHostnameFamily::Ipv6),
+        );
+
+        let mut addresses = Vec::new();
+        let mut last_error = None;
+        for result in [ipv4, ipv6] {
+            match result {
+                Ok(mut resolved) => addresses.append(&mut resolved),
+                Err(error) => last_error = Some(error),
+            }
+        }
+
+        if addresses.is_empty() {
+            Err(last_error.unwrap_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::AddrNotAvailable,
+                    format!("proxy relay domain {domain:?} has no usable address"),
+                )
+            }))
+        } else {
+            Ok(addresses)
+        }
+    }
+
+    /// Resolves one address family for a proxy transport endpoint.
+    async fn resolve_proxy_domain_family(
+        &self,
+        domain: &str,
+        name: Name,
+        family: ResolvedHostnameFamily,
+    ) -> io::Result<Vec<IpAddr>> {
+        let record_type = match family {
+            ResolvedHostnameFamily::Ipv4 => RecordType::A,
+            ResolvedHostnameFamily::Ipv6 => RecordType::AAAA,
+        };
+        let mut query = Message::new(0, MessageType::Query, OpCode::Query);
+        query.metadata.recursion_desired = true;
+        query.add_query(Query::query(name, record_type));
+        let mut edns = Edns::new();
+        edns.set_max_payload(4096);
+        query.edns = Some(edns);
+
+        let raw_query = query
+            .to_bytes()
+            .map_err(|error| io::Error::other(format!("failed to encode DNS query: {error}")))?;
+        let response = self
+            .forward_to_configured(&raw_query, &query, domain, Transport::Udp)
+            .await
+            .ok_or_else(|| io::Error::other("proxy relay DNS query failed"))?;
+
+        Ok(extract_addrs_and_ttl(&response, family, domain)
+            .map_or_else(Vec::new, |(addresses, _)| addresses))
+    }
+
+    /// Processes a guest DNS query through policy and response filtering.
+    async fn forward_query(
         &self,
         raw_query: &[u8],
         original_dst: Option<IpAddr>,
@@ -613,13 +702,17 @@ impl DnsForwarder {
         handle.borrow().clone()
     }
 
-    /// Build a forwarder for proxy tests whose queries are handled locally.
+    /// Build a forwarder for proxy tests, optionally over a test upstream.
     #[cfg(test)]
-    pub(crate) async fn for_proxy_test(shared: Arc<SharedState>, gateway: GatewayIps) -> Arc<Self> {
+    pub(crate) async fn for_proxy_test(
+        shared: Arc<SharedState>,
+        gateway: GatewayIps,
+        upstream: Option<SocketAddr>,
+    ) -> Arc<Self> {
         let config = Arc::new(NormalizedDnsConfig::from_config(
             crate::config::DnsConfig::default(),
         ));
-        let upstream = SocketAddr::from(([127, 0, 0, 1], 9));
+        let upstream = upstream.unwrap_or_else(|| SocketAddr::from(([127, 0, 0, 1], 9)));
         let udp = build_udp_client(upstream, config.query_timeout)
             .await
             .expect("test UDP client should initialize");
@@ -1040,6 +1133,29 @@ mod tests {
             RData::A(a) => Some(Ipv4Addr::from(*a)),
             _ => None,
         })
+    }
+
+    #[tokio::test]
+    async fn proxy_domain_resolution_bypasses_guest_filters() {
+        let expected = Ipv4Addr::new(10, 0, 0, 7);
+        let (upstream, hits) = responding_udp(expected).await;
+        let mut forwarder = forwarder_over(&[upstream]).await;
+        let forwarder_mut = Arc::get_mut(&mut forwarder).expect("unique test forwarder");
+        forwarder_mut.network_policy = Arc::new(NetworkPolicy::none());
+        forwarder_mut.config = Arc::new(NormalizedDnsConfig {
+            rebind_protection: true,
+            nameservers: Vec::new(),
+            query_timeout: Duration::from_millis(300),
+        });
+
+        assert_eq!(
+            forwarder
+                .resolve_proxy_domain("relay.example.com")
+                .await
+                .unwrap(),
+            vec![IpAddr::V4(expected)]
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
     }
 
     /// The reported bug: only the first upstream was ever tried, so an

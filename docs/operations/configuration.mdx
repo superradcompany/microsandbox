@@ -1,0 +1,99 @@
+---
+title: Configuration
+description: Set shared defaults, host policy, registry access, and backend profiles
+icon: "sliders"
+---
+
+microsandbox reads shared configuration from `~/.microsandbox/config.json`. Use this file for defaults and host policy that should apply across the CLI and SDKs. Every field is optional, and a missing file behaves like an empty JSON object.
+
+<Note>
+  This page covers the global JSON configuration. For reusable per-sandbox YAML loaded with `--conf`, see [Configuration file](/cli/configuration). For every global field and accepted value, use the [Global config reference](/configuration).
+</Note>
+
+## What belongs in global configuration
+
+Global configuration is most useful for choices that should be consistent across commands, applications, or sandboxes:
+
+| Area | Use it for | Availability |
+| --- | --- | --- |
+| Sandbox defaults | CPU, memory, storage layout, shell, workdir, and metrics sampling for new sandboxes | Local |
+| Host policy | Deployment isolation, CPU and NUMA placement, and block writeback | Local |
+| Registry access | Credentials, private CAs, and plain-HTTP registry exceptions | Credentials work everywhere; transport overrides are local |
+| Backend profiles | Named local or cloud targets and API-key references | Everywhere |
+| Host integration | Data paths, database pooling, SSH timeout, and metrics registry capacity | Mostly local |
+
+Keep workload-specific settings with the workload. A sandbox's image, network policy, mounts, secrets, and lifecycle usually belong in application code, explicit CLI arguments, or a [sandbox configuration file](/cli/configuration).
+
+## Start small
+
+You do not need to copy the full reference example. Add only the defaults your environment owns:
+
+```json
+{
+  "sandbox_defaults": {
+    "cpus": 2,
+    "memory_mib": 1024,
+    "shell": "/bin/bash"
+  },
+  "active_profile": "local",
+  "profiles": {
+    "local": {
+      "backend": "local"
+    },
+    "production": {
+      "backend": "cloud",
+      "api_key_ref": "env:MSB_API_KEY"
+    }
+  }
+}
+```
+
+This makes local the default backend and gives newly created local sandboxes two vCPUs, 1 GiB of memory, and Bash. Select the cloud profile for one command without editing the file:
+
+```bash
+MSB_PROFILE=production msb run python
+```
+
+Prefer environment or keyring references over storing credentials inline. For a private registry, `msb registry login` stores the secret in the operating system credential store and writes only metadata to `config.json`.
+
+## How values resolve
+
+For most sandbox defaults, the most specific input wins:
+
+```text
+highest precedence
+
+  explicit CLI flags or SDK builder settings
+                     |
+                     v
+  ~/.microsandbox/config.json
+                     |
+                     v
+  built-in defaults
+
+lowest precedence
+```
+
+microsandbox resolves these values when it creates a local sandbox and persists the result. Editing `config.json` changes future sandboxes, not existing ones. Use `msb inspect <name> --format json` to inspect a sandbox's effective configuration.
+
+Host-owned policy is intentionally stricter. A global `deployment_profile` sets the local host's isolation floor and cannot be weakened by a per-sandbox CLI or SDK option. Backend selection and registry authentication also have their own resolution rules; follow their reference links before relying on fallback behavior.
+
+## Common paths through the docs
+
+<CardGroup cols={2}>
+  <Card title="Global config reference" icon="list" href="/configuration">
+    Look up every field, default, accepted value, and precedence exception.
+  </Card>
+
+  <Card title="Sandbox configuration file" icon="file-code" href="/cli/configuration">
+    Define a reusable sandbox in YAML and load it with `--conf`.
+  </Card>
+
+  <Card title="Backends" icon="route" href="/operations/backends">
+    Configure profiles and understand local-versus-cloud resolution.
+  </Card>
+
+  <Card title="Optimization" icon="bolt" href="/sandboxes/optimization">
+    Choose resource, placement, storage, and writeback settings from measurements.
+  </Card>
+</CardGroup>

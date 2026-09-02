@@ -70,7 +70,7 @@ See [Networking DNS](/networking/dns).
 - **Ingress policy gate on published ports.** Inbound TCP connections on published ports are now evaluated against the network policy before the listener accepts them; denied peers receive a TCP RST instead of a graceful close. See the [networking overview](/networking/overview).
 - **`MSB_HOME` env override.** Point a sandbox at an isolated state directory without touching `$HOME`, useful for CI jobs that share a runner. The build script honors the same variable, so build-time and runtime paths agree.
 - **Secret injection for Basic auth.** Placeholders inside `Authorization: Basic <base64>` headers are now decoded, substituted, and re-encoded. The proxy also detects bypass attempts via URL percent-encoding, JSON unicode escapes, and placeholders split across TCP writes. The Python SDK gained the same `SecretInjection` options (`headers`, `basic_auth`, `query_params`, `body`) as the Node SDK.
-- **`createWithProgress` in the Node TS SDK.** Stream image pull events (layer downloads, extraction) while creating a sandbox; the returned `PullSession` resolves to the live sandbox. See the [TypeScript SDK reference](/sdk/typescript/sandbox).
+- **`createWithPullProgress` in the Node TS SDK.** Stream image pull events (layer downloads, extraction) while creating a sandbox; the returned `PullProgressCreate` resolves to the live sandbox. See the [TypeScript SDK reference](/sdk/typescript/sandbox).
 - **`--replace-grace` flag.** Configure how long `replace()` waits for the previous sandbox to shut down before escalating, exposed in the CLI and all SDKs.
 
 ## Bug fixes

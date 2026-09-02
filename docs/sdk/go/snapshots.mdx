@@ -1,6 +1,7 @@
 ---
 title: Snapshots
 description: Go SDK - Snapshot API reference
+keywords: ["Go SDK", "Go snapshots", "microsandbox snapshots"]
 ---
 
 <Tooltip tip="Snapshot creation, restore, import, and export use local disk artifacts and are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
@@ -36,7 +37,7 @@ Create a snapshot from a stopped or crashed sandbox. [`SnapshotCreateOptions.Nam
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#snapshotartifactstruct">*SnapshotArtifact</a></div>
+    <div className="msb-param-key"><a className="msb-type" href="#snapshotartifact">*SnapshotArtifact</a></div>
     <div className="msb-param-desc">The created artifact on disk.</div>
   </div>
 </div>
@@ -89,7 +90,7 @@ Open an existing artifact by bare name or filesystem path. This validates metada
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#snapshotartifactstruct">*SnapshotArtifact</a></div>
+    <div className="msb-param-key"><a className="msb-type" href="#snapshotartifact">*SnapshotArtifact</a></div>
     <div className="msb-param-desc">The artifact on disk.</div>
   </div>
 </div>
@@ -127,7 +128,7 @@ Look up a lightweight handle in the local index by name, digest, or path.
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#snapshothandlestruct">*SnapshotHandle</a></div>
+    <div className="msb-param-key"><a className="msb-type" href="#snapshothandle">*SnapshotHandle</a></div>
     <div className="msb-param-desc">Index-backed handle.</div>
   </div>
 </div>
@@ -155,7 +156,7 @@ List indexed snapshots from the local DB cache.
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#snapshothandlestruct">[]*SnapshotHandle</a></div>
+    <div className="msb-param-key"><a className="msb-type" href="#snapshothandle">[]*SnapshotHandle</a></div>
     <div className="msb-param-desc">All indexed handles.</div>
   </div>
 </div>
@@ -185,7 +186,7 @@ Walk a directory and parse each subdirectory's manifest without touching the ind
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#snapshotartifactstruct">[]*SnapshotArtifact</a></div>
+    <div className="msb-param-key"><a className="msb-type" href="#snapshotartifact">[]*SnapshotArtifact</a></div>
     <div className="msb-param-desc">One artifact per parsed subdirectory.</div>
   </div>
 </div>
@@ -336,7 +337,7 @@ Unpack a snapshot archive into the snapshots directory or an explicit `dest` dir
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#snapshothandlestruct">*SnapshotHandle</a></div>
+    <div className="msb-param-key"><a className="msb-type" href="#snapshothandle">*SnapshotHandle</a></div>
     <div className="msb-param-desc">Handle to the loaded snapshot.</div>
   </div>
 </div>
@@ -351,7 +352,7 @@ h, err := m.Snapshot.Load(ctx, "/tmp/snap.tar.zst", "")
 
 ## SandboxHandle
 
-Snapshots are taken from a metadata handle, so stop the sandbox first and then call [`GetSandbox`](/sdk/go/sandbox#getsandbox).
+Snapshots are taken from a metadata handle, so stop the sandbox first and then call [`GetSandbox`](/sdk/go/sandbox#m-getsandbox).
 
 ```go
 _ = sb.Stop(ctx)
@@ -389,7 +390,7 @@ Snapshot this sandbox under a bare name in the default snapshots directory. The 
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#snapshotartifactstruct">*SnapshotArtifact</a></div>
+    <div className="msb-param-key"><a className="msb-type" href="#snapshotartifact">*SnapshotArtifact</a></div>
     <div className="msb-param-desc">The created artifact.</div>
   </div>
 </div>
@@ -574,7 +575,7 @@ Open the underlying artifact metadata. Equivalent to [`Snapshot.Open`](#snapshot
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#snapshotartifactstruct">*SnapshotArtifact</a></div>
+    <div className="msb-param-key"><a className="msb-type" href="#snapshotartifact">*SnapshotArtifact</a></div>
     <div className="msb-param-desc">The opened artifact.</div>
   </div>
 </div>

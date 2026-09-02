@@ -6,7 +6,7 @@ icon: "docker"
 
 This example starts a complete Docker environment inside a microsandbox VM. It is useful for sandboxed builds, agent workflows that need their own Docker daemon, or experiments you do not want leaking onto the dev machine. The host's Docker setup, if any, is left untouched.
 
-The command below boots the `docker:dind` image, starts Docker inside the sandbox, waits for it to be ready, and then opens an interactive shell. From there, Docker commands run against the daemon inside the sandbox, not your host.
+The command below boots the `docker:dind` image on a flat root disk, starts Docker inside the sandbox, waits for it to be ready, and then opens an interactive shell. From there, Docker commands run against the daemon inside the sandbox, not your host.
 
 ## Run Docker in a sandbox
 
@@ -14,53 +14,7 @@ The command below boots the `docker:dind` image, starts Docker inside the sandbo
 
 <Step title="Start Docker">
 
-<Tooltip tip="On microsandbox cloud, create the named volume separately without disk-kind or size options, then omit replace-on-create from this command."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
-
-<CodeGroup>
-```sh macOS & Linux
-msb run --name docker-demo --replace \
-  --memory 2G \
-  --mount-named docker-data:/var/lib/docker:kind=disk,size=10G \
-  --script start='dockerd >/tmp/dockerd.log 2>&1 &
-  timeout 60 sh -c "until docker info>/dev/null 2>&1;do sleep 1;done" || {
-    cat /tmp/dockerd.log
-    false
-  }
-  exec sh' \
-  --entrypoint start \
-  docker:dind
-```
-
-```powershell Windows
-msb run --name docker-demo --replace `
-  --memory 2G `
-  --mount-named docker-data:/var/lib/docker:kind=disk,size=10G `
-  --script start='dockerd >/tmp/dockerd.log 2>&1 &
-  timeout 60 sh -c "until docker info>/dev/null 2>&1;do sleep 1;done" || {
-    cat /tmp/dockerd.log
-    false
-  }
-  exec sh' `
-  --entrypoint start `
-  docker:dind
-```
-</CodeGroup>
-
-This command does three things:
-
-- Starts the `docker:dind` image in a sandbox named `docker-demo`.
-- Mounts a disk-backed named volume called `docker-data` at `/var/lib/docker`, where Docker stores images, containers, and build cache.
-- Runs the inline `start` script as the entrypoint. The script starts Docker, waits until it is ready, and then opens a shell.
-
-`--mount-named docker-data:/var/lib/docker:kind=disk,size=10G` is idempotent. If `docker-data` does not exist, the CLI creates it before starting the sandbox. If it already exists with compatible disk settings, the same command reuses it, so pulled images and created containers can survive `msb rm docker-demo`.
-
-</Step>
-
-<Step title="Optional: use a flat root disk">
-
-<Tooltip tip="Flat root disks are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
-
-For a simpler local setup, use a flat root disk instead of a separate named volume. A flat root mounts ext4 directly, so Docker's overlay storage is not nested on the default sandbox OverlayFS.
+<Tooltip tip="Flat root disks are not yet available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 <CodeGroup>
 ```sh macOS & Linux
@@ -92,7 +46,13 @@ msb run --name docker-demo --replace `
 ```
 </CodeGroup>
 
-This stores Docker's images, containers, and build cache on the sandbox's root disk. The data persists when the sandbox stops and starts, but unlike a named volume, it does not survive removing or replacing the sandbox. The `10G` capacity covers the entire root filesystem, including Docker's data.
+This command does three things:
+
+- Starts the `docker:dind` image in a sandbox named `docker-demo`.
+- Gives the sandbox a 10 GiB flat root disk for the image, Docker data, and build cache.
+- Runs the inline `start` script as the entrypoint. The script starts Docker, waits until it is ready, and then opens a shell.
+
+The flat root mounts ext4 directly, so Docker's overlay storage is not nested on the default sandbox OverlayFS. Docker's images, containers, and build cache persist when the sandbox stops and starts, but are removed with the sandbox.
 
 </Step>
 
@@ -128,15 +88,7 @@ Back on the host, remove the sandbox:
 msb rm -f docker-demo
 ```
 
-Remove the Docker data only when you no longer need it:
-
-```sh
-msb volume rm docker-data
-```
-
-Remove `docker-data` only when you no longer need the images, containers, and build cache stored by the nested daemon.
-
-If you used the flat-root alternative, skip `msb volume rm docker-data`; removing the sandbox also removes its Docker data.
+Removing the sandbox also removes the nested daemon's images, containers, and build cache.
 
 </Step>
 
@@ -144,7 +96,7 @@ If you used the flat-root alternative, skip `msb volume rm docker-data`; removin
 
 ## Details
 
-The disk-backed named mount gives Docker its own ext4 filesystem at `/var/lib/docker`. That matters because the sandbox root filesystem is already overlay-backed, and Docker's default storage driver also uses overlay layers. Keeping Docker's data root on a dedicated disk-backed volume avoids putting Docker's overlay storage directly on top of the sandbox root overlay.
+The flat root gives Docker a direct ext4 filesystem. That matters because Docker's default storage driver uses overlay layers; a normal managed root would place those layers on top of the sandbox's own OverlayFS.
 
 ## Notes
 

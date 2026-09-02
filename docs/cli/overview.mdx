@@ -25,10 +25,10 @@ irm https://install.microsandbox.dev/windows | iex
 ```
 </CodeGroup>
 
-On Linux and macOS, the install script writes the runtime to `~/.microsandbox/` and creates command links in `~/.local/bin/`. It does not edit shell startup files. If `~/.local/bin` is not on your `PATH`, the installer prints the command to add it. On macOS, Homebrew provides the same CLI through the official tap. On Windows, use PowerShell; Windows support is currently in preview, and Windows 11 is the tested path.
+On Linux and macOS, the install script writes the runtime to `~/.microsandbox/` and creates command links in `~/.local/bin/`. It does not edit shell startup files. If `~/.local/bin` is not on your `PATH`, the installer prints the command to add it. On macOS, Homebrew provides the same CLI through the official tap. On Windows, use PowerShell. Windows support is currently in preview.
 
 <Note>
-  microsandbox requires glibc-based Linux with KVM enabled, macOS with Apple Silicon (M-series chip), or Windows 11 with Windows Hypervisor Platform enabled. Local sandboxes use hardware virtualization. See [Linux troubleshooting](/troubleshooting/linux), [macOS troubleshooting](/troubleshooting/macos), or [Windows troubleshooting](/troubleshooting/windows) for platform-specific notes.
+  Local sandboxes require Linux with glibc 2.28 or newer and KVM, an Apple Silicon Mac, or an x64 or ARM64 machine running Windows 10 or later with Windows Hypervisor Platform enabled. See [Linux troubleshooting](/troubleshooting/linux), [macOS troubleshooting](/troubleshooting/macos), or [Windows troubleshooting](/troubleshooting/windows) for setup help.
 </Note>
 
 Check your local setup with:
@@ -77,7 +77,7 @@ msb images            # List cached images
 msb rmi python        # Remove a cached image
 
 # Volumes
-msb volume create data --size 10G
+msb volume create data
 msb volumes              # Also: msb vols
 msb volume rm data
 

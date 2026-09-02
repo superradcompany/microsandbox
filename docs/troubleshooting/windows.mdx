@@ -4,7 +4,15 @@ description: Diagnose Windows Hypervisor Platform, doctor checks, and terminal s
 icon: "windows"
 ---
 
-Windows support is currently in preview. Windows 11 is the tested path, and local sandboxes require Windows Hypervisor Platform.
+Windows support is currently in preview. To run sandboxes locally, use Windows 10 or later on an x64 or ARM64 machine and enable Windows Hypervisor Platform (WHP).
+
+## Install or reinstall
+
+Run the installer in PowerShell, then open a new terminal:
+
+```powershell
+irm https://install.microsandbox.dev/windows | iex
+```
 
 ## Quick checks
 
@@ -54,7 +62,7 @@ If an error mentions `libkrunfw.so` or `libkrunfw.dylib`, clear any old Unix/mac
 
 ## Updates and reinstalls
 
-`msb self update` stages and verifies the new Windows release before scheduling the installed files for replacement. The command can exit while another `msb` or `microsandbox` process still has an executable locked; the background task keeps retrying and writes its progress to the log path printed by the command.
+`msb self update` stages and verifies the new Windows release before scheduling the installed files for replacement. The command can exit while another `msb` or `microsandbox` process still has an executable locked. The background task keeps retrying and writes its progress to the log path printed by the command.
 
 The PowerShell installer checks both public executable names before changing the installation. If it reports that an executable is still running, stop the listed process or its active sandbox, then rerun the installer.
 

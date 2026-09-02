@@ -1,0 +1,163 @@
+---
+title: "Backends"
+description: "Route CLI and SDK operations between the local runtime and microsandbox cloud"
+icon: "route"
+---
+
+microsandbox exposes one CLI and SDK surface across the local runtime and [microsandbox cloud](/cloud/overview). Local is the default; cloud requires explicit intent and a usable credential.
+
+Use the simplest selector that matches who owns the decision:
+
+| Selector | Best for |
+| --- | --- |
+| `MSB_BACKEND` | One command, a shell, CI, or deployment configuration |
+| SDK selection | Applications that must choose independently of their environment |
+| Named profile | Regular switching or shared environment defaults |
+
+## Environment
+
+The `MSB_BACKEND` environment variable forces a backend for a single command or shell:
+
+```bash
+MSB_BACKEND=local msb run python -- python -V
+MSB_BACKEND=cloud MSB_API_KEY="msb_..." msb ls
+```
+
+Cloud selection and credentials are separate. `MSB_API_KEY` does not select cloud by itself. `MSB_API_URL` only overrides the cloud endpoint and does not select cloud either.
+
+## SDK selection
+
+Programmatic selection wins over environment and profile resolution. Use it when the application should decide regardless of where it is launched:
+
+<CodeGroup>
+```typescript TypeScript
+import { setDefaultBackend } from "microsandbox";
+
+setDefaultBackend({ kind: "cloud", apiKey: process.env.MSB_API_KEY! });
+
+// Or force the local runtime.
+setDefaultBackend("local");
+```
+
+```rust Rust
+use microsandbox::{set_default_backend, CloudBackend, LocalBackend};
+
+// Reads MSB_API_KEY.
+set_default_backend(CloudBackend::from_env()?);
+
+// Or pass the key explicitly.
+set_default_backend(CloudBackend::with_api_key(api_key)?);
+
+// Or force the local runtime.
+set_default_backend(LocalBackend::lazy());
+```
+
+```python Python
+import os
+from microsandbox import set_default_backend
+
+set_default_backend("cloud", api_key=os.environ["MSB_API_KEY"])
+
+# Or force the local runtime.
+set_default_backend("local")
+```
+
+```ruby Ruby
+require "microsandbox"
+
+Microsandbox.use_cloud_backend!(ENV.fetch("MSB_API_KEY"))
+
+# Or force the local runtime.
+Microsandbox.use_local_backend!
+```
+</CodeGroup>
+
+## Profiles
+
+Profiles are named backend configurations in `~/.microsandbox/config.json`. Use them when you switch regularly or want a shared default for an environment:
+
+```json
+{
+  "active_profile": "production",
+  "profiles": {
+    "production": {
+      "backend": "cloud",
+      "api_key_ref": "env:MSB_API_KEY"
+    },
+    "local": {
+      "backend": "local"
+    }
+  }
+}
+```
+
+`active_profile` sets the default. `MSB_PROFILE=<name>` selects another profile for one command:
+
+```bash
+MSB_PROFILE=production msb run python -- python -V
+```
+
+Cloud profiles require `api_key_ref`. The optional `url` field defaults to `https://api.microsandbox.dev`; set it only for a development, self-hosted, or on-premises control plane. See the [profiles schema](/configuration#profiles) for every field and credential-reference format.
+
+## Resolution order
+
+Backend resolution uses this order:
+
+1. Programmatic backend set by the SDK
+2. `MSB_BACKEND=local|cloud`
+3. `MSB_PROFILE=<name>`
+4. `active_profile`
+5. Local runtime
+
+Selecting a cloud profile with `MSB_PROFILE` or `active_profile` is explicit cloud intent when that profile has `"backend": "cloud"`. `MSB_BACKEND=cloud` without a usable API key or cloud profile returns a configuration error; it never falls back to local execution.
+
+## Inspect the resolved backend
+
+Use `msb context` to inspect the backend kind, selection source, profile, and cloud API URL without exposing the API key:
+
+```bash
+msb context
+msb context --format json
+```
+
+Use the SDK accessors to inspect the active backend without exposing its API key. Detailed backend info includes the kind, cloud API URL, selection source, and profile when applicable:
+
+<CodeGroup>
+```typescript TypeScript
+import { defaultBackendInfo } from "microsandbox";
+
+console.log(defaultBackendInfo());
+console.log(sandbox.backendKind);
+```
+
+```rust Rust
+let info = microsandbox::default_backend_info();
+println!("{}", info.kind.as_str());
+println!("{}", sandbox.backend_kind().as_str());
+```
+
+```python Python
+from microsandbox import default_backend_info
+
+print(default_backend_info())
+print(sandbox.backend_kind)
+```
+
+```go Go
+info, err := microsandbox.DefaultBackendInfo()
+if err != nil {
+    return err
+}
+fmt.Println(info.Kind)
+fmt.Println(sandbox.BackendKind())
+```
+
+```ruby Ruby
+require "microsandbox"
+
+puts Microsandbox.default_backend_kind
+puts sandbox.backend
+```
+</CodeGroup>
+
+For global defaults and profile storage, see [Configuration](/operations/configuration). For backend feature differences, see [Cloud compatibility](/cloud/overview#compatibility).

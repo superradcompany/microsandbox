@@ -1,0 +1,55 @@
+---
+title: "Week of August 21, 2026"
+description: "Configurable SSH inactivity timeout, plural resource list shortcuts, precompiled Ruby platform gems, a fallible lazy local backend builder, faster Windows root-disk copies, and reliability fixes across networking, mounts, runtime bootstrap, and Linux releases."
+icon: "bolt"
+---
+
+<Tip>
+  **Released this week:** [v0.6.10](https://github.com/superradcompany/microsandbox/releases/tag/v0.6.10) · [v0.6.11](https://github.com/superradcompany/microsandbox/releases/tag/v0.6.11) · [v0.6.12](https://github.com/superradcompany/microsandbox/releases/tag/v0.6.12) · [v0.6.13](https://github.com/superradcompany/microsandbox/releases/tag/v0.6.13) · [v0.6.14](https://github.com/superradcompany/microsandbox/releases/tag/v0.6.14)
+</Tip>
+
+## New features
+
+**Configurable SSH inactivity timeout**
+
+The SSH inactivity timeout keeps its 10-minute default, but you can now change it. Set `ssh.inactivity_timeout_secs` in the global config, pass `--inactivity-timeout` or `--no-inactivity-timeout` on the CLI, or override it per session in the Rust, TypeScript, Python, and Go SDKs. A value of `0` disables the timeout entirely.
+
+The setting is independent of sandbox idle timeouts and only controls how long an idle SSH session stays open.
+
+```bash
+msb ssh worker --inactivity-timeout 1800
+```
+
+See [SSH](/sandboxes/ssh).
+
+**Plural resource list shortcuts**
+
+Top-level plural aliases now list volumes, snapshots, and configured registries without typing the full `<resource> list` command. `msb volumes` and `msb vols` list volumes, `msb snapshots` and `msb snaps` list snapshots, and `msb registries` and `msb regs` list registries. The shortcuts follow the existing `msb images` convention and accept the same flags as their subcommand counterparts.
+
+```bash
+msb vols --format json
+msb snaps -q
+```
+
+See the [CLI overview](/cli/overview).
+
+**Other features**
+
+- **Precompiled Ruby platform gems.** `gem install microsandbox` now pulls a prebuilt binary on `x86_64-linux-gnu`, `aarch64-linux-gnu`, and `arm64-darwin` for Ruby 3.1 through 3.4. Users on those targets no longer need a Rust toolchain to install. musl, Windows, and other platforms continue to build from source.
+- **Fallible lazy local backend builder.** The Rust SDK adds `LocalBackendBuilder::try_build_lazy()` so embedding hosts can reject invalid persisted configuration before opening the database. `build_lazy()` keeps its fallback behavior for existing callers.
+- **`msb mod` alias.** `mod` is now a visible alias for `msb modify`, so quick tweaks are shorter to type. `msb create`, `remove`, `exec`, and `ssh` also stopped printing the active backend before each command. Use `msb context` or `msb ctx` when you want to inspect it. See the [CLI reference](/cli/sandbox-commands).
+- **Faster Windows root-disk copies.** Cloning sparse root disks on NTFS now copies allocated ranges using `FSCTL_QUERY_ALLOCATED_RANGES` instead of scanning for non-zero bytes. In a measured 10 GiB flat-disk copy on Windows 11 ARM64, the copy went from 271 seconds to a 1.5-second median while preserving sparse output. The non-zero byte scan remains as a fallback when the filesystem cannot expose allocation metadata.
+
+## Bug fixes
+
+- Host DNS lookups on Windows now go through the Windows DNS Client instead of flattening servers from every active adapter. This preserves VPN, NRPT, resolver health, and encrypted-DNS behavior, avoids stale servers from Hyper-V and other virtual adapters, and starts on Windows builds that do not export `DnsQueryRaw`. Explicit `--dns-nameserver` values still use the direct resolver path.
+- `msb modify --root-disk` can grow ext4 upper disks created before v0.6.9. The legacy feature mask is now recognized, damaged or ambiguous layouts are refused before any resize write, and pending journals are replayed before geometry changes.
+- Failed `msb exec` runs against sandboxes the CLI started no longer leave those sandboxes running. Invalid environment variables, resource limits, and timeouts are also caught before the target sandbox is resolved or started. Sandboxes that were already running stay running.
+- Bind-mount rootfs patches are now contained inside the configured guest root, including through descendant symlinks and Windows junctions. `replace: false` is now atomic, guest-internal symlink behavior is preserved, and Windows-incompatible modes are rejected before mutation begins.
+- Guest boot configuration and workload environment values no longer travel on the kernel command line. JSON environment values containing double quotes now survive CLI and SDK launches without appearing in `/proc/cmdline`.
+- Deferred domain allow rules now require a DNS pin binding before admitting a TCP connect, so unrelated raw IPs no longer look reachable under default-deny policies. Deny-only default-deny policies also stop reporting fake connect success.
+- Nested guest mount destinations now always mount parent-first. Submitting mounts in arbitrary order, for example through the Go SDK's mount map, no longer lets a child mount be hidden by a later parent. Canonical duplicate destinations are rejected up front.
+- `host.microsandbox.internal` now reaches host services that only listen on one loopback family. When the matching gateway-family connection is refused or unavailable, the other family is retried across plain TCP, CONNECT, and TLS proxy flows.
+- Bind-mount permission errors now surface a clear message with the host path instead of failing to build.
+- The Linux installer now requires glibc 2.28, matching the released artifacts. Every published Linux binary, including `msb`, `msb-metrics`, the Node native binding, and the Go FFI library, is built against glibc 2.28. A CI gate scans raw release files, npm payloads, tarballs, and wheels and fails the release if any required `GLIBC_*` version exceeds 2.28.
+- Unix Python wheels and release tarballs now ship `msb` with mode `0755`. GitHub artifact transfers were dropping the executable bit, so installed wheels could resolve a non-executable bundled runtime.

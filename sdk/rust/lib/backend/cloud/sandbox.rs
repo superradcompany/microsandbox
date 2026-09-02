@@ -1191,6 +1191,7 @@ mod tests {
         let mut config = base_cloud_config();
         config.spec.network.outbound_proxy = Some(microsandbox_types::OutboundProxy::Socks5 {
             address: "127.0.0.1:1080".to_string(),
+            credentials: None,
         });
 
         assert_unsupported_config_field(config, "network.outbound_proxy");

@@ -31,35 +31,38 @@ test -z "$(git remote)"
 opencode --version
 ```
 
+Create the preparation script that installs the baseline toolchain:
+
+```sh prepare-worker.sh
+#!/bin/sh
+set -eu
+
+apt-get update
+apt-get install -y --no-install-recommends ca-certificates git
+rm -rf /var/lib/apt/lists/*
+npm install -g opencode-ai@1.18.4
+mkdir -p /workspace/project
+chown -R node:node /workspace
+opencode --version
+```
+
 <CodeGroup>
 ```sh macOS & Linux
 msb run --name agent-base --replace \
   --cpus 2 --memory 2G --root-disk 4G \
+  --script-path prepare-worker:./prepare-worker.sh \
   --script-path verify-worker:./verify-worker.sh \
-  node:24-bookworm-slim -- sh -lc '
-    apt-get update &&
-    apt-get install -y --no-install-recommends ca-certificates git &&
-    rm -rf /var/lib/apt/lists/* &&
-    npm install -g opencode-ai@1.18.4 &&
-    mkdir -p /workspace/project &&
-    chown -R node:node /workspace &&
-    opencode --version
-  '
+  --entrypoint prepare-worker \
+  node:24-bookworm-slim
 ```
 
 ```powershell Windows
 msb run --name agent-base --replace `
   --cpus 2 --memory 2G --root-disk 4G `
+  --script-path prepare-worker:./prepare-worker.sh `
   --script-path verify-worker:./verify-worker.sh `
-  node:24-bookworm-slim -- sh -lc '
-    apt-get update &&
-    apt-get install -y --no-install-recommends ca-certificates git &&
-    rm -rf /var/lib/apt/lists/* &&
-    npm install -g opencode-ai@1.18.4 &&
-    mkdir -p /workspace/project &&
-    chown -R node:node /workspace &&
-    opencode --version
-  '
+  --entrypoint prepare-worker `
+  node:24-bookworm-slim
 ```
 </CodeGroup>
 
@@ -214,12 +217,12 @@ Remove the prepared sandbox and workers:
 <CodeGroup>
 ```sh macOS & Linux
 msb rm -f agent-base coding-worker-1 coding-worker-2
-rm -f verify-worker.sh
+rm -f prepare-worker.sh verify-worker.sh
 ```
 
 ```powershell Windows
 msb rm -f agent-base coding-worker-1 coding-worker-2
-Remove-Item verify-worker.sh
+Remove-Item prepare-worker.sh, verify-worker.sh
 ```
 </CodeGroup>
 

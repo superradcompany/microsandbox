@@ -1,6 +1,7 @@
 ---
-title: "Cloud"
-description: "Run the same sandboxes on hosted infrastructure with an API key"
+title: Cloud
+description: Run the same sandboxes on hosted infrastructure with an API key
+keywords: ["microsandbox cloud", "hosted sandboxes", "cloud API keys"]
 icon: "cloud"
 ---
 
@@ -15,13 +16,28 @@ microsandbox cloud runs your sandboxes on hosted infrastructure. The SDKs and th
 ```bash
 export MSB_BACKEND=cloud
 export MSB_API_KEY="msb_..."
+msb context
 ```
+
+`msb context` confirms that subsequent commands will run on cloud and shows what selected the backend without exposing the API key. For profiles, SDK selection, and precedence, see [Backends](/operations/backends).
 
 ## Same code, different backend
 
 Everything from the [quickstart](/getting-started/quickstart) works unchanged. With cloud selected and the API key exported, this creates a sandbox on cloud instead of your machine:
 
 <CodeGroup>
+```typescript TypeScript
+import { Sandbox } from "microsandbox";
+
+await using sb = await Sandbox.builder("hello")
+    .image("python")
+    .memory(512)
+    .create();
+
+const output = await sb.exec("python", ["-c", "print('Hello from the cloud!')"]);
+console.log(output.stdout());
+```
+
 ```rust Rust
 use microsandbox::Sandbox;
 
@@ -35,18 +51,6 @@ let output = sb.exec("python", ["-c", "print('Hello from the cloud!')"]).await?;
 println!("{}", output.stdout()?);
 
 sb.stop().await?;
-```
-
-```typescript TypeScript
-import { Sandbox } from "microsandbox";
-
-await using sb = await Sandbox.builder("hello")
-    .image("python")
-    .memory(512)
-    .create();
-
-const output = await sb.exec("python", ["-c", "print('Hello from the cloud!')"]);
-console.log(output.stdout());
 ```
 
 ```python Python
@@ -126,7 +130,7 @@ The same key also authenticates the [REST API](/api-reference/overview) directly
 
 ## What to know
 
-- **Backend selection.** Cloud is explicit: set `MSB_BACKEND=cloud`, select a cloud profile, or choose it in code. See [Backends](/getting-started/backends).
+- **Backends.** Cloud is explicit: set `MSB_BACKEND=cloud`, select a cloud profile, or choose it in code. See [Backends](/operations/backends).
 - **Networking.** Cloud sandboxes get a platform-assigned hostname. SSH works through the same `msb ssh` and SDK SSH clients you use locally.
 - **Images.** Specify an OCI image when you create the sandbox; the cloud pulls it for you.
 - **Keys and billing.** API keys, usage, and invoices live in the [dashboard](https://dashboard.microsandbox.dev).
@@ -138,7 +142,7 @@ The same key also authenticates the [REST API](/api-reference/overview) directly
     The REST API behind the SDKs, authenticated with your API key.
   </Card>
 
-  <Card title="Backends" icon="route" href="/getting-started/backends">
+  <Card title="Backends" icon="route" href="/operations/backends">
     Force local, select in code, or switch with profiles.
   </Card>
 

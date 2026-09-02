@@ -1,6 +1,7 @@
 ---
 title: Snapshots
 description: Python SDK - Snapshot API reference
+keywords: ["Python SDK", "Python snapshots", "microsandbox snapshots"]
 ---
 
 <Tooltip tip="Snapshot creation, restore, import, and export use local disk artifacts and are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
@@ -460,15 +461,6 @@ Walk `dir` (default: configured snapshots dir) and rebuild the local index. Retu
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-count = await Snapshot.reindex()
-print(f"indexed {count} snapshots")
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">Snapshot.</span><span className="msb-hn">save()</span>
@@ -524,18 +516,6 @@ Bundle a snapshot into a `.tar.zst` archive. The existing snapshot manifest is a
     <div className="msb-param-desc">Write an uncompressed <code>.tar</code> instead of <code>.tar.zst</code>. Default <code>False</code>.</div>
   </div>
 </div>
-
-<Accordion title="Example">
-
-```python
-await Snapshot.save(
-    "after-pip-install",
-    "/tmp/after-pip-install.tar.zst",
-    with_parents=True,
-)
-```
-
-</Accordion>
 
 ---
 

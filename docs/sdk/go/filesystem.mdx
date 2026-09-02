@@ -1,6 +1,7 @@
 ---
 title: Filesystem
 description: Go SDK - Filesystem API reference
+keywords: ["Go SDK", "Go filesystem", "microsandbox filesystem"]
 ---
 
 Read and write files inside a running sandbox. See [Filesystem](/sandboxes/filesystem) for usage examples.
@@ -450,7 +451,7 @@ err := fs.CopyFromHost(ctx, "./seed.db", "/app/data/seed.db")
 
 </Accordion>
 
-Copy a file from the host machine into the sandbox. For transferring many files, consider a [bind-mounted volume](/sdk/go/volumes#mountbind) instead.
+Copy a file from the host machine into the sandbox. For transferring many files, consider a [bind-mounted volume](/sdk/go/volumes#mount-bind) instead.
 
 <p className="msb-label">Parameters</p>
 

@@ -65,6 +65,9 @@ Common flags:
 | `--deployment-profile` | Select `single-tenant` or `multi-tenant` host-runtime isolation; managed backends may override it |
 | `--net` | Add a high-level network profile (`public`, `private`, `host`, `all`, or `none`) |
 | `--net-rule` | Add a network policy rule |
+| `--proxy` | Route eligible outbound traffic through a `socks4://IP:PORT` or `socks5://IP:PORT` proxy. Local-only. See [Proxy](#outbound-proxy) |
+| `--socks4-user-id` | Optional SOCKS4 user ID. Requires a `socks4://` proxy |
+| `--socks5-username`, `--socks5-password-env` | SOCKS5 username and the host environment variable containing its password. Both flags are required together |
 | `--secret` | Inject a host-held secret for an allowed destination |
 | `--tmpfs` | Mount an in-memory filesystem |
 | `--copy`, `--copy-file`, `--copy-dir`, `--mkdir`, `--rm` | Patch the rootfs before boot |
@@ -96,6 +99,14 @@ Flat v1 uses ext4 and rejects rootfs patches and snapshots instead of silently c
 
 Published ports bind to `127.0.0.1` by default. Use an explicit bind address only when the sandbox service should be reachable beyond localhost. On Windows, opening a published port can trigger a Windows Defender Firewall prompt for `msb.exe`. For development, keep the bind on `127.0.0.1`, and allow private/public network access only when you intentionally bind beyond loopback.
 
+### VSock
+
+<Tooltip tip="VSock routes connect to IPC on the computer running the local backend and are unavailable on microsandbox cloud or multi-tenant deployments."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+Use the repeatable `--vsock HOST_PATH:PORT[/stream|/dgram]` flag to expose a host Unix socket or local Windows named pipe on guest host CID `2`. Stream is the default. Datagram routes preserve message boundaries and are unavailable on Windows.
+
+See [VSock](/networking/host-sockets) for guest connection details, limits, and SDK examples.
+
 ### Network profiles
 
 <Tooltip tip="On microsandbox cloud, the host profile targets endpoints reachable from the cloud worker, not the machine running the CLI."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
@@ -110,6 +121,25 @@ msb run alpine --net host --net-rule "deny@host:tcp:22"
 ```
 
 Explicit `--net-rule` entries are evaluated before profile-generated rules, so they can narrow or deny part of a profile. `--net` conflicts with `--no-net` and the `--net-default*` flags because those select a different policy baseline.
+
+### Outbound proxy
+
+<Tooltip tip="User-configured outbound proxies are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+Use `--proxy` with `msb run` or `msb create` to configure one SOCKS proxy:
+
+```bash
+msb run alpine --proxy socks4://127.0.0.1:1080
+msb run alpine --proxy socks4://127.0.0.1:1080 \
+  --socks4-user-id sandbox
+
+msb run alpine --proxy socks5://127.0.0.1:1080
+msb run alpine --proxy socks5://127.0.0.1:1080 \
+  --socks5-username sandbox \
+  --socks5-password-env SOCKS5_PASSWORD
+```
+
+SOCKS4 carries TCP only. SOCKS5 carries TCP and non-DNS UDP. `--socks5-username` and `--socks5-password-env` must be supplied together and require a `socks5://` proxy. The named environment variable is read from the host when the sandbox starts; the password itself is never placed in the command arguments or durable configuration. Proxy URIs reject user information, paths, query parameters, and fragments. See [Proxy](/networking/outbound-proxy) for routing behavior and limits.
 
 ### Network rule syntax
 
@@ -177,7 +207,7 @@ Resume a stopped sandbox. Name one or more sandboxes, or select them by label.
 
 ```bash
 msb start devbox
-msb start --label app=engine          # start every sandbox labelled app=engine
+msb start --label app=engine          # Start every sandbox labeled app=engine
 ```
 
 | Flag | Description |
@@ -193,7 +223,7 @@ msb start --label app=engine          # start every sandbox labelled app=engine
 msb stop devbox                # Graceful shutdown (10s grace)
 msb stop --force devbox        # Force kill immediately
 msb stop -t 30 devbox          # 30s grace before force kill
-msb stop --label app=engine    # stop every sandbox labelled app=engine
+msb stop --label app=engine    # Stop every sandbox labeled app=engine
 ```
 
 Graceful shutdown gives the sandbox a chance to finish writing any
@@ -284,10 +314,10 @@ msb touch --label app=engine
 Change a running sandbox's configuration. Every change is planned and applied all-or-nothing. CPU and memory resize live within the `max_cpus` / `max_memory` ceilings; other changes that can't apply live need `--restart` or `--next-start`.
 
 ```bash
-msb modify api --cpus 4                     # live when 4 <= max_cpus
-msb modify api --env MODE=prod --restart    # restart to apply now
-msb modify api --max-memory 16G --next-start # raise the ceiling on next start
-msb modify api --cpus 8 --dry-run           # show the plan, apply nothing
+msb modify api --cpus 4                     # Live when 4 <= max_cpus
+msb modify api --env MODE=prod --restart    # Restart to apply now
+msb modify api --max-memory 16G --next-start # Raise the ceiling on next start
+msb modify api --cpus 8 --dry-run           # Show the plan, apply nothing
 ```
 
 `max_cpus` and `max_memory` are boot-time reservations chosen at create time. They default to the effective `cpus`/`memory`, which leaves no headroom; live growth beyond them is impossible without a restart. Reserving capacity costs almost nothing (parked vCPUs and lazily-backed memory), so set them above the initial values at create time if the sandbox may need to grow.
@@ -313,7 +343,7 @@ Env and workdir changes on a running sandbox apply to future execs only; running
 | `--restart` | Restart if needed so restart-required changes become active now |
 | `--format json` | Emit the plan/result as JSON |
 
-A live resize may not apply instantly; `--format json` reports a per-resource `resize_status`. See [Tuning](/sandboxes/tuning) for the change model, or use `msb modify --help` for the full flag list.
+A live resize may not apply instantly; `--format json` reports a per-resource `resize_status`. See [Live Modify](/sandboxes/tuning) for the change model, or use `msb modify --help` for the full flag list.
 
 ## msb exec
 
@@ -411,7 +441,7 @@ msb logs devbox --source all                # everything, chronologically merged
 **Source tags** (the `s` field in `--json` output):
 
 - `stdout` / `stderr`: captured from the session's pipes when running in **pipe mode** (streams stay separated end to end).
-- `output`: captured from the session in **pty mode**. pty allocation merges stdout and stderr at the kernel level inside the guest, so they arrive as a single stream, tagged `output` rather than mislabelled as `stdout`.
+- `output`: captured from the session in **pty mode**. pty allocation merges stdout and stderr at the kernel level inside the guest, so they arrive as a single stream, tagged `output` rather than mislabeled as `stdout`.
 - `system`: synthetic lifecycle markers (`--- sandbox started ---` / `--- sandbox stopped ---`) plus diagnostic lines from `runtime.log`/`kernel.log` when `--source system` is requested.
 
 <Tip>
@@ -426,7 +456,7 @@ List all stored sandboxes.
 msb ls                    # All sandboxes (running and stopped)
 msb ls --running          # Running sandboxes only
 msb ls --stopped          # Stopped sandboxes only
-msb ls --label app=engine # Only sandboxes labelled app=engine
+msb ls --label app=engine # Only sandboxes labeled app=engine
 msb ls --format json      # JSON output
 msb ls -q                 # Names only
 ```
@@ -526,7 +556,7 @@ Remove one or more sandboxes and their associated state.
 msb rm devbox
 msb rm --force devbox            # Stop and remove in one step
 msb rm worker-1 worker-2         # Remove multiple
-msb rm --force --label app=engine  # Remove every sandbox labelled app=engine
+msb rm --force --label app=engine  # Remove every sandbox labeled app=engine
 ```
 
 | Flag | Description |

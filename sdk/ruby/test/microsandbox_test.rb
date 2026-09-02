@@ -14,6 +14,9 @@ class MicrosandboxTest < Test::Unit::TestCase
   end
 
   def test_builder_configuration_is_chainable
+    proxy = Microsandbox::OutboundProxy.socks5("127.0.0.1:1080")
+      .credentials("sandbox", Microsandbox::SecretSource.env("SOCKS5_PASSWORD"))
+
     builder = Microsandbox::Sandbox.builder("ruby-test")
       .image("alpine")
       .cpus(2)
@@ -21,10 +24,58 @@ class MicrosandboxTest < Test::Unit::TestCase
       .env("GREETING", "hello")
       .label("suite", "ruby")
       .workdir("/tmp")
+      .proxy(proxy)
       .vsock("/run/host-api.sock", 5000)
       .vsock_dgram("/run/events.sock", 5001)
 
     assert_instance_of Microsandbox::SandboxBuilder, builder
+  end
+
+  def test_socks4_proxy_user_id_is_chainable
+    proxy = Microsandbox::OutboundProxy.socks4("127.0.0.1:1080").user_id("sandbox")
+
+    assert_instance_of Microsandbox::OutboundProxy, proxy
+  end
+
+  def test_proxy_authentication_is_protocol_specific
+    password = Microsandbox::SecretSource.env("SOCKS5_PASSWORD")
+
+    assert_raise(ArgumentError) do
+      Microsandbox::OutboundProxy.socks4("127.0.0.1:1080").credentials("sandbox", password)
+    end
+    assert_raise(ArgumentError) do
+      Microsandbox::OutboundProxy.socks5("127.0.0.1:1080").user_id("sandbox")
+    end
+  end
+
+  def test_secret_source_rejects_an_empty_environment_variable
+    assert_raise(ArgumentError) { Microsandbox::SecretSource.env("") }
+  end
+
+  def test_create_accepts_proxy_keyword
+    proxy = Microsandbox::OutboundProxy.socks5("not-an-address")
+
+    error = assert_raise(Microsandbox::Error) do
+      Microsandbox::Sandbox.create("ruby-test", proxy: proxy)
+    end
+
+    assert_match(/invalid SOCKS5 proxy address/, error.message)
+  end
+
+  def test_create_applies_protocol_specific_proxy_authentication
+    socks4 = Microsandbox::OutboundProxy.socks4("127.0.0.1:1080").user_id("")
+    socks4_error = assert_raise(Microsandbox::Error) do
+      Microsandbox::Sandbox.create("ruby-test", proxy: socks4)
+    end
+
+    password = Microsandbox::SecretSource.env("SOCKS5_PASSWORD")
+    socks5 = Microsandbox::OutboundProxy.socks5("127.0.0.1:1080").credentials("", password)
+    socks5_error = assert_raise(Microsandbox::Error) do
+      Microsandbox::Sandbox.create("ruby-test", proxy: socks5)
+    end
+
+    assert_match(/invalid SOCKS4 user ID/, socks4_error.message)
+    assert_match(/invalid SOCKS5 credentials/, socks5_error.message)
   end
 
   def test_unknown_create_keyword_is_rejected_before_runtime_start

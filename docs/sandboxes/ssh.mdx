@@ -1,6 +1,7 @@
 ---
 title: SSH
 description: Connect to sandboxes through SSH protocol sessions
+keywords: ["sandbox SSH", "SSH connection", "remote shell", "SFTP"]
 icon: "computer"
 ---
 
@@ -43,16 +44,6 @@ msb ssh --name authorize -- uptime
 ### SDK
 
 <CodeGroup>
-```rust Rust
-let sb = Sandbox::start("devbox").await?;
-let ssh = sb.ssh().open_client().await?;
-
-let output = ssh.exec("uname -a").await?;
-println!("{}", String::from_utf8_lossy(&output.stdout));
-
-ssh.close().await?;
-```
-
 ```typescript TypeScript
 const sb = await Sandbox.start("devbox");
 const ssh = await sb.ssh().open_client();
@@ -61,6 +52,16 @@ const output = await ssh.exec("uname -a");
 console.log(output.stdout.toString());
 
 await ssh.close();
+```
+
+```rust Rust
+let sb = Sandbox::start("devbox").await?;
+let ssh = sb.ssh().open_client().await?;
+
+let output = ssh.exec("uname -a").await?;
+println!("{}", String::from_utf8_lossy(&output.stdout));
+
+ssh.close().await?;
 ```
 
 ```python Python
@@ -99,6 +100,11 @@ fmt.Print(string(output.Stdout))
 SDK clients can attach the local terminal to an SSH shell. This requires a real terminal.
 
 <CodeGroup>
+```typescript TypeScript
+const ssh = await sb.ssh().open_client({ term: "xterm-256color" });
+const code = await ssh.attach({ detachKeys: "ctrl-]" });
+```
+
 ```rust Rust
 let code = sb
     .ssh()
@@ -106,11 +112,6 @@ let code = sb
     .await?
     .attach()
     .await?;
-```
-
-```typescript TypeScript
-const ssh = await sb.ssh().open_client({ term: "xterm-256color" });
-const code = await ssh.attach({ detachKeys: "ctrl-]" });
 ```
 
 ```python Python
@@ -132,18 +133,18 @@ code, err := ssh.Attach(ctx, m.WithSSHDetachKeys("ctrl-]"))
 The native SSH client can open SFTP over the same SSH connection.
 
 <CodeGroup>
-```rust Rust
-let sftp = ssh.sftp().await?;
-sftp.write("/tmp/hello.txt", b"hello").await?;
-let data = sftp.read("/tmp/hello.txt").await?;
-sftp.close().await?;
-```
-
 ```typescript TypeScript
 const sftp = await ssh.sftp();
 await sftp.write("/tmp/hello.txt", Buffer.from("hello"));
 const data = await sftp.read("/tmp/hello.txt");
 await sftp.close();
+```
+
+```rust Rust
+let sftp = ssh.sftp().await?;
+sftp.write("/tmp/hello.txt", b"hello").await?;
+let data = sftp.read("/tmp/hello.txt").await?;
+sftp.close().await?;
 ```
 
 ```python Python
@@ -181,7 +182,7 @@ msb ssh authorize --key "ssh-ed25519 AAAA... user@host"
 cat ~/.ssh/id_ed25519.pub | msb ssh authorize --stdin
 ```
 
-Keys are appended to `<MSB_HOME>/ssh/authorized_keys`.
+microsandbox appends keys to `<MSB_HOME>/ssh/authorized_keys`.
 
 ### TCP listener
 
@@ -215,7 +216,7 @@ ssh -p 2222 -L 8080:127.0.0.1:80 root@127.0.0.1
 ssh -p 2222 -D 1080 root@127.0.0.1
 ```
 
-Forwarded TCP connections are opened from inside the sandbox, so destination reachability follows the sandbox's network policy, and `127.0.0.1` refers to the sandbox's loopback interface rather than the host's. Reverse forwarding (`-R`) and stream-local forwarding are not supported.
+microsandbox opens forwarded TCP connections from inside the sandbox, so destination reachability follows the sandbox's network policy. `127.0.0.1` refers to the sandbox's loopback interface rather than the host's. microsandbox does not support reverse forwarding (`-R`) or stream-local forwarding.
 
 ### ProxyCommand
 
@@ -259,6 +260,11 @@ Set a global default in `~/.microsandbox/config.json`. Use `0` to disable the ti
 Override the global value for one CLI session with `--inactivity-timeout 30m`, or disable it with `--no-inactivity-timeout`. The same overrides are available when opening native clients or preparing server endpoints through an SDK:
 
 <CodeGroup>
+```typescript TypeScript
+const ssh = await sb.ssh().openClient({ inactivityTimeoutSecs: 1800 });
+const persistent = await sb.ssh().openClient({ inactivityTimeoutSecs: 0 });
+```
+
 ```rust Rust
 use std::time::Duration;
 
@@ -269,11 +275,6 @@ let ssh = sb.ssh()
 let persistent = sb.ssh()
     .connect_with(|opts| opts.disable_inactivity_timeout())
     .await?;
-```
-
-```typescript TypeScript
-const ssh = await sb.ssh().openClient({ inactivityTimeoutSecs: 1800 });
-const persistent = await sb.ssh().openClient({ inactivityTimeoutSecs: 0 });
 ```
 
 ```python Python
@@ -287,4 +288,6 @@ persistent, err := sb.SSH().OpenClient(ctx, m.WithSSHClientInactivityTimeout(0))
 ```
 </CodeGroup>
 
-For exact SDK signatures, see the SSH reference for [Rust](/sdk/rust/ssh), [TypeScript](/sdk/typescript/ssh), [Python](/sdk/python/ssh), or [Go](/sdk/go/ssh).
+## Reference
+
+For exact SSH APIs, see [TypeScript](/sdk/typescript/ssh), [Rust](/sdk/rust/ssh), [Python](/sdk/python/ssh), or [Go](/sdk/go/ssh). For terminal workflows and serving SSH connections, see [SSH commands](/cli/ssh-commands).

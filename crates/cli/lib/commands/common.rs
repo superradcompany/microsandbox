@@ -12,6 +12,8 @@ use microsandbox::sandbox::{
 };
 use microsandbox::{OutboundProxy, VolumeKind};
 #[cfg(feature = "net")]
+use microsandbox_network::{OutboundProxyBuilder, OutboundProxyConfig};
+#[cfg(feature = "net")]
 use microsandbox_types::NetworkRateLimitDirection;
 
 use crate::ui;
@@ -502,6 +504,29 @@ pub struct SandboxOpts {
     #[arg(long, value_name = "socks[4|5]://IP:PORT")]
     pub proxy: Option<String>,
 
+    /// Optional user ID for a SOCKS4 proxy.
+    #[cfg(feature = "net")]
+    #[arg(long, value_name = "USER_ID", requires = "proxy")]
+    pub socks4_user_id: Option<String>,
+
+    /// Username for SOCKS5 username/password authentication.
+    #[cfg(feature = "net")]
+    #[arg(
+        long,
+        value_name = "USERNAME",
+        requires_all = ["proxy", "socks5_password_env"]
+    )]
+    pub socks5_username: Option<String>,
+
+    /// Host environment variable containing the SOCKS5 password.
+    #[cfg(feature = "net")]
+    #[arg(
+        long,
+        value_name = "ENV_VAR",
+        requires_all = ["proxy", "socks5_username"]
+    )]
+    pub socks5_password_env: Option<String>,
+
     // --- TLS interception ---
     /// Intercept and inspect HTTPS traffic via a built-in TLS proxy.
     #[cfg(feature = "net")]
@@ -624,6 +649,61 @@ enum CopyKind {
 //--------------------------------------------------------------------------------------------------
 
 impl SandboxOpts {
+    /// Builds the protocol-specific proxy selected by the CLI flags.
+    #[cfg(feature = "net")]
+    fn outbound_proxy(&self) -> anyhow::Result<Option<OutboundProxy>> {
+        let Some(raw) = self.proxy.as_deref() else {
+            if self.socks4_user_id.is_some()
+                || self.socks5_username.is_some()
+                || self.socks5_password_env.is_some()
+            {
+                anyhow::bail!("proxy authentication flags require --proxy");
+            }
+            return Ok(None);
+        };
+
+        match raw.parse::<OutboundProxy>()? {
+            OutboundProxy::Socks4 { address, .. } => {
+                if self.socks5_username.is_some() || self.socks5_password_env.is_some() {
+                    anyhow::bail!(
+                        "--socks5-username and --socks5-password-env require a socks5:// proxy"
+                    );
+                }
+
+                let proxy = OutboundProxyBuilder::new().socks4(address.to_string());
+                let proxy = match self.socks4_user_id.as_deref() {
+                    Some(user_id) => proxy.user_id(user_id),
+                    None => proxy,
+                };
+                Ok(Some(proxy.build()?))
+            }
+            OutboundProxy::Socks5 { address, .. } => {
+                if self.socks4_user_id.is_some() {
+                    anyhow::bail!("--socks4-user-id requires a socks4:// proxy");
+                }
+
+                let proxy = OutboundProxyBuilder::new().socks5(address.to_string());
+                let proxy = match (
+                    self.socks5_username.as_deref(),
+                    self.socks5_password_env.as_deref(),
+                ) {
+                    (Some(username), Some(password_env)) => {
+                        proxy.credentials(username, microsandbox::SecretSource::env(password_env))
+                    }
+                    (Some(_), None) => {
+                        anyhow::bail!("--socks5-username requires --socks5-password-env")
+                    }
+                    (None, Some(_)) => {
+                        anyhow::bail!("--socks5-password-env requires --socks5-username")
+                    }
+                    (None, None) => proxy,
+                };
+                Ok(Some(proxy.build()?))
+            }
+            _ => anyhow::bail!("unsupported outbound proxy protocol"),
+        }
+    }
+
     /// Returns true if any creation-time configuration flag was set.
     pub fn has_creation_flags(&self) -> bool {
         let base = self.cpus.is_some()
@@ -687,6 +767,9 @@ impl SandboxOpts {
             || self.max_connections.is_some()
             || self.trust_host_cas
             || self.proxy.is_some()
+            || self.socks4_user_id.is_some()
+            || self.socks5_username.is_some()
+            || self.socks5_password_env.is_some()
             || self.tls_intercept
             || !self.tls_intercept_port.is_empty()
             || !self.tls_bypass.is_empty()
@@ -2045,11 +2128,7 @@ fn apply_network_opts(
         });
     }
 
-    let proxy = opts
-        .proxy
-        .as_deref()
-        .map(str::parse::<OutboundProxy>)
-        .transpose()?;
+    let proxy = opts.outbound_proxy()?;
 
     // DNS, TLS, and other network configuration.
     let has_network_config = opts.no_dns_rebind_protection
@@ -3267,6 +3346,93 @@ mod tests {
                 HostPattern::Any,
             ]
         );
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn outbound_proxy_builds_socks4_user_id() {
+        let opts = SandboxOpts {
+            proxy: Some("socks4://127.0.0.1:1080".into()),
+            socks4_user_id: Some("sandbox".into()),
+            ..Default::default()
+        };
+
+        let proxy = opts.outbound_proxy().unwrap().unwrap();
+        assert_eq!(
+            proxy,
+            OutboundProxy::Socks4 {
+                address: "127.0.0.1:1080".parse().unwrap(),
+                user_id: Some("sandbox".into()),
+            }
+        );
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn outbound_proxy_builds_socks5_environment_credentials() {
+        let opts = SandboxOpts {
+            proxy: Some("socks5://127.0.0.1:1080".into()),
+            socks5_username: Some("sandbox".into()),
+            socks5_password_env: Some("SOCKS5_PASSWORD".into()),
+            ..Default::default()
+        };
+
+        let proxy = opts.outbound_proxy().unwrap().unwrap();
+        let json = serde_json::to_value(proxy).unwrap();
+        assert_eq!(json["protocol"], "socks5");
+        assert_eq!(json["credentials"]["username"], "sandbox");
+        assert_eq!(json["credentials"]["password"]["kind"], "env");
+        assert_eq!(json["credentials"]["password"]["var"], "SOCKS5_PASSWORD");
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn outbound_proxy_rejects_protocol_specific_auth_on_the_wrong_protocol() {
+        let socks4 = SandboxOpts {
+            proxy: Some("socks4://127.0.0.1:1080".into()),
+            socks5_username: Some("sandbox".into()),
+            socks5_password_env: Some("SOCKS5_PASSWORD".into()),
+            ..Default::default()
+        };
+        assert!(
+            socks4
+                .outbound_proxy()
+                .unwrap_err()
+                .to_string()
+                .contains("require a socks5:// proxy")
+        );
+
+        let socks5 = SandboxOpts {
+            proxy: Some("socks5://127.0.0.1:1080".into()),
+            socks4_user_id: Some("sandbox".into()),
+            ..Default::default()
+        };
+        assert!(
+            socks5
+                .outbound_proxy()
+                .unwrap_err()
+                .to_string()
+                .contains("requires a socks4:// proxy")
+        );
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn outbound_proxy_rejects_incomplete_socks5_credentials() {
+        for opts in [
+            SandboxOpts {
+                proxy: Some("socks5://127.0.0.1:1080".into()),
+                socks5_username: Some("sandbox".into()),
+                ..Default::default()
+            },
+            SandboxOpts {
+                proxy: Some("socks5://127.0.0.1:1080".into()),
+                socks5_password_env: Some("SOCKS5_PASSWORD".into()),
+                ..Default::default()
+            },
+        ] {
+            assert!(opts.outbound_proxy().is_err());
+        }
     }
 
     #[cfg(feature = "net")]

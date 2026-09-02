@@ -28,9 +28,9 @@ use crate::dns::{
     proxies::{dot::DotProxy, tcp::DnsTcpProxy},
 };
 use crate::icmp::relay::IcmpRelay;
-use crate::outbound_proxy::OutboundProxy;
 use crate::policy::{EgressEvaluation, HostnameSource, NetworkPolicy, Protocol};
 use crate::ports::PortPublisher;
+use crate::proxy::ResolvedOutboundProxy;
 use crate::secrets::handle::SecretsHandle;
 use crate::tcp::{
     connection::ConnectionTracker, deny as tcp_deny, proxy::TcpProxy, upstream::UpstreamTcpTarget,
@@ -98,7 +98,7 @@ struct GatewayIcmpReply {
 }
 
 /// Resolved network parameters for the poll loop. Created by
-/// `SmoltcpNetwork::new()` from `NetworkConfig` + sandbox slot.
+/// `SmoltcpNetwork::new()` from a resolved network configuration and sandbox slot.
 pub struct PollLoopConfig {
     /// Gateway MAC address (smoltcp's identity on the virtual LAN).
     pub gateway_mac: [u8; 6],
@@ -237,7 +237,7 @@ pub fn smoltcp_poll_loop(
     max_connections: Option<usize>,
     tokio_handle: tokio::runtime::Handle,
     secrets: SecretsHandle,
-    outbound_proxy: Option<Arc<OutboundProxy>>,
+    outbound_proxy: Option<Arc<ResolvedOutboundProxy>>,
 ) {
     let mut device = SmoltcpDevice::new(shared.clone(), config.mtu);
     let mut iface = create_interface(&mut device, &config);
@@ -294,7 +294,9 @@ pub fn smoltcp_poll_loop(
         config.guest_mac,
         config.mtu,
         tokio_handle.clone(),
+        outbound_proxy.clone(),
     );
+    udp_relay.attach_dns_forwarder(dns_forwarder_handle.clone());
     let mut udp_fragments = Ipv4UdpFragmentReassembler::new();
     let mut ipv6_udp_fragments = Ipv6UdpFragmentReassembler::new();
     let icmp_relay = IcmpRelay::new(
@@ -560,8 +562,11 @@ pub fn smoltcp_poll_loop(
             {
                 // TLS-intercepted port — spawn TLS MITM proxy.
                 let connect_target = resolve_tcp_host_target(conn.dst, config.gateway);
-                let connection_outbound_proxy =
-                    outbound_proxy_for_target(conn.dst, connect_target, &outbound_proxy);
+                let connection_outbound_proxy = ResolvedOutboundProxy::select_for_destination(
+                    &outbound_proxy,
+                    conn.dst,
+                    connect_target.primary(),
+                );
                 let proxy = TlsProxy::new(
                     conn.dst,
                     connect_target,
@@ -628,8 +633,11 @@ pub fn smoltcp_poll_loop(
             }
             // Plain TCP proxy.
             let connect_target = resolve_tcp_host_target(conn.dst, config.gateway);
-            let connection_outbound_proxy =
-                outbound_proxy_for_target(conn.dst, connect_target, &outbound_proxy);
+            let connection_outbound_proxy = ResolvedOutboundProxy::select_for_destination(
+                &outbound_proxy,
+                conn.dst,
+                connect_target.primary(),
+            );
             let proxy = TcpProxy::new(
                 conn.dst,
                 connect_target,
@@ -876,21 +884,6 @@ pub(crate) fn resolve_host_dst(dst: SocketAddr, gateway: GatewayIps) -> SocketAd
             SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), dst.port())
         }
         _ => dst,
-    }
-}
-
-/// Return the configured proxy unless the destination was rewritten to a
-/// host-local socket. Sending loopback through a remote proxy would target the
-/// proxy host rather than the microsandbox host.
-fn outbound_proxy_for_target(
-    guest_dst: SocketAddr,
-    connect_target: UpstreamTcpTarget,
-    outbound_proxy: &Option<Arc<OutboundProxy>>,
-) -> Option<Arc<OutboundProxy>> {
-    if guest_dst == connect_target.primary() {
-        outbound_proxy.clone()
-    } else {
-        None
     }
 }
 
@@ -1700,11 +1693,19 @@ mod tests {
         let gw = test_gateway();
         let guest_dst = SocketAddr::new(IpAddr::V4(gw.ipv4.unwrap()), 8080);
         let connect_target = resolve_tcp_host_target(guest_dst, gw);
-        let proxy = Some(Arc::new(OutboundProxy::Socks5 {
+        let proxy = Some(Arc::new(ResolvedOutboundProxy::Socks5 {
             address: "192.0.2.1:1080".parse().unwrap(),
+            credentials: None,
         }));
 
-        assert!(outbound_proxy_for_target(guest_dst, connect_target, &proxy).is_none());
+        assert!(
+            ResolvedOutboundProxy::select_for_destination(
+                &proxy,
+                guest_dst,
+                connect_target.primary(),
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -1712,11 +1713,19 @@ mod tests {
         let gw = test_gateway();
         let guest_dst = "198.51.100.10:443".parse().unwrap();
         let connect_target = resolve_tcp_host_target(guest_dst, gw);
-        let proxy = Some(Arc::new(OutboundProxy::Socks5 {
+        let proxy = Some(Arc::new(ResolvedOutboundProxy::Socks5 {
             address: "192.0.2.1:1080".parse().unwrap(),
+            credentials: None,
         }));
 
-        assert!(outbound_proxy_for_target(guest_dst, connect_target, &proxy).is_some());
+        assert!(
+            ResolvedOutboundProxy::select_for_destination(
+                &proxy,
+                guest_dst,
+                connect_target.primary(),
+            )
+            .is_some()
+        );
     }
 
     #[test]

@@ -1,11 +1,12 @@
 ---
 title: Volumes
 description: Persist and share data across sandboxes
+keywords: ["sandbox volumes", "persistent storage", "mount volumes"]
 icon: "hard-drive"
 ---
 
 <Note>
-  **Cloud:** Volumes use fast block storage managed by the platform. Every organization automatically gets an undeletable **host volume**: think of it as the disk of the one computer all its sandboxes run on, and it is what bind and disk-image mounts resolve against.
+  **On microsandbox cloud:** Volumes use fast block storage managed by the platform. Every organization automatically gets an undeletable **host volume**: think of it as the disk of the one computer all its sandboxes run on, and it is what bind and disk-image mounts resolve against.
 </Note>
 
 Volumes give a sandbox persistent or shared storage by mounting host data, managed storage, disk images, or in-memory filesystems into the guest. Mounts provide direct filesystem access and are significantly faster than the [filesystem API](/sandboxes/filesystem), which transfers files individually, so they are preferable for anything beyond ad-hoc reads and writes.
@@ -16,17 +17,17 @@ microsandbox supports four mount types on both backends: bind mounts, named volu
 
 <Tooltip tip="Available only on microsandbox cloud; the local backend has no default volume."><span className="msb-badge-cloud">Cloud-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
-Every Cloud organization has an always-present default volume. You can read and write it directly without starting a sandbox:
+Every cloud organization has an always-present default volume. You can read and write it directly without starting a sandbox:
 
 <CodeGroup>
-```rust Rust
-let volume = Volume::get_default().await?;
-volume.fs().write("state.json", br#"{"ready":true}"#).await?;
-```
-
 ```typescript TypeScript
 const volume = await Volume.getDefault();
 await volume.fs().write("state.json", JSON.stringify({ ready: true }));
+```
+
+```rust Rust
+let volume = Volume::get_default().await?;
+volume.fs().write("state.json", br#"{"ready":true}"#).await?;
 ```
 
 ```python Python
@@ -36,11 +37,11 @@ await volume.fs().write("state.json", b'{"ready": true}')
 
 ```go Go
 volume, err := m.GetDefaultVolume(ctx)
-err = volume.FS().WriteString("state.json", `{"ready":true}`)
+err = volume.FS().WriteString(ctx, "state.json", `{"ready":true}`)
 ```
 </CodeGroup>
 
-The default volume is isolated to the authenticated Cloud organization and cannot be removed. Default-volume lookup is deliberately unsupported on the local backend: forgetting an API key cannot expose or modify files from your machine. Named local volumes continue to live under `~/.microsandbox/volumes/` and retain their existing direct filesystem API.
+microsandbox isolates the default volume to the authenticated cloud organization, and you cannot remove it. microsandbox deliberately does not support default-volume lookup on the local backend: forgetting an API key cannot expose or modify files from your machine. Named local volumes continue to live under `~/.microsandbox/volumes/` and retain their existing direct filesystem API.
 
 ## Bind mounts
 
@@ -49,15 +50,6 @@ The default volume is isolated to the authenticated Cloud organization and canno
 Mount a directory from the host directly into the sandbox. Changes inside the sandbox are reflected on the host, and vice versa.
 
 <CodeGroup>
-```rust Rust
-let sb = Sandbox::builder("dev")
-    .image("python")
-    .volume("/app/src", |v| v.bind("./src").readonly().noexec())
-    .volume("/app/data", |v| v.bind("./data"))
-    .create()
-    .await?;
-```
-
 ```typescript TypeScript
 import { Sandbox } from "microsandbox";
 
@@ -66,6 +58,15 @@ await using sb = await Sandbox.builder("dev")
     .volume("/app/src",  (m) => m.bind("./src").readonly().noexec())
     .volume("/app/data", (m) => m.bind("./data"))
     .create();
+```
+
+```rust Rust
+let sb = Sandbox::builder("dev")
+    .image("python")
+    .volume("/app/src", |v| v.bind("./src").readonly().noexec())
+    .volume("/app/data", |v| v.bind("./data"))
+    .create()
+    .await?;
 ```
 
 ```python Python
@@ -99,7 +100,7 @@ msb create python --name dev \
 
 </CodeGroup>
 
-Nested destinations are supported. microsandbox canonicalizes guest paths and always applies enclosing mounts before their children, so SDKs that accept unordered maps—such as Go—produce the same result regardless of map iteration order.
+microsandbox supports nested destinations. It canonicalizes guest paths and always applies enclosing mounts before their children. SDKs that accept unordered maps (such as Go) produce the same result regardless of map iteration order.
 
 Use `--mount-file` when you want to bind one host file instead of an entire directory.
 
@@ -116,7 +117,7 @@ msb create alpine --name config-reader \
 
 microsandbox manages named volumes and stores them by default under `~/.microsandbox/volumes/<name>/`. They persist independently of any sandbox, so you can create a volume, populate it, and mount it into different sandboxes over time.
 
-Named volumes can be directory-backed or disk-backed. Directory volumes mount through virtiofs. Disk volumes are raw ext4 disk images managed by microsandbox and mount through virtio-blk.
+Named volumes can be directory-backed or disk-backed. Directory volumes mount through virtiofs. Disk volumes are raw ext4 disk images that microsandbox manages, and they mount through virtio-blk.
 
 CLI named mounts are idempotent. `-v name:/path` and `--mount-named name:/path` create a directory-backed named volume if it does not already exist, then mount it. If the volume already exists, microsandbox reuses it when the requested storage settings are compatible and errors when they are not. Use `--mount-named name:/path:kind=disk,size=20G` to create or reuse a disk-backed named volume from the mount flag itself.
 
@@ -125,16 +126,16 @@ SDK `named(...)` mount helpers are existing-only. They fail if the named volume 
 ### Create a volume
 
 <CodeGroup>
-```rust Rust
-let cache = Volume::builder("pip-cache")
-    .create()
-    .await?;
-```
-
 ```typescript TypeScript
 import { Volume } from "microsandbox";
 
 const cache = await Volume.builder("pip-cache").create();
+```
+
+```rust Rust
+let cache = Volume::builder("pip-cache")
+    .create()
+    .await?;
 ```
 
 ```python Python
@@ -154,19 +155,19 @@ msb volume create pip-cache
 Create a disk-backed named volume when a workload needs a real guest block filesystem, such as Docker's data root:
 
 <CodeGroup>
+```typescript TypeScript
+const dockerData = await Volume.builder("docker-data")
+  .disk()
+  .size(20 * 1024)
+  .create();
+```
+
 ```rust Rust
 let docker_data = Volume::builder("docker-data")
     .disk()
     .size(20.gib())
     .create()
     .await?;
-```
-
-```typescript TypeScript
-const dockerData = await Volume.builder("docker-data")
-  .disk()
-  .size(20 * 1024)
-  .create();
 ```
 
 ```python Python
@@ -194,19 +195,19 @@ msb volume create docker-data --kind disk --size 20G
 ### Mount in a sandbox
 
 <CodeGroup>
+```typescript TypeScript
+await using sb = await Sandbox.builder("worker")
+    .image("python")
+    .volume("/root/.cache/pip", (m) => m.named(cache.name))
+    .create();
+```
+
 ```rust Rust
 let sb = Sandbox::builder("worker")
     .image("python")
     .volume("/root/.cache/pip", |v| v.named(cache.name()))
     .create()
     .await?;
-```
-
-```typescript TypeScript
-await using sb = await Sandbox.builder("worker")
-    .image("python")
-    .volume("/root/.cache/pip", (m) => m.named(cache.name))
-    .create();
 ```
 
 ```python Python
@@ -244,21 +245,21 @@ msb create docker:dind --name docker-demo \
 
 ### Sharing and host-side access
 
-Mount the same directory-backed named volume into multiple sandboxes when they need to share files. Use `readonly` on consumers that should not write. Disk-backed named volumes are attached as block devices; use one writable sandbox at a time, or read-only mounts where sharing is intended.
+Mount the same directory-backed named volume into multiple sandboxes when they need to share files. Use `readonly` on consumers that should not write. microsandbox attaches disk-backed named volumes as block devices; use one writable sandbox at a time, or read-only mounts where sharing is intended.
 
 Directory-backed named volumes are also accessible without a running sandbox, so you can pre-populate a cache or inspect output after the sandbox stops. Local volumes expose their host path directly; cloud default and managed directory volumes use the same volume filesystem API shown above. Disk-backed local volumes store guest data inside `disk.raw`; host filesystem helpers operate on the managed volume directory, not the filesystem inside the disk image.
 
 ### Manage volumes
 
 <CodeGroup>
-```rust Rust
-let volumes = Volume::list().await?;
-Volume::remove("old-cache").await?;
-```
-
 ```typescript TypeScript
 const volumes = await Volume.list();
 await Volume.remove("old-cache");
+```
+
+```rust Rust
+let volumes = Volume::list().await?;
+Volume::remove("old-cache").await?;
 ```
 
 ```python Python
@@ -282,22 +283,22 @@ msb volume rm old-cache
 
 <Tooltip tip="On microsandbox cloud, the host path resolves against your organization's host volume, not the computer running the SDK or CLI."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
-Disk-image volumes attach a host disk image as a virtio-blk device and mount its inner filesystem at a guest path. Use them when you want persistent state isolated from ordinary host filesystem metadata, or when distributing a prebuilt filesystem image. The disk format defaults from the file extension (`.qcow2`, `.raw`, `.vmdk`; otherwise raw), and the inner filesystem type is auto-detected unless you set `fstype`.
+Disk-image volumes attach a host disk image as a virtio-blk device and mount its inner filesystem at a guest path. Use them when you want persistent state isolated from ordinary host filesystem metadata, or when distributing a prebuilt filesystem image. The disk format defaults from the file extension (`.qcow2`, `.raw`, `.vmdk`; otherwise raw). microsandbox auto-detects the inner filesystem type unless you set `fstype`.
 
 <CodeGroup>
+```typescript TypeScript
+await using sb = await Sandbox.builder("seeded")
+    .image("alpine")
+    .volume("/seed", (m) => m.disk("./seed.raw").readonly().noexec())
+    .create();
+```
+
 ```rust Rust
 let sb = Sandbox::builder("seeded")
     .image("alpine")
     .volume("/seed", |v| v.disk("./seed.raw").readonly().noexec())
     .create()
     .await?;
-```
-
-```typescript TypeScript
-await using sb = await Sandbox.builder("seeded")
-    .image("alpine")
-    .volume("/seed", (m) => m.disk("./seed.raw").readonly().noexec())
-    .create();
 ```
 
 ```python Python
@@ -328,14 +329,6 @@ msb create alpine --name seeded \
 An in-memory filesystem that disappears when the sandbox stops. Useful for scratch space, build artifacts, or anything that doesn't need to outlive the sandbox.
 
 <CodeGroup>
-```rust Rust
-let sb = Sandbox::builder("worker")
-    .image("alpine")
-    .volume("/tmp/scratch", |v| v.tmpfs().size(100).noexec())
-    .create()
-    .await?;
-```
-
 ```typescript TypeScript
 import { Sandbox } from "microsandbox";
 
@@ -343,6 +336,14 @@ await using sb = await Sandbox.builder("worker")
     .image("alpine")
     .volume("/tmp/scratch", (m) => m.tmpfs().size(100).noexec())
     .create();
+```
+
+```rust Rust
+let sb = Sandbox::builder("worker")
+    .image("alpine")
+    .volume("/tmp/scratch", |v| v.tmpfs().size(100).noexec())
+    .create()
+    .await?;
 ```
 
 ```python Python
@@ -388,7 +389,7 @@ For stronger in-guest hardening, create the sandbox with the restricted security
 
 Bind mounts and directory-backed named volumes normally present host files without a per-file metadata override using the sandbox user's fallback identity. Set a mount owner when those files should consistently appear as another guest `(uid, gid)` pair. This changes only the guest view: it does not `chown` the host files or create per-file metadata overrides, and an existing per-file override still takes precedence.
 
-Both IDs are required together and may range from `0` through `4294967295`. Mount owners require stat virtualization, so they cannot be combined with `stat-virt=off`, tmpfs, host disk images, or disk-backed named volumes. The local backend supports this policy; the Cloud backend currently rejects it until ownership capability negotiation is available.
+Both IDs are required together and may range from `0` through `4294967295`. Mount owners require stat virtualization, so they cannot be combined with `stat-virt=off`, tmpfs, host disk images, or disk-backed named volumes. The local backend supports this policy; the cloud backend currently rejects it until ownership capability negotiation is available.
 
 ### CLI syntax and flags
 
@@ -404,9 +405,24 @@ CLI mount flags use `SOURCE:DEST[:OPTIONS]`. The `:` before `OPTIONS` starts the
 
 ## Combining mounts
 
-Mount flags may be repeated, so a sandbox can combine host directories, individual files, named volumes, disk images, and tmpfs scratch space.
+You can repeat mount flags, so a sandbox can combine host directories, individual files, named volumes, disk images, and tmpfs scratch space.
 
 <CodeGroup>
+```typescript TypeScript
+await using sb = await Sandbox.builder("full")
+  .image("python")
+  .volume("/app/src", (v) => v.bind("./src").readonly().noexec())
+  .volume("/app/pyproject.toml", (v) => v.bind("./pyproject.toml").readonly())
+  .volume("/root/.cache/pip", (v) =>
+    v.named("pip-cache").statVirtualization("relaxed"),
+  )
+  .volume("/dataset", (v) =>
+    v.disk("./dataset.qcow2").format("qcow2").fstype("ext4").readonly(),
+  )
+  .volume("/tmp", (v) => v.tmpfs().size(1024).noexec().nosuid().nodev())
+  .create();
+```
+
 ```rust Rust
 let sb = Sandbox::builder("full")
     .image("python")
@@ -436,3 +452,7 @@ msb create python --name full \
   --tmpfs /tmp:1G:noexec,nosuid,nodev
 ```
 </CodeGroup>
+
+## Reference
+
+For exact volume APIs, see [TypeScript](/sdk/typescript/volumes), [Rust](/sdk/rust/volumes), [Python](/sdk/python/volumes), or [Go](/sdk/go/volumes). For local volume management, see [Volume commands](/cli/volume-commands).

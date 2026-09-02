@@ -13,6 +13,10 @@
     "light": "#BF84FE",
     "dark": "#BF84FE"
   },
+  "thumbnails": {
+    "appearance": "dark",
+    "background": "/images/og-background.png"
+  },
   "navbar": {
     "primary": {
       "type": "github",
@@ -31,7 +35,6 @@
               "getting-started/introduction",
               "getting-started/quickstart",
               "cloud/overview",
-              "getting-started/backends",
               "getting-started/agents"
             ]
           },
@@ -44,12 +47,11 @@
               "sandboxes/commands",
               "sandboxes/filesystem",
               "sandboxes/secrets",
-              "sandboxes/tuning",
-              "sandboxes/ssh",
-              "sandboxes/volumes",
               "images/overview",
-              "images/disk-images",
+              "sandboxes/volumes",
+              "sandboxes/ssh",
               "sandboxes/snapshots",
+              "sandboxes/tuning",
               "sandboxes/labels",
               "sandboxes/logs",
               "sandboxes/metrics",
@@ -61,20 +63,21 @@
             "icon": "network-wired",
             "pages": [
               "networking/overview",
-              "networking/host-sockets",
               "networking/dns",
+              "networking/outbound-proxy",
               "networking/tls",
-              "networking/outbound-proxy"
+              "networking/host-sockets"
             ]
           },
           {
             "group": "Operations",
             "icon": "gauge",
             "pages": [
+              "operations/configuration",
+              "operations/backends",
               "observability/msb-metrics",
               "observability/deep-dive",
-              "sandboxes/optimization",
-              "sandboxes/cpu-placement"
+              "sandboxes/optimization"
             ]
           },
           {
@@ -106,24 +109,6 @@
             "icon": "code",
             "pages": [
               {
-                "group": "Rust",
-                "icon": "rust",
-                "expanded": false,
-                "pages": [
-                  "sdk/rust/sandbox",
-                  "sdk/rust/execution",
-                  "sdk/rust/ssh",
-                  "sdk/rust/filesystem",
-                  "sdk/rust/volumes",
-                  "sdk/rust/networking",
-                  "sdk/rust/proxies",
-                  "sdk/rust/secrets",
-                  "sdk/rust/snapshots",
-                  "sdk/rust/images",
-                  "sdk/rust/agent-client"
-                ]
-              },
-              {
                 "group": "TypeScript",
                 "icon": "js",
                 "expanded": false,
@@ -135,10 +120,30 @@
                   "sdk/typescript/volumes",
                   "sdk/typescript/networking",
                   "sdk/typescript/proxies",
+                  "sdk/typescript/vsock",
                   "sdk/typescript/secrets",
                   "sdk/typescript/snapshots",
                   "sdk/typescript/images",
                   "sdk/typescript/agent-client"
+                ]
+              },
+              {
+                "group": "Rust",
+                "icon": "rust",
+                "expanded": false,
+                "pages": [
+                  "sdk/rust/sandbox",
+                  "sdk/rust/execution",
+                  "sdk/rust/ssh",
+                  "sdk/rust/filesystem",
+                  "sdk/rust/volumes",
+                  "sdk/rust/networking",
+                  "sdk/rust/proxies",
+                  "sdk/rust/vsock",
+                  "sdk/rust/secrets",
+                  "sdk/rust/snapshots",
+                  "sdk/rust/images",
+                  "sdk/rust/agent-client"
                 ]
               },
               {
@@ -153,6 +158,7 @@
                   "sdk/python/volumes",
                   "sdk/python/networking",
                   "sdk/python/proxies",
+                  "sdk/python/vsock",
                   "sdk/python/secrets",
                   "sdk/python/snapshots",
                   "sdk/python/images",
@@ -172,6 +178,7 @@
                   "sdk/go/images",
                   "sdk/go/networking",
                   "sdk/go/proxies",
+                  "sdk/go/vsock",
                   "sdk/go/secrets",
                   "sdk/go/snapshots",
                   "sdk/go/agent-client"
@@ -182,7 +189,8 @@
                 "icon": "gem",
                 "expanded": false,
                 "pages": [
-                  "sdk/ruby/sandbox"
+                  "sdk/ruby/sandbox",
+                  "sdk/ruby/vsock"
                 ]
               }
             ]
@@ -314,6 +322,8 @@
             "icon": "robot",
             "pages": [
               "examples/overview",
+              "examples/agents/claude-code",
+              "examples/agents/codex",
               "examples/agents/opencode",
               "examples/agents/openclaw",
               "examples/agents/goose",
@@ -369,6 +379,7 @@
             "group": "Data & Observability",
             "icon": "database",
             "pages": [
+              "examples/data/juicefs-s3",
               "examples/data/postgresql",
               "examples/data/migration-rehearsal",
               "examples/data/redis",
@@ -403,7 +414,10 @@
                 "group": "August 2026",
                 "expanded": true,
                 "pages": [
+                  "changelog/2026-08-28",
                   "changelog/2026-08-26",
+                  "changelog/2026-08-21",
+                  "changelog/2026-08-14",
                   "changelog/2026-08-07"
                 ]
               },
@@ -456,8 +470,24 @@
   },
   "redirects": [
     {
+      "source": "/getting-started/backends",
+      "destination": "/operations/backends"
+    },
+    {
+      "source": "/operations/backend-selection",
+      "destination": "/operations/backends"
+    },
+    {
       "source": "/optimization/overview",
       "destination": "/sandboxes/optimization"
+    },
+    {
+      "source": "/sandboxes/cpu-placement",
+      "destination": "/sandboxes/optimization#cpu-placement"
+    },
+    {
+      "source": "/images/disk-images",
+      "destination": "/images/overview#disk-images"
     },
     {
       "source": "/networking/vsock",
@@ -484,6 +514,10 @@
       "destination": "/examples/:slug*"
     },
     {
+      "source": "/examples/data/juicefs-r2",
+      "destination": "/examples/data/juicefs-s3"
+    },
+    {
       "source": "/cloud/compatibility",
       "destination": "/cloud/overview#compatibility"
     }
@@ -498,6 +532,18 @@
     "default": "system"
   },
   "description": "Easy, fast microVMs for untrusted workloads, on your machine or in the cloud",
+  "seo": {
+    "organization": {
+      "id": "https://microsandbox.dev/#organization",
+      "name": "microsandbox",
+      "url": "https://microsandbox.dev",
+      "sameAs": [
+        "https://github.com/superradcompany/microsandbox",
+        "https://www.linkedin.com/company/superradcompany",
+        "https://x.com/microsandbox"
+      ]
+    }
+  },
   "footer": {
     "socials": {
       "github": "https://github.com/superradcompany/microsandbox",

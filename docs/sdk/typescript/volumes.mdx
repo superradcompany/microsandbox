@@ -1,6 +1,7 @@
 ---
 title: Volumes
 description: TypeScript SDK - Volume API reference
+keywords: ["TypeScript SDK", "TypeScript volumes", "microsandbox volumes"]
 ---
 
 Create, manage, and mount named volumes. See [Volumes](/sandboxes/volumes) for usage examples.
@@ -203,7 +204,7 @@ Delete a named volume and its contents. Fails if the volume is currently mounted
   </div>
 </div>
 
-<p className="msb-member-group">Instance methods</p>
+<p className="msb-member-group" id="instance-methods">Instance methods</p>
 
 #### <span className="msb-recv">volume.</span><span className="msb-hn">fs()</span>
 
@@ -221,7 +222,7 @@ console.log(await vfs.readToString("seed.txt"));
 
 </Accordion>
 
-Get a filesystem handle for this volume. Local reads and writes use the managed host directory; Cloud reads and writes use the authenticated volume API. No sandbox needs to be running. See [`VolumeFs`](#volumefs-methods) for the full API.
+Get a filesystem handle for this volume. Local reads and writes use the managed host directory; Cloud reads and writes use the authenticated volume API. No sandbox needs to be running. See [`VolumeFs`](#volumefs) for the full API.
 
 <p className="msb-label">Returns</p>
 
@@ -234,7 +235,7 @@ Get a filesystem handle for this volume. Local reads and writes use the managed 
 
 ## VolumeBuilder
 
-Fluent builder for a named volume. Obtained via [`Volume.builder(name)`](#volume-builder). Directory-backed volumes are the default; call [`disk()`](#disk) plus [`size()`](#size) for a disk-backed volume. Every setter returns the builder, so calls chain.
+Fluent builder for a named volume. Obtained via [`Volume.builder(name)`](#volume-builder). Directory-backed volumes are the default; call [`disk()`](#volumebuilder-disk) plus [`size()`](#volumebuilder-size) for a disk-backed volume. Every setter returns the builder, so calls chain.
 
 #### <span className="msb-recv">volumeBuilder.</span><span className="msb-hn">directory()</span>
 
@@ -263,7 +264,7 @@ const dockerData = await Volume.builder("docker-data")
 
 </Accordion>
 
-Create a raw ext4 disk-backed volume. Pair with [`size()`](#size) to set the capacity.
+Create a raw ext4 disk-backed volume. Pair with [`size()`](#volumebuilder-size) to set the capacity.
 
 #### <span className="msb-recv">volumeBuilder.</span><span className="msb-hn">size()</span>
 
@@ -273,7 +274,7 @@ Create a raw ext4 disk-backed volume. Pair with [`size()`](#size) to set the cap
 size(mib: number): this
 ```
 
-Set the disk capacity in MiB. Required after [`disk()`](#disk).
+Set the disk capacity in MiB. Required after [`disk()`](#volumebuilder-disk).
 
 <p className="msb-label">Parameters</p>
 
@@ -330,7 +331,7 @@ Add a metadata label. Can be called multiple times.
 build(): { name: string; kind: string; quotaMib?: number | null; capacityMib?: number | null; labels: Record<string, string> }
 ```
 
-Materialize the volume configuration without creating the volume on disk. To create it, use [`create()`](#create) instead. The returned config object is the internal `NapiVolumeConfig` shape (not a public export).
+Materialize the volume configuration without creating the volume on disk. To create it, use [`create()`](#volumebuilder-create) instead. The returned config object is the internal `NapiVolumeConfig` shape (not a public export).
 
 <p className="msb-label">Returns</p>
 
@@ -786,7 +787,6 @@ Check whether a path exists.
 
 ## VolumeHandle
 
-
 <p className="msb-backref">Returned by <a href="#volume-get">Volume.get()</a> · <a href="#volume-list">Volume.list()</a></p>
 
 A metadata and lifecycle handle for an existing volume.
@@ -868,10 +868,10 @@ Delete this volume (live handles only; throws on read-only handles)
 <p className="msb-label">Returns</p>
 
 `Promise<void>`
+
 ## VolumeFsReadStream
 
-
-<p className="msb-backref">Returned by <a href="#volumefs-methods">VolumeFs.readStream()</a></p>
+<p className="msb-backref">Returned by <a href="#volumefs">VolumeFs.readStream()</a></p>
 
 A streaming reader over a volume file. Implements `AsyncIterable<Uint8Array>` and `AsyncDisposable`, so it works with `for await` and `using`.
 
@@ -925,8 +925,7 @@ Mark the stream done (for `using`)
 
 ## VolumeFsWriteSink
 
-
-<p className="msb-backref">Returned by <a href="#volumefs-methods">VolumeFs.writeStream()</a></p>
+<p className="msb-backref">Returned by <a href="#volumefs">VolumeFs.writeStream()</a></p>
 
 A streaming writer for a volume file. Implements `AsyncDisposable`, so `await using` closes it automatically.
 

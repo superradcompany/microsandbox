@@ -6,7 +6,7 @@ icon: "database"
 
 <Tooltip tip="This example publishes Redis to a port on the computer running the CLI, which is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
-This example starts Redis 7 with password authentication, a persistent named volume, and a localhost-only forwarded port.
+This example starts Redis 7 with password authentication, a sized root disk, and a localhost-only forwarded port.
 
 ## Run Redis
 
@@ -34,9 +34,8 @@ Start Redis:
 <CodeGroup>
 ```sh macOS & Linux
 msb run -d --name redis-demo --replace \
-  --cpus 1 --memory 512M --root-disk 1G \
+  --cpus 1 --memory 512M --root-disk 2G \
   -p 127.0.0.1:56379:6379 \
-  --mount-named redis-data:/data \
   redis:7-alpine -- redis-server \
     --bind 0.0.0.0 \
     --protected-mode yes \
@@ -46,9 +45,8 @@ msb run -d --name redis-demo --replace \
 
 ```powershell Windows
 msb run -d --name redis-demo --replace `
-  --cpus 1 --memory 512M --root-disk 1G `
+  --cpus 1 --memory 512M --root-disk 2G `
   -p 127.0.0.1:56379:6379 `
-  --mount-named redis-data:/data `
   redis:7-alpine -- redis-server `
     --bind 0.0.0.0 `
     --protected-mode yes `
@@ -111,18 +109,12 @@ The three commands should return `OK`, `ready`, and `PONG`. Host applications co
 
 </Step>
 
-<Step title="Clean up or keep the data">
+<Step title="Clean up">
 
-Remove the sandbox while retaining the append-only database:
+Remove the sandbox and its append-only database:
 
 ```sh
 msb rm -f redis-demo
-```
-
-Delete all persisted Redis data:
-
-```sh
-msb volume rm redis-data
 ```
 
 Clear the password from the host shell:

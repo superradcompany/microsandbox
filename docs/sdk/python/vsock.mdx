@@ -1,0 +1,52 @@
+---
+title: VSock
+description: Python SDK - VSock API reference
+---
+
+Expose a host Unix socket or local Windows named pipe to a sandbox over virtio-vsock. See [VSock](/networking/host-sockets) for guest connection details, platform support, and security considerations.
+
+<Note>VSock routes are local-only and unavailable with the multi-tenant deployment profile.</Note>
+
+## Typical flow
+
+```python
+from microsandbox import Sandbox
+
+sandbox = await Sandbox.create(
+    "worker",
+    image="alpine",
+    vsock={"/run/host-api.sock": 5000},
+)
+```
+
+## Sandbox.create()
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `vsock` | `Mapping[str, int] \| Sequence[VsockRoute] \| None` | `None` | Host IPC routes exposed on guest host-CID ports |
+
+A mapping creates stream routes. Use typed [`VsockRoute`](#vsockroute) values for datagram routes or when the socket type should be explicit.
+
+## VsockRoute
+
+```python
+VsockRoute(host_socket, port, socket_type=VsockSocketType.STREAM)
+```
+
+Frozen route configuration imported from `microsandbox`.
+
+| Class method | Returns | Description |
+|--------------|---------|-------------|
+| `stream(host_socket, port)` | `VsockRoute` | Create a stream route |
+| `dgram(host_socket, port)` | `VsockRoute` | Create a datagram route |
+
+Datagram routes are unavailable on Windows. Host paths must be absolute, and each socket type and port pair must be unique.
+
+## VsockSocketType
+
+String enum imported from `microsandbox`.
+
+| Member | Value | Description |
+|--------|-------|-------------|
+| `STREAM` | `"stream"` | Reliable, ordered byte stream; the default |
+| `DGRAM` | `"dgram"` | Best-effort messages with preserved datagram boundaries |

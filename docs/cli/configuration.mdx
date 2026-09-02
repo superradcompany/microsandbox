@@ -4,11 +4,9 @@ description: Configure sandboxes created by the CLI with root or scoped YAML fil
 icon: "file-code"
 ---
 
-<Tooltip tip="Common image, resource, lifecycle, environment, policy, secret, script, and patch fields work everywhere. Host-integrated networking, local rootfs forms, snapshots, replace behavior, and several runtime fields are unavailable on microsandbox cloud.">
-  <span className="msb-badge-limited">
-    Limited on cloud <Icon icon="circle-info" size={11} />
-  </span>
-</Tooltip>
+<Note>
+Common image, resource, lifecycle, environment, policy, secret, script, and patch fields work everywhere. Host-integrated networking, local rootfs forms, snapshots, replace behavior, and several runtime fields are unavailable on microsandbox cloud.
+</Note>
 
 Sandbox configuration is a reusable, sparse definition for one sandbox. Load it with `msb run`, `msb create`, or `msb install`; explicit CLI arguments are applied on top. The file may have any name when passed with `--conf`.
 
@@ -62,15 +60,15 @@ If neither the files nor the arguments provide an image, the command fails befor
 
 Scoped flags accept the contents of one field or field group without its root wrapper. They are useful for focused policies that should fail on unrelated fields.
 
-| Flag                   | Accepted fields                                                                                  |
-| ---------------------- | ------------------------------------------------------------------------------------------------ |
-| `--conf PATH`          | Any sandbox configuration field                                                                  |
-| `--net-conf PATH`      | `policy`, `allow`, `deny`, `ports`, `dns`, `tls`, `trust_host_cas`, `max_connections`            |
-| `--resource-conf PATH` | `cpus`, `memory`, `max_duration`, `idle_timeout`, `rlimits`                                      |
-| `--runtime-conf PATH`  | `workdir`, `shell`, `user`, `hostname`, `security`, `entrypoint`, `cmd`, `env`, `labels`, `init` |
-| `--fs-conf PATH`       | `mounts`, `patch_files`, `patches`                                                               |
-| `--secret-conf PATH`   | A map of secret names to secret definitions                                                      |
-| `--script-conf PATH`   | A map of script names to shell snippets                                                          |
+| Flag | Accepted fields |
+| --- | --- |
+| `--conf PATH` | Any sandbox configuration field |
+| `--net-conf PATH` | `policy`, `allow`, `deny`, `ports`, `dns`, `tls`, `trust_host_cas`, `max_connections` |
+| `--resource-conf PATH` | `cpus`, `memory`, `max_duration`, `idle_timeout`, `rlimits` |
+| `--runtime-conf PATH` | `workdir`, `shell`, `user`, `hostname`, `security`, `entrypoint`, `cmd`, `env`, `labels`, `init` |
+| `--fs-conf PATH` | `mounts`, `patch_files`, `patches` |
+| `--secret-conf PATH` | A map of secret names to secret definitions |
+| `--script-conf PATH` | A map of script names to shell snippets |
 
 For example, `--net-conf` expects this unwrapped document:
 
@@ -112,38 +110,7 @@ msb run python \
 
 Relative host paths are resolved against the file that contains them. Paths inside a file listed by `patch_files` are resolved against that patch file.
 
-## Rust SDK patches
-
-`SandboxConfigPatch` is the typed sparse representation for per-sandbox configuration. Its nested patch types are generated from the canonical sandbox configuration, compose with right-hand-side precedence, and are applied by `SandboxBuilder::overlay` before later fluent builder calls:
-
-```rust
-use microsandbox::{
-    EnvVar, Sandbox, SandboxConfigPatch, SandboxResourcesPatch,
-};
-
-let resources_patch = SandboxResourcesPatch::new()
-  .max_memory_mib(1024)
-  .memory_mib(1024)
-  .max_cpus(2)
-  .cpus(2);
-
-let patch = SandboxConfigPatch::new()
-    .resources(resources_patch)
-    .env(vec![EnvVar::new("MODE", "production")]);
-
-let sandbox = Sandbox::builder("agent")
-    .image("python:3.12")
-    .overlay(patch)
-    .memory(2048) // Explicit builder calls are higher precedence.
-    .create()
-    .await?;
-```
-
-Every canonical nested struct has a corresponding generated patch type. Adding a field to the source struct adds it to the patch API and its overlay/apply implementations automatically. Patch types do not read YAML, resolve relative paths, expand `${ENV}`, or carry registry credentials and snapshot-selection state; those remain file-adapter or explicit builder responsibilities. `SandboxConfig` remains the complete durable configuration.
-
-Collection fields are atomic unless their canonical field declares a merge strategy. Environment variables merge by variable name, labels and scripts merge by map key, and secret entries merge by environment-variable name; higher values win when keys match. Their normal setters merge, while generated `replace_*` methods replace the complete collection. Calling `clear_*` removes that field from the patch, so applying the patch leaves the lower-layer value unchanged.
-
-The generated model replaces the earlier handwritten patch hierarchy. Use `SandboxResourcesPatch`, `SandboxRuntimeOptionsPatch`, `NetworkSpecPatch`, `SandboxPolicyPatch`, and `SecretsConfigPatch` in place of the former resource, runtime, network, network-policy, and secret patch types. Filesystem, script, image, and init changes are now expressed directly through `SandboxConfigPatch` and its canonical nested patches. The old `LocalConfig` name remains as a deprecated alias of `GlobalConfig`.
+Rust applications can apply the same sparse configuration model without loading YAML. See [`SandboxBuilder::overlay`](/sdk/rust/sandbox#sandbox-overlay) for the typed API, merge behavior, and migration from the earlier patch types.
 
 ## Schema
 
@@ -153,7 +120,7 @@ The common image form is a string. Local paths beginning with `.`, `..`, or `/` 
 
 ```yaml
 image: "python:3.12"
-pull_policy: missing # missing | always | never
+pull_policy: missing       # missing | always | never
 registry:
   username: "deploy"
   password_env: "REGISTRY_TOKEN"
@@ -191,7 +158,7 @@ workdir: "/app"
 shell: "/bin/bash"
 user: "app"
 hostname: "api"
-security: restricted # default | restricted
+security: restricted       # default | restricted
 entrypoint: ["/usr/bin/tini", "--"]
 cmd: ["python", "app.py"]
 env:
@@ -199,7 +166,7 @@ env:
 labels:
   team: "platform"
 init:
-  cmd: auto # auto or an absolute guest path
+  cmd: auto                # auto or an absolute guest path
   args: []
   env: {}
 ```
@@ -250,17 +217,10 @@ Patch files run first in listed order, followed by inline patches:
 patch_files:
   - "./patches/common.yaml"
 patches:
-  - copy_file:
-      {
-        src: "./config.toml",
-        dst: "/etc/app/config.toml",
-        mode: "0644",
-        replace: true,
-      }
+  - copy_file: { src: "./config.toml", dst: "/etc/app/config.toml", mode: "0644", replace: true }
   - copy_dir: { src: "./certs", dst: "/etc/app/certs" }
   - text: { path: "/etc/app/build.txt", content: "release", mode: "0644" }
-  - file:
-      { path: "/etc/app/blob.bin", content_base64: "SGVsbG8=", mode: "0600" }
+  - file: { path: "/etc/app/blob.bin", content_base64: "SGVsbG8=", mode: "0600" }
   - mkdir: { path: "/var/cache/app", mode: "0755" }
   - symlink: { target: "/etc/app/config.toml", link: "/etc/app/active.toml" }
   - append: { path: "/etc/hosts", content: "10.0.0.5 db.internal\n" }
@@ -274,7 +234,7 @@ A patch file has one top-level `patches` list using the same operations. File mo
 Use a preset string for the common cases:
 
 ```yaml
-network: public # none | public | open
+network: public             # none | public | open
 ```
 
 `public`, the default, permits public internet access while blocking private, loopback, link-local, and metadata destinations. `none` denies ingress and egress. `open` is unrestricted.

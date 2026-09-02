@@ -1621,7 +1621,8 @@ export type JsSocks4ProxyBuilder = Socks4ProxyBuilder
 
 /** Builds a SOCKS5 outbound proxy. */
 export declare class Socks5ProxyBuilder {
-
+  /** Set username authentication and a host-side password source. */
+  credentials(username: string, password: SecretSourceInput): this
 }
 export type JsSocks5ProxyBuilder = Socks5ProxyBuilder
 
@@ -2364,6 +2365,14 @@ export interface SecretModifySpec {
   store?: string
   placeholder?: string
   allowedHosts?: Array<string>
+}
+
+/** Host-side source for secret material. */
+export interface SecretSourceInput {
+  /** Source kind. Currently only `env` is supported for proxy credentials. */
+  kind: string
+  /** Host environment variable name. */
+  var: string
 }
 
 /**

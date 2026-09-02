@@ -15,6 +15,7 @@ resolver = "3"
 members = [
     "crates/agentd",
     "crates/protocol",
+    "packages/microsandbox-types/macros",
     "packages/microsandbox-types/rust",
 ]
 
@@ -33,6 +34,7 @@ ipnetwork = { version = "0.21.0", features = ["serde"] }
 libc = "0.2"
 microsandbox-protocol = { path = "crates/protocol" }
 microsandbox-types = { path = "packages/microsandbox-types/rust" }
+microsandbox-types-macros = { path = "packages/microsandbox-types/macros" }
 nix = "0.31"
 serde = { version = "1.0", features = ["derive"] }
 serde_bytes = "0.11"

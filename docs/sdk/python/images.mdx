@@ -1,6 +1,7 @@
 ---
 title: Images
 description: Python SDK - Image cache API reference
+keywords: ["Python SDK", "Python images", "microsandbox images"]
 ---
 
 Configure sandbox image sources and manage the local OCI image cache.
@@ -311,15 +312,6 @@ Remove cached image data that is not used by any sandbox or indexed snapshot. Th
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-report = await Image.prune()
-print(f"{report.layers_removed} layers, {report.bytes_reclaimed} bytes")
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">Image.</span><span className="msb-hn">load()</span>
@@ -565,7 +557,8 @@ Explicit rootfs image source. Build one with [`Image.oci()`](#image-oci), [`Imag
 | `_type` | [`ImageSourceKind`](#imagesourcekind) | Source kind |
 | `_path` | `str \| None` | Host path for `bind` / `disk` sources |
 | `_reference` | `str \| None` | OCI reference for `oci` sources |
-| `_upper_size_mib` | `int \| None` | Writable overlay upper size in MiB (OCI only) |
+| `_root_disk` | [`RootDiskConfig`](#rootdiskconfig)` \| int \| None` | Writable root disk configuration or managed-disk size in MiB (OCI only) |
+| `_upper_size_mib` | `int \| None` | Deprecated managed-disk size alias |
 | `_fstype` | `str \| None` | Filesystem type for `disk` sources |
 | `_format` | [`DiskImageFormat`](#diskimageformat)` \| None` | Disk image format (inferred from extension) |
 

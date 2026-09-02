@@ -10,6 +10,12 @@ These examples start with the smallest useful microsandbox workflow. Short comma
 ## Start with these
 
 <CardGroup cols={2}>
+  <Card title="Claude Code" icon="code" href="/examples/agents/claude-code">
+    Run Claude Code against a project while its credentials stay in a microVM.
+  </Card>
+  <Card title="Codex CLI" icon="terminal" href="/examples/agents/codex">
+    Run Codex against a host checkout from an isolated tool environment.
+  </Card>
   <Card title="OpenCode" icon="terminal" href="/examples/agents/opencode">
     Run a terminal coding agent against an isolated copy of your project.
   </Card>
@@ -38,9 +44,9 @@ These examples start with the smallest useful microsandbox workflow. Short comma
 
 ## Browse by workflow
 
-- **Agents**: OpenCode, OpenClaw, Goose, Gemini CLI, Hermes Agent, and Pi.
+- **Agents**: Claude Code, Codex CLI, OpenCode, OpenClaw, Goose, Gemini CLI, Hermes Agent, and Pi.
 - **CI/CD**: Ephemeral GitHub Actions runners, isolated PR checks, Docker Compose integration tests, and time-limited preview deploys.
 - **Automation**: Scheduled dependency audits and parallel batch dispatch.
 - **Tool isolation**: Vet native Terraform providers in constrained workers.
 - **Web Automation**: Playwright browser jobs and bounded Scrapy crawls.
-- **Systems and data**: Docker, systemd, VNC, PostgreSQL, Redis, migrations, metrics backends, and file processing.
+- **Systems and data**: Docker, systemd, VNC, S3 with JuiceFS, PostgreSQL, Redis, migrations, metrics backends, and file processing.

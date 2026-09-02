@@ -1,6 +1,7 @@
 //! Network configuration types and fluent builders.
 
 pub mod builder;
+mod resolver;
 mod types;
 
 //--------------------------------------------------------------------------------------------------
@@ -8,4 +9,5 @@ mod types;
 //--------------------------------------------------------------------------------------------------
 
 pub use builder::*;
+pub use resolver::*;
 pub use types::*;

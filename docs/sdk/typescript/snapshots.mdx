@@ -1,6 +1,7 @@
 ---
 title: Snapshots
 description: TypeScript SDK - Snapshot API reference
+keywords: ["TypeScript SDK", "TypeScript snapshots", "microsandbox snapshots"]
 ---
 
 <Tooltip tip="Snapshot creation, restore, import, and export use local disk artifacts and are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
@@ -27,7 +28,7 @@ const sb = await Sandbox.builder("worker")
 
 </Accordion>
 
-Boot a fresh sandbox from a snapshot artifact. Mutually exclusive with [`.image()`](/sdk/typescript/sandbox#image); the snapshot already pins the image. Documented in full on the [Sandbox](/sdk/typescript/sandbox#fromsnapshot) page.
+Boot a fresh sandbox from a snapshot artifact. Mutually exclusive with [`.image()`](/sdk/typescript/sandbox#sandboxbuilder-image); the snapshot already pins the image. Documented in full on the [Sandbox](/sdk/typescript/sandbox#sandboxbuilder-fromsnapshot) page.
 
 <p className="msb-label">Parameters</p>
 
@@ -70,7 +71,7 @@ Snapshot this sandbox under a bare name in the default snapshots directory (`~/.
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#snapshot-instance">Promise&lt;Snapshot&gt;</a></div>
+    <div className="msb-param-key"><a className="msb-type" href="#snapshot">Promise&lt;Snapshot&gt;</a></div>
     <div className="msb-param-desc">The created snapshot artifact.</div>
   </div>
 </div>
@@ -198,7 +199,7 @@ Best-effort source-sandbox name, if recorded. `null` when the manifest has no so
 static builder(name: string): SnapshotBuilder
 ```
 
-Begin building a new snapshot named `name`, resolved under the default snapshots directory (`~/.microsandbox/snapshots/<name>/`) or under [`.destDir()`](#destdir) when set. The fluent builder is what powers the CLI internally. The source sandbox is set with [`.fromSandbox()`](#fromsandbox), which is required. See [`SnapshotBuilder`](#snapshotbuilder) for all setters.
+Begin building a new snapshot named `name`, resolved under the default snapshots directory (`~/.microsandbox/snapshots/<name>/`) or under [`.destDir()`](#snapshot-destdir) when set. The fluent builder is what powers the CLI internally. The source sandbox is set with [`.fromSandbox()`](#snapshot-fromsandbox), which is required. See [`SnapshotBuilder`](#snapshotbuilder) for all setters.
 
 <p className="msb-label">Parameters</p>
 
@@ -262,7 +263,7 @@ Open an existing snapshot artifact. Bare names resolve under the default snapsho
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#snapshot-instance">Promise&lt;Snapshot&gt;</a></div>
+    <div className="msb-param-key"><a className="msb-type" href="#snapshot">Promise&lt;Snapshot&gt;</a></div>
     <div className="msb-param-desc">The opened snapshot.</div>
   </div>
 </div>
@@ -282,7 +283,7 @@ console.log(h.digest, h.createdAt);
 
 </Accordion>
 
-Look up an indexed snapshot by digest, name, or path. Returns a lightweight [`SnapshotHandle`](#snapshothandle-class) backed by the local index row.
+Look up an indexed snapshot by digest, name, or path. Returns a lightweight [`SnapshotHandle`](#snapshothandle) backed by the local index row.
 
 <p className="msb-label">Parameters</p>
 
@@ -297,7 +298,7 @@ Look up an indexed snapshot by digest, name, or path. Returns a lightweight [`Sn
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#snapshothandle-class">Promise&lt;SnapshotHandle&gt;</a></div>
+    <div className="msb-param-key"><a className="msb-type" href="#snapshothandle">Promise&lt;SnapshotHandle&gt;</a></div>
     <div className="msb-param-desc">Index-backed handle.</div>
   </div>
 </div>
@@ -324,7 +325,7 @@ List indexed snapshots from the local DB cache.
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#snapshothandle-class">Promise&lt;SnapshotHandle[]&gt;</a></div>
+    <div className="msb-param-key"><a className="msb-type" href="#snapshothandle">Promise&lt;SnapshotHandle[]&gt;</a></div>
     <div className="msb-param-desc">All indexed snapshot handles.</div>
   </div>
 </div>
@@ -350,7 +351,7 @@ Walk a directory and parse each subdirectory's manifest. Does not touch the inde
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#snapshot-instance">Promise&lt;Snapshot[]&gt;</a></div>
+    <div className="msb-param-key"><a className="msb-type" href="#snapshot">Promise&lt;Snapshot[]&gt;</a></div>
     <div className="msb-param-desc">Parsed snapshots found in the directory.</div>
   </div>
 </div>
@@ -428,7 +429,7 @@ Walk the snapshots directory (default: the configured snapshots dir) and rebuild
 static save(nameOrPath: string, out: string, opts?: SaveOpts): Promise<void>
 ```
 
-Bundle a snapshot into a `.tar.zst` archive. The recorded manifest is archived as-is, so create the snapshot with [`recordIntegrity()`](#recordintegrity) if receivers must verify content. See [`SaveOpts`](#saveopts-interface) for bundling options.
+Bundle a snapshot into a `.tar.zst` archive. The recorded manifest is archived as-is, so create the snapshot with [`recordIntegrity()`](#snapshot-recordintegrity) if receivers must verify content. See [`SaveOpts`](#saveopts-interface) for bundling options.
 
 <p className="msb-label">Parameters</p>
 
@@ -485,7 +486,7 @@ Unpack a snapshot archive (`.tar.zst` or `.tar`) into the snapshots directory. S
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#snapshothandle-class">Promise&lt;SnapshotHandle&gt;</a></div>
+    <div className="msb-param-key"><a className="msb-type" href="#snapshothandle">Promise&lt;SnapshotHandle&gt;</a></div>
     <div className="msb-param-desc">Handle to the loaded snapshot.</div>
   </div>
 </div>
@@ -620,7 +621,7 @@ await h.remove({ force: false });     // refuse if it has children
 
 ## SnapshotBuilder
 
-Fluent builder for a snapshot, returned by [`Snapshot.builder(name)`](#snapshotbuilder). Every setter mutates in place and returns `this`, so calls chain. The source sandbox is required: call [`.fromSandbox()`](#fromsandbox) before [`.create()`](#create).
+Fluent builder for a snapshot, returned by [`Snapshot.builder(name)`](#snapshotbuilder). Every setter mutates in place and returns `this`, so calls chain. The source sandbox is required: call [`.fromSandbox()`](#snapshot-fromsandbox) before [`.create()`](#snapshot-create).
 
 ---
 
@@ -631,7 +632,7 @@ Fluent builder for a snapshot, returned by [`Snapshot.builder(name)`](#snapshotb
 fromSandbox(sourceSandbox: string): this
 ```
 
-Set the sandbox to capture. Required; [`.create()`](#create) fails without it.
+Set the sandbox to capture. Required; [`.create()`](#snapshot-create) fails without it.
 
 <p className="msb-label">Parameters</p>
 
@@ -708,7 +709,7 @@ Compute and record a content-integrity hash of the upper layer at creation time,
 resumable(): this
 ```
 
-Request a `"resumable"` snapshot (disk plus VM state). Accepted by the builder, but [`.create()`](#create) currently returns an `Unsupported` error; resumable snapshots have not landed yet.
+Request a `"resumable"` snapshot (disk plus VM state). Accepted by the builder, but [`.create()`](#snapshot-create) currently returns an `Unsupported` error; resumable snapshots have not landed yet.
 
 ---
 
@@ -736,7 +737,7 @@ Capture the configured snapshot and return the resulting artifact.
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#snapshot-instance">Promise&lt;Snapshot&gt;</a></div>
+    <div className="msb-param-key"><a className="msb-type" href="#snapshot">Promise&lt;Snapshot&gt;</a></div>
     <div className="msb-param-desc">The created snapshot artifact.</div>
   </div>
 </div>

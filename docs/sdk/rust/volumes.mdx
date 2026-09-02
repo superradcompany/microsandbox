@@ -1,6 +1,7 @@
 ---
 title: Volumes
 description: Rust SDK - Volume API reference
+keywords: ["Rust SDK", "Rust volumes", "microsandbox volumes"]
 ---
 
 Create, manage, and mount named volumes. See [Volumes](/sandboxes/volumes) for usage examples.
@@ -37,7 +38,7 @@ let vol = Volume::builder("pip-cache").create().await?;
 
 </Accordion>
 
-Create a builder for configuring a new named volume. Directory-backed volumes are the default; call [`.disk()`](#disk) then [`.size()`](#size) for a raw ext4 disk-image volume. Volume names must start with an alphanumeric character and contain only alphanumeric characters, dots, hyphens, and underscores. See [`VolumeBuilder`](#volumebuilder-2) for all options.
+Create a builder for configuring a new named volume. Directory-backed volumes are the default; call [`.disk()`](#volume_builder-disk) then [`.size()`](#volume_builder-size) for a raw ext4 disk-image volume. Volume names must start with an alphanumeric character and contain only alphanumeric characters, dots, hyphens, and underscores. See [`VolumeBuilder`](#volumebuilder-2) for all options.
 
 <p className="msb-label">Parameters</p>
 
@@ -490,7 +491,7 @@ Delete this volume and its contents. Locally the database record is removed firs
 fn used_bytes(&self) -> u64
 ```
 
-Disk usage snapshot from when this handle was created. Not live, call [`Volume::get()`](#volumeget) again for a fresh reading.
+Disk usage snapshot from when this handle was created. Not live; call [`Volume::get()`](#volumeget) again for a fresh reading.
 
 <p className="msb-label">Returns</p>
 
@@ -1113,7 +1114,7 @@ Create a directory-backed named volume (mounted through virtiofs). This is the d
 fn disk(self) -> Self
 ```
 
-Create a raw ext4 disk-image named volume (mounted through virtio-blk). Requires [`.size()`](#size).
+Create a raw ext4 disk-image named volume (mounted through virtio-blk). Requires [`.size()`](#volume_builder-size).
 
 #### <span className="msb-recv">volume_builder.</span><span className="msb-hn">size()</span>
 
@@ -1156,7 +1157,7 @@ Set the disk volume's capacity. Required for disk volumes; rejected for director
 fn quota(self, size: impl Into<Mebibytes>) -> Self
 ```
 
-Limit a directory volume's storage. Accepts a bare `u32` (MiB) or a `SizeExt` helper such as `1.gib()`. Omit for unlimited growth (the default). Rejected for disk volumes, which size up front via [`.size()`](#size).
+Limit a directory volume's storage. Accepts a bare `u32` (MiB) or a `SizeExt` helper such as `1.gib()`. Omit for unlimited growth (the default). Rejected for disk volumes, which size up front via [`.size()`](#volume_builder-size).
 
 <p className="msb-label">Parameters</p>
 
@@ -1240,7 +1241,7 @@ Create the volume on the active backend. Equivalent to `Volume::create(self.buil
 
 ## MountBuilder
 
-<p className="msb-backref">Used by <a href="/sdk/rust/sandbox#volume">SandboxBuilder::volume()</a></p>
+<p className="msb-backref">Used by <a href="/sdk/rust/sandbox#sandbox-volume">SandboxBuilder::volume()</a></p>
 
 Builder for configuring a sandbox volume mount.
 
@@ -1269,7 +1270,7 @@ Bind mount a host directory into the guest. Changes in the guest are reflected o
 fn named(self, name: impl Into<String>) -> Self
 ```
 
-Mount a named volume created via [`Volume::create()`](#volumecreate). The volume must already exist. Persists across sandbox restarts and can be shared between sandboxes. For sandbox-time provisioning, use [`.named_with()`](#named_with).
+Mount a named volume created via [`Volume::create()`](#volumecreate). The volume must already exist. Persists across sandbox restarts and can be shared between sandboxes. For sandbox-time provisioning, use [`.named_with()`](#mount-named_with).
 
 <p className="msb-label">Parameters</p>
 
@@ -1309,7 +1310,7 @@ let sb = Sandbox::builder("worker")
 
 </Accordion>
 
-Mount a named volume with explicit sandbox-time existence behavior, configured via a [`NamedVolumeBuilder`](#namedvolumebuilder-2) closure. `existing` (the default) behaves like [`.named()`](#named); `create` provisions the volume and fails if it already exists; `ensure_exists` provisions it if missing or reuses a compatible existing volume. The ensure-exists mode validates existing metadata and errors when the kind, quota, capacity, or explicitly requested labels differ; it does not mutate existing metadata.
+Mount a named volume with explicit sandbox-time existence behavior, configured via a [`NamedVolumeBuilder`](#namedvolumebuilder) closure. `existing` (the default) behaves like [`.named()`](#mount-named); `create` provisions the volume and fails if it already exists; `ensure_exists` provisions it if missing or reuses a compatible existing volume. The ensure-exists mode validates existing metadata and errors when the kind, quota, capacity, or explicitly requested labels differ; it does not mutate existing metadata.
 
 <p className="msb-label">Parameters</p>
 
@@ -1319,7 +1320,7 @@ Mount a named volume with explicit sandbox-time existence behavior, configured v
     <div className="msb-param-desc">Volume name.</div>
   </div>
   <div className="msb-param">
-    <div className="msb-param-key"><code>f</code><a className="msb-type" href="#namedvolumebuilder-2">FnOnce(NamedVolumeBuilder)</a></div>
+    <div className="msb-param-key"><code>f</code><a className="msb-type" href="#namedvolumebuilder">FnOnce(NamedVolumeBuilder)</a></div>
     <div className="msb-param-desc">Configure existence behavior and creation metadata.</div>
   </div>
 </div>
@@ -1342,7 +1343,7 @@ Use an in-memory filesystem. Contents are discarded when the sandbox stops. Good
 fn disk(self, host: impl Into<PathBuf>) -> Self
 ```
 
-Mount a host disk-image file as a virtio-blk device at the guest path. The format defaults from the file extension (`.qcow2`, `.vmdk`; anything else is `Raw`). Override with [`.format()`](#format).
+Mount a host disk-image file as a virtio-blk device at the guest path. The format defaults from the file extension (`.qcow2`, `.vmdk`; anything else is `Raw`). Override with [`.format()`](#mount-format).
 
 <p className="msb-label">Parameters</p>
 
@@ -1477,7 +1478,7 @@ let sb = Sandbox::builder("worker")
 fn size(self, size: impl Into<Mebibytes>) -> Self
 ```
 
-Set the size limit for a [`.tmpfs()`](#tmpfs) mount. Accepts a bare `u32` (MiB) or a `SizeExt` helper such as `1.gib()`. Valid only for tmpfs mounts.
+Set the size limit for a [`.tmpfs()`](#mount-tmpfs) mount. Accepts a bare `u32` (MiB) or a `SizeExt` helper such as `1.gib()`. Valid only for tmpfs mounts.
 
 <p className="msb-label">Parameters</p>
 
@@ -1496,7 +1497,7 @@ Set the size limit for a [`.tmpfs()`](#tmpfs) mount. Accepts a bare `u32` (MiB) 
 fn build(self) -> MicrosandboxResult<VolumeMount>
 ```
 
-Validate and materialize the mount. Usually called internally by `SandboxBuilder::volume`; call it directly only when assembling a [`VolumeMount`](#mountbuilder-2) by hand. Errors when no mount kind is set, the guest path is not absolute or is `/`, or a kind-specific option was set on the wrong mount kind.
+Validate and materialize the mount. Usually called internally by `SandboxBuilder::volume`; call it directly only when assembling a [`VolumeMount`](#mountbuilder) by hand. Errors when no mount kind is set, the guest path is not absolute or is `/`, or a kind-specific option was set on the wrong mount kind.
 
 <p className="msb-label">Returns</p>
 
@@ -1509,12 +1510,9 @@ Validate and materialize the mount. Usually called internally by `SandboxBuilder
 
 ## NamedVolumeBuilder
 
-Sub-builder for [`MountBuilder::named_with()`](#named_with). Selects sandbox-time existence behavior and creation metadata.
+<p className="msb-backref">Used by <a href="#mount-named_with">MountBuilder::named_with()</a></p>
 
-<p className="msb-backref">Used by <a href="#named_with">MountBuilder::named_with()</a></p>
-
-
-Sub-builder for [`MountBuilder::named_with()`](#named_with). Selects the sandbox-time existence behavior and, for `create` / `ensure_exists`, the creation metadata. Defaults to `existing` and directory-backed.
+Sub-builder for [`MountBuilder::named_with()`](#mount-named_with). Selects the sandbox-time existence behavior and, for `create` / `ensure_exists`, the creation metadata. Defaults to `existing` and directory-backed.
 
 #### <span className="msb-recv">named.</span><span className="msb-hn">existing()</span>
 
@@ -1554,7 +1552,7 @@ Create the named volume if it is missing, or reuse a compatible existing volume.
 fn name(self, name: impl Into<String>) -> Self
 ```
 
-Override the volume name passed to [`named_with()`](#named_with).
+Override the volume name passed to [`named_with()`](#mount-named_with).
 
 <p className="msb-label">Parameters</p>
 
@@ -1654,11 +1652,9 @@ Attach a label to a newly-created volume. For `ensure_exists`, requested labels 
 
 ## VolumeFsReadStream
 
-
-A streaming reader for file data from a local volume directory. Returned by [`VolumeFs::read_stream()`](#fs-read_stream).
-
 <p className="msb-backref">Returned by <a href="#fs-read_stream">VolumeFs::read_stream()</a></p>
 
+A streaming reader for file data from a local volume directory.
 
 #### <span className="msb-recv">stream.</span><span className="msb-hn">recv()</span>
 
@@ -1686,11 +1682,9 @@ Read the rest into one buffer
 
 ## VolumeFsWriteSink
 
-
-A streaming writer for file data to a local volume directory. Returned by [`VolumeFs::write_stream()`](#fs-write_stream).
-
 <p className="msb-backref">Returned by <a href="#fs-write_stream">VolumeFs::write_stream()</a></p>
 
+A streaming writer for file data to a local volume directory.
 
 #### <span className="msb-recv">sink.</span><span className="msb-hn">write()</span>
 
@@ -1737,7 +1731,7 @@ Configuration for creating a named volume. Re-exported as both `VolumeSpec` and 
 
 ### MountOptions
 
-Guest mount behavior shared by every mount kind. Set via the [`MountBuilder`](#mountbuilder-2) toggles; all fields default to `false`.
+Guest mount behavior shared by every mount kind. Set via the [`MountBuilder`](#mountbuilder) toggles; all fields default to `false`.
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -1745,12 +1739,12 @@ Guest mount behavior shared by every mount kind. Set via the [`MountBuilder`](#m
 | `noexec` | `bool` | Direct execution from the mount is disabled |
 | `nosuid` | `bool` | setuid/setgid elevation from files on the mount is ignored |
 | `nodev` | `bool` | Device files on the mount are ignored |
-| `override_uid` | `Option<u32>` | Guest uid fallback for host files without a per-file override; set together with `override_gid` via [`MountBuilder::owner()`](#owner) |
-| `override_gid` | `Option<u32>` | Guest gid fallback for host files without a per-file override; set together with `override_uid` via [`MountBuilder::owner()`](#owner) |
+| `override_uid` | `Option<u32>` | Guest uid fallback for host files without a per-file override; set together with `override_gid` via [`MountBuilder::owner()`](#mount-owner) |
+| `override_gid` | `Option<u32>` | Guest gid fallback for host files without a per-file override; set together with `override_uid` via [`MountBuilder::owner()`](#mount-owner) |
 
 ### StatVirtualization
 
-Stat virtualization policy for a virtiofs-backed mount. Default: `Strict`. Set via [`MountBuilder::stat_virtualization()`](#stat_virtualization).
+Stat virtualization policy for a virtiofs-backed mount. Default: `Strict`. Set via [`MountBuilder::stat_virtualization()`](#mount-stat_virtualization).
 
 | Variant | Description |
 |---------|-------------|
@@ -1760,7 +1754,7 @@ Stat virtualization policy for a virtiofs-backed mount. Default: `Strict`. Set v
 
 ### HostPermissions
 
-Host permission propagation policy for a virtiofs-backed mount. Default: `Private`. Set via [`MountBuilder::host_permissions()`](#host_permissions).
+Host permission propagation policy for a virtiofs-backed mount. Default: `Private`. Set via [`MountBuilder::host_permissions()`](#mount-host_permissions).
 
 | Variant | Description |
 |---------|-------------|
@@ -1769,7 +1763,7 @@ Host permission propagation policy for a virtiofs-backed mount. Default: `Privat
 
 ### DiskImageFormat
 
-Disk image format for virtio-blk root filesystems and volume mounts. Used by [`MountBuilder::format()`](#format).
+Disk image format for virtio-blk root filesystems and volume mounts. Used by [`MountBuilder::format()`](#mount-format).
 
 | Variant | Description |
 |---------|-------------|
@@ -1779,7 +1773,7 @@ Disk image format for virtio-blk root filesystems and volume mounts. Used by [`M
 
 ### NamedVolumeMode
 
-Sandbox-time behavior for a named volume mount, chosen via [`NamedVolumeBuilder`](#namedvolumebuilder-2).
+Sandbox-time behavior for a named volume mount, chosen via [`NamedVolumeBuilder`](#namedvolumebuilder).
 
 | Variant | Description |
 |---------|-------------|

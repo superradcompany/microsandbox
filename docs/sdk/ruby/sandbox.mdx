@@ -1,9 +1,10 @@
 ---
 title: Sandbox
 description: Ruby SDK - Sandbox lifecycle API reference
+keywords: ["Ruby SDK", "Ruby sandbox", "microsandbox sandbox"]
 ---
 
-Create and control a microVM sandbox from Ruby. The SDK supports local and cloud backends; blocking native calls release Ruby's GVL so other Ruby threads can continue running. See [Lifecycle](/sandboxes/lifecycle) for the shared state model and [Error handling](/sdk/errors) for cross-SDK behavior.
+Create and control a microVM sandbox from Ruby. The SDK supports local and cloud backends; blocking native calls release Ruby's global VM lock (GVL) so other Ruby threads can continue running. See [Lifecycle](/sandboxes/lifecycle) for the shared state model and [Error handling](/sdk/errors) for cross-SDK behavior.
 
 ## Installation
 
@@ -19,7 +20,7 @@ require "microsandbox"
 Microsandbox.install unless Microsandbox.installed?
 ```
 
-## Convergent creation
+## Reuse or create a sandbox
 
 #### <span className="msb-recv">Microsandbox::Sandbox.</span><span className="msb-hn">connect_or_create()</span>
 
@@ -27,7 +28,7 @@ Microsandbox.install unless Microsandbox.installed?
 Microsandbox::Sandbox.connect_or_create(name, **options) # => Sandbox
 ```
 
-Converge on the current persisted sandbox by name. The method connects when it is running, waits through `starting`, starts it when it is `created`, `stopped`, or `crashed`, and creates it only when the name is absent. Options apply only to creation; an existing sandbox keeps its persisted configuration. Concurrent callers converge on the winning identity. Replace options are rejected because replacement conflicts with convergence.
+Reuse or create the sandbox with this name. The method connects when it is running, waits while it is starting, starts it when it is created, stopped, or crashed, and creates it only when the name is unused. Options apply only to a new sandbox, and concurrent callers reuse the same sandbox. Replace options are rejected because they request a different sandbox.
 
 ```ruby
 sandbox = Microsandbox::Sandbox.connect_or_create(
@@ -48,7 +49,7 @@ Use `Sandbox.create` when name conflicts must remain an error, or explicit repla
 Microsandbox::Sandbox.builder(name).connect_or_create # => Sandbox
 ```
 
-Builder terminal with the same convergence, existing-configuration, concurrency, and replace-option behavior as `Microsandbox::Sandbox.connect_or_create`.
+Builder terminal with the same reuse, creation-option, concurrency, and replace-option behavior as `Microsandbox::Sandbox.connect_or_create`.
 
 ## Sandbox
 
@@ -76,7 +77,7 @@ Wait without a built-in timeout until this exact sandbox reaches one of `created
 sandbox.restart(force: false, timeout: nil, detached: false) # => Sandbox
 ```
 
-Restart this exact sandbox. Defaults to graceful shutdown, the SDK's ten-second timeout, and attached local start. A created, stopped, or crashed sandbox starts directly; a starting sandbox is observed until it settles. Set `force: true` to kill, `timeout:` in seconds to change shutdown convergence, or `detached: true` for a local background start.
+Restart this exact sandbox. Defaults to graceful shutdown, the SDK's ten-second timeout, and attached local start. A created, stopped, or crashed sandbox starts directly; a starting sandbox is observed until it settles. Set `force: true` to kill, `timeout:` in seconds to change how long shutdown can take, or `detached: true` for a local background start.
 
 On microsandbox cloud, graceful restart is supported, but timeout expiry cannot escalate to force kill. `force: true` is local-only, and `detached:` affects only local process ownership.
 
@@ -148,8 +149,8 @@ rescue Microsandbox::Error => error
 end
 ```
 
-See [Stale receiver identities](/sdk/errors#stale-receiver-identities) for the typed equivalents in the other SDKs and [Identity-safe receivers](/sandboxes/lifecycle#identity-safe-receivers) for the race this prevents.
+See [When a sandbox object is stale](/sdk/errors#when-a-sandbox-object-is-stale) for the typed equivalents in the other SDKs and [Names, handles, and concurrent callers](/sandboxes/lifecycle#names-handles-and-concurrent-callers) for the race this prevents.
 
 ## Live lifecycle example
 
-Run `ruby examples/lifecycle_convergence.rb` from `sdk/ruby` to exercise convergent creation and reuse, stable identity, connect, wait, exec, restart, destroy, same-name replacement, and stale-handle rejection against a live microVM.
+Run `ruby examples/lifecycle_convergence.rb` from `sdk/ruby` to exercise sandbox creation and reuse, stable identity, connect, wait, exec, restart, destroy, same-name replacement, and stale-handle rejection against a live microVM.

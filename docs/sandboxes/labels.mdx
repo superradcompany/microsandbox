@@ -17,6 +17,14 @@ Values may be empty. A valueless label such as `--label gpu` is stored as `gpu="
 Attach labels when you create a sandbox. Labels are repeatable, and a bare key with no value is allowed:
 
 <CodeGroup>
+```typescript TypeScript
+const sb = await Sandbox.builder("worker")
+    .image("python")
+    .label("app", "engine")
+    .label("user.id", "alice")
+    .create();
+```
+
 ```rust Rust
 let sb = Sandbox::builder("worker")
     .image("python")
@@ -24,14 +32,6 @@ let sb = Sandbox::builder("worker")
     .label("user.id", "alice")
     .create()
     .await?;
-```
-
-```typescript TypeScript
-const sb = await Sandbox.builder("worker")
-    .image("python")
-    .label("app", "engine")
-    .label("user.id", "alice")
-    .create();
 ```
 
 ```python Python
@@ -57,7 +57,7 @@ msb create python --name worker \
 ```
 </CodeGroup>
 
-The OCI image's own labels (`LABEL` instructions, `org.opencontainers.image.*`, etc.) are imported automatically at create time. A label you set yourself overrides the image's value on a key collision. Image labels using a reserved prefix are skipped.
+microsandbox imports the OCI image's own labels (`LABEL` instructions, `org.opencontainers.image.*`, etc.) automatically at create time. A label you set yourself overrides the image's value on a key collision. microsandbox skips image labels that use a reserved prefix.
 
 ## Change while running
 
@@ -66,12 +66,12 @@ The OCI image's own labels (`LABEL` instructions, `org.opencontainers.image.*`, 
 Add, change, or remove labels without recreating the sandbox:
 
 <CodeGroup>
-```rust Rust
-sb.modify().label("tier", "web").remove_label("stale").apply().await?;
-```
-
 ```typescript TypeScript
 await sandbox.modify({ labels: { tier: "web" }, labelsRemove: ["stale"] });
+```
+
+```rust Rust
+sb.modify().label("tier", "web").remove_label("stale").apply().await?;
 ```
 
 ```python Python
@@ -100,12 +100,12 @@ msb ps --label app=engine                    # matching sandboxes
 msb ps --label app=engine --label tier=web   # only those with both
 ```
 
-```rust Rust
-let page = Sandbox::list_with(|list| list.label("app", "engine")).await?;
-```
-
 ```typescript TypeScript
 const page = await Sandbox.listWith((list) => list.label("app", "engine"));
+```
+
+```rust Rust
+let page = Sandbox::list_with(|list| list.label("app", "engine")).await?;
 ```
 
 ```python Python
@@ -135,4 +135,8 @@ It works the same on `ps`, `ls`, `start`, `stop`, `restart`, `ping`, `touch`, an
 
 Labels flow into a sandbox's metrics as dimensions, so you can break CPU, memory, and I/O down by any label you set, for example per user or per tenant. See [Labels and per-user views](/observability/msb-metrics#labels-and-per-user-views) for the PromQL detail.
 
-High-cardinality labels can increase the number of metric series your backend stores. If an image label carries a commit SHA, build timestamp, or other noisy value, run `msb-metrics` with `--exclude-label-key <key>` to drop that label from exported metrics while keeping it in the catalog. Use `--no-labels` to disable metric labels entirely.
+High-cardinality labels can increase the number of metric series your backend stores. Suppose an image label carries a commit SHA, build timestamp, or other noisy value. Run `msb-metrics` with `--exclude-label-key <key>` to drop that label from exported metrics while keeping it in the catalog. Use `--no-labels` to disable metric labels entirely.
+
+## Reference
+
+For exact label and sandbox-selection APIs, see [TypeScript](/sdk/typescript/sandbox), [Rust](/sdk/rust/sandbox), [Python](/sdk/python/sandbox), or [Go](/sdk/go/sandbox). For label-aware fleet commands, see [Sandbox commands](/cli/sandbox-commands).

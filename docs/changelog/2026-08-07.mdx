@@ -8,14 +8,14 @@ icon: "bolt"
 
 **Ruby SDK**
 
-microsandbox now ships a first-class Ruby 3.1+ gem backed by a native Magnus extension. The SDK covers sandbox lifecycle, exec and shell, guest filesystem, logs, metrics, images, volumes, snapshots, SSH exec, and explicit local or cloud backend selection. It supports default-deny network allowlists and hostname-scoped secret injection, releases Ruby's GVL around blocking calls, and rebuilds the native runtime after `fork(2)` so Puma, Resque, and Solid Queue process models are safe.
+microsandbox now ships a first-class Ruby 3.1\+ gem backed by a native Magnus extension. The SDK covers sandbox lifecycle, exec and shell, guest filesystem, logs, metrics, images, volumes, snapshots, SSH exec, and explicit local or cloud backend selection. It supports default-deny network allowlists and hostname-scoped secret injection, releases Ruby's GVL around blocking calls, and rebuilds the native runtime after `fork(2)` so Puma, Resque, and Solid Queue process models are safe.
 
 ```ruby
 require "microsandbox"
 
-Microsandbox::Sandbox.with(name: "worker", image: "alpine:3.19") do |sb|
+Microsandbox::Sandbox.with("worker", image: "alpine:3.19") do |sb|
   result = sb.shell("echo hello from ruby")
-  puts result.stdout_text
+  puts result.stdout
 end
 ```
 
@@ -68,21 +68,18 @@ See [volumes](/sandboxes/volumes).
 
 **Other features**
 
-- **Root disk resizing in every SDK.** The TypeScript, Python, and Go SDKs now expose `rootDiskSize` / `root_disk_size` / `RootDiskSizeMiB` on `modify()`, mapped to the canonical `root_disk_size_mib` patch field. Restart and next-start semantics and backing-specific limits are documented in the [tuning guide](/sandboxes/tuning).
-- **Active backend context.** New `default_backend_info()` / `defaultBackendInfo()` accessors, and per-sandbox `backendKind` / `backend_kind` fields, let applications inspect the resolved default backend, its cloud API URL, the selector that chose it, and its profile. The API key is never included. A new `msb context` command prints the same information. Invalid cloud CLI configuration now fails closed instead of silently dispatching locally. See [backends](/getting-started/backends).
+- **Root disk resizing in every SDK.** The TypeScript, Python, and Go SDKs now expose `rootDiskSize` / `root_disk_size` / `RootDiskSizeMiB` on `modify()`, mapped to the canonical `root_disk_size_mib` patch field. Restart and next-start semantics and backing-specific limits are documented in the [Live Modify guide](/sandboxes/tuning).
+- **Active backend context.** New `default_backend_info()` / `defaultBackendInfo()` accessors, and per-sandbox `backendKind` / `backend_kind` fields, let applications inspect the resolved default backend, its cloud API URL, the selector that chose it, and its profile. The API key is never included. A new `msb context` command prints the same information, and `create`, `remove`, `exec`, and `ssh` show a short backend notice. Invalid cloud CLI configuration now fails closed instead of silently dispatching locally. See [backends](/getting-started/backends).
 - **Go SDK: attach as non-default guest users.** The Go SDK gains `AttachWith`, with `WithAttachUser`, `WithAttachCwd`, `WithAttachEnv`, and `WithAttachDetachKeys`, matching the Python and TypeScript surface. The existing `Attach` API is unchanged. See the [Go SDK reference](/sdk/go/execution).
 
 ## Breaking changes
 
 - **Python SDK closed values are enums.** Backend selection, sandbox modification policy, volume and image configuration, snapshot metadata, network destination discriminators, patch kinds, and log sources now require exported `StrEnum` members instead of raw strings. Native getters return enum members. `SandboxStatus` also gains the runtime's `CREATED` and `STARTING` states.
-
   ```python
   from microsandbox import BackendKind, Network, NetworkProfile, set_default_backend
-
   set_default_backend(BackendKind.CLOUD)
   network = Network.from_profiles(NetworkProfile.PUBLIC)
   ```
-
 - **Explicit cloud backend selection is now required.** Setting `MSB_API_KEY` alone no longer selects the cloud. Cloud intent must be declared through `MSB_BACKEND=cloud`, a selected cloud profile, or a programmatic backend setter. Invalid cloud configuration returns `InvalidConfig` instead of falling back to local execution. See [backends](/getting-started/backends).
 
 ## Bug fixes

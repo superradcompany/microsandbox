@@ -114,7 +114,7 @@ microsandbox reads its global configuration from `~/.microsandbox/config.json`. 
 | `ssh` | [reference](#ssh) | Host-side SSH session defaults |
 | `metrics` | [reference](#metrics) | Live metrics shared-memory registry settings |
 | `active_profile` | `null` | Default [backend profile](#profiles) name |
-| `profiles` | [reference](#profiles) | Named [backend profiles](/getting-started/backends) |
+| `profiles` | [reference](#profiles) | Named [backend profiles](/operations/backends#profiles) |
 
 ## `deployment_profile`
 
@@ -154,7 +154,7 @@ On Windows, the default `home` is `%USERPROFILE%\.microsandbox`. JSON strings ca
 | Field | Default | Description |
 |-------|---------|-------------|
 | `msb` | `{home}/bin/msb` | `msb` binary. Resolved via: `MSB_PATH` env, SDK-provided runtime path, this field, debug workspace build paths, default install path, then `PATH` |
-| `libkrunfw` | `{home}/lib/libkrunfw` | Path to a custom VM kernel (`.so` on Linux, `.dylib` on macOS, `.dll` on Windows). Resolved via: `MSB_LIBKRUNFW_PATH` env, SDK-provided runtime path, this field, paths next to the resolved `msb` binary, then default install path |
+| `libkrunfw` | `{home}/lib/libkrunfw` | Path to the libkrunfw shared library (`.so` on Linux, `.dylib` on macOS, `.dll` on Windows). Resolved via: `MSB_LIBKRUNFW_PATH` env, SDK-provided runtime path, this field, paths next to the resolved `msb` binary, then default install path |
 | `cache` | `{home}/cache` | Image layer cache |
 | `sandboxes` | `{home}/sandboxes` | Per-sandbox state |
 | `volumes` | `{home}/volumes` | Named volumes |
@@ -204,9 +204,9 @@ Explicit CLI or SDK options override this value. The setting is resolved when a 
 
 Defaults applied to sandboxes unless overridden per-sandbox.
 
-Explicit CLI or SDK options win over `config.json`, and `config.json` wins over built-in defaults. Microsandbox resolves the effective values once when it creates a local sandbox and persists that resolved sandbox configuration; changing the global file affects future creations, not existing sandboxes.
+Explicit CLI or SDK options win over `config.json`, and `config.json` wins over built-in defaults. microsandbox resolves the effective values once when it creates a local sandbox and persists that resolved sandbox configuration; changing the global file affects future creations, not existing sandboxes.
 
-`SandboxBuilder::new()` and `Sandbox::builder()` apply this base automatically. Use `.overlay(SandboxConfigPatch)` to overlay sparse per-sandbox values, giving the precedence order built-in defaults < `config.json` < per-sandbox patch.
+`SandboxBuilder::new()` and `Sandbox::builder()` apply this base automatically. Rust applications can use [`SandboxBuilder::overlay`](/sdk/rust/sandbox#sandbox-overlay) to add sparse per-sandbox values, giving the precedence order built-in defaults < `config.json` < per-sandbox patch.
 
 For workload effects, host requirements, filesystem expectations, and verification steps for these settings, see [Optimization](/sandboxes/optimization).
 
@@ -217,7 +217,7 @@ For workload effects, host requirements, filesystem expectations, and verificati
 | `cpu_placement` | `"inherit"` | Host vCPU placement: `inherit`, `auto`, `spread`, or `compact` |
 | `placement_profile` | `null` | Name of a host-defined entry in `runtime.placement_profiles` |
 | `thp` | `"madvise"` | Guest transparent huge-page policy: `always`, `madvise`, or `never` |
-| `oci` | [reference](#sandbox_defaultsoci) | Defaults for OCI-rooted sandboxes |
+| `oci` | [reference](#sandbox_defaults-oci) | Defaults for OCI-rooted sandboxes |
 | `shell` | `"/bin/sh"` | Shell for interactive sessions and scripts |
 | `workdir` | `null` | Working directory inside the sandbox |
 | `metrics_sample_interval_ms` | `1000` | Runtime metrics sampling interval in milliseconds. Set to `0` to disable sampling. |
@@ -352,7 +352,7 @@ When pulling from a registry, microsandbox resolves credentials in this order:
 
 ## `profiles`
 
-Named backend profiles keyed by profile name; `active_profile` selects the default. How profiles participate in backend selection, including the full resolution order, is documented in [Backends](/getting-started/backends).
+Named backend profiles keyed by profile name; `active_profile` selects the default. How profiles participate in backend selection, including the full resolution order, is documented in [Backends](/operations/backends).
 
 | Field | Default | Description |
 |-------|---------|-------------|

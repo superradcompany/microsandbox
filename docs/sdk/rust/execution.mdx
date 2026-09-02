@@ -1,6 +1,7 @@
 ---
 title: Execution
 description: Rust SDK - Command execution API reference
+keywords: ["Rust SDK", "Rust execution", "microsandbox execution"]
 ---
 
 Run commands inside a running sandbox. See [Commands](/sandboxes/commands) for usage examples.
@@ -114,7 +115,7 @@ println!("{}", out.stdout()?);
 
 </Accordion>
 
-Run a command through the sandbox's configured shell (default: `/bin/sh`, set via [`SandboxBuilder::shell()`](/sdk/rust/sandbox#shell)). The script is run as `<shell> -c "<script>"`, so shell syntax like pipes, redirects, and `&&` chains works.
+Run a command through the sandbox's configured shell (default: `/bin/sh`, set via [`SandboxBuilder::shell()`](/sdk/rust/sandbox#sandbox-shell)). The script is run as `<shell> -c "<script>"`, so shell syntax like pipes, redirects, and `&&` chains works.
 
 <p className="msb-label">Parameters</p>
 
@@ -249,7 +250,7 @@ if let Some(stdin) = handle.take_stdin() {
 
 </Accordion>
 
-Streaming execution with per-execution overrides. Enable [`stdin_pipe()`](#stdin_pipe) to write to the process's stdin via [`ExecHandle::take_stdin()`](#exechandle), and [`tty(true)`](#tty) to allocate a pseudo-terminal for interactive programs like shells, REPLs, or editors.
+Streaming execution with per-execution overrides. Enable [`stdin_pipe()`](#exec_options-stdin_pipe) to write to the process's stdin via [`ExecHandle::take_stdin()`](#exechandle), and [`tty(true)`](#exec_options-tty) to allocate a pseudo-terminal for interactive programs like shells, REPLs, or editors.
 
 <p className="msb-label">Parameters</p>
 
@@ -453,7 +454,7 @@ let exit_code = sb.attach_shell().await?;
 
 </Accordion>
 
-Attach to the sandbox's default shell (configured via [`SandboxBuilder::shell()`](/sdk/rust/sandbox#shell), default `/bin/sh`) with an interactive PTY session.
+Attach to the sandbox's default shell (configured via [`SandboxBuilder::shell()`](/sdk/rust/sandbox#sandbox-shell), default `/bin/sh`) with an interactive PTY session.
 
 <p className="msb-label">Returns</p>
 
@@ -681,7 +682,7 @@ Set a POSIX resource limit with soft equal to hard. Applied via `setrlimit()` be
 fn rlimit_range(self, resource: RlimitResource, soft: u64, hard: u64) -> Self
 ```
 
-Set a resource limit with different soft and hard values. [`build()`](#build) errors if `soft > hard`.
+Set a resource limit with different soft and hard values. [`build()`](#exec_options-build) errors if `soft > hard`.
 
 <p className="msb-label">Parameters</p>
 
@@ -874,7 +875,7 @@ Set a POSIX resource limit with soft equal to hard for the attached process.
 fn rlimit_range(self, resource: RlimitResource, soft: u64, hard: u64) -> Self
 ```
 
-Set a resource limit with different soft and hard values for the attached process. [`build()`](#build-2) errors if `soft > hard`.
+Set a resource limit with different soft and hard values for the attached process. [`build()`](#attach_options-build) errors if `soft > hard`.
 
 <p className="msb-label">Parameters</p>
 
@@ -1087,7 +1088,7 @@ Resize the PTY for this session.
 
 <p className="msb-backref">Returned by <a href="#exechandle">ExecHandle.take_stdin()</a></p>
 
-A writer for sending data to a running process's stdin. Obtained via [`ExecHandle::take_stdin()`](#exechandle) after enabling [`stdin_pipe()`](#stdin_pipe).
+A writer for sending data to a running process's stdin. Obtained via [`ExecHandle::take_stdin()`](#exechandle) after enabling [`stdin_pipe()`](#exec_options-stdin_pipe).
 
 
 #### <span className="msb-recv">sink.</span><span className="msb-hn">write()</span>
@@ -1204,9 +1205,9 @@ The exit status of a completed process.
 
 ### Rlimit
 
-<p className="msb-backref">Configured via <a href="#rlimit">rlimit()</a> · <a href="#rlimit_range">rlimit_range()</a></p>
+<p className="msb-backref">Configured via <a href="#rlimit">rlimit()</a> · <a href="#exec_options-rlimit_range">rlimit_range()</a></p>
 
-A POSIX resource limit. Built indirectly by [`rlimit()`](#rlimit) and [`rlimit_range()`](#rlimit_range) on the option builders; you rarely construct it by hand.
+A POSIX resource limit. Built indirectly by [`rlimit()`](#rlimit) and [`rlimit_range()`](#exec_options-rlimit_range) on the option builders; you rarely construct it by hand.
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -1216,7 +1217,7 @@ A POSIX resource limit. Built indirectly by [`rlimit()`](#rlimit) and [`rlimit_r
 
 ### RlimitResource
 
-<p className="msb-backref">Used by <a href="#rlimit">rlimit()</a> · <a href="#rlimit_range">rlimit_range()</a> · <a href="#rlimit-3">AttachOptionsBuilder.rlimit()</a></p>
+<p className="msb-backref">Used by <a href="#rlimit">rlimit()</a> · <a href="#exec_options-rlimit_range">rlimit_range()</a> · <a href="#attach_options-rlimit">AttachOptionsBuilder.rlimit()</a></p>
 
 POSIX resource limit identifiers. Each maps to an `RLIMIT_*` constant.
 

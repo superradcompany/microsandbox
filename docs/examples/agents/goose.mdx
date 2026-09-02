@@ -1,6 +1,6 @@
 ---
 title: Goose
-description: Run the native Goose coding agent in an isolated project copy
+description: Run the native Goose coding agent against a project on your host
 icon: "/images/recipes/agents/goose.svg"
 ---
 
@@ -11,16 +11,14 @@ Goose publishes native Linux binaries for both `aarch64` and `x86_64`. Its insta
 <Steps>
 <Step title="Start Goose">
 
-<Tooltip tip="On microsandbox cloud, create the named volume first and omit replace-on-create from this command."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Writable host-directory mounts are local-only. On microsandbox cloud, use the isolated-copy alternative and omit replace-on-create."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 <CodeGroup>
 ```sh macOS & Linux
 msb run -t --name goose-demo --replace \
   --cpus 2 --memory 2G --root-disk 3G \
-  --copy-dir ./my-project:/workspace \
+  --mount-dir ./my-project:/workspace:rw \
   --workdir /workspace \
-  --mount-named goose-data:/data/goose \
-  -e GOOSE_PATH_ROOT=/data/goose \
   debian:bookworm-slim -- sh -lc '
     apt-get update &&
     apt-get install -y --no-install-recommends ca-certificates curl bzip2 git &&
@@ -33,10 +31,8 @@ msb run -t --name goose-demo --replace \
 ```powershell Windows
 msb run -t --name goose-demo --replace `
   --cpus 2 --memory 2G --root-disk 3G `
-  --copy-dir ./my-project:/workspace `
+  --mount-dir ./my-project:/workspace:rw `
   --workdir /workspace `
-  --mount-named goose-data:/data/goose `
-  -e GOOSE_PATH_ROOT=/data/goose `
   debian:bookworm-slim -- sh -lc '
     apt-get update &&
     apt-get install -y --no-install-recommends ca-certificates curl bzip2 git &&
@@ -47,10 +43,10 @@ msb run -t --name goose-demo --replace `
 ```
 </CodeGroup>
 
-On first launch Goose asks whether to share anonymous usage data, then walks through provider configuration. `GOOSE_BIN_DIR` installs the executable on the sandbox's normal `PATH`, including later `msb exec` sessions. `GOOSE_PATH_ROOT` keeps its configuration, data, and session state in the `goose-data` volume.
+On first launch Goose asks whether to share anonymous usage data, then walks through provider configuration. `GOOSE_BIN_DIR` installs the executable on the sandbox's normal `PATH`, including later `msb exec` sessions. Goose keeps its configuration, data, and session state on the sandbox's 3 GiB root disk.
 
 <Tip>
-  To test Goose without copying a project, replace `--copy-dir ./my-project:/workspace` with `--mkdir /workspace`.
+  For an isolated workspace, or when using microsandbox cloud, replace `--mount-dir ./my-project:/workspace:rw` with `--copy-dir ./my-project:/workspace`. To test Goose without a project, use `--mkdir /workspace` instead.
 </Tip>
 
 </Step>
@@ -77,9 +73,15 @@ The pinned installer reports `1.44.0`.
 
 </Step>
 
-<Step title="Export changes">
+<Step title="Review or export changes">
 
-Use the same review boundary as other coding-agent examples:
+With the default writable mount, changes are already in the host checkout. Review them inside the sandbox:
+
+```sh
+msb exec goose-demo -- sh -lc 'cd /workspace && git status --short && git diff --stat && git diff'
+```
+
+If you chose the isolated `--copy-dir` alternative, create a patch inside the sandbox:
 
 ```sh
 msb exec goose-demo -- sh -lc 'cd /workspace && git add -N . && git diff --binary > /tmp/goose.patch'
@@ -107,11 +109,7 @@ Remove the sandbox:
 msb rm -f goose-demo
 ```
 
-Remove persisted Goose data only when you no longer need it:
-
-```sh
-msb volume rm goose-data
-```
+Removing the sandbox also removes its Goose configuration and session data. Changes made through the default workspace mount remain in the host checkout.
 
 </Step>
 </Steps>

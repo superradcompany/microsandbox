@@ -1,0 +1,39 @@
+---
+title: "Week of August 28, 2026"
+description: "Guest ownership for directory mounts, sparse layered sandbox configuration, Go SDK MSB_HOME support, isolated single-file mounts, and fixes for read-only mounts, log retrieval, and network slot exhaustion."
+icon: "bolt"
+---
+
+<Tip>
+  **Released this week:** [v0.6.15](https://github.com/superradcompany/microsandbox/releases/tag/v0.6.15) · [v0.6.16](https://github.com/superradcompany/microsandbox/releases/tag/v0.6.16)
+</Tip>
+
+## New features
+
+**Guest ownership for directory mounts**
+
+Bind mounts and directory-backed named volumes can now present their files as a chosen guest `uid`/`gid` pair. Host ownership is untouched; only the guest view changes, and any existing per-file metadata override still wins. Set the pair through the CLI mount options or the mount APIs in the Rust, TypeScript, Python, and Go SDKs. Both IDs must be set together. The option requires stat virtualization, so it cannot be combined with `stat-virt=off`, tmpfs, or disk-backed mounts.
+
+```bash
+msb run python --mount-dir ./workspace:/workspace:uid=1000,gid=1000
+```
+
+See [Fallback guest ownership](/sandboxes/volumes#fallback-guest-ownership).
+
+**Sparse layered sandbox configuration**
+
+Sandbox configuration now merges by field presence across three layers: built-in defaults, the persisted global config, and per-sandbox settings, in that precedence order. Config files passed to the CLI overlay left to right. Only the fields you set override lower layers, and network policy always replaces as one unit. The Rust SDK exposes the same model through `SandboxBuilder::overlay` with generated patch types. The generated types replace the earlier handwritten patch types, and `LocalConfig` remains a deprecated alias for `GlobalConfig`.
+
+See [Precedence and merging](/cli/configuration#precedence-and-merging) and [`SandboxBuilder::overlay`](/sdk/rust/sandbox#sandbox-overlay).
+
+**Other features**
+
+- **Go SDK honors `MSB_HOME`.** The Go SDK now resolves its install directory from `$MSB_HOME` when set, matching how the runtime resolves state, sandboxes, and cache. One environment variable now relocates a Go application's entire microsandbox footprint. This makes side-by-side isolated instances possible.
+
+## Bug fixes
+
+- Single-file mounts (`--mount-file`) are now fully isolated: sibling files in the host directory can no longer appear in the guest, and host and guest changes stay live. Atomically replacing the host file behaves like a normal file swap. Open descriptors keep reading the old file while fresh opens see the replacement. Per-file quotas no longer count unrelated siblings.
+- Read-only strict bind mounts no longer perform a write probe on the host mount root at startup. Mounting a directory you can read but not write now works with `ro`, and permission diagnostics are clearer.
+- Hosts that create many short-lived sandboxes no longer run out of network slots. microsandbox recycles slots from removed sandboxes once the internal counter crosses its cap, so `msb create` keeps working instead of aborting. Genuine exhaustion at 65535 simultaneously live sandboxes now surfaces a clear error instead of a crash.
+- `msb logs` now behaves consistently for local and cloud sandboxes. Follow mode streams cloud output live, bounded cloud-history filters that are not yet supported return a typed error, and the SDKs expose a boot-error diagnostic for local sandboxes. See [Logs](/sandboxes/logs).
+- The CLI and SDKs now treat an empty `MSB_HOME` value as unset and fall back to `~/.microsandbox` instead of resolving paths against the current working directory. Callers that relied on `MSB_HOME=""` must use an explicit path.

@@ -10,8 +10,8 @@ use microsandbox_types::{NetworkRateLimiterConfig, TlsConfig};
 use serde::{Deserialize, Serialize};
 
 use crate::dns::Nameserver;
-use crate::outbound_proxy::OutboundProxy;
 use crate::policy::NetworkPolicy;
+use crate::proxy::{OutboundProxy, ResolvedOutboundProxy};
 use crate::secrets::config::SecretsConfig;
 
 //--------------------------------------------------------------------------------------------------
@@ -84,8 +84,8 @@ pub struct NetworkConfig {
 
     /// Proxy that all outbound sandbox connections are dialed through.
     ///
-    /// Applies to both TLS-intercepted and bypassed/plain TCP traffic, since
-    /// both use the same upstream connection path.
+    /// Applies to TLS-intercepted and bypassed/plain TCP traffic. SOCKS5 also
+    /// relays non-DNS UDP; SOCKS4 blocks it because that protocol has no UDP command.
     #[serde(default)]
     pub outbound_proxy: Option<OutboundProxy>,
 
@@ -96,6 +96,19 @@ pub struct NetworkConfig {
     /// still closed without a response.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub http_deny_message: Option<String>,
+}
+
+/// Network configuration whose runtime-only values have been resolved.
+#[doc(hidden)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ResolvedNetworkConfig {
+    /// Declarative network configuration with source-backed secret injection
+    /// values resolved for this launch.
+    config: NetworkConfig,
+
+    /// Fully resolved outbound proxy, including runtime authentication
+    /// material when configured.
+    outbound_proxy: Option<ResolvedOutboundProxy>,
 }
 
 /// Optional overrides for the guest interface.
@@ -181,6 +194,46 @@ pub enum PortProtocol {
 }
 
 //--------------------------------------------------------------------------------------------------
+// Methods
+//--------------------------------------------------------------------------------------------------
+
+impl ResolvedNetworkConfig {
+    /// Creates a runtime configuration from its declarative configuration and
+    /// fully resolved outbound proxy.
+    pub(super) fn new(
+        config: NetworkConfig,
+        outbound_proxy: Option<ResolvedOutboundProxy>,
+    ) -> Self {
+        Self {
+            config,
+            outbound_proxy,
+        }
+    }
+
+    /// Returns the declarative configuration with resolved injection values applied.
+    #[doc(hidden)]
+    pub fn config(&self) -> &NetworkConfig {
+        &self.config
+    }
+
+    /// Returns mutable access for applying host-runtime configuration floors.
+    pub(crate) fn config_mut(&mut self) -> &mut NetworkConfig {
+        &mut self.config
+    }
+
+    /// Returns the fully resolved outbound proxy used by the network runtime.
+    pub(crate) fn outbound_proxy(&self) -> Option<&ResolvedOutboundProxy> {
+        self.outbound_proxy.as_ref()
+    }
+
+    /// Clears both the declarative and resolved outbound proxy state.
+    pub(crate) fn clear_outbound_proxy(&mut self) {
+        self.config.outbound_proxy = None;
+        self.outbound_proxy = None;
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
 
@@ -237,8 +290,8 @@ fn default_query_timeout_ms() -> u64 {
 mod tests {
     use super::{InterfaceOverrides, NetworkConfig, PortProtocol};
     use crate::dns::Nameserver;
-    use crate::outbound_proxy::OutboundProxy;
     use crate::policy::{Destination, NetworkPolicy, Rule};
+    use crate::proxy::OutboundProxy;
 
     /// The engine's `policy`/`dns`/`interface` subdocuments must remain
     /// serde-compatible with the wire twins in `microsandbox_types` that the
@@ -318,10 +371,13 @@ mod tests {
     /// hop, not just the field in isolation.
     #[test]
     fn outbound_proxy_round_trips_through_wire_network_spec() {
-        let mut config = NetworkConfig::default();
-        config.outbound_proxy = Some(OutboundProxy::Socks5 {
-            address: "127.0.0.1:1080".parse().unwrap(),
-        });
+        let config = NetworkConfig {
+            outbound_proxy: Some(OutboundProxy::Socks5 {
+                address: "127.0.0.1:1080".parse().unwrap(),
+                credentials: None,
+            }),
+            ..NetworkConfig::default()
+        };
 
         let config_json = serde_json::to_value(&config).unwrap();
         let wire: microsandbox_types::NetworkSpec =
@@ -331,6 +387,7 @@ mod tests {
             wire_proxy,
             &microsandbox_types::OutboundProxy::Socks5 {
                 address: "127.0.0.1:1080".to_string(),
+                credentials: None,
             }
         );
         assert_eq!(
@@ -348,11 +405,13 @@ mod tests {
 
     #[test]
     fn socks4_proxy_user_id_round_trips_through_wire_network_spec() {
-        let mut config = NetworkConfig::default();
-        config.outbound_proxy = Some(OutboundProxy::Socks4 {
-            address: "127.0.0.1:1080".parse().unwrap(),
-            user_id: Some("sandbox".to_string()),
-        });
+        let config = NetworkConfig {
+            outbound_proxy: Some(OutboundProxy::Socks4 {
+                address: "127.0.0.1:1080".parse().unwrap(),
+                user_id: Some("sandbox".to_string()),
+            }),
+            ..NetworkConfig::default()
+        };
 
         let wire: microsandbox_types::NetworkSpec =
             serde_json::from_value(serde_json::to_value(&config).unwrap()).unwrap();

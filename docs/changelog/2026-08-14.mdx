@@ -1,0 +1,90 @@
+---
+title: "Week of August 14, 2026"
+sidebarTitle: "Week of the 14th"
+description: "Per-sandbox network rate limits, NUMA-aware placement profiles, sparse configuration patches with reusable config files, guest-to-host vsock routes, deployment profile from config.json, and reliability fixes across Windows attach, cloud request shapes, image archives, and DNS rules."
+icon: "bolt"
+---
+
+<Tip>
+  **Released this week:** [v0.6.9](https://github.com/superradcompany/microsandbox/releases/tag/v0.6.9)
+</Tip>
+
+## New features
+
+**Per-sandbox network rate limits**
+
+Sandboxes can now cap outbound and inbound network traffic independently. Each direction has a bandwidth bucket in bytes and an ops bucket in packets. Buckets start full, refill continuously, and can carry a one-time startup burst that never refills.
+
+Limits are set at create time and take effect on the next start. Omitted limits stay unlimited, and rate limits are rejected on cloud sandboxes until the hosted backend supports them. The option is available in the CLI and in the Rust, Python, TypeScript, and Go SDKs.
+
+```python
+from microsandbox import Network, NetworkRateLimiter, RateLimiter, Sandbox, TokenBucket
+
+sb = await Sandbox.create(
+    "worker",
+    image="alpine:3.19",
+    network=Network(
+        rate_limiter=NetworkRateLimiter(
+            egress=RateLimiter(
+                bandwidth=TokenBucket(size=10_000_000, refill_time_ms=1_000),
+            ),
+        ),
+    ),
+)
+```
+
+See the [networking overview](/networking/overview).
+
+**NUMA-aware placement profiles**
+
+A new host-owned placement profile selects how each sandbox is pinned to CPUs and memory nodes. `prefer_single` co-locates vCPUs and memory on one NUMA node when it fits and falls back to inherited placement when it does not. `strict_single` fails closed if a single node cannot fit the request. `inherit` preserves the existing behavior.
+
+`cpu_placement: auto` now spreads across untouched physical cores first, then uses SMT siblings when density requires it, without moving sandboxes that are already running. The runtime also degrades ordinary placement under pressure: `auto`, `spread`, and `compact` share logical CPUs when exclusive capacity is exhausted instead of rejecting new sandboxes. Only `strict_single` remains fail-closed.
+
+The selector is available in the CLI and in the Rust, Python, TypeScript, and Go SDKs. macOS supports `inherit` only and fails clearly for managed placement.
+
+See [CPU placement](/sandboxes/optimization#cpu-placement).
+
+**Sparse configuration files with `--conf`**
+
+Sandbox configuration is now a reusable, sparse definition loaded with `msb run`, `msb create`, or `msb install`. Repeatable `--conf`, `--net-conf`, `--resource-conf`, `--runtime-conf`, `--fs-conf`, `--secret-conf`, and `--script-conf` flags compose in exact left-to-right order. Explicit CLI arguments still win. Configuration is never auto-discovered.
+
+Scalars and lists replace right-hand-side, and maps merge recursively, so multiple files can complete each other. The Rust SDK exposes typed `SandboxConfigPatch` values and `SandboxBuilder::configure` for the same model.
+
+```bash
+msb run --conf base.yaml --net-conf strict-egress.yaml alpine
+```
+
+See [sandbox configuration files](/cli/configuration).
+
+**Guest-to-host vsock routes**
+
+A process inside a local sandbox can now talk to a host service over virtio-vsock, without opening a TCP port on either side. The host service listens on a Unix stream socket, a Unix datagram socket, or a Windows named pipe, and microsandbox connects it to a fixed guest port.
+
+```bash
+msb run --vsock /run/host-api.sock:5000 alpine
+msb run --vsock /run/events.sock:5001/dgram alpine
+```
+
+Routes are rejected on cloud sandboxes and under the multi-tenant deployment profile. The option is exposed in the CLI and the Rust, Python, TypeScript, and Go SDKs.
+
+See [host sockets](/networking/host-sockets).
+
+**Other features**
+
+- **Deployment profile from `config.json`.** Local host operators can pin every sandbox to `single-tenant` or `multi-tenant` from the global config file. The configured profile is authoritative on create and restart; programmatic backend configuration still takes precedence. Absent or null keeps the previous per-sandbox default. See [configuration](/configuration).
+- **Live writeback pressure sharing.** Sandboxes with writable disks now start under pressure and converge through weighted fair sharing instead of being rejected when the aggregate writeback pool is full. Every eligible disk gets one fair-share weight, running VMM targets refresh within 250 ms, and reserved writes finish safely before excess dirty ownership retires. Active by default on Linux; a no-op on macOS and Windows.
+- **Snapshot integrity is opt-in.** Snapshot create, open, boot, save, load, and descriptor-upgrade paths no longer run a hidden BLAKE3 content pass. New snapshots write `integrity: null` by default, and integrity is recorded only when `--integrity` (or `record_integrity`) is set. Released SHA-based descriptors keep their exact readers and verifiers. See [snapshots](/sandboxes/snapshots).
+
+## Bug fixes
+
+- Interactive `msb` attach on Windows now renders non-ASCII guest output correctly and forwards typed non-ASCII input as UTF-8. The previous byte-oriented console APIs reinterpreted bytes in the active code page, so characters like `—` printed as `ΓÇö` under `chcp 437`.
+- Cloud sandbox create requests no longer carry host-only CPU placement, placement profiles, or transparent-huge-page policy. The managed worker applies its own policy, and local configuration keeps all three controls unchanged.
+- Bind-mount failures now surface a clear "permission denied" error naming the host path, instead of a generic mount error, when a host directory cannot be read.
+- Image `save` now preserves symbolic-link and hard-link targets longer than the legacy tar 100-byte field. Guest symlink bytes are preserved across Linux, macOS, and Windows hosts.
+- OCI image layouts whose entrypoint points through one or more nested image indexes now load. Incompatible platforms and unknown media types are skipped, and traversal depth is bounded.
+- Published-port responses are no longer truncated when the host relay channel applies backpressure. Bytes are retained and retried instead of being consumed and dropped.
+- `allow@dns` and other qualified DNS network rules now parse in release builds of `msb`. The parser previously depended on a debug-only side effect that was removed in optimized builds.
+- The Go SDK no longer crashes on macOS when the host process spawns a child after starting a sandbox. Tokio's SIGCHLD handler is now installed with `SA_ONSTACK` on every Unix target, matching Go's cgo signal contract.
+- Sandbox labels stay consistent across modify, migration, and metrics. Label changes now update the canonical config and the projection atomically, and metrics enrichment refreshes labels from the active config instead of caching them as immutable.
+- `msb modify` now produces the same `$MSB_<NAME>` default secret placeholders as `msb create`, and existing placeholders are preserved when rotating secrets.

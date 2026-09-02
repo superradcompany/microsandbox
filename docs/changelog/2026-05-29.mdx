@@ -1,7 +1,7 @@
 ---
 title: "Week of May 29, 2026"
 sidebarTitle: "Week of the 29th"
-description: "Native SSH and SFTP, configurable OCI upper size, msb copy and rootfs patch flags, hardened mount options, env-backed secret shorthand, and a fix for multi-second published-port stalls."
+description: "Native SSH and SFTP, configurable OCI root disk size, msb copy and rootfs patch flags, hardened mount options, env-backed secret shorthand, and a fix for multi-second published-port stalls."
 icon: "bolt"
 ---
 
@@ -24,14 +24,16 @@ sftp -P 2222 root@127.0.0.1
 
 See the [SSH overview](/sandboxes/ssh).
 
-**Configurable OCI upper size**
+**Configurable OCI root disk size**
 
-The writable upper layer for OCI sandboxes is now configurable, so workloads that generate large amounts of state during a session no longer have to fit inside the previous fixed default. `msb run --oci-upper-size 8G ...` sets it from the CLI, and `sandbox_defaults.oci.upper_size_mib` sets the deployment-wide default. The Rust, TypeScript, Python, and Go SDKs gained matching surfaces. Fresh OCI roots default to 4096 MiB; snapshot upper layers are copied as-is.
+The writable root disk for OCI sandboxes is now configurable, so workloads that generate large amounts of state during a session no longer have to fit inside the previous fixed default. `msb run --root-disk 8G ...` sets it from the CLI, and `sandbox_defaults.oci.root_disk` sets the deployment-wide default. The Rust, TypeScript, Python, and Go SDKs expose matching root-disk settings. Fresh managed OCI roots default to 4096 MiB; snapshot upper layers are copied as-is.
 
 ```python
+from microsandbox import Image, RootDisk, Sandbox
+
 sandbox = await Sandbox.create(
     "worker",
-    image=Image.oci("python:3.12", upper_size_mib=8192),
+    image=Image.oci("python:3.12", root_disk=RootDisk.managed(8192)),
 )
 ```
 

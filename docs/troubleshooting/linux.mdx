@@ -4,7 +4,31 @@ description: Diagnose KVM, permissions, and host runtime setup on Linux
 icon: "linux"
 ---
 
-microsandbox local sandboxes use hardware virtualization. On Linux, confirm that the host has a glibc-based Linux userland and that KVM is available through `/dev/kvm`.
+microsandbox local sandboxes use hardware virtualization. On Linux, confirm that the host has glibc 2.28 or newer and that KVM is available through `/dev/kvm`.
+
+## Install or reinstall
+
+Run the installer, then open a new terminal if it updates your `PATH`:
+
+```bash
+curl -fsSL https://install.microsandbox.dev | sh
+```
+
+## glibc version
+
+Microsandbox Linux releases require glibc 2.28 or newer on x64 and ARM64 hosts. Check the version provided by your distribution:
+
+```bash
+getconf GNU_LIBC_VERSION
+```
+
+If `getconf` is unavailable, inspect the first line reported by `ldd`:
+
+```bash
+ldd --version | head -n 1
+```
+
+Use a newer glibc-based distribution if the version is below 2.28. Do not replace the system C library manually. Musl-only environments, such as a bare Alpine host, cannot run the local runtime; use a supported host or [microsandbox cloud](/cloud/overview) instead.
 
 ## Quick checks
 
@@ -126,7 +150,3 @@ Do not run either command while `/dev/kvm` has users. A distribution may build K
 </Accordion>
 
 Microsandbox never changes this host-wide policy automatically. See [Optimization](/sandboxes/optimization#host-interrupt-acceleration) for when interrupt acceleration matters.
-
-## Linux userland
-
-Use a normal glibc-based Linux host for the local runtime. Minimal or musl-only environments, such as a bare Alpine host image, are not the tested path for running local microsandbox sandboxes.

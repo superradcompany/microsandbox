@@ -1,11 +1,12 @@
 ---
 title: Sandbox
 description: TypeScript SDK - Sandbox API reference
+keywords: ["TypeScript SDK", "TypeScript sandbox", "microsandbox sandbox"]
 ---
 
 Create and control a microVM sandbox: boot it from an image, run commands, stream logs and metrics, then shut it down. See [Overview](/sandboxes/overview) for configuration examples and [Lifecycle](/sandboxes/lifecycle) for state management.
 
-## Lifecycle convergence
+## Reuse and restart sandboxes
 
 ```typescript
 Sandbox.builder(name).connectOrCreate(): Promise<Sandbox>
@@ -17,7 +18,9 @@ sandbox.id: string
 handle.id: string
 ```
 
-`connectOrCreate` converges on the current persisted sandbox by name and uses builder configuration only when it creates. Receiver lifecycle operations are bound to the stable opaque `id`; a stale receiver throws `SandboxReplacedError` instead of acting on a replacement that reused the name. `Sandbox` also exposes `waitForStatus`, `restart`, and `destroy`. See [Lifecycle convergence and identity safety](/sandboxes/lifecycle#converge-on-a-named-sandbox) for state behavior and examples.
+Use `connectOrCreate` when a named sandbox might already exist. It connects to a running sandbox, starts a stopped or crashed sandbox, and creates one only when the name is unused. Builder options apply only to a new sandbox.
+
+Lifecycle methods on a `Sandbox` or `SandboxHandle` stay attached to its opaque `id`. If the name is removed and reused, an old receiver throws `SandboxReplacedError` instead of acting on the replacement. See [Reuse or create a named sandbox](/sandboxes/lifecycle#reuse-or-create-a-named-sandbox) for examples.
 
 ## Functions
 
@@ -188,7 +191,7 @@ await Sandbox.remove("api");
 
 </Accordion>
 
-Delete a stopped sandbox by name. See [Remove](/sandboxes/lifecycle#remove) for the exact local deletion scope and the external resources that are preserved. Fails if the sandbox is still running—stop it first.
+Delete a stopped sandbox by name. See [Destroy or remove](/sandboxes/lifecycle#destroy-or-remove) for the exact local deletion scope and the external resources that are preserved. Fails if the sandbox is still running. Stop it first.
 
 <p className="msb-label">Parameters</p>
 
@@ -267,7 +270,7 @@ Restart a stopped sandbox in detached mode. The sandbox survives after your proc
   </div>
 </div>
 
-<p className="msb-member-group">Instance methods</p>
+<p className="msb-member-group" id="instance-methods">Instance methods</p>
 
 A running `Sandbox` exposes `name` (`string`), `id` (`string`), and `ownsLifecycle` (`boolean`) as read-only properties. The stable opaque `id` changes when a removed name is recreated. Local attached handles own lifecycle; local detached handles and all cloud handles do not, because the cloud worker owns the sandbox process.
 
@@ -288,7 +291,7 @@ console.log(`${config.memoryMib} MiB`);
 
 </Accordion>
 
-Get the full configuration the sandbox was created with - image, cpus, memory, env, mounts, and the rest. The shape mirrors [`SandboxBuilder.build()`](#build).
+Get the full configuration the sandbox was created with - image, cpus, memory, env, mounts, and the rest. The shape mirrors [`SandboxBuilder.build()`](#sandboxbuilder-build).
 
 <p className="msb-label">Returns</p>
 
@@ -586,9 +589,9 @@ await sandbox.modify({ secretsRemove: ["OLD_API_KEY"] });
 
 Plan or apply a configuration change. The returned plan labels each change `"live"`, `"next start"`, `"requires restart"`, or `"unsupported"`, and apply is all-or-nothing.
 
-`cpus` and `memory` resize live within the [`maxCpus`](#maxcpus) / [`maxMemory`](#maxmemory) ceilings; raising a ceiling requires a restart. `rootDiskSize` changes are offline: managed and flat OCI root disks grow only, tmpfs root disks can change in either direction on the next boot, and user-supplied disk images are rejected. Env and workdir changes affect future execs only. On a stopped sandbox, changes are saved for the next boot.
+`cpus` and `memory` resize live within the [`maxCpus`](#sandboxbuilder-maxcpus) / [`maxMemory`](#sandboxbuilder-maxmemory) ceilings; raising a ceiling requires a restart. `rootDiskSize` changes are offline: managed and flat OCI root disks grow only, tmpfs root disks can change in either direction on the next boot, and user-supplied disk images are rejected. Env and workdir changes affect future execs only. On a stopped sandbox, changes are saved for the next boot.
 
-Secret specs are keyed by stable secret name. Each `SecretModifySpec` selects at most one source—`env`, `value`, or `store`—and may also set `placeholder` and `allowedHosts`; omitting a source updates only the other supplied fields. Plans expose only safe references and metadata; raw secret values never appear in a plan. Removal is explicit through `secretsRemove`.
+Secret specs are keyed by stable secret name. Each `SecretModifySpec` selects at most one source (`env`, `value`, or `store`) and may also set `placeholder` and `allowedHosts`; omitting a source updates only the other supplied fields. Plans expose only safe references and metadata; raw secret values never appear in a plan. Removal is explicit through `secretsRemove`.
 
 A live CPU or memory resize can take a moment to settle. The new limits are enforced immediately, and the returned plan's `resizeStatus` reports when the sandbox has finished adjusting. See [`SandboxModificationPlan`](#sandboxmodificationplan).
 
@@ -779,7 +782,7 @@ Wait without a built-in timeout until this exact persisted sandbox reaches `stat
 restart(options?: { force?: boolean; timeoutMs?: number; detached?: boolean }): Promise<Sandbox>
 ```
 
-Restart this exact sandbox. Defaults to graceful shutdown, a 10_000 ms timeout, and attached local start. A stopped, crashed, or created sandbox starts directly; `Starting` is observed until it settles. Set `force` to kill, `timeoutMs` to change shutdown convergence, or `detached` for a local background start.
+Restart this exact sandbox. Defaults to graceful shutdown, a 10_000 ms timeout, and attached local start. A stopped, crashed, or created sandbox starts directly; `Starting` is observed until it settles. Set `force` to kill, `timeoutMs` to change how long shutdown can take, or `detached` for a local background start.
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">destroy()</span>
 
@@ -873,7 +876,7 @@ Fluent builder for configuring a sandbox before creation. Obtained via [`Sandbox
 build(): Promise<SandboxConfig>
 ```
 
-Materialize the [`SandboxConfig`](#sandboxconfig) without booting the sandbox. Validates the configuration and consumes the builder. For booting, use [`create`](#create) instead - it builds internally.
+Materialize the [`SandboxConfig`](#sandboxconfig) without booting the sandbox. Validates the configuration and consumes the builder. For booting, use [`create`](#sandboxbuilder-create) instead - it builds internally.
 
 <p className="msb-label">Returns</p>
 
@@ -938,7 +941,7 @@ await sandbox.detach();
 
 </Accordion>
 
-Build and boot the sandbox. By default, a local handle is attached and stops when its `await using` binding goes out of scope. A cloud handle does not own the service-managed VM, so stop or remove it explicitly. Call [`detached(true)`](#detached) first for local background mode.
+Build and boot the sandbox. By default, a local handle is attached and stops when its `await using` binding goes out of scope. A cloud handle does not own the service-managed VM, so stop or remove it explicitly. Call [`detached(true)`](#sandboxbuilder-detached) first for local background mode.
 
 <p className="msb-label">Returns</p>
 
@@ -955,7 +958,7 @@ Build and boot the sandbox. By default, a local handle is attached and stops whe
 connectOrCreate(): Promise<Sandbox>
 ```
 
-Converge on the current persisted sandbox by name. The method connects when it is running, waits through `starting`, starts it when it is `created`, `stopped`, or `crashed`, and creates it only when the name is absent. Builder settings apply only when creation is necessary; existing persisted configuration always wins. Concurrent callers converge on the winning identity. Calling [`replace()`](#replace) or [`replaceWithTimeout()`](#replacewithtimeout) on this builder is invalid.
+Reuse or create the sandbox with this name. The method connects when it is running, waits while it is starting, starts it when it is created, stopped, or crashed, and creates it only when the name is unused. Builder settings apply only to a new sandbox. Concurrent callers reuse the same sandbox. Calling [`replace()`](#sandboxbuilder-replace) or [`replaceWithTimeout()`](#sandboxbuilder-replacewithtimeout) on this builder is invalid.
 
 <p className="msb-label">Returns</p>
 
@@ -1185,7 +1188,7 @@ Auto-drain the sandbox after this many seconds of inactivity (no active exec ses
 image(src: string): this
 ```
 
-Set the root filesystem source. Accepts OCI image names (`"alpine"`), local directory paths, or disk image paths. The format is auto-detected. **Required** unless [`fromSnapshot`](#fromsnapshot) is used.
+Set the root filesystem source. Accepts OCI image names (`"alpine"`), local directory paths, or disk image paths. The format is auto-detected. **Required** unless [`fromSnapshot`](#sandboxbuilder-fromsnapshot) is used.
 
 <p className="msb-label">Parameters</p>
 
@@ -1208,13 +1211,13 @@ imageWith(configure: (b: ImageBuilder) => ImageBuilder): this
 
 ```typescript
 const sandbox = await Sandbox.builder("worker")
-  .imageWith((i) => i.oci("python:3.12").upperSize(8192))
+  .imageWith((i) => i.oci("python:3.12").rootDisk(8192))
   .create();
 ```
 
 </Accordion>
 
-Configure an explicit rootfs source. Use this for OCI-only settings such as the writable overlay upper size, or for disk images when the filesystem type can't be auto-detected.
+Configure an explicit rootfs source. Use this for OCI-only settings such as the writable root disk, or for disk images when the filesystem type can't be auto-detected.
 
 <p className="msb-label">Parameters</p>
 
@@ -1257,7 +1260,7 @@ const sandbox = await Sandbox.builder("worker")
 
 </Accordion>
 
-Hand off PID 1 inside the guest to `cmd` after agentd finishes its boot-time setup. `cmd` is either an absolute path inside the guest rootfs or the literal `"auto"`, which honors a known image ENTRYPOINT init then falls back to probing common init paths. See [Custom init system](/sandboxes/bootstrap#custom-init-system). For init binaries that need extra env, use [`initWith`](#initwith).
+Hand off PID 1 inside the guest to `cmd` after agentd finishes its boot-time setup. `cmd` is either an absolute path inside the guest rootfs or the literal `"auto"`, which honors a known image ENTRYPOINT init then falls back to probing common init paths. See [Custom init system](/sandboxes/bootstrap#custom-init-system). For init binaries that need extra env, use [`initWith`](#sandboxbuilder-initwith).
 
 <p className="msb-label">Parameters</p>
 
@@ -1290,7 +1293,7 @@ const sandbox = await Sandbox.builder("worker")
 
 </Accordion>
 
-Like [`init`](#init), but with a closure-builder for argv and env vars. The builder exposes `.arg`, `.args`, `.env`, and `.envs`. Calling `init` or `initWith` more than once overwrites.
+Like [`init`](#sandboxbuilder-init), but with a closure-builder for argv and env vars. The builder exposes `.arg`, `.args`, `.env`, and `.envs`. Calling `init` or `initWith` more than once overwrites.
 
 <p className="msb-label">Parameters</p>
 
@@ -1519,7 +1522,7 @@ Modify the rootfs before the VM boots. Patches go into the writable layer - the 
 port(host: number, guest: number): this
 ```
 
-Publish a TCP port from the sandbox to the host. The default host bind address is `127.0.0.1`. For an explicit bind address, use [`portBind`](#portbind).
+Publish a TCP port from the sandbox to the host. The default host bind address is `127.0.0.1`. For an explicit bind address, use [`portBind`](#sandboxbuilder-portbind).
 
 <p className="msb-label">Parameters</p>
 
@@ -1686,7 +1689,7 @@ If a sandbox with the same name already exists, stop it (10s SIGTERM grace, then
 replaceWithTimeout(timeoutMs: number): this
 ```
 
-Same as [`replace()`](#replace) with a custom SIGTERM timeout in milliseconds. `0` skips SIGTERM and force-kills immediately. Implies `replace()`.
+Same as [`replace()`](#sandboxbuilder-replace) with a custom SIGTERM timeout in milliseconds. `0` skips SIGTERM and force-kills immediately. Implies `replace()`.
 
 <p className="msb-label">Parameters</p>
 
@@ -1703,7 +1706,7 @@ Same as [`replace()`](#replace) with a custom SIGTERM timeout in milliseconds. `
 rlimit(resource: string, limit: number): this
 ```
 
-Set a guest resource limit (a soft and hard limit at the same value). For separate soft/hard values, use [`rlimitRange`](#rlimitrange).
+Set a guest resource limit (a soft and hard limit at the same value). For separate soft/hard values, use [`rlimitRange`](#sandboxbuilder-rlimitrange).
 
 <p className="msb-label">Parameters</p>
 
@@ -2254,9 +2257,9 @@ Stop iterating; safe to use with `await using`
 ## PullProgressCreate
 
 
-<p className="msb-backref">Returned by <a href="#createwithpullprogress">createWithPullProgress()</a></p>
+<p className="msb-backref">Returned by <a href="#sandboxbuilder-createwithpullprogress">createWithPullProgress()</a></p>
 
-Async iterable creation handle returned by [`createWithPullProgress()`](#createwithpullprogress). Yields [`PullProgress`](#pullprogress) events as the image is resolved, downloaded, and materialized. Call `awaitSandbox()` after iteration to obtain the live sandbox.
+Async iterable creation handle returned by [`createWithPullProgress()`](#sandboxbuilder-createwithpullprogress). Yields [`PullProgress`](#pullprogress) events as the image is resolved, downloaded, and materialized. Call `awaitSandbox()` after iteration to obtain the live sandbox.
 
 #### <span className="msb-recv">pull.</span><span className="msb-hn">progress</span>
 
@@ -2547,7 +2550,7 @@ Wait without a built-in timeout until this exact sandbox reaches `status`, retur
 restart(options?: { force?: boolean; timeoutMs?: number; detached?: boolean }): Promise<Sandbox>
 ```
 
-Restart this exact sandbox with the same state and option semantics as [`sandbox.restart()`](#restart).
+Restart this exact sandbox with the same state and option semantics as [`sandbox.restart()`](#sandbox-restart).
 
 #### <span className="msb-recv">handle.</span><span className="msb-hn">destroy()</span>
 
@@ -2693,7 +2696,7 @@ Snapshot this stopped sandbox under a bare name. See [Snapshots](/sdk/typescript
 
 ## RegistryConfigBuilder
 
-Fluent builder for OCI registry connection settings. Obtain it through [`SandboxBuilder.registry()`](#registry); the callback's returned builder is stored in the sandbox configuration.
+Fluent builder for OCI registry connection settings. Obtain it through [`SandboxBuilder.registry()`](#sandboxbuilder-registry); the callback's returned builder is stored in the sandbox configuration.
 
 ```typescript
 .registry((r) =>
@@ -2767,7 +2770,7 @@ Snapshot the accumulated registry configuration.
 
 ### LogLevel
 
-<p className="msb-backref">Used by <a href="#loglevel">logLevel()</a></p>
+<p className="msb-backref">Used by <a href="#sandboxbuilder-loglevel">logLevel()</a></p>
 
 Sandbox process log verbosity. String literal type.
 
@@ -2820,7 +2823,7 @@ type LogSource = "stdout" | "stderr" | "output" | "system";
 |-------|-------------|
 | `"stdout"` | Captured from a session's stdout (pipe mode - streams stayed separated) |
 | `"stderr"` | Captured from a session's stderr (pipe mode) |
-| `"output"` | Captured from a session running in PTY mode. PTY allocation merges stdout and stderr at the kernel level inside the guest, so they arrive as a single stream - tagged `"output"` rather than mislabelled as `"stdout"`. |
+| `"output"` | Captured from a session running in PTY mode. PTY allocation merges stdout and stderr at the kernel level inside the guest, so they arrive as a single stream - tagged `"output"` rather than mislabeled as `"stdout"`. |
 | `"system"` | Synthetic entry: lifecycle markers in `exec.log` plus runtime/kernel diagnostic lines merged in at read time when `"system"` is requested. |
 
 ### ModifyOptions
@@ -2862,7 +2865,7 @@ Desired state for one secret. `env`, `value`, and `store` are mutually exclusive
 
 ### PullPolicy
 
-<p className="msb-backref">Used by <a href="#pullpolicy">pullPolicy()</a></p>
+<p className="msb-backref">Used by <a href="#sandboxbuilder-pullpolicy">pullPolicy()</a></p>
 
 Controls when the SDK fetches an OCI image from the registry. String literal type.
 
@@ -2922,9 +2925,9 @@ OCI registry connection settings produced by [`RegistryConfigBuilder.build()`](#
 
 ### SandboxConfig
 
-<p className="msb-backref">Returned by <a href="#sandbox-config">config()</a> · <a href="#build">build()</a></p>
+<p className="msb-backref">Returned by <a href="#sandbox-config">config()</a> · <a href="#sandboxbuilder-build">build()</a></p>
 
-Configuration object produced by [`build()`](#build) and returned by [`config()`](#sandbox-config). You generally should not construct this by hand; use the builder.
+Configuration object produced by [`build()`](#sandboxbuilder-build) and returned by [`config()`](#sandbox-config). You generally should not construct this by hand; use the builder.
 
 | Field | Type | Description |
 |-------|------|-------------|

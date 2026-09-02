@@ -1,0 +1,141 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 240" role="img" aria-labelledby="title description">
+  <title id="title">Resize a sandbox</title>
+  <desc id="description">A sandbox resizes between two CPU and memory allocations while its bottom-left corner remains fixed. A temporary outline and diagonal arrow show each upcoming size.</desc>
+
+  <defs>
+    <marker id="arrowhead" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M1 1.25L7 4 1 6.75" fill="none" stroke="var(--accent)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
+    </marker>
+  </defs>
+
+  <style>
+    :root {
+      --text: #e5e7eb;
+      --muted: #9ca3af;
+      --accent: #bf84fe;
+    }
+
+    text { font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+    .text { fill: var(--text); }
+    .muted { fill: var(--muted); }
+    .sandbox-box {
+      transform-box: view-box;
+      transform-origin: 180px 200px;
+      animation: resize-sandbox 8s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+    }
+    .sandbox-copy {
+      animation: move-copy 8s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+    }
+    .grow-outline { animation: show-grow-outline 8s ease-in-out infinite; }
+    .shrink-outline { animation: show-shrink-outline 8s ease-in-out infinite; }
+    .grow-arrow {
+      transform-box: view-box;
+      transform-origin: 0 0;
+      animation: move-grow-arrow 8s cubic-bezier(0.4, 0, 0.2, 1) infinite, show-grow-arrow 8s ease-in-out infinite;
+    }
+    .shrink-arrow {
+      transform-box: view-box;
+      transform-origin: 0 0;
+      animation: move-shrink-arrow 8s cubic-bezier(0.4, 0, 0.2, 1) infinite, show-shrink-arrow 8s ease-in-out infinite;
+    }
+    .small-allocation { animation: show-small 8s ease-in-out infinite; }
+    .large-allocation { animation: show-large 8s ease-in-out infinite; }
+
+    @keyframes resize-sandbox {
+      0%, 14%, 86%, 100% { transform: scale(1); }
+      39%, 61% { transform: scale(1.454545); }
+    }
+
+    @keyframes move-copy {
+      0%, 14%, 86%, 100% { transform: translate(-50px, 25px); }
+      39%, 61% { transform: translate(0, 0); }
+    }
+
+    @keyframes move-grow-arrow {
+      0%, 14% { transform: translate(400px, 90px) rotate(-26.565deg) scaleX(1); }
+      36%, 100% { transform: translate(489px, 45.5px) rotate(-26.565deg) scaleX(0.01); }
+    }
+
+    @keyframes move-shrink-arrow {
+      0%, 61% { transform: translate(489px, 45.5px) rotate(153.435deg) scaleX(1); }
+      83%, 100% { transform: translate(400px, 90px) rotate(153.435deg) scaleX(0.01); }
+    }
+
+    @keyframes show-grow-outline {
+      0%, 8%, 42%, 100% { opacity: 0; }
+      12%, 36% { opacity: 0.38; }
+    }
+
+    @keyframes show-shrink-outline {
+      0%, 55%, 89%, 100% { opacity: 0; }
+      59%, 83% { opacity: 0.38; }
+    }
+
+    @keyframes show-grow-arrow {
+      0%, 8%, 32%, 100% { opacity: 0; }
+      11%, 28% { opacity: 0.9; }
+    }
+
+    @keyframes show-shrink-arrow {
+      0%, 55%, 80%, 100% { opacity: 0; }
+      58%, 75% { opacity: 0.9; }
+    }
+
+    @keyframes show-small {
+      0%, 25%, 78%, 100% { opacity: 1; }
+      32%, 70% { opacity: 0; }
+    }
+
+    @keyframes show-large {
+      0%, 25%, 78%, 100% { opacity: 0; }
+      32%, 70% { opacity: 1; }
+    }
+
+    @media (prefers-color-scheme: light) {
+      :root {
+        --text: #1f2937;
+        --muted: #6b7280;
+        --accent: #8b5bb8;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .sandbox-box, .sandbox-copy, .grow-outline, .shrink-outline, .grow-arrow, .shrink-arrow, .small-allocation, .large-allocation { animation: none; }
+      .sandbox-box { transform: scale(1); }
+      .sandbox-copy { transform: translate(-50px, 25px); }
+      .grow-outline, .shrink-outline, .grow-arrow, .shrink-arrow { opacity: 0; }
+      .small-allocation { opacity: 1; }
+      .large-allocation { opacity: 0; }
+    }
+  </style>
+
+  <!-- The target outline appears only before and during the upward resize. -->
+  <rect class="grow-outline" x="180" y="40" width="320" height="160" rx="12" fill="none" stroke="var(--muted)" stroke-width="1.2" stroke-dasharray="3 7" opacity="0" />
+
+  <!-- A local horizontal arrow is rotated into place, then shrinks toward its fixed head. -->
+  <g class="grow-arrow" opacity="0">
+    <line x1="0" y1="0" x2="99.5" y2="0" stroke="var(--accent)" stroke-width="1.5" stroke-linecap="round" marker-end="url(#arrowhead)" />
+  </g>
+
+  <!-- The smaller destination and reverse arrow appear only before and during the downward resize. -->
+  <rect class="shrink-outline" x="180" y="90" width="220" height="110" rx="12" fill="none" stroke="var(--muted)" stroke-width="1.2" stroke-dasharray="3 7" opacity="0" />
+  <!-- On shrink, the head stays on the small destination while the inset tail approaches it. -->
+  <g class="shrink-arrow" opacity="0">
+    <line x1="0" y1="0" x2="99.5" y2="0" stroke="var(--accent)" stroke-width="1.5" stroke-linecap="round" marker-end="url(#arrowhead)" />
+  </g>
+
+  <!-- The left edge and bottom edge stay fixed, making the top-right corner travel diagonally. -->
+  <rect class="sandbox-box" x="180" y="90" width="220" height="110" rx="12" fill="var(--accent)" fill-opacity="0.05" stroke="var(--accent)" stroke-width="1.5" stroke-dasharray="6 5" vector-effect="non-scaling-stroke" />
+
+  <g class="sandbox-copy">
+    <text x="340" y="105" class="muted" text-anchor="middle" font-size="13" font-weight="600">sandbox</text>
+
+    <g class="small-allocation">
+      <text x="340" y="137" class="text" text-anchor="middle" font-size="17">2 vCPU · 1 GiB</text>
+    </g>
+
+    <g class="large-allocation" opacity="0">
+      <text x="340" y="137" class="text" text-anchor="middle" font-size="17">4 vCPU · 2 GiB</text>
+    </g>
+  </g>
+</svg>

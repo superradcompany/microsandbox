@@ -22,6 +22,7 @@
           "Sandboxes"
         ],
         "summary": "List sandboxes",
+        "description": "List the organization's sandboxes with cursor pagination and optional label filtering.",
         "operationId": "list_sandboxes",
         "parameters": [
           {
@@ -93,6 +94,7 @@
           "Sandboxes"
         ],
         "summary": "Create a sandbox",
+        "description": "Create a microVM sandbox for the organization associated with the API key.",
         "operationId": "create_sandbox",
         "parameters": [
           {
@@ -255,6 +257,7 @@
           "Sandboxes"
         ],
         "summary": "Get a sandbox by name",
+        "description": "Retrieve one sandbox by its organization-scoped name.",
         "operationId": "get_by_name",
         "parameters": [
           {
@@ -324,6 +327,7 @@
           "Sandboxes"
         ],
         "summary": "Destroy a sandbox by name",
+        "description": "Stop and permanently destroy a sandbox selected by its organization-scoped name.",
         "operationId": "delete_by_name",
         "parameters": [
           {
@@ -412,6 +416,7 @@
           "Sandboxes"
         ],
         "summary": "Start a sandbox by name",
+        "description": "Start a sandbox selected by its organization-scoped name.",
         "operationId": "start_by_name",
         "parameters": [
           {
@@ -564,6 +569,7 @@
           "Sandboxes"
         ],
         "summary": "Stop a sandbox by name",
+        "description": "Stop a running sandbox selected by its organization-scoped name.",
         "operationId": "stop_by_name",
         "parameters": [
           {
@@ -669,6 +675,7 @@
           "Sandboxes"
         ],
         "summary": "Get a sandbox",
+        "description": "Retrieve one sandbox by its unique identifier.",
         "operationId": "get_sandbox",
         "parameters": [
           {
@@ -739,6 +746,7 @@
           "Sandboxes"
         ],
         "summary": "Destroy a sandbox",
+        "description": "Stop and permanently destroy a sandbox.",
         "operationId": "delete_sandbox",
         "parameters": [
           {
@@ -826,6 +834,7 @@
           "Sandboxes"
         ],
         "summary": "Rename a sandbox",
+        "description": "Rename a sandbox by updating its display name or slug.",
         "operationId": "update_sandbox",
         "parameters": [
           {
@@ -942,6 +951,7 @@
           "Sandboxes"
         ],
         "summary": "Start a sandbox",
+        "description": "Start a sandbox and optionally wait until it is running.",
         "operationId": "start_sandbox",
         "parameters": [
           {
@@ -1095,6 +1105,7 @@
           "Sandboxes"
         ],
         "summary": "Stop a sandbox",
+        "description": "Stop a running sandbox.",
         "operationId": "stop_sandbox",
         "parameters": [
           {
@@ -1201,6 +1212,7 @@
           "Volumes"
         ],
         "summary": "List volumes",
+        "description": "List persistent volumes available to the organization, including current usage.",
         "operationId": "list_volumes",
         "responses": {
           "200": {
@@ -1245,6 +1257,7 @@
           "Volumes"
         ],
         "summary": "Create a named volume",
+        "description": "Create a named persistent volume with optional capacity and labels.",
         "operationId": "create_volume",
         "requestBody": {
           "content": {
@@ -1332,6 +1345,7 @@
           "Volumes"
         ],
         "summary": "Schedule a volume for deletion",
+        "description": "Schedule an unused named volume for deletion.",
         "operationId": "delete_volume",
         "parameters": [
           {
@@ -1419,6 +1433,7 @@
           "Volumes"
         ],
         "summary": "Set or clear a volume's storage cap",
+        "description": "Update a named volume's capacity limit or labels.",
         "operationId": "update_volume",
         "parameters": [
           {
@@ -1535,6 +1550,7 @@
           "Quotas"
         ],
         "summary": "Get quota usage",
+        "description": "Return current resource usage, plan limits, and organization-specific quota overrides.",
         "operationId": "get_quotas",
         "responses": {
           "200": {
@@ -1595,6 +1611,7 @@
           "Usage"
         ],
         "summary": "Get a usage summary",
+        "description": "Return billable usage for the organization.",
         "operationId": "get_usage",
         "responses": {
           "200": {
@@ -1638,6 +1655,7 @@
           "Usage"
         ],
         "summary": "Get per-sandbox usage",
+        "description": "Return billable usage grouped by sandbox for a selected UTC time range.",
         "operationId": "get_sandbox_breakdown",
         "responses": {
           "200": {
@@ -1681,6 +1699,7 @@
           "Usage"
         ],
         "summary": "Get per-volume storage usage",
+        "description": "Return persistent storage usage grouped by volume for a selected UTC time range.",
         "operationId": "get_storage_breakdown",
         "responses": {
           "200": {
@@ -1724,6 +1743,7 @@
           "Audit events"
         ],
         "summary": "List audit events",
+        "description": "List audit events for the organization with cursor pagination and optional filters.",
         "operationId": "list_events",
         "parameters": [
           {
@@ -1832,6 +1852,7 @@
           "Audit events"
         ],
         "summary": "Get an audit event",
+        "description": "Retrieve one audit event by its identifier.",
         "operationId": "get_event",
         "parameters": [
           {
@@ -1948,6 +1969,7 @@
           "Members"
         ],
         "summary": "List organization members",
+        "description": "List organization members and their roles with cursor pagination.",
         "operationId": "list_members",
         "parameters": [
           {

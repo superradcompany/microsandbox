@@ -4,26 +4,7 @@ description: Get a sandbox running in under 5 minutes
 icon: "bolt"
 ---
 
-## Choose where to run
-
-<div className="msb-platform-strip" role="list" aria-label="Supported platforms">
-  <a className="msb-platform-item msb-platform-link" role="listitem" href="/troubleshooting/linux">
-    <span className="msb-platform-icon"><Icon icon="linux" size={18} /></span>
-    <span className="msb-platform-copy"><strong>Linux</strong><span>glibc + KVM</span></span>
-  </a>
-  <a className="msb-platform-item msb-platform-link" role="listitem" href="/troubleshooting/macos">
-    <span className="msb-platform-icon"><Icon icon="apple" size={18} /></span>
-    <span className="msb-platform-copy"><strong>macOS</strong><span>Apple Silicon</span></span>
-  </a>
-  <a className="msb-platform-item msb-platform-link" role="listitem" href="/troubleshooting/windows">
-    <span className="msb-platform-icon"><Icon icon="windows" size={18} /></span>
-    <span className="msb-platform-copy"><strong>Windows</strong><span>Windows 11 + WHP</span></span>
-  </a>
-  <a className="msb-platform-item msb-platform-link" role="listitem" href="/cloud/overview">
-    <span className="msb-platform-icon"><Icon icon="cloud" size={18} /></span>
-    <span className="msb-platform-copy"><strong>Cloud</strong><span>No hypervisor setup</span></span>
-  </a>
-</div>
+## Run your first sandbox
 
 <CodeGroup>
 ```bash npx
@@ -41,17 +22,34 @@ msb run debian
 ```
 </CodeGroup>
 
+Having trouble with a local installation? Choose your platform for setup checks and fixes.
+
+<div className="msb-platform-strip msb-platform-strip-three" role="list" aria-label="Installation troubleshooting">
+  <a className="msb-platform-item msb-platform-link" role="listitem" href="/troubleshooting/linux">
+    <span className="msb-platform-icon"><Icon icon="linux" size={18} /></span>
+    <span className="msb-platform-copy"><strong>Linux</strong><span>glibc 2.28+ and KVM</span></span>
+  </a>
+  <a className="msb-platform-item msb-platform-link" role="listitem" href="/troubleshooting/macos">
+    <span className="msb-platform-icon"><Icon icon="apple" size={18} /></span>
+    <span className="msb-platform-copy"><strong>macOS</strong><span>Apple Silicon</span></span>
+  </a>
+  <a className="msb-platform-item msb-platform-link" role="listitem" href="/troubleshooting/windows">
+    <span className="msb-platform-icon"><Icon icon="windows" size={18} /></span>
+    <span className="msb-platform-copy"><strong>Windows</strong><span>10+ · WHP</span></span>
+  </a>
+</div>
+
 <Steps>
   <Step title="Install microsandbox">
     For application code, install the SDK for your language. For terminal workflows, use one of the CLI options above. Both run microsandbox locally by default; there is no separate server or daemon to set up. The same installation also drives [microsandbox cloud](/cloud/overview) when an API key is set.
 
     <CodeGroup>
-    ```bash Rust
-    cargo add microsandbox
-    ```
-
     ```bash TypeScript
     npm install microsandbox
+    ```
+
+    ```bash Rust
+    cargo add microsandbox
     ```
 
     ```bash Python
@@ -60,6 +58,10 @@ msb run debian
 
     ```bash Go
     go get github.com/superradcompany/microsandbox/sdk/go
+    ```
+
+    ```bash Ruby
+    gem install microsandbox
     ```
 
     </CodeGroup>
@@ -77,6 +79,18 @@ msb run debian
     Create a sandbox, execute code inside it, and get the result back.
 
     <CodeGroup>
+    ```typescript TypeScript
+    import { Sandbox } from "microsandbox";
+
+    await using sb = await Sandbox.builder("hello")
+        .image("python")
+        .memory(512)
+        .create();
+
+    const output = await sb.exec("python", ["-c", "print('Hello from a microVM!')"]);
+    console.log(output.stdout()); // Hello from a microVM!
+    ```
+
     ```rust Rust
     use microsandbox::Sandbox;
 
@@ -94,18 +108,6 @@ msb run debian
         sb.stop().await?;
         Ok(())
     }
-    ```
-
-    ```typescript TypeScript
-    import { Sandbox } from "microsandbox";
-
-    await using sb = await Sandbox.builder("hello")
-        .image("python")
-        .memory(512)
-        .create();
-
-    const output = await sb.exec("python", ["-c", "print('Hello from a microVM!')"]);
-    console.log(output.stdout()); // Hello from a microVM!
     ```
 
     ```python Python
@@ -144,6 +146,17 @@ msb run debian
     fmt.Println(output.Stdout()) // Hello from a microVM!
     ```
 
+    ```ruby Ruby
+    require "microsandbox"
+
+    Microsandbox.install unless Microsandbox.installed?
+
+    Microsandbox::Sandbox.with("hello", image: "python", memory: 512) do |sandbox|
+      output = sandbox.exec("python", ["-c", "print('Hello from a microVM!')"])
+      puts output.stdout
+    end
+    ```
+
     ```bash CLI
     msb run python -- python3 -c "print('Hello from a microVM!')"
     ```
@@ -171,10 +184,10 @@ The `exec` call uses the host-guest command channel, not SSH and not the sandbox
 
 - [Explore practical examples](/examples/overview): tested workflows for agents, CI/CD, Docker, automation, and more
 - [Run on microsandbox cloud](/cloud/overview): the same code on hosted infrastructure
-- [Tune sandbox settings](/sandboxes/tuning): resize headroom, labels, secrets, and storage
+- [Modify live sandbox settings](/sandboxes/tuning): resize headroom, labels, secrets, and storage
 - [Troubleshoot Linux setup](/troubleshooting/linux): KVM, `/dev/kvm`, and permissions
 - [Troubleshoot macOS setup](/troubleshooting/macos): Apple Silicon and local runtime checks
-- [Troubleshoot Windows setup](/troubleshooting/windows): WHP, `msb doctor`, and Windows 11 notes
+- [Troubleshoot Windows setup](/troubleshooting/windows): WHP, `msb doctor`, and runtime setup
 - [Run commands and stream output](/sandboxes/commands): `exec`, `shell`, `attach`, and streaming
 - [Control network access](/networking/overview): policies, DNS interception, and secret protection
 - [Manage sandboxes with the CLI](/cli/overview): create, inspect, and manage sandboxes from the terminal

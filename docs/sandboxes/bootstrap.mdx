@@ -13,6 +13,15 @@ Before a sandbox starts doing real work, you can choose its root storage and pre
 OCI sandboxes use stitched EROFS lower layers with a writable ext4 upper and guest OverlayFS by default. A flat root disk is an explicit alternative: microsandbox merges the OCI layers into one deterministic ext4 base, caches it by content, creates a private clone for each sandbox, grows that clone to the requested capacity, and mounts it directly as the guest root. The immutable cached base is never attached writable.
 
 <CodeGroup>
+```typescript TypeScript
+import { Sandbox } from "microsandbox";
+
+await using sb = await Sandbox.builder("worker")
+    .image("python:3.12")
+    .rootDisk((disk) => disk.flat().size(8192).cloneStrategy("auto"))
+    .create();
+```
+
 ```rust Rust
 use microsandbox::sandbox::FlatClone;
 use microsandbox::Sandbox;
@@ -22,15 +31,6 @@ let sb = Sandbox::builder("worker")
     .root_disk_with(|disk| disk.flat().size(8192).clone_strategy(FlatClone::Auto))
     .create()
     .await?;
-```
-
-```typescript TypeScript
-import { Sandbox } from "microsandbox";
-
-await using sb = await Sandbox.builder("worker")
-    .image("python:3.12")
-    .rootDisk((disk) => disk.flat().size(8192).cloneStrategy("auto"))
-    .create();
 ```
 
 ```python Python
@@ -69,6 +69,19 @@ Scripts are files mounted at `/.msb/scripts/` inside the sandbox. The directory 
 It provides a clean way to bundle setup procedures or entry points with a sandbox without baking them into the image.
 
 <CodeGroup>
+```typescript TypeScript
+import { Sandbox } from "microsandbox";
+
+await using sb = await Sandbox.builder("worker")
+    .image("ubuntu")
+    .script("setup", "#!/bin/bash\napt-get update && apt-get install -y python3 curl")
+    .script("run",   "#!/bin/bash\nexec python3 /app/main.py")
+    .create();
+
+await sb.shell("setup");
+const output = await sb.shell("run");
+```
+
 ```rust Rust
 use indoc::indoc;
 use microsandbox::Sandbox;
@@ -88,19 +101,6 @@ let sb = Sandbox::builder("worker")
 
 sb.shell("setup").await?;
 let output = sb.shell("start").await?;
-```
-
-```typescript TypeScript
-import { Sandbox } from "microsandbox";
-
-await using sb = await Sandbox.builder("worker")
-    .image("ubuntu")
-    .script("setup", "#!/bin/bash\napt-get update && apt-get install -y python3 curl")
-    .script("run",   "#!/bin/bash\nexec python3 /app/main.py")
-    .create();
-
-await sb.shell("setup");
-const output = await sb.shell("run");
 ```
 
 ```python Python
@@ -145,6 +145,22 @@ Patches are applied in order and work with OCI images and bind-mounted rootfs. T
 </Tip>
 
 <CodeGroup>
+```typescript TypeScript
+import { Sandbox } from "microsandbox";
+
+await using sb = await Sandbox.builder("worker")
+    .image("alpine")
+    .patch((p) => p
+        .text("/etc/greeting.txt", "Hello from a patched rootfs!\n")
+        .text("/etc/motd", "Custom message of the day.\n", { replace: true })
+        .mkdir("/app", { mode: 0o755 })
+        .text("/app/config.json", '{"debug": true}', { mode: 0o644 })
+        .copyFile("./cert.pem", "/etc/ssl/cert.pem")
+        .append("/etc/hosts", "127.0.0.1 myapp.local\n"),
+    )
+    .create();
+```
+
 ```rust Rust
 use microsandbox::Sandbox;
 
@@ -160,22 +176,6 @@ let sb = Sandbox::builder("worker")
     )
     .create()
     .await?;
-```
-
-```typescript TypeScript
-import { Sandbox } from "microsandbox";
-
-await using sb = await Sandbox.builder("worker")
-    .image("alpine")
-    .patch((p) => p
-        .text("/etc/greeting.txt", "Hello from a patched rootfs!\n")
-        .text("/etc/motd", "Custom message of the day.\n", { replace: true })
-        .mkdir("/app", { mode: 0o755 })
-        .text("/app/config.json", '{"debug": true}', { mode: 0o644 })
-        .copyFile("./cert.pem", "/etc/ssl/cert.pem")
-        .append("/etc/hosts", "127.0.0.1 myapp.local\n"),
-    )
-    .create();
 ```
 
 ```python Python
@@ -231,6 +231,13 @@ Transparent huge pages (THP) let the guest kernel back eligible anonymous memory
 The selected value is applied as the Linux `transparent_hugepage=` kernel boot parameter before agentd or the user workload starts. It is persisted with the sandbox and takes effect again on every start. It cannot be changed with `msb modify`; create or replace the sandbox to select another policy.
 
 <CodeGroup>
+```typescript TypeScript
+const sb = await Sandbox.builder("memory-worker")
+  .image("python:3.12")
+  .thp("always")
+  .create();
+```
+
 ```rust Rust
 use microsandbox::{Sandbox, sandbox::TransparentHugePagePolicy};
 
@@ -239,13 +246,6 @@ let sb = Sandbox::builder("memory-worker")
     .thp(TransparentHugePagePolicy::Always)
     .create()
     .await?;
-```
-
-```typescript TypeScript
-const sb = await Sandbox.builder("memory-worker")
-  .image("python:3.12")
-  .thp("always")
-  .create();
 ```
 
 ```python Python
@@ -279,6 +279,17 @@ Common reasons to opt in: long-lived daemons, system service tests, anything tha
 Use `auto` to pick a known init binary from the image, or pass an absolute path when you need to pin the entry point for reproducible CI. When an OCI image declares a known init path as the first ENTRYPOINT token, such as `/init` in s6-overlay images, `auto` hands PID 1 to that path. For attached `msb run`, microsandbox preserves the OCI launch contract by passing the remaining ENTRYPOINT plus CMD or trailing command to that init instead of direct-executing the wrapper through agentd. Otherwise, `auto` falls back to probing common distro paths: `/sbin/init`, `/lib/systemd/systemd`, and `/usr/lib/systemd/systemd`.
 
 <CodeGroup>
+```typescript TypeScript
+import { MiB, Sandbox } from "microsandbox";
+
+await using sb = await Sandbox.builder("worker")
+    .image("ghcr.io/superradcompany/debian-systemd:12")
+    .memory(MiB(1024))
+    .cpus(2)
+    .init("auto")
+    .create();
+```
+
 ```rust Rust
 use microsandbox::Sandbox;
 
@@ -289,17 +300,6 @@ let sb = Sandbox::builder("worker")
     .init("auto")
     .create()
     .await?;
-```
-
-```typescript TypeScript
-import { MiB, Sandbox } from "microsandbox";
-
-await using sb = await Sandbox.builder("worker")
-    .image("ghcr.io/superradcompany/debian-systemd:12")
-    .memory(MiB(1024))
-    .cpus(2)
-    .init("auto")
-    .create();
 ```
 
 ```python Python
@@ -344,13 +344,22 @@ If `--init=auto` cannot find an init binary from the image ENTRYPOINT or the gue
 
 Pass extra argv and env to the init:
 
-- **Rust / TypeScript**: `init_with(...)` / `initWith(...)`.
+- **TypeScript / Rust**: `initWith(...)` / `init_with(...)`.
 - **Python**: pass an `InitConfig` to `init=`.
 - **CLI**: repeat `--init-arg` once per entry, and `--init-env KEY=VAL` once per env var.
 
 `argv[0]` is the init command; extra argv entries are appended after it. Env is merged on top of the inherited environment.
 
 <CodeGroup>
+```typescript TypeScript
+await using sb = await Sandbox.builder("worker")
+    .image("ghcr.io/superradcompany/debian-systemd:12")
+    .initWith("/lib/systemd/systemd", (i) => i
+        .args(["--unit=multi-user.target"])
+        .env("container", "microsandbox"))
+    .create();
+```
+
 ```rust Rust
 let sb = Sandbox::builder("worker")
     .image("ghcr.io/superradcompany/debian-systemd:12")
@@ -359,15 +368,6 @@ let sb = Sandbox::builder("worker")
         .env("container", "microsandbox"))
     .create()
     .await?;
-```
-
-```typescript TypeScript
-await using sb = await Sandbox.builder("worker")
-    .image("ghcr.io/superradcompany/debian-systemd:12")
-    .initWith("/lib/systemd/systemd", (i) => i
-        .args(["--unit=multi-user.target"])
-        .env("container", "microsandbox"))
-    .create();
 ```
 
 ```python Python
@@ -410,3 +410,7 @@ msb run ghcr.io/superradcompany/debian-systemd:12 \
 Most slim Docker base images do not include systemd or another full init. Use an image that ships the init you want, or build a small custom image that installs it.
 
 `--init` controls PID 1. `--entrypoint` and the trailing command normally control the workload you run after boot, so the two can be combined. An image-declared init entrypoint such as `/init` is the special case. With `--init auto` and attached `msb run`, microsandbox passes the trailing command to PID 1 as part of the image's own launch contract.
+
+## Reference
+
+For exact bootstrap, patch, and init APIs, see [TypeScript](/sdk/typescript/sandbox), [Rust](/sdk/rust/sandbox), [Python](/sdk/python/sandbox), or [Go](/sdk/go/sandbox). For CLI configuration and creation flags, see [Configuration file](/cli/configuration) and [Sandbox commands](/cli/sandbox-commands).

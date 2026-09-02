@@ -5,7 +5,9 @@ description: Python SDK - Proxy API reference
 
 Configure one SOCKS4 or SOCKS5 proxy for outbound sandbox connections with the `proxy=` argument to [`Sandbox.create()`](/sdk/python/sandbox#sandbox-create). Proxy protocols are mutually exclusive.
 
-See [Outbound proxy](/networking/outbound-proxy) for runtime behavior, security considerations, and current transport limitations.
+See [Proxy](/networking/outbound-proxy) for routing behavior, security considerations, and limits.
+
+<Note>Outbound proxies are local-only. Cloud sandbox creation rejects this setting.</Note>
 
 ## Typical flow
 
@@ -35,3 +37,23 @@ Frozen proxy configuration passed through `Sandbox.create(proxy=...)`.
 | `socks5(address)` | `OutboundProxy` | Configure a SOCKS5 proxy at `IP:port` |
 
 The SOCKS4 `user_id` must contain 1–255 bytes and no null byte. It identifies the caller; it is not a password.
+
+### credentials()
+
+```python
+credentials(username: str, password: SecretSource) -> OutboundProxy
+```
+
+Return a SOCKS5 proxy with username/password authentication. Pass `SecretSource.env("SOCKS5_PASSWORD")` as `password`. Calling this method on a SOCKS4 proxy raises `ValueError`.
+
+The host environment variable is read once each time the sandbox starts. Changing it affects the next start, not a sandbox that is already running. `config_json` and the database contain the source reference but never the resolved password. The username and resolved password must each contain 1–255 bytes.
+
+## SecretSource
+
+### env()
+
+```python
+SecretSource.env(variable: str) -> SecretSource
+```
+
+Create a host environment-variable reference for a SOCKS5 password. Import `SecretSource` from `microsandbox`.

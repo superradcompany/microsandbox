@@ -15,26 +15,25 @@ icon: "bolt"
 
 Network policy is now built from named profiles instead of ad-hoc presets. Pass one or more of `public`, `private`, and `host` to `--net` on the CLI, or to `NetworkPolicy.from_profiles()` / `fromProfiles()` / `FromProfiles()` in the SDKs. `--net` is repeatable and accepts a comma-separated list, plus the terminal values `all` and `none`. Explicit `--net-rule` entries keep first-match precedence and now understand `allow@dns` / `deny@dns` targets, so DNS answers are policy-aware instead of implicitly allowed.
 
-The IPv4 and IPv6 unspecified addresses are excluded from `public`, closing a DNS-rebinding gap. This is a breaking change for pre-1.0 callers: the legacy `public_only` and `non_local` presets are removed. Migrate to `from_profiles("public")` or the CLI equivalent.
+The IPv4 and IPv6 unspecified addresses are excluded from `public`, closing a DNS-rebinding gap. This is a breaking change for pre-1.0 callers: the legacy `public_only` and `non_local` presets are removed. Migrate to the `public` profile or the CLI equivalent.
 
 ```bash
-msb run --net public,private --net-rule 'allow@dns:api.example.com' python
+msb run --net public,private --net-rule 'allow@dns' python
 ```
 
 ```python
-from microsandbox import NetworkPolicy, Rule
+from microsandbox import NetworkPolicy, NetworkProfile
 
-policy = NetworkPolicy.from_profiles("public", "private").with_rules(
-    Rule.allow_dns("api.example.com"),
-    Rule.deny_dns("telemetry.example.com"),
-)
+policy = NetworkPolicy.from_profiles([
+    NetworkProfile.PUBLIC,
+    NetworkProfile.PRIVATE,
+])
 ```
 
 ```typescript
-const policy = NetworkPolicy.fromProfiles("public").withRules(
-  Rule.allowDns("api.example.com"),
-  Rule.denyDns("telemetry.example.com"),
-);
+import { NetworkPolicy } from "microsandbox";
+
+const policy = NetworkPolicy.fromProfiles(["public", "private"]);
 ```
 
 See the [networking overview](/networking/overview).

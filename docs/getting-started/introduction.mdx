@@ -34,7 +34,7 @@ msb run debian
 - **Fast startup.** Sandboxes are lightweight enough to create from application code.
 - **Docker-like inputs.** Use familiar OCI images from Docker Hub, GHCR, ECR, GCR, or another registry.
 - **Programmable controls.** Configure resources, volumes, secrets, networking, and lifecycle from the CLI or SDK.
-- **Multi-language SDKs.** Rust, TypeScript, Python, Go, and Ruby expose the same core model.
+- **Multi-language SDKs.** TypeScript, Rust, Python, Go, and Ruby expose the same core model.
 
 ## Example use cases
 
@@ -58,6 +58,17 @@ msb run debian
 ## Minimal example
 
 <CodeGroup>
+```typescript TypeScript
+import { Sandbox } from "microsandbox";
+
+await using sb = await Sandbox.builder("hello")
+    .image("python")
+    .create();
+
+const output = await sb.exec("python", ["-c", "print('Hello from a microVM!')"]);
+console.log(output.stdout());
+```
+
 ```rust Rust
 use microsandbox::Sandbox;
 
@@ -70,17 +81,6 @@ let output = sb.exec("python", ["-c", "print('Hello from a microVM!')"]).await?;
 println!("{}", output.stdout()?);
 
 sb.stop().await?;
-```
-
-```typescript TypeScript
-import { Sandbox } from "microsandbox";
-
-await using sb = await Sandbox.builder("hello")
-    .image("python")
-    .create();
-
-const output = await sb.exec("python", ["-c", "print('Hello from a microVM!')"]);
-console.log(output.stdout());
 ```
 
 ```python Python

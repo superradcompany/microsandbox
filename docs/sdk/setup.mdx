@@ -4,7 +4,7 @@ description: Install, verify, and configure microsandbox runtime dependencies fr
 icon: "download"
 ---
 
-Local sandboxes use the `msb` executable and `libkrunfw` library. Depending on the SDK and installation method, those runtime files may already be bundled or may need to be downloaded. Each SDK exposes helpers that let an application verify the runtime before creating its first sandbox.
+Local sandboxes use the `msb` executable and `libkrunfw` library. Depending on the SDK and installation method, those runtime files may already be bundled or may need to be downloaded. Each SDK exposes helpers you can use to verify the runtime before creating your first sandbox.
 
 The default install root is `~/.microsandbox/` (`%USERPROFILE%\.microsandbox` on Windows). Explicit setup is useful when you want installation failures to surface at process startup or when you are preparing an offline environment.
 
@@ -13,19 +13,19 @@ The default install root is `~/.microsandbox/` (`%USERPROFILE%\.microsandbox` on
 Check for the runtime and install it only when needed. These installation helpers are idempotent and reuse a matching installation.
 
 <CodeGroup>
-```rust Rust
-use microsandbox::setup;
-
-if !setup::is_installed() {
-    setup::install().await?;
-}
-```
-
 ```typescript TypeScript
 import { install, isInstalled } from "microsandbox";
 
 if (!isInstalled()) {
   await install();
+}
+```
+
+```rust Rust
+use microsandbox::setup;
+
+if !setup::is_installed() {
+    setup::install().await?;
 }
 ```
 
@@ -55,17 +55,28 @@ Microsandbox.install unless Microsandbox.installed?
 
 | SDK | Install | Check | Behavior |
 |-----|---------|-------|----------|
-| Rust | `setup::install() -> MicrosandboxResult<()>` | `setup::is_installed() -> bool` | Downloads the SDK's pinned runtime and verifies it. |
 | TypeScript | `install(): Promise<void>` | `isInstalled(): boolean` | Downloads the package's pinned runtime and verifies it. |
-| Python | `install() -> None` (async) | `is_installed() -> bool` | Installs and verifies the runtime; release wheels normally bundle matching files. |
+| Rust | `setup::install() -> MicrosandboxResult<()>` | `setup::is_installed() -> bool` | Downloads the SDK's pinned runtime and verifies it. |
+| Python | `install() -> Awaitable[None]` | `is_installed() -> bool` | Installs and verifies the runtime; release wheels normally bundle matching files. |
 | Go | `EnsureInstalled(ctx, ...SetupOption) error` | `IsInstalled() bool` | Installs `msb` and `libkrunfw`; the Go FFI library is embedded separately. |
 | Ruby | `Microsandbox.install` | `Microsandbox.installed?` | Installs and verifies the runtime used by the native extension. |
 
 ## Customize installation
 
-Rust and TypeScript expose builders for custom install roots, versions, verification, and forced downloads. Go exposes `WithSkipDownload()` for pre-provisioned or air-gapped environments. Python and Ruby setup helpers use the default installation behavior.
+TypeScript and Rust expose builders for custom install roots, versions, verification, and forced downloads. Go exposes `WithSkipDownload()` for pre-provisioned or air-gapped environments. Python and Ruby setup helpers use the default installation behavior.
 
 <CodeGroup>
+```typescript TypeScript
+import { setup } from "microsandbox";
+
+await setup()
+  .baseDir("/opt/microsandbox")
+  .version("0.6.8")
+  .skipVerify(false)
+  .force(true)
+  .install();
+```
+
 ```rust Rust
 use microsandbox::setup::Setup;
 
@@ -77,17 +88,6 @@ Setup::builder()
     .build()
     .install()
     .await?;
-```
-
-```typescript TypeScript
-import { setup } from "microsandbox";
-
-await setup()
-  .baseDir("/opt/microsandbox")
-  .version("0.6.8")
-  .skipVerify(false)
-  .force(true)
-  .install();
 ```
 
 ```go Go
@@ -102,10 +102,10 @@ if err := m.EnsureInstalled(ctx, m.WithSkipDownload()); err != nil {
 
 | Option | SDKs | Description |
 |--------|------|-------------|
-| Install root | Rust: `base_dir(path)`<br />TypeScript: `baseDir(path)` | Override `~/.microsandbox/`. |
-| Runtime version | Rust: `version(version)`<br />TypeScript: `version(version)` | Install a specific runtime version instead of the SDK's pinned version. |
-| Skip verification | Rust: `skip_verify(enabled)`<br />TypeScript: `skipVerify(enabled)` | Skip post-install verification. |
-| Force download | Rust: `force(enabled)`<br />TypeScript: `force(enabled)` | Download again even when matching files are present. |
+| Install root | TypeScript: `baseDir(path)`<br />Rust: `base_dir(path)` | Override `~/.microsandbox/`. |
+| Runtime version | TypeScript: `version(version)`<br />Rust: `version(version)` | Install a specific runtime version instead of the SDK's pinned version. |
+| Skip verification | TypeScript: `skipVerify(enabled)`<br />Rust: `skip_verify(enabled)` | Skip post-install verification. |
+| Force download | TypeScript: `force(enabled)`<br />Rust: `force(enabled)` | Download again even when matching files are present. |
 | Skip download | Go: `WithSkipDownload()` | Require the runtime to be present without fetching it. |
 
 <span id="go-with-skip-download"></span>
@@ -115,25 +115,31 @@ In Go, `WithSkipDownload()` returns a `SetupOption`, whose exported type is `fun
 
 ## Override runtime paths
 
-The Rust, TypeScript, and Python SDKs can override the process-wide `libkrunfw` path directly. Call the setter before creating a local sandbox.
+The TypeScript, Rust, Python, and Ruby SDKs can override the process-wide `libkrunfw` path directly. Call the setter before creating a local sandbox.
 
 <CodeGroup>
-```rust Rust
-use microsandbox::set_libkrunfw_path;
-
-set_libkrunfw_path("/opt/microsandbox/lib/libkrunfw.dylib");
-```
-
 ```typescript TypeScript
 import { setRuntimeLibkrunfwPath } from "microsandbox";
 
 setRuntimeLibkrunfwPath("/opt/microsandbox/lib/libkrunfw.dylib");
 ```
 
+```rust Rust
+use microsandbox::set_libkrunfw_path;
+
+set_libkrunfw_path("/opt/microsandbox/lib/libkrunfw.dylib");
+```
+
 ```python Python
 from microsandbox import set_libkrunfw_path
 
 set_libkrunfw_path("/opt/microsandbox/lib/libkrunfw.dylib")
+```
+
+```ruby Ruby
+require "microsandbox"
+
+Microsandbox.set_runtime_libkrunfw_path("/opt/microsandbox/lib/libkrunfw.dylib")
 ```
 </CodeGroup>
 

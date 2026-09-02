@@ -1,13 +1,14 @@
 ---
 title: Sandbox
 description: Python SDK - Sandbox API reference
+keywords: ["Python SDK", "Python sandbox", "microsandbox sandbox"]
 ---
 
 Create and control a microVM sandbox: boot it from an image, run commands, stream logs and metrics, then shut it down. See [Overview](/sandboxes/overview) for configuration examples and [Lifecycle](/sandboxes/lifecycle) for state management.
 
 For local runtime installation and verification, see [Runtime setup](/sdk/setup#install-and-verify).
 
-## Lifecycle convergence
+## Reuse and restart sandboxes
 
 ```python
 await Sandbox.connect_or_create(name, **kwargs) -> Sandbox
@@ -19,7 +20,9 @@ await sandbox.id -> str
 handle.id -> str
 ```
 
-`connect_or_create` converges on the current persisted sandbox by name and uses creation arguments only when it creates. Receiver lifecycle operations are bound to the stable opaque `id`; a stale receiver raises `SandboxReplacedError` instead of acting on a replacement that reused the name. `Sandbox` also exposes `wait_for_status`, `restart`, and `destroy`. See [Lifecycle convergence and identity safety](/sandboxes/lifecycle#converge-on-a-named-sandbox) for state behavior and examples.
+Use `connect_or_create` when a named sandbox might already exist. It connects to a running sandbox, starts a stopped or crashed sandbox, and creates one only when the name is unused. Creation arguments apply only to a new sandbox.
+
+Lifecycle methods on a `Sandbox` or `SandboxHandle` stay attached to its opaque `id`. If the name is removed and reused, an old receiver raises `SandboxReplacedError` instead of acting on the replacement. See [Reuse or create a named sandbox](/sandboxes/lifecycle#reuse-or-create-a-named-sandbox) for examples.
 
 ## Sandbox
 
@@ -169,7 +172,7 @@ Same parameters as [`create()`](#sandbox-create) but returns a [`PullSession`](#
 async def connect_or_create(name: str, **kwargs) -> Sandbox
 ```
 
-Converge on the current persisted sandbox by name. The method connects when it is running, waits through `SandboxStatus.STARTING`, starts it when it is created, stopped, or crashed, and creates it only when the name is absent. Keyword arguments apply only to creation; an existing sandbox keeps its persisted configuration. Concurrent callers converge on the winning identity. Passing `replace=True` or `replace_with_timeout` raises an invalid-configuration error.
+Reuse or create the sandbox with this name. The method connects when it is running, waits while it is starting, starts it when it is created, stopped, or crashed, and creates it only when the name is unused. Keyword arguments apply only to a new sandbox. Concurrent callers reuse the same sandbox. Passing `replace=True` or `replace_with_timeout` raises an invalid-configuration error.
 
 <p className="msb-label">Parameters</p>
 
@@ -352,7 +355,7 @@ await Sandbox.remove("api")
 
 </Accordion>
 
-Delete a stopped sandbox by name. See [Remove](/sandboxes/lifecycle#remove) for the exact local deletion scope and the external resources that are preserved. Fails if the sandbox is still running; stop it first.
+Delete a stopped sandbox by name. See [Destroy or remove](/sandboxes/lifecycle#destroy-or-remove) for the exact local deletion scope and the external resources that are preserved. Fails if the sandbox is still running; stop it first.
 
 <p className="msb-label">Parameters</p>
 
@@ -363,7 +366,7 @@ Delete a stopped sandbox by name. See [Remove](/sandboxes/lifecycle#remove) for 
   </div>
 </div>
 
-<p className="msb-member-group">Instance methods</p>
+<p className="msb-member-group" id="instance-methods">Instance methods</p>
 
 Command execution (`exec`, `exec_stream`, `shell`, `shell_stream`) is documented on the [Execution](/sdk/python/execution) page; SSH (`ssh`) on the [SSH](/sdk/python/ssh) page. The lifecycle, attach, metrics, and logs methods follow.
 
@@ -617,7 +620,7 @@ Plan or apply a configuration change. The returned plan uses [`ModificationDispo
 
 `cpus` and `memory` resize live within the `max_cpus` / `max_memory` ceilings; raising a ceiling requires a restart. `root_disk_size` changes are offline: managed and flat OCI root disks grow only, tmpfs root disks can change in either direction on the next boot, and user-supplied disk images are rejected. Env and workdir changes affect future execs only. On a stopped sandbox, changes are saved for the next boot.
 
-Secret specs are keyed by stable secret name. Each `SecretModifySpec` selects at most one source—`env`, `value`, or `store`—and may also set `placeholder` and `allowed_hosts`; omitting a source updates only the other supplied fields. Plans expose only safe references and metadata; raw secret values never appear in a plan. Removal is explicit through `secrets_rm`.
+Secret specs are keyed by stable secret name. Each `SecretModifySpec` selects at most one source (`env`, `value`, or `store`) and may also set `placeholder` and `allowed_hosts`; omitting a source updates only the other supplied fields. Plans expose only safe references and metadata; raw secret values never appear in a plan. Removal is explicit through `secrets_rm`.
 
 The returned [`SandboxModificationPlan`](#sandboxmodificationplan) is a typed dictionary:
 
@@ -1060,7 +1063,7 @@ async def restart(
 ) -> Sandbox
 ```
 
-Restart this exact sandbox. Defaults to graceful shutdown, the SDK's ten-second timeout, and attached local start. A created, stopped, or crashed sandbox starts directly; a starting sandbox is observed until it settles. Set `force` to kill, `timeout` in seconds to change shutdown convergence, or `detached` for a local background start.
+Restart this exact sandbox. Defaults to graceful shutdown, the SDK's ten-second timeout, and attached local start. A created, stopped, or crashed sandbox starts directly; a starting sandbox is observed until it settles. Set `force` to kill, `timeout` in seconds to change how long shutdown can take, or `detached` for a local background start.
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">destroy()</span>
 
@@ -1346,13 +1349,13 @@ Raw JSON configuration
 
 #### <span className="msb-recv">handle.</span><span className="msb-hn">created_at</span>
 
-`float \| None`
+`float | None`
 
 Creation timestamp (ms since epoch)
 
 #### <span className="msb-recv">handle.</span><span className="msb-hn">updated_at</span>
 
-`float \| None`
+`float | None`
 
 Last update timestamp (ms since epoch)
 
@@ -1464,7 +1467,7 @@ async def restart(
 ) -> Sandbox
 ```
 
-Restart this exact sandbox with the same state and option semantics as [`sb.restart()`](#restart).
+Restart this exact sandbox with the same state and option semantics as [`sb.restart()`](#sb-restart).
 
 #### <span className="msb-recv">handle.</span><span className="msb-hn">destroy()</span>
 
@@ -1685,7 +1688,7 @@ Where the chunk came from
 
 #### <span className="msb-recv">entry.</span><span className="msb-hn">session_id</span>
 
-`int \| None`
+`int | None`
 
 Relay-monotonic session id; `None` for `"system"` entries
 
@@ -1824,7 +1827,7 @@ The keyword arguments accepted by [`create()`](#sandbox-create) and [`create_wit
 | network | [`Network`](/sdk/python/networking#network) | public profile | Network policy and configuration |
 | proxy | [`OutboundProxy`](/sdk/python/proxies#outboundproxy)` \| None` | `None` | Single proxy used for outbound connections. See [Proxies](/sdk/python/proxies) |
 | secrets | `Sequence[`[`SecretEntry`](/sdk/python/secrets#secretentry)`]` | `[]` | Secret injection |
-| on_secret_violation | [`ViolationAction`](/sdk/python/secrets#violationaction)` \| `[`ViolationPolicy`](/sdk/python/secrets#violationpolicy) | `BLOCK_AND_LOG` | Sandbox-wide default action when a secret placeholder would leak to a non-eligible destination. Shorthand for `Network.on_secret_violation`; if both are provided, this top-level value takes precedence. See [Violation policy](/sdk/python/secrets#violation-policy) |
+| on_secret_violation | [`ViolationAction`](/sdk/python/secrets#violationaction)` \| `[`ViolationPolicy`](/sdk/python/secrets#violationpolicy) | `BLOCK_AND_LOG` | Sandbox-wide default action when a secret placeholder would leak to a non-eligible destination. Shorthand for `Network.on_secret_violation`; if both are provided, this top-level value takes precedence. See [Violation policy](/sdk/python/secrets#violationpolicy) |
 | detached | `bool` | `False` | If `True`, spawn the sandbox in detached mode; call [`detach()`](#sb-detach) before dropping the returned handle when it should keep running |
 
 ### InitConfig

@@ -68,6 +68,20 @@ export interface SecretInjection {
   readonly body?: boolean;
 }
 
+/** Host-side source for secret material. */
+export interface SecretSource {
+  readonly kind: "env";
+  readonly var: string;
+}
+
+/** Constructors for host-side secret sources. */
+export const SecretSource = {
+  /** Resolve the secret from this host environment variable at sandbox start. */
+  env(variable: string): SecretSource {
+    return { kind: "env", var: variable };
+  },
+} as const;
+
 /** A single secret entry — built via `SecretBuilder`. */
 export interface SecretEntry {
   readonly envVar: string;
@@ -90,6 +104,10 @@ export type OutboundProxy =
   | {
       readonly protocol: "socks5";
       readonly address: string;
+      readonly credentials?: {
+        readonly username: string;
+        readonly password: SecretSource;
+      };
     };
 
 /** Built network configuration produced by `NetworkBuilder.build()`. */

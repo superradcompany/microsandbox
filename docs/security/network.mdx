@@ -6,7 +6,7 @@ icon: "network-wired"
 
 All sandbox traffic flows through a host-side network stack. From inside the VM it looks like a normal network interface. On the host side, a user-space stack terminates every packet and checks it against policy before anything leaves. There is no host kernel routing or NAT in the path. The host process is the sandbox's entire view of the network.
 
-This is the network chapter of the security model: the threats the stack is built to stop and where each defense lives. For day-to-day configuration like policies, ports, DNS knobs, and TLS interception, see the [Networking guide](/networking/overview).
+This is the network chapter of the security model: the threats the stack is built to stop and where each defense lives. For day-to-day configuration like policies, ports, DNS knobs, and TLS MITM, see the [Networking guide](/networking/overview).
 
 ## Default posture
 
@@ -27,7 +27,7 @@ The largest class of real damage comes from a workload reaching things *inside* 
 - `169.254.169.254` (cloud metadata, which takes precedence over link-local)
 - the per-sandbox gateway, meaning your host (the `host` group)
 
-So `curl http://192.168.1.10` (a machine on your LAN) or `curl http://host.microsandbox.internal:5432` (a service on your host) is dropped at the gateway before it reaches the destination.
+So microsandbox drops `curl http://192.168.1.10` (a machine on your LAN) or `curl http://host.microsandbox.internal:5432` (a service on your host) at the gateway before it reaches the destination.
 
 <Warning>
 **`localhost` inside the guest is not your host.** `curl http://localhost:5432` from inside a sandbox does *not* reach a service on your machine. Inside the guest, `localhost` and `127.0.0.1` are the sandbox's own loopback, handled entirely by the guest kernel, so the request never reaches the host stack at all. To reach a service on your host, a workload would have to use `host.microsandbox.internal` (the `host` group), which the default policy denies. The `Loopback` group exists only to catch the unusual case of a guest crafting a raw packet addressed to `127.0.0.1` out its network interface, and the default policy denies that too.
@@ -51,6 +51,13 @@ msb create python --name worker \
     --net-rule "deny@meta"
 ```
 
+```typescript TypeScript
+NetworkPolicy.builder()
+  .defaultAllow()
+  .egress((rule) => rule.denyMeta())
+  .build();
+```
+
 ```rust Rust
 NetworkPolicy::builder()
     .default_allow()
@@ -63,7 +70,7 @@ NetworkPolicy::builder()
 
 An attacker who controls a domain can make it resolve to a public IP during the allowlist check, then flip to a private IP on a later lookup. The guest ends up making a request that *looked* bound for `evil.example.com` but actually lands on `192.168.1.10`.
 
-Rebind protection catches this at the response level. A private, loopback, or link-local answer is rewritten to `NXDOMAIN` unless the first matching explicit, address-only egress rule permits the returned address. For example, the `private` profile allows private DNS answers while retaining protection against loopback, link-local, metadata, and unspecified addresses. Ordered address-specific denies still win; policy defaults, `Any` rules, and port-scoped rules do not disable the check. Disable rebind protection globally only when policy-aware exceptions cannot represent the intended access. See [DNS](/networking/dns).
+Rebind protection catches this at the response level. microsandbox rewrites a private, loopback, or link-local answer to `NXDOMAIN` unless the first matching explicit, address-only egress rule permits the returned address. For example, the `private` profile allows private DNS answers while retaining protection against loopback, link-local, metadata, and unspecified addresses. Ordered address-specific denies still win; policy defaults, `Any` rules, and port-scoped rules do not disable the check. Disable rebind protection globally only when policy-aware exceptions cannot represent the intended access. See [DNS](/networking/dns).
 
 ## DNS-to-IP binding (TOCTOU)
 
@@ -79,13 +86,13 @@ Domain rules require two things when SNI is present, and both must pass: the SNI
 
 ## The DNS bypass surface
 
-DNS-based defenses like block lists, rebind protection, and domain pinning only act on queries the interceptor sees. The gateway intercepts UDP/53 and TCP/53 directly, and DoT (TCP/853) when TLS interception is enabled. Other transports are either refused at the port layer (DoQ, mDNS, LLMNR, NetBIOS-NS) or indistinguishable from ordinary traffic (DoH on TCP/443). Tunneled DNS (VPN, SOCKS5 hostname mode, HTTP `CONNECT`) rides inside the outer encrypted flow and never reaches the forwarder.
+DNS-based defenses like block lists, rebind protection, and domain pinning only act on queries the interceptor sees. The gateway intercepts UDP/53 and TCP/53 directly, and DoT (TCP/853) when TLS MITM is enabled. microsandbox either refuses other transports at the port layer (DoQ, mDNS, LLMNR, NetBIOS-NS) or cannot distinguish them from ordinary traffic (DoH on TCP/443). Tunneled DNS (VPN, SOCKS5 hostname mode, HTTP `CONNECT`) rides inside the outer encrypted flow and never reaches the forwarder.
 
 Where DNS integrity matters, pair DoT interception with a policy that denies egress UDP/53, TCP/53, and TCP/853 to everything except the gateway, and close tunnels by restricting egress to an allowlist. See [DNS](/networking/dns) for the transport-by-transport breakdown.
 
 ## Trusting host CAs
 
-TLS interception uses an auto-generated CA the guest trusts. A separate option, `trust_host_cas`, additionally ships your host's trusted root CAs into the guest so outbound TLS keeps working behind a corporate MITM proxy. It is **off by default** for a reason: anything in your host trust store becomes trusted inside every sandbox, so a CA an attacker managed to plant on your host would be trusted by your guests too. Leave it off unless you specifically need it. See [TLS interception](/networking/tls).
+TLS MITM uses an auto-generated CA the guest trusts. A separate option, `trust_host_cas`, additionally ships your host's trusted root CAs into the guest so outbound TLS keeps working behind a corporate MITM proxy. It is **off by default** for a reason: anything in your host trust store becomes trusted inside every sandbox, so a CA an attacker managed to plant on your host would be trusted by your guests too. Leave it off unless you specifically need it. See [TLS MITM](/networking/tls).
 
 ## Out of scope
 
@@ -100,5 +107,5 @@ The network stack does not try to defend against:
 
 - [Networking overview](/networking/overview): policies, ports, reaching the host
 - [DNS](/networking/dns): interception and the controls that ride on it
-- [TLS interception](/networking/tls): plaintext visibility for per-host policy and secret injection
+- [TLS MITM](/networking/tls): plaintext visibility for per-host policy and secret injection
 - [Secret handling](/security/secrets): how the same DNS and SNI machinery gates credential injection

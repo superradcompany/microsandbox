@@ -1,0 +1,123 @@
+---
+title: Codex CLI
+sidebarTitle: Codex
+description: Run OpenAI Codex CLI against a project on your host
+icon: "/images/recipes/agents/codex.svg"
+---
+
+This example installs a pinned Codex CLI release inside a Node.js microVM and opens it in a project mounted from your host. Codex can work directly in the checkout, while its executable, authentication, configuration, and sessions stay inside the sandbox.
+
+## Run Codex CLI
+
+<Steps>
+<Step title="Start Codex">
+
+<Tooltip tip="Writable host-directory mounts are local-only. On microsandbox cloud, use the isolated-copy alternative and omit replace-on-create."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+Replace `./my-project` with the project directory you want Codex to work on:
+
+<CodeGroup>
+```sh macOS & Linux
+msb run -t --name codex-demo --replace \
+  --cpus 2 --memory 2G --root-disk 4G \
+  --mount-dir ./my-project:/workspace:rw \
+  --workdir /workspace \
+  node:24-bookworm-slim -- sh -lc '
+    apt-get update &&
+    apt-get install -y --no-install-recommends ca-certificates git &&
+    npm install -g @openai/codex@0.148.0 &&
+    exec codex
+  '
+```
+
+```powershell Windows
+msb run -t --name codex-demo --replace `
+  --cpus 2 --memory 2G --root-disk 4G `
+  --mount-dir ./my-project:/workspace:rw `
+  --workdir /workspace `
+  node:24-bookworm-slim -- sh -lc '
+    apt-get update &&
+    apt-get install -y --no-install-recommends ca-certificates git &&
+    npm install -g @openai/codex@0.148.0 &&
+    exec codex
+  '
+```
+</CodeGroup>
+
+On first launch, choose Sign in with ChatGPT, Sign in with Device Code, or provide an API key. Browser-based sign-in happens on your host while the resulting Codex credentials are stored on the sandbox's root disk.
+
+<Tip>
+  For an isolated workspace, or when using microsandbox cloud, replace `--mount-dir ./my-project:/workspace:rw` with `--copy-dir ./my-project:/workspace`.
+</Tip>
+
+</Step>
+
+<Step title="Start another session">
+
+After leaving Codex, return to the same sandbox and workspace with:
+
+```sh
+msb exec -t codex-demo -- codex
+```
+
+The sandbox root disk retains the files under `/root/.codex`, including authentication, configuration, and session history.
+
+</Step>
+
+<Step title="Verify the installation">
+
+Exit the TUI and run:
+
+```sh
+msb exec codex-demo -- codex --version
+```
+
+The pinned example prints `codex-cli 0.148.0`.
+
+</Step>
+
+<Step title="Review or export changes">
+
+With the default writable mount, changes are already in the host checkout. Review them inside the sandbox:
+
+```sh
+msb exec codex-demo -- sh -lc 'cd /workspace && git status --short && git diff --stat && git diff'
+```
+
+If you chose the isolated `--copy-dir` alternative, create a patch inside the sandbox:
+
+```sh
+msb exec codex-demo -- sh -lc 'cd /workspace && git add -N . && git diff --binary > /tmp/codex.patch'
+```
+
+Copy the patch to the host:
+
+```sh
+msb cp codex-demo:/tmp/codex.patch ./codex.patch
+```
+
+Check that it applies cleanly before applying it:
+
+```sh
+git apply --check ./codex.patch
+```
+
+</Step>
+
+<Step title="Clean up">
+
+Remove the sandbox:
+
+```sh
+msb rm -f codex-demo
+```
+
+Removing the sandbox also removes its Codex credentials, configuration, and sessions. Changes made through the default workspace mount remain in the host checkout.
+
+</Step>
+</Steps>
+
+## Reference
+
+- [Codex CLI](https://developers.openai.com/codex/cli/)
+- [Codex CLI repository](https://github.com/openai/codex)

@@ -1,0 +1,309 @@
+---
+title: Mount S3 with JuiceFS
+sidebarTitle: S3 with JuiceFS
+description: Mount an S3-backed JuiceFS filesystem and verify persistent file operations inside a sandbox
+icon: "cloud"
+---
+
+<Tooltip tip="This workflow needs the default guest security profile because FUSE mounts require mount administration. A backend that enforces the restricted profile cannot run it."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+This example mounts an Amazon S3 or S3-compatible bucket as a POSIX filesystem inside a microsandbox, exercises common file operations, and verifies a cold read after remounting with an empty cache.
+
+JuiceFS stores file data as objects in S3 and keeps filesystem metadata in a separate database. This single-sandbox example keeps SQLite metadata on the sandbox's root disk. Use a shared metadata engine such as Redis or PostgreSQL when multiple clients need to mount the same filesystem or when the metadata must outlive the sandbox.
+
+## Create the S3-backed filesystem
+
+<Steps>
+<Step title="Prepare S3 credentials">
+
+Create credentials with read, write, list, and delete access scoped to the bucket you want JuiceFS to use. Set the full bucket URL, access key ID, and secret access key in your host shell, then write only those values to a temporary file. The bucket URL can point to Amazon S3 or an S3-compatible provider such as Cloudflare R2 or MinIO.
+
+<CodeGroup>
+```sh macOS & Linux
+export S3_BUCKET_URL="https://your-bucket.s3.us-east-1.amazonaws.com"
+export S3_ACCESS_KEY_ID="your-access-key-id"
+export S3_SECRET_ACCESS_KEY="your-secret-access-key"
+
+umask 077
+printf 'S3_BUCKET_URL=%s\nACCESS_KEY=%s\nSECRET_KEY=%s\n' \
+  "$S3_BUCKET_URL" \
+  "$S3_ACCESS_KEY_ID" \
+  "$S3_SECRET_ACCESS_KEY" > juicefs-s3.env
+```
+
+```powershell Windows
+$env:S3_BUCKET_URL = 'https://your-bucket.s3.us-east-1.amazonaws.com'
+$env:S3_ACCESS_KEY_ID = 'your-access-key-id'
+$env:S3_SECRET_ACCESS_KEY = 'your-secret-access-key'
+
+$lines = @(
+  "S3_BUCKET_URL=$env:S3_BUCKET_URL"
+  "ACCESS_KEY=$env:S3_ACCESS_KEY_ID"
+  "SECRET_KEY=$env:S3_SECRET_ACCESS_KEY"
+)
+$encoding = New-Object System.Text.UTF8Encoding $false
+[System.IO.File]::WriteAllLines((Join-Path (Get-Location) 'juicefs-s3.env'), $lines, $encoding)
+```
+</CodeGroup>
+
+Do not commit `juicefs-s3.env`. The sandbox receives the filtered file instead of your complete host environment.
+
+</Step>
+
+<Step title="Create the helper scripts">
+
+Save the guest-side workflows as shell files on your host. Keeping them separate makes each later `msb exec` command a single, readable action.
+
+<div className="msb-accordion-group">
+  <AccordionGroup>
+    <Accordion title="mount-juicefs.sh">
+      ```sh mount-juicefs.sh
+      #!/bin/sh
+      set -eu
+
+      . /root/juicefs-s3.env
+      export ACCESS_KEY SECRET_KEY
+
+      volume_file=/var/lib/juicefs/volume-name
+      metadata_file=/var/lib/juicefs/metadata.db
+      metadata_url=sqlite3:///var/lib/juicefs/metadata.db
+
+      mkdir -p /var/lib/juicefs /mnt/juicefs
+
+      if [ -f "$volume_file" ]; then
+        volume="$(cat "$volume_file")"
+      else
+        volume="microsandbox-$(date +%Y%m%d%H%M%S)"
+        printf "%s\n" "$volume" > "$volume_file"
+      fi
+
+      if [ ! -f "$metadata_file" ]; then
+        juicefs format \
+          --storage s3 \
+          --bucket "$S3_BUCKET_URL" \
+          --trash-days 0 \
+          "$metadata_url" \
+          "$volume"
+      fi
+
+      if ! mountpoint -q /mnt/juicefs; then
+        juicefs mount \
+          --background \
+          --backup-meta 0 \
+          --cache-dir /var/cache/juicefs \
+          --log /tmp/juicefs.log \
+          "$metadata_url" \
+          /mnt/juicefs
+      fi
+
+      mountpoint /mnt/juicefs
+      printf "Object prefix: %s/\n" "$volume"
+      ```
+    </Accordion>
+    <Accordion title="test-juicefs.sh">
+      ```sh test-juicefs.sh
+      #!/bin/sh
+      set -eu
+
+      root=/mnt/juicefs/example
+      expected=$(printf "alpha\nbeta")
+      mkdir -p "$root/batch"
+
+      printf "alpha\n" > "$root/message.txt"
+      test "$(cat "$root/message.txt")" = "alpha"
+
+      printf "beta\n" >> "$root/message.txt"
+      test "$(cat "$root/message.txt")" = "$expected"
+
+      mv "$root/message.txt" "$root/renamed.txt"
+      ln "$root/renamed.txt" "$root/hardlink.txt"
+      ln -s renamed.txt "$root/symlink.txt"
+
+      dd if=/dev/urandom of="$root/payload.bin" bs=1M count=8 status=none
+      sha256sum "$root/payload.bin" > /var/lib/juicefs/payload.sha256
+
+      for number in 1 2 3 4; do
+        dd if=/dev/zero of="$root/batch/$number.bin" bs=1M count=1 status=none &
+      done
+      wait
+
+      test "$(find "$root/batch" -type f | wc -l)" -eq 4
+      test "$(cat "$root/hardlink.txt")" = "$expected"
+      test "$(cat "$root/symlink.txt")" = "$expected"
+      sync
+
+      printf "write=ok\nread=ok\nappend=ok\nrename=ok\nlinks=ok\nconcurrent_writes=ok\n"
+      ```
+    </Accordion>
+    <Accordion title="remount-juicefs.sh">
+      ```sh remount-juicefs.sh
+      #!/bin/sh
+      set -eu
+
+      metadata_url=sqlite3:///var/lib/juicefs/metadata.db
+
+      juicefs umount /mnt/juicefs
+      rm -rf /var/cache/juicefs
+      juicefs mount \
+        --background \
+        --backup-meta 0 \
+        --cache-dir /var/cache/juicefs-remount \
+        --log /tmp/juicefs-remount.log \
+        "$metadata_url" \
+        /mnt/juicefs
+
+      sha256sum --check /var/lib/juicefs/payload.sha256
+      ```
+    </Accordion>
+    <Accordion title="cleanup-juicefs.sh">
+      ```sh cleanup-juicefs.sh
+      #!/bin/sh
+      set -eu
+
+      rm -rf /mnt/juicefs/example
+      sync
+      juicefs umount /mnt/juicefs
+      printf "Delete the object prefix: %s/\n" "$(cat /var/lib/juicefs/volume-name)"
+      ```
+    </Accordion>
+  </AccordionGroup>
+</div>
+
+</Step>
+
+<Step title="Create the sandbox">
+
+Boot Ubuntu with a 6 GiB root disk for the JuiceFS client, metadata database, and local cache. Copy the filtered credentials and register each helper under a short command name:
+
+<CodeGroup>
+```sh macOS & Linux
+msb create ubuntu:24.04 \
+  --name juicefs-s3-demo \
+  --replace \
+  --cpus 2 \
+  --memory 2G \
+  --root-disk 6G \
+  --copy-file ./juicefs-s3.env:/root/juicefs-s3.env \
+  --script-path mount-juicefs:./mount-juicefs.sh \
+  --script-path test-juicefs:./test-juicefs.sh \
+  --script-path remount-juicefs:./remount-juicefs.sh \
+  --script-path cleanup-juicefs:./cleanup-juicefs.sh
+```
+
+```powershell Windows
+msb create ubuntu:24.04 `
+  --name juicefs-s3-demo `
+  --replace `
+  --cpus 2 `
+  --memory 2G `
+  --root-disk 6G `
+  --copy-file ./juicefs-s3.env:/root/juicefs-s3.env `
+  --script-path mount-juicefs:./mount-juicefs.sh `
+  --script-path test-juicefs:./test-juicefs.sh `
+  --script-path remount-juicefs:./remount-juicefs.sh `
+  --script-path cleanup-juicefs:./cleanup-juicefs.sh
+```
+</CodeGroup>
+
+The root disk keeps the metadata database when the sandbox stops and starts. Removing or replacing the sandbox removes that metadata, while the file data remains in S3.
+
+</Step>
+
+<Step title="Install and mount JuiceFS">
+
+Install FUSE and the official JuiceFS client:
+
+```sh
+msb exec juicefs-s3-demo -- sh -lc '
+  apt-get update -qq &&
+  apt-get install -y -qq ca-certificates curl fuse3 &&
+  curl -fsSL https://d.juicefs.com/install | sh -
+'
+```
+
+Format a new JuiceFS volume the first time this sandbox is used, then mount it at `/mnt/juicefs`:
+
+```sh
+msb exec juicefs-s3-demo -- mount-juicefs
+```
+
+`--backup-meta 0` keeps this single-sandbox example's metadata lifecycle explicit. It is also required when the S3-compatible provider is Cloudflare R2 because JuiceFS metadata backup relies on object-listing behavior that R2 does not provide.
+
+</Step>
+
+<Step title="Test file operations">
+
+Create, read, append, rename, link, and concurrently write files through the mount. The script also saves the checksum of an 8 MiB payload for the remount test:
+
+```sh
+msb exec juicefs-s3-demo -- test-juicefs
+```
+
+All six checks should print `ok`.
+
+</Step>
+
+<Step title="Verify a cold remount">
+
+Unmount JuiceFS, clear its local cache, mount it again, and verify the payload against the saved checksum:
+
+```sh
+msb exec juicefs-s3-demo -- remount-juicefs
+```
+
+The checksum should report `/mnt/juicefs/example/payload.bin: OK`. Because the first cache was removed before remounting, this read verifies data persisted to S3 rather than only to the guest cache.
+
+</Step>
+
+<Step title="Clean up or keep the filesystem">
+
+To retain the filesystem, stop and keep the sandbox together with the object prefix printed during mounting. The SQLite metadata on its root disk is required to interpret the objects in S3.
+
+To remove the example, delete its files through JuiceFS and unmount it first:
+
+```sh
+msb exec juicefs-s3-demo -- cleanup-juicefs
+```
+
+Delete that exact prefix from the bucket with your provider's console or S3 client, then remove the sandbox:
+
+```sh
+msb rm -f juicefs-s3-demo
+```
+
+Finally, remove the temporary credential file and clear its variables from the host shell:
+
+<CodeGroup>
+```sh macOS & Linux
+rm -f juicefs-s3.env \
+  mount-juicefs.sh test-juicefs.sh \
+  remount-juicefs.sh cleanup-juicefs.sh
+unset S3_BUCKET_URL S3_ACCESS_KEY_ID S3_SECRET_ACCESS_KEY
+```
+
+```powershell Windows
+Remove-Item juicefs-s3.env, mount-juicefs.sh, `
+  test-juicefs.sh, remount-juicefs.sh, cleanup-juicefs.sh
+Remove-Item Env:S3_BUCKET_URL, Env:S3_ACCESS_KEY_ID, Env:S3_SECRET_ACCESS_KEY
+```
+</CodeGroup>
+
+<Warning>
+  On Cloudflare R2, do not substitute `juicefs destroy` for the prefix deletion. JuiceFS documents `destroy`, `gc`, `fsck`, and `sync` as incompatible with R2's object-listing behavior. Check your provider's compatibility before using object-listing-dependent maintenance commands.
+</Warning>
+
+</Step>
+</Steps>
+
+## Production considerations
+
+- Replace SQLite with Redis, PostgreSQL, or another shared metadata engine before mounting the filesystem from multiple sandboxes.
+- Scope the S3 credentials to the target bucket and grant only the object operations JuiceFS needs.
+- Persist the metadata engine independently from the sandbox. S3 objects are not enough to reconstruct the complete filesystem namespace without metadata.
+- Configure metadata backups for your provider. Keep `--backup-meta 0` on R2 mounts and operate an explicit metadata backup process outside the R2 bucket.
+
+## References
+
+- [JuiceFS: object storage](https://juicefs.com/docs/community/reference/how_to_set_up_object_storage/)
+- [JuiceFS: Cloudflare R2 compatibility](https://juicefs.com/docs/community/reference/how_to_set_up_object_storage/#cloudflare-r2)
+- [JuiceFS: metadata engines](https://juicefs.com/docs/community/databases_for_metadata/)

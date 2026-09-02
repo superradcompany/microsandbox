@@ -48,7 +48,7 @@ If both checks pass, continue with the example. If either fails, the Docker envi
 
 If Docker rejects the device mapping or `msb doctor` reports that `/dev/kvm` is missing, consult the relevant setup guide:
 
-- **Linux Docker Engine:** Follow the [`/dev/kvm` setup and permission checks](/troubleshooting/linux#missing-devkvm).
+- **Linux Docker Engine:** Follow the [`/dev/kvm` setup and permission checks](/troubleshooting/linux#missing-/dev/kvm).
 - **Docker Desktop:** Review the [Mac virtual machine manager](https://docs.docker.com/desktop/features/vmm/) or [Windows backend](https://docs.docker.com/desktop/setup/install/windows-install/) documentation. Hardware virtualization on the physical machine does not by itself make `/dev/kvm` available to containers.
 - **Docker Desktop inside another VM or VDI:** Follow Docker's [nested-virtualization guide](https://docs.docker.com/desktop/setup/vm-vdi/).
 

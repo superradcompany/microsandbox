@@ -1,6 +1,7 @@
 ---
 title: Snapshots
 description: Rust SDK - Snapshot API reference
+keywords: ["Rust SDK", "Rust snapshots", "microsandbox snapshots"]
 ---
 
 <Tooltip tip="Snapshot creation, restore, import, and export use local disk artifacts and are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
@@ -15,7 +16,7 @@ Create and manage disk-only snapshots of stopped sandboxes. See [Snapshots](/san
 fn builder(name: impl Into<String>) -> SnapshotBuilder
 ```
 
-Start configuring a new snapshot named `name`, resolved under the default snapshots directory (`~/.microsandbox/snapshots/<name>/`) or under [`dest_dir()`](#dest_dir) when set. The source sandbox is set with [`from_sandbox()`](#from_sandbox), which is required; the other setters cover labels and whether to record content integrity before capturing. See [`SnapshotBuilder`](#snapshotbuilder) for all options.
+Start configuring a new snapshot named `name`, resolved under the default snapshots directory (`~/.microsandbox/snapshots/<name>/`) or under [`dest_dir()`](#snapshot_builder-dest_dir) when set. The source sandbox is set with [`from_sandbox()`](#snapshot_builder-from_sandbox), which is required; the other setters cover labels and whether to record content integrity before capturing. See [`SnapshotBuilder`](#snapshotbuilder) for all options.
 
 <p className="msb-label">Parameters</p>
 
@@ -54,7 +55,7 @@ let snap = Snapshot::builder("baseline")
 async fn create(config: SnapshotConfig) -> MicrosandboxResult<Snapshot>
 ```
 
-Create a snapshot artifact from a stopped sandbox. Writes the `snapshot.json` descriptor and the captured `upper.ext4` into the artifact directory atomically (the descriptor is renamed into place last), then best-effort upserts a row into the local index. Index failures are logged but do not fail the call; the artifact is the source of truth. Most callers use the [builder](#snapshotbuilder)'s [`create()`](#create) instead of constructing a [`SnapshotConfig`](#snapshotconfig) by hand.
+Create a snapshot artifact from a stopped sandbox. Writes the `snapshot.json` descriptor and the captured `upper.ext4` into the artifact directory atomically (the descriptor is renamed into place last), then best-effort upserts a row into the local index. Index failures are logged but do not fail the call; the artifact is the source of truth. Most callers use the [builder](#snapshotbuilder)'s [`create()`](#snapshot_builder-create) instead of constructing a [`SnapshotConfig`](#snapshotconfig) by hand.
 
 <p className="msb-label">Parameters</p>
 
@@ -382,7 +383,7 @@ println!("loaded {}", h.digest());
 
 ---
 
-<p className="msb-member-group">Instance methods</p>
+<p className="msb-member-group" id="instance-methods">Instance methods</p>
 
 Methods on an opened [`Snapshot`](#snapshotopen) artifact.
 
@@ -663,7 +664,7 @@ let sb = Sandbox::builder("api-restored")
 
 </Accordion>
 
-`SandboxBuilder` setter. Boot a fresh sandbox from a snapshot artifact. The snapshot already pins the image reference and digest, so this is mutually exclusive with [`image()`](/sdk/rust/sandbox#image) and [`image_with()`](/sdk/rust/sandbox#image_with). The artifact is structurally opened at [`create()`](/sdk/rust/sandbox#create) time; persistent payload integrity is checked only through explicit [`Snapshot::verify()`](#snap-verify).
+`SandboxBuilder` setter. Boot a fresh sandbox from a snapshot artifact. The snapshot already pins the image reference and digest, so this is mutually exclusive with [`image()`](/sdk/rust/sandbox#sandbox-image) and [`image_with()`](/sdk/rust/sandbox#sandbox-image_with). The artifact is structurally opened at [`create()`](/sdk/rust/sandbox#sandbox-create) time; persistent payload integrity is checked only through explicit [`Snapshot::verify()`](#snap-verify).
 
 <p className="msb-label">Parameters</p>
 
@@ -733,7 +734,7 @@ Builder for snapshot configuration.
 fn from_sandbox(self, source_sandbox: impl Into<String>) -> Self
 ```
 
-Set the sandbox to capture. Required; [`build()`](#build) and [`create()`](#create) fail without it.
+Set the sandbox to capture. Required; [`build()`](#snapshot_builder-build) and [`create()`](#snapshot_builder-create) fail without it.
 
 <p className="msb-label">Parameters</p>
 
@@ -810,7 +811,7 @@ Compute and record sparse-aware BLAKE3 Merkle integrity during creation. [`verif
 fn resumable(self) -> Self
 ```
 
-Request a resumable snapshot (disk plus VM state). Accepted by the builder, but [`create()`](#create) currently fails with `Unsupported`; resumable snapshots have not landed yet.
+Request a resumable snapshot (disk plus VM state). Accepted by the builder, but [`create()`](#snapshot_builder-create) currently fails with `Unsupported`; resumable snapshots have not landed yet.
 
 #### <span className="msb-recv">snapshot_builder.</span><span className="msb-hn">build()</span>
 
@@ -818,7 +819,7 @@ Request a resumable snapshot (disk plus VM state). Accepted by the builder, but 
 fn build(self) -> MicrosandboxResult<SnapshotConfig>
 ```
 
-Materialize the [`SnapshotConfig`](#snapshotconfig) without creating the snapshot. Errors with `InvalidConfig` if [`from_sandbox`](#from_sandbox) was not called. For capturing, use [`create`](#create) instead; it calls `build` internally.
+Materialize the [`SnapshotConfig`](#snapshotconfig) without creating the snapshot. Errors with `InvalidConfig` if [`from_sandbox`](#snapshot_builder-from_sandbox) was not called. For capturing, use [`create`](#snapshot_builder-create) instead; it calls `build` internally.
 
 <p className="msb-label">Returns</p>
 
@@ -850,7 +851,7 @@ Build and execute the snapshot in one step. Equivalent to [`Snapshot::create(sel
 
 ### SnapshotConfig
 
-<p className="msb-backref">Used by <a href="#snapshotcreate">Snapshot::create()</a> · returned by <a href="#build">build()</a></p>
+<p className="msb-backref">Used by <a href="#snapshotcreate">Snapshot::create()</a> · returned by <a href="#snapshot_builder-build">build()</a></p>
 
 Inputs to create a snapshot. A type alias for `SnapshotSpec`. Usually built via [`SnapshotBuilder`](#snapshotbuilder) rather than constructed directly.
 
@@ -974,8 +975,6 @@ Captured upper-layer file metadata. Re-exported as `microsandbox::snapshot::Uppe
 
 Content integrity descriptor for the captured upper layer.
 
-| Field | Type | Description |
-|-------|------|-------------|
 | Variant | Serialized algorithm | Fields | Purpose |
 |---------|----------------------|--------|---------|
 | `Sha256` | `sha256` | `digest` | Exact released compatibility |

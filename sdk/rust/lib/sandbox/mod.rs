@@ -118,8 +118,6 @@ pub use metrics::{
 };
 pub use microsandbox_image::{PullProgress, PullProgressHandle};
 #[cfg(feature = "net")]
-pub use microsandbox_network::OutboundProxy;
-#[cfg(feature = "net")]
 pub use microsandbox_network::builder::SecretBuilder;
 #[cfg(feature = "net")]
 pub use microsandbox_network::config::{NetworkConfig, PublishedPort};
@@ -129,6 +127,8 @@ pub use microsandbox_network::dns::Nameserver;
 pub use microsandbox_network::policy::{
     Action as NetworkAction, NetworkPolicy, NetworkProfile, Rule as NetworkRule,
 };
+#[cfg(feature = "net")]
+pub use microsandbox_network::{OutboundProxy, Socks5Credentials};
 pub use microsandbox_runtime::logging::LogLevel;
 pub use microsandbox_types::{CpuPlacement, PullPolicy};
 #[cfg(feature = "net")]

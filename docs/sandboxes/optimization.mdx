@@ -36,22 +36,110 @@ msb create python:3.12 --name worker --root-disk flat:8G,clone=auto
 
 `clone=auto` uses a native copy-on-write clone when available and falls back to a sparse copy. Use the layered root when image layer sharing or maximum portability matters more.
 
-See [OCI images](/images/overview) for image behavior and [Bootstrap](/sandboxes/bootstrap#flat-oci-rootfs) for flat root details.
+See [OCI images](/images/overview#oci-images) for image behavior and [Bootstrap](/sandboxes/bootstrap#flat-oci-rootfs) for flat root details.
 
 ## CPU placement
 
-CPU placement controls where vCPU threads run on Linux and Windows.
+By default, sandbox vCPU threads follow the host scheduler. On Linux and Windows, microsandbox can place those threads for you.
 
-| Policy | Best starting point for |
+### Choose a policy
+
+| Policy | What it does |
 | --- | --- |
-| `inherit` | External schedulers and macOS |
-| `auto` | General use on a dedicated host |
-| `spread` | Throughput across physical cores |
-| `compact` | Cache locality and host packing |
+| `inherit` | Leaves placement to the host scheduler. This is the default. |
+| `auto` | Uses available physical cores first, then shares CPUs when needed. |
+| `spread` | Spreads work across physical cores. |
+| `compact` | Keeps work on fewer physical cores for better cache locality. |
 
-These policies coordinate sandboxes that share the same `MSB_HOME`. They do not reserve physical cores or isolate other host processes.
+Start with `auto` on a dedicated host. Use `spread` for CPU-heavy throughput work. Use `compact` when cache locality or packing more sandboxes onto a host matters most.
 
-See [CPU placement](/sandboxes/cpu-placement) for setup and limits.
+<CodeGroup>
+```bash CLI
+msb create python:3.12 --name worker --cpus 2 --cpu-placement spread
+```
+
+```typescript TypeScript
+import { Sandbox } from "microsandbox";
+
+await using sb = await Sandbox.builder("worker")
+  .image("python:3.12")
+  .cpus(2)
+  .cpuPlacement("spread")
+  .create();
+```
+
+```rust Rust
+use microsandbox::sandbox::{CpuPlacement, Sandbox};
+
+let sb = Sandbox::builder("worker")
+    .image("python:3.12")
+    .cpus(2)
+    .cpu_placement(CpuPlacement::Spread)
+    .create()
+    .await?;
+```
+
+```python Python
+from microsandbox import CpuPlacement, Sandbox
+
+sb = await Sandbox.create(
+    "worker",
+    image="python:3.12",
+    cpus=2,
+    cpu_placement=CpuPlacement.SPREAD,
+)
+```
+
+```go Go
+sb, err := m.CreateSandbox(ctx, "worker",
+    m.WithImage("python:3.12"),
+    m.WithCPUs(2),
+    m.WithCPUPlacement(m.CPUPlacementSpread),
+)
+```
+</CodeGroup>
+
+### Keep CPU and memory on one NUMA node
+
+Large hosts can have more than one NUMA node. A placement profile can keep a sandbox's CPU and memory on the same node.
+
+First, define a named profile in the [global config](/configuration):
+
+```json
+{
+  "runtime": {
+    "placement_profiles": {
+      "latency": {
+        "numa": { "mode": "prefer_single" },
+        "memory": { "mode": "follow_cpu" }
+      }
+    }
+  }
+}
+```
+
+Then select it when you create the sandbox:
+
+```bash
+msb create python:3.12 \
+  --name worker \
+  --cpus 2 \
+  --cpu-placement auto \
+  --placement-profile latency
+```
+
+`prefer_single` uses one node when enough CPU and memory are available. Otherwise, it falls back to normal placement. Use `strict_single` when the sandbox should fail instead of falling back.
+
+### What placement guarantees
+
+- microsandbox coordinates only sandboxes that share the same `MSB_HOME`.
+- Placement considers the sandbox's maximum CPU count, not only the CPUs online at boot.
+- When exclusive CPU capacity runs out, normal policies may share logical CPUs.
+- Placement does not isolate unrelated host processes or reserve dedicated cores.
+- On macOS, managed policies fall back to `inherit` because hard CPU affinity is not available through a public API.
+- If placement cannot be applied, normal policies fall back to `inherit`. A `strict_single` profile fails instead.
+
+Use `msb inspect worker` to see the resolved policy and placement result.
 
 ## Transparent huge pages
 
@@ -83,7 +171,7 @@ Check their status with `msb doctor`. Read [Linux troubleshooting](/troubleshoot
 
 ## Optimizations that are not knobs
 
-Microsandbox automatically selects compatible filesystem, guest kernel, interrupt, and vCPU affinity optimizations. These implementation details do not have user-facing settings.
+microsandbox automatically selects compatible filesystem, guest kernel, interrupt, and vCPU affinity optimizations. These implementation details do not have user-facing settings.
 
 ## Measure the result
 

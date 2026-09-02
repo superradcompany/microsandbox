@@ -1,6 +1,7 @@
 ---
 title: Execution
 description: Python SDK - Command execution API reference
+keywords: ["Python SDK", "Python execution", "microsandbox execution"]
 ---
 
 Run commands inside a running sandbox. See [Commands](/sandboxes/commands) for usage examples.
@@ -40,7 +41,7 @@ print(out.exit_code)  # 0
 
 </Accordion>
 
-Run a command inside the sandbox and wait for it to complete, buffering all stdout and stderr into memory. The keyword-only options apply to this call alone and don't change the sandbox's defaults. For long-running processes or large output, use [`exec_stream()`](#sandbox-exec_stream) instead. Raises [`ExecTimeoutError`](/sdk/python/sandbox) if `timeout` elapses and [`ExecFailedError`](/sdk/python/sandbox) if the process can't be spawned.
+Run a command inside the sandbox and wait for it to complete, buffering all stdout and stderr into memory. The keyword-only options apply to this call alone and don't change the sandbox's defaults. For long-running processes or large output, use [`exec_stream()`](#sandbox-exec_stream) instead. Raises [`ExecTimeoutError`](/sdk/errors) if `timeout` elapses and `MicrosandboxError` if the process can't be spawned.
 
 <p className="msb-label">Parameters</p>
 

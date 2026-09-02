@@ -404,11 +404,19 @@ func buildFFIOutboundProxy(proxy *OutboundProxy) *ffi.OutboundProxyOptions {
 	if proxy == nil {
 		return nil
 	}
-	return &ffi.OutboundProxyOptions{
+	result := &ffi.OutboundProxyOptions{
 		Protocol: proxy.protocol,
 		Address:  proxy.address,
 		UserID:   proxy.userID,
 	}
+	if proxy.hasCredentials {
+		result.Username = &proxy.username
+		result.PasswordSource = &ffi.SecretSourceOptions{
+			Kind: proxy.password.kind,
+			Var:  proxy.password.varName,
+		}
+	}
+	return result
 }
 
 func buildFFINetworkRateLimiter(l *NetworkRateLimiterConfig) *ffi.NetworkRateLimiterOptions {

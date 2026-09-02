@@ -1,6 +1,7 @@
 ---
 title: Networking
 description: Go SDK - Network API reference
+keywords: ["Go SDK", "Go networking", "microsandbox networking"]
 ---
 
 Configure a sandbox's network stack: a first-match-wins egress/ingress policy, published ports, DNS interception, TLS interception, and secret-violation handling. See [Networking](/networking/overview) for the conceptual overview and [TLS Interception](/networking/tls) for proxy details.
@@ -42,7 +43,7 @@ Set the network configuration for the sandbox. Pass a profile policy from the [`
 <div className="msb-params">
   <div className="msb-param">
     <div className="msb-param-key"><span className="msb-type">SandboxOption</span></div>
-    <div className="msb-param-desc">Option to pass to <a className="msb-type" href="/sdk/go/sandbox#createsandbox">CreateSandbox</a>.</div>
+    <div className="msb-param-desc">Option to pass to <a className="msb-type" href="/sdk/go/sandbox#m-createsandbox">CreateSandbox</a>.</div>
   </div>
 </div>
 
@@ -79,7 +80,7 @@ Make TCP services running in the sandbox reachable on localhost ports on the hos
 <div className="msb-params">
   <div className="msb-param">
     <div className="msb-param-key"><span className="msb-type">SandboxOption</span></div>
-    <div className="msb-param-desc">Option to pass to <a className="msb-type" href="/sdk/go/sandbox#createsandbox">CreateSandbox</a>.</div>
+    <div className="msb-param-desc">Option to pass to <a className="msb-type" href="/sdk/go/sandbox#m-createsandbox">CreateSandbox</a>.</div>
   </div>
 </div>
 
@@ -116,7 +117,7 @@ Make UDP services running in the sandbox reachable on localhost ports on the hos
 <div className="msb-params">
   <div className="msb-param">
     <div className="msb-param-key"><span className="msb-type">SandboxOption</span></div>
-    <div className="msb-param-desc">Option to pass to <a className="msb-type" href="/sdk/go/sandbox#createsandbox">CreateSandbox</a>.</div>
+    <div className="msb-param-desc">Option to pass to <a className="msb-type" href="/sdk/go/sandbox#m-createsandbox">CreateSandbox</a>.</div>
   </div>
 </div>
 
@@ -156,7 +157,7 @@ Make services running in the sandbox reachable on explicit host addresses and po
 <div className="msb-params">
   <div className="msb-param">
     <div className="msb-param-key"><span className="msb-type">SandboxOption</span></div>
-    <div className="msb-param-desc">Option to pass to <a className="msb-type" href="/sdk/go/sandbox#createsandbox">CreateSandbox</a>.</div>
+    <div className="msb-param-desc">Option to pass to <a className="msb-type" href="/sdk/go/sandbox#m-createsandbox">CreateSandbox</a>.</div>
   </div>
 </div>
 
@@ -340,7 +341,7 @@ sb, err := m.CreateSandbox(ctx, "ci-runner",
 
 ## Constants
 
-<p className="msb-member-group">Destination groups</p>
+<p className="msb-member-group" id="destination-groups">Destination groups</p>
 
 <p className="msb-backref">Used by <a href="#policyrule">PolicyRule.Destination</a></p>
 
@@ -402,7 +403,7 @@ The full network stack configuration passed via [`WithNetwork`](#m-withnetwork).
 | IPv6Pool | `string` | Pool used to derive per-sandbox `/64` guest prefixes. Defaults to `fd42:6d73:62::/48` |
 | MaxConnections | `*uint` | Cap on concurrent network connections from the sandbox |
 | RateLimiter | [`*NetworkRateLimiterConfig`](#networkratelimiterconfig) | Rate limits grouped by direction. `nil` means unlimited |
-| OnSecretViolation | [`ViolationAction`](/sdk/go/secrets#violationaction) | Sandbox-wide action when a secret is sent to a disallowed host. Per-secret overrides via `SecretEntry.OnViolation` |
+| OnSecretViolation | [`ViolationAction`](/sdk/go/secrets#violationactionstring-enum) | Sandbox-wide action when a secret is sent to a disallowed host. Per-secret overrides via `SecretEntry.OnViolation` |
 | TrustHostCAs | `*bool` | Ship the host's extra CA bundles into the guest. Opt-in for corporate MITM proxies whose gateway CA is unknown to the guest's stock bundle |
 | HTTPDenyMessage | `string` | Body for the `403 Forbidden` the gateway returns on denied HTTP/HTTPS. `{host}` is substituted. Empty uses the default agent-facing message |
 
@@ -705,7 +706,7 @@ The protocol half of a [`PolicyRule`](#policyrule).
 type NetworkProfile string
 ```
 
-Composable profile names accepted by [`NetworkPolicy.FromProfiles()`](#networkpolicyfromprofiles).
+Composable profile names accepted by [`NetworkPolicy.FromProfiles()`](#networkpolicy-fromprofiles).
 
 | Constant | Value | Description |
 |----------|-------|-------------|

@@ -24,8 +24,10 @@ use tokio::io::Interest;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
+use crate::dns::forwarder::DnsForwarderHandle;
 use crate::icmp::error::{construct_packet_too_big, ethernet_ip_payload};
 use crate::netstack::shared::SharedState;
+use crate::proxy::ResolvedOutboundProxy;
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -52,7 +54,10 @@ const MAX_IPV4_UDP_PAYLOAD_LEN: usize = 65_507;
 /// Maximum UDP payload carried by a non-jumbo IPv6 packet.
 const MAX_IPV6_UDP_PAYLOAD_LEN: usize = 65_527;
 
-/// Buffer size for receiving responses from the real server.
+/// Buffer size for receiving a complete outer UDP datagram.
+///
+/// A SOCKS5 header is part of that outer datagram, so the protocol's maximum
+/// UDP payload size already includes it and requires no additional capacity.
 const RECV_BUF_SIZE: usize = MAX_IPV6_UDP_PAYLOAD_LEN;
 
 /// Ethernet header length.
@@ -95,6 +100,14 @@ pub struct UdpRelay {
     guest_mac: EthernetAddress,
     mtu: usize,
     tokio_handle: tokio::runtime::Handle,
+    outbound_proxy: Option<Arc<ResolvedOutboundProxy>>,
+    dns_forwarder: Option<DnsForwarderHandle>,
+}
+
+/// Upstream transport selected for a UDP relay session.
+enum UdpUpstream {
+    Direct,
+    Socks5(Arc<ResolvedOutboundProxy>),
 }
 
 /// A single UDP relay session.
@@ -137,12 +150,14 @@ impl UdpRelay {
     /// * `guest_mac` - MAC address stamped as the destination on synthesized response frames.
     /// * `mtu` - Guest IP-level MTU. Large UDP replies are fragmented to fit it.
     /// * `tokio_handle` - Runtime the per-session relay tasks are spawned on.
+    /// * `outbound_proxy` - Optional proxy used for external UDP sessions.
     pub fn new(
         shared: Arc<SharedState>,
         gateway_mac: [u8; 6],
         guest_mac: [u8; 6],
         mtu: usize,
         tokio_handle: tokio::runtime::Handle,
+        outbound_proxy: Option<Arc<ResolvedOutboundProxy>>,
     ) -> Self {
         Self {
             shared,
@@ -151,7 +166,14 @@ impl UdpRelay {
             guest_mac: EthernetAddress(guest_mac),
             mtu,
             tokio_handle,
+            outbound_proxy,
+            dns_forwarder: None,
         }
+    }
+
+    /// Attaches the policy-aware resolver used for domain-form SOCKS5 relay addresses.
+    pub(crate) fn attach_dns_forwarder(&mut self, dns_forwarder: DnsForwarderHandle) {
+        self.dns_forwarder = Some(dns_forwarder);
     }
 
     /// Relay an outbound UDP datagram from the guest.
@@ -287,6 +309,8 @@ impl UdpRelay {
         guest_dst: SocketAddr,
         host_dst: SocketAddr,
     ) -> Option<UdpSession> {
+        let upstream = self.select_upstream(guest_src, guest_dst, host_dst)?;
+
         let (outbound_tx, outbound_rx) = mpsc::channel(OUTBOUND_CHANNEL_CAPACITY);
         let queued_bytes = Arc::new(AtomicUsize::new(0));
 
@@ -294,22 +318,42 @@ impl UdpRelay {
         let gateway_mac = self.gateway_mac;
         let guest_mac = self.guest_mac;
         let mtu = self.mtu;
+        let dns_forwarder = self.dns_forwarder.clone();
         let task_queued_bytes = queued_bytes.clone();
-
         self.tokio_handle.spawn(async move {
-            if let Err(e) = udp_relay_task(
-                outbound_rx,
-                task_queued_bytes,
-                guest_src,
-                guest_dst,
-                host_dst,
-                shared,
-                gateway_mac,
-                guest_mac,
-                mtu,
-            )
-            .await
-            {
+            let result = match upstream {
+                UdpUpstream::Socks5(outbound_proxy) => {
+                    Self::relay_socks5_session(
+                        outbound_rx,
+                        task_queued_bytes,
+                        guest_src,
+                        guest_dst,
+                        host_dst,
+                        shared,
+                        gateway_mac,
+                        guest_mac,
+                        mtu,
+                        outbound_proxy,
+                        dns_forwarder,
+                    )
+                    .await
+                }
+                UdpUpstream::Direct => {
+                    Self::relay_direct_session(
+                        outbound_rx,
+                        task_queued_bytes,
+                        guest_src,
+                        guest_dst,
+                        host_dst,
+                        shared,
+                        gateway_mac,
+                        guest_mac,
+                        mtu,
+                    )
+                    .await
+                }
+            };
+            if let Err(e) = result {
                 tracing::debug!(
                     guest_src = %guest_src,
                     guest_dst = %guest_dst,
@@ -324,6 +368,33 @@ impl UdpRelay {
             queued_bytes,
             last_active: Instant::now(),
         })
+    }
+
+    /// Select the upstream transport for a UDP relay session.
+    fn select_upstream(
+        &self,
+        guest_src: SocketAddr,
+        guest_dst: SocketAddr,
+        host_dst: SocketAddr,
+    ) -> Option<UdpUpstream> {
+        match ResolvedOutboundProxy::select_for_destination(
+            &self.outbound_proxy,
+            guest_dst,
+            host_dst,
+        ) {
+            None => Some(UdpUpstream::Direct),
+            Some(proxy) => match proxy.as_ref() {
+                ResolvedOutboundProxy::Socks5 { .. } => Some(UdpUpstream::Socks5(proxy)),
+                ResolvedOutboundProxy::Socks4 { .. } => {
+                    tracing::debug!(
+                        guest_src = %guest_src,
+                        guest_dst = %guest_dst,
+                        "UDP relay dropped datagram because SOCKS4 has no UDP transport",
+                    );
+                    None
+                }
+            },
+        }
     }
 }
 
@@ -357,165 +428,263 @@ impl UdpSession {
 }
 
 //--------------------------------------------------------------------------------------------------
-// Functions
+// Methods: Relay Tasks
 //--------------------------------------------------------------------------------------------------
 
-/// Per-session UDP relay loop: forwards guest datagrams to a host socket, stamps the replies
-/// back into frames the guest accepts, and exits on idle timeout or channel close.
-///
-/// Binds an ephemeral host UDP socket in the address family of `host_dst` and `connect()`s it
-/// to that peer. The `connect` restricts the socket to that peer's datagrams, which both sets
-/// the default send target and filters spoofed inbound traffic. Responses are wrapped in a
-/// synthesised ethernet frame (src IP = `guest_dst`, dst = `guest_src`) and pushed into
-/// `rx_ring`.
-///
-/// # Arguments
-///
-/// * `outbound_rx` - Receives UDP payloads from the poll-loop side. Channel close signals
-///   session drop.
-/// * `guest_src` - Guest source address; stamped as the destination on reply frames.
-/// * `guest_dst` - Destination the guest wrote on the datagram. Stamped as the source IP on
-///   reply frames so the guest sees replies from the same address it dialed.
-/// * `host_dst` - Address the host socket connects to. Equal to `guest_dst` for external
-///   destinations; rewritten to loopback by [`crate::netstack::poll::resolve_host_dst`] when the guest
-///   addressed the gateway.
-/// * `shared` - Shared state; reply frames go into `rx_ring` and wake the poll thread.
-/// * `gateway_mac` - Source MAC on reply frames (guest sees replies from the gateway's MAC).
-/// * `guest_mac` - Destination MAC on reply frames.
-/// * `mtu` - Guest IP-level MTU used to fragment large replies before injection.
-///
-/// # Errors
-///
-/// Returns [`std::io::Error`] when the initial `bind` or `connect` on
-/// the host UDP socket fails, or when the host-side `recv` fails after
-/// the socket was established.
-#[allow(clippy::too_many_arguments)]
-async fn udp_relay_task(
-    mut outbound_rx: mpsc::Receiver<OutboundDatagram>,
-    queued_bytes: Arc<AtomicUsize>,
-    guest_src: SocketAddr,
-    guest_dst: SocketAddr,
-    host_dst: SocketAddr,
-    shared: Arc<SharedState>,
-    gateway_mac: EthernetAddress,
-    guest_mac: EthernetAddress,
-    mtu: usize,
-) -> std::io::Result<()> {
-    let socket = open_udp_socket(host_dst)?;
-    // Connect to the destination to restrict accepted source addresses,
-    // preventing host-network entities from injecting spoofed datagrams.
-    socket.connect(host_dst).await?;
+impl UdpRelay {
+    /// Relays one direct UDP session until it becomes idle or its channel closes.
+    ///
+    /// Binds an ephemeral host UDP socket in the address family of `host_dst` and `connect()`s it
+    /// to that peer. The `connect` restricts the socket to that peer's datagrams, which both sets
+    /// the default send target and filters spoofed inbound traffic. Responses are wrapped in a
+    /// synthesised ethernet frame (src IP = `guest_dst`, dst = `guest_src`) and pushed into
+    /// `rx_ring`.
+    ///
+    /// # Arguments
+    ///
+    /// * `outbound_rx` - Receives UDP payloads from the poll-loop side. Channel close signals
+    ///   session drop.
+    /// * `guest_src` - Guest source address; stamped as the destination on reply frames.
+    /// * `guest_dst` - Destination the guest wrote on the datagram. Stamped as the source IP on
+    ///   reply frames so the guest sees replies from the same address it dialed.
+    /// * `host_dst` - Address the host socket connects to. Equal to `guest_dst` for external
+    ///   destinations; rewritten to loopback by
+    ///   [`crate::netstack::poll::resolve_host_dst`] when the guest addressed the gateway.
+    /// * `shared` - Shared state; reply frames go into `rx_ring` and wake the poll thread.
+    /// * `gateway_mac` - Source MAC on reply frames (guest sees replies from the gateway's MAC).
+    /// * `guest_mac` - Destination MAC on reply frames.
+    /// * `mtu` - Guest IP-level MTU used to fragment large replies before injection.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`std::io::Error`] when the initial `bind` or `connect` on
+    /// the host UDP socket fails, or when the host-side `recv` fails after
+    /// the socket was established.
+    #[allow(clippy::too_many_arguments)]
+    async fn relay_direct_session(
+        mut outbound_rx: mpsc::Receiver<OutboundDatagram>,
+        queued_bytes: Arc<AtomicUsize>,
+        guest_src: SocketAddr,
+        guest_dst: SocketAddr,
+        host_dst: SocketAddr,
+        shared: Arc<SharedState>,
+        gateway_mac: EthernetAddress,
+        guest_mac: EthernetAddress,
+        mtu: usize,
+    ) -> std::io::Result<()> {
+        let socket = open_udp_socket(host_dst)?;
+        // Connect to the destination to restrict accepted source addresses,
+        // preventing host-network entities from injecting spoofed datagrams.
+        socket.connect(host_dst).await?;
 
-    let mut recv_buf = vec![0u8; RECV_BUF_SIZE];
-    let mut pmtu_contexts = VecDeque::new();
-    let timeout = SESSION_TIMEOUT;
+        let mut recv_buf = vec![0u8; RECV_BUF_SIZE];
+        let mut pmtu_contexts = VecDeque::new();
+        let timeout = SESSION_TIMEOUT;
 
-    loop {
-        tokio::select! {
-            // Outbound: guest → server.
-            data = outbound_rx.recv() => {
-                match data {
-                    Some(datagram) => {
-                        queued_bytes.fetch_sub(datagram.queued_len(), Ordering::AcqRel);
-                        match socket.send(&datagram.payload).await {
-                            Ok(_) => {
-                                remember_pmtu_context(&mut pmtu_contexts, datagram.original_ip_packet);
-                            }
-                            Err(e) if is_message_size_error(&e) => {
-                                inject_packet_too_big(
-                                    &shared,
-                                    datagram.original_ip_packet.as_ref(),
-                                    socket_path_mtu(&socket, host_dst).ok(),
-                                    gateway_mac,
-                                    guest_mac,
-                                );
-                            }
-                            Err(e) => {
-                                tracing::debug!(error = %e, "UDP relay send failed");
+        loop {
+            tokio::select! {
+                // Outbound: guest → server.
+                data = outbound_rx.recv() => {
+                    match data {
+                        Some(datagram) => {
+                            queued_bytes.fetch_sub(datagram.queued_len(), Ordering::AcqRel);
+                            match socket.send(&datagram.payload).await {
+                                Ok(_) => {
+                                    remember_pmtu_context(&mut pmtu_contexts, datagram.original_ip_packet);
+                                }
+                                Err(e) if is_message_size_error(&e) => {
+                                    inject_packet_too_big(
+                                        &shared,
+                                        datagram.original_ip_packet.as_ref(),
+                                        socket_path_mtu(&socket, host_dst).ok(),
+                                        gateway_mac,
+                                        guest_mac,
+                                    );
+                                }
+                                Err(e) => {
+                                    tracing::debug!(error = %e, "UDP relay send failed");
+                                }
                             }
                         }
+                        // Channel closed — session dropped by poll loop.
+                        None => break,
                     }
-                    // Channel closed — session dropped by poll loop.
-                    None => break,
                 }
-            }
 
-            // Inbound/error readiness: server → guest data or host PMTU feedback.
-            ready = socket.ready(Interest::READABLE | Interest::ERROR) => {
-                let ready = ready?;
+                // Inbound/error readiness: server → guest data or host PMTU feedback.
+                ready = socket.ready(Interest::READABLE | Interest::ERROR) => {
+                    let ready = ready?;
 
-                #[cfg(target_os = "linux")]
-                if ready.is_error() {
-                    match drain_pmtu_errors(&socket) {
-                        Ok(updates) => {
-                            for mtu in updates {
+                    #[cfg(target_os = "linux")]
+                    if ready.is_error() {
+                        match drain_pmtu_errors(&socket) {
+                            Ok(updates) => {
+                                for mtu in updates {
+                                    if let Some(original_ip_packet) =
+                                        take_pmtu_context(&mut pmtu_contexts, mtu)
+                                    {
+                                        inject_packet_too_big(
+                                            &shared,
+                                            original_ip_packet.as_ref(),
+                                            Some(mtu),
+                                            gateway_mac,
+                                            guest_mac,
+                                        );
+                                    }
+                                }
+                            }
+                            Err(e) => tracing::debug!(error = %e, "UDP relay error queue drain failed"),
+                        }
+                    }
+
+                    if ready.is_readable() {
+                        match socket.try_recv(&mut recv_buf) {
+                            Ok(n) => {
+                                if let Some(frames) = construct_udp_response_frames(
+                                    guest_dst,
+                                    guest_src,
+                                    &recv_buf[..n],
+                                    gateway_mac,
+                                    guest_mac,
+                                    mtu,
+                                ) {
+                                    for frame in frames {
+                                        if !shared.push_rx_frame_and_wake(frame) {
+                                            tracing::debug!("UDP relay response dropped because rx_ring is full");
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
+                            Err(e) if is_message_size_error(&e) => {
                                 if let Some(original_ip_packet) =
-                                    take_pmtu_context(&mut pmtu_contexts, mtu)
+                                    take_pmtu_context_without_mtu(&mut pmtu_contexts)
                                 {
                                     inject_packet_too_big(
                                         &shared,
                                         original_ip_packet.as_ref(),
-                                        Some(mtu),
+                                        socket_path_mtu(&socket, host_dst).ok(),
                                         gateway_mac,
                                         guest_mac,
                                     );
                                 }
                             }
+                            Err(e) => {
+                                tracing::debug!(error = %e, "UDP relay recv failed");
+                                break;
+                            }
                         }
-                        Err(e) => tracing::debug!(error = %e, "UDP relay error queue drain failed"),
                     }
                 }
 
-                if ready.is_readable() {
-                    match socket.try_recv(&mut recv_buf) {
-                        Ok(n) => {
+                // Idle timeout.
+                () = tokio::time::sleep(timeout) => {
+                    break;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Relays one SOCKS5 UDP association until it becomes idle or its channel closes.
+    ///
+    /// The TCP control connection and UDP association live for the same lifetime
+    /// as the guest UDP session. Replies are accepted only when the endpoint in
+    /// the SOCKS5 UDP header matches the destination selected by the guest.
+    #[allow(clippy::too_many_arguments)]
+    async fn relay_socks5_session(
+        mut outbound_rx: mpsc::Receiver<OutboundDatagram>,
+        queued_bytes: Arc<AtomicUsize>,
+        guest_src: SocketAddr,
+        guest_dst: SocketAddr,
+        host_dst: SocketAddr,
+        shared: Arc<SharedState>,
+        gateway_mac: EthernetAddress,
+        guest_mac: EthernetAddress,
+        mtu: usize,
+        outbound_proxy: Arc<ResolvedOutboundProxy>,
+        dns_forwarder: Option<DnsForwarderHandle>,
+    ) -> io::Result<()> {
+        let association = outbound_proxy.associate_udp(dns_forwarder).await?;
+        let mut recv_buf = vec![0u8; RECV_BUF_SIZE];
+
+        loop {
+            tokio::select! {
+                data = outbound_rx.recv() => {
+                    match data {
+                        Some(datagram) => {
+                            queued_bytes.fetch_sub(datagram.queued_len(), Ordering::AcqRel);
+                            match association.send_to(&datagram.payload, host_dst).await {
+                                Ok(_) => {}
+                                Err(e) if is_message_size_error(&e) => {
+                                    tracing::debug!(
+                                        error = %e,
+                                        "SOCKS5 UDP relay dropped an oversized datagram",
+                                    );
+                                }
+                                Err(e) => {
+                                    tracing::debug!(error = %e, "SOCKS5 UDP relay send failed");
+                                }
+                            }
+                        }
+                        None => break,
+                    }
+                }
+
+                result = association.recv_from(&mut recv_buf) => {
+                    match result {
+                        Ok((received, sources)) if sources.contains(&host_dst) => {
                             if let Some(frames) = construct_udp_response_frames(
                                 guest_dst,
                                 guest_src,
-                                &recv_buf[..n],
+                                &recv_buf[..received],
                                 gateway_mac,
                                 guest_mac,
                                 mtu,
                             ) {
                                 for frame in frames {
                                     if !shared.push_rx_frame_and_wake(frame) {
-                                        tracing::debug!("UDP relay response dropped because rx_ring is full");
+                                        tracing::debug!(
+                                            "SOCKS5 UDP relay response dropped because rx_ring is full"
+                                        );
                                         break;
                                     }
                                 }
                             }
                         }
-                        Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
-                        Err(e) if is_message_size_error(&e) => {
-                            if let Some(original_ip_packet) =
-                                take_pmtu_context_without_mtu(&mut pmtu_contexts)
-                            {
-                                inject_packet_too_big(
-                                    &shared,
-                                    original_ip_packet.as_ref(),
-                                    socket_path_mtu(&socket, host_dst).ok(),
-                                    gateway_mac,
-                                    guest_mac,
-                                );
-                            }
+                        Ok((_, sources)) => {
+                            tracing::debug!(
+                                expected = %host_dst,
+                                actual = ?sources,
+                                "SOCKS5 UDP relay dropped a response from an unexpected endpoint",
+                            );
+                        }
+                        Err(e) if e.kind() == io::ErrorKind::InvalidData => {
+                            tracing::debug!(
+                                error = %e,
+                                "SOCKS5 UDP relay dropped a malformed response",
+                            );
                         }
                         Err(e) => {
-                            tracing::debug!(error = %e, "UDP relay recv failed");
+                            tracing::debug!(error = %e, "SOCKS5 UDP relay receive failed");
                             break;
                         }
                     }
                 }
-            }
 
-            // Idle timeout.
-            () = tokio::time::sleep(timeout) => {
-                break;
+                () = tokio::time::sleep(SESSION_TIMEOUT) => break,
             }
         }
-    }
 
-    Ok(())
+        Ok(())
+    }
 }
+
+//--------------------------------------------------------------------------------------------------
+// Functions
+//--------------------------------------------------------------------------------------------------
 
 /// Construct an ethernet frame containing a UDP response for the guest.
 ///
