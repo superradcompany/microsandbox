@@ -196,7 +196,12 @@ pub async fn run(
     // kill the sandbox. A plain OS thread is scheduled by the guest kernel
     // independently of the async runtime, so the pulse keeps ticking under load.
     let heartbeat_shutdown = Arc::new(AtomicBool::new(false));
-    let heartbeat_thread = spawn_heartbeat_thread(heartbeat_rx, Arc::clone(&heartbeat_shutdown));
+    let heartbeat_control = Arc::new(heartbeat::HeartbeatControl::default());
+    let heartbeat_thread = spawn_heartbeat_thread(
+        heartbeat_rx,
+        Arc::clone(&heartbeat_shutdown),
+        Arc::clone(&heartbeat_control),
+    );
 
     // Send core.ready with boot timing data.
     let ready_time_ns = clock::boottime_ns();
@@ -312,6 +317,7 @@ pub async fn run(
                                     &mut serial_out_buf,
                                     config,
                                     &mut workload,
+                                    &heartbeat_control,
                                 ).await?;
                                 record_encoded_guest_messages(
                                     &serial_out_buf,
@@ -481,6 +487,7 @@ async fn handle_message(
     out_buf: &mut Vec<u8>,
     config: &AgentdConfig,
     workload: &mut WorkloadLatch,
+    heartbeat_control: &heartbeat::HeartbeatControl,
 ) -> AgentdResult<()> {
     match msg.t {
         MessageType::Ping => {
@@ -517,21 +524,38 @@ async fn handle_message(
             };
             match workload.freeze(&request.attempt_id) {
                 Ok(()) => {
-                    let reply = Message::with_payload(
-                        MessageType::WorkloadFrozen,
-                        msg.id,
-                        &WorkloadFrozen {
-                            attempt_id: request.attempt_id,
-                        },
-                    )
-                    .map_err(|error| {
-                        AgentdError::ExecSession(format!(
-                            "encode workload-frozen response: {error}"
-                        ))
-                    })?;
-                    codec::encode_to_buf(&reply, out_buf).map_err(|error| {
-                        AgentdError::ExecSession(format!("encode workload-frozen frame: {error}"))
-                    })?;
+                    if let Err(pause_error) = heartbeat_control.pause() {
+                        let rollback = workload.thaw(&request.attempt_id).err();
+                        let message = match rollback {
+                            Some(error) => format!(
+                                "heartbeat checkpoint gate failed: {pause_error}; workload rollback failed: {error}"
+                            ),
+                            None => format!("heartbeat checkpoint gate failed: {pause_error}"),
+                        };
+                        encode_workload_error(
+                            &msg,
+                            WorkloadLatchError::Io(std::io::Error::other(message)),
+                            out_buf,
+                        )?;
+                    } else {
+                        let reply = Message::with_payload(
+                            MessageType::WorkloadFrozen,
+                            msg.id,
+                            &WorkloadFrozen {
+                                attempt_id: request.attempt_id,
+                            },
+                        )
+                        .map_err(|error| {
+                            AgentdError::ExecSession(format!(
+                                "encode workload-frozen response: {error}"
+                            ))
+                        })?;
+                        codec::encode_to_buf(&reply, out_buf).map_err(|error| {
+                            AgentdError::ExecSession(format!(
+                                "encode workload-frozen frame: {error}"
+                            ))
+                        })?;
+                    }
                 }
                 Err(error) => encode_workload_error(&msg, error, out_buf)?,
             }
@@ -543,6 +567,7 @@ async fn handle_message(
             };
             match workload.thaw(&request.attempt_id) {
                 Ok(()) => {
+                    heartbeat_control.resume();
                     let reply = Message::with_payload(
                         MessageType::WorkloadThawed,
                         msg.id,
@@ -898,6 +923,7 @@ fn guest_message_refreshes_idle_timer(t: &MessageType) -> bool {
 fn spawn_heartbeat_thread(
     snapshot_rx: watch::Receiver<HeartbeatSnapshot>,
     shutdown: Arc<AtomicBool>,
+    control: Arc<heartbeat::HeartbeatControl>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::Builder::new()
         .name("agentd-heartbeat".to_string())
@@ -939,6 +965,9 @@ fn spawn_heartbeat_thread(
                     active_fs_streams: snapshot.active_fs_streams,
                     active_tcp_streams: snapshot.active_tcp_streams,
                     activity_counters: snapshot.counters,
+                };
+                let Some(_write_guard) = control.begin_write() else {
+                    continue;
                 };
                 let _ = heartbeat::write_heartbeat(&heartbeat);
             }
