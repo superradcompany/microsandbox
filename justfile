@@ -100,11 +100,18 @@ build-agentd:
     # Linux target supported by the installed Rust toolchain (x86_64, ARM64,
     # riscv64, and future targets), while still using the native compiler.
     host="$(rustc -vV | sed -n 's/^host: //p')"
-    target="${host/-unknown-linux-gnu/-unknown-linux-musl}"
-    if [ "$target" = "$host" ]; then
-        echo "error: cannot derive a Linux musl target from Rust host '$host'"
-        exit 1
-    fi
+    case "$host" in
+        *-unknown-linux-gnu)
+            target="${host/-unknown-linux-gnu/-unknown-linux-musl}"
+            ;;
+        *-unknown-linux-musl)
+            target="$host"
+            ;;
+        *)
+            echo "error: cannot derive a Linux musl target from Rust host '$host'"
+            exit 1
+            ;;
+    esac
 
     rustup target add "$target"
     cargo build --release --manifest-path crates/agentd/Cargo.toml --target-dir target --target "$target"
