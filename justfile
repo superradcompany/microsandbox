@@ -90,11 +90,6 @@ build-agentd:
     #!/usr/bin/env bash
     set -euo pipefail
 
-    command -v musl-gcc >/dev/null || {
-        echo "error: musl-gcc not found. Install your distro's musl toolchain."
-        exit 1
-    }
-
     # Derive the musl target from Rust's host triple instead of maintaining an
     # architecture allowlist. This keeps local builds aligned with every
     # Linux target supported by the installed Rust toolchain (x86_64, ARM64,
@@ -112,6 +107,13 @@ build-agentd:
             exit 1
             ;;
     esac
+
+    # Native musl hosts already have a suitable system compiler. GNU hosts
+    # need the musl wrapper to link the cross-libc target.
+    if [ "$target" != "$host" ] && ! command -v musl-gcc >/dev/null; then
+        echo "error: musl-gcc not found. Install your distro's musl toolchain."
+        exit 1
+    fi
 
     rustup target add "$target"
     cargo build --release --manifest-path crates/agentd/Cargo.toml --target-dir target --target "$target"
