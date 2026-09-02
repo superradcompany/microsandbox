@@ -8,7 +8,7 @@ use microsandbox_cli::{
     commands::{
         completion, context, copy, create, exec, image, inspect, install, list, logs, metrics,
         modify, ping, ps, pull, registry, remove, restart, run, self_cmd, snapshot, start, stop,
-        touch, uninstall, volume,
+        touch, uninstall, volume, wait,
     },
     log_args::{self, LogArgs},
     sandbox_cmd::{self, SandboxArgs},
@@ -22,7 +22,7 @@ const TOP_LEVEL_COMMAND_GROUPS: &[CommandGroup] = &[
     CommandGroup {
         heading: "Sandboxes",
         commands: &[
-            "run", "create", "modify", "start", "stop", "restart", "ping", "touch", "list",
+            "run", "create", "modify", "start", "stop", "restart", "wait", "ping", "touch", "list",
             "status", "metrics", "remove", "exec", "copy", "logs", "ssh", "inspect",
         ],
     },
@@ -110,6 +110,9 @@ enum Commands {
 
     /// Restart one or more sandboxes.
     Restart(restart::RestartArgs),
+
+    /// Wait for a sandbox to stop or crash.
+    Wait(wait::WaitArgs),
 
     /// Check whether one or more sandbox agents are reachable.
     Ping(ping::PingArgs),
@@ -667,6 +670,7 @@ fn run_async_command_anyhow(
             Commands::Start(args) => start::run(args).await,
             Commands::Stop(args) => stop::run(args).await,
             Commands::Restart(args) => restart::run(args).await,
+            Commands::Wait(args) => wait::run(args).await,
             Commands::Ping(args) => ping::run(args).await,
             Commands::Touch(args) => touch::run(args).await,
             Commands::List(args) => list::run(args).await,

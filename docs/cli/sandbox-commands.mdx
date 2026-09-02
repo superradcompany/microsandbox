@@ -237,6 +237,29 @@ msb restart -t 30 devbox
 | `-t`, `--timeout` | Seconds to wait for graceful shutdown before force-killing. Defaults to 10 |
 | `-q`, `--quiet` | Suppress progress output |
 
+## msb wait
+
+Wait for a named sandbox to enter a terminal `Stopped` or `Crashed` state. This
+is useful with persistent detached sandboxes and from host-side workflow
+orchestrators that need a bounded lifecycle primitive instead of their own
+status polling loop.
+
+```bash
+msb wait worker
+msb wait worker --timeout 30s
+msb wait worker --timeout 5m --format json
+```
+
+| Flag | Description |
+|------|-------------|
+| `--timeout` | Stop waiting after a duration such as `30s`, `5m`, or `1h` |
+| `--format json` | Emit the final status and available process metadata as JSON |
+
+The timeout bounds the initial sandbox lookup and host-side wait. It does not
+stop or kill the sandbox. JSON output includes `name`, `status`, `terminal`, `exit_code`,
+`signal`, `observed_at`, and `source`; process details are `null` when the
+backend cannot observe them.
+
 ## msb ping
 
 <Tooltip tip="Not yet available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
