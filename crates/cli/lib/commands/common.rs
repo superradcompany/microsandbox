@@ -651,7 +651,7 @@ enum CopyKind {
 impl SandboxOpts {
     /// Builds the protocol-specific proxy selected by the CLI flags.
     #[cfg(feature = "net")]
-    fn outbound_proxy(&self) -> anyhow::Result<Option<OutboundProxy>> {
+    fn build_outbound_proxy(&self) -> anyhow::Result<Option<OutboundProxy>> {
         let Some(raw) = self.proxy.as_deref() else {
             if self.socks4_user_id.is_some()
                 || self.socks5_username.is_some()
@@ -702,6 +702,257 @@ impl SandboxOpts {
             }
             _ => anyhow::bail!("unsupported outbound proxy protocol"),
         }
+    }
+
+    /// Resolves the root disk specification selected by the CLI flags.
+    fn root_disk_spec(&self) -> anyhow::Result<Option<RootDiskSpec>> {
+        self.root_disk
+            .as_deref()
+            .or(self.oci_upper_size.as_deref())
+            .map(parse_root_disk_spec)
+            .transpose()
+    }
+
+    /// Resolves script flags into a deduplicated list preserving argv order.
+    fn collect_scripts(&self) -> anyhow::Result<Vec<(String, String)>> {
+        use std::collections::HashSet;
+
+        let mut scripts =
+            Vec::with_capacity(self.script.len() + self.script_raw.len() + self.script_path.len());
+        let mut seen = HashSet::new();
+
+        for spec in &self.script {
+            let (name, body) = parse_script_spec(spec, "script")?;
+            if !seen.insert(name.clone()) {
+                anyhow::bail!("script name '{name}' specified more than once");
+            }
+            let decoded = decode_script_escapes(&body);
+            scripts.push((name, wrap_shell_script(self.shell.as_deref(), &decoded)));
+        }
+        for spec in &self.script_raw {
+            let (name, body) = parse_script_spec(spec, "script-raw")?;
+            if !seen.insert(name.clone()) {
+                anyhow::bail!("script name '{name}' specified more than once");
+            }
+            scripts.push((name, body));
+        }
+        for spec in &self.script_path {
+            let (name, content) = parse_script_path(spec)?;
+            if !seen.insert(name.clone()) {
+                anyhow::bail!("script name '{name}' specified more than once");
+            }
+            scripts.push((name, content));
+        }
+
+        Ok(scripts)
+    }
+
+    /// Returns true when any CLI flag requires building network configuration.
+    #[cfg(feature = "net")]
+    fn has_network_config(&self) -> bool {
+        self.no_dns_rebind_protection
+            || !self.dns_nameserver.is_empty()
+            || self.dns_query_timeout_ms.is_some()
+            || !self.net_rule.is_empty()
+            || !self.net.is_empty()
+            || self.no_net
+            || self.net_default.is_some()
+            || self.net_default_egress.is_some()
+            || self.net_default_ingress.is_some()
+            || self.net_ipv4_pool.is_some()
+            || self.net_ipv6_pool.is_some()
+            || self.net_egress_bandwidth.is_some()
+            || self.net_egress_bandwidth_burst.is_some()
+            || self.net_egress_ops.is_some()
+            || self.net_egress_ops_burst.is_some()
+            || self.net_ingress_bandwidth.is_some()
+            || self.net_ingress_bandwidth_burst.is_some()
+            || self.net_ingress_ops.is_some()
+            || self.net_ingress_ops_burst.is_some()
+            || self.max_connections.is_some()
+            || self.trust_host_cas
+            || self.tls_intercept
+            || !self.tls_intercept_port.is_empty()
+            || !self.tls_bypass.is_empty()
+            || self.no_block_quic
+            || self.tls_intercept_ca_cert.is_some()
+            || self.tls_intercept_ca_key.is_some()
+            || !self.tls_upstream_ca_cert.is_empty()
+            || !self.tls_upstream_ca_cert_for.is_empty()
+            || !self.tls_no_verify_upstream_for.is_empty()
+            || self.on_secret_violation.is_some()
+    }
+
+    /// Builds one direction of the network rate limiter from its related flags.
+    #[cfg(feature = "net")]
+    fn build_rate_limiter(
+        &self,
+        direction: NetworkRateLimitDirection,
+    ) -> anyhow::Result<Option<CliRateLimiter>> {
+        let (bandwidth, bandwidth_burst, ops, ops_burst) = match direction {
+            NetworkRateLimitDirection::Egress => (
+                self.net_egress_bandwidth.as_deref(),
+                self.net_egress_bandwidth_burst.as_deref(),
+                self.net_egress_ops.as_deref(),
+                self.net_egress_ops_burst,
+            ),
+            NetworkRateLimitDirection::Ingress => (
+                self.net_ingress_bandwidth.as_deref(),
+                self.net_ingress_bandwidth_burst.as_deref(),
+                self.net_ingress_ops.as_deref(),
+                self.net_ingress_ops_burst,
+            ),
+        };
+
+        if bandwidth.is_none() && bandwidth_burst.is_none() && ops.is_none() && ops_burst.is_none()
+        {
+            return Ok(None);
+        }
+
+        let bandwidth = bandwidth
+            .map(|spec| {
+                parse_rate(&format!("--net-{direction}-bandwidth"), spec, |s| {
+                    ui::parse_size_bytes(s).map_err(anyhow::Error::msg)
+                })
+            })
+            .transpose()?;
+        let bandwidth_burst = bandwidth_burst
+            .map(|s| {
+                ui::parse_size_bytes(s)
+                    .map_err(|e| anyhow::anyhow!("--net-{direction}-bandwidth-burst: {e}"))
+            })
+            .transpose()?;
+        let ops = ops
+            .map(|spec| {
+                parse_rate(&format!("--net-{direction}-ops"), spec, |s| {
+                    s.parse::<u64>().map_err(anyhow::Error::from)
+                })
+            })
+            .transpose()?;
+
+        Ok(Some(CliRateLimiter {
+            bandwidth,
+            bandwidth_burst,
+            ops,
+            ops_burst,
+        }))
+    }
+
+    /// Builds the network policy selected by the related CLI flags.
+    #[cfg(feature = "net")]
+    fn build_network_policy(
+        &self,
+    ) -> anyhow::Result<Option<microsandbox_network::policy::NetworkPolicy>> {
+        use microsandbox_network::policy::{Action, NetworkPolicy, NetworkProfile};
+
+        use crate::net_rule::parse_rule_list;
+
+        let no_flags = self.net.is_empty()
+            && self.net_rule.is_empty()
+            && !self.no_net
+            && self.net_default.is_none()
+            && self.net_default_egress.is_none()
+            && self.net_default_ingress.is_none();
+        if no_flags {
+            return Ok(None);
+        }
+
+        let mut rules = Vec::new();
+        for arg in &self.net_rule {
+            let parsed = parse_rule_list(arg).map_err(anyhow::Error::from)?;
+            rules.extend(parsed);
+        }
+
+        if !self.net.is_empty() {
+            let mut profiles = Vec::new();
+            let mut terminal = None;
+            for raw in self
+                .net
+                .iter()
+                .flat_map(|arg| arg.split(','))
+                .map(str::trim)
+            {
+                if raw.is_empty() {
+                    anyhow::bail!(
+                        "empty --net profile; expected public, private, host, all, or none"
+                    );
+                }
+                match raw {
+                    "public" => profiles.push(NetworkProfile::Public),
+                    "private" => profiles.push(NetworkProfile::Private),
+                    "host" => profiles.push(NetworkProfile::Host),
+                    "all" | "none" => {
+                        if let Some(previous) = terminal {
+                            if previous == raw {
+                                anyhow::bail!("--net `{raw}` may only be specified once");
+                            }
+                            anyhow::bail!(
+                                "--net terminal profiles `all` and `none` cannot be combined"
+                            );
+                        }
+                        terminal = Some(raw);
+                    }
+                    other => anyhow::bail!(
+                        "unknown --net profile {other:?}; expected public, private, host, all, or none"
+                    ),
+                }
+            }
+            if let Some(terminal) = terminal {
+                if !profiles.is_empty() {
+                    anyhow::bail!(
+                        "--net `{terminal}` cannot be combined with public, private, or host"
+                    );
+                }
+                let mut policy = match terminal {
+                    "all" => NetworkPolicy::allow_all(),
+                    "none" => NetworkPolicy::none(),
+                    _ => unreachable!("validated terminal profile"),
+                };
+                policy.rules = rules;
+                return Ok(Some(policy));
+            }
+
+            let mut policy = NetworkPolicy::from_profiles(profiles);
+            rules.append(&mut policy.rules);
+            policy.rules = rules;
+            return Ok(Some(policy));
+        }
+
+        let parse_action = |label: &str, raw: &str| -> anyhow::Result<Action> {
+            match raw {
+                "allow" => Ok(Action::Allow),
+                "deny" => Ok(Action::Deny),
+                other => {
+                    anyhow::bail!("unknown {label} value {other:?}; expected `allow` or `deny`")
+                }
+            }
+        };
+
+        let symmetric = if self.no_net {
+            Some(Action::Deny)
+        } else if let Some(raw) = self.net_default.as_deref() {
+            Some(parse_action("--net-default", raw)?)
+        } else {
+            None
+        };
+
+        let baseline = NetworkPolicy::default();
+        let default_egress = match (symmetric, self.net_default_egress.as_deref()) {
+            (_, Some(raw)) => parse_action("--net-default-egress", raw)?,
+            (Some(action), None) => action,
+            (None, None) => baseline.default_egress,
+        };
+        let default_ingress = match (symmetric, self.net_default_ingress.as_deref()) {
+            (_, Some(raw)) => parse_action("--net-default-ingress", raw)?,
+            (Some(action), None) => action,
+            (None, None) => baseline.default_ingress,
+        };
+
+        Ok(Some(NetworkPolicy {
+            default_egress,
+            default_ingress,
+            rules,
+        }))
     }
 
     /// Returns true if any creation-time configuration flag was set.
@@ -1056,12 +1307,7 @@ fn apply_sandbox_opts_inner(
     }
 
     // --- Scripts ---
-    for (name, content) in collect_scripts(
-        opts.shell.as_deref(),
-        &opts.script,
-        &opts.script_raw,
-        &opts.script_path,
-    )? {
+    for (name, content) in opts.collect_scripts()? {
         builder = builder.script(name, content);
     }
 
@@ -1081,8 +1327,7 @@ fn apply_sandbox_opts_inner(
     if let Some(ref pull) = opts.pull {
         builder = builder.pull_policy(parse_pull_policy(pull)?);
     }
-    if let Some(spec) = opts.root_disk.as_deref().or(opts.oci_upper_size.as_deref()) {
-        let spec = parse_root_disk_spec(spec)?;
+    if let Some(spec) = opts.root_disk_spec()? {
         builder = builder.root_disk_with(|d| spec.apply(d));
     }
     if let Some(ref security) = opts.security {
@@ -2128,42 +2373,10 @@ fn apply_network_opts(
         });
     }
 
-    let proxy = opts.outbound_proxy()?;
+    let proxy = opts.build_outbound_proxy()?;
 
     // DNS, TLS, and other network configuration.
-    let has_network_config = opts.no_dns_rebind_protection
-        || !opts.dns_nameserver.is_empty()
-        || opts.dns_query_timeout_ms.is_some()
-        || !opts.net_rule.is_empty()
-        || !opts.net.is_empty()
-        || opts.no_net
-        || opts.net_default.is_some()
-        || opts.net_default_egress.is_some()
-        || opts.net_default_ingress.is_some()
-        || opts.net_ipv4_pool.is_some()
-        || opts.net_ipv6_pool.is_some()
-        || opts.net_egress_bandwidth.is_some()
-        || opts.net_egress_bandwidth_burst.is_some()
-        || opts.net_egress_ops.is_some()
-        || opts.net_egress_ops_burst.is_some()
-        || opts.net_ingress_bandwidth.is_some()
-        || opts.net_ingress_bandwidth_burst.is_some()
-        || opts.net_ingress_ops.is_some()
-        || opts.net_ingress_ops_burst.is_some()
-        || opts.max_connections.is_some()
-        || opts.trust_host_cas
-        || opts.tls_intercept
-        || !opts.tls_intercept_port.is_empty()
-        || !opts.tls_bypass.is_empty()
-        || opts.no_block_quic
-        || opts.tls_intercept_ca_cert.is_some()
-        || opts.tls_intercept_ca_key.is_some()
-        || !opts.tls_upstream_ca_cert.is_empty()
-        || !opts.tls_upstream_ca_cert_for.is_empty()
-        || !opts.tls_no_verify_upstream_for.is_empty()
-        || opts.on_secret_violation.is_some();
-
-    if has_network_config {
+    if opts.has_network_config() {
         let no_dns_rebind = opts.no_dns_rebind_protection;
         let dns_nameservers = opts
             .dns_nameserver
@@ -2171,14 +2384,7 @@ fn apply_network_opts(
             .map(|s| s.parse::<Nameserver>().map_err(anyhow::Error::from))
             .collect::<anyhow::Result<Vec<_>>>()?;
         let dns_query_timeout_ms = opts.dns_query_timeout_ms;
-        let network_policy = build_network_policy(
-            &opts.net,
-            &opts.net_rule,
-            opts.no_net,
-            opts.net_default.as_deref(),
-            opts.net_default_egress.as_deref(),
-            opts.net_default_ingress.as_deref(),
-        )?;
+        let network_policy = opts.build_network_policy()?;
         let replaces_configured_policy = !opts.net.is_empty()
             || opts.no_net
             || opts.net_default.is_some()
@@ -2227,20 +2433,8 @@ fn apply_network_opts(
             .collect::<anyhow::Result<Vec<_>>>()?;
         let no_verify_upstream_for = opts.tls_no_verify_upstream_for.clone();
         let violation_action = parse_violation_action(&opts.on_secret_violation)?;
-        let egress_rate_limiter = parse_rate_limiter_flags(
-            NetworkRateLimitDirection::Egress,
-            opts.net_egress_bandwidth.as_deref(),
-            opts.net_egress_bandwidth_burst.as_deref(),
-            opts.net_egress_ops.as_deref(),
-            opts.net_egress_ops_burst,
-        )?;
-        let ingress_rate_limiter = parse_rate_limiter_flags(
-            NetworkRateLimitDirection::Ingress,
-            opts.net_ingress_bandwidth.as_deref(),
-            opts.net_ingress_bandwidth_burst.as_deref(),
-            opts.net_ingress_ops.as_deref(),
-            opts.net_ingress_ops_burst,
-        )?;
+        let egress_rate_limiter = opts.build_rate_limiter(NetworkRateLimitDirection::Egress)?;
+        let ingress_rate_limiter = opts.build_rate_limiter(NetworkRateLimitDirection::Ingress)?;
 
         builder = builder.network(move |mut n| {
             if no_dns_rebind || !dns_nameservers.is_empty() || dns_query_timeout_ms.is_some() {
@@ -2417,49 +2611,6 @@ impl CliRateLimiter {
     }
 }
 
-/// Parse one direction's rate limit flags. Returns `None` when none of
-/// the four flags is set.
-#[cfg(feature = "net")]
-fn parse_rate_limiter_flags(
-    direction: NetworkRateLimitDirection,
-    bandwidth: Option<&str>,
-    bandwidth_burst: Option<&str>,
-    ops: Option<&str>,
-    ops_burst: Option<u64>,
-) -> anyhow::Result<Option<CliRateLimiter>> {
-    if bandwidth.is_none() && bandwidth_burst.is_none() && ops.is_none() && ops_burst.is_none() {
-        return Ok(None);
-    }
-
-    let bandwidth = bandwidth
-        .map(|spec| {
-            parse_rate(&format!("--net-{direction}-bandwidth"), spec, |s| {
-                ui::parse_size_bytes(s).map_err(anyhow::Error::msg)
-            })
-        })
-        .transpose()?;
-    let bandwidth_burst = bandwidth_burst
-        .map(|s| {
-            ui::parse_size_bytes(s)
-                .map_err(|e| anyhow::anyhow!("--net-{direction}-bandwidth-burst: {e}"))
-        })
-        .transpose()?;
-    let ops = ops
-        .map(|spec| {
-            parse_rate(&format!("--net-{direction}-ops"), spec, |s| {
-                s.parse::<u64>().map_err(anyhow::Error::from)
-            })
-        })
-        .transpose()?;
-
-    Ok(Some(CliRateLimiter {
-        bandwidth,
-        bandwidth_burst,
-        ops,
-        ops_burst,
-    }))
-}
-
 /// Parse a `VALUE/DURATION` rate spec like `1M/1s` or `1000/1s`. A bare
 /// value means per second.
 #[cfg(feature = "net")]
@@ -2477,136 +2628,6 @@ fn parse_rate(
     };
     let value = parse_value(value.trim()).map_err(|e| anyhow::anyhow!("{flag}: {e}"))?;
     Ok((value, duration))
-}
-
-/// Assemble a [`NetworkPolicy`] from `--net`, `--net-rule`,
-/// `--net-default*`, and `--no-net`. Returns `None` when no flag is set.
-/// Multiple profile and rule invocations concatenate in argv order.
-///
-/// `--no-net` desugars to `--net-default deny`; clap rejects combining
-/// it with the explicit defaults, so the four default-source params are
-/// mutually exclusive on the caller side.
-#[cfg(feature = "net")]
-pub(crate) fn build_network_policy(
-    profile_args: &[String],
-    rule_args: &[String],
-    no_net: bool,
-    default_both: Option<&str>,
-    default_egress: Option<&str>,
-    default_ingress: Option<&str>,
-) -> anyhow::Result<Option<microsandbox_network::policy::NetworkPolicy>> {
-    use microsandbox_network::policy::{Action, NetworkPolicy, NetworkProfile};
-
-    use crate::net_rule::parse_rule_list;
-
-    let no_flags = profile_args.is_empty()
-        && rule_args.is_empty()
-        && !no_net
-        && default_both.is_none()
-        && default_egress.is_none()
-        && default_ingress.is_none();
-    if no_flags {
-        return Ok(None);
-    }
-
-    let mut rules = Vec::new();
-    for arg in rule_args {
-        let parsed = parse_rule_list(arg).map_err(anyhow::Error::from)?;
-        rules.extend(parsed);
-    }
-
-    if !profile_args.is_empty() {
-        let mut profiles = Vec::new();
-        let mut terminal = None;
-        for raw in profile_args
-            .iter()
-            .flat_map(|arg| arg.split(','))
-            .map(str::trim)
-        {
-            if raw.is_empty() {
-                anyhow::bail!("empty --net profile; expected public, private, host, all, or none");
-            }
-            match raw {
-                "public" => profiles.push(NetworkProfile::Public),
-                "private" => profiles.push(NetworkProfile::Private),
-                "host" => profiles.push(NetworkProfile::Host),
-                "all" | "none" => {
-                    if let Some(previous) = terminal {
-                        if previous == raw {
-                            anyhow::bail!("--net `{raw}` may only be specified once");
-                        }
-                        anyhow::bail!(
-                            "--net terminal profiles `all` and `none` cannot be combined"
-                        );
-                    }
-                    terminal = Some(raw);
-                }
-                other => anyhow::bail!(
-                    "unknown --net profile {other:?}; expected public, private, host, all, or none"
-                ),
-            }
-        }
-        if let Some(terminal) = terminal {
-            if !profiles.is_empty() {
-                anyhow::bail!(
-                    "--net `{terminal}` cannot be combined with public, private, or host"
-                );
-            }
-            let mut policy = match terminal {
-                "all" => NetworkPolicy::allow_all(),
-                "none" => NetworkPolicy::none(),
-                _ => unreachable!("validated terminal profile"),
-            };
-            policy.rules = rules;
-            return Ok(Some(policy));
-        }
-
-        let mut policy = NetworkPolicy::from_profiles(profiles);
-        rules.append(&mut policy.rules);
-        policy.rules = rules;
-        return Ok(Some(policy));
-    }
-
-    let parse_action = |label: &str, raw: &str| -> anyhow::Result<Action> {
-        match raw {
-            "allow" => Ok(Action::Allow),
-            "deny" => Ok(Action::Deny),
-            other => anyhow::bail!("unknown {label} value {other:?}; expected `allow` or `deny`"),
-        }
-    };
-
-    // `--no-net` and `--net-default` are siblings: both set egress and
-    // ingress symmetrically. clap enforces they're mutex with each
-    // other and with `--net-default-{egress,ingress}`, so at most one
-    // source resolves here.
-    let symmetric = if no_net {
-        Some(Action::Deny)
-    } else if let Some(raw) = default_both {
-        Some(parse_action("--net-default", raw)?)
-    } else {
-        None
-    };
-
-    // When the user sets no defaults explicitly, fall through to
-    // the default public-profile policy's direction defaults so low-level
-    // rule-only behavior remains deny-egress / allow-ingress.
-    let baseline = NetworkPolicy::default();
-    let default_egress = match (symmetric, default_egress) {
-        (_, Some(raw)) => parse_action("--net-default-egress", raw)?,
-        (Some(action), None) => action,
-        (None, None) => baseline.default_egress,
-    };
-    let default_ingress = match (symmetric, default_ingress) {
-        (_, Some(raw)) => parse_action("--net-default-ingress", raw)?,
-        (Some(action), None) => action,
-        (None, None) => baseline.default_ingress,
-    };
-
-    Ok(Some(NetworkPolicy {
-        default_egress,
-        default_ingress,
-        rules,
-    }))
 }
 
 /// Parse a port spec:
@@ -2821,47 +2842,6 @@ fn parse_deployment_profile(value: &str) -> anyhow::Result<DeploymentProfile> {
         "multi-tenant" | "multi_tenant" => Ok(DeploymentProfile::MultiTenant),
         other => anyhow::bail!("invalid deployment profile {other:?}"),
     }
-}
-
-/// Resolve `--script` / `--script-raw` / `--script-path` specs into a
-/// deduped list of `(name, content)` pairs preserving argv order:
-/// inline shell snippets first, then raw inline, then path-backed.
-/// Duplicate names across any source are rejected. `shell` is used to
-/// generate the shebang for `--script` entries only.
-fn collect_scripts(
-    shell: Option<&str>,
-    scripts: &[String],
-    raw_scripts: &[String],
-    paths: &[String],
-) -> anyhow::Result<Vec<(String, String)>> {
-    use std::collections::HashSet;
-
-    let mut out = Vec::with_capacity(scripts.len() + raw_scripts.len() + paths.len());
-    let mut seen: HashSet<String> = HashSet::new();
-
-    for spec in scripts {
-        let (name, body) = parse_script_spec(spec, "script")?;
-        if !seen.insert(name.clone()) {
-            anyhow::bail!("script name '{name}' specified more than once");
-        }
-        let decoded = decode_script_escapes(&body);
-        out.push((name, wrap_shell_script(shell, &decoded)));
-    }
-    for spec in raw_scripts {
-        let (name, body) = parse_script_spec(spec, "script-raw")?;
-        if !seen.insert(name.clone()) {
-            anyhow::bail!("script name '{name}' specified more than once");
-        }
-        out.push((name, body));
-    }
-    for spec in paths {
-        let (name, content) = parse_script_path(spec)?;
-        if !seen.insert(name.clone()) {
-            anyhow::bail!("script name '{name}' specified more than once");
-        }
-        out.push((name, content));
-    }
-    Ok(out)
 }
 
 /// Parse a `NAME=BODY` spec for `--script` / `--script-raw`. Splits on
@@ -3191,16 +3171,18 @@ mod tests {
 
     #[cfg(feature = "net")]
     #[test]
-    fn parse_rate_limiter_flags_maps_all_four_flags() {
-        let limiter = parse_rate_limiter_flags(
-            NetworkRateLimitDirection::Egress,
-            Some("1M/1s"),
-            Some("512K"),
-            Some("1000/1s"),
-            Some(500),
-        )
-        .unwrap()
-        .expect("limiter should be present");
+    fn build_rate_limiter_maps_all_four_flags() {
+        let opts = SandboxOpts {
+            net_egress_bandwidth: Some("1M/1s".into()),
+            net_egress_bandwidth_burst: Some("512K".into()),
+            net_egress_ops: Some("1000/1s".into()),
+            net_egress_ops_burst: Some(500),
+            ..Default::default()
+        };
+        let limiter = opts
+            .build_rate_limiter(NetworkRateLimitDirection::Egress)
+            .unwrap()
+            .expect("limiter should be present");
 
         assert_eq!(
             limiter.bandwidth,
@@ -3211,7 +3193,8 @@ mod tests {
         assert_eq!(limiter.ops_burst, Some(500));
 
         assert!(
-            parse_rate_limiter_flags(NetworkRateLimitDirection::Ingress, None, None, None, None,)
+            SandboxOpts::default()
+                .build_rate_limiter(NetworkRateLimitDirection::Ingress)
                 .unwrap()
                 .is_none()
         );
@@ -3357,7 +3340,7 @@ mod tests {
             ..Default::default()
         };
 
-        let proxy = opts.outbound_proxy().unwrap().unwrap();
+        let proxy = opts.build_outbound_proxy().unwrap().unwrap();
         assert_eq!(
             proxy,
             OutboundProxy::Socks4 {
@@ -3377,7 +3360,7 @@ mod tests {
             ..Default::default()
         };
 
-        let proxy = opts.outbound_proxy().unwrap().unwrap();
+        let proxy = opts.build_outbound_proxy().unwrap().unwrap();
         let json = serde_json::to_value(proxy).unwrap();
         assert_eq!(json["protocol"], "socks5");
         assert_eq!(json["credentials"]["username"], "sandbox");
@@ -3396,7 +3379,7 @@ mod tests {
         };
         assert!(
             socks4
-                .outbound_proxy()
+                .build_outbound_proxy()
                 .unwrap_err()
                 .to_string()
                 .contains("require a socks5:// proxy")
@@ -3409,7 +3392,7 @@ mod tests {
         };
         assert!(
             socks5
-                .outbound_proxy()
+                .build_outbound_proxy()
                 .unwrap_err()
                 .to_string()
                 .contains("requires a socks4:// proxy")
@@ -3431,7 +3414,7 @@ mod tests {
                 ..Default::default()
             },
         ] {
-            assert!(opts.outbound_proxy().is_err());
+            assert!(opts.build_outbound_proxy().is_err());
         }
     }
 
@@ -4555,6 +4538,21 @@ mod tests {
 
     // --- collect_scripts (duplicate logic) ---
 
+    fn script_opts(
+        shell: Option<&str>,
+        scripts: &[String],
+        raw_scripts: &[String],
+        paths: &[String],
+    ) -> SandboxOpts {
+        SandboxOpts {
+            shell: shell.map(str::to_owned),
+            script: scripts.to_vec(),
+            script_raw: raw_scripts.to_vec(),
+            script_path: paths.to_vec(),
+            ..Default::default()
+        }
+    }
+
     // --- parse_port_mapping ---
 
     #[cfg(feature = "net")]
@@ -4634,7 +4632,9 @@ mod tests {
     #[test]
     fn collect_script_wraps_with_default_shebang() {
         let scripts = vec!["start=echo hello".to_string()];
-        let out = collect_scripts(None, &scripts, &[], &[]).unwrap();
+        let out = script_opts(None, &scripts, &[], &[])
+            .collect_scripts()
+            .unwrap();
         assert_eq!(
             out,
             vec![("start".to_string(), "#!/bin/sh\necho hello\n".to_string())]
@@ -4644,7 +4644,9 @@ mod tests {
     #[test]
     fn collect_script_decodes_newlines_in_body() {
         let scripts = vec![r#"start=echo hello\npython -c "print(123)""#.to_string()];
-        let out = collect_scripts(None, &scripts, &[], &[]).unwrap();
+        let out = script_opts(None, &scripts, &[], &[])
+            .collect_scripts()
+            .unwrap();
         assert_eq!(
             out[0].1,
             "#!/bin/sh\necho hello\npython -c \"print(123)\"\n"
@@ -4654,28 +4656,32 @@ mod tests {
     #[test]
     fn collect_script_uses_absolute_shell_path() {
         let scripts = vec!["start=echo hi".to_string()];
-        let out = collect_scripts(Some("/bin/bash"), &scripts, &[], &[]).unwrap();
+        let out = script_opts(Some("/bin/bash"), &scripts, &[], &[])
+            .collect_scripts()
+            .unwrap();
         assert_eq!(out[0].1, "#!/bin/bash\necho hi\n");
     }
 
     #[test]
     fn collect_script_uses_env_for_bare_shell() {
         let scripts = vec!["start=echo $BASH_VERSION".to_string()];
-        let out = collect_scripts(Some("bash"), &scripts, &[], &[]).unwrap();
+        let out = script_opts(Some("bash"), &scripts, &[], &[])
+            .collect_scripts()
+            .unwrap();
         assert_eq!(out[0].1, "#!/usr/bin/env bash\necho $BASH_VERSION\n");
     }
 
     #[test]
     fn collect_script_raw_is_exact() {
         let raw = vec!["start=echo hello".to_string()];
-        let out = collect_scripts(None, &[], &raw, &[]).unwrap();
+        let out = script_opts(None, &[], &raw, &[]).collect_scripts().unwrap();
         assert_eq!(out, vec![("start".to_string(), "echo hello".to_string())]);
     }
 
     #[test]
     fn collect_script_raw_preserves_escapes_literally() {
         let raw = vec![r"start=echo hello\nworld".to_string()];
-        let out = collect_scripts(None, &[], &raw, &[]).unwrap();
+        let out = script_opts(None, &[], &raw, &[]).collect_scripts().unwrap();
         assert_eq!(out[0].1, r"echo hello\nworld");
     }
 
@@ -4683,7 +4689,9 @@ mod tests {
     fn collect_script_path_is_exact_file_contents() {
         let p = write_temp("#!/bin/sh\necho from-file\n");
         let paths = vec![format!("start:{}", p.display())];
-        let out = collect_scripts(None, &[], &[], &paths).unwrap();
+        let out = script_opts(None, &[], &[], &paths)
+            .collect_scripts()
+            .unwrap();
         assert_eq!(out[0].1, "#!/bin/sh\necho from-file\n");
         let _ = std::fs::remove_file(&p);
     }
@@ -4691,14 +4699,18 @@ mod tests {
     #[test]
     fn collect_script_preserves_unknown_escapes() {
         let scripts = vec![r"re=grep '\d\+' file".to_string()];
-        let out = collect_scripts(None, &scripts, &[], &[]).unwrap();
+        let out = script_opts(None, &scripts, &[], &[])
+            .collect_scripts()
+            .unwrap();
         assert_eq!(out[0].1, "#!/bin/sh\ngrep '\\d\\+' file\n");
     }
 
     #[test]
     fn collect_script_always_ends_with_newline() {
         let scripts = vec!["start=echo hello".to_string()];
-        let out = collect_scripts(None, &scripts, &[], &[]).unwrap();
+        let out = script_opts(None, &scripts, &[], &[])
+            .collect_scripts()
+            .unwrap();
         assert!(out[0].1.ends_with('\n'));
     }
 
@@ -4708,7 +4720,9 @@ mod tests {
         let scripts = vec!["a=echo a".to_string()];
         let raw = vec!["b=echo b".to_string()];
         let paths = vec![format!("c:{}", p.display())];
-        let out = collect_scripts(None, &scripts, &raw, &paths).unwrap();
+        let out = script_opts(None, &scripts, &raw, &paths)
+            .collect_scripts()
+            .unwrap();
         assert_eq!(out.len(), 3);
         assert_eq!(out[0].0, "a");
         assert_eq!(out[1], ("b".to_string(), "echo b".to_string()));
@@ -4719,7 +4733,9 @@ mod tests {
     #[test]
     fn collect_rejects_duplicate_within_script() {
         let scripts = vec!["foo=echo a".to_string(), "foo=echo b".to_string()];
-        let err = collect_scripts(None, &scripts, &[], &[]).unwrap_err();
+        let err = script_opts(None, &scripts, &[], &[])
+            .collect_scripts()
+            .unwrap_err();
         assert!(
             err.to_string().contains("'foo' specified more than once"),
             "got: {err}"
@@ -4733,7 +4749,9 @@ mod tests {
             format!("foo:{}", p.display()),
             format!("foo:{}", p.display()),
         ];
-        let err = collect_scripts(None, &[], &[], &paths).unwrap_err();
+        let err = script_opts(None, &[], &[], &paths)
+            .collect_scripts()
+            .unwrap_err();
         assert!(
             err.to_string().contains("'foo' specified more than once"),
             "got: {err}"
@@ -4748,19 +4766,25 @@ mod tests {
         let raw = vec!["foo=echo b".to_string()];
         let paths = vec![format!("foo:{}", p.display())];
 
-        let err = collect_scripts(None, &scripts, &raw, &[]).unwrap_err();
+        let err = script_opts(None, &scripts, &raw, &[])
+            .collect_scripts()
+            .unwrap_err();
         assert!(
             err.to_string().contains("'foo' specified more than once"),
             "script vs script-raw: {err}"
         );
 
-        let err = collect_scripts(None, &scripts, &[], &paths).unwrap_err();
+        let err = script_opts(None, &scripts, &[], &paths)
+            .collect_scripts()
+            .unwrap_err();
         assert!(
             err.to_string().contains("'foo' specified more than once"),
             "script vs script-path: {err}"
         );
 
-        let err = collect_scripts(None, &[], &raw, &paths).unwrap_err();
+        let err = script_opts(None, &[], &raw, &paths)
+            .collect_scripts()
+            .unwrap_err();
         assert!(
             err.to_string().contains("'foo' specified more than once"),
             "script-raw vs script-path: {err}"
@@ -4771,7 +4795,7 @@ mod tests {
 
     #[test]
     fn collect_empty_inputs_ok() {
-        let out = collect_scripts(None, &[], &[], &[]).unwrap();
+        let out = script_opts(None, &[], &[], &[]).collect_scripts().unwrap();
         assert!(out.is_empty());
     }
 
@@ -4781,16 +4805,39 @@ mod tests {
     use microsandbox_network::policy::Action;
 
     #[cfg(feature = "net")]
+    fn network_policy_opts(
+        profiles: &[String],
+        rules: &[String],
+        no_net: bool,
+        default: Option<&str>,
+        default_egress: Option<&str>,
+        default_ingress: Option<&str>,
+    ) -> SandboxOpts {
+        SandboxOpts {
+            net: profiles.to_vec(),
+            net_rule: rules.to_vec(),
+            no_net,
+            net_default: default.map(str::to_owned),
+            net_default_egress: default_egress.map(str::to_owned),
+            net_default_ingress: default_ingress.map(str::to_owned),
+            ..Default::default()
+        }
+    }
+
+    #[cfg(feature = "net")]
     #[test]
     fn build_policy_no_flags_returns_none() {
-        let p = build_network_policy(&[], &[], false, None, None, None).unwrap();
+        let p = network_policy_opts(&[], &[], false, None, None, None)
+            .build_network_policy()
+            .unwrap();
         assert!(p.is_none());
     }
 
     #[cfg(feature = "net")]
     #[test]
     fn build_policy_net_default_deny_sets_both_directions() {
-        let p = build_network_policy(&[], &[], false, Some("deny"), None, None)
+        let p = network_policy_opts(&[], &[], false, Some("deny"), None, None)
+            .build_network_policy()
             .unwrap()
             .expect("policy");
         assert_eq!(p.default_egress, Action::Deny);
@@ -4801,7 +4848,8 @@ mod tests {
     #[cfg(feature = "net")]
     #[test]
     fn build_policy_net_default_allow_sets_both_directions() {
-        let p = build_network_policy(&[], &[], false, Some("allow"), None, None)
+        let p = network_policy_opts(&[], &[], false, Some("allow"), None, None)
+            .build_network_policy()
             .unwrap()
             .expect("policy");
         assert_eq!(p.default_egress, Action::Allow);
@@ -4811,7 +4859,8 @@ mod tests {
     #[cfg(feature = "net")]
     #[test]
     fn build_policy_no_net_desugars_to_deny_both() {
-        let p = build_network_policy(&[], &[], true, None, None, None)
+        let p = network_policy_opts(&[], &[], true, None, None, None)
+            .build_network_policy()
             .unwrap()
             .expect("policy");
         assert_eq!(p.default_egress, Action::Deny);
@@ -4822,7 +4871,8 @@ mod tests {
     #[test]
     fn build_policy_no_net_with_allow_rule_yields_allowlist() {
         let rules = vec!["allow@example.com".to_string()];
-        let p = build_network_policy(&[], &rules, true, None, None, None)
+        let p = network_policy_opts(&[], &rules, true, None, None, None)
+            .build_network_policy()
             .unwrap()
             .expect("policy");
         assert_eq!(p.default_egress, Action::Deny);
@@ -4834,7 +4884,9 @@ mod tests {
     #[cfg(feature = "net")]
     #[test]
     fn build_policy_net_default_rejects_unknown_action() {
-        let err = build_network_policy(&[], &[], false, Some("maybe"), None, None).unwrap_err();
+        let err = network_policy_opts(&[], &[], false, Some("maybe"), None, None)
+            .build_network_policy()
+            .unwrap_err();
         assert!(
             err.to_string().contains("--net-default"),
             "expected --net-default in error, got: {err}"
@@ -4849,7 +4901,8 @@ mod tests {
         // "rules alone keep the default direction actions" path now that the
         // --deny-domain* flip-to-allow exception is gone.
         let rules = vec!["allow@example.com".to_string()];
-        let p = build_network_policy(&[], &rules, false, None, None, None)
+        let p = network_policy_opts(&[], &rules, false, None, None, None)
+            .build_network_policy()
             .unwrap()
             .expect("policy");
         let baseline = microsandbox_network::policy::NetworkPolicy::default();
@@ -4863,7 +4916,8 @@ mod tests {
         use microsandbox_network::policy::{Destination, DestinationGroup, Protocol};
 
         let profiles = vec!["host,private".to_string(), "public,private".to_string()];
-        let p = build_network_policy(&profiles, &[], false, None, None, None)
+        let p = network_policy_opts(&profiles, &[], false, None, None, None)
+            .build_network_policy()
             .unwrap()
             .expect("policy");
         assert_eq!(p.rules.len(), 4);
@@ -4882,7 +4936,8 @@ mod tests {
     fn build_policy_places_explicit_rules_before_profile_rules() {
         let profiles = vec!["public".to_string()];
         let rules = vec!["deny@dns".to_string()];
-        let p = build_network_policy(&profiles, &rules, false, None, None, None)
+        let p = network_policy_opts(&profiles, &rules, false, None, None, None)
+            .build_network_policy()
             .unwrap()
             .expect("policy");
         assert_eq!(p.rules[0].action, Action::Deny);
@@ -4893,13 +4948,15 @@ mod tests {
     #[test]
     fn build_policy_terminal_all_and_none_reject_composition() {
         let rules = vec!["deny@private".to_string()];
-        let all = build_network_policy(&["all".to_string()], &rules, false, None, None, None)
+        let all = network_policy_opts(&["all".to_string()], &rules, false, None, None, None)
+            .build_network_policy()
             .unwrap()
             .expect("policy");
         assert_eq!(all.default_egress, Action::Allow);
         assert_eq!(all.rules.len(), 1);
 
-        let err = build_network_policy(&["none,public".to_string()], &[], false, None, None, None)
+        let err = network_policy_opts(&["none,public".to_string()], &[], false, None, None, None)
+            .build_network_policy()
             .unwrap_err();
         assert!(err.to_string().contains("cannot be combined"));
 
@@ -4907,14 +4964,16 @@ mod tests {
             vec!["all".to_string(), "none".to_string()],
             vec!["none,all".to_string()],
         ] {
-            let err = build_network_policy(&profiles, &[], false, None, None, None).unwrap_err();
+            let err = network_policy_opts(&profiles, &[], false, None, None, None)
+                .build_network_policy()
+                .unwrap_err();
             assert_eq!(
                 err.to_string(),
                 "--net terminal profiles `all` and `none` cannot be combined"
             );
         }
 
-        let err = build_network_policy(
+        let err = network_policy_opts(
             &["all".to_string(), "all".to_string()],
             &[],
             false,
@@ -4922,6 +4981,7 @@ mod tests {
             None,
             None,
         )
+        .build_network_policy()
         .unwrap_err();
         assert_eq!(err.to_string(), "--net `all` may only be specified once");
     }
