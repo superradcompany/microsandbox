@@ -53,7 +53,10 @@ const MAX_IPV4_UDP_PAYLOAD_LEN: usize = 65_507;
 /// Maximum UDP payload carried by a non-jumbo IPv6 packet.
 const MAX_IPV6_UDP_PAYLOAD_LEN: usize = 65_527;
 
-/// Buffer size for receiving responses from the real server.
+/// Buffer size for receiving a complete outer UDP datagram.
+///
+/// A SOCKS5 header is part of that outer datagram, so the protocol's maximum
+/// UDP payload size already includes it and requires no additional capacity.
 const RECV_BUF_SIZE: usize = MAX_IPV6_UDP_PAYLOAD_LEN;
 
 /// Ethernet header length.

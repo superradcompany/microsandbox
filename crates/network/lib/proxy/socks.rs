@@ -11,7 +11,7 @@ use tokio::net::TcpStream;
 use tokio_socks::tcp::Socks4Stream;
 use zeroize::Zeroizing;
 
-use super::{
+use super::types::{
     OutboundProxy, OutboundProxyBuildError, OutboundProxyBuilder, OutboundProxyConfig,
     OutboundProxyProtocol, ResolvedOutboundProxy,
 };
@@ -57,6 +57,12 @@ pub(crate) struct Socks5UdpAssociation {
 
 /// SOCKS5 wire protocol operations shared by TCP and UDP proxying.
 struct Socks5Protocol;
+
+/// Address returned by a SOCKS5 command reply.
+enum Socks5ReplyAddress {
+    Socket(SocketAddr),
+    Domain,
+}
 
 //--------------------------------------------------------------------------------------------------
 // Methods
@@ -142,7 +148,9 @@ impl ResolvedOutboundProxy {
             } => {
                 let mut stream = TcpStream::connect(*address).await?;
                 Socks5Protocol::negotiate(&mut stream, credentials.as_ref()).await?;
-                Socks5Protocol::command(&mut stream, 0x01, destination).await?;
+                // The bound address is informational for CONNECT. Parse it to
+                // validate the reply, but do not resolve proxy-supplied domains.
+                let _ = Socks5Protocol::command(&mut stream, 0x01, destination).await?;
                 Ok(stream)
             }
         }
@@ -167,7 +175,14 @@ impl ResolvedOutboundProxy {
         let control_local = control.local_addr()?;
         let udp_bind = SocketAddr::new(control_local.ip(), 0);
         let socket = tokio::net::UdpSocket::bind(udp_bind).await?;
-        let relay = Socks5Protocol::command(&mut control, 0x03, socket.local_addr()?).await?;
+        let relay = match Socks5Protocol::command(&mut control, 0x03, socket.local_addr()?).await? {
+            Socks5ReplyAddress::Socket(relay) => relay,
+            Socks5ReplyAddress::Domain => {
+                return Err(Socks5Protocol::invalid_response(
+                    "domain-form SOCKS5 UDP relay addresses are not supported",
+                ));
+            }
+        };
         let relay = if relay.ip().is_unspecified() {
             SocketAddr::new(control.peer_addr()?.ip(), relay.port())
         } else {
@@ -469,7 +484,7 @@ impl Socks5Protocol {
         stream: &mut TcpStream,
         command: u8,
         destination: SocketAddr,
-    ) -> io::Result<SocketAddr> {
+    ) -> io::Result<Socks5ReplyAddress> {
         let mut request = Vec::with_capacity(3 + Self::address_len(destination));
         request.extend_from_slice(&[0x05, command, 0x00]);
         Self::encode_address(&mut request, destination);
@@ -491,7 +506,10 @@ impl Socks5Protocol {
     }
 
     /// Reads a SOCKS5 address whose address-type byte was already consumed.
-    async fn read_address(stream: &mut TcpStream, address_type: u8) -> io::Result<SocketAddr> {
+    async fn read_address(
+        stream: &mut TcpStream,
+        address_type: u8,
+    ) -> io::Result<Socks5ReplyAddress> {
         let ip = match address_type {
             0x01 => {
                 let mut octets = [0u8; 4];
@@ -507,23 +525,19 @@ impl Socks5Protocol {
                 let length = stream.read_u8().await? as usize;
                 let mut domain = vec![0u8; length];
                 stream.read_exact(&mut domain).await?;
-                let domain = std::str::from_utf8(&domain).map_err(|_| {
-                    Self::invalid_response("SOCKS5 reply contains a non-UTF-8 domain")
-                })?;
                 let mut port = [0u8; 2];
                 stream.read_exact(&mut port).await?;
-                let port = u16::from_be_bytes(port);
-                return tokio::net::lookup_host((domain, port))
-                    .await?
-                    .next()
-                    .ok_or_else(|| Self::invalid_response("SOCKS5 reply domain did not resolve"));
+                return Ok(Socks5ReplyAddress::Domain);
             }
             _ => return Err(Self::invalid_response("unsupported SOCKS5 address type")),
         };
 
         let mut port = [0u8; 2];
         stream.read_exact(&mut port).await?;
-        Ok(SocketAddr::new(ip, u16::from_be_bytes(port)))
+        Ok(Socks5ReplyAddress::Socket(SocketAddr::new(
+            ip,
+            u16::from_be_bytes(port),
+        )))
     }
 
     /// Encodes a socket address in SOCKS5 address form.
@@ -949,6 +963,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn connect_does_not_resolve_domain_from_socks5_reply() {
+        let target: SocketAddr = "93.184.216.34:443".parse().unwrap();
+        let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_addr = proxy_listener.local_addr().unwrap();
+        let proxy_task = tokio::spawn(async move {
+            let (mut client, _) = proxy_listener.accept().await.unwrap();
+
+            let mut greeting = [0u8; 3];
+            client.read_exact(&mut greeting).await.unwrap();
+            client.write_all(&[0x05, 0x00]).await.unwrap();
+
+            let mut request = [0u8; 10];
+            client.read_exact(&mut request).await.unwrap();
+            let domain = b"does-not-resolve.invalid";
+            let mut response = vec![0x05, 0x00, 0x00, 0x03, domain.len() as u8];
+            response.extend_from_slice(domain);
+            response.extend_from_slice(&443u16.to_be_bytes());
+            client.write_all(&response).await.unwrap();
+
+            let mut buf = [0u8; 5];
+            client.read_exact(&mut buf).await.unwrap();
+            client.write_all(&buf).await.unwrap();
+        });
+
+        let mut stream = ResolvedOutboundProxy::Socks5 {
+            address: proxy_addr,
+            credentials: None,
+        }
+        .connect(target)
+        .await
+        .unwrap();
+        stream.write_all(b"hello").await.unwrap();
+        let mut echoed = [0u8; 5];
+        stream.read_exact(&mut echoed).await.unwrap();
+        assert_eq!(&echoed, b"hello");
+
+        proxy_task.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn connects_through_authenticated_socks5_proxy() {
         let target: SocketAddr = "93.184.216.34:443".parse().unwrap();
         let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1043,6 +1097,46 @@ mod tests {
         let (received, source) = association.recv_from(&mut response).await.unwrap();
         assert_eq!(source, target);
         assert_eq!(&response[..received], b"hello");
+
+        proxy_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn udp_association_rejects_domain_relay_address() {
+        let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_addr = proxy_listener.local_addr().unwrap();
+        let proxy_task = tokio::spawn(async move {
+            let (mut control, _) = proxy_listener.accept().await.unwrap();
+
+            let mut greeting = [0u8; 3];
+            control.read_exact(&mut greeting).await.unwrap();
+            control.write_all(&[0x05, 0x00]).await.unwrap();
+
+            let mut request = [0u8; 10];
+            control.read_exact(&mut request).await.unwrap();
+            assert_eq!(request[1], 0x03, "UDP ASSOCIATE command");
+
+            let domain = b"does-not-resolve.invalid";
+            let mut response = vec![0x05, 0x00, 0x00, 0x03, domain.len() as u8];
+            response.extend_from_slice(domain);
+            response.extend_from_slice(&1080u16.to_be_bytes());
+            control.write_all(&response).await.unwrap();
+        });
+
+        let proxy = ResolvedOutboundProxy::Socks5 {
+            address: proxy_addr,
+            credentials: None,
+        };
+        let error = match proxy.associate_udp().await {
+            Ok(_) => panic!("accepted a domain-form UDP relay address"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(
+            error
+                .to_string()
+                .contains("domain-form SOCKS5 UDP relay addresses are not supported")
+        );
 
         proxy_task.await.unwrap();
     }
