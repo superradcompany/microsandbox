@@ -237,6 +237,15 @@ pub const MIGRATION_METADATA: &[MigrationMetadata] = &[
         summary: "restore exclusive logical CPU allocation rows",
     },
     MigrationMetadata {
+        id: MOUNT_OWNER_CONFIG_MIGRATION_ID,
+        reversible: true,
+        affects_cache: false,
+        affects_user_data: false,
+        summary: "remove the compatibility marker after confirming no persisted mount ownership",
+    },
+    MigrationMetadata {
+        // This backdated migration first shipped in v0.6.16. Keep it after
+        // the v0.6.15 mount-owner marker so released databases stay prefixes.
         id: SANDBOX_NETWORK_SLOT_MIGRATION_ID,
         // The column is deliberately left in place on rollback (SQLite has
         // no DROP COLUMN on every supported version); `up` probes for it so a
@@ -245,13 +254,6 @@ pub const MIGRATION_METADATA: &[MigrationMetadata] = &[
         affects_cache: false,
         affects_user_data: false,
         summary: "retain the compatible sandbox network slot column",
-    },
-    MigrationMetadata {
-        id: MOUNT_OWNER_CONFIG_MIGRATION_ID,
-        reversible: true,
-        affects_cache: false,
-        affects_user_data: false,
-        summary: "remove the compatibility marker after confirming no persisted mount ownership",
     },
 ];
 
@@ -372,6 +374,16 @@ mod tests {
             .map(|metadata| metadata.id)
             .chain(["m20990101_000001_future"]);
         assert!(canonical_applied_prefix(with_unknown).is_none());
+    }
+
+    #[test]
+    fn released_v0_6_15_migrations_remain_a_prefix() {
+        let applied: Vec<_> = migration_ids()
+            .take_while(|id| *id != SANDBOX_NETWORK_SLOT_MIGRATION_ID)
+            .collect();
+
+        assert_eq!(applied.last(), Some(&MOUNT_OWNER_CONFIG_MIGRATION_ID));
+        assert!(canonical_applied_prefix(applied).is_some());
     }
 
     #[test]

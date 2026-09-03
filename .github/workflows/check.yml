@@ -1365,6 +1365,35 @@ jobs:
           go test -tags "smoke microsandbox_ffi_path" -count=1 -timeout 2m .
 
   # ---------------------------------------------------------------------------
+  # Previous-release upgrade smoke test
+  #
+  # Creates databases with the two latest released CLIs, then opens them with
+  # the candidate binary. This catches migration-order and compatibility gaps
+  # without requiring KVM.
+  # ---------------------------------------------------------------------------
+  previous-release-upgrade-smoke:
+    name: Previous Release Upgrade Smoke
+    needs: [build-linux-x86_64, changes]
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Download candidate runtime
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: msb-linux-x86_64
+          path: build/
+
+      - name: Test released database upgrades
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          chmod +x build/msb
+          python3 scripts/smoke/cli/previous_release_upgrade.py
+
+  # ---------------------------------------------------------------------------
   # CLI smoke tests (requires KVM)
   #
   # Runs black-box CLI user flows against the freshly-built msb artifact.
@@ -1925,6 +1954,7 @@ jobs:
       - ruby-platform-smoke
       - ruby-platform-smoke-clean
       - go-quality
+      - previous-release-upgrade-smoke
       - cli-smoke-test
       - integration-test
       - node-sdk-test
