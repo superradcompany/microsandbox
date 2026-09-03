@@ -11,24 +11,25 @@ use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
 use crate::error::to_napi_error;
+use crate::snapshot_copy_builder::JsSnapshotCopyBuilder;
 
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
 
-/// A snapshot artifact on disk.
+/// A backend-neutral snapshot artifact.
 #[napi(js_name = "Snapshot")]
 pub struct JsSnapshot {
     inner: RustSnapshot,
 }
 
-/// Lightweight snapshot handle from the local index.
+/// Lightweight snapshot handle returned by the active backend.
 #[napi(js_name = "SnapshotHandle")]
 pub struct JsSnapshotHandle {
     inner: RustSnapshotHandle,
 }
 
-/// Options for `Snapshot.save()`.
+/// Options for `Snapshot.save()` and instance `saveTo()` methods.
 #[derive(Default)]
 #[napi(object, js_name = "SaveOpts")]
 pub struct JsSaveOpts {
@@ -80,7 +81,9 @@ pub struct JsSnapshotInfo {
     pub migration_state: String,
     pub migration_error_code: Option<String>,
     pub created_at: f64,
-    pub path: String,
+    pub reference: String,
+    #[napi(ts_type = "'id' | 'path'")]
+    pub reference_kind: String,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -115,18 +118,6 @@ impl JsSnapshot {
         Ok(handles.iter().map(snapshot_handle_to_info).collect())
     }
 
-    /// Walk `dir` and parse each subdirectory's `snapshot.json`. Does
-    /// not touch the local index — useful for inspecting external
-    /// snapshot collections (e.g. a mounted volume of artifacts that
-    /// were never imported).
-    #[napi(js_name = "listDir")]
-    pub async fn list_dir(dir: String) -> Result<Vec<JsSnapshot>> {
-        let snapshots = RustSnapshot::list_dir(PathBuf::from(dir))
-            .await
-            .map_err(to_napi_error)?;
-        Ok(snapshots.into_iter().map(JsSnapshot::from_rust).collect())
-    }
-
     #[napi(js_name = "remove")]
     pub async fn remove_static(
         path_or_name: String,
@@ -138,51 +129,18 @@ impl JsSnapshot {
             .map_err(to_napi_error)
     }
 
-    #[napi]
-    pub async fn reindex(dir: Option<String>) -> Result<u32> {
-        let dir = match dir {
-            Some(p) => PathBuf::from(p),
-            None => microsandbox::backend::default_backend()
-                .as_local()
-                .map(|l| l.snapshots_dir())
-                .unwrap_or_else(|| PathBuf::from(".")),
-        };
-        let n = RustSnapshot::reindex(&dir).await.map_err(to_napi_error)?;
-        Ok(n as u32)
-    }
-
-    /// Bundle a snapshot into a `.tar.zst` archive. The recorded
-    /// manifest is archived as-is, so create the snapshot with
-    /// `recordIntegrity()` if receivers must verify content.
-    #[napi]
-    pub async fn save(name_or_path: String, out: String, opts: Option<JsSaveOpts>) -> Result<()> {
-        let opts = opts.unwrap_or_default();
-        let rust_opts = RustSaveOpts {
-            with_parents: opts.with_parents.unwrap_or(false),
-            with_image: opts.with_image.unwrap_or(false),
-            plain_tar: opts.plain_tar.unwrap_or(false),
-        };
-        RustSnapshot::save(&name_or_path, &PathBuf::from(out), rust_opts)
-            .await
-            .map_err(to_napi_error)
-    }
-
-    #[napi]
-    pub async fn load(archive: String, dest: Option<String>) -> Result<JsSnapshotHandle> {
-        let dest = dest.map(PathBuf::from);
-        let h = RustSnapshot::load(&PathBuf::from(archive), dest.as_deref())
-            .await
-            .map_err(to_napi_error)?;
-        Ok(JsSnapshotHandle::from_rust(h))
-    }
-
     //----------------------------------------------------------------------------------------------
     // Instance accessors (mirror PyVolume's getter style)
     //----------------------------------------------------------------------------------------------
 
     #[napi(getter)]
-    pub fn path(&self) -> String {
-        self.inner.path().display().to_string()
+    pub fn reference(&self) -> String {
+        self.inner.reference().value().to_owned()
+    }
+
+    #[napi(getter, ts_return_type = "'id' | 'path'")]
+    pub fn reference_kind(&self) -> &'static str {
+        self.inner.reference().kind()
     }
 
     #[napi(getter)]
@@ -332,10 +290,71 @@ impl JsSnapshot {
     pub fn source_sandbox(&self) -> Option<String> {
         self.inner.manifest().source_sandbox.clone()
     }
+}
 
+#[napi]
+impl JsSnapshot {
+    /// Walk `dir` and parse each snapshot artifact within it.
+    #[napi(js_name = "listDir")]
+    pub async fn list_dir(dir: String) -> Result<Vec<JsSnapshot>> {
+        let snapshots = RustSnapshot::list_dir(PathBuf::from(dir))
+            .await
+            .map_err(to_napi_error)?;
+        Ok(snapshots.into_iter().map(JsSnapshot::from_rust).collect())
+    }
+
+    /// Rebuild the backend snapshot index from artifacts in `dir`.
+    #[napi]
+    pub async fn reindex(dir: Option<String>) -> Result<u32> {
+        let n = match dir {
+            Some(path) => RustSnapshot::reindex(PathBuf::from(path)).await,
+            None => RustSnapshot::reindex_default().await,
+        };
+        let n = n.map_err(to_napi_error)?;
+        Ok(n as u32)
+    }
+
+    /// Bundle a snapshot into a `.tar.zst` archive.
+    #[napi]
+    pub async fn save(name_or_path: String, out: String, opts: Option<JsSaveOpts>) -> Result<()> {
+        RustSnapshot::save(&name_or_path, &PathBuf::from(out), save_opts_to_rust(opts))
+            .await
+            .map_err(to_napi_error)
+    }
+
+    /// Bundle this snapshot into a `.tar.zst` archive.
+    #[napi(js_name = "saveTo")]
+    pub async fn save_to(&self, out: String, opts: Option<JsSaveOpts>) -> Result<()> {
+        let snapshot = self.inner.clone();
+        snapshot
+            .save_to(&PathBuf::from(out), save_opts_to_rust(opts))
+            .await
+            .map_err(to_napi_error)
+    }
+
+    /// Configure a new archive containing this snapshot's disk data and
+    /// replacement labels and integrity metadata.
+    /// Returns an unsupported-operation error when artifact archives are unavailable.
+    #[napi(js_name = "copyTo")]
+    pub fn copy_to(&self, output_archive_path: String) -> JsSnapshotCopyBuilder {
+        JsSnapshotCopyBuilder::from_rust(self.inner.copy_to(output_archive_path))
+    }
+
+    /// Unpack a snapshot archive into the active backend's snapshot store.
+    #[napi]
+    pub async fn load(archive: String, dest: Option<String>) -> Result<JsSnapshotHandle> {
+        let dest = dest.map(PathBuf::from);
+        let h = RustSnapshot::load(&PathBuf::from(archive), dest.as_deref())
+            .await
+            .map_err(to_napi_error)?;
+        Ok(JsSnapshotHandle::from_rust(h))
+    }
+
+    /// Verify this snapshot's recorded payload integrity.
     #[napi]
     pub async fn verify(&self) -> Result<JsSnapshotVerifyReport> {
-        let report = self.inner.verify().await.map_err(to_napi_error)?;
+        let snapshot = self.inner.clone();
+        let report = snapshot.verify().await.map_err(to_napi_error)?;
         Ok(verify_report_to_js(report))
     }
 }
@@ -426,8 +445,13 @@ impl JsSnapshotHandle {
     }
 
     #[napi(getter)]
-    pub fn path(&self) -> String {
-        self.inner.path().display().to_string()
+    pub fn reference(&self) -> String {
+        self.inner.reference().value().to_owned()
+    }
+
+    #[napi(getter, ts_return_type = "'id' | 'path'")]
+    pub fn reference_kind(&self) -> &'static str {
+        self.inner.reference().kind()
     }
 
     #[napi]
@@ -440,6 +464,16 @@ impl JsSnapshotHandle {
     pub async fn remove(&self, opts: Option<JsSnapshotRemoveOpts>) -> Result<()> {
         let force = opts.and_then(|o| o.force).unwrap_or(false);
         self.inner.remove(force).await.map_err(to_napi_error)
+    }
+
+    /// Bundle this snapshot into a `.tar.zst` archive.
+    #[napi(js_name = "saveTo")]
+    pub async fn save_to(&self, out: String, opts: Option<JsSaveOpts>) -> Result<()> {
+        let handle = self.inner.clone();
+        handle
+            .save_to(&PathBuf::from(out), save_opts_to_rust(opts))
+            .await
+            .map_err(to_napi_error)
     }
 }
 
@@ -457,6 +491,15 @@ fn format_str(f: RustSnapshotFormat) -> &'static str {
     match f {
         RustSnapshotFormat::Raw => "raw",
         RustSnapshotFormat::Qcow2 => "qcow2",
+    }
+}
+
+fn save_opts_to_rust(opts: Option<JsSaveOpts>) -> RustSaveOpts {
+    let opts = opts.unwrap_or_default();
+    RustSaveOpts {
+        with_parents: opts.with_parents.unwrap_or(false),
+        with_image: opts.with_image.unwrap_or(false),
+        plain_tar: opts.plain_tar.unwrap_or(false),
     }
 }
 
@@ -484,7 +527,8 @@ fn snapshot_handle_to_info(h: &RustSnapshotHandle) -> JsSnapshotInfo {
         migration_state: h.migration_state().into(),
         migration_error_code: h.migration_error_code().map(str::to_string),
         created_at: h.created_at().and_utc().timestamp_millis() as f64,
-        path: h.path().display().to_string(),
+        reference: h.reference().value().to_owned(),
+        reference_kind: h.reference().kind().into(),
     }
 }
 

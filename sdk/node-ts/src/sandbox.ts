@@ -17,6 +17,7 @@ import {
   type NapiSandboxConfig,
   type NapiSandboxListOptions,
   type NapiSandboxPage,
+  type NapiSnapshotSeed,
 } from "./internal/napi.js";
 import { ExecHandle, ExecOutput } from "./exec.js";
 import { SandboxFsOps } from "./fs.js";
@@ -65,6 +66,7 @@ export type SandboxConfig = NapiSandboxConfig;
 export type CpuPlacement = "inherit" | "auto" | "spread" | "compact";
 
 export interface SandboxBuilder extends NapiSandboxBuilderSetters {
+  fromSnapshot(snapshot: NapiSnapshotSeed): this;
   /** Create a new sandbox, preserving strict name-conflict behavior. */
   create(): Promise<Sandbox>;
   /**
@@ -203,15 +205,26 @@ export class Sandbox implements AsyncDisposable {
     const nb = new napi.SandboxBuilder(name);
     let detached = false;
     const origDetached = nb.detached.bind(nb);
+    const origFromSnapshot = nb.fromSnapshot.bind(nb) as (reference: string) => unknown;
     const origCreate = nb.create.bind(nb);
     const origConnectOrCreate = nb.connectOrCreate.bind(nb);
     const origCreateWithPP = nb.createWithPullProgress.bind(nb);
+    const origFromSnapshotRef = nb.fromSnapshotRef.bind(nb);
     const wrapped = nb as unknown as {
       detached: (enabled: boolean) => SandboxBuilder;
+      fromSnapshot: (snapshot: NapiSnapshotSeed) => SandboxBuilder;
     };
     wrapped.detached = (enabled: boolean) => {
       detached = enabled;
       origDetached(enabled);
+      return nb as unknown as SandboxBuilder;
+    };
+    wrapped.fromSnapshot = (snapshot: NapiSnapshotSeed) => {
+      if (typeof snapshot === "string") {
+        origFromSnapshot(snapshot);
+      } else {
+        origFromSnapshotRef(snapshot.reference, snapshot.referenceKind);
+      }
       return nb as unknown as SandboxBuilder;
     };
     // Override the terminals so they return a TS Sandbox.
@@ -502,6 +515,12 @@ export class Sandbox implements AsyncDisposable {
 
   // -- lifecycle ----------------------------------------------------------
 
+  /**
+   * Gracefully stop the sandbox and wait for stopped state. Local waits 10
+   * seconds before force-killing. Cloud waits 6 minutes and throws
+   * `SandboxStopTimedOutError` on expiry without cancelling the accepted
+   * server-side stop.
+   */
   async stop(): Promise<void> {
     await withMappedErrors(() => this.inner.stop());
   }
@@ -510,6 +529,12 @@ export class Sandbox implements AsyncDisposable {
     await withMappedErrors(() => this.inner.requestStop());
   }
 
+  /**
+   * Stop with an explicit observation timeout. Local force-kills after the
+   * timeout. Cloud throws `SandboxStopTimedOutError` instead, while the
+   * accepted server-side stop may continue. `0` is local-only because it
+   * requests immediate force termination.
+   */
   async stopWithTimeout(timeoutMs: number): Promise<void> {
     await withMappedErrors(() => this.inner.stopWithTimeout(timeoutMs));
   }

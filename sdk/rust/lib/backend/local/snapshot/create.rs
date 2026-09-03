@@ -1,10 +1,10 @@
-//! Snapshot creation from a stopped sandbox.
+//! Local snapshot creation from a stopped sandbox.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use chrono::Utc;
-use microsandbox_image::snapshot::{
+use microsandbox_types::snapshot::{
     DEFAULT_UPPER_FILE, DESCRIPTOR_FILENAME, FileSnapshotState, ImageRef, Manifest, SCHEMA_VERSION,
     SNAPSHOT_ARTIFACT_KIND, SnapshotFormat, SnapshotScope, SnapshotState, UpperLayer,
 };
@@ -15,140 +15,170 @@ use crate::db::entity::sandbox as sandbox_entity;
 use crate::sandbox::{RootDisk, SandboxConfig, SandboxStatus};
 use crate::{MicrosandboxError, MicrosandboxResult, Operation, UnsupportedReason};
 
-use super::store::index_upsert;
-use super::{Snapshot, SnapshotConfig};
+use super::{LocalSnapshotArtifact, SnapshotConfig};
 
 //--------------------------------------------------------------------------------------------------
-// Functions
+// Methods
 //--------------------------------------------------------------------------------------------------
 
-pub(super) async fn create_snapshot(
-    local: &LocalBackend,
-    config: SnapshotConfig,
-) -> MicrosandboxResult<Snapshot> {
-    let SnapshotConfig {
-        name,
-        dest_dir,
-        source_sandbox,
-        labels,
-        force,
-        record_integrity,
-        resumable,
-    } = config;
+impl LocalBackend {
+    pub(super) async fn create_snapshot(
+        &self,
+        config: SnapshotConfig,
+    ) -> MicrosandboxResult<LocalSnapshotArtifact> {
+        let SnapshotConfig {
+            name,
+            dest_dir,
+            source_sandbox,
+            labels,
+            force,
+            record_integrity,
+            resumable,
+        } = config;
 
-    if resumable {
-        return Err(MicrosandboxError::unsupported(
-            Operation::SnapshotOps,
-            UnsupportedReason::NotAvailable(
-                "resumable snapshots require VM pause/resume restore support".into(),
-            ),
-        ));
-    }
+        if resumable {
+            return Err(MicrosandboxError::unsupported(
+                Operation::SnapshotOps,
+                UnsupportedReason::NotAvailable(
+                    "resumable snapshots require VM pause/resume restore support".into(),
+                ),
+            ));
+        }
 
-    // Validate the destination before anything else so name errors surface
-    // ahead of sandbox lookups and no work happens for an invalid target.
-    let dest_dir = resolve_destination(local, &name, dest_dir)?;
-    if dest_dir.exists() && !force {
-        return Err(MicrosandboxError::SnapshotAlreadyExists(
-            dest_dir.display().to_string(),
-        ));
-    }
+        // Validate the destination before anything else so name errors surface
+        // ahead of sandbox lookups and no work happens for an invalid target.
+        let dest_dir = self.resolve_snapshot_destination(&name, dest_dir)?;
+        if dest_dir.exists() && !force {
+            return Err(MicrosandboxError::SnapshotAlreadyExists(
+                dest_dir.display().to_string(),
+            ));
+        }
 
-    let db = local.db().await?.read();
+        let db = self.db().await?.read();
 
-    // Look up the sandbox row + parse its persisted config.
-    let model = sandbox_entity::Entity::find()
-        .filter(sandbox_entity::Column::Name.eq(&source_sandbox))
-        .one(db)
-        .await?
-        .ok_or_else(|| MicrosandboxError::SandboxNotFound(source_sandbox.clone()))?;
+        // Look up the sandbox row + parse its persisted config.
+        let model = sandbox_entity::Entity::find()
+            .filter(sandbox_entity::Column::Name.eq(&source_sandbox))
+            .one(db)
+            .await?
+            .ok_or_else(|| MicrosandboxError::SandboxNotFound(source_sandbox.clone()))?;
 
-    if matches!(
-        model.status,
-        SandboxStatus::Running | SandboxStatus::Draining | SandboxStatus::Paused
-    ) {
-        return Err(MicrosandboxError::SnapshotSandboxRunning(
-            source_sandbox.clone(),
-        ));
-    }
+        if matches!(
+            model.status,
+            SandboxStatus::Running | SandboxStatus::Draining | SandboxStatus::Paused
+        ) {
+            return Err(MicrosandboxError::SnapshotSandboxRunning(
+                source_sandbox.clone(),
+            ));
+        }
 
-    let sandbox_config: SandboxConfig = serde_json::from_str(&model.config)?;
+        let sandbox_config: SandboxConfig = serde_json::from_str(&model.config)?;
 
-    // Only OCI-rooted sandboxes can be snapshotted today; non-OCI
-    // rootfs (passthrough, disk-image-rootfs) are out of scope.
-    let manifest_digest_str = sandbox_config.manifest_digest.clone().ok_or_else(|| {
+        // Only OCI-rooted sandboxes can be snapshotted today; non-OCI
+        // rootfs (passthrough, disk-image-rootfs) are out of scope.
+        let manifest_digest_str = sandbox_config.manifest_digest.clone().ok_or_else(|| {
         MicrosandboxError::InvalidConfig(format!(
             "sandbox '{source_sandbox}' has no OCI image pinned; only OCI-rooted sandboxes can be snapshotted"
         ))
     })?;
-    let image_reference = oci_reference_string(&sandbox_config)?;
+        let image_reference = oci_reference_string(&sandbox_config)?;
 
-    ensure_snapshottable_root_disk(sandbox_config.spec.image.oci_root_disk(), &source_sandbox)?;
+        ensure_snapshottable_root_disk(sandbox_config.spec.image.oci_root_disk(), &source_sandbox)?;
 
-    // Resolve source upper.ext4 path from the canonical sandbox layout.
-    let sandbox_dir = local.sandboxes_dir().join(&source_sandbox);
-    let src_upper = sandbox_dir.join("upper.ext4");
-    if !src_upper.exists() {
-        return Err(MicrosandboxError::Custom(format!(
-            "source sandbox '{source_sandbox}' has no upper.ext4 at {}",
-            src_upper.display()
-        )));
-    }
-
-    // Stage the artifact in a sibling directory, so a failed create never
-    // leaves a partial artifact at the destination (which would poison
-    // retries with SnapshotAlreadyExists) and a force overwrite only
-    // removes the old artifact after the new one is complete.
-    let parent_dir = dest_dir
-        .parent()
-        .ok_or_else(|| {
-            MicrosandboxError::InvalidConfig(format!(
-                "snapshot destination has no parent directory: {}",
-                dest_dir.display()
-            ))
-        })?
-        .to_path_buf();
-    tokio::fs::create_dir_all(&parent_dir).await?;
-    let staging_dir = parent_dir.join(format!(".{name}.staging"));
-    if staging_dir.exists() {
-        tokio::fs::remove_dir_all(&staging_dir).await?;
-    }
-    tokio::fs::create_dir_all(&staging_dir).await?;
-
-    let built = build_artifact(
-        &staging_dir,
-        &src_upper,
-        labels,
-        image_reference,
-        manifest_digest_str,
-        &source_sandbox,
-        record_integrity,
-    )
-    .await;
-    let (digest, manifest) = match built {
-        Ok(v) => v,
-        Err(e) => {
-            let _ = tokio::fs::remove_dir_all(&staging_dir).await;
-            return Err(e);
+        // Resolve source upper.ext4 path from the canonical sandbox layout.
+        let sandbox_dir = self.sandboxes_dir().join(&source_sandbox);
+        let src_upper = sandbox_dir.join("upper.ext4");
+        if !src_upper.exists() {
+            return Err(MicrosandboxError::Custom(format!(
+                "source sandbox '{source_sandbox}' has no upper.ext4 at {}",
+                src_upper.display()
+            )));
         }
-    };
 
-    // Promote the staged artifact into place.
-    if dest_dir.exists() {
-        tokio::fs::remove_dir_all(&dest_dir).await?;
-    }
-    if let Err(e) = tokio::fs::rename(&staging_dir, &dest_dir).await {
-        let _ = tokio::fs::remove_dir_all(&staging_dir).await;
-        return Err(e.into());
+        // Stage the artifact in a sibling directory, so a failed create never
+        // leaves a partial artifact at the destination (which would poison
+        // retries with SnapshotAlreadyExists) and a force overwrite only
+        // removes the old artifact after the new one is complete.
+        let parent_dir = dest_dir
+            .parent()
+            .ok_or_else(|| {
+                MicrosandboxError::InvalidConfig(format!(
+                    "snapshot destination has no parent directory: {}",
+                    dest_dir.display()
+                ))
+            })?
+            .to_path_buf();
+        tokio::fs::create_dir_all(&parent_dir).await?;
+        let staging_dir = parent_dir.join(format!(".{name}.staging"));
+        if staging_dir.exists() {
+            tokio::fs::remove_dir_all(&staging_dir).await?;
+        }
+        tokio::fs::create_dir_all(&staging_dir).await?;
+
+        let built = build_artifact(
+            &staging_dir,
+            &src_upper,
+            labels,
+            image_reference,
+            manifest_digest_str,
+            &source_sandbox,
+            record_integrity,
+        )
+        .await;
+        let (digest, manifest) = match built {
+            Ok(v) => v,
+            Err(e) => {
+                let _ = tokio::fs::remove_dir_all(&staging_dir).await;
+                return Err(e);
+            }
+        };
+
+        // Promote the staged artifact into place.
+        if dest_dir.exists() {
+            tokio::fs::remove_dir_all(&dest_dir).await?;
+        }
+        if let Err(e) = tokio::fs::rename(&staging_dir, &dest_dir).await {
+            let _ = tokio::fs::remove_dir_all(&staging_dir).await;
+            return Err(e.into());
+        }
+
+        // Best-effort index upsert. Failures are logged, not propagated —
+        // the artifact on disk is the source of truth.
+        if let Err(e) = self
+            .upsert_snapshot_index(&dest_dir, &digest, &manifest)
+            .await
+        {
+            tracing::warn!(error = %e, snapshot = %digest, "snapshot_index upsert failed");
+        }
+
+        Ok(LocalSnapshotArtifact::new(dest_dir, digest, manifest))
     }
 
-    // Best-effort index upsert. Failures are logged, not propagated —
-    // the artifact on disk is the source of truth.
-    if let Err(e) = index_upsert(local, &dest_dir, &digest, &manifest).await {
-        tracing::warn!(error = %e, snapshot = %digest, "snapshot_index upsert failed");
+    fn resolve_snapshot_destination(
+        &self,
+        name: &str,
+        dest_dir: Option<PathBuf>,
+    ) -> MicrosandboxResult<PathBuf> {
+        if name.is_empty() {
+            return Err(MicrosandboxError::InvalidConfig(
+                "snapshot name must not be empty".into(),
+            ));
+        }
+        // Reject names the open/get/remove resolvers would misread: leading '.'
+        // and '~' or a '/' read as paths, and ':' collides with digest prefixes
+        // (sha256:...). Such a snapshot would be creatable but unaddressable.
+        if name.contains('/')
+            || name.contains('\\')
+            || name.contains(':')
+            || name.starts_with('.')
+            || name.starts_with('~')
+        {
+            return Err(MicrosandboxError::InvalidConfig(format!(
+                "snapshot name must be a bare identifier, not a path: '{name}' (use dest_dir to choose a parent directory)"
+            )));
+        }
+        Ok(dest_dir.unwrap_or_else(|| self.snapshots_dir()).join(name))
     }
-
-    Ok(Snapshot::from_parts(dest_dir, digest, manifest))
 }
 
 /// Build the artifact contents (upper copy, integrity, descriptor) into
@@ -285,32 +315,6 @@ fn oci_reference_string(config: &SandboxConfig) -> MicrosandboxResult<String> {
     }
 }
 
-fn resolve_destination(
-    local: &LocalBackend,
-    name: &str,
-    dest_dir: Option<PathBuf>,
-) -> MicrosandboxResult<PathBuf> {
-    if name.is_empty() {
-        return Err(MicrosandboxError::InvalidConfig(
-            "snapshot name must not be empty".into(),
-        ));
-    }
-    // Reject names the open/get/remove resolvers would misread: leading '.'
-    // and '~' or a '/' read as paths, and ':' collides with digest prefixes
-    // (sha256:...). Such a snapshot would be creatable but unaddressable.
-    if name.contains('/')
-        || name.contains('\\')
-        || name.contains(':')
-        || name.starts_with('.')
-        || name.starts_with('~')
-    {
-        return Err(MicrosandboxError::InvalidConfig(format!(
-            "snapshot name must be a bare identifier, not a path: '{name}' (use dest_dir to choose a parent directory)"
-        )));
-    }
-    Ok(dest_dir.unwrap_or_else(|| local.snapshots_dir()).join(name))
-}
-
 //--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
@@ -413,7 +417,7 @@ mod tests {
         .unwrap();
         assert!(matches!(
             &with.state.as_file().unwrap().upper.integrity,
-            Some(microsandbox_image::snapshot::UpperIntegrity::FileMerkleBlake3V1 { .. })
+            Some(microsandbox_types::snapshot::UpperIntegrity::FileMerkleBlake3V1 { .. })
         ));
     }
 }

@@ -1,4 +1,4 @@
-//! Internal adjacent-release snapshot downgrade coordination.
+//! Internal adjacent-release local snapshot downgrade coordination.
 //!
 //! This module is public only so the workspace CLI can coordinate snapshot
 //! artifacts with its database and binary rollback. It is not a general
@@ -17,7 +17,7 @@ use chrono::Utc;
 use microsandbox_image::snapshot::migration::{
     V066_BACKUP_FILENAME, V066_DESCRIPTOR_FILENAME, inspect_v066_source, translate_v066_reverse,
 };
-use microsandbox_image::snapshot::{DESCRIPTOR_FILENAME, Manifest, SnapshotState, UpperIntegrity};
+use microsandbox_types::snapshot::{DESCRIPTOR_FILENAME, Manifest, SnapshotState, UpperIntegrity};
 use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, Statement, TransactionTrait};
 use serde::Serialize;
 
@@ -1104,7 +1104,7 @@ mod tests {
             .await
             .unwrap();
         Migrator::up(pools.write().inner(), None).await.unwrap();
-        crate::snapshot::migration::reconcile_managed(&pools, &snapshots)
+        super::super::migration::reconcile_managed(&pools, &snapshots)
             .await
             .unwrap();
 
@@ -1208,7 +1208,7 @@ mod tests {
             .await
             .unwrap();
         Migrator::up(pools.write().inner(), None).await.unwrap();
-        crate::snapshot::migration::reconcile_managed(&pools, &snapshots)
+        super::super::migration::reconcile_managed(&pools, &snapshots)
             .await
             .unwrap();
 
@@ -1288,7 +1288,7 @@ mod tests {
             .await
             .unwrap();
         Migrator::up(pools.write().inner(), None).await.unwrap();
-        crate::snapshot::migration::reconcile_managed(&pools, &snapshots)
+        super::super::migration::reconcile_managed(&pools, &snapshots)
             .await
             .unwrap();
 
@@ -1360,7 +1360,7 @@ mod tests {
         file.upper.integrity = Some(UpperIntegrity::FileMerkleBlake3V1 {
             root: format!("blake3:{}", "b".repeat(64)),
             logical_size: 5,
-            leaf_size: microsandbox_image::snapshot::FILE_MERKLE_BLAKE3_LEAF_SIZE,
+            leaf_size: microsandbox_types::snapshot::FILE_MERKLE_BLAKE3_LEAF_SIZE,
         });
         let error = validate_payload(&artifact, &manifest, true)
             .await

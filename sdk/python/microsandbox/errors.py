@@ -52,6 +52,11 @@ class SandboxStillRunningError(MicrosandboxError):
     code = "sandbox-still-running"
 
 
+class SandboxStopTimedOutError(MicrosandboxError):
+    """Sandbox stop was not observed before its deadline and may still complete."""
+    code = "sandbox-stop-timed-out"
+
+
 class ExecTimeoutError(MicrosandboxError):
     """Command execution timed out."""
     code = "exec-timeout"

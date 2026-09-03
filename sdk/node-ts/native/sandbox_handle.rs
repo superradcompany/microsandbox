@@ -181,9 +181,9 @@ impl JsSandboxHandle {
     /// Stop the sandbox gracefully.
     ///
     /// Lets the sandbox finish writing any pending data to disk before
-    /// it exits, so files written inside the sandbox aren't lost across
-    /// a later restart. Waits 10_000 ms by default before force-kill;
-    /// override with `stopWithTimeout(timeoutMs)`.
+    /// it exits, so files written inside the sandbox aren't lost across a
+    /// later restart. The default wait depends on the active backend; override
+    /// it with `stopWithTimeout(timeoutMs)`.
     #[napi]
     pub async fn stop(&self) -> Result<()> {
         self.inner.stop().await.map_err(to_napi_error)
@@ -195,8 +195,9 @@ impl JsSandboxHandle {
         self.inner.request_stop().await.map_err(to_napi_error)
     }
 
-    /// Stop the sandbox gracefully with an explicit timeout in
-    /// milliseconds before escalation.
+    /// Stop gracefully with an explicit convergence timeout in milliseconds.
+    /// Backends without force termination return a typed timeout while the
+    /// accepted stop may still complete.
     #[napi]
     pub async fn stop_with_timeout(&self, timeout_ms: u32) -> Result<()> {
         let timeout = std::time::Duration::from_millis(timeout_ms.into());

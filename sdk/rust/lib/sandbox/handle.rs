@@ -30,7 +30,9 @@ use super::{
 /// [`SandboxHandle::connect`].
 pub const DEFAULT_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// Default timeout for [`SandboxHandle::stop`] before escalation.
+/// Default timeout for local [`SandboxHandle::stop`] before escalation.
+///
+/// Backends whose graceful stop path needs longer override this internally.
 pub const DEFAULT_STOP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Default timeout for observing stopped state after force termination.
@@ -612,34 +614,40 @@ impl SandboxHandle {
         self.connect().await?.touch().await
     }
 
-    /// Snapshot this sandbox to a bare name under the default snapshots
-    /// directory (`~/.microsandbox/snapshots/<name>/`).
+    /// Snapshot this sandbox under a bare name using the handle's backend.
     ///
     /// The sandbox must be stopped (or crashed); running sandboxes are
-    /// rejected with `MicrosandboxError::SnapshotSandboxRunning`. **Local
-    /// handles only** — cloud snapshot semantics are deferred.
+    /// rejected with `MicrosandboxError::SnapshotSandboxRunning`. Local uses
+    /// its default snapshot directory; cloud uses managed storage.
     pub async fn snapshot(
         &self,
         name: &str,
     ) -> MicrosandboxResult<super::super::snapshot::Snapshot> {
-        if self.local().is_none() {
-            return Err(MicrosandboxError::local_only(
-                Operation::SandboxHandleSnapshot,
-            ));
-        }
         use super::super::snapshot::Snapshot;
-        Snapshot::builder(name)
-            .from_sandbox(&self.name)
-            .create()
+        let config = Snapshot::builder(name).from_sandbox(&self.name).build()?;
+        self.backend
+            .snapshots()
+            .create(self.backend.clone(), config)
             .await
     }
 
-    /// Stop the sandbox gracefully using the default stop timeout.
+    /// Stop the sandbox gracefully using the backend's default stop timeout.
+    ///
+    /// Local waits ten seconds by default, then force-kills the sandbox if it
+    /// is still running. Cloud waits six minutes for its durable checkpoint;
+    /// if that deadline expires, this returns
+    /// [`MicrosandboxError::SandboxStopTimedOut`] without cancelling the
+    /// accepted server-side stop.
     pub async fn stop(&self) -> MicrosandboxResult<()> {
-        self.stop_with_timeout(DEFAULT_STOP_TIMEOUT).await
+        self.stop_with_timeout(self.backend.sandboxes().default_stop_timeout())
+            .await
     }
 
-    /// Stop the sandbox gracefully with an explicit timeout before escalation.
+    /// Stop gracefully with an explicit convergence timeout.
+    ///
+    /// Local escalates to force termination after `timeout`. Cloud returns
+    /// [`MicrosandboxError::SandboxStopTimedOut`] instead; the accepted
+    /// server-side stop may still complete after this method returns.
     pub async fn stop_with_timeout(&self, timeout: std::time::Duration) -> MicrosandboxResult<()> {
         let current = self.refresh().await?;
         if sandbox_status_is_terminal(current.status_snapshot()) {
@@ -663,6 +671,17 @@ impl SandboxHandle {
             }
             Ok(Err(error)) => return Err(error),
             Err(_) => {}
+        }
+
+        if !current
+            .backend
+            .sandboxes()
+            .should_force_kill_after_stop_timeout()
+        {
+            return Err(MicrosandboxError::SandboxStopTimedOut {
+                name: current.name,
+                timeout,
+            });
         }
 
         tracing::warn!(

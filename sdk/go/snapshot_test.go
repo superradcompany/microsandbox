@@ -9,6 +9,45 @@ import (
 	"github.com/superradcompany/microsandbox/sdk/go/internal/ffi"
 )
 
+type snapshotSaver interface {
+	SaveTo(context.Context, string, SnapshotSaveOptions) error
+}
+
+type snapshotCopier interface {
+	CopyTo(string) *SnapshotCopyBuilder
+}
+
+var (
+	_ snapshotSaver  = (*SnapshotArtifact)(nil)
+	_ snapshotSaver  = (*SnapshotHandle)(nil)
+	_ snapshotCopier = (*SnapshotArtifact)(nil)
+)
+
+func TestSnapshotCopyBuilderCopiesMutableInput(t *testing.T) {
+	snapshot := &SnapshotArtifact{reference: "/snapshots/example", referenceKind: "path"}
+	labels := map[string]string{"environment": "test"}
+	builder := snapshot.CopyTo("/tmp/copied.tar.zst").Labels(labels).RecordIntegrity(true)
+	labels["environment"] = "changed"
+
+	if got := builder.labels["environment"]; got != "test" {
+		t.Fatalf("builder label = %q, want %q", got, "test")
+	}
+	if !builder.recordIntegrity {
+		t.Fatal("builder recordIntegrity = false, want true")
+	}
+	if builder.outputArchivePath != "/tmp/copied.tar.zst" {
+		t.Fatalf("builder output path = %q", builder.outputArchivePath)
+	}
+}
+
+func TestZeroSnapshotCopyBuilderFailsCleanly(t *testing.T) {
+	var builder SnapshotCopyBuilder
+	err := builder.Save(context.Background())
+	if !IsKind(err, ErrInvalidConfig) {
+		t.Fatalf("Save error = %v, want ErrInvalidConfig", err)
+	}
+}
+
 func TestSnapshotCreateEmptyName(t *testing.T) {
 	_, err := Snapshot.Create(context.Background(), SnapshotCreateOptions{FromSandbox: "baseline"})
 	if !IsKind(err, ErrInvalidConfig) {

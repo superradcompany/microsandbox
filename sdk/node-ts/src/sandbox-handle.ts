@@ -168,8 +168,10 @@ export class SandboxHandle {
   /**
    * Gracefully shut down the sandbox. Lets it finish writing any
    * pending data to disk before it exits, so files written inside the
-   * sandbox aren't lost across a later restart. Force-kills after
-   * 10_000 ms by default; use `stopWithTimeout` to override.
+   * sandbox aren't lost across a later restart. Local waits 10 seconds by
+   * default and then force-kills. Cloud waits 6 minutes; if the deadline
+   * expires, it throws `SandboxStopTimedOutError` without cancelling the
+   * accepted server-side stop.
    */
   async stop(): Promise<void> {
     await withMappedErrors(() => this.inner.stop());
@@ -180,10 +182,10 @@ export class SandboxHandle {
   }
 
   /**
-   * Stop gracefully with an explicit timeout in milliseconds. If the
-   * sandbox is still running after this window, it is force-killed.
-   * `0` force-kills immediately. Resolves successfully either way —
-   * does not throw on timeout expiry.
+   * Stop gracefully with an explicit timeout in milliseconds. Local
+   * force-kills after this window. Cloud throws `SandboxStopTimedOutError`
+   * instead, and the accepted server-side stop may still complete. `0`
+   * requests immediate force termination and is local-only.
    */
   async stopWithTimeout(timeoutMs: number): Promise<void> {
     await withMappedErrors(() => this.inner.stopWithTimeout(timeoutMs));

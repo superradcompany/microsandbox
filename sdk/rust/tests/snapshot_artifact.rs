@@ -7,12 +7,12 @@
 
 use std::collections::BTreeMap;
 use std::io::Cursor;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use microsandbox::Snapshot;
 use microsandbox::backend::{Backend, LocalBackend};
-use microsandbox_image::snapshot::{
+use microsandbox::{MicrosandboxResult, SaveOpts, Snapshot, SnapshotReference};
+use microsandbox_types::snapshot::{
     CheckpointSnapshotState, DEFAULT_UPPER_FILE, DESCRIPTOR_FILENAME, FileSnapshotState, ImageRef,
     Manifest, SCHEMA_VERSION, SNAPSHOT_ARTIFACT_KIND, SnapshotFormat, SnapshotScope, SnapshotState,
     UpperIntegrity, UpperLayer,
@@ -30,6 +30,17 @@ struct SeededImageCache {
     manifest_digest: String,
     image_digest: microsandbox_image::Digest,
     diff_id: microsandbox_image::Digest,
+}
+
+fn reference_path(reference: SnapshotReference) -> PathBuf {
+    match reference {
+        SnapshotReference::Path(path) => PathBuf::from(path),
+        other => panic!("expected path-backed snapshot, got {other:?}"),
+    }
+}
+
+async fn save_snapshot(name_or_path: &str, out: &Path, opts: SaveOpts) -> MicrosandboxResult<()> {
+    Snapshot::open(name_or_path).await?.save_to(out, opts).await
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -474,12 +485,54 @@ async fn open_reads_valid_artifact_metadata() {
     let snap = Snapshot::open(dir.to_string_lossy().as_ref())
         .await
         .unwrap();
+    assert_eq!(snap.path().unwrap(), dir);
     assert_eq!(snap.digest(), expected_digest);
-    assert_eq!(snap.path(), dir);
+    assert_eq!(reference_path(snap.reference()), dir);
     assert_eq!(
         snap.size_bytes(),
         Some(b"upper data goes here".len() as u64)
     );
+}
+
+#[tokio::test]
+async fn typed_id_reference_is_resolved_by_the_local_backend() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    let snapshots = home.join("snapshots");
+    std::fs::create_dir_all(&snapshots).unwrap();
+    let (_dir, expected_digest) = make_artifact(&snapshots, "snap-by-id", b"upper data");
+    let backend = isolated_backend(&home).await;
+
+    microsandbox::with_backend(backend, async {
+        Snapshot::reindex(&snapshots).await.unwrap();
+        let snap = Snapshot::open_ref(SnapshotReference::id(&expected_digest))
+            .await
+            .unwrap();
+        assert_eq!(snap.digest(), expected_digest);
+        assert_eq!(snap.reference().kind(), "path");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn indexed_handle_can_remove_a_missing_local_artifact() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    let snapshots = home.join("snapshots");
+    std::fs::create_dir_all(&snapshots).unwrap();
+    let (dir, digest) = make_artifact(&snapshots, "stale", b"upper data");
+    let backend = isolated_backend(&home).await;
+
+    microsandbox::with_backend(backend, async {
+        Snapshot::reindex(&snapshots).await.unwrap();
+        let handle = Snapshot::get(&digest).await.unwrap();
+        assert_eq!(handle.path().unwrap(), dir);
+        std::fs::remove_dir_all(dir).unwrap();
+
+        handle.remove(false).await.unwrap();
+        assert!(Snapshot::get(&digest).await.is_err());
+    })
+    .await;
 }
 
 #[test]
@@ -567,7 +620,7 @@ async fn from_snapshot_rejects_resumable_scope_at_restore() {
     );
 
     let err = microsandbox::Sandbox::builder("restore-scope-test")
-        .from_snapshot(dir.to_string_lossy().to_string())
+        .from_snapshot_ref(SnapshotReference::path(dir.to_string_lossy()))
         .build()
         .await
         .unwrap_err();
@@ -607,7 +660,7 @@ async fn verify_rejects_tampered_upper_contents() {
     let snap = Snapshot::open(dir.to_string_lossy().as_ref())
         .await
         .unwrap();
-    let err = snap.verify().await.unwrap_err();
+    let err = Snapshot::verify(&snap).await.unwrap_err();
     let msg = format!("{err}");
     assert!(
         msg.contains("integrity mismatch"),
@@ -624,7 +677,7 @@ async fn verify_reports_not_recorded_without_reading_payload_contents() {
     let snapshot = Snapshot::open(dir.to_string_lossy().as_ref())
         .await
         .unwrap();
-    let report = snapshot.verify().await.unwrap();
+    let report = Snapshot::verify(&snapshot).await.unwrap();
     assert!(matches!(
         report.upper,
         microsandbox::snapshot::UpperVerifyStatus::NotRecorded
@@ -671,7 +724,10 @@ async fn list_dir_skips_non_artifact_directories() {
 
     let snaps = Snapshot::list_dir(tmp.path()).await.unwrap();
     assert_eq!(snaps.len(), 1);
-    assert_eq!(snaps[0].path().file_name().unwrap(), "good");
+    assert_eq!(
+        reference_path(snaps[0].reference()).file_name().unwrap(),
+        "good"
+    );
 }
 
 #[tokio::test]
@@ -680,7 +736,7 @@ async fn save_then_load_round_trips_via_zstd() {
     let (dir, original_digest) = make_artifact(tmp.path(), "src-snap", b"the upper bytes");
 
     let archive = tmp.path().join("bundle.tar.zst");
-    Snapshot::save(
+    save_snapshot(
         dir.to_string_lossy().as_ref(),
         &archive,
         microsandbox::snapshot::SaveOpts::default(),
@@ -694,11 +750,212 @@ async fn save_then_load_round_trips_via_zstd() {
     let handle = Snapshot::load(&archive, Some(&dest)).await.unwrap();
     assert_eq!(handle.digest(), original_digest);
 
+    let handle_archive = tmp.path().join("bundle-from-handle.tar.zst");
+    handle
+        .save_to(&handle_archive, SaveOpts::default())
+        .await
+        .unwrap();
+    assert!(handle_archive.exists());
+
     // Re-open the imported artifact via path; integrity should hold.
-    let imported = Snapshot::open(handle.path().to_string_lossy().as_ref())
+    let imported_path = reference_path(handle.reference());
+    let imported = Snapshot::open(imported_path.to_string_lossy().as_ref())
         .await
         .unwrap();
     assert_eq!(imported.digest(), original_digest);
+}
+
+#[tokio::test]
+async fn copy_to_applies_labels_and_records_integrity_without_changing_the_source() {
+    let tmp = TempDir::new().unwrap();
+    let (source_dir, source_digest) =
+        make_artifact(tmp.path(), "checkpoint", b"durable checkpoint data");
+    let source_archive = tmp.path().join("checkpoint.tar.zst");
+    save_snapshot(
+        source_dir.to_string_lossy().as_ref(),
+        &source_archive,
+        SaveOpts::default(),
+    )
+    .await
+    .unwrap();
+    let source_archive_bytes = std::fs::read(&source_archive).unwrap();
+
+    let backend = isolated_backend(&tmp.path().join("copy-home")).await;
+    let work_dir = tmp.path().join("copy-work");
+    let output_archive = tmp.path().join("explicit.tar.zst");
+    let labels = BTreeMap::from([
+        ("environment".into(), "staging".into()),
+        ("purpose".into(), "backup".into()),
+    ]);
+    let (manifest, imported_manifest, imported_descriptor) =
+        microsandbox::with_backend(backend, async {
+            let snapshot = Snapshot::load(&source_archive, Some(&work_dir))
+                .await?
+                .open()
+                .await?;
+            let imported_manifest = snapshot.manifest().clone();
+            let imported_descriptor =
+                tokio::fs::read(snapshot.path()?.join(DESCRIPTOR_FILENAME)).await?;
+            let manifest = snapshot
+                .copy_to(&output_archive)
+                .labels(labels.clone())
+                .record_integrity(true)
+                .save()
+                .await?;
+
+            assert_eq!(snapshot.manifest(), &imported_manifest);
+            assert_eq!(
+                tokio::fs::read(snapshot.path()?.join(DESCRIPTOR_FILENAME)).await?,
+                imported_descriptor
+            );
+
+            Ok::<_, microsandbox::MicrosandboxError>((
+                manifest,
+                imported_manifest,
+                imported_descriptor,
+            ))
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(manifest.labels, labels);
+    assert!(manifest.state.as_file().unwrap().upper.integrity.is_some());
+    assert_ne!(manifest.digest().unwrap(), source_digest);
+    assert_eq!(
+        std::fs::read(&source_archive).unwrap(),
+        source_archive_bytes
+    );
+    assert_eq!(
+        imported_manifest.to_canonical_bytes().unwrap(),
+        imported_descriptor
+    );
+
+    let verify_backend = isolated_backend(&tmp.path().join("verify-home")).await;
+    let imported = microsandbox::with_backend(verify_backend, async {
+        Snapshot::load(&output_archive, Some(&tmp.path().join("copied")))
+            .await?
+            .open()
+            .await
+    })
+    .await
+    .unwrap();
+    assert_eq!(imported.manifest(), &manifest);
+    assert_eq!(
+        std::fs::read(imported.path().unwrap().join(DEFAULT_UPPER_FILE)).unwrap(),
+        b"durable checkpoint data"
+    );
+    assert!(matches!(
+        imported.verify().await.unwrap().upper,
+        microsandbox::snapshot::UpperVerifyStatus::Verified { .. }
+    ));
+
+    let backend = isolated_backend(&tmp.path().join("copy-without-integrity-home")).await;
+    let output_without_integrity = tmp.path().join("explicit-without-integrity.tar.zst");
+    let manifest = microsandbox::with_backend(backend, async {
+        let snapshot = Snapshot::load(
+            &output_archive,
+            Some(&tmp.path().join("copy-without-integrity-work")),
+        )
+        .await?
+        .open()
+        .await?;
+        snapshot
+            .copy_to(&output_without_integrity)
+            .labels(BTreeMap::new())
+            .record_integrity(false)
+            .save()
+            .await
+    })
+    .await
+    .unwrap();
+
+    assert!(manifest.labels.is_empty());
+    assert!(manifest.state.as_file().unwrap().upper.integrity.is_none());
+}
+
+#[tokio::test]
+async fn copy_to_translates_a_legacy_checkpoint() {
+    let tmp = TempDir::new().unwrap();
+    let source_archive = tmp.path().join("legacy-checkpoint.tar");
+    write_v066_archive(
+        &source_archive,
+        "sha256-0123456789abcdef",
+        b"legacy checkpoint data",
+    );
+    let backend = isolated_backend(&tmp.path().join("copy-legacy-home")).await;
+    let output_archive = tmp.path().join("explicit.tar.zst");
+
+    let manifest = microsandbox::with_backend(backend, async {
+        let snapshot = Snapshot::load(&source_archive, Some(&tmp.path().join("legacy-copy-work")))
+            .await?
+            .open()
+            .await?;
+        snapshot
+            .copy_to(&output_archive)
+            .labels(BTreeMap::from([(
+                "origin".into(),
+                "legacy-checkpoint".into(),
+            )]))
+            .record_integrity(true)
+            .save()
+            .await
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(manifest.schema, SCHEMA_VERSION);
+    assert_eq!(manifest.labels["origin"], "legacy-checkpoint");
+    assert!(manifest.state.as_file().unwrap().upper.integrity.is_some());
+    let verify_backend = isolated_backend(&tmp.path().join("legacy-verify-home")).await;
+    let imported = microsandbox::with_backend(verify_backend, async {
+        Snapshot::load(&output_archive, Some(&tmp.path().join("legacy-copied")))
+            .await?
+            .open()
+            .await
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        std::fs::read(imported.path().unwrap().join(DEFAULT_UPPER_FILE)).unwrap(),
+        b"legacy checkpoint data"
+    );
+}
+
+#[tokio::test]
+async fn copy_to_rejects_checkpoint_state_without_writing_an_archive() {
+    let tmp = TempDir::new().unwrap();
+    let (source_dir, _) = make_artifact_with_scope(
+        tmp.path(),
+        "resumable",
+        b"checkpoint state",
+        SnapshotScope::Resumable,
+    );
+    let source_archive = tmp.path().join("resumable.tar.zst");
+    save_snapshot(
+        source_dir.to_string_lossy().as_ref(),
+        &source_archive,
+        SaveOpts::default(),
+    )
+    .await
+    .unwrap();
+
+    let output_archive = tmp.path().join("copy.tar.zst");
+    let backend = isolated_backend(&tmp.path().join("resumable-copy-home")).await;
+    let error = microsandbox::with_backend(backend, async {
+        let snapshot = Snapshot::load(
+            &source_archive,
+            Some(&tmp.path().join("resumable-copy-work")),
+        )
+        .await?
+        .open()
+        .await?;
+        snapshot.copy_to(&output_archive).save().await
+    })
+    .await
+    .expect_err("checkpoint-state copy should fail");
+
+    assert!(error.to_string().contains("checkpoint-state"));
+    assert!(!output_archive.exists());
 }
 
 #[tokio::test]
@@ -742,7 +999,7 @@ async fn save_sparse_upper_round_trips_and_preserves_holes() {
     }
 
     let archive = tmp.path().join("sparse.tar.zst");
-    Snapshot::save(
+    save_snapshot(
         dir.to_string_lossy().as_ref(),
         &archive,
         microsandbox::snapshot::SaveOpts::default(),
@@ -755,7 +1012,7 @@ async fn save_sparse_upper_round_trips_and_preserves_holes() {
     let dest = tmp.path().join("imported-sparse");
     let handle = Snapshot::load(&archive, Some(&dest)).await.unwrap();
     assert_eq!(handle.digest(), original_digest);
-    let imported_upper = handle.path().join(DEFAULT_UPPER_FILE);
+    let imported_upper = reference_path(handle.reference()).join(DEFAULT_UPPER_FILE);
     assert_eq!(std::fs::read(&imported_upper).unwrap(), logical);
 
     // Holes must come back as holes, not zero-filled blocks.
@@ -781,7 +1038,7 @@ async fn sparse_save_stores_only_data_extents_in_plain_tar() {
     }
 
     let archive = tmp.path().join("sparse.tar");
-    Snapshot::save(
+    save_snapshot(
         dir.to_string_lossy().as_ref(),
         &archive,
         microsandbox::snapshot::SaveOpts {
@@ -843,7 +1100,7 @@ async fn sparse_save_many_extents_round_trips() {
     }
 
     let archive = tmp.path().join("many.tar.zst");
-    Snapshot::save(
+    save_snapshot(
         dir.to_string_lossy().as_ref(),
         &archive,
         microsandbox::snapshot::SaveOpts::default(),
@@ -854,7 +1111,7 @@ async fn sparse_save_many_extents_round_trips() {
     let dest = tmp.path().join("imported-many");
     let handle = Snapshot::load(&archive, Some(&dest)).await.unwrap();
     assert_eq!(handle.digest(), original_digest);
-    let imported_upper = handle.path().join(DEFAULT_UPPER_FILE);
+    let imported_upper = reference_path(handle.reference()).join(DEFAULT_UPPER_FILE);
     assert_eq!(std::fs::read(&imported_upper).unwrap(), logical);
 }
 
@@ -870,7 +1127,7 @@ async fn sparse_save_all_hole_upper_round_trips() {
     }
 
     let archive = tmp.path().join("hole.tar.zst");
-    Snapshot::save(
+    save_snapshot(
         dir.to_string_lossy().as_ref(),
         &archive,
         microsandbox::snapshot::SaveOpts::default(),
@@ -881,7 +1138,7 @@ async fn sparse_save_all_hole_upper_round_trips() {
     let dest = tmp.path().join("imported-hole");
     let handle = Snapshot::load(&archive, Some(&dest)).await.unwrap();
     assert_eq!(handle.digest(), original_digest);
-    let imported_upper = handle.path().join(DEFAULT_UPPER_FILE);
+    let imported_upper = reference_path(handle.reference()).join(DEFAULT_UPPER_FILE);
     assert_eq!(std::fs::read(&imported_upper).unwrap(), logical);
 }
 
@@ -891,7 +1148,7 @@ async fn dense_upper_keeps_regular_entry() {
     let (dir, _) = make_artifact(tmp.path(), "src-dense", b"fully allocated upper");
 
     let archive = tmp.path().join("dense.tar");
-    Snapshot::save(
+    save_snapshot(
         dir.to_string_lossy().as_ref(),
         &archive,
         microsandbox::snapshot::SaveOpts {
@@ -954,7 +1211,7 @@ async fn load_rejects_corrupt_header_checksum() {
     let (dir, _) = make_artifact(tmp.path(), "src-cksum", b"upper bytes");
 
     let archive = tmp.path().join("ok.tar");
-    Snapshot::save(
+    save_snapshot(
         dir.to_string_lossy().as_ref(),
         &archive,
         microsandbox::snapshot::SaveOpts {
@@ -989,7 +1246,7 @@ async fn load_rejects_payload_corruption_without_recorded_snapshot_integrity() {
     let tmp = TempDir::new().unwrap();
     let (dir, _) = make_artifact(tmp.path(), "src-transport", b"transport bytes");
     let archive = tmp.path().join("transport.tar");
-    Snapshot::save(
+    save_snapshot(
         dir.to_string_lossy().as_ref(),
         &archive,
         microsandbox::snapshot::SaveOpts {
@@ -1079,7 +1336,7 @@ async fn save_with_image_includes_only_pinned_cache_artifacts() {
     let archive = tmp.path().join("with-image.tar");
 
     microsandbox::with_backend(backend, async {
-        Snapshot::save(
+        save_snapshot(
             dir.to_string_lossy().as_ref(),
             &archive,
             microsandbox::snapshot::SaveOpts {
@@ -1207,7 +1464,7 @@ async fn archive_round_trip_preserves_integrity_without_implicitly_executing_it(
     let (bad_dir, _) = make_artifact_with_integrity(tmp.path(), "bad-snap", b"original", true);
     std::fs::write(bad_dir.join(DEFAULT_UPPER_FILE), b"tampered").unwrap();
     let archive = tmp.path().join("tampered.tar");
-    Snapshot::save(
+    save_snapshot(
         bad_dir.to_string_lossy().as_ref(),
         &archive,
         microsandbox::snapshot::SaveOpts::default(),
@@ -1217,10 +1474,11 @@ async fn archive_round_trip_preserves_integrity_without_implicitly_executing_it(
 
     let dest = tmp.path().join("imported");
     let handle = Snapshot::load(&archive, Some(&dest)).await.unwrap();
-    let imported = Snapshot::open(handle.path().to_string_lossy().as_ref())
+    let imported_path = reference_path(handle.reference());
+    let imported = Snapshot::open(imported_path.to_string_lossy().as_ref())
         .await
         .unwrap();
-    let error = imported.verify().await.unwrap_err();
+    let error = Snapshot::verify(&imported).await.unwrap_err();
     assert!(error.to_string().contains("integrity mismatch"));
 }
 
@@ -1230,7 +1488,7 @@ async fn load_detects_zstd_by_magic_bytes() {
     let (dir, original_digest) = make_artifact(tmp.path(), "src-magic", b"magic zstd");
 
     let archive = tmp.path().join("bundle.snapshot");
-    Snapshot::save(
+    save_snapshot(
         dir.to_string_lossy().as_ref(),
         &archive,
         microsandbox::snapshot::SaveOpts::default(),
@@ -1268,12 +1526,13 @@ async fn load_translates_v066_plain_and_zstd_archives() {
             Snapshot::load(archive, Some(&dest)).await.unwrap()
         })
         .await;
+        let handle_path = reference_path(handle.reference());
         let manifest =
-            Manifest::from_bytes(&std::fs::read(handle.path().join(DESCRIPTOR_FILENAME)).unwrap())
+            Manifest::from_bytes(&std::fs::read(handle_path.join(DESCRIPTOR_FILENAME)).unwrap())
                 .unwrap();
         assert_eq!(manifest.state.as_file().unwrap().upper.size_bytes, 12);
-        assert!(handle.path().join(DESCRIPTOR_FILENAME).is_file());
-        assert!(handle.path().join(".manifest.json.legacy").is_file());
+        assert!(handle_path.join(DESCRIPTOR_FILENAME).is_file());
+        assert!(handle_path.join(".manifest.json.legacy").is_file());
     }
 }
 
@@ -1297,7 +1556,7 @@ async fn load_selects_child_head_when_parents_are_present() {
             Snapshot::open(child_dir.to_string_lossy().as_ref())
                 .await
                 .unwrap();
-            Snapshot::save(
+            save_snapshot(
                 child_dir.to_string_lossy().as_ref(),
                 &archive,
                 microsandbox::snapshot::SaveOpts {
@@ -1314,7 +1573,7 @@ async fn load_selects_child_head_when_parents_are_present() {
     .await;
     assert_eq!(handle.digest(), child_digest);
     assert_eq!(
-        handle.path(),
+        reference_path(handle.reference()),
         dest.join(child_digest.strip_prefix("sha256:").unwrap())
     );
 }
@@ -1368,7 +1627,7 @@ async fn failed_load_with_conflicting_cache_target_does_not_install_cache_entrie
     microsandbox::with_backend(
         export_backend,
         Box::pin(async {
-            Snapshot::save(
+            save_snapshot(
                 dir.to_string_lossy().as_ref(),
                 &archive,
                 microsandbox::snapshot::SaveOpts {
@@ -1515,7 +1774,7 @@ async fn from_snapshot_rejects_unknown_required_extension_but_open_works() {
     assert_eq!(snap.manifest().requires, vec!["msb.future/1".to_string()]);
 
     let err = microsandbox::Sandbox::builder("requires-gate-test")
-        .from_snapshot(dir.to_string_lossy().to_string())
+        .from_snapshot_ref(snap.reference())
         .build()
         .await
         .unwrap_err();
@@ -1567,5 +1826,5 @@ async fn list_dir_skips_dot_prefixed_staging_directories() {
 
     let snaps = Snapshot::list_dir(tmp.path()).await.unwrap();
     assert_eq!(snaps.len(), 1);
-    assert!(snaps[0].path().ends_with("real"));
+    assert!(reference_path(snaps[0].reference()).ends_with("real"));
 }

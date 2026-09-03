@@ -81,6 +81,17 @@ pub enum MicrosandboxError {
     #[error("sandbox {0}")]
     SandboxNotRunning(String),
 
+    /// Graceful sandbox shutdown did not converge before the requested deadline.
+    #[error(
+        "timed out after {timeout:?} waiting for sandbox {name:?} to stop; the accepted stop may still complete"
+    )]
+    SandboxStopTimedOut {
+        /// Sandbox whose shutdown is still in progress.
+        name: String,
+        /// Time spent waiting for stopped-state observation.
+        timeout: std::time::Duration,
+    },
+
     /// A runtime error occurred.
     #[error("runtime error: {0}")]
     Runtime(String),
@@ -553,6 +564,12 @@ impl From<microsandbox_types::CommandResolutionError> for MicrosandboxError {
     }
 }
 
+impl From<microsandbox_types::SnapshotManifestError> for MicrosandboxError {
+    fn from(value: microsandbox_types::SnapshotManifestError) -> Self {
+        Self::Image(value.into())
+    }
+}
+
 impl microsandbox_db::retry::IsSqliteBusy for MicrosandboxError {
     fn is_sqlite_busy(&self) -> bool {
         matches!(self, MicrosandboxError::Database(db_err) if microsandbox_db::retry::is_sqlite_busy(db_err))
@@ -591,6 +608,19 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "Sandbox::create is not supported by this backend: the ca_certs option is not accepted here"
+        );
+    }
+
+    #[test]
+    fn sandbox_stop_timeout_explains_that_shutdown_continues() {
+        let error = MicrosandboxError::SandboxStopTimedOut {
+            name: "cloud-sandbox".into(),
+            timeout: std::time::Duration::from_secs(360),
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "timed out after 360s waiting for sandbox \"cloud-sandbox\" to stop; the accepted stop may still complete"
         );
     }
 }

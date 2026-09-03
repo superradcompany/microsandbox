@@ -88,39 +88,40 @@ func resolveRegistryCACertPaths(o *SandboxConfig) error {
 // Extracted so tests can assert the JSON envelope without booting the runtime.
 func buildFFICreateOptions(o SandboxConfig) ffi.CreateOptions {
 	ffiOpts := ffi.CreateOptions{
-		Image:             o.Image,
-		ImageFstype:       o.ImageFstype,
-		ImageBind:         o.ImageBind,
-		Snapshot:          o.Snapshot,
-		MemoryMiB:         o.MemoryMiB,
-		CPUs:              o.CPUs,
-		MaxMemoryMiB:      o.MaxMemoryMiB,
-		MaxCPUs:           o.MaxCPUs,
-		CPUPlacement:      string(o.CPUPlacement),
-		PlacementProfile:  o.PlacementProfile,
-		THP:               string(o.THP),
-		Workdir:           o.Workdir,
-		Shell:             o.Shell,
-		SecurityProfile:   string(o.SecurityProfile),
-		DeploymentProfile: string(o.DeploymentProfile),
-		Hostname:          o.Hostname,
-		User:              o.User,
-		Replace:           o.Replace,
-		Env:               o.Env,
-		Labels:            o.Labels,
-		Detached:          o.Detached,
-		Ephemeral:         o.Ephemeral,
-		LogLevel:          string(o.LogLevel),
-		QuietLogs:         o.QuietLogs,
-		Scripts:           o.Scripts,
-		PullPolicy:        string(o.PullPolicy),
-		MaxDurationSecs:   durationSecsCeil(o.MaxDuration),
-		IdleTimeoutSecs:   durationSecsCeil(o.IdleTimeout),
-		Ports:             o.Ports,
-		PortsUDP:          o.PortsUDP,
-		PortBindings:      buildFFIPortBindings(o.PortBindings),
-		Vsock:             buildFFIVsockRoutes(o.Vsock),
-		RegistryInsecure:  o.RegistryInsecure,
+		Image:                 o.Image,
+		ImageFstype:           o.ImageFstype,
+		ImageBind:             o.ImageBind,
+		Snapshot:              o.Snapshot,
+		SnapshotReferenceKind: o.SnapshotReferenceKind,
+		MemoryMiB:             o.MemoryMiB,
+		CPUs:                  o.CPUs,
+		MaxMemoryMiB:          o.MaxMemoryMiB,
+		MaxCPUs:               o.MaxCPUs,
+		CPUPlacement:          string(o.CPUPlacement),
+		PlacementProfile:      o.PlacementProfile,
+		THP:                   string(o.THP),
+		Workdir:               o.Workdir,
+		Shell:                 o.Shell,
+		SecurityProfile:       string(o.SecurityProfile),
+		DeploymentProfile:     string(o.DeploymentProfile),
+		Hostname:              o.Hostname,
+		User:                  o.User,
+		Replace:               o.Replace,
+		Env:                   o.Env,
+		Labels:                o.Labels,
+		Detached:              o.Detached,
+		Ephemeral:             o.Ephemeral,
+		LogLevel:              string(o.LogLevel),
+		QuietLogs:             o.QuietLogs,
+		Scripts:               o.Scripts,
+		PullPolicy:            string(o.PullPolicy),
+		MaxDurationSecs:       durationSecsCeil(o.MaxDuration),
+		IdleTimeoutSecs:       durationSecsCeil(o.IdleTimeout),
+		Ports:                 o.Ports,
+		PortsUDP:              o.PortsUDP,
+		PortBindings:          buildFFIPortBindings(o.PortBindings),
+		Vsock:                 buildFFIVsockRoutes(o.Vsock),
+		RegistryInsecure:      o.RegistryInsecure,
 	}
 	if o.Entrypoint != nil {
 		entrypoint := append([]string{}, o.Entrypoint...)
@@ -614,7 +615,9 @@ type SandboxTouchResult struct {
 	ActivitySeq uint64
 }
 
-// WithStopTimeout sets how long Stop waits for graceful shutdown before force-killing.
+// WithStopTimeout sets how long Stop waits for graceful shutdown. Local
+// force-kills after the timeout. Cloud returns ErrSandboxStopTimedOut instead,
+// while the accepted server-side stop may continue.
 func WithStopTimeout(timeout time.Duration) StopOption {
 	return func(o *lifecycleOptions) { o.timeout = timeout }
 }
@@ -901,6 +904,9 @@ func (h *SandboxHandle) ConnectOrStart(ctx context.Context, opts ...ConnectOrSta
 }
 
 // Stop gracefully stops the sandbox and waits until stopped state is observed.
+// Local waits ten seconds by default before force-killing. Cloud waits six
+// minutes and returns ErrSandboxStopTimedOut on expiry without cancelling the
+// accepted server-side stop.
 func (h *SandboxHandle) Stop(ctx context.Context, opts ...StopOption) error {
 	return wrapFFI(ffi.SandboxHandleVoidLifecycle(ctx, h.name, h.id, "stop", ffi.SandboxHandleLifecycleOptions{TimeoutMs: stopTimeoutMillis(opts)}))
 }
@@ -1007,6 +1013,9 @@ func (s *Sandbox) identityHandle() *SandboxHandle {
 }
 
 // Stop gracefully stops the sandbox and waits until stopped state is observed.
+// Local waits ten seconds by default before force-killing. Cloud waits six
+// minutes and returns ErrSandboxStopTimedOut on expiry without cancelling the
+// accepted server-side stop.
 func (s *Sandbox) Stop(ctx context.Context, opts ...StopOption) error {
 	return wrapFFI(s.inner.Stop(ctx, stopTimeoutMillis(opts)))
 }

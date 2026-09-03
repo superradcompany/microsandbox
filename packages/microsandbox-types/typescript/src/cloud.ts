@@ -13,20 +13,31 @@ import type {
   StatVirtualization,
 } from "./domain.js";
 export type * from "./domain.js";
+import type { SnapshotManifest } from "./snapshot.js";
+export type * from "./snapshot.js";
 
-export type CloudSandboxSpec = {
+export type CloudCreateSandboxRequest = {
+  "source": "oci";
+  /**
+   * OCI image reference.
+   */
+  reference: string;
+  /**
+   * CPU, memory, and writable-disk resources.
+   */
+  resources: CloudSandboxResources;
+  /**
+   * Rootfs patches applied before VM start.
+   */
+  patches: Array<CloudPatch>;
+  /**
+   * OCI image pull policy.
+   */
+  pull_policy: CloudPullPolicy;
   /**
    * Unique sandbox name.
    */
   name: string;
-  /**
-   * Root filesystem source.
-   */
-  image: CloudRootfsSource;
-  /**
-   * CPU, memory, and user-facing disk resources.
-   */
-  resources: CloudSandboxResources;
   /**
    * Guest runtime options.
    */
@@ -48,9 +59,59 @@ export type CloudSandboxSpec = {
    */
   mounts: Array<CloudVolumeMount>;
   /**
+   * Network specification.
+   */
+  network: CloudNetworkSpec;
+  /**
+   * Hand off PID 1 to a guest init binary after agentd setup.
+   */
+  init: HandoffInit | null;
+  /**
+   * In-guest security profile.
+   */
+  security_profile: SecurityProfile;
+  /**
+   * Sandbox lifecycle policy.
+   */
+  lifecycle: SandboxPolicy;
+} | {
+  "source": "bind";
+  /**
+   * Host directory used as the root filesystem.
+   */
+  path: string;
+  /**
+   * CPU and memory resources.
+   */
+  resources: CloudSandboxComputeResources;
+  /**
    * Rootfs patches applied before VM start.
    */
   patches: Array<CloudPatch>;
+  /**
+   * Unique sandbox name.
+   */
+  name: string;
+  /**
+   * Guest runtime options.
+   */
+  runtime: CloudSandboxRuntimeOptions;
+  /**
+   * Environment variables visible to commands in the sandbox.
+   */
+  env: Array<EnvVar>;
+  /**
+   * User-defined labels attached to the sandbox.
+   */
+  labels: { [key in string]: string };
+  /**
+   * Sandbox-wide resource limits inherited by guest processes.
+   */
+  rlimits: Array<CloudRlimit>;
+  /**
+   * Volume mounts.
+   */
+  mounts: Array<CloudVolumeMount>;
   /**
    * Network specification.
    */
@@ -60,9 +121,67 @@ export type CloudSandboxSpec = {
    */
   init: HandoffInit | null;
   /**
-   * Pull policy for OCI images.
+   * In-guest security profile.
    */
-  pull_policy: CloudPullPolicy;
+  security_profile: SecurityProfile;
+  /**
+   * Sandbox lifecycle policy.
+   */
+  lifecycle: SandboxPolicy;
+} | {
+  "source": "disk_image";
+  /**
+   * Host path to the disk image.
+   */
+  path: string;
+  /**
+   * Disk image format.
+   */
+  format: CloudDiskImageFormat;
+  /**
+   * Inner filesystem type, when it cannot be detected automatically.
+   */
+  fstype: string | null;
+  /**
+   * CPU and memory resources.
+   */
+  resources: CloudSandboxComputeResources;
+  /**
+   * Rootfs patches applied before VM start.
+   */
+  patches: Array<CloudPatch>;
+  /**
+   * Unique sandbox name.
+   */
+  name: string;
+  /**
+   * Guest runtime options.
+   */
+  runtime: CloudSandboxRuntimeOptions;
+  /**
+   * Environment variables visible to commands in the sandbox.
+   */
+  env: Array<EnvVar>;
+  /**
+   * User-defined labels attached to the sandbox.
+   */
+  labels: { [key in string]: string };
+  /**
+   * Sandbox-wide resource limits inherited by guest processes.
+   */
+  rlimits: Array<CloudRlimit>;
+  /**
+   * Volume mounts.
+   */
+  mounts: Array<CloudVolumeMount>;
+  /**
+   * Network specification.
+   */
+  network: CloudNetworkSpec;
+  /**
+   * Hand off PID 1 to a guest init binary after agentd setup.
+   */
+  init: HandoffInit | null;
   /**
    * In-guest security profile.
    */
@@ -71,6 +190,114 @@ export type CloudSandboxSpec = {
    * Sandbox lifecycle policy.
    */
   lifecycle: SandboxPolicy;
+} | {
+  "source": "disk_snapshot";
+  /**
+   * Disk snapshot to restore.
+   */
+  disk_snapshot_ref: CloudSnapshotLocation;
+  /**
+   * CPU and memory resources.
+   */
+  resources: CloudSandboxComputeResources;
+  /**
+   * Pull policy used if the snapshot's pinned base image must be fetched.
+   */
+  pull_policy: CloudPullPolicy;
+  /**
+   * Unique sandbox name.
+   */
+  name: string;
+  /**
+   * Guest runtime options.
+   */
+  runtime: CloudSandboxRuntimeOptions;
+  /**
+   * Environment variables visible to commands in the sandbox.
+   */
+  env: Array<EnvVar>;
+  /**
+   * User-defined labels attached to the sandbox.
+   */
+  labels: { [key in string]: string };
+  /**
+   * Sandbox-wide resource limits inherited by guest processes.
+   */
+  rlimits: Array<CloudRlimit>;
+  /**
+   * Volume mounts.
+   */
+  mounts: Array<CloudVolumeMount>;
+  /**
+   * Network specification.
+   */
+  network: CloudNetworkSpec;
+  /**
+   * Hand off PID 1 to a guest init binary after agentd setup.
+   */
+  init: HandoffInit | null;
+  /**
+   * In-guest security profile.
+   */
+  security_profile: SecurityProfile;
+  /**
+   * Sandbox lifecycle policy.
+   */
+  lifecycle: SandboxPolicy;
+};
+
+export type CloudSandboxSpec = {
+  /**
+   * Unique sandbox name.
+   */
+  name: string;
+  /**
+   * Guest runtime options.
+   */
+  runtime: CloudSandboxRuntimeOptions;
+  /**
+   * Environment variables visible to commands in the sandbox.
+   */
+  env: Array<EnvVar>;
+  /**
+   * User-defined labels attached to the sandbox.
+   */
+  labels: { [key in string]: string };
+  /**
+   * Sandbox-wide resource limits inherited by guest processes.
+   */
+  rlimits: Array<CloudRlimit>;
+  /**
+   * Volume mounts.
+   */
+  mounts: Array<CloudVolumeMount>;
+  /**
+   * Network specification.
+   */
+  network: CloudNetworkSpec;
+  /**
+   * Hand off PID 1 to a guest init binary after agentd setup.
+   */
+  init: HandoffInit | null;
+  /**
+   * In-guest security profile.
+   */
+  security_profile: SecurityProfile;
+  /**
+   * Sandbox lifecycle policy.
+   */
+  lifecycle: SandboxPolicy;
+};
+
+export type CloudSandboxComputeResources = {
+  /**
+   * Number of virtual CPUs.
+   */
+  vcpus: number;
+  /**
+   * Guest memory in MiB.
+   */
+  memory_mib: number;
 };
 
 export type CloudRootfsSource = {
@@ -548,6 +775,191 @@ export type CloudSandboxStatus =
   | "failed";
 
 export type CloudSandboxStatusReason = "scheduling" | "insufficient_capacity";
+
+export type CloudCreateSnapshotRequest = {
+  "kind": "disk";
+  /**
+   * Immutable identifier of the sandbox to capture.
+   */
+  sandbox_id: string;
+  /**
+   * Snapshot name.
+   */
+  name: string;
+  /**
+   * Directory on a mounted host volume to write the artifact into. `None`
+   * stores the snapshot in managed snapshot storage.
+   */
+  dest_dir?: string | null;
+  /**
+   * User-defined labels stored on the snapshot.
+   */
+  labels?: { [key in string]: string };
+  /**
+   * Replace an existing snapshot with the same name.
+   */
+  force?: boolean;
+  /**
+   * Record payload integrity metadata during capture.
+   */
+  record_integrity?: boolean;
+};
+
+export type CloudSnapshotSpec = {
+  /**
+   * Immutable identifier of the sandbox to capture.
+   */
+  sandbox_id: string;
+  /**
+   * Snapshot name.
+   */
+  name: string;
+  /**
+   * Directory on a mounted host volume to write the artifact into. `None`
+   * stores the snapshot in managed snapshot storage.
+   */
+  dest_dir?: string | null;
+  /**
+   * User-defined labels stored on the snapshot.
+   */
+  labels?: { [key in string]: string };
+  /**
+   * Replace an existing snapshot with the same name.
+   */
+  force?: boolean;
+  /**
+   * Record payload integrity metadata during capture.
+   */
+  record_integrity?: boolean;
+};
+
+export type CloudSnapshot = {
+  "kind": "disk";
+  /**
+   * Snapshot name.
+   */
+  name: string;
+  /**
+   * Where the snapshot artifact resides.
+   */
+  location: CloudSnapshotLocation;
+  /**
+   * Identifier of the sandbox the snapshot was captured from, when known.
+   */
+  sandbox_id: string | null;
+  /**
+   * Snapshot identity: the `sha256:` digest of the canonical descriptor.
+   */
+  digest: string;
+  /**
+   * Stored payload size in bytes.
+   */
+  size_bytes: number;
+  /**
+   * Canonical snapshot descriptor.
+   */
+  manifest: SnapshotManifest;
+  /**
+   * User-defined labels stored on the snapshot.
+   */
+  labels: { [key in string]: string };
+  /**
+   * Creation timestamp.
+   */
+  created_at: string;
+};
+
+export type CloudSnapshotDetails = {
+  /**
+   * Snapshot name.
+   */
+  name: string;
+  /**
+   * Where the snapshot artifact resides.
+   */
+  location: CloudSnapshotLocation;
+  /**
+   * Identifier of the sandbox the snapshot was captured from, when known.
+   */
+  sandbox_id: string | null;
+  /**
+   * Snapshot identity: the `sha256:` digest of the canonical descriptor.
+   */
+  digest: string;
+  /**
+   * Stored payload size in bytes.
+   */
+  size_bytes: number;
+  /**
+   * Canonical snapshot descriptor.
+   */
+  manifest: SnapshotManifest;
+  /**
+   * User-defined labels stored on the snapshot.
+   */
+  labels: { [key in string]: string };
+  /**
+   * Creation timestamp.
+   */
+  created_at: string;
+};
+
+export type CloudSnapshotLocation = {
+  "type": "managed";
+  /**
+   * Identifier of the stored artifact.
+   */
+  id: string;
+} | {
+  "type": "host_volume";
+  /**
+   * Artifact directory path on the host volume.
+   */
+  path: string;
+};
+
+export type CloudSnapshotOperation = {
+  /**
+   * Server-side operation identifier.
+   */
+  id: string;
+  /**
+   * Kind of snapshot being captured.
+   */
+  kind: CloudSnapshotKind;
+  /**
+   * Current operation status.
+   */
+  status: CloudSnapshotOperationStatus;
+  /**
+   * The resulting snapshot, present once the operation succeeds.
+   */
+  result: CloudSnapshot | null;
+  /**
+   * Error details for a failed operation.
+   */
+  error: CloudErrorDetails | null;
+  /**
+   * Creation timestamp.
+   */
+  created_at: string;
+  /**
+   * Timestamp of the most recent status change.
+   */
+  updated_at: string;
+  /**
+   * Timestamp of the terminal status, when the operation has finished.
+   */
+  completed_at: string | null;
+};
+
+export type CloudSnapshotOperationStatus =
+  | "queued"
+  | "in_progress"
+  | "succeeded"
+  | "failed";
+
+export type CloudSnapshotKind = "disk";
 
 export type CloudPaginated<T> = {
   /**

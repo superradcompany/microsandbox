@@ -679,7 +679,7 @@ Request graceful shutdown and return once the request is sent, without waiting f
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">stop()</span>
 
-<Tooltip tip="Graceful stop works on microsandbox cloud; timeout expiry cannot escalate to force kill."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On Cloud, the timeout only limits how long the SDK waits; the accepted stop may continue server-side."><span className="msb-badge-limited">Different on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```rust
 async fn stop(&self) -> MicrosandboxResult<()>
@@ -693,17 +693,17 @@ sb.stop().await?;
 
 </Accordion>
 
-Gracefully shut down the sandbox. Lets the sandbox finish writing any pending data to disk before it exits, so files written inside the sandbox aren't lost across a later restart. Waits up to ten seconds for a clean exit; if the sandbox is still running after that, microsandbox force-kills it.
+Gracefully shut down the sandbox and wait until stopped state is observed. Local waits up to ten seconds, then force-kills the sandbox if it is still running. Cloud waits up to six minutes because shutdown may include creating a durable disk checkpoint. If that deadline expires, this returns `MicrosandboxError::SandboxStopTimedOut` without cancelling the accepted server-side stop, which may still complete afterward.
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">stop_with_timeout()</span>
 
-<Tooltip tip="Graceful stop works on microsandbox cloud; timeout expiry cannot escalate to force kill."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On Cloud, the timeout only limits how long the SDK waits; the accepted stop may continue server-side."><span className="msb-badge-limited">Different on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```rust
 async fn stop_with_timeout(&self, timeout: Duration) -> MicrosandboxResult<()>
 ```
 
-Gracefully shut down the sandbox with an explicit timeout before escalation. `Duration::ZERO` skips graceful shutdown and force-kills immediately.
+Gracefully shut down the sandbox with an explicit observation timeout. Local force-kills after the timeout. Cloud returns `MicrosandboxError::SandboxStopTimedOut` instead, while the accepted server-side stop may continue. `Duration::ZERO` requests immediate force termination and is therefore local-only.
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">stop_and_wait()</span>
 
@@ -846,7 +846,12 @@ Request a globally unique cloud slug. When omitted, microsandbox cloud assigns o
 async fn build(self) -> MicrosandboxResult<SandboxConfig>
 ```
 
-Materialize the [`SandboxConfig`](#sandboxconfig) without booting the sandbox. Validates the configuration and, if `from_snapshot` was called, opens the snapshot manifest to pin its image reference and upper-layer source. For booting, use [`create`](#sandbox-create) instead; call [`detached(true)`](#sandbox-detached) first for background mode. `create()` calls `build` internally.
+Materialize the [`SandboxConfig`](#sandboxconfig) without booting the sandbox.
+Local snapshot references are opened to pin their image and upper-layer source;
+cloud references remain typed and are resolved by the cloud backend. For
+booting, use [`create`](#sandbox-create) instead; call
+[`detached(true)`](#sandbox-detached) first for background mode. `create()` calls
+`build` internally.
 
 <p className="msb-label">Returns</p>
 
@@ -2621,13 +2626,13 @@ Current status
 
 #### <span className="msb-recv">h.</span><span className="msb-hn">stop()</span>
 
-<Tooltip tip="Graceful stop works on microsandbox cloud; timeout expiry cannot escalate to force kill."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On Cloud, the timeout only limits how long the SDK waits; the accepted stop may continue server-side."><span className="msb-badge-limited">Different on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```rust
 stop()
 ```
 
-Gracefully shut down. Waits up to ten seconds for pending writes to flush, then force-kills
+Gracefully shut down and wait until stopped. Local waits up to ten seconds, then force-kills. Cloud waits up to six minutes and returns `SandboxStopTimedOut` on expiry without cancelling the accepted server-side stop.
 
 <p className="msb-label">Returns</p>
 
@@ -2635,13 +2640,13 @@ Gracefully shut down. Waits up to ten seconds for pending writes to flush, then 
 
 #### <span className="msb-recv">h.</span><span className="msb-hn">stop_with_timeout()</span>
 
-<Tooltip tip="Graceful stop works on microsandbox cloud; timeout expiry cannot escalate to force kill."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On Cloud, the timeout only limits how long the SDK waits; the accepted stop may continue server-side."><span className="msb-badge-limited">Different on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```rust
 stop_with_timeout(timeout)
 ```
 
-Same as `stop()` with an explicit timeout; `Duration::ZERO` force-kills immediately
+Same as `stop()` with an explicit timeout. Local force-kills on expiry; Cloud returns `SandboxStopTimedOut` while the accepted stop may continue. `Duration::ZERO` requests immediate force termination and is local-only.
 
 <p className="msb-label">Returns</p>
 

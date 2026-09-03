@@ -5,12 +5,20 @@ keywords: ["sandbox snapshots", "checkpoint", "restore sandbox"]
 icon: "code-branch"
 ---
 
-<Tooltip tip="Disk snapshots are local-only. On microsandbox cloud, use a named volume for state that must survive sandbox replacement."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
-
-A snapshot is a portable, on-disk capture of a sandbox's writable filesystem. Move it with `scp`, archive it as `.tar.zst`, or boot fresh sandboxes from it.
+A snapshot captures a sandbox's writable filesystem. The local backend stores a
+portable on-disk artifact; microsandbox cloud stores it in managed object
+storage by default, or in a directory on the organization's host volume when a
+destination is supplied.
 
 <Note>
 Snapshots are **disk-only** and require a sandbox that is not running. You can snapshot stopped and crashed sandboxes; microsandbox rejects running, draining, and paused sandboxes.
+</Note>
+
+<Note>
+Snapshot objects now expose a backend-neutral `reference` (and reference kind)
+instead of a host `path` or storage `location`. When upgrading, pass the
+snapshot object directly where supported, or pass its reference to the restore
+API. This keeps the same application code valid for local and cloud backends.
 </Note>
 
 ## What gets captured
@@ -42,12 +50,18 @@ msb run --name worker --from-snapshot after-pip-install \
 ```
 
 <Tip>
-By default, the snapshot lives at `~/.microsandbox/snapshots/after-pip-install/`. That whole directory is the snapshot.
+On the local backend, the snapshot lives at
+`~/.microsandbox/snapshots/after-pip-install/`. In cloud, omitting a destination
+creates a managed snapshot and returns its stable snapshot reference.
 </Tip>
 
 ## Snapshot a sandbox
 
-Snapshot under a bare name, resolved to `~/.microsandbox/snapshots/<name>/` by default. The name is the snapshot's identity; pass a destination directory to create the artifact on a different volume (`DIR/<name>`). Either way the directory is the whole artifact; move it with save/load (or plain `mv`):
+Snapshot under a bare name. Locally, it resolves to
+`~/.microsandbox/snapshots/<name>/`. In cloud, it is uploaded to managed storage
+and recorded by the control plane. Passing a destination stores an artifact at
+`DIR/<name>` locally or at the corresponding path on the organization's host
+volume in cloud.
 
 <CodeGroup>
 ```typescript TypeScript
@@ -55,7 +69,7 @@ import { Sandbox } from "microsandbox";
 
 const h = await Sandbox.get("baseline");
 
-// Resolves under ~/.microsandbox/snapshots/<name>/
+// Local: default store. Cloud: managed snapshot storage.
 const snap = await h.snapshot("after-pip-install");
 
 console.log(snap.digest); // sha256:...
@@ -66,7 +80,7 @@ use microsandbox::Sandbox;
 
 let h = Sandbox::get("baseline").await?;
 
-// Resolves under ~/.microsandbox/snapshots/<name>/
+// Local: default store. Cloud: managed snapshot storage.
 let snap = h.snapshot("after-pip-install").await?;
 
 println!("{}", snap.digest()); // sha256:...
@@ -77,7 +91,7 @@ from microsandbox import Sandbox
 
 h = await Sandbox.get("baseline")
 
-# Resolves under ~/.microsandbox/snapshots/<name>/
+# Local: default store. Cloud: managed snapshot storage.
 snap = await h.snapshot("after-pip-install")
 
 print(snap.digest)  # sha256:...
@@ -89,7 +103,7 @@ if err != nil {
     return err
 }
 
-// Resolves under ~/.microsandbox/snapshots/<name>/
+// Local: default store. Cloud: managed snapshot storage.
 snap, err := h.Snapshot(ctx, "after-pip-install")
 
 fmt.Println(snap.Digest()) // sha256:...
@@ -148,7 +162,10 @@ msb run --name worker --from-snapshot after-pip-install -- python -V
 
 </CodeGroup>
 
-Booting validates the snapshot, resolves the pinned image, and gives the new sandbox its own writable copy.
+Booting validates the snapshot, resolves the pinned image, and gives the new
+sandbox its own writable copy. When you already have a `Snapshot` or
+`SnapshotHandle`, pass its stable reference rather than its local path. The
+Python, TypeScript, and Go accept the snapshot object directly.
 
 ## List, inspect, and remove
 
@@ -214,9 +231,13 @@ msb snapshot reindex
 
 </CodeGroup>
 
-`list` and `get` use a local index for fast lookup. If the index gets out of sync, `reindex` rebuilds it from the snapshot artifacts on disk.
+`list` and `get` use the active backend. `reindex`, `list_dir`, `save`, `copy_to`, `load`,
+direct artifact-file operations, and full payload verification keep the same
+SDK surface on every backend but currently return a typed `Unsupported` error
+in cloud. Snapshot path references themselves are supported in cloud and are
+resolved relative to the organization's host volume.
 
-## Move snapshots between machines
+## Move local snapshots between machines
 
 The snapshot directory is the whole artifact; there is no hidden daemon state. Copy the directory directly, or save it as an archive:
 
@@ -236,6 +257,50 @@ ssh other-host msb snapshot load /tmp/snap.tar.zst
 ```
 
 Archives default to `.tar.zst`. Pass `--plain-tar` for a plain `.tar`. SDKs expose the same save and load operations as the CLI.
+
+### Copy an archive with new metadata
+
+The SDKs can package the same disk data into a new archive while replacing its
+labels and choosing whether to record integrity. The original snapshot and
+archive are not modified. This direct artifact operation is currently
+local-only; cloud backends return a typed unsupported-operation error.
+
+<CodeGroup>
+```typescript TypeScript
+await snapshot
+  .copyTo("/tmp/snapshot-copy.tar.zst")
+  .labels({ environment: "test" })
+  .recordIntegrity(true)
+  .save();
+```
+
+```rust Rust
+use std::collections::BTreeMap;
+
+let copied = snapshot
+    .copy_to("/tmp/snapshot-copy.tar.zst")
+    .labels(BTreeMap::from([("environment".into(), "test".into())]))
+    .record_integrity(true)
+    .save()
+    .await?;
+```
+
+```python Python
+await (
+    snapshot.copy_to("/tmp/snapshot-copy.tar.zst")
+    .labels({"environment": "test"})
+    .record_integrity(True)
+    .save()
+)
+```
+
+```go Go
+err := snapshot.CopyTo("/tmp/snapshot-copy.tar.zst").
+    Labels(map[string]string{"environment": "test"}).
+    RecordIntegrity(true).
+    Save(ctx)
+```
+</CodeGroup>
 
 ## Integrity verification
 

@@ -42,7 +42,7 @@ use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use microsandbox_image::progress_channel;
 
 use crate::{
-    MicrosandboxResult,
+    MicrosandboxError, MicrosandboxResult,
     agent::AgentClient,
     backend::{LocalBackend, sandbox::SandboxIdentity},
     db::entity::sandbox as sandbox_entity,
@@ -832,9 +832,14 @@ impl Sandbox {
 
     /// Stop the sandbox gracefully and wait until stopped state is observed.
     ///
-    /// Uses [`DEFAULT_STOP_TIMEOUT`] before escalating to force termination.
+    /// Local waits ten seconds by default, then force-kills the sandbox if it
+    /// is still running. Cloud waits six minutes for its durable checkpoint;
+    /// if that deadline expires, this returns
+    /// [`MicrosandboxError::SandboxStopTimedOut`] without cancelling the
+    /// accepted server-side stop.
     pub async fn stop(&self) -> MicrosandboxResult<()> {
-        self.stop_with_timeout(DEFAULT_STOP_TIMEOUT).await
+        self.stop_with_timeout(self.backend.sandboxes().default_stop_timeout())
+            .await
     }
 
     /// Request graceful shutdown and return once the request is sent.
@@ -852,7 +857,11 @@ impl Sandbox {
             .await
     }
 
-    /// Stop the sandbox gracefully with an explicit timeout before escalation.
+    /// Stop gracefully with an explicit convergence timeout.
+    ///
+    /// Local escalates to force termination after `timeout`. Cloud returns
+    /// [`MicrosandboxError::SandboxStopTimedOut`] instead; the accepted
+    /// server-side stop may still complete after this method returns.
     pub async fn stop_with_timeout(&self, timeout: std::time::Duration) -> MicrosandboxResult<()> {
         if timeout.is_zero() {
             self.kill_with_timeout(DEFAULT_KILL_TIMEOUT).await?;
@@ -863,6 +872,17 @@ impl Sandbox {
         if let Ok(result) = tokio::time::timeout(timeout, self.wait_until_stopped()).await {
             result?;
             return Ok(());
+        }
+
+        if !self
+            .backend
+            .sandboxes()
+            .should_force_kill_after_stop_timeout()
+        {
+            return Err(MicrosandboxError::SandboxStopTimedOut {
+                name: self.name.clone(),
+                timeout,
+            });
         }
 
         tracing::warn!(
