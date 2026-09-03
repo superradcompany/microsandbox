@@ -3,6 +3,8 @@ import {
   napi,
   type NapiSnapshot,
   type NapiSnapshotBuilderSetters,
+  type NapiSnapshotCopyBuilder,
+  type NapiSnapshotCopyBuilderSetters,
   type NapiSnapshotInfo,
   type NapiSnapshotVerifyReport,
 } from "./internal/napi.js";
@@ -85,6 +87,11 @@ export type SnapshotVerifyReport =
  */
 export interface SnapshotBuilder extends NapiSnapshotBuilderSetters {
   create(): Promise<Snapshot>;
+}
+
+/** Builder for copying a snapshot archive with replacement metadata. */
+export interface SnapshotCopyBuilder extends NapiSnapshotCopyBuilderSetters {
+  save(): Promise<void>;
 }
 
 /**
@@ -358,6 +365,15 @@ export class Snapshot {
   }
 
   /**
+   * Configure a new archive containing this snapshot's disk data and
+   * replacement labels and integrity metadata.
+   * Throws `UnsupportedError` when the backend does not expose artifact archives.
+   */
+  copyTo(outputArchivePath: string): SnapshotCopyBuilder {
+    return wrapCopyBuilder(this.inner.copyTo(outputArchivePath));
+  }
+
+  /**
    * Verify this snapshot's recorded payload integrity.
    * Throws `UnsupportedError` when the backend does not expose payload verification.
    */
@@ -375,6 +391,13 @@ function wrapBuilder(nb: InstanceType<typeof napi.SnapshotBuilder>): SnapshotBui
     return new Snapshot(inner);
   };
   return nb as unknown as SnapshotBuilder;
+}
+
+/** @internal */
+function wrapCopyBuilder(builder: NapiSnapshotCopyBuilder): SnapshotCopyBuilder {
+  const originalSave = builder.save.bind(builder);
+  builder.save = () => withMappedErrors(originalSave);
+  return builder;
 }
 
 /** @internal */

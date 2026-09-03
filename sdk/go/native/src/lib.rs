@@ -1180,6 +1180,14 @@ struct SnapshotSaveOptsJson {
 }
 
 #[derive(serde::Deserialize, Default)]
+struct SnapshotCopyOpts {
+    #[serde(default)]
+    labels: HashMap<String, String>,
+    #[serde(default)]
+    record_integrity: bool,
+}
+
+#[derive(serde::Deserialize, Default)]
 struct MountSpec {
     bind: Option<String>,
     named: Option<String>,
@@ -6283,6 +6291,40 @@ pub unsafe extern "C" fn msb_snapshot_export(
                         plain_tar: opts.plain_tar,
                     },
                 )
+                .await
+                .map_err(FfiError::from)?;
+            Ok(r#"{"ok":true}"#.into())
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_snapshot_copy(
+    cancel_id: u64,
+    reference: *const c_char,
+    reference_kind: *const c_char,
+    output_archive_path: *const c_char,
+    opts_json: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let reference = unsafe { cstr(reference) }?;
+        let reference_kind = unsafe { cstr(reference_kind) }?;
+        let reference = parse_snapshot_reference(reference, &reference_kind)?;
+        let output_archive_path = unsafe { cstr(output_archive_path) }?;
+        let opts_raw = unsafe { cstr(opts_json) }?;
+        let opts: SnapshotCopyOpts = serde_json::from_str(&opts_raw)
+            .map_err(|e| FfiError::invalid_argument(format!("invalid opts JSON: {e}")))?;
+        Ok(Box::pin(async move {
+            let snapshot = Snapshot::open_ref(reference)
+                .await
+                .map_err(FfiError::from)?;
+            snapshot
+                .copy_to(output_archive_path)
+                .labels(opts.labels.into_iter().collect())
+                .record_integrity(opts.record_integrity)
+                .save()
                 .await
                 .map_err(FfiError::from)?;
             Ok(r#"{"ok":true}"#.into())

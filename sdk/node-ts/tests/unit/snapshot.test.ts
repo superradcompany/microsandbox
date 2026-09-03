@@ -222,4 +222,23 @@ describe("Snapshot native projections", () => {
       plainTar: true,
     });
   });
+
+  it("builds a snapshot archive copy with replacement metadata", async () => {
+    const save = vi.fn().mockResolvedValue(undefined);
+    const labels = vi.fn().mockReturnThis();
+    const recordIntegrity = vi.fn().mockReturnThis();
+    const copyTo = vi.fn().mockReturnValue({ labels, recordIntegrity, save });
+    const snapshot = projectedSnapshot({ copyTo });
+
+    await snapshot
+      .copyTo("/tmp/copied.tar.zst")
+      .labels({ environment: "test" })
+      .recordIntegrity(true)
+      .save();
+
+    expect(copyTo).toHaveBeenCalledWith("/tmp/copied.tar.zst");
+    expect(labels).toHaveBeenCalledWith({ environment: "test" });
+    expect(recordIntegrity).toHaveBeenCalledWith(true);
+    expect(save).toHaveBeenCalledOnce();
+  });
 });

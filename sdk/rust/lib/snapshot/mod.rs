@@ -9,6 +9,8 @@
 //! the manifest schema and DB columns are forward-compatible with
 //! qcow2 backing chains landing later.
 
+mod copy;
+
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -258,6 +260,17 @@ impl Snapshot {
     /// return [`crate::MicrosandboxError::Unsupported`].
     pub async fn verify(&self) -> MicrosandboxResult<SnapshotVerifyReport> {
         self.backend.snapshots().verify(self).await
+    }
+
+    /// Configure a new archive containing this snapshot's disk data and
+    /// replacement explicit-snapshot metadata.
+    ///
+    /// The source snapshot is unchanged. This artifact-file operation is
+    /// currently local-only; other backends return
+    /// [`crate::MicrosandboxError::Unsupported`] from
+    /// [`SnapshotCopyBuilder::save`].
+    pub fn copy_to(&self, output_archive_path: impl Into<PathBuf>) -> SnapshotCopyBuilder {
+        SnapshotCopyBuilder::new(self.clone(), output_archive_path.into())
     }
 
     /// Bundle this snapshot into a `.tar.zst` archive.
@@ -603,6 +616,7 @@ impl SnapshotBuilder {
 // Re-Exports
 //--------------------------------------------------------------------------------------------------
 
+pub use copy::SnapshotCopyBuilder;
 pub use microsandbox_types::snapshot::{
     CheckpointSnapshotState, DESCRIPTOR_FILENAME, FileSnapshotState, ImageRef, Manifest,
     SnapshotDescriptor, SnapshotFormat, SnapshotScope, SnapshotState, UpperIntegrity, UpperLayer,

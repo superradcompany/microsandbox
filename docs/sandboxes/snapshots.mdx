@@ -231,7 +231,7 @@ msb snapshot reindex
 
 </CodeGroup>
 
-`list` and `get` use the active backend. `reindex`, `list_dir`, `save`, `load`,
+`list` and `get` use the active backend. `reindex`, `list_dir`, `save`, `copy_to`, `load`,
 direct artifact-file operations, and full payload verification keep the same
 SDK surface on every backend but currently return a typed `Unsupported` error
 in cloud. Snapshot path references themselves are supported in cloud and are
@@ -257,6 +257,50 @@ ssh other-host msb snapshot load /tmp/snap.tar.zst
 ```
 
 Archives default to `.tar.zst`. Pass `--plain-tar` for a plain `.tar`. SDKs expose the same save and load operations as the CLI.
+
+### Copy an archive with new metadata
+
+The SDKs can package the same disk data into a new archive while replacing its
+labels and choosing whether to record integrity. The original snapshot and
+archive are not modified. This direct artifact operation is currently
+local-only; cloud backends return a typed unsupported-operation error.
+
+<CodeGroup>
+```typescript TypeScript
+await snapshot
+  .copyTo("/tmp/snapshot-copy.tar.zst")
+  .labels({ environment: "test" })
+  .recordIntegrity(true)
+  .save();
+```
+
+```rust Rust
+use std::collections::BTreeMap;
+
+let copied = snapshot
+    .copy_to("/tmp/snapshot-copy.tar.zst")
+    .labels(BTreeMap::from([("environment".into(), "test".into())]))
+    .record_integrity(true)
+    .save()
+    .await?;
+```
+
+```python Python
+await (
+    snapshot.copy_to("/tmp/snapshot-copy.tar.zst")
+    .labels({"environment": "test"})
+    .record_integrity(True)
+    .save()
+)
+```
+
+```go Go
+err := snapshot.CopyTo("/tmp/snapshot-copy.tar.zst").
+    Labels(map[string]string{"environment": "test"}).
+    RecordIntegrity(true).
+    Save(ctx)
+```
+</CodeGroup>
 
 ## Integrity verification
 

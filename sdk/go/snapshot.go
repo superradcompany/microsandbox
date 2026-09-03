@@ -35,6 +35,15 @@ type SnapshotSaveOptions struct {
 	PlainTar    bool
 }
 
+// SnapshotCopyBuilder configures a new archive containing an existing
+// snapshot's disk data and replacement metadata.
+type SnapshotCopyBuilder struct {
+	snapshot          *SnapshotArtifact
+	outputArchivePath string
+	labels            map[string]string
+	recordIntegrity   bool
+}
+
 // Snapshot payload scope values, as reported by SnapshotArtifact.Scope
 // and SnapshotHandle.Scope.
 const (
@@ -157,6 +166,47 @@ func (s *SnapshotArtifact) Verify(ctx context.Context) (*SnapshotVerifyReport, e
 // Backends that do not expose artifact archives return ErrUnsupportedOperation.
 func (s *SnapshotArtifact) SaveTo(ctx context.Context, outPath string, opts SnapshotSaveOptions) error {
 	return saveSnapshotReference(ctx, s.reference, s.referenceKind, outPath, opts)
+}
+
+// CopyTo starts configuring a new archive containing this snapshot's disk data.
+// The returned builder replaces labels and integrity metadata without changing
+// the source snapshot. Save returns ErrUnsupportedOperation when the backend
+// does not expose artifact archives.
+func (s *SnapshotArtifact) CopyTo(outputArchivePath string) *SnapshotCopyBuilder {
+	return &SnapshotCopyBuilder{
+		snapshot:          s,
+		outputArchivePath: outputArchivePath,
+		labels:            map[string]string{},
+	}
+}
+
+// Labels replaces the copied snapshot's labels.
+func (b *SnapshotCopyBuilder) Labels(labels map[string]string) *SnapshotCopyBuilder {
+	b.labels = cloneMap(labels)
+	return b
+}
+
+// RecordIntegrity chooses whether to calculate and record disk integrity.
+func (b *SnapshotCopyBuilder) RecordIntegrity(enabled bool) *SnapshotCopyBuilder {
+	b.recordIntegrity = enabled
+	return b
+}
+
+// Save writes the configured snapshot archive.
+func (b *SnapshotCopyBuilder) Save(ctx context.Context) error {
+	if b == nil || b.snapshot == nil {
+		return &Error{Kind: ErrInvalidConfig, Message: "snapshot copy builder has no source"}
+	}
+	return wrapFFI(ffi.SnapshotCopy(
+		ctx,
+		b.snapshot.reference,
+		b.snapshot.referenceKind,
+		b.outputArchivePath,
+		ffi.SnapshotCopyOptions{
+			Labels:          b.labels,
+			RecordIntegrity: b.recordIntegrity,
+		},
+	))
 }
 
 // SnapshotHandle is a lightweight handle returned by the active backend.

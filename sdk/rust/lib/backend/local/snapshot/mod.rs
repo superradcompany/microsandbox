@@ -1,12 +1,14 @@
 //! Local snapshot lifecycle and artifact operations.
 
 pub(super) mod archive;
+mod copy;
 mod create;
 pub mod downgrade;
 pub(super) mod migration;
 mod store;
 mod verify;
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -158,6 +160,19 @@ impl SnapshotBackend for LocalBackend {
         Box::pin(async move {
             let path = artifact_path(snapshot)?;
             verify::verify_snapshot(path, snapshot.digest(), snapshot.manifest()).await
+        })
+    }
+
+    fn copy<'a>(
+        &'a self,
+        snapshot: &'a Snapshot,
+        output_archive_path: &'a Path,
+        labels: BTreeMap<String, String>,
+        record_integrity: bool,
+    ) -> BoxFuture<'a, MicrosandboxResult<Manifest>> {
+        Box::pin(async move {
+            self.copy_snapshot_archive(snapshot, output_archive_path, labels, record_integrity)
+                .await
         })
     }
 

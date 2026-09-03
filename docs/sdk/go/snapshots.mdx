@@ -10,7 +10,7 @@ host volume. See [Snapshots](/sandboxes/snapshots) for concepts and walkthroughs
 
 <Note>
   Snapshots are **disk-only** and require a sandbox that is stopped or crashed.
-  `ListDir`, `Reindex`, `Save`/`SaveTo`, `Load`, and `Verify` retain the same
+  `ListDir`, `Reindex`, `Save`/`SaveTo`, `CopyTo`, `Load`, and `Verify` retain the same
   API on every backend, but currently return `ErrUnsupportedOperation` in cloud.
 </Note>
 
@@ -445,6 +445,23 @@ err := snap.SaveTo(ctx, "/tmp/snap.tar.zst", m.SnapshotSaveOptions{
 })
 ```
 
+#### <span className="msb-recv">s.</span><span className="msb-hn">CopyTo()</span>
+
+```go
+func (s *SnapshotArtifact) CopyTo(outputArchivePath string) *SnapshotCopyBuilder
+```
+
+Create a new archive from this snapshot's disk data while replacing its labels
+and integrity metadata. The source snapshot is unchanged. Cloud returns
+`ErrUnsupportedOperation` when `Save` is called.
+
+```go
+err := snap.CopyTo("/tmp/snap-copy.tar.zst").
+    Labels(map[string]string{"environment": "test"}).
+    RecordIntegrity(true).
+    Save(ctx)
+```
+
 #### <span className="msb-recv">s.</span><span className="msb-hn">Verify()</span>
 
 ```go
@@ -765,7 +782,19 @@ accessor methods below.
 | [`Labels()`](#s-labels) | `map[string]string` | User labels |
 | [`SourceSandbox()`](#s-sourcesandbox) | `*string` | Best-effort source sandbox name |
 | [`SaveTo(ctx, outPath, opts)`](#s-saveto) | `error` | Bundle using this snapshot's typed reference |
+| [`CopyTo(outputArchivePath)`](#s-copyto) | `*SnapshotCopyBuilder` | Configure a copied archive with replacement metadata |
 | [`Verify(ctx)`](#s-verify) | `(*SnapshotVerifyReport, error)` | Recompute content integrity |
+
+### SnapshotCopyBuilder<span className="msb-tag is-type" style={{marginLeft: "8px"}}>struct</span>
+
+Returned by [`SnapshotArtifact.CopyTo`](#s-copyto). Fields are unexported; use
+the fluent methods below.
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `Labels(map[string]string)` | `*SnapshotCopyBuilder` | Replace all labels in the copied manifest |
+| `RecordIntegrity(bool)` | `*SnapshotCopyBuilder` | Compute integrity when true, or omit it when false |
+| `Save(context.Context)` | `error` | Write the configured archive |
 
 ### SnapshotHandle<span className="msb-tag is-type" style={{marginLeft: "8px"}}>struct</span>
 

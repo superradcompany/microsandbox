@@ -11,6 +11,7 @@ use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
 use crate::error::to_napi_error;
+use crate::snapshot_copy_builder::JsSnapshotCopyBuilder;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -329,6 +330,14 @@ impl JsSnapshot {
             .save_to(&PathBuf::from(out), save_opts_to_rust(opts))
             .await
             .map_err(to_napi_error)
+    }
+
+    /// Configure a new archive containing this snapshot's disk data and
+    /// replacement labels and integrity metadata.
+    /// Returns an unsupported-operation error when artifact archives are unavailable.
+    #[napi(js_name = "copyTo")]
+    pub fn copy_to(&self, output_archive_path: String) -> JsSnapshotCopyBuilder {
+        JsSnapshotCopyBuilder::from_rust(self.inner.copy_to(output_archive_path))
     }
 
     /// Unpack a snapshot archive into the active backend's snapshot store.

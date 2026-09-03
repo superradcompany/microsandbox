@@ -1,5 +1,6 @@
 //! Backend-neutral snapshot lifecycle dispatch.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -9,7 +10,8 @@ use super::Backend;
 use crate::MicrosandboxResult;
 use crate::sandbox::SandboxConfig;
 use crate::snapshot::{
-    SaveOpts, Snapshot, SnapshotConfig, SnapshotHandle, SnapshotReference, SnapshotVerifyReport,
+    Manifest, SaveOpts, Snapshot, SnapshotConfig, SnapshotHandle, SnapshotReference,
+    SnapshotVerifyReport,
 };
 
 /// Backend implementation for snapshot lifecycle operations.
@@ -67,6 +69,15 @@ pub trait SnapshotBackend: Send + Sync {
         &'a self,
         snapshot: &'a Snapshot,
     ) -> BoxFuture<'a, MicrosandboxResult<SnapshotVerifyReport>>;
+
+    /// Package a snapshot as a new archive with replacement metadata.
+    fn copy<'a>(
+        &'a self,
+        snapshot: &'a Snapshot,
+        output_archive_path: &'a Path,
+        labels: BTreeMap<String, String>,
+        record_integrity: bool,
+    ) -> BoxFuture<'a, MicrosandboxResult<Manifest>>;
 
     /// Enumerate snapshot artifacts in a backend-specific directory.
     fn list_dir(

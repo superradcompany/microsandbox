@@ -225,6 +225,7 @@ typedef char *(*msb_snapshot_list_dir_fn)(uint64_t cancel_id, const char *dir, u
 typedef char *(*msb_snapshot_remove_fn)(uint64_t cancel_id, const char *reference, const char *reference_kind, bool force, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_snapshot_reindex_fn)(uint64_t cancel_id, const char *dir, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_snapshot_export_fn)(uint64_t cancel_id, const char *reference, const char *reference_kind, const char *out, const char *opts_json, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_snapshot_copy_fn)(uint64_t cancel_id, const char *reference, const char *reference_kind, const char *output_archive_path, const char *opts_json, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_snapshot_import_fn)(uint64_t cancel_id, const char *archive, const char *dest, uint8_t *buf, size_t buf_len);
 
 typedef char *(*msb_fs_read_stream_fn)(uint64_t cancel_id, uint64_t handle, const char *path, uint8_t *buf, size_t buf_len);
@@ -382,6 +383,7 @@ static msb_snapshot_list_dir_fn    ptr_msb_snapshot_list_dir    = NULL;
 static msb_snapshot_remove_fn      ptr_msb_snapshot_remove      = NULL;
 static msb_snapshot_reindex_fn     ptr_msb_snapshot_reindex     = NULL;
 static msb_snapshot_export_fn      ptr_msb_snapshot_export      = NULL;
+static msb_snapshot_copy_fn        ptr_msb_snapshot_copy        = NULL;
 static msb_snapshot_import_fn      ptr_msb_snapshot_import      = NULL;
 
 // dlopen handle — set once by load_microsandbox, never closed.
@@ -558,6 +560,7 @@ const char *load_microsandbox(const char *path) {
 	RESOLVE(msb_snapshot_remove);
 	RESOLVE(msb_snapshot_reindex);
 	RESOLVE(msb_snapshot_export);
+	RESOLVE(msb_snapshot_copy);
 	RESOLVE(msb_snapshot_import);
 	return NULL;
 }
@@ -974,6 +977,9 @@ char *call_msb_snapshot_reindex(uint64_t cancel_id, const char *dir, uint8_t *bu
 }
 char *call_msb_snapshot_export(uint64_t cancel_id, const char *reference, const char *reference_kind, const char *out, const char *opts_json, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_snapshot_export ? ptr_msb_snapshot_export(cancel_id, reference, reference_kind, out, opts_json, buf, buf_len) : NULL;
+}
+char *call_msb_snapshot_copy(uint64_t cancel_id, const char *reference, const char *reference_kind, const char *output_archive_path, const char *opts_json, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_snapshot_copy ? ptr_msb_snapshot_copy(cancel_id, reference, reference_kind, output_archive_path, opts_json, buf, buf_len) : NULL;
 }
 char *call_msb_snapshot_import(uint64_t cancel_id, const char *archive, const char *dest, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_snapshot_import ? ptr_msb_snapshot_import(cancel_id, archive, dest, buf, buf_len) : NULL;
@@ -4809,6 +4815,11 @@ type SnapshotSaveOptions struct {
 	PlainTar    bool `json:"plain_tar,omitempty"`
 }
 
+type SnapshotCopyOptions struct {
+	Labels          map[string]string `json:"labels,omitempty"`
+	RecordIntegrity bool              `json:"record_integrity,omitempty"`
+}
+
 func SandboxHandleSnapshot(ctx context.Context, sandboxName, snapshotName string) (*SnapshotInfo, error) {
 	if err := ensureLoaded(); err != nil {
 		return nil, err
@@ -5005,6 +5016,28 @@ func SnapshotSave(ctx context.Context, reference, referenceKind, outPath string,
 	defer C.free(unsafe.Pointer(cOpts))
 	_, err = call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
 		return C.call_msb_snapshot_export(cancelID, cReference, cReferenceKind, cOut, cOpts, buf, bufLen)
+	})
+	return err
+}
+
+func SnapshotCopy(ctx context.Context, reference, referenceKind, outputArchivePath string, opts SnapshotCopyOptions) error {
+	if err := ensureLoaded(); err != nil {
+		return err
+	}
+	payload, err := json.Marshal(opts)
+	if err != nil {
+		return err
+	}
+	cReference := C.CString(reference)
+	defer C.free(unsafe.Pointer(cReference))
+	cReferenceKind := C.CString(referenceKind)
+	defer C.free(unsafe.Pointer(cReferenceKind))
+	cOutputArchivePath := C.CString(outputArchivePath)
+	defer C.free(unsafe.Pointer(cOutputArchivePath))
+	cOpts := C.CString(string(payload))
+	defer C.free(unsafe.Pointer(cOpts))
+	_, err = call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_snapshot_copy(cancelID, cReference, cReferenceKind, cOutputArchivePath, cOpts, buf, bufLen)
 	})
 	return err
 }

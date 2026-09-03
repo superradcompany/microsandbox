@@ -120,6 +120,7 @@ export type SnapshotBuilder = _SnapBT;
 export { SnapshotHandle } from "./snapshot-handle.js";
 export type {
   SaveOpts,
+  SnapshotCopyBuilder,
   SnapshotScope,
   SnapshotState,
   SnapshotVerifyReport,

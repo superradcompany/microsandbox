@@ -13,7 +13,8 @@ use crate::logs::{BootError, LogEntry, LogOptions, LogStreamOptions};
 use crate::sandbox::metrics::SandboxMetrics;
 use crate::sandbox::{Sandbox, SandboxConfig, SandboxHandle, SandboxListBuilder, SandboxPage};
 use crate::snapshot::{
-    SaveOpts, Snapshot, SnapshotConfig, SnapshotHandle, SnapshotReference, SnapshotVerifyReport,
+    Manifest, SaveOpts, Snapshot, SnapshotConfig, SnapshotHandle, SnapshotReference,
+    SnapshotVerifyReport,
 };
 use crate::volume::{Volume, VolumeConfig, VolumeFsReadStream, VolumeFsWriteSink, VolumeHandle};
 use crate::{MicrosandboxError, MicrosandboxResult};
@@ -286,6 +287,16 @@ impl SnapshotBackend for ConfigurationErrorBackend {
         &'a self,
         _snapshot: &'a Snapshot,
     ) -> BoxFuture<'a, MicrosandboxResult<SnapshotVerifyReport>> {
+        self.fail()
+    }
+
+    fn copy<'a>(
+        &'a self,
+        _snapshot: &'a Snapshot,
+        _output_archive_path: &'a Path,
+        _labels: std::collections::BTreeMap<String, String>,
+        _record_integrity: bool,
+    ) -> BoxFuture<'a, MicrosandboxResult<Manifest>> {
         self.fail()
     }
 

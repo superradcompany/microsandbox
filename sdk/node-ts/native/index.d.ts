@@ -1543,6 +1543,12 @@ export declare class Snapshot {
   static save(nameOrPath: string, out: string, opts?: SaveOpts | undefined | null): Promise<void>
   /** Bundle this snapshot into a `.tar.zst` archive. */
   saveTo(out: string, opts?: SaveOpts | undefined | null): Promise<void>
+  /**
+   * Configure a new archive containing this snapshot's disk data and
+   * replacement labels and integrity metadata.
+   * Returns an unsupported-operation error when artifact archives are unavailable.
+   */
+  copyTo(outputArchivePath: string): JsSnapshotCopyBuilder
   /** Unpack a snapshot archive into the active backend's snapshot store. */
   static load(archive: string, dest?: string | undefined | null): Promise<SnapshotHandle>
   /** Verify this snapshot's recorded payload integrity. */
@@ -1585,6 +1591,20 @@ export declare class SnapshotBuilder {
   create(): Promise<Snapshot>
 }
 export type JsSnapshotBuilder = SnapshotBuilder
+
+/** Builder for copying a snapshot archive with replacement metadata. */
+export declare class SnapshotCopyBuilder {
+  /** Replace the copied snapshot's labels. */
+  labels(labels: Record<string, string>): this
+  /** Choose whether to calculate and record disk integrity in the copy. */
+  recordIntegrity(enabled: boolean): this
+  /**
+   * Write the configured snapshot archive.
+   * Returns an unsupported-operation error when artifact archives are unavailable.
+   */
+  save(): Promise<void>
+}
+export type JsSnapshotCopyBuilder = SnapshotCopyBuilder
 
 /** Lightweight snapshot handle returned by the active backend. */
 export declare class SnapshotHandle {
