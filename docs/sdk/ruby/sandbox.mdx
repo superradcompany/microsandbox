@@ -71,6 +71,16 @@ sandbox.wait_for_status(status) # => SandboxHandle
 
 Wait without a built-in timeout until this exact sandbox reaches one of `created`, `starting`, `running`, `draining`, `paused`, `stopped`, or `crashed`. Returns a refreshed metadata handle. Use Ruby's `Timeout.timeout` or an application cancellation mechanism when a deadline is required.
 
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">stop()</span>
+
+<Tooltip tip="On Cloud, the timeout only limits how long the SDK waits; the accepted stop may continue server-side."><span className="msb-badge-limited">Different on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+```ruby
+sandbox.stop(timeout: nil) # => nil
+```
+
+Gracefully shut down and wait until stopped. Local waits up to ten seconds by default, then force-kills the sandbox if it is still running. Cloud waits up to six minutes because shutdown may include creating a durable disk checkpoint. If that deadline expires, this raises `Microsandbox::Error` without cancelling the accepted server-side stop, which may still complete afterward. Pass `timeout:` in seconds to change the observation deadline.
+
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">restart()</span>
 
 ```ruby
@@ -120,6 +130,16 @@ handle.wait_for_status(status) # => SandboxHandle
 ```
 
 Wait until this exact sandbox reaches `status`, returning a refreshed handle. The method does not have a built-in timeout.
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">stop()</span>
+
+<Tooltip tip="On Cloud, the timeout only limits how long the SDK waits; the accepted stop may continue server-side."><span className="msb-badge-limited">Different on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+```ruby
+handle.stop(timeout: nil) # => nil
+```
+
+Gracefully shut down with the same Local and Cloud timeout behavior as `Sandbox#stop`.
 
 #### <span className="msb-recv">handle.</span><span className="msb-hn">restart()</span>
 
