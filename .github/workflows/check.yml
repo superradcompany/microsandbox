@@ -815,7 +815,7 @@ jobs:
         working-directory: sdk/node-ts
         run: |
           node scripts/prune-platform-optional-deps.mjs
-          npm install --package-lock=false
+          npm ci --ignore-scripts
           npm run build:ci
 
       - name: Build MCP server
@@ -1587,7 +1587,7 @@ jobs:
         working-directory: sdk/node-ts
         run: |
           node scripts/prune-platform-optional-deps.mjs
-          npm install --package-lock=false --ignore-scripts
+          npm ci --ignore-scripts
 
       # The published platform-pkg msb may lag the SDK; replace it with the
       # freshly-built binaries so the smoke test runs against current code.
