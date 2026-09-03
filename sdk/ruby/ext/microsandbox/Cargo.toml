@@ -23,4 +23,7 @@ strip = false
 [dependencies]
 magnus = "0.8.2"
 microsandbox_core = { package = "microsandbox", version = "=0.6.16", default-features = false, features = ["net", "ssh"] }
+# Platform builds intentionally resolve without the committed extension lockfile.
+# Keep them off tinyvec 1.13.0, whose no-std build cannot resolve the vec! macro.
+tinyvec = "=1.12.0"
 tokio = { version = "1.52", features = ["rt-multi-thread", "time"] }
