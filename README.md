@@ -400,22 +400,22 @@ Practical ways to put microsandbox to work:
 
 > • <img height="14" src="https://octicons-col.vercel.app/workflow/A770EF"> **[Eve](https://eve.dev/docs/sandbox#microsandbox) by Vercel**: Agent framework that ships microsandbox as a sandbox backend.<br />
 > • <img height="14" src="https://octicons-col.vercel.app/package/A770EF"> **[Condukt](https://github.com/tuist/condukt) and [Once](https://github.com/tuist/once) by Tuist**: Elixir agentic engine, and cacheable actions that run in fresh sandboxes.<br />
-> • <img height="14" src="https://octicons-col.vercel.app/stack/A770EF"> **[agent-compose by Chaitin](https://github.com/chaitin/agent-compose)**: docker-compose-style daemon for orchestrating agents.<br />
-> • <img height="14" src="https://octicons-col.vercel.app/history/A770EF"> **[Smithers](https://github.com/smithersai/smithers)**: Agent workflows with full observability, rewind, fork, and replay.<br />
+> • <img height="14" src="https://octicons-col.vercel.app/stack/A770EF"> **[agent-compose](https://github.com/chaitin/agent-compose) by Chaitin**: docker-compose-style daemon for orchestrating agents.<br />
+> • <img height="14" src="https://octicons-col.vercel.app/history/A770EF"> **[Smithers](https://github.com/smithersai/smithers) by Smithers**: Agent workflows with full observability, rewind, fork, and replay.<br />
 > • <img height="14" src="https://octicons-col.vercel.app/terminal/A770EF"> **[wrap](https://github.com/tobi/wrap) by Tobi Lütke**: Run coding agents and project commands in isolated Arch Linux microVMs.<br />
 > • <img height="14" src="https://octicons-col.vercel.app/shield-lock/A770EF"> **[Agent VM](https://github.com/wirenboard/agent-vm) by Wiren Board**: Run AI agents in safe VMs scoped to a local folder.
 
 #### <img height="14" src="https://octicons-col.vercel.app/cpu/A770EF">&nbsp;&nbsp;Tools & infrastructure
 
-> • <img height="14" src="https://octicons-col.vercel.app/browser/A770EF"> **[h5i](https://github.com/h5i-dev/h5i)**: Secure, auditable browser for AI agents, written in pure Rust.<br />
-> • <img height="14" src="https://octicons-col.vercel.app/cloud/A770EF"> **[Devsy](https://github.com/devsy-org/devsy)**: Deploy devcontainers onto any cloud, Kubernetes cluster, or Docker host.<br />
-> • <img height="14" src="https://octicons-col.vercel.app/briefcase/A770EF"> **[OpenWork](https://github.com/different-ai/openwork)**: Open-source alternative to Claude Cowork, with a ready-made microsandbox image.
+> • <img height="14" src="https://octicons-col.vercel.app/browser/A770EF"> **[h5i](https://github.com/h5i-dev/h5i) by h5i**: Secure, auditable browser for AI agents, written in pure Rust.<br />
+> • <img height="14" src="https://octicons-col.vercel.app/cloud/A770EF"> **[Devsy](https://github.com/devsy-org/devsy) by Devsy**: Deploy devcontainers onto any cloud, Kubernetes cluster, or Docker host.<br />
+> • <img height="14" src="https://octicons-col.vercel.app/briefcase/A770EF"> **[OpenWork](https://github.com/different-ai/openwork) by Different AI**: Open-source alternative to Claude Cowork, with a ready-made microsandbox image.
 
 #### <img height="14" src="https://octicons-col.vercel.app/list-unordered/A770EF">&nbsp;&nbsp;Guides & showcases
 
-> • <img height="14" src="https://octicons-col.vercel.app/list-unordered/A770EF"> **[Awesome Microsandbox](https://github.com/ya-luotao/awesome-microsandbox)**: Curated list of SDKs, integrations, tools, and resources.<br />
-> • <img height="14" src="https://octicons-col.vercel.app/organization/A770EF"> **[U.S. GSA — Agentic Coding Quickstart](https://github.com/GSA-TTS/agentic-coding-quickstart)**: From zero to a running AI coding agent with USAi in minutes.<br />
-> • <img height="14" src="https://octicons-col.vercel.app/device-desktop/A770EF"> **[msb-omarchy](https://github.com/ya-luotao/msb-omarchy)**: Omarchy desktop with graphics inside a microVM on Apple Silicon.
+> • <img height="14" src="https://octicons-col.vercel.app/list-unordered/A770EF"> **[Awesome Microsandbox](https://github.com/ya-luotao/awesome-microsandbox) by luotao**: Curated list of SDKs, integrations, tools, and resources.<br />
+> • <img height="14" src="https://octicons-col.vercel.app/organization/A770EF"> **[Agentic Coding Quickstart](https://github.com/GSA-TTS/agentic-coding-quickstart) by U.S. GSA**: From zero to a running AI coding agent with USAi in minutes.<br />
+> • <img height="14" src="https://octicons-col.vercel.app/device-desktop/A770EF"> **[msb-omarchy](https://github.com/ya-luotao/msb-omarchy) by luotao**: Omarchy desktop with graphics inside a microVM on Apple Silicon.
 
 <br />
 
