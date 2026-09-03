@@ -606,6 +606,16 @@ export interface NapiSnapshotBuilder extends NapiSnapshotBuilderSetters {
   create(): Promise<NapiSnapshot>;
 }
 
+export interface NapiSnapshotCopyBuilderSetters {
+  labels(labels: Record<string, string>): this;
+  recordIntegrity(enabled: boolean): this;
+}
+
+export interface NapiSnapshotCopyBuilder
+  extends NapiSnapshotCopyBuilderSetters {
+  save(): Promise<void>;
+}
+
 export interface NapiSnapshot {
   readonly reference: string;
   readonly referenceKind: "id" | "path";
@@ -628,6 +638,7 @@ export interface NapiSnapshot {
   readonly createdAt: string; // RFC 3339 UTC
   readonly labels: Record<string, string>;
   readonly sourceSandbox: string | null | undefined;
+  copyTo(outputArchivePath: string): NapiSnapshotCopyBuilder;
   saveTo(out: string, opts?: NapiSaveOpts): Promise<void>;
   verify(): Promise<NapiSnapshotVerifyReport>;
 }

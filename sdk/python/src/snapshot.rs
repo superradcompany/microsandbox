@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
 use pyo3::prelude::*;
@@ -22,6 +22,15 @@ use crate::helpers::str_enum_member;
 #[pyclass(name = "Snapshot")]
 pub struct PySnapshot {
     inner: RustSnapshot,
+}
+
+/// Builder for copying a snapshot archive with replacement metadata.
+#[pyclass(name = "SnapshotCopyBuilder")]
+pub struct PySnapshotCopyBuilder {
+    snapshot: RustSnapshot,
+    output_archive_path: PathBuf,
+    labels: BTreeMap<String, String>,
+    record_integrity: bool,
 }
 
 /// Lightweight snapshot handle returned by the active backend.
@@ -360,6 +369,18 @@ impl PySnapshot {
         })
     }
 
+    /// Configure a new archive containing this snapshot's disk data and
+    /// replacement labels and integrity metadata.
+    /// Raises `UnsupportedError` when artifact archives are unavailable.
+    fn copy_to(&self, output_archive_path: PathBuf) -> PySnapshotCopyBuilder {
+        PySnapshotCopyBuilder {
+            snapshot: self.inner.clone(),
+            output_archive_path,
+            labels: BTreeMap::new(),
+            record_integrity: false,
+        }
+    }
+
     /// Unpack a snapshot archive into the active backend's snapshot store.
     /// Raises `UnsupportedError` when artifact archives are unavailable.
     #[staticmethod]
@@ -401,6 +422,47 @@ impl PySnapshot {
                 out.set_item("upper", upper)?;
                 Ok(out.into())
             })
+        })
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Methods: SnapshotCopyBuilder
+//--------------------------------------------------------------------------------------------------
+
+#[pymethods]
+impl PySnapshotCopyBuilder {
+    /// Replace the copied snapshot's labels.
+    fn labels<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        labels: HashMap<String, String>,
+    ) -> PyRefMut<'py, Self> {
+        slf.labels = labels.into_iter().collect();
+        slf
+    }
+
+    /// Choose whether to calculate and record disk integrity in the copy.
+    fn record_integrity<'py>(mut slf: PyRefMut<'py, Self>, enabled: bool) -> PyRefMut<'py, Self> {
+        slf.record_integrity = enabled;
+        slf
+    }
+
+    /// Write the configured snapshot archive.
+    /// Raises `UnsupportedError` when artifact archives are unavailable.
+    fn save<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let snapshot = self.snapshot.clone();
+        let output_archive_path = self.output_archive_path.clone();
+        let labels = self.labels.clone();
+        let record_integrity = self.record_integrity;
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            snapshot
+                .copy_to(output_archive_path)
+                .labels(labels)
+                .record_integrity(record_integrity)
+                .save()
+                .await
+                .map_err(to_py_err)?;
+            Ok(())
         })
     }
 }

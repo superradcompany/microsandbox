@@ -45,6 +45,7 @@ from microsandbox import (
     SecretChangeKind,
     SecurityProfile,
     Snapshot,
+    SnapshotCopyBuilder,
     SnapshotHandle,
     Stdin,
     StdinMode,
@@ -55,8 +56,12 @@ from microsandbox import (
 )
 
 
-def test_snapshot_instances_expose_save_to() -> None:
+def test_snapshot_types_expose_archive_operations() -> None:
     assert callable(Snapshot.save_to)
+    assert callable(Snapshot.copy_to)
+    assert callable(SnapshotCopyBuilder.labels)
+    assert callable(SnapshotCopyBuilder.record_integrity)
+    assert callable(SnapshotCopyBuilder.save)
     assert callable(SnapshotHandle.save_to)
 
 

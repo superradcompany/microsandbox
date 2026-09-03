@@ -153,6 +153,16 @@ impl SnapshotBackend for CloudBackend {
         Box::pin(async move { Err(MicrosandboxError::local_only(Operation::SnapshotOps)) })
     }
 
+    fn copy<'a>(
+        &'a self,
+        _snapshot: &'a Snapshot,
+        _output_archive_path: &'a Path,
+        _labels: BTreeMap<String, String>,
+        _record_integrity: bool,
+    ) -> BoxFuture<'a, MicrosandboxResult<Manifest>> {
+        Box::pin(async move { Err(MicrosandboxError::local_only(Operation::SnapshotOps)) })
+    }
+
     fn list_dir(
         &self,
         _backend: Arc<dyn Backend>,

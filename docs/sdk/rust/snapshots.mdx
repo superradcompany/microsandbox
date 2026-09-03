@@ -12,7 +12,7 @@ and walkthroughs; this page is the Rust SDK reference.
 
 <Note>
   Snapshots are **disk-only** today and capture a sandbox that is stopped or
-  crashed. `list_dir`, `reindex`, `save`/`save_to`, `load`, and `verify` remain
+  crashed. `list_dir`, `reindex`, `save`/`save_to`, `copy_to`, `load`, and `verify` remain
   on the shared `Snapshot` API, but currently return
   `MicrosandboxError::Unsupported` with the cloud backend.
 </Note>
@@ -542,6 +542,28 @@ created or opened. This avoids re-resolving its reference through the current
 default backend. Artifact archives are currently local-only; other backends
 return `MicrosandboxError::Unsupported`.
 
+#### <span className="msb-recv">snap.</span><span className="msb-hn">copy_to()</span>
+
+```rust
+fn copy_to(&self, output_archive_path: impl Into<PathBuf>) -> SnapshotCopyBuilder
+```
+
+Create a new archive from this snapshot's disk data while replacing its labels
+and integrity metadata. The source snapshot is unchanged. Artifact copies are
+currently local-only; other backends return `MicrosandboxError::Unsupported`
+when `save()` is awaited.
+
+```rust
+use std::collections::BTreeMap;
+
+let copied_manifest = snapshot
+    .copy_to("./baseline-copy.tar.zst")
+    .labels(BTreeMap::from([("environment".into(), "test".into())]))
+    .record_integrity(true)
+    .save()
+    .await?;
+```
+
 #### <span className="msb-recv">snap.</span><span className="msb-hn">verify()</span>
 
 ```rust
@@ -965,6 +987,17 @@ Build and execute the snapshot in one step. Equivalent to [`Snapshot::create(sel
     <div className="msb-param-desc">The created artifact handle.</div>
   </div>
 </div>
+
+## SnapshotCopyBuilder
+
+Returned by [`Snapshot::copy_to()`](#snapcopy_to). It reuses the source disk
+data while replacing explicit-snapshot metadata in a new archive.
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `labels(BTreeMap<String, String>)` | `Self` | Replace all labels in the copied manifest |
+| `record_integrity(bool)` | `Self` | Compute integrity when true, or omit it when false |
+| `save()` | `MicrosandboxResult<Manifest>` | Write the archive and return its manifest |
 
 ## Types
 

@@ -111,6 +111,7 @@ describe("native image cache contract", () => {
 describe("native snapshot contract", () => {
   it("exports instance archive methods", () => {
     expect(typeof napi.Snapshot.prototype.saveTo).toBe("function");
+    expect(typeof napi.Snapshot.prototype.copyTo).toBe("function");
     expect(typeof napi.SnapshotHandle.prototype.saveTo).toBe("function");
   });
 });

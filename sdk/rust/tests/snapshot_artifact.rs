@@ -766,6 +766,199 @@ async fn save_then_load_round_trips_via_zstd() {
 }
 
 #[tokio::test]
+async fn copy_to_applies_labels_and_records_integrity_without_changing_the_source() {
+    let tmp = TempDir::new().unwrap();
+    let (source_dir, source_digest) =
+        make_artifact(tmp.path(), "checkpoint", b"durable checkpoint data");
+    let source_archive = tmp.path().join("checkpoint.tar.zst");
+    save_snapshot(
+        source_dir.to_string_lossy().as_ref(),
+        &source_archive,
+        SaveOpts::default(),
+    )
+    .await
+    .unwrap();
+    let source_archive_bytes = std::fs::read(&source_archive).unwrap();
+
+    let backend = isolated_backend(&tmp.path().join("copy-home")).await;
+    let work_dir = tmp.path().join("copy-work");
+    let output_archive = tmp.path().join("explicit.tar.zst");
+    let labels = BTreeMap::from([
+        ("environment".into(), "staging".into()),
+        ("purpose".into(), "backup".into()),
+    ]);
+    let (manifest, imported_manifest, imported_descriptor) =
+        microsandbox::with_backend(backend, async {
+            let snapshot = Snapshot::load(&source_archive, Some(&work_dir))
+                .await?
+                .open()
+                .await?;
+            let imported_manifest = snapshot.manifest().clone();
+            let imported_descriptor =
+                tokio::fs::read(snapshot.path()?.join(DESCRIPTOR_FILENAME)).await?;
+            let manifest = snapshot
+                .copy_to(&output_archive)
+                .labels(labels.clone())
+                .record_integrity(true)
+                .save()
+                .await?;
+
+            assert_eq!(snapshot.manifest(), &imported_manifest);
+            assert_eq!(
+                tokio::fs::read(snapshot.path()?.join(DESCRIPTOR_FILENAME)).await?,
+                imported_descriptor
+            );
+
+            Ok::<_, microsandbox::MicrosandboxError>((
+                manifest,
+                imported_manifest,
+                imported_descriptor,
+            ))
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(manifest.labels, labels);
+    assert!(manifest.state.as_file().unwrap().upper.integrity.is_some());
+    assert_ne!(manifest.digest().unwrap(), source_digest);
+    assert_eq!(
+        std::fs::read(&source_archive).unwrap(),
+        source_archive_bytes
+    );
+    assert_eq!(
+        imported_manifest.to_canonical_bytes().unwrap(),
+        imported_descriptor
+    );
+
+    let verify_backend = isolated_backend(&tmp.path().join("verify-home")).await;
+    let imported = microsandbox::with_backend(verify_backend, async {
+        Snapshot::load(&output_archive, Some(&tmp.path().join("copied")))
+            .await?
+            .open()
+            .await
+    })
+    .await
+    .unwrap();
+    assert_eq!(imported.manifest(), &manifest);
+    assert_eq!(
+        std::fs::read(imported.path().unwrap().join(DEFAULT_UPPER_FILE)).unwrap(),
+        b"durable checkpoint data"
+    );
+    assert!(matches!(
+        imported.verify().await.unwrap().upper,
+        microsandbox::snapshot::UpperVerifyStatus::Verified { .. }
+    ));
+
+    let backend = isolated_backend(&tmp.path().join("copy-without-integrity-home")).await;
+    let output_without_integrity = tmp.path().join("explicit-without-integrity.tar.zst");
+    let manifest = microsandbox::with_backend(backend, async {
+        let snapshot = Snapshot::load(
+            &output_archive,
+            Some(&tmp.path().join("copy-without-integrity-work")),
+        )
+        .await?
+        .open()
+        .await?;
+        snapshot
+            .copy_to(&output_without_integrity)
+            .labels(BTreeMap::new())
+            .record_integrity(false)
+            .save()
+            .await
+    })
+    .await
+    .unwrap();
+
+    assert!(manifest.labels.is_empty());
+    assert!(manifest.state.as_file().unwrap().upper.integrity.is_none());
+}
+
+#[tokio::test]
+async fn copy_to_translates_a_legacy_checkpoint() {
+    let tmp = TempDir::new().unwrap();
+    let source_archive = tmp.path().join("legacy-checkpoint.tar");
+    write_v066_archive(
+        &source_archive,
+        "sha256-0123456789abcdef",
+        b"legacy checkpoint data",
+    );
+    let backend = isolated_backend(&tmp.path().join("copy-legacy-home")).await;
+    let output_archive = tmp.path().join("explicit.tar.zst");
+
+    let manifest = microsandbox::with_backend(backend, async {
+        let snapshot = Snapshot::load(&source_archive, Some(&tmp.path().join("legacy-copy-work")))
+            .await?
+            .open()
+            .await?;
+        snapshot
+            .copy_to(&output_archive)
+            .labels(BTreeMap::from([(
+                "origin".into(),
+                "legacy-checkpoint".into(),
+            )]))
+            .record_integrity(true)
+            .save()
+            .await
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(manifest.schema, SCHEMA_VERSION);
+    assert_eq!(manifest.labels["origin"], "legacy-checkpoint");
+    assert!(manifest.state.as_file().unwrap().upper.integrity.is_some());
+    let verify_backend = isolated_backend(&tmp.path().join("legacy-verify-home")).await;
+    let imported = microsandbox::with_backend(verify_backend, async {
+        Snapshot::load(&output_archive, Some(&tmp.path().join("legacy-copied")))
+            .await?
+            .open()
+            .await
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        std::fs::read(imported.path().unwrap().join(DEFAULT_UPPER_FILE)).unwrap(),
+        b"legacy checkpoint data"
+    );
+}
+
+#[tokio::test]
+async fn copy_to_rejects_checkpoint_state_without_writing_an_archive() {
+    let tmp = TempDir::new().unwrap();
+    let (source_dir, _) = make_artifact_with_scope(
+        tmp.path(),
+        "resumable",
+        b"checkpoint state",
+        SnapshotScope::Resumable,
+    );
+    let source_archive = tmp.path().join("resumable.tar.zst");
+    save_snapshot(
+        source_dir.to_string_lossy().as_ref(),
+        &source_archive,
+        SaveOpts::default(),
+    )
+    .await
+    .unwrap();
+
+    let output_archive = tmp.path().join("copy.tar.zst");
+    let backend = isolated_backend(&tmp.path().join("resumable-copy-home")).await;
+    let error = microsandbox::with_backend(backend, async {
+        let snapshot = Snapshot::load(
+            &source_archive,
+            Some(&tmp.path().join("resumable-copy-work")),
+        )
+        .await?
+        .open()
+        .await?;
+        snapshot.copy_to(&output_archive).save().await
+    })
+    .await
+    .expect_err("checkpoint-state copy should fail");
+
+    assert!(error.to_string().contains("checkpoint-state"));
+    assert!(!output_archive.exists());
+}
+
+#[tokio::test]
 async fn save_then_load_round_trips_via_plain_tar() {
     let tmp = TempDir::new().unwrap();
     let (dir, original_digest) = make_artifact(tmp.path(), "src-plain", b"plain tar bytes");

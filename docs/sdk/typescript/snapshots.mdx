@@ -15,7 +15,7 @@ import type { SaveOpts, SnapshotScope, SnapshotVerifyReport } from "microsandbox
 
 <Note>
   Snapshots are **disk-only** and require a sandbox that is not running (stopped or crashed).
-  `listDir`, `reindex`, `save`/`saveTo`, `load`, and `verify` keep the same API
+  `listDir`, `reindex`, `save`/`saveTo`, `copyTo`, `load`, and `verify` keep the same API
   on every backend, but currently reject with `UnsupportedError` in cloud.
 </Note>
 
@@ -570,6 +570,24 @@ different current default backend. Cloud returns `UnsupportedError`.
 await snap.saveTo("./baseline.tar.zst", { withImage: true });
 ```
 
+#### <span className="msb-recv">snap.</span><span className="msb-hn">copyTo()</span>
+
+```typescript
+copyTo(outputArchivePath: string): SnapshotCopyBuilder
+```
+
+Create a new archive from this snapshot's disk data while replacing its labels
+and integrity metadata. The source snapshot is unchanged. Cloud returns
+`UnsupportedError` when `save()` is awaited.
+
+```typescript
+await snap
+  .copyTo("./baseline-copy.tar.zst")
+  .labels({ environment: "test" })
+  .recordIntegrity(true)
+  .save();
+```
+
 #### <span className="msb-recv">snap.</span><span className="msb-hn">verify()</span>
 
 ```typescript
@@ -722,6 +740,17 @@ Capture the configured snapshot and return the resulting artifact.
     <div className="msb-param-desc">The created snapshot artifact.</div>
   </div>
 </div>
+
+## SnapshotCopyBuilder
+
+Returned by [`snapshot.copyTo()`](#snapcopyto). Each setter mutates the builder
+and returns `this`.
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `labels(Record<string, string>)` | `this` | Replace all labels in the copied manifest |
+| `recordIntegrity(boolean)` | `this` | Compute integrity when true, or omit it when false |
+| `save()` | `Promise<void>` | Write the configured archive |
 
 ## Types
 

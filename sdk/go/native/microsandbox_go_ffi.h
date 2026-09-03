@@ -773,6 +773,14 @@ char *msb_snapshot_export(uint64_t cancel_id,
                           unsigned char *buf,
                           uintptr_t buf_len);
 
+char *msb_snapshot_copy(uint64_t cancel_id,
+                        const char *reference,
+                        const char *reference_kind,
+                        const char *output_archive_path,
+                        const char *opts_json,
+                        unsigned char *buf,
+                        uintptr_t buf_len);
+
 char *msb_snapshot_import(uint64_t cancel_id,
                           const char *archive,
                           const char *dest,
