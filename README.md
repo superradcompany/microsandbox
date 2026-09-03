@@ -394,27 +394,6 @@ Practical ways to put microsandbox to work:
 
 <br />
 
-## <a href="./#gh-dark-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/dependabot/ffffff" alt="agents-dark"></a><a href="./#gh-light-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/dependabot/000000" alt="agents"></a>&nbsp;&nbsp;AI Agents
-
-#### <img height="14" src="https://octicons-col.vercel.app/book/A770EF">&nbsp;&nbsp;Agent Skills
-
-> Teach any AI coding agent how to use microsandbox by installing the [Agent Skills](https://github.com/superradcompany/skills). Works with Claude Code, Cursor, Codex, Gemini CLI, GitHub Copilot, and more.
->
-> ```sh
-> npx skills add superradcompany/skills
-> ```
-
-#### <img height="14" src="https://octicons-col.vercel.app/plug/A770EF">&nbsp;&nbsp;MCP Server
-
-> Connect any MCP-compatible agent to microsandbox with the [MCP server](https://github.com/superradcompany/microsandbox-mcp). Provides structured tool calls for sandbox lifecycle, command execution, filesystem access, volumes, and monitoring.
->
-> ```sh
-> # Claude Code
-> claude mcp add --transport stdio microsandbox -- npx -y microsandbox-mcp
-> ```
-
-<br />
-
 ## <a href="./#gh-dark-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/people/ffffff" alt="people-dark"></a><a href="./#gh-light-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/people/000000" alt="people"></a>&nbsp;&nbsp;Community ecosystem
 
 #### <img height="14" src="https://octicons-col.vercel.app/hubot/A770EF">&nbsp;&nbsp;Agent frameworks & runtimes
@@ -441,6 +420,27 @@ Practical ways to put microsandbox to work:
 <br />
 
 <a href="https://discord.gg/T95Y3XnEAK"><img src="https://img.shields.io/badge/Share_a_Project-%E2%86%92-A770EF?style=flat-square&labelColor=2b2b2b" alt="Share a Project"></a>
+
+<br />
+
+## <a href="./#gh-dark-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/dependabot/ffffff" alt="agents-dark"></a><a href="./#gh-light-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/dependabot/000000" alt="agents"></a>&nbsp;&nbsp;AI Agents
+
+#### <img height="14" src="https://octicons-col.vercel.app/book/A770EF">&nbsp;&nbsp;Agent Skills
+
+> Teach any AI coding agent how to use microsandbox by installing the [Agent Skills](https://github.com/superradcompany/skills). Works with Claude Code, Cursor, Codex, Gemini CLI, GitHub Copilot, and more.
+>
+> ```sh
+> npx skills add superradcompany/skills
+> ```
+
+#### <img height="14" src="https://octicons-col.vercel.app/plug/A770EF">&nbsp;&nbsp;MCP Server
+
+> Connect any MCP-compatible agent to microsandbox with the [MCP server](https://github.com/superradcompany/microsandbox-mcp). Provides structured tool calls for sandbox lifecycle, command execution, filesystem access, volumes, and monitoring.
+>
+> ```sh
+> # Claude Code
+> claude mcp add --transport stdio microsandbox -- npx -y microsandbox-mcp
+> ```
 
 <br />
 
