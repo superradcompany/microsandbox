@@ -913,7 +913,7 @@ Stream captured log entries as a [`LogStream`](#logstream). With `follow=True` t
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">stop()</span>
 
-<Tooltip tip="Graceful stop works on microsandbox cloud; timeout expiry cannot escalate to force kill."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On Cloud, the timeout only limits how long the SDK waits; the accepted stop may continue server-side."><span className="msb-badge-limited">Different on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```python
 async def stop(self, timeout: float | None = None) -> None
@@ -927,14 +927,14 @@ await sb.stop()
 
 </Accordion>
 
-Gracefully shut down the sandbox and wait until stopped state is observed. Lets the sandbox finish writing any pending data to disk before it exits, so files written inside the sandbox aren't lost across a later restart. Waits up to ten seconds by default; pass `timeout` to override the graceful shutdown window before force-kill escalation.
+Gracefully shut down the sandbox and wait until stopped state is observed. Local waits up to ten seconds by default, then force-kills the sandbox if it is still running. Cloud waits up to six minutes because shutdown may include creating a durable disk checkpoint. If that deadline expires, this raises `SandboxStopTimedOutError` without cancelling the accepted server-side stop, which may still complete afterward.
 
 <p className="msb-label">Parameters</p>
 
 <div className="msb-params">
   <div className="msb-param">
     <div className="msb-param-key"><code>timeout</code><span className="msb-type">float | None</span></div>
-    <div className="msb-param-desc">Seconds to wait for graceful exit before force-kill. <code>None</code> uses the ten-second default.</div>
+    <div className="msb-param-desc">Seconds to wait for stopped state. On Local, expiry force-kills; on Cloud, expiry raises without cancelling the accepted stop. <code>None</code> uses the backend default.</div>
   </div>
 </div>
 
@@ -1491,13 +1491,13 @@ Start in attached or detached mode
 
 #### <span className="msb-recv">handle.</span><span className="msb-hn">stop()</span>
 
-<Tooltip tip="Graceful stop works on microsandbox cloud; timeout expiry cannot escalate to force kill."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On Cloud, the timeout only limits how long the SDK waits; the accepted stop may continue server-side."><span className="msb-badge-limited">Different on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```python
 stop(timeout=None)
 ```
 
-Gracefully shut down and wait until stopped state is observed
+Gracefully shut down and wait until stopped state is observed. Local waits ten seconds by default, then force-kills. Cloud waits six minutes and raises `SandboxStopTimedOutError` on expiry without cancelling the accepted server-side stop.
 
 <p className="msb-label">Returns</p>
 

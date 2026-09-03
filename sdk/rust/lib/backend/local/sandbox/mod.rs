@@ -1340,8 +1340,17 @@ mod tests {
     use crate::backend::{Backend, LocalBackend, SandboxBackend};
     use crate::logs::{LogOptions, LogSource};
     use crate::sandbox::{
-        OciRootfsSource, RootfsSource, SandboxConfig, SandboxListBuilder, SandboxStatus,
+        DEFAULT_STOP_TIMEOUT, OciRootfsSource, RootfsSource, SandboxConfig, SandboxListBuilder,
+        SandboxStatus,
     };
+
+    #[test]
+    fn local_stop_policy_preserves_existing_escalation() {
+        let backend = LocalBackend::lazy();
+
+        assert_eq!(backend.default_stop_timeout(), DEFAULT_STOP_TIMEOUT);
+        assert!(backend.should_force_kill_after_stop_timeout());
+    }
 
     /// Open both pools at `db_path` for tests, with migrations applied.
     async fn open_test_pools(db_path: &std::path::Path) -> DbPools {

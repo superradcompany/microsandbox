@@ -515,6 +515,12 @@ export class Sandbox implements AsyncDisposable {
 
   // -- lifecycle ----------------------------------------------------------
 
+  /**
+   * Gracefully stop the sandbox and wait for stopped state. Local waits 10
+   * seconds before force-killing. Cloud waits 6 minutes and throws
+   * `SandboxStopTimedOutError` on expiry without cancelling the accepted
+   * server-side stop.
+   */
   async stop(): Promise<void> {
     await withMappedErrors(() => this.inner.stop());
   }
@@ -523,6 +529,12 @@ export class Sandbox implements AsyncDisposable {
     await withMappedErrors(() => this.inner.requestStop());
   }
 
+  /**
+   * Stop with an explicit observation timeout. Local force-kills after the
+   * timeout. Cloud throws `SandboxStopTimedOutError` instead, while the
+   * accepted server-side stop may continue. `0` is local-only because it
+   * requests immediate force termination.
+   */
   async stopWithTimeout(timeoutMs: number): Promise<void> {
     await withMappedErrors(() => this.inner.stopWithTimeout(timeoutMs));
   }

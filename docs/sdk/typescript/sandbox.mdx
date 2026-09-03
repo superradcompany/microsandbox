@@ -752,7 +752,7 @@ Get an SSH handle for opening interactive sessions and port forwards into the ru
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">stop()</span>
 
-<Tooltip tip="Graceful stop works on microsandbox cloud; timeout expiry cannot escalate to force kill."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On Cloud, the timeout only limits how long the SDK waits; the accepted stop may continue server-side."><span className="msb-badge-limited">Different on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 stop(): Promise<void>
@@ -766,7 +766,7 @@ await sandbox.stop();
 
 </Accordion>
 
-Gracefully shut down the sandbox and wait until stopped state is observed. Lets the sandbox finish writing any pending data to disk before it exits, so files written inside the sandbox aren't lost across a later restart. Waits up to 10_000 ms for a clean exit; if the sandbox is still running after that, it is force-killed.
+Gracefully shut down the sandbox and wait until stopped state is observed. Local waits up to 10,000 ms, then force-kills the sandbox if it is still running. Cloud waits up to 6 minutes because shutdown may include creating a durable disk checkpoint. If that deadline expires, this throws `SandboxStopTimedOutError` without cancelling the accepted server-side stop, which may still complete afterward.
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">waitForStatus()</span>
 
@@ -794,7 +794,7 @@ Stop and remove this exact sandbox. Defaults to graceful shutdown with a 10_000 
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">stopWithTimeout()</span>
 
-<Tooltip tip="Graceful stop works on microsandbox cloud; timeout expiry cannot escalate to force kill."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On Cloud, the timeout only limits how long the SDK waits; the accepted stop may continue server-side."><span className="msb-badge-limited">Different on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 stopWithTimeout(timeoutMs: number): Promise<void>
@@ -808,14 +808,14 @@ await sandbox.stopWithTimeout(5000);
 
 </Accordion>
 
-Gracefully shut down the sandbox with an explicit observation timeout before force-kill escalation. `0` force-kills immediately. Resolves successfully either way - it does not throw on timeout expiry.
+Gracefully shut down the sandbox with an explicit observation timeout. Local force-kills after the timeout. Cloud throws `SandboxStopTimedOutError` instead, while the accepted server-side stop may continue. `0` requests immediate force termination and is therefore local-only.
 
 <p className="msb-label">Parameters</p>
 
 <div className="msb-params">
   <div className="msb-param">
     <div className="msb-param-key"><code>timeoutMs</code><span className="msb-type">number</span></div>
-    <div className="msb-param-desc">Milliseconds to wait for a clean exit before force-killing. <code>0</code> skips the grace period.</div>
+    <div className="msb-param-desc">Milliseconds to wait for stopped state. On Local, expiry force-kills; on Cloud, expiry throws without cancelling the accepted stop. <code>0</code> is local-only.</div>
   </div>
 </div>
 
@@ -2564,13 +2564,13 @@ Stop and remove this exact sandbox. A stale handle cannot destroy a same-name re
 
 #### <span className="msb-recv">handle.</span><span className="msb-hn">stop()</span>
 
-<Tooltip tip="Graceful stop works on microsandbox cloud; timeout expiry cannot escalate to force kill."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On Cloud, the timeout only limits how long the SDK waits; the accepted stop may continue server-side."><span className="msb-badge-limited">Different on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 stop()
 ```
 
-Gracefully shut down. Waits up to 10_000 ms for pending writes to flush, then force-kills
+Gracefully shut down and wait until stopped. Local waits up to 10,000 ms, then force-kills. Cloud waits up to 6 minutes and throws `SandboxStopTimedOutError` on expiry without cancelling the accepted server-side stop.
 
 <p className="msb-label">Returns</p>
 
@@ -2578,13 +2578,13 @@ Gracefully shut down. Waits up to 10_000 ms for pending writes to flush, then fo
 
 #### <span className="msb-recv">handle.</span><span className="msb-hn">stopWithTimeout()</span>
 
-<Tooltip tip="Graceful stop works on microsandbox cloud; timeout expiry cannot escalate to force kill."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On Cloud, the timeout only limits how long the SDK waits; the accepted stop may continue server-side."><span className="msb-badge-limited">Different on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 stopWithTimeout(timeoutMs)
 ```
 
-Same as `stop()` with an explicit timeout in milliseconds; `0` force-kills immediately
+Same as `stop()` with an explicit timeout in milliseconds. Local force-kills on expiry; Cloud throws `SandboxStopTimedOutError` while the accepted stop may continue. `0` requests immediate force termination and is local-only.
 
 <p className="msb-label">Returns</p>
 

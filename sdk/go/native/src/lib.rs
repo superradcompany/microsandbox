@@ -450,6 +450,7 @@ mod error_kind {
     pub const SANDBOX_NOT_RUNNING: &str = "sandbox_not_running";
     pub const SANDBOX_ALREADY_EXISTS: &str = "sandbox_already_exists";
     pub const SANDBOX_REPLACED: &str = "sandbox_replaced";
+    pub const SANDBOX_STOP_TIMED_OUT: &str = "sandbox_stop_timed_out";
     pub const VOLUME_NOT_FOUND: &str = "volume_not_found";
     pub const VOLUME_ALREADY_EXISTS: &str = "volume_already_exists";
     pub const EXEC_TIMEOUT: &str = "exec_timeout";
@@ -520,6 +521,7 @@ impl From<MicrosandboxError> for FfiError {
             MicrosandboxError::SandboxNotRunning(_) => error_kind::SANDBOX_NOT_RUNNING,
             MicrosandboxError::SandboxAlreadyExists(_) => error_kind::SANDBOX_ALREADY_EXISTS,
             MicrosandboxError::SandboxReplaced { .. } => error_kind::SANDBOX_REPLACED,
+            MicrosandboxError::SandboxStopTimedOut { .. } => error_kind::SANDBOX_STOP_TIMED_OUT,
             MicrosandboxError::VolumeNotFound(_) => error_kind::VOLUME_NOT_FOUND,
             MicrosandboxError::VolumeAlreadyExists(_) => error_kind::VOLUME_ALREADY_EXISTS,
             MicrosandboxError::ExecTimeout(_) => error_kind::EXEC_TIMEOUT,
@@ -2762,9 +2764,14 @@ pub unsafe extern "C" fn msb_sandbox_handle_lifecycle(
                     registered_sandbox_json(sandbox)
                 }
                 "stop" => {
-                    handle
-                        .stop_with_timeout(Duration::from_millis(opts.timeout_ms.unwrap_or(10_000)))
-                        .await?;
+                    match opts.timeout_ms {
+                        Some(timeout_ms) => {
+                            handle
+                                .stop_with_timeout(Duration::from_millis(timeout_ms))
+                                .await?;
+                        }
+                        None => handle.stop().await?,
+                    }
                     Ok(r#"{"ok":true}"#.to_string())
                 }
                 "request_stop" => {

@@ -615,7 +615,9 @@ type SandboxTouchResult struct {
 	ActivitySeq uint64
 }
 
-// WithStopTimeout sets how long Stop waits for graceful shutdown before force-killing.
+// WithStopTimeout sets how long Stop waits for graceful shutdown. Local
+// force-kills after the timeout. Cloud returns ErrSandboxStopTimedOut instead,
+// while the accepted server-side stop may continue.
 func WithStopTimeout(timeout time.Duration) StopOption {
 	return func(o *lifecycleOptions) { o.timeout = timeout }
 }
@@ -902,6 +904,9 @@ func (h *SandboxHandle) ConnectOrStart(ctx context.Context, opts ...ConnectOrSta
 }
 
 // Stop gracefully stops the sandbox and waits until stopped state is observed.
+// Local waits ten seconds by default before force-killing. Cloud waits six
+// minutes and returns ErrSandboxStopTimedOut on expiry without cancelling the
+// accepted server-side stop.
 func (h *SandboxHandle) Stop(ctx context.Context, opts ...StopOption) error {
 	return wrapFFI(ffi.SandboxHandleVoidLifecycle(ctx, h.name, h.id, "stop", ffi.SandboxHandleLifecycleOptions{TimeoutMs: stopTimeoutMillis(opts)}))
 }
@@ -1008,6 +1013,9 @@ func (s *Sandbox) identityHandle() *SandboxHandle {
 }
 
 // Stop gracefully stops the sandbox and waits until stopped state is observed.
+// Local waits ten seconds by default before force-killing. Cloud waits six
+// minutes and returns ErrSandboxStopTimedOut on expiry without cancelling the
+// accepted server-side stop.
 func (s *Sandbox) Stop(ctx context.Context, opts ...StopOption) error {
 	return wrapFFI(s.inner.Stop(ctx, stopTimeoutMillis(opts)))
 }

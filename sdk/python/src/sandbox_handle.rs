@@ -364,7 +364,12 @@ impl PySandboxHandle {
         })
     }
 
-    /// Stop the sandbox gracefully and wait until stopped.
+    /// Stop gracefully and wait until stopped.
+    ///
+    /// Local waits ten seconds by default before force-killing. Cloud waits
+    /// six minutes and raises `SandboxStopTimedOutError` on expiry without
+    /// cancelling the accepted server-side stop. An explicit `timeout`
+    /// overrides the wait but not these backend-specific expiry semantics.
     #[pyo3(signature = (timeout = None))]
     fn stop<'py>(&self, py: Python<'py>, timeout: Option<f64>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();

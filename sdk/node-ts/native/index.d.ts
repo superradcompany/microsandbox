@@ -998,7 +998,13 @@ export declare class Sandbox {
   stopAndWait(): Promise<ExitStatus>
   /** Request graceful shutdown without waiting for observed exit. */
   requestStop(): Promise<void>
-  /** Stop gracefully with an explicit timeout before escalating to SIGKILL. */
+  /**
+   * Stop gracefully with an explicit convergence timeout.
+   *
+   * Backends that support force termination escalate after the timeout;
+   * otherwise the accepted stop may still complete and returns a typed
+   * timeout error.
+   */
   stopWithTimeout(timeoutMs: number): Promise<void>
   /** Kill the sandbox immediately and wait for observed exit. */
   kill(): Promise<void>
@@ -1379,16 +1385,17 @@ export declare class SandboxHandle {
    * Stop the sandbox gracefully.
    *
    * Lets the sandbox finish writing any pending data to disk before
-   * it exits, so files written inside the sandbox aren't lost across
-   * a later restart. Waits 10_000 ms by default before force-kill;
-   * override with `stopWithTimeout(timeoutMs)`.
+   * it exits, so files written inside the sandbox aren't lost across a
+   * later restart. The default wait depends on the active backend; override
+   * it with `stopWithTimeout(timeoutMs)`.
    */
   stop(): Promise<void>
   /** Request graceful shutdown without waiting. */
   requestStop(): Promise<void>
   /**
-   * Stop the sandbox gracefully with an explicit timeout in
-   * milliseconds before escalation.
+   * Stop gracefully with an explicit convergence timeout in milliseconds.
+   * Backends without force termination return a typed timeout while the
+   * accepted stop may still complete.
    */
   stopWithTimeout(timeoutMs: number): Promise<void>
   /** Force-kill the sandbox and wait until stopped state is observed. */
