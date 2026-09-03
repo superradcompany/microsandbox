@@ -10,6 +10,11 @@ rm -rf "${GITHUB_WORKSPACE:-$PWD}"/build
 rm -rf "${GITHUB_WORKSPACE:-$PWD}"/target
 rm -rf "${HOME}/.microsandbox"
 
+# KVM test jobs consume prebuilt artifacts, so their build caches are
+# expendable. Reclaim them before unpacking the multi-gigabyte nextest archive.
+rm -rf "${HOME}/.cargo/registry" "${HOME}/.cargo/git"
+rm -rf "${HOME}/go/pkg/mod" "${HOME}/.cache/go-build"
+
 # Self-hosted x64 runners share one root disk across multiple runner users.
 # Clean only old temp directories so active jobs keep their per-test homes.
 # The runner sudoers policy only permits apt-get, so keep this best-effort and
