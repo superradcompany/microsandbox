@@ -11,6 +11,7 @@ export type MicrosandboxErrorCode =
   | "sandboxReplaced"
   | "sandboxStillRunning"
   | "sandboxNotRunning"
+  | "sandboxStopTimedOut"
   | "runtime"
   | "json"
   | "protocol"
@@ -109,6 +110,12 @@ export class SandboxStillRunningError extends MicrosandboxError {
 export class SandboxNotRunningError extends MicrosandboxError {
   constructor(message: string, options?: ErrorOptions) {
     super("sandboxNotRunning", message, options);
+  }
+}
+
+export class SandboxStopTimedOutError extends MicrosandboxError {
+  constructor(message: string, options?: ErrorOptions) {
+    super("sandboxStopTimedOut", message, options);
   }
 }
 

@@ -324,6 +324,12 @@ end
 
 Ruby does not yet expose a dedicated stale-identity subclass. Until it does, `Microsandbox::Error` with the stable `was replaced` message is the Ruby-specific contract; the operation still refuses to act on the replacement.
 
+## Stop observation timeouts
+
+On Local, a graceful-stop timeout causes the SDK to force-kill the sandbox. On Cloud, the same timeout only limits how long the SDK waits: the accepted server-side stop is not cancelled and may still complete. Cloud reports this with `SandboxStopTimedOutError` in TypeScript and Python, `Error::SandboxStopTimedOut` in Rust, and `ErrSandboxStopTimedOut` in Go.
+
+After a Cloud timeout, poll the sandbox status or call the wait-until-stopped method if the caller still needs confirmation. Calling `request_stop` first is useful when the application wants to submit the stop and control its own observation deadline.
+
 ## Sandbox start failures
 
 When a sandbox process exits before the agent relay is ready, creation returns or raises an SDK error. Rust exposes a structured `BootStart` payload with the failure stage and underlying message.

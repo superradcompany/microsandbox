@@ -56,6 +56,13 @@ An attached local SDK handle normally stops its sandbox when the client process 
 
 Stopping gracefully terminates guest processes and shuts down the VM. The sandbox moves to `Stopped`, but its configuration and filesystem remain available for the next start.
 
+The timeout behavior depends on the backend:
+
+- **Local:** `stop()` waits up to 10 seconds, then force-kills the sandbox if it is still running.
+- **Cloud:** `stop()` waits up to 6 minutes because shutdown may include creating a durable disk checkpoint. If the deadline expires, the SDK returns its typed stop-timeout error and stops waiting. It does not cancel or force-kill the accepted server-side stop, which may still complete afterward.
+
+Use the explicit timeout option in your SDK to change how long the caller waits. On Cloud this remains an observation deadline, not a cancellation deadline. Use `request_stop` and `wait_until_stopped` separately when you want to submit the stop and manage observation yourself.
+
 <CodeGroup>
 ```typescript TypeScript
 await sb.stop();
@@ -99,7 +106,7 @@ Use `restart` when you want to stop and start the sandbox in one operation. If i
 msb restart worker
 ```
 
-On microsandbox cloud, restart and destroy can request a graceful stop, but timeout expiry cannot escalate to a force kill. Force controls are local-only, and detached-start controls affect only local process ownership.
+On microsandbox cloud, timeout expiry cannot escalate to a force kill. Force controls are local-only, and detached-start controls affect only local process ownership.
 
 ## Reuse or create a named sandbox
 

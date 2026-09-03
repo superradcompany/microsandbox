@@ -27,6 +27,14 @@ use microsandbox_types::{
 };
 
 //--------------------------------------------------------------------------------------------------
+// Constants
+//--------------------------------------------------------------------------------------------------
+
+/// Allows the worker's five-minute checkpoint deadline plus control-plane
+/// reconciliation before reporting that a Cloud stop timed out.
+const DEFAULT_CLOUD_STOP_TIMEOUT: Duration = Duration::from_secs(360);
+
+//--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
 
@@ -71,6 +79,14 @@ pub(in crate::backend) enum CloudRegistrySelection {
 //--------------------------------------------------------------------------------------------------
 
 impl SandboxBackend for CloudBackend {
+    fn default_stop_timeout(&self) -> Duration {
+        DEFAULT_CLOUD_STOP_TIMEOUT
+    }
+
+    fn should_force_kill_after_stop_timeout(&self) -> bool {
+        false
+    }
+
     fn create<'a>(
         &'a self,
         backend: Arc<dyn Backend>,
@@ -702,6 +718,14 @@ mod tests {
     use crate::sandbox::{EnvVar, OciRootfsSource, RootDisk, SandboxBuilder, SandboxSpec};
     use crate::snapshot::SnapshotReference;
     use microsandbox_types::CloudSnapshotLocation;
+
+    #[test]
+    fn cloud_default_stop_timeout_covers_checkpoint_convergence() {
+        let backend = CloudBackend::new("http://127.0.0.1:1", "test-key").unwrap();
+
+        assert_eq!(backend.default_stop_timeout(), Duration::from_secs(360));
+        assert!(!backend.should_force_kill_after_stop_timeout());
+    }
 
     #[tokio::test]
     async fn cloud_boot_error_is_absent_until_the_api_exposes_diagnostics() {

@@ -26,7 +26,8 @@ use crate::sandbox::exec::{ExecHandle, ExecOptions, ExecOutput};
 use crate::sandbox::fs::{FsEntry, FsMetadata, FsReadStream, FsWriteSink};
 use crate::sandbox::metrics::SandboxMetrics;
 use crate::sandbox::{
-    Sandbox, SandboxConfig, SandboxHandle, SandboxListBuilder, SandboxPage, SandboxStatus,
+    DEFAULT_STOP_TIMEOUT, Sandbox, SandboxConfig, SandboxHandle, SandboxListBuilder, SandboxPage,
+    SandboxStatus,
 };
 
 // Keep the pre-split path `crate::backend::sandbox::cloud_status_to_sandbox_status`
@@ -148,6 +149,25 @@ pub struct SandboxHandleCloudState {
 /// `Sandbox::create`) resolve the backend via
 /// [`default_backend`](super::default_backend) and forward it through.
 pub trait SandboxBackend: Send + Sync {
+    /// Default time to wait for graceful stop convergence.
+    ///
+    /// Local and custom backends retain the SDK's existing ten-second
+    /// default. Backends whose stop path includes durable persistence work may
+    /// override this without changing the backend-neutral sandbox API.
+    fn default_stop_timeout(&self) -> Duration {
+        DEFAULT_STOP_TIMEOUT
+    }
+
+    /// Whether a graceful stop timeout should escalate to force termination.
+    ///
+    /// Local and custom backends retain the existing escalation behavior.
+    /// Backends whose accepted stop may continue asynchronously can return
+    /// `false` and surface an observation timeout instead.
+    #[doc(hidden)]
+    fn should_force_kill_after_stop_timeout(&self) -> bool {
+        true
+    }
+
     /// Create a sandbox. The returned outer [`Sandbox`] carries the supplied
     /// `backend` Arc and the variant-specific state inside `SandboxInner`.
     ///

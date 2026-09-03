@@ -447,6 +447,7 @@ export {
   SandboxAlreadyExistsError,
   SandboxNotFoundError,
   SandboxNotRunningError,
+  SandboxStopTimedOutError,
   SandboxReplacedError,
   SandboxStillRunningError,
   TerminalError,

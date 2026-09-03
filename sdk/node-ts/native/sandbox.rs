@@ -548,7 +548,11 @@ impl Sandbox {
         sb.request_stop().await.map_err(to_napi_error)
     }
 
-    /// Stop gracefully with an explicit timeout before escalating to SIGKILL.
+    /// Stop gracefully with an explicit convergence timeout.
+    ///
+    /// Backends that support force termination escalate after the timeout;
+    /// otherwise the accepted stop may still complete and returns a typed
+    /// timeout error.
     #[napi]
     pub async fn stop_with_timeout(&self, timeout_ms: u32) -> Result<()> {
         let guard = self.inner.lock().await;

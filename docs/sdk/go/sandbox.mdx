@@ -827,7 +827,7 @@ Attach to the sandbox's default shell (configured via [`WithShell`](#withshell),
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">Stop()</span>
 
-<Tooltip tip="Graceful stop works on microsandbox cloud; timeout expiry cannot escalate to force kill."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On Cloud, the timeout only limits how long the SDK waits; the accepted stop may continue server-side."><span className="msb-badge-limited">Different on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 func (s *Sandbox) Stop(ctx context.Context, opts ...StopOption) error
@@ -841,14 +841,14 @@ err := sb.Stop(ctx, m.WithStopTimeout(30*time.Second))
 
 </Accordion>
 
-Gracefully shut down the sandbox and wait until stopped state is observed. Lets the workload finish writing any pending data to disk before it exits. Defaults to a ten-second graceful window before force-kill; pass [`WithStopTimeout`](#withstoptimeout) to change it.
+Gracefully shut down the sandbox and wait until stopped state is observed. Local waits up to ten seconds by default, then force-kills the sandbox if it is still running. Cloud waits up to six minutes because shutdown may include creating a durable disk checkpoint. If that deadline expires, this returns `ErrSandboxStopTimedOut` without cancelling the accepted server-side stop, which may still complete afterward. Pass [`WithStopTimeout`](#withstoptimeout) to change the observation deadline.
 
 <p className="msb-label">Parameters</p>
 
 <div className="msb-params">
   <div className="msb-param">
     <div className="msb-param-key"><code>opts</code><a className="msb-type" href="#withstoptimeout">...StopOption</a></div>
-    <div className="msb-param-desc">Graceful shutdown window, e.g. <code>WithStopTimeout(30 * time.Second)</code>.</div>
+    <div className="msb-param-desc">Stopped-state observation deadline, e.g. <code>WithStopTimeout(30 * time.Second)</code>.</div>
   </div>
 </div>
 
@@ -1882,14 +1882,14 @@ Add volume mount configurations keyed by guest path. Build values via the [`Moun
 func WithStopTimeout(timeout time.Duration) StopOption
 ```
 
-Set how long [`Stop`](#sb-stop) waits for graceful shutdown before force-killing. The default is ten seconds. This is a `StopOption`, not a `SandboxOption`. Pass it to [`Stop`](#sb-stop).
+Set how long [`Stop`](#sb-stop) waits for stopped state. Local force-kills when the deadline expires. Cloud returns `ErrSandboxStopTimedOut` instead, while the accepted server-side stop may continue. The default is ten seconds on Local and six minutes on Cloud. This is a `StopOption`, not a `SandboxOption`. Pass it to [`Stop`](#sb-stop).
 
 <p className="msb-label">Parameters</p>
 
 <div className="msb-params">
   <div className="msb-param">
     <div className="msb-param-key"><code>timeout</code><span className="msb-type">time.Duration</span></div>
-    <div className="msb-param-desc">Graceful shutdown window.</div>
+    <div className="msb-param-desc">Stopped-state observation deadline.</div>
   </div>
 </div>
 
@@ -2521,13 +2521,13 @@ Stop and remove this exact sandbox. A stale handle returns `ErrSandboxReplaced` 
 
 #### <span className="msb-recv">h.</span><span className="msb-hn">Stop()</span>
 
-<Tooltip tip="Graceful stop works on microsandbox cloud; timeout expiry cannot escalate to force kill."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On Cloud, the timeout only limits how long the SDK waits; the accepted stop may continue server-side."><span className="msb-badge-limited">Different on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 Stop(ctx, opts...)
 ```
 
-Graceful shutdown; accepts [`StopOption`](#withstoptimeout)
+Graceful shutdown with the same Local and Cloud timeout behavior as [`Sandbox.Stop`](#sb-stop); accepts [`StopOption`](#withstoptimeout).
 
 <p className="msb-label">Returns</p>
 
