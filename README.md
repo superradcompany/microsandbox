@@ -417,8 +417,6 @@ Practical ways to put microsandbox to work:
 
 ## <a href="./#gh-dark-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/people/ffffff" alt="people-dark"></a><a href="./#gh-light-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/people/000000" alt="people"></a>&nbsp;&nbsp;Community ecosystem
 
-Projects and platforms built on top of microsandbox, or built to run inside it:
-
 #### <img height="14" src="https://octicons-col.vercel.app/hubot/A770EF">&nbsp;&nbsp;Agent frameworks & runtimes
 
 > • <img height="14" src="https://octicons-col.vercel.app/workflow/A770EF"> **[Eve by Vercel](https://eve.dev/docs/sandbox#microsandbox)**: Agent framework that ships microsandbox as a sandbox backend.<br />
