@@ -610,7 +610,7 @@ jobs:
         working-directory: sdk/node-ts
         run: |
           node scripts/prune-platform-optional-deps.mjs
-          npm install --package-lock=false
+          npm ci --ignore-scripts
           npm run build:native -- --target ${{ matrix.napi_target }}
           npm run build:ts
 
@@ -832,7 +832,7 @@ jobs:
           . "$env:GITHUB_WORKSPACE\vendor\libkrunfw\scripts\msvc-env.ps1"
           Set-MsvcEnvironment -Architecture ${{ matrix.vs_arch }} -HostArchitecture ${{ matrix.vs_host_arch }}
           node scripts/prune-platform-optional-deps.mjs
-          npm install --package-lock=false
+          npm ci --ignore-scripts
           npm run build:native -- --target ${{ matrix.napi_target }}
           npm run build:ts
 
