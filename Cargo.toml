@@ -137,6 +137,9 @@ scopeguard = "1.2"
 serde = { version = "1.0", features = ["derive"] }
 serde_bytes = "0.11"
 serde_json = "1.0"
+memmap2 = "0.9"
+winit = "0.30"
+softbuffer = "0.4"
 serde-saphyr = { version = "1.0.1", default-features = false, features = ["deserialize"] }
 sha2 = "0.11.0"
 smoltcp = { version = "0.14", default-features = false }
@@ -208,3 +211,10 @@ parking_lot = "0.12"
 rpassword = "7"
 russh = "0.63.1"
 russh-sftp = "2.3.0"
+
+# Published 0.1.32 crates plus the changes the experimental virtio-gpu display
+# needs (see third_party/README.md). Upstream target: zerocore-ai/libkrun.
+[patch.crates-io]
+msb_krun = { path = "third_party/msb_krun" }
+msb_krun_devices = { path = "third_party/msb_krun_devices" }
+msb_krun_utils = { path = "third_party/msb_krun_utils" }

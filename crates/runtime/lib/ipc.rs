@@ -193,6 +193,16 @@ pub fn control_socket_path_for(agent_sock: &Path) -> PathBuf {
     agent_sock.with_extension(crate::control::CONTROL_SOCKET_EXTENSION)
 }
 
+/// Derive the display endpoint (virtio-gpu scanouts and input for `msb display`)
+/// belonging to an agent endpoint.
+pub fn display_socket_path_for(agent_sock: &Path) -> PathBuf {
+    #[cfg(unix)]
+    if is_canonical_agent_socket(agent_sock) {
+        return agent_sock.with_file_name("display.sock");
+    }
+    agent_sock.with_extension("display.sock")
+}
+
 /// Derive every canonical and compatibility Unix socket path for a sandbox.
 #[cfg(unix)]
 pub fn sandbox_socket_paths(run_dir: &Path, name: &str) -> SandboxSocketPaths {
@@ -575,7 +585,9 @@ fn remove_canonical_socket_pair(agent_sock: &Path) -> std::io::Result<()> {
         return Ok(());
     };
 
-    let control_result = unlinkat_if_exists(&canonical, c"control.sock", 0);
+    // The display endpoint is optional (MSB_GPU); remove it when present.
+    let display_result = unlinkat_if_exists(&canonical, c"display.sock", 0);
+    let control_result = unlinkat_if_exists(&canonical, c"control.sock", 0).and(display_result);
     let agent_result = unlinkat_if_exists(&canonical, c"agent.sock", 0);
     control_result.and(agent_result)
 }
@@ -655,7 +667,9 @@ fn remove_canonical_socket_dir(run_dir: &Path, paths: &SandboxSocketPaths) -> st
         Err(error) => return Err(error),
     };
 
-    let control_result = unlinkat_if_exists(&canonical, c"control.sock", 0);
+    // The display endpoint is optional (MSB_GPU); remove it when present.
+    let display_result = unlinkat_if_exists(&canonical, c"display.sock", 0);
+    let control_result = unlinkat_if_exists(&canonical, c"control.sock", 0).and(display_result);
     let agent_result = unlinkat_if_exists(&canonical, c"agent.sock", 0);
     control_result.and(agent_result)?;
     unlinkat_if_exists(&sandboxes, &hash, libc::AT_REMOVEDIR)

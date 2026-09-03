@@ -47,6 +47,11 @@ pub struct RunArgs {
     #[arg(short = 't', long, conflicts_with = "no_tty")]
     pub tty: bool,
 
+    /// Give the guest a virtio-gpu display and open it in a native window
+    /// (`msb display`) once the sandbox is up. Experimental; macOS only.
+    #[arg(long)]
+    pub display: bool,
+
     /// Disable pseudo-terminal allocation and run non-interactively.
     #[arg(long = "no-tty", conflicts_with = "tty")]
     pub no_tty: bool,
@@ -113,6 +118,13 @@ pub async fn run(args: RunArgs, log_level: Option<microsandbox::LogLevel>) -> an
     let is_named = args.sandbox.name.is_some();
     let name = args.sandbox.name.clone().unwrap_or_else(ui::generate_name);
 
+    if args.display {
+        // The sandbox process inherits the environment; MSB_GPU is the
+        // experimental switch for the virtio-gpu device (see the runtime).
+        // SAFETY: called before any thread the CLI spawns reads the env.
+        unsafe { std::env::set_var("MSB_GPU", "1") };
+    }
+
     // Named sandboxes are reused if they already exist (unless --replace
     // or --replace-with-timeout). --replace-with-timeout implies --replace,
     // so either flag opts out of the reuse path.
@@ -133,6 +145,12 @@ async fn run_existing(name: String, args: RunArgs) -> anyhow::Result<()> {
     }
 
     let sandbox = super::resolve_and_start(&name, args.sandbox.quiet).await?;
+
+    // A reused sandbox keeps whatever GPU setting it was created with; the
+    // viewer simply fails to connect if it has none.
+    if args.display {
+        spawn_display_viewer(&name);
+    }
 
     // Detach mode: ensure running and exit.
     if args.detach {
@@ -221,6 +239,10 @@ async fn run_new(
     let sandbox = task
         .await
         .map_err(|e| anyhow::anyhow!("create task panicked: {e}"))??;
+
+    if args.display {
+        spawn_display_viewer(&name);
+    }
 
     // Detach mode: just print the name and exit.
     if args.detach {
@@ -420,6 +442,34 @@ fn ignored_existing_inputs(args: &RunArgs) -> Option<&'static str> {
         (true, false) => Some("--from-snapshot"),
         (false, true) => Some("creation flags"),
         (false, false) => None,
+    }
+}
+
+/// Open `msb display <name>` as a child process; the viewer waits for the
+/// guest's first scanout on its own.
+fn spawn_display_viewer(name: &str) {
+    if !cfg!(target_os = "macos") {
+        ui::warn("--display: the native viewer is only available on macOS");
+        return;
+    }
+    let exe = match std::env::current_exe() {
+        Ok(exe) => exe,
+        Err(e) => {
+            ui::warn(&format!("--display: cannot locate msb: {e}"));
+            return;
+        }
+    };
+    if let Err(e) = std::process::Command::new(exe)
+        .arg("display")
+        .arg(name)
+        // A GUI child must not keep the caller's pipes open (scripts using
+        // `msb run -d --display` would otherwise wait on it).
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        ui::warn(&format!("--display: cannot start the viewer: {e}"));
     }
 }
 

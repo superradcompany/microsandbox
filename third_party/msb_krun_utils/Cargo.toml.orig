@@ -1,0 +1,27 @@
+[package]
+name = "msb_krun_utils"
+version = "0.1.32"
+authors = ["Amazon Firecracker team <firecracker-devel@amazon.com>"]
+edition = "2021"
+license = "Apache-2.0 AND BSD-3-Clause"
+description = "Shared utilities for msb_krun microVMs"
+repository = "https://github.com/containers/libkrun"
+
+[dependencies]
+bitflags = "1.2.0"
+libc = ">=0.2.85"
+log = "0.4.0"
+nix = "0.30.1"
+crossbeam-channel = ">=0.5.15"
+
+[target.'cfg(unix)'.dependencies]
+vmm-sys-util = ">= 0.14"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+kvm-bindings = { version = ">=0.11", features = ["fam-wrappers"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+nix = { version = "0.30.1", features = ["fs"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_System_SystemInformation", "Win32_System_Threading"] }

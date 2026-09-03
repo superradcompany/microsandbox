@@ -31,7 +31,9 @@ microsandbox-protocol.workspace = true
 microsandbox-types.workspace = true
 microsandbox-utils.workspace = true
 microsandbox-vsock.workspace = true
-msb_krun = { workspace = true, features = ["blk"] }
+msb_krun = { workspace = true, features = ["blk", "gpu", "input"] }
+msb_krun_utils.workspace = true
+memmap2.workspace = true
 nix = { workspace = true, features = ["process", "signal"] }
 rand.workspace = true
 rustls = { workspace = true }
