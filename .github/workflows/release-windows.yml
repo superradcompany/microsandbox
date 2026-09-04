@@ -270,7 +270,7 @@ jobs:
           . "$env:GITHUB_WORKSPACE\vendor\libkrunfw\scripts\msvc-env.ps1"
           Set-MsvcEnvironment -Architecture ${{ inputs.vs_arch }} -HostArchitecture ${{ inputs.vs_host_arch }}
           node scripts/prune-platform-optional-deps.mjs
-          npm install --package-lock=false
+          npm ci
           npm run build:native -- --target ${{ inputs.napi_target }}
           node -e "require('./native/index.cjs')"
 
