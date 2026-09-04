@@ -35,7 +35,7 @@ See the [CLI overview](/cli/overview).
 
 **Other features**
 
-- **Precompiled Ruby platform gems.** `gem install microsandbox` now pulls a prebuilt binary on `x86_64-linux-gnu`, `aarch64-linux-gnu`, and `arm64-darwin` for Ruby 3.1 through 3.4. Users on those targets no longer need a Rust toolchain to install. musl, Windows, and other platforms continue to build from source.
+- **Precompiled Ruby platform gems.** `gem install microsandbox` now pulls a prebuilt binary on `x86_64-linux-gnu`, `aarch64-linux-gnu`, and `arm64-darwin` for Ruby 3.1 through 3.4. On those targets you no longer need a Rust toolchain to install. musl, Windows, and other platforms continue to build from source.
 - **Fallible lazy local backend builder.** The Rust SDK adds `LocalBackendBuilder::try_build_lazy()` so embedding hosts can reject invalid persisted configuration before opening the database. `build_lazy()` keeps its fallback behavior for existing callers.
 - **`msb mod` alias.** `mod` is now a visible alias for `msb modify`, so quick tweaks are shorter to type. `msb create`, `remove`, `exec`, and `ssh` also stopped printing the active backend before each command. Use `msb context` or `msb ctx` when you want to inspect it. See the [CLI reference](/cli/sandbox-commands).
 - **Faster Windows root-disk copies.** Cloning sparse root disks on NTFS now copies allocated ranges using `FSCTL_QUERY_ALLOCATED_RANGES` instead of scanning for non-zero bytes. In a measured 10 GiB flat-disk copy on Windows 11 ARM64, the copy went from 271 seconds to a 1.5-second median while preserving sparse output. The non-zero byte scan remains as a fallback when the filesystem cannot expose allocation metadata.
