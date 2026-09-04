@@ -575,6 +575,23 @@ Whether to ship the host's trusted root CAs into the guest at boot. Default: `fa
   </div>
 </div>
 
+#### <span className="msb-recv">network.</span><span className="msb-hn">httpDenyMessage()</span>
+
+```typescript
+httpDenyMessage(message: string): this
+```
+
+Body returned to HTTP clients (and HTTPS clients on intercepted ports) when a domain rule denies the connection. The gateway answers `403 Forbidden` with this plain-text body instead of resetting the connection. `{host}` is replaced with the blocked hostname. Omit to use the default, which tells an agent the host is not on the allow list. See [What a denied HTTP request sees](/networking/overview#what-a-denied-http-request-sees).
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>message</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Plain-text body template; <code>{"{host}"}</code> is substituted.</div>
+  </div>
+</div>
+
 #### <span className="msb-recv">network.</span><span className="msb-hn">maxConnections()</span>
 
 ```typescript
@@ -1923,6 +1940,7 @@ Built network configuration produced by `NetworkBuilder.build()`. Keys are camel
 | interface | `{ ipv4Pool?, ipv6Pool?, ipv4Address?, ipv6Address?, mac?, mtu? }` | Optional interface overrides |
 | trustHostCAs | `boolean` | Ship host CAs into the guest |
 | outboundProxy | [`OutboundProxy`](/sdk/typescript/proxies#outboundproxy)` \| null` | Canonical outbound proxy configuration stored in the sandbox network spec; `null` when unset |
+| httpDenyMessage | `string \| null` | Body for `403 Forbidden` on denied HTTP/HTTPS; `null` uses the default |
 
 ### NetworkProfile
 

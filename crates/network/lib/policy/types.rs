@@ -263,6 +263,17 @@ pub enum EgressEvaluation {
     DeferUntilHostname,
 }
 
+/// Raw result of the egress rule walk, before the default is applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EgressWalk {
+    /// A rule matched and decided.
+    Matched(Action),
+    /// A domain rule needs the hostname before it can decide.
+    Defer,
+    /// No rule matched; `default_egress` applies.
+    Default,
+}
+
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
@@ -406,6 +417,26 @@ impl NetworkPolicy {
         self.egress_walk(dst.ip(), Some(dst.port()), protocol, shared, source)
     }
 
+    /// Whether a TCP SYN to `dst` is denied only because no rule matched
+    /// and `default_egress` is `Deny` — i.e. "not on the allow list" — as
+    /// opposed to an explicit deny rule (CIDR, group, or domain block).
+    ///
+    /// The gateway uses this to decide whether a denied HTTP/HTTPS flow
+    /// may be accepted just far enough to answer `403 Forbidden`.
+    pub fn egress_denied_by_default(
+        &self,
+        dst: SocketAddr,
+        protocol: Protocol,
+        shared: &SharedState,
+        source: HostnameSource<'_>,
+    ) -> bool {
+        self.default_egress.is_deny()
+            && matches!(
+                self.egress_walk_outcome(dst.ip(), Some(dst.port()), protocol, shared, source),
+                EgressWalk::Default
+            )
+    }
+
     /// Shared rule walk for the egress public methods. `port = None`
     /// is the ICMP path; rules with a port filter are skipped there.
     fn egress_walk(
@@ -416,6 +447,23 @@ impl NetworkPolicy {
         shared: &SharedState,
         source: HostnameSource<'_>,
     ) -> EgressEvaluation {
+        match self.egress_walk_outcome(addr, port, protocol, shared, source) {
+            EgressWalk::Matched(action) => action.into(),
+            EgressWalk::Defer => EgressEvaluation::DeferUntilHostname,
+            EgressWalk::Default => self.default_egress.into(),
+        }
+    }
+
+    /// The rule walk itself, keeping "a rule decided" distinct from "fell
+    /// through to the default".
+    fn egress_walk_outcome(
+        &self,
+        addr: IpAddr,
+        port: Option<u16>,
+        protocol: Protocol,
+        shared: &SharedState,
+        source: HostnameSource<'_>,
+    ) -> EgressWalk {
         for (idx, rule) in self.rules.iter().enumerate() {
             if !matches!(rule.direction, Direction::Egress | Direction::Any) {
                 continue;
@@ -438,19 +486,19 @@ impl NetworkPolicy {
                 shared,
                 source,
             ) {
-                DestinationMatch::Match => return rule.action.into(),
+                DestinationMatch::Match => return EgressWalk::Matched(rule.action),
                 DestinationMatch::Defer => {
                     if rule.action.is_deny()
                         && !self.deferred_tail_can_allow(idx + 1, addr, port, protocol, shared)
                     {
-                        return EgressEvaluation::Deny;
+                        return EgressWalk::Matched(Action::Deny);
                     }
-                    return EgressEvaluation::DeferUntilHostname;
+                    return EgressWalk::Defer;
                 }
                 DestinationMatch::NoMatch => continue,
             }
         }
-        self.default_egress.into()
+        EgressWalk::Default
     }
 
     /// Return whether the rules after a deferred deny-domain rule could
@@ -1970,6 +2018,77 @@ mod tests {
             policy.evaluate_dns_query(&name("evil.com"), Protocol::Udp, 53),
             Action::Deny
         );
+    }
+
+    //----------------------------------------------------------------------------------------------
+    // egress_denied_by_default
+    //----------------------------------------------------------------------------------------------
+
+    /// Allow-list policy, unknown IP: no rule matches, default deny.
+    /// This is the "host is not on the allow list" case the HTTP 403
+    /// answer is for.
+    #[test]
+    fn denied_by_default_when_no_allow_rule_matches() {
+        let shared = SharedState::new(4);
+        let policy = allow_rule(Destination::Domain(name("pypi.org")));
+        assert!(policy.egress_denied_by_default(
+            sock(PYPI_V4, 443),
+            Protocol::Tcp,
+            &shared,
+            HostnameSource::Deferred,
+        ));
+        // A bare deny-all is also "by default".
+        assert!(NetworkPolicy::none().egress_denied_by_default(
+            sock(PYPI_V4, 80),
+            Protocol::Tcp,
+            &shared,
+            HostnameSource::Deferred,
+        ));
+    }
+
+    /// An explicit deny rule (group, CIDR, or domain) is not "by default".
+    #[test]
+    fn explicit_deny_rules_are_not_denied_by_default() {
+        let shared = SharedState::new(4);
+        let group_deny = NetworkPolicy {
+            default_egress: Action::Deny,
+            default_ingress: Action::Allow,
+            rules: vec![Rule::deny_egress(Destination::Group(
+                DestinationGroup::Public,
+            ))],
+        };
+        assert!(!group_deny.egress_denied_by_default(
+            sock(PYPI_V4, 443),
+            Protocol::Tcp,
+            &shared,
+            HostnameSource::Deferred,
+        ));
+        let domain_deny = deny_domain_policy(Destination::Domain(name("evil.com")));
+        assert!(!domain_deny.egress_denied_by_default(
+            sock(PYPI_V4, 443),
+            Protocol::Tcp,
+            &shared,
+            HostnameSource::Sni("evil.com"),
+        ));
+    }
+
+    /// Allowed or deferred flows are never "denied by default".
+    #[test]
+    fn allowed_and_deferred_flows_are_not_denied_by_default() {
+        let shared = shared_with_host("pypi.org", PYPI_V4);
+        let policy = allow_rule(Destination::Domain(name("pypi.org")));
+        assert!(!policy.egress_denied_by_default(
+            sock(PYPI_V4, 443),
+            Protocol::Tcp,
+            &shared,
+            HostnameSource::Deferred,
+        ));
+        assert!(!NetworkPolicy::allow_all().egress_denied_by_default(
+            sock(PYPI_V4, 443),
+            Protocol::Tcp,
+            &shared,
+            HostnameSource::Deferred,
+        ));
     }
 
     //----------------------------------------------------------------------------------------------

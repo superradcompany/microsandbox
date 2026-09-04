@@ -594,6 +594,12 @@ pub struct NetworkSpec {
     ///
     #[serde(skip_serializing_if = "Option::is_none")]
     pub outbound_proxy: Option<OutboundProxy>,
+
+    /// Body template returned to HTTP/HTTPS clients when egress is denied.
+    /// `{host}` is replaced with the blocked hostname. Missing uses the
+    /// engine default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub http_deny_message: Option<String>,
 }
 
 /// Proxy configuration for outbound sandbox connections.
@@ -1706,6 +1712,7 @@ impl Default for NetworkSpec {
             rate_limiter: None,
             trust_host_cas: false,
             outbound_proxy: None,
+            http_deny_message: None,
         }
     }
 }

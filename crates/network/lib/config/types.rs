@@ -88,6 +88,14 @@ pub struct NetworkConfig {
     /// relays non-DNS UDP; SOCKS4 blocks it because that protocol has no UDP command.
     #[serde(default)]
     pub outbound_proxy: Option<OutboundProxy>,
+
+    /// Body template returned to HTTP/HTTPS clients when egress is denied.
+    ///
+    /// `{host}` is replaced with the blocked hostname. `None` uses
+    /// [`crate::http_deny::DEFAULT_HTTP_DENY_MESSAGE`]. Non-HTTP TCP is
+    /// still closed without a response.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http_deny_message: Option<String>,
 }
 
 /// Network configuration whose runtime-only values have been resolved.
@@ -243,6 +251,7 @@ impl Default for NetworkConfig {
             rate_limiter: None,
             trust_host_cas: false,
             outbound_proxy: None,
+            http_deny_message: None,
         }
     }
 }

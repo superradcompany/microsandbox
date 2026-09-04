@@ -329,6 +329,75 @@ msb create python --name throttled \
 
 The `--net-ingress-*` flags mirror the egress flags for inbound traffic (`--net-ingress-bandwidth`, `--net-ingress-bandwidth-burst`, `--net-ingress-ops`, `--net-ingress-ops-burst`). Sizes accept raw bytes plus `K`, `M`, and `G` suffixes; the interval defaults to one second when omitted. A frame larger than the bandwidth bucket is delivered once and the limiter then pauses long enough to pay it off, so oversized packets are throttled instead of stuck.
 
+## What a denied HTTP request sees
+
+When a domain rule denies a connection, the gateway never dials upstream. For plain HTTP, and for HTTPS on an intercepted port (see [TLS interception](/networking/tls)), the gateway answers the guest with `403 Forbidden` and a plain-text body instead of a bare connection reset. The default body is written for an agent running inside the sandbox:
+
+```text
+This host is not allowed by the sandbox network policy config.
+
+Note to agent: `example.com` is not in the allowed-host list. Ask the user to add it to the sandbox network allow list.
+```
+
+Set `http_deny_message` to replace the body; `{host}` is substituted with the blocked hostname. Use it to name the tool or workflow your agent should use to request access.
+
+<CodeGroup>
+```rust Rust
+let sb = Sandbox::builder("agent")
+    .image("python")
+    .network(|n| n
+        .policy(policy)
+        .tls(|t| t.enabled(true))
+        .http_deny_message("{host} is blocked. Call the `RequestHostAccess` tool to ask the user for it."))
+    .create()
+    .await?;
+```
+
+```typescript TypeScript
+await using sb = await Sandbox.builder("agent")
+    .image("python")
+    .network((n) => n
+        .policy(policy)
+        .tls((t) => t)
+        .httpDenyMessage("{host} is blocked. Call the `RequestHostAccess` tool to ask the user for it."))
+    .create();
+```
+
+```python Python
+from microsandbox import Network, Sandbox, TlsConfig
+
+sb = await Sandbox.create(
+    "agent",
+    image="python",
+    network=Network(
+        policy=policy,
+        tls=TlsConfig(),
+        http_deny_message="{host} is blocked. Call the `RequestHostAccess` tool to ask the user for it.",
+    ),
+)
+```
+
+```go Go
+sb, err := m.CreateSandbox(ctx, "agent",
+    m.WithImage("python"),
+    m.WithNetwork(&m.NetworkConfig{
+        Rules:           rules,
+        TLS:             &m.TLSConfig{},
+        HTTPDenyMessage: "{host} is blocked. Call the `RequestHostAccess` tool to ask the user for it.",
+    }),
+)
+```
+
+```yaml sandbox.yml
+network:
+  policy: none
+  allow: [github.com]
+  http_deny_message: "{host} is blocked. Call the `RequestHostAccess` tool to ask the user for it."
+```
+</CodeGroup>
+
+DNS-level denies (a name matched by a `deny` domain rule, or a deny-by-default policy without a DNS allow) still fail at resolution with `NXDOMAIN`, before any HTTP exchange. HTTPS on a port that is not intercepted, or to a name on the TLS bypass list, is closed without a response: the gateway cannot answer inside a TLS session it does not terminate. Non-HTTP TCP is closed as before.
+
 ## Reaching the host
 
 <Tooltip tip="The host group is backend-relative; on microsandbox cloud it does not refer to the machine running the SDK or CLI, so expose local services through a reachable network endpoint."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>

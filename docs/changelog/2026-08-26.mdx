@@ -26,4 +26,8 @@ The SDK references show the exact method names for Rust, TypeScript, Python, Go,
 
 Live sandboxes and metadata handles now expose a stable ID. Lifecycle calls use that ID, so removing a sandbox and recreating its name cannot redirect an old handle to the replacement. Rust, TypeScript, Python, and Go return typed replacement errors; Ruby reports the same refusal through `Microsandbox::Error`.
 
-See [Names, handles, and concurrent callers](/sandboxes/lifecycle#names-handles-and-concurrent-callers) and [Error handling](/sdk/errors#when-a-sandbox-object-is-stale) for details.
+This change requires no persistence migration or guest wire-protocol update. See [Identity-safe receivers](/sandboxes/lifecycle#identity-safe-receivers) and [Error handling](/sdk/errors#stale-receiver-identities).
+
+**Readable denials for HTTP and HTTPS**
+
+When a domain rule denies egress, the gateway now answers plain-HTTP clients, and HTTPS clients on TLS-intercepted ports, with `403 Forbidden` and a plain-text body instead of a bare connection reset. The default body is written for an agent running inside the sandbox and names the blocked host; `http_deny_message` (`httpDenyMessage` in TypeScript, `HTTPDenyMessage` in Go) replaces it, with `{host}` substituted. Denials that happen at DNS, on non-intercepted TLS, or on non-HTTP TCP are unchanged. See [What a denied HTTP request sees](/networking/overview#what-a-denied-http-request-sees).

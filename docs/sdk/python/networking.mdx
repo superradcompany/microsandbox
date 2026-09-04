@@ -24,6 +24,7 @@ Network(
     ipv6_pool: str | None = None,
     max_connections: int | None = None,
     on_secret_violation: ViolationAction | ViolationPolicy = ViolationAction.BLOCK_AND_LOG,
+    http_deny_message: str | None = None,
 )
 ```
 
@@ -94,6 +95,12 @@ Ingress and egress rate limits
 [`ViolationAction`](/sdk/python/secrets#violationaction)` \| `[`ViolationPolicy`](/sdk/python/secrets#violationpolicy) · Default: `BLOCK_AND_LOG`
 
 Sandbox-wide action when a secret placeholder reaches a disallowed host
+
+#### <span className="msb-recv">network.</span><span className="msb-hn">http_deny_message</span>
+
+`str \| None` · Default: `None`
+
+Body for the `403 Forbidden` the gateway returns to HTTP clients (and HTTPS clients on intercepted ports) when a domain rule denies the connection. `{host}` is substituted with the blocked hostname. `None` uses the default agent-facing message. See [What a denied HTTP request sees](/networking/overview#what-a-denied-http-request-sees)
 
 #### <span className="msb-recv">Network.</span><span className="msb-hn">none()</span>
 

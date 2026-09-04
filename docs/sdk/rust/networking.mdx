@@ -845,6 +845,14 @@ fn trust_host_cas(self, enabled: bool) -> Self
 
 Whether to ship the host's trusted root CAs into the guest at boot. Default: `false`. Opt in when egress HTTPS inside the sandbox needs to work behind corporate MITM proxies (Cloudflare Warp Zero Trust, Zscaler, Netskope, etc.). Those proxies install a gateway CA on the host that's unknown to the guest's stock Mozilla bundle.
 
+#### <span className="msb-recv">network.</span><span className="msb-hn">http_deny_message()</span>
+
+```rust
+fn http_deny_message(self, message: impl Into<String>) -> Self
+```
+
+Body returned to HTTP clients (and HTTPS clients on intercepted ports) when a domain rule denies the connection. The gateway answers `403 Forbidden` with this plain-text body instead of resetting the connection. `{host}` is replaced with the blocked hostname. Omit to use the default, which tells an agent the host is not on the allow list. See [What a denied HTTP request sees](/networking/overview#what-a-denied-http-request-sees).
+
 #### <span className="msb-recv">network.</span><span className="msb-hn">max_connections()</span>
 
 ```rust

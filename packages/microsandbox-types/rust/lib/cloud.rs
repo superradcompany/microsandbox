@@ -1002,6 +1002,7 @@ impl TryFrom<CloudSandboxSpec> for SandboxSpec {
             rate_limiter: None,
             trust_host_cas: false,
             outbound_proxy: None,
+            http_deny_message: None,
         };
         let runtime = SandboxRuntimeOptions {
             workdir: spec.runtime.workdir,

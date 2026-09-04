@@ -1730,6 +1730,11 @@ class Network:
     rate_limiter: NetworkRateLimiter | None = None
     """Local egress and ingress rate limits. ``None`` means unlimited."""
     on_secret_violation: ViolationAction | ViolationPolicy = ViolationAction.BLOCK_AND_LOG
+    http_deny_message: str | None = None
+    """Body returned to HTTP/HTTPS clients when egress is denied by
+    policy. ``{host}`` is replaced with the blocked hostname. ``None``
+    uses the engine default, which tells an agent the host is not on the
+    allow list."""
 
     @classmethod
     def none(cls) -> Network:
@@ -1789,6 +1794,10 @@ class Network:
         violation = violation_policy_to_dict(self.on_secret_violation)
         if violation != str(ViolationAction.BLOCK_AND_LOG):
             d["on_secret_violation"] = violation
+        if self.http_deny_message is not None:
+            if not isinstance(self.http_deny_message, str):
+                raise TypeError("Network.http_deny_message must be a str or None")
+            d["http_deny_message"] = self.http_deny_message
         return d
 
 

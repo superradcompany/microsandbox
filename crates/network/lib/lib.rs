@@ -16,6 +16,7 @@ pub mod proxy;
 
 pub mod config;
 pub mod dns;
+pub mod http_deny;
 pub mod icmp;
 pub mod netstack;
 pub mod network;

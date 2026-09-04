@@ -20,12 +20,14 @@ use super::connection::ProxyConnectState;
 #[cfg(test)]
 use super::connection::ProxyConnectStatus;
 use super::upstream::UpstreamTcpTarget;
+use crate::http_deny::http_forbidden_response;
 use crate::netstack::shared::SharedState;
 use crate::policy::{EgressEvaluation, HostnameSource, NetworkPolicy, Protocol};
 use crate::proxy::ResolvedOutboundProxy;
 use crate::secrets::config::{SecretsConfig, SecretsConfigExt, ViolationAction};
 use crate::secrets::handler::{
     SecretsHandler, first_line_is_not_http_request, looks_like_http_request_prefix,
+    skip_leading_empty_http_lines,
 };
 use crate::tls::proxy::TlsProxy;
 use crate::tls::sni;
@@ -42,11 +44,11 @@ const SERVER_READ_BUF_SIZE: usize = 16384;
 const CONNECT_RESP_LIMIT: usize = 8192;
 
 /// Max bytes to buffer while peeking for the ClientHello's SNI.
-const PEEK_BUF_SIZE: usize = 16384;
+pub(crate) const PEEK_BUF_SIZE: usize = 16384;
 
 /// Upper bound on time spent buffering the first flight before
 /// falling back to a cache-only egress decision.
-const PEEK_BUDGET: Duration = Duration::from_secs(5);
+pub(crate) const PEEK_BUDGET: Duration = Duration::from_secs(5);
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -222,15 +224,27 @@ impl TcpProxy {
                         source = source.label(),
                         "TCP egress denied by domain policy",
                     );
-                    proxy_connect.mark_policy_denied();
-                    shared.proxy_wake.wake();
-                    return Ok(());
+                    return deny_http_or_close(
+                        guest_dst,
+                        sni.as_deref(),
+                        &initial_buf,
+                        to_smoltcp,
+                        &shared,
+                        &proxy_connect,
+                    )
+                    .await;
                 }
                 EgressEvaluation::DeferUntilHostname => {
                     debug_assert!(false, "DeferUntilHostname leaked into TCP proxy task");
-                    proxy_connect.mark_policy_denied();
-                    shared.proxy_wake.wake();
-                    return Ok(());
+                    return deny_http_or_close(
+                        guest_dst,
+                        sni.as_deref(),
+                        &initial_buf,
+                        to_smoltcp,
+                        &shared,
+                        &proxy_connect,
+                    )
+                    .await;
                 }
             }
         }
@@ -914,6 +928,83 @@ fn connect_response_is_success(headers: &[u8]) -> bool {
             .is_ok_and(|code| (200..300).contains(&code))
 }
 
+/// Close a denied TCP connection, answering HTTP clients with 403.
+///
+/// TLS first-flights stay silent: injecting plaintext HTTP into a TLS
+/// stream is worse than a reset, and intercepted HTTPS is handled by
+/// [`crate::tls::proxy`].
+pub(crate) async fn deny_http_or_close(
+    guest_dst: SocketAddr,
+    sni: Option<&str>,
+    initial_buf: &[u8],
+    to_smoltcp: mpsc::Sender<Bytes>,
+    shared: &SharedState,
+    proxy_connect: &ProxyConnectState,
+) -> io::Result<()> {
+    // Port 80 with nothing buffered (peek budget elapsed) is still
+    // answered: HTTP clients speak first, so silence means a slow client,
+    // not a different protocol. A TLS record, and any other non-HTTP
+    // first flight, is never answered in clear.
+    let answer = should_send_http_403(guest_dst, initial_buf);
+    if answer {
+        let host = denied_host_label(sni, initial_buf, guest_dst);
+        let body = shared.http_deny_body(&host);
+        let _ = to_smoltcp
+            .send(Bytes::from(http_forbidden_response(&body)))
+            .await;
+        shared.proxy_wake.wake();
+    }
+    proxy_connect.mark_policy_denied();
+    shared.proxy_wake.wake();
+    Ok(())
+}
+
+fn should_send_http_403(guest_dst: SocketAddr, initial_buf: &[u8]) -> bool {
+    first_flight_is_http(initial_buf) || (guest_dst.port() == 80 && initial_buf.is_empty())
+}
+
+fn first_flight_is_http(buf: &[u8]) -> bool {
+    if buf.is_empty() || buf.first() == Some(&0x16) {
+        return false;
+    }
+    if !looks_like_http_request_prefix(buf) || first_line_is_not_http_request(buf) {
+        return false;
+    }
+    incomplete_first_line_has_known_method(buf)
+}
+/// HTTP methods recognized while a first line is still incomplete. A
+/// complete line is judged by its `HTTP/x.y` version instead, so custom
+/// methods still classify once the version arrives.
+const KNOWN_METHODS: [&str; 10] = [
+    "GET", "HEAD", "POST", "PUT", "DELETE", "CONNECT", "OPTIONS", "TRACE", "PATCH", "PRI",
+];
+
+/// With no CRLF yet, an ASCII token alone is not proof of HTTP: a split SSH
+/// banner (`SSH-2.0-…`) or SMTP greeting (`EHLO …`) passes the token check
+/// and would be answered with HTTP bytes. Require a complete, space-terminated
+/// known method. Complete lines keep the version-based check above, and the
+/// HTTP/2 prior-knowledge preface qualifies once its `PRI` method is complete.
+fn incomplete_first_line_has_known_method(buf: &[u8]) -> bool {
+    let buf = skip_leading_empty_http_lines(buf);
+    if buf.windows(2).any(|window| window == b"\r\n") {
+        return true;
+    }
+    let Some(end) = buf.iter().position(|&b| b == b' ') else {
+        return false;
+    };
+    KNOWN_METHODS.iter().any(|m| m.as_bytes() == &buf[..end])
+}
+
+fn denied_host_label(sni: Option<&str>, buf: &[u8], guest_dst: SocketAddr) -> String {
+    if let Some(name) = sni.filter(|name| !name.is_empty()) {
+        return name.to_string();
+    }
+    if let Some(host) = extract_http_host(buf) {
+        return host;
+    }
+    guest_dst.ip().to_string()
+}
+
 /// Extract the `Host:` header value from an already-buffered HTTP header block.
 ///
 /// Returns `None` if:
@@ -1037,6 +1128,50 @@ async fn classify_first_flight(
     }
 }
 
+/// Buffer a denied plaintext first flight until HTTP classification is
+/// decisive, or until the shared peek budget/cap is exhausted.
+///
+/// Unlike [`peek_for_sni`], this does not return on the first non-TLS chunk:
+/// a request method may be split across chunks (`GE` then `T / ...`). It stops
+/// once a complete first line, a known method plus space, or a conclusively
+/// non-HTTP prefix is available. No upstream connection exists on this path.
+pub(crate) async fn peek_for_http_request(
+    rx: &mut mpsc::Receiver<Bytes>,
+    max: usize,
+    budget: Duration,
+) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(PEEK_BUF_SIZE.min(8192));
+    let timeout_fut = tokio::time::sleep(budget);
+    tokio::pin!(timeout_fut);
+
+    loop {
+        tokio::select! {
+            biased;
+            _ = &mut timeout_fut => break,
+            data = rx.recv() => match data {
+                Some(bytes) => {
+                    buf.extend_from_slice(&bytes);
+                    if plaintext_http_classification_ready(&buf) || buf.len() >= max {
+                        break;
+                    }
+                }
+                None => break,
+            }
+        }
+    }
+    buf
+}
+
+fn plaintext_http_classification_ready(buf: &[u8]) -> bool {
+    if buf.first() == Some(&0x16) {
+        return true;
+    }
+    let first_line = skip_leading_empty_http_lines(buf);
+    first_line.windows(2).any(|window| window == b"\r\n")
+        || !looks_like_http_request_prefix(buf)
+        || incomplete_first_line_has_known_method(buf)
+}
+
 /// Buffer the first flight until SNI can be extracted, or until one
 /// of the bail-out conditions hits (channel close, buffer cap,
 /// timeout). Never errors; non-TLS / slow / malformed input all
@@ -1046,7 +1181,7 @@ async fn classify_first_flight(
 /// for byte-equal matching against rule destinations. The returned
 /// buffer must be replayed verbatim to upstream before the caller
 /// starts its relay loop.
-async fn peek_for_sni(
+pub(crate) async fn peek_for_sni(
     rx: &mut mpsc::Receiver<Bytes>,
     max: usize,
     budget: Duration,
@@ -1267,6 +1402,32 @@ mod tests {
         assert!(!could_be_connect_request(b"GET / HTTP/1.1\r\n"));
     }
 
+    #[test]
+    fn first_flight_http_accepts_partial_and_complete_http() {
+        assert!(first_flight_is_http(b"GET /index.html"));
+        assert!(first_flight_is_http(b"GET /x HTTP/1.1\r\nHost: a\r\n"));
+        assert!(first_flight_is_http(b"\r\nGET /x HTTP/1.0\r\n"));
+        // Prior-knowledge h2 is answerable once its PRI method is complete.
+        assert!(first_flight_is_http(b"PRI * HTTP/2.0"));
+        // A complete line is judged by its version, so custom methods pass.
+        assert!(first_flight_is_http(b"QUERY /x HTTP/1.1\r\n"));
+    }
+
+    #[test]
+    fn first_flight_http_rejects_split_non_http_banners() {
+        assert!(!first_flight_is_http(b""));
+        assert!(!first_flight_is_http(&synthetic_client_hello(
+            "example.com"
+        )));
+        assert!(!first_flight_is_http(b"GE"));
+        assert!(!first_flight_is_http(b"PRI"));
+        // Split before its first CRLF, an SSH banner or SMTP greeting is a
+        // valid ASCII token but no HTTP method.
+        assert!(!first_flight_is_http(b"SSH-2.0-OpenSSH_9.9"));
+        assert!(!first_flight_is_http(b"EHLO mail.example.com"));
+        assert!(!first_flight_is_http(b"QUERY /x"));
+    }
+
     #[tokio::test]
     async fn buffer_connect_request_reads_split_headers() {
         let (tx, mut rx) = mpsc::channel(4);
@@ -1325,6 +1486,34 @@ mod tests {
         assert!(!connect_response_is_success(b"HTTP/1.1 2000 Weird\r\n\r\n"));
         assert!(!connect_response_is_success(b"HTTP/1.1 199 Nope\r\n\r\n"));
         assert!(!connect_response_is_success(b"NOTHTTP 200 OK\r\n\r\n"));
+    }
+
+    #[tokio::test]
+    async fn peek_for_http_request_joins_a_fragmented_method() {
+        let (tx, mut rx) = mpsc::channel(4);
+        tx.send(Bytes::from_static(b"GE")).await.unwrap();
+        tx.send(Bytes::from_static(b"T / HTTP/1.1\r\nHost: x\r\n\r\n"))
+            .await
+            .unwrap();
+        drop(tx);
+
+        let buf = peek_for_http_request(&mut rx, PEEK_BUF_SIZE, PEEK_BUDGET).await;
+        assert_eq!(buf, b"GET / HTTP/1.1\r\nHost: x\r\n\r\n");
+        assert!(first_flight_is_http(&buf));
+    }
+
+    #[tokio::test]
+    async fn peek_for_http_request_joins_a_fragmented_non_http_line() {
+        let (tx, mut rx) = mpsc::channel(4);
+        tx.send(Bytes::from_static(b"EH")).await.unwrap();
+        tx.send(Bytes::from_static(b"LO mail.example.com\r\n"))
+            .await
+            .unwrap();
+        drop(tx);
+
+        let buf = peek_for_http_request(&mut rx, PEEK_BUF_SIZE, PEEK_BUDGET).await;
+        assert_eq!(buf, b"EHLO mail.example.com\r\n");
+        assert!(!first_flight_is_http(&buf));
     }
 
     #[tokio::test]
@@ -1670,6 +1859,21 @@ mod tests {
     fn extract_http_host_tls_first_byte() {
         let buf = [0x16u8, 0x03, 0x01, 0x00, 0x01];
         assert_eq!(extract_http_host(&buf), None);
+    }
+
+    fn addr(port: u16) -> SocketAddr {
+        SocketAddr::from(([203, 0, 113, 1], port))
+    }
+
+    #[test]
+    fn http_403_answers_http_and_silent_port80_not_other_protocols() {
+        let get = b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n";
+        assert!(should_send_http_403(addr(80), get));
+        assert!(should_send_http_403(addr(8080), get));
+        assert!(should_send_http_403(addr(80), b""));
+        assert!(!should_send_http_403(addr(443), b""));
+        assert!(!should_send_http_403(addr(80), &[0x16, 0x03, 0x01]));
+        assert!(!should_send_http_403(addr(80), b"\x00\x01binary"));
     }
 
     #[test]

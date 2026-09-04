@@ -17,6 +17,7 @@ use tokio::sync::mpsc;
 
 use super::sni;
 use super::state::TlsState;
+use crate::http_deny::http_forbidden_response;
 use crate::netstack::shared::SharedState;
 use crate::policy::{EgressEvaluation, HostnameSource, NetworkPolicy, Protocol};
 use crate::proxy::ResolvedOutboundProxy;
@@ -190,6 +191,22 @@ impl TlsProxy {
                 dst = %guest_dst,
                 "TLS egress denied by domain policy",
             );
+            // Bypassed names cannot be answered in-tunnel (the guest expects
+            // the real server's certificate); they still get a plain close.
+            if !tls_state.should_bypass(&sni_name) {
+                let denied = serve_tls_deny(
+                    &sni_name,
+                    initial_buf,
+                    &mut from_smoltcp,
+                    &to_smoltcp,
+                    &shared,
+                    &tls_state,
+                )
+                .await;
+                if let Err(error) = denied {
+                    tracing::debug!(sni = %sni_name, %error, "TLS deny response not delivered");
+                }
+            }
             proxy_connect.mark_policy_denied();
             shared.proxy_wake.wake();
             return Ok(());
@@ -232,6 +249,117 @@ impl TlsProxy {
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
+
+/// Answer a policy-denied HTTPS connection with `403 Forbidden`.
+///
+/// Terminates the guest's TLS with the intercept cert for `sni_name`, reads
+/// the first request so the client is not mid-write when the close lands,
+/// then writes the deny body and a `close_notify`. No upstream connection
+/// is ever opened.
+pub(crate) async fn serve_tls_deny(
+    sni_name: &str,
+    initial_buf: Vec<u8>,
+    from_smoltcp: &mut mpsc::Receiver<Bytes>,
+    to_smoltcp: &mpsc::Sender<Bytes>,
+    shared: &SharedState,
+    tls_state: &TlsState,
+) -> io::Result<()> {
+    let domain_cert = tls_state
+        .get_or_generate_cert(sni_name)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    let mut guest_tls = rustls::ServerConnection::new(domain_cert.server_config.clone())
+        .map_err(io::Error::other)?;
+    let mut tls_buf = Vec::with_capacity(RELAY_BUF_SIZE + 256);
+
+    complete_guest_handshake(
+        &mut guest_tls,
+        initial_buf,
+        from_smoltcp,
+        to_smoltcp,
+        shared,
+        &mut tls_buf,
+    )
+    .await?;
+
+    // Wait (briefly) for the request head so the 403 lands after the
+    // client has sent its request, then discard it.
+    let mut scratch = vec![0u8; RELAY_BUF_SIZE];
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            match guest_tls.reader().read(&mut scratch) {
+                Ok(0) => return,
+                Ok(n) if scratch[..n].windows(4).any(|w| w == b"\r\n\r\n") => return,
+                Ok(_) => {}
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {}
+                Err(_) => return,
+            }
+            let Some(data) = from_smoltcp.recv().await else {
+                return;
+            };
+            let mut remaining = &data[..];
+            while !remaining.is_empty() {
+                if guest_tls.read_tls(&mut remaining).is_err()
+                    || guest_tls.process_new_packets().is_err()
+                {
+                    return;
+                }
+            }
+        }
+    })
+    .await;
+
+    let body = shared.http_deny_body(sni_name);
+    guest_tls
+        .writer()
+        .write_all(&http_forbidden_response(&body))
+        .map_err(io::Error::other)?;
+    guest_tls.send_close_notify();
+    flush_to_guest(&mut guest_tls, to_smoltcp, shared, &mut tls_buf).await
+}
+
+/// Feed the buffered ClientHello and drive the guest-facing handshake to
+/// completion, bounded by a 10s timeout.
+async fn complete_guest_handshake(
+    guest_tls: &mut rustls::ServerConnection,
+    initial_buf: Vec<u8>,
+    from_smoltcp: &mut mpsc::Receiver<Bytes>,
+    to_smoltcp: &mpsc::Sender<Bytes>,
+    shared: &SharedState,
+    tls_buf: &mut Vec<u8>,
+) -> io::Result<()> {
+    {
+        let mut remaining = &initial_buf[..];
+        while !remaining.is_empty() {
+            guest_tls
+                .read_tls(&mut remaining)
+                .map_err(io::Error::other)?;
+            guest_tls.process_new_packets().map_err(io::Error::other)?;
+        }
+    }
+
+    // Send ServerHello etc. back to guest.
+    flush_to_guest(guest_tls, to_smoltcp, shared, tls_buf).await?;
+
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while guest_tls.is_handshaking() {
+            let data = from_smoltcp
+                .recv()
+                .await
+                .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "channel closed"))?;
+            let mut remaining = &data[..];
+            while !remaining.is_empty() {
+                guest_tls
+                    .read_tls(&mut remaining)
+                    .map_err(io::Error::other)?;
+                guest_tls.process_new_packets().map_err(io::Error::other)?;
+            }
+            flush_to_guest(guest_tls, to_smoltcp, shared, tls_buf).await?;
+        }
+        Ok::<_, io::Error>(())
+    })
+    .await
+    .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "TLS handshake timed out"))?
+}
 
 /// Bypass mode: plain TCP splice, no TLS termination.
 #[allow(clippy::too_many_arguments)]
@@ -326,43 +454,20 @@ pub(crate) async fn intercept_relay(
     let mut guest_tls = rustls::ServerConnection::new(domain_cert.server_config.clone())
         .map_err(io::Error::other)?;
 
-    // Feed the buffered ClientHello.
-    {
-        let mut remaining = &initial_buf[..];
-        while !remaining.is_empty() {
-            guest_tls
-                .read_tls(&mut remaining)
-                .map_err(io::Error::other)?;
-            guest_tls.process_new_packets().map_err(io::Error::other)?;
-        }
-    }
-
     // Reusable buffer for TLS output — avoids per-flush heap allocation.
     let mut tls_buf = Vec::with_capacity(RELAY_BUF_SIZE + 256);
 
-    // Send ServerHello etc. back to guest.
-    flush_to_guest(&mut guest_tls, &to_smoltcp, &shared, &mut tls_buf).await?;
-
-    // Complete guest-facing TLS handshake with timeout to prevent resource exhaustion.
-    tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        while guest_tls.is_handshaking() {
-            let data = from_smoltcp
-                .recv()
-                .await
-                .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "channel closed"))?;
-            let mut remaining = &data[..];
-            while !remaining.is_empty() {
-                guest_tls
-                    .read_tls(&mut remaining)
-                    .map_err(io::Error::other)?;
-                guest_tls.process_new_packets().map_err(io::Error::other)?;
-            }
-            flush_to_guest(&mut guest_tls, &to_smoltcp, &shared, &mut tls_buf).await?;
-        }
-        Ok::<_, io::Error>(())
-    })
-    .await
-    .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "TLS handshake timed out"))??;
+    // Feed the buffered ClientHello and complete the guest-facing handshake
+    // (bounded, to prevent resource exhaustion).
+    complete_guest_handshake(
+        &mut guest_tls,
+        initial_buf,
+        &mut from_smoltcp,
+        &to_smoltcp,
+        &shared,
+        &mut tls_buf,
+    )
+    .await?;
 
     // Connect to real server with TLS.
     let server_stream = match upstream_stream {

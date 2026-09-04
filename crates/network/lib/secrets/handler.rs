@@ -2218,7 +2218,7 @@ pub(crate) fn first_line_is_not_http_request(data: &[u8]) -> bool {
     http_request_version(line.as_ref()).is_none()
 }
 
-fn skip_leading_empty_http_lines(mut data: &[u8]) -> &[u8] {
+pub(crate) fn skip_leading_empty_http_lines(mut data: &[u8]) -> &[u8] {
     while data.starts_with(b"\r\n") {
         data = &data[2..];
     }

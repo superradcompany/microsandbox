@@ -1663,6 +1663,7 @@ type NetworkOptions struct {
 	RateLimiter         *NetworkRateLimiterOptions `json:"rate_limiter,omitempty"`
 	OnSecretViolation   string                     `json:"on_secret_violation,omitempty"`
 	TrustHostCAs        *bool                      `json:"trust_host_cas,omitempty"`
+	HTTPDenyMessage     string                     `json:"http_deny_message,omitempty"`
 }
 
 // RateLimiterOptions limits one traffic direction; a nil bucket leaves that

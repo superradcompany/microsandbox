@@ -132,4 +132,11 @@ export interface NetworkConfig {
   readonly trustHostCAs: boolean;
   /** Canonical proxy configuration for outbound connections. */
   readonly outboundProxy: OutboundProxy | null;
+
+  /**
+   * Body returned to HTTP/HTTPS clients when egress is denied by policy;
+   * `{host}` is replaced with the blocked hostname. `null` uses the
+   * engine default.
+   */
+  readonly httpDenyMessage?: string | null;
 }

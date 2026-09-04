@@ -328,6 +328,16 @@ impl NetworkBuilder {
         self
     }
 
+    /// Body template returned to HTTP/HTTPS clients when egress is denied.
+    ///
+    /// `{host}` is replaced with the blocked hostname. Omit this to use
+    /// the default agent-facing message. Non-HTTP TCP is still closed
+    /// without a response.
+    pub fn http_deny_message(mut self, message: impl Into<String>) -> Self {
+        self.config.http_deny_message = Some(message.into());
+        self
+    }
+
     /// Configure egress and ingress traffic rate limits. Applies on the next
     /// sandbox start.
     ///
