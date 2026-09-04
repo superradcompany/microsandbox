@@ -1210,7 +1210,7 @@ jobs:
       - name: Build TypeScript output (root package dist/)
         working-directory: sdk/node-ts
         run: |
-          npm install --omit=optional --package-lock=false
+          npm ci --omit=optional
           npm run build:ts
 
       - name: Build and publish agent client package
