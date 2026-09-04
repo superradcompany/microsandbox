@@ -4,6 +4,8 @@ on:
   push:
     tags: ["v*"]
   pull_request:
+    branches-ignore:
+      - mintlify
     paths:
       - .github/workflows/release.yml
       - .github/workflows/release-linux.yml
@@ -1075,7 +1077,9 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           branch="mintlify-sync-${{ github.ref_name }}"
-          git push --force origin ${{ github.sha }}:refs/heads/"$branch"
+          git switch --detach "${{ github.sha }}"
+          git commit --allow-empty -m "chore(docs): sync mintlify to ${{ github.ref_name }}"
+          git push --force origin HEAD:refs/heads/"$branch"
           if [ "${{ steps.merge.outputs.result }}" = "clean" ]; then
             body="Syncs mintlify to ${{ github.ref_name }}. The release commit merges cleanly, so this PR was enqueued automatically; the merge queue lands it as a merge commit."
           else
