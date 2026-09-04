@@ -8,6 +8,7 @@ on:
       - .github/workflows/release.yml
       - .github/workflows/release-linux.yml
       - .github/workflows/release-macos.yml
+      - .github/workflows/release-npm.yml
       - .github/workflows/release-windows.yml
       - .github/actions/cache-libkrunfw-kernel/action.yml
       - scripts/ci/publish-crates.py
@@ -1164,203 +1165,24 @@ jobs:
           token: ${{ secrets.WINGET_TOKEN }}
 
   # ---------------------------------------------------------------------------
-  # Publish Node SDK to npm
+  # Publish the Node SDK and MCP server to npm, then refresh the Node lockfile.
+  # The reusable workflow can also recover this flow independently without
+  # rerunning publishers for the other ecosystems.
   # ---------------------------------------------------------------------------
-  npm-publish:
-    name: Publish npm packages
+  npm-release:
+    name: Publish npm release
     needs: release-ready
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: 22
-          registry-url: https://registry.npmjs.org
-
-      - name: Download Node SDK artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          path: node-artifacts
-          pattern: node-sdk-*
-
-      - name: Place binaries and update generated files
-        run: |
-          # Copy prepared platform package payloads.
-          for dir in darwin-arm64 linux-x64-gnu linux-arm64-gnu win32-x64-msvc win32-arm64-msvc; do
-            mkdir -p "sdk/node-ts/npm/$dir/bin" "sdk/node-ts/npm/$dir/lib"
-            cp "node-artifacts/node-sdk-$dir/npm/$dir"/microsandbox.*.node "sdk/node-ts/npm/$dir/"
-            cp "node-artifacts/node-sdk-$dir/npm/$dir/bin/"* "sdk/node-ts/npm/$dir/bin/"
-            cp "node-artifacts/node-sdk-$dir/npm/$dir/lib/"* "sdk/node-ts/npm/$dir/lib/"
-            # GitHub Actions artifacts strip Unix exec bits; restore before publish
-            # so the published tarball carries 0755 on the binary.
-            if [ -f "sdk/node-ts/npm/$dir/bin/msb" ]; then
-              chmod +x "sdk/node-ts/npm/$dir/bin/msb"
-            fi
-          done
-
-          # Copy napi-generated bindings into the root package's native/ dir
-          # (use darwin-arm64; all platforms emit identical JS and types).
-          # napi build emits index.d.ts; rename to index.d.cts so nodenext
-          # resolution finds it next to the .cjs binding.
-          cp node-artifacts/node-sdk-darwin-arm64/native/index.cjs sdk/node-ts/native/index.cjs
-          cp node-artifacts/node-sdk-darwin-arm64/native/index.d.ts sdk/node-ts/native/index.d.cts
-
-      - name: Build TypeScript output (root package dist/)
-        working-directory: sdk/node-ts
-        run: |
-          npm install --omit=optional --package-lock=false
-          npm run build:ts
-
-      - name: Build and publish agent client package
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        working-directory: packages/agent-client/typescript
-        run: |
-          npm ci
-          npm run build
-          npm publish --access public
-
-      - name: Build and publish microsandbox types package
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        working-directory: packages/microsandbox-types/typescript
-        run: |
-          npm ci
-          npm run build
-          npm publish --access public
-
-      - name: Publish platform packages
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: |
-          for dir in darwin-arm64 linux-x64-gnu linux-arm64-gnu win32-x64-msvc win32-arm64-msvc; do
-            echo "Publishing @superradcompany/microsandbox-$dir..."
-            cd sdk/node-ts/npm/$dir
-            npm publish --access public
-            cd ../../../..
-          done
-
-      - name: Wait for npm to index platform packages
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          node scripts/ci/wait-for-npm-packages.mjs "$VERSION" \
-            @superradcompany/microsandbox-darwin-arm64 \
-            @superradcompany/microsandbox-linux-arm64-gnu \
-            @superradcompany/microsandbox-linux-x64-gnu \
-            @superradcompany/microsandbox-win32-arm64-msvc \
-            @superradcompany/microsandbox-win32-x64-msvc
-
-      - name: Verify root package platform dependencies
-        working-directory: sdk/node-ts
-        run: |
-          node - <<'NODE'
-          const fs = require("node:fs");
-
-          const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
-          const optionalDependencies = pkg.optionalDependencies ?? {};
-          const required = [
-            "@superradcompany/microsandbox-darwin-arm64",
-            "@superradcompany/microsandbox-linux-arm64-gnu",
-            "@superradcompany/microsandbox-linux-x64-gnu",
-            "@superradcompany/microsandbox-win32-arm64-msvc",
-            "@superradcompany/microsandbox-win32-x64-msvc",
-          ];
-
-          const missing = required.filter((name) => optionalDependencies[name] !== pkg.version);
-
-          if (missing.length > 0) {
-            console.error(`Missing or mismatched platform optional dependencies: ${missing.join(", ")}`);
-            process.exit(1);
-          }
-          NODE
-
-      - name: Publish root package
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        working-directory: sdk/node-ts
-        run: npm publish --access public
-
-  # ---------------------------------------------------------------------------
-  # Refresh sdk/node-ts/package-lock.json against the just-published platform
-  # packages, so main always has lockfile integrity hashes that satisfy
-  # `npm ci`. Opens a PR that the maintainer merges manually.
-  # ---------------------------------------------------------------------------
-  refresh-lockfile:
-    name: Refresh npm lockfile
-    needs: npm-publish
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
     permissions:
+      actions: read
       contents: write
       pull-requests: write
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: main
-
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: 22
-
-      - name: Wait for npm to index platform packages
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          node scripts/ci/wait-for-npm-packages.mjs "$VERSION" \
-            @superradcompany/microsandbox-darwin-arm64 \
-            @superradcompany/microsandbox-linux-arm64-gnu \
-            @superradcompany/microsandbox-linux-x64-gnu \
-            @superradcompany/microsandbox-win32-arm64-msvc \
-            @superradcompany/microsandbox-win32-x64-msvc
-
-      - name: Regenerate lockfile
-        working-directory: sdk/node-ts
-        run: npm install --package-lock-only --ignore-scripts
-
-      - uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
-        with:
-          title: "chore: refresh npm lockfile after ${{ github.ref_name }}"
-          body: |
-            Regenerates `sdk/node-ts/package-lock.json` against the platform packages published for ${{ github.ref_name }}, so `npm ci` keeps working on main.
-          branch: refresh-lockfile-${{ github.ref_name }}
-          commit-message: "chore: refresh npm lockfile after ${{ github.ref_name }}"
-          base: main
-          add-paths: sdk/node-ts/package-lock.json
-          delete-branch: true
-
-  # ---------------------------------------------------------------------------
-  # Publish MCP server to npm
-  # ---------------------------------------------------------------------------
-  mcp-publish:
-    name: Publish MCP server
-    needs: npm-publish
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          submodules: true
-
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: 22
-          registry-url: https://registry.npmjs.org
-
-      - name: Wait for the root SDK package
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          node scripts/ci/wait-for-npm-packages.mjs "$VERSION" microsandbox
-
-      - name: Build and publish MCP server
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        working-directory: mcp
-        run: |
-          rm -f package-lock.json
-          npm install
-          npm run build
-          npm publish --access public
+    uses: ./.github/workflows/release-npm.yml
+    with:
+      artifact_run_id: ${{ github.run_id }}
+      confirm_publish: true
+      release_tag: ${{ github.ref_name }}
+    secrets: inherit
 
   # ---------------------------------------------------------------------------
   # Publish Rust crates to crates.io

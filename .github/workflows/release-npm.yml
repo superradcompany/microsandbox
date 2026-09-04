@@ -1,0 +1,289 @@
+name: Release npm packages
+
+on:
+  workflow_call:
+    inputs:
+      artifact_run_id:
+        description: Workflow run containing the Node SDK artifacts
+        required: true
+        type: string
+      confirm_publish:
+        description: Confirm that npm packages should be published
+        required: true
+        type: boolean
+      release_tag:
+        description: Release tag whose npm packages should be published
+        required: true
+        type: string
+    secrets:
+      NPM_TOKEN:
+        required: true
+  workflow_dispatch:
+    inputs:
+      artifact_run_id:
+        description: Workflow run containing the Node SDK artifacts
+        required: true
+        type: string
+      confirm_publish:
+        description: Publish only the npm release flow
+        required: true
+        default: false
+        type: boolean
+      release_tag:
+        description: Release tag whose npm packages should be published
+        required: true
+        type: string
+
+concurrency:
+  group: release-npm-${{ inputs.release_tag }}
+  cancel-in-progress: false
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  npm-publish:
+    name: Publish npm packages
+    if: inputs.confirm_publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.release_tag }}
+          submodules: true
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - name: Verify release source
+        env:
+          ARTIFACT_RUN_ID: ${{ inputs.artifact_run_id }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          case "$RELEASE_TAG" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "Invalid release tag: $RELEASE_TAG" >&2; exit 1 ;;
+          esac
+
+          release_sha=$(git rev-parse HEAD)
+          IFS=$'\t' read -r run_sha run_event run_ref run_status <<EOF
+          $(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${ARTIFACT_RUN_ID}" \
+            --jq '[.head_sha, .event, .head_branch, .status] | @tsv')
+          EOF
+          if [ "$release_sha" != "$run_sha" ]; then
+            echo "Artifact run $ARTIFACT_RUN_ID belongs to $run_sha, not $release_sha ($RELEASE_TAG)" >&2
+            exit 1
+          fi
+          if [ "$run_event" != push ] || [ "$run_ref" != "$RELEASE_TAG" ] || [ "$run_status" != completed ]; then
+            echo "Artifact run $ARTIFACT_RUN_ID is not a completed push run for $RELEASE_TAG" >&2
+            exit 1
+          fi
+
+          version="${RELEASE_TAG#v}"
+          node - "$version" <<'NODE'
+          const fs = require("node:fs");
+
+          const expected = process.argv[2];
+          const manifests = [
+            "sdk/node-ts/package.json",
+            "packages/agent-client/typescript/package.json",
+            "packages/microsandbox-types/typescript/package.json",
+            "mcp/package.json",
+            ...fs.readdirSync("sdk/node-ts/npm").map((dir) => `sdk/node-ts/npm/${dir}/package.json`),
+          ];
+          const mismatched = manifests.filter((path) => {
+            const pkg = JSON.parse(fs.readFileSync(path, "utf8"));
+            return pkg.version !== expected;
+          });
+          if (mismatched.length > 0) {
+            console.error(`Expected npm version ${expected} in: ${mismatched.join(", ")}`);
+            process.exit(1);
+          }
+          NODE
+
+      - name: Download Node SDK artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: node-artifacts
+          pattern: node-sdk-*
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.artifact_run_id }}
+
+      - name: Place binaries and update generated files
+        run: |
+          # Copy prepared platform package payloads.
+          for dir in darwin-arm64 linux-x64-gnu linux-arm64-gnu win32-x64-msvc win32-arm64-msvc; do
+            mkdir -p "sdk/node-ts/npm/$dir/bin" "sdk/node-ts/npm/$dir/lib"
+            cp "node-artifacts/node-sdk-$dir/npm/$dir"/microsandbox.*.node "sdk/node-ts/npm/$dir/"
+            cp "node-artifacts/node-sdk-$dir/npm/$dir/bin/"* "sdk/node-ts/npm/$dir/bin/"
+            cp "node-artifacts/node-sdk-$dir/npm/$dir/lib/"* "sdk/node-ts/npm/$dir/lib/"
+            # GitHub Actions artifacts strip Unix exec bits; restore before publish
+            # so the published tarball carries 0755 on the binary.
+            if [ -f "sdk/node-ts/npm/$dir/bin/msb" ]; then
+              chmod +x "sdk/node-ts/npm/$dir/bin/msb"
+            fi
+          done
+
+          # Copy napi-generated bindings into the root package's native/ dir
+          # (use darwin-arm64; all platforms emit identical JS and types).
+          # napi build emits index.d.ts; rename to index.d.cts so nodenext
+          # resolution finds it next to the .cjs binding.
+          cp node-artifacts/node-sdk-darwin-arm64/native/index.cjs sdk/node-ts/native/index.cjs
+          cp node-artifacts/node-sdk-darwin-arm64/native/index.d.ts sdk/node-ts/native/index.d.cts
+
+      - name: Build TypeScript output (root package dist/)
+        working-directory: sdk/node-ts
+        run: |
+          npm ci --omit=optional
+          npm run build:ts
+
+      - name: Build and publish agent client package
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        working-directory: packages/agent-client/typescript
+        run: |
+          npm ci
+          npm run build
+          npm publish --access public
+
+      - name: Build and publish microsandbox types package
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        working-directory: packages/microsandbox-types/typescript
+        run: |
+          npm ci
+          npm run build
+          npm publish --access public
+
+      - name: Publish platform packages
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          for dir in darwin-arm64 linux-x64-gnu linux-arm64-gnu win32-x64-msvc win32-arm64-msvc; do
+            echo "Publishing @superradcompany/microsandbox-$dir..."
+            cd "sdk/node-ts/npm/$dir"
+            npm publish --access public
+            cd ../../../..
+          done
+
+      - name: Wait for npm to index platform packages
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          VERSION="${RELEASE_TAG#v}"
+          node scripts/ci/wait-for-npm-packages.mjs "$VERSION" \
+            @superradcompany/microsandbox-darwin-arm64 \
+            @superradcompany/microsandbox-linux-arm64-gnu \
+            @superradcompany/microsandbox-linux-x64-gnu \
+            @superradcompany/microsandbox-win32-arm64-msvc \
+            @superradcompany/microsandbox-win32-x64-msvc
+
+      - name: Verify root package platform dependencies
+        working-directory: sdk/node-ts
+        run: |
+          node - <<'NODE'
+          const fs = require("node:fs");
+
+          const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+          const optionalDependencies = pkg.optionalDependencies ?? {};
+          const required = [
+            "@superradcompany/microsandbox-darwin-arm64",
+            "@superradcompany/microsandbox-linux-arm64-gnu",
+            "@superradcompany/microsandbox-linux-x64-gnu",
+            "@superradcompany/microsandbox-win32-arm64-msvc",
+            "@superradcompany/microsandbox-win32-x64-msvc",
+          ];
+
+          const missing = required.filter((name) => optionalDependencies[name] !== pkg.version);
+
+          if (missing.length > 0) {
+            console.error(`Missing or mismatched platform optional dependencies: ${missing.join(", ")}`);
+            process.exit(1);
+          }
+          NODE
+
+      - name: Publish root package
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        working-directory: sdk/node-ts
+        run: npm publish --access public
+
+  mcp-publish:
+    name: Publish MCP server
+    needs: npm-publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.release_tag }}
+          submodules: true
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - name: Wait for the root SDK package
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          VERSION="${RELEASE_TAG#v}"
+          node scripts/ci/wait-for-npm-packages.mjs "$VERSION" microsandbox
+
+      - name: Build and publish MCP server
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        working-directory: mcp
+        run: |
+          rm -f package-lock.json
+          npm install
+          npm run build
+          npm publish --access public
+
+  refresh-lockfile:
+    name: Refresh npm lockfile
+    needs: npm-publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+
+      - name: Wait for npm to index platform packages
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          VERSION="${RELEASE_TAG#v}"
+          node scripts/ci/wait-for-npm-packages.mjs "$VERSION" \
+            @superradcompany/microsandbox-darwin-arm64 \
+            @superradcompany/microsandbox-linux-arm64-gnu \
+            @superradcompany/microsandbox-linux-x64-gnu \
+            @superradcompany/microsandbox-win32-arm64-msvc \
+            @superradcompany/microsandbox-win32-x64-msvc
+
+      - name: Regenerate lockfile
+        working-directory: sdk/node-ts
+        run: npm install --package-lock-only --ignore-scripts
+
+      - uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
+        with:
+          title: "chore: refresh npm lockfile after ${{ inputs.release_tag }}"
+          body: |
+            Regenerates `sdk/node-ts/package-lock.json` against the platform packages published for ${{ inputs.release_tag }}, so `npm ci` keeps working on main.
+          branch: refresh-lockfile-${{ inputs.release_tag }}
+          commit-message: "chore: refresh npm lockfile after ${{ inputs.release_tag }}"
+          base: main
+          add-paths: sdk/node-ts/package-lock.json
+          delete-branch: true
