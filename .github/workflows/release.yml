@@ -12,6 +12,8 @@ on:
       - .github/workflows/release-windows.yml
       - .github/actions/cache-libkrunfw-kernel/action.yml
       - scripts/ci/publish-crates.py
+      - scripts/ci/publish_npm_package.py
+      - scripts/ci/test_publish_npm_package.py
       - scripts/ci/validate-release-artifacts.py
       - scripts/ci/test_validate_release_artifacts.py
       - scripts/ci/validate_linux_glibc.py
