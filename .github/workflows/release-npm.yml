@@ -25,7 +25,7 @@ on:
         required: true
         type: string
       confirm_publish:
-        description: Publish only the npm release flow
+        description: Publish an npm flow that failed before any npm package was published
         required: true
         default: false
         type: boolean
@@ -104,6 +104,34 @@ jobs:
             process.exit(1);
           }
           NODE
+
+      - name: Verify npm versions are unpublished
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          version="${RELEASE_TAG#v}"
+          packages=(
+            microsandbox
+            @microsandbox/agent-client
+            @microsandbox/types
+            microsandbox-mcp
+            @superradcompany/microsandbox-darwin-arm64
+            @superradcompany/microsandbox-linux-arm64-gnu
+            @superradcompany/microsandbox-linux-x64-gnu
+            @superradcompany/microsandbox-win32-arm64-msvc
+            @superradcompany/microsandbox-win32-x64-msvc
+          )
+          published=()
+          for package in "${packages[@]}"; do
+            if npm view "$package@$version" version --json >/dev/null 2>&1; then
+              published+=("$package@$version")
+            fi
+          done
+          if [ "${#published[@]}" -ne 0 ]; then
+            echo "Refusing npm recovery because these versions already exist:" >&2
+            printf '  %s\n' "${published[@]}" >&2
+            exit 1
+          fi
 
       - name: Download Node SDK artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1

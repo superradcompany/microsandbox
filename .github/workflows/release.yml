@@ -1182,7 +1182,8 @@ jobs:
       artifact_run_id: ${{ github.run_id }}
       confirm_publish: true
       release_tag: ${{ github.ref_name }}
-    secrets: inherit
+    secrets:
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
 
   # ---------------------------------------------------------------------------
   # Publish Rust crates to crates.io
