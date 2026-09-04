@@ -305,7 +305,7 @@ jobs:
 
       # mold keeps uncached workspace links fast.
       - name: Set up mold
-        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # 2.41.0
+        uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # 2.41.0
 
       - name: Build msb
         run: |
@@ -348,7 +348,7 @@ jobs:
           path: build/
 
       - name: Set up mold
-        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # 2.41.0
+        uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # 2.41.0
 
       - name: Build Go FFI
         run: cargo build --profile ci -p microsandbox-go
@@ -380,12 +380,12 @@ jobs:
           cache-bin: false
           cache-targets: true
 
-      - uses: taiki-e/install-action@b6b84cf49ebfe0176417bdce007c624f0db37f20 # v2
+      - uses: taiki-e/install-action@1ed6d7be6168f6c9046541087ff549b6bc581fdf # v2
         with:
           tool: cargo-nextest@0.9.143
 
       - name: Set up mold
-        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # 2.41.0
+        uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # 2.41.0
 
       - name: Install build dependencies
         run: scripts/ci/install-apt-packages.sh libcap-ng-dev
@@ -753,7 +753,7 @@ jobs:
           cargo +stable clippy --manifest-path crates/agentd/Cargo.toml --target x86_64-unknown-linux-musl -- -D warnings
 
       - name: Set up mold
-        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # 2.41.0
+        uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # 2.41.0
 
       - name: Clippy
         run: cargo +stable clippy --workspace --exclude microsandbox-agentd -- -D warnings
@@ -788,7 +788,7 @@ jobs:
           cache-targets: true
 
       - name: Set up mold
-        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # 2.41.0
+        uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # 2.41.0
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -815,7 +815,7 @@ jobs:
         working-directory: sdk/node-ts
         run: |
           node scripts/prune-platform-optional-deps.mjs
-          npm install --package-lock=false
+          npm ci --ignore-scripts
           npm run build:ci
 
       - name: Build MCP server
@@ -868,7 +868,7 @@ jobs:
           cache-targets: true
 
       - name: Set up mold
-        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # 2.41.0
+        uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # 2.41.0
 
       - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
@@ -979,7 +979,7 @@ jobs:
           cache-targets: true
 
       - name: Set up mold
-        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # 2.41.0
+        uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # 2.41.0
 
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev
@@ -1038,7 +1038,7 @@ jobs:
           cache-targets: true
 
       - name: Set up mold
-        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # 2.41.0
+        uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # 2.41.0
 
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev
@@ -1059,7 +1059,7 @@ jobs:
         run: |
           gem build microsandbox.gemspec
           mold -run gem install --local microsandbox-*.gem --no-document
-          ruby --disable-gems -e 'require "rubygems"; require "microsandbox"; abort unless Microsandbox.version == "0.6.16"'
+          ruby --disable-gems -e 'require "rubygems"; require "microsandbox"; abort unless Microsandbox.version == "0.6.17"'
 
       - name: Restore standalone Ruby lockfile
         if: always()
@@ -1365,6 +1365,35 @@ jobs:
           go test -tags "smoke microsandbox_ffi_path" -count=1 -timeout 2m .
 
   # ---------------------------------------------------------------------------
+  # Previous-release upgrade smoke test
+  #
+  # Creates databases with the two latest released CLIs, then opens them with
+  # the candidate binary. This catches migration-order and compatibility gaps
+  # without requiring KVM.
+  # ---------------------------------------------------------------------------
+  previous-release-upgrade-smoke:
+    name: Previous Release Upgrade Smoke
+    needs: [build-linux-x86_64, changes]
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Download candidate runtime
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: msb-linux-x86_64
+          path: build/
+
+      - name: Test released database upgrades
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          chmod +x build/msb
+          python3 scripts/smoke/cli/previous_release_upgrade.py
+
+  # ---------------------------------------------------------------------------
   # CLI smoke tests (requires KVM)
   #
   # Runs black-box CLI user flows against the freshly-built msb artifact.
@@ -1430,7 +1459,7 @@ jobs:
       - name: Clean runner disk
         run: scripts/ci/clean-runner-disk.sh
 
-      - uses: taiki-e/install-action@b6b84cf49ebfe0176417bdce007c624f0db37f20 # v2
+      - uses: taiki-e/install-action@1ed6d7be6168f6c9046541087ff549b6bc581fdf # v2
         with:
           tool: cargo-nextest@0.9.143
 
@@ -1558,7 +1587,7 @@ jobs:
         working-directory: sdk/node-ts
         run: |
           node scripts/prune-platform-optional-deps.mjs
-          npm install --package-lock=false --ignore-scripts
+          npm ci --ignore-scripts
 
       # The published platform-pkg msb may lag the SDK; replace it with the
       # freshly-built binaries so the smoke test runs against current code.
@@ -1925,6 +1954,7 @@ jobs:
       - ruby-platform-smoke
       - ruby-platform-smoke-clean
       - go-quality
+      - previous-release-upgrade-smoke
       - cli-smoke-test
       - integration-test
       - node-sdk-test

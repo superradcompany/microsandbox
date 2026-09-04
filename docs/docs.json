@@ -47,11 +47,11 @@
               "sandboxes/commands",
               "sandboxes/filesystem",
               "sandboxes/secrets",
-              "sandboxes/tuning",
-              "sandboxes/ssh",
-              "sandboxes/volumes",
               "images/overview",
+              "sandboxes/volumes",
+              "sandboxes/ssh",
               "sandboxes/snapshots",
+              "sandboxes/tuning",
               "sandboxes/labels",
               "sandboxes/logs",
               "sandboxes/metrics",
@@ -64,6 +64,7 @@
             "pages": [
               "networking/overview",
               "networking/dns",
+              "networking/outbound-proxy",
               "networking/tls",
               "networking/host-sockets"
             ]
@@ -118,6 +119,8 @@
                   "sdk/typescript/filesystem",
                   "sdk/typescript/volumes",
                   "sdk/typescript/networking",
+                  "sdk/typescript/proxies",
+                  "sdk/typescript/vsock",
                   "sdk/typescript/secrets",
                   "sdk/typescript/snapshots",
                   "sdk/typescript/images",
@@ -135,6 +138,8 @@
                   "sdk/rust/filesystem",
                   "sdk/rust/volumes",
                   "sdk/rust/networking",
+                  "sdk/rust/proxies",
+                  "sdk/rust/vsock",
                   "sdk/rust/secrets",
                   "sdk/rust/snapshots",
                   "sdk/rust/images",
@@ -152,6 +157,8 @@
                   "sdk/python/filesystem",
                   "sdk/python/volumes",
                   "sdk/python/networking",
+                  "sdk/python/proxies",
+                  "sdk/python/vsock",
                   "sdk/python/secrets",
                   "sdk/python/snapshots",
                   "sdk/python/images",
@@ -170,6 +177,8 @@
                   "sdk/go/volumes",
                   "sdk/go/images",
                   "sdk/go/networking",
+                  "sdk/go/proxies",
+                  "sdk/go/vsock",
                   "sdk/go/secrets",
                   "sdk/go/snapshots",
                   "sdk/go/agent-client"
@@ -180,7 +189,8 @@
                 "icon": "gem",
                 "expanded": false,
                 "pages": [
-                  "sdk/ruby/sandbox"
+                  "sdk/ruby/sandbox",
+                  "sdk/ruby/vsock"
                 ]
               }
             ]

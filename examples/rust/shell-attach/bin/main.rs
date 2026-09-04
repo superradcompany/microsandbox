@@ -6,14 +6,15 @@ use microsandbox::Sandbox;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("Creating sandbox (image=alpine)");
+    println!("Connecting to or creating sandbox (image=alpine on first creation)");
 
+    // An interactive workspace is useful across runs. Builder options seed only the first creation;
+    // later runs reconnect to the persisted sandbox and preserve its files and configuration.
     let sandbox = Sandbox::builder("attach-example")
         .image("alpine")
         .cpus(1)
         .memory(512)
-        .replace()
-        .create()
+        .connect_or_create()
         .await?;
 
     println!("Attaching to shell (press Ctrl+] to detach)...");

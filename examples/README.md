@@ -4,6 +4,8 @@ Examples showing how to use the microsandbox SDK in TypeScript, Rust, Python, Go
 
 Each language directory has its own README with setup and run instructions.
 
+Most configuration-focused examples intentionally replace their fixed-name sandbox so every run uses the image, resources, mounts, networking, and secrets shown in the source. The interactive `shell-attach` example instead uses connect-or-create because preserving its workspace across runs is useful. Examples that generate a unique name use strict creation.
+
 | Language | Directory | README |
 |----------|-----------|--------|
 | TypeScript | [`typescript/`](./typescript/) | [typescript/README.md](./typescript/README.md) |
@@ -34,7 +36,7 @@ git submodule update --init --recursive
 | `volume-disk` | Mount raw / qcow2 disk images at arbitrary guest paths |
 | `fs-read-stream` | Stream a large file from the sandbox in chunks |
 | `metrics-stream` | Subscribe to streaming resource metrics |
-| `shell-attach` | Interactive terminal session inside a sandbox |
+| `shell-attach` | Reusable interactive terminal session using connect-or-create |
 | `net-basic` | DNS resolution, HTTP fetch, interface status |
 | `net-dns` | DNS filtering — block domains and suffixes |
 | `net-policy` | Network policies — public-only, allow-all, no-network |

@@ -30,6 +30,7 @@ use crate::dns::{
 use crate::icmp::relay::IcmpRelay;
 use crate::policy::{EgressEvaluation, HostnameSource, NetworkPolicy, Protocol};
 use crate::ports::PortPublisher;
+use crate::proxy::ResolvedOutboundProxy;
 use crate::secrets::handle::SecretsHandle;
 use crate::tcp::{connection::ConnectionTracker, proxy::TcpProxy, upstream::UpstreamTcpTarget};
 use crate::tls::{proxy::TlsProxy, state::TlsState};
@@ -95,7 +96,7 @@ struct GatewayIcmpReply {
 }
 
 /// Resolved network parameters for the poll loop. Created by
-/// `SmoltcpNetwork::new()` from `NetworkConfig` + sandbox slot.
+/// `SmoltcpNetwork::new()` from a resolved network configuration and sandbox slot.
 pub struct PollLoopConfig {
     /// Gateway MAC address (smoltcp's identity on the virtual LAN).
     pub gateway_mac: [u8; 6],
@@ -234,6 +235,7 @@ pub fn smoltcp_poll_loop(
     max_connections: Option<usize>,
     tokio_handle: tokio::runtime::Handle,
     secrets: SecretsHandle,
+    outbound_proxy: Option<Arc<ResolvedOutboundProxy>>,
 ) {
     let mut device = SmoltcpDevice::new(shared.clone(), config.mtu);
     let mut iface = create_interface(&mut device, &config);
@@ -290,7 +292,9 @@ pub fn smoltcp_poll_loop(
         config.guest_mac,
         config.mtu,
         tokio_handle.clone(),
+        outbound_proxy.clone(),
     );
+    udp_relay.attach_dns_forwarder(dns_forwarder_handle.clone());
     let mut udp_fragments = Ipv4UdpFragmentReassembler::new();
     let mut ipv6_udp_fragments = Ipv6UdpFragmentReassembler::new();
     let icmp_relay = IcmpRelay::new(
@@ -523,6 +527,11 @@ pub fn smoltcp_poll_loop(
             {
                 // TLS-intercepted port — spawn TLS MITM proxy.
                 let connect_target = resolve_tcp_host_target(conn.dst, config.gateway);
+                let connection_outbound_proxy = ResolvedOutboundProxy::select_for_destination(
+                    &outbound_proxy,
+                    conn.dst,
+                    connect_target.primary(),
+                );
                 let proxy = TlsProxy::new(
                     conn.dst,
                     connect_target,
@@ -532,6 +541,7 @@ pub fn smoltcp_poll_loop(
                     tls_state.clone(),
                     network_policy.clone(),
                     conn.proxy_connect,
+                    connection_outbound_proxy,
                 );
                 tokio_handle.spawn(proxy.run());
                 continue;
@@ -588,6 +598,11 @@ pub fn smoltcp_poll_loop(
             }
             // Plain TCP proxy.
             let connect_target = resolve_tcp_host_target(conn.dst, config.gateway);
+            let connection_outbound_proxy = ResolvedOutboundProxy::select_for_destination(
+                &outbound_proxy,
+                conn.dst,
+                connect_target.primary(),
+            );
             let proxy = TcpProxy::new(
                 conn.dst,
                 connect_target,
@@ -600,6 +615,7 @@ pub fn smoltcp_poll_loop(
                 secrets.load(),
                 tls_state.clone(),
                 conn.proxy_connect,
+                connection_outbound_proxy,
             );
             tokio_handle.spawn(proxy.run());
         }
@@ -1635,6 +1651,46 @@ mod tests {
         let gw = test_gateway();
         let dst = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 443);
         assert_eq!(resolve_host_dst(dst, gw), dst);
+    }
+
+    #[test]
+    fn outbound_proxy_is_skipped_for_host_destination() {
+        let gw = test_gateway();
+        let guest_dst = SocketAddr::new(IpAddr::V4(gw.ipv4.unwrap()), 8080);
+        let connect_target = resolve_tcp_host_target(guest_dst, gw);
+        let proxy = Some(Arc::new(ResolvedOutboundProxy::Socks5 {
+            address: "192.0.2.1:1080".parse().unwrap(),
+            credentials: None,
+        }));
+
+        assert!(
+            ResolvedOutboundProxy::select_for_destination(
+                &proxy,
+                guest_dst,
+                connect_target.primary(),
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn outbound_proxy_is_preserved_for_external_destination() {
+        let gw = test_gateway();
+        let guest_dst = "198.51.100.10:443".parse().unwrap();
+        let connect_target = resolve_tcp_host_target(guest_dst, gw);
+        let proxy = Some(Arc::new(ResolvedOutboundProxy::Socks5 {
+            address: "192.0.2.1:1080".parse().unwrap(),
+            credentials: None,
+        }));
+
+        assert!(
+            ResolvedOutboundProxy::select_for_destination(
+                &proxy,
+                guest_dst,
+                connect_target.primary(),
+            )
+            .is_some()
+        );
     }
 
     #[test]

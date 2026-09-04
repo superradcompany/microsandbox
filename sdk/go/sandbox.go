@@ -199,6 +199,7 @@ func buildFFICreateOptions(o SandboxConfig) ffi.CreateOptions {
 	if o.Network != nil {
 		ffiOpts.Network = buildFFINetwork(o.Network)
 	}
+	ffiOpts.Proxy = buildFFIOutboundProxy(o.Proxy)
 
 	for _, s := range o.Secrets {
 		ffiOpts.Secrets = append(ffiOpts.Secrets, ffi.SecretOptions{
@@ -396,6 +397,25 @@ func buildFFINetwork(n *NetworkConfig) *ffi.NetworkOptions {
 	}
 
 	return out
+}
+
+func buildFFIOutboundProxy(proxy *OutboundProxy) *ffi.OutboundProxyOptions {
+	if proxy == nil {
+		return nil
+	}
+	result := &ffi.OutboundProxyOptions{
+		Protocol: proxy.protocol,
+		Address:  proxy.address,
+		UserID:   proxy.userID,
+	}
+	if proxy.hasCredentials {
+		result.Username = &proxy.username
+		result.PasswordSource = &ffi.SecretSourceOptions{
+			Kind: proxy.password.kind,
+			Var:  proxy.password.varName,
+		}
+	}
+	return result
 }
 
 func buildFFINetworkRateLimiter(l *NetworkRateLimiterConfig) *ffi.NetworkRateLimiterOptions {

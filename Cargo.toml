@@ -50,7 +50,7 @@ members = [
 [workspace.package]
 authors = ["Super Rad Company <development@superrad.company>"]
 repository = "https://github.com/superradcompany/microsandbox"
-version = "0.6.16"
+version = "0.6.17"
 license = "Apache-2.0"
 edition = "2024"
 
@@ -77,20 +77,20 @@ strip = false
 # Exact (`=`) pins: these crates share private, unstable APIs across patch
 # releases, so every published version must resolve its siblings to the same
 # version. Caret would let an older release pull newer siblings and break.
-microsandbox = { version = "=0.6.16", path = "sdk/rust", default-features = false }
-microsandbox-agent-client = { version = "=0.6.16", path = "packages/agent-client/rust" }
-microsandbox-db = { version = "=0.6.16", path = "crates/db" }
-microsandbox-filesystem = { version = "=0.6.16", path = "crates/filesystem", default-features = false }
-microsandbox-image = { version = "=0.6.16", path = "crates/image" }
-microsandbox-metrics = { version = "=0.6.16", path = "crates/metrics" }
-microsandbox-types-macros = { version = "=0.6.16", path = "packages/microsandbox-types/macros" }
-microsandbox-types = { version = "=0.6.16", path = "packages/microsandbox-types/rust" }
-microsandbox-migration = { version = "=0.6.16", path = "crates/migration" }
-microsandbox-network = { version = "=0.6.16", path = "crates/network" }
-microsandbox-protocol = { version = "=0.6.16", path = "crates/protocol" }
-microsandbox-runtime = { version = "=0.6.16", path = "crates/runtime", default-features = false }
-microsandbox-utils = { version = "=0.6.16", path = "crates/utils" }
-microsandbox-vsock = { version = "=0.6.16", path = "crates/vsock" }
+microsandbox = { version = "=0.6.17", path = "sdk/rust", default-features = false }
+microsandbox-agent-client = { version = "=0.6.17", path = "packages/agent-client/rust" }
+microsandbox-db = { version = "=0.6.17", path = "crates/db" }
+microsandbox-filesystem = { version = "=0.6.17", path = "crates/filesystem", default-features = false }
+microsandbox-image = { version = "=0.6.17", path = "crates/image" }
+microsandbox-metrics = { version = "=0.6.17", path = "crates/metrics" }
+microsandbox-types-macros = { version = "=0.6.17", path = "packages/microsandbox-types/macros" }
+microsandbox-types = { version = "=0.6.17", path = "packages/microsandbox-types/rust" }
+microsandbox-migration = { version = "=0.6.17", path = "crates/migration" }
+microsandbox-network = { version = "=0.6.17", path = "crates/network" }
+microsandbox-protocol = { version = "=0.6.17", path = "crates/protocol" }
+microsandbox-runtime = { version = "=0.6.17", path = "crates/runtime", default-features = false }
+microsandbox-utils = { version = "=0.6.17", path = "crates/utils" }
+microsandbox-vsock = { version = "=0.6.17", path = "crates/vsock" }
 msb_krun = "=0.1.32"
 msb_krun_utils = "=0.1.32"
 test-macros = { path = "crates/testing/macros" }
@@ -139,7 +139,7 @@ serde_bytes = "0.11"
 serde_json = "1.0"
 serde-saphyr = { version = "1.0.1", default-features = false, features = ["deserialize"] }
 sha2 = "0.11.0"
-smoltcp = { version = "0.13", default-features = false }
+smoltcp = { version = "0.14", default-features = false }
 socket2 = "0.6"
 strum = { version = "0.28", features = ["derive"] }
 tar = "0.4"
@@ -163,6 +163,7 @@ tokio = { version = "1.52", features = [
     "sync",
     "time",
 ] }
+tokio-socks = "0.5.3"
 tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-webpki-roots"] }
 tokio-util = { version = "0.7", features = ["io"] }
 tracing = "0.1"
@@ -205,5 +206,5 @@ rcgen = { version = "0.14", features = ["x509-parser"] }
 lru = "0.18.0"
 parking_lot = "0.12"
 rpassword = "7"
-russh = "0.62.4"
+russh = "0.63.1"
 russh-sftp = "2.3.0"

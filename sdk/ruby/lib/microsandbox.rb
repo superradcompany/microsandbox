@@ -22,7 +22,7 @@ module Microsandbox
     %i[
       image cpus max_cpus memory max_memory workdir shell hostname user
       detached ephemeral max_duration idle_timeout replace root_disk
-      disable_network quiet_logs entrypoint init vsock vsock_dgram
+      disable_network quiet_logs entrypoint init proxy vsock vsock_dgram
     ].each do |name|
       define_method(name) do |*args|
         public_send(:"#{name}!", *args)
@@ -42,6 +42,18 @@ module Microsandbox
 
     def replace_with_timeout(seconds)
       replace_with_timeout!(seconds)
+      self
+    end
+  end
+
+  class OutboundProxy
+    def user_id(value)
+      user_id!(value)
+      self
+    end
+
+    def credentials(username, password)
+      credentials!(username, password)
       self
     end
   end

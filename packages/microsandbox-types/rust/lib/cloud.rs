@@ -1001,6 +1001,7 @@ impl TryFrom<CloudSandboxSpec> for SandboxSpec {
             max_connections: spec.network.max_connections,
             rate_limiter: None,
             trust_host_cas: false,
+            outbound_proxy: None,
         };
         let runtime = SandboxRuntimeOptions {
             workdir: spec.runtime.workdir,

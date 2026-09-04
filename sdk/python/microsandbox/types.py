@@ -1542,6 +1542,79 @@ class PortBinding:
 
 
 @dataclass(frozen=True, slots=True)
+class SecretSource:
+    """Host-side source for secret material."""
+
+    kind: Literal["env"]
+    var: str
+
+    def __post_init__(self) -> None:
+        if self.kind != "env":
+            raise ValueError("only environment-backed secret sources are supported")
+        if not self.var:
+            raise ValueError("secret source environment variable must not be empty")
+
+    @classmethod
+    def env(cls, variable: str) -> SecretSource:
+        """Resolve the secret from this host environment variable."""
+        return cls(kind="env", var=variable)
+
+    def _to_dict(self) -> dict:
+        return {"kind": self.kind, "var": self.var}
+
+
+@dataclass(frozen=True, slots=True)
+class OutboundProxy:
+    """Proxy used for outbound sandbox connections."""
+
+    protocol: Literal["socks4", "socks5"]
+    address: str
+    user_id: str | None = None
+    username: str | None = None
+    password: SecretSource | None = None
+
+    def __post_init__(self) -> None:
+        if self.protocol != "socks4" and self.user_id is not None:
+            raise ValueError("user_id is only supported for SOCKS4 proxies")
+        if self.protocol != "socks5" and (self.username is not None or self.password is not None):
+            raise ValueError("credentials are only supported for SOCKS5 proxies")
+        if (self.username is None) != (self.password is None):
+            raise ValueError("SOCKS5 username and password must be provided together")
+
+    @classmethod
+    def socks4(cls, address: str, *, user_id: str | None = None) -> OutboundProxy:
+        """Create a SOCKS4 outbound proxy."""
+        return cls(protocol="socks4", address=address, user_id=user_id)
+
+    @classmethod
+    def socks5(cls, address: str) -> OutboundProxy:
+        """Create a SOCKS5 outbound proxy."""
+        return cls(protocol="socks5", address=address)
+
+    def credentials(self, username: str, password: SecretSource) -> OutboundProxy:
+        """Set username authentication and a host-side password source."""
+        if self.protocol != "socks5":
+            raise ValueError("credentials are only supported for SOCKS5 proxies")
+        return OutboundProxy(
+            protocol=self.protocol,
+            address=self.address,
+            username=username,
+            password=password,
+        )
+
+    def _to_dict(self) -> dict:
+        value = {"protocol": self.protocol, "address": self.address}
+        if self.user_id is not None:
+            value["user_id"] = self.user_id
+        if self.username is not None and self.password is not None:
+            value["credentials"] = {
+                "username": self.username,
+                "password": self.password._to_dict(),
+            }
+        return value
+
+
+@dataclass(frozen=True, slots=True)
 class TokenBucket:
     """One token bucket of a rate limiter.
 

@@ -1,0 +1,108 @@
+---
+title: Proxies
+description: TypeScript SDK - Proxy API reference
+---
+
+Configure one SOCKS4 or SOCKS5 proxy for outbound sandbox connections with [`SandboxBuilder.proxy()`](#proxy). Proxy protocols are mutually exclusive.
+
+See [Proxy](/networking/outbound-proxy) for routing behavior, security considerations, and limits.
+
+<Note>Outbound proxies are local-only. Cloud sandbox creation rejects this setting.</Note>
+
+## Typical flow
+
+```typescript
+import { Sandbox } from "microsandbox";
+
+await using sandbox = await Sandbox.builder("worker")
+  .image("python")
+  .proxy((p) => p.socks5("127.0.0.1:1080"))
+  .create();
+```
+
+## SandboxBuilder
+
+### <span id="proxy">proxy()</span>
+
+```typescript
+proxy(configure: (proxy: OutboundProxyBuilder) => Socks4ProxyBuilder | Socks5ProxyBuilder): this
+```
+
+Select and configure the single outbound proxy for the sandbox. The callback receives an [`OutboundProxyBuilder`](#outboundproxybuilder) and must return one protocol-specific builder. Invalid addresses throw while applying the callback.
+
+## OutboundProxyBuilder
+
+Protocol selector passed to [`SandboxBuilder.proxy()`](#proxy).
+
+### <span id="socks4">socks4()</span>
+
+```typescript
+socks4(address: string): Socks4ProxyBuilder
+```
+
+Select a SOCKS4 proxy at `IP:port`. The returned builder can optionally set a user ID.
+
+### <span id="socks5">socks5()</span>
+
+```typescript
+socks5(address: string): Socks5ProxyBuilder
+```
+
+Select a SOCKS5 proxy at `IP:port`. The parent sandbox builder validates and materializes the returned [`Socks5ProxyBuilder`](#socks5proxybuilder).
+
+## Socks4ProxyBuilder
+
+Protocol-specific builder returned by [`OutboundProxyBuilder.socks4()`](#socks4).
+
+### userId()
+
+```typescript
+userId(userId: string): this
+```
+
+Set the optional SOCKS4 user ID. It must contain 1–255 bytes and no null byte. A user ID identifies the caller; it is not a password.
+
+## Socks5ProxyBuilder
+
+Protocol-specific builder returned by [`OutboundProxyBuilder.socks5()`](#socks5). It carries the proxy address and is finalized when returned from the `.proxy()` callback.
+
+### credentials()
+
+```typescript
+credentials(username: string, password: SecretSource): this
+```
+
+Set optional SOCKS5 username/password authentication. Pass `SecretSource.env("SOCKS5_PASSWORD")` as `password`. The username and resolved password must each contain 1–255 bytes.
+
+The host environment variable is read once each time the sandbox starts. Changing it affects the next start, not a sandbox that is already running. `configJson` and the database contain the source reference but never the resolved password.
+
+## SecretSource
+
+### env()
+
+```typescript
+env(variable: string): SecretSource
+```
+
+Create a host environment-variable reference for a SOCKS5 password. Import `SecretSource` from `microsandbox`.
+
+## OutboundProxy
+
+Discriminated outbound proxy value stored in the sandbox's durable network specification. A SOCKS5 password remains a [`SecretSource`](#secretsource) reference in this value; the resolved password is runtime-only.
+
+```typescript
+type OutboundProxy =
+  | {
+      readonly protocol: "socks4";
+      readonly address: string;
+      readonly userId?: string;
+    }
+  | {
+      readonly protocol: "socks5";
+      readonly address: string;
+      readonly credentials?: {
+        readonly username: string;
+        readonly password: SecretSource;
+      };
+    };
+```

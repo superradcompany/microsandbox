@@ -1,0 +1,86 @@
+---
+title: Proxies
+description: Go SDK - Proxy API reference
+---
+
+Configure one SOCKS4 or SOCKS5 proxy for outbound sandbox connections with [`WithProxy`](#m-withproxy). Proxy protocols are mutually exclusive.
+
+See [Proxy](/networking/outbound-proxy) for routing behavior, security considerations, and limits.
+
+<Note>Outbound proxies are local-only. Cloud sandbox creation rejects this setting.</Note>
+
+## Typical flow
+
+```go
+sb, err := m.CreateSandbox(ctx, "worker",
+    m.WithImage("python"),
+    m.WithProxy(m.SOCKS5Proxy("127.0.0.1:1080")),
+)
+```
+
+## Functions
+
+### <span className="msb-recv" id="m-withproxy">m.</span><span className="msb-hn">WithProxy()</span>
+
+```go
+func WithProxy(proxy *OutboundProxy) SandboxOption
+```
+
+Set the single proxy used for outbound sandbox connections.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>proxy</code><a className="msb-type" href="#outboundproxy">*OutboundProxy</a></div>
+    <div className="msb-param-desc">Protocol-specific outbound proxy configuration.</div>
+  </div>
+</div>
+
+### <span className="msb-recv" id="m-socks4proxy">m.</span><span className="msb-hn">SOCKS4Proxy()</span>
+
+```go
+func SOCKS4Proxy(address string, options ...SOCKS4ProxyOptions) *OutboundProxy
+```
+
+Construct a SOCKS4 proxy at `IP:port` for [`WithProxy`](#m-withproxy). Pass `SOCKS4ProxyOptions{UserID: "sandbox"}` to include the optional SOCKS4 user ID. It must contain 1–255 bytes and no null byte; it is an identifier, not a password.
+
+### <span className="msb-recv" id="m-socks5proxy">m.</span><span className="msb-hn">SOCKS5Proxy()</span>
+
+```go
+func SOCKS5Proxy(address string) *OutboundProxy
+```
+
+Construct a SOCKS5 proxy at `IP:port` for [`WithProxy`](#m-withproxy).
+
+### <span className="msb-recv">(*OutboundProxy).</span><span className="msb-hn">Credentials()</span>
+
+```go
+func (p *OutboundProxy) Credentials(username string, password SecretSource) *OutboundProxy
+```
+
+Return a copy configured with SOCKS5 username/password authentication. Call this on a value returned by [`SOCKS5Proxy`](#m-socks5proxy) and pass `SecretSourceEnv("SOCKS5_PASSWORD")` as `password`.
+
+The host environment variable is read once each time the sandbox starts. Changing it affects the next start, not a sandbox that is already running. `ConfigJSON()` and the database contain the source reference but never the resolved password. The username and resolved password must each contain 1–255 bytes.
+
+### <span className="msb-recv">m.</span><span className="msb-hn" id="m-secretsourceenv">SecretSourceEnv()</span>
+
+```go
+func SecretSourceEnv(variable string) SecretSource
+```
+
+Create a host environment-variable reference for a SOCKS5 password.
+
+## OutboundProxy
+
+Opaque outbound proxy configuration constructed with a protocol-specific function. Pass it to [`WithProxy`](#m-withproxy).
+
+## SecretSource
+
+Opaque host-side secret source constructed with [`SecretSourceEnv`](#m-secretsourceenv). Durable configuration contains this source reference, not the resolved password.
+
+## SOCKS4ProxyOptions
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `UserID` | `string` | `""` | Optional user ID sent during the SOCKS4 handshake |

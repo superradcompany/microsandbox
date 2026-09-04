@@ -586,6 +586,16 @@ export declare class NetworkRateLimiterBuilder {
 }
 export type JsNetworkRateLimiterBuilder = NetworkRateLimiterBuilder
 
+/** Selects the protocol for an outbound proxy. */
+export declare class OutboundProxyBuilder {
+  constructor()
+  /** Select a SOCKS4 proxy at `address`. */
+  socks4(address: string): Socks4ProxyBuilder
+  /** Select a SOCKS5 proxy at `address`. */
+  socks5(address: string): Socks5ProxyBuilder
+}
+export type JsOutboundProxyBuilder = OutboundProxyBuilder
+
 /** Fluent builder for an ordered list of pre-boot rootfs patches. */
 export declare class PatchBuilder {
   constructor()
@@ -1178,6 +1188,8 @@ export declare class SandboxBuilder {
   disableNetwork(): this
   /** Configure networking via a callback. */
   network(configure: (arg: NetworkBuilder) => NetworkBuilder): this
+  /** Configure the single proxy used for outbound sandbox connections. */
+  proxy(configure: (arg: OutboundProxyBuilder) => Socks4ProxyBuilder | Socks5ProxyBuilder): this
   /** Publish a TCP port from host -> guest. */
   port(hostPort: number, guestPort: number): this
   /** Publish a TCP port from host -> guest on a specific host bind address. */
@@ -1594,6 +1606,20 @@ export declare class SnapshotHandle {
   remove(opts?: SnapshotRemoveOptions | undefined | null): Promise<void>
 }
 export type JsSnapshotHandle = SnapshotHandle
+
+/** Builds a SOCKS4 outbound proxy. */
+export declare class Socks4ProxyBuilder {
+  /** Set the optional user ID sent during the SOCKS4 handshake. */
+  userId(userId: string): this
+}
+export type JsSocks4ProxyBuilder = Socks4ProxyBuilder
+
+/** Builds a SOCKS5 outbound proxy. */
+export declare class Socks5ProxyBuilder {
+  /** Set username authentication and a host-side password source. */
+  credentials(username: string, password: SecretSourceInput): this
+}
+export type JsSocks5ProxyBuilder = Socks5ProxyBuilder
 
 /** Native in-process SSH client session. */
 export declare class SshClient {
@@ -2334,6 +2360,14 @@ export interface SecretModifySpec {
   store?: string
   placeholder?: string
   allowedHosts?: Array<string>
+}
+
+/** Host-side source for secret material. */
+export interface SecretSourceInput {
+  /** Source kind. Currently only `env` is supported for proxy credentials. */
+  kind: string
+  /** Host environment variable name. */
+  var: string
 }
 
 /**

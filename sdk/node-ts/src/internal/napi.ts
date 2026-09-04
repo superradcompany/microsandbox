@@ -54,6 +54,9 @@ export interface NativeBindings {
   readonly SecretBuilder: NapiBuilderCtor<NapiSecretBuilder>;
   readonly ViolationActionBuilder: NapiBuilderCtor<NapiViolationActionBuilder>;
   readonly NetworkBuilder: NapiBuilderCtor<NapiNetworkBuilder>;
+  readonly OutboundProxyBuilder: NapiBuilderCtor<NapiOutboundProxyBuilder>;
+  readonly Socks4ProxyBuilder: { prototype: NapiSocks4ProxyBuilder };
+  readonly Socks5ProxyBuilder: { prototype: NapiSocks5ProxyBuilder };
   readonly NetworkPolicyBuilder: NapiBuilderCtor<NapiNetworkPolicyBuilder>;
   readonly RuleBuilder: NapiBuilderCtor<NapiRuleBuilder>;
   readonly RuleDestinationBuilder: NapiBuilderCtor<NapiRuleDestinationBuilder>;
@@ -212,6 +215,11 @@ export interface NapiSandboxBuilderSetters {
   disableNetwork(): this;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   network(configure: (b: any) => any): this;
+  proxy(
+    configure: (
+      b: NapiOutboundProxyBuilder,
+    ) => NapiSocks4ProxyBuilder | NapiSocks5ProxyBuilder,
+  ): this;
   port(host: number, guest: number): this;
   portBind(bind: string, host: number, guest: number): this;
   portUdp(host: number, guest: number): this;
@@ -994,6 +1002,22 @@ export interface NapiNetworkBuilder {
   build(): NetworkConfig;
 }
 
+export interface NapiOutboundProxyBuilder {
+  socks4(address: string): NapiSocks4ProxyBuilder;
+  socks5(address: string): NapiSocks5ProxyBuilder;
+}
+
+export interface NapiSocks4ProxyBuilder {
+  userId(userId: string): this;
+}
+
+export interface NapiSocks5ProxyBuilder {
+  credentials(
+    username: string,
+    password: { kind: "env"; var: string },
+  ): this;
+}
+
 export interface NapiRateLimiterBuilder {
   bandwidth(sizeBytes: number, refillTimeMs: number): this;
   bandwidthBurst(sizeBytes: number): this;
@@ -1005,6 +1029,7 @@ export interface NapiNetworkRateLimiterBuilder {
   egress(configure: (b: NapiRateLimiterBuilder) => NapiRateLimiterBuilder): this;
   ingress(configure: (b: NapiRateLimiterBuilder) => NapiRateLimiterBuilder): this;
 }
+
 
 export interface NapiInterfaceOverridesBuilder {
   mac(mac: string): this;

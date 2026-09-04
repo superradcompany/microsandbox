@@ -1,6 +1,6 @@
 ---
-title: Host Socket
-sidebarTitle: "Host Socket"
+title: VSock
+sidebarTitle: "VSock"
 description: Connect a sandbox to a Unix socket or Windows named pipe
 icon: "arrows-left-right"
 ---
@@ -87,3 +87,7 @@ Use `vsock_dgram`, `vsockDgram`, or a datagram `VsockRoute` when you need datagr
 - Port `123` is reserved. Port `0` and `u32::MAX` are not valid.
 
 A route gives sandbox processes access to whatever the host service allows. Avoid exposing powerful services such as the Docker socket or an SSH agent unless the service has its own authentication and narrow permissions.
+
+## Reference
+
+For exact VSock APIs, see [TypeScript](/sdk/typescript/vsock), [Rust](/sdk/rust/vsock), [Python](/sdk/python/vsock), [Go](/sdk/go/vsock), or [Ruby](/sdk/ruby/vsock). For the CLI route syntax, see [Sandbox commands](/cli/sandbox-commands#vsock).

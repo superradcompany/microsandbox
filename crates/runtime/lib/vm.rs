@@ -23,12 +23,16 @@ use microsandbox_filesystem::{
     HostPermissions, PassthroughConfig, PassthroughFs, SingleFileFs, StatVirtualization,
 };
 use microsandbox_metrics::{ActivateSlot, MetricsRegistry, ReleaseMode};
+#[cfg(feature = "net")]
+use microsandbox_network::{ResolvedNetworkConfig, network::SmoltcpNetwork};
 use microsandbox_protocol::{
     bootstrap::{BootstrapBlockRoot, GuestBootstrap},
     codec,
     message::{Message, MessageType},
 };
 use microsandbox_types::CpuPlacement;
+#[cfg(feature = "net")]
+use microsandbox_types::DeploymentProfile;
 #[cfg(windows)]
 use microsandbox_vsock::WindowsNamedPipePortBackend;
 #[cfg(unix)]
@@ -371,13 +375,13 @@ pub struct VmConfig {
     /// Arguments to the executable.
     pub exec_args: Vec<String>,
 
-    /// Network configuration for the smoltcp in-process stack.
+    /// Fully resolved network configuration for the smoltcp in-process stack.
     #[cfg(feature = "net")]
-    pub network: microsandbox_network::config::NetworkConfig,
+    pub network: ResolvedNetworkConfig,
 
     /// Host-runtime isolation profile enforced by the network backend.
     #[cfg(feature = "net")]
-    pub deployment_profile: microsandbox_types::DeploymentProfile,
+    pub deployment_profile: DeploymentProfile,
 
     /// Sandbox slot for deterministic network address derivation.
     #[cfg(feature = "net")]
@@ -1739,7 +1743,7 @@ fn build_vm(
     #[cfg(unix)]
     if !vm.vsock.is_empty() {
         #[cfg(feature = "net")]
-        if vm.deployment_profile == microsandbox_types::DeploymentProfile::MultiTenant {
+        if vm.deployment_profile == DeploymentProfile::MultiTenant {
             return Err(RuntimeError::Custom(
                 "host vsock routes are disabled for multi-tenant deployments".to_string(),
             ));
@@ -1793,7 +1797,7 @@ fn build_vm(
     #[cfg(windows)]
     if !vm.vsock.is_empty() {
         #[cfg(feature = "net")]
-        if vm.deployment_profile == microsandbox_types::DeploymentProfile::MultiTenant {
+        if vm.deployment_profile == DeploymentProfile::MultiTenant {
             return Err(RuntimeError::Custom(
                 "host vsock routes are disabled for multi-tenant deployments".to_string(),
             ));
@@ -1827,26 +1831,24 @@ fn build_vm(
 
     // Network.
     #[cfg(feature = "net")]
-    if vm.network.enabled {
+    if vm.network.config().enabled {
         let _ = rustls::crypto::ring::default_provider().install_default();
         vm.network
+            .config()
             .secrets
             .validate()
             .map_err(|err| RuntimeError::Custom(format!("invalid network secrets: {err}")))?;
-        let rate_limiters = to_krun_network_rate_limiters(&vm.network);
+        let rate_limiters = to_krun_network_rate_limiters(vm.network.config());
 
-        let mut network = microsandbox_network::network::SmoltcpNetwork::new_with_profile(
-            vm.network.clone(),
-            vm.sandbox_slot,
-            vm.deployment_profile,
-        )
-        .map_err(|err| RuntimeError::Custom(format!("initialize network: {err}")))?;
+        let mut network =
+            SmoltcpNetwork::new(vm.network.clone(), vm.sandbox_slot, vm.deployment_profile)
+                .map_err(|err| RuntimeError::Custom(format!("initialize network: {err}")))?;
         network_termination_handle = Some(network.termination_handle());
         network_metrics_handle = Some(network.metrics_handle());
         // Only sandboxes that booted with secrets can be live-reconfigured:
         // new placeholders cannot be introduced into a running guest, so a
         // secret-free boot never needs the secrets side of the control socket.
-        if !vm.network.secrets.secrets.is_empty() {
+        if !vm.network.config().secrets.secrets.is_empty() {
             network_secrets_handle = Some(network.secrets_handle());
         }
 

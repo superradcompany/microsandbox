@@ -127,6 +127,8 @@ pub use microsandbox_network::dns::Nameserver;
 pub use microsandbox_network::policy::{
     Action as NetworkAction, NetworkPolicy, NetworkProfile, Rule as NetworkRule,
 };
+#[cfg(feature = "net")]
+pub use microsandbox_network::{OutboundProxy, Socks5Credentials};
 pub use microsandbox_runtime::logging::LogLevel;
 pub use microsandbox_types::{CpuPlacement, PullPolicy};
 #[cfg(feature = "net")]

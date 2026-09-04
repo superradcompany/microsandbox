@@ -410,3 +410,7 @@ msb run ghcr.io/superradcompany/debian-systemd:12 \
 Most slim Docker base images do not include systemd or another full init. Use an image that ships the init you want, or build a small custom image that installs it.
 
 `--init` controls PID 1. `--entrypoint` and the trailing command normally control the workload you run after boot, so the two can be combined. An image-declared init entrypoint such as `/init` is the special case. With `--init auto` and attached `msb run`, microsandbox passes the trailing command to PID 1 as part of the image's own launch contract.
+
+## Reference
+
+For exact bootstrap, patch, and init APIs, see [TypeScript](/sdk/typescript/sandbox), [Rust](/sdk/rust/sandbox), [Python](/sdk/python/sandbox), or [Go](/sdk/go/sandbox). For CLI configuration and creation flags, see [Configuration file](/cli/configuration) and [Sandbox commands](/cli/sandbox-commands).

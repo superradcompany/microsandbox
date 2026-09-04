@@ -753,6 +753,7 @@ func TestFFIWireShape_NetworkCustomRules(t *testing.T) {
 			IPv4Pool: "172.31.240.0/24",
 			IPv6Pool: "fd7a:115c:a1e0:100::/56",
 		}),
+		WithProxy(SOCKS5Proxy("127.0.0.1:1080")),
 	)
 	net := mustField(t, got, "network").(map[string]any)
 
@@ -784,6 +785,21 @@ func TestFFIWireShape_NetworkCustomRules(t *testing.T) {
 	ns := dns["nameservers"].([]any)
 	if len(ns) != 1 || ns[0] != "1.1.1.1:53" {
 		t.Fatalf("dns.nameservers = %v", ns)
+	}
+	proxy := mustField(t, got, "proxy").(map[string]any)
+	if proxy["protocol"] != "socks5" || proxy["address"] != "127.0.0.1:1080" {
+		t.Fatalf("proxy = %#v", proxy)
+	}
+}
+
+func TestFFIWireShape_SOCKS4Proxy(t *testing.T) {
+	got := marshalCreateOptions(t,
+		WithImage("alpine"),
+		WithProxy(SOCKS4Proxy("127.0.0.1:1080", SOCKS4ProxyOptions{UserID: "sandbox"})),
+	)
+	proxy := mustField(t, got, "proxy").(map[string]any)
+	if proxy["protocol"] != "socks4" || proxy["address"] != "127.0.0.1:1080" || proxy["user_id"] != "sandbox" {
+		t.Fatalf("proxy = %#v", proxy)
 	}
 }
 
@@ -903,6 +919,18 @@ func TestFFIWireShape_NetworkRateLimiters(t *testing.T) {
 	}
 }
 
+func TestFFIWireShape_SOCKS5Credentials(t *testing.T) {
+	got := marshalCreateOptions(t,
+		WithImage("alpine"),
+		WithProxy(SOCKS5Proxy("127.0.0.1:1080").Credentials("sandbox", SecretSourceEnv("SOCKS5_PASSWORD"))),
+	)
+	proxy := mustField(t, got, "proxy").(map[string]any)
+	passwordSource, ok := proxy["password_source"].(map[string]any)
+	if proxy["username"] != "sandbox" || !ok || passwordSource["kind"] != "env" || passwordSource["var"] != "SOCKS5_PASSWORD" {
+		t.Fatalf("proxy credentials = %#v", proxy)
+	}
+}
+
 // The Rust side relies on serde(default), so zero-valued Go scalar fields must
 // not reach the wire. Explicit optional values use pointers when zero is valid
 // on the wire for validation.
@@ -914,7 +942,7 @@ func TestFFIWireShape_EmptyConfigOmitsOptionalFields(t *testing.T) {
 		"thp",
 		"hostname", "user", "replace", "detached", "env", "scripts",
 		"ports", "ports_udp", "vsock", "network", "secrets", "patches", "volumes",
-		"init", "registry_auth", "registry_insecure", "registry_ca_certs", "root_disk",
+		"proxy", "init", "registry_auth", "registry_insecure", "registry_ca_certs", "root_disk",
 	} {
 		if _, present := got[key]; present {
 			body, _ := json.Marshal(got)

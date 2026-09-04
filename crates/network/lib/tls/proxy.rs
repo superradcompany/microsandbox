@@ -19,6 +19,7 @@ use super::sni;
 use super::state::TlsState;
 use crate::netstack::shared::SharedState;
 use crate::policy::{EgressEvaluation, HostnameSource, NetworkPolicy, Protocol};
+use crate::proxy::ResolvedOutboundProxy;
 use crate::secrets::config::ViolationAction;
 use crate::secrets::handler::SecretsHandler;
 use crate::tcp::{connection::ProxyConnectState, upstream::UpstreamTcpTarget};
@@ -47,6 +48,7 @@ pub(crate) struct TlsProxy {
     tls_state: Arc<TlsState>,
     network_policy: Arc<NetworkPolicy>,
     proxy_connect: Arc<ProxyConnectState>,
+    outbound_proxy: Option<Arc<ResolvedOutboundProxy>>,
     /// Pre-connected upstream; when `Some`, skips dialing `connect_target`.
     upstream_stream: Option<TcpStream>,
     /// Hostname from a CONNECT authority that must match the ClientHello SNI.
@@ -73,6 +75,7 @@ impl TlsProxy {
         tls_state: Arc<TlsState>,
         network_policy: Arc<NetworkPolicy>,
         proxy_connect: Arc<ProxyConnectState>,
+        outbound_proxy: Option<Arc<ResolvedOutboundProxy>>,
     ) -> Self {
         Self {
             guest_dst,
@@ -83,6 +86,7 @@ impl TlsProxy {
             tls_state,
             network_policy,
             proxy_connect,
+            outbound_proxy,
             upstream_stream: None,
             expected_sni: None,
             via_connect: false,
@@ -139,6 +143,7 @@ impl TlsProxy {
             network_policy,
             proxy_connect,
             upstream_stream,
+            outbound_proxy,
             expected_sni,
             via_connect,
             initial_buf,
@@ -200,6 +205,7 @@ impl TlsProxy {
                 shared,
                 proxy_connect,
                 upstream_stream,
+                outbound_proxy,
             )
             .await
         } else {
@@ -216,6 +222,7 @@ impl TlsProxy {
                 tls_state,
                 proxy_connect,
                 upstream_stream,
+                outbound_proxy,
             )
             .await
         }
@@ -227,6 +234,7 @@ impl TlsProxy {
 //--------------------------------------------------------------------------------------------------
 
 /// Bypass mode: plain TCP splice, no TLS termination.
+#[allow(clippy::too_many_arguments)]
 async fn bypass_relay(
     connect_target: UpstreamTcpTarget,
     initial_buf: Vec<u8>,
@@ -235,10 +243,15 @@ async fn bypass_relay(
     shared: Arc<SharedState>,
     proxy_connect: Arc<ProxyConnectState>,
     upstream_stream: Option<TcpStream>,
+    outbound_proxy: Option<Arc<ResolvedOutboundProxy>>,
 ) -> io::Result<()> {
     let mut server = match upstream_stream {
         Some(s) => s,
-        None => connect_target.connect(&proxy_connect, &shared).await?,
+        None => {
+            connect_target
+                .connect(&proxy_connect, &shared, outbound_proxy.as_deref())
+                .await?
+        }
     };
     server.write_all(&initial_buf).await?;
 
@@ -293,6 +306,7 @@ pub(crate) async fn intercept_relay(
     tls_state: Arc<TlsState>,
     proxy_connect: Arc<ProxyConnectState>,
     upstream_stream: Option<TcpStream>,
+    outbound_proxy: Option<Arc<ResolvedOutboundProxy>>,
 ) -> io::Result<()> {
     // Per-connection snapshot: live secret updates apply to later connections.
     let secrets = tls_state.secrets.load();
@@ -353,7 +367,11 @@ pub(crate) async fn intercept_relay(
     // Connect to real server with TLS.
     let server_stream = match upstream_stream {
         Some(s) => s,
-        None => connect_target.connect(&proxy_connect, &shared).await?,
+        None => {
+            connect_target
+                .connect(&proxy_connect, &shared, outbound_proxy.as_deref())
+                .await?
+        }
     };
     let server_name = ServerName::try_from(sni_name.to_string())
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;

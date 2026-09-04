@@ -153,6 +153,13 @@ pub enum SecretSource {
     },
 }
 
+impl SecretSource {
+    /// Creates a host environment-variable source.
+    pub fn env(var: impl Into<String>) -> Self {
+        Self::Env { var: var.into() }
+    }
+}
+
 /// Serializable dry-run or apply plan for a sandbox modification.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]

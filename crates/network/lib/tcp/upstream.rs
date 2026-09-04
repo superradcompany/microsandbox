@@ -7,6 +7,7 @@ use tokio::net::TcpStream;
 
 use super::connection::ProxyConnectState;
 use crate::netstack::shared::SharedState;
+use crate::proxy::ResolvedOutboundProxy;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -46,12 +47,21 @@ impl UpstreamTcpTarget {
     }
 
     /// Connect and publish the final outcome to the guest proxy state.
+    ///
+    /// When `outbound_proxy` is set, it dials `primary` through that proxy
+    /// instead of connecting directly; the address-family fallback only
+    /// applies to direct dials.
     pub(crate) async fn connect(
         self,
         proxy_connect: &ProxyConnectState,
         shared: &SharedState,
+        outbound_proxy: Option<&ResolvedOutboundProxy>,
     ) -> io::Result<TcpStream> {
-        let stream = match self.dial().await {
+        let result = match outbound_proxy {
+            Some(proxy) => proxy.connect(self.primary).await,
+            None => self.dial().await,
+        };
+        let stream = match result {
             Ok(stream) => stream,
             Err(error) => {
                 proxy_connect.mark_upstream_connect_failed();
@@ -132,7 +142,7 @@ mod tests {
         let shared = SharedState::new(4);
 
         let stream = target
-            .connect(&proxy_connect, &shared)
+            .connect(&proxy_connect, &shared, None)
             .await
             .expect("IPv4 loopback fallback should connect");
 

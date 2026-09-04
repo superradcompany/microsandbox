@@ -1,6 +1,6 @@
 use microsandbox::sandbox::{
     CpuPlacement, DeploymentProfile, NetworkPolicy, Patch, PullPolicy, SandboxBuilder,
-    SecurityProfile, TransparentHugePagePolicy,
+    SecretSource, SecurityProfile, TransparentHugePagePolicy,
 };
 use microsandbox::{LogLevel, RegistryAuth};
 use microsandbox_network::dns::Nameserver;
@@ -50,6 +50,7 @@ const KNOWN_CREATE_KWARGS: &[&str] = &[
     "ports",
     "vsock",
     "network",
+    "proxy",
     "secrets",
     "on_secret_violation",
     "detached",
@@ -566,6 +567,69 @@ pub fn sandbox_builder_from_args(
     if let Some(network) = kwargs.get_item("network")?.filter(|v| !v.is_none()) {
         let net_dict = config_dict(&network, "Network")?;
         builder = apply_network(builder, &net_dict)?;
+    }
+
+    // Outbound proxy.
+    if let Some(proxy) = kwargs.get_item("proxy")?
+        && !proxy.is_none()
+    {
+        let proxy = config_dict(&proxy, "OutboundProxy")?;
+        let protocol = extract_required::<String>(&proxy, "protocol")?;
+        let address = extract_required::<String>(&proxy, "address")?;
+        builder = match protocol.as_str() {
+            "socks4" => {
+                let user_id = extract_opt::<String>(&proxy, "user_id")?;
+                builder.proxy(move |p| {
+                    let proxy = p.socks4(address);
+                    match user_id {
+                        Some(user_id) => proxy.user_id(user_id),
+                        None => proxy,
+                    }
+                })
+            }
+            "socks5" => {
+                let credentials = proxy
+                    .get_item("credentials")?
+                    .filter(|value| !value.is_none())
+                    .map(|value| config_dict(&value, "SOCKS5 credentials"))
+                    .transpose()?;
+                let username = credentials
+                    .as_ref()
+                    .map(|value| extract_required::<String>(value, "username"))
+                    .transpose()?;
+                let password = credentials
+                    .as_ref()
+                    .map(|value| {
+                        let password = value.get_item("password")?.ok_or_else(|| {
+                            pyo3::exceptions::PyValueError::new_err(
+                                "SOCKS5 credentials requires password",
+                            )
+                        })?;
+                        let source = config_dict(&password, "SOCKS5 password source")?;
+                        let kind = extract_required::<String>(&source, "kind")?;
+                        if kind != "env" {
+                            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                                "unsupported SOCKS5 password source {kind:?}; only env is supported"
+                            )));
+                        }
+                        let var = extract_required::<String>(&source, "var")?;
+                        Ok(SecretSource::env(var))
+                    })
+                    .transpose()?;
+                builder.proxy(move |p| {
+                    let proxy = p.socks5(address);
+                    match (username, password) {
+                        (Some(username), Some(password)) => proxy.credentials(username, password),
+                        _ => proxy,
+                    }
+                })
+            }
+            _ => {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "unsupported outbound proxy protocol {protocol:?}"
+                )));
+            }
+        };
     }
 
     // Secrets.

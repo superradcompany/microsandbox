@@ -134,4 +134,8 @@ for r in &reports {
 let report = sandbox_metrics_report_local(&local, "my-app").await?;
 ```
 
-Report APIs for TypeScript, Python, and Go will follow.
+Metrics reports are currently available only in the Rust SDK.
+
+## Reference
+
+For exact per-sandbox metrics APIs, see [TypeScript](/sdk/typescript/sandbox), [Rust](/sdk/rust/sandbox), [Python](/sdk/python/sandbox), or [Go](/sdk/go/sandbox). For local reports and fleet snapshots, see [`msb metrics`](/cli/sandbox-commands#msb-metrics).

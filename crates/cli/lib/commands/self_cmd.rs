@@ -3479,23 +3479,10 @@ mod tests {
         .unwrap();
         Migrator::up(db.inner(), None).await.unwrap();
 
-        // The newest owner-compatibility marker has no schema objects of its
-        // own. With no persisted sandboxes, its preflight permits rollback and
-        // removes only the migration record.
-        rollback_schema(db.inner(), 1).await.unwrap();
-
-        let rows = db
-            .query_all_raw(Statement::from_sql_and_values(
-                DatabaseBackend::Sqlite,
-                "SELECT version FROM seaql_migrations WHERE version = ?",
-                [schema_metadata::MOUNT_OWNER_CONFIG_MIGRATION_ID.into()],
-            ))
-            .await
-            .unwrap();
-        assert!(rows.is_empty(), "mount owner marker should be rolled back");
-
-        // The network-slot migration leaves its compatible SQLite column and
-        // constraints in place, but removes the migration record.
+        // The backdated network-slot migration was released after the
+        // owner-compatibility marker, so it is the first migration rolled back.
+        // It leaves its compatible SQLite column and constraints in place, but
+        // removes the migration record.
         rollback_schema(db.inner(), 1).await.unwrap();
 
         let rows = db
@@ -3524,6 +3511,21 @@ mod tests {
                 .any(|row| row.try_get_by_index::<String>(1).unwrap() == "network_slot"),
             "network slot column should remain compatible after rollback"
         );
+
+        // The owner-compatibility marker has no schema objects of its own. With
+        // no persisted sandboxes, its preflight permits rollback and removes
+        // only the migration record.
+        rollback_schema(db.inner(), 1).await.unwrap();
+
+        let rows = db
+            .query_all_raw(Statement::from_sql_and_values(
+                DatabaseBackend::Sqlite,
+                "SELECT version FROM seaql_migrations WHERE version = ?",
+                [schema_metadata::MOUNT_OWNER_CONFIG_MIGRATION_ID.into()],
+            ))
+            .await
+            .unwrap();
+        assert!(rows.is_empty(), "mount owner marker should be rolled back");
 
         // Shared CPU assignment rows downgrade first. Active sandboxes are
         // prohibited during schema rollback, so the allocation table is empty

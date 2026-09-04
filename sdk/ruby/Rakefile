@@ -129,6 +129,12 @@ namespace :cargo do
       microsandbox = { path = "../rust" }
     TOML
     File.write(PATCH_STATE, patch_config_digest)
+
+    # tinyvec 1.13.0 does not import the vec! macro for alloc-only builds.
+    # Keep the temporary patched graph on the version already proven by the
+    # standalone lockfile until an upstream fix supersedes the broken release.
+    sh "cargo", "update", "--manifest-path", "ext/microsandbox/Cargo.toml",
+       "-p", "tinyvec", "--precise", "1.12.0"
   end
 
   desc "Undo cargo:patch_workspace: drop the patch config, restore the lockfile"

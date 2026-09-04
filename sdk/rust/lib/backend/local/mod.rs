@@ -1127,6 +1127,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_connect_and_migrate_upgrades_v0_6_15_prefix() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_dir = tmp.path().join("db");
+        let db_path = db_dir.join(microsandbox_utils::DB_FILENAME);
+        std::fs::create_dir_all(&db_dir).unwrap();
+
+        let db = microsandbox_db::connection::DbWriteConnection::open(
+            &db_path,
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+        let released_prefix_len = schema_metadata::migration_ids()
+            .position(|id| id == schema_metadata::SHARED_CPU_ALLOCATION_MIGRATION_ID)
+            .unwrap()
+            + 1;
+        Migrator::up(db.inner(), Some(released_prefix_len as u32))
+            .await
+            .unwrap();
+
+        // v0.6.15 ended with this schema-free compatibility marker. Insert
+        // its migration row to reproduce a database last opened by v0.6.15.
+        db.inner()
+            .execute_raw(Statement::from_sql_and_values(
+                DatabaseBackend::Sqlite,
+                "INSERT INTO seaql_migrations (version, applied_at) VALUES (?, ?)",
+                [
+                    schema_metadata::MOUNT_OWNER_CONFIG_MIGRATION_ID.into(),
+                    1_i64.into(),
+                ],
+            ))
+            .await
+            .unwrap();
+        drop(db);
+
+        let pools = connect_and_migrate(
+            &db_dir,
+            &DatabaseConfig::default(),
+            &tmp.path().join("snapshots"),
+        )
+        .await
+        .unwrap();
+        let network_slot_migration = pools
+            .read()
+            .query_one_raw(Statement::from_sql_and_values(
+                DatabaseBackend::Sqlite,
+                "SELECT version FROM seaql_migrations WHERE version = ?",
+                [schema_metadata::SANDBOX_NETWORK_SLOT_MIGRATION_ID.into()],
+            ))
+            .await
+            .unwrap();
+        let network_slot_column = pools
+            .read()
+            .query_one_raw(Statement::from_string(
+                DatabaseBackend::Sqlite,
+                "SELECT name FROM pragma_table_info('sandbox') WHERE name = 'network_slot'"
+                    .to_owned(),
+            ))
+            .await
+            .unwrap();
+
+        assert!(network_slot_migration.is_some());
+        assert!(network_slot_column.is_some());
+    }
+
+    #[tokio::test]
     async fn test_connect_and_migrate_accepts_equal_migration_timestamps() {
         let tmp = tempfile::tempdir().unwrap();
         let db_dir = tmp.path().join("db");

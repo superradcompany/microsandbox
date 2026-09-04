@@ -107,7 +107,7 @@ The returned `Sandbox` is an async context manager. On the local backend, `async
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>**kwargs</code><a className="msb-type" href="#sandboxconfig">SandboxConfig</a></div>
-    <div className="msb-param-desc">Configuration fields: <code>image</code>, <code>cpus</code>, <code>memory</code>, <code>volumes</code>, <code>ports</code>, <code>network</code>, <code>secrets</code>, <code>detached</code>, and more.</div>
+    <div className="msb-param-desc">Configuration fields: <code>image</code>, <code>cpus</code>, <code>memory</code>, <code>volumes</code>, <code>ports</code>, <code>network</code>, <code>proxy</code>, <code>secrets</code>, <code>detached</code>, and more.</div>
   </div>
 </div>
 
@@ -1825,6 +1825,7 @@ The keyword arguments accepted by [`create()`](#sandbox-create) and [`create_wit
 | patches | `Sequence[`[`PatchConfig`](#patchconfig)`]` | `[]` | Rootfs modifications applied before boot |
 | ports | `Mapping[int, int] \| Sequence[`[`PortBinding`](/sdk/python/networking#portbinding)`]` | `{}` | Port mappings. Mapping form is TCP and binds to `127.0.0.1`; use `PortBinding` for explicit bind addresses or UDP |
 | network | [`Network`](/sdk/python/networking#network) | public profile | Network policy and configuration |
+| proxy | [`OutboundProxy`](/sdk/python/proxies#outboundproxy)` \| None` | `None` | Single proxy used for outbound connections. See [Proxies](/sdk/python/proxies) |
 | secrets | `Sequence[`[`SecretEntry`](/sdk/python/secrets#secretentry)`]` | `[]` | Secret injection |
 | on_secret_violation | [`ViolationAction`](/sdk/python/secrets#violationaction)` \| `[`ViolationPolicy`](/sdk/python/secrets#violationpolicy) | `BLOCK_AND_LOG` | Sandbox-wide default action when a secret placeholder would leak to a non-eligible destination. Shorthand for `Network.on_secret_violation`; if both are provided, this top-level value takes precedence. See [Violation policy](/sdk/python/secrets#violationpolicy) |
 | detached | `bool` | `False` | If `True`, spawn the sandbox in detached mode; call [`detach()`](#sb-detach) before dropping the returned handle when it should keep running |

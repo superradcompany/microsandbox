@@ -383,6 +383,29 @@ func TestWithNetworkNilClearsPolicy(t *testing.T) {
 	}
 }
 
+func TestWithProxy(t *testing.T) {
+	proxy := SOCKS5Proxy("127.0.0.1:1080")
+	var o SandboxConfig
+	WithProxy(proxy)(&o)
+	if o.Proxy != proxy {
+		t.Error("WithProxy should set the Proxy pointer")
+	}
+}
+
+func TestSOCKS4ProxyOptions(t *testing.T) {
+	proxy := SOCKS4Proxy("127.0.0.1:1080", SOCKS4ProxyOptions{UserID: "sandbox"})
+	if proxy.protocol != "socks4" || proxy.address != "127.0.0.1:1080" || proxy.userID != "sandbox" {
+		t.Fatalf("SOCKS4Proxy: got %+v", proxy)
+	}
+}
+
+func TestSOCKS5ProxyCredentials(t *testing.T) {
+	proxy := SOCKS5Proxy("127.0.0.1:1080").Credentials("sandbox", SecretSourceEnv("SOCKS5_PASSWORD"))
+	if proxy.protocol != "socks5" || proxy.username != "sandbox" || proxy.password.kind != "env" || proxy.password.varName != "SOCKS5_PASSWORD" || !proxy.hasCredentials {
+		t.Fatalf("SOCKS5Proxy credentials: got %+v", proxy)
+	}
+}
+
 func TestNetworkPolicyFactory(t *testing.T) {
 	if got := NetworkPolicy.None(); got.DefaultEgress != PolicyActionDeny || got.DefaultIngress != PolicyActionDeny {
 		t.Fatalf("None defaults = %q/%q", got.DefaultEgress, got.DefaultIngress)

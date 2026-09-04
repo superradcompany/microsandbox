@@ -1,0 +1,47 @@
+---
+title: VSock
+description: Go SDK - VSock API reference
+---
+
+Expose a host Unix socket or local Windows named pipe to a sandbox over virtio-vsock. See [VSock](/networking/host-sockets) for guest connection details, platform support, and security considerations.
+
+<Note>VSock routes are local-only and unavailable with the multi-tenant deployment profile.</Note>
+
+## Typical flow
+
+```go
+sandbox, err := m.CreateSandbox(ctx, "worker",
+    m.WithImage("alpine"),
+    m.WithVsock(m.VsockRoute{
+        HostSocket: "/run/host-api.sock",
+        Port:       5000,
+    }),
+)
+```
+
+## Functions
+
+### <span className="msb-recv" id="m-withvsock">m.</span><span className="msb-hn">WithVsock()</span>
+
+```go
+func WithVsock(routes ...VsockRoute) SandboxOption
+```
+
+Append one or more guest-to-host VSock routes to the sandbox configuration.
+
+## VsockRoute
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `HostSocket` | `string` | — | Existing Unix socket or local Windows named-pipe path |
+| `Port` | `uint32` | — | Guest-facing port on host CID `2` |
+| `SocketType` | `VsockSocketType` | `""` (stream) | Stream or datagram message semantics |
+
+Use `VsockSocketTypeDgram` for a datagram route. Datagram routes are unavailable on Windows. Host paths must be absolute, and each socket type and port pair must be unique.
+
+## VsockSocketType
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `VsockSocketTypeStream` | `"stream"` | Reliable, ordered byte stream |
+| `VsockSocketTypeDgram` | `"dgram"` | Best-effort messages with preserved datagram boundaries |

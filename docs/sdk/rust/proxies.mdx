@@ -1,0 +1,101 @@
+---
+title: Proxies
+description: Rust SDK - Proxy API reference
+---
+
+Configure one SOCKS4 or SOCKS5 proxy for outbound sandbox connections with [`SandboxBuilder::proxy()`](#proxy). Proxy protocols are mutually exclusive.
+
+See [Proxy](/networking/outbound-proxy) for routing behavior, security considerations, and limits.
+
+<Note>Outbound proxies are local-only. Cloud sandbox creation rejects this setting.</Note>
+
+## Typical flow
+
+```rust
+use microsandbox::Sandbox;
+
+let sandbox = Sandbox::builder("worker")
+    .image("python")
+    .proxy(|p| p.socks5("127.0.0.1:1080"))
+    .create()
+    .await?;
+```
+
+## SandboxBuilder
+
+### <span id="proxy">proxy()</span>
+
+```rust
+fn proxy<P>(self, configure: impl FnOnce(OutboundProxyBuilder) -> P) -> Self
+where
+    P: OutboundProxyConfig
+```
+
+Select and configure the single outbound proxy for the sandbox. The callback receives an [`OutboundProxyBuilder`](#outboundproxybuilder) and must return one protocol-specific builder.
+
+Invalid proxy configuration is retained by the sandbox builder and returned from `build()` or `create()` as `MicrosandboxError::NetworkBuilder(BuildError::InvalidOutboundProxy)`.
+
+## OutboundProxyBuilder
+
+Protocol selector passed to [`SandboxBuilder::proxy()`](#proxy).
+
+### <span id="socks4">socks4()</span>
+
+```rust
+fn socks4(self, address: impl Into<String>) -> Socks4ProxyBuilder
+```
+
+Select a SOCKS4 proxy at `IP:port`. The returned builder can optionally set a user ID.
+
+### <span id="socks5">socks5()</span>
+
+```rust
+fn socks5(self, address: impl Into<String>) -> Socks5ProxyBuilder
+```
+
+Select a SOCKS5 proxy at `IP:port`. The parent sandbox builder validates and materializes the returned [`Socks5ProxyBuilder`](#socks5proxybuilder).
+
+## Socks4ProxyBuilder
+
+Protocol-specific builder returned by [`OutboundProxyBuilder::socks4()`](#socks4).
+
+### user_id()
+
+```rust
+fn user_id(self, user_id: impl Into<String>) -> Self
+```
+
+Set the optional SOCKS4 user ID. It must contain 1–255 bytes and no null byte. A user ID identifies the caller; it is not a password.
+
+## Socks5ProxyBuilder
+
+Protocol-specific builder returned by [`OutboundProxyBuilder::socks5()`](#socks5). It carries the proxy address and is finalized when returned from the `.proxy()` callback.
+
+### credentials()
+
+```rust
+fn credentials(self, username: impl Into<String>, password: SecretSource) -> Self
+```
+
+Set optional SOCKS5 username/password authentication. Pass `SecretSource::env("SOCKS5_PASSWORD")` as `password`; store-backed sources are not supported for proxy credentials. The username and resolved password must each contain 1–255 bytes.
+
+The host environment variable is read once each time the sandbox starts. Changing it affects the next start, not a sandbox that is already running. `config_json()` and the database contain the source reference but never the resolved password.
+
+## SecretSource
+
+### env()
+
+```rust
+fn env(var: impl Into<String>) -> SecretSource
+```
+
+Create a host environment-variable reference for a SOCKS5 password. Import `SecretSource` from `microsandbox`.
+
+## OutboundProxy
+
+Declarative outbound proxy configuration stored in the sandbox's durable network specification. `Socks5Credentials` contains a password source, not the resolved password.
+
+| Variant | Fields | Description |
+|---------|--------|-------------|
+| `Socks4` | `address: SocketAddr`, `user_id: Option<String>` | SOCKS4 proxy address and optional user ID |
+| `Socks5` | `address: SocketAddr`, `credentials: Option<Socks5Credentials>` | SOCKS5 proxy address and optional username/password credentials |

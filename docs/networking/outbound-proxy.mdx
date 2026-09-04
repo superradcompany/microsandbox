@@ -1,0 +1,172 @@
+---
+title: Proxy
+description: Route outbound sandbox traffic through a SOCKS proxy
+icon: "route"
+---
+
+Configure one SOCKS4 or SOCKS5 proxy for outbound sandbox traffic. The guest connects to its normal destination; microsandbox routes eligible traffic through the proxy on the host.
+
+<Note>Outbound proxies are local-only. Cloud sandbox creation rejects this setting.</Note>
+
+## Supported proxies
+
+| Proxy | Authentication | Traffic | Availability |
+|-------|----------------|---------|--------------|
+| SOCKS4 | None | TCP | SDKs and CLI |
+| SOCKS4 | Optional user ID | TCP | SDKs and CLI |
+| SOCKS5 | None | TCP and non-DNS UDP | SDKs and CLI |
+| SOCKS5 | Optional username and password | TCP and non-DNS UDP | SDKs and CLI |
+
+Only one proxy can be configured for a sandbox. A SOCKS4 user ID identifies the caller; it is not a password.
+
+## Configure a proxy
+
+<CodeGroup>
+```typescript TypeScript
+import { Sandbox } from "microsandbox";
+
+await using sb = await Sandbox.builder("proxied")
+  .image("python")
+  .proxy((p) => p.socks5("127.0.0.1:1080"))
+  .create();
+```
+
+```rust Rust
+use microsandbox::Sandbox;
+
+let sb = Sandbox::builder("proxied")
+    .image("python")
+    .proxy(|p| p.socks5("127.0.0.1:1080"))
+    .create()
+    .await?;
+```
+
+```python Python
+from microsandbox import OutboundProxy, Sandbox
+
+sb = await Sandbox.create(
+    "proxied",
+    image="python",
+    proxy=OutboundProxy.socks5("127.0.0.1:1080"),
+)
+```
+
+```go Go
+sb, err := m.CreateSandbox(ctx, "proxied",
+    m.WithImage("python"),
+    m.WithProxy(m.SOCKS5Proxy("127.0.0.1:1080")),
+)
+```
+
+```bash CLI
+# Choose one:
+msb create python --name proxied --proxy socks4://127.0.0.1:1080
+msb create python --name proxied --proxy socks5://127.0.0.1:1080
+```
+</CodeGroup>
+
+SDK addresses use `IP:port`. The `msb run` and `msb create` commands accept `--proxy socks4://IP:port` or `--proxy socks5://IP:port`. Proxy URIs reject user information, paths, query parameters, and fragments; protocol-specific authentication uses separate CLI flags.
+
+## SOCKS4 user ID
+
+Add an optional user ID through an SDK or `--socks4-user-id` in the CLI.
+
+<CodeGroup>
+```typescript TypeScript
+.proxy((p) => p.socks4("127.0.0.1:1080").userId("sandbox"))
+```
+
+```rust Rust
+.proxy(|p| p.socks4("127.0.0.1:1080").user_id("sandbox"))
+```
+
+```python Python
+proxy=OutboundProxy.socks4("127.0.0.1:1080", user_id="sandbox")
+```
+
+```go Go
+m.WithProxy(m.SOCKS4Proxy(
+    "127.0.0.1:1080",
+    m.SOCKS4ProxyOptions{UserID: "sandbox"},
+))
+```
+
+```bash CLI
+msb run alpine \
+  --proxy socks4://127.0.0.1:1080 \
+  --socks4-user-id sandbox
+```
+</CodeGroup>
+
+The user ID must contain 1–255 bytes and cannot contain a null byte. Omit it to use SOCKS4 without a user ID.
+
+## SOCKS5 credentials
+
+SOCKS5 supports optional username/password authentication. Passwords are loaded from a host environment variable rather than placed directly in configuration.
+
+<CodeGroup>
+```typescript TypeScript
+.proxy((proxy) =>
+  proxy.socks5("127.0.0.1:1080").credentials(
+    "sandbox",
+    SecretSource.env("SOCKS5_PASSWORD"),
+  ),
+)
+```
+
+```rust Rust
+.proxy(|proxy| {
+    proxy.socks5("127.0.0.1:1080").credentials(
+        "sandbox",
+        SecretSource::env("SOCKS5_PASSWORD"),
+    )
+})
+```
+
+```python Python
+proxy = OutboundProxy.socks5("127.0.0.1:1080").credentials(
+    "sandbox",
+    SecretSource.env("SOCKS5_PASSWORD"),
+)
+```
+
+```go Go
+proxy := m.SOCKS5Proxy("127.0.0.1:1080").Credentials(
+    "sandbox",
+    m.SecretSourceEnv("SOCKS5_PASSWORD"),
+)
+m.WithProxy(proxy)
+```
+
+```bash CLI
+msb run alpine \
+  --proxy socks5://127.0.0.1:1080 \
+  --socks5-username sandbox \
+  --socks5-password-env SOCKS5_PASSWORD
+```
+</CodeGroup>
+
+Environment variables are currently the only supported password source. The password is read from the host environment once each time the sandbox starts and reused for that run. Changing the environment variable affects the next start, not a sandbox that is already running. The username and resolved password must each contain 1–255 bytes; startup fails if the environment variable is missing, empty, or invalid.
+
+Durable configuration and the database store the environment-variable reference, such as `SOCKS5_PASSWORD`, but never the resolved password.
+
+SOCKS5 authentication does not encrypt credentials on the wire. Use a trusted local or private proxy, or protect the connection at the transport layer.
+
+## Behavior and limits
+
+- Network policy is evaluated against the sandbox's actual destination before the proxy connection is opened.
+- SOCKS4 supports TCP only and cannot reach IPv6 destinations. Non-DNS UDP is blocked while SOCKS4 is configured.
+- SOCKS5 uses `CONNECT` for TCP and `UDP ASSOCIATE` for non-DNS UDP.
+- DNS uses microsandbox's DNS forwarder instead of the configured proxy. This includes plain DNS, DNS-over-TCP, and DNS-over-TLS.
+- Connections to `host.microsandbox.internal` bypass the proxy and continue to target the microsandbox host.
+- Each TCP connection opens its own proxy connection and handshake. Each UDP flow opens its own SOCKS5 control connection and UDP association.
+- TLS interception and secret injection continue to work as configured.
+
+## Reference
+
+For exact proxy APIs, see [TypeScript](/sdk/typescript/proxies), [Rust](/sdk/rust/proxies), [Python](/sdk/python/proxies), or [Go](/sdk/go/proxies). For CLI flags, see [Sandbox commands](/cli/sandbox-commands#outbound-proxy).
+
+## Related
+
+- [TLS interception](/networking/tls)
+- [Network overview](/networking/overview)

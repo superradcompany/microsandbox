@@ -32,7 +32,7 @@ use syn::{ItemFn, parse_macro_input};
 ///
 /// The `#[ignore]` is automatic because every microsandbox integration test
 /// requires KVM (or libkrun on macOS) and must be opted into explicitly via
-/// `--run-ignored=only`.
+/// `--ignored`.
 ///
 /// `init_isolated_home` is a no-op unless `MSB_TEST_ISOLATE_HOME` is set, so
 /// local `cargo test` runs against the real `~/.microsandbox`.

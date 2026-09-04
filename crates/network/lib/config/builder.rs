@@ -1037,6 +1037,12 @@ mod tests {
     }
 
     #[test]
+    fn outbound_proxy_defaults_to_none() {
+        let cfg = NetworkBuilder::new().build().unwrap();
+        assert_eq!(cfg.outbound_proxy, None);
+    }
+
+    #[test]
     fn network_builder_sets_global_passthrough_action() {
         let cfg = NetworkBuilder::new()
             .on_secret_violation(|v| {

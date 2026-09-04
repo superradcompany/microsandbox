@@ -1777,6 +1777,23 @@ Configure the network stack: profiles, custom rules, DNS, and TLS interception. 
   </div>
 </div>
 
+#### <span className="msb-recv"></span><span className="msb-hn">WithProxy()</span>
+
+```go
+func WithProxy(proxy *OutboundProxy) SandboxOption
+```
+
+Configure the single proxy used for outbound sandbox connections. See [Proxies](/sdk/go/proxies) for constructors and examples.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>proxy</code><a className="msb-type" href="/sdk/go/proxies#outboundproxy">*OutboundProxy</a></div>
+    <div className="msb-param-desc">Protocol-specific outbound proxy configuration.</div>
+  </div>
+</div>
+
 #### <span className="msb-recv"></span><span className="msb-hn">WithSecrets()</span>
 
 ```go

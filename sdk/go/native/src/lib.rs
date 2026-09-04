@@ -933,6 +933,25 @@ struct NetworkOpts {
 }
 
 #[derive(serde::Deserialize)]
+struct OutboundProxyOpts {
+    protocol: String,
+    address: String,
+    #[serde(default)]
+    user_id: Option<String>,
+    #[serde(default)]
+    username: Option<String>,
+    #[serde(default)]
+    password_source: Option<SecretSourceOpts>,
+}
+
+#[derive(serde::Deserialize)]
+struct SecretSourceOpts {
+    kind: String,
+    #[serde(default)]
+    var: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
 struct SecretOpts {
     env_var: String,
     value: String,
@@ -1064,6 +1083,8 @@ struct SandboxCreateOpts {
     #[serde(default)]
     registry_ca_certs: Vec<String>,
     network: Option<NetworkOpts>,
+    /// Proxy that all outbound sandbox connections are dialed through.
+    proxy: Option<OutboundProxyOpts>,
     /// Top-level ports shorthand: {host_port: guest_port} (TCP).
     #[serde(default)]
     ports: HashMap<u16, u16>,
@@ -2332,6 +2353,55 @@ pub unsafe extern "C" fn msb_sandbox_create(
             // Network (policy, DNS, TLS, ports-in-network).
             if let Some(ref net) = opts.network {
                 builder = apply_network(builder, net)?;
+            }
+            if let Some(proxy) = opts.proxy {
+                if proxy.protocol != "socks5"
+                    && (proxy.username.is_some() || proxy.password_source.is_some())
+                {
+                    return Err(FfiError::invalid_argument(
+                        "credentials are only supported for SOCKS5 proxies",
+                    ));
+                }
+                if let Some(source) = &proxy.password_source
+                    && source.kind != "env"
+                {
+                    return Err(FfiError::invalid_argument(format!(
+                        "unsupported SOCKS5 password source {:?}; only env is supported",
+                        source.kind
+                    )));
+                }
+                builder = match proxy.protocol.as_str() {
+                    "socks4" => builder.proxy(move |p| {
+                        let proxy_builder = p.socks4(proxy.address);
+                        match proxy.user_id {
+                            Some(user_id) => proxy_builder.user_id(user_id),
+                            None => proxy_builder,
+                        }
+                    }),
+                    "socks5" => builder.proxy(move |p| {
+                        let proxy_builder = p.socks5(proxy.address);
+                        match (proxy.username, proxy.password_source) {
+                            (Some(username), Some(password)) if password.kind == "env" => {
+                                proxy_builder.credentials(
+                                    username,
+                                    microsandbox::sandbox::SecretSource::env(
+                                        password.var.unwrap_or_default(),
+                                    ),
+                                )
+                            }
+                            (None, None) => proxy_builder,
+                            _ => proxy_builder.credentials(
+                                String::new(),
+                                microsandbox::sandbox::SecretSource::env(String::new()),
+                            ),
+                        }
+                    }),
+                    protocol => {
+                        return Err(FfiError::invalid_argument(format!(
+                            "unsupported outbound proxy protocol {protocol:?}"
+                        )));
+                    }
+                };
             }
             // Secrets.
             for s in &opts.secrets {

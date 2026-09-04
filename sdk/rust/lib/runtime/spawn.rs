@@ -56,6 +56,8 @@ use windows_sys::Win32::System::Threading::{
 
 use microsandbox_image::{Digest, GlobalCache};
 use microsandbox_metrics::{MetricsRegistry, ReserveSlot, SlotReservation};
+#[cfg(feature = "net")]
+use microsandbox_network::{ResolvedNetworkConfig, config::EnvNetworkSecretResolver};
 use microsandbox_protocol::{
     bootstrap::{
         BootstrapBlockRoot, BootstrapBlockRootUpper, BootstrapDirMount, BootstrapDiskMount,
@@ -277,14 +279,14 @@ pub async fn spawn_sandbox(
     mode: SpawnMode,
     lifecycle_guard: Option<microsandbox_runtime::ipc::SandboxLifecycleGuard>,
 ) -> MicrosandboxResult<(ProcessHandle, PathBuf)> {
-    // Reference-model secrets store only a host-side source reference in the
-    // durable config; resolve the actual values now so they travel to the
-    // sandbox process on the private launch-config fd without ever being
-    // persisted.
+    // Durable configuration stores only host-side source references. Resolve
+    // them into the private runtime configuration before the sandbox process
+    // is spawned.
     #[cfg(feature = "net")]
-    let resolved_config = crate::sandbox::config::resolve_config_secret_sources(config)?;
-    #[cfg(feature = "net")]
-    let config = resolved_config.as_ref().unwrap_or(config);
+    let resolved_network = config
+        .local_network_config()?
+        .resolve(&EnvNetworkSecretResolver)
+        .map_err(|error| MicrosandboxError::InvalidConfig(error.to_string()))?;
 
     // libkrunfw is process-level (one dylib per process address space). The
     // resolver consults MSB_LIBKRUNFW_PATH env, then SDK_LIBKRUNFW_PATH static,
@@ -475,6 +477,8 @@ pub async fn spawn_sandbox(
         sandbox_id,
         #[cfg(feature = "net")]
         network_slot,
+        #[cfg(feature = "net")]
+        resolved_network,
         &db_path,
         global.database.connect_timeout_secs,
         &log_dir,
@@ -505,7 +509,6 @@ pub async fn spawn_sandbox(
     );
     launch.block_writeback_limit_bytes = writeback_limit_bytes;
     launch.block_writeback_pool_bytes = writeback_pool_bytes;
-
     #[cfg(unix)]
     let config_file = match write_launch_config_fd(&launch) {
         Ok(file) => file,
@@ -2377,6 +2380,7 @@ fn sandbox_cli_args(
     config: &SandboxConfig,
     sandbox_id: i32,
     #[cfg(feature = "net")] network_slot: NetworkSlot,
+    #[cfg(feature = "net")] resolved_network: ResolvedNetworkConfig,
     db_path: &Path,
     db_connect_timeout_secs: u64,
     log_dir: &Path,
@@ -2756,11 +2760,7 @@ fn sandbox_cli_args(
     // Network configuration travels as a typed value inside the JSON payload.
     #[cfg(feature = "net")]
     {
-        launch.network = Some(
-            config
-                .local_network_config()
-                .expect("sandbox network spec should decode to local network config"),
-        );
+        launch.network = Some(resolved_network);
         launch.sandbox_slot = network_slot.get();
     }
 
@@ -2925,6 +2925,17 @@ mod tests {
         NetworkSlot::try_from(1).unwrap()
     }
 
+    #[cfg(feature = "net")]
+    fn test_resolved_network(
+        config: &SandboxConfig,
+    ) -> microsandbox_network::ResolvedNetworkConfig {
+        config
+            .local_network_config()
+            .unwrap()
+            .resolve(&microsandbox_network::config::EnvNetworkSecretResolver)
+            .unwrap()
+    }
+
     /// Return the typed launch payload generated for a sandbox configuration.
     fn render_launch(config: &SandboxConfig) -> LaunchConfig {
         let local = test_local_backend();
@@ -2934,6 +2945,8 @@ mod tests {
             42,
             #[cfg(feature = "net")]
             test_network_slot(),
+            #[cfg(feature = "net")]
+            test_resolved_network(config),
             Path::new("/tmp/msb.db"),
             30,
             Path::new("/tmp/logs"),
@@ -3155,7 +3168,7 @@ mod tests {
             pair(
                 &mut out,
                 "--network-config",
-                serde_json::to_string(net).unwrap(),
+                serde_json::to_string(net.config()).unwrap(),
             );
             pair(&mut out, "--sandbox-slot", launch.sandbox_slot.to_string());
         }
@@ -3182,6 +3195,8 @@ mod tests {
             42,
             #[cfg(feature = "net")]
             test_network_slot(),
+            #[cfg(feature = "net")]
+            test_resolved_network(config),
             Path::new("/tmp/msb.db"),
             30,
             Path::new("/tmp/logs"),
@@ -3285,6 +3300,8 @@ mod tests {
             42,
             #[cfg(feature = "net")]
             test_network_slot(),
+            #[cfg(feature = "net")]
+            test_resolved_network(config),
             Path::new("/tmp/msb.db"),
             30,
             Path::new("/tmp/logs"),
@@ -3315,6 +3332,8 @@ mod tests {
             42,
             #[cfg(feature = "net")]
             test_network_slot(),
+            #[cfg(feature = "net")]
+            test_resolved_network(config),
             Path::new("/tmp/msb.db"),
             30,
             Path::new("/tmp/logs"),
@@ -3399,6 +3418,8 @@ mod tests {
             42,
             #[cfg(feature = "net")]
             test_network_slot(),
+            #[cfg(feature = "net")]
+            test_resolved_network(&config),
             Path::new("/tmp/msb.db"),
             30,
             Path::new("/tmp/logs"),
@@ -3476,6 +3497,8 @@ mod tests {
             42,
             #[cfg(feature = "net")]
             test_network_slot(),
+            #[cfg(feature = "net")]
+            test_resolved_network(&config),
             Path::new("/tmp/msb.db"),
             30,
             Path::new("/tmp/logs"),

@@ -17,9 +17,12 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 
 use super::connection::ProxyConnectState;
+#[cfg(test)]
+use super::connection::ProxyConnectStatus;
 use super::upstream::UpstreamTcpTarget;
 use crate::netstack::shared::SharedState;
 use crate::policy::{EgressEvaluation, HostnameSource, NetworkPolicy, Protocol};
+use crate::proxy::ResolvedOutboundProxy;
 use crate::secrets::config::{SecretsConfig, SecretsConfigExt, ViolationAction};
 use crate::secrets::handler::{
     SecretsHandler, first_line_is_not_http_request, looks_like_http_request_prefix,
@@ -74,6 +77,7 @@ pub(crate) struct TcpProxy {
     secrets: Arc<SecretsConfig>,
     tls_state: Option<Arc<TlsState>>,
     proxy_connect: Arc<ProxyConnectState>,
+    outbound_proxy: Option<Arc<ResolvedOutboundProxy>>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -138,6 +142,7 @@ impl TcpProxy {
         secrets: Arc<SecretsConfig>,
         tls_state: Option<Arc<TlsState>>,
         proxy_connect: Arc<ProxyConnectState>,
+        outbound_proxy: Option<Arc<ResolvedOutboundProxy>>,
     ) -> Self {
         Self {
             guest_dst,
@@ -149,6 +154,7 @@ impl TcpProxy {
             secrets,
             tls_state,
             proxy_connect,
+            outbound_proxy,
         }
     }
 
@@ -179,6 +185,7 @@ impl TcpProxy {
             secrets,
             tls_state,
             proxy_connect,
+            outbound_proxy,
         } = self;
 
         // Pre-connect peek is only for domain policy: the hostname has to be known
@@ -245,6 +252,7 @@ impl TcpProxy {
                     network_policy,
                     tls_state,
                     proxy_connect,
+                    outbound_proxy,
                     None,
                 )
                 .await;
@@ -255,7 +263,9 @@ impl TcpProxy {
         // server-first protocol (SSH, SMTP, a database) sends nothing until it has
         // seen the server's banner; with the socket already open we can relay that
         // banner while we wait, instead of burning the peek budget pre-connect.
-        let stream = connect_target.connect(&proxy_connect, &shared).await?;
+        let stream = connect_target
+            .connect(&proxy_connect, &shared, outbound_proxy.as_deref())
+            .await?;
         let connect_dst = stream.peer_addr().unwrap_or(connect_target.primary());
         let (mut server_rx, mut server_tx) = stream.into_split();
 
@@ -301,6 +311,7 @@ impl TcpProxy {
                 network_policy,
                 tls_state,
                 proxy_connect,
+                outbound_proxy,
                 Some(proxy_stream),
             )
             .await;
@@ -381,6 +392,7 @@ impl TcpProxy {
                                     network_policy,
                                     tls_state,
                                     proxy_connect,
+                                    outbound_proxy,
                                     Some(proxy_stream),
                                 )
                                 .await;
@@ -478,6 +490,7 @@ pub fn spawn_tcp_proxy(
     secrets: Arc<SecretsConfig>,
     tls_state: Option<Arc<TlsState>>,
     proxy_connect: Arc<ProxyConnectState>,
+    outbound_proxy: Option<Arc<ResolvedOutboundProxy>>,
 ) {
     let proxy = TcpProxy::new(
         guest_dst,
@@ -489,6 +502,7 @@ pub fn spawn_tcp_proxy(
         secrets,
         tls_state,
         proxy_connect,
+        outbound_proxy,
     );
 
     handle.spawn(proxy.run());
@@ -510,6 +524,7 @@ async fn handle_connect_tunnel(
     network_policy: Arc<NetworkPolicy>,
     tls_state: Arc<TlsState>,
     proxy_connect: Arc<ProxyConnectState>,
+    outbound_proxy: Option<Arc<ResolvedOutboundProxy>>,
     preconnected_proxy: Option<TcpStream>,
 ) -> io::Result<()> {
     let proxy_dst = proxy_target.primary();
@@ -533,7 +548,11 @@ async fn handle_connect_tunnel(
     // Dial the proxy and forward the CONNECT request so it opens the tunnel.
     let mut proxy_stream = match preconnected_proxy {
         Some(stream) => stream,
-        None => proxy_target.connect(&proxy_connect, &shared).await?,
+        None => {
+            proxy_target
+                .connect(&proxy_connect, &shared, outbound_proxy.as_deref())
+                .await?
+        }
     };
 
     if !connect_req.target.is_intercepted(&tls_state) {
@@ -610,6 +629,10 @@ async fn handle_connect_tunnel(
         tls_state,
         network_policy,
         proxy_connect,
+        // Unused: `upstream_stream` is already `Some` below, so the
+        // outbound proxy (already applied when dialing `proxy_stream`
+        // above) is never consulted again.
+        None,
     )
     .with_upstream(proxy_stream)
     .with_expected_sni(expected_sni)
@@ -1118,6 +1141,121 @@ mod tests {
         record.extend_from_slice(&hs);
 
         record
+    }
+
+    #[tokio::test]
+    async fn connect_upstream_dials_target_directly_without_outbound_proxy() {
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accept = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 5];
+            sock.read_exact(&mut buf).await.unwrap();
+            assert_eq!(&buf, b"hello");
+        });
+
+        let shared = SharedState::new(4);
+        let proxy_connect = ProxyConnectState::new();
+        let mut stream = UpstreamTcpTarget::direct(addr)
+            .connect(&proxy_connect, &shared, None)
+            .await
+            .unwrap();
+        stream.write_all(b"hello").await.unwrap();
+
+        accept.await.unwrap();
+        assert!(matches!(
+            proxy_connect.status(),
+            ProxyConnectStatus::Connected
+        ));
+    }
+
+    #[tokio::test]
+    async fn early_http_connect_dials_proxy_through_configured_socks5_proxy() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        // This is the HTTP proxy the guest originally dialed. It is never
+        // contacted directly; the SOCKS5 request below must carry this address.
+        let http_proxy_addr: SocketAddr = "93.184.216.34:3128".parse().unwrap();
+        let socks_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let outbound_proxy = ResolvedOutboundProxy::Socks5 {
+            address: socks_listener.local_addr().unwrap(),
+            credentials: None,
+        };
+        let socks_task = tokio::spawn(async move {
+            let (mut client, _) = socks_listener.accept().await.unwrap();
+
+            let mut greeting = [0u8; 3];
+            client.read_exact(&mut greeting).await.unwrap();
+            assert_eq!(greeting, [0x05, 0x01, 0x00]);
+            client.write_all(&[0x05, 0x00]).await.unwrap();
+
+            let mut socks_request = [0u8; 10];
+            client.read_exact(&mut socks_request).await.unwrap();
+            assert_eq!(socks_request[0..4], [0x05, 0x01, 0x00, 0x01]);
+            assert_eq!(&socks_request[4..8], &[93, 184, 216, 34]);
+            assert_eq!(
+                u16::from_be_bytes([socks_request[8], socks_request[9]]),
+                3128
+            );
+            client
+                .write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+                .await
+                .unwrap();
+
+            let expected_connect =
+                b"CONNECT example.com:80 HTTP/1.1\r\nHost: example.com:80\r\n\r\n";
+            let mut connect_request = vec![0u8; expected_connect.len()];
+            client.read_exact(&mut connect_request).await.unwrap();
+            assert_eq!(&connect_request, expected_connect);
+            client
+                .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                .await
+                .unwrap();
+        });
+
+        let connect_request =
+            b"CONNECT example.com:80 HTTP/1.1\r\nHost: example.com:80\r\n\r\n".to_vec();
+        let (from_tx, from_rx) = mpsc::channel(1);
+        let (to_tx, mut to_rx) = mpsc::channel(1);
+        drop(from_tx);
+
+        let tls_state = Arc::new(
+            TlsState::new(
+                microsandbox_types::TlsConfig::default(),
+                crate::secrets::handle::SecretsHandle::new(SecretsConfig::default()),
+            )
+            .unwrap(),
+        );
+        let proxy_connect = Arc::new(ProxyConnectState::new());
+
+        handle_connect_tunnel(
+            http_proxy_addr,
+            UpstreamTcpTarget::direct(http_proxy_addr),
+            connect_request,
+            from_rx,
+            to_tx,
+            Arc::new(SharedState::new(4)),
+            Arc::new(NetworkPolicy::default()),
+            tls_state,
+            proxy_connect.clone(),
+            Some(Arc::new(outbound_proxy)),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let response = to_rx.recv().await.unwrap();
+        assert_eq!(
+            &response[..],
+            b"HTTP/1.1 200 Connection Established\r\n\r\n"
+        );
+        socks_task.await.unwrap();
+        assert!(matches!(
+            proxy_connect.status(),
+            ProxyConnectStatus::Connected
+        ));
     }
 
     #[test]
@@ -1696,6 +1834,7 @@ mod tests {
             secrets,
             None,
             proxy_connect,
+            None,
         )
         .try_run()
         .await
@@ -1737,6 +1876,7 @@ mod tests {
             Arc::new(secrets),
             None,
             proxy_connect,
+            None,
         )
         .try_run()
         .await
@@ -1808,6 +1948,7 @@ mod tests {
             Arc::new(secrets),
             None,
             proxy_connect,
+            None,
         )
         .try_run()
         .await
@@ -1909,6 +2050,7 @@ mod tests {
             Arc::new(secrets),
             None,
             proxy_connect,
+            None,
         )
         .try_run()
         .await

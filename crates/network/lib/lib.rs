@@ -12,6 +12,7 @@
 )]
 
 mod addr;
+pub mod proxy;
 
 pub mod config;
 pub mod dns;
@@ -39,9 +40,17 @@ pub(crate) const HOST_ALIAS: &str = "host.microsandbox.internal";
 // Re-Exports
 //--------------------------------------------------------------------------------------------------
 
+#[doc(hidden)]
+pub use config::ResolvedNetworkConfig;
+pub use proxy::{
+    OutboundProxy, OutboundProxyBuildError, OutboundProxyBuilder, OutboundProxyConfig,
+    OutboundProxyParseError, OutboundProxyProtocol, Socks4ProxyBuilder, Socks5Credentials,
+    Socks5ProxyBuilder,
+};
+
 pub use config::builder;
 pub use icmp::{error as icmp_error, relay as icmp_relay};
 pub use netstack::{backend, device, poll as stack, shared};
 pub use ports::publisher;
-pub use tcp::{connection as conn, proxy};
+pub use tcp::connection as conn;
 pub use udp::{fragments as udp_fragments, relay as udp_relay};
