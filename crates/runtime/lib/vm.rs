@@ -222,26 +222,26 @@ enum ParentWatchdogSignal {
     Detached,
 }
 
-/// Specification for the writable upper layer attached as virtio-blk.
-///
-/// The managed root disk is a flat raw ext4 file (`format = Raw`, empty
-/// `backing`); a user-supplied disk-image root disk carries its own path
-/// and format. A tmpfs root disk attaches no upper device at all — the
-/// caller leaves both `rootfs_upper` and `rootfs_upper_spec` unset and
-/// selects tmpfs in the typed guest bootstrap. The shape stays
-/// forward-compatible with qcow2 backing chains: when chains land,
-/// `backing` lists ancestor files that the runtime attaches read-only
-/// ahead of the head file.
-#[derive(Debug, Clone)]
-pub struct UpperSpec {
-    /// Path to the head upper file. Mounted writable.
-    pub primary: PathBuf,
-    /// On-disk format. `Raw` today; `Qcow2` once chains land.
+/// One explicitly typed layer in a writable upper block chain.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct UpperLayerSpec {
+    /// Exact host path of this layer.
+    pub path: PathBuf,
+    /// On-disk format of this layer.
     pub format: msb_krun::DiskImageFormat,
-    /// Ancestor files in the backing chain, oldest-first. Empty today.
-    pub backing: Vec<PathBuf>,
-    /// Whether the head file is read-only. Should be `false` for the
-    /// running sandbox's upper.
+}
+
+/// Specification for one guest-visible writable upper disk.
+///
+/// `layers` is the complete dependency chain ordered from the oldest base to the active head.
+/// Libkrun composes every entry behind one virtio-blk device; ancestors are opened read-only and
+/// only the final layer may be writable. A flat ext4 upper is therefore a one-layer raw chain,
+/// while checkpoint rollover appends qcow2 heads without changing the guest's device identity.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct UpperSpec {
+    /// Complete, non-empty block dependency chain ordered oldest-to-head.
+    pub layers: Vec<UpperLayerSpec>,
+    /// Whether the final head is read-only.
     pub read_only: bool,
 }
 
@@ -328,18 +328,12 @@ pub struct VmConfig {
 
     /// Upper ext4 disk path for writable overlay (paired with rootfs_vmdk).
     ///
-    /// Convenience field equivalent to `rootfs_upper_spec` with format
-    /// `Raw` and no backing chain. When `rootfs_upper_spec` is set, it
-    /// takes precedence; this field is the fast path for the common case.
+    /// Convenience field equivalent to a one-layer raw `rootfs_upper_spec`. When
+    /// `rootfs_upper_spec` is set, it takes precedence; this field is the fast path for the common
+    /// managed ext4 case.
     pub rootfs_upper: Option<PathBuf>,
 
-    /// Full spec for the writable upper layer.
-    ///
-    /// Forward-compat seam for qcow2 backing chains. Today this always
-    /// produces `Raw` with an empty backing chain — equivalent to
-    /// `rootfs_upper`. The qcow2 future populates `format = Qcow2`
-    /// and a non-empty `backing` chain without touching every call
-    /// site.
+    /// Complete explicitly typed oldest-to-head chain for the writable upper disk.
     pub rootfs_upper_spec: Option<UpperSpec>,
 
     /// Additional mounts as `tag:host_path[:opts]` strings.
@@ -514,7 +508,7 @@ pub fn enter(config: Config) -> ! {
     }
 }
 
-fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
+fn run(mut config: Config) -> RuntimeResult<std::convert::Infallible> {
     // Raise the fd limit before anything else: every guest-held open file on a virtiofs share pins one fd in this process, so the shell's default soft limit
     // (1024 on many distros) is nowhere near enough for real workloads. Reference virtiofsd raises its own limit for the same reason. Best-effort: failure is
     // not fatal, just a smaller fd budget.
@@ -552,6 +546,8 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
     // Set up runtime directory.
     std::fs::create_dir_all(&config.runtime_dir)?;
     std::fs::create_dir_all(config.runtime_dir.join("scripts"))?;
+    crate::checkpoint::recover_managed_upper(&config.runtime_dir, &mut config.vm)
+        .map_err(|error| RuntimeError::Custom(format!("recover managed root disk: {error}")))?;
     // Heartbeats are per boot, while the runtime directory persists across starts.
     heartbeat::clear_stale(&config.runtime_dir)?;
 
@@ -919,24 +915,34 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
     let exit_handle = vm.exit_handle();
     let upper_host_path = oci_upper_host_path(&config.vm);
 
-    // Serve host-side live control when this VM booted with reserved resize
-    // capacity or with secrets to live-reconfigure. Failure is non-fatal: the
-    // SDK treats a missing socket as "no live control capability" and
-    // classifies restart-required.
+    // Serve every host-side control operation through one runtime-owned executor and endpoint.
     {
         let control = vm.control_handle();
         #[cfg(feature = "net")]
         let secrets = _network_secrets_handle.clone();
         #[cfg(not(feature = "net"))]
         let secrets: Option<()> = None;
-        if control.memory_resize_supported() || control.cpu_resize_supported() || secrets.is_some()
         {
             let control_sock_path =
                 crate::control::control_socket_path_for(&config.agent_sock_path);
-            let context = crate::control::ControlContext {
-                vm: control,
+            let executor = crate::control::RuntimeControlExecutor::new(
+                control,
                 #[cfg(feature = "net")]
                 secrets,
+                &config.runtime_dir,
+                &config.vm,
+                tokio_rt.handle().clone(),
+            );
+            let context = crate::control::ControlContext {
+                executor: match executor {
+                    Ok(executor) => Arc::new(executor),
+                    Err(error) => {
+                        let _ = tokio_rt.block_on(mark_run_failed(&db, run_db_id));
+                        return Err(RuntimeError::Custom(format!(
+                            "publish runtime control identity: {error}"
+                        )));
+                    }
+                },
             };
             match crate::control::spawn_control_listener(control_sock_path.clone(), context) {
                 Ok(()) => {
@@ -1320,7 +1326,8 @@ fn oci_upper_host_path(vm: &VmConfig) -> Option<PathBuf> {
 
     vm.rootfs_upper_spec
         .as_ref()
-        .map(|spec| spec.primary.clone())
+        .and_then(|spec| spec.layers.last())
+        .map(|layer| layer.path.clone())
         .or_else(|| vm.rootfs_upper.clone())
 }
 
@@ -1351,6 +1358,44 @@ fn apply_block_writeback_limit(
     disk
 }
 
+fn validate_upper_layers(spec: &UpperSpec) -> RuntimeResult<Vec<UpperLayerSpec>> {
+    if spec.layers.is_empty() {
+        return Err(RuntimeError::Custom(
+            "upper block chain must contain at least one layer".into(),
+        ));
+    }
+
+    let mut paths = std::collections::BTreeSet::new();
+    for (index, layer) in spec.layers.iter().enumerate() {
+        if layer.path.as_os_str().is_empty() {
+            return Err(RuntimeError::Custom(format!(
+                "upper block chain layer {index} has an empty path"
+            )));
+        }
+        if !paths.insert(layer.path.clone()) {
+            return Err(RuntimeError::Custom(format!(
+                "upper block chain repeats path {}",
+                layer.path.display()
+            )));
+        }
+        match layer.format {
+            msb_krun::DiskImageFormat::Raw if index > 0 => {
+                return Err(RuntimeError::Custom(format!(
+                    "upper block chain layer {index} is raw but has a predecessor"
+                )));
+            }
+            msb_krun::DiskImageFormat::Vmdk => {
+                return Err(RuntimeError::Custom(format!(
+                    "upper block chain layer {index} uses unsupported VMDK format"
+                )));
+            }
+            msb_krun::DiskImageFormat::Raw | msb_krun::DiskImageFormat::Qcow2 => {}
+        }
+    }
+
+    Ok(spec.layers.clone())
+}
+
 fn writeback_limited_disk_paths(vm: &VmConfig) -> RuntimeResult<Vec<PathBuf>> {
     if vm.block_writeback_limit_bytes.is_none() {
         return Ok(Vec::new());
@@ -1361,8 +1406,10 @@ fn writeback_limited_disk_paths(vm: &VmConfig) -> RuntimeResult<Vec<PathBuf>> {
         // Direct root filesystems do not attach a virtio-blk device.
     } else if vm.rootfs_vmdk.is_some() {
         if let Some(spec) = &vm.rootfs_upper_spec {
-            if is_writeback_limited_disk(spec.format, spec.read_only) {
-                paths.push(spec.primary.clone());
+            if let Some(head) = spec.layers.last()
+                && is_writeback_limited_disk(head.format, spec.read_only)
+            {
+                paths.push(head.path.clone());
             }
         } else if let Some(upper) = &vm.rootfs_upper {
             paths.push(upper.clone());
@@ -1494,24 +1541,26 @@ fn build_vm(
                 .read_only(true)
         });
 
-        // Attach the writable upper. Prefer the typed `UpperSpec` if
-        // provided; otherwise fall back to the legacy raw-only field.
-        // When chains are populated (qcow2 future), each ancestor is
-        // attached read-only ahead of the head file.
+        // Attach the writable upper. An explicit chain remains one guest-visible block device;
+        // libkrun opens its ancestors read-only and permits writes only through the final head.
         if let Some(ref spec) = vm.rootfs_upper_spec {
-            for backing in spec.backing.clone() {
-                builder = builder.disk(move |d| {
-                    d.path(&backing)
-                        .format(msb_krun::DiskImageFormat::Qcow2)
-                        .read_only(true)
-                });
-            }
-            let primary = spec.primary.clone();
-            let format = spec.format;
+            let layers = validate_upper_layers(spec)?;
+            let format = layers.last().expect("validated non-empty chain").format;
             let read_only = spec.read_only;
+            // Keep restart behavior identical to in-process rollover: formatted Linux heads use
+            // direct I/O instead of the raw-only bounded writeback controller.
+            let direct_io =
+                cfg!(target_os = "linux") && matches!(format, msb_krun::DiskImageFormat::Qcow2);
             let writeback_limit = writeback_limit.cloned();
             builder = builder.disk(move |d| {
-                let d = d.path(&primary).format(format).read_only(read_only);
+                let layers = layers
+                    .into_iter()
+                    .map(|layer| msb_krun::DiskLayer::new(layer.path, layer.format));
+                let d = d
+                    .layers(layers)
+                    .format(format)
+                    .read_only(read_only)
+                    .direct_io(direct_io);
                 apply_block_writeback_limit(d, format, read_only, writeback_limit.as_ref())
             });
         } else if let Some(ref upper) = vm.rootfs_upper {
@@ -2754,11 +2803,11 @@ mod tests {
         bind_identity_map_for_mount, read_parent_watchdog_signal,
     };
     use super::{
-        ConsoleSharedState, HostPermissions, StatVirtualization, append_block_root_env,
-        bind_rootfs_backend, encode_bootstrap_frame, guest_shutdown_flush_timeout,
-        guest_shutdown_flush_timeout_with_override, parse_mount_spec, prepend_scripts_path,
-        request_guest_shutdown, request_guest_shutdown_with_timeout, thp_kernel_cmdline,
-        validate_disk_format,
+        ConsoleSharedState, HostPermissions, StatVirtualization, UpperLayerSpec, UpperSpec,
+        append_block_root_env, bind_rootfs_backend, encode_bootstrap_frame,
+        guest_shutdown_flush_timeout, guest_shutdown_flush_timeout_with_override, parse_mount_spec,
+        prepend_scripts_path, request_guest_shutdown, request_guest_shutdown_with_timeout,
+        thp_kernel_cmdline, validate_disk_format, validate_upper_layers,
     };
 
     use microsandbox_filesystem::{Context, DynFileSystem, FsOptions};
@@ -2775,6 +2824,62 @@ mod tests {
             gid: 0,
             pid: 1,
         }
+    }
+
+    #[test]
+    fn upper_chain_accepts_one_raw_base_followed_by_qcow2_heads() {
+        let spec = UpperSpec {
+            layers: vec![
+                UpperLayerSpec {
+                    path: "upper.ext4".into(),
+                    format: msb_krun::DiskImageFormat::Raw,
+                },
+                UpperLayerSpec {
+                    path: "upper-2.qcow2".into(),
+                    format: msb_krun::DiskImageFormat::Qcow2,
+                },
+                UpperLayerSpec {
+                    path: "upper-3.qcow2".into(),
+                    format: msb_krun::DiskImageFormat::Qcow2,
+                },
+            ],
+            read_only: false,
+        };
+
+        assert_eq!(validate_upper_layers(&spec).unwrap(), spec.layers);
+    }
+
+    #[test]
+    fn upper_chain_rejects_raw_successors_and_repeated_paths() {
+        let raw_successor = UpperSpec {
+            layers: vec![
+                UpperLayerSpec {
+                    path: "upper.ext4".into(),
+                    format: msb_krun::DiskImageFormat::Raw,
+                },
+                UpperLayerSpec {
+                    path: "upper-next.ext4".into(),
+                    format: msb_krun::DiskImageFormat::Raw,
+                },
+            ],
+            read_only: false,
+        };
+        assert!(validate_upper_layers(&raw_successor).is_err());
+
+        let repeated = UpperSpec {
+            layers: vec![
+                UpperLayerSpec {
+                    path: "upper.ext4".into(),
+                    format: msb_krun::DiskImageFormat::Raw,
+                },
+                UpperLayerSpec {
+                    path: "upper.ext4".into(),
+                    format: msb_krun::DiskImageFormat::Qcow2,
+                },
+            ],
+            read_only: false,
+        };
+        assert!(validate_upper_layers(&repeated).is_err());
     }
 
     #[cfg(feature = "net")]

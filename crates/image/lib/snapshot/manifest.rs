@@ -701,7 +701,7 @@ fn normalize_timestamp(value: &str) -> ImageResult<String> {
         .to_rfc3339_opts(SecondsFormat::Nanos, true))
 }
 
-fn reject_duplicate_json_keys(bytes: &[u8]) -> ImageResult<()> {
+pub(crate) fn reject_duplicate_json_keys(bytes: &[u8]) -> ImageResult<()> {
     let mut deserializer = serde_json::Deserializer::from_slice(bytes);
     DuplicateCheckedJson::deserialize(&mut deserializer)
         .map_err(|error| descriptor_error_value(format!("parse failed: {error}")))?;
@@ -746,7 +746,10 @@ fn validate_json_value(value: &serde_json::Value, depth: usize) -> ImageResult<(
     Ok(())
 }
 
-fn write_canonical_json(value: &serde_json::Value, output: &mut Vec<u8>) -> ImageResult<()> {
+pub(crate) fn write_canonical_json(
+    value: &serde_json::Value,
+    output: &mut Vec<u8>,
+) -> ImageResult<()> {
     match value {
         serde_json::Value::Null => output.extend_from_slice(b"null"),
         serde_json::Value::Bool(true) => output.extend_from_slice(b"true"),
