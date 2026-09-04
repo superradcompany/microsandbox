@@ -6,14 +6,13 @@ from __future__ import annotations
 import json
 import subprocess
 import tempfile
-import unittest
 from pathlib import Path
-from unittest import mock
+from unittest import TestCase, main, mock
 
 from scripts.ci import publish_npm_package
 
 
-class PublishNpmPackageTests(unittest.TestCase):
+class PublishNpmPackageTests(TestCase):
     def setUp(self) -> None:
         self.temporary_directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary_directory.cleanup)
@@ -110,4 +109,4 @@ class PublishNpmPackageTests(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    main()
