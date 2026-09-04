@@ -6,7 +6,7 @@ icon: "robot"
 
 AI agents are a natural fit for microsandbox. They run tools, inspect files, install packages, call APIs, and execute generated code, often with more ambient access than they should have.
 
-microsandbox gives those actions a dedicated microVM instead of your host process. Agents can still work normally, but their filesystem, network, lifecycle, and secrets are controlled by the sandbox boundary.
+microsandbox gives those actions a dedicated microVM instead of your host process. Agents can still work normally, but the sandbox boundary controls their filesystem, network, lifecycle, and secrets.
 
 The SDK and CLI give you full programmatic control, and there are two additional ways to connect agents directly: **Agent Skills** for coding assistants and an **MCP server** for any MCP-compatible client.
 
