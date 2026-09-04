@@ -191,6 +191,19 @@ pub struct RootfsConfig {
     /// Mount the disk image as read-only.
     pub disk_readonly: bool,
 
+    /// Complete oldest-to-head chain for a runtime-owned flat root disk.
+    ///
+    /// This is mutually exclusive with the single-file `disk` representation. It is used after
+    /// checkpoint rollover has replaced the original raw root with a qcow2 successor.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub disk_layers: Vec<RootfsUpperLayerConfig>,
+
+    /// Whether the direct root disk is sandbox-owned and may be rolled over for checkpoints.
+    ///
+    /// User-supplied disk-image roots deliberately leave this false.
+    #[serde(default)]
+    pub disk_runtime_owned: bool,
+
     /// Writable upper block device for OCI rootfs overlay.
     pub upper: Option<PathBuf>,
 

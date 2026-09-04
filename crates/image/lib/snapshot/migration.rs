@@ -247,6 +247,7 @@ pub fn translate_v066_forward(
             reference: legacy.image.reference,
             manifest_digest: legacy.image.manifest_digest,
         },
+        root_disk: super::SnapshotRootDisk::Managed,
         parent,
         extensions: BTreeMap::new(),
         requires: Vec::new(),
@@ -290,6 +291,11 @@ pub fn translate_v066_reverse(
     source.validate()?;
     if source.scope != SnapshotScope::Disk {
         return legacy_error("snapshot_downgrade_unrepresentable: scope is not disk");
+    }
+    if source.root_disk != super::SnapshotRootDisk::Managed {
+        return legacy_error(
+            "released flat downgrade can represent only a managed OCI upper, not the captured root layout",
+        );
     }
     if !source.requires.is_empty() || !source.extensions.is_empty() {
         return legacy_error(
@@ -431,6 +437,7 @@ pub fn translate_released_flat_forward(source: &[u8]) -> ImageResult<ReleasedFla
             reference: legacy.image.reference,
             manifest_digest: legacy.image.manifest_digest,
         },
+        root_disk: super::SnapshotRootDisk::Managed,
         parent,
         requires: Vec::new(),
         extensions: BTreeMap::new(),
@@ -457,6 +464,11 @@ pub fn translate_released_flat_reverse(
     if source.scope != SnapshotScope::Disk {
         return legacy_error(
             "checkpoint snapshots are not representable by the released flat schema",
+        );
+    }
+    if source.root_disk != super::SnapshotRootDisk::Managed {
+        return legacy_error(
+            "released descriptor downgrade can represent only a managed OCI upper, not the captured root layout",
         );
     }
     let SnapshotState::File(file) = &source.state else {
@@ -748,6 +760,17 @@ mod tests {
         assert_eq!(
             round_trip_file.layers[0].payload,
             translated_file.layers[0].payload
+        );
+    }
+
+    #[test]
+    fn legacy_reverse_translations_reject_complete_flat_roots() {
+        let mut translated = translate_v066_forward(LEGACY, &payload(), None).unwrap();
+        translated.target.root_disk = super::super::SnapshotRootDisk::Flat;
+
+        assert!(translate_v066_reverse(&translated.target, None, None, BTreeMap::new()).is_err());
+        assert!(
+            translate_released_flat_reverse(&translated.target, None, BTreeMap::new()).is_err()
         );
     }
 

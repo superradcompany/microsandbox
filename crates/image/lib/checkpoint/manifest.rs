@@ -119,6 +119,12 @@ pub struct DiskGenerationManifest {
     pub schema: String,
     /// Logical writable volume identity.
     pub volume_id: String,
+    /// Stable guest-visible block device whose bytes this generation captures.
+    #[serde(
+        default = "default_root_disk_device_id",
+        skip_serializing_if = "is_default_root_disk_device_id"
+    )]
+    pub device_id: String,
     /// Monotonic immutable generation.
     pub generation: u64,
     /// Complete oldest-first physical closure.
@@ -248,7 +254,11 @@ impl MemoryManifest {
 
 impl DiskGenerationManifest {
     fn validate_body(&self) -> ImageResult<()> {
-        if !portable_member_id(&self.volume_id) || self.generation == 0 || self.layers.is_empty() {
+        if !portable_member_id(&self.volume_id)
+            || !portable_member_id(&self.device_id)
+            || self.generation == 0
+            || self.layers.is_empty()
+        {
             return manifest_error("disk generation has invalid identity, generation, or layers");
         }
         if self.layers.len() > 256 {
@@ -338,6 +348,14 @@ manifest_methods!(CheckpointManifest, "microsandbox.checkpoint/1");
 //--------------------------------------------------------------------------------------------------
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
+
+fn default_root_disk_device_id() -> String {
+    "vdb".into()
+}
+
+fn is_default_root_disk_device_id(value: &str) -> bool {
+    value == "vdb"
+}
 
 fn validate_extents(extents: &[MemoryExtent]) -> ImageResult<()> {
     let mut previous_end = 0u64;
@@ -459,6 +477,7 @@ mod tests {
         let manifest = DiskGenerationManifest {
             schema: "microsandbox.disk-generation/1".into(),
             volume_id: "vol_test".into(),
+            device_id: "vdb".into(),
             generation: 1,
             layers: vec![DiskLayerRef {
                 layer_id: "../outside".into(),
@@ -472,5 +491,29 @@ mod tests {
         };
 
         assert!(manifest.validate().is_err());
+    }
+
+    #[test]
+    fn earlier_disk_generation_defaults_to_managed_device() {
+        let manifest = DiskGenerationManifest {
+            schema: "microsandbox.disk-generation/1".into(),
+            volume_id: "vol_test".into(),
+            device_id: "vdb".into(),
+            generation: 1,
+            layers: vec![DiskLayerRef {
+                layer_id: "layer_test".into(),
+                format: "raw".into(),
+                virtual_size: 4096,
+                predecessor: None,
+                integrity_root: format!("blake3:{}", "0".repeat(64)),
+            }],
+            head: "layer_test".into(),
+            pause_generation: 1,
+        };
+        let mut value = serde_json::to_value(manifest).unwrap();
+        value.as_object_mut().unwrap().remove("device_id");
+        let parsed =
+            DiskGenerationManifest::from_bytes(&serde_json::to_vec(&value).unwrap()).unwrap();
+        assert_eq!(parsed.device_id, "vdb");
     }
 }

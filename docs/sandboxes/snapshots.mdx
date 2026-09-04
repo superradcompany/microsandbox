@@ -6,7 +6,7 @@ icon: "code-branch"
 
 <Tooltip tip="Disk snapshots are local-only. On microsandbox cloud, use a named volume for state that must survive sandbox replacement."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
-A snapshot is a portable artifact that can hold either a sandbox's writable disk state or a full checkpoint of a running sandbox. Move it with `scp`, archive it as `.tar.zst`, or create a child sandbox from it.
+A snapshot is a portable artifact that can hold either a sandbox's writable disk state or a full checkpoint of a running sandbox. Managed and flat OCI roots are supported; the descriptor preserves the root layout so a flat `rootfs.raw` is never mistaken for a managed OverlayFS upper. Move it with `scp`, archive it as `.tar.zst`, or create a child sandbox from it.
 
 <Note>
 Disk snapshots capture stopped or crashed sandboxes. Full snapshots use `--full` and capture a running sandbox without requiring the user to pause it first.
@@ -19,7 +19,7 @@ Disk snapshots capture stopped or crashed sandboxes. Full snapshots use `--full`
 | Disk (default) | Stopped or crashed sandbox | Writable disk closure and pinned image | Cold-boots a fresh VM |
 | Full | Running sandbox | Disk, memory, vCPU, device, and admitted resource state | Eagerly resumes the captured execution in a child VM |
 
-Both modes produce the same schema-1 `snapshot.json` descriptor. Its closed `state.kind` is either `file` or `checkpoint`; checkpoint payloads live in a content-addressed closure rather than an `upper.ext4` file.
+Both modes produce the same schema-1 `snapshot.json` descriptor. Its closed `state.kind` is either `file` or `checkpoint`, and `root_disk.layout` records `managed`, `flat`, or `tmpfs`. Checkpoint payloads live in a content-addressed closure rather than a standalone disk file. A tmpfs root has no stopped disk snapshot because its writable state exists only in memory, but it is included in a running full snapshot; such a snapshot must be resumed and cannot use `--disk-only`.
 
 ## Quick start
 
@@ -103,7 +103,7 @@ msb snapshot create after-pip-install --from baseline --dest-dir /mnt/big
 
 </CodeGroup>
 
-The default disk mode requires a stopped or crashed sandbox; running sandboxes are rejected.
+The default disk mode requires a stopped or crashed sandbox; running sandboxes are rejected. If the sandbox has previously produced a full snapshot, its writable state may already be a raw/qcow2 chain. Disk snapshotting preserves that complete chain, including writes made after the earlier full snapshot, and every restored child receives a fresh private writable head.
 
 ## Capture a running sandbox
 
@@ -387,7 +387,7 @@ Archives default to `.tar.zst`. Pass `--plain-tar` for a plain `.tar`. SDKs expo
 
 ## Artifact identity and layout
 
-Current file snapshots use a stable opaque snapshot ID, a separate SHA-256 descriptor digest, and one ordered physical layer closure. A normal raw ext4 snapshot is still one layer:
+Current file snapshots use a stable opaque snapshot ID, a separate SHA-256 descriptor digest, and one ordered physical layer closure. A normal raw ext4 snapshot is still one layer, whether those bytes represent a managed upper or a complete flat root:
 
 ```text
 after-pip-install/
@@ -397,7 +397,7 @@ after-pip-install/
     └── layer_....raw
 ```
 
-`metadata.json` contains mutable local labels and does not participate in the descriptor digest or snapshot identity. The descriptor names each layer by `DiskLayerId`; future qcow2 snapshots can carry an oldest-first raw/qcow2 chain without changing the artifact family.
+`metadata.json` contains mutable local labels and does not participate in the descriptor digest or snapshot identity. The descriptor names each layer by `DiskLayerId`. Once a full snapshot has rolled the sandbox onto qcow2, a later disk snapshot carries the complete oldest-first raw/qcow2 chain in this same artifact family; archive save/load and direct archive restore preserve every member.
 
 ## Integrity verification
 

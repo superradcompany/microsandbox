@@ -1,4 +1,4 @@
-//! Crash-forward managed root-disk rollover.
+//! Crash-forward rollover for sandbox-owned root disks.
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -21,16 +21,37 @@ use crate::vm::{UpperLayerSpec, UpperSpec, VmConfig};
 const ROOT_DISK_STATE_FILE: &str = "root-disk.json";
 const ROOT_DISK_STATE_SCHEMA: &str = "microsandbox.runtime-root-disk/1";
 const MAX_ROOT_DISK_STATE_BYTES: u64 = 1024 * 1024;
-const ROOT_UPPER_DEVICE_ID: &str = "vdb";
+const MANAGED_ROOT_DEVICE_ID: &str = "vdb";
+const FLAT_ROOT_DEVICE_ID: &str = "vda";
 
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
 
-/// Runtime owner of the managed OCI writable-root chain.
-pub(crate) struct ManagedRootDisk {
+/// Runtime owner of a sandbox-owned writable-root chain.
+pub(crate) struct RuntimeOwnedRootDisk {
     state_path: PathBuf,
     state: RootDiskState,
+}
+
+/// Stable stopped view of one sandbox-owned root-disk chain.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeOwnedRootChain {
+    /// Guest-visible block device backed by this chain.
+    pub device_id: String,
+    /// Guest-visible capacity shared by every layer in the chain.
+    pub virtual_size: u64,
+    /// Complete oldest-to-head physical closure.
+    pub layers: Vec<RuntimeOwnedRootLayer>,
+}
+
+/// One physical member of a stopped sandbox-owned root-disk chain.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeOwnedRootLayer {
+    /// Runtime-owned host path.
+    pub path: PathBuf,
+    /// Explicit physical format (`raw` or `qcow2`).
+    pub format: String,
 }
 
 /// Successfully sealed disk generation and the block state captured at its pause boundary.
@@ -52,8 +73,18 @@ struct RootDiskState {
     schema: String,
     volume_id: String,
     device_id: String,
+    #[serde(default)]
+    layout: RootDiskLayout,
     published_generation: u64,
     layers: Vec<RootDiskLayer>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum RootDiskLayout {
+    #[default]
+    ManagedUpper,
+    FlatRoot,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -76,24 +107,25 @@ struct RootDiskLayer {
 // Methods
 //--------------------------------------------------------------------------------------------------
 
-impl ManagedRootDisk {
-    /// Open the authoritative chain journal or initialize it from the VM's managed OCI upper.
+impl RuntimeOwnedRootDisk {
+    /// Open the authoritative chain journal or initialize it from a sandbox-owned root disk.
     pub(crate) fn open(runtime_dir: &Path, vm: &VmConfig) -> Result<Option<Self>, String> {
-        if vm.rootfs_vmdk.is_none() {
+        let Some(layout) = configured_layout(vm) else {
             return Ok(None);
-        }
+        };
         let state_path = runtime_dir.join(ROOT_DISK_STATE_FILE);
         let state = if state_path.exists() {
             read_state(&state_path)?
         } else {
-            let layers = configured_layers(vm)?;
+            let layers = configured_layers(vm, layout)?;
             if layers.is_empty() {
                 return Ok(None);
             }
             let mut state = RootDiskState {
                 schema: ROOT_DISK_STATE_SCHEMA.into(),
                 volume_id: new_id("vol"),
-                device_id: ROOT_UPPER_DEVICE_ID.into(),
+                device_id: layout.device_id().into(),
+                layout,
                 published_generation: 0,
                 layers: layers
                     .into_iter()
@@ -119,6 +151,11 @@ impl ManagedRootDisk {
         };
         state.validate()?;
         Ok(Some(Self { state_path, state }))
+    }
+
+    /// Guest-visible block identity owned by this rollover provider.
+    pub(crate) fn device_id(&self) -> &str {
+        &self.state.device_id
     }
 
     /// Seal the current head, publish its closure, and switch the paused device to a fresh head.
@@ -182,6 +219,7 @@ impl ManagedRootDisk {
         let manifest = DiskGenerationManifest {
             schema: "microsandbox.disk-generation/1".into(),
             volume_id: self.state.volume_id.clone(),
+            device_id: self.state.device_id.clone(),
             generation,
             head: sealed_layers
                 .last()
@@ -200,7 +238,7 @@ impl ManagedRootDisk {
             .layers
             .last()
             .expect("managed root chain is non-empty");
-        let new_path = next_overlay_path(&previous_head.path);
+        let new_path = next_overlay_path(&previous_head.path, self.state.layout);
         runtime
             .block_on(microsandbox_image::checkpoint::create_qcow2_overlay(
                 &new_path,
@@ -239,11 +277,11 @@ impl RootDiskState {
     fn validate(&self) -> Result<(), String> {
         if self.schema != ROOT_DISK_STATE_SCHEMA
             || !valid_id(&self.volume_id, "vol")
-            || self.device_id != ROOT_UPPER_DEVICE_ID
+            || self.device_id != self.layout.device_id()
             || self.layers.is_empty()
             || self.layers.len() > 256
         {
-            return Err("managed root-disk state has invalid identity or bounds".into());
+            return Err("runtime-owned root-disk state has invalid identity or bounds".into());
         }
         let mut paths = BTreeSet::new();
         let mut ids = BTreeSet::new();
@@ -255,13 +293,13 @@ impl RootDiskState {
                 || (index > 0 && layer.format != RootDiskFormat::Qcow2)
                 || (index + 1 < self.layers.len() && layer.integrity_root.is_none())
             {
-                return Err(format!("managed root-disk layer {index} is invalid"));
+                return Err(format!("runtime-owned root-disk layer {index} is invalid"));
             }
         }
         Ok(())
     }
 
-    fn upper_spec(&self) -> UpperSpec {
+    fn disk_spec(&self) -> UpperSpec {
         UpperSpec {
             layers: self
                 .layers
@@ -272,6 +310,15 @@ impl RootDiskState {
                 })
                 .collect(),
             read_only: false,
+        }
+    }
+}
+
+impl RootDiskLayout {
+    fn device_id(self) -> &'static str {
+        match self {
+            Self::ManagedUpper => MANAGED_ROOT_DEVICE_ID,
+            Self::FlatRoot => FLAT_ROOT_DEVICE_ID,
         }
     }
 }
@@ -293,7 +340,7 @@ impl TryFrom<msb_krun::DiskImageFormat> for RootDiskFormat {
             msb_krun::DiskImageFormat::Raw => Ok(Self::Raw),
             msb_krun::DiskImageFormat::Qcow2 => Ok(Self::Qcow2),
             msb_krun::DiskImageFormat::Vmdk => {
-                Err("managed root chains do not support VMDK layers".into())
+                Err("runtime-owned root chains do not support VMDK layers".into())
             }
         }
     }
@@ -346,41 +393,114 @@ impl std::error::Error for RootDiskRolloverError {}
 //--------------------------------------------------------------------------------------------------
 
 /// Apply the durable forward chain before VM construction after a runtime restart.
-pub(crate) fn recover_managed_upper(runtime_dir: &Path, vm: &mut VmConfig) -> Result<(), String> {
+pub(crate) fn recover_runtime_owned_root(
+    runtime_dir: &Path,
+    vm: &mut VmConfig,
+) -> Result<(), String> {
     let state_path = runtime_dir.join(ROOT_DISK_STATE_FILE);
     if !state_path.exists() {
         return Ok(());
     }
-    if vm.rootfs_vmdk.is_none() {
-        return Err("managed root-disk state exists for a VM without an OCI block root".into());
-    }
     let state = read_state(&state_path)?;
-    let configured = configured_layers(vm)?;
+    if configured_layout(vm) != Some(state.layout) {
+        return Err("root-disk journal does not match the configured root layout".into());
+    }
+    let configured = configured_layers(vm, state.layout)?;
     let configured_base = configured.first().map(|layer| &layer.path);
     let journal_base = state.layers.first().map(|layer| &layer.path);
     if configured_base != journal_base {
-        return Err("managed root-disk journal does not match the configured base layer".into());
+        return Err("root-disk journal does not match the configured base layer".into());
     }
-    vm.rootfs_upper = None;
-    vm.rootfs_upper_spec = Some(state.upper_spec());
+    match state.layout {
+        RootDiskLayout::ManagedUpper => {
+            vm.rootfs_upper = None;
+            vm.rootfs_upper_spec = Some(state.disk_spec());
+        }
+        RootDiskLayout::FlatRoot => {
+            vm.rootfs_disk = None;
+            vm.rootfs_disk_format = None;
+            vm.rootfs_disk_spec = Some(state.disk_spec());
+        }
+    }
     Ok(())
+}
+
+/// Read the authoritative root-disk chain after the caller has proven the sandbox stopped.
+///
+/// `None` means no rollover journal exists yet. The first layer of runtime-produced roots is raw,
+/// so its apparent size is the shared guest-visible capacity. A foreign qcow2-only base fails
+/// explicitly instead of being assigned the container file's smaller apparent size.
+pub fn load_runtime_owned_root_chain(
+    runtime_dir: &Path,
+) -> Result<Option<RuntimeOwnedRootChain>, String> {
+    let state_path = runtime_dir.join(ROOT_DISK_STATE_FILE);
+    if !state_path.exists() {
+        return Ok(None);
+    }
+    let state = read_state(&state_path)?;
+    let first = state
+        .layers
+        .first()
+        .expect("validated runtime root chain is non-empty");
+    if first.format != RootDiskFormat::Raw {
+        return Err("runtime-owned root chain has no raw capacity-bearing base".into());
+    }
+    let virtual_size = std::fs::metadata(&first.path)
+        .map_err(|error| format!("read runtime-owned root base size: {error}"))?
+        .len();
+    if virtual_size == 0 {
+        return Err("runtime-owned root base has zero capacity".into());
+    }
+    Ok(Some(RuntimeOwnedRootChain {
+        device_id: state.device_id,
+        virtual_size,
+        layers: state
+            .layers
+            .into_iter()
+            .map(|layer| RuntimeOwnedRootLayer {
+                path: layer.path,
+                format: layer.format.as_str().into(),
+            })
+            .collect(),
+    }))
 }
 
 //--------------------------------------------------------------------------------------------------
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
 
-fn configured_layers(vm: &VmConfig) -> Result<Vec<UpperLayerSpec>, String> {
-    if let Some(spec) = &vm.rootfs_upper_spec {
+fn configured_layout(vm: &VmConfig) -> Option<RootDiskLayout> {
+    if vm.rootfs_vmdk.is_some() {
+        Some(RootDiskLayout::ManagedUpper)
+    } else if vm.rootfs_disk_runtime_owned {
+        Some(RootDiskLayout::FlatRoot)
+    } else {
+        None
+    }
+}
+
+fn configured_layers(vm: &VmConfig, layout: RootDiskLayout) -> Result<Vec<UpperLayerSpec>, String> {
+    let (spec, path, format) = match layout {
+        RootDiskLayout::ManagedUpper => (
+            vm.rootfs_upper_spec.as_ref(),
+            vm.rootfs_upper.as_ref(),
+            msb_krun::DiskImageFormat::Raw,
+        ),
+        RootDiskLayout::FlatRoot => (
+            vm.rootfs_disk_spec.as_ref(),
+            vm.rootfs_disk.as_ref(),
+            crate::vm::validate_disk_format(vm.rootfs_disk_format.as_deref())
+                .map_err(|error| error.to_string())?,
+        ),
+    };
+    if let Some(spec) = spec {
         return Ok(spec.layers.clone());
     }
-    Ok(vm
-        .rootfs_upper
-        .as_ref()
+    Ok(path
         .map(|path| {
             vec![UpperLayerSpec {
                 path: path.clone(),
-                format: msb_krun::DiskImageFormat::Raw,
+                format,
             }]
         })
         .unwrap_or_default())
@@ -401,7 +521,7 @@ fn prepare_backend(state: &RootDiskState) -> Result<msb_krun::PreparedBlockBacke
         .collect();
     let backend = msb_krun::BlockBackendSpec::new(layers).direct_io(direct_io);
     msb_krun::PreparedBlockBackend::open(&backend)
-        .map_err(|error| format!("prepare managed root backend: {error}"))
+        .map_err(|error| format!("prepare runtime-owned root backend: {error}"))
 }
 
 fn publish_layer_closure(root: &Path, layers: &[RootDiskLayer]) -> Result<(), String> {
@@ -433,7 +553,7 @@ fn publish_layer_closure(root: &Path, layers: &[RootDiskLayer]) -> Result<(), St
 fn read_state(path: &Path) -> Result<RootDiskState, String> {
     let metadata = path.metadata().map_err(|error| error.to_string())?;
     if metadata.len() > MAX_ROOT_DISK_STATE_BYTES {
-        return Err("managed root-disk state exceeds its size bound".into());
+        return Err("runtime-owned root-disk state exceeds its size bound".into());
     }
     let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
     let state: RootDiskState = serde_json::from_slice(&bytes)
@@ -468,9 +588,13 @@ fn write_state(path: &Path, state: &RootDiskState) -> Result<(), String> {
     sync_directory(parent).map_err(|error| error.to_string())
 }
 
-fn next_overlay_path(previous: &Path) -> PathBuf {
+fn next_overlay_path(previous: &Path, layout: RootDiskLayout) -> PathBuf {
     let parent = previous.parent().unwrap_or_else(|| Path::new("."));
-    parent.join(format!("upper-{}.qcow2", &new_id("head")[5..]))
+    let prefix = match layout {
+        RootDiskLayout::ManagedUpper => "upper",
+        RootDiskLayout::FlatRoot => "root",
+    };
+    parent.join(format!("{prefix}-{}.qcow2", &new_id("head")[5..]))
 }
 
 fn new_id(prefix: &str) -> String {
@@ -502,8 +626,9 @@ fn sync_directory(path: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ROOT_DISK_STATE_SCHEMA, ROOT_UPPER_DEVICE_ID, RootDiskFormat, RootDiskLayer, RootDiskState,
-        new_id, read_state, write_state,
+        FLAT_ROOT_DEVICE_ID, MANAGED_ROOT_DEVICE_ID, ROOT_DISK_STATE_SCHEMA, RootDiskFormat,
+        RootDiskLayer, RootDiskLayout, RootDiskState, load_runtime_owned_root_chain, new_id,
+        next_overlay_path, read_state, write_state,
     };
 
     use crate::vm::UpperLayerSpec;
@@ -518,7 +643,8 @@ mod tests {
         let state = RootDiskState {
             schema: ROOT_DISK_STATE_SCHEMA.into(),
             volume_id: new_id("vol"),
-            device_id: ROOT_UPPER_DEVICE_ID.into(),
+            device_id: MANAGED_ROOT_DEVICE_ID.into(),
+            layout: RootDiskLayout::ManagedUpper,
             published_generation: 1,
             layers: vec![
                 RootDiskLayer {
@@ -537,7 +663,7 @@ mod tests {
         };
         let path = directory.path().join("root-disk.json");
         write_state(&path, &state).unwrap();
-        let recovered = read_state(&path).unwrap().upper_spec();
+        let recovered = read_state(&path).unwrap().disk_spec();
 
         assert_eq!(
             recovered.layers,
@@ -552,5 +678,70 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn flat_journal_uses_root_device_and_root_overlay_names() {
+        let directory = tempfile::tempdir().unwrap();
+        let base = directory.path().join("rootfs.raw");
+        std::fs::write(&base, b"base").unwrap();
+        let state = RootDiskState {
+            schema: ROOT_DISK_STATE_SCHEMA.into(),
+            volume_id: new_id("vol"),
+            device_id: FLAT_ROOT_DEVICE_ID.into(),
+            layout: RootDiskLayout::FlatRoot,
+            published_generation: 0,
+            layers: vec![RootDiskLayer {
+                layer_id: new_id("layer"),
+                path: base.clone(),
+                format: RootDiskFormat::Raw,
+                integrity_root: None,
+            }],
+        };
+        let state_path = directory.path().join("root-disk.json");
+        write_state(&state_path, &state).unwrap();
+
+        let next = next_overlay_path(&base, state.layout);
+        assert_eq!(next.parent(), Some(directory.path()));
+        assert!(
+            next.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("root-")
+        );
+        assert_eq!(
+            next.extension().and_then(|value| value.to_str()),
+            Some("qcow2")
+        );
+        let loaded = load_runtime_owned_root_chain(directory.path())
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.device_id, FLAT_ROOT_DEVICE_ID);
+        assert_eq!(loaded.virtual_size, 4);
+        assert_eq!(loaded.layers[0].path, base);
+        assert_eq!(loaded.layers[0].format, "raw");
+    }
+
+    #[test]
+    fn journal_without_layout_defaults_to_managed_upper() {
+        let state = RootDiskState {
+            schema: ROOT_DISK_STATE_SCHEMA.into(),
+            volume_id: new_id("vol"),
+            device_id: MANAGED_ROOT_DEVICE_ID.into(),
+            layout: RootDiskLayout::ManagedUpper,
+            published_generation: 0,
+            layers: vec![RootDiskLayer {
+                layer_id: new_id("layer"),
+                path: "upper.ext4".into(),
+                format: RootDiskFormat::Raw,
+                integrity_root: None,
+            }],
+        };
+        let mut value = serde_json::to_value(state).unwrap();
+        value.as_object_mut().unwrap().remove("layout");
+        let parsed: RootDiskState = serde_json::from_value(value).unwrap();
+
+        assert_eq!(parsed.layout, RootDiskLayout::ManagedUpper);
+        parsed.validate().unwrap();
     }
 }

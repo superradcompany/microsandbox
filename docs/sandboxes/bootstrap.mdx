@@ -58,7 +58,7 @@ sb, err := m.CreateSandbox(ctx, "worker",
 
 `auto` first asks the host filesystem for a native copy-on-write clone and falls back to an independent sparse copy when cloning is unsupported. Use `copy` when independence from the base's physical extents matters more than provisioning latency, or `reflink` when clone support is an operational requirement and failure is preferable to fallback. Linux uses `FICLONE`, macOS uses `clonefile`, and Windows uses block cloning only on volumes that advertise block refcounting.
 
-The normal layered root remains the default and retains layer-level deduplication. Flat v1 uses ext4 and is incompatible with rootfs patches and snapshots; unsupported combinations fail explicitly.
+The normal layered root remains the default and retains layer-level deduplication. Flat roots use ext4 and support the same patch operations and local snapshot workflows. A patched flat sandbox is materialized as a private complete filesystem rather than changing the shared cached base.
 
 See [Optimization](/sandboxes/optimization#storage-layout-layered-or-flat) for workload tradeoffs, host filesystem expectations, and how to verify the clone strategy actually used.
 

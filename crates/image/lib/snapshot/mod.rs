@@ -21,6 +21,6 @@ pub use manifest::{
     LAYERS_DIRECTORY, LayerFileKind, LayerPayload, MAX_DESCRIPTOR_BYTES, MAX_FILE_LAYERS,
     MAX_JSON_SAFE_INTEGER, Manifest, SCHEMA, SCHEMA_VERSION, SNAPSHOT_ARTIFACT_KIND,
     SPARSE_SHA256_V1, SUPPORTED_REQUIRES, SnapshotCapture, SnapshotConsistency, SnapshotDescriptor,
-    SnapshotFormat, SnapshotId, SnapshotScope, SnapshotState, UpperIntegrity, UpperLayer,
-    layer_path,
+    SnapshotFormat, SnapshotId, SnapshotRootDisk, SnapshotScope, SnapshotState, UpperIntegrity,
+    UpperLayer, layer_path,
 };

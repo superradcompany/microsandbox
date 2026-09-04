@@ -334,6 +334,7 @@ async fn inspect(args: SnapshotInspectArgs) -> anyhow::Result<()> {
     ui::detail_kv("Image", &m.image.reference);
     ui::detail_kv("Image Manifest", &m.image.manifest_digest);
     ui::detail_kv("Scope", format_scope(m.scope));
+    ui::detail_kv("Root Disk", format_root_disk(&m.root_disk));
     ui::detail_kv(
         "Parent",
         m.parent
@@ -478,6 +479,14 @@ fn format_scope(scope: microsandbox::SnapshotScope) -> &'static str {
     match scope {
         microsandbox::SnapshotScope::Disk => "disk",
         microsandbox::SnapshotScope::Full => "full",
+    }
+}
+
+fn format_root_disk(root_disk: &microsandbox::SnapshotRootDisk) -> &'static str {
+    match root_disk {
+        microsandbox::SnapshotRootDisk::Managed => "managed",
+        microsandbox::SnapshotRootDisk::Flat => "flat",
+        microsandbox::SnapshotRootDisk::Tmpfs { .. } => "tmpfs",
     }
 }
 

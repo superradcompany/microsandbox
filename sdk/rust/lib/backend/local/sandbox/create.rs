@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use microsandbox_db::DbWriteConnection;
 use microsandbox_db::pool::DbPools;
+use microsandbox_image::snapshot::SnapshotRootDisk;
 use microsandbox_image::{
     CachedImageMetadata, Digest, GlobalCache, PullOptions, PullProgress, PullProgressSender,
     PullResult, Reference, Registry, ext4, tree,
@@ -30,8 +31,8 @@ use crate::runtime::{
 };
 use crate::sandbox::{
     FsEntryKind, PullPolicy, RootDisk, RootfsSource, Sandbox, SandboxConfig, SandboxStatus,
-    apply_patches, build_upper_tree, config::SnapshotRestoreMode, remove_dir_if_exists,
-    validate_env, validate_hostname, validate_labels, validate_sandbox_name,
+    apply_patches, build_flat_tree, build_upper_tree, config::SnapshotRestoreMode,
+    remove_dir_if_exists, validate_env, validate_hostname, validate_labels, validate_sandbox_name,
     validate_volume_mounts,
 };
 
@@ -158,6 +159,8 @@ impl LocalBackend {
         // feeding that result through the installed-snapshot copier would copy the closure onto
         // itself and destroy the eager restore source.
         let installed_checkpoint_restore = config.checkpoint_restore.take();
+        let installed_file_sources = std::mem::take(&mut config.snapshot_root_layer_sources);
+        let installed_file_virtual_size = config.snapshot_root_virtual_size.take();
 
         // A direct archive restore streams its layer into the ordinary child
         // staging location before image resolution. The archive supplies the
@@ -174,6 +177,10 @@ impl LocalBackend {
             .await?;
             config.spec.image = RootfsSource::oci(materialized.manifest.image.reference.clone());
             config.manifest_digest = Some(materialized.manifest.image.manifest_digest.clone());
+            crate::sandbox::apply_snapshot_root_layout(
+                &mut config,
+                &materialized.manifest.root_disk,
+            )?;
             if let Some(restore) = materialized.checkpoint_restore {
                 let state = match &materialized.manifest.state {
                     crate::snapshot::SnapshotState::Checkpoint(state) => state,
@@ -206,8 +213,18 @@ impl LocalBackend {
                 config.suppress_launch_for_full_restore();
             } else if !materialized.upper_layers.is_empty() {
                 config.snapshot_upper_layers = materialized.upper_layers;
-            } else {
-                config.snapshot_upper_source = Some(sandbox_dir.join("upper.ext4"));
+            } else if matches!(
+                materialized.manifest.state,
+                crate::snapshot::SnapshotState::File(_)
+            ) {
+                config.snapshot_upper_source =
+                    Some(sandbox_dir.join(match &materialized.manifest.root_disk {
+                        SnapshotRootDisk::Managed => "upper.ext4",
+                        SnapshotRootDisk::Flat => crate::sandbox::flat_rootfs::FLAT_ROOTFS_FILENAME,
+                        SnapshotRootDisk::Tmpfs { .. } => {
+                            unreachable!("file snapshots reject tmpfs roots")
+                        }
+                    }));
             }
         }
 
@@ -216,11 +233,15 @@ impl LocalBackend {
         // head remain under the ordinary sandbox directory and root-disk journal.
         if let Some(source) = installed_checkpoint_restore {
             child_stage_guard = Some(ChildStageGuard::new(sandbox_dir.clone()));
+            let root_layout = snapshot_root_layout_from_config(&config)?;
             match config.snapshot_restore_mode {
                 SnapshotRestoreMode::Full => {
-                    let materialized =
-                        crate::snapshot::materialize_checkpoint_for_child(&source, &sandbox_dir)
-                            .await?;
+                    let materialized = crate::snapshot::materialize_checkpoint_for_child(
+                        &source,
+                        &sandbox_dir,
+                        &root_layout,
+                    )
+                    .await?;
                     config.checkpoint_restore = Some(materialized.restore);
                     config.snapshot_upper_layers = materialized.upper_layers;
                     config.suppress_launch_for_full_restore();
@@ -229,11 +250,29 @@ impl LocalBackend {
                     let materialized = crate::snapshot::materialize_checkpoint_disk_for_child(
                         &source,
                         &sandbox_dir,
+                        &root_layout,
                     )
                     .await?;
                     config.snapshot_upper_layers = materialized.upper_layers;
                 }
             }
+        }
+        if !installed_file_sources.is_empty() {
+            child_stage_guard = Some(ChildStageGuard::new(sandbox_dir.clone()));
+            let virtual_size = installed_file_virtual_size.ok_or_else(|| {
+                crate::MicrosandboxError::SnapshotIntegrity(
+                    "file snapshot is missing its root-disk capacity".into(),
+                )
+            })?;
+            let root_layout = snapshot_root_layout_from_config(&config)?;
+            let materialized = crate::snapshot::materialize_file_snapshot_for_child(
+                &installed_file_sources,
+                virtual_size,
+                &sandbox_dir,
+                &root_layout,
+            )
+            .await?;
+            config.snapshot_upper_layers = materialized.upper_layers;
         }
         // Archive descriptors are intentionally inspected only while streaming into child
         // staging, after outer builder dispatch has selected its provisional mode. Re-evaluate
@@ -332,58 +371,96 @@ impl LocalBackend {
                             fstype.as_deref().unwrap_or_default()
                         )));
                     }
-                    if !config.spec.patches.is_empty() {
-                        return Err(crate::MicrosandboxError::InvalidConfig(
-                            "patches are not yet compatible with flat OCI rootfs".into(),
+                    if config.snapshot_upper_source.is_some()
+                        || !config.snapshot_upper_layers.is_empty()
+                        || !config.spec.patches.is_empty()
+                    {
+                        None
+                    } else {
+                        let flat_ref = cache
+                            .read_flat_ref(&pull_result.manifest_digest)?
+                            .ok_or_else(|| {
+                                crate::MicrosandboxError::Custom(
+                                    "flat rootfs was not published by the image pull".into(),
+                                )
+                            })?;
+                        let artifact_digest: Digest =
+                            flat_ref.artifact_digest.parse().map_err(|e| {
+                                crate::MicrosandboxError::Custom(format!(
+                                    "invalid flat rootfs artifact digest in cache: {e}"
+                                ))
+                            })?;
+                        let minimum_mib = flat_ref.virtual_size_bytes.div_ceil(1024 * 1024);
+                        let requested_mib = size_mib.map(u64::from).unwrap_or(u64::from(
+                            crate::sandbox::config::DEFAULT_OCI_UPPER_SIZE_MIB,
                         ));
-                    }
-                    if config.snapshot_upper_source.is_some() {
-                        return Err(crate::MicrosandboxError::InvalidConfig(
-                            "from_snapshot is not yet compatible with flat OCI rootfs".into(),
-                        ));
-                    }
-
-                    let flat_ref = cache
-                        .read_flat_ref(&pull_result.manifest_digest)?
-                        .ok_or_else(|| {
-                            crate::MicrosandboxError::Custom(
-                                "flat rootfs was not published by the image pull".into(),
+                        let target_mib = size_mib
+                            .map(|_| requested_mib)
+                            .unwrap_or_else(|| requested_mib.max(minimum_mib));
+                        let target_mib = u32::try_from(target_mib).map_err(|_| {
+                            crate::MicrosandboxError::InvalidConfig(
+                                "flat root disk size exceeds supported MiB range".into(),
                             )
                         })?;
-                    let artifact_digest: Digest =
-                        flat_ref.artifact_digest.parse().map_err(|e| {
-                            crate::MicrosandboxError::Custom(format!(
-                                "invalid flat rootfs artifact digest in cache: {e}"
-                            ))
-                        })?;
-                    let minimum_mib = flat_ref.virtual_size_bytes.div_ceil(1024 * 1024);
-                    let requested_mib = size_mib.map(u64::from).unwrap_or(u64::from(
-                        crate::sandbox::config::DEFAULT_OCI_UPPER_SIZE_MIB,
-                    ));
-                    let target_mib = size_mib
-                        .map(|_| requested_mib)
-                        .unwrap_or_else(|| requested_mib.max(minimum_mib));
-                    let target_mib = u32::try_from(target_mib).map_err(|_| {
-                        crate::MicrosandboxError::InvalidConfig(
-                            "flat root disk size exceeds supported MiB range".into(),
-                        )
-                    })?;
-                    Some((cache.flat_blob_path(&artifact_digest), target_mib, *clone))
+                        Some((cache.flat_blob_path(&artifact_digest), target_mib, *clone))
+                    }
                 }
                 _ => None,
             };
 
-            let upper_tree = if !config.spec.patches.is_empty() {
-                Some(build_upper_tree(&config.spec.patches, &layer_erofs_paths).await?)
+            // Flat patches modify a complete private tree. Managed patches remain a compact
+            // OverlayFS upper and therefore retain their existing fast path.
+            tokio::fs::create_dir_all(&sandbox_dir).await?;
+            let flat_patch_spool = sandbox_dir.join(".flat-patch.spool");
+            let flat_tree = if !config.spec.patches.is_empty()
+                && matches!(root_disk, RootDisk::Flat { .. })
+            {
+                match build_flat_tree(&config.spec.patches, &layer_erofs_paths, &flat_patch_spool)
+                    .await
+                {
+                    Ok(tree) => Some(tree),
+                    Err(error) => {
+                        let _ = tokio::fs::remove_file(&flat_patch_spool).await;
+                        return Err(error);
+                    }
+                }
             } else {
                 None
             };
+            let upper_tree =
+                if !config.spec.patches.is_empty() && !matches!(root_disk, RootDisk::Flat { .. }) {
+                    Some(build_upper_tree(&config.spec.patches, &layer_erofs_paths).await?)
+                } else {
+                    None
+                };
 
             // Ensure sandbox storage exists before provisioning either a private flat rootfs or
             // the writable overlay upper image.
-            tokio::fs::create_dir_all(&sandbox_dir).await?;
             let upper_path = sandbox_dir.join("upper.ext4");
-            if let Some((base, target_mib, clone)) = flat_spec {
+            let writable_disk_path = if matches!(root_disk, RootDisk::Flat { .. }) {
+                sandbox_dir.join(crate::sandbox::flat_rootfs::FLAT_ROOTFS_FILENAME)
+            } else {
+                upper_path.clone()
+            };
+            if let Some(flat_tree) = flat_tree {
+                let requested_mib = match &root_disk {
+                    RootDisk::Flat { size_mib, .. } => *size_mib,
+                    _ => unreachable!("flat patch tree requires a flat root"),
+                };
+                let materialized = crate::sandbox::flat_rootfs::create_patched_flat_rootfs(
+                    writable_disk_path.clone(),
+                    flat_tree,
+                    requested_mib,
+                )
+                .await;
+                let _ = tokio::fs::remove_file(&flat_patch_spool).await;
+                let target_mib = materialized?;
+                if let RootfsSource::Oci(oci) = &mut config.spec.image
+                    && let Some(RootDisk::Flat { size_mib, .. }) = &mut oci.root_disk
+                {
+                    *size_mib = Some(target_mib);
+                }
+            } else if let Some((base, target_mib, clone)) = flat_spec {
                 crate::sandbox::flat_rootfs::create_private_flat_rootfs(
                     base,
                     sandbox_dir.join(crate::sandbox::flat_rootfs::FLAT_ROOTFS_FILENAME),
@@ -412,8 +489,8 @@ impl LocalBackend {
                         "patches cannot be combined with from_snapshot".into(),
                     ));
                 }
-                if snap_upper != upper_path {
-                    let dst = upper_path.clone();
+                if snap_upper != writable_disk_path {
+                    let dst = writable_disk_path.clone();
                     tokio::task::spawn_blocking(move || {
                         microsandbox_utils::copy::fast_copy(&snap_upper, &dst)
                     })
@@ -483,8 +560,8 @@ impl LocalBackend {
             }
         }
 
-        // Apply rootfs patches before VM start (bind mounts only — OCI patches
-        // are baked into upper.ext4 above).
+        // Apply rootfs patches before VM start. OCI patches were baked into their managed upper or
+        // complete private flat root above; this path handles bind roots only.
         if !config.spec.patches.is_empty() && !matches!(config.spec.image, RootfsSource::Oci(_)) {
             apply_patches(&config.spec.image, &config.spec.patches).await?;
         }
@@ -1434,6 +1511,28 @@ impl LocalBackend {
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
+
+fn snapshot_root_layout_from_config(
+    config: &SandboxConfig,
+) -> MicrosandboxResult<SnapshotRootDisk> {
+    let RootfsSource::Oci(oci) = &config.spec.image else {
+        return Err(crate::MicrosandboxError::SnapshotIntegrity(
+            "snapshot restore did not resolve to an OCI rootfs".into(),
+        ));
+    };
+    Ok(match oci.root_disk.as_ref() {
+        None | Some(RootDisk::Managed { .. }) => SnapshotRootDisk::Managed,
+        Some(RootDisk::Flat { .. }) => SnapshotRootDisk::Flat,
+        Some(RootDisk::Tmpfs { size_mib }) => SnapshotRootDisk::Tmpfs {
+            size_mib: *size_mib,
+        },
+        Some(RootDisk::DiskImage { .. }) => {
+            return Err(crate::MicrosandboxError::SnapshotIntegrity(
+                "snapshot descriptor cannot select a user-owned disk-image root".into(),
+            ));
+        }
+    })
+}
 
 /// Probe every backward-compatible Unix endpoint before recovering an
 /// untracked namespace. A successful connection is direct evidence that an

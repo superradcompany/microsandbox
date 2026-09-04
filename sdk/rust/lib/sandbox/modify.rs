@@ -578,6 +578,7 @@ async fn grow_root_disk_now(
         )
     })?;
     let sandbox_dir = local_backend.sandboxes_dir().join(name);
+    refuse_checkpoint_backed_root_grow(&sandbox_dir)?;
     if matches!(
         &config.spec.image,
         RootfsSource::Oci(oci) if matches!(&oci.root_disk, Some(RootDisk::Flat { .. }))
@@ -589,6 +590,29 @@ async fn grow_root_disk_now(
         .await;
     }
     super::upper::grow_upper_to_mib(sandbox_dir.join("upper.ext4"), target_mib).await
+}
+
+/// Refuse the legacy raw-file grow path once checkpoint rollover has installed a qcow2 head.
+///
+/// A one-layer journal still names the ordinary mutable raw disk and is safe to grow in place.
+/// With two or more layers, however, the raw file is a sealed ancestor and only a future
+/// chain-aware resize may extend the active qcow2 head and filesystem.
+fn refuse_checkpoint_backed_root_grow(sandbox_dir: &std::path::Path) -> MicrosandboxResult<()> {
+    let chain = microsandbox_runtime::checkpoint::load_runtime_owned_root_chain(
+        &sandbox_dir.join("runtime"),
+    )
+    .map_err(|error| {
+        crate::MicrosandboxError::Runtime(format!(
+            "cannot inspect the root-disk chain before resize: {error}"
+        ))
+    })?;
+    if chain.is_some_and(|chain| chain.layers.len() > 1) {
+        return Err(crate::MicrosandboxError::Custom(
+            "cannot grow a checkpoint-backed root disk yet; its sealed raw ancestor must not be resized"
+                .into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Path of the sandbox's host-side runtime control socket.
@@ -2890,6 +2914,52 @@ mod tests {
         assert_eq!(
             root_disk_grow_target(&plan, &patch, &oci_config_with_upper(4096)),
             Some(8192)
+        );
+    }
+
+    #[test]
+    fn checkpoint_backed_root_grow_refuses_to_mutate_the_sealed_base() {
+        let sandbox = tempdir().unwrap();
+        let runtime = sandbox.path().join("runtime");
+        std::fs::create_dir(&runtime).unwrap();
+        let base = sandbox.path().join("rootfs.raw");
+        let head = sandbox.path().join("root-active.qcow2");
+        std::fs::write(&base, vec![0; 4096]).unwrap();
+        std::fs::write(&head, b"qcow").unwrap();
+        let state = serde_json::json!({
+            "schema": "microsandbox.runtime-root-disk/1",
+            "volume_id": "vol_00000000000000000000000000000000",
+            "device_id": "vda",
+            "layout": "flat-root",
+            "published_generation": 1,
+            "layers": [
+                {
+                    "layer_id": "layer_00000000000000000000000000000001",
+                    "path": base,
+                    "format": "raw",
+                    "integrity_root": "blake3:sealed"
+                },
+                {
+                    "layer_id": "layer_00000000000000000000000000000002",
+                    "path": head,
+                    "format": "qcow2",
+                    "integrity_root": null
+                }
+            ]
+        });
+        std::fs::write(
+            runtime.join("root-disk.json"),
+            serde_json::to_vec(&state).unwrap(),
+        )
+        .unwrap();
+
+        let error = refuse_checkpoint_backed_root_grow(sandbox.path()).unwrap_err();
+        assert!(error.to_string().contains("checkpoint-backed root disk"));
+        assert_eq!(
+            std::fs::metadata(sandbox.path().join("rootfs.raw"))
+                .unwrap()
+                .len(),
+            4096
         );
     }
 

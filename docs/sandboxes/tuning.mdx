@@ -375,6 +375,7 @@ Root disk changes are offline, not live. For a running sandbox, use the restart 
 The backing determines which changes are valid:
 
 - Managed and flat OCI root disks are grow-only. Shrinking is rejected because it risks filesystem data loss.
+- After a full snapshot has rolled a root disk onto a qcow2 chain, root-disk growth is refused for now. Microsandbox will not resize the chain's sealed raw ancestor; chain-aware online growth is tracked separately.
 - A tmpfs OCI root disk can grow or shrink on the next boot, but its size cannot exceed sandbox memory.
 - User-supplied root disk images are not resized or deleted by microsandbox; resize the image file yourself while it is detached.
 - Existing disk-backed named volumes do not have a resize operation. Their capacity is fixed when the volume is created.

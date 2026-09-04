@@ -307,6 +307,7 @@ pub(crate) async fn materialize_archive_for_child(
 pub(crate) use restore::{
     materialize_checkpoint_child_disk_state, materialize_checkpoint_child_state,
     materialize_checkpoint_disk_for_child, materialize_checkpoint_for_child,
+    materialize_file_snapshot_for_child,
 };
 
 pub(crate) use create::CHECKPOINT_DIRECTORY;
@@ -520,8 +521,8 @@ pub use archive::fuzz_unpack_archive;
 pub use microsandbox_image::snapshot::{
     CheckpointSnapshotState, DESCRIPTOR_FILENAME, DiskLayer, DiskLayerId, FileSnapshotState,
     ImageRef, LayerFileKind, LayerPayload, Manifest, SnapshotCapture, SnapshotConsistency,
-    SnapshotDescriptor, SnapshotFormat, SnapshotId, SnapshotScope, SnapshotState, UpperIntegrity,
-    UpperLayer,
+    SnapshotDescriptor, SnapshotFormat, SnapshotId, SnapshotRootDisk, SnapshotScope, SnapshotState,
+    UpperIntegrity, UpperLayer,
 };
 pub use microsandbox_types::{SnapshotSpec, SnapshotSpec as SnapshotConfig};
 pub use verify::{CheckpointVerifyStatus, SnapshotVerifyReport, UpperVerifyStatus};

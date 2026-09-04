@@ -22,7 +22,7 @@ use msb_krun::{
     MemoryCaptureSink,
 };
 
-use super::disk::ManagedRootDisk;
+use super::disk::RuntimeOwnedRootDisk;
 use crate::vm::VmConfig;
 
 //--------------------------------------------------------------------------------------------------
@@ -51,7 +51,7 @@ pub(crate) struct CheckpointCoordinator {
     store: LocalObjectStore,
     runtime: tokio::runtime::Handle,
     agent_sock: PathBuf,
-    root_disk: Option<ManagedRootDisk>,
+    root_disk: Option<RuntimeOwnedRootDisk>,
     fs_resource_bindings: BTreeMap<String, BTreeMap<String, String>>,
     network_resource_binding: Option<String>,
     previous_memory: Option<MemoryManifest>,
@@ -143,8 +143,10 @@ impl CheckpointCoordinator {
         std::fs::create_dir_all(&root).map_err(|error| error.to_string())?;
         let store = LocalObjectStore::open(runtime_dir.join("checkpoint-store"))
             .map_err(|error| error.to_string())?;
-        let root_disk = ManagedRootDisk::open(runtime_dir, vm)?;
-        let fs_resource_bindings = runtime_owned_fs_bindings(root_disk.is_some());
+        let root_disk = RuntimeOwnedRootDisk::open(runtime_dir, vm)?;
+        let block_root =
+            vm.rootfs_vmdk.is_some() || vm.rootfs_disk.is_some() || vm.rootfs_disk_spec.is_some();
+        let fs_resource_bindings = runtime_owned_fs_bindings(block_root);
         let network_resource_binding = guest_bootstrap
             .network
             .as_ref()
@@ -437,7 +439,11 @@ impl CheckpointCoordinator {
         let mut pending_devices = Vec::with_capacity(inventory.len());
         let mut disk_roots = Vec::new();
         for (device_type, device_id) in inventory {
-            let bytes = if *device_type == TYPE_BLOCK && device_id == "vdb" {
+            let runtime_owned_root = self
+                .root_disk
+                .as_ref()
+                .is_some_and(|disk| disk.device_id() == device_id);
+            let bytes = if *device_type == TYPE_BLOCK && runtime_owned_root {
                 let disk = self.root_disk.as_mut().ok_or_else(|| {
                     CheckpointFailure::resumable(
                         "managed root block device has no rollover provider",
@@ -938,17 +944,15 @@ fn validate_vm_generation_state(state: Option<msb_krun::VmGenerationState>) -> R
 ///
 /// libkrun exposes transport identifiers rather than FUSE mount tags in its
 /// device inventory. Microsandbox constructs filesystems in a fixed order:
-/// the root/bootstrap transport first and `msb_runtime` second. A managed
-/// block root may reconnect the first transport because it is only the
+/// the root/bootstrap transport first and `msb_runtime` second. A block
+/// root may reconnect the first transport because it is only the
 /// discarded init trampoline. The runtime share is likewise an explicitly
 /// reconnectable host-control binding. Every later filesystem belongs to a
 /// user mount and remains ineligible until its provider can preserve live
 /// handles and object identity.
-fn runtime_owned_fs_bindings(
-    managed_block_root: bool,
-) -> BTreeMap<String, BTreeMap<String, String>> {
+fn runtime_owned_fs_bindings(block_root: bool) -> BTreeMap<String, BTreeMap<String, String>> {
     let mut bindings = BTreeMap::new();
-    if managed_block_root {
+    if block_root {
         bindings.insert(
             "virtio_fs0".into(),
             BTreeMap::from([

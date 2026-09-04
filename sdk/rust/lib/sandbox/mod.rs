@@ -87,9 +87,9 @@ pub(crate) fn reserved_label_prefix(key: &str) -> Option<&'static str> {
 
 // `mod patch` and `mod types` are private; re-export the entry points the
 // local backend's lifecycle and create methods under `backend/local/` call.
-pub(crate) use builder::apply_checkpoint_restore_constraints;
+pub(crate) use builder::{apply_checkpoint_restore_constraints, apply_snapshot_root_layout};
 pub(crate) use modify::control_checkpoint_create;
-pub(crate) use patch::{apply_patches, build_upper_tree};
+pub(crate) use patch::{apply_patches, build_flat_tree, build_upper_tree};
 #[cfg(windows)]
 pub(crate) use reap::reap_leaked_runtime_process;
 pub(crate) use types::validate_named_disk_mount_options;

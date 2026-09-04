@@ -323,6 +323,12 @@ pub struct VmConfig {
     /// Whether the disk image is read-only.
     pub rootfs_disk_readonly: bool,
 
+    /// Complete explicitly typed oldest-to-head chain for a runtime-owned flat root disk.
+    pub rootfs_disk_spec: Option<UpperSpec>,
+
+    /// Whether the direct root disk is sandbox-owned and eligible for checkpoint rollover.
+    pub rootfs_disk_runtime_owned: bool,
+
     /// VMDK descriptor path for EROFS fsmerge OCI rootfs (read-only).
     pub rootfs_vmdk: Option<PathBuf>,
 
@@ -511,6 +517,8 @@ impl std::fmt::Debug for VmConfig {
             .field("rootfs_disk", &self.rootfs_disk)
             .field("rootfs_disk_format", &self.rootfs_disk_format)
             .field("rootfs_disk_readonly", &self.rootfs_disk_readonly)
+            .field("rootfs_disk_spec", &self.rootfs_disk_spec)
+            .field("rootfs_disk_runtime_owned", &self.rootfs_disk_runtime_owned)
             .field("mounts", &self.mounts)
             .field("disks", &self.disks);
         #[cfg(unix)]
@@ -596,8 +604,9 @@ fn run(mut config: Config) -> RuntimeResult<std::convert::Infallible> {
     // Set up runtime directory.
     std::fs::create_dir_all(&config.runtime_dir)?;
     std::fs::create_dir_all(config.runtime_dir.join("scripts"))?;
-    crate::checkpoint::recover_managed_upper(&config.runtime_dir, &mut config.vm)
-        .map_err(|error| RuntimeError::Custom(format!("recover managed root disk: {error}")))?;
+    crate::checkpoint::recover_runtime_owned_root(&config.runtime_dir, &mut config.vm).map_err(
+        |error| RuntimeError::Custom(format!("recover runtime-owned root disk: {error}")),
+    )?;
     // Heartbeats are per boot, while the runtime directory persists across starts.
     heartbeat::clear_stale(&config.runtime_dir)?;
     if config.vm.checkpoint_restore.is_some() {
@@ -1415,13 +1424,21 @@ fn run(mut config: Config) -> RuntimeResult<std::convert::Infallible> {
 }
 
 fn oci_upper_host_path(vm: &VmConfig) -> Option<PathBuf> {
-    vm.rootfs_vmdk.as_ref()?;
-
-    vm.rootfs_upper_spec
-        .as_ref()
-        .and_then(|spec| spec.layers.last())
-        .map(|layer| layer.path.clone())
-        .or_else(|| vm.rootfs_upper.clone())
+    if vm.rootfs_vmdk.is_some() {
+        return vm
+            .rootfs_upper_spec
+            .as_ref()
+            .and_then(|spec| spec.layers.last())
+            .map(|layer| layer.path.clone())
+            .or_else(|| vm.rootfs_upper.clone());
+    }
+    vm.rootfs_disk_runtime_owned.then(|| {
+        vm.rootfs_disk_spec
+            .as_ref()
+            .and_then(|spec| spec.layers.last())
+            .map(|layer| layer.path.clone())
+            .or_else(|| vm.rootfs_disk.clone())
+    })?
 }
 
 #[cfg(windows)]
@@ -1506,6 +1523,12 @@ fn writeback_limited_disk_paths(vm: &VmConfig) -> RuntimeResult<Vec<PathBuf>> {
             }
         } else if let Some(upper) = &vm.rootfs_upper {
             paths.push(upper.clone());
+        }
+    } else if let Some(spec) = &vm.rootfs_disk_spec {
+        if let Some(head) = spec.layers.last()
+            && is_writeback_limited_disk(head.format, spec.read_only)
+        {
+            paths.push(head.path.clone());
         }
     } else if let Some(rootfs_disk) = &vm.rootfs_disk {
         let format = validate_disk_format(vm.rootfs_disk_format.as_deref())
@@ -1656,7 +1679,7 @@ fn build_vm(
                 apply_block_writeback_limit(d, format, false, writeback_limit.as_ref())
             });
         }
-    } else if let Some(ref disk_path) = vm.rootfs_disk {
+    } else if vm.rootfs_disk_spec.is_some() || vm.rootfs_disk.is_some() {
         #[cfg(unix)]
         {
             let backend = bootstrap_trampoline_backend()?;
@@ -1669,15 +1692,35 @@ fn build_vm(
             builder = builder.fs(move |fs| fs.tag("/dev/root").custom(Box::new(backend)));
         }
 
-        let format = validate_disk_format(vm.rootfs_disk_format.as_deref())
-            .map_err(|e| RuntimeError::Custom(format!("disk format: {e}")))?;
-        let disk_path = disk_path.clone();
-        let readonly = vm.rootfs_disk_readonly;
-        let writeback_limit = writeback_limit.cloned();
-        builder = builder.disk(move |d| {
-            let d = d.path(&disk_path).format(format).read_only(readonly);
-            apply_block_writeback_limit(d, format, readonly, writeback_limit.as_ref())
-        });
+        if let Some(ref spec) = vm.rootfs_disk_spec {
+            let layers = validate_upper_layers(spec)?;
+            let format = layers.last().expect("validated non-empty chain").format;
+            let read_only = spec.read_only;
+            let direct_io =
+                cfg!(target_os = "linux") && matches!(format, msb_krun::DiskImageFormat::Qcow2);
+            let writeback_limit = writeback_limit.cloned();
+            builder = builder.disk(move |d| {
+                let layers = layers
+                    .into_iter()
+                    .map(|layer| msb_krun::DiskLayer::new(layer.path, layer.format));
+                let d = d
+                    .layers(layers)
+                    .format(format)
+                    .read_only(read_only)
+                    .direct_io(direct_io);
+                apply_block_writeback_limit(d, format, read_only, writeback_limit.as_ref())
+            });
+        } else if let Some(ref disk_path) = vm.rootfs_disk {
+            let format = validate_disk_format(vm.rootfs_disk_format.as_deref())
+                .map_err(|e| RuntimeError::Custom(format!("disk format: {e}")))?;
+            let disk_path = disk_path.clone();
+            let readonly = vm.rootfs_disk_readonly;
+            let writeback_limit = writeback_limit.cloned();
+            builder = builder.disk(move |d| {
+                let d = d.path(&disk_path).format(format).read_only(readonly);
+                apply_block_writeback_limit(d, format, readonly, writeback_limit.as_ref())
+            });
+        }
         if bootstrap.block_root.is_none() {
             bootstrap.block_root = Some(BootstrapBlockRoot::DiskImage {
                 device: "/dev/vda".to_string(),

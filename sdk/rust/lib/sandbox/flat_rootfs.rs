@@ -84,6 +84,76 @@ pub(crate) async fn grow_private_flat_rootfs(
         .map_err(|error| MicrosandboxError::Custom(format!("failed to grow flat rootfs: {error}")))
 }
 
+/// Materialize a patched complete OCI tree as one private flat root disk.
+pub(crate) async fn create_patched_flat_rootfs(
+    destination: PathBuf,
+    tree: microsandbox_image::tree::FileTree,
+    requested_mib: Option<u32>,
+) -> MicrosandboxResult<u32> {
+    tokio::task::spawn_blocking(move || {
+        if destination.exists() {
+            return Err(MicrosandboxError::Custom(format!(
+                "flat rootfs already exists at {}",
+                destination.display()
+            )));
+        }
+        let temporary = destination.with_extension("raw.part");
+        let result = (|| {
+            let artifact = microsandbox_image::ext4::materialize_ext4_rootfs(
+                &temporary,
+                tree,
+                &microsandbox_image::ext4::Ext4RootfsOptions {
+                    derivation_digest: rand::random(),
+                    ..Default::default()
+                },
+            )
+            .map_err(|error| {
+                MicrosandboxError::Custom(format!("failed to materialize patched flat rootfs: {error}"))
+            })?;
+            let minimum_mib = artifact.virtual_size_bytes.div_ceil(BYTES_PER_MIB);
+            let target_mib = requested_mib
+                .map(u64::from)
+                .unwrap_or(u64::from(crate::sandbox::config::DEFAULT_OCI_UPPER_SIZE_MIB))
+                .max(minimum_mib);
+            if let Some(requested) = requested_mib
+                && u64::from(requested) < minimum_mib
+            {
+                return Err(MicrosandboxError::InvalidConfig(format!(
+                    "flat root disk must be at least {minimum_mib} MiB for this patched image (requested {requested} MiB)"
+                )));
+            }
+            let target_bytes = target_mib.checked_mul(BYTES_PER_MIB).ok_or_else(|| {
+                MicrosandboxError::InvalidConfig("flat root disk size overflows".into())
+            })?;
+            if target_bytes > artifact.virtual_size_bytes {
+                microsandbox_image::ext4::grow_image(&temporary, target_bytes).map_err(|error| {
+                    MicrosandboxError::Custom(format!("failed to grow patched flat rootfs: {error}"))
+                })?;
+            }
+            let target_mib = u32::try_from(target_mib).map_err(|_| {
+                MicrosandboxError::InvalidConfig(
+                    "flat root disk size exceeds supported MiB range".into(),
+                )
+            })?;
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&temporary)?
+                .sync_all()?;
+            std::fs::rename(&temporary, &destination)?;
+            Ok(target_mib)
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&temporary);
+        }
+        result
+    })
+    .await
+    .map_err(|error| {
+        MicrosandboxError::Runtime(format!("patched flat rootfs task failed: {error}"))
+    })?
+}
+
 /// Publish the private clone only after copy, growth, and synchronization all succeed.
 fn create_private_flat_rootfs_sync(
     base: &Path,
@@ -232,5 +302,43 @@ mod tests {
         .unwrap_err();
 
         assert!(error.to_string().contains("must be at least"));
+    }
+
+    #[tokio::test]
+    async fn materializes_a_patched_private_root() {
+        use microsandbox_image::tree::{
+            FileData, InodeMetadata, RegularFileId, RegularFileNode, TreeNode,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let destination = dir.path().join(FLAT_ROOTFS_FILENAME);
+        let mut tree = FileTree::new();
+        tree.insert(
+            b"hello.txt",
+            TreeNode::RegularFile(RegularFileNode {
+                id: RegularFileId::new(),
+                metadata: InodeMetadata {
+                    uid: 0,
+                    gid: 0,
+                    mode: 0o644,
+                    mtime: 0,
+                    mtime_nsec: 0,
+                },
+                xattrs: Vec::new(),
+                data: FileData::Memory(b"hello".to_vec()),
+                nlink: 1,
+            }),
+        )
+        .unwrap();
+
+        let target_mib = create_patched_flat_rootfs(destination.clone(), tree, None)
+            .await
+            .unwrap();
+
+        assert!(destination.is_file());
+        assert_eq!(
+            std::fs::metadata(destination).unwrap().len(),
+            u64::from(target_mib) * BYTES_PER_MIB
+        );
     }
 }

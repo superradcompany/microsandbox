@@ -230,6 +230,33 @@ pub fn run(args: SandboxArgs) -> ! {
         } else {
             None
         };
+    let rootfs_disk_spec = if launch.rootfs.disk_layers.is_empty() {
+        None
+    } else {
+        if launch.rootfs.disk.is_some() {
+            eprintln!("disk_layers cannot be combined with disk");
+            std::process::exit(2);
+        }
+        let layers = launch
+            .rootfs
+            .disk_layers
+            .iter()
+            .map(|layer| {
+                let format = validate_disk_format(Some(&layer.format)).unwrap_or_else(|err| {
+                    eprintln!("root disk layer format: {err}");
+                    std::process::exit(2);
+                });
+                UpperLayerSpec {
+                    path: layer.path.clone(),
+                    format,
+                }
+            })
+            .collect();
+        Some(UpperSpec {
+            layers,
+            read_only: false,
+        })
+    };
     if let Some(profile_name) = &launch.placement_profile_name
         && launch.placement_profile.is_none()
     {
@@ -268,6 +295,8 @@ pub fn run(args: SandboxArgs) -> ! {
             launch.rootfs.disk_format
         },
         rootfs_disk_readonly: launch.rootfs.disk_readonly,
+        rootfs_disk_spec,
+        rootfs_disk_runtime_owned: launch.rootfs.disk_runtime_owned,
         mounts: launch.mounts,
         disks,
         vsock: launch.vsock,

@@ -25,6 +25,7 @@ use microsandbox_image::snapshot::migration::V066_DESCRIPTOR_FILENAME;
 use microsandbox_image::snapshot::{
     DEFAULT_UPPER_FILE, DESCRIPTOR_FILENAME, MAX_JSON_SAFE_INTEGER, SnapshotState, UpperIntegrity,
 };
+use microsandbox_runtime::launch::RootfsUpperLayerConfig;
 use microsandbox_utils::extent::{self, ExtentMap};
 use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -443,7 +444,7 @@ pub(super) async fn save_direct_file_snapshot(
     manifest: &microsandbox_image::snapshot::Manifest,
     labels: &BTreeMap<String, String>,
     suggested_name: &str,
-    source_layer: &Path,
+    source_layers: &[PathBuf],
     out: &Path,
     plain_tar: bool,
     force: bool,
@@ -460,12 +461,9 @@ pub(super) async fn save_direct_file_snapshot(
             ),
         ));
     };
-    if file.layers.len() != 1 {
-        return Err(MicrosandboxError::unsupported(
-            Operation::SnapshotOps,
-            UnsupportedReason::NotAvailable(
-                "direct multi-layer capture requires the managed qcow writer".into(),
-            ),
+    if file.layers.len() != source_layers.len() {
+        return Err(MicrosandboxError::SnapshotIntegrity(
+            "direct snapshot layer sources do not match the descriptor".into(),
         ));
     }
     if out.exists() && !force {
@@ -491,7 +489,7 @@ pub(super) async fn save_direct_file_snapshot(
                 manifest,
                 labels,
                 suggested_name,
-                source_layer,
+                source_layers,
             )
             .await?;
             let mut inner = builder.into_inner().await?;
@@ -504,7 +502,7 @@ pub(super) async fn save_direct_file_snapshot(
                 manifest,
                 labels,
                 suggested_name,
-                source_layer,
+                source_layers,
             )
             .await?;
             let mut inner = builder.into_inner().await?;
@@ -651,7 +649,7 @@ async fn write_direct_archive_entries<W>(
     manifest: &microsandbox_image::snapshot::Manifest,
     labels: &BTreeMap<String, String>,
     suggested_name: &str,
-    source_layer: &Path,
+    source_layers: &[PathBuf],
 ) -> MicrosandboxResult<()>
 where
     W: tokio::io::AsyncWrite + Unpin + Send,
@@ -674,26 +672,24 @@ where
     append_bytes(builder, &descriptor_path, &descriptor_bytes).await?;
 
     let file = manifest.state.as_file().expect("validated file descriptor");
-    let layer = file.layers.first().expect("validated nonempty closure");
-    let layer_path = portable_archive_path(&file.layer_path(layer))?;
-    let layer_transport =
-        append_artifact_file(builder, source_layer, &layer_path, "file-payload").await?;
-
-    let mut entries = vec![
-        ArchiveEntry {
-            path: descriptor_path.clone(),
-            owner_snapshot: Some(manifest.snapshot_id.to_string()),
-            kind: "snapshot-descriptor".into(),
-            included: true,
-            encoded_size: descriptor_bytes.len() as u64,
-            apparent_size: descriptor_bytes.len() as u64,
-            sparse_ranges: Vec::new(),
-            integrity: Some(UpperIntegrity::Sha256 {
-                digest: descriptor_digest.clone(),
-            }),
-            transport_integrity: Some(finish_archive_transport(descriptor_hasher)),
-        },
-        ArchiveEntry {
+    let mut entries = vec![ArchiveEntry {
+        path: descriptor_path.clone(),
+        owner_snapshot: Some(manifest.snapshot_id.to_string()),
+        kind: "snapshot-descriptor".into(),
+        included: true,
+        encoded_size: descriptor_bytes.len() as u64,
+        apparent_size: descriptor_bytes.len() as u64,
+        sparse_ranges: Vec::new(),
+        integrity: Some(UpperIntegrity::Sha256 {
+            digest: descriptor_digest.clone(),
+        }),
+        transport_integrity: Some(finish_archive_transport(descriptor_hasher)),
+    }];
+    for (layer, source_layer) in file.layers.iter().zip(source_layers) {
+        let layer_path = portable_archive_path(&file.layer_path(layer))?;
+        let layer_transport =
+            append_artifact_file(builder, source_layer, &layer_path, "file-payload").await?;
+        entries.push(ArchiveEntry {
             path: layer_path,
             owner_snapshot: Some(manifest.snapshot_id.to_string()),
             kind: "file-payload".into(),
@@ -703,8 +699,8 @@ where
             integrity: layer.payload.integrity.clone(),
             sparse_ranges: layer_transport.sparse_ranges,
             transport_integrity: Some(layer_transport.transport_integrity),
-        },
-    ];
+        });
+    }
     if !labels.is_empty() {
         let metadata_bytes = super::metadata::encode(labels)?;
         let metadata_path = format!(
@@ -1169,6 +1165,7 @@ pub(crate) async fn materialize_archive_for_child(
                 &state.checkpoint_root,
                 &state.checkpoint_id,
                 child_stage,
+                &manifest.root_disk,
             )
             .await?;
             install_staged_cache(cache_stage.path(), &cache_dir, &manifest).await?;
@@ -1191,6 +1188,7 @@ pub(crate) async fn materialize_archive_for_child(
             &state.checkpoint_root,
             &state.checkpoint_id,
             child_stage,
+            &manifest.root_disk,
         )
         .await?;
         install_staged_cache(cache_stage.path(), &cache_dir, &manifest).await?;
@@ -1214,31 +1212,40 @@ pub(crate) async fn materialize_archive_for_child(
             "disk_only requires a full snapshot with checkpoint state".into(),
         ));
     }
-    if file.layers.len() != 1
-        || file.disk_format != super::SnapshotFormat::Raw
-        || file.filesystem != "ext4"
-    {
+    if file.filesystem != "ext4" {
         return Err(MicrosandboxError::unsupported(
             Operation::SnapshotOps,
             UnsupportedReason::NotAvailable(
-                "child restore currently requires one raw ext4 layer".into(),
+                "child restore currently requires an ext4 file-state closure".into(),
             ),
         ));
     }
-    let layer = file.head_layer().map_err(|error| {
-        MicrosandboxError::SnapshotIntegrity(format!("invalid archive closure: {error}"))
-    })?;
-    let source_layer = child_stage.join(".archive-layers").join(
-        file.layer_path(layer)
-            .file_name()
-            .expect("canonical layer path has a filename"),
-    );
-    let target_layer = child_stage.join("upper.ext4");
-    tokio::fs::rename(&source_layer, &target_layer).await?;
-    if let Some(parent) = source_layer.parent()
-        && parent.exists()
-    {
-        tokio::fs::remove_dir_all(parent).await?;
+    let archive_layers = child_stage.join(".archive-layers");
+    let sources = file
+        .layers
+        .iter()
+        .map(|layer| RootfsUpperLayerConfig {
+            path: archive_layers.join(
+                file.layer_path(layer)
+                    .file_name()
+                    .expect("canonical layer path has a filename"),
+            ),
+            format: match layer.format {
+                super::SnapshotFormat::Raw => "raw",
+                super::SnapshotFormat::Qcow2 => "qcow2",
+            }
+            .into(),
+        })
+        .collect::<Vec<_>>();
+    let materialized = super::materialize_file_snapshot_for_child(
+        &sources,
+        file.virtual_size,
+        child_stage,
+        &manifest.root_disk,
+    )
+    .await?;
+    if archive_layers.exists() {
+        tokio::fs::remove_dir_all(&archive_layers).await?;
     }
 
     install_staged_cache(cache_stage.path(), &cache_dir, &manifest).await?;
@@ -1251,7 +1258,7 @@ pub(crate) async fn materialize_archive_for_child(
     Ok(ArchiveChildMaterialization {
         manifest,
         checkpoint_restore: None,
-        upper_layers: Vec::new(),
+        upper_layers: materialized.upper_layers,
     })
 }
 
@@ -3876,7 +3883,7 @@ mod tests {
     use microsandbox_image::snapshot::{
         CheckpointSnapshotState, DiskLayer, DiskLayerId, FileSnapshotState, ImageRef,
         LayerFileKind, LayerPayload, Manifest, SCHEMA, SnapshotCapture, SnapshotConsistency,
-        SnapshotFormat, SnapshotId, SnapshotScope, SnapshotState,
+        SnapshotFormat, SnapshotId, SnapshotRootDisk, SnapshotScope, SnapshotState,
     };
 
     use super::*;
@@ -3916,6 +3923,7 @@ mod tests {
                 reference: "docker.io/library/alpine:latest".into(),
                 manifest_digest: index_digest.clone(),
             },
+            root_disk: SnapshotRootDisk::Managed,
             parent: None,
             extensions: BTreeMap::new(),
             requires: Vec::new(),
@@ -3972,8 +3980,9 @@ mod tests {
         let source = directory.path().join("upper.ext4");
         let archive = directory.path().join("snapshot.tar.zst");
         let child_stage = directory.path().join("child");
-        let payload = b"direct archive payload";
-        std::fs::write(&source, payload).unwrap();
+        let mut payload = b"direct archive payload".to_vec();
+        payload.resize(4096, 0);
+        std::fs::write(&source, &payload).unwrap();
 
         let snapshot_id = SnapshotId::new("snap_00000000000000000000000000000001").unwrap();
         let layer_id = DiskLayerId::new("layer_00000000000000000000000000000001").unwrap();
@@ -4008,6 +4017,7 @@ mod tests {
                 manifest_digest:
                     "sha256:0000000000000000000000000000000000000000000000000000000000000001".into(),
             },
+            root_disk: SnapshotRootDisk::Managed,
             parent: None,
             extensions: BTreeMap::new(),
             requires: Vec::new(),
@@ -4018,7 +4028,7 @@ mod tests {
             &manifest,
             &BTreeMap::new(),
             "test-snapshot",
-            &source,
+            std::slice::from_ref(&source),
             &archive,
             false,
             false,
@@ -4035,6 +4045,99 @@ mod tests {
             payload
         );
         assert!(!child_stage.join(snapshot_id.as_str()).exists());
+        assert!(!home.join("snapshots").join(snapshot_id.as_str()).exists());
+    }
+
+    #[tokio::test]
+    async fn direct_archive_preserves_a_complete_raw_qcow_chain() {
+        let directory = tempfile::tempdir().unwrap();
+        let home = directory.path().join("home");
+        let raw = directory.path().join("root.raw");
+        let qcow = directory.path().join("head.qcow2");
+        let archive = directory.path().join("snapshot.tar.zst");
+        let child_stage = directory.path().join("child");
+        std::fs::File::create(&raw)
+            .unwrap()
+            .set_len(16 * 1024 * 1024)
+            .unwrap();
+        microsandbox_image::checkpoint::create_qcow2_overlay(&qcow, 16 * 1024 * 1024, &raw, "raw")
+            .await
+            .unwrap();
+
+        let snapshot_id = SnapshotId::new("snap_00000000000000000000000000000002").unwrap();
+        let raw_id = DiskLayerId::new("layer_00000000000000000000000000000002").unwrap();
+        let qcow_id = DiskLayerId::new("layer_00000000000000000000000000000003").unwrap();
+        let manifest = Manifest {
+            schema: SCHEMA.into(),
+            snapshot_id: snapshot_id.clone(),
+            scope: SnapshotScope::Disk,
+            state: SnapshotState::File(FileSnapshotState {
+                disk_format: SnapshotFormat::Qcow2,
+                filesystem: "ext4".into(),
+                virtual_size: 16 * 1024 * 1024,
+                head: qcow_id.clone(),
+                layers: vec![
+                    DiskLayer {
+                        layer_id: raw_id.clone(),
+                        format: SnapshotFormat::Raw,
+                        virtual_size: 16 * 1024 * 1024,
+                        backing: None,
+                        payload: LayerPayload {
+                            file_kind: LayerFileKind::Regular,
+                            integrity: None,
+                        },
+                    },
+                    DiskLayer {
+                        layer_id: qcow_id,
+                        format: SnapshotFormat::Qcow2,
+                        virtual_size: 16 * 1024 * 1024,
+                        backing: Some(raw_id),
+                        payload: LayerPayload {
+                            file_kind: LayerFileKind::Regular,
+                            integrity: None,
+                        },
+                    },
+                ],
+            }),
+            capture: SnapshotCapture {
+                created_at: "2026-08-29T00:00:00Z".into(),
+                source_lineage: Some("test-box".into()),
+                source_checkpoint: None,
+                consistency: SnapshotConsistency::CrashConsistent,
+            },
+            image: ImageRef {
+                reference: "docker.io/library/alpine:3.20".into(),
+                manifest_digest:
+                    "sha256:0000000000000000000000000000000000000000000000000000000000000001".into(),
+            },
+            root_disk: SnapshotRootDisk::Flat,
+            parent: None,
+            extensions: BTreeMap::new(),
+            requires: Vec::new(),
+        };
+        let local = LocalBackend::builder().home(&home).build().await.unwrap();
+
+        save_direct_file_snapshot(
+            &manifest,
+            &BTreeMap::new(),
+            "chained-snapshot",
+            &[raw, qcow],
+            &archive,
+            false,
+            false,
+        )
+        .await
+        .unwrap();
+        let restored = materialize_archive_for_child(&local, &archive, &child_stage, false)
+            .await
+            .unwrap();
+
+        assert_eq!(restored.manifest.snapshot_id, snapshot_id);
+        assert_eq!(restored.upper_layers.len(), 3);
+        assert_eq!(restored.upper_layers[0].format, "raw");
+        assert_eq!(restored.upper_layers[1].format, "qcow2");
+        assert_eq!(restored.upper_layers[2].format, "qcow2");
+        assert!(!child_stage.join(".archive-layers").exists());
         assert!(!home.join("snapshots").join(snapshot_id.as_str()).exists());
     }
 
@@ -4114,6 +4217,7 @@ mod tests {
         let disk = DiskGenerationManifest {
             schema: "microsandbox.disk-generation/1".into(),
             volume_id: "vol_test".into(),
+            device_id: "vdb".into(),
             generation: 1,
             layers: vec![DiskLayerRef {
                 layer_id: layer_id.into(),
@@ -4171,6 +4275,7 @@ mod tests {
                 manifest_digest:
                     "sha256:0000000000000000000000000000000000000000000000000000000000000002".into(),
             },
+            root_disk: SnapshotRootDisk::Managed,
             parent: None,
             extensions: BTreeMap::new(),
             requires: Vec::new(),

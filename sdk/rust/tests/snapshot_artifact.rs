@@ -15,7 +15,8 @@ use microsandbox::backend::{Backend, LocalBackend};
 use microsandbox_image::snapshot::{
     CheckpointSnapshotState, DEFAULT_UPPER_FILE, DESCRIPTOR_FILENAME, DiskLayer, DiskLayerId,
     FileSnapshotState, ImageRef, LayerFileKind, LayerPayload, Manifest, SCHEMA, SnapshotCapture,
-    SnapshotConsistency, SnapshotFormat, SnapshotId, SnapshotScope, SnapshotState, UpperIntegrity,
+    SnapshotConsistency, SnapshotFormat, SnapshotId, SnapshotRootDisk, SnapshotScope,
+    SnapshotState, UpperIntegrity,
 };
 use sha2::{Digest, Sha256};
 use tar::{Builder, EntryType, Header};
@@ -108,6 +109,7 @@ fn sample_manifest(upper_size: u64) -> Manifest {
             reference: "docker.io/library/alpine:3.20".into(),
             manifest_digest: "sha256:0000000000000000000000000000000000000000000000000000000000000001".into(),
         },
+        root_disk: SnapshotRootDisk::Managed,
         parent: None,
         extensions: BTreeMap::new(),
         requires: Vec::new(),

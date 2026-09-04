@@ -9,7 +9,7 @@ use microsandbox_image::checkpoint::{CheckpointClosure, ObjectId};
 use microsandbox_image::snapshot::{
     CheckpointSnapshotState, DESCRIPTOR_FILENAME, DiskLayer, DiskLayerId, FileSnapshotState,
     ImageRef, LayerFileKind, LayerPayload, Manifest, SCHEMA, SnapshotCapture, SnapshotConsistency,
-    SnapshotFormat, SnapshotId, SnapshotScope, SnapshotState, layer_path,
+    SnapshotFormat, SnapshotId, SnapshotRootDisk, SnapshotScope, SnapshotState, layer_path,
 };
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
@@ -36,6 +36,17 @@ struct CapturedFullSnapshot {
     checkpoint_root: ObjectId,
     manifest: Manifest,
     labels: BTreeMap<String, String>,
+}
+
+#[derive(Clone)]
+struct SnapshotDiskSource {
+    path: PathBuf,
+    format: SnapshotFormat,
+}
+
+struct SnapshotDiskClosure {
+    sources: Vec<SnapshotDiskSource>,
+    virtual_size: u64,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -132,17 +143,15 @@ pub(super) async fn create_snapshot(
     })?;
     let image_reference = oci_reference_string(&sandbox_config)?;
 
-    ensure_snapshottable_root_disk(sandbox_config.spec.image.oci_root_disk(), &source_sandbox)?;
-
-    // Resolve source upper.ext4 path from the canonical sandbox layout.
-    let sandbox_dir = local.sandboxes_dir().join(&source_sandbox);
-    let src_upper = sandbox_dir.join("upper.ext4");
-    if !src_upper.exists() {
-        return Err(MicrosandboxError::Custom(format!(
-            "source sandbox '{source_sandbox}' has no upper.ext4 at {}",
-            src_upper.display()
+    let root_disk = snapshot_root_disk(sandbox_config.spec.image.oci_root_disk(), &source_sandbox)?;
+    if matches!(root_disk, SnapshotRootDisk::Tmpfs { .. }) {
+        return Err(MicrosandboxError::InvalidConfig(format!(
+            "sandbox '{source_sandbox}' uses a tmpfs root disk, whose writable state exists only in a running full snapshot"
         )));
     }
+
+    let sandbox_dir = local.sandboxes_dir().join(&source_sandbox);
+    let disk = snapshot_disk_closure(&sandbox_dir, &root_disk)?;
 
     // Stage the artifact in a sibling directory, so a failed create never
     // leaves a partial artifact at the destination (which would poison
@@ -165,12 +174,13 @@ pub(super) async fn create_snapshot(
     let artifact_started = Instant::now();
     let built = build_artifact(
         &staging_dir,
-        &src_upper,
+        &disk,
         &labels,
         image_reference,
         manifest_digest_str,
         &source_sandbox,
         record_integrity,
+        root_disk,
     )
     .await;
     let (digest, manifest) = match built {
@@ -401,42 +411,50 @@ pub(super) async fn create_snapshot_archive(
         )
     })?;
     let image_reference = oci_reference_string(&sandbox_config)?;
-    ensure_snapshottable_root_disk(sandbox_config.spec.image.oci_root_disk(), &source_sandbox)?;
-    let source_layer = local
-        .sandboxes_dir()
-        .join(&source_sandbox)
-        .join("upper.ext4");
-    let metadata = tokio::fs::symlink_metadata(&source_layer).await?;
-    if !metadata.file_type().is_file() {
-        return Err(MicrosandboxError::SnapshotIntegrity(format!(
-            "snapshot source is not a regular file: {}",
-            source_layer.display()
+    let root_disk = snapshot_root_disk(sandbox_config.spec.image.oci_root_disk(), &source_sandbox)?;
+    if matches!(root_disk, SnapshotRootDisk::Tmpfs { .. }) {
+        return Err(MicrosandboxError::InvalidConfig(format!(
+            "sandbox '{source_sandbox}' uses a tmpfs root disk, whose writable state exists only in a running full snapshot"
         )));
     }
+    let sandbox_dir = local.sandboxes_dir().join(&source_sandbox);
+    let disk = snapshot_disk_closure(&sandbox_dir, &root_disk)?;
     let integrity_started = Instant::now();
-    let integrity = if record_integrity {
-        Some(super::verify::compute_merkle_integrity(&source_layer).await?)
+    let integrities = if record_integrity {
+        let mut values = Vec::with_capacity(disk.sources.len());
+        for source in &disk.sources {
+            values.push(Some(
+                super::verify::compute_merkle_integrity(&source.path).await?,
+            ));
+        }
+        values
     } else {
-        None
+        vec![None; disk.sources.len()]
     };
     let integrity_us = integrity_started.elapsed().as_micros();
     let labels: BTreeMap<_, _> = labels.into_iter().collect();
     let manifest = new_file_manifest(
-        metadata.len(),
-        integrity,
+        &disk,
+        integrities,
         image_reference,
         manifest_digest,
         &source_sandbox,
+        root_disk,
     )?;
     let digest = manifest
         .digest()
         .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
     let archive_started = Instant::now();
+    let source_paths = disk
+        .sources
+        .iter()
+        .map(|source| source.path.clone())
+        .collect::<Vec<_>>();
     super::archive::save_direct_file_snapshot(
         &manifest,
         &labels,
         &name,
-        &source_layer,
+        &source_paths,
         out,
         plain_tar,
         force,
@@ -449,7 +467,7 @@ pub(super) async fn create_snapshot_archive(
         source_sandbox,
         plain_tar,
         record_integrity,
-        logical_bytes = metadata.len(),
+        logical_bytes = disk.virtual_size,
         total_us = total_started.elapsed().as_micros(),
         integrity_us,
         archive_us,
@@ -481,11 +499,11 @@ async fn capture_full_snapshot(
     let sandbox_config: SandboxConfig = serde_json::from_str(&model.config)?;
     let manifest_digest = sandbox_config.manifest_digest.clone().ok_or_else(|| {
         MicrosandboxError::InvalidConfig(format!(
-            "sandbox '{source_sandbox}' has no OCI image pinned; full snapshots currently require a managed OCI root"
+            "sandbox '{source_sandbox}' has no OCI image pinned; full snapshots require an OCI root"
         ))
     })?;
     let image_reference = oci_reference_string(&sandbox_config)?;
-    ensure_snapshottable_root_disk(sandbox_config.spec.image.oci_root_disk(), source_sandbox)?;
+    let root_disk = snapshot_root_disk(sandbox_config.spec.image.oci_root_disk(), source_sandbox)?;
 
     let checkpoint_id = format!("checkpoint_{:032x}", rand::random::<u128>());
     let checkpoint =
@@ -557,6 +575,7 @@ async fn capture_full_snapshot(
             reference: image_reference,
             manifest_digest,
         },
+        root_disk,
         parent: None,
         requires: Vec::new(),
         extensions: BTreeMap::new(),
@@ -576,101 +595,80 @@ async fn capture_full_snapshot(
 /// `dir`. Pure staging: the caller promotes or discards the directory.
 async fn build_artifact(
     dir: &std::path::Path,
-    src_upper: &std::path::Path,
+    disk: &SnapshotDiskClosure,
     labels: &BTreeMap<String, String>,
     image_reference: String,
     manifest_digest_str: String,
     source_sandbox: &str,
     record_integrity: bool,
+    root_disk: SnapshotRootDisk,
 ) -> MicrosandboxResult<(String, Manifest)> {
     let total_started = Instant::now();
-    // Copy the upper layer (sparse-aware, see microsandbox_utils::copy).
     let snapshot_id = SnapshotId::new(format!("snap_{:032x}", rand::random::<u128>()))
         .map_err(|e| MicrosandboxError::SnapshotIntegrity(e.to_string()))?;
-    let layer_id = DiskLayerId::new(format!("layer_{:032x}", rand::random::<u128>()))
-        .map_err(|e| MicrosandboxError::SnapshotIntegrity(e.to_string()))?;
-    let relative_layer_path = layer_path(&layer_id, SnapshotFormat::Raw);
-    let dst_upper = dir.join(&relative_layer_path);
-    tokio::fs::create_dir_all(
-        dst_upper
-            .parent()
-            .expect("canonical layer path always has a parent"),
-    )
-    .await?;
-    let src_upper_clone = src_upper.to_path_buf();
-    let dst_upper_clone = dst_upper.clone();
+    let layers_dir = dir.join(microsandbox_image::snapshot::LAYERS_DIRECTORY);
+    tokio::fs::create_dir_all(&layers_dir).await?;
+
     let copy_started = Instant::now();
-    let copied_len = tokio::task::spawn_blocking(move || {
-        microsandbox_utils::copy::fast_copy(&src_upper_clone, &dst_upper_clone)
-    })
-    .await
-    .map_err(|e| MicrosandboxError::Custom(format!("snapshot copy task: {e}")))??;
+    let mut captured = Vec::with_capacity(disk.sources.len());
+    for source in &disk.sources {
+        let layer_id = DiskLayerId::new(format!("layer_{:032x}", rand::random::<u128>()))
+            .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+        let destination = dir.join(layer_path(&layer_id, source.format));
+        let source_path = source.path.clone();
+        let destination_for_copy = destination.clone();
+        tokio::task::spawn_blocking(move || {
+            microsandbox_utils::copy::fast_copy(&source_path, &destination_for_copy)
+        })
+        .await
+        .map_err(|error| MicrosandboxError::Custom(format!("snapshot copy task: {error}")))??;
+        captured.push((layer_id, source.format, destination));
+    }
     let copy_us = copy_started.elapsed().as_micros();
 
     let payload_sync_started = Instant::now();
-    let dst_upper_for_sync = dst_upper.clone();
-    tokio::task::spawn_blocking(move || -> std::io::Result<()> {
-        let f = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&dst_upper_for_sync)?;
-        f.sync_all()?;
-        Ok(())
-    })
-    .await
-    .map_err(|e| MicrosandboxError::Custom(format!("snapshot upper fsync task: {e}")))??;
+    for (_, _, destination) in &captured {
+        let destination = destination.clone();
+        tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(destination)?
+                .sync_all()
+        })
+        .await
+        .map_err(|error| MicrosandboxError::Custom(format!("snapshot fsync task: {error}")))??;
+    }
     let payload_sync_us = payload_sync_started.elapsed().as_micros();
 
-    // Persistent payload integrity is deliberately opt-in: large allocated
-    // uppers make any independent content pass observable. When requested,
-    // the sparse-aware Merkle construction skips known all-hole subtrees.
     let integrity_started = Instant::now();
-    let integrity = if record_integrity {
-        Some(super::verify::compute_merkle_integrity(&dst_upper).await?)
-    } else {
-        None
-    };
+    let mut integrities = Vec::with_capacity(captured.len());
+    for (_, _, destination) in &captured {
+        integrities.push(if record_integrity {
+            Some(super::verify::compute_merkle_integrity(destination).await?)
+        } else {
+            None
+        });
+    }
     let integrity_us = integrity_started.elapsed().as_micros();
 
     // Labels are local presentation metadata. Persist them before the
     // descriptor is published so they never alter snapshot identity.
     let descriptor_started = Instant::now();
     super::metadata::write(dir, labels).await?;
-    let manifest = Manifest {
-        schema: SCHEMA.into(),
+    let manifest = new_file_manifest_with_id(
         snapshot_id,
-        scope: SnapshotScope::Disk,
-        state: SnapshotState::File(FileSnapshotState {
-            disk_format: SnapshotFormat::Raw,
-            filesystem: "ext4".into(),
-            virtual_size: copied_len,
-            head: layer_id.clone(),
-            layers: vec![DiskLayer {
-                layer_id,
-                format: SnapshotFormat::Raw,
-                virtual_size: copied_len,
-                backing: None,
-                payload: LayerPayload {
-                    file_kind: LayerFileKind::Regular,
-                    integrity,
-                },
-            }],
-        }),
-        capture: SnapshotCapture {
-            created_at: Utc::now().to_rfc3339(),
-            source_lineage: Some(source_sandbox.to_string()),
-            source_checkpoint: None,
-            consistency: SnapshotConsistency::CrashConsistent,
-        },
-        image: ImageRef {
-            reference: image_reference,
-            manifest_digest: manifest_digest_str,
-        },
-        parent: None,
-        requires: Vec::new(),
-        extensions: BTreeMap::new(),
-    };
-    manifest.validate()?;
+        disk,
+        captured
+            .iter()
+            .zip(integrities)
+            .map(|((layer_id, format, _), integrity)| (layer_id.clone(), *format, integrity))
+            .collect(),
+        image_reference,
+        manifest_digest_str,
+        source_sandbox,
+        root_disk,
+    )?;
     let canonical = manifest
         .to_canonical_bytes()
         .map_err(|e| MicrosandboxError::Custom(format!("manifest serialize: {e}")))?;
@@ -700,7 +698,8 @@ async fn build_artifact(
         operation = "snapshot_build_file_artifact",
         source_sandbox,
         record_integrity,
-        logical_bytes = copied_len,
+        logical_bytes = disk.virtual_size,
+        layer_count = disk.sources.len(),
         total_us = total_started.elapsed().as_micros(),
         copy_us,
         payload_sync_us,
@@ -713,35 +712,90 @@ async fn build_artifact(
 }
 
 fn new_file_manifest(
-    size_bytes: u64,
-    integrity: Option<microsandbox_image::snapshot::UpperIntegrity>,
+    disk: &SnapshotDiskClosure,
+    integrities: Vec<Option<microsandbox_image::snapshot::UpperIntegrity>>,
     image_reference: String,
     manifest_digest: String,
     source_sandbox: &str,
+    root_disk: SnapshotRootDisk,
 ) -> MicrosandboxResult<Manifest> {
     let snapshot_id = SnapshotId::new(format!("snap_{:032x}", rand::random::<u128>()))
         .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
-    let layer_id = DiskLayerId::new(format!("layer_{:032x}", rand::random::<u128>()))
-        .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+    let layers = disk
+        .sources
+        .iter()
+        .zip(integrities)
+        .map(|(source, integrity)| {
+            DiskLayerId::new(format!("layer_{:032x}", rand::random::<u128>()))
+                .map(|layer_id| (layer_id, source.format, integrity))
+                .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))
+        })
+        .collect::<MicrosandboxResult<Vec<_>>>()?;
+    new_file_manifest_with_id(
+        snapshot_id,
+        disk,
+        layers,
+        image_reference,
+        manifest_digest,
+        source_sandbox,
+        root_disk,
+    )
+}
+
+fn new_file_manifest_with_id(
+    snapshot_id: SnapshotId,
+    disk: &SnapshotDiskClosure,
+    layer_inputs: Vec<(
+        DiskLayerId,
+        SnapshotFormat,
+        Option<microsandbox_image::snapshot::UpperIntegrity>,
+    )>,
+    image_reference: String,
+    manifest_digest: String,
+    source_sandbox: &str,
+    root_disk: SnapshotRootDisk,
+) -> MicrosandboxResult<Manifest> {
+    if layer_inputs.is_empty() || layer_inputs.len() != disk.sources.len() {
+        return Err(MicrosandboxError::SnapshotIntegrity(
+            "snapshot disk closure and integrity inputs differ".into(),
+        ));
+    }
+    let head = layer_inputs
+        .last()
+        .expect("checked non-empty layer inputs")
+        .0
+        .clone();
+    let disk_format = layer_inputs
+        .last()
+        .expect("checked non-empty layer inputs")
+        .1;
+    let mut predecessor = None;
+    let layers = layer_inputs
+        .into_iter()
+        .map(|(layer_id, format, integrity)| {
+            let backing = predecessor.replace(layer_id.clone());
+            DiskLayer {
+                layer_id,
+                format,
+                virtual_size: disk.virtual_size,
+                backing,
+                payload: LayerPayload {
+                    file_kind: LayerFileKind::Regular,
+                    integrity,
+                },
+            }
+        })
+        .collect();
     let manifest = Manifest {
         schema: SCHEMA.into(),
         snapshot_id,
         scope: SnapshotScope::Disk,
         state: SnapshotState::File(FileSnapshotState {
-            disk_format: SnapshotFormat::Raw,
+            disk_format,
             filesystem: "ext4".into(),
-            virtual_size: size_bytes,
-            head: layer_id.clone(),
-            layers: vec![DiskLayer {
-                layer_id,
-                format: SnapshotFormat::Raw,
-                virtual_size: size_bytes,
-                backing: None,
-                payload: LayerPayload {
-                    file_kind: LayerFileKind::Regular,
-                    integrity,
-                },
-            }],
+            virtual_size: disk.virtual_size,
+            head,
+            layers,
         }),
         capture: SnapshotCapture {
             created_at: Utc::now().to_rfc3339(),
@@ -753,6 +807,7 @@ fn new_file_manifest(
             reference: image_reference,
             manifest_digest,
         },
+        root_disk,
         parent: None,
         requires: Vec::new(),
         extensions: BTreeMap::new(),
@@ -767,24 +822,119 @@ fn new_file_manifest(
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
 
-/// Snapshots capture the managed upper. The other root-disk kinds have nothing msb-owned on the host to capture: a tmpfs upper lives in guest RAM (until full snapshots
-/// capture memory), and a disk-image upper is a user-owned file msb never copies into artifacts it owns.
-fn ensure_snapshottable_root_disk(
+/// Resolve the root layout carried by a snapshot while retaining the ownership boundary for
+/// caller-provided disk images.
+fn snapshot_root_disk(
     root_disk: Option<&RootDisk>,
     source_sandbox: &str,
-) -> MicrosandboxResult<()> {
+) -> MicrosandboxResult<SnapshotRootDisk> {
     match root_disk {
-        Some(RootDisk::Tmpfs { .. }) => Err(MicrosandboxError::InvalidConfig(format!(
-            "sandbox '{source_sandbox}' uses a tmpfs root disk, which is ephemeral and cannot be snapshotted; use the managed kind"
-        ))),
+        Some(RootDisk::Tmpfs { size_mib }) => Ok(SnapshotRootDisk::Tmpfs {
+            size_mib: *size_mib,
+        }),
         Some(RootDisk::DiskImage { .. }) => Err(MicrosandboxError::InvalidConfig(format!(
             "sandbox '{source_sandbox}' uses a user-owned disk-image root disk, which microsandbox does not snapshot"
         ))),
-        Some(RootDisk::Flat { .. }) => Err(MicrosandboxError::InvalidConfig(format!(
-            "sandbox '{source_sandbox}' uses a flat root disk, which is not yet supported by snapshots"
-        ))),
-        Some(RootDisk::Managed { .. }) | None => Ok(()),
+        Some(RootDisk::Flat { .. }) => Ok(SnapshotRootDisk::Flat),
+        Some(RootDisk::Managed { .. }) | None => Ok(SnapshotRootDisk::Managed),
     }
+}
+
+fn snapshot_disk_closure(
+    sandbox_dir: &Path,
+    root_disk: &SnapshotRootDisk,
+) -> MicrosandboxResult<SnapshotDiskClosure> {
+    let expected_device = match root_disk {
+        SnapshotRootDisk::Managed => "vdb",
+        SnapshotRootDisk::Flat => "vda",
+        SnapshotRootDisk::Tmpfs { .. } => {
+            return Err(MicrosandboxError::SnapshotIntegrity(
+                "tmpfs root has no stopped disk closure".into(),
+            ));
+        }
+    };
+    if let Some(chain) = microsandbox_runtime::checkpoint::load_runtime_owned_root_chain(
+        &sandbox_dir.join("runtime"),
+    )
+    .map_err(MicrosandboxError::Runtime)?
+    {
+        if chain.device_id != expected_device {
+            return Err(MicrosandboxError::SnapshotIntegrity(format!(
+                "root-disk journal names {} but the snapshot layout requires {expected_device}",
+                chain.device_id
+            )));
+        }
+        let sources = chain
+            .layers
+            .into_iter()
+            .map(|layer| {
+                let format = match layer.format.as_str() {
+                    "raw" => SnapshotFormat::Raw,
+                    "qcow2" => SnapshotFormat::Qcow2,
+                    other => {
+                        return Err(MicrosandboxError::SnapshotIntegrity(format!(
+                            "root-disk journal uses unsupported format {other:?}"
+                        )));
+                    }
+                };
+                Ok(SnapshotDiskSource {
+                    path: layer.path,
+                    format,
+                })
+            })
+            .collect::<MicrosandboxResult<Vec<_>>>()?;
+        return validate_snapshot_disk_sources(sources, chain.virtual_size);
+    }
+
+    let path = sandbox_dir.join(match root_disk {
+        SnapshotRootDisk::Managed => "upper.ext4",
+        SnapshotRootDisk::Flat => crate::sandbox::flat_rootfs::FLAT_ROOTFS_FILENAME,
+        SnapshotRootDisk::Tmpfs { .. } => unreachable!("rejected above"),
+    });
+    let virtual_size = std::fs::symlink_metadata(&path)
+        .map_err(|error| {
+            MicrosandboxError::SnapshotIntegrity(format!(
+                "cannot read snapshot root disk {}: {error}",
+                path.display()
+            ))
+        })?
+        .len();
+    validate_snapshot_disk_sources(
+        vec![SnapshotDiskSource {
+            path,
+            format: SnapshotFormat::Raw,
+        }],
+        virtual_size,
+    )
+}
+
+fn validate_snapshot_disk_sources(
+    sources: Vec<SnapshotDiskSource>,
+    virtual_size: u64,
+) -> MicrosandboxResult<SnapshotDiskClosure> {
+    if sources.is_empty() || virtual_size == 0 {
+        return Err(MicrosandboxError::SnapshotIntegrity(
+            "snapshot root-disk closure is empty or has zero capacity".into(),
+        ));
+    }
+    for source in &sources {
+        let metadata = std::fs::symlink_metadata(&source.path).map_err(|error| {
+            MicrosandboxError::SnapshotIntegrity(format!(
+                "cannot read snapshot layer {}: {error}",
+                source.path.display()
+            ))
+        })?;
+        if !metadata.file_type().is_file() {
+            return Err(MicrosandboxError::SnapshotIntegrity(format!(
+                "snapshot layer is not a regular file: {}",
+                source.path.display()
+            )));
+        }
+    }
+    Ok(SnapshotDiskClosure {
+        sources,
+        virtual_size,
+    })
 }
 
 fn oci_reference_string(config: &SandboxConfig) -> MicrosandboxResult<String> {
@@ -1054,31 +1204,50 @@ mod tests {
     use super::*;
 
     #[test]
-    fn managed_or_default_root_disk_is_snapshottable() {
-        assert!(ensure_snapshottable_root_disk(None, "sb").is_ok());
-        assert!(
-            ensure_snapshottable_root_disk(
+    fn snapshot_root_layout_preserves_owned_kinds() {
+        assert_eq!(
+            snapshot_root_disk(None, "sb").unwrap(),
+            SnapshotRootDisk::Managed
+        );
+        assert_eq!(
+            snapshot_root_disk(
                 Some(&RootDisk::Managed {
                     size_mib: Some(4096)
                 }),
                 "sb"
             )
-            .is_ok()
+            .unwrap(),
+            SnapshotRootDisk::Managed
+        );
+        assert_eq!(
+            snapshot_root_disk(
+                Some(&RootDisk::Flat {
+                    size_mib: Some(8192),
+                    fstype: None,
+                    clone: microsandbox_types::FlatClone::Auto,
+                }),
+                "sb",
+            )
+            .unwrap(),
+            SnapshotRootDisk::Flat
+        );
+        assert_eq!(
+            snapshot_root_disk(
+                Some(&RootDisk::Tmpfs {
+                    size_mib: Some(256)
+                }),
+                "sb"
+            )
+            .unwrap(),
+            SnapshotRootDisk::Tmpfs {
+                size_mib: Some(256)
+            }
         );
     }
 
     #[test]
-    fn tmpfs_root_disk_is_rejected_with_a_purposeful_error() {
-        let err = ensure_snapshottable_root_disk(Some(&RootDisk::Tmpfs { size_mib: None }), "sb")
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("tmpfs"), "unexpected error: {err}");
-        assert!(err.contains("managed"), "unexpected error: {err}");
-    }
-
-    #[test]
     fn disk_image_root_disk_is_rejected_with_a_purposeful_error() {
-        let err = ensure_snapshottable_root_disk(
+        let err = snapshot_root_disk(
             Some(&RootDisk::DiskImage {
                 path: PathBuf::from("./scratch.img"),
                 format: DiskImageFormat::Raw,
@@ -1091,38 +1260,30 @@ mod tests {
         assert!(err.contains("disk-image"), "unexpected error: {err}");
     }
 
-    #[test]
-    fn flat_root_disk_is_rejected_with_a_purposeful_error() {
-        let err = ensure_snapshottable_root_disk(
-            Some(&RootDisk::Flat {
-                size_mib: Some(8192),
-                fstype: None,
-                clone: microsandbox_types::FlatClone::Auto,
-            }),
-            "sb",
-        )
-        .unwrap_err()
-        .to_string();
-        assert!(err.contains("flat"), "unexpected error: {err}");
-        assert!(err.contains("not yet supported"), "unexpected error: {err}");
-    }
-
     #[tokio::test]
     async fn artifact_integrity_is_recorded_only_when_requested() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("source.ext4");
         std::fs::write(&source, b"snapshot payload").unwrap();
+        let disk = SnapshotDiskClosure {
+            sources: vec![SnapshotDiskSource {
+                path: source,
+                format: SnapshotFormat::Raw,
+            }],
+            virtual_size: b"snapshot payload".len() as u64,
+        };
 
         let without_dir = temp.path().join("without");
         std::fs::create_dir(&without_dir).unwrap();
         let (_, without) = build_artifact(
             &without_dir,
-            &source,
+            &disk,
             &BTreeMap::new(),
             "docker.io/library/alpine:3.20".into(),
             "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
             "box",
             false,
+            SnapshotRootDisk::Managed,
         )
         .await
         .unwrap();
@@ -1135,12 +1296,13 @@ mod tests {
         std::fs::create_dir(&with_dir).unwrap();
         let (_, with) = build_artifact(
             &with_dir,
-            &source,
+            &disk,
             &BTreeMap::new(),
             "docker.io/library/alpine:3.20".into(),
             "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
             "box",
             true,
+            SnapshotRootDisk::Managed,
         )
         .await
         .unwrap();
@@ -1148,6 +1310,64 @@ mod tests {
             &with.state.as_file().unwrap().layers[0].payload.integrity,
             Some(microsandbox_image::snapshot::UpperIntegrity::FileMerkleBlake3V1 { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn artifact_preserves_an_ordered_raw_qcow_disk_closure() {
+        let temp = tempfile::tempdir().unwrap();
+        let raw = temp.path().join("root.raw");
+        let qcow = temp.path().join("generation.qcow2");
+        let raw_file = std::fs::File::create(&raw).unwrap();
+        raw_file.set_len(4096).unwrap();
+        std::fs::write(&qcow, b"compact qcow payload").unwrap();
+        let disk = SnapshotDiskClosure {
+            sources: vec![
+                SnapshotDiskSource {
+                    path: raw,
+                    format: SnapshotFormat::Raw,
+                },
+                SnapshotDiskSource {
+                    path: qcow,
+                    format: SnapshotFormat::Qcow2,
+                },
+            ],
+            virtual_size: 4096,
+        };
+        let artifact = temp.path().join("artifact");
+        std::fs::create_dir(&artifact).unwrap();
+
+        let (_, manifest) = build_artifact(
+            &artifact,
+            &disk,
+            &BTreeMap::new(),
+            "docker.io/library/alpine:3.20".into(),
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            "box",
+            true,
+            SnapshotRootDisk::Flat,
+        )
+        .await
+        .unwrap();
+
+        let file = manifest.state.as_file().unwrap();
+        assert_eq!(file.disk_format, SnapshotFormat::Qcow2);
+        assert_eq!(file.layers.len(), 2);
+        assert_eq!(file.layers[0].format, SnapshotFormat::Raw);
+        assert_eq!(file.layers[1].format, SnapshotFormat::Qcow2);
+        assert_eq!(
+            file.layers[1].backing,
+            Some(file.layers[0].layer_id.clone())
+        );
+        assert_eq!(file.head, file.layers[1].layer_id);
+        let Some(microsandbox_image::snapshot::UpperIntegrity::FileMerkleBlake3V1 {
+            logical_size,
+            ..
+        }) = &file.layers[1].payload.integrity
+        else {
+            panic!("qcow layer is missing BLAKE3 integrity");
+        };
+        assert_eq!(*logical_size, b"compact qcow payload".len() as u64);
+        assert_ne!(*logical_size, file.virtual_size);
     }
 
     #[test]

@@ -185,14 +185,24 @@ pub struct SandboxConfig {
     #[serde(default)]
     pub(crate) manifest_digest: Option<String>,
 
-    /// Path to a snapshot's `upper.ext4` file to copy into the new
-    /// sandbox's upper layer at create time, replacing the fresh-format
-    /// step.
+    /// Path to a file snapshot's writable root disk to copy into the new
+    /// sandbox at create time, replacing fresh root-disk provisioning.
     ///
     /// Transient: set by `SandboxBuilder::from_snapshot` and consumed
     /// during `create_with_mode`. Never persisted.
     #[serde(skip)]
     pub(crate) snapshot_upper_source: Option<PathBuf>,
+
+    /// Immutable installed-snapshot layers to materialize into child-owned root storage.
+    ///
+    /// Transient: paths remain read-only sources until local create copies or links them and adds
+    /// a private writable qcow2 head.
+    #[serde(skip)]
+    pub(crate) snapshot_root_layer_sources: Vec<RootfsUpperLayerConfig>,
+
+    /// Guest-visible capacity of `snapshot_root_layer_sources`.
+    #[serde(skip)]
+    pub(crate) snapshot_root_virtual_size: Option<u64>,
 
     /// Archive to materialize directly into child staging during create.
     ///
@@ -215,7 +225,7 @@ pub struct SandboxConfig {
     #[serde(skip)]
     pub(crate) resumed_from_full_snapshot: bool,
 
-    /// Child-owned oldest-to-head upper chain prepared for checkpoint restore.
+    /// Child-owned oldest-to-head root-disk chain prepared for checkpoint restore.
     #[serde(skip)]
     pub(crate) snapshot_upper_layers: Vec<RootfsUpperLayerConfig>,
 
@@ -266,6 +276,8 @@ impl SandboxConfig {
         config.checkpoint_restore = None;
         config.snapshot_restore_mode = SnapshotRestoreMode::Full;
         config.resumed_from_full_snapshot = false;
+        config.snapshot_root_layer_sources.clear();
+        config.snapshot_root_virtual_size = None;
         config.snapshot_upper_layers.clear();
         config.restore_overrides = RestoreOverrideIntent::default();
         config.launch_intent = LaunchIntent::None;
@@ -499,6 +511,7 @@ impl SandboxConfig {
         }
 
         if self.snapshot_upper_source.is_some()
+            || !self.snapshot_root_layer_sources.is_empty()
             || self.snapshot_archive_source.is_some()
             || self.checkpoint_restore.is_some()
         {
@@ -788,6 +801,8 @@ impl Default for SandboxConfig {
             slug: None,
             manifest_digest: None,
             snapshot_upper_source: None,
+            snapshot_root_layer_sources: Vec::new(),
+            snapshot_root_virtual_size: None,
             snapshot_archive_source: None,
             checkpoint_restore: None,
             snapshot_restore_mode: SnapshotRestoreMode::Full,

@@ -6,6 +6,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use microsandbox_image::snapshot::SnapshotRootDisk;
 use microsandbox_image::{PullProgressHandle, RegistryAuth};
 #[cfg(feature = "net")]
 use microsandbox_network::builder::{NetworkBuilder, SecretBuilder};
@@ -1089,9 +1090,9 @@ impl SandboxBuilder {
 
     /// Apply rootfs patches using a builder closure.
     ///
-    /// Patches are applied before VM start. OCI roots bake patches into
-    /// `upper.ext4`; bind roots patch the host directory directly. Returns an
-    /// error at create time if used with block device roots (Qcow2, Raw).
+    /// Patches are applied before VM start. Managed OCI roots bake patches into their writable
+    /// upper, flat OCI roots bake them into the private complete root disk, and bind roots patch
+    /// the host directory directly. User-owned disk-image roots and tmpfs roots reject patches.
     ///
     /// ```ignore
     /// .patch(|p| p
@@ -1251,6 +1252,7 @@ impl SandboxBuilder {
         let snap_ref = snap.manifest().image.reference.clone();
         self.config.spec.image = RootfsSource::oci(snap_ref);
         self.config.manifest_digest = Some(snap.manifest().image.manifest_digest.clone());
+        apply_snapshot_root_layout(&mut self.config, &snap.manifest().root_disk)?;
 
         let file_state = match &snap.manifest().state {
             crate::snapshot::SnapshotState::File(state) => state,
@@ -1314,9 +1316,7 @@ impl SandboxBuilder {
                 "file state must use disk snapshot scope".into(),
             ));
         }
-        if file_state.disk_format != crate::snapshot::SnapshotFormat::Raw
-            || file_state.filesystem != "ext4"
-        {
+        if file_state.filesystem != "ext4" {
             return Err(crate::MicrosandboxError::unsupported(
                 Operation::SnapshotOps,
                 UnsupportedReason::NotAvailable(format!(
@@ -1325,10 +1325,21 @@ impl SandboxBuilder {
                 )),
             ));
         }
-        let head = file_state
-            .head_layer()
-            .map_err(|e| crate::MicrosandboxError::SnapshotIntegrity(e.to_string()))?;
-        self.config.snapshot_upper_source = Some(snap.layer_path(head));
+        self.config.snapshot_root_layer_sources = file_state
+            .layers
+            .iter()
+            .map(
+                |layer| microsandbox_runtime::launch::RootfsUpperLayerConfig {
+                    path: snap.layer_path(layer),
+                    format: match layer.format {
+                        crate::snapshot::SnapshotFormat::Raw => "raw",
+                        crate::snapshot::SnapshotFormat::Qcow2 => "qcow2",
+                    }
+                    .into(),
+                },
+            )
+            .collect();
+        self.config.snapshot_root_virtual_size = Some(file_state.virtual_size);
         Ok(())
     }
 
@@ -1726,14 +1737,7 @@ impl SandboxBuilder {
                 }
                 if !self.config.spec.patches.is_empty() {
                     return Err(crate::MicrosandboxError::InvalidConfig(
-                        "patches require a managed root disk (they are baked into the upper at create time)".into(),
-                    ));
-                }
-                if self.config.snapshot_upper_source.is_some()
-                    || self.config.snapshot_archive_source.is_some()
-                {
-                    return Err(crate::MicrosandboxError::InvalidConfig(
-                        "from_snapshot requires a managed root disk".into(),
+                        "patches require a managed or flat sandbox-owned root disk".into(),
                     ));
                 }
                 Ok(())
@@ -1746,7 +1750,7 @@ impl SandboxBuilder {
                 }
                 if !self.config.spec.patches.is_empty() {
                     return Err(crate::MicrosandboxError::InvalidConfig(
-                        "patches require a managed root disk (they are baked into the upper at create time)".into(),
+                        "patches require a managed or flat sandbox-owned root disk".into(),
                     ));
                 }
                 if self.config.snapshot_upper_source.is_some()
@@ -1771,18 +1775,6 @@ impl SandboxBuilder {
                         "flat root disks currently support only fstype=ext4".into(),
                     ));
                 }
-                if !self.config.spec.patches.is_empty() {
-                    return Err(crate::MicrosandboxError::InvalidConfig(
-                        "patches are not yet compatible with flat OCI rootfs".into(),
-                    ));
-                }
-                if self.config.snapshot_upper_source.is_some()
-                    || self.config.snapshot_archive_source.is_some()
-                {
-                    return Err(crate::MicrosandboxError::InvalidConfig(
-                        "from_snapshot is not yet compatible with flat OCI rootfs".into(),
-                    ));
-                }
                 Ok(())
             }
         }
@@ -1792,6 +1784,29 @@ impl SandboxBuilder {
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
+
+pub(crate) fn apply_snapshot_root_layout(
+    config: &mut SandboxConfig,
+    layout: &SnapshotRootDisk,
+) -> MicrosandboxResult<()> {
+    let RootfsSource::Oci(oci) = &mut config.spec.image else {
+        return Err(MicrosandboxError::SnapshotIntegrity(
+            "snapshot image did not resolve to an OCI rootfs".into(),
+        ));
+    };
+    oci.root_disk = Some(match layout {
+        SnapshotRootDisk::Managed => microsandbox_types::RootDisk::Managed { size_mib: None },
+        SnapshotRootDisk::Flat => microsandbox_types::RootDisk::Flat {
+            size_mib: None,
+            fstype: Some("ext4".into()),
+            clone: microsandbox_types::FlatClone::Auto,
+        },
+        SnapshotRootDisk::Tmpfs { size_mib } => microsandbox_types::RootDisk::Tmpfs {
+            size_mib: *size_mib,
+        },
+    });
+    Ok(())
+}
 
 fn validate_config_script_name(name: &str) -> Result<(), String> {
     let path = std::path::Path::new(name);
@@ -2364,7 +2379,7 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(err.to_string().contains("require a managed root disk"));
+        assert!(err.to_string().contains("sandbox-owned root disk"));
     }
 
     #[tokio::test]
@@ -2391,16 +2406,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_builder_flat_root_disk_rejects_patches() {
-        let err = SandboxBuilder::new("test")
+    async fn test_builder_flat_root_disk_accepts_patches() {
+        let config = SandboxBuilder::new("test")
             .image("alpine")
             .root_disk_with(|disk| disk.flat())
             .patch(|patch| patch.text("/etc/motd", "hello", None, true))
             .build()
             .await
-            .unwrap_err();
+            .unwrap();
 
-        assert!(err.to_string().contains("not yet compatible with flat"));
+        assert!(matches!(
+            config.spec.image.oci_root_disk(),
+            Some(crate::sandbox::RootDisk::Flat { .. })
+        ));
+        assert_eq!(config.spec.patches.len(), 1);
     }
 
     #[tokio::test]
