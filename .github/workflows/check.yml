@@ -1065,6 +1065,76 @@ jobs:
         if: always()
         run: scripts/ci/ruby-sdk-checkout.sh restore
 
+  # ---------------------------------------------------------------------------
+  # Every other Ruby job swaps the extension's Cargo.lock for the workspace
+  # one and patches `microsandbox` to the in-tree SDK, so the committed lock
+  # and the exact crates.io pin the source gem ships are never resolved
+  # as-is. Resolve and fetch them here unpatched and --locked against the
+  # registry, which fails on a lock that drifted from the pin or on a crate
+  # missing from the published closure. Skipped with a notice while the pin
+  # names a version crates.io does not carry yet (the version-bump PR ahead
+  # of a core release); release.yml refreshes the lock once it is published.
+  # Compiling is deliberately not attempted: without the `prebuilt` feature,
+  # which the extension does not enable, the published core crates' build
+  # scripts require the workspace's build/agentd and cannot run from a
+  # registry checkout, so a registry compile fails for reasons unrelated to
+  # the lock.
+  # ---------------------------------------------------------------------------
+  ruby-standalone-pin:
+    name: Ruby standalone crates.io pin
+    needs: [changes]
+    if: needs.changes.outputs.ruby == 'true' && (github.event_name == 'push' || needs.changes.outputs.ruby_package == 'true')
+    runs-on: ${{ vars.CI_LINUX_X86_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      # Nothing is compiled, so only the registry index and crate sources
+      # are worth caching.
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+        with:
+          workspaces: sdk/ruby/ext/microsandbox -> target
+          key: ruby-standalone-pin
+          cache-bin: false
+          cache-targets: false
+
+      - name: Check whether the pinned core crate is published
+        id: pin
+        run: |
+          pin="$(sed -nE 's/.*package = "microsandbox", version = "=([^"]+)".*/\1/p' sdk/ruby/ext/microsandbox/Cargo.toml)"
+          if [ -z "$pin" ]; then
+            echo "::error::could not read the exact microsandbox pin from sdk/ruby/ext/microsandbox/Cargo.toml"
+            exit 1
+          fi
+          # crates.io rejects requests without a User-Agent.
+          status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+            --header 'User-Agent: microsandbox-ci (https://github.com/superradcompany/microsandbox)' \
+            "https://crates.io/api/v1/crates/microsandbox/$pin")"
+          echo "pin=$pin" >> "$GITHUB_OUTPUT"
+          case "$status" in
+            200)
+              echo "microsandbox $pin is published on crates.io"
+              echo "published=true" >> "$GITHUB_OUTPUT"
+              ;;
+            404)
+              echo "::notice::microsandbox $pin is not on crates.io yet; skipping standalone pin check"
+              echo "published=false" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "::error::crates.io returned HTTP $status for microsandbox $pin"
+              exit 1
+              ;;
+          esac
+
+      # No `scripts/ci/ruby-sdk-checkout.sh prepare`, no [patch.crates-io]:
+      # this is the resolution a `gem install microsandbox` gets.
+      - name: Resolve the extension against the published pin
+        if: steps.pin.outputs.published == 'true'
+        working-directory: sdk/ruby/ext/microsandbox
+        run: cargo fetch --locked
+
   ruby-platform-gem:
     name: Build Ruby platform gem / ${{ matrix.platform }}
     needs: [build-agentd-aarch64, build-agentd-x86_64, changes]
@@ -1140,7 +1210,7 @@ jobs:
         working-directory: sdk/ruby
         run: |
           gem install rake rake-compiler rb_sys --no-document
-          rake version_check cargo:patch_workspace gem:stage
+          rake cargo:patch_workspace version_check gem:stage
 
       - name: Assert the extension uses the checkout Rust SDK
         working-directory: sdk/ruby
@@ -1950,6 +2020,7 @@ jobs:
       - python-quality
       - ruby-sdk
       - ruby-source-gem
+      - ruby-standalone-pin
       - ruby-platform-gem
       - ruby-platform-smoke
       - ruby-platform-smoke-clean

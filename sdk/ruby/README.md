@@ -197,3 +197,9 @@ not currently exposed. Use the Rust SDK when those APIs are required.
 The native extension is built against the published `microsandbox` Rust crate
 at the exact same version. `rake version_check` rejects non-exact requirements
 and version drift between the gem, native extension, and Rust SDK.
+
+The committed `ext/microsandbox/Cargo.lock` tracks that published pin: after a
+core release, `release.yml` re-resolves it against the crate on crates.io and
+opens a follow-up PR, and `rake version_check` rejects a lock whose registry
+`microsandbox` entry drifts from the pin (`cargo update -p microsandbox
+--precise <version>` refreshes it by hand).
