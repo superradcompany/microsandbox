@@ -222,7 +222,7 @@
             "group": "API keys",
             "icon": "key",
             "openapi": {
-              "source": "/api-reference/openapi.staging.json",
+              "source": "/api-reference/openapi.json",
               "directory": "api-reference/endpoints"
             }
           },
@@ -230,7 +230,7 @@
             "group": "Personal tokens",
             "icon": "user",
             "openapi": {
-              "source": "/api-reference/openapi.personal.staging.json",
+              "source": "/api-reference/openapi.personal.json",
               "directory": "api-reference/personal"
             }
           }
