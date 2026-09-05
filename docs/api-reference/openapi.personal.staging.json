@@ -1,8 +1,8 @@
 {
   "openapi": "3.1.0",
   "info": {
-    "title": "microsandbox cloud API",
-    "description": "REST API for microsandbox cloud operations authenticated with an organization API key.",
+    "title": "Personal token API",
+    "description": "User-scoped API for account and organization management.",
     "version": "0.1.0"
   },
   "servers": [
@@ -12,19 +12,1371 @@
   ],
   "security": [
     {
-      "api_key": []
+      "bearer": []
     }
   ],
   "paths": {
-    "/v1/sandboxes": {
+    "/v1/users/me": {
+      "get": {
+        "tags": [
+          "Account"
+        ],
+        "summary": "Get the current user",
+        "operationId": "get_me",
+        "responses": {
+          "200": {
+            "description": "Current user",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/User"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "Account"
+        ],
+        "summary": "Delete the current user",
+        "description": "The user's PII (email, name, password hash, MFA secret, avatar) is cleared\nand the row is tombstoned with `deleted_at`. Sessions are invalidated, org\nmemberships removed, and pending invites issued by this user revoked. Audit\nevents are preserved.\n\nRequires fresh credential proof: the current password (password-backed\naccounts) or a TOTP code (MFA-enabled accounts). At least one must be\nsupplied; both being valid is fine but a single matching proof is enough.\n\nReturns `409 Conflict` if the user is the sole owner of an organization -\nownership must be transferred first.",
+        "operationId": "delete_me",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeleteMeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Account deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MessageResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing credential proof"
+          },
+          "401": {
+            "description": "Invalid password or MFA code"
+          },
+          "409": {
+            "description": "Sole owner of an organization"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "Account"
+        ],
+        "summary": "Update the current user",
+        "operationId": "update_me",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateMeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Profile updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/User"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v1/orgs": {
+      "get": {
+        "tags": [
+          "Organization"
+        ],
+        "summary": "List the current user's organizations",
+        "operationId": "list_orgs",
+        "responses": {
+          "200": {
+            "description": "User's organizations",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/OrgWithRole"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "Organization"
+        ],
+        "summary": "Create an organization",
+        "description": "The current user becomes its owner.",
+        "operationId": "create_org",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateOrgRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Organization created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Organization"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "409": {
+            "description": "Slug already taken"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v1/orgs/{slug}": {
+      "get": {
+        "tags": [
+          "Organization"
+        ],
+        "summary": "Get an organization",
+        "operationId": "get_org",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "Organization slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Organization details",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrgWithRole"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Not a member"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "Organization"
+        ],
+        "summary": "Delete an organization",
+        "description": "Hides the organization immediately and schedules its resources for cleanup.\nThe request must confirm the organization slug.",
+        "operationId": "delete_org",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "Organization slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeleteOrgRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Organization scheduled for deletion",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MessageResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Confirmation does not match"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Owner role required"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "Organization"
+        ],
+        "summary": "Update an organization",
+        "operationId": "update_org",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "Organization slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateOrgRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Organization updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Organization"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v1/orgs/{slug}/members": {
+      "get": {
+        "tags": [
+          "Members"
+        ],
+        "summary": "List organization members",
+        "operationId": "list_members",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "Organization slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Pagination cursor",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size (default 20, max 100)",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Paginated list of members",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaginatedMemberResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Not a member"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v1/orgs/{slug}/members/{user_id}": {
+      "delete": {
+        "tags": [
+          "Members"
+        ],
+        "summary": "Remove an organization member",
+        "operationId": "remove_member",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "Organization slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "user_id",
+            "in": "path",
+            "description": "Target user ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Member removed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MessageResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Cannot remove yourself"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          },
+          "404": {
+            "description": "Member not found"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "Members"
+        ],
+        "summary": "Change an organization member's role",
+        "operationId": "update_member_role",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "Organization slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "user_id",
+            "in": "path",
+            "description": "Target user ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateMemberRoleRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Role updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrgMember"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          },
+          "404": {
+            "description": "Member not found"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v1/invites/{token}/accept": {
+      "post": {
+        "tags": [
+          "Invites"
+        ],
+        "summary": "Accept an organization invite",
+        "operationId": "accept_invite",
+        "parameters": [
+          {
+            "name": "token",
+            "in": "path",
+            "description": "Invite token",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Invite accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MessageResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid or expired token"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Email mismatch"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v1/invites/{token}/decline": {
+      "post": {
+        "tags": [
+          "Invites"
+        ],
+        "summary": "Decline an organization invite",
+        "operationId": "decline_invite",
+        "parameters": [
+          {
+            "name": "token",
+            "in": "path",
+            "description": "Invite token",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Invite declined",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MessageResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid or expired token"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Email mismatch"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v1/orgs/{slug}/invites": {
+      "get": {
+        "tags": [
+          "Invites"
+        ],
+        "summary": "List pending organization invites",
+        "operationId": "list_invites",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "Organization slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of pending invites",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/OrgInvite"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "Invites"
+        ],
+        "summary": "Invite an organization member",
+        "operationId": "create_invite",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "Organization slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateInviteRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Invite created or refreshed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrgInvite"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid email"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          },
+          "409": {
+            "description": "User already a member"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v1/orgs/{slug}/invites/{invite_id}": {
+      "delete": {
+        "tags": [
+          "Invites"
+        ],
+        "summary": "Cancel an organization invite",
+        "operationId": "cancel_invite",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "Organization slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "invite_id",
+            "in": "path",
+            "description": "Invite ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Invite cancelled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MessageResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          },
+          "404": {
+            "description": "Invite not found"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v1/orgs/{slug}/oidc": {
+      "get": {
+        "tags": [
+          "OIDC"
+        ],
+        "summary": "Get organization SSO settings",
+        "operationId": "get_oidc_config",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "Organization slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OIDC configuration",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrgOidcConfig"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          },
+          "404": {
+            "description": "OIDC not configured"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "OIDC"
+        ],
+        "summary": "Configure organization SSO",
+        "operationId": "upsert_oidc_config",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "Organization slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpsertOidcConfigRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OIDC config created or updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrgOidcConfig"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "OIDC"
+        ],
+        "summary": "Remove organization SSO settings",
+        "operationId": "delete_oidc_config",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "Organization slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OIDC config removed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MessageResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          },
+          "404": {
+            "description": "OIDC not configured"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v1/orgs/{slug}/api-keys": {
+      "get": {
+        "tags": [
+          "Credentials"
+        ],
+        "summary": "List API keys",
+        "description": "Admins and owners see all keys. Members see only their own keys.",
+        "operationId": "list_api_keys",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "Organization slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Pagination cursor",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size (default 20, max 100)",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Paginated list of API keys",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaginatedApiKeyResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v1/users/me/pats": {
+      "get": {
+        "tags": [
+          "Credentials"
+        ],
+        "summary": "List personal access tokens",
+        "description": "Returns metadata without token values.",
+        "operationId": "list_pats",
+        "responses": {
+          "200": {
+            "description": "Active PATs for the current user",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/PersonalAccessTokenResponse"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "Credentials"
+        ],
+        "summary": "Create a personal access token",
+        "description": "The token value is returned only once.",
+        "operationId": "create_pat",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreatePersonalAccessTokenRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "PAT created (raw token returned once)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreatePersonalAccessTokenResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "PATs cannot mint other PATs"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v1/users/me/pats/{id}": {
+      "delete": {
+        "tags": [
+          "Credentials"
+        ],
+        "summary": "Revoke a personal access token",
+        "description": "Returns not found when the token is missing or already revoked.",
+        "operationId": "revoke_pat",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "PAT id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "PAT revoked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MessageResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "404": {
+            "description": "PAT not found"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v1/orgs/{slug}/registries": {
+      "get": {
+        "tags": [
+          "Registry credentials"
+        ],
+        "summary": "List registry credentials",
+        "description": "Returns credential metadata without secret values.",
+        "operationId": "list_registry_credentials",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "Organization slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Configured registry credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/RegistryCredentialResponse"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "Registry credentials"
+        ],
+        "summary": "Create or update a registry credential",
+        "description": "Each registry host can have one stored credential.",
+        "operationId": "upsert_registry_credential",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "Organization slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpsertRegistryCredentialRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Credential created or updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RegistryCredentialResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v1/orgs/{slug}/registries/{id}": {
+      "delete": {
+        "tags": [
+          "Registry credentials"
+        ],
+        "summary": "Delete a registry credential",
+        "operationId": "delete_registry_credential",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "Organization slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Registry credential id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Credential removed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MessageResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          },
+          "404": {
+            "description": "Credential not found"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v1/orgs/{slug}/sandbox-slug/check": {
+      "get": {
+        "tags": [
+          "Sandboxes"
+        ],
+        "summary": "Check whether a sandbox slug is valid and available",
+        "operationId": "check_slug",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "Organization slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "sandbox_slug",
+            "in": "query",
+            "description": "Candidate slug to validate + check. Named `sandbox_slug` in the query to\ndisambiguate from the org `:slug` route param.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Slug validity + availability",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SlugAvailability"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v1/orgs/{slug}/sandbox-slug/suggest": {
+      "get": {
+        "tags": [
+          "Sandboxes"
+        ],
+        "summary": "Suggest an available sandbox slug",
+        "operationId": "suggest_slug",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "Organization slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A suggested available slug",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SlugSuggestion"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v1/orgs/{slug}/sandboxes": {
       "get": {
         "tags": [
           "Sandboxes"
         ],
         "summary": "List sandboxes",
-        "description": "List the organization's sandboxes with cursor pagination and optional label filtering.",
         "operationId": "list_sandboxes",
         "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "Organization slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
           {
             "name": "cursor",
             "in": "query",
@@ -66,26 +1418,15 @@
             }
           },
           "401": {
-            "description": "Unauthorized",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "invalid_api_key",
-                    "message": "unauthorized",
-                    "details": null
-                  }
-                }
-              }
-            }
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Not a member"
           }
         },
         "security": [
           {
-            "api_key": []
+            "bearer": []
           }
         ]
       },
@@ -94,9 +1435,18 @@
           "Sandboxes"
         ],
         "summary": "Create a sandbox",
-        "description": "Create a sandbox, optionally start it immediately, and optionally wait until it is ready.",
+        "description": "By default, the sandbox is created without starting. Use `start=true` to\nstart it immediately and `wait_for=running` to wait until it is ready.",
         "operationId": "create_sandbox",
         "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "Organization slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
           {
             "name": "start",
             "in": "query",
@@ -159,508 +1509,45 @@
             }
           },
           "400": {
-            "description": "Invalid request",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "invalid_request",
-                    "message": "invalid request",
-                    "details": null
-                  }
-                }
-              }
-            }
+            "description": "Invalid request"
           },
           "401": {
-            "description": "Unauthorized",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "invalid_api_key",
-                    "message": "unauthorized",
-                    "details": null
-                  }
-                }
-              }
-            }
+            "description": "Unauthorized"
           },
           "409": {
-            "description": "Name already exists",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "name_already_exists",
-                    "message": "'name' already exists",
-                    "details": null
-                  }
-                }
-              }
-            }
+            "description": "Name already exists"
           },
           "429": {
-            "description": "Readiness wait capacity exhausted",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "rate_limited",
-                    "message": "too many requests",
-                    "details": null
-                  }
-                }
-              }
-            }
+            "description": "Readiness wait capacity exhausted"
           },
           "502": {
-            "description": "Orchestrator unreachable",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "orchestrator_unreachable",
-                    "message": "orchestrator unreachable",
-                    "details": null
-                  }
-                }
-              }
-            }
+            "description": "Orchestrator unreachable"
           }
         },
         "security": [
           {
-            "api_key": []
+            "bearer": []
           }
         ]
       }
     },
-    "/v1/sandboxes/by-name/{name}": {
-      "get": {
-        "tags": [
-          "Sandboxes"
-        ],
-        "summary": "Get a sandbox by name",
-        "description": "Retrieve one sandbox by its organization-scoped name.",
-        "operationId": "get_by_name",
-        "parameters": [
-          {
-            "name": "name",
-            "in": "path",
-            "description": "Sandbox name (unique within the org)",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Sandbox details",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/SandboxResponse"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Unauthorized",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "invalid_api_key",
-                    "message": "unauthorized",
-                    "details": null
-                  }
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Sandbox not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "sandbox_not_found",
-                    "message": "resource not found",
-                    "details": null
-                  }
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "api_key": []
-          }
-        ]
-      },
-      "delete": {
-        "tags": [
-          "Sandboxes"
-        ],
-        "summary": "Delete a sandbox by name",
-        "description": "Delete a sandbox selected by its organization-scoped name. Resource cleanup continues asynchronously.",
-        "operationId": "delete_by_name",
-        "parameters": [
-          {
-            "name": "name",
-            "in": "path",
-            "description": "Sandbox name (unique within the org)",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Sandbox scheduled for deletion",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/MessageResponse"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Unauthorized",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "invalid_api_key",
-                    "message": "unauthorized",
-                    "details": null
-                  }
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Sandbox not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "sandbox_not_found",
-                    "message": "resource not found",
-                    "details": null
-                  }
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "api_key": []
-          }
-        ]
-      }
-    },
-    "/v1/sandboxes/by-name/{name}/start": {
-      "post": {
-        "tags": [
-          "Sandboxes"
-        ],
-        "summary": "Start a sandbox by name",
-        "description": "Start a sandbox selected by its organization-scoped name.",
-        "operationId": "start_by_name",
-        "parameters": [
-          {
-            "name": "name",
-            "in": "path",
-            "description": "Sandbox name (unique within the org)",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "wait_for",
-            "in": "query",
-            "description": "Optional lifecycle state to wait for after durable start admission.",
-            "required": false,
-            "schema": {
-              "oneOf": [
-                {
-                  "type": "null"
-                },
-                {
-                  "$ref": "#/components/schemas/SandboxWaitFor"
-                }
-              ]
-            }
-          },
-          {
-            "name": "wait_timeout",
-            "in": "query",
-            "description": "Server-side wait budget in seconds; valid only with `wait_for`.",
-            "required": false,
-            "schema": {
-              "type": [
-                "integer",
-                "null"
-              ],
-              "format": "int64",
-              "minimum": 0
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Sandbox start admitted or requested wait completed",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/SandboxResponse"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Unauthorized",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "invalid_api_key",
-                    "message": "unauthorized",
-                    "details": null
-                  }
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Sandbox not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "sandbox_not_found",
-                    "message": "resource not found",
-                    "details": null
-                  }
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "Invalid state transition",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "invalid_state_transition",
-                    "message": "invalid state transition",
-                    "details": null
-                  }
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "Readiness wait capacity exhausted",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "rate_limited",
-                    "message": "too many requests",
-                    "details": null
-                  }
-                }
-              }
-            }
-          },
-          "502": {
-            "description": "Orchestrator unreachable",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "orchestrator_unreachable",
-                    "message": "orchestrator unreachable",
-                    "details": null
-                  }
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "api_key": []
-          }
-        ]
-      }
-    },
-    "/v1/sandboxes/by-name/{name}/stop": {
-      "post": {
-        "tags": [
-          "Sandboxes"
-        ],
-        "summary": "Stop a sandbox by name",
-        "description": "Stop a running sandbox selected by its organization-scoped name.",
-        "operationId": "stop_by_name",
-        "parameters": [
-          {
-            "name": "name",
-            "in": "path",
-            "description": "Sandbox name (unique within the org)",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Sandbox stopping",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/SandboxResponse"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Unauthorized",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "invalid_api_key",
-                    "message": "unauthorized",
-                    "details": null
-                  }
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Sandbox not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "sandbox_not_found",
-                    "message": "resource not found",
-                    "details": null
-                  }
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "Invalid state transition",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "invalid_state_transition",
-                    "message": "invalid state transition",
-                    "details": null
-                  }
-                }
-              }
-            }
-          },
-          "502": {
-            "description": "Orchestrator unreachable",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "orchestrator_unreachable",
-                    "message": "orchestrator unreachable",
-                    "details": null
-                  }
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "api_key": []
-          }
-        ]
-      }
-    },
-    "/v1/sandboxes/{sandbox_id}": {
+    "/v1/orgs/{slug}/sandboxes/{sandbox_id}": {
       "get": {
         "tags": [
           "Sandboxes"
         ],
         "summary": "Get a sandbox",
-        "description": "Retrieve one sandbox by its unique identifier.",
         "operationId": "get_sandbox",
         "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "Organization slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
           {
             "name": "sandbox_id",
             "in": "path",
@@ -684,43 +1571,15 @@
             }
           },
           "401": {
-            "description": "Unauthorized",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "invalid_api_key",
-                    "message": "unauthorized",
-                    "details": null
-                  }
-                }
-              }
-            }
+            "description": "Unauthorized"
           },
           "404": {
-            "description": "Sandbox not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "sandbox_not_found",
-                    "message": "resource not found",
-                    "details": null
-                  }
-                }
-              }
-            }
+            "description": "Sandbox not found"
           }
         },
         "security": [
           {
-            "api_key": []
+            "bearer": []
           }
         ]
       },
@@ -729,9 +1588,18 @@
           "Sandboxes"
         ],
         "summary": "Delete a sandbox",
-        "description": "Delete a sandbox. Resource cleanup continues asynchronously.",
+        "description": "Resource cleanup continues asynchronously.",
         "operationId": "delete_sandbox",
         "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "Organization slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
           {
             "name": "sandbox_id",
             "in": "path",
@@ -755,43 +1623,15 @@
             }
           },
           "401": {
-            "description": "Unauthorized",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "invalid_api_key",
-                    "message": "unauthorized",
-                    "details": null
-                  }
-                }
-              }
-            }
+            "description": "Unauthorized"
           },
           "404": {
-            "description": "Sandbox not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "sandbox_not_found",
-                    "message": "resource not found",
-                    "details": null
-                  }
-                }
-              }
-            }
+            "description": "Sandbox not found"
           }
         },
         "security": [
           {
-            "api_key": []
+            "bearer": []
           }
         ]
       },
@@ -800,9 +1640,17 @@
           "Sandboxes"
         ],
         "summary": "Update a sandbox",
-        "description": "Rename a sandbox by updating its display name or slug.",
         "operationId": "update_sandbox",
         "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "Organization slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
           {
             "name": "sandbox_id",
             "in": "path",
@@ -836,89 +1684,43 @@
             }
           },
           "400": {
-            "description": "Invalid name/slug",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "invalid_request",
-                    "message": "invalid request",
-                    "details": null
-                  }
-                }
-              }
-            }
+            "description": "Invalid name/slug"
           },
           "401": {
-            "description": "Unauthorized",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "invalid_api_key",
-                    "message": "unauthorized",
-                    "details": null
-                  }
-                }
-              }
-            }
+            "description": "Unauthorized"
           },
           "404": {
-            "description": "Sandbox not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "sandbox_not_found",
-                    "message": "resource not found",
-                    "details": null
-                  }
-                }
-              }
-            }
+            "description": "Sandbox not found"
           },
           "409": {
-            "description": "Name or slug already taken",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "name_already_exists",
-                    "message": "'name' already exists",
-                    "details": null
-                  }
-                }
-              }
-            }
+            "description": "Name or slug already taken"
           }
         },
         "security": [
           {
-            "api_key": []
+            "bearer": []
           }
         ]
       }
     },
-    "/v1/sandboxes/{sandbox_id}/metrics": {
+    "/v1/orgs/{slug}/sandboxes/{sandbox_id}/metrics": {
       "get": {
         "tags": [
           "Sandboxes"
         ],
         "summary": "Get sandbox metrics",
+        "description": "Returns CPU, memory, disk, and network metrics for a time range.",
         "operationId": "get_metrics",
         "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "Organization slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
           {
             "name": "sandbox_id",
             "in": "path",
@@ -970,90 +1772,42 @@
             }
           },
           "400": {
-            "description": "Invalid range/step",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "invalid_request",
-                    "message": "invalid request",
-                    "details": null
-                  }
-                }
-              }
-            }
+            "description": "Invalid range/step"
           },
           "401": {
-            "description": "Unauthorized",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "invalid_api_key",
-                    "message": "unauthorized",
-                    "details": null
-                  }
-                }
-              }
-            }
+            "description": "Unauthorized"
           },
           "404": {
-            "description": "Sandbox not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "sandbox_not_found",
-                    "message": "resource not found",
-                    "details": null
-                  }
-                }
-              }
-            }
+            "description": "Sandbox not found"
           },
           "502": {
-            "description": "Metrics backend unavailable",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "orchestrator_unreachable",
-                    "message": "orchestrator unreachable",
-                    "details": null
-                  }
-                }
-              }
-            }
+            "description": "Metrics backend unavailable"
           }
         },
         "security": [
           {
-            "api_key": []
+            "bearer": []
           }
         ]
       }
     },
-    "/v1/sandboxes/{sandbox_id}/start": {
+    "/v1/orgs/{slug}/sandboxes/{sandbox_id}/start": {
       "post": {
         "tags": [
           "Sandboxes"
         ],
         "summary": "Start a sandbox",
-        "description": "Start a sandbox and optionally wait until it is running.",
         "operationId": "start_sandbox",
         "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "Organization slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
           {
             "name": "sandbox_id",
             "in": "path",
@@ -1107,107 +1861,45 @@
             }
           },
           "401": {
-            "description": "Unauthorized",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "invalid_api_key",
-                    "message": "unauthorized",
-                    "details": null
-                  }
-                }
-              }
-            }
+            "description": "Unauthorized"
           },
           "404": {
-            "description": "Sandbox not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "sandbox_not_found",
-                    "message": "resource not found",
-                    "details": null
-                  }
-                }
-              }
-            }
+            "description": "Sandbox not found"
           },
           "409": {
-            "description": "Invalid state transition",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "invalid_state_transition",
-                    "message": "invalid state transition",
-                    "details": null
-                  }
-                }
-              }
-            }
+            "description": "Invalid state transition"
           },
           "429": {
-            "description": "Readiness wait capacity exhausted",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "rate_limited",
-                    "message": "too many requests",
-                    "details": null
-                  }
-                }
-              }
-            }
+            "description": "Readiness wait capacity exhausted"
           },
           "502": {
-            "description": "Orchestrator unreachable",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "orchestrator_unreachable",
-                    "message": "orchestrator unreachable",
-                    "details": null
-                  }
-                }
-              }
-            }
+            "description": "Orchestrator unreachable"
           }
         },
         "security": [
           {
-            "api_key": []
+            "bearer": []
           }
         ]
       }
     },
-    "/v1/sandboxes/{sandbox_id}/stop": {
+    "/v1/orgs/{slug}/sandboxes/{sandbox_id}/stop": {
       "post": {
         "tags": [
           "Sandboxes"
         ],
         "summary": "Stop a sandbox",
-        "description": "Stop a running sandbox.",
         "operationId": "stop_sandbox",
         "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "Organization slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
           {
             "name": "sandbox_id",
             "in": "path",
@@ -1231,82 +1923,26 @@
             }
           },
           "401": {
-            "description": "Unauthorized",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "invalid_api_key",
-                    "message": "unauthorized",
-                    "details": null
-                  }
-                }
-              }
-            }
+            "description": "Unauthorized"
           },
           "404": {
-            "description": "Sandbox not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "sandbox_not_found",
-                    "message": "resource not found",
-                    "details": null
-                  }
-                }
-              }
-            }
+            "description": "Sandbox not found"
           },
           "409": {
-            "description": "Invalid state transition",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "invalid_state_transition",
-                    "message": "invalid state transition",
-                    "details": null
-                  }
-                }
-              }
-            }
+            "description": "Invalid state transition"
           },
           "502": {
-            "description": "Sandbox orchestrator unreachable",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "orchestrator_unreachable",
-                    "message": "orchestrator unreachable",
-                    "details": null
-                  }
-                }
-              }
-            }
+            "description": "Sandbox orchestrator unreachable"
           }
         },
         "security": [
           {
-            "api_key": []
+            "bearer": []
           }
         ]
       }
     },
-    "/v1/sandboxes/{sandbox_id}/volumes": {
+    "/v1/orgs/{slug}/sandboxes/{sandbox_id}/volumes": {
       "get": {
         "tags": [
           "Sandboxes"
@@ -1314,6 +1950,15 @@
         "summary": "List mounted volumes",
         "operationId": "list_volumes",
         "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "Organization slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
           {
             "name": "sandbox_id",
             "in": "path",
@@ -1340,56 +1985,36 @@
             }
           },
           "401": {
-            "description": "Unauthorized",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "invalid_api_key",
-                    "message": "unauthorized",
-                    "details": null
-                  }
-                }
-              }
-            }
+            "description": "Unauthorized"
           },
           "404": {
-            "description": "Sandbox not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "sandbox_not_found",
-                    "message": "resource not found",
-                    "details": null
-                  }
-                }
-              }
-            }
+            "description": "Sandbox not found"
           }
         },
         "security": [
           {
-            "api_key": []
+            "bearer": []
           }
         ]
       }
     },
-    "/v1/sandboxes/snapshot-candidates": {
+    "/v1/orgs/{slug}/sandboxes/snapshot-candidates": {
       "get": {
         "tags": [
           "Snapshots"
         ],
-        "summary": "List snapshot candidates",
-        "description": "List persistent, stopped sandboxes supported by the current disk snapshot policy.",
+        "summary": "List sandboxes available for snapshots",
         "operationId": "list_snapshot_candidates",
         "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "Organization slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
           {
             "name": "cursor",
             "in": "query",
@@ -1422,39 +2047,36 @@
             }
           },
           "401": {
-            "description": "Unauthorized",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "invalid_api_key",
-                    "message": "unauthorized",
-                    "details": null
-                  }
-                }
-              }
-            }
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Insufficient permissions"
           }
         },
         "security": [
           {
-            "api_key": []
+            "bearer": []
           }
         ]
       }
     },
-    "/v1/snapshot-operations": {
+    "/v1/orgs/{slug}/snapshot-operations": {
       "get": {
         "tags": [
           "Snapshots"
         ],
         "summary": "List snapshot operations",
-        "description": "List asynchronous snapshot operations requested by this organization.",
         "operationId": "list_operations",
         "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "Organization slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
           {
             "name": "cursor",
             "in": "query",
@@ -1496,39 +2118,36 @@
             }
           },
           "401": {
-            "description": "Unauthorized",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "invalid_api_key",
-                    "message": "unauthorized",
-                    "details": null
-                  }
-                }
-              }
-            }
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Insufficient permissions"
           }
         },
         "security": [
           {
-            "api_key": []
+            "bearer": []
           }
         ]
       }
     },
-    "/v1/snapshot-operations/{operation_id}": {
+    "/v1/orgs/{slug}/snapshot-operations/{operation_id}": {
       "get": {
         "tags": [
           "Snapshots"
         ],
         "summary": "Get a snapshot operation",
-        "description": "Poll an asynchronous snapshot operation.",
         "operationId": "get_operation",
         "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "Organization slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
           {
             "name": "operation_id",
             "in": "path",
@@ -1552,56 +2171,36 @@
             }
           },
           "401": {
-            "description": "Unauthorized",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "invalid_api_key",
-                    "message": "unauthorized",
-                    "details": null
-                  }
-                }
-              }
-            }
+            "description": "Unauthorized"
           },
           "404": {
-            "description": "Snapshot operation not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "sandbox_not_found",
-                    "message": "resource not found",
-                    "details": null
-                  }
-                }
-              }
-            }
+            "description": "Snapshot operation not found"
           }
         },
         "security": [
           {
-            "api_key": []
+            "bearer": []
           }
         ]
       }
     },
-    "/v1/snapshots": {
+    "/v1/orgs/{slug}/snapshots": {
       "get": {
         "tags": [
           "Snapshots"
         ],
         "summary": "List snapshots",
-        "description": "List the organization's managed disk snapshots.",
         "operationId": "list",
         "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "Organization slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
           {
             "name": "cursor",
             "in": "query",
@@ -1634,26 +2233,15 @@
             }
           },
           "401": {
-            "description": "Unauthorized",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "invalid_api_key",
-                    "message": "unauthorized",
-                    "details": null
-                  }
-                }
-              }
-            }
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Insufficient permissions"
           }
         },
         "security": [
           {
-            "api_key": []
+            "bearer": []
           }
         ]
       },
@@ -1662,8 +2250,18 @@
           "Snapshots"
         ],
         "summary": "Create a snapshot",
-        "description": "Create a managed or host-volume disk snapshot asynchronously.",
         "operationId": "create",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "Organization slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -1686,100 +2284,48 @@
             }
           },
           "400": {
-            "description": "Invalid snapshot request",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "invalid_request",
-                    "message": "invalid request",
-                    "details": null
-                  }
-                }
-              }
-            }
+            "description": "Invalid snapshot request"
           },
           "401": {
-            "description": "Unauthorized",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "invalid_api_key",
-                    "message": "unauthorized",
-                    "details": null
-                  }
-                }
-              }
-            }
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Insufficient permissions"
           },
           "404": {
-            "description": "Source sandbox not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "sandbox_not_found",
-                    "message": "resource not found",
-                    "details": null
-                  }
-                }
-              }
-            }
+            "description": "Source sandbox not found"
           },
           "409": {
-            "description": "Snapshot destination already exists",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "name_already_exists",
-                    "message": "'name' already exists",
-                    "details": null
-                  }
-                }
-              }
-            }
+            "description": "Snapshot destination already exists"
           },
           "422": {
-            "description": "Unsupported or ineligible snapshot request",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
+            "description": "Unsupported or ineligible snapshot request"
           }
         },
         "security": [
           {
-            "api_key": []
+            "bearer": []
           }
         ]
       }
     },
-    "/v1/snapshots/by-name/{name}": {
+    "/v1/orgs/{slug}/snapshots/by-name/{name}": {
       "get": {
         "tags": [
           "Snapshots"
         ],
         "summary": "Get a snapshot by name",
-        "description": "Retrieve a managed disk snapshot by its organization-unique name.",
         "operationId": "get_by_name",
         "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "Organization slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
           {
             "name": "name",
             "in": "path",
@@ -1802,43 +2348,15 @@
             }
           },
           "401": {
-            "description": "Unauthorized",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "invalid_api_key",
-                    "message": "unauthorized",
-                    "details": null
-                  }
-                }
-              }
-            }
+            "description": "Unauthorized"
           },
           "404": {
-            "description": "Snapshot not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "sandbox_not_found",
-                    "message": "resource not found",
-                    "details": null
-                  }
-                }
-              }
-            }
+            "description": "Snapshot not found"
           }
         },
         "security": [
           {
-            "api_key": []
+            "bearer": []
           }
         ]
       },
@@ -1847,9 +2365,17 @@
           "Snapshots"
         ],
         "summary": "Delete a snapshot by name",
-        "description": "Delete a managed disk snapshot by its organization-unique name.",
         "operationId": "delete_by_name",
         "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "Organization slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
           {
             "name": "name",
             "in": "path",
@@ -1872,56 +2398,36 @@
             }
           },
           "401": {
-            "description": "Unauthorized",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "invalid_api_key",
-                    "message": "unauthorized",
-                    "details": null
-                  }
-                }
-              }
-            }
+            "description": "Unauthorized"
           },
           "404": {
-            "description": "Snapshot not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "sandbox_not_found",
-                    "message": "resource not found",
-                    "details": null
-                  }
-                }
-              }
-            }
+            "description": "Snapshot not found"
           }
         },
         "security": [
           {
-            "api_key": []
+            "bearer": []
           }
         ]
       }
     },
-    "/v1/snapshots/{snapshot_id}": {
+    "/v1/orgs/{slug}/snapshots/{snapshot_id}": {
       "get": {
         "tags": [
           "Snapshots"
         ],
-        "summary": "Get a snapshot",
-        "description": "Retrieve a managed disk snapshot by its immutable identifier.",
+        "summary": "Get a snapshot by ID",
         "operationId": "get",
         "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "Organization slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
           {
             "name": "snapshot_id",
             "in": "path",
@@ -1945,43 +2451,15 @@
             }
           },
           "401": {
-            "description": "Unauthorized",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "invalid_api_key",
-                    "message": "unauthorized",
-                    "details": null
-                  }
-                }
-              }
-            }
+            "description": "Unauthorized"
           },
           "404": {
-            "description": "Snapshot not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "sandbox_not_found",
-                    "message": "resource not found",
-                    "details": null
-                  }
-                }
-              }
-            }
+            "description": "Snapshot not found"
           }
         },
         "security": [
           {
-            "api_key": []
+            "bearer": []
           }
         ]
       },
@@ -1989,10 +2467,18 @@
         "tags": [
           "Snapshots"
         ],
-        "summary": "Delete a snapshot",
-        "description": "Delete a managed disk snapshot by its immutable identifier.",
+        "summary": "Delete a snapshot by ID",
         "operationId": "delete",
         "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "Organization slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
           {
             "name": "snapshot_id",
             "in": "path",
@@ -2016,55 +2502,37 @@
             }
           },
           "401": {
-            "description": "Unauthorized",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "invalid_api_key",
-                    "message": "unauthorized",
-                    "details": null
-                  }
-                }
-              }
-            }
+            "description": "Unauthorized"
           },
           "404": {
-            "description": "Snapshot not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "sandbox_not_found",
-                    "message": "resource not found",
-                    "details": null
-                  }
-                }
-              }
-            }
+            "description": "Snapshot not found"
           }
         },
         "security": [
           {
-            "api_key": []
+            "bearer": []
           }
         ]
       }
     },
-    "/v1/volumes": {
+    "/v1/orgs/{slug}/volumes": {
       "get": {
         "tags": [
           "Volumes"
         ],
         "summary": "List volumes",
-        "description": "List persistent volumes available to the organization, including current usage.",
         "operationId": "list_volumes",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "Organization slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "The org's volumes",
@@ -2080,26 +2548,15 @@
             }
           },
           "401": {
-            "description": "Unauthorized",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "invalid_api_key",
-                    "message": "unauthorized",
-                    "details": null
-                  }
-                }
-              }
-            }
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Insufficient permissions"
           }
         },
         "security": [
           {
-            "api_key": []
+            "bearer": []
           }
         ]
       },
@@ -2108,8 +2565,18 @@
           "Volumes"
         ],
         "summary": "Create a volume",
-        "description": "Create a named persistent volume with optional capacity and labels.",
         "operationId": "create_volume",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "Organization slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -2132,65 +2599,26 @@
             }
           },
           "400": {
-            "description": "Invalid request",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "invalid_request",
-                    "message": "invalid request",
-                    "details": null
-                  }
-                }
-              }
-            }
+            "description": "Invalid request"
           },
           "401": {
-            "description": "Unauthorized",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "invalid_api_key",
-                    "message": "unauthorized",
-                    "details": null
-                  }
-                }
-              }
-            }
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Insufficient permissions"
           },
           "409": {
-            "description": "Volume name already in use",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "name_already_exists",
-                    "message": "'name' already exists",
-                    "details": null
-                  }
-                }
-              }
-            }
+            "description": "Volume name already in use"
           }
         },
         "security": [
           {
-            "api_key": []
+            "bearer": []
           }
         ]
       }
     },
-    "/v1/volumes/default": {
+    "/v1/orgs/{slug}/volumes/default": {
       "get": {
         "tags": [
           "Volumes"
@@ -2200,20 +2628,28 @@
         "responses": {},
         "security": [
           {
-            "api_key": []
+            "bearer": []
           }
         ]
       }
     },
-    "/v1/volumes/{id}": {
+    "/v1/orgs/{slug}/volumes/{id}": {
       "delete": {
         "tags": [
           "Volumes"
         ],
         "summary": "Delete a volume",
-        "description": "Schedule an unused named volume for deletion.",
         "operationId": "delete_volume",
         "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "Organization slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
           {
             "name": "id",
             "in": "path",
@@ -2237,60 +2673,21 @@
             }
           },
           "401": {
-            "description": "Unauthorized",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "invalid_api_key",
-                    "message": "unauthorized",
-                    "details": null
-                  }
-                }
-              }
-            }
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Insufficient permissions"
           },
           "404": {
-            "description": "Volume not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "sandbox_not_found",
-                    "message": "resource not found",
-                    "details": null
-                  }
-                }
-              }
-            }
+            "description": "Volume not found"
           },
           "409": {
-            "description": "The default volume cannot be deleted",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "invalid_request",
-                    "message": "the host volume cannot be deleted",
-                    "details": null
-                  }
-                }
-              }
-            }
+            "description": "The host volume cannot be deleted, or it is in use by a sandbox"
           }
         },
         "security": [
           {
-            "api_key": []
+            "bearer": []
           }
         ]
       },
@@ -2299,9 +2696,17 @@
           "Volumes"
         ],
         "summary": "Update a volume",
-        "description": "Update a named volume's capacity limit or labels.",
         "operationId": "update_volume",
         "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "Organization slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
           {
             "name": "id",
             "in": "path",
@@ -2335,417 +2740,29 @@
             }
           },
           "400": {
-            "description": "Invalid request (e.g. cap exceeds the org cap)",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "invalid_request",
-                    "message": "invalid request",
-                    "details": null
-                  }
-                }
-              }
-            }
+            "description": "Invalid request (e.g. cap exceeds the org cap)"
           },
           "401": {
-            "description": "Unauthorized",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "invalid_api_key",
-                    "message": "unauthorized",
-                    "details": null
-                  }
-                }
-              }
-            }
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Insufficient permissions"
           },
           "404": {
-            "description": "Volume not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "sandbox_not_found",
-                    "message": "resource not found",
-                    "details": null
-                  }
-                }
-              }
-            }
+            "description": "Volume not found"
           },
           "409": {
-            "description": "The host volume cannot be capped",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "invalid_request",
-                    "message": "the host volume cannot be capped",
-                    "details": null
-                  }
-                }
-              }
-            }
+            "description": "The host volume cannot be capped"
           }
         },
         "security": [
           {
-            "api_key": []
+            "bearer": []
           }
         ]
       }
     },
-    "/v1/volumes/{id}/files": {
-      "get": {
-        "tags": [
-          "Volumes"
-        ],
-        "summary": "List files",
-        "operationId": "list",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "description": "Volume UUID",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          },
-          {
-            "name": "x-msb-file-path",
-            "in": "header",
-            "description": "URL-safe base64 encoded volume-relative UTF-8 path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {},
-        "security": [
-          {
-            "api_key": []
-          }
-        ]
-      },
-      "delete": {
-        "tags": [
-          "Volumes"
-        ],
-        "summary": "Delete a file or directory",
-        "operationId": "remove",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "description": "Volume UUID",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          },
-          {
-            "name": "x-msb-file-path",
-            "in": "header",
-            "description": "URL-safe base64 encoded volume-relative UTF-8 path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "x-msb-file-recursive",
-            "in": "header",
-            "description": "Recursively remove a directory",
-            "required": false,
-            "schema": {
-              "type": [
-                "boolean",
-                "null"
-              ]
-            }
-          }
-        ],
-        "responses": {},
-        "security": [
-          {
-            "api_key": []
-          }
-        ]
-      }
-    },
-    "/v1/volumes/{id}/files/content": {
-      "get": {
-        "tags": [
-          "Volumes"
-        ],
-        "summary": "Read a file",
-        "operationId": "read",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "description": "Volume UUID",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          },
-          {
-            "name": "x-msb-file-path",
-            "in": "header",
-            "description": "URL-safe base64 encoded volume-relative UTF-8 path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {},
-        "security": [
-          {
-            "api_key": []
-          }
-        ]
-      },
-      "put": {
-        "tags": [
-          "Volumes"
-        ],
-        "summary": "Write a file",
-        "operationId": "write",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "description": "Volume UUID",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          },
-          {
-            "name": "x-msb-file-path",
-            "in": "header",
-            "description": "URL-safe base64 encoded volume-relative UTF-8 path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {},
-        "security": [
-          {
-            "api_key": []
-          }
-        ]
-      }
-    },
-    "/v1/volumes/{id}/files/copy": {
-      "post": {
-        "tags": [
-          "Volumes"
-        ],
-        "summary": "Copy a file or directory",
-        "operationId": "copy",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "description": "Volume UUID",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/FileMoveRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {},
-        "security": [
-          {
-            "api_key": []
-          }
-        ]
-      }
-    },
-    "/v1/volumes/{id}/files/exists": {
-      "get": {
-        "tags": [
-          "Volumes"
-        ],
-        "summary": "Check whether a file exists",
-        "operationId": "exists",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "description": "Volume UUID",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          },
-          {
-            "name": "x-msb-file-path",
-            "in": "header",
-            "description": "URL-safe base64 encoded volume-relative UTF-8 path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {},
-        "security": [
-          {
-            "api_key": []
-          }
-        ]
-      }
-    },
-    "/v1/volumes/{id}/files/mkdir": {
-      "post": {
-        "tags": [
-          "Volumes"
-        ],
-        "summary": "Create a directory",
-        "operationId": "mkdir",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "description": "Volume UUID",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/FilePathRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {},
-        "security": [
-          {
-            "api_key": []
-          }
-        ]
-      }
-    },
-    "/v1/volumes/{id}/files/rename": {
-      "post": {
-        "tags": [
-          "Volumes"
-        ],
-        "summary": "Move a file or directory",
-        "operationId": "rename",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "description": "Volume UUID",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/FileMoveRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {},
-        "security": [
-          {
-            "api_key": []
-          }
-        ]
-      }
-    },
-    "/v1/volumes/{id}/files/stat": {
-      "get": {
-        "tags": [
-          "Volumes"
-        ],
-        "summary": "Get file information",
-        "operationId": "stat",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "description": "Volume UUID",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          },
-          {
-            "name": "x-msb-file-path",
-            "in": "header",
-            "description": "URL-safe base64 encoded volume-relative UTF-8 path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {},
-        "security": [
-          {
-            "api_key": []
-          }
-        ]
-      }
-    },
-    "/v1/volumes/{id}/metrics": {
+    "/v1/orgs/{slug}/volumes/{id}/metrics": {
       "get": {
         "tags": [
           "Volumes"
@@ -2753,6 +2770,15 @@
         "summary": "Get volume metrics",
         "operationId": "get_metrics",
         "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "Organization slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
           {
             "name": "id",
             "in": "path",
@@ -2804,89 +2830,46 @@
             }
           },
           "400": {
-            "description": "Invalid time range or resolution",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "invalid_request",
-                    "message": "invalid request",
-                    "details": null
-                  }
-                }
-              }
-            }
+            "description": "Invalid time range or resolution"
           },
           "401": {
-            "description": "Unauthorized",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "invalid_api_key",
-                    "message": "unauthorized",
-                    "details": null
-                  }
-                }
-              }
-            }
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Insufficient permissions"
           },
           "404": {
-            "description": "Volume not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "sandbox_not_found",
-                    "message": "resource not found",
-                    "details": null
-                  }
-                }
-              }
-            }
+            "description": "Volume not found"
           },
           "502": {
-            "description": "Metrics backend unavailable",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "orchestrator_unreachable",
-                    "message": "orchestrator unreachable",
-                    "details": null
-                  }
-                }
-              }
-            }
+            "description": "Metrics backend unavailable"
           }
         },
         "security": [
           {
-            "api_key": []
+            "bearer": []
           }
         ]
       }
     },
-    "/v1/quotas": {
+    "/v1/orgs/{slug}/quotas": {
       "get": {
         "tags": [
           "Quotas"
         ],
         "summary": "Get quota usage",
-        "description": "Return current resource usage, plan limits, and organization-specific quota overrides.",
         "operationId": "get_quotas",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "Organization slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Quota usage",
@@ -2899,54 +2882,40 @@
             }
           },
           "401": {
-            "description": "Unauthorized",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "invalid_api_key",
-                    "message": "unauthorized",
-                    "details": null
-                  }
-                }
-              }
-            }
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Not a member"
           },
           "404": {
-            "description": "Org not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "org_not_found",
-                    "message": "org not found",
-                    "details": null
-                  }
-                }
-              }
-            }
+            "description": "Org not found"
           }
         },
         "security": [
           {
-            "api_key": []
+            "bearer": []
           }
         ]
       }
     },
-    "/v1/billing": {
+    "/v1/orgs/{slug}/billing": {
       "get": {
         "tags": [
           "Billing"
         ],
         "summary": "Get billing summary",
         "operationId": "get_billing",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "Organization slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Billing summary",
@@ -2959,37 +2928,80 @@
             }
           },
           "401": {
-            "description": "Unauthorized",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "invalid_api_key",
-                    "message": "unauthorized",
-                    "details": null
-                  }
-                }
-              }
-            }
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Not a member"
           }
         },
         "security": [
           {
-            "api_key": []
+            "bearer": []
           }
         ]
       }
     },
-    "/v1/billing/invoices": {
+    "/v1/orgs/{slug}/billing/cancel": {
+      "post": {
+        "tags": [
+          "Billing"
+        ],
+        "summary": "Cancel the subscription at the end of the billing period",
+        "operationId": "cancel_subscription",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "Organization slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Cancellation scheduled for period end",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BillingSummaryResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v1/orgs/{slug}/billing/invoices": {
       "get": {
         "tags": [
           "Billing"
         ],
         "summary": "List invoices",
         "operationId": "list_invoices",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "Organization slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Invoice list",
@@ -3005,31 +3017,17 @@
             }
           },
           "401": {
-            "description": "Unauthorized",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "invalid_api_key",
-                    "message": "unauthorized",
-                    "details": null
-                  }
-                }
-              }
-            }
+            "description": "Unauthorized"
           }
         },
         "security": [
           {
-            "api_key": []
+            "bearer": []
           }
         ]
       }
     },
-    "/v1/billing/invoices/{invoice_id}": {
+    "/v1/orgs/{slug}/billing/invoices/{invoice_id}": {
       "get": {
         "tags": [
           "Billing"
@@ -3037,6 +3035,15 @@
         "summary": "Get an invoice",
         "operationId": "get_invoice",
         "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "Organization slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
           {
             "name": "invoice_id",
             "in": "path",
@@ -3059,54 +3066,137 @@
             }
           },
           "401": {
-            "description": "Unauthorized",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "invalid_api_key",
-                    "message": "unauthorized",
-                    "details": null
-                  }
-                }
-              }
-            }
+            "description": "Unauthorized"
           },
           "404": {
-            "description": "Invoice not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "sandbox_not_found",
-                    "message": "resource not found",
-                    "details": null
-                  }
-                }
-              }
-            }
+            "description": "Invoice not found"
           }
         },
         "security": [
           {
-            "api_key": []
+            "bearer": []
           }
         ]
       }
     },
-    "/v1/billing/plans": {
+    "/v1/orgs/{slug}/billing/payment-portal": {
+      "get": {
+        "tags": [
+          "Billing"
+        ],
+        "summary": "Open the payment portal",
+        "description": "Returns a URL for managing payment methods.",
+        "operationId": "payment_portal",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "Organization slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Payment portal URL",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaymentPortalResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v1/orgs/{slug}/billing/plan": {
+      "put": {
+        "tags": [
+          "Billing"
+        ],
+        "summary": "Change the billing plan",
+        "operationId": "change_plan",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "Organization slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChangePlanRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Plan changed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BillingSummaryResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid plan or payment method required"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v1/orgs/{slug}/billing/plans": {
       "get": {
         "tags": [
           "Billing"
         ],
         "summary": "List billing plans",
         "operationId": "list_plans",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "Organization slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Available plans",
@@ -3122,41 +3212,38 @@
             }
           },
           "401": {
-            "description": "Unauthorized",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "invalid_api_key",
-                    "message": "unauthorized",
-                    "details": null
-                  }
-                }
-              }
-            }
+            "description": "Unauthorized"
           }
         },
         "security": [
           {
-            "api_key": []
+            "bearer": []
           }
         ]
       }
     },
-    "/v1/billing/usage": {
+    "/v1/orgs/{slug}/billing/usage": {
       "get": {
         "tags": [
           "Billing"
         ],
-        "summary": "Get a usage summary",
-        "description": "Return billable usage for the organization.",
+        "summary": "Get estimated usage costs",
+        "description": "Includes the subscription and estimated overage for the current period.",
         "operationId": "get_usage",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "Organization slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
-            "description": "Usage summary",
+            "description": "Cost estimate for the current period",
             "content": {
               "application/json": {
                 "schema": {
@@ -3166,38 +3253,53 @@
             }
           },
           "401": {
-            "description": "Unauthorized",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "invalid_api_key",
-                    "message": "unauthorized",
-                    "details": null
-                  }
-                }
-              }
-            }
+            "description": "Unauthorized"
           }
         },
         "security": [
           {
-            "api_key": []
+            "bearer": []
           }
         ]
       }
     },
-    "/v1/billing/usage/sandbox": {
+    "/v1/orgs/{slug}/billing/usage/sandbox": {
       "get": {
         "tags": [
           "Billing"
         ],
-        "summary": "Get per-sandbox usage",
-        "description": "Return billable usage grouped by sandbox for a selected UTC time range.",
+        "summary": "Get sandbox usage",
+        "description": "Groups compute usage by sandbox and day for the requested time range.",
         "operationId": "get_sandbox_breakdown",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "Organization slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "description": "Window start (RFC 3339); defaults to month start",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "Window end (RFC 3339); defaults to now",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Per-sandbox / per-day usage",
@@ -3210,38 +3312,53 @@
             }
           },
           "401": {
-            "description": "Unauthorized",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "invalid_api_key",
-                    "message": "unauthorized",
-                    "details": null
-                  }
-                }
-              }
-            }
+            "description": "Unauthorized"
           }
         },
         "security": [
           {
-            "api_key": []
+            "bearer": []
           }
         ]
       }
     },
-    "/v1/billing/usage/storage": {
+    "/v1/orgs/{slug}/billing/usage/storage": {
       "get": {
         "tags": [
           "Billing"
         ],
-        "summary": "Get per-volume storage usage",
-        "description": "Return persistent storage usage grouped by volume for a selected UTC time range.",
+        "summary": "Get storage usage",
+        "description": "Groups persistent storage usage by volume and day for the requested time range.",
         "operationId": "get_storage_breakdown",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "Organization slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "description": "Window start (RFC 3339); defaults to month start",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "Window end (RFC 3339); defaults to now",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Per-volume / per-day storage usage",
@@ -3254,39 +3371,34 @@
             }
           },
           "401": {
-            "description": "Unauthorized",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "invalid_api_key",
-                    "message": "unauthorized",
-                    "details": null
-                  }
-                }
-              }
-            }
+            "description": "Unauthorized"
           }
         },
         "security": [
           {
-            "api_key": []
+            "bearer": []
           }
         ]
       }
     },
-    "/v1/events": {
+    "/v1/orgs/{slug}/events": {
       "get": {
         "tags": [
           "Audit events"
         ],
         "summary": "List audit events",
-        "description": "List audit events for the organization with cursor pagination and optional filters.",
+        "description": "Returns customer-visible audit events with optional filters.",
         "operationId": "list_events",
         "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "Organization slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
           {
             "name": "event_type",
             "in": "query",
@@ -3363,39 +3475,36 @@
             }
           },
           "401": {
-            "description": "Unauthorized",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "invalid_api_key",
-                    "message": "unauthorized",
-                    "details": null
-                  }
-                }
-              }
-            }
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Insufficient permissions"
           }
         },
         "security": [
           {
-            "api_key": []
+            "bearer": []
           }
         ]
       }
     },
-    "/v1/events/{event_id}": {
+    "/v1/orgs/{slug}/events/{event_id}": {
       "get": {
         "tags": [
           "Audit events"
         ],
         "summary": "Get an audit event",
-        "description": "Retrieve one audit event by its identifier.",
         "operationId": "get_event",
         "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "Organization slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
           {
             "name": "event_id",
             "in": "path",
@@ -3419,152 +3528,18 @@
             }
           },
           "401": {
-            "description": "Unauthorized",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "invalid_api_key",
-                    "message": "unauthorized",
-                    "details": null
-                  }
-                }
-              }
-            }
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Insufficient permissions"
           },
           "404": {
-            "description": "Event not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "sandbox_not_found",
-                    "message": "resource not found",
-                    "details": null
-                  }
-                }
-              }
-            }
+            "description": "Event not found"
           }
         },
         "security": [
           {
-            "api_key": []
-          }
-        ]
-      }
-    },
-    "/v1/me/org": {
-      "get": {
-        "tags": [
-          "Organization"
-        ],
-        "summary": "Get the current organization",
-        "description": "Returns the organization associated with the current credential.",
-        "operationId": "get_org",
-        "responses": {
-          "200": {
-            "description": "Current organization",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/OrgWithRole"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Unauthorized",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "invalid_api_key",
-                    "message": "unauthorized",
-                    "details": null
-                  }
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "api_key": []
-          }
-        ]
-      }
-    },
-    "/v1/members": {
-      "get": {
-        "tags": [
-          "Members"
-        ],
-        "summary": "List organization members",
-        "description": "List organization members and their roles with cursor pagination.",
-        "operationId": "list_members",
-        "parameters": [
-          {
-            "name": "cursor",
-            "in": "query",
-            "description": "Pagination cursor",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "limit",
-            "in": "query",
-            "description": "Page size (default 20, max 100)",
-            "required": false,
-            "schema": {
-              "type": "integer",
-              "format": "int64"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Paginated list of members",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/PaginatedMemberResponse"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Unauthorized",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "invalid_api_key",
-                    "message": "unauthorized",
-                    "details": null
-                  }
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "api_key": []
+            "bearer": []
           }
         ]
       }
@@ -3579,6 +3554,35 @@
           "allow",
           "deny"
         ]
+      },
+      "ApiKeyResponse": {
+        "type": "object",
+        "description": "API key metadata returned in list responses. Never includes the raw key or hashes.",
+        "required": [
+          "id",
+          "name",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "expires_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
       },
       "BillingEffectiveState": {
         "type": "string",
@@ -4013,6 +4017,19 @@
             "format": "int64",
             "description": "Certificate validity duration in hours. Default: 24.",
             "minimum": 0
+          }
+        }
+      },
+      "ChangePlanRequest": {
+        "type": "object",
+        "description": "PUT /v1/orgs/:slug/billing/plan - change billing plan.",
+        "required": [
+          "plan"
+        ],
+        "properties": {
+          "plan": {
+            "type": "string",
+            "description": "Catalog name of the plan to switch to (e.g. \"builder\")."
           }
         }
       },
@@ -5576,6 +5593,97 @@
         ],
         "description": "Cloud volume mount. Internal-tagged mirror of the domain [`VolumeMount`];\nthe transient `create` field is not carried on the wire."
       },
+      "CreateInviteRequest": {
+        "type": "object",
+        "description": "Request body for `POST /v1/orgs/:slug/invites`.",
+        "required": [
+          "email",
+          "role"
+        ],
+        "properties": {
+          "email": {
+            "type": "string"
+          },
+          "role": {
+            "$ref": "#/components/schemas/OrgRole"
+          }
+        }
+      },
+      "CreateOrgRequest": {
+        "type": "object",
+        "description": "POST /v1/orgs - create a new organization.",
+        "required": [
+          "name",
+          "slug"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "slug": {
+            "type": "string"
+          }
+        }
+      },
+      "CreatePersonalAccessTokenRequest": {
+        "type": "object",
+        "description": "POST /v1/users/me/pats",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "expires_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "Optional ISO-8601 expiry. Omitted = no expiry."
+          },
+          "name": {
+            "type": "string",
+            "description": "Human-readable label for the token (e.g. \"macbook-cli\")."
+          }
+        }
+      },
+      "CreatePersonalAccessTokenResponse": {
+        "type": "object",
+        "description": "Returned to the caller once on creation - includes the full plaintext token.",
+        "required": [
+          "id",
+          "name",
+          "prefix",
+          "token",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "expires_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "prefix": {
+            "type": "string"
+          },
+          "token": {
+            "type": "string",
+            "description": "Raw bearer token in the form `msb_pat_<env>_<random>`. Surfaced once."
+          }
+        }
+      },
       "CreateSandboxRequest": {
         "allOf": [
           {
@@ -5641,6 +5749,38 @@
                 "description": "Physical backing for the volume. Omitted = `block` (the default and only\nvalue today)."
               }
             ]
+          }
+        }
+      },
+      "DeleteMeRequest": {
+        "type": "object",
+        "description": "DELETE /v1/users/me - body confirms the destructive action.\n\nProvide exactly one credential proof: the current password (for\npassword-backed accounts) or a TOTP code (when MFA is enabled).\nOAuth-only accounts must enrol in MFA before deletion is permitted.",
+        "properties": {
+          "mfa_code": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "TOTP code - required when MFA is enabled."
+          },
+          "password": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Current account password - required for password-backed accounts."
+          }
+        }
+      },
+      "DeleteOrgRequest": {
+        "type": "object",
+        "description": "DELETE /v1/orgs/:slug - delete an organization. `confirm` must echo the org slug,\nmirroring the dashboard's type-to-confirm, so a deletion can't fire by accident.",
+        "required": [
+          "confirm"
+        ],
+        "properties": {
+          "confirm": {
+            "type": "string"
           }
         }
       },
@@ -5780,39 +5920,6 @@
           "value": {
             "type": "string",
             "description": "Environment variable value."
-          }
-        }
-      },
-      "ErrorResponse": {
-        "type": "object",
-        "description": "Error envelope returned by every non-2xx response.",
-        "required": [
-          "error"
-        ],
-        "properties": {
-          "error": {
-            "type": "object",
-            "required": [
-              "code",
-              "message"
-            ],
-            "properties": {
-              "code": {
-                "type": "string",
-                "description": "Stable machine-readable error code, e.g. `invalid_api_key`."
-              },
-              "message": {
-                "type": "string",
-                "description": "Human-readable description of the error."
-              },
-              "details": {
-                "type": [
-                  "object",
-                  "null"
-                ],
-                "description": "Optional structured context for the error."
-              }
-            }
           }
         }
       },
@@ -5959,32 +6066,6 @@
           "timestamp": {
             "type": "string",
             "format": "date-time"
-          }
-        }
-      },
-      "FileMoveRequest": {
-        "type": "object",
-        "required": [
-          "from",
-          "to"
-        ],
-        "properties": {
-          "from": {
-            "type": "string"
-          },
-          "to": {
-            "type": "string"
-          }
-        }
-      },
-      "FilePathRequest": {
-        "type": "object",
-        "required": [
-          "path"
-        ],
-        "properties": {
-          "path": {
-            "type": "string"
           }
         }
       },
@@ -6351,6 +6432,98 @@
           "expired"
         ]
       },
+      "OrgInvite": {
+        "type": "object",
+        "description": "An email-based invitation to join an organization.",
+        "required": [
+          "id",
+          "org_id",
+          "email",
+          "role",
+          "invited_by",
+          "expires_at",
+          "created_at"
+        ],
+        "properties": {
+          "accepted_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "declined_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "email": {
+            "type": "string"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "invited_by": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "org_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "role": {
+            "$ref": "#/components/schemas/OrgRole"
+          }
+        }
+      },
+      "OrgMember": {
+        "type": "object",
+        "description": "A user's membership in an organization.",
+        "required": [
+          "id",
+          "org_id",
+          "user_id",
+          "role",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "org_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "role": {
+            "$ref": "#/components/schemas/OrgRole"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "user_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
       "OrgMemberResponse": {
         "type": "object",
         "description": "Member with joined user profile data - repository read view.",
@@ -6391,6 +6564,53 @@
           "user_id": {
             "type": "string",
             "format": "uuid"
+          }
+        }
+      },
+      "OrgOidcConfig": {
+        "type": "object",
+        "description": "OIDC configuration for an organization's enterprise SSO.",
+        "required": [
+          "id",
+          "org_id",
+          "issuer_url",
+          "client_id",
+          "allowed_domains",
+          "enabled",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "allowed_domains": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "client_id": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "issuer_url": {
+            "type": "string"
+          },
+          "org_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
           }
         }
       },
@@ -6440,6 +6660,66 @@
           "updated_at": {
             "type": "string",
             "format": "date-time"
+          }
+        }
+      },
+      "Organization": {
+        "type": "object",
+        "description": "A tenant organization. Users belong to orgs via `OrgMember`.",
+        "required": [
+          "id",
+          "name",
+          "slug",
+          "mfa_required",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "mfa_required": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": "string"
+          },
+          "slug": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "PaginatedApiKeyResponse": {
+        "type": "object",
+        "description": "Paginated list of API keys (OpenAPI schema for `PaginatedResponse<ApiKeyResponse>`).",
+        "required": [
+          "data",
+          "has_more"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ApiKeyResponse"
+            }
+          },
+          "has_more": {
+            "type": "boolean"
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
@@ -6590,6 +6870,59 @@
               "string",
               "null"
             ]
+          }
+        }
+      },
+      "PaymentPortalResponse": {
+        "type": "object",
+        "description": "Response for the payment-portal endpoint - a hosted URL the client redirects\nto for adding/managing payment methods (Stripe Checkout / billing-portal).",
+        "required": [
+          "portal_url"
+        ],
+        "properties": {
+          "portal_url": {
+            "type": "string"
+          }
+        }
+      },
+      "PersonalAccessTokenResponse": {
+        "type": "object",
+        "description": "PAT metadata returned in list responses. Never includes the raw token.",
+        "required": [
+          "id",
+          "name",
+          "prefix",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "expires_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "last_used_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "name": {
+            "type": "string"
+          },
+          "prefix": {
+            "type": "string",
+            "description": "Last 8 chars of the original token - safe to display."
           }
         }
       },
@@ -6841,6 +7174,37 @@
           }
         ],
         "description": "Resolved quota limits and current usage for an organization.\n\nLimits are resolved via COALESCE: per-org override > plan. Every limit is\n`Option`: `None` = unlimited (counts/budgets) or the platform default\n(per-sandbox vCPU/memory/disk). The API materializes resource defaults in\nresponses. There is no magic 0."
+      },
+      "RegistryCredentialResponse": {
+        "type": "object",
+        "description": "Registry credential metadata returned in list/upsert responses. Never includes\nthe secret or the internal vault path.",
+        "required": [
+          "id",
+          "registry_host",
+          "username",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "registry_host": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "username": {
+            "type": "string"
+          }
+        }
       },
       "RegistrySelection": {
         "oneOf": [
@@ -7779,6 +8143,44 @@
           "restricted"
         ]
       },
+      "SlugAvailability": {
+        "type": "object",
+        "description": "Whether a candidate slug is well-formed and currently unused. `valid` is\nthe format check; `available` is the global-uniqueness check (only meaningful\nwhen `valid`). `reason` explains an invalid format. Lets the create form\nguide the user before the sandbox is created.",
+        "required": [
+          "slug",
+          "valid",
+          "available"
+        ],
+        "properties": {
+          "available": {
+            "type": "boolean"
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "slug": {
+            "type": "string"
+          },
+          "valid": {
+            "type": "boolean"
+          }
+        }
+      },
+      "SlugSuggestion": {
+        "type": "object",
+        "description": "A suggested, currently-available sandbox slug to prefill the create form.",
+        "required": [
+          "slug"
+        ],
+        "properties": {
+          "slug": {
+            "type": "string"
+          }
+        }
+      },
       "SnapshotDestinationKind": {
         "type": "string",
         "description": "Type of storage used by a snapshot.",
@@ -8090,6 +8492,60 @@
           }
         }
       },
+      "UpdateMeRequest": {
+        "type": "object",
+        "description": "PATCH /v1/users/me",
+        "properties": {
+          "avatar_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "display_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "UpdateMemberRoleRequest": {
+        "type": "object",
+        "description": "PATCH /v1/orgs/:slug/members/:user_id - update a member's role.",
+        "required": [
+          "role"
+        ],
+        "properties": {
+          "role": {
+            "$ref": "#/components/schemas/OrgRole"
+          }
+        }
+      },
+      "UpdateOrgRequest": {
+        "type": "object",
+        "description": "PATCH /v1/orgs/:slug - update an organization.",
+        "properties": {
+          "mfa_required": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "slug": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
       "UpdateSandboxRequest": {
         "type": "object",
         "description": "Request body for `PATCH /v1/orgs/:slug/sandboxes/:id` - rename a sandbox.\nEach field updates only when present; omit one to leave it unchanged.\n`name` is the per-org display label; `slug` is the globally-unique SSH\naddress handle (changing it breaks existing `ssh <old-slug>@msb.run`).",
@@ -8249,6 +8705,55 @@
         },
         "additionalProperties": false
       },
+      "UpsertOidcConfigRequest": {
+        "type": "object",
+        "description": "PUT /v1/orgs/:slug/oidc - create or update OIDC config.",
+        "required": [
+          "issuer_url",
+          "client_id",
+          "client_secret"
+        ],
+        "properties": {
+          "allowed_domains": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "client_id": {
+            "type": "string"
+          },
+          "client_secret": {
+            "type": "string"
+          },
+          "issuer_url": {
+            "type": "string"
+          }
+        }
+      },
+      "UpsertRegistryCredentialRequest": {
+        "type": "object",
+        "description": "PUT /v1/orgs/{slug}/registries",
+        "required": [
+          "registry_host",
+          "username",
+          "password"
+        ],
+        "properties": {
+          "password": {
+            "type": "string",
+            "description": "Password or access token. Stored in OpenBao - never persisted to the DB."
+          },
+          "registry_host": {
+            "type": "string",
+            "description": "Registry host, e.g. `ghcr.io` or `localhost:5000`. Canonicalized\nserver-side; Docker Hub aliases fold to `docker.io`."
+          },
+          "username": {
+            "type": "string",
+            "description": "Registry username."
+          }
+        }
+      },
       "UsageBreakdown": {
         "type": "object",
         "description": "Compute-on-read usage breakdown for an org over a window: per-(sandbox, day)\nquantity rows plus a directory of the sandboxes they reference. The frontend\ngroups `rows` by sandbox (for the per-sandbox table) or by day (for the\nchart) and labels them via `sandboxes`.",
@@ -8379,6 +8884,62 @@
             "format": "int64"
           }
         }
+      },
+      "User": {
+        "type": "object",
+        "description": "An active registered human user.\n\nRepository methods returning this type exclude soft-deleted rows, so email\nis always present. Use [`UserRecord`] for lookups that include tombstones.",
+        "required": [
+          "id",
+          "email",
+          "email_verified",
+          "status",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "avatar_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "display_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "email": {
+            "type": "string"
+          },
+          "email_verified": {
+            "type": "boolean"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "status": {
+            "$ref": "#/components/schemas/UserStatus"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "UserStatus": {
+        "type": "string",
+        "description": "User account status.",
+        "enum": [
+          "active",
+          "suspended",
+          "pending_verification"
+        ]
       },
       "VolumeIdentity": {
         "type": "object",
@@ -8531,10 +9092,10 @@
       }
     },
     "securitySchemes": {
-      "api_key": {
+      "bearer": {
         "type": "http",
         "scheme": "bearer",
-        "description": "Organization API key (msb_…) - org-scoped programmatic access."
+        "description": "Personal access token (msb_pat_…) or session JWT - the credential an agent acts with on a user's behalf."
       }
     }
   }
