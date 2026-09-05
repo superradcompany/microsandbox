@@ -1,0 +1,65 @@
+name: Sync docs OpenAPI
+
+# Refresh the staging API reference without making unrelated pull requests
+# depend on the live API. Scheduled workflows run from the default branch,
+# while the generated docs are proposed against the Mintlify deploy branch.
+
+on:
+  schedule:
+    - cron: "23 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: sync-docs-openapi
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Refresh staging API reference
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: mintlify
+
+      - name: Generate reference
+        run: python3 scripts/sync-docs-openapi.py --environment staging --audience all
+
+      - name: Validate reference
+        run: |
+          python3 scripts/sync-docs-openapi.py --environment staging --audience all --check
+          jq empty \
+            docs/api-reference/openapi.staging.json \
+            docs/api-reference/openapi.personal.staging.json
+
+      - name: Open update PR
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
+        with:
+          title: "docs(api): refresh staging reference"
+          body: |
+            ## TL;DR
+
+            Refreshes the checked-in API reference from the staging OpenAPI contract.
+
+            ## Description
+
+            - updates API-key endpoints
+            - updates personal-token endpoints
+            - excludes unauthenticated, `x-hidden`, and `x-excluded` operations
+
+            ## Test Plan
+
+            - `python3 scripts/sync-docs-openapi.py --environment staging --audience all --check`
+            - validate both generated files with `jq`
+          branch: automation/sync-docs-openapi
+          base: mintlify
+          commit-message: "docs(api): refresh staging reference"
+          add-paths: |
+            docs/api-reference/openapi.staging.json
+            docs/api-reference/openapi.personal.staging.json
+          delete-branch: true
