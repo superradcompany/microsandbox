@@ -25,17 +25,23 @@ pub struct RunArgs {
     #[arg(conflicts_with = "from_snapshot")]
     pub image: Option<String>,
 
-    /// Boot a fresh sandbox from a snapshot artifact (path or name).
+    /// Create from a snapshot artifact (path or name).
     ///
-    /// The snapshot pins the image; passing `--from-snapshot` is equivalent
-    /// to specifying the snapshot's image plus pre-populating the
-    /// upper layer from the artifact.
+    /// Disk snapshots cold-boot a fresh VM. Full snapshots resume captured execution unless
+    /// `--disk-only` is selected.
     #[arg(
         long = "from-snapshot",
         alias = "from-snap",
         value_name = "PATH_OR_NAME"
     )]
     pub from_snapshot: Option<String>,
+
+    /// Cold-boot only the disk state when the source is a full snapshot.
+    #[arg(long, requires = "from_snapshot")]
+    pub disk_only: bool,
+    /// Exact base snapshot or standalone base archive required by a dependent snapshot archive.
+    #[arg(long, requires = "from_snapshot")]
+    pub snapshot_base: Option<String>,
 
     /// Run the resolved image command in the background and print the sandbox name.
     ///
@@ -174,7 +180,13 @@ async fn run_new(
     let resolved = sandbox_config::resolve(&args.sandbox.config)?;
     let image = resolved.image(args.image.as_deref(), args.from_snapshot.as_deref())?;
     let builder = resolved.apply(Sandbox::builder(&name))?;
-    let builder = image.apply(builder)?;
+    let mut builder = image.apply(builder)?;
+    if args.disk_only {
+        builder = builder.disk_only();
+    }
+    if let Some(base) = &args.snapshot_base {
+        builder = builder.snapshot_base(base);
+    }
     if args.sandbox.log_level.is_none()
         && let Some(log_level) = log_level
     {
@@ -221,6 +233,22 @@ async fn run_new(
     let sandbox = task
         .await
         .map_err(|e| anyhow::anyhow!("create task panicked: {e}"))??;
+
+    if sandbox.config().resumed_from_full_snapshot() {
+        if !args.command.is_empty() {
+            ui::warn(&format!(
+                "command ignored because snapshot restore resumed its captured workload (use `msb exec {name} -- ...` after restore)"
+            ));
+        }
+        if !args.detach {
+            ui::warn(
+                "full snapshot restore resumes in the background because it has no new foreground command to attach",
+            );
+        }
+        sandbox.detach().await;
+        println!("{name}");
+        return Ok(());
+    }
 
     // Detach mode: just print the name and exit.
     if args.detach {
@@ -611,6 +639,20 @@ mod tests {
         let args = parse_run_args(&["--name", "box", "--from-snap", "clean"]);
 
         assert_eq!(args.from_snapshot.as_deref(), Some("clean"));
+    }
+
+    #[test]
+    fn disk_only_requires_and_accepts_snapshot_source() {
+        let args = parse_run_args(&[
+            "--name",
+            "box",
+            "--from-snapshot",
+            "checkpoint",
+            "--disk-only",
+        ]);
+
+        assert!(args.disk_only);
+        assert_eq!(args.from_snapshot.as_deref(), Some("checkpoint"));
     }
 
     #[test]

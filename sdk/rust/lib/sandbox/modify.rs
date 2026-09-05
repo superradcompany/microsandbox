@@ -605,6 +605,7 @@ async fn grow_root_disk_now(
         )
     })?;
     let sandbox_dir = local_backend.sandboxes_dir().join(name);
+    refuse_checkpoint_backed_root_grow(&sandbox_dir)?;
     if matches!(
         &config.spec.image,
         RootfsSource::Oci(oci) if matches!(&oci.root_disk, Some(RootDisk::Flat { .. }))
@@ -616,6 +617,29 @@ async fn grow_root_disk_now(
         .await;
     }
     super::upper::grow_upper_to_mib(sandbox_dir.join("upper.ext4"), target_mib).await
+}
+
+/// Refuse the legacy raw-file grow path once checkpoint rollover has installed a qcow2 head.
+///
+/// A one-layer journal still names the ordinary mutable raw disk and is safe to grow in place.
+/// With two or more layers, however, the raw file is a sealed ancestor and only a future
+/// chain-aware resize may extend the active qcow2 head and filesystem.
+fn refuse_checkpoint_backed_root_grow(sandbox_dir: &std::path::Path) -> MicrosandboxResult<()> {
+    let chain = microsandbox_runtime::checkpoint::load_runtime_owned_root_chain(
+        &sandbox_dir.join("runtime"),
+    )
+    .map_err(|error| {
+        crate::MicrosandboxError::Runtime(format!(
+            "cannot inspect the root-disk chain before resize: {error}"
+        ))
+    })?;
+    if chain.is_some_and(|chain| chain.layers.len() > 1) {
+        return Err(crate::MicrosandboxError::Custom(
+            "cannot grow a checkpoint-backed root disk yet; its sealed raw ancestor must not be resized"
+                .into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Path of the sandbox's host-side runtime control socket.
@@ -717,6 +741,22 @@ async fn control_request(
     name: &str,
     request: String,
 ) -> MicrosandboxResult<microsandbox_runtime::control::ControlResponse> {
+    let response = control_request_raw(name, request).await?;
+    if !response.ok {
+        return Err(crate::MicrosandboxError::Runtime(format!(
+            "live update refused: {}",
+            response
+                .error
+                .unwrap_or_else(|| "unknown error".to_string())
+        )));
+    }
+    Ok(response)
+}
+
+async fn control_request_raw(
+    name: &str,
+    request: String,
+) -> MicrosandboxResult<microsandbox_runtime::control::ControlResponse> {
     #[cfg(unix)]
     {
         let stream = connect_control_socket(control_socket_path_candidates(name))
@@ -782,15 +822,70 @@ where
         .map_err(|e| crate::MicrosandboxError::Runtime(format!("control response failed: {e}")))?;
     let response: microsandbox_runtime::control::ControlResponse =
         serde_json::from_str(line.trim())?;
-    if !response.ok {
-        return Err(crate::MicrosandboxError::Runtime(format!(
-            "live update refused: {}",
-            response
-                .error
-                .unwrap_or_else(|| "unknown error".to_string())
-        )));
-    }
     Ok(response)
+}
+
+/// Capability-gated disk maintenance over the existing control endpoint.
+pub(crate) async fn control_disk_compact(
+    name: &str,
+    layers: Option<usize>,
+    dry_run: bool,
+) -> MicrosandboxResult<super::DiskCompactionResult> {
+    if !control_capabilities(name).await?.disk_compact {
+        return Err(crate::MicrosandboxError::Runtime(
+            "this running sandbox does not support disk compaction; restart with the updated runtime".into(),
+        ));
+    }
+    let request = microsandbox_runtime::control::ControlRequest::DiskCompact { layers, dry_run };
+    let mut line = serde_json::to_string(&request)?;
+    line.push('\n');
+    let response = control_request(name, line).await?;
+    response.compaction.ok_or_else(|| {
+        crate::MicrosandboxError::Runtime("control response omitted compaction result".into())
+    })
+}
+
+/// Capture one full checkpoint through the running sandbox's existing control endpoint.
+///
+/// A post-publication source-resume failure still returns the immutable checkpoint so the caller
+/// can finish publishing the requested snapshot. The runtime diagnostic is logged and the source
+/// remains visibly non-running rather than losing the completed capture.
+pub(crate) async fn control_checkpoint_create(
+    name: &str,
+    checkpoint_id: String,
+) -> MicrosandboxResult<microsandbox_runtime::control::CheckpointControlState> {
+    let capabilities = control_capabilities(name).await?;
+    if !capabilities.checkpoint_create {
+        return Err(crate::MicrosandboxError::unsupported(
+            Operation::SnapshotOps,
+            UnsupportedReason::NotAvailable(
+                "this running sandbox does not support full checkpoint capture".into(),
+            ),
+        ));
+    }
+    let request = microsandbox_runtime::control::ControlRequest::CheckpointCreate {
+        checkpoint_id,
+        intent: microsandbox_runtime::control::CheckpointCaptureIntent::FullSnapshot,
+    };
+    let mut line = serde_json::to_string(&request)?;
+    line.push('\n');
+    let response = control_request_raw(name, line).await?;
+    if let Some(checkpoint) = response.checkpoint {
+        if !response.ok {
+            tracing::warn!(
+                sandbox = name,
+                error = response.error.as_deref().unwrap_or("source resume failed"),
+                "checkpoint published but the source runtime did not return to running"
+            );
+        }
+        return Ok(checkpoint);
+    }
+    Err(crate::MicrosandboxError::Runtime(format!(
+        "full checkpoint refused: {}",
+        response
+            .error
+            .unwrap_or_else(|| "control response omitted checkpoint state".into())
+    )))
 }
 
 /// Send the value-bearing live secret batch to the sandbox process. The
@@ -2879,6 +2974,52 @@ mod tests {
         assert_eq!(
             root_disk_grow_target(&plan, &patch, &oci_config_with_upper(4096)),
             Some(8192)
+        );
+    }
+
+    #[test]
+    fn checkpoint_backed_root_grow_refuses_to_mutate_the_sealed_base() {
+        let sandbox = tempdir().unwrap();
+        let runtime = sandbox.path().join("runtime");
+        std::fs::create_dir(&runtime).unwrap();
+        let base = sandbox.path().join("rootfs.raw");
+        let head = sandbox.path().join("root-active.qcow2");
+        std::fs::write(&base, vec![0; 4096]).unwrap();
+        std::fs::write(&head, b"qcow").unwrap();
+        let state = serde_json::json!({
+            "schema": "microsandbox.runtime-root-disk/1",
+            "volume_id": "vol_00000000000000000000000000000000",
+            "device_id": "vda",
+            "layout": "flat-root",
+            "published_generation": 1,
+            "layers": [
+                {
+                    "layer_id": "layer_00000000000000000000000000000001",
+                    "path": base,
+                    "format": "raw",
+                    "integrity_root": "blake3:sealed"
+                },
+                {
+                    "layer_id": "layer_00000000000000000000000000000002",
+                    "path": head,
+                    "format": "qcow2",
+                    "integrity_root": null
+                }
+            ]
+        });
+        std::fs::write(
+            runtime.join("root-disk.json"),
+            serde_json::to_vec(&state).unwrap(),
+        )
+        .unwrap();
+
+        let error = refuse_checkpoint_backed_root_grow(sandbox.path()).unwrap_err();
+        assert!(error.to_string().contains("checkpoint-backed root disk"));
+        assert_eq!(
+            std::fs::metadata(sandbox.path().join("rootfs.raw"))
+                .unwrap()
+                .len(),
+            4096
         );
     }
 

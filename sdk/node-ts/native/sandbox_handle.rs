@@ -108,6 +108,12 @@ impl JsSandboxHandle {
         crate::sandbox::run_modify(builder, crate::sandbox::modify_dry_run(options.as_ref())).await
     }
 
+    /// Explicitly compact a running or stopped sandbox's immutable disk prefix.
+    #[napi]
+    pub async fn compact(&self, layers: Option<f64>, dry_run: Option<bool>) -> Result<String> {
+        crate::sandbox::run_compact(self.inner.compact(), layers, dry_run.unwrap_or(false)).await
+    }
+
     /// Start the sandbox (attached mode) — returns a live Sandbox handle.
     #[napi]
     pub async fn start(&self) -> Result<Sandbox> {

@@ -30,13 +30,15 @@ pub(crate) fn do_opendir(
     fs: &PassthroughFs,
     _ctx: Context,
     inode: u64,
-    _flags: u32,
+    flags: u32,
 ) -> io::Result<(Option<u64>, OpenOptions)> {
     let fd = inode::open_inode_fd(fs, inode, libc::O_RDONLY | libc::O_DIRECTORY)?;
     let file = unsafe { std::fs::File::from_raw_fd(fd) };
 
     let handle = fs.next_handle.fetch_add(1, Ordering::Relaxed);
     let data = Arc::new(PassthroughDirHandle {
+        inode,
+        flags,
         file: RwLock::new(file),
         snapshot: std::sync::Mutex::new(None),
     });

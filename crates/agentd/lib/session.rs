@@ -19,6 +19,7 @@ use crate::config::SecurityProfile;
 use crate::error::{AgentdError, AgentdResult};
 use crate::process::{ProcessExitWatcher, ProcessIdentity, ProcessManager};
 use crate::rlimit;
+use crate::workload::WorkloadPlacement;
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -287,6 +288,7 @@ impl ExecSession {
         tx: mpsc::UnboundedSender<(u32, SessionOutput)>,
         default_user: Option<&str>,
         security_profile: SecurityProfile,
+        workload_placement: Option<WorkloadPlacement>,
     ) -> AgentdResult<Self> {
         let process_manager = ProcessManager::get()?;
         if req.tty {
@@ -297,6 +299,7 @@ impl ExecSession {
                 default_user,
                 security_profile,
                 &process_manager,
+                workload_placement,
             )
         } else {
             Self::spawn_pipe(
@@ -306,6 +309,7 @@ impl ExecSession {
                 default_user,
                 security_profile,
                 &process_manager,
+                workload_placement,
             )
         }
     }
@@ -375,6 +379,7 @@ impl ExecSession {
         default_user: Option<&str>,
         security_profile: SecurityProfile,
         process_manager: &Arc<ProcessManager>,
+        workload_placement: Option<WorkloadPlacement>,
     ) -> AgentdResult<Self> {
         let pty = pty::openpty(None, None)?;
         let err_pipe = new_exec_error_pipe()?;
@@ -462,6 +467,14 @@ impl ExecSession {
             // Child process — only async-signal-safe operations from here.
             drop(pty.master);
             drop(err_pipe.read_end);
+
+            // Join the workload cgroup before any user code can execute. This
+            // closes the post-spawn PID-assignment race with checkpoint freeze.
+            if let Some(ref placement) = workload_placement
+                && placement.place_current().is_err()
+            {
+                write_exec_error_and_exit(err_pipe.write_end.as_raw_fd());
+            }
 
             // Create new session.
             if unsafe { libc::setsid() } < 0 {
@@ -587,6 +600,7 @@ impl ExecSession {
         default_user: Option<&str>,
         security_profile: SecurityProfile,
         process_manager: &Arc<ProcessManager>,
+        workload_placement: Option<WorkloadPlacement>,
     ) -> AgentdResult<Self> {
         let mut cmd = Command::new(&req.cmd);
         cmd.args(&req.args)
@@ -613,6 +627,11 @@ impl ExecSession {
         let parsed_rlimits = rlimit::to_libc(&req.rlimits);
         unsafe {
             cmd.pre_exec(move || {
+                // This uses only write(2) in the child and therefore remains
+                // safe in the fork-to-exec window.
+                if let Some(ref placement) = workload_placement {
+                    placement.place_current()?;
+                }
                 // Become a session (and process-group) leader so signals sent
                 // to the group reach every descendant the command spawns, not
                 // just the direct child. The PTY path does the same for its
@@ -1360,7 +1379,7 @@ mod tests {
             rlimits: Vec::new(),
         };
 
-        let session = ExecSession::spawn(17, &req, tx, None, SecurityProfile::Default)
+        let session = ExecSession::spawn(17, &req, tx, None, SecurityProfile::Default, None)
             .expect("spawn background descendant session");
         let leader_pid = session.pid() as i32;
         let mut stdout = Vec::new();
@@ -1503,7 +1522,7 @@ mod tests {
                     cols: 80,
                     rlimits: Vec::new(),
                 };
-                ExecSession::spawn(100 + offset, &req, tx, None, SecurityProfile::Default)
+                ExecSession::spawn(100 + offset, &req, tx, None, SecurityProfile::Default, None)
             }));
         }
         drop(tx);
@@ -1592,7 +1611,7 @@ mod tests {
             cols: 80,
             rlimits: Vec::new(),
         };
-        let _session = ExecSession::spawn(id, &req, tx, None, SecurityProfile::Default)
+        let _session = ExecSession::spawn(id, &req, tx, None, SecurityProfile::Default, None)
             .expect("spawn session on replacement runtime");
 
         let actual = time::timeout(Duration::from_secs(5), async {
@@ -1694,7 +1713,7 @@ mod tests {
             rlimits: Vec::new(),
         };
 
-        let session = ExecSession::spawn(7, &req, tx, None, SecurityProfile::Default)
+        let session = ExecSession::spawn(7, &req, tx, None, SecurityProfile::Default, None)
             .expect("spawn pty session");
         let mut stdout = Vec::new();
         let mut exit = None;
@@ -1915,6 +1934,7 @@ mod tests {
             None,
             SecurityProfile::Default,
             &process_manager,
+            None,
         )
         .expect_err("spawn should fail");
 

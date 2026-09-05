@@ -19,6 +19,7 @@ use super::{
 };
 use crate::checkpoint::{CheckpointCoordinator, CheckpointResult};
 use crate::vm::VmConfig;
+use microsandbox_protocol::bootstrap::GuestBootstrap;
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -126,12 +127,20 @@ impl RuntimeControlExecutor {
         >,
         runtime_dir: &Path,
         vm_config: &VmConfig,
+        guest_bootstrap: &GuestBootstrap,
         runtime: tokio::runtime::Handle,
+        agent_sock: &Path,
     ) -> Result<Self, String> {
         let runtime_boot_id = new_runtime_boot_id();
         persist_runtime_boot_id(runtime_dir, &runtime_boot_id)
             .map_err(|error| error.to_string())?;
-        let checkpoint = CheckpointCoordinator::open(runtime_dir, vm_config, runtime)?;
+        let checkpoint = CheckpointCoordinator::open(
+            runtime_dir,
+            vm_config,
+            guest_bootstrap,
+            runtime,
+            agent_sock,
+        )?;
         Ok(Self {
             vm,
             #[cfg(feature = "net")]
@@ -239,6 +248,7 @@ impl RuntimeControlExecutor {
                 | ControlRequest::CpuTarget { .. }
                 | ControlRequest::SecretsUpdate { .. }
                 | ControlRequest::CheckpointCreate { .. }
+                | ControlRequest::DiskCompact { dry_run: false, .. }
         );
         if mutation && state.lifecycle != RuntimeLifecycle::Running {
             return control_error(
@@ -248,6 +258,28 @@ impl RuntimeControlExecutor {
         }
 
         let response = match request {
+            ControlRequest::DiskCompact { layers, dry_run } => {
+                match state.checkpoint.compact(&self.vm, layers, dry_run) {
+                    Ok(result) => ControlResponse {
+                        ok: true,
+                        compaction: Some(result),
+                        ..Default::default()
+                    },
+                    Err(error) => {
+                        if error.keep_paused {
+                            state.lifecycle = RuntimeLifecycle::Quiesced;
+                        }
+                        control_error(
+                            if error.keep_paused {
+                                "compaction_recovery_required"
+                            } else {
+                                "compaction_failed"
+                            },
+                            error.to_string(),
+                        )
+                    }
+                }
+            }
             ControlRequest::CheckpointCreate {
                 checkpoint_id,
                 intent,
@@ -257,8 +289,8 @@ impl RuntimeControlExecutor {
                     &self.vm,
                     &checkpoint_id,
                     match intent {
-                        CheckpointCaptureIntent::ResumableSnapshot => {
-                            microsandbox_image::checkpoint::CaptureIntent::ResumableSnapshot
+                        CheckpointCaptureIntent::FullSnapshot => {
+                            microsandbox_image::checkpoint::CaptureIntent::FullSnapshot
                         }
                         CheckpointCaptureIntent::Park => {
                             microsandbox_image::checkpoint::CaptureIntent::Park
@@ -346,6 +378,7 @@ impl RuntimeControlExecutor {
                     memory_resize: self.vm.memory_resize_supported(),
                     secrets_update: self.secrets_update_supported(),
                     checkpoint_create: true,
+                    disk_compact: true,
                 }),
                 ..Default::default()
             },
@@ -364,7 +397,7 @@ impl RuntimeControlExecutor {
             }
             ControlRequest::CpuState => cpu(self.vm.cpu_state()),
             ControlRequest::SecretsUpdate { changes } => self.handle_secrets_update(changes),
-            ControlRequest::CheckpointCreate { .. } => {
+            ControlRequest::CheckpointCreate { .. } | ControlRequest::DiskCompact { .. } => {
                 unreachable!("checkpoint requests are handled by the executor lifecycle path")
             }
         }

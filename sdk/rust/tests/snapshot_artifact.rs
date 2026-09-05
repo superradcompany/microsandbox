@@ -15,7 +15,8 @@ use microsandbox::backend::{Backend, LocalBackend};
 use microsandbox_image::snapshot::{
     CheckpointSnapshotState, DEFAULT_UPPER_FILE, DESCRIPTOR_FILENAME, DiskLayer, DiskLayerId,
     FileSnapshotState, ImageRef, LayerFileKind, LayerPayload, Manifest, SCHEMA, SnapshotCapture,
-    SnapshotConsistency, SnapshotFormat, SnapshotId, SnapshotScope, SnapshotState, UpperIntegrity,
+    SnapshotConsistency, SnapshotFormat, SnapshotId, SnapshotRootDisk, SnapshotScope,
+    SnapshotState, UpperIntegrity,
 };
 use sha2::{Digest, Sha256};
 use tar::{Builder, EntryType, Header};
@@ -52,7 +53,7 @@ fn make_artifact_with_scope(
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join(DEFAULT_UPPER_FILE), upper_bytes).unwrap();
 
-    let manifest = if scope == SnapshotScope::Resumable {
+    let manifest = if scope == SnapshotScope::Full {
         Manifest {
             scope,
             state: SnapshotState::Checkpoint(CheckpointSnapshotState {
@@ -108,6 +109,7 @@ fn sample_manifest(upper_size: u64) -> Manifest {
             reference: "docker.io/library/alpine:3.20".into(),
             manifest_digest: "sha256:0000000000000000000000000000000000000000000000000000000000000001".into(),
         },
+        root_disk: SnapshotRootDisk::Managed,
         parent: None,
         extensions: BTreeMap::new(),
         requires: Vec::new(),
@@ -646,30 +648,20 @@ async fn managed_v066_migration_rewrites_parent_to_stable_snapshot_id() {
 }
 
 #[tokio::test]
-async fn open_accepts_resumable_scope_artifact() {
+async fn open_accepts_full_scope_artifact() {
     let tmp = TempDir::new().unwrap();
-    let (dir, _) = make_artifact_with_scope(
-        tmp.path(),
-        "resumable-snap",
-        b"upper",
-        SnapshotScope::Resumable,
-    );
+    let (dir, _) = make_artifact_with_scope(tmp.path(), "full-snap", b"upper", SnapshotScope::Full);
 
     let snap = Snapshot::open(dir.to_string_lossy().as_ref())
         .await
         .unwrap();
-    assert_eq!(snap.manifest().scope, SnapshotScope::Resumable);
+    assert_eq!(snap.manifest().scope, SnapshotScope::Full);
 }
 
 #[tokio::test]
-async fn from_snapshot_rejects_resumable_scope_at_restore() {
+async fn from_snapshot_rejects_full_artifact_without_checkpoint_closure() {
     let tmp = TempDir::new().unwrap();
-    let (dir, _) = make_artifact_with_scope(
-        tmp.path(),
-        "resumable-snap",
-        b"upper",
-        SnapshotScope::Resumable,
-    );
+    let (dir, _) = make_artifact_with_scope(tmp.path(), "full-snap", b"upper", SnapshotScope::Full);
 
     let err = microsandbox::Sandbox::builder("restore-scope-test")
         .from_snapshot(dir.to_string_lossy().to_string())
@@ -677,8 +669,12 @@ async fn from_snapshot_rejects_resumable_scope_at_restore() {
         .await
         .unwrap_err();
     assert!(
-        err.to_string().contains("non-disk"),
+        err.to_string().contains("snapshot"),
         "unexpected error: {err}"
+    );
+    assert!(
+        !err.to_string().contains("restoring non-disk snapshots"),
+        "full restore should reach closure validation: {err}"
     );
 }
 
@@ -1028,7 +1024,8 @@ async fn dense_upper_keeps_regular_entry() {
     assert_eq!(upper_entry_type, Some(EntryType::Regular));
 }
 
-/// The load walker's grammar is closed: GNU long-name entries (which our save path never produces; archive names are two short components) must be rejected, not resolved.
+/// GNU long-name entries may be decoded for checkpoint members, but the resolved path must still
+/// pass the snapshot archive's closed path grammar.
 #[tokio::test]
 async fn load_rejects_long_name_entries() {
     let tmp = TempDir::new().unwrap();
@@ -1055,10 +1052,7 @@ async fn load_rejects_long_name_entries() {
         .await
         .unwrap_err()
         .to_string();
-    assert!(
-        err.contains("unsupported entry type"),
-        "expected long-name rejection, got: {err}"
-    );
+    assert!(err.contains("unsupported path"), "unexpected error: {err}");
 }
 
 /// A header whose recorded checksum disagrees with its bytes is corruption, not something to unpack around.
@@ -1566,16 +1560,20 @@ async fn manifest_digest_is_stable_across_processes() {
 #[tokio::test]
 async fn load_streams_large_archive_without_buffering() {
     let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    let backend = isolated_backend(&home).await;
     let archive = tmp.path().join("sparse.tar");
 
     let file = std::fs::File::create(&archive).unwrap();
     file.set_len(4 * 1024 * 1024 * 1024).unwrap();
     drop(file);
 
-    let dest = tmp.path().join("dest");
-    let err = Snapshot::load(&archive, Some(&dest))
-        .await
-        .expect_err("expected import of sparse archive to fail");
+    let err = microsandbox::with_backend(backend, async {
+        Snapshot::load(&archive, Some(&tmp.path().join("dest")))
+            .await
+            .expect_err("expected import of sparse archive to fail")
+    })
+    .await;
 
     let msg = err.to_string();
     assert!(
@@ -1585,7 +1583,7 @@ async fn load_streams_large_archive_without_buffering() {
 }
 
 #[tokio::test]
-async fn create_rejects_resumable_before_touching_anything() {
+async fn create_full_resolves_source_before_touching_anything() {
     let tmp = TempDir::new().unwrap();
     let home = tmp.path().join("home");
     let backend = isolated_backend(&home).await;
@@ -1593,14 +1591,14 @@ async fn create_rejects_resumable_before_touching_anything() {
     microsandbox::with_backend(backend, async {
         let err = Snapshot::builder("warm")
             .from_sandbox("box")
-            .resumable()
+            .full()
             .create()
             .await
             .unwrap_err();
-        assert!(
-            matches!(&err, microsandbox::MicrosandboxError::Unsupported { .. }),
-            "unexpected error: {err}"
-        );
+        assert!(matches!(
+            &err,
+            microsandbox::MicrosandboxError::SandboxNotFound(_)
+        ));
     })
     .await;
 

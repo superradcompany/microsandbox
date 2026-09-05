@@ -177,32 +177,85 @@ pub fn run(args: SandboxArgs) -> ! {
             std::process::exit(2);
         }
     };
-    // A user-supplied (disk-image) root disk carries an explicit format and
-    // rides the typed UpperSpec; the managed ext4 fast path stays on
-    // rootfs_upper. Exactly one of the two is populated.
-    let rootfs_upper_spec = match (&launch.rootfs.upper, &launch.rootfs.upper_format) {
-        (Some(upper), Some(format)) => {
-            let format = match validate_disk_format(Some(format)) {
-                Ok(format) => format,
-                Err(err) => {
-                    eprintln!("upper disk format: {err}");
-                    std::process::exit(2);
-                }
-            };
-            Some(UpperSpec {
-                layers: vec![UpperLayerSpec {
-                    path: upper.clone(),
-                    format,
-                }],
-                read_only: false,
-            })
+    // Restored managed chains and user-supplied disk-image roots ride the typed UpperSpec. The
+    // ordinary managed ext4 fast path stays on rootfs_upper. Exactly one representation is used.
+    let rootfs_upper_spec = if !launch.rootfs.upper_layers.is_empty() {
+        if launch.rootfs.upper.is_some() || launch.rootfs.upper_format.is_some() {
+            eprintln!("upper_layers cannot be combined with upper or upper_format");
+            std::process::exit(2);
         }
-        _ => None,
-    };
-    let rootfs_upper = if launch.rootfs.upper_format.is_none() {
-        launch.rootfs.upper
+        let layers = launch
+            .rootfs
+            .upper_layers
+            .iter()
+            .map(|layer| {
+                let format = validate_disk_format(Some(&layer.format)).unwrap_or_else(|err| {
+                    eprintln!("upper layer format: {err}");
+                    std::process::exit(2);
+                });
+                UpperLayerSpec {
+                    path: layer.path.clone(),
+                    format,
+                }
+            })
+            .collect();
+        Some(UpperSpec {
+            layers,
+            read_only: false,
+        })
     } else {
+        match (&launch.rootfs.upper, &launch.rootfs.upper_format) {
+            (Some(upper), Some(format)) => {
+                let format = match validate_disk_format(Some(format)) {
+                    Ok(format) => format,
+                    Err(err) => {
+                        eprintln!("upper disk format: {err}");
+                        std::process::exit(2);
+                    }
+                };
+                Some(UpperSpec {
+                    layers: vec![UpperLayerSpec {
+                        path: upper.clone(),
+                        format,
+                    }],
+                    read_only: false,
+                })
+            }
+            _ => None,
+        }
+    };
+    let rootfs_upper =
+        if launch.rootfs.upper_format.is_none() && launch.rootfs.upper_layers.is_empty() {
+            launch.rootfs.upper
+        } else {
+            None
+        };
+    let rootfs_disk_spec = if launch.rootfs.disk_layers.is_empty() {
         None
+    } else {
+        if launch.rootfs.disk.is_some() {
+            eprintln!("disk_layers cannot be combined with disk");
+            std::process::exit(2);
+        }
+        let layers = launch
+            .rootfs
+            .disk_layers
+            .iter()
+            .map(|layer| {
+                let format = validate_disk_format(Some(&layer.format)).unwrap_or_else(|err| {
+                    eprintln!("root disk layer format: {err}");
+                    std::process::exit(2);
+                });
+                UpperLayerSpec {
+                    path: layer.path.clone(),
+                    format,
+                }
+            })
+            .collect();
+        Some(UpperSpec {
+            layers,
+            read_only: false,
+        })
     };
     if let Some(profile_name) = &launch.placement_profile_name
         && launch.placement_profile.is_none()
@@ -242,6 +295,8 @@ pub fn run(args: SandboxArgs) -> ! {
             launch.rootfs.disk_format
         },
         rootfs_disk_readonly: launch.rootfs.disk_readonly,
+        rootfs_disk_spec,
+        rootfs_disk_runtime_owned: launch.rootfs.disk_runtime_owned,
         mounts: launch.mounts,
         disks,
         vsock: launch.vsock,
@@ -257,6 +312,7 @@ pub fn run(args: SandboxArgs) -> ! {
         deployment_profile: launch.deployment_profile,
         #[cfg(feature = "net")]
         sandbox_slot: launch.sandbox_slot,
+        checkpoint_restore: launch.checkpoint_restore,
     };
 
     let config = Config {

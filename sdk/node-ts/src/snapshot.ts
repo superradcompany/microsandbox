@@ -15,7 +15,7 @@ import {
 /**
  * Snapshot payload scope.
  */
-export type SnapshotScope = "disk" | "resumable";
+export type SnapshotScope = "disk" | "full";
 
 /** Canonical closed state family from schema-1 `snapshot.json`. */
 export type SnapshotState =
@@ -52,6 +52,10 @@ export type SnapshotState =
  * Bundle options for `Snapshot.save`.
  */
 export interface SaveOpts {
+  /** Exact base snapshot or standalone archive; mutually exclusive with lastLayers/withParents. */
+  since?: string;
+  /** Newest N sealed disk layers. Full snapshots still include all memory/device state. */
+  lastLayers?: number;
   /** Walk the parent chain and include each ancestor in the archive. */
   withParents?: boolean;
   /** Include the OCI image cache so the archive boots offline. */
@@ -66,6 +70,7 @@ export type SnapshotVerifyReport =
       readonly digest: string;
       readonly path: string;
       readonly upper: { readonly kind: "notRecorded" };
+      readonly checkpoint?: { readonly kind: "verified"; readonly root: string };
     }
   | {
       readonly digest: string;
@@ -75,6 +80,7 @@ export type SnapshotVerifyReport =
         readonly algorithm: string;
         readonly digest: string;
       };
+      readonly checkpoint?: { readonly kind: "verified"; readonly root: string };
     };
 
 /**
@@ -113,10 +119,9 @@ export class SnapshotArchive {
  * Returned by `Snapshot.builder(name).create()`, `Snapshot.open(...)`,
  * and `SandboxHandle.snapshot(name)`.
  *
- * The artifact is a directory containing `snapshot.json` and the
- * captured `upper.ext4`. The directory is the source of truth; the
- * local DB index (used for queries like `Snapshot.list()`) is just a
- * cache and is rebuildable via `Snapshot.reindex()`.
+ * The artifact is a directory containing `snapshot.json` and either a disk
+ * layer closure or a full checkpoint closure. The directory is the
+ * source of truth; the local DB index is rebuildable via `Snapshot.reindex()`.
  */
 export class Snapshot {
   /** @internal */
@@ -217,8 +222,8 @@ export class Snapshot {
    * snapshots directory. Recorded payload integrity is preserved for
    * explicit verification. Compression is detected from magic bytes.
    */
-  static async load(archive: string, dest?: string): Promise<SnapshotHandle> {
-    const raw = await withMappedErrors(() => napi.Snapshot.load(archive, dest));
+  static async load(archive: string, dest?: string, base?: string): Promise<SnapshotHandle> {
+    const raw = await withMappedErrors(() => napi.Snapshot.load(archive, dest, base));
     return new SnapshotHandle(raw);
   }
 
@@ -410,11 +415,16 @@ function wrapBuilder(nb: InstanceType<typeof napi.SnapshotBuilder>): SnapshotBui
 
 /** @internal */
 function verifyReportToTs(r: NapiSnapshotVerifyReport): SnapshotVerifyReport {
+  const checkpoint =
+    typeof r.checkpointRoot === "string"
+      ? { kind: "verified" as const, root: r.checkpointRoot }
+      : undefined;
   if (r.upperKind === "notRecorded") {
     return {
       digest: r.digest,
       path: r.path,
       upper: { kind: "notRecorded" },
+      ...(checkpoint === undefined ? {} : { checkpoint }),
     };
   }
   if (r.upperKind === "verified") {
@@ -429,6 +439,7 @@ function verifyReportToTs(r: NapiSnapshotVerifyReport): SnapshotVerifyReport {
         ),
         digest: requiredProjectionString(r.upperDigest, "verify.upperDigest"),
       },
+      ...(checkpoint === undefined ? {} : { checkpoint }),
     };
   }
   throw invalidProjection(`unknown verification kind ${r.upperKind}`);

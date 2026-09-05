@@ -224,6 +224,11 @@ impl SandboxHandle {
         SandboxModificationBuilder::new(self.backend.clone(), self.name.clone())
     }
 
+    /// Explicitly compact the root disk's sealed backing prefix, running or stopped.
+    pub fn compact(&self) -> super::DiskCompactionBuilder {
+        super::DiskCompactionBuilder::new(self.backend.clone(), self.name.clone())
+    }
+
     /// Fail with a typed error when the sandbox is not running.
     fn require_running(&self, operation: &str) -> MicrosandboxResult<()> {
         let status = self.status_snapshot();

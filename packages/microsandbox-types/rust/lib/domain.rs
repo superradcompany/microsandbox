@@ -755,13 +755,9 @@ pub struct SnapshotSpec {
     /// Compute and record upper-layer content integrity at creation time.
     pub record_integrity: bool,
 
-    /// Request a future resumable snapshot that includes memory/device state.
-    ///
-    /// This is part of the public contract now so callers can validate shape
-    /// early. The local runtime returns an unsupported-feature error until VM
-    /// pause/resume capture lands.
+    /// Capture disk, memory, execution, and device state from a running sandbox.
     #[serde(default)]
-    pub resumable: bool,
+    pub full: bool,
 }
 
 //--------------------------------------------------------------------------------------------------

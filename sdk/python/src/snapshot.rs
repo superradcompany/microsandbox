@@ -42,7 +42,7 @@ pub struct PySnapshotHandle {
 
 #[pymethods]
 impl PySnapshot {
-    /// Create a snapshot named `name` from a stopped sandbox.
+    /// Create a disk snapshot from a stopped sandbox or a full snapshot from a running one.
     ///
     /// The artifact is created under `~/.microsandbox/snapshots/<name>/`,
     /// or under `dest_dir=` when given; move artifacts with `save`/`load`.
@@ -57,7 +57,7 @@ impl PySnapshot {
         labels = None,
         force = false,
         record_integrity = false,
-        resumable = false,
+        full = false,
     ))]
     fn create<'py>(
         py: Python<'py>,
@@ -67,7 +67,7 @@ impl PySnapshot {
         labels: Option<HashMap<String, String>>,
         force: bool,
         record_integrity: bool,
-        resumable: bool,
+        full: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let mut builder = RustSnapshot::builder(name).from_sandbox(&from_sandbox);
@@ -85,8 +85,8 @@ impl PySnapshot {
             if record_integrity {
                 builder = builder.record_integrity();
             }
-            if resumable {
-                builder = builder.resumable();
+            if full {
+                builder = builder.full();
             }
             let snap = builder.create().await.map_err(to_py_err)?;
             Ok(PySnapshot::from_rust(snap))
@@ -104,7 +104,7 @@ impl PySnapshot {
         labels = None,
         force = false,
         record_integrity = false,
-        resumable = false,
+        full = false,
         plain_tar = false,
     ))]
     fn create_archive<'py>(
@@ -115,7 +115,7 @@ impl PySnapshot {
         labels: Option<HashMap<String, String>>,
         force: bool,
         record_integrity: bool,
-        resumable: bool,
+        full: bool,
         plain_tar: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -131,8 +131,8 @@ impl PySnapshot {
             if record_integrity {
                 builder = builder.record_integrity();
             }
-            if resumable {
-                builder = builder.resumable();
+            if full {
+                builder = builder.full();
             }
             let archive = builder
                 .create_archive(archive, plain_tar)
@@ -238,6 +238,8 @@ impl PySnapshot {
         with_parents = false,
         with_image = false,
         plain_tar = false,
+        since = None,
+        last_layers = None,
     ))]
     fn save<'py>(
         py: Python<'py>,
@@ -246,12 +248,16 @@ impl PySnapshot {
         with_parents: bool,
         with_image: bool,
         plain_tar: bool,
+        since: Option<String>,
+        last_layers: Option<usize>,
     ) -> PyResult<Bound<'py, PyAny>> {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let opts = RustSaveOpts {
                 with_parents,
                 with_image,
                 plain_tar,
+                since,
+                last_layers,
             };
             RustSnapshot::save(&name_or_path, &out, opts)
                 .await
@@ -264,16 +270,20 @@ impl PySnapshot {
     /// snapshots directory, preserving recorded integrity for explicit
     /// verification.
     #[staticmethod]
-    #[pyo3(signature = (archive, *, dest = None))]
+    #[pyo3(signature = (archive, *, dest = None, base = None))]
     fn load<'py>(
         py: Python<'py>,
         archive: PathBuf,
         dest: Option<PathBuf>,
+        base: Option<String>,
     ) -> PyResult<Bound<'py, PyAny>> {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let h = RustSnapshot::load(&archive, dest.as_deref())
-                .await
-                .map_err(to_py_err)?;
+            let h = if let Some(base) = base {
+                RustSnapshot::load_with_base(&archive, dest.as_deref(), &base).await
+            } else {
+                RustSnapshot::load(&archive, dest.as_deref()).await
+            }
+            .map_err(to_py_err)?;
             Ok(PySnapshotHandle::from_rust(h))
         })
     }
@@ -432,6 +442,14 @@ impl PySnapshot {
                 out.set_item("digest", report.digest)?;
                 out.set_item("path", report.path.display().to_string())?;
                 out.set_item("upper", upper)?;
+                if let Some(checkpoint) = report.checkpoint {
+                    let checkpoint_out = PyDict::new(py);
+                    checkpoint_out.set_item("kind", "verified")?;
+                    checkpoint_out.set_item("root", checkpoint.root)?;
+                    out.set_item("checkpoint", checkpoint_out)?;
+                } else {
+                    out.set_item("checkpoint", py.None())?;
+                }
                 Ok(out.into())
             })
         })
@@ -601,6 +619,6 @@ fn format_str(f: RustSnapshotFormat) -> &'static str {
 fn format_scope(scope: RustSnapshotScope) -> &'static str {
     match scope {
         RustSnapshotScope::Disk => "disk",
-        RustSnapshotScope::Resumable => "resumable",
+        RustSnapshotScope::Full => "full",
     }
 }

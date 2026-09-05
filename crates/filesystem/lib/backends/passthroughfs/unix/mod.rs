@@ -11,6 +11,7 @@ mod file_ops;
 mod host_mode;
 pub(crate) mod inode;
 mod metadata;
+mod mobility;
 mod remove_ops;
 mod special;
 mod xattr_ops;
@@ -222,6 +223,12 @@ pub struct PassthroughFs {
 
 /// Open directory handle with a lazy point-in-time snapshot.
 pub(crate) struct PassthroughDirHandle {
+    /// Guest-visible inode that owns this directory handle.
+    pub inode: u64,
+
+    /// Guest open flags used when the handle was admitted.
+    pub flags: u32,
+
     /// Real open fd for directory operations.
     pub file: RwLock<File>,
 
@@ -483,6 +490,18 @@ pub use stat_override::{BindIdentityMap, BindIdentityMapHandle};
 //--------------------------------------------------------------------------------------------------
 
 impl DynFileSystem for PassthroughFs {
+    fn capture_state(&self) -> io::Result<Vec<u8>> {
+        mobility::capture(self)
+    }
+
+    fn validate_state(&self, state: &[u8]) -> io::Result<()> {
+        mobility::prepare(self, state).map(drop)
+    }
+
+    fn restore_state(&self, state: &[u8]) -> io::Result<()> {
+        mobility::restore(self, state)
+    }
+
     fn init(&self, capable: FsOptions) -> io::Result<FsOptions> {
         // Register root inode (inode 1) in the inode table.
         // The guest kernel issues GETATTR on the root inode immediately after FUSE_INIT.

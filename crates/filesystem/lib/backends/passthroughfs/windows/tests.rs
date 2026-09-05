@@ -276,6 +276,217 @@ fn quota_rejects_growth_past_limit() {
 }
 
 #[test]
+fn mobility_preserves_inode_file_handle_and_directory_cookie_state() {
+    let temp = TempDir::new();
+    std::fs::write(temp.path.join("alpha.txt"), b"alpha").unwrap();
+    std::fs::write(temp.path.join("beta.txt"), b"beta").unwrap();
+    let source = fs_for(&temp.path);
+
+    let alpha = source.lookup(context(), ROOT_INODE, c"alpha.txt").unwrap();
+    let beta = source.lookup(context(), ROOT_INODE, c"beta.txt").unwrap();
+    let (file_handle, _) = source.open(context(), alpha.inode, false, 0).unwrap();
+    let file_handle = file_handle.unwrap();
+    let (dir_handle, _) = source
+        .opendir(context(), ROOT_INODE, LINUX_O_DIRECTORY as u32)
+        .unwrap();
+    let dir_handle = dir_handle.unwrap();
+    let entries = source
+        .readdir(context(), ROOT_INODE, dir_handle, 4096, 0)
+        .unwrap();
+    let cookie = entries
+        .iter()
+        .find(|entry| entry.name == b"alpha.txt")
+        .unwrap()
+        .offset;
+    let expected_tail = source
+        .readdir(context(), ROOT_INODE, dir_handle, 4096, cookie)
+        .unwrap()
+        .into_iter()
+        .map(|entry| (entry.ino, entry.offset, entry.name.to_vec()))
+        .collect::<Vec<_>>();
+    let next_inode = source.next_inode.load(Ordering::Acquire);
+    let next_handle = source.next_handle.load(Ordering::Acquire);
+    let state = source.capture_state().unwrap();
+
+    let destination = fs_for(&temp.path);
+    destination.restore_state(&state).unwrap();
+
+    assert_eq!(
+        destination
+            .lookup(context(), ROOT_INODE, c"alpha.txt")
+            .unwrap()
+            .inode,
+        alpha.inode
+    );
+    assert_eq!(
+        destination
+            .lookup(context(), ROOT_INODE, c"beta.txt")
+            .unwrap()
+            .inode,
+        beta.inode
+    );
+    let mut writer = CaptureWriter { bytes: Vec::new() };
+    destination
+        .read(
+            context(),
+            alpha.inode,
+            file_handle,
+            &mut writer,
+            5,
+            0,
+            None,
+            0,
+        )
+        .unwrap();
+    assert_eq!(writer.bytes, b"alpha");
+    let restored_tail = destination
+        .readdir(context(), ROOT_INODE, dir_handle, 4096, cookie)
+        .unwrap()
+        .into_iter()
+        .map(|entry| (entry.ino, entry.offset, entry.name.to_vec()))
+        .collect::<Vec<_>>();
+    assert_eq!(restored_tail, expected_tail);
+    assert_eq!(destination.next_inode.load(Ordering::Acquire), next_inode);
+    assert_eq!(destination.next_handle.load(Ordering::Acquire), next_handle);
+}
+
+#[test]
+fn mobility_missing_object_rejection_does_not_mutate_destination() {
+    let temp = TempDir::new();
+    std::fs::write(temp.path.join("source.txt"), b"source").unwrap();
+    std::fs::write(temp.path.join("destination.txt"), b"destination").unwrap();
+    let source = fs_for(&temp.path);
+    let source_entry = source.lookup(context(), ROOT_INODE, c"source.txt").unwrap();
+    let (source_handle, _) = source
+        .open(context(), source_entry.inode, false, 0)
+        .unwrap();
+    assert!(source_handle.is_some());
+    let state = source.capture_state().unwrap();
+
+    let destination = fs_for(&temp.path);
+    let destination_entry = destination
+        .lookup(context(), ROOT_INODE, c"destination.txt")
+        .unwrap();
+    let (destination_handle, _) = destination
+        .open(context(), destination_entry.inode, false, 0)
+        .unwrap();
+    assert!(destination_handle.is_some());
+    let before = destination.capture_state().unwrap();
+    drop(source);
+    std::fs::remove_file(temp.path.join("source.txt")).unwrap();
+
+    assert!(destination.restore_state(&state).is_err());
+
+    assert_eq!(destination.capture_state().unwrap(), before);
+    let mut writer = CaptureWriter { bytes: Vec::new() };
+    destination
+        .read(
+            context(),
+            destination_entry.inode,
+            destination_handle.unwrap(),
+            &mut writer,
+            11,
+            0,
+            None,
+            0,
+        )
+        .unwrap();
+    assert_eq!(writer.bytes, b"destination");
+}
+
+#[test]
+fn mobility_preserves_quota_accounting_and_open_handle() {
+    let temp = TempDir::new();
+    let config = PassthroughConfig {
+        root_dir: temp.path.clone(),
+        inject_init: false,
+        quota_bytes: Some(8),
+        ..Default::default()
+    };
+    let source = PassthroughFs::new(config.clone()).unwrap();
+    source.init(FsOptions::empty()).unwrap();
+    let (entry, handle, _) = source
+        .create(
+            context(),
+            ROOT_INODE,
+            c"quota.txt",
+            S_IFREG | 0o644,
+            false,
+            (LINUX_O_CREAT | LINUX_O_RDWR) as u32,
+            0,
+            Extensions::default(),
+        )
+        .unwrap();
+    let handle = handle.unwrap();
+    let mut initial = SourceReader {
+        bytes: b"abcd".to_vec(),
+        pos: 0,
+    };
+    source
+        .write(
+            context(),
+            entry.inode,
+            handle,
+            &mut initial,
+            4,
+            0,
+            None,
+            false,
+            false,
+            0,
+        )
+        .unwrap();
+    let quota_state = source.quota.as_ref().unwrap().capture_state();
+    let state = source.capture_state().unwrap();
+
+    let destination = PassthroughFs::new(config).unwrap();
+    destination.init(FsOptions::empty()).unwrap();
+    destination.restore_state(&state).unwrap();
+
+    assert_eq!(
+        destination.quota.as_ref().unwrap().capture_state(),
+        quota_state
+    );
+    let mut remaining = SourceReader {
+        bytes: b"efgh".to_vec(),
+        pos: 0,
+    };
+    destination
+        .write(
+            context(),
+            entry.inode,
+            handle,
+            &mut remaining,
+            4,
+            4,
+            None,
+            false,
+            false,
+            0,
+        )
+        .unwrap();
+    let mut over = SourceReader {
+        bytes: b"i".to_vec(),
+        pos: 0,
+    };
+    expect_errno(
+        destination.write(
+            context(),
+            entry.inode,
+            handle,
+            &mut over,
+            1,
+            8,
+            None,
+            false,
+            false,
+            0,
+        ),
+        LINUX_ENOSPC,
+    );
+}
+
+#[test]
 fn rejects_malicious_components() {
     for name in [c"..", c".", c"a/b", c"a\\b", c"a:b", c".msb_override_stat"] {
         expect_errno(validate_component(name), LINUX_EPERM);

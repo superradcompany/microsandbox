@@ -34,6 +34,16 @@ pub(super) struct HandleData {
 
 pub(super) struct DirHandle {
     pub(super) inode: u64,
+    pub(super) flags: u32,
+    pub(super) snapshot: Mutex<Option<Vec<DirSnapshotEntry>>>,
+}
+
+#[derive(Clone)]
+pub(super) struct DirSnapshotEntry {
+    pub(super) inode: u64,
+    pub(super) name: Vec<u8>,
+    pub(super) offset: u64,
+    pub(super) file_type: u32,
 }
 
 //--------------------------------------------------------------------------------------------------

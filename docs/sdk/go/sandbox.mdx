@@ -1094,6 +1094,15 @@ Boot from a snapshot artifact by bare name, artifact directory, or archive file.
   </div>
 </div>
 
+#### <span className="msb-recv"></span><span className="msb-hn">WithSnapshotDiskOnly()</span>
+<div className="msb-tags"><span className="msb-tag is-builder">option</span></div>
+
+```go
+func WithSnapshotDiskOnly() SandboxOption
+```
+
+Cold-boot only the disk state carried by a full snapshot. Use with [`WithFromSnapshot()`](#withfromsnapshot). Without it, a full snapshot resumes its captured execution and does not run the image CMD.
+
 #### <span className="msb-recv"></span><span className="msb-hn">WithMemory()</span>
 
 ```go

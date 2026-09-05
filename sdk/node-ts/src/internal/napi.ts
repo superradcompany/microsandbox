@@ -171,6 +171,8 @@ export type NapiSandboxBuilderCtor = new (name: string) => NapiSandboxBuilder;
 export interface NapiSandboxBuilderSetters {
   image(s: string): this;
   fromSnapshot(pathOrName: string): this;
+  snapshotBase(base: string): this;
+  diskOnly(): this;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   imageWith(configure: (b: any) => any): this;
   /** Managed root disk of the given size in MiB. Requires an OCI image. */
@@ -263,6 +265,7 @@ export interface NapiSandbox {
   ping(): Promise<NapiSandboxPingResult>;
   touch(): Promise<NapiSandboxTouchResult>;
   modify(opts?: NapiSandboxModifyOptions): Promise<string>;
+  compact(layers?: number, dryRun?: boolean): Promise<string>;
   attach(cmd: string, args?: string[]): Promise<number>;
   attachDefault(): Promise<number>;
   attachDefaultWithBuilder(builder: NapiAttachOptionsBuilder): Promise<number>;
@@ -293,6 +296,7 @@ export interface NapiSandboxHandle {
   ping(): Promise<NapiSandboxPingResult>;
   touch(): Promise<NapiSandboxTouchResult>;
   modify(opts?: NapiSandboxModifyOptions): Promise<string>;
+  compact(layers?: number, dryRun?: boolean): Promise<string>;
   start(): Promise<NapiSandbox>;
   startDetached(): Promise<NapiSandbox>;
   connect(): Promise<NapiSandbox>;
@@ -546,7 +550,7 @@ export interface NapiSnapshotStatic {
   remove(pathOrName: string, opts?: NapiSnapshotRemoveOptions): Promise<void>;
   reindex(dir?: string): Promise<number>;
   save(name: string, out: string, opts?: NapiSaveOpts): Promise<void>;
-  load(archive: string, dest?: string): Promise<NapiSnapshotHandle>;
+  load(archive: string, dest?: string, base?: string): Promise<NapiSnapshotHandle>;
 }
 
 export type NapiSnapshotBuilderCtor = new (name: string) => NapiSnapshotBuilder;
@@ -557,7 +561,7 @@ export interface NapiSnapshotBuilderSetters {
   label(key: string, value: string): this;
   force(): this;
   recordIntegrity(): this;
-  resumable(): this;
+  full(): this;
 }
 
 export interface NapiSnapshotBuilder extends NapiSnapshotBuilderSetters {
@@ -589,7 +593,7 @@ export interface NapiSnapshot {
   readonly checkpointId: string | null | undefined;
   readonly checkpointManifestDigest: string | null | undefined;
   readonly parent: string | null | undefined;
-  readonly scope: string; // "disk" | "resumable"
+  readonly scope: string; // "disk" | "full"
   readonly createdAt: string; // RFC 3339 UTC
   readonly labels: Record<string, string>;
   readonly sourceSandbox: string | null | undefined;
@@ -601,7 +605,7 @@ export interface NapiSnapshotHandle {
   readonly digest: string;
   readonly name: string | null | undefined;
   readonly parentDigest: string | null | undefined;
-  readonly scope: string; // "disk" | "resumable"
+  readonly scope: string; // "disk" | "full"
   readonly imageRef: string;
   readonly stateKind: string;
   readonly format: string | null | undefined;
@@ -623,7 +627,7 @@ export interface NapiSnapshotInfo {
   readonly digest: string;
   readonly name: string | null | undefined;
   readonly parentDigest: string | null | undefined;
-  readonly scope: string; // "disk" | "resumable"
+  readonly scope: string; // "disk" | "full"
   readonly imageRef: string;
   readonly stateKind: string;
   readonly format: string | null | undefined;
@@ -639,6 +643,8 @@ export interface NapiSnapshotInfo {
 }
 
 export interface NapiSaveOpts {
+  since?: string;
+  lastLayers?: number;
   withParents?: boolean;
   withImage?: boolean;
   plainTar?: boolean;
@@ -654,6 +660,7 @@ export interface NapiSnapshotVerifyReport {
   readonly upperKind: string; // "notRecorded" | "verified"
   readonly upperAlgorithm: string | null | undefined;
   readonly upperDigest: string | null | undefined;
+  readonly checkpointRoot: string | null | undefined;
 }
 
 export interface NapiImageHandle {

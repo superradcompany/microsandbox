@@ -1074,6 +1074,14 @@ Boot from a previously captured snapshot instead of a fresh image. The image ref
   </div>
 </div>
 
+#### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">diskOnly()</span>
+
+```typescript
+diskOnly(): this
+```
+
+Cold-boot only the disk state carried by a full snapshot. Chain after [`fromSnapshot()`](#fromsnapshot). Without it, a full snapshot resumes its captured execution and does not run the image CMD.
+
 #### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">hostname()</span>
 
 <Tooltip tip="Not accepted on microsandbox cloud; the platform assigns the hostname."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>

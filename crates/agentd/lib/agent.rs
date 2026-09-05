@@ -18,7 +18,8 @@ use microsandbox_protocol::bootstrap::GuestBootstrap;
 use microsandbox_protocol::codec::{self, MAX_FRAME_SIZE};
 use microsandbox_protocol::core::{
     ClockSync, CoreError, CoreErrorKind, InitAck, InitResolved, Ping, Pong, Ready,
-    RelayClientDisconnected, ResolvedUser, Touch, Touched,
+    RelayClientDisconnected, ResolvedUser, Touch, Touched, WorkloadFreeze, WorkloadFrozen,
+    WorkloadThaw, WorkloadThawed,
 };
 use microsandbox_protocol::exec::{
     ExecExited, ExecFailed, ExecFailureKind, ExecRequest, ExecResize, ExecSignal, ExecStarted,
@@ -38,6 +39,7 @@ use crate::session::{
     ExecSession, RawActivity, RawSessionCompletion, SessionOutput, resolve_default_user,
 };
 use crate::tcp::TcpSession;
+use crate::workload::{WorkloadLatch, WorkloadLatchError};
 use crate::{clock, fs, handoff, heartbeat, serial};
 
 //--------------------------------------------------------------------------------------------------
@@ -170,6 +172,16 @@ pub async fn run(
     let mut serial_out_buf = Vec::new();
 
     let mut state = AgentState::default();
+    let mut workload = if handoff::is_pid_1() {
+        WorkloadLatch::initialize()
+    } else {
+        WorkloadLatch::unavailable(
+            "PID 1 handoff workloads are not wholly owned by agentd's cgroup",
+        )
+    };
+    if let Some(reason) = workload.unavailable_reason() {
+        eprintln!("checkpoint workload freezer unavailable: {reason}");
+    }
 
     // Channel for session output events.
     let (session_tx, mut session_rx) = mpsc::unbounded_channel::<(u32, SessionOutput)>();
@@ -184,7 +196,12 @@ pub async fn run(
     // kill the sandbox. A plain OS thread is scheduled by the guest kernel
     // independently of the async runtime, so the pulse keeps ticking under load.
     let heartbeat_shutdown = Arc::new(AtomicBool::new(false));
-    let heartbeat_thread = spawn_heartbeat_thread(heartbeat_rx, Arc::clone(&heartbeat_shutdown));
+    let heartbeat_control = Arc::new(heartbeat::HeartbeatControl::default());
+    let heartbeat_thread = spawn_heartbeat_thread(
+        heartbeat_rx,
+        Arc::clone(&heartbeat_shutdown),
+        Arc::clone(&heartbeat_control),
+    );
 
     // Send core.ready with boot timing data.
     let ready_time_ns = clock::boottime_ns();
@@ -299,6 +316,8 @@ pub async fn run(
                                     &session_tx,
                                     &mut serial_out_buf,
                                     config,
+                                    &mut workload,
+                                    &heartbeat_control,
                                 ).await?;
                                 record_encoded_guest_messages(
                                     &serial_out_buf,
@@ -467,6 +486,8 @@ async fn handle_message(
     session_tx: &mpsc::UnboundedSender<(u32, SessionOutput)>,
     out_buf: &mut Vec<u8>,
     config: &AgentdConfig,
+    workload: &mut WorkloadLatch,
+    heartbeat_control: &heartbeat::HeartbeatControl,
 ) -> AgentdResult<()> {
     match msg.t {
         MessageType::Ping => {
@@ -496,6 +517,77 @@ async fn handle_message(
                 .map_err(|e| AgentdError::ExecSession(format!("encode touched frame: {e}")))?;
         }
 
+        MessageType::WorkloadFreeze => {
+            let Some(request) = decode_payload_or_core_error::<WorkloadFreeze>(&msg, out_buf)?
+            else {
+                return Ok(());
+            };
+            match workload.freeze(&request.attempt_id) {
+                Ok(()) => {
+                    if let Err(pause_error) = heartbeat_control.pause() {
+                        let rollback = workload.thaw(&request.attempt_id).err();
+                        let message = match rollback {
+                            Some(error) => format!(
+                                "heartbeat checkpoint gate failed: {pause_error}; workload rollback failed: {error}"
+                            ),
+                            None => format!("heartbeat checkpoint gate failed: {pause_error}"),
+                        };
+                        encode_workload_error(
+                            &msg,
+                            WorkloadLatchError::Io(std::io::Error::other(message)),
+                            out_buf,
+                        )?;
+                    } else {
+                        let reply = Message::with_payload(
+                            MessageType::WorkloadFrozen,
+                            msg.id,
+                            &WorkloadFrozen {
+                                attempt_id: request.attempt_id,
+                            },
+                        )
+                        .map_err(|error| {
+                            AgentdError::ExecSession(format!(
+                                "encode workload-frozen response: {error}"
+                            ))
+                        })?;
+                        codec::encode_to_buf(&reply, out_buf).map_err(|error| {
+                            AgentdError::ExecSession(format!(
+                                "encode workload-frozen frame: {error}"
+                            ))
+                        })?;
+                    }
+                }
+                Err(error) => encode_workload_error(&msg, error, out_buf)?,
+            }
+        }
+
+        MessageType::WorkloadThaw => {
+            let Some(request) = decode_payload_or_core_error::<WorkloadThaw>(&msg, out_buf)? else {
+                return Ok(());
+            };
+            match workload.thaw(&request.attempt_id) {
+                Ok(()) => {
+                    heartbeat_control.resume();
+                    let reply = Message::with_payload(
+                        MessageType::WorkloadThawed,
+                        msg.id,
+                        &WorkloadThawed {
+                            attempt_id: request.attempt_id,
+                        },
+                    )
+                    .map_err(|error| {
+                        AgentdError::ExecSession(format!(
+                            "encode workload-thawed response: {error}"
+                        ))
+                    })?;
+                    codec::encode_to_buf(&reply, out_buf).map_err(|error| {
+                        AgentdError::ExecSession(format!("encode workload-thawed frame: {error}"))
+                    })?;
+                }
+                Err(error) => encode_workload_error(&msg, error, out_buf)?,
+            }
+        }
+
         MessageType::ExecRequest => {
             let Some(mut req) = decode_payload_or_core_error::<ExecRequest>(&msg, out_buf)? else {
                 return Ok(());
@@ -504,12 +596,44 @@ async fn handle_message(
                 req.cwd = config.default_cwd().map(str::to_string);
             }
             prepend_scripts_to_path(&mut req);
+            if workload.is_frozen() {
+                encode_exec_failed(
+                    msg.id,
+                    ExecFailed {
+                        kind: ExecFailureKind::Other,
+                        errno: None,
+                        errno_name: None,
+                        message: "sandbox workload is frozen for checkpoint activation".into(),
+                        stage: Some("workload_latch".into()),
+                    },
+                    out_buf,
+                )?;
+                return Ok(());
+            }
+            let workload_placement = match workload.placement() {
+                Ok(placement) => placement,
+                Err(error) => {
+                    encode_exec_failed(
+                        msg.id,
+                        ExecFailed {
+                            kind: ExecFailureKind::Other,
+                            errno: None,
+                            errno_name: None,
+                            message: error.to_string(),
+                            stage: Some("workload_cgroup".into()),
+                        },
+                        out_buf,
+                    )?;
+                    return Ok(());
+                }
+            };
             match ExecSession::spawn(
                 msg.id,
                 &req,
                 session_tx.clone(),
                 config.user.as_deref(),
                 config.security_profile,
+                workload_placement,
             ) {
                 Ok(session) => {
                     let reply = Message::with_payload(
@@ -761,7 +885,11 @@ async fn handle_message(
 fn message_refreshes_idle_timer(t: &MessageType) -> bool {
     !matches!(
         t,
-        MessageType::ClockSync | MessageType::Ping | MessageType::Touch
+        MessageType::ClockSync
+            | MessageType::Ping
+            | MessageType::Touch
+            | MessageType::WorkloadFreeze
+            | MessageType::WorkloadThaw
     )
 }
 
@@ -775,7 +903,11 @@ fn message_refreshes_idle_timer(t: &MessageType) -> bool {
 fn guest_message_refreshes_idle_timer(t: &MessageType) -> bool {
     !matches!(
         t,
-        MessageType::Pong | MessageType::Touched | MessageType::CoreError
+        MessageType::Pong
+            | MessageType::Touched
+            | MessageType::WorkloadFrozen
+            | MessageType::WorkloadThawed
+            | MessageType::CoreError
     )
 }
 
@@ -791,6 +923,7 @@ fn guest_message_refreshes_idle_timer(t: &MessageType) -> bool {
 fn spawn_heartbeat_thread(
     snapshot_rx: watch::Receiver<HeartbeatSnapshot>,
     shutdown: Arc<AtomicBool>,
+    control: Arc<heartbeat::HeartbeatControl>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::Builder::new()
         .name("agentd-heartbeat".to_string())
@@ -832,6 +965,9 @@ fn spawn_heartbeat_thread(
                     active_fs_streams: snapshot.active_fs_streams,
                     active_tcp_streams: snapshot.active_tcp_streams,
                     activity_counters: snapshot.counters,
+                };
+                let Some(_write_guard) = control.begin_write() else {
+                    continue;
                 };
                 let _ = heartbeat::write_heartbeat(&heartbeat);
             }
@@ -1023,6 +1159,36 @@ fn encode_core_error(
     .map_err(|e| AgentdError::ExecSession(format!("encode core error: {e}")))?;
     codec::encode_to_buf(&reply, out_buf)
         .map_err(|e| AgentdError::ExecSession(format!("encode core error frame: {e}")))?;
+    Ok(())
+}
+
+fn encode_workload_error(
+    source: &Message,
+    error: WorkloadLatchError,
+    out_buf: &mut Vec<u8>,
+) -> AgentdResult<()> {
+    let kind = match &error {
+        WorkloadLatchError::Unavailable(_) | WorkloadLatchError::Io(_) => {
+            CoreErrorKind::CapabilityUnavailable
+        }
+        WorkloadLatchError::InvalidAttempt(_) => CoreErrorKind::InvalidPayload,
+        WorkloadLatchError::Conflict(_) => CoreErrorKind::InvalidSession,
+    };
+    encode_core_error_if_supported(
+        source,
+        source.id,
+        kind,
+        error.to_string(),
+        Some(source.t.as_str().to_string()),
+        out_buf,
+    )
+}
+
+fn encode_exec_failed(id: u32, payload: ExecFailed, out_buf: &mut Vec<u8>) -> AgentdResult<()> {
+    let reply = Message::with_payload(MessageType::ExecFailed, id, &payload)
+        .map_err(|error| AgentdError::ExecSession(format!("encode exec failure: {error}")))?;
+    codec::encode_to_buf(&reply, out_buf)
+        .map_err(|error| AgentdError::ExecSession(format!("encode exec failure frame: {error}")))?;
     Ok(())
 }
 
@@ -1355,7 +1521,7 @@ mod tests {
     fn bootstrap_rejects_older_protocol_generation() {
         let mut message =
             Message::with_payload(MessageType::Bootstrap, 0, &GuestBootstrap::default()).unwrap();
-        message.v = PROTOCOL_VERSION - 1;
+        message.v = MessageType::Bootstrap.min_protocol_version() - 1;
 
         let error = decode_bootstrap_message(message).unwrap_err();
         assert!(error.to_string().contains("or newer"));

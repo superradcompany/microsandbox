@@ -16,7 +16,7 @@ use crate::backend::LocalBackend;
 use crate::db::entity::snapshot as snapshot_entity;
 use crate::{MicrosandboxError, MicrosandboxResult};
 
-use super::{Snapshot, SnapshotFormat, SnapshotHandle, SnapshotScope};
+use super::{Snapshot, SnapshotFormat, SnapshotHandle, SnapshotScope, UpperIntegrity};
 
 //--------------------------------------------------------------------------------------------------
 // Functions
@@ -73,8 +73,9 @@ pub(super) async fn open_snapshot(
         .map_err(|e| MicrosandboxError::SnapshotIntegrity(format!("{e}")))?;
 
     if let SnapshotState::File(file_state) = &manifest.state {
-        // Metadata open proves every member of the physical closure exists
-        // with its bound apparent size. Explicit verify reads payload bytes.
+        // Metadata open proves every member of the physical closure exists. Raw images expose
+        // their guest capacity as file length; qcow2 files are compact containers, so their
+        // payload length is validated independently from guest-visible virtual size.
         for layer in &file_state.layers {
             let canonical_path = dir.join(file_state.layer_path(layer));
             let upper_path = if canonical_path.exists() {
@@ -99,10 +100,27 @@ pub(super) async fn open_snapshot(
                 )));
             }
             let actual_size = upper_meta.len();
-            if actual_size != layer.virtual_size {
+            match layer.format {
+                SnapshotFormat::Raw if actual_size != layer.virtual_size => {
+                    return Err(MicrosandboxError::SnapshotIntegrity(format!(
+                        "raw layer size mismatch: descriptor says {}, file is {}",
+                        layer.virtual_size, actual_size
+                    )));
+                }
+                SnapshotFormat::Qcow2 if actual_size == 0 => {
+                    return Err(MicrosandboxError::SnapshotIntegrity(format!(
+                        "qcow2 layer is empty: {}",
+                        upper_path.display()
+                    )));
+                }
+                SnapshotFormat::Raw | SnapshotFormat::Qcow2 => {}
+            }
+            if let Some(UpperIntegrity::FileMerkleBlake3V1 { logical_size, .. }) =
+                &layer.payload.integrity
+                && *logical_size != actual_size
+            {
                 return Err(MicrosandboxError::SnapshotIntegrity(format!(
-                    "upper size mismatch: descriptor says {}, file is {}",
-                    layer.virtual_size, actual_size
+                    "layer payload size mismatch: integrity says {logical_size}, file is {actual_size}"
                 )));
             }
         }
@@ -207,7 +225,7 @@ pub(super) async fn index_upsert(
     };
     let scope_str = match manifest.scope {
         SnapshotScope::Disk => "disk",
-        SnapshotScope::Resumable => "resumable",
+        SnapshotScope::Full => "full",
     };
 
     let row = snapshot_entity::ActiveModel {
@@ -480,7 +498,9 @@ fn handle_from_model(m: snapshot_entity::Model) -> SnapshotHandle {
     });
     let scope = match m.scope.as_str() {
         "disk" => SnapshotScope::Disk,
-        "resumable" => SnapshotScope::Resumable,
+        // `resumable` was the released index projection. The artifact is authoritative and the
+        // index is rebuildable, but accepting the old cache value keeps upgrades non-disruptive.
+        "full" | "resumable" => SnapshotScope::Full,
         other => {
             tracing::warn!(digest = %m.digest, scope = other, "unknown snapshot scope in index; treating as disk");
             SnapshotScope::Disk

@@ -20,7 +20,7 @@ pub struct SnapshotArgs {
 /// Snapshot subcommands.
 #[derive(Debug, Subcommand)]
 pub enum SnapshotCommands {
-    /// Create a snapshot from a stopped sandbox.
+    /// Create a disk snapshot from a stopped sandbox or a full snapshot from a running one.
     Create(SnapshotCreateArgs),
 
     /// List indexed snapshots.
@@ -83,13 +83,9 @@ pub struct SnapshotCreateArgs {
     #[arg(long)]
     pub integrity: bool,
 
-    /// Request a resumable snapshot with memory/device state.
-    ///
-    /// This flag is reserved by the public contract. Current runtimes
-    /// return an unsupported-feature error instead of creating a
-    /// misleading disk-only artifact.
+    /// Capture disk, memory, execution, and device state from a running sandbox.
     #[arg(long)]
-    pub resumable: bool,
+    pub full: bool,
 
     /// Suppress output.
     #[arg(short, long)]
@@ -171,6 +167,12 @@ pub struct SnapshotSaveArgs {
     /// CPU but much larger file for sparse uppers.
     #[arg(long)]
     pub plain_tar: bool,
+    /// Export disk layers after an exact base snapshot or standalone base archive.
+    #[arg(long, conflicts_with_all = ["last_layers", "with_parents"])]
+    pub since: Option<String>,
+    /// Export only the newest N sealed disk layers (load requires the omitted base).
+    #[arg(long, conflicts_with = "with_parents", value_name = "N")]
+    pub last_layers: Option<usize>,
 }
 
 /// Arguments for `msb snapshot load`.
@@ -181,6 +183,9 @@ pub struct SnapshotLoadArgs {
 
     /// Destination directory (defaults to `~/.microsandbox/snapshots/`).
     pub dest: Option<std::path::PathBuf>,
+    /// Exact base snapshot or standalone base archive for a dependent archive.
+    #[arg(long)]
+    pub base: Option<String>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -218,8 +223,8 @@ async fn create(args: SnapshotCreateArgs) -> anyhow::Result<()> {
     if args.integrity {
         builder = builder.record_integrity();
     }
-    if args.resumable {
-        builder = builder.resumable();
+    if args.full {
+        builder = builder.full();
     }
 
     let spinner = if args.quiet {
@@ -338,6 +343,7 @@ async fn inspect(args: SnapshotInspectArgs) -> anyhow::Result<()> {
     ui::detail_kv("Image", &m.image.reference);
     ui::detail_kv("Image Manifest", &m.image.manifest_digest);
     ui::detail_kv("Scope", format_scope(m.scope));
+    ui::detail_kv("Root Disk", format_root_disk(&m.root_disk));
     ui::detail_kv(
         "Parent",
         m.parent
@@ -402,7 +408,11 @@ async fn verify(args: SnapshotVerifyArgs) -> anyhow::Result<()> {
     let report = snap.verify().await?;
     ui::detail_kv("Digest", &report.digest);
     ui::detail_kv("Path", &report.path.display().to_string());
-    ui::detail_kv("Verification", &format_verify_status(&report.upper));
+    if let Some(checkpoint) = report.checkpoint {
+        ui::detail_kv("Checkpoint", &format!("verified ({})", checkpoint.root));
+    } else {
+        ui::detail_kv("Verification", &format_verify_status(&report.upper));
+    }
     Ok(())
 }
 
@@ -450,6 +460,8 @@ async fn save(args: SnapshotSaveArgs) -> anyhow::Result<()> {
         with_parents: args.with_parents,
         with_image: args.with_image,
         plain_tar: args.plain_tar,
+        since: args.since,
+        last_layers: args.last_layers,
     };
     Snapshot::save(&args.snapshot, &args.out, opts).await?;
     println!("{}", args.out.display());
@@ -457,7 +469,11 @@ async fn save(args: SnapshotSaveArgs) -> anyhow::Result<()> {
 }
 
 async fn load(args: SnapshotLoadArgs) -> anyhow::Result<()> {
-    let handle = Snapshot::load(&args.archive, args.dest.as_deref()).await?;
+    let handle = if let Some(base) = args.base.as_deref() {
+        Snapshot::load_with_base(&args.archive, args.dest.as_deref(), base).await?
+    } else {
+        Snapshot::load(&args.archive, args.dest.as_deref()).await?
+    };
     println!("{}", handle.digest());
     println!("{}", handle.path().display());
     Ok(())
@@ -477,7 +493,15 @@ fn format_str(f: microsandbox::SnapshotFormat) -> &'static str {
 fn format_scope(scope: microsandbox::SnapshotScope) -> &'static str {
     match scope {
         microsandbox::SnapshotScope::Disk => "disk",
-        microsandbox::SnapshotScope::Resumable => "resumable",
+        microsandbox::SnapshotScope::Full => "full",
+    }
+}
+
+fn format_root_disk(root_disk: &microsandbox::SnapshotRootDisk) -> &'static str {
+    match root_disk {
+        microsandbox::SnapshotRootDisk::Managed => "managed",
+        microsandbox::SnapshotRootDisk::Flat => "flat",
+        microsandbox::SnapshotRootDisk::Tmpfs { .. } => "tmpfs",
     }
 }
 
@@ -541,14 +565,14 @@ mod tests {
     }
 
     #[test]
-    fn create_parses_resumable_contract_flag() {
-        let args = parse_snapshot_args(&["create", "clean", "--from", "box", "--resumable"]);
+    fn create_parses_full_capture_flag() {
+        let args = parse_snapshot_args(&["create", "clean", "--from", "box", "--full"]);
         let SnapshotCommands::Create(args) = args.command else {
             panic!("expected create command");
         };
         assert_eq!(args.name, "clean");
         assert_eq!(args.from, "box");
-        assert!(args.resumable);
+        assert!(args.full);
     }
 
     #[test]

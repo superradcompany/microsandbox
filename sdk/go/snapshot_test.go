@@ -42,13 +42,13 @@ func marshalSnapshotCreateOptions(t *testing.T, opts ffi.SnapshotCreateOptions) 
 	return out
 }
 
-func TestFFIWireShape_SnapshotCreateResumable(t *testing.T) {
+func TestFFIWireShape_SnapshotCreateFull(t *testing.T) {
 	got := marshalSnapshotCreateOptions(t, ffi.SnapshotCreateOptions{
-		Name:      "after-pip-install",
-		Resumable: true,
+		Name: "after-pip-install",
+		Full: true,
 	})
-	if v := mustField(t, got, "resumable"); v != true {
-		t.Fatalf("resumable = %v, want true", v)
+	if v := mustField(t, got, "full"); v != true {
+		t.Fatalf("full = %v, want true", v)
 	}
 	if _, present := got["dest_dir"]; present {
 		t.Fatal("dest_dir must not appear in payload when unset")
@@ -63,8 +63,8 @@ func TestFFIWireShape_SnapshotCreateDestDir(t *testing.T) {
 	if v := mustField(t, got, "dest_dir"); v != "/data/snapshots" {
 		t.Fatalf("dest_dir = %v, want %q", v, "/data/snapshots")
 	}
-	if _, present := got["resumable"]; present {
-		t.Fatal("resumable must not appear in payload when unset")
+	if _, present := got["full"]; present {
+		t.Fatal("full must not appear in payload when unset")
 	}
 }
 

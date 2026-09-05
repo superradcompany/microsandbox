@@ -25,11 +25,15 @@ type SnapshotCreateOptions struct {
 	Labels          map[string]string
 	Force           bool
 	RecordIntegrity bool
-	Resumable       bool
+	Full            bool
 }
 
 // SnapshotSaveOptions configures Snapshot.Save.
 type SnapshotSaveOptions struct {
+	// Since identifies an exact base snapshot or standalone base archive.
+	Since string
+	// LastLayers includes the newest N sealed disk layers. Mutually exclusive with Since.
+	LastLayers  *uint32
 	WithParents bool
 	WithImage   bool
 	PlainTar    bool
@@ -57,15 +61,22 @@ func (a *SnapshotArchive) Path() string             { return a.path }
 // Snapshot payload scope values, as reported by SnapshotArtifact.Scope
 // and SnapshotHandle.Scope.
 const (
-	SnapshotScopeDisk      = "disk"
-	SnapshotScopeResumable = "resumable"
+	SnapshotScopeDisk = "disk"
+	SnapshotScopeFull = "full"
 )
 
 // SnapshotVerifyReport is returned by SnapshotArtifact.Verify.
 type SnapshotVerifyReport struct {
-	Digest string
-	Path   string
-	Upper  SnapshotUpperVerifyStatus
+	Digest     string
+	Path       string
+	Upper      SnapshotUpperVerifyStatus
+	Checkpoint *SnapshotCheckpointVerifyStatus
+}
+
+// SnapshotCheckpointVerifyStatus identifies a fully verified checkpoint closure.
+type SnapshotCheckpointVerifyStatus struct {
+	Kind string
+	Root string
 }
 
 type SnapshotUpperVerifyStatus struct {
@@ -255,7 +266,7 @@ func (snapshotFactory) Create(ctx context.Context, opts SnapshotCreateOptions) (
 		Labels:          opts.Labels,
 		Force:           opts.Force,
 		RecordIntegrity: opts.RecordIntegrity,
-		Resumable:       opts.Resumable,
+		Full:            opts.Full,
 	})
 	if err != nil {
 		return nil, wrapFFI(err)
@@ -263,7 +274,7 @@ func (snapshotFactory) Create(ctx context.Context, opts SnapshotCreateOptions) (
 	return snapshotFromInfo(info), nil
 }
 
-// CreateArchive captures a stopped sandbox directly into one archive file.
+// CreateArchive captures a disk or full snapshot directly into one archive file.
 // It does not create an installed snapshot directory or index row.
 func (snapshotFactory) CreateArchive(ctx context.Context, opts SnapshotArchiveOptions) (*SnapshotArchive, error) {
 	if opts.Name == "" {
@@ -282,7 +293,7 @@ func (snapshotFactory) CreateArchive(ctx context.Context, opts SnapshotArchiveOp
 		Labels:          create.Labels,
 		Force:           create.Force,
 		RecordIntegrity: create.RecordIntegrity,
-		Resumable:       create.Resumable,
+		Full:            create.Full,
 	}, opts.PlainTar)
 	if err != nil {
 		return nil, wrapFFI(err)
@@ -348,11 +359,22 @@ func (snapshotFactory) Save(ctx context.Context, nameOrPath, outPath string, opt
 		WithParents: opts.WithParents,
 		WithImage:   opts.WithImage,
 		PlainTar:    opts.PlainTar,
+		Since:       opts.Since,
+		LastLayers:  opts.LastLayers,
 	}))
 }
 
 func (snapshotFactory) Load(ctx context.Context, archive, dest string) (*SnapshotHandle, error) {
 	info, err := ffi.SnapshotLoad(ctx, archive, dest)
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	return snapshotHandleFromInfo(info), nil
+}
+
+// LoadWithBase imports a dependent archive into a complete locally owned snapshot closure.
+func (snapshotFactory) LoadWithBase(ctx context.Context, archive, dest, base string) (*SnapshotHandle, error) {
+	info, err := ffi.SnapshotLoadWithBase(ctx, archive, dest, base)
 	if err != nil {
 		return nil, wrapFFI(err)
 	}
@@ -367,7 +389,7 @@ func normalizeSnapshotScope(scope string) string {
 }
 
 func snapshotVerifyReportFromInfo(info *ffi.SnapshotVerifyReport) *SnapshotVerifyReport {
-	return &SnapshotVerifyReport{
+	report := &SnapshotVerifyReport{
 		Digest: info.Digest,
 		Path:   info.Path,
 		Upper: SnapshotUpperVerifyStatus{
@@ -376,6 +398,13 @@ func snapshotVerifyReportFromInfo(info *ffi.SnapshotVerifyReport) *SnapshotVerif
 			Digest:    info.Upper.Digest,
 		},
 	}
+	if info.Checkpoint != nil {
+		report.Checkpoint = &SnapshotCheckpointVerifyStatus{
+			Kind: info.Checkpoint.Kind,
+			Root: info.Checkpoint.Root,
+		}
+	}
+	return report
 }
 
 func snapshotStateFromInfo(info *ffi.SnapshotInfo) SnapshotState {

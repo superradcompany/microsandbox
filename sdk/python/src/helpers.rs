@@ -16,6 +16,8 @@ use pyo3::types::{PyByteArray, PyBytes, PyDict, PyList, PyModule};
 const KNOWN_CREATE_KWARGS: &[&str] = &[
     "image",
     "from_snapshot",
+    "disk_only",
+    "snapshot_base",
     "memory",
     "cpus",
     "max_memory",
@@ -177,6 +179,22 @@ pub fn sandbox_builder_from_args(
     let snapshot_present = kwargs
         .get_item("from_snapshot")?
         .is_some_and(|value| !value.is_none());
+    if !snapshot_present
+        && kwargs
+            .get_item("snapshot_base")?
+            .is_some_and(|value| !value.is_none())
+    {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "snapshot_base requires from_snapshot",
+        ));
+    }
+    let disk_only = match kwargs
+        .get_item("disk_only")?
+        .filter(|value| !value.is_none())
+    {
+        Some(value) => value.extract::<bool>()?,
+        None => false,
+    };
     if image_present && snapshot_present {
         return Err(pyo3::exceptions::PyValueError::new_err(
             "pass either image= or from_snapshot=, not both",
@@ -187,11 +205,16 @@ pub fn sandbox_builder_from_args(
             "image= or from_snapshot= is required",
         ));
     }
+    if disk_only && !snapshot_present {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "disk_only requires from_snapshot",
+        ));
+    }
 
     let mut builder = microsandbox::Sandbox::builder(name);
 
     if snapshot_present {
-        // Boot from a snapshot. Accept str or PathLike.
+        // Create from a snapshot. Accept str or PathLike.
         let snap_obj = kwargs.get_item("from_snapshot")?.unwrap();
         let snap_str: String = if let Ok(s) = snap_obj.extract::<String>() {
             s
@@ -202,72 +225,26 @@ pub fn sandbox_builder_from_args(
                 "from_snapshot must be str or os.PathLike",
             ));
         };
-        // Archive sources are resolved asynchronously by the Rust builder so
-        // the payload can stream directly into child staging in one pass.
-        if std::path::Path::new(&snap_str).is_file() {
-            builder = builder.from_snapshot(snap_str);
-        } else {
-            // Resolve an installed snapshot synchronously: read the manifest and
-            // pin the image. We can't use the async `from_snapshot` here
-            // because `sandbox_builder_from_args` runs in sync context; instead
-            // we replicate the resolution against the on-disk artifact
-            // directly via `snapshot_resolved`.
-            let snap_dir = resolve_snapshot_dir(&snap_str);
-            if !snap_dir.exists() {
-                return Err(pyo3::exceptions::PyFileNotFoundError::new_err(format!(
-                    "snapshot artifact not found: {}",
-                    snap_dir.display()
-                )));
+        // Preserve Python's established immediate missing-artifact error before constructing an
+        // awaitable. Descriptor parsing and disk/full admission remain deferred to the shared Rust
+        // resolver so installed directories and direct archives follow exactly the same path.
+        let snapshot_path = resolve_snapshot_path(&snap_str);
+        if !snapshot_path.exists() {
+            return Err(pyo3::exceptions::PyFileNotFoundError::new_err(format!(
+                "snapshot artifact not found: {}",
+                snapshot_path.display()
+            )));
+        }
+        // Resolution stays deferred until the async build so installed and direct-archive sources
+        // share the same disk/full admission path.
+        builder = builder.from_snapshot(snap_str);
+        if let Some(base) = kwargs.get_item("snapshot_base")? {
+            if !base.is_none() {
+                builder = builder.snapshot_base(base.extract::<String>()?);
             }
-            let manifest_bytes = std::fs::read(
-                snap_dir.join(microsandbox::snapshot::DESCRIPTOR_FILENAME),
-            )
-            .map_err(|e| {
-                pyo3::exceptions::PyFileNotFoundError::new_err(format!(
-                    "snapshot descriptor not readable at {}: {e}",
-                    snap_dir.display(),
-                ))
-            })?;
-            let manifest =
-                microsandbox::snapshot::Manifest::from_bytes(&manifest_bytes).map_err(|e| {
-                    pyo3::exceptions::PyValueError::new_err(format!(
-                        "snapshot descriptor invalid: {e}"
-                    ))
-                })?;
-            if manifest.scope != microsandbox::snapshot::SnapshotScope::Disk {
-                return Err(pyo3::exceptions::PyValueError::new_err(
-                    "restoring non-disk snapshots is not supported by this runtime",
-                ));
-            }
-            let file_state = match &manifest.state {
-                microsandbox::snapshot::SnapshotState::File(state) => state,
-                microsandbox::snapshot::SnapshotState::Checkpoint(_) => {
-                    return Err(pyo3::exceptions::PyValueError::new_err(
-                        "restoring checkpoint-state snapshots is not supported by this runtime",
-                    ));
-                }
-            };
-            if file_state.disk_format != microsandbox::snapshot::SnapshotFormat::Raw
-                || file_state.filesystem != "ext4"
-            {
-                return Err(pyo3::exceptions::PyValueError::new_err(
-                    "snapshot file state is not a supported raw ext4 upper",
-                ));
-            }
-            let head = file_state.head_layer().map_err(|error| {
-                pyo3::exceptions::PyValueError::new_err(format!(
-                    "snapshot file closure is invalid: {error}"
-                ))
-            })?;
-            let upper_path = snap_dir.join(file_state.layer_path(head));
-            if !upper_path.exists() {
-                return Err(pyo3::exceptions::PyFileNotFoundError::new_err(format!(
-                    "snapshot upper file missing: {}",
-                    upper_path.display(),
-                )));
-            }
-            builder = builder.image(manifest.image.reference.as_str());
-            builder = builder.snapshot_resolved(manifest.image.manifest_digest.clone(), upper_path);
+        }
+        if disk_only {
+            builder = builder.disk_only();
         }
     } else {
         let image_obj = kwargs.get_item("image")?.unwrap();
@@ -1971,32 +1948,31 @@ fn extract_required<'py, T: FromPyObject<'py>>(
         .extract()
 }
 
-/// Resolve a snapshot reference (bare name or path) to its on-disk
-/// directory. Mirrors the convention used by `Snapshot::open`
-/// (`snapshot::store::looks_like_path`) — keep the heuristics in sync.
-fn resolve_snapshot_dir(s: &str) -> std::path::PathBuf {
-    if snapshot_ref_looks_like_path(s) {
-        std::path::PathBuf::from(s)
+/// Resolve a snapshot reference only far enough to preserve synchronous Python path validation.
+fn resolve_snapshot_path(reference: &str) -> std::path::PathBuf {
+    if snapshot_ref_looks_like_path(reference) {
+        std::path::PathBuf::from(reference)
     } else {
         microsandbox::backend::default_backend()
             .as_local()
-            .map(|local| local.snapshots_dir().join(s))
-            .unwrap_or_else(|| std::path::PathBuf::from(s))
+            .map(|local| local.snapshots_dir().join(reference))
+            .unwrap_or_else(|| std::path::PathBuf::from(reference))
     }
 }
 
-/// Heuristic split between a bare snapshot name and a filesystem path.
-fn snapshot_ref_looks_like_path(s: &str) -> bool {
-    if s.contains('/') || s.starts_with('.') || s.starts_with('~') {
+/// Match the Rust snapshot resolver's bare-name versus filesystem-path boundary.
+fn snapshot_ref_looks_like_path(reference: &str) -> bool {
+    if reference.contains('/') || reference.starts_with('.') || reference.starts_with('~') {
         return true;
     }
-    // On Windows hosts, native separators and drive/UNC prefixes (`C:\snaps\foo`, `C:foo`, `\\server\share`) mark a path even when no forward slash appears.
+
     #[cfg(windows)]
     {
         use typed_path::{Utf8WindowsComponent, Utf8WindowsPath};
-        s.contains('\\')
+
+        reference.contains('\\')
             || matches!(
-                Utf8WindowsPath::new(s).components().next(),
+                Utf8WindowsPath::new(reference).components().next(),
                 Some(Utf8WindowsComponent::Prefix(_))
             )
     }

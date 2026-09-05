@@ -1,5 +1,10 @@
 import { withMappedErrors } from "./internal/error-mapping.js";
 import {
+  compactionResultFromJson,
+  type DiskCompactionOptions,
+  type DiskCompactionResult,
+} from "./compact.js";
+import {
   modificationPlanFromJson,
   modifyOptionsToNapi,
   type ModifyOptions,
@@ -462,6 +467,14 @@ export class Sandbox implements AsyncDisposable {
       this.inner.modify(modifyOptionsToNapi(opts)),
     );
     return modificationPlanFromJson(raw);
+  }
+
+  /** Explicitly compact sealed root-disk layers without rewriting existing snapshots. */
+  async compact(opts?: DiskCompactionOptions): Promise<DiskCompactionResult> {
+    const raw = await withMappedErrors(() =>
+      this.inner.compact(opts?.layers, opts?.dryRun),
+    );
+    return compactionResultFromJson(raw);
   }
 
   /** Stream metrics snapshots at the given interval (in milliseconds). */

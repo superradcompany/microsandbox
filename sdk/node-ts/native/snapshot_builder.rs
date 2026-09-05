@@ -19,7 +19,7 @@ pub struct JsSnapshotConfig {
     pub labels: Vec<JsSnapshotLabel>,
     pub force: bool,
     pub record_integrity: bool,
-    pub resumable: bool,
+    pub full: bool,
 }
 
 #[derive(Clone)]
@@ -40,7 +40,7 @@ pub struct JsSnapshotBuilder {
     labels: Vec<(String, String)>,
     force: bool,
     record_integrity: bool,
-    resumable: bool,
+    full: bool,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -59,7 +59,7 @@ impl JsSnapshotBuilder {
             labels: Vec::new(),
             force: false,
             record_integrity: false,
-            resumable: false,
+            full: false,
         }
     }
 
@@ -112,12 +112,12 @@ impl JsSnapshotBuilder {
         self
     }
 
-    /// Request a future resumable snapshot.
+    /// Capture disk, memory, execution, and device state from a running sandbox.
     #[napi]
-    pub fn resumable(&mut self) -> &Self {
+    pub fn full(&mut self) -> &Self {
         let prev = self.take_inner();
-        self.inner = Some(prev.resumable());
-        self.resumable = true;
+        self.inner = Some(prev.full());
+        self.full = true;
         self
     }
 
@@ -138,7 +138,7 @@ impl JsSnapshotBuilder {
                 .collect(),
             force: self.force,
             record_integrity: self.record_integrity,
-            resumable: self.resumable,
+            full: self.full,
         }
     }
 

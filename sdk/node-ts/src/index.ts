@@ -99,6 +99,7 @@ export {
 
 // Snapshots
 export { Snapshot, SnapshotArchive } from "./snapshot.js";
+export type { DiskCompactionOptions, DiskCompactionResult } from "./compact.js";
 import { Snapshot as _Snapshot, type SnapshotBuilder as _SnapBT } from "./snapshot.js";
 /**
  * Native fluent builder for a snapshot. `new SnapshotBuilder(name)`

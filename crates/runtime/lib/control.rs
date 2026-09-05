@@ -42,6 +42,14 @@ pub const CONTROL_SOCKET_EXTENSION: &str = "control.sock";
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum ControlRequest {
+    /// Explicitly consolidate the oldest sealed root-disk layers.
+    DiskCompact {
+        /// Oldest layer count including the base; omitted selects all sealed layers.
+        layers: Option<usize>,
+        /// Resolve the selection without changing disk state.
+        #[serde(default)]
+        dry_run: bool,
+    },
     /// Report which live-control operations this sandbox process supports.
     Capabilities,
 
@@ -72,7 +80,7 @@ pub enum ControlRequest {
         changes: Vec<SecretLiveChange>,
     },
 
-    /// Produce one same-epoch resumable checkpoint and return the source to its prior running
+    /// Produce one same-epoch full checkpoint and return the source to its prior running
     /// state after root-last publication.
     CheckpointCreate {
         /// Caller-selected safe checkpoint identity.
@@ -86,8 +94,8 @@ pub enum ControlRequest {
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CheckpointCaptureIntent {
-    /// User-requested resumable snapshot.
-    ResumableSnapshot,
+    /// User-requested full snapshot.
+    FullSnapshot,
     /// Local idle/park continuation.
     Park,
     /// Transparent continuity operation.
@@ -132,6 +140,9 @@ pub struct SecretValue(pub String);
 /// The reply to any control request.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ControlResponse {
+    /// Explicit disk-compaction result or dry-run projection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compaction: Option<crate::checkpoint::DiskCompactionResult>,
     /// Whether the request was accepted.
     pub ok: bool,
 
@@ -184,6 +195,9 @@ pub struct CheckpointControlState {
 /// resize-capable and secrets-incapable.
 #[derive(Debug, Default, Clone, Copy, Serialize, Deserialize)]
 pub struct ControlCapabilities {
+    /// Explicit root-disk prefix compaction is supported.
+    #[serde(default)]
+    pub disk_compact: bool,
     /// Live CPU online/offline targets are available.
     pub cpu_resize: bool,
 
@@ -522,7 +536,7 @@ mod tests {
     fn checkpoint_request_round_trips_through_json() {
         let request = ControlRequest::CheckpointCreate {
             checkpoint_id: "checkpoint_0123456789abcdef".into(),
-            intent: CheckpointCaptureIntent::ResumableSnapshot,
+            intent: CheckpointCaptureIntent::FullSnapshot,
         };
 
         let json = serde_json::to_string(&request).unwrap();
@@ -532,7 +546,7 @@ mod tests {
             parsed,
             ControlRequest::CheckpointCreate {
                 checkpoint_id,
-                intent: CheckpointCaptureIntent::ResumableSnapshot,
+                intent: CheckpointCaptureIntent::FullSnapshot,
             } if checkpoint_id == "checkpoint_0123456789abcdef"
         ));
     }
@@ -542,6 +556,7 @@ mod tests {
         let response = ControlResponse {
             ok: true,
             capabilities: Some(ControlCapabilities {
+                disk_compact: true,
                 cpu_resize: true,
                 memory_resize: false,
                 secrets_update: true,

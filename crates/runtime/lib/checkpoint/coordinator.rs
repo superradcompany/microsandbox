@@ -4,18 +4,25 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
+use microsandbox_agent_client::AgentClient;
 use microsandbox_image::checkpoint::{
     CaptureIntent, CheckpointManifest, ContentRef, DeviceStateRef, LocalObjectStore,
-    MemoryCaptureMode, MemoryExtent, MemoryExtentContent, MemoryManifest, ResourceDescriptor,
-    ResourceTreatment,
+    MemoryCaptureMode, MemoryExtent, MemoryExtentContent, MemoryManifest, ObjectId,
+    ResourceDescriptor, ResourceTreatment,
 };
+use microsandbox_protocol::bootstrap::GuestBootstrap;
+use microsandbox_protocol::core::{
+    CoreError, Ready, WorkloadFreeze, WorkloadFrozen, WorkloadThaw, WorkloadThawed,
+};
+use microsandbox_protocol::message::{Message, MessageType};
 use msb_krun::{
     GuestMemoryRange, IncrementalCaptureDecision, MemoryCaptureOptions, MemoryCapturePlan,
     MemoryCaptureSink,
 };
 
-use super::disk::ManagedRootDisk;
+use super::disk::RuntimeOwnedRootDisk;
 use crate::vm::VmConfig;
 
 //--------------------------------------------------------------------------------------------------
@@ -26,8 +33,13 @@ const TYPE_NET: u32 = 1;
 const TYPE_BLOCK: u32 = 2;
 const TYPE_RNG: u32 = 4;
 const TYPE_VSOCK: u32 = 19;
-const TYPE_FS: u32 = 26;
-const MEMORY_CHUNK_SIZE: usize = 2 * 1024 * 1024;
+pub(super) const TYPE_FS: u32 = 26;
+// Keep zero detection fine-grained so one live page does not force a large sparse range into the
+// object store. Independently pack non-zero ranges into larger immutable objects to amortize
+// hashing, fsync, directory publication, and restore-time object opens.
+const MEMORY_SCAN_CHUNK_SIZE: usize = 2 * 1024 * 1024;
+const MEMORY_OBJECT_PACK_SIZE: usize = 32 * 1024 * 1024;
+const WORKLOAD_CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -38,8 +50,10 @@ pub(crate) struct CheckpointCoordinator {
     root: PathBuf,
     store: LocalObjectStore,
     runtime: tokio::runtime::Handle,
-    root_disk: Option<ManagedRootDisk>,
+    agent_sock: PathBuf,
+    root_disk: Option<RuntimeOwnedRootDisk>,
     fs_resource_bindings: BTreeMap<String, BTreeMap<String, String>>,
+    network_resource_binding: Option<String>,
     previous_memory: Option<MemoryManifest>,
 }
 
@@ -71,6 +85,26 @@ struct PausedCapture {
     result: CheckpointResult,
     memory_plan: MemoryCapturePlan,
     memory_manifest: MemoryManifest,
+    timings: PausedCaptureTimings,
+}
+
+#[derive(Default)]
+struct PausedCaptureTimings {
+    execution_us: u128,
+    devices_us: u128,
+    managed_disk_us: u128,
+    memory_plan_us: u128,
+    memory_capture_us: u128,
+    extent_overlay_us: u128,
+    memory_manifest_us: u128,
+    checkpoint_publish_us: u128,
+}
+
+struct FrozenWorkload {
+    client: AgentClient,
+    attempt_id: String,
+    protocol_generation: u8,
+    ready: Ready,
 }
 
 struct MemoryObjectSink<'a> {
@@ -86,29 +120,61 @@ struct PendingMemoryExtent {
     object_offset: u64,
 }
 
+struct PendingDeviceState {
+    device_type: u32,
+    device_id: String,
+    bytes: Vec<u8>,
+}
+
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
 
 impl CheckpointCoordinator {
+    pub(crate) fn compact(
+        &mut self,
+        vm: &msb_krun::VmControl,
+        layers: Option<usize>,
+        dry_run: bool,
+    ) -> Result<super::DiskCompactionResult, super::disk::RootDiskRolloverError> {
+        match self.root_disk.as_mut() {
+            Some(disk) => disk.compact(Some(vm), &self.runtime, layers, dry_run),
+            None => Err(super::disk::RootDiskRolloverError::pre_rebind(
+                "this root has no runtime-owned disk chain",
+            )),
+        }
+    }
+
     /// Open the per-runtime object store and managed root-disk state.
     pub(crate) fn open(
         runtime_dir: &Path,
         vm: &VmConfig,
+        guest_bootstrap: &GuestBootstrap,
         runtime: tokio::runtime::Handle,
+        agent_sock: &Path,
     ) -> Result<Self, String> {
         let root = runtime_dir.join("checkpoints");
         std::fs::create_dir_all(&root).map_err(|error| error.to_string())?;
         let store = LocalObjectStore::open(runtime_dir.join("checkpoint-store"))
             .map_err(|error| error.to_string())?;
-        let root_disk = ManagedRootDisk::open(runtime_dir, vm)?;
-        let fs_resource_bindings = runtime_owned_fs_bindings(root_disk.is_some());
+        let root_disk = RuntimeOwnedRootDisk::open(runtime_dir, vm)?;
+        let block_root =
+            vm.rootfs_vmdk.is_some() || vm.rootfs_disk.is_some() || vm.rootfs_disk_spec.is_some();
+        let fs_resource_bindings = runtime_owned_fs_bindings(block_root);
+        let network_resource_binding = guest_bootstrap
+            .network
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|error| format!("serialize effective guest network binding: {error}"))?;
         Ok(Self {
             root,
             store,
             runtime,
+            agent_sock: agent_sock.to_path_buf(),
             root_disk,
             fs_resource_bindings,
+            network_resource_binding,
             previous_memory: None,
         })
     }
@@ -120,9 +186,19 @@ impl CheckpointCoordinator {
         checkpoint_id: &str,
         intent: CaptureIntent,
     ) -> Result<CheckpointResult, CheckpointFailure> {
+        let total_started = Instant::now();
         validate_checkpoint_id(checkpoint_id).map_err(CheckpointFailure::before_pause)?;
-        let admitted = admit_resources(vm, &self.fs_resource_bindings)
+        validate_vm_generation_state(vm.vm_generation_state())
             .map_err(CheckpointFailure::before_pause)?;
+        let admission_started = Instant::now();
+        let mut admitted = admit_resources(
+            vm,
+            &self.fs_resource_bindings,
+            self.network_resource_binding.as_deref(),
+        )
+        .map_err(CheckpointFailure::before_pause)?;
+        let admission_us = admission_started.elapsed().as_micros();
+        let staging_started = Instant::now();
         let final_path = self.root.join(checkpoint_id);
         if final_path.exists() {
             return Err(CheckpointFailure::before_pause(
@@ -134,14 +210,39 @@ impl CheckpointCoordinator {
             rand::random::<u64>()
         ));
         std::fs::create_dir(&staging).map_err(CheckpointFailure::before_pause)?;
+        let staging_us = staging_started.elapsed().as_micros();
 
+        // The guest latch is acquired while vCPUs can still service agentd.
+        // It remains held in captured guest memory so a restored child cannot
+        // run application code before VM Generation ID activation completes.
+        let workload_unavailable_started = Instant::now();
+        let freeze_started = Instant::now();
+        let workload = match self.freeze_workload(checkpoint_id) {
+            Ok(workload) => workload,
+            Err(error) => {
+                let _ = std::fs::remove_dir_all(&staging);
+                return Err(CheckpointFailure::before_pause(error));
+            }
+        };
+        let freeze_us = freeze_started.elapsed().as_micros();
+        admitted.resources.push(workload.resource_descriptor());
+
+        let vm_pause_window_started = Instant::now();
+        let pause_started = Instant::now();
         let pause = match vm.pause() {
             Ok(pause) => pause,
             Err(error) => {
                 let _ = std::fs::remove_dir_all(&staging);
-                return Err(CheckpointFailure::paused(error));
+                return match self.thaw_workload(&workload) {
+                    Ok(()) => Err(CheckpointFailure::before_pause(error)),
+                    Err(thaw_error) => Err(CheckpointFailure::paused(format!(
+                        "VM pause failed: {error}; workload thaw failed: {thaw_error}"
+                    ))),
+                };
             }
         };
+        let pause_barrier_us = pause_started.elapsed().as_micros();
+        let paused_capture_started = Instant::now();
         let paused = self.capture_paused(
             vm,
             checkpoint_id,
@@ -152,6 +253,7 @@ impl CheckpointCoordinator {
             &staging,
             &final_path,
         );
+        let paused_capture_us = paused_capture_started.elapsed().as_micros();
         let captured = match paused {
             Ok(captured) => captured,
             Err(mut failure) => {
@@ -160,6 +262,17 @@ impl CheckpointCoordinator {
                 {
                     failure.keep_paused = true;
                     failure.message = format!("{}; source resume failed: {error}", failure.message);
+                } else if !failure.keep_paused
+                    && let Err(error) = self.thaw_workload(&workload)
+                {
+                    failure.keep_paused = true;
+                    failure.message = format!("{}; workload thaw failed: {error}", failure.message);
+                    if let Err(pause_error) = vm.pause() {
+                        failure.message = format!(
+                            "{}; fail-closed VM re-pause failed: {pause_error}",
+                            failure.message
+                        );
+                    }
                 }
                 if failure.published.is_none() {
                     let _ = std::fs::remove_dir_all(&staging);
@@ -168,6 +281,7 @@ impl CheckpointCoordinator {
             }
         };
 
+        let baseline_started = Instant::now();
         let baseline_published = match vm.publish_memory_capture(&captured.memory_plan) {
             Ok(_) => true,
             Err(error) => {
@@ -176,6 +290,8 @@ impl CheckpointCoordinator {
                 false
             }
         };
+        let baseline_publish_us = baseline_started.elapsed().as_micros();
+        let resume_started = Instant::now();
         if let Err(error) = vm.resume(pause) {
             return Err(CheckpointFailure {
                 message: format!("checkpoint published but source resume failed: {error}"),
@@ -183,12 +299,122 @@ impl CheckpointCoordinator {
                 published: Some(Box::new(captured.result)),
             });
         }
+        let resume_us = resume_started.elapsed().as_micros();
+        let vm_pause_window_us = vm_pause_window_started.elapsed().as_micros();
+        let thaw_started = Instant::now();
+        if let Err(error) = self.thaw_workload(&workload) {
+            let repause = vm.pause().err();
+            let message = match repause {
+                Some(pause_error) => format!(
+                    "checkpoint published but workload thaw failed: {error}; fail-closed VM re-pause failed: {pause_error}"
+                ),
+                None => format!("checkpoint published but workload thaw failed: {error}"),
+            };
+            return Err(CheckpointFailure {
+                message,
+                keep_paused: true,
+                published: Some(Box::new(captured.result)),
+            });
+        }
+        let thaw_us = thaw_started.elapsed().as_micros();
+        let workload_unavailable_us = workload_unavailable_started.elapsed().as_micros();
         if baseline_published {
             self.previous_memory = Some(captured.memory_manifest);
         } else {
             self.previous_memory = None;
         }
+        tracing::info!(
+            target: "microsandbox_checkpoint_timing",
+            operation = "capture",
+            checkpoint_id,
+            memory_mode = ?captured.result.memory_mode,
+            memory_logical_bytes = captured.result.memory_logical_bytes,
+            memory_emitted_bytes = captured.result.memory_emitted_bytes,
+            total_us = total_started.elapsed().as_micros(),
+            admission_us,
+            staging_us,
+            freeze_us,
+            pause_barrier_us,
+            paused_capture_us,
+            execution_us = captured.timings.execution_us,
+            devices_us = captured.timings.devices_us,
+            managed_disk_us = captured.timings.managed_disk_us,
+            memory_plan_us = captured.timings.memory_plan_us,
+            memory_capture_us = captured.timings.memory_capture_us,
+            extent_overlay_us = captured.timings.extent_overlay_us,
+            memory_manifest_us = captured.timings.memory_manifest_us,
+            checkpoint_publish_us = captured.timings.checkpoint_publish_us,
+            baseline_publish_us,
+            resume_us,
+            thaw_us,
+            vm_pause_window_us,
+            workload_unavailable_us,
+            "checkpoint capture timing"
+        );
         Ok(captured.result)
+    }
+
+    fn freeze_workload(&self, attempt_id: &str) -> Result<FrozenWorkload, String> {
+        let client = self
+            .runtime
+            .block_on(AgentClient::connect_with_timeout(
+                &self.agent_sock,
+                WORKLOAD_CONTROL_TIMEOUT,
+            ))
+            .map_err(|error| format!("connect workload latch: {error}"))?;
+        let request = WorkloadFreeze {
+            attempt_id: attempt_id.to_string(),
+        };
+        let reply = self
+            .runtime
+            .block_on(async {
+                tokio::time::timeout(
+                    WORKLOAD_CONTROL_TIMEOUT,
+                    client.request(MessageType::WorkloadFreeze, &request),
+                )
+                .await
+            })
+            .map_err(|_| "workload freeze timed out".to_string())?
+            .map_err(|error| format!("request workload freeze: {error}"))?;
+        validate_workload_reply::<WorkloadFrozen>(
+            reply,
+            MessageType::WorkloadFrozen,
+            attempt_id,
+            |payload| &payload.attempt_id,
+        )?;
+        let protocol_generation = client.negotiated_version();
+        let ready = client
+            .ready()
+            .map_err(|error| format!("read workload-agent identity: {error}"))?;
+        Ok(FrozenWorkload {
+            client,
+            attempt_id: attempt_id.to_string(),
+            protocol_generation,
+            ready,
+        })
+    }
+
+    fn thaw_workload(&self, workload: &FrozenWorkload) -> Result<(), String> {
+        let request = WorkloadThaw {
+            attempt_id: workload.attempt_id.clone(),
+        };
+        let reply = self
+            .runtime
+            .block_on(async {
+                tokio::time::timeout(
+                    WORKLOAD_CONTROL_TIMEOUT,
+                    workload.client.request(MessageType::WorkloadThaw, &request),
+                )
+                .await
+            })
+            .map_err(|_| "workload thaw timed out".to_string())?
+            .map_err(|error| format!("request workload thaw: {error}"))?;
+        validate_workload_reply::<WorkloadThawed>(
+            reply,
+            MessageType::WorkloadThawed,
+            &workload.attempt_id,
+            |payload| &payload.attempt_id,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -203,6 +429,8 @@ impl CheckpointCoordinator {
         staging: &Path,
         final_path: &Path,
     ) -> Result<PausedCapture, CheckpointFailure> {
+        let mut timings = PausedCaptureTimings::default();
+        let execution_started = Instant::now();
         let execution = vm
             .capture_execution_state()
             .map_err(CheckpointFailure::resumable)?;
@@ -219,16 +447,23 @@ impl CheckpointCoordinator {
         self.store
             .link_into(&execution_id, staging)
             .map_err(CheckpointFailure::resumable)?;
+        timings.execution_us = execution_started.elapsed().as_micros();
 
-        let mut device_refs = Vec::with_capacity(inventory.len());
+        let devices_started = Instant::now();
+        let mut pending_devices = Vec::with_capacity(inventory.len());
         let mut disk_roots = Vec::new();
         for (device_type, device_id) in inventory {
-            let bytes = if *device_type == TYPE_BLOCK && device_id == "vdb" {
+            let runtime_owned_root = self
+                .root_disk
+                .as_ref()
+                .is_some_and(|disk| disk.device_id() == device_id);
+            let bytes = if *device_type == TYPE_BLOCK && runtime_owned_root {
                 let disk = self.root_disk.as_mut().ok_or_else(|| {
                     CheckpointFailure::resumable(
                         "managed root block device has no rollover provider",
                     )
                 })?;
+                let disk_started = Instant::now();
                 let rollover = disk
                     .rollover(vm, &self.runtime, staging, pause_generation)
                     .map_err(|error| CheckpointFailure {
@@ -236,6 +471,7 @@ impl CheckpointCoordinator {
                         keep_paused: error.keep_paused,
                         published: None,
                     })?;
+                timings.managed_disk_us += disk_started.elapsed().as_micros();
                 let manifest_bytes = rollover
                     .manifest
                     .to_canonical_bytes()
@@ -283,31 +519,30 @@ impl CheckpointCoordinator {
                 }
                 state.encode().map_err(CheckpointFailure::resumable)?
             };
-            let state_id = self
-                .store
-                .put_bytes(&bytes)
-                .map_err(CheckpointFailure::resumable)?;
-            self.store
-                .link_into(&state_id, staging)
-                .map_err(CheckpointFailure::resumable)?;
-            device_refs.push(DeviceStateRef {
+            pending_devices.push(PendingDeviceState {
                 device_type: *device_type,
                 device_id: device_id.clone(),
-                state: state_id,
+                bytes,
             });
         }
+        let device_refs = persist_device_states(&self.store, staging, &pending_devices)
+            .map_err(CheckpointFailure::resumable)?;
+        timings.devices_us = devices_started.elapsed().as_micros();
 
+        let memory_plan_started = Instant::now();
         let (memory_plan, memory_mode, base_extents) =
             self.plan_memory(vm).map_err(CheckpointFailure::resumable)?;
+        timings.memory_plan_us = memory_plan_started.elapsed().as_micros();
         let mut sink = MemoryObjectSink {
             store: &self.store,
             updates: Vec::new(),
-            pending_bytes: Vec::with_capacity(MEMORY_CHUNK_SIZE),
+            pending_bytes: Vec::with_capacity(MEMORY_OBJECT_PACK_SIZE),
             pending_extents: Vec::new(),
         };
+        let memory_capture_started = Instant::now();
         let stats = match vm.capture_memory(
             &memory_plan,
-            MemoryCaptureOptions::new(MEMORY_CHUNK_SIZE, true)
+            MemoryCaptureOptions::new(MEMORY_SCAN_CHUNK_SIZE, true)
                 .map_err(CheckpointFailure::resumable)?,
             &mut sink,
         ) {
@@ -324,6 +559,8 @@ impl CheckpointCoordinator {
                 return Err(CheckpointFailure::resumable(error));
             }
         };
+        timings.memory_capture_us = memory_capture_started.elapsed().as_micros();
+        let extent_overlay_started = Instant::now();
         let extents = match overlay_extents(base_extents, updates) {
             Ok(extents) => extents,
             Err(error) => {
@@ -331,6 +568,8 @@ impl CheckpointCoordinator {
                 return Err(CheckpointFailure::resumable(error));
             }
         };
+        timings.extent_overlay_us = extent_overlay_started.elapsed().as_micros();
+        let memory_manifest_started = Instant::now();
         let memory_manifest = MemoryManifest {
             schema: "microsandbox.memory/1".into(),
             architecture: std::env::consts::ARCH.into(),
@@ -352,13 +591,17 @@ impl CheckpointCoordinator {
         // object once so closure construction never rehashes or relinks it per guest extent.
         let mut linked_memory_objects = BTreeSet::new();
         for extent in &memory_manifest.extents {
-            if let MemoryExtentContent::Object(content) = &extent.content
-                && linked_memory_objects.insert(content.object.clone())
-                && let Err(error) = self.store.link_into(&content.object, staging)
-            {
-                let _ = vm.abandon_memory_capture(&memory_plan);
-                return Err(CheckpointFailure::resumable(error));
+            if let MemoryExtentContent::Object(content) = &extent.content {
+                linked_memory_objects.insert(content.object.clone());
             }
+        }
+        if let Err(error) = parallel_link_objects(
+            &self.store,
+            staging,
+            &linked_memory_objects.into_iter().collect::<Vec<_>>(),
+        ) {
+            let _ = vm.abandon_memory_capture(&memory_plan);
+            return Err(CheckpointFailure::resumable(error));
         }
         let memory_id = match self.store.put_bytes(&memory_bytes) {
             Ok(id) => id,
@@ -371,7 +614,9 @@ impl CheckpointCoordinator {
             let _ = vm.abandon_memory_capture(&memory_plan);
             return Err(CheckpointFailure::resumable(error));
         }
+        timings.memory_manifest_us = memory_manifest_started.elapsed().as_micros();
 
+        let checkpoint_publish_started = Instant::now();
         let checkpoint = CheckpointManifest {
             schema: "microsandbox.checkpoint/1".into(),
             checkpoint_id: checkpoint_id.into(),
@@ -407,6 +652,7 @@ impl CheckpointCoordinator {
             let _ = vm.abandon_memory_capture(&memory_plan);
             return Err(CheckpointFailure::resumable(error));
         }
+        timings.checkpoint_publish_us = checkpoint_publish_started.elapsed().as_micros();
 
         Ok(PausedCapture {
             result: CheckpointResult {
@@ -419,6 +665,7 @@ impl CheckpointCoordinator {
             },
             memory_plan,
             memory_manifest,
+            timings,
         })
     }
 
@@ -483,6 +730,26 @@ impl CheckpointFailure {
     }
 }
 
+impl FrozenWorkload {
+    fn resource_descriptor(&self) -> ResourceDescriptor {
+        ResourceDescriptor {
+            id: "guest:agentd".into(),
+            kind: "agent".into(),
+            treatment: ResourceTreatment::Serialize,
+            binding: BTreeMap::from([
+                (
+                    "protocol_generation".into(),
+                    self.protocol_generation.to_string(),
+                ),
+                ("agent_version".into(), self.ready.agent_version.clone()),
+                ("boot_time_ns".into(), self.ready.boot_time_ns.to_string()),
+                ("init_time_ns".into(), self.ready.init_time_ns.to_string()),
+                ("ready_time_ns".into(), self.ready.ready_time_ns.to_string()),
+            ]),
+        }
+    }
+}
+
 impl MemoryObjectSink<'_> {
     /// Publish the final partial content pack and return its exact guest-address projection.
     fn finish(mut self) -> io::Result<Vec<MemoryExtent>> {
@@ -509,7 +776,7 @@ impl MemoryObjectSink<'_> {
                     object_offset: extent.object_offset,
                 }),
             }));
-        self.pending_bytes = Vec::with_capacity(MEMORY_CHUNK_SIZE);
+        self.pending_bytes = Vec::with_capacity(MEMORY_OBJECT_PACK_SIZE);
         Ok(())
     }
 }
@@ -536,11 +803,11 @@ impl MemoryCaptureSink for MemoryObjectSink<'_> {
         }
 
         if !self.pending_bytes.is_empty()
-            && self.pending_bytes.len().saturating_add(bytes.len()) > MEMORY_CHUNK_SIZE
+            && self.pending_bytes.len().saturating_add(bytes.len()) > MEMORY_OBJECT_PACK_SIZE
         {
             self.flush_pending()?;
         }
-        if bytes.len() > MEMORY_CHUNK_SIZE {
+        if bytes.len() > MEMORY_OBJECT_PACK_SIZE {
             let object = self
                 .store
                 .put_bytes(bytes)
@@ -580,9 +847,41 @@ impl MemoryCaptureSink for MemoryObjectSink<'_> {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
+fn validate_workload_reply<T>(
+    reply: Message,
+    expected_type: MessageType,
+    expected_attempt: &str,
+    attempt_id: impl for<'a> Fn(&'a T) -> &'a str,
+) -> Result<(), String>
+where
+    T: serde::de::DeserializeOwned,
+{
+    if reply.t == MessageType::CoreError {
+        let error = reply
+            .payload::<CoreError>()
+            .map_err(|decode| format!("decode workload control error: {decode}"))?;
+        return Err(format!("workload control rejected: {}", error.message));
+    }
+    if reply.t != expected_type {
+        return Err(format!(
+            "unexpected workload control reply {} (expected {})",
+            reply.t.as_str(),
+            expected_type.as_str()
+        ));
+    }
+    let payload = reply
+        .payload::<T>()
+        .map_err(|error| format!("decode {}: {error}", expected_type.as_str()))?;
+    if attempt_id(&payload) != expected_attempt {
+        return Err("workload control reply belongs to another checkpoint attempt".into());
+    }
+    Ok(())
+}
+
 fn admit_resources(
     vm: &msb_krun::VmControl,
     fs_resource_bindings: &BTreeMap<String, BTreeMap<String, String>>,
+    network_resource_binding: Option<&str>,
 ) -> Result<AdmittedResources, String> {
     let inventory = vm
         .virtio_device_inventory()
@@ -616,6 +915,12 @@ fn admit_resources(
         };
         let mut binding = BTreeMap::new();
         binding.insert("device_id".into(), device_id.clone());
+        if *device_type == TYPE_NET {
+            let network = network_resource_binding.ok_or_else(|| {
+                format!("active network resource {device_id} has no effective guest binding")
+            })?;
+            binding.insert("guest_network".into(), network.into());
+        }
         if let Some(fs_binding) = fs_binding {
             binding.extend(fs_binding.clone());
         }
@@ -632,21 +937,39 @@ fn admit_resources(
     })
 }
 
+/// Require the guest-side generation driver before producing a checkpoint that promises full restore.
+///
+/// Merely attaching the host transport is insufficient: without a bound guest driver, a restored
+/// child cannot acknowledge the fresh generation that gates workload thaw.
+fn validate_vm_generation_state(state: Option<msb_krun::VmGenerationState>) -> Result<(), String> {
+    let state = state.ok_or_else(|| {
+        "VM Generation ID transport is unavailable for full checkpoints".to_string()
+    })?;
+    if state.driver_error {
+        return Err("guest VM Generation ID driver reported a protocol error".to_string());
+    }
+    if !state.driver_ready {
+        return Err("guest VM Generation ID driver is not ready for full checkpoints".to_string());
+    }
+    if !state.clock_sync_supported {
+        return Err("guest kernel lacks clock-aware activation required for full checkpoints; restart with the updated kernel".to_string());
+    }
+    Ok(())
+}
+
 /// Describe the two filesystem transports owned by the runtime itself.
 ///
 /// libkrun exposes transport identifiers rather than FUSE mount tags in its
 /// device inventory. Microsandbox constructs filesystems in a fixed order:
-/// the root/bootstrap transport first and `msb_runtime` second. A managed
-/// block root may reconnect the first transport because it is only the
+/// the root/bootstrap transport first and `msb_runtime` second. A block
+/// root may reconnect the first transport because it is only the
 /// discarded init trampoline. The runtime share is likewise an explicitly
 /// reconnectable host-control binding. Every later filesystem belongs to a
 /// user mount and remains ineligible until its provider can preserve live
 /// handles and object identity.
-fn runtime_owned_fs_bindings(
-    managed_block_root: bool,
-) -> BTreeMap<String, BTreeMap<String, String>> {
+fn runtime_owned_fs_bindings(block_root: bool) -> BTreeMap<String, BTreeMap<String, String>> {
     let mut bindings = BTreeMap::new();
-    if managed_block_root {
+    if block_root {
         bindings.insert(
             "virtio_fs0".into(),
             BTreeMap::from([
@@ -813,6 +1136,98 @@ fn resource_kind(device_type: u32) -> &'static str {
     }
 }
 
+/// Persist independent device envelopes concurrently after every device has reached the same
+/// paused epoch. Immutable-object publication is thread-safe, and the returned vector retains the
+/// inventory order required by the checkpoint manifest.
+fn persist_device_states(
+    store: &LocalObjectStore,
+    staging: &Path,
+    pending: &[PendingDeviceState],
+) -> Result<Vec<DeviceStateRef>, String> {
+    if pending.is_empty() {
+        return Ok(Vec::new());
+    }
+    let workers = parallel_worker_count(pending.len());
+    let chunk_size = pending.len().div_ceil(workers);
+    std::thread::scope(|scope| {
+        let handles = pending
+            .chunks(chunk_size)
+            .map(|chunk| {
+                scope.spawn(move || {
+                    chunk
+                        .iter()
+                        .map(|state| {
+                            let id = store.put_bytes(&state.bytes).map_err(|error| {
+                                format!("store device state {}: {error}", state.device_id)
+                            })?;
+                            store.link_into(&id, staging).map_err(|error| {
+                                format!("link device state {}: {error}", state.device_id)
+                            })?;
+                            Ok(DeviceStateRef {
+                                device_type: state.device_type,
+                                device_id: state.device_id.clone(),
+                                state: id,
+                            })
+                        })
+                        .collect::<Result<Vec<_>, String>>()
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut refs = Vec::with_capacity(pending.len());
+        for handle in handles {
+            refs.extend(
+                handle
+                    .join()
+                    .map_err(|_| "device-state persistence worker panicked".to_string())??,
+            );
+        }
+        Ok(refs)
+    })
+}
+
+/// Link independent immutable memory objects concurrently. Each object remains fully verified by
+/// `LocalObjectStore::link_into`; this only overlaps hashing and filesystem durability waits.
+fn parallel_link_objects(
+    store: &LocalObjectStore,
+    staging: &Path,
+    objects: &[ObjectId],
+) -> Result<(), String> {
+    if objects.is_empty() {
+        return Ok(());
+    }
+    let workers = parallel_worker_count(objects.len());
+    let chunk_size = objects.len().div_ceil(workers);
+    std::thread::scope(|scope| {
+        let handles = objects
+            .chunks(chunk_size)
+            .map(|chunk| {
+                scope.spawn(move || {
+                    for object in chunk {
+                        store
+                            .link_into(object, staging)
+                            .map_err(|error| format!("link memory object {object}: {error}"))?;
+                    }
+                    Ok::<(), String>(())
+                })
+            })
+            .collect::<Vec<_>>();
+        for handle in handles {
+            handle
+                .join()
+                .map_err(|_| "memory-object link worker panicked".to_string())??;
+        }
+        Ok(())
+    })
+}
+
+fn parallel_worker_count(items: usize) -> usize {
+    std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1)
+        .min(8)
+        .min(items.max(1))
+}
+
 fn sync_directory(path: &Path) -> io::Result<()> {
     #[cfg(unix)]
     std::fs::File::open(path)?.sync_all()?;
@@ -827,11 +1242,17 @@ fn sync_directory(path: &Path) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{MemoryObjectSink, overlay_extents, publish_root_last, runtime_owned_fs_bindings};
+    use super::{
+        MemoryObjectSink, PendingDeviceState, overlay_extents, persist_device_states,
+        publish_root_last, runtime_owned_fs_bindings, validate_vm_generation_state,
+        validate_workload_reply,
+    };
 
     use microsandbox_image::checkpoint::{
         ContentRef, LocalObjectStore, MemoryExtent, MemoryExtentContent, ObjectId,
     };
+    use microsandbox_protocol::core::{CoreError, CoreErrorKind, WorkloadFrozen};
+    use microsandbox_protocol::message::{Message, MessageType};
     use msb_krun::{GuestMemoryRange, MemoryCaptureSink};
 
     #[test]
@@ -881,6 +1302,52 @@ mod tests {
             microsandbox_protocol::RUNTIME_FS_TAG
         );
         assert!(!bindings.contains_key("virtio_fs2"));
+    }
+
+    #[test]
+    fn full_checkpoint_requires_a_ready_generation_driver() {
+        assert!(validate_vm_generation_state(None).is_err());
+        assert!(
+            validate_vm_generation_state(Some(msb_krun::VmGenerationState {
+                driver_ready: true,
+                driver_error: false,
+                clock_sync_supported: false,
+                requested: None,
+                processed: None,
+            }))
+            .unwrap_err()
+            .contains("clock-aware")
+        );
+        assert!(
+            validate_vm_generation_state(Some(msb_krun::VmGenerationState {
+                driver_ready: false,
+                driver_error: false,
+                clock_sync_supported: false,
+                requested: None,
+                processed: None,
+            }))
+            .is_err()
+        );
+        assert!(
+            validate_vm_generation_state(Some(msb_krun::VmGenerationState {
+                driver_ready: true,
+                driver_error: true,
+                clock_sync_supported: true,
+                requested: None,
+                processed: None,
+            }))
+            .is_err()
+        );
+        assert!(
+            validate_vm_generation_state(Some(msb_krun::VmGenerationState {
+                driver_ready: true,
+                driver_error: false,
+                clock_sync_supported: true,
+                requested: None,
+                processed: None,
+            }))
+            .is_ok()
+        );
     }
 
     #[test]
@@ -942,5 +1409,93 @@ mod tests {
             std::fs::read(store.object_path(&first.object)).unwrap(),
             b"abcde"
         );
+    }
+
+    #[test]
+    fn parallel_device_persistence_preserves_inventory_order() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = LocalObjectStore::open(temp.path().join("store")).unwrap();
+        let staging = temp.path().join("checkpoint");
+        std::fs::create_dir(&staging).unwrap();
+        let pending = (0..16)
+            .map(|index| PendingDeviceState {
+                device_type: index,
+                device_id: format!("device-{index:02}"),
+                bytes: vec![index as u8; 4096],
+            })
+            .collect::<Vec<_>>();
+
+        let persisted = persist_device_states(&store, &staging, &pending).unwrap();
+
+        assert_eq!(persisted.len(), pending.len());
+        for (index, state) in persisted.iter().enumerate() {
+            assert_eq!(state.device_type, index as u32);
+            assert_eq!(state.device_id, format!("device-{index:02}"));
+            assert_eq!(
+                std::fs::read(store.object_path(&state.state)).unwrap(),
+                vec![index as u8; 4096]
+            );
+        }
+    }
+
+    #[test]
+    fn workload_reply_must_confirm_the_exact_attempt() {
+        let reply = Message::with_payload(
+            MessageType::WorkloadFrozen,
+            7,
+            &WorkloadFrozen {
+                attempt_id: "checkpoint-42".into(),
+            },
+        )
+        .unwrap();
+
+        validate_workload_reply::<WorkloadFrozen>(
+            reply,
+            MessageType::WorkloadFrozen,
+            "checkpoint-42",
+            |payload| &payload.attempt_id,
+        )
+        .unwrap();
+
+        let stale = Message::with_payload(
+            MessageType::WorkloadFrozen,
+            7,
+            &WorkloadFrozen {
+                attempt_id: "checkpoint-41".into(),
+            },
+        )
+        .unwrap();
+        assert!(
+            validate_workload_reply::<WorkloadFrozen>(
+                stale,
+                MessageType::WorkloadFrozen,
+                "checkpoint-42",
+                |payload| &payload.attempt_id,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn workload_core_error_preserves_guest_diagnostic() {
+        let reply = Message::with_payload(
+            MessageType::CoreError,
+            7,
+            &CoreError {
+                kind: CoreErrorKind::CapabilityUnavailable,
+                message: "freezer unavailable".into(),
+                offending_type: Some(MessageType::WorkloadFreeze.as_str().into()),
+            },
+        )
+        .unwrap();
+
+        let error = validate_workload_reply::<WorkloadFrozen>(
+            reply,
+            MessageType::WorkloadFrozen,
+            "checkpoint-42",
+            |payload| &payload.attempt_id,
+        )
+        .unwrap_err();
+        assert!(error.contains("freezer unavailable"));
     }
 }

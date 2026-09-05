@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     ffi::CStr,
     fs::File,
     io::{self, Write},
@@ -12,6 +12,7 @@ use msb_krun::backends::fs::{
     Context, DirEntry, DynFileSystem, Entry, FsOptions, OpenOptions, ZeroCopyWriter, stat64,
     statvfs64,
 };
+use serde::{Deserialize, Serialize};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -35,6 +36,8 @@ const LINUX_EEXIST: i32 = 17;
 const LINUX_ENOENT: i32 = 2;
 const LINUX_ENOTDIR: i32 = 20;
 const LINUX_EISDIR: i32 = 21;
+const MOBILITY_STATE_VERSION: u16 = 1;
+const MAX_MOBILITY_STATE_BYTES: usize = 4 * 1024 * 1024;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -56,6 +59,14 @@ struct DirNode {
     parent: u64,
 }
 
+#[derive(Deserialize, Serialize)]
+struct BootstrapMobilityState {
+    version: u16,
+    next_inode: u64,
+    nodes: Vec<(u64, u64)>,
+    children: Vec<(u64, Vec<u8>, u64)>,
+}
+
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
@@ -70,6 +81,106 @@ impl AgentBootstrapFs {
             init_file: Mutex::new(init_file),
             dirs: Mutex::new(DirState::new()),
         })
+    }
+
+    fn decode_mobility_state(bytes: &[u8]) -> io::Result<DirState> {
+        if bytes.len() > MAX_MOBILITY_STATE_BYTES {
+            return Err(invalid_state(
+                "agent bootstrap filesystem state exceeds 4 MiB",
+            ));
+        }
+        let state: BootstrapMobilityState = serde_json::from_slice(bytes)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        if state.version != MOBILITY_STATE_VERSION {
+            return Err(invalid_state(
+                "unsupported agent bootstrap filesystem state version",
+            ));
+        }
+
+        let mut nodes = BTreeMap::new();
+        for (inode, parent) in state.nodes {
+            if inode == INIT_INODE || nodes.insert(inode, DirNode { parent }).is_some() {
+                return Err(invalid_state("duplicate or reserved bootstrap inode"));
+            }
+        }
+        if nodes
+            .get(&ROOT_INODE)
+            .is_none_or(|node| node.parent != ROOT_INODE)
+        {
+            return Err(invalid_state("bootstrap root inode is missing"));
+        }
+
+        let mut children = BTreeMap::new();
+        let mut child_ids = BTreeSet::new();
+        for (parent, name, child) in state.children {
+            if name.is_empty()
+                || name == b"."
+                || name == b".."
+                || name.contains(&0)
+                || name.contains(&b'/')
+                || !nodes.contains_key(&parent)
+                || nodes.get(&child).is_none_or(|node| node.parent != parent)
+                || !child_ids.insert(child)
+                || children.insert((parent, name), child).is_some()
+            {
+                return Err(invalid_state("invalid bootstrap directory topology"));
+            }
+        }
+        if nodes.keys().any(|inode| *inode >= state.next_inode)
+            || state.next_inode <= INIT_INODE
+            || nodes
+                .keys()
+                .any(|inode| *inode != ROOT_INODE && !child_ids.contains(inode))
+        {
+            return Err(invalid_state("invalid bootstrap next inode or topology"));
+        }
+
+        Ok(DirState {
+            next_inode: state.next_inode,
+            nodes,
+            children,
+        })
+    }
+
+    fn dir_entries(&self, inode: u64) -> io::Result<Vec<DirEntry<'static>>> {
+        let dirs = self.dirs.lock().unwrap();
+        let parent = dirs
+            .parent(inode)
+            .ok_or_else(|| linux_error(LINUX_ENOTDIR))?;
+        let mut entries = vec![
+            DirEntry {
+                ino: inode,
+                offset: 1,
+                type_: DT_DIR,
+                name: b".",
+            },
+            DirEntry {
+                ino: parent,
+                offset: 2,
+                type_: DT_DIR,
+                name: b"..",
+            },
+        ];
+
+        if inode == ROOT_INODE {
+            entries.push(DirEntry {
+                ino: INIT_INODE,
+                offset: entries.len() as u64 + 1,
+                type_: DT_REG,
+                name: INIT_NAME,
+            });
+        }
+
+        for (child, name) in dirs.child_entries(inode)? {
+            entries.push(DirEntry {
+                ino: child,
+                offset: entries.len() as u64 + 1,
+                type_: DT_DIR,
+                name: Box::leak(name.into_boxed_slice()),
+            });
+        }
+
+        Ok(entries)
     }
 }
 
@@ -144,6 +255,41 @@ impl DirState {
 //--------------------------------------------------------------------------------------------------
 
 impl DynFileSystem for AgentBootstrapFs {
+    fn capture_state(&self) -> io::Result<Vec<u8>> {
+        let dirs = self.dirs.lock().unwrap();
+        let state = BootstrapMobilityState {
+            version: MOBILITY_STATE_VERSION,
+            next_inode: dirs.next_inode,
+            nodes: dirs
+                .nodes
+                .iter()
+                .map(|(inode, node)| (*inode, node.parent))
+                .collect(),
+            children: dirs
+                .children
+                .iter()
+                .map(|((parent, name), child)| (*parent, name.clone(), *child))
+                .collect(),
+        };
+        let bytes = serde_json::to_vec(&state).map_err(io::Error::other)?;
+        if bytes.len() > MAX_MOBILITY_STATE_BYTES {
+            return Err(invalid_state(
+                "agent bootstrap filesystem state exceeds 4 MiB",
+            ));
+        }
+        Ok(bytes)
+    }
+
+    fn validate_state(&self, bytes: &[u8]) -> io::Result<()> {
+        Self::decode_mobility_state(bytes).map(drop)
+    }
+
+    fn restore_state(&self, bytes: &[u8]) -> io::Result<()> {
+        let restored = Self::decode_mobility_state(bytes)?;
+        *self.dirs.lock().unwrap() = restored;
+        Ok(())
+    }
+
     fn init(&self, _capable: FsOptions) -> io::Result<FsOptions> {
         Ok(FsOptions::empty())
     }
@@ -387,52 +533,13 @@ impl DynFileSystem for AgentBootstrapFs {
     }
 }
 
-impl AgentBootstrapFs {
-    fn dir_entries(&self, inode: u64) -> io::Result<Vec<DirEntry<'static>>> {
-        let dirs = self.dirs.lock().unwrap();
-        let parent = dirs
-            .parent(inode)
-            .ok_or_else(|| linux_error(LINUX_ENOTDIR))?;
-        let mut entries = vec![
-            DirEntry {
-                ino: inode,
-                offset: 1,
-                type_: DT_DIR,
-                name: b".",
-            },
-            DirEntry {
-                ino: parent,
-                offset: 2,
-                type_: DT_DIR,
-                name: b"..",
-            },
-        ];
-
-        if inode == ROOT_INODE {
-            entries.push(DirEntry {
-                ino: INIT_INODE,
-                offset: entries.len() as u64 + 1,
-                type_: DT_REG,
-                name: INIT_NAME,
-            });
-        }
-
-        for (child, name) in dirs.child_entries(inode)? {
-            entries.push(DirEntry {
-                ino: child,
-                offset: entries.len() as u64 + 1,
-                type_: DT_DIR,
-                name: Box::leak(name.into_boxed_slice()),
-            });
-        }
-
-        Ok(entries)
-    }
-}
-
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
+
+fn invalid_state(message: &'static str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, message)
+}
 
 fn dir_entry_for_ino(inode: u64) -> Entry {
     Entry {

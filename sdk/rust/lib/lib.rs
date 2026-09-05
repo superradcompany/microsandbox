@@ -78,7 +78,7 @@ pub use sandbox::{
 pub use snapshot::{
     CheckpointSnapshotState, FileSnapshotState, SaveOpts, Snapshot, SnapshotArchive,
     SnapshotBuilder, SnapshotConfig, SnapshotDescriptor, SnapshotFormat, SnapshotHandle,
-    SnapshotScope, SnapshotSpec, SnapshotState, SnapshotVerifyReport, UpperIntegrity,
-    UpperVerifyStatus,
+    SnapshotRootDisk, SnapshotScope, SnapshotSpec, SnapshotState, SnapshotVerifyReport,
+    UpperIntegrity, UpperVerifyStatus,
 };
 pub use volume::{Volume, VolumeConfig, VolumeHandle, VolumeKind, VolumeSpec};

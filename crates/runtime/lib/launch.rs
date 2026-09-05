@@ -128,6 +128,22 @@ pub struct LaunchConfig {
     /// Host Unix sockets exposed through virtio-vsock.
     #[serde(default)]
     pub vsock: Vec<VsockRouteSpec>,
+
+    /// Construction-only checkpoint restore source, if this launch is a clone/rollback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint_restore: Option<CheckpointRestoreConfig>,
+}
+
+/// Pinned child-owned checkpoint closure delivered to the sandbox process.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CheckpointRestoreConfig {
+    /// Path to the complete eager checkpoint closure.
+    pub closure: PathBuf,
+    /// Expected algorithm-qualified composite checkpoint root.
+    pub checkpoint_root: String,
+    /// Stable source checkpoint identifier retained for diagnostics.
+    pub checkpoint_id: String,
 }
 
 /// Lifetime bounds for the sandbox.
@@ -175,6 +191,19 @@ pub struct RootfsConfig {
     /// Mount the disk image as read-only.
     pub disk_readonly: bool,
 
+    /// Complete oldest-to-head chain for a runtime-owned flat root disk.
+    ///
+    /// This is mutually exclusive with the single-file `disk` representation. It is used after
+    /// checkpoint rollover has replaced the original raw root with a qcow2 successor.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub disk_layers: Vec<RootfsUpperLayerConfig>,
+
+    /// Whether the direct root disk is sandbox-owned and may be rolled over for checkpoints.
+    ///
+    /// User-supplied disk-image roots deliberately leave this false.
+    #[serde(default)]
+    pub disk_runtime_owned: bool,
+
     /// Writable upper block device for OCI rootfs overlay.
     pub upper: Option<PathBuf>,
 
@@ -183,4 +212,21 @@ pub struct RootfsConfig {
     /// root disks so the runner attaches with the right format.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upper_format: Option<String>,
+
+    /// Complete oldest-to-head writable upper chain for a restored managed root.
+    ///
+    /// This is mutually exclusive with `upper`/`upper_format`. Every path is child-owned before
+    /// the launch contract is published, and libkrun presents the chain as one virtio-blk device.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub upper_layers: Vec<RootfsUpperLayerConfig>,
+}
+
+/// One explicitly resolved member of a managed root upper chain.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RootfsUpperLayerConfig {
+    /// Exact child-owned host path.
+    pub path: PathBuf,
+    /// On-disk format (`raw` or `qcow2`).
+    pub format: String,
 }

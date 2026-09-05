@@ -45,6 +45,10 @@ pub struct JsSaveOpts {
     pub with_image: Option<bool>,
     /// Skip zstd compression and write a plain `.tar`.
     pub plain_tar: Option<bool>,
+    /// Exact base snapshot or standalone archive for incremental disk export.
+    pub since: Option<String>,
+    /// Newest N immutable disk layers to include.
+    pub last_layers: Option<f64>,
 }
 
 /// Result of `Snapshot.verify()`.
@@ -58,6 +62,8 @@ pub struct JsSnapshotVerifyReport {
     pub upper_kind: String,
     pub upper_algorithm: Option<String>,
     pub upper_digest: Option<String>,
+    /// Verified composite-checkpoint root, when the artifact is full.
+    pub checkpoint_root: Option<String>,
 }
 
 /// Options for `Snapshot.remove()` (instance and static).
@@ -75,7 +81,7 @@ pub struct JsSnapshotInfo {
     pub name: Option<String>,
     pub parent_digest: Option<String>,
     pub image_ref: String,
-    /// `"disk"` today; `"resumable"` once memory/device-state restore lands.
+    /// `"disk"` for file state or `"full"` for a complete VM checkpoint.
     pub scope: String,
     /// `"raw"` or `"qcow2"`.
     pub state_kind: String,
@@ -169,6 +175,8 @@ impl JsSnapshot {
             with_parents: opts.with_parents.unwrap_or(false),
             with_image: opts.with_image.unwrap_or(false),
             plain_tar: opts.plain_tar.unwrap_or(false),
+            since: opts.since,
+            last_layers: crate::sandbox::checked_layer_count(opts.last_layers)?,
         };
         RustSnapshot::save(&name_or_path, &PathBuf::from(out), rust_opts)
             .await
@@ -176,11 +184,18 @@ impl JsSnapshot {
     }
 
     #[napi]
-    pub async fn load(archive: String, dest: Option<String>) -> Result<JsSnapshotHandle> {
+    pub async fn load(
+        archive: String,
+        dest: Option<String>,
+        base: Option<String>,
+    ) -> Result<JsSnapshotHandle> {
         let dest = dest.map(PathBuf::from);
-        let h = RustSnapshot::load(&PathBuf::from(archive), dest.as_deref())
-            .await
-            .map_err(to_napi_error)?;
+        let h = if let Some(base) = base {
+            RustSnapshot::load_with_base(&PathBuf::from(archive), dest.as_deref(), &base).await
+        } else {
+            RustSnapshot::load(&PathBuf::from(archive), dest.as_deref()).await
+        }
+        .map_err(to_napi_error)?;
         Ok(JsSnapshotHandle::from_rust(h))
     }
 
@@ -330,7 +345,7 @@ impl JsSnapshot {
             .map(ToString::to_string)
     }
 
-    #[napi(getter, ts_return_type = "'disk' | 'resumable'")]
+    #[napi(getter, ts_return_type = "'disk' | 'full'")]
     pub fn scope(&self) -> String {
         format_scope(self.inner.manifest().scope).into()
     }
@@ -415,7 +430,7 @@ impl JsSnapshotHandle {
         self.inner.parent_digest().map(|s| s.to_string())
     }
 
-    #[napi(getter, ts_return_type = "'disk' | 'resumable'")]
+    #[napi(getter, ts_return_type = "'disk' | 'full'")]
     pub fn scope(&self) -> String {
         format_scope(self.inner.scope()).into()
     }
@@ -513,7 +528,7 @@ fn format_str(f: RustSnapshotFormat) -> &'static str {
 fn format_scope(scope: RustSnapshotScope) -> &'static str {
     match scope {
         RustSnapshotScope::Disk => "disk",
-        RustSnapshotScope::Resumable => "resumable",
+        RustSnapshotScope::Full => "full",
     }
 }
 
@@ -542,6 +557,7 @@ fn snapshot_handle_to_info(h: &RustSnapshotHandle) -> JsSnapshotInfo {
 fn verify_report_to_js(
     report: microsandbox::snapshot::SnapshotVerifyReport,
 ) -> JsSnapshotVerifyReport {
+    let checkpoint_root = report.checkpoint.map(|checkpoint| checkpoint.root);
     let (kind, algorithm, digest) = match report.upper {
         RustUpperVerifyStatus::NotRecorded => ("notRecorded".to_string(), None, None),
         RustUpperVerifyStatus::Verified { algorithm, digest } => {
@@ -554,6 +570,7 @@ fn verify_report_to_js(
         upper_kind: kind,
         upper_algorithm: algorithm,
         upper_digest: digest,
+        checkpoint_root,
     }
 }
 

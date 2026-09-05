@@ -89,7 +89,7 @@ msb run --root-disk flat:8G,clone=auto python -- python -c "print('hello')"
 
 The pre-pull is optional: creating the first flat sandbox lazily materializes a missing flat artifact from the normal OCI layer cache. `clone=auto` prefers a native copy-on-write clone and falls back to a sparse copy, `clone=copy` forces an independent portable copy, and `clone=reflink` requires native clone support and fails clearly if the destination filesystem cannot provide it. Native cloning uses `FICLONE` on Linux, `clonefile` on macOS, and block cloning on Windows volumes that advertise block refcounting, including supported ReFS and Dev Drive configurations.
 
-Flat v1 uses ext4 and rejects rootfs patches and snapshots instead of silently changing their semantics. The normal layered root remains the built-in default, and `sandbox_defaults.oci.root_disk` can select flat for future sandboxes without repeating the flag.
+Flat roots support the same pre-boot patches and local snapshot commands as managed roots. Patches are applied while microsandbox builds the sandbox's private complete ext4 disk; the shared cached base is never modified. A snapshot preserves whether its payload is a managed upper or a complete flat root and restores with the same layout. The normal layered root remains the built-in default, and `sandbox_defaults.oci.root_disk` can select flat for future sandboxes without repeating the flag.
 
 ### Published ports
 

@@ -180,6 +180,11 @@ where
         self.alt.clear();
         self.main.clear();
     }
+
+    /// Iterate primary keys and values in deterministic key order.
+    pub fn iter(&self) -> impl Iterator<Item = (&K1, &V)> {
+        self.main.iter().map(|(key, (_, value))| (key, value))
+    }
 }
 
 //--------------------------------------------------------------------------------------------------

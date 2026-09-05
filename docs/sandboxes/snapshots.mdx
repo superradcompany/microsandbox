@@ -1,26 +1,25 @@
 ---
 title: Snapshots
-description: Capture a sandbox's writable layer as a portable artifact
+description: Capture a sandbox's disk or full execution state as a portable artifact
 icon: "code-branch"
 ---
 
 <Tooltip tip="Disk snapshots are local-only. On microsandbox cloud, use a named volume for state that must survive sandbox replacement."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
-A snapshot is a portable, on-disk capture of a sandbox's writable filesystem. Move it with `scp`, archive it as `.tar.zst`, or boot fresh sandboxes from it.
+A snapshot is a portable artifact that can hold either a sandbox's writable disk state or a full checkpoint of a running sandbox. Managed and flat OCI roots are supported; the descriptor preserves the root layout so a flat `rootfs.raw` is never mistaken for a managed OverlayFS upper. Move it with `scp`, archive it as `.tar.zst`, or create a child sandbox from it.
 
 <Note>
-Snapshots are **disk-only** and require a sandbox that is not running. Stopped and crashed sandboxes can be snapshotted; running, draining, and paused sandboxes are rejected.
+Disk snapshots capture stopped or crashed sandboxes. Full snapshots use `--full` and capture a running sandbox without requiring the user to pause it first.
 </Note>
 
 ## What gets captured
 
-| Captured | Not captured |
-| -------- | ------------ |
-| Writable filesystem changes | Memory contents |
-| Pinned image identity | Running processes |
-| Optional labels and integrity metadata | Network state |
+| Mode | Source | Captured state | Restore behavior |
+| ---- | ------ | -------------- | ---------------- |
+| Disk (default) | Stopped or crashed sandbox | Writable disk closure and pinned image | Cold-boots a fresh VM |
+| Full | Running sandbox | Disk, memory, vCPU, device, and admitted resource state | Eagerly resumes the captured execution in a child VM |
 
-Booting from a snapshot is a cold boot of a fresh VM that starts from the captured filesystem changes.
+Both modes produce the same schema-1 `snapshot.json` descriptor. Its closed `state.kind` is either `file` or `checkpoint`, and `root_disk.layout` records `managed`, `flat`, or `tmpfs`. Checkpoint payloads live in a content-addressed closure rather than a standalone disk file. A tmpfs root has no stopped disk snapshot because its writable state exists only in memory, but it is included in a running full snapshot; such a snapshot must be resumed and cannot use `--disk-only`.
 
 ## Quick start
 
@@ -104,7 +103,74 @@ msb snapshot create after-pip-install --from baseline --dest-dir /mnt/big
 
 </CodeGroup>
 
-The sandbox must be stopped or crashed; running sandboxes are rejected.
+The default disk mode requires a stopped or crashed sandbox; running sandboxes are rejected. If the sandbox has previously produced a full snapshot, its writable state may already be a raw/qcow2 chain. Disk snapshotting preserves that complete chain, including writes made after the earlier full snapshot, and every restored child receives a fresh private writable head.
+
+## Capture a running sandbox
+
+Use full mode when the child must continue the captured processes and memory instead of cold-booting from disk state:
+
+<CodeGroup>
+```rust Rust
+let snap = Snapshot::builder("worker-checkpoint")
+    .from_sandbox("worker")
+    .full()
+    .create()
+    .await?;
+```
+
+```typescript TypeScript
+const snap = await Snapshot.builder("worker-checkpoint")
+  .fromSandbox("worker")
+  .full()
+  .create();
+```
+
+```python Python
+snap = await Snapshot.create(
+    "worker-checkpoint",
+    from_sandbox="worker",
+    full=True,
+)
+```
+
+```go Go
+snap, err := m.Snapshot.Create(ctx, m.SnapshotCreateOptions{
+    Name:        "worker-checkpoint",
+    FromSandbox: "worker",
+    Full:   true,
+})
+```
+
+```bash CLI
+msb snapshot create worker-checkpoint --from worker --full
+```
+</CodeGroup>
+
+Capture briefly quiesces the VM, publishes one same-epoch checkpoint, and returns the source to running state. The first capture records a full memory generation; later captures may reuse unchanged objects through retained dirty tracking while every published manifest still describes complete logical memory.
+
+Creating a sandbox from the resulting snapshot restores into a child-owned disk generation and installs a fresh VM Generation ID. Before your processes continue, the guest kernel corrects its wall clock and acknowledges activation; the runtime then thaws the workload and publishes network access last. Full restore requires the matching clock-aware kernel. Older development full snapshots must be recaptured, or restored with `--disk-only` where supported. Restore is eager: the archive or installed artifact is no longer needed after construction succeeds.
+
+## Export changes and compact a disk chain
+
+Repeated full checkpoints add disk layers. You choose when to export changes and when to compact; neither happens automatically.
+
+```bash
+msb snapshot create checkpoint-b --from worker --full
+msb snapshot save checkpoint-b changes.tar.zst --since checkpoint-a
+msb modify worker --compact --layers 3 --dry-run
+msb modify worker --compact --layers 3
+```
+
+`--layers 3` merges the oldest three physical layers, **including the base**. It never includes the writable head, even when stopped. Omit `--layers` to merge all sealed layers; a chain with fewer than two sealed layers is unchanged. Managed and flat roots support compaction, running or stopped. Existing snapshots remain valid and retain their storage until you remove them separately.
+
+`--since` requires an exact physical-prefix base. Alternatively, `--last-layers 2` includes the newest two sealed checkpoint layers. A full checkpoint export still includes all required memory and device state. Unlike ordinary standalone exports, these smaller archives require the omitted base when loading or restoring:
+
+```bash
+msb snapshot load changes.tar.zst --base checkpoint-a
+msb create --name child --from-snapshot changes.tar.zst --snapshot-base checkpoint-a
+```
+
+The base can also be a standalone snapshot archive. Restore copies the required closure into child-owned storage, without installing an intermediate snapshot. Add `--disk-only` to cold-boot only disk state. After compaction, export a new standalone baseline before resuming incremental exports: the old physical prefix no longer matches. Do not combine compaction with unrelated `modify` options, or incremental export with `--with-parents`.
 
 ## Capture directly to an archive
 
@@ -155,7 +221,7 @@ msb snapshot create after-pip-install \
 ```
 </CodeGroup>
 
-Direct capture publishes only the archive and returns its snapshot ID and path. It creates no intermediate snapshot directory and no local index row. Add `--plain-tar` or the corresponding SDK option to skip zstd compression.
+Direct capture publishes only the archive and returns its snapshot ID and path. It creates no intermediate snapshot directory and no local index row. Add `--full` to capture a running sandbox directly to the same archive, or `--plain-tar` to skip zstd compression.
 
 An explicit archive path can also be used directly as the source of a new sandbox:
 
@@ -210,7 +276,49 @@ msb run --name worker --from-snapshot after-pip-install -- python -V
 
 </CodeGroup>
 
-Booting validates the snapshot, resolves the pinned image, and gives the new sandbox its own writable copy.
+For disk state, creation cold-boots from a child-owned writable copy. For checkpoint state, creation eagerly restores the captured execution into child-owned state.
+
+A full restore does not also run the image CMD: the processes in memory are already the workload. `msb run` publishes that restored sandbox in the background and prints its name because there is no new foreground command to attach. If the command includes arguments after `--`, they are ignored with a warning; run a separate command afterward with `msb exec`.
+
+To discard the captured execution and cold-boot only its filesystem state, select disk-only restore:
+
+<CodeGroup>
+```rust Rust
+let sb = Sandbox::builder("worker")
+    .from_snapshot("worker-checkpoint")
+    .disk_only()
+    .create()
+    .await?;
+```
+
+```typescript TypeScript
+const sb = await Sandbox.builder("worker")
+  .fromSnapshot("worker-checkpoint")
+  .diskOnly()
+  .create();
+```
+
+```python Python
+sb = await Sandbox.create(
+    "worker",
+    from_snapshot="worker-checkpoint",
+    disk_only=True,
+)
+```
+
+```go Go
+sb, err := m.CreateSandbox(ctx, "worker",
+    m.WithFromSnapshot("worker-checkpoint"),
+    m.WithSnapshotDiskOnly(),
+)
+```
+
+```bash CLI
+msb run --name worker --from-snapshot worker-checkpoint --disk-only
+```
+</CodeGroup>
+
+Disk-only restore copies only the checkpoint's disk chain, creates a fresh writable qcow2 head, and performs an ordinary boot. It does not require the destination to support the checkpoint's memory or execution codec. The full capture freezes workloads and syncs guest filesystems before pausing the VM, so this cold-boot view is filesystem-clean.
 
 ## List, inspect, and remove
 
@@ -301,7 +409,7 @@ Archives default to `.tar.zst`. Pass `--plain-tar` for a plain `.tar`. SDKs expo
 
 ## Artifact identity and layout
 
-Current file snapshots use a stable opaque snapshot ID, a separate SHA-256 descriptor digest, and one ordered physical layer closure. A normal raw ext4 snapshot is still one layer:
+Current file snapshots use a stable opaque snapshot ID, a separate SHA-256 descriptor digest, and one ordered physical layer closure. A normal raw ext4 snapshot is still one layer, whether those bytes represent a managed upper or a complete flat root:
 
 ```text
 after-pip-install/
@@ -311,7 +419,7 @@ after-pip-install/
     └── layer_....raw
 ```
 
-`metadata.json` contains mutable local labels and does not participate in the descriptor digest or snapshot identity. The descriptor names each layer by `DiskLayerId`; future qcow2 snapshots can carry an oldest-first raw/qcow2 chain without changing the artifact family.
+`metadata.json` contains mutable local labels and does not participate in the descriptor digest or snapshot identity. The descriptor names each layer by `DiskLayerId`. Once a full snapshot has rolled the sandbox onto qcow2, a later disk snapshot carries the complete oldest-first raw/qcow2 chain in this same artifact family; archive save/load and direct archive restore preserve every member.
 
 ## Integrity verification
 

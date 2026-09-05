@@ -4,7 +4,10 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::num::NonZero;
 use std::path::PathBuf;
 
-use microsandbox_runtime::logging::LogLevel;
+use microsandbox_runtime::{
+    launch::{CheckpointRestoreConfig, RootfsUpperLayerConfig},
+    logging::LogLevel,
+};
 use microsandbox_types::{
     EnvVar, SandboxLogLevel, SandboxResources, SandboxRuntimeOptions, SandboxSpec,
     TransparentHugePagePolicy,
@@ -98,6 +101,26 @@ pub(crate) enum LaunchIntent {
     Background,
 }
 
+/// Materialization selected when a checkpoint snapshot is used as a sandbox source.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum SnapshotRestoreMode {
+    /// Restore disk, memory, execution, and device state.
+    #[default]
+    Full,
+
+    /// Use only the checkpoint's disk closure and perform an ordinary cold boot.
+    DiskOnly,
+}
+
+/// Explicit resource choices that must not be silently replaced during deferred archive restore.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct RestoreOverrideIntent {
+    pub(crate) cpus: bool,
+    pub(crate) max_cpus: bool,
+    pub(crate) memory: bool,
+    pub(crate) max_memory: bool,
+}
+
 /// Configuration for a sandbox.
 ///
 /// The durable task description lives in [`SandboxSpec`]. This type keeps
@@ -162,24 +185,64 @@ pub struct SandboxConfig {
     #[serde(default)]
     pub(crate) manifest_digest: Option<String>,
 
-    /// Path to a snapshot's `upper.ext4` file to copy into the new
-    /// sandbox's upper layer at create time, replacing the fresh-format
-    /// step.
+    /// Path to a file snapshot's writable root disk to copy into the new
+    /// sandbox at create time, replacing fresh root-disk provisioning.
     ///
     /// Transient: set by `SandboxBuilder::from_snapshot` and consumed
     /// during `create_with_mode`. Never persisted.
     #[serde(skip)]
     pub(crate) snapshot_upper_source: Option<PathBuf>,
 
+    /// Immutable installed-snapshot layers to materialize into child-owned root storage.
+    ///
+    /// Transient: paths remain read-only sources until local create copies or links them and adds
+    /// a private writable qcow2 head.
+    #[serde(skip)]
+    pub(crate) snapshot_root_layer_sources: Vec<RootfsUpperLayerConfig>,
+
+    /// Guest-visible capacity of `snapshot_root_layer_sources`.
+    #[serde(skip)]
+    pub(crate) snapshot_root_virtual_size: Option<u64>,
+
     /// Archive to materialize directly into child staging during create.
     ///
     /// Transient and never persisted.
     #[serde(skip)]
     pub(crate) snapshot_archive_source: Option<PathBuf>,
+    /// Explicit base dependency used only while constructing a child from a delta archive.
+    #[serde(skip)]
+    pub(crate) snapshot_base: Option<String>,
+
+    /// Child-owned checkpoint closure used only for this process construction.
+    ///
+    /// The builder initially points this at an installed snapshot. The local create path copies
+    /// the closure into child staging and rewrites the path before spawning the runtime.
+    #[serde(skip)]
+    pub(crate) checkpoint_restore: Option<CheckpointRestoreConfig>,
+
+    /// Transient checkpoint materialization policy selected by the caller.
+    #[serde(skip)]
+    pub(crate) snapshot_restore_mode: SnapshotRestoreMode,
+
+    /// Whether this create operation resumed execution from a full snapshot.
+    #[serde(skip)]
+    pub(crate) resumed_from_full_snapshot: bool,
+
+    /// Child-owned oldest-to-head root-disk chain prepared for checkpoint restore.
+    #[serde(skip)]
+    pub(crate) snapshot_upper_layers: Vec<RootfsUpperLayerConfig>,
+
+    /// Explicit builder choices retained until a deferred archive descriptor is available.
+    #[serde(skip)]
+    pub(crate) restore_overrides: RestoreOverrideIntent,
 
     /// Transient process-launch intent for the current create operation.
     #[serde(skip)]
     pub(crate) launch_intent: LaunchIntent,
+
+    /// Durable CMD before a detached one-shot command temporarily replaced it.
+    #[serde(skip)]
+    pub(crate) launch_cmd_before_override: Option<Option<Vec<String>>>,
 
     /// Whether image-init routing consumed the requested boot workload.
     #[serde(skip)]
@@ -213,7 +276,15 @@ impl SandboxConfig {
     /// transient launch markers and any workload argv routed through an inherited init are removed.
     pub(crate) fn clone_for_persistence(&self) -> Self {
         let mut config = self.clone();
+        config.checkpoint_restore = None;
+        config.snapshot_restore_mode = SnapshotRestoreMode::Full;
+        config.resumed_from_full_snapshot = false;
+        config.snapshot_root_layer_sources.clear();
+        config.snapshot_root_virtual_size = None;
+        config.snapshot_upper_layers.clear();
+        config.restore_overrides = RestoreOverrideIntent::default();
         config.launch_intent = LaunchIntent::None;
+        config.launch_cmd_before_override = None;
         config.init_owns_workload = false;
         if config.init_workload_arg_count > 0 {
             if let Some(init) = config.spec.init.as_mut() {
@@ -247,6 +318,9 @@ impl SandboxConfig {
     /// same OCI process.
     pub(crate) fn set_background_command(&mut self, command: Vec<String>) {
         if !command.is_empty() {
+            if self.launch_cmd_before_override.is_none() {
+                self.launch_cmd_before_override = Some(self.spec.runtime.cmd.clone());
+            }
             self.spec.runtime.cmd = Some(command);
         }
         self.launch_intent = LaunchIntent::Background;
@@ -260,12 +334,28 @@ impl SandboxConfig {
     /// Clear process-launch intent after another mechanism takes ownership of the command.
     pub(crate) fn clear_launch_intent(&mut self) {
         self.launch_intent = LaunchIntent::None;
+        self.launch_cmd_before_override = None;
+    }
+
+    /// Discard a requested startup command because restored execution already owns the workload.
+    pub(crate) fn suppress_launch_for_full_restore(&mut self) {
+        if let Some(previous) = self.launch_cmd_before_override.take() {
+            self.spec.runtime.cmd = previous;
+        }
+        self.launch_intent = LaunchIntent::None;
+        self.resumed_from_full_snapshot = true;
     }
 
     /// Return whether inherited image init routing owns this create operation's boot workload.
     #[doc(hidden)]
     pub fn init_owns_boot_workload(&self) -> bool {
         self.init_owns_workload
+    }
+
+    /// Return whether this create operation resumed execution from a full snapshot.
+    #[doc(hidden)]
+    pub fn resumed_from_full_snapshot(&self) -> bool {
+        self.resumed_from_full_snapshot
     }
 
     /// Apply OCI image config as defaults. User-provided values take precedence.
@@ -423,7 +513,11 @@ impl SandboxConfig {
             ));
         }
 
-        if self.snapshot_upper_source.is_some() || self.snapshot_archive_source.is_some() {
+        if self.snapshot_upper_source.is_some()
+            || !self.snapshot_root_layer_sources.is_empty()
+            || self.snapshot_archive_source.is_some()
+            || self.checkpoint_restore.is_some()
+        {
             return Ok(());
         }
 
@@ -710,8 +804,17 @@ impl Default for SandboxConfig {
             slug: None,
             manifest_digest: None,
             snapshot_upper_source: None,
+            snapshot_root_layer_sources: Vec::new(),
+            snapshot_root_virtual_size: None,
             snapshot_archive_source: None,
+            snapshot_base: None,
+            checkpoint_restore: None,
+            snapshot_restore_mode: SnapshotRestoreMode::Full,
+            resumed_from_full_snapshot: false,
+            snapshot_upper_layers: Vec::new(),
+            restore_overrides: RestoreOverrideIntent::default(),
             launch_intent: LaunchIntent::None,
+            launch_cmd_before_override: None,
             init_owns_workload: false,
             init_workload_arg_count: 0,
         }
@@ -724,7 +827,11 @@ impl Default for SandboxConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::{SandboxConfig, merge_env};
+    use std::path::PathBuf;
+
+    use microsandbox_runtime::launch::CheckpointRestoreConfig;
+
+    use super::{SandboxConfig, SnapshotRestoreMode, merge_env};
     use crate::sandbox::{
         HandoffInit, MountOptions, NamedVolumeMode, RootDisk, RootfsSource, StatVirtualization,
         VolumeMount,
@@ -837,6 +944,27 @@ mod tests {
         );
         assert_eq!(config.spec.runtime.workdir, Some("/workspace".to_string()));
         assert_eq!(config.spec.runtime.user, Some("root".to_string()));
+    }
+
+    #[test]
+    fn full_restore_suppresses_transient_background_command() {
+        let mut config = SandboxConfig {
+            spec: SandboxSpec {
+                runtime: SandboxRuntimeOptions {
+                    cmd: Some(vec!["durable".to_string()]),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        config.set_background_command(vec!["ignored".to_string()]);
+        config.suppress_launch_for_full_restore();
+
+        assert_eq!(config.spec.runtime.cmd, Some(vec!["durable".to_string()]));
+        assert!(!config.should_launch_background_command());
+        assert!(config.resumed_from_full_snapshot());
     }
 
     #[test]
@@ -1646,6 +1774,39 @@ mod tests {
             .unwrap();
 
         assert!(config.spec.image.oci_root_disk().is_none());
+    }
+
+    #[test]
+    fn test_apply_rootfs_defaults_skips_installed_checkpoint_restore() {
+        for restore_mode in [SnapshotRestoreMode::Full, SnapshotRestoreMode::DiskOnly] {
+            let mut config = SandboxConfig {
+                spec: SandboxSpec {
+                    image: RootfsSource::oci("python:3.12"),
+                    ..Default::default()
+                },
+                snapshot_restore_mode: restore_mode,
+                checkpoint_restore: Some(CheckpointRestoreConfig {
+                    closure: PathBuf::from("/tmp/checkpoint"),
+                    checkpoint_root:
+                        "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                            .into(),
+                    checkpoint_id: "checkpoint_test".into(),
+                }),
+                ..Default::default()
+            };
+
+            config
+                .apply_rootfs_defaults(&crate::config::OciSandboxDefaults {
+                    upper_size_mib: Some(8192),
+                    root_disk: None,
+                })
+                .unwrap();
+
+            assert!(
+                config.spec.image.oci_root_disk().is_none(),
+                "{restore_mode:?} restore inherited an ordinary root-disk default"
+            );
+        }
     }
 
     #[test]

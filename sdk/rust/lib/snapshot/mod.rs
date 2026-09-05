@@ -1,15 +1,9 @@
-//! Disk snapshot creation, inspection, and consumption.
+//! Disk and full snapshot creation, inspection, and consumption.
 //!
-//! A snapshot is a self-describing, content-addressed directory on
-//! disk. It captures a stopped sandbox's writable upper layer plus
-//! the metadata needed to pin the immutable lower (image). The
-//! artifact is the source of truth; the local DB index is just a
-//! cache of "snapshots I happen to know about on this machine."
-//!
-//! See `planning/microsandbox/implementation/snapshot-api-resumable-cloning.md` for the
-//! full design. Today snapshots are stopped-sandbox / raw-format only;
-//! the manifest schema and DB columns are forward-compatible with
-//! qcow2 backing chains landing later.
+//! A snapshot is a self-describing, content-addressed artifact on disk. A disk snapshot captures
+//! the writable root closure for a cold boot. A full snapshot captures one running sandbox's
+//! disk, memory, execution, and device state for eager restore. The artifact is the source of
+//! truth; the local DB index is a rebuildable cache.
 
 mod archive;
 mod create;
@@ -17,6 +11,7 @@ mod create;
 pub mod downgrade;
 mod metadata;
 pub(crate) mod migration;
+mod restore;
 mod store;
 mod verify;
 
@@ -66,7 +61,7 @@ pub struct SnapshotBuilder {
     labels: Vec<(String, String)>,
     force: bool,
     record_integrity: bool,
-    resumable: bool,
+    full: bool,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -94,24 +89,22 @@ impl Snapshot {
             labels: Vec::new(),
             force: false,
             record_integrity: false,
-            resumable: false,
+            full: false,
         }
     }
 
-    /// Create a snapshot artifact from a stopped sandbox.
+    /// Create an installed disk or full snapshot artifact.
     ///
-    /// Writes `snapshot.json` and the captured `upper.ext4` into the
-    /// destination directory atomically (manifest renamed last). On
-    /// success, also upserts a row into the local `snapshot_index`
-    /// cache; index failures are logged but do not fail the call —
-    /// the artifact is the source of truth.
+    /// Disk capture requires a stopped or crashed sandbox. A builder configured with
+    /// [`full`](SnapshotBuilder::full) captures a running sandbox's checkpoint closure.
+    /// Publication is atomic and the local index remains a rebuildable cache.
     pub async fn create(config: SnapshotConfig) -> MicrosandboxResult<Self> {
         let backend = crate::backend::default_backend();
         let local = backend.as_local().ok_or_else(snapshots_require_local)?;
         create::create_snapshot(local, config).await
     }
 
-    /// Capture a stopped sandbox directly into an archive.
+    /// Capture a disk or full snapshot directly into an archive.
     pub async fn create_archive(
         config: SnapshotConfig,
         out: impl AsRef<Path>,
@@ -267,6 +260,18 @@ impl Snapshot {
         let local = backend.as_local().ok_or_else(snapshots_require_local)?;
         archive::load_snapshot(local, archive_path, dest).await
     }
+
+    /// Load a disk-dependent archive using its exact base snapshot or standalone base archive.
+    /// The imported snapshot owns a complete local closure after this call.
+    pub async fn load_with_base(
+        archive_path: &Path,
+        dest: Option<&Path>,
+        base: &str,
+    ) -> MicrosandboxResult<SnapshotHandle> {
+        let backend = crate::backend::default_backend();
+        let local = backend.as_local().ok_or_else(snapshots_require_local)?;
+        archive::load_snapshot_with_base(local, archive_path, dest, Some(base)).await
+    }
 }
 
 impl SnapshotArchive {
@@ -306,9 +311,20 @@ pub(crate) async fn materialize_archive_for_child(
     local: &crate::backend::LocalBackend,
     archive: &Path,
     child_stage: &Path,
-) -> MicrosandboxResult<Manifest> {
-    archive::materialize_archive_for_child(local, archive, child_stage).await
+    disk_only: bool,
+    base: Option<&str>,
+) -> MicrosandboxResult<archive::ArchiveChildMaterialization> {
+    archive::materialize_archive_for_child_with_base(local, archive, child_stage, disk_only, base)
+        .await
 }
+
+pub(crate) use restore::{
+    materialize_checkpoint_child_disk_state, materialize_checkpoint_child_state,
+    materialize_checkpoint_disk_for_child, materialize_checkpoint_for_child,
+    materialize_file_snapshot_for_child,
+};
+
+pub(crate) use create::CHECKPOINT_DIRECTORY;
 
 /// Lightweight handle backed by an index row.
 ///
@@ -470,12 +486,9 @@ impl SnapshotBuilder {
         self
     }
 
-    /// Request a future resumable snapshot.
-    ///
-    /// The builder accepts this stable option now, but creation returns
-    /// `Unsupported` until VM pause/resume capture is implemented.
-    pub fn resumable(mut self) -> Self {
-        self.resumable = true;
+    /// Capture disk, memory, execution, and device state from a running sandbox.
+    pub fn full(mut self) -> Self {
+        self.full = true;
         self
     }
 
@@ -493,7 +506,7 @@ impl SnapshotBuilder {
             labels: self.labels,
             force: self.force,
             record_integrity: self.record_integrity,
-            resumable: self.resumable,
+            full: self.full,
         })
     }
 
@@ -522,11 +535,11 @@ pub use archive::fuzz_unpack_archive;
 pub use microsandbox_image::snapshot::{
     CheckpointSnapshotState, DESCRIPTOR_FILENAME, DiskLayer, DiskLayerId, FileSnapshotState,
     ImageRef, LayerFileKind, LayerPayload, Manifest, SnapshotCapture, SnapshotConsistency,
-    SnapshotDescriptor, SnapshotFormat, SnapshotId, SnapshotScope, SnapshotState, UpperIntegrity,
-    UpperLayer,
+    SnapshotDescriptor, SnapshotFormat, SnapshotId, SnapshotRootDisk, SnapshotScope, SnapshotState,
+    UpperIntegrity, UpperLayer,
 };
 pub use microsandbox_types::{SnapshotSpec, SnapshotSpec as SnapshotConfig};
-pub use verify::{SnapshotVerifyReport, UpperVerifyStatus};
+pub use verify::{CheckpointVerifyStatus, SnapshotVerifyReport, UpperVerifyStatus};
 
 //--------------------------------------------------------------------------------------------------
 // Internal — used by submodules

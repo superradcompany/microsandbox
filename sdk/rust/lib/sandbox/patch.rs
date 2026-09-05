@@ -647,8 +647,8 @@ impl RootedPatchFs {
 
 /// Apply patches to the rootfs before VM start.
 ///
-/// This host-filesystem path is used for bind roots. OCI roots are normalized
-/// into an in-memory tree and baked into `upper.ext4` instead.
+/// This host-filesystem path is used for bind roots. OCI roots are normalized into an in-memory
+/// tree and baked into their sandbox-owned writable disk instead.
 pub(crate) async fn apply_patches(
     image: &RootfsSource,
     patches: &[Patch],
@@ -664,7 +664,7 @@ pub(crate) async fn apply_patches(
         } => (path.clone(), *follow_root_symlinks),
         RootfsSource::Oci(_) => {
             return Err(crate::MicrosandboxError::InvalidConfig(
-                "OCI patches are baked into upper.ext4 before VM start".into(),
+                "OCI patches are baked into the sandbox-owned writable disk before VM start".into(),
             ));
         }
         RootfsSource::DiskImage { .. } => {
@@ -716,6 +716,22 @@ pub(crate) async fn build_upper_tree(
     Ok(tree)
 }
 
+/// Apply patches to a complete merged OCI tree for private flat-root materialization.
+pub(crate) async fn build_flat_tree(
+    patches: &[Patch],
+    lower_erofs: &[PathBuf],
+    spool_path: &Path,
+) -> MicrosandboxResult<FileTree> {
+    let mut tree = microsandbox_image::merge_erofs_layers(lower_erofs, spool_path)?;
+    let mut no_lowers = LowerLayers {
+        readers: Vec::new(),
+    };
+    for patch in patches {
+        apply_one_to_tree(&mut tree, &mut no_lowers, patch).await?;
+    }
+    Ok(tree)
+}
+
 async fn apply_one_to_tree(
     tree: &mut FileTree,
     lowers: &mut LowerLayers,
@@ -731,6 +747,9 @@ async fn apply_one_to_tree(
             let rel = normalize_guest_path_bytes(path)?;
             check_replace_tree(tree, lowers, path, *replace)?;
             ensure_tree_parents(tree, lowers, &rel)?;
+            if *replace {
+                tree.remove(&rel);
+            }
             insert_tree_node(
                 tree,
                 &rel,
@@ -752,6 +771,9 @@ async fn apply_one_to_tree(
             let rel = normalize_guest_path_bytes(path)?;
             check_replace_tree(tree, lowers, path, *replace)?;
             ensure_tree_parents(tree, lowers, &rel)?;
+            if *replace {
+                tree.remove(&rel);
+            }
             insert_tree_node(
                 tree,
                 &rel,
@@ -773,6 +795,9 @@ async fn apply_one_to_tree(
             let rel = normalize_guest_path_bytes(dst)?;
             check_replace_tree(tree, lowers, dst, *replace)?;
             ensure_tree_parents(tree, lowers, &rel)?;
+            if *replace {
+                tree.remove(&rel);
+            }
             let (data, source_mode) = read_regular_source(src).await?;
             let file_mode = mode.map_or(source_mode, |mode| mode as u16);
             insert_tree_node(
@@ -800,6 +825,9 @@ async fn apply_one_to_tree(
             let rel = normalize_guest_path_bytes(link)?;
             check_replace_tree(tree, lowers, link, *replace)?;
             ensure_tree_parents(tree, lowers, &rel)?;
+            if *replace {
+                tree.remove(&rel);
+            }
             insert_tree_node(
                 tree,
                 &rel,
@@ -3315,6 +3343,56 @@ mod tests {
         let tree = build_upper_tree(&patches, &[lower_path]).await.unwrap();
         match tree.get(b"etc/config.txt").unwrap() {
             TreeNode::RegularFile(file) => assert_eq!(file.data.read_all().unwrap(), b"alpha-beta"),
+            _ => panic!("expected regular file"),
+        }
+    }
+
+    #[tokio::test]
+    async fn build_flat_tree_preserves_and_patches_the_merged_image() {
+        let dir = tempfile::tempdir().unwrap();
+        let base_path = dir.path().join("base.erofs");
+        let top_path = dir.path().join("top.erofs");
+        let spool_path = dir.path().join("flat.spool");
+
+        let mut base = FileTree::new();
+        base.insert(b"etc/keep.txt", make_regular_file(b"keep"))
+            .unwrap();
+        base.insert(b"etc/change.txt", make_regular_file(b"base"))
+            .unwrap();
+        write_erofs(&base, &base_path).unwrap();
+
+        let mut top = FileTree::new();
+        top.insert(b"etc/change.txt", make_regular_file(b"top"))
+            .unwrap();
+        top.insert(b"etc/remove.txt", make_regular_file(b"remove"))
+            .unwrap();
+        write_erofs(&top, &top_path).unwrap();
+
+        let tree = build_flat_tree(
+            &[
+                Patch::Append {
+                    path: "/etc/change.txt".into(),
+                    content: "-patched".into(),
+                },
+                Patch::Remove {
+                    path: "/etc/remove.txt".into(),
+                },
+            ],
+            &[base_path, top_path],
+            &spool_path,
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(
+            tree.get(b"etc/keep.txt"),
+            Some(TreeNode::RegularFile(_))
+        ));
+        assert!(tree.get(b"etc/remove.txt").is_none());
+        match tree.get(b"etc/change.txt").unwrap() {
+            TreeNode::RegularFile(file) => {
+                assert_eq!(file.data.read_all().unwrap(), b"top-patched")
+            }
             _ => panic!("expected regular file"),
         }
     }

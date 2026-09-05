@@ -118,6 +118,14 @@ func TestWithFromSnapshot(t *testing.T) {
 	}
 }
 
+func TestWithSnapshotDiskOnly(t *testing.T) {
+	o := SandboxConfig{}
+	WithSnapshotDiskOnly()(&o)
+	if !o.SnapshotDiskOnly {
+		t.Fatal("SnapshotDiskOnly = false, want true")
+	}
+}
+
 func TestWithMemory(t *testing.T) {
 	o := SandboxConfig{}
 	WithMemory(512)(&o)

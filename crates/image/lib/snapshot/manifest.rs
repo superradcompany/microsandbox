@@ -74,7 +74,7 @@ pub enum SnapshotScope {
     Disk,
     /// Composite checkpoint state.
     #[serde(rename = "checkpoint")]
-    Resumable,
+    Full,
 }
 
 /// Consistency guarantee of a capture.
@@ -87,6 +87,33 @@ pub enum SnapshotConsistency {
     FilesystemConsistent,
     /// Coherently resumable execution state.
     ApplicationConsistent,
+}
+
+/// Guest-visible OCI root-disk layout captured by the snapshot.
+///
+/// This is required because a one-layer raw disk can either be a managed
+/// OverlayFS upper or a complete flat root filesystem. Those byte payloads
+/// have different attachment and restore semantics even when their physical
+/// layer shapes happen to match.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "layout", rename_all = "lowercase", deny_unknown_fields)]
+pub enum SnapshotRootDisk {
+    /// Immutable OCI lower layers plus a writable managed upper device.
+    Managed,
+    /// One complete filesystem attached directly as the guest root device.
+    Flat,
+    /// An OCI lower with a writable upper held entirely in guest memory.
+    Tmpfs {
+        /// Configured tmpfs ceiling in MiB, or the runtime default.
+        #[serde(deserialize_with = "deserialize_required_option")]
+        size_mib: Option<u32>,
+    },
+}
+
+impl Default for SnapshotRootDisk {
+    fn default() -> Self {
+        Self::Managed
+    }
 }
 
 /// Pinned OCI image reference.
@@ -238,6 +265,9 @@ pub struct Manifest {
     pub capture: SnapshotCapture,
     /// Pinned base image.
     pub image: ImageRef,
+    /// Root-disk layout whose state is represented by this artifact.
+    #[serde(default)]
+    pub root_disk: SnapshotRootDisk,
     /// Logical parent by snapshot ID.
     #[serde(deserialize_with = "deserialize_required_option")]
     pub parent: Option<SnapshotId>,
@@ -417,10 +447,13 @@ impl Manifest {
                 if self.scope != SnapshotScope::Disk {
                     return descriptor_error("state.kind=file requires scope=file");
                 }
+                if matches!(self.root_disk, SnapshotRootDisk::Tmpfs { .. }) {
+                    return descriptor_error("file snapshots cannot capture a tmpfs root disk");
+                }
                 validate_file_state(file)?;
             }
             SnapshotState::Checkpoint(checkpoint) => {
-                if self.scope != SnapshotScope::Resumable {
+                if self.scope != SnapshotScope::Full {
                     return descriptor_error("state.kind=checkpoint requires scope=checkpoint");
                 }
                 if checkpoint.checkpoint_id.is_empty() {
@@ -642,7 +675,7 @@ fn validate_file_state(file: &FileSnapshotState) -> ImageResult<()> {
             }
         }
         if let Some(integrity) = &layer.payload.integrity {
-            validate_integrity(integrity, layer.virtual_size)?;
+            validate_integrity(integrity)?;
         }
     }
     let head = file.head_layer()?;
@@ -652,7 +685,7 @@ fn validate_file_state(file: &FileSnapshotState) -> ImageResult<()> {
     Ok(())
 }
 
-fn validate_integrity(integrity: &UpperIntegrity, virtual_size: u64) -> ImageResult<()> {
+fn validate_integrity(integrity: &UpperIntegrity) -> ImageResult<()> {
     match integrity {
         UpperIntegrity::Sha256 { digest } | UpperIntegrity::SparseSha256V1 { digest } => {
             validate_digest(digest, "sha256:", "layer integrity digest")
@@ -663,10 +696,11 @@ fn validate_integrity(integrity: &UpperIntegrity, virtual_size: u64) -> ImageRes
             leaf_size,
         } => {
             validate_digest(root, "blake3:", "layer integrity root")?;
-            if *logical_size != virtual_size {
-                return descriptor_error(
-                    "layer integrity logical_size does not match virtual_size",
-                );
+            // The integrity size describes the payload file. A raw layer commonly has the same
+            // size as the virtual disk, while a qcow2 layer is a compact container whose file
+            // length is deliberately different from the guest-visible capacity.
+            if *logical_size == 0 {
+                return descriptor_error("layer integrity logical_size must be non-zero");
             }
             if *leaf_size != FILE_MERKLE_BLAKE3_LEAF_SIZE {
                 return descriptor_error(format!(
@@ -840,6 +874,7 @@ mod tests {
                 reference: "docker.io/library/alpine:latest".into(),
                 manifest_digest: format!("sha256:{}", "a".repeat(64)),
             },
+            root_disk: SnapshotRootDisk::Managed,
             parent: None,
             requires: Vec::new(),
             extensions: BTreeMap::new(),
@@ -874,6 +909,23 @@ mod tests {
     }
 
     #[test]
+    fn earlier_schema_one_descriptor_defaults_to_managed_root() {
+        let mut value = serde_json::to_value(descriptor()).unwrap();
+        value.as_object_mut().unwrap().remove("root_disk");
+        let parsed = Manifest::from_bytes(&serde_json::to_vec(&value).unwrap()).unwrap();
+        assert_eq!(parsed.root_disk, SnapshotRootDisk::Managed);
+    }
+
+    #[test]
+    fn file_snapshot_rejects_tmpfs_root_layout() {
+        let mut descriptor = descriptor();
+        descriptor.root_disk = SnapshotRootDisk::Tmpfs {
+            size_mib: Some(128),
+        };
+        assert!(descriptor.validate().is_err());
+    }
+
+    #[test]
     fn rejects_nonlinear_closure() {
         let mut descriptor = descriptor();
         let SnapshotState::File(file) = &mut descriptor.state else {
@@ -892,5 +944,33 @@ mod tests {
         file.head = file.layers[1].layer_id.clone();
         file.disk_format = SnapshotFormat::Qcow2;
         assert!(descriptor.validate().is_err());
+    }
+
+    #[test]
+    fn qcow_integrity_size_describes_payload_not_virtual_disk() {
+        let mut descriptor = descriptor();
+        let SnapshotState::File(file) = &mut descriptor.state else {
+            unreachable!()
+        };
+        let predecessor = file.layers[0].layer_id.clone();
+        let head = DiskLayerId::new("layer_11111111111111111111111111111111").unwrap();
+        file.layers.push(DiskLayer {
+            layer_id: head.clone(),
+            format: SnapshotFormat::Qcow2,
+            virtual_size: 4,
+            backing: Some(predecessor),
+            payload: LayerPayload {
+                file_kind: LayerFileKind::Regular,
+                integrity: Some(UpperIntegrity::FileMerkleBlake3V1 {
+                    root: format!("blake3:{}", "b".repeat(64)),
+                    logical_size: 1024,
+                    leaf_size: FILE_MERKLE_BLAKE3_LEAF_SIZE,
+                }),
+            },
+        });
+        file.head = head;
+        file.disk_format = SnapshotFormat::Qcow2;
+
+        descriptor.validate().unwrap();
     }
 }

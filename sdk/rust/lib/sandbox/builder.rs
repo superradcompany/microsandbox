@@ -6,6 +6,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use microsandbox_image::snapshot::SnapshotRootDisk;
 use microsandbox_image::{PullProgressHandle, RegistryAuth};
 #[cfg(feature = "net")]
 use microsandbox_network::builder::{NetworkBuilder, SecretBuilder};
@@ -17,7 +18,9 @@ use microsandbox_types::{PortProtocol, PublishedPortSpec};
 
 use super::{
     SandboxSpec,
-    config::{SandboxConfig, sandbox_log_level_from_runtime},
+    config::{
+        RestoreOverrideIntent, SandboxConfig, SnapshotRestoreMode, sandbox_log_level_from_runtime,
+    },
     exec::{Rlimit, RlimitResource},
     init::{HandoffInit, InitOptionsBuilder},
     types::{
@@ -39,6 +42,8 @@ pub struct SandboxBuilder {
     config: SandboxConfig,
     detached: bool,
     build_error: Option<crate::MicrosandboxError>,
+    cpus_explicit: bool,
+    memory_explicit: bool,
     max_cpus_explicit: bool,
     max_memory_explicit: bool,
     /// Raw script snippets supplied through construction patches. They are materialized only when
@@ -101,6 +106,8 @@ impl SandboxBuilder {
             config,
             detached: false,
             build_error: None,
+            cpus_explicit: false,
+            memory_explicit: false,
             max_cpus_explicit: false,
             max_memory_explicit: false,
             config_scripts: BTreeMap::new(),
@@ -302,6 +309,7 @@ impl SandboxBuilder {
     /// Allocate virtual CPUs for this sandbox (default: 1).
     pub fn cpus(mut self, count: u8) -> Self {
         self.config.spec.resources.cpus = count;
+        self.cpus_explicit = true;
         if !self.max_cpus_explicit || self.config.spec.resources.max_cpus < count {
             self.config.spec.resources.max_cpus = count;
         }
@@ -342,6 +350,7 @@ impl SandboxBuilder {
     pub fn memory(mut self, size: impl Into<Mebibytes>) -> Self {
         let memory_mib = size.into().as_u32();
         self.config.spec.resources.memory_mib = memory_mib;
+        self.memory_explicit = true;
         if !self.max_memory_explicit || self.config.spec.resources.max_memory_mib < memory_mib {
             self.config.spec.resources.max_memory_mib = memory_mib;
         }
@@ -1102,9 +1111,9 @@ impl SandboxBuilder {
 
     /// Apply rootfs patches using a builder closure.
     ///
-    /// Patches are applied before VM start. OCI roots bake patches into
-    /// `upper.ext4`; bind roots patch the host directory directly. Returns an
-    /// error at create time if used with block device roots (Qcow2, Raw).
+    /// Patches are applied before VM start. Managed OCI roots bake patches into their writable
+    /// upper, flat OCI roots bake them into the private complete root disk, and bind roots patch
+    /// the host directory directly. User-owned disk-image roots and tmpfs roots reject patches.
     ///
     /// ```ignore
     /// .patch(|p| p
@@ -1134,7 +1143,7 @@ impl SandboxBuilder {
         self
     }
 
-    /// Boot a fresh sandbox from a snapshot artifact.
+    /// Create a sandbox from a snapshot artifact.
     ///
     /// The snapshot already pins the image reference and digest, so
     /// this method is mutually exclusive with [`image`](Self::image)
@@ -1142,10 +1151,28 @@ impl SandboxBuilder {
     /// opened at `create()` time; content verification stays explicit.
     ///
     /// `path_or_name` accepts a snapshot artifact directory, an archive
-    /// file, or a bare name resolved under the default snapshots directory.
+    /// file, or a bare name resolved under the default snapshots directory. Disk snapshots cold
+    /// boot; full snapshots resume their captured execution unless [`disk_only`](Self::disk_only)
+    /// is selected.
     pub fn from_snapshot(mut self, path_or_name: impl Into<String>) -> Self {
         self.pending_snapshot = Some(path_or_name.into());
         self.pending_snapshot_from_config = false;
+        self
+    }
+
+    /// Cold-boot only the disk state carried by a full snapshot.
+    ///
+    /// This is a restore policy, not a different artifact kind. It must be combined with
+    /// [`from_snapshot`](Self::from_snapshot), and the selected artifact must contain checkpoint
+    /// state. Memory, execution, and device state are deliberately ignored.
+    pub fn disk_only(mut self) -> Self {
+        self.config.snapshot_restore_mode = SnapshotRestoreMode::DiskOnly;
+        self
+    }
+
+    /// Supply the exact base snapshot or standalone base archive for a disk-dependent archive.
+    pub fn snapshot_base(mut self, base: impl Into<String>) -> Self {
+        self.config.snapshot_base = Some(base.into());
         self
     }
 
@@ -1177,6 +1204,8 @@ impl SandboxBuilder {
         self.materialize_config_scripts();
         self.resolve_pending().await?;
         self.validate()?;
+        let restore_overrides = self.restore_override_intent();
+        self.config.restore_overrides = restore_overrides;
         Ok(self.config)
     }
 
@@ -1237,14 +1266,6 @@ impl SandboxBuilder {
         }
 
         let snap = crate::snapshot::Snapshot::open(&snapshot_ref).await?;
-        if snap.manifest().scope != crate::snapshot::SnapshotScope::Disk {
-            return Err(crate::MicrosandboxError::unsupported(
-                Operation::SnapshotOps,
-                UnsupportedReason::NotAvailable(
-                    "restoring non-disk snapshots requires resumable restore support".into(),
-                ),
-            ));
-        }
         let unsupported = snap.manifest().unsupported_requires();
         if !unsupported.is_empty() {
             return Err(crate::MicrosandboxError::unsupported(
@@ -1255,20 +1276,74 @@ impl SandboxBuilder {
                 )),
             ));
         }
+        let snap_ref = snap.manifest().image.reference.clone();
+        self.config.spec.image = RootfsSource::oci(snap_ref);
+        self.config.manifest_digest = Some(snap.manifest().image.manifest_digest.clone());
+        apply_snapshot_root_layout(&mut self.config, &snap.manifest().root_disk)?;
+
         let file_state = match &snap.manifest().state {
             crate::snapshot::SnapshotState::File(state) => state,
-            crate::snapshot::SnapshotState::Checkpoint(_) => {
-                return Err(crate::MicrosandboxError::unsupported(
-                    Operation::SnapshotOps,
-                    UnsupportedReason::NotAvailable(
-                        "checkpoint-state restore providers are not available".into(),
-                    ),
-                ));
+            crate::snapshot::SnapshotState::Checkpoint(state) => {
+                if snap.manifest().scope != crate::snapshot::SnapshotScope::Full {
+                    return Err(crate::MicrosandboxError::SnapshotIntegrity(
+                        "checkpoint state must use full snapshot scope".into(),
+                    ));
+                }
+                let expected = microsandbox_image::checkpoint::ObjectId::new(
+                    &state.checkpoint_root,
+                )
+                .map_err(|error| crate::MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+                let closure = snap.path().join(crate::snapshot::CHECKPOINT_DIRECTORY);
+                let opened = match self.config.snapshot_restore_mode {
+                    SnapshotRestoreMode::Full => {
+                        microsandbox_image::checkpoint::CheckpointClosure::open(
+                            &closure,
+                            Some(&expected),
+                        )
+                    }
+                    SnapshotRestoreMode::DiskOnly => {
+                        microsandbox_image::checkpoint::CheckpointClosure::open_portable(
+                            &closure,
+                            Some(&expected),
+                        )
+                    }
+                }
+                .map_err(|error| crate::MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+                if opened.checkpoint().checkpoint_id != state.checkpoint_id {
+                    return Err(crate::MicrosandboxError::SnapshotIntegrity(
+                        "snapshot and checkpoint closure identities differ".into(),
+                    ));
+                }
+                if self.config.snapshot_restore_mode == SnapshotRestoreMode::Full {
+                    let restore_overrides = self.restore_override_intent();
+                    apply_checkpoint_restore_constraints(
+                        &mut self.config,
+                        state,
+                        &opened,
+                        restore_overrides,
+                    )?;
+                    self.config.suppress_launch_for_full_restore();
+                }
+                self.config.checkpoint_restore =
+                    Some(microsandbox_runtime::launch::CheckpointRestoreConfig {
+                        closure,
+                        checkpoint_root: state.checkpoint_root.clone(),
+                        checkpoint_id: state.checkpoint_id.clone(),
+                    });
+                return Ok(());
             }
         };
-        if file_state.disk_format != crate::snapshot::SnapshotFormat::Raw
-            || file_state.filesystem != "ext4"
-        {
+        if self.config.snapshot_restore_mode == SnapshotRestoreMode::DiskOnly {
+            return Err(crate::MicrosandboxError::InvalidConfig(
+                "disk_only requires a full snapshot with checkpoint state".into(),
+            ));
+        }
+        if snap.manifest().scope != crate::snapshot::SnapshotScope::Disk {
+            return Err(crate::MicrosandboxError::SnapshotIntegrity(
+                "file state must use disk snapshot scope".into(),
+            ));
+        }
+        if file_state.filesystem != "ext4" {
             return Err(crate::MicrosandboxError::unsupported(
                 Operation::SnapshotOps,
                 UnsupportedReason::NotAvailable(format!(
@@ -1277,15 +1352,31 @@ impl SandboxBuilder {
                 )),
             ));
         }
-        let snap_ref = snap.manifest().image.reference.clone();
-
-        self.config.spec.image = RootfsSource::oci(snap_ref);
-        self.config.manifest_digest = Some(snap.manifest().image.manifest_digest.clone());
-        let head = file_state
-            .head_layer()
-            .map_err(|e| crate::MicrosandboxError::SnapshotIntegrity(e.to_string()))?;
-        self.config.snapshot_upper_source = Some(snap.layer_path(head));
+        self.config.snapshot_root_layer_sources = file_state
+            .layers
+            .iter()
+            .map(
+                |layer| microsandbox_runtime::launch::RootfsUpperLayerConfig {
+                    path: snap.layer_path(layer),
+                    format: match layer.format {
+                        crate::snapshot::SnapshotFormat::Raw => "raw",
+                        crate::snapshot::SnapshotFormat::Qcow2 => "qcow2",
+                    }
+                    .into(),
+                },
+            )
+            .collect();
+        self.config.snapshot_root_virtual_size = Some(file_state.virtual_size);
         Ok(())
+    }
+
+    fn restore_override_intent(&self) -> RestoreOverrideIntent {
+        RestoreOverrideIntent {
+            cpus: self.cpus_explicit,
+            max_cpus: self.max_cpus_explicit,
+            memory: self.memory_explicit,
+            max_memory: self.max_memory_explicit,
+        }
     }
 
     fn has_explicit_rootfs_source(&self) -> bool {
@@ -1329,8 +1420,12 @@ impl SandboxBuilder {
     )> {
         let (handle, sender) = microsandbox_image::progress_channel();
         let task = tokio::spawn(async move {
-            let detached = self.detached;
+            let requested_detached = self.detached;
             let config = self.build().await?;
+            // Resumed execution is not a new foreground command owned by this caller. Its runtime
+            // must be detached before spawn; disarming an attached parent watchdog after startup
+            // races the creator's exit and leaves Windows in a kill-on-close job.
+            let detached = requested_detached || config.resumed_from_full_snapshot();
             let backend = crate::backend::default_backend();
             match backend.kind() {
                 crate::backend::BackendKind::Local => {
@@ -1480,6 +1575,24 @@ impl SandboxBuilder {
                 ));
             }
             _ => {}
+        }
+        if self.config.snapshot_restore_mode == SnapshotRestoreMode::DiskOnly
+            && self.config.snapshot_archive_source.is_none()
+            && self.config.checkpoint_restore.is_none()
+        {
+            return Err(crate::MicrosandboxError::InvalidConfig(
+                "disk_only must be combined with from_snapshot".into(),
+            ));
+        }
+        if self.config.checkpoint_restore.is_some() && !self.config.spec.patches.is_empty() {
+            return Err(crate::MicrosandboxError::InvalidConfig(
+                "patches cannot be combined with full snapshot restore".into(),
+            ));
+        }
+        if self.config.snapshot_base.is_some() && self.config.snapshot_archive_source.is_none() {
+            return Err(crate::MicrosandboxError::InvalidConfig(
+                "snapshot_base requires from_snapshot with an archive path".into(),
+            ));
         }
 
         for rlimit in &self.config.spec.rlimits {
@@ -1656,14 +1769,7 @@ impl SandboxBuilder {
                 }
                 if !self.config.spec.patches.is_empty() {
                     return Err(crate::MicrosandboxError::InvalidConfig(
-                        "patches require a managed root disk (they are baked into the upper at create time)".into(),
-                    ));
-                }
-                if self.config.snapshot_upper_source.is_some()
-                    || self.config.snapshot_archive_source.is_some()
-                {
-                    return Err(crate::MicrosandboxError::InvalidConfig(
-                        "from_snapshot requires a managed root disk".into(),
+                        "patches require a managed or flat sandbox-owned root disk".into(),
                     ));
                 }
                 Ok(())
@@ -1676,7 +1782,7 @@ impl SandboxBuilder {
                 }
                 if !self.config.spec.patches.is_empty() {
                     return Err(crate::MicrosandboxError::InvalidConfig(
-                        "patches require a managed root disk (they are baked into the upper at create time)".into(),
+                        "patches require a managed or flat sandbox-owned root disk".into(),
                     ));
                 }
                 if self.config.snapshot_upper_source.is_some()
@@ -1701,18 +1807,6 @@ impl SandboxBuilder {
                         "flat root disks currently support only fstype=ext4".into(),
                     ));
                 }
-                if !self.config.spec.patches.is_empty() {
-                    return Err(crate::MicrosandboxError::InvalidConfig(
-                        "patches are not yet compatible with flat OCI rootfs".into(),
-                    ));
-                }
-                if self.config.snapshot_upper_source.is_some()
-                    || self.config.snapshot_archive_source.is_some()
-                {
-                    return Err(crate::MicrosandboxError::InvalidConfig(
-                        "from_snapshot is not yet compatible with flat OCI rootfs".into(),
-                    ));
-                }
                 Ok(())
             }
         }
@@ -1722,6 +1816,29 @@ impl SandboxBuilder {
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
+
+pub(crate) fn apply_snapshot_root_layout(
+    config: &mut SandboxConfig,
+    layout: &SnapshotRootDisk,
+) -> MicrosandboxResult<()> {
+    let RootfsSource::Oci(oci) = &mut config.spec.image else {
+        return Err(MicrosandboxError::SnapshotIntegrity(
+            "snapshot image did not resolve to an OCI rootfs".into(),
+        ));
+    };
+    oci.root_disk = Some(match layout {
+        SnapshotRootDisk::Managed => microsandbox_types::RootDisk::Managed { size_mib: None },
+        SnapshotRootDisk::Flat => microsandbox_types::RootDisk::Flat {
+            size_mib: None,
+            fstype: Some("ext4".into()),
+            clone: microsandbox_types::FlatClone::Auto,
+        },
+        SnapshotRootDisk::Tmpfs { size_mib } => microsandbox_types::RootDisk::Tmpfs {
+            size_mib: *size_mib,
+        },
+    });
+    Ok(())
+}
 
 fn validate_config_script_name(name: &str) -> Result<(), String> {
     let path = std::path::Path::new(name);
@@ -1737,6 +1854,157 @@ fn validate_config_script_name(name: &str) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+/// Apply the immutable VM geometry and effective guest network identity carried by a checkpoint.
+///
+/// Installed snapshots call this while resolving the builder. Archive restores call it after the
+/// descriptor and closure have streamed into child staging.
+pub(crate) fn apply_checkpoint_restore_constraints(
+    config: &mut SandboxConfig,
+    state: &crate::snapshot::CheckpointSnapshotState,
+    closure: &microsandbox_image::checkpoint::CheckpointClosure,
+    overrides: RestoreOverrideIntent,
+) -> MicrosandboxResult<()> {
+    apply_checkpoint_resources(config, state, overrides)?;
+
+    let mut resources = closure
+        .checkpoint()
+        .resources
+        .iter()
+        .filter(|resource| resource.kind == "network");
+    let Some(resource) = resources.next() else {
+        if !config.spec.network.ports.is_empty() {
+            return Err(MicrosandboxError::InvalidConfig(
+                "a checkpoint without a network device cannot restore published ports".into(),
+            ));
+        }
+        config.spec.network.enabled = false;
+        config.spec.network.interface = None;
+        return Ok(());
+    };
+    if resources.next().is_some() {
+        return Err(MicrosandboxError::SnapshotIntegrity(
+            "checkpoint contains more than one guest network resource".into(),
+        ));
+    }
+    if !config.spec.network.enabled {
+        return Err(MicrosandboxError::InvalidConfig(
+            "a checkpoint with a network device cannot restore with networking disabled".into(),
+        ));
+    }
+    let encoded = resource.binding.get("guest_network").ok_or_else(|| {
+        MicrosandboxError::SnapshotIntegrity(
+            "checkpoint network resource has no effective guest binding".into(),
+        )
+    })?;
+    let network: microsandbox_protocol::bootstrap::BootstrapNetwork = serde_json::from_str(encoded)
+        .map_err(|error| {
+            MicrosandboxError::SnapshotIntegrity(format!(
+                "checkpoint guest network binding is invalid: {error}"
+            ))
+        })?;
+    if network.interface != "eth0" {
+        return Err(MicrosandboxError::SnapshotIntegrity(format!(
+            "checkpoint guest network interface {:?} is unsupported",
+            network.interface
+        )));
+    }
+    let interface = microsandbox_types::InterfaceOverrides {
+        mac: Some(network.mac),
+        mtu: Some(network.mtu),
+        ipv4_address: network.ipv4.map(|ipv4| ipv4.address),
+        ipv4_pool: None,
+        ipv6_address: network.ipv6.map(|ipv6| ipv6.address),
+        ipv6_pool: None,
+    };
+    if config
+        .spec
+        .network
+        .interface
+        .as_ref()
+        .is_some_and(|requested| checkpoint_network_override_conflicts(requested, &interface))
+    {
+        return Err(MicrosandboxError::InvalidConfig(
+            "full snapshot restore cannot change the captured guest network identity".into(),
+        ));
+    }
+    config.spec.network.interface = Some(interface);
+    Ok(())
+}
+
+/// Return whether an explicitly populated guest-interface field conflicts with the captured
+/// effective identity. An empty `InterfaceOverrides` is the normal result of round-tripping local
+/// network defaults through the shared spec and must not be mistaken for an explicit override.
+fn checkpoint_network_override_conflicts(
+    requested: &microsandbox_types::InterfaceOverrides,
+    captured: &microsandbox_types::InterfaceOverrides,
+) -> bool {
+    requested.mac.is_some_and(|value| Some(value) != captured.mac)
+        || requested
+            .mtu
+            .is_some_and(|value| Some(value) != captured.mtu)
+        || requested
+            .ipv4_address
+            .is_some_and(|value| Some(value) != captured.ipv4_address)
+        || requested
+            .ipv6_address
+            .is_some_and(|value| Some(value) != captured.ipv6_address)
+        // Pools derive an identity from the destination slot, which cannot be substituted for the
+        // effective address already present in the restored guest and device state.
+        || requested.ipv4_pool.is_some()
+        || requested.ipv6_pool.is_some()
+}
+
+fn apply_checkpoint_resources(
+    config: &mut SandboxConfig,
+    state: &crate::snapshot::CheckpointSnapshotState,
+    overrides: RestoreOverrideIntent,
+) -> MicrosandboxResult<()> {
+    let vcpus = u8::try_from(checkpoint_requirement_u64(state, "vcpus")?).map_err(|_| {
+        MicrosandboxError::SnapshotIntegrity("checkpoint vCPU count exceeds u8".into())
+    })?;
+    let max_vcpus =
+        u8::try_from(checkpoint_requirement_u64(state, "max_vcpus")?).map_err(|_| {
+            MicrosandboxError::SnapshotIntegrity("checkpoint maximum vCPU count exceeds u8".into())
+        })?;
+    let memory_mib =
+        u32::try_from(checkpoint_requirement_u64(state, "memory_mib")?).map_err(|_| {
+            MicrosandboxError::SnapshotIntegrity("checkpoint memory exceeds u32 MiB".into())
+        })?;
+    let max_memory_mib = u32::try_from(checkpoint_requirement_u64(state, "max_memory_mib")?)
+        .map_err(|_| {
+            MicrosandboxError::SnapshotIntegrity("checkpoint maximum memory exceeds u32 MiB".into())
+        })?;
+    if (overrides.cpus && config.spec.resources.cpus != vcpus)
+        || (overrides.max_cpus && config.spec.resources.max_cpus != max_vcpus)
+        || (overrides.memory && config.spec.resources.memory_mib != memory_mib)
+        || (overrides.max_memory && config.spec.resources.max_memory_mib != max_memory_mib)
+    {
+        return Err(MicrosandboxError::InvalidConfig(
+            "a full snapshot must restore with its captured CPU and memory geometry".into(),
+        ));
+    }
+    config.spec.resources.cpus = vcpus;
+    config.spec.resources.max_cpus = max_vcpus;
+    config.spec.resources.memory_mib = memory_mib;
+    config.spec.resources.max_memory_mib = max_memory_mib;
+    Ok(())
+}
+
+fn checkpoint_requirement_u64(
+    state: &crate::snapshot::CheckpointSnapshotState,
+    key: &str,
+) -> MicrosandboxResult<u64> {
+    state
+        .requirements_summary
+        .get(key)
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| {
+            MicrosandboxError::SnapshotIntegrity(format!(
+                "checkpoint snapshot is missing numeric restore requirement {key:?}"
+            ))
+        })
 }
 
 fn wrap_config_script(shell: Option<&str>, body: &str) -> String {
@@ -1764,6 +2032,8 @@ impl From<SandboxConfig> for SandboxBuilder {
             config,
             detached: false,
             build_error: None,
+            cpus_explicit: true,
+            memory_explicit: true,
             max_cpus_explicit: true,
             max_memory_explicit: true,
             config_scripts: BTreeMap::new(),
@@ -1781,8 +2051,13 @@ impl From<SandboxConfig> for SandboxBuilder {
 
 #[cfg(test)]
 mod tests {
-    use super::SandboxBuilder;
+    use std::collections::BTreeMap;
+
+    use super::{
+        SandboxBuilder, apply_checkpoint_resources, checkpoint_network_override_conflicts,
+    };
     use crate::LogLevel;
+    use crate::sandbox::config::RestoreOverrideIntent;
     use crate::sandbox::{MAX_HOSTNAME_BYTES, MAX_SANDBOX_NAME_BYTES, RlimitResource};
     #[cfg(feature = "net")]
     use microsandbox_network::secrets::config::{HostPattern, SecretEntry, SecretSubstitution};
@@ -1794,6 +2069,29 @@ mod tests {
     };
     #[cfg(feature = "net")]
     use std::net::{IpAddr, Ipv4Addr};
+
+    fn checkpoint_state_with_geometry(
+        vcpus: u8,
+        max_vcpus: u8,
+        memory_mib: u32,
+        max_memory_mib: u32,
+    ) -> crate::snapshot::CheckpointSnapshotState {
+        crate::snapshot::CheckpointSnapshotState {
+            checkpoint_id: "checkpoint_test".into(),
+            checkpoint_root:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            restore_intents: vec!["clone".into()],
+            requirements_summary: BTreeMap::from([
+                ("vcpus".into(), serde_json::Value::from(vcpus)),
+                ("max_vcpus".into(), serde_json::Value::from(max_vcpus)),
+                ("memory_mib".into(), serde_json::Value::from(memory_mib)),
+                (
+                    "max_memory_mib".into(),
+                    serde_json::Value::from(max_memory_mib),
+                ),
+            ]),
+        }
+    }
 
     #[test]
     fn deployment_profile_sets_sandbox_spec() {
@@ -2113,7 +2411,7 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(err.to_string().contains("require a managed root disk"));
+        assert!(err.to_string().contains("sandbox-owned root disk"));
     }
 
     #[tokio::test]
@@ -2140,16 +2438,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_builder_flat_root_disk_rejects_patches() {
-        let err = SandboxBuilder::new("test")
+    async fn test_builder_flat_root_disk_accepts_patches() {
+        let config = SandboxBuilder::new("test")
             .image("alpine")
             .root_disk_with(|disk| disk.flat())
             .patch(|patch| patch.text("/etc/motd", "hello", None, true))
             .build()
             .await
-            .unwrap_err();
+            .unwrap();
 
-        assert!(err.to_string().contains("not yet compatible with flat"));
+        assert!(matches!(
+            config.spec.image.oci_root_disk(),
+            Some(crate::sandbox::RootDisk::Flat { .. })
+        ));
+        assert_eq!(config.spec.patches.len(), 1);
     }
 
     #[tokio::test]
@@ -2229,6 +2531,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_builder_disk_only_requires_snapshot() {
+        let err = SandboxBuilder::new("test")
+            .image("alpine")
+            .disk_only()
+            .build()
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("disk_only must be combined"));
+    }
+
+    #[tokio::test]
     async fn test_builder_accepts_archive_as_deferred_image_source() {
         let directory = tempfile::tempdir().unwrap();
         let archive = directory.path().join("snapshot.tar.zst");
@@ -2248,6 +2562,82 @@ mod tests {
             config.spec.image,
             crate::sandbox::RootfsSource::Oci(ref image) if image.reference.is_empty()
         ));
+    }
+
+    #[test]
+    fn checkpoint_restore_adopts_captured_vm_geometry() {
+        let mut builder = SandboxBuilder::new("restore");
+        let state = checkpoint_state_with_geometry(4, 8, 2048, 4096);
+
+        apply_checkpoint_resources(
+            &mut builder.config,
+            &state,
+            RestoreOverrideIntent::default(),
+        )
+        .unwrap();
+
+        assert_eq!(builder.config.spec.resources.cpus, 4);
+        assert_eq!(builder.config.spec.resources.max_cpus, 8);
+        assert_eq!(builder.config.spec.resources.memory_mib, 2048);
+        assert_eq!(builder.config.spec.resources.max_memory_mib, 4096);
+    }
+
+    #[test]
+    fn checkpoint_restore_rejects_conflicting_explicit_geometry() {
+        let mut builder = SandboxBuilder::new("restore").cpus(2);
+        let state = checkpoint_state_with_geometry(4, 8, 2048, 4096);
+
+        let error = apply_checkpoint_resources(
+            &mut builder.config,
+            &state,
+            RestoreOverrideIntent {
+                cpus: true,
+                ..RestoreOverrideIntent::default()
+            },
+        )
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("captured CPU and memory geometry")
+        );
+    }
+
+    #[test]
+    fn checkpoint_restore_accepts_default_and_matching_network_fields() {
+        let captured = microsandbox_types::InterfaceOverrides {
+            mac: Some([0x02, 0x4d, 0x53, 0x42, 0x00, 0x01]),
+            mtu: Some(1500),
+            ..Default::default()
+        };
+
+        assert!(!checkpoint_network_override_conflicts(
+            &microsandbox_types::InterfaceOverrides::default(),
+            &captured,
+        ));
+        assert!(!checkpoint_network_override_conflicts(
+            &microsandbox_types::InterfaceOverrides {
+                mtu: Some(1500),
+                ..Default::default()
+            },
+            &captured,
+        ));
+    }
+
+    #[test]
+    fn checkpoint_restore_rejects_conflicting_network_fields() {
+        let captured = microsandbox_types::InterfaceOverrides {
+            mac: Some([0x02, 0x4d, 0x53, 0x42, 0x00, 0x01]),
+            mtu: Some(1500),
+            ..Default::default()
+        };
+        let requested = microsandbox_types::InterfaceOverrides {
+            mtu: Some(1400),
+            ..Default::default()
+        };
+
+        assert!(checkpoint_network_override_conflicts(&requested, &captured,));
     }
 
     #[tokio::test]

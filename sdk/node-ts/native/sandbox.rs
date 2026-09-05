@@ -423,6 +423,16 @@ impl Sandbox {
         run_modify(builder, modify_dry_run(options.as_ref())).await
     }
 
+    /// Compact the immutable disk prefix; the count includes the base, not the writable head.
+    #[napi]
+    pub async fn compact(&self, layers: Option<f64>, dry_run: Option<bool>) -> Result<String> {
+        let builder = {
+            let guard = self.inner.lock().await;
+            guard.as_ref().ok_or_else(consumed_error)?.compact()
+        };
+        run_compact(builder, layers, dry_run.unwrap_or(false)).await
+    }
+
     /// Stream metrics snapshots at the requested interval (in milliseconds).
     #[napi]
     pub async fn metrics_stream(&self, interval_ms: f64) -> Result<JsMetricsStream> {
@@ -998,6 +1008,40 @@ pub(crate) fn configure_modify(
 
 pub(crate) fn modify_dry_run(options: Option<&SandboxModifyOptions>) -> bool {
     options.and_then(|options| options.dry_run).unwrap_or(false)
+}
+
+pub(crate) async fn run_compact(
+    mut builder: microsandbox::sandbox::DiskCompactionBuilder,
+    layers: Option<f64>,
+    dry_run: bool,
+) -> Result<String> {
+    if let Some(layers) = checked_layer_count(layers)? {
+        builder = builder.layers(layers);
+    }
+    let result = if dry_run {
+        builder.dry_run().await
+    } else {
+        builder.apply().await
+    }
+    .map_err(to_napi_error)?;
+    serde_json::to_string(&result).map_err(|error| napi::Error::from_reason(error.to_string()))
+}
+
+pub(crate) fn checked_layer_count(layers: Option<f64>) -> Result<Option<usize>> {
+    // N-API integer conversion otherwise truncates fractions or wraps negative JS numbers.
+    layers
+        .map(|value| {
+            if !value.is_finite()
+                || value.fract() != 0.0
+                || !(0.0..=u32::MAX as f64).contains(&value)
+            {
+                return Err(Error::from_reason(
+                    "layer count must be a non-negative integer",
+                ));
+            }
+            Ok(value as usize)
+        })
+        .transpose()
 }
 
 /// Convert one `secrets` entry into the canonical secret patch, rejecting
