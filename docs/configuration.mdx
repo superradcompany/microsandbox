@@ -1,8 +1,11 @@
 ---
-title: Global config
+title: Global config reference
 description: Reference for the global config.json shared by the CLI and SDKs
 icon: "gear"
 ---
+
+For guidance on choosing between global configuration, sandbox YAML, CLI
+arguments, and SDK inputs, start with [Configuration](/operations/configuration).
 
 microsandbox reads its global configuration from `~/.microsandbox/config.json`. All fields are optional. A missing file or empty JSON object is equivalent to using the defaults.
 
@@ -208,7 +211,7 @@ Explicit CLI or SDK options win over `config.json`, and `config.json` wins over 
 
 `SandboxBuilder::new()` and `Sandbox::builder()` apply this base automatically. Rust applications can use [`SandboxBuilder::overlay`](/sdk/rust/sandbox#sandbox-overlay) to add sparse per-sandbox values, giving the precedence order built-in defaults < `config.json` < per-sandbox patch.
 
-For workload effects, host requirements, filesystem expectations, and verification steps for these settings, see [Optimization](/sandboxes/optimization).
+For workload effects, host requirements, filesystem expectations, and verification steps for these settings, see [Performance](/sandboxes/optimization).
 
 | Field | Default | Description |
 |-------|---------|-------------|
@@ -275,7 +278,7 @@ Use a fixed policy only when representative measurements justify a different per
 
 `pool_mib` is a live pressure budget, not eagerly allocated RAM. Every eligible writable disk in the same `MSB_HOME` receives a weighted max-min fair share: disks with a smaller configured maximum keep that smaller value, and the remaining pool is divided equally across the rest. Creating another sandbox never fails merely because this pool is full. Existing VMMs observe membership changes within 250 ms; if a disk already owns more dirty data than its new share, libkrun retires accounted ranges and pauses later writes until it converges below the target. A guest write already reserved before the target changed is allowed to complete safely. `fixed` and an explicitly pooled `auto` policy are unsupported on other hosts.
 
-Hardware CRC32C, the guest kernel preemption model, x2APIC, APICv/AVIC capability, vCPU affinity mechanics, and the pure-Rust ext4 writer are implementation or capability details rather than user policy, so they intentionally have no global config keys. The [optimization guide](/sandboxes/optimization#optimizations-that-are-not-knobs) explains how those automatic layers interact with the configurable policy.
+Hardware CRC32C, the guest kernel preemption model, x2APIC, APICv/AVIC capability, vCPU affinity mechanics, and the pure-Rust ext4 writer are implementation or capability details rather than user policy, so they intentionally have no global config keys. The [performance guide](/sandboxes/optimization#automatic) explains how those automatic layers interact with the configurable policy.
 
 ## `registries`
 
@@ -352,7 +355,7 @@ When pulling from a registry, microsandbox resolves credentials in this order:
 
 ## `profiles`
 
-Named backend profiles keyed by profile name; `active_profile` selects the default. How profiles participate in backend selection, including the full resolution order, is documented in [Backends](/operations/backends).
+Named backend profiles keyed by profile name; `active_profile` selects the default. How profiles participate in local or cloud selection, including the full precedence order, is documented in [Local or cloud](/operations/backends).
 
 | Field | Default | Description |
 |-------|---------|-------------|

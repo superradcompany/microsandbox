@@ -63,7 +63,7 @@ See the [sandbox commands reference](/cli/sandbox-commands).
 
 Sandboxes booted from an OCI image now publish live metrics for the writable upper layer: `upper_used_bytes`, `upper_free_bytes`, and `upper_host_allocated_bytes`. The fields flow through `msb metrics --format json`, the Rust, TypeScript, Python, and Go SDKs, and `msb-metrics` OTel gauges (`microsandbox.upper.used`, `microsandbox.upper.free`, `microsandbox.upper.host_allocated`), so capacity dashboards can track the writable overlay without parsing the live ext4 image.
 
-See the [`msb-metrics` deep dive](/observability/deep-dive).
+See [Observability](/observability/msb-metrics#metrics).
 
 **Other features**
 

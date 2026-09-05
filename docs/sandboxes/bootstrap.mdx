@@ -60,7 +60,7 @@ sb, err := m.CreateSandbox(ctx, "worker",
 
 The normal layered root remains the default and retains layer-level deduplication. Flat v1 uses ext4 and is incompatible with rootfs patches and snapshots; unsupported combinations fail explicitly.
 
-See [Optimization](/sandboxes/optimization#storage-layout-layered-or-flat) for workload tradeoffs, host filesystem expectations, and how to verify the clone strategy actually used.
+See [Performance](/sandboxes/optimization#storage) for workload tradeoffs, host filesystem expectations, and how to verify the clone strategy actually used.
 
 ## Scripts
 
@@ -413,4 +413,4 @@ Most slim Docker base images do not include systemd or another full init. Use an
 
 ## Reference
 
-For exact bootstrap, patch, and init APIs, see [TypeScript](/sdk/typescript/sandbox), [Rust](/sdk/rust/sandbox), [Python](/sdk/python/sandbox), or [Go](/sdk/go/sandbox). For CLI configuration and creation flags, see [Configuration file](/cli/configuration) and [Sandbox commands](/cli/sandbox-commands).
+For exact bootstrap, patch, and init APIs, see [TypeScript](/sdk/typescript/sandbox), [Rust](/sdk/rust/sandbox), [Python](/sdk/python/sandbox), or [Go](/sdk/go/sandbox). For CLI configuration and creation flags, see [Sandbox configuration](/cli/configuration) and [Sandbox commands](/cli/sandbox-commands).

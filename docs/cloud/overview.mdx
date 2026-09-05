@@ -19,7 +19,7 @@ export MSB_API_KEY="msb_..."
 msb context
 ```
 
-`msb context` confirms that subsequent commands will run on cloud and shows what selected the backend without exposing the API key. For profiles, SDK selection, and precedence, see [Backends](/operations/backends).
+`msb context` confirms that subsequent commands will run on cloud and shows what selected it without exposing the API key. For profiles, SDK selection, and precedence, see [Local or cloud](/operations/backends).
 
 ## Same code, different backend
 
@@ -130,7 +130,7 @@ The same key also authenticates the [REST API](/api-reference/overview) directly
 
 ## What to know
 
-- **Backends.** Cloud is explicit: set `MSB_BACKEND=cloud`, select a cloud profile, or choose it in code. See [Backends](/operations/backends).
+- **Local or cloud.** Cloud is explicit: set `MSB_BACKEND=cloud`, select a cloud profile, or choose it in code. See [Local or cloud](/operations/backends).
 - **Networking.** Cloud sandboxes get a platform-assigned hostname. SSH works through the same `msb ssh` and SDK SSH clients you use locally.
 - **Images.** Specify an OCI image when you create the sandbox; the cloud pulls it for you.
 - **Keys and billing.** API keys, usage, and invoices live in the [dashboard](https://dashboard.microsandbox.dev).
@@ -142,7 +142,7 @@ The same key also authenticates the [REST API](/api-reference/overview) directly
     The REST API behind the SDKs, authenticated with your API key.
   </Card>
 
-  <Card title="Backends" icon="route" href="/operations/backends">
+  <Card title="Local or cloud" icon="cloud-arrow-up" href="/operations/backends">
     Force local, select in code, or switch with profiles.
   </Card>
 
