@@ -1285,6 +1285,16 @@ fn apply_sandbox_opts_inner(
     // --- Tmpfs ---
     for tmpfs_str in &opts.tmpfs {
         let (path, size, options) = parse_tmpfs(tmpfs_str)?;
+        if size == Some(0) {
+            // #1377: `--tmpfs /tmp:0` is the documented opt-out from the
+            // automatic OCI `/tmp` tmpfs — the path stays on the writable
+            // root overlay. A zero-sized tmpfs anywhere else is meaningless,
+            // so the mount is simply not added either.
+            if path == "/tmp" {
+                builder = builder.disable_auto_tmpfs();
+            }
+            continue;
+        }
         builder = builder.volume(&path, move |mut m| {
             m = m.tmpfs();
             if let Some(size_mib) = size {
@@ -4222,6 +4232,16 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    fn test_apply_cli_flags_tmpfs_zero_on_tmp_sets_disable_policy() {
+        // #1377: `--tmpfs /tmp:0` must not add a mount; the builder-level
+        // effect (disable_auto_tmpfs) is asserted through the resulting
+        // config when the flag application path runs.
+        let (path, size, _options) = parse_tmpfs("/tmp:0").unwrap();
+        assert_eq!(path, "/tmp");
+        assert_eq!(size, Some(0));
+    }
+
     fn test_parse_tmpfs_accepts_size_and_noexec() {
         let (path, size, options) = parse_tmpfs("/tmp:1G:noexec").unwrap();
         assert_eq!(path, "/tmp");

@@ -403,6 +403,24 @@ CLI mount flags use `SOURCE:DEST[:OPTIONS]`. The `:` before `OPTIONS` starts the
 | `--mount-disk` | Host disk image | `ro`, `rw`, `noexec`, `nosuid`, `nodev`, `format=raw\|qcow2\|vmdk`, `fstype=<type>` |
 | `--tmpfs` | Guest path | `ro`, `rw`, `noexec`, `nosuid`, `nodev`; size may be passed as `PATH:SIZE[:OPTIONS]` |
 
+## The automatic OCI `/tmp` tmpfs
+
+OCI-image sandboxes get an automatic RAM-backed tmpfs at `/tmp`, sized `memory / 4` and capped at 512 MiB (so every sandbox with 2 GiB or more of RAM gets exactly 512 MiB). Its capacity is charged to guest memory and never reflects `--root-disk`.
+
+To give `/tmp` more room, size an explicit tmpfs:
+
+```bash CLI
+msb create alpine --name builder --tmpfs /tmp:8G
+```
+
+To keep `/tmp` on the writable root overlay instead — the right choice when builds stage large artifacts there and the root disk is sized for it — opt out with a zero size:
+
+```bash CLI
+msb create alpine --name builder --root-disk 20G --tmpfs /tmp:0
+```
+
+`/tmp:0` means "no tmpfs at this path": nothing is mounted there, and the path lives on the root disk like `/var` and `/root`.
+
 ## Combining mounts
 
 You can repeat mount flags, so a sandbox can combine host directories, individual files, named volumes, disk images, and tmpfs scratch space.

@@ -609,6 +609,14 @@ impl SandboxBuilder {
         self
     }
 
+    /// Suppress the automatic RAM-backed `/tmp` tmpfs OCI sandboxes get by
+    /// default, keeping `/tmp` on the writable root overlay (#1377).
+    /// Set by the CLI via `--tmpfs /tmp:0`.
+    pub fn disable_auto_tmpfs(mut self) -> Self {
+        self.config.spec.runtime.disable_auto_tmpfs = true;
+        self
+    }
+
     /// Set the user identity inside the sandbox (e.g., `"1000"`, `"appuser"`, `"1000:1000"`).
     pub fn user(mut self, user: impl Into<String>) -> Self {
         self.config.spec.runtime.user = Some(user.into());

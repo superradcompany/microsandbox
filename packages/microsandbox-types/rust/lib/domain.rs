@@ -1032,6 +1032,11 @@ pub struct SandboxRuntimeOptions {
 
     /// Force-disable metrics sampling regardless of `metrics_sample_interval_ms`.
     pub disable_metrics_sample: bool,
+
+    /// Suppress the automatic RAM-backed `/tmp` tmpfs OCI sandboxes get by
+    /// default, keeping `/tmp` on the writable root overlay (#1377). Set by
+    /// `--tmpfs /tmp:0` or the builder's `disable_auto_tmpfs()`.
+    pub disable_auto_tmpfs: bool,
 }
 
 /// Environment variable entry.

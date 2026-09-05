@@ -3962,6 +3962,69 @@ mod tests {
         assert!(rendered.contains(&"MSB_TMPFS=/tmp:size=256".to_string()));
     }
 
+    /// #1377: the persisted opt-out suppresses the automatic OCI /tmp tmpfs
+    /// at the config layer, so /tmp stays on the writable root overlay.
+    #[tokio::test]
+    async fn test_sandbox_cli_args_disable_auto_tmpfs_policy_beats_oci_default() {
+        let mut config = SandboxConfig {
+            spec: microsandbox_types::SandboxSpec {
+                name: "test".into(),
+                image: RootfsSource::Oci(OciRootfsSource {
+                    reference: "alpine".into(),
+                    root_disk: None,
+                }),
+                resources: microsandbox_types::SandboxResources {
+                    memory_mib: 8192,
+                    ..Default::default()
+                },
+                runtime: microsandbox_types::SandboxRuntimeOptions {
+                    disable_auto_tmpfs: true,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            manifest_digest: Some(
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            ),
+            ..Default::default()
+        };
+        config.apply_runtime_defaults();
+
+        let rendered = render_args(&config);
+
+        assert!(
+            !rendered.iter().any(|a| a.starts_with("MSB_TMPFS=")),
+            "the disable_auto_tmpfs policy must suppress the automatic mount: {rendered:?}"
+        );
+    }
+
+    /// #1377: without the policy the default is applied exactly as before.
+    #[tokio::test]
+    async fn test_sandbox_cli_args_default_tmpfs_without_policy() {
+        let mut config = SandboxConfig {
+            spec: microsandbox_types::SandboxSpec {
+                name: "test".into(),
+                image: RootfsSource::Oci(OciRootfsSource {
+                    reference: "alpine".into(),
+                    root_disk: None,
+                }),
+                resources: microsandbox_types::SandboxResources {
+                    memory_mib: 8192,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            manifest_digest: Some(
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            ),
+            ..Default::default()
+        };
+        config.apply_runtime_defaults();
+
+        let rendered = render_args(&config);
+        assert!(rendered.contains(&"MSB_TMPFS=/tmp:size=512".to_string()));
+    }
+
     #[tokio::test]
     async fn test_sandbox_cli_args_omit_tmpfs_env_var_when_no_tmpfs() {
         let config = SandboxBuilder::new("test")
