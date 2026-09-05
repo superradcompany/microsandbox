@@ -132,4 +132,9 @@ export interface NetworkConfig {
   readonly trustHostCAs: boolean;
   /** Canonical proxy configuration for outbound connections. */
   readonly outboundProxy: OutboundProxy | null;
+  readonly proxy: {
+    readonly enabled: boolean;
+    readonly port: number;
+  };
+  readonly upstreamProxy: string | null;
 }

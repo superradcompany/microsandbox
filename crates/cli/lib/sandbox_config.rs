@@ -394,8 +394,18 @@ struct NetworkConfigInput {
     dns: Option<DnsInput>,
     #[config_patch(nested)]
     tls: Option<TlsInput>,
+    #[config_patch(nested)]
+    proxy: Option<ProxyInput>,
     trust_host_cas: Option<bool>,
     max_connections: Option<usize>,
+    upstream_proxy: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, ConfigPatch)]
+#[serde(default, deny_unknown_fields)]
+struct ProxyInput {
+    enabled: Option<bool>,
+    port: Option<u16>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, ConfigPatch)]
@@ -1672,6 +1682,16 @@ fn materialize_network_patch(
         }
         patch = patch.dns(value);
     }
+    if let Some(proxy) = input.proxy {
+        let mut value = microsandbox_types::HttpProxyConfigPatch::new();
+        if let Some(enabled) = proxy.enabled {
+            value = value.enabled(enabled);
+        }
+        if let Some(port) = proxy.port {
+            value = value.port(port);
+        }
+        patch = patch.proxy(value);
+    }
 
     let materialized_secrets = secrets.map(materialize_secrets).transpose()?;
     if tls_present
@@ -1709,6 +1729,9 @@ fn materialize_network_patch(
     }
     if let Some(max) = input.max_connections {
         patch = patch.max_connections(max);
+    }
+    if let Some(upstream_proxy) = input.upstream_proxy {
+        patch = patch.upstream_proxy(upstream_proxy);
     }
     Ok(patch)
 }
@@ -2065,6 +2088,10 @@ network:
     block_quic: true
   trust_host_cas: true
   max_connections: 10
+  proxy:
+    enabled: true
+    port: 8080
+  upstream_proxy: "http://proxy.example:3128"
 secrets:
   TOKEN:
     value: lower
@@ -2131,6 +2158,13 @@ ADD:
         assert_eq!(tls.block_quic, Some(true));
         assert_eq!(network.trust_host_cas, Some(false));
         assert_eq!(network.max_connections, Some(20));
+        let proxy = network.proxy.unwrap();
+        assert_eq!(proxy.enabled, Some(true));
+        assert_eq!(proxy.port, Some(8080));
+        assert_eq!(
+            network.upstream_proxy.as_deref(),
+            Some("http://proxy.example:3128")
+        );
 
         let secrets = input.secrets.unwrap();
         let token = &secrets["TOKEN"];

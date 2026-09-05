@@ -49,6 +49,42 @@ msb create python --name isolated --no-net
 
 The TypeScript and Rust examples disable the network device. Python `Network.none()`, Go `NetworkPolicy.None()`, and CLI `--no-net` retain the device but deny traffic in both directions through policy.
 
+## Upstream proxy
+
+All outbound TCP connections, including HTTP, HTTPS, TLS, SSH, and database protocols, can be routed through an HTTP CONNECT proxy. Set `upstream_proxy` in the sandbox network configuration, or use `MSB_UPSTREAM_PROXY`. When the explicit setting is absent, `HTTPS_PROXY`, `HTTP_PROXY`, and `ALL_PROXY` are checked in that order. Gateway loopback connections remain direct so published host ports continue to work.
+
+```rust
+let sb = Sandbox::builder("proxied")
+    .image("python")
+    .network(|n| n.upstream_proxy("http://proxy.example:3128"))
+    .create()
+    .await?;
+```
+
+## Guest HTTP forward proxy
+
+Enable the guest-facing HTTP proxy with `network.proxy`. It listens on the
+gateway/host alias and accepts HTTP absolute-form requests and `CONNECT
+host:port`. When `upstream_proxy` is set, the proxy opens each tunnel through
+that HTTP CONNECT proxy without resolving the destination hostname locally.
+
+```yaml
+network:
+  proxy:
+    enabled: true
+    # Omit port (or set it to 0) to assign a free port per sandbox.
+    port: 0
+  upstream_proxy: http://proxy.example:8080
+```
+
+When enabled, `HTTP_PROXY`, `HTTPS_PROXY`, and `ALL_PROXY` (plus lowercase
+variants) are set in the guest unless explicitly supplied. The host alias and
+loopback addresses are added to `NO_PROXY`.
+
+Hostname allow-list entries are forwarded to the upstream proxy unchanged.
+Therefore, the upstream proxy's DNS resolution is part of the trust boundary:
+only use an upstream proxy whose DNS results you trust for the allowed hosts.
+
 ## Deployment profiles
 
 <Tooltip tip="Managed cloud deployments choose the platform isolation profile; per-sandbox and local-operator profile overrides are not accepted."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>

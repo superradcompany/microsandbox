@@ -139,6 +139,19 @@ impl NetworkBuilder {
         self
     }
 
+    /// Route all host-side TCP egress through an HTTP CONNECT proxy.
+    pub fn upstream_proxy(mut self, proxy: impl Into<String>) -> Self {
+        self.config.upstream_proxy = Some(proxy.into());
+        self
+    }
+
+    /// Configure the guest-facing HTTP forward proxy.
+    pub fn proxy(mut self, enabled: bool, port: u16) -> Self {
+        self.config.proxy.enabled = enabled;
+        self.config.proxy.port = port;
+        self
+    }
+
     /// Publish a TCP port: `host_port` on the host maps to `guest_port` in the guest.
     pub fn port(self, host_port: u16, guest_port: u16) -> Self {
         self.port_bind(

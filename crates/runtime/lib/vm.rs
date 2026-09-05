@@ -1871,6 +1871,18 @@ fn build_vm(
         bootstrap.network = Some(network.guest_bootstrap_network());
         bootstrap.host_alias = Some(network.guest_host_alias().to_string());
         bootstrap.default_env.extend(network.guest_secret_env());
+        let configured_env = bootstrap
+            .default_env
+            .iter()
+            .map(|variable| variable.key.to_ascii_lowercase())
+            .collect::<std::collections::HashSet<_>>();
+        for (key, value) in network.guest_proxy_env() {
+            if !configured_env.contains(&key.to_ascii_lowercase()) {
+                bootstrap
+                    .default_env
+                    .push(microsandbox_protocol::bootstrap::BootstrapEnvVar { key, value });
+            }
+        }
 
         builder = builder.net(move |mut n| {
             n = n.mac(guest_mac);

@@ -560,6 +560,36 @@ impl NetworkPolicy {
         self.evaluate_dns_query_inner(None, protocol, port)
     }
 
+    /// Evaluate a TCP destination selected by a hostname-aware proxy.
+    ///
+    /// Hostnames are matched directly against domain rules so the proxy can
+    /// preserve them for upstream DNS resolution. IP-only rules are applied
+    /// by the regular packet path when the guest supplies a literal address.
+    pub fn evaluate_proxy_hostname(&self, hostname: &str, protocol: Protocol, port: u16) -> Action {
+        let hostname = hostname.trim_end_matches('.').to_ascii_lowercase();
+        for rule in &self.rules {
+            if !matches!(rule.direction, Direction::Egress | Direction::Any) {
+                continue;
+            }
+            let matched = match &rule.destination {
+                Destination::Any => rule_matches_protocol_and_port(rule, protocol, port),
+                Destination::Domain(domain) => {
+                    hostname == domain.as_str()
+                        && rule_matches_protocol_and_port(rule, protocol, port)
+                }
+                Destination::DomainSuffix(suffix) => {
+                    matches_suffix(&hostname, suffix.as_str())
+                        && rule_matches_protocol_and_port(rule, protocol, port)
+                }
+                Destination::Cidr(_) | Destination::Group(_) => false,
+            };
+            if matched {
+                return rule.action;
+            }
+        }
+        self.default_egress
+    }
+
     fn evaluate_dns_query_inner(
         &self,
         name: Option<&DomainName>,

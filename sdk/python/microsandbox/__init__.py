@@ -109,6 +109,7 @@ from microsandbox.types import (
     FsEntryKind,
     GiB,
     HostPermissions,
+    HttpProxy,
     ImageArchiveFormat,
     ImageSource,
     ImageSourceKind,
@@ -270,6 +271,7 @@ __all__ = [
     "SnapshotScope",
     # Network
     "Network",
+    "HttpProxy",
     "NetworkPolicy",
     "NetworkProfile",
     "NetworkRateLimiter",

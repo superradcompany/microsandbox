@@ -4,6 +4,7 @@ import type {
   EnvVar,
   HandoffInit,
   HostPermissions,
+  HttpProxyConfig,
   MountOptions,
   NetworkPolicy,
   SandboxLogLevel,
@@ -397,6 +398,14 @@ export type CloudNetworkSpec = {
    * Max concurrent guest connections.
    */
   max_connections: number | null;
+  /**
+   * Guest-facing HTTP forward proxy configuration.
+   */
+  proxy: HttpProxyConfig;
+  /**
+   * HTTP CONNECT proxy for host-side TCP egress.
+   */
+  upstream_proxy: string | null;
 };
 
 export type CloudSecretsConfig = {

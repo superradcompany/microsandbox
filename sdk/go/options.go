@@ -1158,6 +1158,18 @@ type NetworkConfig struct {
 
 	// TrustHostCAs ships the host's extra CA bundles into the guest.
 	TrustHostCAs *bool
+
+	// Proxy configures the guest-facing HTTP forward proxy.
+	Proxy *HTTPProxyConfig
+
+	// UpstreamProxy routes outbound proxy traffic through an HTTP CONNECT proxy.
+	UpstreamProxy string
+}
+
+// HTTPProxyConfig configures the guest-facing HTTP forward proxy.
+type HTTPProxyConfig struct {
+	Enabled bool
+	Port    uint16
 }
 
 // DNSConfig configures the in-VM DNS proxy.

@@ -4098,6 +4098,7 @@ dependencies = [
  "tokio-rustls",
  "tokio-socks",
  "tracing",
+ "url",
  "windows-sys 0.61.2",
  "zeroize",
 ]

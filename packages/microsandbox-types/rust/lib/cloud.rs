@@ -15,11 +15,11 @@ use zeroize::Zeroizing;
 
 use crate::domain::{
     CpuPlacement, DeploymentProfile, DiskImageFormat, EnvVar, HandoffInit, HostPattern,
-    HostPermissions, MountOptions, NetworkPolicy, NetworkSpec, OciRootfsSource, Patch, PullPolicy,
-    Rlimit, RlimitResource, RootDisk, RootfsSource, SandboxLogLevel, SandboxPolicy,
-    SandboxResources, SandboxRuntimeOptions, SandboxSpec, SecretEntry, SecretInjection,
-    SecretsConfig, SecurityProfile, StatVirtualization, TransparentHugePagePolicy, ViolationAction,
-    VolumeMount, VsockSpec, default_private, default_strict,
+    HostPermissions, HttpProxyConfig, MountOptions, NetworkPolicy, NetworkSpec, OciRootfsSource,
+    Patch, PullPolicy, Rlimit, RlimitResource, RootDisk, RootfsSource, SandboxLogLevel,
+    SandboxPolicy, SandboxResources, SandboxRuntimeOptions, SandboxSpec, SecretEntry,
+    SecretInjection, SecretsConfig, SecurityProfile, StatVirtualization, TransparentHugePagePolicy,
+    ViolationAction, VolumeMount, VsockSpec, default_private, default_strict,
 };
 use crate::modify::SecretSource;
 use crate::{TypesError, TypesResult};
@@ -751,6 +751,14 @@ pub struct CloudNetworkSpec {
     /// Max concurrent guest connections.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_connections: Option<usize>,
+
+    /// Guest-facing HTTP forward proxy configuration.
+    #[serde(default)]
+    pub proxy: HttpProxyConfig,
+
+    /// HTTP CONNECT proxy for host-side TCP egress.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upstream_proxy: Option<String>,
 }
 
 impl Default for CloudNetworkSpec {
@@ -760,6 +768,8 @@ impl Default for CloudNetworkSpec {
             policy: None,
             secrets: None,
             max_connections: None,
+            proxy: HttpProxyConfig::default(),
+            upstream_proxy: None,
         }
     }
 }
@@ -1002,6 +1012,8 @@ impl TryFrom<CloudSandboxSpec> for SandboxSpec {
             rate_limiter: None,
             trust_host_cas: false,
             outbound_proxy: None,
+            proxy: spec.network.proxy,
+            upstream_proxy: spec.network.upstream_proxy,
         };
         let runtime = SandboxRuntimeOptions {
             workdir: spec.runtime.workdir,
@@ -1099,6 +1111,8 @@ impl From<SandboxSpec> for CloudSandboxSpec {
                 policy: spec.network.policy,
                 secrets: spec.network.secrets.map(Into::into),
                 max_connections: spec.network.max_connections,
+                proxy: spec.network.proxy,
+                upstream_proxy: spec.network.upstream_proxy,
             },
             init: spec.init,
             pull_policy: spec.pull_policy.into(),

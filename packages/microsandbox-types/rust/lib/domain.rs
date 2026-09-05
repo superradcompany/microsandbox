@@ -594,6 +594,15 @@ pub struct NetworkSpec {
     ///
     #[serde(skip_serializing_if = "Option::is_none")]
     pub outbound_proxy: Option<OutboundProxy>,
+
+    /// Guest-facing HTTP forward proxy configuration.
+    #[serde(default)]
+    #[config_patch(nested)]
+    pub proxy: HttpProxyConfig,
+
+    /// HTTP CONNECT proxy used for host-side TCP egress.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upstream_proxy: Option<String>,
 }
 
 /// Proxy configuration for outbound sandbox connections.
@@ -635,6 +644,19 @@ pub struct Socks5Credentials {
 
     /// Host-side source for the SOCKS5 authentication password.
     pub password: SecretSource,
+}
+
+/// Guest-facing HTTP forward proxy configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, ConfigPatch)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(default)]
+pub struct HttpProxyConfig {
+    /// Whether the proxy listener is enabled.
+    pub enabled: bool,
+
+    /// TCP port exposed on the guest gateway and host alias.
+    pub port: u16,
 }
 
 /// A published port mapping between host and guest.
@@ -1706,6 +1728,17 @@ impl Default for NetworkSpec {
             rate_limiter: None,
             trust_host_cas: false,
             outbound_proxy: None,
+            proxy: HttpProxyConfig::default(),
+            upstream_proxy: None,
+        }
+    }
+}
+
+impl Default for HttpProxyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            port: 0,
         }
     }
 }

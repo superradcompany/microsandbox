@@ -1371,6 +1371,18 @@ fn apply_network(
         builder = builder.network(move |n| n.trust_host_cas(trust));
     }
 
+    if let Some(proxy) = net.get_item("proxy")?
+        && !proxy.is_none()
+    {
+        let proxy: Bound<'_, PyDict> = proxy.downcast::<PyDict>()?.clone();
+        let enabled = extract_opt::<bool>(&proxy, "enabled")?.unwrap_or(true);
+        let port = extract_opt::<u16>(&proxy, "port")?.unwrap_or(0);
+        builder = builder.network(move |n| n.proxy(enabled, port));
+    }
+    if let Some(upstream) = extract_opt::<String>(net, "upstream_proxy")? {
+        builder = builder.network(move |n| n.upstream_proxy(upstream));
+    }
+
     // Secret violation action (sandbox-level, not per-secret).
     if let Some(violation_obj) = net.get_item("on_secret_violation")?
         && !violation_obj.is_none()

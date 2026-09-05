@@ -1663,6 +1663,14 @@ type NetworkOptions struct {
 	RateLimiter         *NetworkRateLimiterOptions `json:"rate_limiter,omitempty"`
 	OnSecretViolation   string                     `json:"on_secret_violation,omitempty"`
 	TrustHostCAs        *bool                      `json:"trust_host_cas,omitempty"`
+	Proxy               *HTTPProxyOptions          `json:"proxy,omitempty"`
+	UpstreamProxy       string                     `json:"upstream_proxy,omitempty"`
+}
+
+// HTTPProxyOptions configures the guest-facing HTTP forward proxy.
+type HTTPProxyOptions struct {
+	Enabled bool   `json:"enabled"`
+	Port    uint16 `json:"port"`
 }
 
 // RateLimiterOptions limits one traffic direction; a nil bucket leaves that

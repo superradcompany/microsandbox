@@ -97,6 +97,17 @@ export type StatVirtualization = "strict" | "relaxed" | "off";
 
 export type HostPermissions = "private" | "mirror";
 
+export type HttpProxyConfig = {
+  /**
+   * Whether the proxy listener is enabled.
+   */
+  enabled: boolean;
+  /**
+   * TCP port exposed on the guest gateway and host alias.
+   */
+  port: number;
+};
+
 export type SecretInjection = {
   /**
    * Substitute in HTTP headers (default: true).

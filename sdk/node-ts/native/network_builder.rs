@@ -46,6 +46,24 @@ impl JsNetworkBuilder {
         self
     }
 
+    /// Configure the guest-facing HTTP forward proxy.
+    #[napi]
+    pub fn proxy(&mut self, enabled: bool, port: u32) -> Result<&Self> {
+        let port =
+            u16::try_from(port).map_err(|_| napi::Error::from_reason("proxy port out of range"))?;
+        let prev = self.take_inner();
+        self.inner = Some(prev.proxy(enabled, port));
+        Ok(self)
+    }
+
+    /// Route host-side TCP egress through an HTTP CONNECT proxy.
+    #[napi(js_name = "upstreamProxy")]
+    pub fn upstream_proxy(&mut self, proxy: String) -> &Self {
+        let prev = self.take_inner();
+        self.inner = Some(prev.upstream_proxy(proxy));
+        self
+    }
+
     /// Publish a TCP port.
     #[napi]
     pub fn port(&mut self, host_port: u32, guest_port: u32) -> Result<&Self> {

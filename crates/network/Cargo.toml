@@ -34,6 +34,7 @@ msb_krun_utils.workspace = true
 parking_lot = { workspace = true }
 pem = "3"
 percent-encoding = "2"
+url = "2"
 rcgen = { workspace = true }
 resolv-conf = { workspace = true }
 rustls = { workspace = true }

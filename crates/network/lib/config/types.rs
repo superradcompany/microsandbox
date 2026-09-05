@@ -88,6 +88,26 @@ pub struct NetworkConfig {
     /// relays non-DNS UDP; SOCKS4 blocks it because that protocol has no UDP command.
     #[serde(default)]
     pub outbound_proxy: Option<OutboundProxy>,
+
+    /// Guest-facing HTTP forward proxy configuration.
+    #[serde(default)]
+    pub proxy: HttpProxyConfig,
+
+    /// HTTP CONNECT proxy for host-side TCP egress.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_proxy: Option<String>,
+}
+
+/// Guest-facing HTTP forward proxy configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HttpProxyConfig {
+    /// Whether the proxy listener is enabled.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// TCP port exposed on the guest gateway and host alias.
+    #[serde(default = "default_proxy_port")]
+    pub port: u16,
 }
 
 /// Network configuration whose runtime-only values have been resolved.
@@ -243,6 +263,17 @@ impl Default for NetworkConfig {
             rate_limiter: None,
             trust_host_cas: false,
             outbound_proxy: None,
+            proxy: HttpProxyConfig::default(),
+            upstream_proxy: None,
+        }
+    }
+}
+
+impl Default for HttpProxyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            port: default_proxy_port(),
         }
     }
 }
@@ -271,6 +302,10 @@ fn default_host_bind() -> IpAddr {
 
 fn default_query_timeout_ms() -> u64 {
     5000
+}
+
+fn default_proxy_port() -> u16 {
+    0
 }
 
 //--------------------------------------------------------------------------------------------------

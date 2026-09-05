@@ -27,6 +27,7 @@ use crate::netstack::{
 };
 use crate::policy::{NetworkPolicy, NetworkProfile};
 use crate::secrets::handle::SecretsHandle;
+use crate::tcp::http;
 use crate::tls::state::{TlsState, TlsStateError};
 
 //--------------------------------------------------------------------------------------------------
@@ -74,6 +75,7 @@ pub struct SmoltcpNetwork {
 
     // Live-swappable secrets view shared with the poll loop and TLS state.
     secrets: SecretsHandle,
+    proxy_listeners: Option<http::HttpProxyListeners>,
 }
 
 #[derive(Clone, Copy)]
@@ -85,6 +87,10 @@ struct HostRoutes {
 /// Errors that prevent the smoltcp network from being created safely.
 #[derive(Debug, thiserror::Error)]
 pub enum NetworkInitError {
+    /// The guest-facing HTTP proxy listener could not be prepared.
+    #[error("failed to prepare guest HTTP proxy listener")]
+    ProxyListener(#[source] std::io::Error),
+
     /// The configured connection cap is above the hard safety limit.
     #[error("max_connections {configured} exceeds hard limit {limit}")]
     MaxConnectionsExceeded {
@@ -183,9 +189,24 @@ impl SmoltcpNetwork {
         host_routes: HostRoutes,
     ) -> Result<Self, NetworkInitError> {
         enforce_deployment_profile(&mut config, deployment_profile);
+        if config.config().upstream_proxy.is_none() {
+            let upstream_proxy = [
+                "MSB_UPSTREAM_PROXY",
+                "HTTPS_PROXY",
+                "HTTP_PROXY",
+                "ALL_PROXY",
+            ]
+            .iter()
+            .find_map(|key| {
+                std::env::var(key)
+                    .ok()
+                    .filter(|value| !value.trim().is_empty())
+            });
+            config.config_mut().upstream_proxy = upstream_proxy;
+        }
         let platform_policy = Self::platform_policy(deployment_profile);
-        let resolved_config = config;
-        let config = resolved_config.config();
+        let mut resolved_config = config;
+        let config = resolved_config.config().clone();
 
         if let Some(configured) = config.max_connections
             && configured > MAX_NETWORK_CONNECTIONS
@@ -227,6 +248,11 @@ impl SmoltcpNetwork {
             None => None,
         };
         let gateway_ipv6 = guest_ipv6.map(gateway_from_guest_ipv6);
+        let proxy_listeners = http::prepare(&config.proxy, gateway_ipv4, gateway_ipv6)
+            .map_err(NetworkInitError::ProxyListener)?;
+        if let Some((_, port)) = proxy_listeners.as_ref() {
+            resolved_config.config_mut().proxy.port = *port;
+        }
 
         let queue_capacity = config
             .max_connections
@@ -288,6 +314,7 @@ impl SmoltcpNetwork {
             gateway_ipv6,
             tls_state,
             secrets,
+            proxy_listeners: proxy_listeners.map(|(listeners, _)| listeners),
         })
     }
 
@@ -321,6 +348,8 @@ impl SmoltcpNetwork {
             guest_ipv4: self.guest_ipv4,
             guest_ipv6: self.guest_ipv6,
             mtu: self.mtu as usize,
+            proxy: self.config.config().proxy.clone(),
+            upstream_proxy: self.config.config().upstream_proxy.clone(),
         };
         let config = self.config.config();
         let network_policy = config.policy.clone();
@@ -331,6 +360,7 @@ impl SmoltcpNetwork {
         let max_connections = config.max_connections;
         let secrets = self.secrets.clone();
         let outbound_proxy = self.config.outbound_proxy().cloned().map(Arc::new);
+        let proxy_listeners = self.proxy_listeners.take();
 
         self.poll_handle = Some(
             std::thread::Builder::new()
@@ -348,6 +378,7 @@ impl SmoltcpNetwork {
                         tokio_handle,
                         secrets,
                         outbound_proxy,
+                        proxy_listeners,
                     );
                 })
                 .expect("failed to spawn smoltcp poll thread"),
@@ -401,6 +432,29 @@ impl SmoltcpNetwork {
         }
 
         vars
+    }
+
+    /// Generate proxy environment variables for the guest when its HTTP proxy is enabled.
+    pub fn guest_proxy_env(&self) -> Vec<(String, String)> {
+        let proxy = &self.config.config().proxy;
+        if !proxy.enabled {
+            return Vec::new();
+        }
+        let value = format!("http://{}:{}", crate::HOST_ALIAS, proxy.port);
+        let no_proxy = format!("{},127.0.0.1,::1", crate::HOST_ALIAS);
+        [
+            ("HTTP_PROXY", value.clone()),
+            ("HTTPS_PROXY", value.clone()),
+            ("ALL_PROXY", value.clone()),
+            ("http_proxy", value.clone()),
+            ("https_proxy", value.clone()),
+            ("all_proxy", value),
+            ("NO_PROXY", no_proxy.clone()),
+            ("no_proxy", no_proxy),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.to_string(), value))
+        .collect()
     }
 
     /// Build the typed network payload consumed by agentd during bootstrap.

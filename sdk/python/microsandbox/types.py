@@ -1680,6 +1680,17 @@ class NetworkRateLimiter:
 
 
 @dataclass(frozen=True, slots=True)
+class HttpProxy:
+    """Guest-facing HTTP forward proxy."""
+
+    enabled: bool = True
+    port: int = 0
+
+    def _to_dict(self) -> dict:
+        return {"enabled": self.enabled, "port": self.port}
+
+
+@dataclass(frozen=True, slots=True)
 class VsockRoute:
     """Host Unix socket or Windows named pipe exposed on host CID 2."""
 
@@ -1730,6 +1741,8 @@ class Network:
     rate_limiter: NetworkRateLimiter | None = None
     """Local egress and ingress rate limits. ``None`` means unlimited."""
     on_secret_violation: ViolationAction | ViolationPolicy = ViolationAction.BLOCK_AND_LOG
+    proxy: HttpProxy | None = None
+    upstream_proxy: str | None = None
 
     @classmethod
     def none(cls) -> Network:
@@ -1786,6 +1799,12 @@ class Network:
             if not isinstance(self.rate_limiter, NetworkRateLimiter):
                 raise TypeError("Network.rate_limiter must be NetworkRateLimiter or None")
             d["rate_limiter"] = self.rate_limiter._to_dict()
+        if self.proxy is not None:
+            if not isinstance(self.proxy, HttpProxy):
+                raise TypeError("Network.proxy must be HttpProxy or None")
+            d["proxy"] = self.proxy._to_dict()
+        if self.upstream_proxy is not None:
+            d["upstream_proxy"] = self.upstream_proxy
         violation = violation_policy_to_dict(self.on_secret_violation)
         if violation != str(ViolationAction.BLOCK_AND_LOG):
             d["on_secret_violation"] = violation

@@ -457,6 +457,10 @@ export declare class NetworkBuilder {
   constructor()
   /** Enable or disable networking. */
   enabled(enabled: boolean): this
+  /** Configure the guest-facing HTTP forward proxy. */
+  proxy(enabled: boolean, port: number): this
+  /** Route host-side TCP egress through an HTTP CONNECT proxy. */
+  upstreamProxy(proxy: string): this
   /** Publish a TCP port. */
   port(hostPort: number, guestPort: number): this
   /** Publish a TCP port on a specific host bind address. */

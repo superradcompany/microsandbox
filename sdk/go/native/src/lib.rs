@@ -883,6 +883,12 @@ struct NetworkRateLimiterOpts {
     ingress: Option<RateLimiterOpts>,
 }
 
+#[derive(serde::Deserialize)]
+struct HttpProxyOpts {
+    enabled: bool,
+    port: u16,
+}
+
 /// Token bucket: `size` tokens (bytes or frames) refilled every
 /// `refill_time_ms`, plus an optional startup-only burst.
 #[derive(Clone, serde::Deserialize)]
@@ -930,6 +936,8 @@ struct NetworkOpts {
     on_secret_violation: Option<String>,
     /// Trust the host's extra CA certificates inside the guest.
     trust_host_cas: Option<bool>,
+    proxy: Option<HttpProxyOpts>,
+    upstream_proxy: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -1435,6 +1443,15 @@ fn apply_network(
     // Trust host CA bundles inside the guest.
     if let Some(trust) = net.trust_host_cas {
         builder = builder.network(move |n| n.trust_host_cas(trust));
+    }
+    if let Some(proxy) = &net.proxy {
+        let enabled = proxy.enabled;
+        let port = proxy.port;
+        builder = builder.network(move |n| n.proxy(enabled, port));
+    }
+    if let Some(upstream) = &net.upstream_proxy {
+        let upstream = upstream.clone();
+        builder = builder.network(move |n| n.upstream_proxy(upstream));
     }
 
     // Sandbox-wide secret violation action.

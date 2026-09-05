@@ -336,6 +336,10 @@ func buildFFINetwork(n *NetworkConfig) *ffi.NetworkOptions {
 		RateLimiter:         buildFFINetworkRateLimiter(n.RateLimiter),
 		OnSecretViolation:   string(n.OnSecretViolation),
 		TrustHostCAs:        n.TrustHostCAs,
+		UpstreamProxy:       n.UpstreamProxy,
+	}
+	if n.Proxy != nil {
+		out.Proxy = &ffi.HTTPProxyOptions{Enabled: n.Proxy.Enabled, Port: n.Proxy.Port}
 	}
 
 	if len(n.Rules) > 0 || n.DefaultEgress != "" || n.DefaultIngress != "" {

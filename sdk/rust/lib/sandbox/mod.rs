@@ -120,7 +120,7 @@ pub use microsandbox_image::{PullProgress, PullProgressHandle};
 #[cfg(feature = "net")]
 pub use microsandbox_network::builder::SecretBuilder;
 #[cfg(feature = "net")]
-pub use microsandbox_network::config::{NetworkConfig, PublishedPort};
+pub use microsandbox_network::config::{HttpProxyConfig, NetworkConfig, PublishedPort};
 #[cfg(feature = "net")]
 pub use microsandbox_network::dns::Nameserver;
 #[cfg(feature = "net")]

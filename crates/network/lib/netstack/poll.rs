@@ -21,7 +21,7 @@ use smoltcp::wire::{
     Ipv6Repr, TcpPacket, UdpPacket,
 };
 
-use crate::config::{DnsConfig, PublishedPort};
+use crate::config::{DnsConfig, HttpProxyConfig, PublishedPort};
 use crate::dns::common::ports::DnsPortType;
 use crate::dns::{
     interceptor::DnsInterceptor,
@@ -32,6 +32,7 @@ use crate::policy::{EgressEvaluation, HostnameSource, NetworkPolicy, Protocol};
 use crate::ports::PortPublisher;
 use crate::proxy::ResolvedOutboundProxy;
 use crate::secrets::handle::SecretsHandle;
+use crate::tcp::http;
 use crate::tcp::{connection::ConnectionTracker, proxy::TcpProxy, upstream::UpstreamTcpTarget};
 use crate::tls::{proxy::TlsProxy, state::TlsState};
 use crate::udp::fragments::{
@@ -112,6 +113,10 @@ pub struct PollLoopConfig {
     pub guest_ipv6: Option<Ipv6Addr>,
     /// IP-level MTU (e.g. 1500).
     pub mtu: usize,
+    /// Guest-facing HTTP proxy configuration.
+    pub proxy: HttpProxyConfig,
+    /// Optional host-side HTTP CONNECT proxy.
+    pub upstream_proxy: Option<String>,
 }
 
 /// Per-sandbox gateway addresses owned by the smoltcp virtual stack.
@@ -224,7 +229,7 @@ pub fn create_interface(device: &mut SmoltcpDevice, config: &PollLoopConfig) -> 
 /// * `tokio_handle` - Runtime handle used for proxy tasks, DNS forwarding, port publishing,
 ///   and ICMP relays.
 #[allow(clippy::too_many_arguments)]
-pub fn smoltcp_poll_loop(
+pub(crate) fn smoltcp_poll_loop(
     shared: Arc<SharedState>,
     config: PollLoopConfig,
     network_policy: NetworkPolicy,
@@ -236,6 +241,7 @@ pub fn smoltcp_poll_loop(
     tokio_handle: tokio::runtime::Handle,
     secrets: SecretsHandle,
     outbound_proxy: Option<Arc<ResolvedOutboundProxy>>,
+    proxy_listeners: Option<http::HttpProxyListeners>,
 ) {
     let mut device = SmoltcpDevice::new(shared.clone(), config.mtu);
     let mut iface = create_interface(&mut device, &config);
@@ -283,6 +289,14 @@ pub fn smoltcp_poll_loop(
         config.gateway_mac,
         config.guest_mac,
         network_policy.clone(),
+        shared.clone(),
+        &tokio_handle,
+    );
+    http::spawn(
+        proxy_listeners,
+        config.upstream_proxy.clone(),
+        network_policy.clone(),
+        platform_policy.clone(),
         shared.clone(),
         &tokio_handle,
     );
@@ -391,21 +405,39 @@ pub fn smoltcp_poll_loop(
                         // Other: regular outbound — defer Domain rules to first-flight;
                         // accept unless an IP-layer rule denies.
                         DnsPortType::Other => {
-                            let platform_allows = platform_policy.as_deref().is_none_or(|policy| {
-                                policy
-                                    .evaluate_egress(dst, Protocol::Tcp, &shared)
-                                    .is_allow()
-                            });
-                            platform_allows
-                                && matches!(
-                                    network_policy.evaluate_egress_with_source(
-                                        dst,
-                                        Protocol::Tcp,
-                                        &shared,
-                                        HostnameSource::Deferred,
-                                    ),
-                                    EgressEvaluation::Allow | EgressEvaluation::DeferUntilHostname
-                                )
+                            let guest_http_proxy = config.proxy.enabled
+                                && dst.port() == config.proxy.port
+                                && config
+                                    .gateway
+                                    .ipv4
+                                    .is_some_and(|gateway| dst.ip() == IpAddr::V4(gateway))
+                                || config.proxy.enabled
+                                    && dst.port() == config.proxy.port
+                                    && config
+                                        .gateway
+                                        .ipv6
+                                        .is_some_and(|gateway| dst.ip() == IpAddr::V6(gateway));
+                            if guest_http_proxy {
+                                true
+                            } else {
+                                let platform_allows =
+                                    platform_policy.as_deref().is_none_or(|policy| {
+                                        policy
+                                            .evaluate_egress(dst, Protocol::Tcp, &shared)
+                                            .is_allow()
+                                    });
+                                platform_allows
+                                    && matches!(
+                                        network_policy.evaluate_egress_with_source(
+                                            dst,
+                                            Protocol::Tcp,
+                                            &shared,
+                                            HostnameSource::Deferred,
+                                        ),
+                                        EgressEvaluation::Allow
+                                            | EgressEvaluation::DeferUntilHostname
+                                    )
+                            }
                         }
                     };
                     if allow && !conn_tracker.has_socket_for(&src, &dst) {
@@ -526,7 +558,11 @@ pub fn smoltcp_poll_loop(
                     .contains(&conn.dst.port())
             {
                 // TLS-intercepted port — spawn TLS MITM proxy.
-                let connect_target = resolve_tcp_host_target(conn.dst, config.gateway);
+                let connect_target = resolve_tcp_host_target(
+                    conn.dst,
+                    config.gateway,
+                    config.upstream_proxy.as_deref(),
+                );
                 let connection_outbound_proxy = ResolvedOutboundProxy::select_for_destination(
                     &outbound_proxy,
                     conn.dst,
@@ -597,7 +633,8 @@ pub fn smoltcp_poll_loop(
                 continue;
             }
             // Plain TCP proxy.
-            let connect_target = resolve_tcp_host_target(conn.dst, config.gateway);
+            let connect_target =
+                resolve_tcp_host_target(conn.dst, config.gateway, config.upstream_proxy.as_deref());
             let connection_outbound_proxy = ResolvedOutboundProxy::select_for_destination(
                 &outbound_proxy,
                 conn.dst,
@@ -816,7 +853,11 @@ fn handle_reassembled_udp_datagram(
 /// A guest connection to either gateway family first dials the matching host
 /// loopback address, then may fall back to the other loopback family. Regular
 /// outbound destinations have no fallback.
-fn resolve_tcp_host_target(dst: SocketAddr, gateway: GatewayIps) -> UpstreamTcpTarget {
+fn resolve_tcp_host_target(
+    dst: SocketAddr,
+    gateway: GatewayIps,
+    upstream_proxy: Option<&str>,
+) -> UpstreamTcpTarget {
     let port = dst.port();
     match dst.ip() {
         IpAddr::V4(v4) if gateway.ipv4 == Some(v4) => UpstreamTcpTarget::with_fallback(
@@ -827,7 +868,7 @@ fn resolve_tcp_host_target(dst: SocketAddr, gateway: GatewayIps) -> UpstreamTcpT
             SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), port),
             SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         ),
-        _ => UpstreamTcpTarget::direct(dst),
+        _ => UpstreamTcpTarget::direct(dst).with_proxy(upstream_proxy),
     }
 }
 
@@ -1420,6 +1461,8 @@ mod tests {
             guest_ipv4: Some(Ipv4Addr::new(100, 96, 0, 2)),
             guest_ipv6: None,
             mtu: 1500,
+            proxy: HttpProxyConfig::default(),
+            upstream_proxy: None,
         };
         let guest_ipv4 = poll_config.guest_ipv4.unwrap();
         let gateway_ipv4 = poll_config.gateway.ipv4.unwrap();
@@ -1507,6 +1550,8 @@ mod tests {
             guest_ipv4: Some(Ipv4Addr::new(100, 96, 0, 2)),
             guest_ipv6: None,
             mtu: 1500,
+            proxy: HttpProxyConfig::default(),
+            upstream_proxy: None,
         };
         let policy = NetworkPolicy::builder().default_deny().build().unwrap();
         let frame = build_icmpv4_echo_frame(
@@ -1548,6 +1593,8 @@ mod tests {
             guest_ipv4: Some(guest),
             guest_ipv6: None,
             mtu: 1500,
+            proxy: HttpProxyConfig::default(),
+            upstream_proxy: None,
         };
         let frame = build_icmpv4_echo_frame(
             config.guest_mac,
@@ -1583,7 +1630,7 @@ mod tests {
         let dst = SocketAddr::new(IpAddr::V4(gw.ipv4.unwrap()), 8080);
 
         assert_eq!(
-            resolve_tcp_host_target(dst, gw),
+            resolve_tcp_host_target(dst, gw, None),
             UpstreamTcpTarget::with_fallback(
                 SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
                 SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 8080),
@@ -1597,7 +1644,7 @@ mod tests {
         let dst = SocketAddr::new(IpAddr::V6(gw.ipv6.unwrap()), 8080);
 
         assert_eq!(
-            resolve_tcp_host_target(dst, gw),
+            resolve_tcp_host_target(dst, gw, None),
             UpstreamTcpTarget::with_fallback(
                 SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 8080),
                 SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
@@ -1610,7 +1657,7 @@ mod tests {
         let dst = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 443);
 
         assert_eq!(
-            resolve_tcp_host_target(dst, test_gateway()),
+            resolve_tcp_host_target(dst, test_gateway(), None),
             UpstreamTcpTarget::direct(dst)
         );
     }
@@ -1657,7 +1704,7 @@ mod tests {
     fn outbound_proxy_is_skipped_for_host_destination() {
         let gw = test_gateway();
         let guest_dst = SocketAddr::new(IpAddr::V4(gw.ipv4.unwrap()), 8080);
-        let connect_target = resolve_tcp_host_target(guest_dst, gw);
+        let connect_target = resolve_tcp_host_target(guest_dst, gw, None);
         let proxy = Some(Arc::new(ResolvedOutboundProxy::Socks5 {
             address: "192.0.2.1:1080".parse().unwrap(),
             credentials: None,
@@ -1677,7 +1724,7 @@ mod tests {
     fn outbound_proxy_is_preserved_for_external_destination() {
         let gw = test_gateway();
         let guest_dst = "198.51.100.10:443".parse().unwrap();
-        let connect_target = resolve_tcp_host_target(guest_dst, gw);
+        let connect_target = resolve_tcp_host_target(guest_dst, gw, None);
         let proxy = Some(Arc::new(ResolvedOutboundProxy::Socks5 {
             address: "192.0.2.1:1080".parse().unwrap(),
             credentials: None,
@@ -1729,6 +1776,8 @@ mod tests {
             guest_ipv4: Some(Ipv4Addr::new(100, 96, 0, 2)),
             guest_ipv6: None,
             mtu: 1500,
+            proxy: HttpProxyConfig::default(),
+            upstream_proxy: None,
         };
         let guest_ipv4 = poll_config.guest_ipv4.unwrap();
         let gateway_ipv4 = poll_config.gateway.ipv4.unwrap();
@@ -1818,6 +1867,8 @@ mod tests {
             guest_ipv4: Some(Ipv4Addr::from(GUEST_IP)),
             guest_ipv6: None,
             mtu: 1500,
+            proxy: HttpProxyConfig::default(),
+            upstream_proxy: None,
         }
     }
 
