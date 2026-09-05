@@ -30,6 +30,10 @@ type SnapshotCreateOptions struct {
 
 // SnapshotSaveOptions configures Snapshot.Save.
 type SnapshotSaveOptions struct {
+	// Since identifies an exact base snapshot or standalone base archive.
+	Since string
+	// LastLayers includes the newest N sealed disk layers. Mutually exclusive with Since.
+	LastLayers  *uint32
 	WithParents bool
 	WithImage   bool
 	PlainTar    bool
@@ -355,11 +359,22 @@ func (snapshotFactory) Save(ctx context.Context, nameOrPath, outPath string, opt
 		WithParents: opts.WithParents,
 		WithImage:   opts.WithImage,
 		PlainTar:    opts.PlainTar,
+		Since:       opts.Since,
+		LastLayers:  opts.LastLayers,
 	}))
 }
 
 func (snapshotFactory) Load(ctx context.Context, archive, dest string) (*SnapshotHandle, error) {
 	info, err := ffi.SnapshotLoad(ctx, archive, dest)
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	return snapshotHandleFromInfo(info), nil
+}
+
+// LoadWithBase imports a dependent archive into a complete locally owned snapshot closure.
+func (snapshotFactory) LoadWithBase(ctx context.Context, archive, dest, base string) (*SnapshotHandle, error) {
+	info, err := ffi.SnapshotLoadWithBase(ctx, archive, dest, base)
 	if err != nil {
 		return nil, wrapFFI(err)
 	}

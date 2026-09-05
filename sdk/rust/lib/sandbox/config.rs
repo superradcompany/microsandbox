@@ -209,6 +209,9 @@ pub struct SandboxConfig {
     /// Transient and never persisted.
     #[serde(skip)]
     pub(crate) snapshot_archive_source: Option<PathBuf>,
+    /// Explicit base dependency used only while constructing a child from a delta archive.
+    #[serde(skip)]
+    pub(crate) snapshot_base: Option<String>,
 
     /// Child-owned checkpoint closure used only for this process construction.
     ///
@@ -804,6 +807,7 @@ impl Default for SandboxConfig {
             snapshot_root_layer_sources: Vec::new(),
             snapshot_root_virtual_size: None,
             snapshot_archive_source: None,
+            snapshot_base: None,
             checkpoint_restore: None,
             snapshot_restore_mode: SnapshotRestoreMode::Full,
             resumed_from_full_snapshot: false,

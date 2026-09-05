@@ -52,6 +52,10 @@ export type SnapshotState =
  * Bundle options for `Snapshot.save`.
  */
 export interface SaveOpts {
+  /** Exact base snapshot or standalone archive; mutually exclusive with lastLayers/withParents. */
+  since?: string;
+  /** Newest N sealed disk layers. Full snapshots still include all memory/device state. */
+  lastLayers?: number;
   /** Walk the parent chain and include each ancestor in the archive. */
   withParents?: boolean;
   /** Include the OCI image cache so the archive boots offline. */
@@ -218,8 +222,8 @@ export class Snapshot {
    * snapshots directory. Recorded payload integrity is preserved for
    * explicit verification. Compression is detected from magic bytes.
    */
-  static async load(archive: string, dest?: string): Promise<SnapshotHandle> {
-    const raw = await withMappedErrors(() => napi.Snapshot.load(archive, dest));
+  static async load(archive: string, dest?: string, base?: string): Promise<SnapshotHandle> {
+    const raw = await withMappedErrors(() => napi.Snapshot.load(archive, dest, base));
     return new SnapshotHandle(raw);
   }
 

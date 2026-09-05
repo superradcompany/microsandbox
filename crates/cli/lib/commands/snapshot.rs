@@ -167,6 +167,12 @@ pub struct SnapshotSaveArgs {
     /// CPU but much larger file for sparse uppers.
     #[arg(long)]
     pub plain_tar: bool,
+    /// Export disk layers after an exact base snapshot or standalone base archive.
+    #[arg(long, conflicts_with_all = ["last_layers", "with_parents"])]
+    pub since: Option<String>,
+    /// Export only the newest N sealed disk layers (load requires the omitted base).
+    #[arg(long, conflicts_with = "with_parents", value_name = "N")]
+    pub last_layers: Option<usize>,
 }
 
 /// Arguments for `msb snapshot load`.
@@ -177,6 +183,9 @@ pub struct SnapshotLoadArgs {
 
     /// Destination directory (defaults to `~/.microsandbox/snapshots/`).
     pub dest: Option<std::path::PathBuf>,
+    /// Exact base snapshot or standalone base archive for a dependent archive.
+    #[arg(long)]
+    pub base: Option<String>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -451,6 +460,8 @@ async fn save(args: SnapshotSaveArgs) -> anyhow::Result<()> {
         with_parents: args.with_parents,
         with_image: args.with_image,
         plain_tar: args.plain_tar,
+        since: args.since,
+        last_layers: args.last_layers,
     };
     Snapshot::save(&args.snapshot, &args.out, opts).await?;
     println!("{}", args.out.display());
@@ -458,7 +469,11 @@ async fn save(args: SnapshotSaveArgs) -> anyhow::Result<()> {
 }
 
 async fn load(args: SnapshotLoadArgs) -> anyhow::Result<()> {
-    let handle = Snapshot::load(&args.archive, args.dest.as_deref()).await?;
+    let handle = if let Some(base) = args.base.as_deref() {
+        Snapshot::load_with_base(&args.archive, args.dest.as_deref(), base).await?
+    } else {
+        Snapshot::load(&args.archive, args.dest.as_deref()).await?
+    };
     println!("{}", handle.digest());
     println!("{}", handle.path().display());
     Ok(())

@@ -260,6 +260,18 @@ impl Snapshot {
         let local = backend.as_local().ok_or_else(snapshots_require_local)?;
         archive::load_snapshot(local, archive_path, dest).await
     }
+
+    /// Load a disk-dependent archive using its exact base snapshot or standalone base archive.
+    /// The imported snapshot owns a complete local closure after this call.
+    pub async fn load_with_base(
+        archive_path: &Path,
+        dest: Option<&Path>,
+        base: &str,
+    ) -> MicrosandboxResult<SnapshotHandle> {
+        let backend = crate::backend::default_backend();
+        let local = backend.as_local().ok_or_else(snapshots_require_local)?;
+        archive::load_snapshot_with_base(local, archive_path, dest, Some(base)).await
+    }
 }
 
 impl SnapshotArchive {
@@ -300,8 +312,10 @@ pub(crate) async fn materialize_archive_for_child(
     archive: &Path,
     child_stage: &Path,
     disk_only: bool,
+    base: Option<&str>,
 ) -> MicrosandboxResult<archive::ArchiveChildMaterialization> {
-    archive::materialize_archive_for_child(local, archive, child_stage, disk_only).await
+    archive::materialize_archive_for_child_with_base(local, archive, child_stage, disk_only, base)
+        .await
 }
 
 pub(crate) use restore::{

@@ -7,6 +7,7 @@
 
 pub(crate) mod attach;
 mod builder;
+mod compact;
 pub(crate) mod config;
 mod config_patch;
 pub mod exec;
@@ -103,6 +104,7 @@ pub use crate::db::entity::sandbox::SandboxStatus;
 pub use crate::logs::{LogEntry, LogOptions, LogSource, LogStreamOptions};
 pub use attach::AttachOptionsBuilder;
 pub use builder::{RegistryConfigBuilder, SandboxBuilder};
+pub use compact::{DiskCompactionBuilder, DiskCompactionResult};
 pub use config::SandboxConfig;
 #[cfg(feature = "net")]
 pub use config_patch::{
@@ -618,6 +620,11 @@ impl Sandbox {
     /// phases wire the same plan model into persistence and runtime control.
     pub fn modify(&self) -> SandboxModificationBuilder {
         SandboxModificationBuilder::new(self.backend.clone(), self.name.clone())
+    }
+
+    /// Explicitly compact the root disk's sealed backing prefix.
+    pub fn compact(&self) -> DiskCompactionBuilder {
+        DiskCompactionBuilder::new(self.backend.clone(), self.name.clone())
     }
 
     /// Which backend variant this sandbox is bound to. Returns `Local` or

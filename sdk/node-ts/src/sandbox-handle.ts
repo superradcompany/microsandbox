@@ -1,5 +1,10 @@
 import { withMappedErrors } from "./internal/error-mapping.js";
 import {
+  compactionResultFromJson,
+  type DiskCompactionOptions,
+  type DiskCompactionResult,
+} from "./compact.js";
+import {
   modificationPlanFromJson,
   modifyOptionsToNapi,
   type ModifyOptions,
@@ -102,6 +107,14 @@ export class SandboxHandle {
       this.inner.modify(modifyOptionsToNapi(opts)),
     );
     return modificationPlanFromJson(raw);
+  }
+
+  /** Explicitly compact the sealed root-disk prefix, running or stopped. */
+  async compact(opts?: DiskCompactionOptions): Promise<DiskCompactionResult> {
+    const raw = await withMappedErrors(() =>
+      this.inner.compact(opts?.layers, opts?.dryRun),
+    );
+    return compactionResultFromJson(raw);
   }
 
   /** Resume in attached mode. */

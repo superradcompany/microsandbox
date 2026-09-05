@@ -142,6 +142,14 @@ impl JsSandboxBuilder {
         self
     }
 
+    /// Supply the exact base for a disk-dependent snapshot archive.
+    #[napi]
+    pub fn snapshot_base(&mut self, base: String) -> &Self {
+        let prev = self.take_inner();
+        self.inner = Some(prev.snapshot_base(base));
+        self
+    }
+
     /// Cold-boot only the disk state carried by a full snapshot.
     #[napi(js_name = "diskOnly")]
     pub fn disk_only(&mut self) -> &Self {

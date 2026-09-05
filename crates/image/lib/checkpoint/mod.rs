@@ -3,6 +3,7 @@
 //! Checkpoint artifacts keep guest-visible state in canonical, content-addressed objects. Mutable
 //! operation progress, runtime ownership, and provider locations deliberately live elsewhere.
 
+mod compact;
 mod layer_selection;
 mod manifest;
 mod qcow;
@@ -13,6 +14,9 @@ mod store;
 // Re-Exports
 //--------------------------------------------------------------------------------------------------
 
+pub use compact::{
+    CompactLayer, CompactMaterialization, compact_layer_capacity, materialize_compact_prefix,
+};
 pub use layer_selection::{DiskCompactionPlan, DiskLayerExportPlan, LayerSelectionError};
 pub use manifest::{
     CaptureIntent, CheckpointManifest, ContentRef, DeviceStateRef, DiskGenerationManifest,

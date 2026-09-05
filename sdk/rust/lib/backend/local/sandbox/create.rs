@@ -168,12 +168,15 @@ impl LocalBackend {
         if let Some(archive) = config.snapshot_archive_source.take() {
             child_stage_guard = Some(ChildStageGuard::new(sandbox_dir.clone()));
             let disk_only = config.snapshot_restore_mode == SnapshotRestoreMode::DiskOnly;
-            let materialized = crate::snapshot::materialize_archive_for_child(
+            // Archive decoding has a large async state machine. Keep it off the containing
+            // create future so native SDK debug builds fit ordinary Tokio worker stacks.
+            let materialized = Box::pin(crate::snapshot::materialize_archive_for_child(
                 self,
                 &archive,
                 &sandbox_dir,
                 disk_only,
-            )
+                config.snapshot_base.as_deref(),
+            ))
             .await?;
             config.spec.image = RootfsSource::oci(materialized.manifest.image.reference.clone());
             config.manifest_digest = Some(materialized.manifest.image.manifest_digest.clone());

@@ -17,6 +17,7 @@ const KNOWN_CREATE_KWARGS: &[&str] = &[
     "image",
     "from_snapshot",
     "disk_only",
+    "snapshot_base",
     "memory",
     "cpus",
     "max_memory",
@@ -178,6 +179,15 @@ pub fn sandbox_builder_from_args(
     let snapshot_present = kwargs
         .get_item("from_snapshot")?
         .is_some_and(|value| !value.is_none());
+    if !snapshot_present
+        && kwargs
+            .get_item("snapshot_base")?
+            .is_some_and(|value| !value.is_none())
+    {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "snapshot_base requires from_snapshot",
+        ));
+    }
     let disk_only = match kwargs
         .get_item("disk_only")?
         .filter(|value| !value.is_none())
@@ -228,6 +238,11 @@ pub fn sandbox_builder_from_args(
         // Resolution stays deferred until the async build so installed and direct-archive sources
         // share the same disk/full admission path.
         builder = builder.from_snapshot(snap_str);
+        if let Some(base) = kwargs.get_item("snapshot_base")? {
+            if !base.is_none() {
+                builder = builder.snapshot_base(base.extract::<String>()?);
+            }
+        }
         if disk_only {
             builder = builder.disk_only();
         }

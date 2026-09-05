@@ -172,6 +172,7 @@ export type NapiSandboxBuilderCtor = new (name: string) => NapiSandboxBuilder;
 export interface NapiSandboxBuilderSetters {
   image(s: string): this;
   fromSnapshot(pathOrName: string): this;
+  snapshotBase(base: string): this;
   diskOnly(): this;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   imageWith(configure: (b: any) => any): this;
@@ -265,6 +266,7 @@ export interface NapiSandbox {
   ping(): Promise<NapiSandboxPingResult>;
   touch(): Promise<NapiSandboxTouchResult>;
   modify(opts?: NapiSandboxModifyOptions): Promise<string>;
+  compact(layers?: number, dryRun?: boolean): Promise<string>;
   attach(cmd: string, args?: string[]): Promise<number>;
   attachDefault(): Promise<number>;
   attachDefaultWithBuilder(builder: NapiAttachOptionsBuilder): Promise<number>;
@@ -295,6 +297,7 @@ export interface NapiSandboxHandle {
   ping(): Promise<NapiSandboxPingResult>;
   touch(): Promise<NapiSandboxTouchResult>;
   modify(opts?: NapiSandboxModifyOptions): Promise<string>;
+  compact(layers?: number, dryRun?: boolean): Promise<string>;
   start(): Promise<NapiSandbox>;
   startDetached(): Promise<NapiSandbox>;
   connect(): Promise<NapiSandbox>;
@@ -548,7 +551,7 @@ export interface NapiSnapshotStatic {
   remove(pathOrName: string, opts?: NapiSnapshotRemoveOptions): Promise<void>;
   reindex(dir?: string): Promise<number>;
   save(name: string, out: string, opts?: NapiSaveOpts): Promise<void>;
-  load(archive: string, dest?: string): Promise<NapiSnapshotHandle>;
+  load(archive: string, dest?: string, base?: string): Promise<NapiSnapshotHandle>;
 }
 
 export type NapiSnapshotBuilderCtor = new (name: string) => NapiSnapshotBuilder;
@@ -641,6 +644,8 @@ export interface NapiSnapshotInfo {
 }
 
 export interface NapiSaveOpts {
+  since?: string;
+  lastLayers?: number;
   withParents?: boolean;
   withImage?: boolean;
   plainTar?: boolean;

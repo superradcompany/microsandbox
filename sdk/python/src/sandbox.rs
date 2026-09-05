@@ -774,6 +774,21 @@ impl PySandbox {
         })
     }
 
+    /// Compact the immutable root-disk prefix; layers includes the base, never the writable head.
+    #[pyo3(signature = (*, layers = None, dry_run = false))]
+    fn compact<'py>(
+        &self,
+        py: Python<'py>,
+        layers: Option<usize>,
+        dry_run: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let sandbox = Self::clone_sandbox(&inner).await?;
+            run_compact(sandbox.compact(), layers, dry_run).await
+        })
+    }
+
     /// Plan or apply a sandbox modification. Returns the plan as a dict.
     ///
     /// `memory` / `max_memory` / `root_disk_size` are in MiB. `policy` is a
@@ -1271,6 +1286,26 @@ pub(crate) async fn run_modify(
     .map_err(to_py_err)?;
     let value = serde_json::to_value(&plan)
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+    Python::with_gil(|py| modification_plan_to_py(py, value))
+}
+
+/// Drive the shared compaction builder and return its measured result as a Python dictionary.
+pub(crate) async fn run_compact(
+    mut builder: microsandbox::sandbox::DiskCompactionBuilder,
+    layers: Option<usize>,
+    dry_run: bool,
+) -> PyResult<PyObject> {
+    if let Some(layers) = layers {
+        builder = builder.layers(layers);
+    }
+    let result = if dry_run {
+        builder.dry_run().await
+    } else {
+        builder.apply().await
+    }
+    .map_err(to_py_err)?;
+    let value =
+        serde_json::to_value(result).map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
     Python::with_gil(|py| modification_plan_to_py(py, value))
 }
 

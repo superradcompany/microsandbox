@@ -128,6 +128,16 @@ char *msb_sandbox_handle_modify(uint64_t cancel_id,
                                 unsigned char *buf,
                                 uintptr_t buf_len);
 
+/**
+ * Explicit compaction. A nonzero handle retains its backend; zero resolves the supplied name.
+ */
+char *msb_sandbox_compact(uint64_t cancel_id,
+                          Handle handle,
+                          const char *name,
+                          const char *opts_json,
+                          unsigned char *buf,
+                          uintptr_t buf_len);
+
 char *msb_sandbox_close(uint64_t cancel_id, Handle handle, unsigned char *buf, uintptr_t buf_len);
 
 char *msb_sandbox_detach(uint64_t cancel_id, Handle handle, unsigned char *buf, uintptr_t buf_len);
@@ -770,6 +780,16 @@ char *msb_snapshot_import(uint64_t cancel_id,
                           const char *dest,
                           unsigned char *buf,
                           uintptr_t buf_len);
+
+/**
+ * Import a dependent archive with an explicit base without changing the existing import ABI.
+ */
+char *msb_snapshot_import_with_base(uint64_t cancel_id,
+                                    const char *archive,
+                                    const char *dest,
+                                    const char *base,
+                                    unsigned char *buf,
+                                    uintptr_t buf_len);
 
 /**
  * Open a streaming read from a guest file.

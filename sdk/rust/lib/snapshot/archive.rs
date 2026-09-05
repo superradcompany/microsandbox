@@ -8,6 +8,8 @@
 //! depths, produced by our own save path), and owning the walk lets sparse entries be restored map-driven: data runs copied straight off the wire, holes never written and kept
 //! unallocated per platform ([`extent::mark_sparse`] on NTFS, [`extent::punch_hole_aligned`] on APFS). `tokio_tar` remains the header codec and the dense-entry writer.
 
+mod delta;
+
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 #[cfg(windows)]
 use std::iter;
@@ -67,6 +69,12 @@ pub struct SaveOpts {
     pub with_image: bool,
     /// Skip zstd compression and write a plain `.tar`. Default: zstd.
     pub plain_tar: bool,
+    /// Export only disk layers after this exact base snapshot (name, directory, or archive).
+    /// Mutually exclusive with `last_layers` and `with_parents`.
+    pub since: Option<String>,
+    /// Export the newest N sealed disk layers, requiring an explicit base when loading omissions.
+    /// Memory, execution, and device objects remain complete for full snapshots.
+    pub last_layers: Option<usize>,
 }
 
 struct UnpackedArchive {
@@ -277,6 +285,7 @@ pub(super) async fn save_snapshot(
     // Collect the artifact dirs we need to ship: the head snapshot
     // and (optionally) all ancestors via their stable snapshot IDs.
     let head = store::open_snapshot(local, name_or_path).await?;
+    let dependencies = delta::selection(local, &head, &opts).await?;
     let mut parents: Vec<Snapshot> = Vec::new();
 
     if opts.with_parents {
@@ -371,6 +380,7 @@ pub(super) async fn save_snapshot(
                 &cache_files,
                 &head,
                 &opts,
+                dependencies.as_ref(),
             ))
             .await?;
             let mut inner = builder.into_inner().await?;
@@ -384,6 +394,7 @@ pub(super) async fn save_snapshot(
                 &cache_files,
                 &head,
                 &opts,
+                dependencies.as_ref(),
             ))
             .await?;
             let mut inner = builder.into_inner().await?;
@@ -900,6 +911,15 @@ pub(super) async fn load_snapshot(
     archive: &Path,
     dest: Option<&Path>,
 ) -> MicrosandboxResult<SnapshotHandle> {
+    load_snapshot_with_base(local, archive, dest, None).await
+}
+
+pub(super) async fn load_snapshot_with_base(
+    local: &LocalBackend,
+    archive: &Path,
+    dest: Option<&Path>,
+    base: Option<&str>,
+) -> MicrosandboxResult<SnapshotHandle> {
     let total_started = Instant::now();
     let snapshots_dir = match dest {
         Some(d) => d.to_path_buf(),
@@ -952,6 +972,14 @@ pub(super) async fn load_snapshot(
     if unpacked.inventory.is_none() {
         super::migration::normalize_staged(local.db().await?, &unpacked.manifest_dirs).await?;
     } else if let Some(inventory) = unpacked.inventory.as_ref() {
+        delta::resolve(
+            local,
+            inventory,
+            snapshot_stage.path(),
+            cache_stage.path(),
+            base,
+        )
+        .await?;
         materialize_inventory_layers(inventory, snapshot_stage.path()).await?;
     }
     let imported = verify_imported_snapshots(local, &unpacked.manifest_dirs).await?;
@@ -1059,11 +1087,22 @@ pub(super) async fn load_snapshot(
 ///
 /// The archive layer is streamed once into operation-owned staging and renamed
 /// to `upper.ext4`; no installed snapshot artifact or index row is published.
+#[cfg(test)]
 pub(crate) async fn materialize_archive_for_child(
     local: &LocalBackend,
     archive: &Path,
     child_stage: &Path,
     disk_only: bool,
+) -> MicrosandboxResult<ArchiveChildMaterialization> {
+    materialize_archive_for_child_with_base(local, archive, child_stage, disk_only, None).await
+}
+
+pub(crate) async fn materialize_archive_for_child_with_base(
+    local: &LocalBackend,
+    archive: &Path,
+    child_stage: &Path,
+    disk_only: bool,
+    base: Option<&str>,
 ) -> MicrosandboxResult<ArchiveChildMaterialization> {
     let total_started = Instant::now();
     tokio::fs::create_dir_all(child_stage).await?;
@@ -1149,6 +1188,7 @@ pub(crate) async fn materialize_archive_for_child(
             upper_layers: Vec::new(),
         });
     };
+    delta::resolve(local, &inventory, child_stage, cache_stage.path(), base).await?;
     let member = inventory
         .members
         .iter()
@@ -1286,6 +1326,7 @@ async fn write_archive_entries<W>(
     cache_files: &[(PathBuf, String)],
     head: &Snapshot,
     opts: &SaveOpts,
+    dependencies: Option<&delta::DiskDependencies>,
 ) -> MicrosandboxResult<()>
 where
     W: tokio::io::AsyncWrite + Unpin + Send,
@@ -1293,6 +1334,9 @@ where
     let checkpoint_members = collect_checkpoint_archive_members(snapshots)?;
     let mut inventory =
         build_archive_inventory(snapshots, cache_files, head, opts, &checkpoint_members).await?;
+    if let Some(dependencies) = dependencies {
+        delta::apply(&mut inventory, dependencies)?;
+    }
 
     // The inventory is also the write allowlist. Never sweep artifact
     // directories: migration backups, locks, journals and unknown files are
@@ -1341,6 +1385,13 @@ where
             SnapshotState::File(file) => {
                 for layer in &file.layers {
                     let payload_name = portable_archive_path(&file.layer_path(layer))?;
+                    if inventory
+                        .entries
+                        .iter()
+                        .any(|entry| entry.path == payload_name && !entry.included)
+                    {
+                        continue;
+                    }
                     let written = append_artifact_file(
                         builder,
                         &snapshot.layer_path(layer),
@@ -1356,6 +1407,13 @@ where
                     .get(snapshot.id().as_str())
                     .expect("checkpoint members were collected before inventory construction")
                 {
+                    if inventory
+                        .entries
+                        .iter()
+                        .any(|entry| entry.path == member.archive_path && !entry.included)
+                    {
+                        continue;
+                    }
                     let written = append_artifact_file(
                         builder,
                         &member.source,
@@ -2294,8 +2352,13 @@ where
     }
 
     let inventory = if let Some(path) = inventory_path {
-        let inventory =
-            validate_archive_inventory(&path, &observed_files, snapshots_dir, cache_dir).await?;
+        let inventory = Box::pin(validate_archive_inventory(
+            &path,
+            &observed_files,
+            snapshots_dir,
+            cache_dir,
+        ))
+        .await?;
         tokio::fs::remove_file(path).await?;
         inventory
     } else {
@@ -2758,7 +2821,10 @@ async fn validate_archive_inventory(
             "unsupported archive inventory schema or artifact".into(),
         ));
     }
-    if inventory.completeness != "boot-complete" {
+    if !matches!(
+        inventory.completeness.as_str(),
+        "boot-complete" | "disk-dependent"
+    ) {
         return Err(MicrosandboxError::unsupported(
             Operation::SnapshotOps,
             UnsupportedReason::NotAvailable(format!(
@@ -2767,19 +2833,24 @@ async fn validate_archive_inventory(
             )),
         ));
     }
-    let requires_transport = match inventory.requires.as_slice() {
-        [] => false,
-        [requirement] if requirement == ARCHIVE_MEMBER_TRANSPORT_ALGORITHM => true,
-        _ => {
-            return Err(MicrosandboxError::unsupported(
-                Operation::SnapshotOps,
-                UnsupportedReason::NotAvailable(format!(
-                    "snapshot archive requires unsupported extensions: {:?}",
-                    inventory.requires
-                )),
-            ));
-        }
-    };
+    if inventory.requires.windows(2).any(|pair| pair[0] >= pair[1])
+        || inventory.requires.iter().any(|requirement| {
+            requirement != ARCHIVE_MEMBER_TRANSPORT_ALGORITHM && requirement != delta::REQUIREMENT
+        })
+    {
+        return Err(MicrosandboxError::unsupported(
+            Operation::SnapshotOps,
+            UnsupportedReason::NotAvailable(format!(
+                "snapshot archive requires unsupported extensions: {:?}",
+                inventory.requires
+            )),
+        ));
+    }
+    delta::validate(&inventory)?;
+    let requires_transport = inventory
+        .requires
+        .iter()
+        .any(|requirement| requirement == ARCHIVE_MEMBER_TRANSPORT_ALGORITHM);
     if inventory
         .suggested_name
         .as_deref()

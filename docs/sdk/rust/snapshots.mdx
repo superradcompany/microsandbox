@@ -7,6 +7,21 @@ description: Rust SDK - Snapshot API reference
 
 Create disk snapshots of stopped sandboxes and full checkpoints of running sandboxes. See [Snapshots](/sandboxes/snapshots) for usage and lifecycle concepts.
 
+## Disk maintenance and incremental export
+
+```rust
+let worker = Sandbox::get("worker").await?;
+let plan = worker.compact().layers(3).dry_run().await?;
+let result = worker.compact().layers(3).apply().await?;
+Snapshot::save("checkpoint-b", Path::new("changes.tar.zst"), SaveOpts {
+    since: Some("checkpoint-a".into()),
+    ..Default::default()
+}).await?;
+Snapshot::load_with_base(Path::new("changes.tar.zst"), None, "checkpoint-a").await?;
+```
+
+`layers` counts the oldest physical layers including the base, excluding the writable head. Omit it to compact all sealed layers. `last_layers: Some(n)` is an alternative to `since`; they cannot be combined with each other or `with_parents`. For direct restore, use `Sandbox::builder("child").from_snapshot("changes.tar.zst").snapshot_base("checkpoint-a")`. See [disk-chain maintenance](/sandboxes/snapshots#export-changes-and-compact-a-disk-chain) for dependency and retention rules.
+
 ## Snapshot
 
 #### <span className="msb-recv">Snapshot::</span><span className="msb-hn">builder()</span>

@@ -238,6 +238,8 @@ impl PySnapshot {
         with_parents = false,
         with_image = false,
         plain_tar = false,
+        since = None,
+        last_layers = None,
     ))]
     fn save<'py>(
         py: Python<'py>,
@@ -246,12 +248,16 @@ impl PySnapshot {
         with_parents: bool,
         with_image: bool,
         plain_tar: bool,
+        since: Option<String>,
+        last_layers: Option<usize>,
     ) -> PyResult<Bound<'py, PyAny>> {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let opts = RustSaveOpts {
                 with_parents,
                 with_image,
                 plain_tar,
+                since,
+                last_layers,
             };
             RustSnapshot::save(&name_or_path, &out, opts)
                 .await
@@ -264,16 +270,20 @@ impl PySnapshot {
     /// snapshots directory, preserving recorded integrity for explicit
     /// verification.
     #[staticmethod]
-    #[pyo3(signature = (archive, *, dest = None))]
+    #[pyo3(signature = (archive, *, dest = None, base = None))]
     fn load<'py>(
         py: Python<'py>,
         archive: PathBuf,
         dest: Option<PathBuf>,
+        base: Option<String>,
     ) -> PyResult<Bound<'py, PyAny>> {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let h = RustSnapshot::load(&archive, dest.as_deref())
-                .await
-                .map_err(to_py_err)?;
+            let h = if let Some(base) = base {
+                RustSnapshot::load_with_base(&archive, dest.as_deref(), &base).await
+            } else {
+                RustSnapshot::load(&archive, dest.as_deref()).await
+            }
+            .map_err(to_py_err)?;
             Ok(PySnapshotHandle::from_rust(h))
         })
     }

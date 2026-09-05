@@ -99,6 +99,19 @@ sb = await Sandbox.create("worker", image="python:3.12")
 
 ---
 
+## Disk maintenance and incremental export
+
+```python
+worker = await Sandbox.get("worker")
+plan = await worker.compact(layers=3, dry_run=True)
+result = await worker.compact(layers=3)
+await Snapshot.save("checkpoint-b", "changes.tar.zst", since="checkpoint-a")
+await Snapshot.load("changes.tar.zst", base="checkpoint-a")
+child = await Sandbox.create("child", from_snapshot="changes.tar.zst", snapshot_base="checkpoint-a")
+```
+
+The count includes the oldest base but excludes the writable head. Omit `layers` to compact all sealed layers. Use `last_layers=n` instead of `since` to export the newest N sealed layers. Results are dictionaries with `input_layers`, `selected_layers`, `output_layers`, `materialized_bytes`, `total_us`, `pause_us`, and `dry_run`. See [disk-chain maintenance](/sandboxes/snapshots#export-changes-and-compact-a-disk-chain) for dependency and retention rules.
+
 ## Snapshot
 
 <div className="msb-tags"><span className="msb-tag is-type">class</span></div>

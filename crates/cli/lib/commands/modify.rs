@@ -22,6 +22,14 @@ pub struct ModifyArgs {
     /// Sandbox to modify.
     pub name: String,
 
+    /// Compact the root disk's sealed backing layers without changing snapshots.
+    #[arg(long, conflicts_with_all = ["cpus", "max_cpus", "memory", "max_memory", "root_disk", "oci_upper_size", "env", "env_remove", "labels", "label_remove", "workdir", "secrets", "secret_remove", "next_start", "restart"])]
+    pub compact: bool,
+
+    /// Oldest physical layers to merge, including the base, excluding the writable head.
+    #[arg(long, requires = "compact", value_name = "N")]
+    pub layers: Option<usize>,
+
     /// Desired effective vCPU count.
     #[arg(long)]
     pub cpus: Option<u8>,
@@ -106,6 +114,31 @@ pub struct ModifyArgs {
 pub async fn run(args: ModifyArgs) -> anyhow::Result<()> {
     let json = args.format.as_deref() == Some("json");
     let handle = Sandbox::get(&args.name).await?;
+    if args.compact {
+        let mut compact = handle.compact();
+        if let Some(layers) = args.layers {
+            compact = compact.layers(layers);
+        }
+        let result = if args.dry_run {
+            compact.dry_run().await?
+        } else {
+            compact.apply().await?
+        };
+        if json {
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        } else {
+            println!(
+                "{}: {} → {} disk layers ({} selected, {} bytes materialized, {:.2} ms paused)",
+                if args.dry_run { "Plan" } else { "Compacted" },
+                result.input_layers,
+                result.output_layers,
+                result.selected_layers,
+                result.materialized_bytes,
+                result.pause_us as f64 / 1000.0
+            );
+        }
+        return Ok(());
+    }
     let mut builder = handle.modify();
 
     if args.next_start {
@@ -689,6 +722,20 @@ mod tests {
         assert_eq!(args.max_cpus, Some(8));
         assert_eq!(args.max_memory.as_deref(), Some("16G"));
         assert!(args.dry_run);
+    }
+
+    #[test]
+    fn compaction_is_explicit_and_cannot_mix_config_changes() {
+        let args = parse_modify_args(&["api", "--compact", "--layers", "3", "--dry-run"]);
+        assert!(args.compact && args.dry_run);
+        assert_eq!(args.layers, Some(3));
+        for flags in [
+            vec!["api", "--layers", "3"],
+            vec!["api", "--compact", "--cpus", "2"],
+            vec!["api", "--compact", "--restart"],
+        ] {
+            assert!(TestCli::try_parse_from(std::iter::once("msb").chain(flags)).is_err());
+        }
     }
 
     #[test]

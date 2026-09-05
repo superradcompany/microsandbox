@@ -150,6 +150,28 @@ Capture briefly quiesces the VM, publishes one same-epoch checkpoint, and return
 
 Creating a sandbox from the resulting snapshot restores into a child-owned disk generation and installs a fresh VM Generation ID. Before your processes continue, the guest kernel corrects its wall clock and acknowledges activation; the runtime then thaws the workload and publishes network access last. Full restore requires the matching clock-aware kernel. Older development full snapshots must be recaptured, or restored with `--disk-only` where supported. Restore is eager: the archive or installed artifact is no longer needed after construction succeeds.
 
+## Export changes and compact a disk chain
+
+Repeated full checkpoints add disk layers. You choose when to export changes and when to compact; neither happens automatically.
+
+```bash
+msb snapshot create checkpoint-b --from worker --full
+msb snapshot save checkpoint-b changes.tar.zst --since checkpoint-a
+msb modify worker --compact --layers 3 --dry-run
+msb modify worker --compact --layers 3
+```
+
+`--layers 3` merges the oldest three physical layers, **including the base**. It never includes the writable head, even when stopped. Omit `--layers` to merge all sealed layers; a chain with fewer than two sealed layers is unchanged. Managed and flat roots support compaction, running or stopped. Existing snapshots remain valid and retain their storage until you remove them separately.
+
+`--since` requires an exact physical-prefix base. Alternatively, `--last-layers 2` includes the newest two sealed checkpoint layers. A full checkpoint export still includes all required memory and device state. Unlike ordinary standalone exports, these smaller archives require the omitted base when loading or restoring:
+
+```bash
+msb snapshot load changes.tar.zst --base checkpoint-a
+msb create --name child --from-snapshot changes.tar.zst --snapshot-base checkpoint-a
+```
+
+The base can also be a standalone snapshot archive. Restore copies the required closure into child-owned storage, without installing an intermediate snapshot. Add `--disk-only` to cold-boot only disk state. After compaction, export a new standalone baseline before resuming incremental exports: the old physical prefix no longer matches. Do not combine compaction with unrelated `modify` options, or incremental export with `--with-parents`.
+
 ## Capture directly to an archive
 
 When the archive is the desired result, capture straight into it instead of creating an installed snapshot directory and then saving a second copy:

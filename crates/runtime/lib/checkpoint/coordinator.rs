@@ -131,6 +131,20 @@ struct PendingDeviceState {
 //--------------------------------------------------------------------------------------------------
 
 impl CheckpointCoordinator {
+    pub(crate) fn compact(
+        &mut self,
+        vm: &msb_krun::VmControl,
+        layers: Option<usize>,
+        dry_run: bool,
+    ) -> Result<super::DiskCompactionResult, super::disk::RootDiskRolloverError> {
+        match self.root_disk.as_mut() {
+            Some(disk) => disk.compact(Some(vm), &self.runtime, layers, dry_run),
+            None => Err(super::disk::RootDiskRolloverError::pre_rebind(
+                "this root has no runtime-owned disk chain",
+            )),
+        }
+    }
+
     /// Open the per-runtime object store and managed root-disk state.
     pub(crate) fn open(
         runtime_dir: &Path,

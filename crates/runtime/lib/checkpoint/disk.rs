@@ -5,10 +5,14 @@ use std::fmt;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 #[cfg(unix)]
 use std::fs::File;
 
+use microsandbox_image::checkpoint::{
+    CompactLayer, DiskCompactionPlan, compact_layer_capacity, materialize_compact_prefix,
+};
 use microsandbox_image::checkpoint::{DiskGenerationManifest, DiskLayerRef, sparse_file_integrity};
 use serde::{Deserialize, Serialize};
 
@@ -54,6 +58,25 @@ pub struct RuntimeOwnedRootLayer {
     pub format: String,
 }
 
+/// Measured outcome or dry-run projection of an explicit root-disk compaction.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct DiskCompactionResult {
+    /// Whether only selection was performed.
+    pub dry_run: bool,
+    /// Physical layers before compaction, including the writable head.
+    pub input_layers: usize,
+    /// Selected oldest layers, including the base, excluding the writable head.
+    pub selected_layers: usize,
+    /// Physical layers after compaction, including the writable head.
+    pub output_layers: usize,
+    /// Guest bytes materialized; not a disk-space saving estimate.
+    pub materialized_bytes: u64,
+    /// Total operation duration in microseconds.
+    pub total_us: u64,
+    /// Measured VM pause through resume, zero for stopped sources and dry runs.
+    pub pause_us: u64,
+}
+
 /// Successfully sealed disk generation and the block state captured at its pause boundary.
 pub(crate) struct RootDiskRollover {
     pub(crate) manifest: DiskGenerationManifest,
@@ -76,6 +99,9 @@ struct RootDiskState {
     #[serde(default)]
     layout: RootDiskLayout,
     published_generation: u64,
+    /// Original launch configuration binding, retained across representation-only compaction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    launch_base: Option<PathBuf>,
     layers: Vec<RootDiskLayer>,
 }
 
@@ -127,6 +153,7 @@ impl RuntimeOwnedRootDisk {
                 device_id: layout.device_id().into(),
                 layout,
                 published_generation: 0,
+                launch_base: None,
                 layers: layers
                     .into_iter()
                     .map(|layer| RootDiskLayer {
@@ -156,6 +183,135 @@ impl RuntimeOwnedRootDisk {
     /// Guest-visible block identity owned by this rollover provider.
     pub(crate) fn device_id(&self) -> &str {
         &self.state.device_id
+    }
+
+    pub(crate) fn compact(
+        &mut self,
+        vm: Option<&msb_krun::VmControl>,
+        runtime: &tokio::runtime::Handle,
+        layers: Option<usize>,
+        dry_run: bool,
+    ) -> Result<DiskCompactionResult, RootDiskRolloverError> {
+        let started = Instant::now();
+        let plan = DiskCompactionPlan::new(self.state.layers.len(), layers)
+            .map_err(RootDiskRolloverError::pre_rebind)?;
+        let mut result = DiskCompactionResult {
+            dry_run,
+            input_layers: self.state.layers.len(),
+            selected_layers: plan.prefix().len(),
+            output_layers: plan.output_layers(),
+            ..Default::default()
+        };
+        if dry_run || plan.is_noop() {
+            return Ok(result);
+        }
+        let parent = self.state_path.parent().expect("root journal has parent");
+        let stage = tempfile::Builder::new()
+            .prefix(".compact-")
+            .tempdir_in(parent)
+            .map_err(RootDiskRolloverError::pre_rebind)?;
+        let prefix = &self.state.layers[plan.prefix()];
+        let boundary = prefix.last().expect("nonempty compact prefix");
+        if boundary.format != RootDiskFormat::Qcow2 {
+            return Err(RootDiskRolloverError::pre_rebind(
+                "compaction boundary must be qcow2",
+            ));
+        }
+        let base_path = stage.path().join(
+            boundary
+                .path
+                .file_name()
+                .ok_or_else(|| RootDiskRolloverError::pre_rebind("invalid base name"))?,
+        );
+        let sources = prefix
+            .iter()
+            .map(|layer| CompactLayer {
+                path: layer.path.clone(),
+                qcow2: layer.format == RootDiskFormat::Qcow2,
+            })
+            .collect::<Vec<_>>();
+        let materialized = runtime
+            .block_on(materialize_compact_prefix(&sources, &base_path))
+            .map_err(RootDiskRolloverError::pre_rebind)?;
+        result.materialized_bytes = materialized.materialized_bytes;
+        let mut next = self.state.clone();
+        // Startup still carries the original configured root path. Preserve that binding rather
+        // than weakening recovery to accept a journal belonging to an unrelated root.
+        if next.launch_base.is_none() {
+            next.launch_base = self.state.layers.first().map(|layer| layer.path.clone());
+        }
+        next.layers = vec![RootDiskLayer {
+            layer_id: new_id("layer"),
+            path: base_path,
+            format: RootDiskFormat::Qcow2,
+            integrity_root: None,
+        }];
+        next.layers[0].integrity_root = Some(
+            sparse_file_integrity(&next.layers[0].path)
+                .map_err(RootDiskRolloverError::pre_rebind)?
+                .root,
+        );
+        for layer in &self.state.layers[plan.retained()] {
+            let path = stage.path().join(
+                layer
+                    .path
+                    .file_name()
+                    .ok_or_else(|| RootDiskRolloverError::pre_rebind("invalid suffix name"))?,
+            );
+            // Same inode, different owned directory binding. Do not copy the changing writable
+            // head and do not rewrite shared metadata. Backing basenames and formats stay valid.
+            std::fs::hard_link(&layer.path, &path).map_err(|error| {
+                RootDiskRolloverError::pre_rebind(format!(
+                    "compaction requires same-filesystem hardlink bindings: {error}"
+                ))
+            })?;
+            let mut replacement = layer.clone();
+            replacement.path = path;
+            // Archive relocation will change predecessor names after this representation cut.
+            // Fresh IDs prevent later exports from confusing old and new physical prefixes.
+            replacement.layer_id = new_id("layer");
+            next.layers.push(replacement);
+        }
+        sync_directory(stage.path()).map_err(RootDiskRolloverError::pre_rebind)?;
+        let paused_at = Instant::now();
+        let pause = vm
+            .map(|vm| vm.pause())
+            .transpose()
+            .map_err(RootDiskRolloverError::pre_rebind)?;
+        let prepared = prepare_backend(&next);
+        let backend = match prepared {
+            Ok(backend) => backend,
+            Err(error) => {
+                if let (Some(vm), Some(pause)) = (vm, pause) {
+                    vm.resume(pause)
+                        .map_err(RootDiskRolloverError::post_journal)?;
+                }
+                return Err(RootDiskRolloverError::pre_rebind(error));
+            }
+        };
+        // Preserve the files before attempting the durable commit. Even a directory fsync error
+        // may occur after rename, so uncertain publication must retain data and recover forward.
+        let _published_directory = stage.keep();
+        write_state(&self.state_path, &next).map_err(RootDiskRolloverError::post_journal)?;
+        let old = std::mem::replace(&mut self.state, next);
+        if let (Some(vm), Some(pause)) = (vm, pause) {
+            vm.replace_block_backend(&self.state.device_id, backend)
+                .map_err(RootDiskRolloverError::post_journal)?;
+            vm.resume(pause)
+                .map_err(RootDiskRolloverError::post_journal)?;
+            result.pause_us = paused_at.elapsed().as_micros() as u64;
+        } else {
+            drop(backend);
+        }
+        // Only retire this sandbox's directory entries. Other snapshots/children keep their own
+        // hardlinks. Failed unlinks are harmless retained storage, never a reason to undo commit.
+        for layer in old.layers {
+            if layer.path.starts_with(parent) {
+                let _ = std::fs::remove_file(layer.path);
+            }
+        }
+        result.total_us = started.elapsed().as_micros() as u64;
+        Ok(result)
     }
 
     /// Seal the current head, publish its closure, and switch the paused device to a fresh head.
@@ -362,7 +518,7 @@ impl From<RootDiskFormat> for msb_krun::BlockImageFormat {
 }
 
 impl RootDiskRolloverError {
-    fn pre_rebind(error: impl fmt::Display) -> Self {
+    pub(super) fn pre_rebind(error: impl fmt::Display) -> Self {
         Self {
             message: error.to_string(),
             keep_paused: false,
@@ -404,7 +560,10 @@ pub(crate) fn recover_runtime_owned_root(
     }
     let configured = configured_layers(vm, state.layout)?;
     let configured_base = configured.first().map(|layer| &layer.path);
-    let journal_base = state.layers.first().map(|layer| &layer.path);
+    let journal_base = state
+        .launch_base
+        .as_ref()
+        .or_else(|| state.layers.first().map(|layer| &layer.path));
     if configured_base != journal_base {
         return Err("root-disk journal does not match the configured base layer".into());
     }
@@ -424,9 +583,8 @@ pub(crate) fn recover_runtime_owned_root(
 
 /// Read the authoritative root-disk chain after the caller has proven the sandbox stopped.
 ///
-/// `None` means no rollover journal exists yet. The first layer of runtime-produced roots is raw,
-/// so its apparent size is the shared guest-visible capacity. A foreign qcow2-only base fails
-/// explicitly instead of being assigned the container file's smaller apparent size.
+/// `None` means no rollover journal exists yet. Read the head's declared capacity, not the
+/// container size or an older base's capacity: compaction and grow can change both assumptions.
 pub fn load_runtime_owned_root_chain(
     runtime_dir: &Path,
 ) -> Result<Option<RuntimeOwnedRootChain>, String> {
@@ -435,16 +593,25 @@ pub fn load_runtime_owned_root_chain(
         return Ok(None);
     }
     let state = read_state(&state_path)?;
-    let first = state
+    let head = state
         .layers
-        .first()
+        .last()
         .expect("validated runtime root chain is non-empty");
-    if first.format != RootDiskFormat::Raw {
-        return Err("runtime-owned root chain has no raw capacity-bearing base".into());
-    }
-    let virtual_size = std::fs::metadata(&first.path)
-        .map_err(|error| format!("read runtime-owned root base size: {error}"))?
-        .len();
+    // This sync projection can be called inside an async SDK. A dedicated thread owns its tiny
+    // runtime so nested block_on cannot panic and no implicit backing dependency is opened.
+    let layer = CompactLayer {
+        path: head.path.clone(),
+        qcow2: head.format == RootDiskFormat::Qcow2,
+    };
+    let virtual_size = std::thread::spawn(move || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?
+            .block_on(compact_layer_capacity(layer))
+    })
+    .join()
+    .map_err(|_| "disk capacity reader panicked".to_string())?
+    .map_err(|error| format!("read runtime-owned root capacity: {error}"))?;
     if virtual_size == 0 {
         return Err("runtime-owned root base has zero capacity".into());
     }
@@ -460,6 +627,35 @@ pub fn load_runtime_owned_root_chain(
             })
             .collect(),
     }))
+}
+
+/// Compact a stopped runtime-owned root after the caller acquires the sandbox lifecycle lock.
+/// The caller must prove no live process can write this disk until the operation finishes.
+pub fn compact_stopped_root(
+    runtime_dir: &Path,
+    layers: Option<usize>,
+    dry_run: bool,
+) -> Result<DiskCompactionResult, String> {
+    let state_path = runtime_dir.join(ROOT_DISK_STATE_FILE);
+    if !state_path.exists() {
+        let plan = DiskCompactionPlan::new(1, layers).map_err(|error| error.to_string())?;
+        return Ok(DiskCompactionResult {
+            dry_run,
+            input_layers: 1,
+            output_layers: plan.output_layers(),
+            ..Default::default()
+        });
+    }
+    let mut disk = RuntimeOwnedRootDisk {
+        state: read_state(&state_path)?,
+        state_path,
+    };
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| error.to_string())?;
+    disk.compact(None, runtime.handle(), layers, dry_run)
+        .map_err(|error| error.to_string())
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -650,6 +846,117 @@ fn sync_directory(path: &Path) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn stopped_compaction_preserves_head_and_recovers_both_layouts() {
+        use super::*;
+        for layout in [RootDiskLayout::ManagedUpper, RootDiskLayout::FlatRoot] {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path().join("runtime");
+            std::fs::create_dir(&root).unwrap();
+            let base = dir.path().join("base.raw");
+            std::fs::write(&base, vec![71u8; 131072]).unwrap();
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let mut layers = vec![RootDiskLayer {
+                layer_id: new_id("layer"),
+                path: base.clone(),
+                format: RootDiskFormat::Raw,
+                integrity_root: Some(sparse_file_integrity(&base).unwrap().root),
+            }];
+            for i in 0..3 {
+                let path = root.join(format!("next-{i}.qcow2"));
+                let prior = layers.last().unwrap();
+                rt.block_on(microsandbox_image::checkpoint::create_qcow2_overlay(
+                    &path,
+                    131072,
+                    &prior.path,
+                    prior.format.as_str(),
+                ))
+                .unwrap();
+                layers.push(RootDiskLayer {
+                    layer_id: new_id("layer"),
+                    format: RootDiskFormat::Qcow2,
+                    integrity_root: if i == 2 {
+                        None
+                    } else {
+                        Some(sparse_file_integrity(&path).unwrap().root)
+                    },
+                    path,
+                });
+            }
+            let head = layers.last().unwrap().path.clone();
+            let head_bytes = std::fs::read(&head).unwrap();
+            // An old published snapshot owns its own links, not the runtime's retired names.
+            let retained = dir.path().join("published-layer.qcow2");
+            std::fs::hard_link(&layers[1].path, &retained).unwrap();
+            let retained_bytes = std::fs::read(&retained).unwrap();
+            let journal = root.join(ROOT_DISK_STATE_FILE);
+            write_state(
+                &journal,
+                &RootDiskState {
+                    schema: ROOT_DISK_STATE_SCHEMA.into(),
+                    volume_id: new_id("vol"),
+                    device_id: layout.device_id().into(),
+                    layout,
+                    published_generation: 3,
+                    launch_base: None,
+                    layers,
+                },
+            )
+            .unwrap();
+            let before = std::fs::read(&journal).unwrap();
+            assert!(compact_stopped_root(&root, Some(4), false).is_err());
+            let plan = compact_stopped_root(&root, Some(2), true).unwrap();
+            assert_eq!(
+                (plan.input_layers, plan.selected_layers, plan.output_layers),
+                (4, 2, 3)
+            );
+            assert_eq!(std::fs::read(&journal).unwrap(), before);
+            // Preparation failure must neither publish a journal nor retain staging files.
+            let moved_base = dir.path().join("unavailable.raw");
+            std::fs::rename(&base, &moved_base).unwrap();
+            assert!(compact_stopped_root(&root, Some(2), false).is_err());
+            assert_eq!(std::fs::read(&journal).unwrap(), before);
+            assert!(std::fs::read_dir(&root).unwrap().all(|entry| {
+                !entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".compact-")
+            }));
+            std::fs::rename(&moved_base, &base).unwrap();
+            let result = compact_stopped_root(&root, Some(2), false).unwrap();
+            assert_eq!(
+                (result.input_layers, result.output_layers, result.pause_us),
+                (4, 3, 0)
+            );
+            let state = read_state(&journal).unwrap();
+            assert_eq!(state.launch_base.as_ref(), Some(&base));
+            assert_eq!(
+                std::fs::read(&state.layers.last().unwrap().path).unwrap(),
+                head_bytes
+            );
+            assert_eq!(std::fs::read(&retained).unwrap(), retained_bytes);
+            let chain = load_runtime_owned_root_chain(&root).unwrap().unwrap();
+            assert_eq!(chain.virtual_size, 131072);
+            assert_eq!(chain.layers[0].format, "qcow2");
+            let compacted = compact_stopped_root(&root, None, false).unwrap();
+            assert_eq!(compacted.output_layers, 2);
+            assert_eq!(
+                read_state(&journal).unwrap().launch_base.as_ref(),
+                Some(&base)
+            );
+            assert_eq!(
+                compact_stopped_root(&root, None, false)
+                    .unwrap()
+                    .selected_layers,
+                0
+            );
+        }
+    }
+
     use super::{
         FLAT_ROOT_DEVICE_ID, MANAGED_ROOT_DEVICE_ID, ROOT_DISK_STATE_SCHEMA, RootDiskFormat,
         RootDiskLayer, RootDiskLayout, RootDiskState, load_runtime_owned_root_chain, new_id,
@@ -671,6 +978,7 @@ mod tests {
             device_id: MANAGED_ROOT_DEVICE_ID.into(),
             layout: RootDiskLayout::ManagedUpper,
             published_generation: 1,
+            launch_base: None,
             layers: vec![
                 RootDiskLayer {
                     layer_id: new_id("layer"),
@@ -716,6 +1024,7 @@ mod tests {
             device_id: FLAT_ROOT_DEVICE_ID.into(),
             layout: RootDiskLayout::FlatRoot,
             published_generation: 0,
+            launch_base: None,
             layers: vec![RootDiskLayer {
                 layer_id: new_id("layer"),
                 path: base.clone(),
@@ -755,6 +1064,7 @@ mod tests {
             device_id: MANAGED_ROOT_DEVICE_ID.into(),
             layout: RootDiskLayout::ManagedUpper,
             published_generation: 0,
+            launch_base: None,
             layers: vec![RootDiskLayer {
                 layer_id: new_id("layer"),
                 path: "upper.ext4".into(),

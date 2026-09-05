@@ -157,6 +157,21 @@ impl PySandboxHandle {
         })
     }
 
+    /// Compact the immutable root-disk prefix, running or stopped.
+    #[pyo3(signature = (*, layers = None, dry_run = false))]
+    fn compact<'py>(
+        &self,
+        py: Python<'py>,
+        layers: Option<usize>,
+        dry_run: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let builder = inner.lock().await.compact();
+            crate::sandbox::run_compact(builder, layers, dry_run).await
+        })
+    }
+
     /// Plan or apply a sandbox modification. Returns the plan as a dict.
     ///
     /// `memory` / `max_memory` are in MiB. `policy` is a

@@ -7,6 +7,21 @@ description: Go SDK - Snapshot API reference
 
 Create disk snapshots of stopped sandboxes and full checkpoints of running sandboxes. See [Snapshots](/sandboxes/snapshots) for usage and lifecycle concepts.
 
+## Disk maintenance and incremental export
+
+```go
+worker, err := m.GetSandbox(ctx, "worker")
+if err != nil { return err }
+layers := uint32(3)
+result, err := worker.Compact(ctx, m.DiskCompactionOptions{Layers: &layers})
+if err != nil { return err }
+err = m.Snapshot.Save(ctx, "checkpoint-b", "changes.tar.zst", m.SnapshotSaveOptions{Since: "checkpoint-a"})
+if err != nil { return err }
+snapshot, err := m.Snapshot.LoadWithBase(ctx, "changes.tar.zst", "", "checkpoint-a")
+```
+
+The count includes the oldest base but excludes the writable head. A nil `Layers` selects all sealed layers; `DryRun: true` only resolves the plan. `LastLayers` is an alternative to `Since` for export. For direct restore combine `WithFromSnapshot("changes.tar.zst")` with `WithSnapshotBase("checkpoint-a")`. See [disk-chain maintenance](/sandboxes/snapshots#export-changes-and-compact-a-disk-chain) for dependency and retention rules.
+
 ## Snapshot
 
 Package-level helpers for snapshot artifacts. Access them through the exported `Snapshot` value, e.g. `m.Snapshot.Create(ctx, ...)`.

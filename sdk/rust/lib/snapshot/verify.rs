@@ -143,24 +143,29 @@ pub(super) async fn verify_snapshot(snap: &Snapshot) -> MicrosandboxResult<Snaps
             checkpoint: Some(checkpoint),
         });
     };
-    if file_state.layers.len() != 1 {
-        return Err(MicrosandboxError::unsupported(
-            crate::Operation::SnapshotOps,
-            crate::UnsupportedReason::NotAvailable(
-                "multi-layer verification requires the managed qcow implementation".into(),
-            ),
-        ));
+    let mut upper = UpperVerifyStatus::NotRecorded;
+    // Every recorded ancestor binding matters, not just the newest layer. Keep the released
+    // `upper` projection describing the head, while any ancestor mismatch fails the operation.
+    for layer in &file_state.layers {
+        let verified = verify_file_layer(snap, layer).await?;
+        if layer.layer_id == file_state.head {
+            upper = verified;
+        }
     }
-    let layer = file_state
-        .head_layer()
-        .map_err(|e| MicrosandboxError::SnapshotIntegrity(format!("invalid file closure: {e}")))?;
+    Ok(SnapshotVerifyReport {
+        digest: snap.digest().to_string(),
+        path: snap.path().to_path_buf(),
+        upper,
+        checkpoint: None,
+    })
+}
+
+async fn verify_file_layer(
+    snap: &Snapshot,
+    layer: &microsandbox_image::snapshot::DiskLayer,
+) -> MicrosandboxResult<UpperVerifyStatus> {
     let Some(expected) = layer.payload.integrity.as_ref() else {
-        return Ok(SnapshotVerifyReport {
-            digest: snap.digest().to_string(),
-            path: snap.path().to_path_buf(),
-            upper: UpperVerifyStatus::NotRecorded,
-            checkpoint: None,
-        });
+        return Ok(UpperVerifyStatus::NotRecorded);
     };
 
     let upper_path = snap.layer_path(layer);
@@ -187,14 +192,9 @@ pub(super) async fn verify_snapshot(snap: &Snapshot) -> MicrosandboxResult<Snaps
         )));
     }
 
-    Ok(SnapshotVerifyReport {
-        digest: snap.digest().to_string(),
-        path: snap.path().to_path_buf(),
-        upper: UpperVerifyStatus::Verified {
-            algorithm: expected.algorithm().into(),
-            digest: actual.value().into(),
-        },
-        checkpoint: None,
+    Ok(UpperVerifyStatus::Verified {
+        algorithm: expected.algorithm().into(),
+        digest: actual.value().into(),
     })
 }
 

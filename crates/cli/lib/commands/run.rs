@@ -39,6 +39,9 @@ pub struct RunArgs {
     /// Cold-boot only the disk state when the source is a full snapshot.
     #[arg(long, requires = "from_snapshot")]
     pub disk_only: bool,
+    /// Exact base snapshot or standalone base archive required by a dependent snapshot archive.
+    #[arg(long, requires = "from_snapshot")]
+    pub snapshot_base: Option<String>,
 
     /// Run the resolved image command in the background and print the sandbox name.
     ///
@@ -180,6 +183,9 @@ async fn run_new(
     let mut builder = image.apply(builder)?;
     if args.disk_only {
         builder = builder.disk_only();
+    }
+    if let Some(base) = &args.snapshot_base {
+        builder = builder.snapshot_base(base);
     }
     if args.sandbox.log_level.is_none()
         && let Some(log_level) = log_level

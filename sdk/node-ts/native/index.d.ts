@@ -961,6 +961,8 @@ export declare class Sandbox {
    * string; the TS wrapper parses it into a `SandboxModificationPlan`.
    */
   modify(options?: SandboxModifyOptions | undefined | null): Promise<string>
+  /** Compact the immutable disk prefix; the count includes the base, not the writable head. */
+  compact(layers?: number | undefined | null, dryRun?: boolean | undefined | null): Promise<string>
   /** Stream metrics snapshots at the requested interval (in milliseconds). */
   metricsStream(intervalMs: number): Promise<MetricsStream>
   /** Attach to the sandbox's effective OCI entrypoint and CMD. */
@@ -1066,6 +1068,8 @@ export declare class SandboxBuilder {
    * snapshot already pins the image reference and digest.
    */
   fromSnapshot(pathOrName: string): this
+  /** Supply the exact base for a disk-dependent snapshot archive. */
+  snapshotBase(base: string): this
   /** Cold-boot only the disk state carried by a full snapshot. */
   diskOnly(): this
   /** Number of virtual CPUs. */
@@ -1327,6 +1331,8 @@ export declare class SandboxHandle {
    * string; the TS wrapper parses it into a `SandboxModificationPlan`.
    */
   modify(options?: SandboxModifyOptions | undefined | null): Promise<string>
+  /** Explicitly compact a running or stopped sandbox's immutable disk prefix. */
+  compact(layers?: number | undefined | null, dryRun?: boolean | undefined | null): Promise<string>
   /** Start the sandbox (attached mode) — returns a live Sandbox handle. */
   start(): Promise<Sandbox>
   /** Start the sandbox (detached mode). */
@@ -1488,7 +1494,7 @@ export declare class Snapshot {
    * `recordIntegrity()` if receivers must verify content.
    */
   static save(nameOrPath: string, out: string, opts?: SaveOpts | undefined | null): Promise<void>
-  static load(archive: string, dest?: string | undefined | null): Promise<SnapshotHandle>
+  static load(archive: string, dest?: string | undefined | null, base?: string | undefined | null): Promise<SnapshotHandle>
   get path(): string
   get id(): string
   get digest(): string
@@ -2253,6 +2259,10 @@ export interface SaveOpts {
   withImage?: boolean
   /** Skip zstd compression and write a plain `.tar`. */
   plainTar?: boolean
+  /** Exact base snapshot or standalone archive for incremental disk export. */
+  since?: string
+  /** Newest N immutable disk layers to include. */
+  lastLayers?: number
 }
 
 /** Host-scoped upstream CA certificate path. */

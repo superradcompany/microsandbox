@@ -1149,6 +1149,12 @@ impl SandboxBuilder {
         self
     }
 
+    /// Supply the exact base snapshot or standalone base archive for a disk-dependent archive.
+    pub fn snapshot_base(mut self, base: impl Into<String>) -> Self {
+        self.config.snapshot_base = Some(base.into());
+        self
+    }
+
     /// Pre-populate the snapshot resolution for callers that opened
     /// the artifact synchronously and don't want the async manifest
     /// read that [`build`](Self::build) would otherwise perform.
@@ -1560,6 +1566,11 @@ impl SandboxBuilder {
         if self.config.checkpoint_restore.is_some() && !self.config.spec.patches.is_empty() {
             return Err(crate::MicrosandboxError::InvalidConfig(
                 "patches cannot be combined with full snapshot restore".into(),
+            ));
+        }
+        if self.config.snapshot_base.is_some() && self.config.snapshot_archive_source.is_none() {
+            return Err(crate::MicrosandboxError::InvalidConfig(
+                "snapshot_base requires from_snapshot with an archive path".into(),
             ));
         }
 

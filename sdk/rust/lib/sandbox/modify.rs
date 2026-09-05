@@ -798,6 +798,26 @@ where
     Ok(response)
 }
 
+/// Capability-gated disk maintenance over the existing control endpoint.
+pub(crate) async fn control_disk_compact(
+    name: &str,
+    layers: Option<usize>,
+    dry_run: bool,
+) -> MicrosandboxResult<super::DiskCompactionResult> {
+    if !control_capabilities(name).await?.disk_compact {
+        return Err(crate::MicrosandboxError::Runtime(
+            "this running sandbox does not support disk compaction; restart with the updated runtime".into(),
+        ));
+    }
+    let request = microsandbox_runtime::control::ControlRequest::DiskCompact { layers, dry_run };
+    let mut line = serde_json::to_string(&request)?;
+    line.push('\n');
+    let response = control_request(name, line).await?;
+    response.compaction.ok_or_else(|| {
+        crate::MicrosandboxError::Runtime("control response omitted compaction result".into())
+    })
+}
+
 /// Capture one full checkpoint through the running sandbox's existing control endpoint.
 ///
 /// A post-publication source-resume failure still returns the immutable checkpoint so the caller

@@ -45,6 +45,10 @@ pub struct JsSaveOpts {
     pub with_image: Option<bool>,
     /// Skip zstd compression and write a plain `.tar`.
     pub plain_tar: Option<bool>,
+    /// Exact base snapshot or standalone archive for incremental disk export.
+    pub since: Option<String>,
+    /// Newest N immutable disk layers to include.
+    pub last_layers: Option<f64>,
 }
 
 /// Result of `Snapshot.verify()`.
@@ -171,6 +175,8 @@ impl JsSnapshot {
             with_parents: opts.with_parents.unwrap_or(false),
             with_image: opts.with_image.unwrap_or(false),
             plain_tar: opts.plain_tar.unwrap_or(false),
+            since: opts.since,
+            last_layers: crate::sandbox::checked_layer_count(opts.last_layers)?,
         };
         RustSnapshot::save(&name_or_path, &PathBuf::from(out), rust_opts)
             .await
@@ -178,11 +184,18 @@ impl JsSnapshot {
     }
 
     #[napi]
-    pub async fn load(archive: String, dest: Option<String>) -> Result<JsSnapshotHandle> {
+    pub async fn load(
+        archive: String,
+        dest: Option<String>,
+        base: Option<String>,
+    ) -> Result<JsSnapshotHandle> {
         let dest = dest.map(PathBuf::from);
-        let h = RustSnapshot::load(&PathBuf::from(archive), dest.as_deref())
-            .await
-            .map_err(to_napi_error)?;
+        let h = if let Some(base) = base {
+            RustSnapshot::load_with_base(&PathBuf::from(archive), dest.as_deref(), &base).await
+        } else {
+            RustSnapshot::load(&PathBuf::from(archive), dest.as_deref()).await
+        }
+        .map_err(to_napi_error)?;
         Ok(JsSnapshotHandle::from_rust(h))
     }
 

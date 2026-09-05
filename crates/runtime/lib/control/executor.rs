@@ -248,6 +248,7 @@ impl RuntimeControlExecutor {
                 | ControlRequest::CpuTarget { .. }
                 | ControlRequest::SecretsUpdate { .. }
                 | ControlRequest::CheckpointCreate { .. }
+                | ControlRequest::DiskCompact { dry_run: false, .. }
         );
         if mutation && state.lifecycle != RuntimeLifecycle::Running {
             return control_error(
@@ -257,6 +258,28 @@ impl RuntimeControlExecutor {
         }
 
         let response = match request {
+            ControlRequest::DiskCompact { layers, dry_run } => {
+                match state.checkpoint.compact(&self.vm, layers, dry_run) {
+                    Ok(result) => ControlResponse {
+                        ok: true,
+                        compaction: Some(result),
+                        ..Default::default()
+                    },
+                    Err(error) => {
+                        if error.keep_paused {
+                            state.lifecycle = RuntimeLifecycle::Quiesced;
+                        }
+                        control_error(
+                            if error.keep_paused {
+                                "compaction_recovery_required"
+                            } else {
+                                "compaction_failed"
+                            },
+                            error.to_string(),
+                        )
+                    }
+                }
+            }
             ControlRequest::CheckpointCreate {
                 checkpoint_id,
                 intent,
@@ -355,6 +378,7 @@ impl RuntimeControlExecutor {
                     memory_resize: self.vm.memory_resize_supported(),
                     secrets_update: self.secrets_update_supported(),
                     checkpoint_create: true,
+                    disk_compact: true,
                 }),
                 ..Default::default()
             },
@@ -373,7 +397,7 @@ impl RuntimeControlExecutor {
             }
             ControlRequest::CpuState => cpu(self.vm.cpu_state()),
             ControlRequest::SecretsUpdate { changes } => self.handle_secrets_update(changes),
-            ControlRequest::CheckpointCreate { .. } => {
+            ControlRequest::CheckpointCreate { .. } | ControlRequest::DiskCompact { .. } => {
                 unreachable!("checkpoint requests are handled by the executor lifecycle path")
             }
         }

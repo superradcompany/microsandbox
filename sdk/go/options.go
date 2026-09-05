@@ -28,6 +28,7 @@ type SandboxConfig struct {
 	ociUpperSizeSet   bool
 	Snapshot          string
 	SnapshotDiskOnly  bool
+	SnapshotBase      string
 	MemoryMiB         uint32
 	CPUs              uint8
 	MaxMemoryMiB      uint32
@@ -668,6 +669,11 @@ func WithFromSnapshot(pathOrName string) SandboxOption {
 // It must be combined with WithFromSnapshot.
 func WithSnapshotDiskOnly() SandboxOption {
 	return func(o *SandboxConfig) { o.SnapshotDiskOnly = true }
+}
+
+// WithSnapshotBase supplies the exact base snapshot or standalone base archive for a delta archive.
+func WithSnapshotBase(base string) SandboxOption {
+	return func(o *SandboxConfig) { o.SnapshotBase = base }
 }
 
 // WithMemory sets the memory limit in MiB (default 512MiB).

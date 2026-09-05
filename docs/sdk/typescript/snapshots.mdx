@@ -89,6 +89,20 @@ const snap = await h.snapshot("after-pip-install");
 
 ---
 
+## Disk maintenance and incremental export
+
+```typescript
+const worker = await Sandbox.get("worker");
+const plan = await worker.compact({ layers: 3, dryRun: true });
+const result = await worker.compact({ layers: 3 });
+await Snapshot.save("checkpoint-b", "changes.tar.zst", { since: "checkpoint-a" });
+await Snapshot.load("changes.tar.zst", undefined, "checkpoint-a");
+const child = await Sandbox.builder("child")
+  .fromSnapshot("changes.tar.zst").snapshotBase("checkpoint-a").create();
+```
+
+The count includes the oldest base but excludes the writable head. Omit `layers` to compact all sealed layers. `lastLayers` selects the newest N sealed export layers instead of `since`. Results expose physical counts, `materializedBytes`, `totalUs`, and `pauseUs`; materialized bytes are not reclaimed space. See [disk-chain maintenance](/sandboxes/snapshots#export-changes-and-compact-a-disk-chain) for dependency and retention rules.
+
 ## Snapshot
 
 <p className="msb-member-group">Instance properties</p>
