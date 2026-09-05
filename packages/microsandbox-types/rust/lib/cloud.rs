@@ -626,6 +626,9 @@ impl From<CloudVolumeMount> for VolumeMount {
                 // the protective no-follow behavior.
                 follow_root_symlinks: false,
                 quota_mib,
+                // The cloud wire type carries no deny list; an empty list hides
+                // nothing.
+                deny: Vec::new(),
             },
             CloudVolumeMount::Named {
                 name,
@@ -679,6 +682,10 @@ impl From<VolumeMount> for CloudVolumeMount {
                 host_permissions,
                 follow_root_symlinks: _,
                 quota_mib,
+                // The cloud wire format has no deny field, so the policy cannot
+                // round-trip; the SDK create path rejects non-empty deny lists
+                // before this conversion is reached.
+                deny: _,
             } => CloudVolumeMount::Bind {
                 host,
                 guest,

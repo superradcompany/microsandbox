@@ -1668,6 +1668,7 @@ fn build_vm(
             #[cfg(windows)]
             default_owner: override_owner,
             quota_bytes: parsed.quota_bytes,
+            deny: parsed.deny,
             ..Default::default()
         };
         let backend = PassthroughFs::new(cfg).map_err(|e| {
@@ -2503,6 +2504,7 @@ struct ParsedMountSpec {
     /// (`gid=` option). `None` keeps the runtime default. Must be set together
     /// with [`override_uid`](Self::override_uid).
     override_gid: Option<u32>,
+    deny: Vec<String>,
 }
 
 /// Parse a `--mount` spec into [`ParsedMountSpec`].
@@ -2540,6 +2542,7 @@ fn parse_mount_spec(spec: &str) -> Result<ParsedMountSpec, String> {
     let mut quota_bytes = None;
     let mut override_uid = None;
     let mut override_gid = None;
+    let mut deny: Vec<String> = Vec::new();
     let mut seen_stat_virt = false;
     let mut seen_host_perms = false;
     let mut seen_access = false;
@@ -2671,6 +2674,10 @@ fn parse_mount_spec(spec: &str) -> Result<ParsedMountSpec, String> {
                                 format!("invalid gid {value:?} (expected an unsigned integer)")
                             })?);
                         }
+                        "deny" => {
+                            validate_deny_pattern(value)?;
+                            deny.push(value.to_string())
+                        }
                         other => return Err(format!("unknown mount option {other:?}")),
                     }
                 }
@@ -2700,7 +2707,29 @@ fn parse_mount_spec(spec: &str) -> Result<ParsedMountSpec, String> {
         quota_bytes,
         override_uid,
         override_gid,
+        deny,
     })
+}
+
+/// Reject deny patterns that would corrupt the mount wire format.
+///
+/// The option block is comma-joined and the spec is colon-split, so a `,` or
+/// `:` in a pattern would either fail the whole spawn or — worse — silently
+/// attenuate other mount protections. A newline/NUL would corrupt gitignore
+/// parsing. Validate here so the runtime never accepts an injectable pattern.
+///
+/// Keep this in sync with the identical validators in
+/// `sdk/rust/lib/sandbox/types.rs` and `sdk/go/native/src/lib.rs`.
+fn validate_deny_pattern(value: &str) -> Result<(), String> {
+    if value.is_empty() {
+        return Err("empty deny pattern".to_string());
+    }
+    if value.contains(',') || value.contains(':') || value.contains('\n') || value.contains('\0') {
+        return Err(format!(
+            "deny pattern must not contain ',', ':', newline, or NUL: {value:?}"
+        ));
+    }
+    Ok(())
 }
 
 /// Split `host_path[:opts]`, skipping the drive colon in Windows paths.
@@ -3024,6 +3053,56 @@ mod tests {
         assert!(
             err.contains("`quota` specified more than once"),
             "got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_parse_mount_spec_deny_single() {
+        let p = parse_mount_spec("foo:/host/data:deny=.env").unwrap();
+        assert_eq!(p.deny, vec![".env".to_string()]);
+    }
+
+    #[test]
+    fn test_parse_mount_spec_deny_repeatable() {
+        let p = parse_mount_spec("foo:/host/data:deny=.env,deny=*.log,deny=sub/secret").unwrap();
+        assert_eq!(p.deny, vec![".env", "*.log", "sub/secret"]);
+    }
+
+    #[test]
+    fn test_parse_mount_spec_deny_default_empty() {
+        let p = parse_mount_spec("foo:/host/data:ro").unwrap();
+        assert!(p.deny.is_empty());
+    }
+
+    #[test]
+    fn test_parse_mount_spec_deny_value_with_equals() {
+        let p = parse_mount_spec("foo:/host/data:deny=a=b").unwrap();
+        assert_eq!(p.deny, vec!["a=b".to_string()]);
+    }
+
+    #[test]
+    fn test_parse_mount_spec_rejects_deny_with_colon() {
+        // A colon in the option block is consumed by the host/options split, so
+        // it cannot reach the deny handler; the spec still fails loudly rather
+        // than silently dropping the pattern.
+        assert!(parse_mount_spec("foo:/host/data:deny=a:b").is_err());
+    }
+
+    #[test]
+    fn test_parse_mount_spec_rejects_deny_with_newline() {
+        let err = parse_mount_spec("foo:/host/data:deny=bad\npattern").unwrap_err();
+        assert!(
+            err.contains("must not contain"),
+            "expected newline rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_parse_mount_spec_rejects_empty_deny() {
+        let err = parse_mount_spec("foo:/host/data:deny=").unwrap_err();
+        assert!(
+            err.contains("empty deny pattern"),
+            "expected empty-pattern rejection, got: {err}"
         );
     }
 

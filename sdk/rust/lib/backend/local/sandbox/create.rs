@@ -1828,6 +1828,7 @@ mod tests {
             host_permissions: HostPermissions::Private,
             follow_root_symlinks: false,
             quota_mib: None,
+            deny: Vec::new(),
         });
 
         let sandbox_id = LocalBackend::insert_sandbox_record(pools.write(), &config)

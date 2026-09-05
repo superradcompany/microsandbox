@@ -4,6 +4,7 @@
 //! implementation lives under platform-specific submodules. Shared helpers
 //! such as quota accounting live beside the platform modules.
 
+pub(crate) mod deny;
 pub(crate) mod quota;
 
 #[cfg(unix)]

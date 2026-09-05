@@ -2198,6 +2198,7 @@ fn push_dir_mount_arg(
     host_permissions: HostPermissions,
     follow_root_symlinks: bool,
     quota_mib: Option<u32>,
+    deny: &[String],
 ) {
     let tag = guest_mount_tag(guest);
     let mut arg = format!("{tag}:{host_display}");
@@ -2212,6 +2213,12 @@ fn push_dir_mount_arg(
     );
     if let Some(mib) = quota_mib {
         opts.push(format!("quota={mib}"));
+    }
+    for p in deny {
+        // Trim the pattern so a value like `" .env"` renders as `deny=.env`
+        // rather than a literal-space pattern `deny= .env`, matching the CLI
+        // and runtime, which trim option tokens on parse.
+        opts.push(format!("deny={}", p.trim()));
     }
     append_option_block(&mut arg, opts);
     mounts.push(arg);
@@ -2228,6 +2235,7 @@ fn push_file_mount_arg(
     stat_virtualization: StatVirtualization,
     host_permissions: HostPermissions,
     quota_mib: u32,
+    deny: &[String],
 ) {
     let mut arg = format!("{tag}:{}", host_file.display());
     let mut opts = mount_option_tokens(options);
@@ -2242,6 +2250,12 @@ fn push_file_mount_arg(
         options.override_gid,
     );
     opts.push(format!("quota={quota_mib}"));
+    for p in deny {
+        // Trim the pattern so a value like `" .env"` renders as `deny=.env`
+        // rather than a literal-space pattern `deny= .env`, matching the CLI
+        // and runtime, which trim option tokens on parse.
+        opts.push(format!("deny={}", p.trim()));
+    }
     append_option_block(&mut arg, opts);
     mounts.push(FileMountConfig {
         mount: arg,
@@ -2625,6 +2639,7 @@ fn sandbox_cli_args(
                 host_permissions,
                 follow_root_symlinks,
                 quota_mib,
+                deny,
             } => {
                 if let Some((filename, tag)) = file_mounts.get(guest) {
                     // File binds receive the same default-on host disk
@@ -2639,6 +2654,7 @@ fn sandbox_cli_args(
                         *stat_virtualization,
                         *host_permissions,
                         quota,
+                        deny,
                     );
                     launch.bootstrap.file_mounts.push(BootstrapFileMount {
                         tag: tag.clone(),
@@ -2659,6 +2675,7 @@ fn sandbox_cli_args(
                         *host_permissions,
                         *follow_root_symlinks,
                         Some(quota),
+                        deny,
                     );
                     launch.bootstrap.dir_mounts.push(BootstrapDirMount {
                         tag: guest_mount_tag(guest),
@@ -2717,6 +2734,7 @@ fn sandbox_cli_args(
                             *host_permissions,
                             *follow_root_symlinks,
                             *quota_mib,
+                            &[],
                         );
                         launch.bootstrap.dir_mounts.push(BootstrapDirMount {
                             tag: guest_mount_tag(guest),
@@ -4228,6 +4246,42 @@ mod tests {
                 .windows(2)
                 .any(|pair| pair[0] == "--mount" && pair[1] == expected),
             "missing override-quota --mount arg in {rendered:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sandbox_cli_args_bind_mount_deny_renders_arg_only() {
+        let config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .volume("/data", |m| {
+                m.bind("/host/data").deny([".env", "sub/secret"])
+            })
+            .build()
+            .await
+            .unwrap();
+
+        let rendered = render_args(&config);
+        let data_tag = super::guest_mount_tag("/data");
+        let expected = format!(
+            "{data_tag}:/host/data:quota={},deny=.env,deny=sub/secret",
+            crate::sandbox::config::DEFAULT_BIND_QUOTA_MIB
+        );
+        assert!(
+            rendered
+                .windows(2)
+                .any(|pair| pair[0] == "--mount" && pair[1] == expected),
+            "missing deny --mount arg in {rendered:?}"
+        );
+
+        // Deny rides only in the --mount arg, never the agentd env spec.
+        let dir_mounts = rendered
+            .iter()
+            .find(|arg| arg.starts_with("MSB_DIR_MOUNTS="))
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            !dir_mounts.contains("deny"),
+            "MSB_DIR_MOUNTS must not carry deny, got {dir_mounts:?}"
         );
     }
 

@@ -1420,6 +1420,23 @@ fn nodev(self) -> Self
 
 Ignore device files on this mount.
 
+#### <span className="msb-recv">mount.</span><span className="msb-hn">deny()</span>
+
+```rust
+fn deny(self, patterns: impl IntoIterator<Item = impl Into<String>>) -> Self
+```
+
+Hide host paths matching gitignore-style patterns from the guest. Matching entries are invisible (ENOENT) and writes to them are forbidden (EACCES). Patterns are relative to the mount root and may be names (`.env`, `*.log`) or paths (`sub/secret`). Valid only for bind mounts.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>patterns</code><span className="msb-type">impl IntoIterator&lt;Item = impl Into&lt;String&gt;&gt;</span></div>
+    <div className="msb-param-desc">Gitignore-style patterns to hide from the guest.</div>
+  </div>
+</div>
+
 #### <span className="msb-recv">mount.</span><span className="msb-hn">stat_virtualization()</span>
 
 ```rust

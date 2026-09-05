@@ -204,13 +204,9 @@ fn open_macos_inode_reopen(path: *const libc::c_char, flags: i32) -> io::Result<
     ))
 }
 
+/// Build a `/.vol/<dev>/<ino>` identity path as a `CString` (macOS only).
 #[cfg(target_os = "macos")]
-pub(crate) fn vol_path(dev: u64, ino: u64) -> std::ffi::CString {
-    use std::ffi::CString;
-
-    CString::new(format!("/.vol/{dev}/{ino}"))
-        .expect("formatted /.vol path never contains interior nul")
-}
+pub(crate) use crate::backends::shared::platform::vol_path;
 
 /// Look up a child name in a parent directory and return an [`Entry`].
 ///
@@ -220,7 +216,20 @@ pub(crate) fn vol_path(dev: u64, ino: u64) -> std::ffi::CString {
 pub(crate) fn do_lookup(fs: &PassthroughFs, parent: u64, name: &CStr) -> io::Result<Entry> {
     crate::backends::shared::name_validation::validate_name(name)?;
 
+    // Determine the child's type (without following a symlink) to support
+    // dir-only deny patterns.
     let parent_fd = get_inode_fd(fs, parent)?;
+    let is_dir = if fs.deny.has_dir_only_patterns() {
+        platform::fstatat_nofollow(parent_fd.raw(), name)
+            .map(|st| platform::mode_file_type(st.st_mode) == platform::MODE_DIR)
+            .unwrap_or(false)
+    } else {
+        false
+    };
+
+    if fs.deny_matches_name(parent, name.to_bytes(), is_dir) {
+        return Err(platform::enoent());
+    }
 
     #[cfg(target_os = "linux")]
     return do_lookup_linux(fs, parent, parent_fd.raw(), name);
@@ -1044,4 +1053,102 @@ pub(crate) fn stat_inode(fs: &PassthroughFs, inode: u64) -> io::Result<stat64> {
             fs.cfg.bind_identity_map.as_ref(),
         )
     }
+}
+
+/// Reconstruct the mount-relative path components for an inode by
+/// walking `anchor_parent` + `anchor_name` from the inode up to root.
+///
+/// Uses read locks so it can be called from any context without requiring
+/// write access. Returns `None` when the anchor chain is broken so the
+/// caller can fail closed. The `_root` argument is unused on Linux (the
+/// anchor chain is already mount-relative).
+#[cfg(target_os = "linux")]
+pub(crate) fn parent_path_components(
+    inodes: &std::sync::RwLock<
+        crate::backends::shared::inode_table::MultikeyBTreeMap<
+            u64,
+            crate::backends::shared::inode_table::InodeAltKey,
+            std::sync::Arc<crate::backends::shared::inode_table::InodeData>,
+        >,
+    >,
+    inode: u64,
+    _root: &std::path::Path,
+) -> Option<Vec<Vec<u8>>> {
+    let inodes_locked = inodes.read().unwrap();
+    _parent_path_components_locked(&inodes_locked, inode, &mut std::collections::HashSet::new())
+}
+
+#[cfg(target_os = "linux")]
+fn _parent_path_components_locked(
+    inodes: &crate::backends::shared::inode_table::MultikeyBTreeMap<
+        u64,
+        crate::backends::shared::inode_table::InodeAltKey,
+        std::sync::Arc<crate::backends::shared::inode_table::InodeData>,
+    >,
+    inode: u64,
+    seen: &mut std::collections::HashSet<u64>,
+) -> Option<Vec<Vec<u8>>> {
+    // Inode 1 is the mount root; its mount-relative path is empty.
+    if inode == 1 {
+        return Some(Vec::new());
+    }
+    if !seen.insert(inode) {
+        return None;
+    }
+
+    let data = inodes.get(&inode)?;
+    let anchor_parent = data
+        .anchor_parent
+        .load(std::sync::atomic::Ordering::Acquire);
+    if anchor_parent == 0 {
+        return None;
+    }
+
+    let mut components = _parent_path_components_locked(inodes, anchor_parent, seen)?;
+    let anchor_name = data.anchor_name.read().unwrap();
+    if !anchor_name.is_empty() {
+        components.push(anchor_name.clone());
+    }
+    Some(components)
+}
+
+/// Reconstruct the mount-relative path components for an inode on macOS by
+/// resolving its real host path via `/.vol/<dev>/<ino>` + `F_GETPATH`, then
+/// stripping the canonical mount root.
+///
+/// Returns `None` when the inode is absent from the table or its host path
+/// cannot be resolved (e.g. after unlink), so the caller can fail closed.
+#[cfg(target_os = "macos")]
+pub(crate) fn parent_path_components(
+    inodes: &std::sync::RwLock<
+        crate::backends::shared::inode_table::MultikeyBTreeMap<
+            u64,
+            crate::backends::shared::inode_table::InodeAltKey,
+            std::sync::Arc<crate::backends::shared::inode_table::InodeData>,
+        >,
+    >,
+    inode: u64,
+    root: &std::path::Path,
+) -> Option<Vec<Vec<u8>>> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let dev;
+    let ino;
+    {
+        let inodes_locked = inodes.read().unwrap();
+        let data = inodes_locked.get(&inode)?;
+        dev = data.dev;
+        ino = data.ino;
+    }
+
+    let host = crate::backends::shared::platform::path_from_vol(dev, ino).ok()?;
+    let rel = host.strip_prefix(root).ok()?;
+
+    let mut components = Vec::new();
+    for part in rel.components() {
+        if let std::path::Component::Normal(part) = part {
+            components.push(part.as_bytes().to_vec());
+        }
+    }
+    Some(components)
 }

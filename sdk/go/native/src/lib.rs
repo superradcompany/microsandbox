@@ -1202,6 +1202,8 @@ struct MountSpec {
     nodev: bool,
     size_mib: Option<u32>,
     quota_mib: Option<u32>,
+    #[serde(default)]
+    deny: Vec<String>,
     /// Per-mount stat-virtualization policy ("strict" | "relaxed" | "off").
     /// Only valid for bind / named mounts.
     stat_virtualization: Option<String>,
@@ -1891,6 +1893,33 @@ fn apply_patch(
     Ok(builder.add_patch(patch))
 }
 
+/// Reject deny patterns that would corrupt the mount wire format.
+///
+/// The mount option block is comma-joined and the spec is colon-split, so a
+/// `,` or `:` in a pattern would either fail the whole spawn or silently
+/// attenuate other mount protections; a newline/NUL would corrupt gitignore
+/// parsing. Reject here so the FFI boundary reports a clear error instead of
+/// the deeper `MountBuilder::build()` validation.
+///
+/// Keep this in sync with the identical validators in
+/// `crates/runtime/lib/vm.rs` (`validate_deny_pattern`) and
+/// `sdk/rust/lib/sandbox/types.rs`.
+fn validate_deny_pattern(pattern: &str) -> Result<(), FfiError> {
+    if pattern.is_empty() {
+        return Err(FfiError::invalid_argument("deny pattern must not be empty"));
+    }
+    if pattern.contains(',')
+        || pattern.contains(':')
+        || pattern.contains('\n')
+        || pattern.contains('\0')
+    {
+        return Err(FfiError::invalid_argument(format!(
+            "deny pattern must not contain ',', ':', newline, or NUL: {pattern:?}"
+        )));
+    }
+    Ok(())
+}
+
 fn apply_volume(
     builder: microsandbox::sandbox::SandboxBuilder,
     guest_path: &str,
@@ -1936,6 +1965,10 @@ fn apply_volume(
     let quota_mib = m.quota_mib;
     let override_uid = m.override_uid;
     let override_gid = m.override_gid;
+    let deny = m.deny.clone();
+    for pattern in &deny {
+        validate_deny_pattern(pattern)?;
+    }
     let raw_named_mode = m.named_mode.clone();
     let raw_named_kind = m.named_kind.clone();
 
@@ -1987,6 +2020,11 @@ fn apply_volume(
             "override_uid/override_gid are only valid for bind or named mounts",
         ));
     }
+    if !deny.is_empty() && bind.is_none() {
+        return Err(FfiError::invalid_argument(
+            "deny is only valid for bind mounts",
+        ));
+    }
 
     Ok(builder.volume(guest_path, move |mb| {
         let mut mb = if let Some(ref host) = bind {
@@ -1995,6 +2033,9 @@ fn apply_volume(
             let mut b = mb.bind(host);
             if let Some(quota) = quota_mib {
                 b = b.quota(quota);
+            }
+            if !deny.is_empty() {
+                b = b.deny(deny.clone());
             }
             b
         } else if let Some(ref name) = named {
@@ -7107,6 +7148,77 @@ mod tests {
 
         assert!(
             err.message.contains("size_mib is only valid"),
+            "got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn mount_spec_parses_deny_list() {
+        let spec: MountSpec =
+            serde_json::from_str(r#"{"bind":"/host/data","deny":[".env","sub/secret"]}"#).unwrap();
+
+        assert_eq!(spec.bind.as_deref(), Some("/host/data"));
+        assert_eq!(spec.deny, vec![".env", "sub/secret"]);
+    }
+
+    #[test]
+    fn apply_volume_rejects_deny_with_wire_separator() {
+        for bad in [",", ":", "\n"] {
+            let builder = microsandbox::sandbox::SandboxBuilder::new("test").image("alpine");
+            let spec = MountSpec {
+                bind: Some("/host/data".to_string()),
+                deny: vec![format!("a{bad}b")],
+                ..Default::default()
+            };
+
+            let err = match apply_volume(builder, "/data", &spec) {
+                Ok(_) => panic!("deny pattern {bad:?} should be rejected"),
+                Err(err) => err,
+            };
+            assert!(
+                err.message.contains("must not contain"),
+                "pattern {bad:?} got: {}",
+                err.message
+            );
+        }
+    }
+
+    #[test]
+    fn apply_volume_rejects_empty_deny() {
+        let builder = microsandbox::sandbox::SandboxBuilder::new("test").image("alpine");
+        let spec = MountSpec {
+            bind: Some("/host/data".to_string()),
+            deny: vec![String::new()],
+            ..Default::default()
+        };
+
+        let err = match apply_volume(builder, "/data", &spec) {
+            Ok(_) => panic!("empty deny pattern should be rejected"),
+            Err(err) => err,
+        };
+        assert!(
+            err.message.contains("must not be empty"),
+            "got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn apply_volume_rejects_deny_on_named_mount() {
+        let builder = microsandbox::sandbox::SandboxBuilder::new("test").image("alpine");
+        let spec = MountSpec {
+            named: Some("vol".to_string()),
+            deny: vec![".env".to_string()],
+            ..Default::default()
+        };
+
+        let err = match apply_volume(builder, "/data", &spec) {
+            Ok(_) => panic!("deny on a named mount should be rejected"),
+            Err(err) => err,
+        };
+        assert!(
+            err.message.contains("deny is only valid for bind mounts"),
             "got: {}",
             err.message
         );

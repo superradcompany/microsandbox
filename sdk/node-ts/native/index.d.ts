@@ -426,6 +426,13 @@ export declare class MountBuilder {
    */
   quota(mib: number): this
   /**
+   * Hide host paths matching gitignore-style patterns from the guest.
+   *
+   * Matching entries are invisible (ENOENT) and writes to them are forbidden
+   * (EACCES). Patterns are relative to the mount root. Valid only for bind mounts.
+   */
+  deny(patterns: Array<string>): this
+  /**
    * Set the guest stat virtualization policy.
    *
    * Accepts `"strict"`, `"relaxed"`, or `"off"`. Valid only for bind and
@@ -2560,6 +2567,7 @@ export interface VolumeMount {
   namedKind?: string
   sizeMib?: number
   quotaMib?: number
+  deny?: Array<string>
   format?: string
   fstype?: string
   /** `"strict" | "relaxed" | "off"` for bind/named mounts; `None` for tmpfs/disk. */

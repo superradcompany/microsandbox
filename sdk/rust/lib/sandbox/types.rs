@@ -66,6 +66,7 @@ pub struct MountBuilder {
     stat_virtualization: Option<StatVirtualization>,
     host_permissions: Option<HostPermissions>,
     follow_root_symlinks: bool,
+    deny: Vec<String>,
     error: Option<crate::MicrosandboxError>,
 }
 
@@ -215,6 +216,7 @@ impl MountBuilder {
             stat_virtualization: None,
             host_permissions: None,
             follow_root_symlinks: false,
+            deny: Vec::new(),
             error: None,
         }
     }
@@ -402,6 +404,16 @@ impl MountBuilder {
         self
     }
 
+    /// Hide host paths matching gitignore-style patterns from the guest.
+    ///
+    /// Matching entries are invisible (ENOENT) and writes to them are forbidden
+    /// (EACCES). Patterns are relative to the mount root and may be component
+    /// names (`.env`, `*.log`) or paths (`sub/secret`). Valid only for bind mounts.
+    pub fn deny(mut self, patterns: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.deny.extend(patterns.into_iter().map(Into::into));
+        self
+    }
+
     /// Build the volume mount.
     pub fn build(self) -> crate::MicrosandboxResult<VolumeMount> {
         if let Some(err) = self.error {
@@ -443,6 +455,14 @@ impl MountBuilder {
                  .named_with(|v| v.quota(..))"
                     .into(),
             ));
+        }
+        if !self.deny.is_empty() && !is_bind {
+            return Err(crate::MicrosandboxError::InvalidConfig(
+                ".deny() is only valid for bind mounts".into(),
+            ));
+        }
+        for pattern in &self.deny {
+            validate_deny_pattern(pattern)?;
         }
         if self.disk_format.is_some() && !is_disk {
             return Err(crate::MicrosandboxError::InvalidConfig(
@@ -536,6 +556,7 @@ impl MountBuilder {
                     host_permissions,
                     follow_root_symlinks: self.follow_root_symlinks,
                     quota_mib: self.quota_mib,
+                    deny: self.deny.clone(),
                 }
             }
             MountKind::Named { name, create } => {
@@ -1146,10 +1167,14 @@ fn validate_volume_mount(mount: &VolumeMount) -> crate::MicrosandboxResult<()> {
             options,
             stat_virtualization,
             host_permissions,
+            deny,
             ..
         } => {
             validate_host_path_wire_safe(host, "bind host path")?;
             validate_virtiofs_policies(*stat_virtualization, *host_permissions, options)?;
+            for pattern in deny {
+                validate_deny_pattern(pattern)?;
+            }
         }
         VolumeMount::Named {
             name,
@@ -1201,6 +1226,34 @@ fn validate_host_path_wire_safe(path: &Path, label: &str) -> crate::Microsandbox
     if path.contains(',') || path.contains(';') || has_forbidden_host_path_colon(path) {
         return Err(crate::MicrosandboxError::InvalidConfig(format!(
             "{label} must not contain ',', ':', or ';': {path}"
+        )));
+    }
+    Ok(())
+}
+
+/// Validate a single deny-list pattern for the mount wire format.
+///
+/// Patterns are rendered into the `--mount` option block as `deny=<pattern>`.
+/// The block is comma-joined and the spec is colon-split, so any of those
+/// separators (or a newline/NUL, which would corrupt gitignore parsing) must
+/// be rejected up front rather than silently attenuating other mount options.
+///
+/// Keep this in sync with the identical validators in
+/// `crates/runtime/lib/vm.rs` (`validate_deny_pattern`) and
+/// `sdk/go/native/src/lib.rs`.
+fn validate_deny_pattern(pattern: &str) -> crate::MicrosandboxResult<()> {
+    if pattern.is_empty() {
+        return Err(crate::MicrosandboxError::InvalidConfig(
+            "deny patterns must not be empty".into(),
+        ));
+    }
+    if pattern.contains(',')
+        || pattern.contains(':')
+        || pattern.contains('\n')
+        || pattern.contains('\0')
+    {
+        return Err(crate::MicrosandboxError::InvalidConfig(format!(
+            "deny pattern must not contain ',', ':', newline, or NUL: {pattern:?}"
         )));
     }
     Ok(())
@@ -1446,6 +1499,62 @@ mod tests {
     }
 
     #[test]
+    fn test_mount_builder_deny_on_bind() {
+        let mount = MountBuilder::new("/data")
+            .bind("/host/data")
+            .deny([".env", "*.log", "sub/secret"])
+            .build()
+            .unwrap();
+        match mount {
+            VolumeMount::Bind { deny, .. } => {
+                assert_eq!(deny, vec![".env", "*.log", "sub/secret"]);
+            }
+            other => panic!("expected bind mount, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_mount_builder_deny_rejected_on_non_bind() {
+        let err = MountBuilder::new("/data")
+            .tmpfs()
+            .deny(["secret"])
+            .build()
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains(".deny() is only valid for bind mounts")
+        );
+    }
+
+    #[test]
+    fn test_mount_builder_deny_rejects_wire_separators() {
+        for bad in [",", ":", "\n", "\0"] {
+            let err = MountBuilder::new("/data")
+                .bind("/host/data")
+                .deny([format!("a{bad}b")])
+                .build()
+                .unwrap_err();
+            assert!(
+                err.to_string().contains("must not contain"),
+                "pattern {bad:?} should be rejected, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_mount_builder_deny_rejects_empty_pattern() {
+        let err = MountBuilder::new("/data")
+            .bind("/host/data")
+            .deny([""])
+            .build()
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("must not be empty"),
+            "empty pattern should be rejected, got: {err}"
+        );
+    }
+
+    #[test]
     fn test_mount_builder_format_rejected_on_non_disk() {
         let err = MountBuilder::new("/data")
             .bind("/host/data")
@@ -1603,6 +1712,56 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_volume_mounts_rejects_direct_bind_deny_separators() {
+        let mut mount = VolumeMount::Bind {
+            host: PathBuf::from("/host/data"),
+            guest: "/data".to_string(),
+            options: MountOptions::default(),
+            stat_virtualization: StatVirtualization::Strict,
+            host_permissions: HostPermissions::Private,
+            follow_root_symlinks: false,
+            quota_mib: None,
+            deny: vec!["secret,ro".to_string()],
+        };
+
+        let err = validate_volume_mounts(std::slice::from_mut(&mut mount)).unwrap_err();
+        assert!(err.to_string().contains("must not contain"));
+    }
+
+    #[test]
+    fn test_validate_volume_mounts_rejects_direct_bind_empty_deny_pattern() {
+        let mut mount = VolumeMount::Bind {
+            host: PathBuf::from("/host/data"),
+            guest: "/data".to_string(),
+            options: MountOptions::default(),
+            stat_virtualization: StatVirtualization::Strict,
+            host_permissions: HostPermissions::Private,
+            follow_root_symlinks: false,
+            quota_mib: None,
+            deny: vec![String::new()],
+        };
+
+        let err = validate_volume_mounts(std::slice::from_mut(&mut mount)).unwrap_err();
+        assert!(err.to_string().contains("must not be empty"));
+    }
+
+    #[test]
+    fn test_validate_volume_mounts_accepts_direct_bind_valid_deny() {
+        let mut mount = VolumeMount::Bind {
+            host: PathBuf::from("/host/data"),
+            guest: "/data".to_string(),
+            options: MountOptions::default(),
+            stat_virtualization: StatVirtualization::Strict,
+            host_permissions: HostPermissions::Private,
+            follow_root_symlinks: false,
+            quota_mib: None,
+            deny: vec![".env".to_string(), "node_modules/".to_string()],
+        };
+
+        validate_volume_mounts(std::slice::from_mut(&mut mount)).unwrap();
+    }
+
+    #[test]
     fn test_validate_volume_mounts_rejects_duplicate_guest_paths() {
         let mut mounts = vec![
             VolumeMount::Tmpfs {
@@ -1673,6 +1832,7 @@ mod tests {
                 host_permissions: HostPermissions::Private,
                 follow_root_symlinks: false,
                 quota_mib: None,
+                deny: Vec::new(),
             },
             VolumeMount::DiskImage {
                 host: PathBuf::from(r"C:\Users\Stephen\data.raw"),
@@ -1710,6 +1870,7 @@ mod tests {
             host_permissions: HostPermissions::Mirror,
             follow_root_symlinks: false,
             quota_mib: None,
+            deny: Vec::new(),
         };
 
         let err = validate_volume_mounts(std::slice::from_mut(&mut mount)).unwrap_err();
@@ -1729,6 +1890,7 @@ mod tests {
             host_permissions: HostPermissions::Private,
             follow_root_symlinks: false,
             quota_mib: None,
+            deny: Vec::new(),
         };
         let err = validate_volume_mounts(std::slice::from_mut(&mut partial)).unwrap_err();
         assert!(
@@ -1748,6 +1910,7 @@ mod tests {
             host_permissions: HostPermissions::Private,
             follow_root_symlinks: false,
             quota_mib: None,
+            deny: Vec::new(),
         };
         let err = validate_volume_mounts(std::slice::from_mut(&mut off)).unwrap_err();
         assert!(err.to_string().contains("literal host metadata"), "{err}");
@@ -1767,6 +1930,7 @@ mod tests {
             host_permissions: HostPermissions::Private,
             follow_root_symlinks: false,
             quota_mib: None,
+            deny: Vec::new(),
         };
 
         let value = serde_json::to_value(&mount).unwrap();

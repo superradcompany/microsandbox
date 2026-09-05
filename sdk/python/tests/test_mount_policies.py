@@ -232,3 +232,49 @@ def test_security_profile_str_values() -> None:
 def test_deployment_profile_str_values() -> None:
     assert DeploymentProfile.SINGLE_TENANT.value == "single-tenant"
     assert DeploymentProfile.MULTI_TENANT.value == "multi-tenant"
+
+
+def test_bind_serializes_deny() -> None:
+    mc = MountConfig(
+        kind=MountKind.BIND,
+        bind="/host/data",
+        deny=[".env", "sub/secret"],
+    )
+    d = mc._to_dict()
+    assert d["deny"] == [".env", "sub/secret"]
+
+
+def test_bind_omits_deny_when_empty_or_none() -> None:
+    assert "deny" not in MountConfig(kind=MountKind.BIND, bind="/host/data")._to_dict()
+    assert "deny" not in MountConfig(kind=MountKind.BIND, bind="/host/data", deny=[])._to_dict()
+
+
+def test_non_bind_rejects_deny() -> None:
+    for kind, kw in (
+        (MountKind.NAMED, {"named": "vol"}),
+        (MountKind.TMPFS, {"size_mib": 64}),
+        (MountKind.DISK, {"disk": "/host/d.qcow2"}),
+    ):
+        mc = MountConfig(kind=kind, deny=[".env"], **kw)  # type: ignore[arg-type]
+        with pytest.raises(ValueError, match="deny is only valid for BIND"):
+            mc._to_dict()
+
+
+def test_volume_bind_accepts_deny() -> None:
+    mc = Volume.bind("/host/data", deny=[".env", "secret"])
+    d = mc._to_dict()
+    assert d["bind"] == "/host/data"
+    assert d["deny"] == [".env", "secret"]
+
+
+def test_volume_bind_omits_deny_when_unset() -> None:
+    d = Volume.bind("/host/data")._to_dict()
+    assert "deny" not in d
+
+
+def test_apply_mount_contract_carries_deny() -> None:
+    mc = MountConfig(kind=MountKind.BIND, bind="/host/data", deny=[".env"])
+    d = mc._to_dict()
+    # apply_mount reads "deny" from this dict; the value must round-trip.
+    assert d["bind"] == "/host/data"
+    assert d["deny"] == [".env"]

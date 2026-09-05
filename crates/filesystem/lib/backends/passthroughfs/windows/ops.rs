@@ -82,7 +82,12 @@ impl DynFileSystem for PassthroughFs {
         _extensions: Extensions,
     ) -> io::Result<Entry> {
         self.require_writable()?;
+        // Validate the name before the deny check so a non-UTF-8 (invalid)
+        // name fails with EINVAL rather than EACCES, matching lookup.
         let path = self.child_path(parent, name)?;
+        if self.deny_matches_name(parent, name, true) {
+            return Err(linux_error(LINUX_EACCES));
+        }
         let parent_path = path.parent().ok_or_else(|| linux_error(LINUX_EINVAL))?;
         let parent_metadata = self.safe_metadata(parent_path)?;
         if !parent_metadata.file_type().is_dir() {
@@ -108,7 +113,12 @@ impl DynFileSystem for PassthroughFs {
 
     fn unlink(&self, _ctx: Context, parent: u64, name: &CStr) -> io::Result<()> {
         self.require_writable()?;
+        // Validate the name before the deny check so a non-UTF-8 (invalid)
+        // name fails with EINVAL rather than EACCES, matching lookup.
         let path = self.child_path(parent, name)?;
+        if self.deny_matches_name(parent, name, false) {
+            return Err(linux_error(LINUX_EACCES));
+        }
         let metadata = self.safe_metadata(&path)?;
         if metadata.file_type().is_dir() {
             return Err(linux_error(LINUX_EISDIR));
@@ -124,7 +134,12 @@ impl DynFileSystem for PassthroughFs {
 
     fn rmdir(&self, _ctx: Context, parent: u64, name: &CStr) -> io::Result<()> {
         self.require_writable()?;
+        // Validate the name before the deny check so a non-UTF-8 (invalid)
+        // name fails with EINVAL rather than EACCES, matching lookup.
         let path = self.child_path(parent, name)?;
+        if self.deny_matches_name(parent, name, true) {
+            return Err(linux_error(LINUX_EACCES));
+        }
         let metadata = self.safe_metadata(&path)?;
         if !metadata.file_type().is_dir() {
             return Err(linux_error(LINUX_ENOTDIR));
@@ -152,22 +167,113 @@ impl DynFileSystem for PassthroughFs {
             return Err(linux_error(LINUX_EOPNOTSUPP));
         }
 
+        // Validate both names before the deny check so a non-UTF-8 (invalid)
+        // name fails with EINVAL rather than EACCES, matching lookup.
         let old_path = self.child_path(olddir, oldname)?;
-        self.safe_metadata(&old_path)?;
         let new_path = self.child_path(newdir, newname)?;
-        let new_parent = new_path.parent().ok_or_else(|| linux_error(LINUX_EINVAL))?;
-        let parent_metadata = self.safe_metadata(new_parent)?;
-        if !parent_metadata.file_type().is_dir() {
-            return Err(linux_error(LINUX_ENOTDIR));
-        }
-        if flags & RENAME_NOREPLACE != 0 && new_path.exists() {
-            return Err(linux_error(LINUX_EEXIST));
-        }
-        if new_path.exists() {
-            self.safe_metadata(&new_path)?;
+
+        // The source type can change between the deny checks and the move when
+        // an external writer (host process, or a second mount on the same host
+        // directory) bypasses the single-threaded virtio-fs worker that
+        // serializes guest requests. A directory swapped in for a file would
+        // otherwise land at a dir-only-denied destination. Narrow this by
+        // capturing the source file's identity, re-verifying the source path
+        // still refers to it immediately before the move, and retrying the
+        // whole check+move on a mismatch.
+        const MAX_RETRIES: u32 = 3;
+        let mut attempts = 0u32;
+        loop {
+            attempts += 1;
+            if attempts > MAX_RETRIES {
+                return Err(linux_error(LINUX_EBUSY));
+            }
+
+            // A rename replaces the destination with the source's type, so the
+            // destination's effective type is the source's; use it for both deny
+            // checks so a dir-only pattern like `node_modules/` rejects renaming
+            // a directory to that name while still allowing a same-named file.
+            let source_meta = self.safe_metadata(&old_path)?;
+            let source_is_dir = if self.deny.has_dir_only_patterns() {
+                source_meta.file_type().is_dir()
+            } else {
+                false
+            };
+
+            if self.deny_matches_name(olddir, oldname, source_is_dir)
+                || self.deny_matches_name(newdir, newname, source_is_dir)
+            {
+                return Err(linux_error(LINUX_EACCES));
+            }
+
+            // A rename whose destination already exists as a *directory* denied
+            // by a dir-only pattern would otherwise surface a raw EISDIR/ENOTDIR
+            // and leak the hidden entry's existence and type. Reject it explicitly.
+            if self.deny.has_dir_only_patterns() {
+                let dest_is_dir = self
+                    .safe_metadata(&new_path)
+                    .map(|m| m.file_type().is_dir())
+                    .unwrap_or(false);
+                if dest_is_dir && self.deny_matches_name(newdir, newname, true) {
+                    return Err(linux_error(LINUX_EACCES));
+                }
+            }
+
+            // The source path must still refer to the same file before moving it.
+            // Only retry on a definitive identity mismatch. A dir-only pattern
+            // distinguishes files from directories, so a file named `node_modules`
+            // is legitimately renamable while a directory is denied. The stale-type
+            // risk is therefore only real when a directory could land at a
+            // dir-only-denied *destination* after a file was decided; the
+            // source-side collision is already enforced by the deny check above (a
+            // denied directory is rejected outright). Refuse just that destination
+            // case, and only when the source was decided to be a file (the decision
+            // a swap could invalidate). `is_dir` only affects matching under
+            // dir-only patterns, so gate on that too and skip the redundant pass
+            // otherwise.
+            // When the filesystem reports no file identity (FAT32/exFAT, some
+            // network volumes) the source's type at move time cannot be verified.
+            // On such filesystems this guard makes a rename fail closed (EBUSY)
+            // only when the destination collides with a dir-only pattern and the
+            // source was decided to be a file, because that is the one case a swap
+            // could turn into a directory landing at a denied name. Ordinary
+            // renames between non-denied paths, and renames of a same-named file
+            // away from a dir-only pattern, are unaffected: FAT/exFAT keeps nearly
+            // full rename support except for the narrow destination-collision case.
+            // The window between this re-check and the path-based rename below is
+            // irreducible: nothing pins the source through the move, so a fast
+            // enough external writer can still swap a directory past this final
+            // check. That residual risk is accepted, matching the Linux and macOS
+            // backends, where no rename-conditional-on-inode operation exists and
+            // the same window cannot be closed at all (upstream virtiofsd accepts
+            // the same race).
+            let after_identity = file_identity(&self.safe_metadata(&old_path)?);
+            let dir_denied = !source_is_dir
+                && self.deny.has_dir_only_patterns()
+                && self.deny_matches_name(newdir, newname, true);
+            match (file_identity(&source_meta), after_identity) {
+                (Some(before), Some(after)) if before != after => continue,
+                (None, _) | (_, None) if dir_denied => {
+                    return Err(linux_error(LINUX_EBUSY));
+                }
+                _ => {}
+            }
+
+            let new_parent = new_path.parent().ok_or_else(|| linux_error(LINUX_EINVAL))?;
+            let parent_metadata = self.safe_metadata(new_parent)?;
+            if !parent_metadata.file_type().is_dir() {
+                return Err(linux_error(LINUX_ENOTDIR));
+            }
+            if flags & RENAME_NOREPLACE != 0 && new_path.exists() {
+                return Err(linux_error(LINUX_EEXIST));
+            }
+            if new_path.exists() {
+                self.safe_metadata(&new_path)?;
+            }
+
+            std::fs::rename(&old_path, &new_path).map_err(host_error)?;
+            break;
         }
 
-        std::fs::rename(&old_path, &new_path).map_err(host_error)?;
         if let Some(store) = &self.stat_store {
             store.rename(&old_path, &new_path)?;
         }

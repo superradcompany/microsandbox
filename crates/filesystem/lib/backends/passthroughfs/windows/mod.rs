@@ -153,6 +153,8 @@ pub struct PassthroughFs {
     init_file: Option<Mutex<File>>,
     stat_store: Option<StatStore>,
     quota: Option<super::quota::DirQuota>,
+    /// Matcher for the deny list (empty = allow everything).
+    deny: super::deny::DenyList,
 }
 
 #[repr(C, packed)]
@@ -207,6 +209,56 @@ impl PassthroughFs {
         if let Some(quota) = &self.quota {
             quota.ensure_baseline();
         }
+    }
+
+    /// Whether `name` in `parent` is denied by the deny list.
+    ///
+    /// Fails closed (returns `true`) when the parent-inode path cannot be
+    /// reconstructed under active path patterns, so a deny list is never
+    /// silently bypassed on an unresolvable path.
+    ///
+    /// `is_dir` defines whether the entry is a directory, enabling support for
+    /// dir-only deny patterns.
+    pub(super) fn deny_matches_name(&self, parent: u64, name: &CStr, is_dir: bool) -> bool {
+        let name_bytes = name.to_bytes();
+        // The structural `.` and `..` entries must never be denied, otherwise a
+        // `.*` or `*` pattern would break path walks and directory listings.
+        if name_bytes == b"." || name_bytes == b".." {
+            return false;
+        }
+        if !self.deny.needs_path_reconstruction() {
+            return self.deny.matches_basename(name_bytes, is_dir);
+        }
+        let Ok(parent_data) = self.inode(parent) else {
+            // Fail closed: an unresolvable parent under active path patterns
+            // must deny, never allow.
+            return true;
+        };
+
+        let Some(rel) = parent_data.path.strip_prefix(&self.root) else {
+            // Fail closed: a parent path outside the mount root cannot be
+            // matched against a path pattern, so it must deny, never allow.
+            return true;
+        };
+        let mut rel_str = String::new();
+        for component in rel.components() {
+            if let Component::Normal(part) = component {
+                if !rel_str.is_empty() {
+                    rel_str.push('/');
+                }
+                rel_str.push_str(&part.to_string_lossy());
+            }
+        }
+        let Ok(name_str) = std::str::from_utf8(name_bytes) else {
+            // Fail closed: a name that cannot be decoded to UTF-8 cannot be
+            // matched against a path pattern, so it must deny, never allow.
+            return true;
+        };
+        if !rel_str.is_empty() {
+            rel_str.push('/');
+        }
+        rel_str.push_str(name_str);
+        self.deny.matches_path(rel_str.as_bytes(), is_dir)
     }
 }
 
@@ -727,6 +779,18 @@ fn host_error(error: io::Error) -> io::Error {
 
 fn linux_error(errno: i32) -> io::Error {
     io::Error::from_raw_os_error(errno)
+}
+
+/// A stable per-volume file identity, when the filesystem exposes one.
+///
+/// Combines the volume serial number and the volume-unique file index. Returns
+/// `None` when the filesystem does not report a file index (so callers can skip
+/// identity-based race checks rather than fail).
+fn file_identity(metadata: &std::fs::Metadata) -> Option<(u32, u64)> {
+    match (metadata.volume_serial_number(), metadata.file_index()) {
+        (Some(volume), Some(index)) => Some((volume, index)),
+        _ => None,
+    }
 }
 
 //--------------------------------------------------------------------------------------------------

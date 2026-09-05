@@ -1627,22 +1627,23 @@ type RootDiskSpec struct {
 
 // MountSpec describes a volume mount for a sandbox.
 type MountSpec struct {
-	Bind               string  `json:"bind,omitempty"`
-	Named              string  `json:"named,omitempty"`
-	NamedMode          string  `json:"named_mode,omitempty"`
-	NamedKind          string  `json:"named_kind,omitempty"`
-	Tmpfs              bool    `json:"tmpfs,omitempty"`
-	Disk               string  `json:"disk,omitempty"`
-	Format             string  `json:"format,omitempty"`
-	Fstype             string  `json:"fstype,omitempty"`
-	Readonly           bool    `json:"readonly,omitempty"`
-	Noexec             bool    `json:"noexec,omitempty"`
-	Nosuid             bool    `json:"nosuid,omitempty"`
-	Nodev              bool    `json:"nodev,omitempty"`
-	SizeMiB            uint32  `json:"size_mib,omitempty"`
-	QuotaMiB           uint32  `json:"quota_mib,omitempty"`
-	StatVirtualization string  `json:"stat_virtualization,omitempty"`
-	HostPermissions    string  `json:"host_permissions,omitempty"`
+	Bind               string   `json:"bind,omitempty"`
+	Named              string   `json:"named,omitempty"`
+	NamedMode          string   `json:"named_mode,omitempty"`
+	NamedKind          string   `json:"named_kind,omitempty"`
+	Tmpfs              bool     `json:"tmpfs,omitempty"`
+	Disk               string   `json:"disk,omitempty"`
+	Format             string   `json:"format,omitempty"`
+	Fstype             string   `json:"fstype,omitempty"`
+	Readonly           bool     `json:"readonly,omitempty"`
+	Noexec             bool     `json:"noexec,omitempty"`
+	Nosuid             bool     `json:"nosuid,omitempty"`
+	Nodev              bool     `json:"nodev,omitempty"`
+	SizeMiB            uint32   `json:"size_mib,omitempty"`
+	QuotaMiB           uint32   `json:"quota_mib,omitempty"`
+	Deny               []string `json:"deny,omitempty"`
+	StatVirtualization string   `json:"stat_virtualization,omitempty"`
+	HostPermissions    string   `json:"host_permissions,omitempty"`
 	OverrideUid        *uint32 `json:"override_uid,omitempty"`
 	OverrideGid        *uint32 `json:"override_gid,omitempty"`
 }

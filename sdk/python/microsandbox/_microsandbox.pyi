@@ -687,6 +687,7 @@ class Volume:
         host_permissions: HostPermissions | None = None,
         uid: int | None = None,
         gid: int | None = None,
+        deny: list[str] | None = None,
     ) -> MountConfig: ...
     @staticmethod
     def named(

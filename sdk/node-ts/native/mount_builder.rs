@@ -35,6 +35,7 @@ pub struct JsBuiltVolumeMount {
     pub named_kind: Option<String>,
     pub size_mib: Option<u32>,
     pub quota_mib: Option<u32>,
+    pub deny: Option<Vec<String>>,
     pub format: Option<String>,
     pub fstype: Option<String>,
     /// `"strict" | "relaxed" | "off"` for bind/named mounts; `None` for tmpfs/disk.
@@ -231,6 +232,17 @@ impl JsMountBuilder {
         self
     }
 
+    /// Hide host paths matching gitignore-style patterns from the guest.
+    ///
+    /// Matching entries are invisible (ENOENT) and writes to them are forbidden
+    /// (EACCES). Patterns are relative to the mount root. Valid only for bind mounts.
+    #[napi]
+    pub fn deny(&mut self, patterns: Vec<String>) -> &Self {
+        let prev = self.take_inner();
+        self.inner = Some(prev.deny(patterns));
+        self
+    }
+
     /// Set the guest stat virtualization policy.
     ///
     /// Accepts `"strict"`, `"relaxed"`, or `"off"`. Valid only for bind and
@@ -341,6 +353,7 @@ fn to_built_mount(mount: RustVolumeMount) -> JsBuiltVolumeMount {
             quota_mib,
             // TODO: surface follow_root_symlinks in the Node opt-out API.
             follow_root_symlinks: _,
+            deny,
         } => JsBuiltVolumeMount {
             kind: "bind".into(),
             guest,
@@ -354,6 +367,7 @@ fn to_built_mount(mount: RustVolumeMount) -> JsBuiltVolumeMount {
             named_kind: None,
             size_mib: None,
             quota_mib,
+            deny: if deny.is_empty() { None } else { Some(deny) },
             format: None,
             fstype: None,
             stat_virtualization: Some(sv_str(stat_virtualization)),
@@ -395,6 +409,7 @@ fn to_built_mount(mount: RustVolumeMount) -> JsBuiltVolumeMount {
                 named_kind,
                 size_mib,
                 quota_mib,
+                deny: None,
                 format: None,
                 fstype: None,
                 stat_virtualization: Some(sv_str(stat_virtualization)),
@@ -420,6 +435,7 @@ fn to_built_mount(mount: RustVolumeMount) -> JsBuiltVolumeMount {
             named_kind: None,
             size_mib,
             quota_mib: None,
+            deny: None,
             format: None,
             fstype: None,
             stat_virtualization: None,
@@ -446,6 +462,7 @@ fn to_built_mount(mount: RustVolumeMount) -> JsBuiltVolumeMount {
             named_kind: None,
             size_mib: None,
             quota_mib: None,
+            deny: None,
             format: Some(
                 match format {
                     RustDiskImageFormat::Qcow2 => "qcow2",
