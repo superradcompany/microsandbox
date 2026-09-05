@@ -25,7 +25,8 @@ use crate::policy::{EgressEvaluation, HostnameSource, NetworkPolicy, Protocol};
 use crate::proxy::ResolvedOutboundProxy;
 use crate::secrets::config::{SecretsConfig, SecretsConfigExt, ViolationAction};
 use crate::secrets::handler::{
-    SecretsHandler, first_line_is_not_http_request, looks_like_http_request_prefix,
+    MAX_HTTP_HEADER_BYTES, SecretsHandler, first_line_is_not_http_request,
+    looks_like_http_request_prefix,
 };
 use crate::tls::proxy::TlsProxy;
 use crate::tls::sni;
@@ -64,6 +65,66 @@ struct ConnectTarget {
     host: String,
     port: u16,
     expected_sni: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FirstFlightClass {
+    Tls,
+    Http,
+    Opaque,
+    Unclassified,
+}
+
+impl FirstFlightClass {
+    fn uses_opaque_secret_handling(self) -> bool {
+        matches!(self, Self::Opaque)
+    }
+
+    fn allows_connect(self) -> bool {
+        matches!(self, Self::Http | Self::Unclassified)
+    }
+}
+
+/// Ordering state for the first guest write to an upstream connection.
+///
+/// While pending, a readable upstream socket wins the first-flight decision.
+/// Once guest bytes have been written, later upstream data cannot change the
+/// protocol handling selected for that connection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FirstGuestWriteState {
+    Pending,
+    ClientFirst,
+    ServerFirst,
+}
+
+impl FirstGuestWriteState {
+    fn is_pending(self) -> bool {
+        matches!(self, Self::Pending)
+    }
+
+    fn server_won(self) -> bool {
+        matches!(self, Self::ServerFirst)
+    }
+
+    fn observe_server_data(&mut self) {
+        if self.is_pending() {
+            *self = Self::ServerFirst;
+        }
+    }
+
+    fn commit_guest_write(&mut self) {
+        if self.is_pending() {
+            *self = Self::ClientFirst;
+        }
+    }
+}
+
+/// Plain-HTTP secret handling that waits for a complete request before binding
+/// host-scoped secrets when the initial first flight was inconclusive.
+enum PlainSecretsHandler {
+    Http(Box<SecretsHandler>),
+    Opaque(Box<SecretsHandler>),
+    Deferred { pending: Vec<u8> },
 }
 
 /// Per-connection TCP proxy task and the state it owns.
@@ -126,6 +187,91 @@ impl ConnectTarget {
         }
 
         SocketAddr::new(fallback.ip(), self.port)
+    }
+}
+
+impl PlainSecretsHandler {
+    fn new(
+        class: FirstFlightClass,
+        initial_buf: &[u8],
+        secrets: &SecretsConfig,
+        guest_dst: SocketAddr,
+        shared: &SharedState,
+    ) -> Self {
+        match class {
+            FirstFlightClass::Http => Self::Http(Box::new(match extract_http_host(initial_buf) {
+                Some(host) => {
+                    SecretsHandler::new_plain_http(secrets, &host, guest_dst.ip(), shared)
+                }
+                None => SecretsHandler::new_plain_http_invalid_host(secrets),
+            })),
+            FirstFlightClass::Opaque => Self::Opaque(Box::new(
+                SecretsHandler::new_plain_http_invalid_host(secrets),
+            )),
+            FirstFlightClass::Unclassified => Self::Deferred {
+                pending: Vec::new(),
+            },
+            FirstFlightClass::Tls => unreachable!("TLS does not use plain secret handling"),
+        }
+    }
+
+    fn substitute<'a>(
+        &mut self,
+        data: &'a [u8],
+        opaque: bool,
+        secrets: &SecretsConfig,
+        guest_dst: SocketAddr,
+        shared: &SharedState,
+    ) -> Result<Cow<'a, [u8]>, ViolationAction> {
+        match self {
+            Self::Opaque(handler) => return handler.substitute_opaque(data),
+            Self::Http(handler) if !opaque => return handler.substitute(data),
+            Self::Http(handler) => {
+                let mut buffered = handler.take_unwritten_http_bytes();
+                buffered.extend_from_slice(data);
+                let mut opaque_handler = SecretsHandler::new_plain_http_invalid_host(secrets);
+                let output = opaque_handler.substitute_opaque(&buffered)?.into_owned();
+                *self = Self::Opaque(Box::new(opaque_handler));
+                return Ok(Cow::Owned(output));
+            }
+            Self::Deferred { .. } => {}
+        }
+
+        let Self::Deferred { pending } = self else {
+            unreachable!("non-deferred handlers returned above");
+        };
+
+        pending.extend_from_slice(data);
+        if opaque {
+            let buffered = std::mem::take(pending);
+            let mut handler = SecretsHandler::new_plain_http_invalid_host(secrets);
+            let output = handler.substitute_opaque(&buffered)?.into_owned();
+            *self = Self::Opaque(Box::new(handler));
+            return Ok(Cow::Owned(output));
+        }
+
+        if pending.len() > MAX_HTTP_HEADER_BYTES {
+            return Err(ViolationAction::Block);
+        }
+        if headers_end(pending).is_none() {
+            if first_line_is_not_http_request(pending) || !looks_like_http_request_prefix(pending) {
+                let buffered = std::mem::take(pending);
+                let mut handler = SecretsHandler::new_plain_http_invalid_host(secrets);
+                let output = handler.substitute_opaque(&buffered)?.into_owned();
+                *self = Self::Opaque(Box::new(handler));
+                return Ok(Cow::Owned(output));
+            }
+            return Ok(Cow::Owned(Vec::new()));
+        }
+
+        let buffered = std::mem::take(pending);
+        let mut handler = match extract_http_host(&buffered) {
+            Some(host) => SecretsHandler::new_plain_http(secrets, &host, guest_dst.ip(), shared),
+            None => SecretsHandler::new_plain_http_invalid_host(secrets),
+        };
+        let output = handler.substitute(&buffered)?.into_owned();
+        *self = Self::Http(Box::new(handler));
+        Ok(Cow::Owned(output))
     }
 }
 
@@ -273,9 +419,9 @@ impl TcpProxy {
         // plain-HTTP candidates, gather a full header block — without blocking the
         // server→guest direction. When domain rules already peeked, `initial_buf`
         // is reused and this is cheap; with no secrets it is skipped entirely
-        // (`is_tls` only matters for deciding whether to build the handler).
+        // (the class only matters for deciding how to handle secrets).
         let want_headers = secrets.has_plain_http_candidates() || secrets.has_host_scoped_secrets();
-        let (initial_buf, is_tls) = if !secrets.secrets.is_empty() {
+        let (initial_buf, first_flight_class) = if !secrets.secrets.is_empty() {
             classify_first_flight(
                 initial_buf,
                 &mut from_smoltcp,
@@ -283,68 +429,132 @@ impl TcpProxy {
                 &to_smoltcp,
                 &shared,
                 want_headers,
-                PEEK_BUF_SIZE,
+                MAX_HTTP_HEADER_BYTES,
                 PEEK_BUDGET,
             )
             .await?
         } else {
-            (initial_buf, false)
+            (initial_buf, FirstFlightClass::Unclassified)
         };
 
+        let mut first_guest_write = FirstGuestWriteState::Pending;
+
         if let Some(tls_state) = tls_state.clone()
-            && could_be_connect_request(&initial_buf)
+            && should_handle_connect(first_flight_class, &initial_buf)
         {
-            // The pre-connect CONNECT peek can miss a client whose first bytes arrive
-            // after we dial upstream. Once classify_first_flight has captured that
-            // request, rejoin the already-open proxy socket and use the CONNECT path
-            // so intercepted tunnels still get TLS substitution and policy checks.
-            let proxy_stream = server_rx
-                .reunite(server_tx)
-                .map_err(|_| io::Error::other("failed to reunite proxy stream halves"))?;
-            return handle_connect_tunnel(
-                guest_dst,
-                connect_target,
-                initial_buf,
-                from_smoltcp,
-                to_smoltcp,
-                shared,
-                network_policy,
-                tls_state,
-                proxy_connect,
-                outbound_proxy,
-                Some(proxy_stream),
+            if !observe_server_before_first_guest_write(
+                &mut first_guest_write,
+                &mut server_rx,
+                &to_smoltcp,
+                &shared,
             )
-            .await;
+            .await?
+            {
+                return Ok(());
+            }
+            if first_guest_write.server_won() {
+                // A server-first exchange cannot be an HTTP CONNECT tunnel.
+            } else {
+                first_guest_write.commit_guest_write();
+                // The pre-connect CONNECT peek can miss a client whose first bytes arrive
+                // after we dial upstream. Once classify_first_flight has captured that
+                // request, rejoin the already-open proxy socket and use the CONNECT path
+                // so intercepted tunnels still get TLS substitution and policy checks.
+                let proxy_stream = server_rx
+                    .reunite(server_tx)
+                    .map_err(|_| io::Error::other("failed to reunite proxy stream halves"))?;
+                return handle_connect_tunnel(
+                    guest_dst,
+                    connect_target,
+                    initial_buf,
+                    from_smoltcp,
+                    to_smoltcp,
+                    shared,
+                    network_policy,
+                    tls_state,
+                    proxy_connect,
+                    outbound_proxy,
+                    Some(proxy_stream),
+                )
+                .await;
+            }
         }
 
-        let mut late_connect_state = tls_state;
-        let mut secrets_handler: Option<SecretsHandler> = if !secrets.secrets.is_empty() && !is_tls
+        let mut opaque_stream =
+            first_flight_class.uses_opaque_secret_handling() || first_guest_write.server_won();
+        let mut late_connect_state = if first_flight_class == FirstFlightClass::Unclassified
+            && initial_buf.is_empty()
+            && !first_guest_write.server_won()
         {
-            Some(match extract_http_host(&initial_buf) {
-                Some(host) => {
-                    SecretsHandler::new_plain_http(&secrets, &host, guest_dst.ip(), &shared)
-                }
-                None => SecretsHandler::new_plain_http_invalid_host(&secrets),
-            })
+            tls_state
         } else {
             None
         };
+        let mut secrets_handler: Option<PlainSecretsHandler> =
+            if !secrets.secrets.is_empty() && first_flight_class != FirstFlightClass::Tls {
+                Some(PlainSecretsHandler::new(
+                    if opaque_stream {
+                        FirstFlightClass::Opaque
+                    } else {
+                        first_flight_class
+                    },
+                    &initial_buf,
+                    &secrets,
+                    guest_dst,
+                    &shared,
+                ))
+            } else {
+                None
+            };
 
         // Replay the buffered first flight — run through secrets handler first.
         if !initial_buf.is_empty() {
-            let out: Cow<[u8]> = match secrets_handler.as_mut() {
-                Some(h) => match h.substitute(&initial_buf) {
-                    // Borrow the input when nothing was substituted; only a chunk
-                    // that actually carries a placeholder is reallocated.
-                    Ok(cow) => cow,
-                    Err(action) => {
-                        tracing::warn!(dst = %connect_dst, violation = ?action, "secret violation in first flight");
-                        if matches!(action, ViolationAction::BlockAndTerminate) {
-                            shared.trigger_termination();
-                        }
-                        return Ok(());
+            // This is the final ordering point before processing and writing
+            // buffered guest bytes. A server banner observed here changes the
+            // stream to opaque before any host-aware substitution can happen.
+            if first_guest_write.is_pending()
+                && !opaque_stream
+                && first_flight_class != FirstFlightClass::Tls
+            {
+                if !observe_server_before_first_guest_write(
+                    &mut first_guest_write,
+                    &mut server_rx,
+                    &to_smoltcp,
+                    &shared,
+                )
+                .await?
+                {
+                    return Ok(());
+                }
+                if first_guest_write.server_won() {
+                    opaque_stream = true;
+                    late_connect_state = None;
+                    if !secrets.secrets.is_empty() {
+                        secrets_handler = Some(PlainSecretsHandler::new(
+                            FirstFlightClass::Opaque,
+                            &initial_buf,
+                            &secrets,
+                            guest_dst,
+                            &shared,
+                        ));
                     }
-                },
+                }
+            }
+            let out: Cow<[u8]> = match secrets_handler.as_mut() {
+                Some(h) => {
+                    match h.substitute(&initial_buf, opaque_stream, &secrets, guest_dst, &shared) {
+                        // Borrow the input when nothing was substituted; only a chunk
+                        // that actually carries a placeholder is reallocated.
+                        Ok(cow) => cow,
+                        Err(action) => {
+                            tracing::warn!(dst = %connect_dst, violation = ?action, "secret violation in first flight");
+                            if matches!(action, ViolationAction::BlockAndTerminate) {
+                                shared.trigger_termination();
+                            }
+                            return Ok(());
+                        }
+                    }
+                }
                 None => Cow::Borrowed(&initial_buf),
             };
             if !out.is_empty() {
@@ -356,6 +566,7 @@ impl TcpProxy {
                     tracing::debug!(dst = %connect_dst, error = %e, "flush after first flight failed");
                     return Ok(());
                 }
+                first_guest_write.commit_guest_write();
             }
         }
 
@@ -372,7 +583,54 @@ impl TcpProxy {
                 data = from_smoltcp.recv(), if !guest_eof => {
                     match data {
                         Some(bytes) => {
-                            if let Some(tls_state) = late_connect_state.take()
+                            if first_guest_write.is_pending()
+                                && !opaque_stream
+                                && first_flight_class != FirstFlightClass::Tls
+                            {
+                                if !observe_server_before_first_guest_write(
+                                    &mut first_guest_write,
+                                    &mut server_rx,
+                                    &to_smoltcp,
+                                    &shared,
+                                )
+                                .await?
+                                {
+                                    return Ok(());
+                                }
+                                if first_guest_write.server_won() {
+                                    opaque_stream = true;
+                                    late_connect_state = None;
+                                    let out = match secrets_handler.as_mut() {
+                                        Some(handler) => handler.substitute(
+                                            &[],
+                                            true,
+                                            &secrets,
+                                            guest_dst,
+                                            &shared,
+                                        ),
+                                        None => Ok(Cow::Borrowed(&[] as &[u8])),
+                                    };
+                                    match out {
+                                        Ok(out) if !out.is_empty() => {
+                                            if server_tx.write_all(&out).await.is_err()
+                                                || server_tx.flush().await.is_err()
+                                            {
+                                                break;
+                                            }
+                                        }
+                                        Ok(_) => {}
+                                        Err(action) => {
+                                            tracing::warn!(dst = %connect_dst, violation = ?action, "secret violation in deferred first flight");
+                                            if matches!(action, ViolationAction::BlockAndTerminate) {
+                                                shared.trigger_termination();
+                                            }
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            if !first_guest_write.server_won()
+                                && let Some(tls_state) = late_connect_state.take()
                                 && could_be_connect_request(&bytes)
                             {
                                 // The first guest bytes can arrive after both peek
@@ -400,7 +658,13 @@ impl TcpProxy {
                             // No handler (no secrets / TLS) is the common path: forward
                             // the chunk borrowed, with no per-chunk allocation or copy.
                             let out: Cow<[u8]> = match secrets_handler.as_mut() {
-                                Some(h) => match h.substitute(&bytes) {
+                                Some(h) => match h.substitute(
+                                    &bytes,
+                                    opaque_stream,
+                                    &secrets,
+                                    guest_dst,
+                                    &shared,
+                                ) {
                                     Ok(cow) => cow,
                                     Err(action) => {
                                         tracing::warn!(dst = %connect_dst, violation = ?action, "secret violation");
@@ -421,6 +685,7 @@ impl TcpProxy {
                                     tracing::debug!(dst = %connect_dst, error = %e, "flush to server failed");
                                     break;
                                 }
+                                first_guest_write.commit_guest_write();
                             }
                         }
                         // Channel closed — the guest half-closed (FIN) or the
@@ -442,8 +707,14 @@ impl TcpProxy {
                         Ok(0) => break, // Server closed connection.
                         Ok(n) => {
                             // A server-first byte means this is not an HTTP CONNECT
-                            // tunnel to a proxy. Keep relaying normally afterward.
-                            late_connect_state = None;
+                            // tunnel to a proxy. If it arrives before any guest write,
+                            // it also commits opaque secret handling.
+                            let server_won_first_flight = first_guest_write.is_pending();
+                            if server_won_first_flight {
+                                first_guest_write.observe_server_data();
+                                opaque_stream = true;
+                                late_connect_state = None;
+                            }
                             let data = Bytes::copy_from_slice(&server_buf[..n]);
                             if to_smoltcp.send(data).await.is_err() {
                                 // Channel closed — poll loop dropped the receiver.
@@ -452,6 +723,39 @@ impl TcpProxy {
                             // Wake the poll thread so it writes data to the
                             // smoltcp socket.
                             shared.proxy_wake.wake();
+
+                            // A deferred HTTP candidate may have buffered guest
+                            // bytes without writing them. Once a server banner wins,
+                            // flush those bytes through scan-only opaque handling.
+                            if server_won_first_flight {
+                                let out = match secrets_handler.as_mut() {
+                                    Some(handler) => handler.substitute(
+                                        &[],
+                                        true,
+                                        &secrets,
+                                        guest_dst,
+                                        &shared,
+                                    ),
+                                    None => Ok(Cow::Borrowed(&[] as &[u8])),
+                                };
+                                match out {
+                                    Ok(out) if !out.is_empty() => {
+                                        if server_tx.write_all(&out).await.is_err()
+                                            || server_tx.flush().await.is_err()
+                                        {
+                                            break;
+                                        }
+                                    }
+                                    Ok(_) => {}
+                                    Err(action) => {
+                                        tracing::warn!(dst = %connect_dst, violation = ?action, "secret violation in deferred first flight");
+                                        if matches!(action, ViolationAction::BlockAndTerminate) {
+                                            shared.trigger_termination();
+                                        }
+                                        break;
+                                    }
+                                }
+                            }
                         }
                         Err(e) => {
                             tracing::debug!(dst = %connect_dst, error = %e, "read from server failed");
@@ -798,6 +1102,47 @@ fn could_be_connect_request(buf: &[u8]) -> bool {
     buf[..n].eq_ignore_ascii_case(&PREFIX[..n])
 }
 
+fn should_handle_connect(class: FirstFlightClass, buf: &[u8]) -> bool {
+    class.allows_connect() && could_be_connect_request(buf)
+}
+
+/// Observe upstream data at the ordering point before the first guest write.
+///
+/// A readable server socket wins while [`FirstGuestWriteState::Pending`]. A
+/// pending read commits the opposite order: the caller may write the guest
+/// bytes and later server data cannot reclassify the stream. This intentionally
+/// defines ordering by observation at the proxy boundary; TCP cannot provide an
+/// atomic "server arrival versus client write" operation.
+async fn observe_server_before_first_guest_write(
+    first_guest_write: &mut FirstGuestWriteState,
+    server_rx: &mut tokio::net::tcp::OwnedReadHalf,
+    to_smoltcp: &mpsc::Sender<Bytes>,
+    shared: &SharedState,
+) -> io::Result<bool> {
+    if !first_guest_write.is_pending() {
+        return Ok(true);
+    }
+
+    let mut server_buf = [0u8; SERVER_READ_BUF_SIZE];
+    match server_rx.try_read(&mut server_buf) {
+        Ok(0) => {
+            first_guest_write.observe_server_data();
+            Ok(true)
+        }
+        Ok(n) => {
+            first_guest_write.observe_server_data();
+            let data = Bytes::copy_from_slice(&server_buf[..n]);
+            if to_smoltcp.send(data).await.is_err() {
+                return Ok(false);
+            }
+            shared.proxy_wake.wake();
+            Ok(true)
+        }
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(true),
+        Err(error) => Err(error),
+    }
+}
+
 fn parse_connect_request(bytes: Vec<u8>) -> io::Result<ConnectRequest> {
     let header_end = headers_end(&bytes).ok_or_else(|| {
         io::Error::new(
@@ -930,8 +1275,8 @@ fn extract_http_host(buf: &[u8]) -> Option<String> {
     // Size the header pool to the buffer rather than a fixed array: a header
     // line is at least four bytes (`a:\r\n`), so `len / 4` always covers the
     // real header count, and `httparse` never reports `TooManyHeaders` (which
-    // would make a request with many headers look hostless). The first flight
-    // is capped at PEEK_BUF_SIZE, so this stays bounded.
+    // would make a request with many headers look hostless). First-flight HTTP
+    // buffering uses MAX_HTTP_HEADER_BYTES, so this stays bounded.
     let mut headers = vec![httparse::EMPTY_HEADER; (buf.len() / 4).max(16)];
     let mut req = httparse::Request::new(&mut headers);
     req.parse(buf).ok()?;
@@ -951,8 +1296,9 @@ fn extract_http_host(buf: &[u8]) -> Option<String> {
 }
 
 /// Finish classifying the guest's first flight after the upstream socket is
-/// open, returning the (possibly extended) first-flight buffer and whether it
-/// is a TLS record.
+/// open, returning the (possibly extended) first-flight buffer and its protocol
+/// class. A stream is opaque when the server spoke before buffered guest data
+/// was forwarded or when the guest bytes are conclusively not HTTP or TLS.
 ///
 /// `buf` carries whatever a pre-connect domain-rule peek already captured; when
 /// it is non-empty the TLS/plain decision is already settled and only header
@@ -976,64 +1322,118 @@ async fn classify_first_flight(
     want_headers: bool,
     max: usize,
     budget: Duration,
-) -> io::Result<(Vec<u8>, bool)> {
+) -> io::Result<(Vec<u8>, FirstFlightClass)> {
     let mut server_buf = vec![0u8; SERVER_READ_BUF_SIZE];
+    let mut server_spoke_first = false;
     let timeout_fut = tokio::time::sleep(budget);
     tokio::pin!(timeout_fut);
 
     loop {
+        // Once the server has sent application bytes before any buffered guest
+        // bytes were forwarded upstream, the connection cannot be ordinary
+        // HTTP. Return the guest's first reply immediately and keep the stream
+        // in opaque mode so an HTTP-like binary prefix is not buffered as an
+        // incomplete request.
+        if server_spoke_first && !buf.is_empty() {
+            return Ok((buf, FirstFlightClass::Opaque));
+        }
+
         // Stop as soon as the protocol class is known and — for plain-HTTP
         // candidates — a full header block has arrived. Bail the moment a
         // non-TLS flight stops looking like an HTTP request so non-HTTP
-        // protocols (SSH, Postgres) aren't withheld from upstream for the
-        // whole budget while we wait for a `\r\n\r\n` that never comes.
-        if !buf.is_empty() {
+        // protocols aren't withheld from upstream for the whole budget while
+        // we wait for a `\r\n\r\n` that never comes.
+        let ready_class = if !buf.is_empty() {
             let is_tls = buf.first() == Some(&0x16);
             let not_http = !is_tls
                 && (!looks_like_http_request_prefix(&buf) || first_line_is_not_http_request(&buf));
-            let done = !want_headers
-                || is_tls
-                || not_http
-                || buf.len() >= max
-                || buf.windows(4).any(|w| w == b"\r\n\r\n");
+            let has_headers = buf.windows(4).any(|w| w == b"\r\n\r\n");
+            let done = !want_headers || is_tls || not_http || buf.len() >= max || has_headers;
             if done {
-                return Ok((buf, is_tls));
+                let class = if is_tls {
+                    FirstFlightClass::Tls
+                } else if not_http {
+                    FirstFlightClass::Opaque
+                } else if has_headers {
+                    FirstFlightClass::Http
+                } else {
+                    // An incomplete HTTP-looking prefix remains undecided. It
+                    // can still become a valid request when the next guest
+                    // segment arrives, so defer host binding rather than
+                    // permanently selecting scan-only opaque handling.
+                    FirstFlightClass::Unclassified
+                };
+                Some(class)
+            } else {
+                None
             }
+        } else {
+            None
+        };
+
+        // The classification is ready, but server/client ordering remains
+        // pending until immediately before the first guest write.
+        if let Some(class) = ready_class {
+            return Ok((buf, class));
         }
 
         tokio::select! {
             biased;
             _ = &mut timeout_fut => {
-                let is_tls = buf.first() == Some(&0x16);
-                return Ok((buf, is_tls));
+                let class = timed_out_first_flight_class(&buf, server_spoke_first);
+                return Ok((buf, class));
             }
-            // Guest → buffer (not forwarded here; the caller replays it once the
-            // handler is built, so substitution applies to the first flight too).
-            guest = from_smoltcp.recv() => match guest {
-                Some(bytes) => buf.extend_from_slice(&bytes),
-                None => {
-                    let is_tls = buf.first() == Some(&0x16);
-                    return Ok((buf, is_tls));
-                }
-            },
             // Server → guest: relay immediately so a server-first banner is never
-            // held hostage by the peek.
+            // held hostage by the peek. Prefer an already-ready server read over
+            // guest input so immediate guest classification cannot lose this state.
             server = server_rx.read(&mut server_buf) => match server {
                 Ok(0) => {
-                    let is_tls = buf.first() == Some(&0x16);
-                    return Ok((buf, is_tls));
+                    let class = terminal_first_flight_class(&buf, server_spoke_first);
+                    return Ok((buf, class));
                 }
                 Ok(n) => {
+                    server_spoke_first = true;
                     let data = Bytes::copy_from_slice(&server_buf[..n]);
                     if to_smoltcp.send(data).await.is_err() {
-                        let is_tls = buf.first() == Some(&0x16);
-                        return Ok((buf, is_tls));
+                        let class = terminal_first_flight_class(&buf, server_spoke_first);
+                        return Ok((buf, class));
                     }
                     shared.proxy_wake.wake();
                 }
                 Err(e) => return Err(e),
             },
+            // Guest → buffer (not forwarded here; the caller replays it once the
+            // handler is built, so substitution applies to the first flight too).
+            guest = from_smoltcp.recv() => match guest {
+                Some(bytes) => buf.extend_from_slice(&bytes),
+                None => {
+                    let class = terminal_first_flight_class(&buf, server_spoke_first);
+                    return Ok((buf, class));
+                }
+            },
         }
+    }
+}
+
+fn timed_out_first_flight_class(buf: &[u8], server_spoke_first: bool) -> FirstFlightClass {
+    if server_spoke_first {
+        FirstFlightClass::Opaque
+    } else if buf.first() == Some(&0x16) {
+        FirstFlightClass::Tls
+    } else {
+        // The timeout only reaches an HTTP-looking prefix: conclusively
+        // non-HTTP traffic exits earlier. Keep this state genuinely undecided
+        // so the next guest segment can complete a valid HTTP request or
+        // CONNECT header block under the handler's full header limit.
+        FirstFlightClass::Unclassified
+    }
+}
+
+fn terminal_first_flight_class(buf: &[u8], server_spoke_first: bool) -> FirstFlightClass {
+    if !server_spoke_first && buf.first() == Some(&0x16) {
+        FirstFlightClass::Tls
+    } else {
+        FirstFlightClass::Opaque
     }
 }
 
@@ -1265,6 +1665,30 @@ mod tests {
         assert!(could_be_connect_request(b"CONNECT example.com:443"));
         assert!(!could_be_connect_request(b"CLIENT"));
         assert!(!could_be_connect_request(b"GET / HTTP/1.1\r\n"));
+        assert!(should_handle_connect(
+            FirstFlightClass::Http,
+            b"CONNECT example.com:443"
+        ));
+        assert!(should_handle_connect(
+            FirstFlightClass::Unclassified,
+            b"CONNECT example.com:443"
+        ));
+        assert!(!should_handle_connect(
+            FirstFlightClass::Opaque,
+            b"CONNECT example.com:443"
+        ));
+        assert_eq!(
+            timed_out_first_flight_class(b"", false),
+            FirstFlightClass::Unclassified
+        );
+        assert_eq!(
+            timed_out_first_flight_class(b"CON", false),
+            FirstFlightClass::Unclassified
+        );
+        assert_eq!(
+            timed_out_first_flight_class(b"BINARY3 incomplete", false),
+            FirstFlightClass::Unclassified
+        );
     }
 
     #[tokio::test]
@@ -1841,6 +2265,607 @@ mod tests {
         .unwrap();
 
         handle.await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn server_first_http_like_binary_first_flight_is_forwarded() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            stream
+                .write_all(b"binary server-first greeting")
+                .await
+                .unwrap();
+            stream.flush().await.unwrap();
+
+            let mut received = Vec::new();
+            stream.read_to_end(&mut received).await.unwrap();
+            received
+        });
+
+        let (from_tx, from_rx) = mpsc::channel::<Bytes>(8);
+        let (to_tx, mut to_rx) = mpsc::channel::<Bytes>(8);
+        let secrets = Arc::new(make_plain_http_secret(
+            "$MSB_UNUSED",
+            "unused-secret-value",
+            false,
+        ));
+        spawn_tcp_proxy(
+            &tokio::runtime::Handle::current(),
+            addr,
+            addr,
+            from_rx,
+            to_tx,
+            Arc::new(SharedState::new(4)),
+            Arc::new(NetworkPolicy::default()),
+            secrets,
+            None,
+            Arc::new(ProxyConnectState::new()),
+            None,
+        );
+
+        let greeting = to_rx.recv().await.unwrap();
+        assert_eq!(greeting, b"binary server-first greeting"[..]);
+
+        // `BINARY3` is deliberately a valid HTTP token followed by a space,
+        // but this invented binary frame has no HTTP request line or headers.
+        // The configured secret is unrelated and only enables HTTP inspection.
+        let first_flight = Bytes::from_static(b"BINARY3 v1\x00\x01opaque request");
+        from_tx.send(first_flight.clone()).await.unwrap();
+        drop(from_tx);
+
+        let wire = tokio::time::timeout(Duration::from_secs(7), server)
+            .await
+            .expect("proxy did not finish forwarding the client first flight")
+            .unwrap();
+        assert_eq!(wire, first_flight);
+    }
+
+    #[tokio::test]
+    async fn server_first_http_shaped_payload_cannot_claim_host_identity() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            stream
+                .write_all(b"binary server-first greeting")
+                .await
+                .unwrap();
+            stream.flush().await.unwrap();
+
+            let mut received = Vec::new();
+            stream.read_to_end(&mut received).await.unwrap();
+            received
+        });
+
+        let shared = Arc::new(SharedState::new(4));
+        shared.cache_resolved_hostname(
+            "example.com",
+            ResolvedHostnameFamily::Ipv4,
+            [addr.ip()],
+            StdDuration::from_secs(60),
+        );
+        let mut secrets = make_host_bound_secret("$MSB_KEY", "real-secret-value", "example.com");
+        secrets.secrets[0].require_tls_identity = false;
+
+        let (from_tx, from_rx) = mpsc::channel::<Bytes>(8);
+        let (to_tx, mut to_rx) = mpsc::channel::<Bytes>(8);
+        spawn_tcp_proxy(
+            &tokio::runtime::Handle::current(),
+            addr,
+            addr,
+            from_rx,
+            to_tx,
+            shared,
+            Arc::new(NetworkPolicy::default()),
+            Arc::new(secrets),
+            None,
+            Arc::new(ProxyConnectState::new()),
+            None,
+        );
+
+        let greeting = to_rx.recv().await.unwrap();
+        assert_eq!(greeting, b"binary server-first greeting"[..]);
+
+        // Even a byte-for-byte valid HTTP shape cannot establish a trusted
+        // Host identity after the server has proven the stream is server-first.
+        from_tx
+            .send(Bytes::from_static(
+                b"BINARY3 /opaque HTTP/1.1\r\nHost: example.com\r\nAuthorization: Bearer $MSB_KEY\r\n\r\n",
+            ))
+            .await
+            .unwrap();
+        drop(from_tx);
+
+        let wire = tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .expect("proxy did not close after the forbidden placeholder")
+            .unwrap();
+        assert!(wire.is_empty(), "opaque placeholder reached upstream");
+    }
+
+    #[tokio::test]
+    async fn server_first_http_like_payload_is_forwarded_after_guest_eof() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            stream
+                .write_all(b"binary server-first greeting")
+                .await
+                .unwrap();
+            stream.flush().await.unwrap();
+
+            let mut received = Vec::new();
+            stream.read_to_end(&mut received).await.unwrap();
+            received
+        });
+
+        let (from_tx, from_rx) = mpsc::channel::<Bytes>(8);
+        let (to_tx, mut to_rx) = mpsc::channel::<Bytes>(8);
+        let first_flight = Bytes::from_static(b"BINARY3 v1\x00\x01eof opaque request");
+        from_tx.send(first_flight.clone()).await.unwrap();
+        drop(from_tx);
+
+        spawn_tcp_proxy(
+            &tokio::runtime::Handle::current(),
+            addr,
+            addr,
+            from_rx,
+            to_tx,
+            Arc::new(SharedState::new(4)),
+            Arc::new(NetworkPolicy::default()),
+            Arc::new(make_plain_http_secret(
+                "$MSB_UNUSED",
+                "unused-secret-value",
+                false,
+            )),
+            None,
+            Arc::new(ProxyConnectState::new()),
+            None,
+        );
+
+        let greeting = tokio::time::timeout(Duration::from_secs(2), to_rx.recv())
+            .await
+            .expect("proxy did not relay the delayed server-first greeting")
+            .unwrap();
+        assert_eq!(greeting, b"binary server-first greeting"[..]);
+
+        let wire = tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .expect("proxy did not finish after guest EOF")
+            .unwrap();
+        assert_eq!(wire, first_flight);
+    }
+
+    #[tokio::test]
+    async fn server_first_http_like_payload_is_forwarded_after_classification_timeout() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            tokio::time::sleep(PEEK_BUDGET + Duration::from_millis(100)).await;
+            stream
+                .write_all(b"binary server-first greeting")
+                .await
+                .unwrap();
+            stream.flush().await.unwrap();
+
+            let mut received = Vec::new();
+            stream.read_to_end(&mut received).await.unwrap();
+            received
+        });
+
+        let (from_tx, from_rx) = mpsc::channel::<Bytes>(8);
+        let (to_tx, mut to_rx) = mpsc::channel::<Bytes>(8);
+        let first_flight = Bytes::from_static(b"BINARY3 v1\x00\x01timeout opaque request");
+        from_tx.send(first_flight.clone()).await.unwrap();
+
+        spawn_tcp_proxy(
+            &tokio::runtime::Handle::current(),
+            addr,
+            addr,
+            from_rx,
+            to_tx,
+            Arc::new(SharedState::new(4)),
+            Arc::new(NetworkPolicy::default()),
+            Arc::new(make_plain_http_secret(
+                "$MSB_UNUSED",
+                "unused-secret-value",
+                false,
+            )),
+            None,
+            Arc::new(ProxyConnectState::new()),
+            None,
+        );
+
+        let greeting = tokio::time::timeout(PEEK_BUDGET + Duration::from_secs(2), to_rx.recv())
+            .await
+            .expect("proxy did not relay the delayed server-first greeting")
+            .unwrap();
+        assert_eq!(greeting, b"binary server-first greeting"[..]);
+        drop(from_tx);
+
+        let wire = tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .expect("proxy did not finish after the classification timeout")
+            .unwrap();
+        assert_eq!(wire, first_flight);
+    }
+
+    #[tokio::test]
+    async fn server_first_state_wins_when_banner_and_opaque_payload_are_ready() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let connect = TcpStream::connect(addr);
+        let (client, accepted) = tokio::join!(connect, listener.accept());
+        let client = client.unwrap();
+        let (mut server, _) = accepted.unwrap();
+
+        server
+            .write_all(b"binary server-first greeting")
+            .await
+            .unwrap();
+        server.flush().await.unwrap();
+        client.readable().await.unwrap();
+
+        let (mut server_rx, _server_tx) = client.into_split();
+        let (from_tx, mut from_rx) = mpsc::channel::<Bytes>(1);
+        let (to_tx, mut to_rx) = mpsc::channel::<Bytes>(1);
+        let first_flight =
+            Bytes::from_static(b"BINARY3 /opaque HTTP/1.1\r\nX-Binary: \x00\x01\r\n\r\n");
+        from_tx.send(first_flight.clone()).await.unwrap();
+
+        let (buffered, _class) = tokio::time::timeout(
+            Duration::from_millis(500),
+            classify_first_flight(
+                Vec::new(),
+                &mut from_rx,
+                &mut server_rx,
+                &to_tx,
+                &SharedState::new(4),
+                true,
+                PEEK_BUF_SIZE,
+                Duration::from_secs(1),
+            ),
+        )
+        .await
+        .expect("ready server-first data did not finish classification")
+        .unwrap();
+
+        assert_eq!(buffered, first_flight);
+        assert_eq!(
+            tokio::time::timeout(Duration::from_millis(500), to_rx.recv())
+                .await
+                .expect("ready server-first greeting was not relayed")
+                .unwrap(),
+            b"binary server-first greeting"[..]
+        );
+    }
+
+    #[tokio::test]
+    async fn server_first_state_survives_buffered_guest_payload() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let connect = TcpStream::connect(addr);
+        let (client, accepted) = tokio::join!(connect, listener.accept());
+        let client = client.unwrap();
+        let (mut server, _) = accepted.unwrap();
+
+        server
+            .write_all(b"binary server-first greeting")
+            .await
+            .unwrap();
+        server.flush().await.unwrap();
+        client.readable().await.unwrap();
+
+        let (mut server_rx, _server_tx) = client.into_split();
+        let (_from_tx, mut from_rx) = mpsc::channel::<Bytes>(1);
+        let (to_tx, mut to_rx) = mpsc::channel::<Bytes>(1);
+        let first_flight = b"BINARY3 /opaque HTTP/1.1\r\nX-Binary: \x00\x01\r\n\r\n".to_vec();
+
+        let (buffered, class) = tokio::time::timeout(
+            Duration::from_millis(500),
+            classify_first_flight(
+                first_flight.clone(),
+                &mut from_rx,
+                &mut server_rx,
+                &to_tx,
+                &SharedState::new(4),
+                true,
+                PEEK_BUF_SIZE,
+                Duration::from_secs(1),
+            ),
+        )
+        .await
+        .expect("server-first state was lost for buffered guest data")
+        .unwrap();
+
+        assert_eq!(buffered, first_flight);
+        assert_eq!(class, FirstFlightClass::Http);
+
+        let mut first_guest_write = FirstGuestWriteState::Pending;
+        assert!(
+            observe_server_before_first_guest_write(
+                &mut first_guest_write,
+                &mut server_rx,
+                &to_tx,
+                &SharedState::new(4),
+            )
+            .await
+            .unwrap()
+        );
+        assert_eq!(first_guest_write, FirstGuestWriteState::ServerFirst);
+        assert_eq!(
+            tokio::time::timeout(Duration::from_millis(500), to_rx.recv())
+                .await
+                .expect("ready server-first greeting was not relayed")
+                .unwrap(),
+            b"binary server-first greeting"[..]
+        );
+    }
+
+    #[tokio::test]
+    async fn server_banner_after_classification_wins_before_first_guest_write() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let connect = TcpStream::connect(addr);
+        let (client, accepted) = tokio::join!(connect, listener.accept());
+        let client = client.unwrap();
+        let (mut server, _) = accepted.unwrap();
+
+        let (mut server_rx, _server_tx) = client.into_split();
+        let (_from_tx, mut from_rx) = mpsc::channel::<Bytes>(1);
+        let (to_tx, mut to_rx) = mpsc::channel::<Bytes>(1);
+        let shared = SharedState::new(4);
+        let first_flight =
+            b"GET /opaque HTTP/1.1\r\nHost: example.com\r\nAuthorization: Bearer $MSB_KEY\r\n\r\n"
+                .to_vec();
+
+        let (buffered, class) = classify_first_flight(
+            first_flight.clone(),
+            &mut from_rx,
+            &mut server_rx,
+            &to_tx,
+            &shared,
+            true,
+            PEEK_BUF_SIZE,
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(buffered, first_flight);
+        assert_eq!(class, FirstFlightClass::Http);
+
+        // This banner arrives after classification but before the explicit
+        // first-write ordering point. It must select opaque handling without
+        // relying on a timer window.
+        server
+            .write_all(b"binary server-first greeting")
+            .await
+            .unwrap();
+        server.flush().await.unwrap();
+        server_rx.readable().await.unwrap();
+
+        let mut first_guest_write = FirstGuestWriteState::Pending;
+        assert!(
+            observe_server_before_first_guest_write(
+                &mut first_guest_write,
+                &mut server_rx,
+                &to_tx,
+                &shared,
+            )
+            .await
+            .unwrap()
+        );
+        assert_eq!(first_guest_write, FirstGuestWriteState::ServerFirst);
+        shared.cache_resolved_hostname(
+            "example.com",
+            ResolvedHostnameFamily::Ipv4,
+            [addr.ip()],
+            StdDuration::from_secs(60),
+        );
+        let mut secrets = make_host_bound_secret("$MSB_KEY", "real-secret-value", "example.com");
+        secrets.secrets[0].require_tls_identity = false;
+        let mut handler =
+            PlainSecretsHandler::new(FirstFlightClass::Opaque, &buffered, &secrets, addr, &shared);
+        assert_eq!(
+            handler.substitute(&buffered, true, &secrets, addr, &shared),
+            Err(ViolationAction::BlockAndLog)
+        );
+        assert_eq!(
+            tokio::time::timeout(Duration::from_millis(500), to_rx.recv())
+                .await
+                .expect("server-first greeting was not relayed")
+                .unwrap(),
+            b"binary server-first greeting"[..]
+        );
+    }
+
+    #[test]
+    fn http_to_opaque_flushes_partial_http2_preface() {
+        let secrets = make_plain_http_secret("$MSB_UNUSED", "unused-secret-value", false);
+        let shared = SharedState::new(4);
+        let guest_dst: SocketAddr = "127.0.0.1:80".parse().unwrap();
+        let preface_prefix = b"PRI * HTTP/2.0\r\n\r\n";
+        let mut handler = PlainSecretsHandler::new(
+            FirstFlightClass::Http,
+            preface_prefix,
+            &secrets,
+            guest_dst,
+            &shared,
+        );
+
+        assert!(
+            handler
+                .substitute(preface_prefix, false, &secrets, guest_dst, &shared)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            handler
+                .substitute(&[], true, &secrets, guest_dst, &shared)
+                .unwrap(),
+            &preface_prefix[..]
+        );
+        let opaque_placeholder = b"opaque $MSB_UNUSED";
+        assert_eq!(
+            handler
+                .substitute(opaque_placeholder, true, &secrets, guest_dst, &shared,)
+                .unwrap(),
+            &opaque_placeholder[..]
+        );
+    }
+
+    #[test]
+    fn http_to_opaque_flushes_buffered_body_and_resets_host_identity() {
+        let guest_dst: SocketAddr = "127.0.0.1:80".parse().unwrap();
+        let shared = SharedState::new(4);
+        shared.cache_resolved_hostname(
+            "example.com",
+            ResolvedHostnameFamily::Ipv4,
+            [guest_dst.ip()],
+            StdDuration::from_secs(60),
+        );
+        let mut secrets = make_host_bound_secret("$MSB_KEY", "real-secret-value", "example.com");
+        secrets.secrets[0].require_tls_identity = false;
+        secrets.secrets[0].injection.body = true;
+        let request =
+            b"POST /upload HTTP/1.1\r\nHost: example.com\r\nContent-Length: 32\r\n\r\npartial body";
+        let mut handler = PlainSecretsHandler::new(
+            FirstFlightClass::Http,
+            request,
+            &secrets,
+            guest_dst,
+            &shared,
+        );
+
+        assert!(
+            handler
+                .substitute(request, false, &secrets, guest_dst, &shared)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            handler
+                .substitute(&[], true, &secrets, guest_dst, &shared)
+                .unwrap(),
+            &request[..]
+        );
+        assert_eq!(
+            handler.substitute(b"opaque $MSB_KEY", true, &secrets, guest_dst, &shared,),
+            Err(ViolationAction::BlockAndLog)
+        );
+    }
+
+    #[test]
+    fn http_to_opaque_blocks_placeholder_split_at_transition() {
+        let guest_dst: SocketAddr = "127.0.0.1:80".parse().unwrap();
+        let shared = SharedState::new(4);
+        shared.cache_resolved_hostname(
+            "example.com",
+            ResolvedHostnameFamily::Ipv4,
+            [guest_dst.ip()],
+            StdDuration::from_secs(60),
+        );
+        let mut secrets = make_host_bound_secret("$MSB_KEY", "real-secret-value", "example.com");
+        secrets.secrets[0].require_tls_identity = false;
+        secrets.secrets[0].injection.body = true;
+        let request = b"POST /upload HTTP/1.1\r\nHost: example.com\r\nContent-Length: 32\r\n\r\npartial $MSB_";
+        let mut handler = PlainSecretsHandler::new(
+            FirstFlightClass::Http,
+            request,
+            &secrets,
+            guest_dst,
+            &shared,
+        );
+
+        assert!(
+            handler
+                .substitute(request, false, &secrets, guest_dst, &shared)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            handler.substitute(b"KEY", true, &secrets, guest_dst, &shared),
+            Err(ViolationAction::BlockAndLog)
+        );
+    }
+
+    #[test]
+    fn deferred_plain_http_substitutes_when_headers_finish_after_sixteen_kib() {
+        let secrets = make_plain_http_secret("$MSB_KEY", "real-secret-value", false);
+        let shared = SharedState::new(4);
+        let guest_dst: SocketAddr = "127.0.0.1:80".parse().unwrap();
+        let mut handler = PlainSecretsHandler::new(
+            FirstFlightClass::Unclassified,
+            &[],
+            &secrets,
+            guest_dst,
+            &shared,
+        );
+
+        let mut first = b"GET /api HTTP/1.1\r\nX-Pad: ".to_vec();
+        first.extend(std::iter::repeat_n(b'x', PEEK_BUF_SIZE));
+        assert!(
+            handler
+                .substitute(&first, false, &secrets, guest_dst, &shared)
+                .unwrap()
+                .is_empty()
+        );
+
+        let second = b"\r\nHost: example.com\r\nAuthorization: Bearer $MSB_KEY\r\n\r\n";
+        let output = handler
+            .substitute(second, false, &secrets, guest_dst, &shared)
+            .unwrap()
+            .into_owned();
+        assert!(
+            output
+                .windows(b"real-secret-value".len())
+                .any(|w| w == b"real-secret-value")
+        );
+        assert!(!output.windows(b"$MSB_KEY".len()).any(|w| w == b"$MSB_KEY"));
+    }
+
+    #[test]
+    fn deferred_plain_http_keeps_the_sixty_four_kib_header_limit() {
+        let secrets = make_plain_http_secret("$MSB_KEY", "real-secret-value", false);
+        let shared = SharedState::new(4);
+        let guest_dst: SocketAddr = "127.0.0.1:80".parse().unwrap();
+        let mut handler = PlainSecretsHandler::new(
+            FirstFlightClass::Unclassified,
+            &[],
+            &secrets,
+            guest_dst,
+            &shared,
+        );
+
+        let mut header = b"GET /api HTTP/1.1\r\nX-Pad: ".to_vec();
+        header.resize(MAX_HTTP_HEADER_BYTES, b'x');
+        assert!(
+            handler
+                .substitute(&header, false, &secrets, guest_dst, &shared)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            handler.substitute(b"x", false, &secrets, guest_dst, &shared),
+            Err(ViolationAction::Block)
+        );
+    }
+
+    #[tokio::test]
+    async fn non_http_first_flight_is_forwarded_without_secret_substitution() {
+        let (addr, sink) = spawn_sink().await;
+        let secrets = make_plain_http_secret("$MSB_KEY", "real-secret-value", false);
+        let first_flight = b"\x01opaque\r\nAuthorization: Bearer $MSB_KEY\r\n\r\n".to_vec();
+
+        let wire = relay_through_proxy(first_flight.clone(), secrets, sink, addr).await;
+
+        assert_eq!(wire, first_flight);
     }
 
     #[tokio::test]
