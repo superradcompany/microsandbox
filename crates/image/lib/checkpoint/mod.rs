@@ -17,6 +17,6 @@ pub use manifest::{
     DiskLayerRef, MemoryCaptureMode, MemoryExtent, MemoryExtentContent, MemoryManifest,
     ResourceDescriptor, ResourceTreatment,
 };
-pub use qcow::create_qcow2_overlay;
+pub use qcow::{create_qcow2_overlay, relocate_qcow2_backing, relocated_qcow2_header};
 pub use resolver::CheckpointClosure;
 pub use store::{LocalObjectStore, ObjectId, SparseFileIntegrity, sparse_file_integrity};

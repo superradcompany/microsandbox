@@ -190,7 +190,7 @@ impl RuntimeOwnedRootDisk {
                 layer.integrity_root = Some(integrity.root);
             }
         }
-        publish_layer_closure(checkpoint_root, &self.state.layers)
+        let published_integrities = publish_layer_closure(checkpoint_root, &self.state.layers)
             .map_err(RootDiskRolloverError::pre_rebind)?;
 
         let generation = self
@@ -210,10 +210,7 @@ impl RuntimeOwnedRootDisk {
                 predecessor: index
                     .checked_sub(1)
                     .map(|previous| self.state.layers[previous].layer_id.clone()),
-                integrity_root: layer
-                    .integrity_root
-                    .clone()
-                    .expect("all sealed layers were hashed"),
+                integrity_root: published_integrities[index].clone(),
             })
             .collect::<Vec<_>>();
         let manifest = DiskGenerationManifest {
@@ -524,30 +521,58 @@ fn prepare_backend(state: &RootDiskState) -> Result<msb_krun::PreparedBlockBacke
         .map_err(|error| format!("prepare runtime-owned root backend: {error}"))
 }
 
-fn publish_layer_closure(root: &Path, layers: &[RootDiskLayer]) -> Result<(), String> {
+fn publish_layer_closure(root: &Path, layers: &[RootDiskLayer]) -> Result<Vec<String>, String> {
     let directory = root.join("layers");
     std::fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
-    for layer in layers {
+    let mut integrities = Vec::with_capacity(layers.len());
+    for (index, layer) in layers.iter().enumerate() {
         let target = directory.join(format!("{}.{}", layer.layer_id, layer.format.as_str()));
-        if target.exists() {
+        if index > 0 && matches!(layer.format, RootDiskFormat::Qcow2) {
+            // Published names differ from the active journal. Reflink/copy before rewriting:
+            // the running VM and earlier checkpoints may still reference the source inode.
+            let staging = tempfile::tempdir_in(&directory).map_err(|error| error.to_string())?;
+            let staged = staging.path().join("layer.qcow2");
+            microsandbox_utils::copy::fast_copy(&layer.path, &staged)
+                .map_err(|error| error.to_string())?;
+            let previous = &layers[index - 1];
+            let backing = directory.join(format!(
+                "{}.{}",
+                previous.layer_id,
+                previous.format.as_str()
+            ));
+            microsandbox_image::checkpoint::relocate_qcow2_backing(&staged, &backing)
+                .map_err(|error| error.to_string())?;
+            let expected = sparse_file_integrity(&staged)
+                .map_err(|error| error.to_string())?
+                .root;
+            publish_sealed_layer(&staged, &target, &expected)?;
+            integrities.push(expected);
+        } else {
             let expected = layer
                 .integrity_root
-                .as_deref()
+                .clone()
                 .ok_or_else(|| "sealed layer is missing integrity".to_string())?;
-            let actual = sparse_file_integrity(&target).map_err(|error| error.to_string())?;
-            if actual.root != expected {
-                return Err(format!("checkpoint layer {} conflicts", layer.layer_id));
-            }
-            continue;
+            publish_sealed_layer(&layer.path, &target, &expected)?;
+            integrities.push(expected);
         }
-        std::fs::hard_link(&layer.path, &target).map_err(|error| {
-            format!(
-                "link sealed layer {} into checkpoint closure: {error}",
-                layer.path.display()
-            )
-        })?;
     }
-    sync_directory(&directory).map_err(|error| error.to_string())
+    sync_directory(&directory).map_err(|error| error.to_string())?;
+    Ok(integrities)
+}
+
+fn publish_sealed_layer(source: &Path, target: &Path, expected: &str) -> Result<(), String> {
+    match std::fs::hard_link(source, target) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let actual = sparse_file_integrity(target).map_err(|error| error.to_string())?;
+            if actual.root == expected {
+                Ok(())
+            } else {
+                Err(format!("checkpoint layer {} conflicts", target.display()))
+            }
+        }
+        Err(error) => Err(error.to_string()),
+    }
 }
 
 fn read_state(path: &Path) -> Result<RootDiskState, String> {

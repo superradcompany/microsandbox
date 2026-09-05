@@ -238,17 +238,17 @@ async fn create_full_snapshot(
         })?
         .to_path_buf();
     tokio::fs::create_dir_all(&parent_dir).await?;
-    let staging_dir = parent_dir.join(format!(".{name}.{:016x}.staging", rand::random::<u64>()));
-    tokio::fs::create_dir_all(&staging_dir).await?;
     let capture_started = Instant::now();
-    let captured = match capture_full_snapshot(source_sandbox, labels, model).await {
-        Ok(captured) => captured,
-        Err(error) => {
-            let _ = tokio::fs::remove_dir_all(&staging_dir).await;
-            return Err(error);
-        }
-    };
+    // The runtime owns capture and recovery even if this client disappears. Do not allocate an
+    // artifact staging directory while waiting for it: there is nothing to stage until capture
+    // succeeds. The guard also removes partial materialization on ordinary errors/cancellation.
+    let captured = capture_full_snapshot(source_sandbox, labels, model).await?;
     let capture_us = capture_started.elapsed().as_micros();
+    let staging = tempfile::Builder::new()
+        .prefix(&format!(".{name}."))
+        .suffix(".staging")
+        .tempdir_in(&parent_dir)?;
+    let staging_dir = staging.path().to_path_buf();
     let checkpoint_source = captured.checkpoint_path.clone();
     let checkpoint_destination = staging_dir.join(CHECKPOINT_DIRECTORY);
     let checkpoint_destination_for_copy = checkpoint_destination.clone();
@@ -420,20 +420,9 @@ pub(super) async fn create_snapshot_archive(
     let sandbox_dir = local.sandboxes_dir().join(&source_sandbox);
     let disk = snapshot_disk_closure(&sandbox_dir, &root_disk)?;
     let integrity_started = Instant::now();
-    let integrities = if record_integrity {
-        let mut values = Vec::with_capacity(disk.sources.len());
-        for source in &disk.sources {
-            values.push(Some(
-                super::verify::compute_merkle_integrity(&source.path).await?,
-            ));
-        }
-        values
-    } else {
-        vec![None; disk.sources.len()]
-    };
-    let integrity_us = integrity_started.elapsed().as_micros();
+    let integrities = vec![None; disk.sources.len()];
     let labels: BTreeMap<_, _> = labels.into_iter().collect();
-    let manifest = new_file_manifest(
+    let mut manifest = new_file_manifest(
         &disk,
         integrities,
         image_reference,
@@ -441,6 +430,23 @@ pub(super) async fn create_snapshot_archive(
         &source_sandbox,
         root_disk,
     )?;
+    if record_integrity && let SnapshotState::File(file) = &mut manifest.state {
+        for index in 0..file.layers.len() {
+            let source = &disk.sources[index].path;
+            let prefix = if index > 0 {
+                let backing = layer_path(
+                    &file.layers[index - 1].layer_id,
+                    file.layers[index - 1].format,
+                );
+                microsandbox_image::checkpoint::relocated_qcow2_header(source, &backing)?
+            } else {
+                Vec::new()
+            };
+            file.layers[index].payload.integrity =
+                Some(super::verify::compute_merkle_integrity_with_prefix(source, prefix).await?);
+        }
+    }
+    let integrity_us = integrity_started.elapsed().as_micros();
     let digest = manifest
         .digest()
         .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
@@ -610,7 +616,8 @@ async fn build_artifact(
     tokio::fs::create_dir_all(&layers_dir).await?;
 
     let copy_started = Instant::now();
-    let mut captured = Vec::with_capacity(disk.sources.len());
+    let mut captured: Vec<(DiskLayerId, SnapshotFormat, PathBuf)> =
+        Vec::with_capacity(disk.sources.len());
     for source in &disk.sources {
         let layer_id = DiskLayerId::new(format!("layer_{:032x}", rand::random::<u128>()))
             .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
@@ -622,6 +629,9 @@ async fn build_artifact(
         })
         .await
         .map_err(|error| MicrosandboxError::Custom(format!("snapshot copy task: {error}")))??;
+        if let Some((_, _, predecessor)) = captured.last() {
+            microsandbox_image::checkpoint::relocate_qcow2_backing(&destination, predecessor)?;
+        }
         captured.push((layer_id, source.format, destination));
     }
     let copy_us = copy_started.elapsed().as_micros();
@@ -1319,7 +1329,9 @@ mod tests {
         let qcow = temp.path().join("generation.qcow2");
         let raw_file = std::fs::File::create(&raw).unwrap();
         raw_file.set_len(4096).unwrap();
-        std::fs::write(&qcow, b"compact qcow payload").unwrap();
+        microsandbox_image::checkpoint::create_qcow2_overlay(&qcow, 4096, &raw, "raw")
+            .await
+            .unwrap();
         let disk = SnapshotDiskClosure {
             sources: vec![
                 SnapshotDiskSource {
@@ -1366,8 +1378,29 @@ mod tests {
         else {
             panic!("qcow layer is missing BLAKE3 integrity");
         };
-        assert_eq!(*logical_size, b"compact qcow payload".len() as u64);
+        assert_eq!(
+            *logical_size,
+            std::fs::metadata(&disk.sources[1].path).unwrap().len()
+        );
         assert_ne!(*logical_size, file.virtual_size);
+        let captured_qcow = artifact.join(file.layer_path(&file.layers[1]));
+        let captured_backing = artifact.join(file.layer_path(&file.layers[0]));
+        let prefix = microsandbox_image::checkpoint::relocated_qcow2_header(
+            &disk.sources[1].path,
+            &captured_backing,
+        )
+        .unwrap();
+        assert_eq!(
+            super::super::verify::compute_merkle_integrity_with_prefix(
+                &disk.sources[1].path,
+                prefix
+            )
+            .await
+            .unwrap(),
+            super::super::verify::compute_merkle_integrity(&captured_qcow)
+                .await
+                .unwrap(),
+        );
     }
 
     #[test]

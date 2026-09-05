@@ -685,10 +685,24 @@ where
         }),
         transport_integrity: Some(finish_archive_transport(descriptor_hasher)),
     }];
-    for (layer, source_layer) in file.layers.iter().zip(source_layers) {
+    for (index, (layer, source_layer)) in file.layers.iter().zip(source_layers).enumerate() {
         let layer_path = portable_archive_path(&file.layer_path(layer))?;
-        let layer_transport =
-            append_artifact_file(builder, source_layer, &layer_path, "file-payload").await?;
+        let prefix = if index > 0 {
+            microsandbox_image::checkpoint::relocated_qcow2_header(
+                source_layer,
+                &file.layer_path(&file.layers[index - 1]),
+            )?
+        } else {
+            Vec::new()
+        };
+        let layer_transport = append_artifact_file_with_prefix(
+            builder,
+            source_layer,
+            &layer_path,
+            "file-payload",
+            &prefix,
+        )
+        .await?;
         entries.push(ArchiveEntry {
             path: layer_path,
             owner_snapshot: Some(manifest.snapshot_id.to_string()),
@@ -1759,7 +1773,21 @@ async fn append_artifact_file<W>(
 where
     W: tokio::io::AsyncWrite + Unpin + Send,
 {
-    if let Some(integrity) = try_append_sparse(builder, path, name, kind).await? {
+    append_artifact_file_with_prefix(builder, path, name, kind, &[]).await
+}
+
+async fn append_artifact_file_with_prefix<W>(
+    builder: &mut Builder<W>,
+    path: &Path,
+    name: &str,
+    kind: &str,
+    prefix: &[u8],
+) -> MicrosandboxResult<WrittenArchiveMember>
+where
+    W: tokio::io::AsyncWrite + Unpin + Send,
+{
+    use tokio::io::AsyncSeekExt;
+    if let Some(integrity) = try_append_sparse(builder, path, name, kind, prefix).await? {
         return Ok(integrity);
     }
 
@@ -1776,9 +1804,11 @@ where
     header.set_size(size);
     header.set_cksum();
 
-    let file = tokio::fs::File::open(path).await?;
+    let mut file = tokio::fs::File::open(path).await?;
+    file.seek(std::io::SeekFrom::Start(prefix.len() as u64))
+        .await?;
     let mut source = TransportHashingReader {
-        inner: file,
+        inner: std::io::Cursor::new(prefix).chain(file),
         hasher: archive_transport_hasher(kind, name, size, size, &[]),
         bytes_read: 0,
     };
@@ -1804,6 +1834,7 @@ async fn try_append_sparse<W>(
     path: &Path,
     name: &str,
     kind: &str,
+    prefix: &[u8],
 ) -> MicrosandboxResult<Option<WrittenArchiveMember>>
 where
     W: tokio::io::AsyncWrite + Unpin + Send,
@@ -1815,12 +1846,27 @@ where
     if !meta.is_file() {
         return Ok(None);
     }
-    let map = {
+    let mut map = {
         let path = path.to_path_buf();
         tokio::task::spawn_blocking(move || ExtentMap::scan(&path))
             .await
             .map_err(|e| MicrosandboxError::Custom(format!("snapshot export scan task: {e}")))??
     };
+    if !prefix.is_empty()
+        && let Some(map) = &mut map
+    {
+        // Include every rewritten header byte even if the source allocation map has holes.
+        let mut end = prefix.len() as u64;
+        let mut consumed = 0;
+        for &(offset, length) in &map.extents {
+            if offset > end {
+                break;
+            }
+            end = end.max(offset + length);
+            consumed += 1;
+        }
+        map.extents.splice(..consumed, [(0, end)]);
+    }
     let Some(map) = map.as_ref().and_then(tar_sparse_map) else {
         return Ok(None);
     };
@@ -1884,6 +1930,12 @@ where
                 return Err(MicrosandboxError::Custom(format!(
                     "archive source truncated during export: extent at {offset} expected {numbytes} bytes"
                 )));
+            }
+            let position = *offset + *numbytes - remaining;
+            if position < prefix.len() as u64 {
+                let count = read.min(prefix.len() - position as usize);
+                buffer[..count]
+                    .copy_from_slice(&prefix[position as usize..position as usize + count]);
             }
             transport.update(&buffer[..read]);
             dst.write_all(&buffer[..read]).await?;

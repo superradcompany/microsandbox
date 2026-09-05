@@ -164,11 +164,16 @@ pub(crate) async fn materialize_file_snapshot_for_child(
         let target = checkpoint_layer_target(child_stage, root_disk, index, &source.format)?;
         let source_path = source.path.clone();
         let target_for_copy = target.clone();
-        tokio::task::spawn_blocking(move || copy_checkpoint_file(&source_path, &target_for_copy))
-            .await
-            .map_err(|error| {
-                MicrosandboxError::Custom(format!("snapshot layer copy task: {error}"))
-            })??;
+        let predecessor = layers
+            .last()
+            .map(|layer: &RootfsUpperLayerConfig| layer.path.clone());
+        tokio::task::spawn_blocking(move || {
+            copy_child_disk_layer(&source_path, &target_for_copy, predecessor.as_deref())
+        })
+        .await
+        .map_err(|error| {
+            MicrosandboxError::Custom(format!("snapshot layer copy task: {error}"))
+        })??;
         layers.push(RootfsUpperLayerConfig {
             path: target,
             format: source.format.clone(),
@@ -240,8 +245,11 @@ async fn materialize_checkpoint_disk_layers(
         let source_layer = closure.disk_layer_path(layer);
         let source_for_copy = source_layer.clone();
         let target_for_copy = target.clone();
+        let predecessor = upper_layers
+            .last()
+            .map(|layer: &RootfsUpperLayerConfig| layer.path.clone());
         tokio::task::spawn_blocking(move || {
-            copy_checkpoint_file(&source_for_copy, &target_for_copy)
+            copy_child_disk_layer(&source_for_copy, &target_for_copy, predecessor.as_deref())
         })
         .await
         .map_err(|error| {
@@ -306,6 +314,21 @@ async fn append_private_writable_head(
         format: "qcow2".into(),
     });
     Ok(())
+}
+
+fn copy_child_disk_layer(
+    source: &Path,
+    target: &Path,
+    predecessor: Option<&Path>,
+) -> std::io::Result<()> {
+    if let Some(predecessor) = predecessor {
+        // Only qcow2 layers may have a predecessor. Their relocated header must not write into
+        // an inode shared with the source artifact or another restored child.
+        microsandbox_utils::copy::fast_copy(source, target)?;
+        microsandbox_image::checkpoint::relocate_qcow2_backing(target, predecessor)
+    } else {
+        copy_checkpoint_file(source, target)
+    }
 }
 
 fn checkpoint_layer_target(

@@ -1468,6 +1468,23 @@ fn apply_block_writeback_limit(
     disk
 }
 
+fn attach_upper_layers(
+    disk: msb_krun::DiskBuilder,
+    layers: Vec<UpperLayerSpec>,
+) -> msb_krun::DiskBuilder {
+    // A standalone raw disk has no dependency resolver. Keep it on the ordinary raw path so
+    // Linux bounded writeback works identically on initial boot and subsequent restarts.
+    if layers.len() == 1 && matches!(layers[0].format, msb_krun::DiskImageFormat::Raw) {
+        disk.path(&layers[0].path)
+    } else {
+        disk.layers(
+            layers
+                .into_iter()
+                .map(|layer| msb_krun::DiskLayer::new(layer.path, layer.format)),
+        )
+    }
+}
+
 fn validate_upper_layers(spec: &UpperSpec) -> RuntimeResult<Vec<UpperLayerSpec>> {
     if spec.layers.is_empty() {
         return Err(RuntimeError::Custom(
@@ -1660,11 +1677,7 @@ fn build_vm(
                 cfg!(target_os = "linux") && matches!(format, msb_krun::DiskImageFormat::Qcow2);
             let writeback_limit = writeback_limit.cloned();
             builder = builder.disk(move |d| {
-                let layers = layers
-                    .into_iter()
-                    .map(|layer| msb_krun::DiskLayer::new(layer.path, layer.format));
-                let d = d
-                    .layers(layers)
+                let d = attach_upper_layers(d, layers)
                     .format(format)
                     .read_only(read_only)
                     .direct_io(direct_io);
@@ -1700,11 +1713,7 @@ fn build_vm(
                 cfg!(target_os = "linux") && matches!(format, msb_krun::DiskImageFormat::Qcow2);
             let writeback_limit = writeback_limit.cloned();
             builder = builder.disk(move |d| {
-                let layers = layers
-                    .into_iter()
-                    .map(|layer| msb_krun::DiskLayer::new(layer.path, layer.format));
-                let d = d
-                    .layers(layers)
+                let d = attach_upper_layers(d, layers)
                     .format(format)
                     .read_only(read_only)
                     .direct_io(direct_io);

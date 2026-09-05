@@ -319,13 +319,36 @@ fn merkle_integrity_blocking(path: &Path) -> io::Result<UpperIntegrity> {
 }
 
 fn merkle_integrity_from_file(mut file: File) -> io::Result<UpperIntegrity> {
+    merkle_integrity_with_prefix(&mut file, &[])
+}
+
+/// Hash the bytes emitted by direct qcow2 export without making an intermediate disk copy.
+pub(super) async fn compute_merkle_integrity_with_prefix(
+    path: &Path,
+    prefix: Vec<u8>,
+) -> MicrosandboxResult<UpperIntegrity> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        merkle_integrity_with_prefix(&mut File::open(path)?, &prefix)
+    })
+    .await
+    .map_err(|error| MicrosandboxError::Custom(format!("snapshot integrity task: {error}")))?
+    .map_err(Into::into)
+}
+
+fn merkle_integrity_with_prefix(file: &mut File, prefix: &[u8]) -> io::Result<UpperIntegrity> {
     let logical_size = file.metadata()?.len();
     let leaf_size = u64::from(FILE_MERKLE_BLAKE3_LEAF_SIZE);
     let logical_leaf_count = logical_size.div_ceil(leaf_size).max(1);
     let tree_leaf_count = logical_leaf_count.next_power_of_two();
     let tree_height = tree_leaf_count.trailing_zeros();
     let zero_roots = zero_subtree_roots(tree_height);
-    let allocation_map = ExtentMap::scan_file(&file)?;
+    let mut allocation_map = ExtentMap::scan_file(file)?;
+    if !prefix.is_empty()
+        && let Some(map) = &mut allocation_map
+    {
+        map.extents.insert(0, (0, prefix.len() as u64));
+    }
     let ranges = allocated_leaf_ranges(allocation_map.as_ref(), logical_size, logical_leaf_count);
 
     let mut accumulator = MerkleAccumulator::new(tree_height);
@@ -336,12 +359,13 @@ fn merkle_integrity_from_file(mut file: File) -> io::Result<UpperIntegrity> {
     for (start, end) in ranges {
         push_zero_range(&mut accumulator, &zero_roots, cursor, start);
         hash_leaf_range(
-            &mut file,
+            file,
             logical_size,
             start,
             end,
             &mut buffer,
             &mut accumulator,
+            prefix,
         )?;
         cursor = end;
     }
@@ -401,6 +425,7 @@ fn hash_leaf_range(
     end: u64,
     buffer: &mut Vec<u8>,
     accumulator: &mut MerkleAccumulator,
+    prefix: &[u8],
 ) -> io::Result<()> {
     let leaf_size = FILE_MERKLE_BLAKE3_LEAF_SIZE as usize;
     let leaves_per_batch = (MERKLE_READ_BATCH / leaf_size).max(1);
@@ -415,6 +440,10 @@ fn hash_leaf_range(
         buffer[..batch_bytes].fill(0);
         file.seek(SeekFrom::Start(offset))?;
         file.read_exact(&mut buffer[..readable])?;
+        if offset < prefix.len() as u64 {
+            let count = readable.min(prefix.len() - offset as usize);
+            buffer[..count].copy_from_slice(&prefix[offset as usize..offset as usize + count]);
+        }
 
         let hashes: Vec<[u8; 32]> = buffer[..batch_bytes]
             .par_chunks_exact(leaf_size)
