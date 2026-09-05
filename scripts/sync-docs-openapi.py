@@ -1,20 +1,21 @@
 #!/usr/bin/env python3
-"""Derive the public Cloud API reference spec from the live msb-api OpenAPI spec.
+"""Derive credential-specific API references from the live Cloud OpenAPI spec.
 
-Selects the organization API-key surface (operations authenticated with the
-`api_key` scheme), drops operations the hosted Cloud does not yet support
-publicly, rewrites implementation-oriented summaries into reader-facing
-titles, and prunes unreferenced schemas. The result is checked in at
-docs/api-reference/openapi.json and rendered by Mintlify.
+Authenticated operations are grouped automatically by their declared security
+scheme: organization API keys or personal access tokens. Unauthenticated,
+hidden, and excluded operations are not published. Each generated spec also
+rewrites implementation-oriented summaries into reader-facing titles and
+prunes unreferenced schemas.
 
 Usage:
   scripts/sync-docs-openapi.py            # rewrite docs/api-reference/openapi.json
   scripts/sync-docs-openapi.py --check    # exit 1 if the checked-in spec is stale
-  scripts/sync-docs-openapi.py --environment staging
+  scripts/sync-docs-openapi.py --environment staging --audience all
   scripts/sync-docs-openapi.py --source /path/to/openapi.json
 """
 
 import argparse
+import copy
 import json
 import re
 import sys
@@ -26,12 +27,33 @@ ENVIRONMENTS = {
     "production": {
         "source": "https://api.microsandbox.dev/docs/openapi.json",
         "server": "https://api.microsandbox.dev",
-        "output": REPO / "docs" / "api-reference" / "openapi.json",
     },
     "staging": {
         "source": "https://api.msbx.fyi/docs/openapi.json",
         "server": "https://api.msbx.fyi",
-        "output": REPO / "docs" / "api-reference" / "openapi.staging.json",
+    },
+}
+AUDIENCES = {
+    "organization": {
+        "scheme": "api_key",
+        "title": "microsandbox cloud API",
+        "description": (
+            "REST API for microsandbox cloud operations authenticated with an "
+            "organization API key."
+        ),
+        "outputs": {
+            "production": "openapi.json",
+            "staging": "openapi.staging.json",
+        },
+    },
+    "personal": {
+        "scheme": "bearer",
+        "title": "Personal token API",
+        "description": "User-scoped API for account and organization management.",
+        "outputs": {
+            "production": "openapi.personal.json",
+            "staging": "openapi.personal.staging.json",
+        },
     },
 }
 
@@ -41,6 +63,7 @@ PAREN_NOISE = re.compile(r"\s*\((API key[^)]*|Member\+|Admin\+|Owner only)\)")
 # Sidebar group per upstream tag, in display order. Mintlify renders tag names
 # verbatim as nav groups, so raw tags like `audit-log` are retitled here.
 TAG_GROUPS = {
+    "users": "Account",
     "sandboxes": "Sandboxes",
     "snapshots": "Snapshots",
     "volumes": "Volumes",
@@ -49,6 +72,38 @@ TAG_GROUPS = {
     "audit-log": "Audit events",
     "organizations": "Organization",
     "members": "Members",
+    "invites": "Invites",
+    "oidc-config": "OIDC",
+    "registry-credentials": "Registry credentials",
+    "api-keys": "Credentials",
+    "personal-access-tokens": "Credentials",
+}
+TAG_ORDER = {
+    "organization": [
+        "Sandboxes",
+        "Snapshots",
+        "Volumes",
+        "Quotas",
+        "Billing",
+        "Audit events",
+        "Organization",
+        "Members",
+    ],
+    "personal": [
+        "Account",
+        "Organization",
+        "Members",
+        "Invites",
+        "OIDC",
+        "Credentials",
+        "Registry credentials",
+        "Sandboxes",
+        "Snapshots",
+        "Volumes",
+        "Quotas",
+        "Billing",
+        "Audit events",
+    ],
 }
 
 # Schemas referenced by operations but missing from the live spec's components
@@ -202,6 +257,17 @@ RESPONSE_OVERRIDES = {
     ("GET", "/v1/members"): "PaginatedMemberResponse",
     ("GET", "/v1/snapshot-operations"): "PaginatedSnapshotOperationResponse",
     ("GET", "/v1/snapshots"): "PaginatedSnapshotResponse",
+    ("GET", "/v1/orgs/{slug}/members"): "PaginatedMemberResponse",
+    ("GET", "/v1/orgs/{slug}/sandboxes"): "PaginatedSandboxResponse",
+    (
+        "GET",
+        "/v1/orgs/{slug}/sandboxes/snapshot-candidates",
+    ): "PaginatedSnapshotCandidateResponse",
+    (
+        "GET",
+        "/v1/orgs/{slug}/snapshot-operations",
+    ): "PaginatedSnapshotOperationResponse",
+    ("GET", "/v1/orgs/{slug}/snapshots"): "PaginatedSnapshotResponse",
 }
 
 # Reader-facing titles for operations whose upstream summaries carry internal
@@ -236,10 +302,22 @@ def clean_summary(summary: str) -> str:
     return s[:1].upper() + s[1:] if s else s
 
 
-def op_uses_api_key(op: dict) -> bool:
-    # Public endpoints (auth, health, waitlist) declare no op-level security and
-    # fall back to the spec default; only explicit api_key ops are in scope.
-    return any("api_key" in requirement for requirement in op.get("security", []))
+def operation_audience(op: dict) -> str | None:
+    """Return the single public audience declared for an operation."""
+    if op.get("x-hidden") or op.get("x-excluded"):
+        return None
+    if not op.get("security"):
+        return None
+
+    matches = [
+        name
+        for name, audience in AUDIENCES.items()
+        if audience["scheme"]
+        and any(audience["scheme"] in requirement for requirement in op["security"])
+    ]
+    if len(matches) > 1:
+        return "ambiguous"
+    return matches[0] if matches else None
 
 
 def collect_refs(node, refs: set):
@@ -254,7 +332,9 @@ def collect_refs(node, refs: set):
             collect_refs(value, refs)
 
 
-def curate(spec: dict, *, server_url: str) -> dict:
+def curate(spec: dict, *, server_url: str, audience_name: str) -> dict:
+    audience = AUDIENCES[audience_name]
+    scheme = audience["scheme"]
     paths = {}
     for path, ops in spec["paths"].items():
         kept = {}
@@ -262,23 +342,25 @@ def curate(spec: dict, *, server_url: str) -> dict:
             if not isinstance(op, dict):
                 continue
             key = (method.upper(), path)
-            if op.get("x-hidden") or op.get("x-excluded"):
+            if operation_audience(op) != audience_name:
                 continue
-            if not op_uses_api_key(op):
-                continue
-            op = dict(op)
+            op = copy.deepcopy(op)
             if key in SUMMARY_OVERRIDES:
                 op["summary"] = SUMMARY_OVERRIDES[key]
             elif "summary" in op:
                 op["summary"] = clean_summary(op["summary"])
-            op["security"] = [{"api_key": []}]
+            op["security"] = [{scheme: []}]
             raw_tag = next(iter(op.get("tags", [])), "Other")
             op["tags"] = [TAG_GROUPS.get(raw_tag, raw_tag.replace("-", " ").capitalize())]
             if key in RESPONSE_OVERRIDES:
                 ok = op["responses"]["200"]["content"]["application/json"]
                 ok["schema"] = {"$ref": f"#/components/schemas/{RESPONSE_OVERRIDES[key]}"}
             for status, resp in op["responses"].items():
-                if not status.startswith("2") and "content" not in resp:
+                if (
+                    audience_name == "organization"
+                    and not status.startswith("2")
+                    and "content" not in resp
+                ):
                     body = {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}
                     example = error_example(status, resp.get("description", ""))
                     if example is not None:
@@ -297,8 +379,9 @@ def curate(spec: dict, *, server_url: str) -> dict:
             "schema; add it to RESPONSE_OVERRIDES with its real item type"
         )
 
-    # Order paths by display-group order so the sidebar leads with Sandboxes.
-    group_rank = {name: i for i, name in enumerate(TAG_GROUPS.values())}
+    # Give each credential section a task-oriented story instead of inheriting
+    # the upstream route-registration order.
+    group_rank = {name: i for i, name in enumerate(TAG_ORDER[audience_name])}
     paths = dict(
         sorted(
             paths.items(),
@@ -312,7 +395,7 @@ def curate(spec: dict, *, server_url: str) -> dict:
     # Close over every schema transitively referenced by the kept operations.
     refs: set = set()
     collect_refs(paths, refs)
-    schemas = dict(spec.get("components", {}).get("schemas", {}))
+    schemas = copy.deepcopy(spec.get("components", {}).get("schemas", {}))
     schemas.update(INJECTED_SCHEMAS)
     while True:
         extra: set = set()
@@ -341,23 +424,67 @@ def curate(spec: dict, *, server_url: str) -> dict:
     return {
         "openapi": spec["openapi"],
         "info": {
-            "title": "microsandbox cloud API",
-            "description": (
-                "REST API for microsandbox cloud operations authenticated with an "
-                "organization API key."
-            ),
+            "title": audience["title"],
+            "description": audience["description"],
             "version": spec["info"]["version"],
         },
         "servers": [{"url": server_url}],
-        "security": [{"api_key": []}],
+        "security": [{scheme: []}],
         "paths": paths,
         "components": {
             "schemas": {name: schemas[name] for name in sorted(refs) if name in schemas},
-            "securitySchemes": {
-                "api_key": spec["components"]["securitySchemes"]["api_key"],
-            },
+            "securitySchemes": {scheme: spec["components"]["securitySchemes"][scheme]},
         },
     }
+
+
+def validate_partition(spec: dict) -> None:
+    """Require every published operation to map to one credential audience."""
+    unmapped = []
+    ambiguous = []
+    for path, ops in spec["paths"].items():
+        for method, op in ops.items():
+            if not isinstance(op, dict) or op.get("x-hidden") or op.get("x-excluded"):
+                continue
+            if not op.get("security"):
+                continue
+            audience = operation_audience(op)
+            operation = f"{method.upper()} {path}"
+            if audience == "ambiguous":
+                ambiguous.append(operation)
+            elif audience is None:
+                unmapped.append(operation)
+
+    if ambiguous:
+        sys.exit(
+            "error: operations declare more than one public credential scheme: "
+            + ", ".join(ambiguous)
+        )
+    if unmapped:
+        sys.exit(
+            "error: visible operations do not map to a public audience: "
+            + ", ".join(unmapped)
+        )
+
+
+def output_path(environment: str, audience: str) -> Path:
+    filename = AUDIENCES[audience]["outputs"][environment]
+    return REPO / "docs" / "api-reference" / filename
+
+
+def render(spec: dict, *, environment: str, audience: str) -> str:
+    rendered = json.dumps(
+        curate(
+            spec,
+            server_url=ENVIRONMENTS[environment]["server"],
+            audience_name=audience,
+        ),
+        indent=2,
+        ensure_ascii=False,
+    ) + "\n"
+    # House style bans em dashes; upstream doc comments still use them, so
+    # normalize to plain dashes until the source text is reworded.
+    return rendered.replace("—", "-").replace("–", "-")
 
 
 def main() -> None:
@@ -368,13 +495,18 @@ def main() -> None:
         default="production",
         help="API environment to read from and generate for (default: production)",
     )
+    parser.add_argument(
+        "--audience",
+        choices=[*AUDIENCES, "all"],
+        default="organization",
+        help="credential audience to generate (default: organization)",
+    )
     parser.add_argument("--source", help="local path or HTTPS URL instead of the environment source")
     parser.add_argument("--check", action="store_true", help="fail if the output is stale")
     args = parser.parse_args()
 
     environment = ENVIRONMENTS[args.environment]
     source = args.source or environment["source"]
-    output = environment["output"]
 
     if source.startswith("https://"):
         request = urllib.request.Request(
@@ -386,30 +518,35 @@ def main() -> None:
     else:
         spec = json.loads(Path(source).read_text())
 
-    rendered = json.dumps(
-        curate(
-            spec,
-            server_url=environment["server"],
-        ),
-        indent=2,
-        ensure_ascii=False,
-    ) + "\n"
-    # House style bans em dashes; upstream doc comments still use them, so
-    # normalize to plain dashes until the source text is reworded.
-    rendered = rendered.replace("—", "-").replace("–", "-")
+    validate_partition(spec)
+    audiences = list(AUDIENCES) if args.audience == "all" else [args.audience]
 
     if args.check:
-        if not output.exists() or output.read_text() != rendered:
-            command = "scripts/sync-docs-openapi.py"
-            if args.environment != "production":
-                command += f" --environment {args.environment}"
-            sys.exit(f"error: {output} is stale; run {command}")
-        print("api reference spec is up to date")
+        stale = [
+            output_path(args.environment, audience)
+            for audience in audiences
+            if not output_path(args.environment, audience).exists()
+            or output_path(args.environment, audience).read_text()
+            != render(spec, environment=args.environment, audience=audience)
+        ]
+        if stale:
+            command = (
+                "scripts/sync-docs-openapi.py"
+                f" --environment {args.environment} --audience {args.audience}"
+            )
+            sys.exit(
+                "error: stale API reference specs: "
+                + ", ".join(str(path) for path in stale)
+                + f"; run {command}"
+            )
+        print("API reference specs are up to date")
         return
 
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(rendered)
-    print(f"wrote {output}")
+    for audience in audiences:
+        output = output_path(args.environment, audience)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(render(spec, environment=args.environment, audience=audience))
+        print(f"wrote {output}")
 
 
 if __name__ == "__main__":

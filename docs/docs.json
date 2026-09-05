@@ -219,11 +219,19 @@
             ]
           },
           {
-            "group": "Endpoints",
-            "icon": "brackets-curly",
+            "group": "API keys",
+            "icon": "key",
             "openapi": {
               "source": "/api-reference/openapi.staging.json",
               "directory": "api-reference/endpoints"
+            }
+          },
+          {
+            "group": "Personal tokens",
+            "icon": "user",
+            "openapi": {
+              "source": "/api-reference/openapi.personal.staging.json",
+              "directory": "api-reference/personal"
             }
           }
         ]
