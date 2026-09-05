@@ -28,17 +28,26 @@ const CLOCK_SYNC_WAKE_THRESHOLD: Duration = Duration::from_secs(6);
 //--------------------------------------------------------------------------------------------------
 
 /// Spawns a background task that keeps the guest wall clock aligned with the host.
-pub(crate) fn spawn_clock_sync_task(agent_tx: mpsc::Sender<Vec<u8>>) -> JoinHandle<()> {
-    tokio::spawn(clock_sync_task(agent_tx))
+pub(crate) fn spawn_clock_sync_task(
+    agent_tx: mpsc::Sender<Vec<u8>>,
+    already_synchronized: bool,
+) -> JoinHandle<()> {
+    tokio::spawn(clock_sync_task(agent_tx, already_synchronized))
 }
 
-async fn clock_sync_task(agent_tx: mpsc::Sender<Vec<u8>>) {
+async fn clock_sync_task(agent_tx: mpsc::Sender<Vec<u8>>, already_synchronized: bool) {
     let mut last_wall = SystemTime::now();
-    let mut last_sync = match send_clock_sync(&agent_tx).await {
-        Ok(sent_at) => sent_at,
-        Err(err) => {
-            tracing::debug!(error = %err, "agent relay: initial clock sync failed");
-            return;
+    // Full restore completed the kernel clock barrier before workload thaw. Do not immediately
+    // overwrite it with a queued userspace timestamp. Ordinary boot keeps its existing sync.
+    let mut last_sync = if already_synchronized {
+        last_wall
+    } else {
+        match send_clock_sync(&agent_tx).await {
+            Ok(sent_at) => sent_at,
+            Err(err) => {
+                tracing::debug!(error = %err, "agent relay: initial clock sync failed");
+                return;
+            }
         }
     };
 

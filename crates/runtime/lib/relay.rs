@@ -109,6 +109,7 @@ pub struct AgentRelay {
     endpoint: PathBuf,
     /// Cached `core.ready` frame bytes (length-prefixed wire format).
     ready_frame: Option<Vec<u8>>,
+    kernel_clock_synchronized: bool,
     /// Optional `exec.log` writer. When set, the ring reader task
     /// captures the primary session's stdout/stderr to JSON Lines.
     log_writer: Option<Arc<LogWriter>>,
@@ -243,6 +244,7 @@ impl AgentRelay {
             listener: Some(listener),
             endpoint: agent_sock_path.to_path_buf(),
             ready_frame: None,
+            kernel_clock_synchronized: false,
             log_writer: None,
             #[cfg(unix)]
             bind_identity_map: None,
@@ -262,6 +264,7 @@ impl AgentRelay {
             listener: None,
             endpoint: agent_sock_path.to_path_buf(),
             ready_frame: None,
+            kernel_clock_synchronized: false,
             log_writer: None,
             #[cfg(unix)]
             bind_identity_map: None,
@@ -480,9 +483,9 @@ impl AgentRelay {
         let prepared_persist_us = prepared_persist_started.elapsed().as_micros();
         let generation_install_started = Instant::now();
         let request = vm
-            .install_vm_generation_id(generation_bytes.into())
+            .install_vm_generation_and_clock(generation_bytes.into())
             .ok_or_else(|| {
-                RuntimeError::Custom("restored VM has no usable VM Generation ID transport".into())
+                RuntimeError::Custom("restored kernel lacks identity-and-clock activation; recreate this development full snapshot with the updated kernel or use disk-only restore".into())
             })?;
         let generation_install_us = generation_install_started.elapsed().as_micros();
         let resume_started = Instant::now();
@@ -494,6 +497,9 @@ impl AgentRelay {
         let generation_ack_started = Instant::now();
         match vm.wait_vm_generation_processed(request, RESTORE_ACTIVATION_TIMEOUT) {
             Some(msb_krun::VmGenerationWaitOutcome::Processed) => {}
+            Some(msb_krun::VmGenerationWaitOutcome::Failed) => {
+                return Err(RuntimeError::Custom("restored kernel rejected identity-and-clock activation; workloads remain frozen".into()));
+            }
             Some(msb_krun::VmGenerationWaitOutcome::Superseded) => {
                 return Err(RuntimeError::Custom(
                     "restored VM Generation ID request was superseded".into(),
@@ -511,6 +517,7 @@ impl AgentRelay {
             }
         }
         let generation_ack_us = generation_ack_started.elapsed().as_micros();
+        self.kernel_clock_synchronized = true;
 
         let thaw_started = Instant::now();
         self.thaw_restored_workload(restored)?;
@@ -666,7 +673,8 @@ impl AgentRelay {
         // Spawn the ring writer task (client frames → rx_ring → guest).
         let shared_for_writer = Arc::clone(&self.shared);
         let ring_writer_handle = tokio::spawn(ring_writer_task(shared_for_writer, agent_rx));
-        let clock_sync_handle = spawn_clock_sync_task(agent_tx.clone());
+        let clock_sync_handle =
+            spawn_clock_sync_task(agent_tx.clone(), self.kernel_clock_synchronized);
 
         // Spawn the ring reader task (tx_ring → guest frames → clients).
         // When a log writer is attached, the reader also captures

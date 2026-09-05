@@ -937,6 +937,9 @@ fn validate_vm_generation_state(state: Option<msb_krun::VmGenerationState>) -> R
     if !state.driver_ready {
         return Err("guest VM Generation ID driver is not ready for full checkpoints".to_string());
     }
+    if !state.clock_sync_supported {
+        return Err("guest kernel lacks clock-aware activation required for full checkpoints; restart with the updated kernel".to_string());
+    }
     Ok(())
 }
 
@@ -1292,8 +1295,20 @@ mod tests {
         assert!(validate_vm_generation_state(None).is_err());
         assert!(
             validate_vm_generation_state(Some(msb_krun::VmGenerationState {
+                driver_ready: true,
+                driver_error: false,
+                clock_sync_supported: false,
+                requested: None,
+                processed: None,
+            }))
+            .unwrap_err()
+            .contains("clock-aware")
+        );
+        assert!(
+            validate_vm_generation_state(Some(msb_krun::VmGenerationState {
                 driver_ready: false,
                 driver_error: false,
+                clock_sync_supported: false,
                 requested: None,
                 processed: None,
             }))
@@ -1303,6 +1318,7 @@ mod tests {
             validate_vm_generation_state(Some(msb_krun::VmGenerationState {
                 driver_ready: true,
                 driver_error: true,
+                clock_sync_supported: true,
                 requested: None,
                 processed: None,
             }))
@@ -1312,6 +1328,7 @@ mod tests {
             validate_vm_generation_state(Some(msb_krun::VmGenerationState {
                 driver_ready: true,
                 driver_error: false,
+                clock_sync_supported: true,
                 requested: None,
                 processed: None,
             }))

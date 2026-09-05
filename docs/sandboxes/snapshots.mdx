@@ -148,7 +148,7 @@ msb snapshot create worker-checkpoint --from worker --full
 
 Capture briefly quiesces the VM, publishes one same-epoch checkpoint, and returns the source to running state. The first capture records a full memory generation; later captures may reuse unchanged objects through retained dirty tracking while every published manifest still describes complete logical memory.
 
-Creating a sandbox from the resulting snapshot restores into a child-owned disk generation, installs a fresh VM Generation ID, waits for the guest freshness acknowledgement, thaws the captured workload, and publishes network access last. Restore is eager: the archive or installed artifact is no longer needed after construction succeeds.
+Creating a sandbox from the resulting snapshot restores into a child-owned disk generation and installs a fresh VM Generation ID. Before your processes continue, the guest kernel corrects its wall clock and acknowledges activation; the runtime then thaws the workload and publishes network access last. Full restore requires the matching clock-aware kernel. Older development full snapshots must be recaptured, or restored with `--disk-only` where supported. Restore is eager: the archive or installed artifact is no longer needed after construction succeeds.
 
 ## Capture directly to an archive
 
