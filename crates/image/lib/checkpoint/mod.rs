@@ -3,6 +3,7 @@
 //! Checkpoint artifacts keep guest-visible state in canonical, content-addressed objects. Mutable
 //! operation progress, runtime ownership, and provider locations deliberately live elsewhere.
 
+mod layer_selection;
 mod manifest;
 mod qcow;
 mod resolver;
@@ -12,6 +13,7 @@ mod store;
 // Re-Exports
 //--------------------------------------------------------------------------------------------------
 
+pub use layer_selection::{DiskCompactionPlan, DiskLayerExportPlan, LayerSelectionError};
 pub use manifest::{
     CaptureIntent, CheckpointManifest, ContentRef, DeviceStateRef, DiskGenerationManifest,
     DiskLayerRef, MemoryCaptureMode, MemoryExtent, MemoryExtentContent, MemoryManifest,
