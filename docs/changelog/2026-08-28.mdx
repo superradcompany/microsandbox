@@ -24,7 +24,7 @@ See [Fallback guest ownership](/sandboxes/volumes#fallback-guest-ownership).
 
 Sandbox configuration now merges by field presence across three layers: built-in defaults, the persisted global config, and per-sandbox settings, in that precedence order. Config files passed to the CLI overlay left to right. Only the fields you set override lower layers, and network policy always replaces as one unit. The Rust SDK exposes the same model through `SandboxBuilder::overlay` with generated patch types. The generated types replace the earlier handwritten patch types, and `LocalConfig` remains a deprecated alias for `GlobalConfig`.
 
-See [Precedence and merging](/cli/configuration#precedence-and-merging) and [`SandboxBuilder::overlay`](/sdk/rust/sandbox#sandbox-overlay).
+See [Merge precedence](/operations/configuration#merge-precedence) and [`SandboxBuilder::overlay`](/sdk/rust/sandbox#sandbox-overlay).
 
 **Other features**
 

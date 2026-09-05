@@ -65,7 +65,7 @@ Common flags:
 | `--deployment-profile` | Select `single-tenant` or `multi-tenant` host-runtime isolation; managed backends may override it |
 | `--net` | Add a high-level network profile (`public`, `private`, `host`, `all`, or `none`) |
 | `--net-rule` | Add a network policy rule |
-| `--proxy` | Route eligible outbound traffic through a `socks4://IP:PORT` or `socks5://IP:PORT` proxy. Local-only. See [Proxy](#outbound-proxy) |
+| `--proxy` | Route eligible outbound traffic through a `socks4://IP:PORT` or `socks5://IP:PORT` proxy. Local-only. See [Proxies](#outbound-proxy) |
 | `--socks4-user-id` | Optional SOCKS4 user ID. Requires a `socks4://` proxy |
 | `--socks5-username`, `--socks5-password-env` | SOCKS5 username and the host environment variable containing its password. Both flags are required together |
 | `--secret` | Inject a host-held secret for an allowed destination |
@@ -105,7 +105,7 @@ Published ports bind to `127.0.0.1` by default. Use an explicit bind address onl
 
 Use the repeatable `--vsock HOST_PATH:PORT[/stream|/dgram]` flag to expose a host Unix socket or local Windows named pipe on guest host CID `2`. Stream is the default. Datagram routes preserve message boundaries and are unavailable on Windows.
 
-See [VSock](/networking/host-sockets) for guest connection details, limits, and SDK examples.
+See [Host sockets](/networking/host-sockets) for guest connection details, limits, and SDK examples.
 
 ### Network profiles
 
@@ -139,7 +139,7 @@ msb run alpine --proxy socks5://127.0.0.1:1080 \
   --socks5-password-env SOCKS5_PASSWORD
 ```
 
-SOCKS4 carries TCP only. SOCKS5 carries TCP and non-DNS UDP. `--socks5-username` and `--socks5-password-env` must be supplied together and require a `socks5://` proxy. The named environment variable is read from the host when the sandbox starts; the password itself is never placed in the command arguments or durable configuration. Proxy URIs reject user information, paths, query parameters, and fragments. See [Proxy](/networking/outbound-proxy) for routing behavior and limits.
+SOCKS4 carries TCP only. SOCKS5 carries TCP and non-DNS UDP. `--socks5-username` and `--socks5-password-env` must be supplied together and require a `socks5://` proxy. The named environment variable is read from the host when the sandbox starts; the password itself is never placed in the command arguments or durable configuration. Proxy URIs reject user information, paths, query parameters, and fragments. See [Proxies](/networking/outbound-proxy) for routing behavior and limits.
 
 ### Network rule syntax
 
@@ -646,4 +646,4 @@ On Linux x86 hosts, `msb doctor` reports the applicable KVM interrupt-accelerati
 
 Doctor also runs a short-lived clone probe inside `MSB_HOME` and reports whether flat-root `clone=auto` resolves to a native reflink or the portable sparse-copy fallback. The probe files are removed immediately and no host configuration is changed.
 
-See [Optimization](/sandboxes/optimization) for interpreting these checks, choosing sandbox-level policies, and preparing the host storage and virtualization environment.
+See [Performance](/sandboxes/optimization) for interpreting these checks, choosing sandbox-level policies, and preparing the host storage and virtualization environment.

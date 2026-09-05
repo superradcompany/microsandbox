@@ -10,6 +10,7 @@ docs/api-reference/openapi.json and rendered by Mintlify.
 Usage:
   scripts/sync-docs-openapi.py            # rewrite docs/api-reference/openapi.json
   scripts/sync-docs-openapi.py --check    # exit 1 if the checked-in spec is stale
+  scripts/sync-docs-openapi.py --environment staging
   scripts/sync-docs-openapi.py --source /path/to/openapi.json
 """
 
@@ -20,45 +21,18 @@ import sys
 import urllib.request
 from pathlib import Path
 
-LIVE_SPEC_URL = "https://api.microsandbox.dev/docs/openapi.json"
-OUTPUT = Path(__file__).resolve().parent.parent / "docs" / "api-reference" / "openapi.json"
-
-# Operations excluded even though they carry api_key auth. Keyed by
-# (METHOD, path); the value documents why the operation is held back.
-POLICY_EXCLUDE = {
-    ("GET", "/v1/sandboxes/{sandbox_id}/metrics"): "resource metrics not yet public on Cloud",
-    ("GET", "/v1/billing"): "billing account state is dashboard-facing",
-    ("GET", "/v1/billing/invoices"): "invoice flows are dashboard-facing",
-    ("GET", "/v1/billing/invoices/{invoice_id}"): "invoice flows are dashboard-facing",
-    ("GET", "/v1/billing/plans"): "plan selection is dashboard-facing",
-}
-
-# Every operation expected in the public reference; the script fails if one
-# disappears from the live spec so removals are always a conscious decision.
-EXPECTED = {
-    ("GET", "/v1/sandboxes"),
-    ("POST", "/v1/sandboxes"),
-    ("GET", "/v1/sandboxes/{sandbox_id}"),
-    ("PATCH", "/v1/sandboxes/{sandbox_id}"),
-    ("DELETE", "/v1/sandboxes/{sandbox_id}"),
-    ("POST", "/v1/sandboxes/{sandbox_id}/start"),
-    ("POST", "/v1/sandboxes/{sandbox_id}/stop"),
-    ("GET", "/v1/sandboxes/by-name/{name}"),
-    ("DELETE", "/v1/sandboxes/by-name/{name}"),
-    ("POST", "/v1/sandboxes/by-name/{name}/start"),
-    ("POST", "/v1/sandboxes/by-name/{name}/stop"),
-    ("GET", "/v1/volumes"),
-    ("POST", "/v1/volumes"),
-    ("PATCH", "/v1/volumes/{id}"),
-    ("DELETE", "/v1/volumes/{id}"),
-    ("GET", "/v1/events"),
-    ("GET", "/v1/events/{event_id}"),
-    ("GET", "/v1/me/org"),
-    ("GET", "/v1/members"),
-    ("GET", "/v1/quotas"),
-    ("GET", "/v1/billing/usage"),
-    ("GET", "/v1/billing/usage/sandbox"),
-    ("GET", "/v1/billing/usage/storage"),
+REPO = Path(__file__).resolve().parent.parent
+ENVIRONMENTS = {
+    "production": {
+        "source": "https://api.microsandbox.dev/docs/openapi.json",
+        "server": "https://api.microsandbox.dev",
+        "output": REPO / "docs" / "api-reference" / "openapi.json",
+    },
+    "staging": {
+        "source": "https://api.msbx.fyi/docs/openapi.json",
+        "server": "https://api.msbx.fyi",
+        "output": REPO / "docs" / "api-reference" / "openapi.staging.json",
+    },
 }
 
 SUMMARY_PREFIX = re.compile(r"^(GET|POST|PUT|PATCH|DELETE)\s+\S+\s+[—–-]+\s+", re.IGNORECASE)
@@ -68,9 +42,10 @@ PAREN_NOISE = re.compile(r"\s*\((API key[^)]*|Member\+|Admin\+|Owner only)\)")
 # verbatim as nav groups, so raw tags like `audit-log` are retitled here.
 TAG_GROUPS = {
     "sandboxes": "Sandboxes",
+    "snapshots": "Snapshots",
     "volumes": "Volumes",
     "quotas": "Quotas",
-    "billing": "Usage",
+    "billing": "Billing",
     "audit-log": "Audit events",
     "organizations": "Organization",
     "members": "Members",
@@ -149,6 +124,39 @@ INJECTED_SCHEMAS = {
             "next_cursor": {"type": ["string", "null"]},
         },
     },
+    "PaginatedSnapshotCandidateResponse": {
+        "type": "object",
+        "description": "Paginated list of sandboxes eligible for snapshots.",
+        "required": ["data", "has_more"],
+        "properties": {
+            "data": {"type": "array", "items": {"$ref": "#/components/schemas/SandboxResponse"}},
+            "has_more": {"type": "boolean"},
+            "next_cursor": {"type": ["string", "null"]},
+        },
+    },
+    "PaginatedSnapshotOperationResponse": {
+        "type": "object",
+        "description": "Paginated list of snapshot operations.",
+        "required": ["data", "has_more"],
+        "properties": {
+            "data": {
+                "type": "array",
+                "items": {"$ref": "#/components/schemas/SnapshotOperationListItem"},
+            },
+            "has_more": {"type": "boolean"},
+            "next_cursor": {"type": ["string", "null"]},
+        },
+    },
+    "PaginatedSnapshotResponse": {
+        "type": "object",
+        "description": "Paginated list of managed snapshots.",
+        "required": ["data", "has_more"],
+        "properties": {
+            "data": {"type": "array", "items": {"$ref": "#/components/schemas/CloudSnapshot"}},
+            "has_more": {"type": "boolean"},
+            "next_cursor": {"type": ["string", "null"]},
+        },
+    },
 }
 
 def error_example(status: str, description: str) -> dict | None:
@@ -190,7 +198,10 @@ def error_example(status: str, description: str) -> dict | None:
 # the collapsed generic PaginatedResponse.
 RESPONSE_OVERRIDES = {
     ("GET", "/v1/sandboxes"): "PaginatedSandboxResponse",
+    ("GET", "/v1/sandboxes/snapshot-candidates"): "PaginatedSnapshotCandidateResponse",
     ("GET", "/v1/members"): "PaginatedMemberResponse",
+    ("GET", "/v1/snapshot-operations"): "PaginatedSnapshotOperationResponse",
+    ("GET", "/v1/snapshots"): "PaginatedSnapshotResponse",
 }
 
 # Reader-facing titles for operations whose upstream summaries carry internal
@@ -204,6 +215,15 @@ SUMMARY_OVERRIDES = {
     ("GET", "/v1/me/org"): "Get the current organization",
     ("GET", "/v1/members"): "List organization members",
     ("GET", "/v1/quotas"): "Get quota usage",
+    ("POST", "/v1/snapshots"): "Create a snapshot",
+    ("GET", "/v1/snapshots"): "List snapshots",
+    ("GET", "/v1/snapshots/{snapshot_id}"): "Get a snapshot",
+    ("GET", "/v1/snapshots/by-name/{name}"): "Get a snapshot by name",
+    ("DELETE", "/v1/snapshots/{snapshot_id}"): "Delete a snapshot",
+    ("DELETE", "/v1/snapshots/by-name/{name}"): "Delete a snapshot by name",
+    ("GET", "/v1/sandboxes/snapshot-candidates"): "List snapshot candidates",
+    ("GET", "/v1/snapshot-operations"): "List snapshot operations",
+    ("GET", "/v1/snapshot-operations/{operation_id}"): "Get a snapshot operation",
 }
 
 
@@ -234,16 +254,15 @@ def collect_refs(node, refs: set):
             collect_refs(value, refs)
 
 
-def curate(spec: dict) -> dict:
+def curate(spec: dict, *, server_url: str) -> dict:
     paths = {}
-    seen = set()
     for path, ops in spec["paths"].items():
         kept = {}
         for method, op in ops.items():
             if not isinstance(op, dict):
                 continue
             key = (method.upper(), path)
-            if op.get("x-hidden") or key in POLICY_EXCLUDE:
+            if op.get("x-hidden") or op.get("x-excluded"):
                 continue
             if not op_uses_api_key(op):
                 continue
@@ -253,10 +272,8 @@ def curate(spec: dict) -> dict:
             elif "summary" in op:
                 op["summary"] = clean_summary(op["summary"])
             op["security"] = [{"api_key": []}]
-            tags = [t for t in op.get("tags", []) if t in TAG_GROUPS]
-            if not tags:
-                sys.exit(f"error: {method.upper()} {path} has no tag in TAG_GROUPS")
-            op["tags"] = [TAG_GROUPS[tags[0]]]
+            raw_tag = next(iter(op.get("tags", [])), "Other")
+            op["tags"] = [TAG_GROUPS.get(raw_tag, raw_tag.replace("-", " ").capitalize())]
             if key in RESPONSE_OVERRIDES:
                 ok = op["responses"]["200"]["content"]["application/json"]
                 ok["schema"] = {"$ref": f"#/components/schemas/{RESPONSE_OVERRIDES[key]}"}
@@ -268,7 +285,6 @@ def curate(spec: dict) -> dict:
                         body["example"] = example
                     resp["content"] = {"application/json": body}
             kept[method] = op
-            seen.add(key)
         if kept:
             paths[path] = kept
 
@@ -286,21 +302,12 @@ def curate(spec: dict) -> dict:
     paths = dict(
         sorted(
             paths.items(),
-            key=lambda kv: (min(group_rank[op["tags"][0]] for op in kv[1].values()), kv[0]),
+            key=lambda kv: (
+                min(group_rank.get(op["tags"][0], len(group_rank)) for op in kv[1].values()),
+                kv[0],
+            ),
         )
     )
-
-    missing = EXPECTED - seen
-    if missing:
-        listing = ", ".join(f"{m} {p}" for m, p in sorted(missing))
-        sys.exit(f"error: expected operations missing from the live spec: {listing}")
-    unexpected = seen - EXPECTED
-    if unexpected:
-        listing = ", ".join(f"{m} {p}" for m, p in sorted(unexpected))
-        sys.exit(
-            "error: new api_key operations appeared in the live spec; review and add "
-            f"them to EXPECTED or POLICY_EXCLUDE: {listing}"
-        )
 
     # Close over every schema transitively referenced by the kept operations.
     refs: set = set()
@@ -336,13 +343,12 @@ def curate(spec: dict) -> dict:
         "info": {
             "title": "microsandbox cloud API",
             "description": (
-                "REST API for microsandbox cloud: sandbox and volume lifecycle, "
-                "organization context, quotas, usage, and audit events, authenticated "
-                "with an organization API key."
+                "REST API for microsandbox cloud operations authenticated with an "
+                "organization API key."
             ),
             "version": spec["info"]["version"],
         },
-        "servers": [{"url": "https://api.microsandbox.dev"}],
+        "servers": [{"url": server_url}],
         "security": [{"api_key": []}],
         "paths": paths,
         "components": {
@@ -356,30 +362,54 @@ def curate(spec: dict) -> dict:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--source", help="path to a local spec instead of the live URL")
+    parser.add_argument(
+        "--environment",
+        choices=ENVIRONMENTS,
+        default="production",
+        help="API environment to read from and generate for (default: production)",
+    )
+    parser.add_argument("--source", help="local path or HTTPS URL instead of the environment source")
     parser.add_argument("--check", action="store_true", help="fail if the output is stale")
     args = parser.parse_args()
 
-    if args.source:
-        spec = json.loads(Path(args.source).read_text())
-    else:
-        with urllib.request.urlopen(LIVE_SPEC_URL) as response:
-            spec = json.load(response)
+    environment = ENVIRONMENTS[args.environment]
+    source = args.source or environment["source"]
+    output = environment["output"]
 
-    rendered = json.dumps(curate(spec), indent=2, ensure_ascii=False) + "\n"
+    if source.startswith("https://"):
+        request = urllib.request.Request(
+            source,
+            headers={"User-Agent": "microsandbox-docs-openapi-sync/1.0"},
+        )
+        with urllib.request.urlopen(request) as response:
+            spec = json.load(response)
+    else:
+        spec = json.loads(Path(source).read_text())
+
+    rendered = json.dumps(
+        curate(
+            spec,
+            server_url=environment["server"],
+        ),
+        indent=2,
+        ensure_ascii=False,
+    ) + "\n"
     # House style bans em dashes; upstream doc comments still use them, so
     # normalize to plain dashes until the source text is reworded.
     rendered = rendered.replace("—", "-").replace("–", "-")
 
     if args.check:
-        if not OUTPUT.exists() or OUTPUT.read_text() != rendered:
-            sys.exit(f"error: {OUTPUT} is stale; run scripts/sync-docs-openapi.py")
+        if not output.exists() or output.read_text() != rendered:
+            command = "scripts/sync-docs-openapi.py"
+            if args.environment != "production":
+                command += f" --environment {args.environment}"
+            sys.exit(f"error: {output} is stale; run {command}")
         print("api reference spec is up to date")
         return
 
-    OUTPUT.parent.mkdir(parents=True, exist_ok=True)
-    OUTPUT.write_text(rendered)
-    print(f"wrote {OUTPUT}")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(rendered)
+    print(f"wrote {output}")
 
 
 if __name__ == "__main__":

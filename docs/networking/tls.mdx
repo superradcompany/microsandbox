@@ -1,12 +1,13 @@
 ---
-title: TLS MITM
+title: TLS inspection
+sidebarTitle: TLS
 description: Inspect HTTPS traffic and manage certificate trust
 icon: "lock"
 ---
 
-<Tooltip tip="TLS MITM and host CA trust are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="TLS inspection and host CA trust are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
-TLS MITM lets microsandbox inspect HTTPS traffic. This enables URL policy checks, request logging, and secure secret injection for matching hosts.
+TLS inspection lets microsandbox inspect HTTPS traffic. This enables URL policy checks, request logging, and secure secret injection for matching hosts.
 
 ## How it works
 
@@ -184,24 +185,24 @@ msb run alpine --trust-host-cas -- apk update
 Host CA trust gives the guest every root certificate trusted by the host. Enable it only when you trust the host's CA store.
 </Note>
 
-## Interaction with TLS MITM
+## Using both
 
-TLS MITM covers configured ports, with port `443` enabled by default. TLS MITM and host CA trust solve different problems:
+TLS inspection covers configured ports, with port `443` enabled by default. TLS inspection and host CA trust solve different problems:
 
 | Feature | Covers |
 | --- | --- |
-| TLS MITM | Configured TLS ports and hosts that are not bypassed |
+| TLS inspection | Configured TLS ports and hosts that are not bypassed |
 | Host CA trust | Any guest connection that uses the guest's system trust store |
 
 Use both when you need HTTPS inspection and also need raw TLS connections to trust corporate certificates. Raw TLS includes bypassed hosts, custom TLS ports, and protocols such as Postgres or Redis over TLS.
 
 ## Reference
 
-For exact TLS and network APIs, see [TypeScript](/sdk/typescript/networking#tlsbuilder), [Rust](/sdk/rust/networking#tlsbuilder), [Python](/sdk/python/networking#tlsconfig), or [Go](/sdk/go/networking#tlsconfig). For CLI fields and flags, see [Configuration file](/cli/configuration#network) and [Sandbox commands](/cli/sandbox-commands).
+For exact TLS and network APIs, see [TypeScript](/sdk/typescript/networking#tlsbuilder), [Rust](/sdk/rust/networking#tlsbuilder), [Python](/sdk/python/networking#tlsconfig), or [Go](/sdk/go/networking#tlsconfig). For CLI fields and flags, see [Sandbox configuration](/cli/configuration#network) and [Sandbox commands](/cli/sandbox-commands).
 
 ## Related
 
 - [DNS](/networking/dns) explains DNS policy and DNS over TLS.
-- [Proxy](/networking/outbound-proxy) explains routing outbound TCP and non-DNS UDP through an external SOCKS proxy.
+- [Proxies](/networking/outbound-proxy) explains routing outbound TCP and non-DNS UDP through an external SOCKS proxy.
 - [Network defenses](/security/network) explains SSRF protection.
 - [Secret handling](/security/secrets) explains credential injection.

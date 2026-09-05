@@ -19,7 +19,7 @@ Every DNS query must pass the sandbox's egress policy.
 
 The `public`, `private`, and `host` profiles already allow DNS through the gateway. With a custom deny-by-default policy, add the equivalent of `allow_dns()` or use `allow@dns` in the CLI. Otherwise, every lookup will be denied.
 
-DNS over TLS uses TCP port `853` and needs its own allow rule. It also requires [TLS MITM](/networking/tls).
+DNS over TLS uses TCP port `853` and needs its own allow rule. It also requires [TLS inspection](/networking/tls).
 
 DNS rebinding protection is separate from query access. microsandbox rejects private or reserved answers unless an explicit address rule allows them. An allow-by-default policy does not disable this protection. See [Network defenses](/security/network) for the full policy behavior.
 
@@ -167,7 +167,7 @@ An application can request a specific resolver, such as with `dig @1.1.1.1`. Tha
 | Transport | Behavior |
 | --- | --- |
 | UDP or TCP on port `53` | Intercepted |
-| DNS over TLS on TCP port `853` | Intercepted when TLS MITM is enabled |
+| DNS over TLS on TCP port `853` | Intercepted when TLS inspection is enabled |
 | DNS over QUIC, mDNS, LLMNR, and NetBIOS-NS | Refused so the guest can fall back to regular DNS |
 | DNS over HTTPS | Treated as normal HTTPS traffic |
 
@@ -181,9 +181,9 @@ An application that connects directly to a hard-coded IP does not match a domain
 
 ## Reference
 
-For exact DNS and network APIs, see [TypeScript](/sdk/typescript/networking#dnsbuilder), [Rust](/sdk/rust/networking#dnsbuilder), [Python](/sdk/python/networking#dnsconfig), or [Go](/sdk/go/networking#dnsconfig). For CLI fields and flags, see [Configuration file](/cli/configuration#network) and [Sandbox commands](/cli/sandbox-commands).
+For exact DNS and network APIs, see [TypeScript](/sdk/typescript/networking#dnsbuilder), [Rust](/sdk/rust/networking#dnsbuilder), [Python](/sdk/python/networking#dnsconfig), or [Go](/sdk/go/networking#dnsconfig). For CLI fields and flags, see [Sandbox configuration](/cli/configuration#network) and [Sandbox commands](/cli/sandbox-commands).
 
 ## Related
 
 - [Network defenses](/security/network) explains rebinding protection and DNS-to-IP binding.
-- [TLS MITM](/networking/tls) explains inspection for HTTPS and DNS over TLS.
+- [TLS inspection](/networking/tls) explains inspection for HTTPS and DNS over TLS.

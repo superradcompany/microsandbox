@@ -78,7 +78,7 @@ The restricted profile is incompatible with workloads that need those capabiliti
 
 - Inject credentials with [secrets](/security/secrets) and narrow allow lists, so a value only materializes at the destinations that need it.
 - Keep [`trust_host_cas`](/security/network#trusting-host-cas) off unless you're behind a corporate MITM proxy.
-- For credentialed egress you want to inspect, enable [TLS MITM](/networking/tls) and pin [DNS](/networking/dns).
+- For credentialed egress you want to inspect, enable [TLS inspection](/networking/tls) and pin [DNS](/networking/dns).
 
 ## Bound resources and lifetime
 
@@ -92,7 +92,7 @@ The restricted profile is incompatible with workloads that need those capabiliti
 | Trusted internal tool | Default public egress | Root is fine | Mounts as needed |
 | Untrusted code / AI agent with internet | Default, or deny-by-default allowlist | Non-root + restricted | Read-only mounts |
 | Multi-tenant / per-user | Deny-by-default allowlist | Non-root + restricted | No shared writable volumes, one sandbox per tenant |
-| Credential-handling egress | Deny-by-default + TLS MITM | Non-root + restricted | Minimal and read-only, with narrow secret allow lists |
+| Credential-handling egress | Deny-by-default + TLS inspection | Non-root + restricted | Minimal and read-only, with narrow secret allow lists |
 | Fully offline / compute-only | `--no-net` | Non-root + restricted | Read-only or none |
 
 ## Where hardening stops
