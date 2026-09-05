@@ -1,99 +1,165 @@
 ---
 title: Configuration
-description: Set shared defaults, host policy, registry access, and backend profiles
+description: How sandbox settings resolve across defaults, global config, YAML, and explicit inputs
 icon: "sliders"
 ---
 
-microsandbox reads shared configuration from `~/.microsandbox/config.json`. Use this file for defaults and host policy that should apply across the CLI and SDKs. Every field is optional, and a missing file behaves like an empty JSON object.
+A sandbox's settings can come from built-in defaults, the global `config.json`
+on the machine, sandbox YAML files, and values passed directly through the CLI
+or an SDK. Which sources apply depends on how the sandbox is created, so the
+resolution order below is split between command-line and SDK usage.
+
+## Precedence
+
+Layers are applied from lowest to highest precedence. When two layers set the
+same value, the later layer wins.
+
+<Tabs>
+  <Tab title="Command line">
+    <Steps>
+      <Step title="Built-in defaults">
+        Used when no other layer sets a value. This layer is always present.
+      </Step>
+
+      <Step title="Global sandbox defaults">
+        Loaded automatically from `sandbox_defaults` in
+        `~/.microsandbox/config.json`; nothing needs to be passed to load them.
+        A missing file behaves like an empty JSON object.
+
+        These defaults apply to sandboxes created by the local runtime only.
+        Microsandbox cloud uses service-side defaults instead.
+
+        [Global sandbox defaults reference](/configuration#sandbox_defaults)
+      </Step>
+
+      <Step title="Sandbox configuration files">
+        Root files are passed with `--conf`. Scoped files are passed with
+        `--net-conf`, `--resource-conf`, `--runtime-conf`, `--fs-conf`,
+        `--secret-conf`, or `--script-conf`.
+
+        These files are used by the CLI only and are never auto-discovered.
+        Every file must be named explicitly. Multiple files are applied from
+        left to right on the command line.
+
+        [Sandbox config reference](/cli/configuration)
+      </Step>
+
+      <Step title="CLI input">
+        Explicit flags and positional arguments apply last and have the highest
+        precedence. Use them to specialize a file for one invocation.
+
+        [Sandbox commands and flags](/cli/sandbox-commands)
+      </Step>
+    </Steps>
+  </Tab>
+
+  <Tab title="SDKs">
+    <Steps>
+      <Step title="Built-in defaults">
+        Used when no other layer sets a value. This layer is always present.
+      </Step>
+
+      <Step title="Global sandbox defaults">
+        SDKs using the local backend automatically load `sandbox_defaults` from
+        `~/.microsandbox/config.json`. Microsandbox cloud uses service-side
+        defaults instead.
+
+        [Global sandbox defaults reference](/configuration#sandbox_defaults)
+      </Step>
+
+      <Step title="SDK input">
+        Explicit arguments, options, or builder methods apply last and have the
+        highest precedence.
+
+        [SDK overview](/sdk/overview)
+      </Step>
+    </Steps>
+
+    <Note>
+      Sandbox YAML is a CLI configuration surface. SDKs do not load
+      `sandbox.yaml`, root configuration files, or scoped configuration files.
+      Rust applications can use
+      [`SandboxBuilder::overlay`](/sdk/rust/sandbox#sandbox-overlay) for a typed
+      sparse-overlay model instead.
+    </Note>
+  </Tab>
+</Tabs>
+
+## Merge precedence
+
+In the command-line path, each root or scoped file overlays the files to its
+left. Explicit CLI input is applied after every file.
+
+| Value | Merge behavior |
+| --- | --- |
+| Scalar | A later value replaces the earlier value |
+| Map | Keys are combined; a later value replaces an earlier value with the same key |
+| List | A later list replaces the entire earlier list |
+| Network policy | When a later source provides `policy`, `allow`, or `deny`, those values replace the complete earlier policy; other network fields continue to merge |
+
+Maps merge recursively for nested `init`, `network.dns`, `network.tls`, and
+secret definitions. See [Combining files](/cli/configuration#combining-files)
+for CLI-specific constraints and path resolution.
+
+## Exceptions
+
+Some settings resolve outside the sandbox precedence rules above.
+
+<Warning>
+  Host-owned policy is not an overridable sandbox default. A global
+  `deployment_profile` sets the local host's isolation floor and cannot be
+  weakened by a sandbox file, CLI flag, or SDK option.
+</Warning>
+
+Local or cloud selection resolves across explicit SDK selection, environment
+variables, profiles, and the local default. See the
+[selection precedence](/operations/backends#precedence).
+
+Registry authentication resolves across explicit secret names, environment
+variables, and the operating-system keyring. See the
+[authentication resolution order](/configuration#auth-resolution-order).
+Registry and backend credentials should use environment or keyring references
+rather than workload files.
+
+## Existing sandboxes
 
 <Note>
-  This page covers the global JSON configuration. For reusable per-sandbox YAML loaded with `--conf`, see [Configuration file](/cli/configuration). For every global field and accepted value, use the [Global config reference](/configuration).
+  Resolved values are persisted when a local sandbox is created. Editing global
+  or sandbox configuration changes future creations, not an existing sandbox.
+  Use `msb inspect <name> --format json` to inspect effective configuration and
+  [`msb modify`](/cli/sandbox-commands#msb-modify) to plan or apply supported
+  changes. See [Live Modify](/sandboxes/tuning) for the complete change model.
 </Note>
 
-## What belongs in global configuration
+## Ownership
 
-Global configuration is most useful for choices that should be consistent across commands, applications, or sandboxes:
-
-| Area | Use it for | Availability |
+| If the setting is... | Put it in... | It applies to... |
 | --- | --- | --- |
-| Sandbox defaults | CPU, memory, storage layout, shell, workdir, and metrics sampling for new sandboxes | Local |
-| Host policy | Deployment isolation, CPU and NUMA placement, and block writeback | Local |
-| Registry access | Credentials, private CAs, and plain-HTTP registry exceptions | Credentials work everywhere; transport overrides are local |
-| Backend profiles | Named local or cloud targets and API-key references | Everywhere |
-| Host integration | Data paths, database pooling, SSH timeout, and metrics registry capacity | Mostly local |
+| A temporary change or experiment | CLI flags | One invocation |
+| Owned by a reusable workload or repository | [Sandbox YAML](/cli/configuration) | Sandboxes the CLI creates from that file |
+| Selected by application logic | [SDK input](/sdk/overview) | The sandbox created by the application |
+| Owned by a machine or deployment | [Global `config.json`](/configuration) | Sandboxes created in that environment |
 
-Keep workload-specific settings with the workload. A sandbox's image, network policy, mounts, secrets, and lifecycle usually belong in application code, explicit CLI arguments, or a [sandbox configuration file](/cli/configuration).
-
-## Start small
-
-You do not need to copy the full reference example. Add only the defaults your environment owns:
-
-```json
-{
-  "sandbox_defaults": {
-    "cpus": 2,
-    "memory_mib": 1024,
-    "shell": "/bin/bash"
-  },
-  "active_profile": "local",
-  "profiles": {
-    "local": {
-      "backend": "local"
-    },
-    "production": {
-      "backend": "cloud",
-      "api_key_ref": "env:MSB_API_KEY"
-    }
-  }
-}
-```
-
-This makes local the default backend and gives newly created local sandboxes two vCPUs, 1 GiB of memory, and Bash. Select the cloud profile for one command without editing the file:
-
-```bash
-MSB_PROFILE=production msb run python
-```
-
-Prefer environment or keyring references over storing credentials inline. For a private registry, `msb registry login` stores the secret in the operating system credential store and writes only metadata to `config.json`.
-
-## How values resolve
-
-For most sandbox defaults, the most specific input wins:
-
-```text
-highest precedence
-
-  explicit CLI flags or SDK builder settings
-                     |
-                     v
-  ~/.microsandbox/config.json
-                     |
-                     v
-  built-in defaults
-
-lowest precedence
-```
-
-microsandbox resolves these values when it creates a local sandbox and persists the result. Editing `config.json` changes future sandboxes, not existing ones. Use `msb inspect <name> --format json` to inspect a sandbox's effective configuration.
-
-Host-owned policy is intentionally stricter. A global `deployment_profile` sets the local host's isolation floor and cannot be weakened by a per-sandbox CLI or SDK option. Backend selection and registry authentication also have their own resolution rules; follow their reference links before relying on fallback behavior.
-
-## Common paths through the docs
+## References
 
 <CardGroup cols={2}>
   <Card title="Global config reference" icon="list" href="/configuration">
-    Look up every field, default, accepted value, and precedence exception.
+    Look up shared defaults, host policy, registries, metrics, and backend
+    profiles.
   </Card>
 
-  <Card title="Sandbox configuration file" icon="file-code" href="/cli/configuration">
-    Define a reusable sandbox in YAML and load it with `--conf`.
+  <Card title="Sandbox config reference" icon="file-code" href="/cli/configuration">
+    Look up root and scoped YAML fields, validation, and merge behavior.
   </Card>
 
-  <Card title="Backends" icon="route" href="/operations/backends">
-    Configure profiles and understand local-versus-cloud resolution.
+  <Card title="CLI sandbox commands" icon="terminal" href="/cli/sandbox-commands">
+    Look up flags for creating, running, inspecting, and modifying sandboxes.
   </Card>
 
-  <Card title="Optimization" icon="bolt" href="/sandboxes/optimization">
-    Choose resource, placement, storage, and writeback settings from measurements.
+  <Card title="SDK overview" icon="code" href="/sdk/overview">
+    Choose an SDK and configure sandboxes from application code.
   </Card>
 </CardGroup>
+
+For resource, placement, storage, and writeback guidance, continue to
+[Performance](/sandboxes/optimization).

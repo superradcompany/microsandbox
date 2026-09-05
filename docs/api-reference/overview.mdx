@@ -1,7 +1,7 @@
 ---
 title: Overview
-description: The REST API behind the SDKs and CLI
-keywords: ["cloud API", "REST API", "API keys", "endpoint reference"]
+description: Choose the right credential and explore the Cloud API
+keywords: ["cloud API", "REST API", "API keys", "personal access tokens", "endpoint reference"]
 icon: "book-open"
 ---
 
@@ -9,24 +9,37 @@ icon: "book-open"
   microsandbox cloud is in [private beta](/cloud/overview); the API is available to organizations with access.
 </Note>
 
-The microsandbox cloud REST API manages sandboxes, volumes, quotas, usage, and audit events for your organization. It is the control-plane API behind the SDKs and CLI. Reach for it directly from environments without an SDK, or for automation around usage and auditing.
+The microsandbox cloud REST API manages sandboxes and the accounts around them. Use it directly when an SDK does not cover your workflow, or when you need account, billing, or audit endpoints.
 
 For running code in sandboxes (exec, streaming, PTY, file transfer, SSH), use the [SDKs](/sdk/overview) or [CLI](/cli/overview). They speak the sandbox command channel, which is not part of this REST surface.
 
-## Base URL
+## Credentials
 
-```text
-https://api.microsandbox.dev
-```
+The sidebar separates endpoints by who the request represents:
 
-## Authentication
+| Credential | Represents | Use for |
+| --- | --- | --- |
+| API key (`msb_...`) | An organization | Services, SDKs, CLI automation, and organization resources |
+| Personal token (`msb_pat_...`) | A user | Account and organization administration |
 
-Authenticate every request with an organization API key (`msb_...`) as a bearer token. Keys are created in the [dashboard](https://dashboard.microsandbox.dev/access/api-keys). The key identifies your organization; no org identifier appears in these paths.
+API keys and personal tokens are both sent as bearer tokens:
 
 ```bash
-curl https://api.microsandbox.dev/v1/sandboxes \
+MSB_API_URL=https://api.microsandbox.dev
+curl "$MSB_API_URL/v1/sandboxes" \
   -H "Authorization: Bearer $MSB_API_KEY"
 ```
+
+API keys are created in the [dashboard](https://dashboard.microsandbox.dev/access/api-keys). API-key paths infer the organization from the key. Personal-token paths include the organization slug when the request needs an organization.
+
+## Base URLs
+
+| Environment | URL |
+| --- | --- |
+| Production | `https://api.microsandbox.dev` |
+| Staging | `https://api.msbx.fyi` |
+
+Each endpoint page uses the URL for the current docs environment.
 
 ## Errors
 

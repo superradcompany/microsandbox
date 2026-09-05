@@ -1,57 +1,147 @@
 ---
-title: Optimization
+title: Performance
 description: Choose the settings that can improve local sandbox performance
 icon: "bolt"
 ---
 
-There is no single fastest setup. Start with the defaults, measure your workload, and change one setting at a time.
+<Tooltip tip="These settings tune the local runtime. Microsandbox cloud manages its own host configuration."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
-Run these commands before tuning anything:
+There is no single fastest setup. Start with the defaults, measure your
+workload, and change one setting at a time.
+
+The CLI and SDKs can tune individual sandboxes. Use the
+[global config](/configuration) to set host-wide defaults. Sandbox YAML does
+not currently expose these local performance controls.
+
+## Baseline
+
+Check the host and the sandbox before tuning:
 
 ```bash
 msb doctor
-msb inspect worker
+msb inspect my-sandbox
 ```
 
-`msb doctor` checks host capabilities. `msb inspect` shows the settings that a sandbox actually uses.
+`msb doctor` reports host capabilities, including native root-disk cloning and
+interrupt acceleration. `msb inspect` shows the settings the sandbox actually
+uses. Replace `my-sandbox` with the sandbox you want to tune. Decide whether
+you are improving creation time, workload latency, or throughput, then record
+that result at your normal concurrency.
 
-## Quick guide
+## Storage
 
-| If you want to | Start with |
-| --- | --- |
-| Create OCI sandboxes faster | A flat root disk with `clone=auto` |
-| Spread CPU-heavy work across physical cores | `cpu_placement: spread` |
-| Favor cache locality | `cpu_placement: compact` |
-| Tune large memory mappings | Keep THP at `madvise`, then benchmark `always` |
-| Control buffered disk pressure on Linux | Keep block writeback at `auto` |
+Every OCI sandbox has a root disk. Choose its layout based on the bottleneck
+you are trying to remove.
 
-## Storage layout: layered or flat
+<Frame>
+  <img src="/images/storage-layouts.svg" alt="Layered roots share OCI image layers and add a writable layer per sandbox, while flat roots clone a materialized ext4 image into a private disk per sandbox" />
+</Frame>
 
-The default layered root shares OCI layers between sandboxes. A flat root turns the image into one ext4 disk and clones it for each sandbox. This can improve creation time and filesystem-heavy workloads on hosts with copy-on-write cloning.
+| | Layered (default) | Flat |
+| --- | --- | --- |
+| Layout | Shared read-only image layers with a writable layer per sandbox | One ext4 disk cloned per sandbox |
+| Best for | Sharing images and maximum portability | Faster creation and filesystem-heavy work |
+| Disk use | Image layers are shared | Each sandbox gets a private clone |
+| Patches and snapshots | Supported | Not supported |
+| Host needs | None | Copy-on-write support for the fastest cloning |
 
-```bash
-msb pull python:3.12 --materialize flat
+Keep the layered layout unless creation time or filesystem throughput is a
+measured bottleneck.
+
+**Configure a flat root**
+
+<CodeGroup>
+```bash CLI
 msb create python:3.12 --name worker --root-disk flat:8G,clone=auto
 ```
 
-`clone=auto` uses a native copy-on-write clone when available and falls back to a sparse copy. Use the layered root when image layer sharing or maximum portability matters more.
+```typescript TypeScript
+import { Sandbox } from "microsandbox";
 
-See [OCI images](/images/overview#oci-images) for image behavior and [Bootstrap](/sandboxes/bootstrap#flat-oci-rootfs) for flat root details.
+await using sb = await Sandbox.builder("worker")
+  .image("python:3.12")
+  .rootDisk((disk) => disk.flat().size(8192).cloneStrategy("auto"))
+  .create();
+```
 
-## CPU placement
+```rust Rust
+use microsandbox::sandbox::FlatClone;
+use microsandbox::Sandbox;
 
-By default, sandbox vCPU threads follow the host scheduler. On Linux and Windows, microsandbox can place those threads for you.
+let sb = Sandbox::builder("worker")
+    .image("python:3.12")
+    .root_disk_with(|disk| disk.flat().size(8192).clone_strategy(FlatClone::Auto))
+    .create()
+    .await?;
+```
 
-### Choose a policy
+```python Python
+from microsandbox import FlatClone, Image, RootDisk, Sandbox
 
-| Policy | What it does |
+sb = await Sandbox.create(
+    "worker",
+    image=Image.oci(
+        "python:3.12",
+        root_disk=RootDisk.flat(8192, clone=FlatClone.AUTO),
+    ),
+)
+```
+
+```go Go
+sb, err := m.CreateSandbox(ctx, "worker",
+    m.WithImage("python:3.12"),
+    m.WithRootDisk(m.RootDisk.Flat(m.RootDiskFlatOptions{
+        SizeMiB: 8192,
+        Clone:   m.FlatCloneAuto,
+    })),
+)
+```
+</CodeGroup>
+
+To make flat roots the default for future sandboxes, set
+`sandbox_defaults.oci.root_disk` in the [global config](/configuration).
+
+**Prepare for benchmarking**
+
+Missing flat images are materialized automatically. To exclude that one-time
+work from a creation benchmark, prepare the image first:
+
+```bash
+msb pull python:3.12 --materialize flat
+```
+
+Flat roots also have three clone strategies:
+
+| Strategy | Behavior |
 | --- | --- |
-| `inherit` | Leaves placement to the host scheduler. This is the default. |
-| `auto` | Uses available physical cores first, then shares CPUs when needed. |
-| `spread` | Spreads work across physical cores. |
-| `compact` | Keeps work on fewer physical cores for better cache locality. |
+| `auto` | Uses a native copy-on-write clone when available, otherwise makes a sparse copy. |
+| `reflink` | Requires native cloning and fails when the host cannot provide it. |
+| `copy` | Always makes an independent sparse copy. |
 
-Start with `auto` on a dedicated host. Use `spread` for CPU-heavy throughput work. Use `compact` when cache locality or packing more sandboxes onto a host matters most.
+Use `auto` unless clone support is an operational requirement.
+
+**Verify**
+
+Run `msb inspect worker` to see the resolved root layout and clone strategy.
+
+See [Bootstrap](/sandboxes/bootstrap#flat-oci-rootfs) for the flat-root API and
+[OCI images](/images/overview#oci-images) for image behavior.
+
+## CPU
+
+### Policies
+
+Sandbox vCPU threads use the host scheduler by default. Linux and Windows can
+also place those threads according to a policy.
+
+| Policy | Behavior | Use when |
+| --- | --- | --- |
+| `inherit` (default) | Leaves placement to the host scheduler. | You do not need managed placement. |
+| `auto` | Uses available physical cores first, then shares CPUs. | You run a dedicated sandbox host. |
+| `spread` | Spreads work across physical cores. | CPU throughput matters most. |
+| `compact` | Packs work onto fewer physical cores. | Cache locality or host density matters most. |
+
+**Configure placement**
 
 <CodeGroup>
 ```bash CLI
@@ -99,11 +189,13 @@ sb, err := m.CreateSandbox(ctx, "worker",
 ```
 </CodeGroup>
 
-### Keep CPU and memory on one NUMA node
+Set `sandbox_defaults.cpu_placement` in the
+[global config](/configuration) to choose a host-wide default.
 
-Large hosts can have more than one NUMA node. A placement profile can keep a sandbox's CPU and memory on the same node.
+### NUMA
 
-First, define a named profile in the [global config](/configuration):
+On a multi-node host, a placement profile can keep a sandbox's CPU and memory
+on one NUMA node. Define the profile in the [global config](/configuration):
 
 ```json
 {
@@ -118,9 +210,10 @@ First, define a named profile in the [global config](/configuration):
 }
 ```
 
-Then select it when you create the sandbox:
+Then select it when creating the sandbox:
 
-```bash
+<CodeGroup>
+```bash CLI
 msb create python:3.12 \
   --name worker \
   --cpus 2 \
@@ -128,51 +221,191 @@ msb create python:3.12 \
   --placement-profile latency
 ```
 
-`prefer_single` uses one node when enough CPU and memory are available. Otherwise, it falls back to normal placement. Use `strict_single` when the sandbox should fail instead of falling back.
+```typescript TypeScript
+import { Sandbox } from "microsandbox";
 
-### What placement guarantees
+await using sb = await Sandbox.builder("worker")
+  .image("python:3.12")
+  .cpus(2)
+  .cpuPlacement("auto")
+  .placementProfile("latency")
+  .create();
+```
 
-- microsandbox coordinates only sandboxes that share the same `MSB_HOME`.
-- Placement considers the sandbox's maximum CPU count, not only the CPUs online at boot.
-- When exclusive CPU capacity runs out, normal policies may share logical CPUs.
-- Placement does not isolate unrelated host processes or reserve dedicated cores.
-- On macOS, managed policies fall back to `inherit` because hard CPU affinity is not available through a public API.
-- If placement cannot be applied, normal policies fall back to `inherit`. A `strict_single` profile fails instead.
+```rust Rust
+use microsandbox::sandbox::{CpuPlacement, Sandbox};
 
-Use `msb inspect worker` to see the resolved policy and placement result.
+let sb = Sandbox::builder("worker")
+    .image("python:3.12")
+    .cpus(2)
+    .cpu_placement(CpuPlacement::Auto)
+    .placement_profile("latency")
+    .create()
+    .await?;
+```
 
-## Transparent huge pages
+```python Python
+from microsandbox import CpuPlacement, Sandbox
 
-Transparent huge pages, or THP, control how the guest handles large memory mappings.
+sb = await Sandbox.create(
+    "worker",
+    image="python:3.12",
+    cpus=2,
+    cpu_placement=CpuPlacement.AUTO,
+    placement_profile="latency",
+)
+```
 
-| Policy | Use it when |
+```go Go
+sb, err := m.CreateSandbox(ctx, "worker",
+    m.WithImage("python:3.12"),
+    m.WithCPUs(2),
+    m.WithCPUPlacement(m.CPUPlacementAuto),
+    m.WithPlacementProfile("latency"),
+)
+```
+</CodeGroup>
+
+Use `prefer_single` as an optimization: it falls back to normal placement when
+one node cannot fit the sandbox. Use `strict_single` when the workload should
+not start without single-node placement.
+
+**Verify**
+
+Run `msb inspect worker` to see the resolved policy, profile, and assigned host
+CPUs.
+
+### Caveats
+
+- Placement coordinates only sandboxes that share the same `MSB_HOME`.
+- It considers the sandbox's maximum CPU count, including CPUs currently offline.
+- Normal policies may share logical CPUs when exclusive capacity runs out.
+- Placement does not isolate host processes or reserve dedicated cores.
+- macOS falls back to `inherit` because public APIs do not provide hard CPU affinity.
+- Normal policies fall back to `inherit` when placement fails;
+  `strict_single` fails the sandbox instead.
+
+## Memory
+
+Transparent huge pages (THP) control how the guest handles large memory
+mappings.
+
+| Policy | Use when |
 | --- | --- |
-| `madvise` | You want the safe default |
-| `always` | Benchmarks show a gain for large, sustained mappings |
-| `never` | Predictable small-page behavior matters more |
+| `madvise` (default) | You want the safe default. |
+| `always` | Benchmarks show a gain for large, sustained mappings. |
+| `never` | Predictable small-page behavior matters more. |
 
-THP changes take effect the next time the sandbox boots. Keep `madvise` unless real workload tests show a clear improvement.
+THP changes apply on the next boot. Keep `madvise` unless workload tests show
+a clear gain.
 
-## Buffered block writeback
+**Configure THP**
 
-On Linux, block writeback limits how much buffered disk data active sandboxes can hold in host memory.
+<CodeGroup>
+```bash CLI
+msb create python:3.12 --name memory-worker --thp always
+```
 
-- `auto` chooses safe limits from the host. This is the recommended setting.
-- `fixed` uses limits that you provide.
-- `off` disables the limits for new sandboxes.
+```typescript TypeScript
+import { Sandbox } from "microsandbox";
 
-This setting has no effect on non-Linux hosts, read-only disks, or direct I/O. See [Global config](/configuration) for the available fields.
+await using sb = await Sandbox.builder("memory-worker")
+  .image("python:3.12")
+  .thp("always")
+  .create();
+```
 
-## Host interrupt acceleration
+```rust Rust
+use microsandbox::{sandbox::TransparentHugePagePolicy, Sandbox};
 
-On Linux x86 hosts, AMD AVIC and Intel APICv can make virtual interrupt delivery faster. These are host KVM settings, not sandbox settings.
+let sb = Sandbox::builder("memory-worker")
+    .image("python:3.12")
+    .thp(TransparentHugePagePolicy::Always)
+    .create()
+    .await?;
+```
 
-Check their status with `msb doctor`. Read [Linux troubleshooting](/troubleshooting/linux#interrupt-acceleration) before changing a KVM module because the change affects every VM on the host.
+```python Python
+from microsandbox import Sandbox
 
-## Optimizations that are not knobs
+sb = await Sandbox.create(
+    "memory-worker",
+    image="python:3.12",
+    thp="always",
+)
+```
 
-microsandbox automatically selects compatible filesystem, guest kernel, interrupt, and vCPU affinity optimizations. These implementation details do not have user-facing settings.
+```go Go
+sb, err := m.CreateSandbox(ctx, "memory-worker",
+    m.WithImage("python:3.12"),
+    m.WithTHP(m.THPAlways),
+)
+```
+</CodeGroup>
 
-## Measure the result
+Set `sandbox_defaults.thp` in the [global config](/configuration) to choose a
+host-wide default. The policy cannot change with `msb modify`; create or
+replace the sandbox to select another value.
 
-Keep the image, CPU and memory limits, storage, host power settings, and concurrency unchanged while comparing settings. Measure sandbox creation separately from workload performance.
+**Verify**
+
+Run `msb inspect memory-worker` to see the resolved THP policy.
+
+See [Bootstrap](/sandboxes/bootstrap#transparent-huge-pages) for how THP is
+applied and [Live modify](/sandboxes/tuning) for memory sizing and resize
+headroom.
+
+## Writeback
+
+On Linux, block writeback limits the buffered disk data that active sandboxes
+can hold in host memory.
+
+- `auto` derives safe limits from the host and is the recommended setting.
+- `fixed` uses operator-defined limits. Choose it only after measuring a
+  representative workload.
+- `off` removes the limit for new sandboxes, allowing buffered guest writes to
+  create more host-memory pressure.
+
+**Configure writeback**
+
+Writeback is global runtime policy, not a per-sandbox SDK option:
+
+```json
+{
+  "runtime": {
+    "block_writeback": {
+      "mode": "auto"
+    }
+  }
+}
+```
+
+Writeback does not affect non-Linux hosts, read-only disks, or direct I/O. See
+[Global config](/configuration) for `fixed` limits and pool settings.
+
+## Host
+
+On Linux x86, AMD AVIC and Intel APICv can accelerate virtual interrupts. These
+are host-wide KVM policies, not sandbox settings. `msb doctor` reports their
+status without changing them.
+
+The same command probes whether `MSB_HOME` supports native flat-root clones.
+A copy fallback is correct but slower to provision.
+
+Read [Linux troubleshooting](/troubleshooting/linux#interrupt-acceleration)
+before changing a KVM module because the change affects every VM on the host.
+
+## Automatic
+
+microsandbox automatically selects compatible filesystem, guest-kernel,
+interrupt, and vCPU-affinity optimizations. These implementation details do
+not have user-facing settings.
+
+## Measure
+
+- Cache or materialize the same image before each test unless cold-start cost
+  is what you are measuring.
+- Keep CPU, memory, storage, host power settings, and concurrency unchanged.
+- Measure sandbox creation separately from the workload.
+- Repeat each test and compare the median, not a single run.
+- Use `msb inspect` to confirm the intended setting was applied.
