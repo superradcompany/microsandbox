@@ -37,7 +37,7 @@
 - <img height="14" src="https://octicons-col.vercel.app/plug/A770EF"> **Embeddable**: Spawn VMs right within your code. No setup server. No long-running daemon.
 - <img height="14" src="https://octicons-col.vercel.app/lock/A770EF"> **Secrets That Can't Leak**: Unexploitable secret keys that never enter the VM.
 - <img height="14" src="https://octicons-col.vercel.app/database/A770EF"> **Long-Running**: Sandboxes can run in detached mode. Great for long-lived sessions.
-- <img height="14" src="https://octicons-col.vercel.app/terminal/A770EF"> **Agent-Ready**: Your agents can create their own sandboxes with our [Agent Skills](https://github.com/superradcompany/skills) and [MCP server](https://github.com/superradcompany/microsandbox-mcp).
+- <img height="14" src="https://octicons-col.vercel.app/terminal/A770EF"> **Agent-Ready**: Your agents can create their own sandboxes with our [Agent Skills](https://github.com/superradcompany/skills), [MCP server](https://github.com/superradcompany/microsandbox-mcp), and optional host-shell hooks (skills repo; not auto-installed).
 
 <br />
 
@@ -441,6 +441,12 @@ Practical ways to put microsandbox to work:
 > # Claude Code
 > claude mcp add --transport stdio microsandbox -- npx -y microsandbox-mcp
 > ```
+
+#### <img height="14" src="https://octicons-col.vercel.app/shield-lock/A770EF">&nbsp;&nbsp;Optional host-shell hooks
+
+> MCP-only clients do not need this. Coding agents that still have a **host shell** can attach an optional PreToolUse-style hook so `apt` / `brew` / `npm -g` on the workstation is denied unless wrapped in `msb run` / `msb exec`.
+>
+> The hook pack lives in the [skills](https://github.com/superradcompany/skills) repo and is **not** auto-installed. Guest bootstrap / `--init` stays a separate mechanism.
 
 <br />
 
