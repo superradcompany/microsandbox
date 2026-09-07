@@ -62,6 +62,9 @@ jobs:
               - 'sdk/rust/**'
             ruby_binaries:
               - '.github/workflows/check.yml'
+              - 'Cargo.toml'
+              - 'scripts/bump-version.sh'
+              - 'sdk/ruby/lib/microsandbox/version.rb'
               - 'sdk/ruby-binaries/**'
             ruby_package:
               - '.github/workflows/check.yml'

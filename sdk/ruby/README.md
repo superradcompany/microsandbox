@@ -85,6 +85,9 @@ it, so cloud-only users can omit it:
 gem install microsandbox-binaries
 ```
 
+With Bundler, also add `gem "microsandbox-binaries"` to your Gemfile and run
+`bundle install`; installing it globally does not make it available to a bundle.
+
 Alternatively, install the microsandbox runtime and firmware through the SDK:
 
 ```ruby
