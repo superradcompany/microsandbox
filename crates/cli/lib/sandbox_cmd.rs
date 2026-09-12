@@ -266,6 +266,7 @@ pub fn run(args: SandboxArgs) -> ! {
         sandbox_db_path: launch.db_path,
         sandbox_db_connect_timeout_secs: launch.db_connect_timeout_secs,
         log_dir: launch.log_dir,
+        disable_exec_log: launch.disable_exec_log,
         runtime_dir: launch.runtime_dir,
         sandboxes_dir: launch.sandboxes_dir,
         run_dir,
@@ -729,6 +730,20 @@ mod tests {
 
         assert!(loaded.run_dir.as_os_str().is_empty());
         assert_eq!(launch_run_dir(&loaded), PathBuf::from("/tmp/msb/run"));
+    }
+
+    /// A launcher from before `disable_exec_log` sends no such field; its
+    /// sandboxes must keep capturing, which is the default.
+    #[test]
+    fn test_old_launch_config_without_disable_exec_log_keeps_capture_on() {
+        let launch = LaunchConfig {
+            disable_exec_log: true,
+            ..Default::default()
+        };
+        let mut value = serde_json::to_value(&launch).unwrap();
+        value.as_object_mut().unwrap().remove("disable_exec_log");
+        let loaded: LaunchConfig = serde_json::from_value(value).unwrap();
+        assert!(!loaded.disable_exec_log);
     }
 
     #[test]

@@ -1358,6 +1358,7 @@ mod tests {
             rows: 24,
             cols: 80,
             rlimits: Vec::new(),
+            capture: false,
         };
 
         let session = ExecSession::spawn(17, &req, tx, None, SecurityProfile::Default)
@@ -1502,6 +1503,7 @@ mod tests {
                     rows: 24,
                     cols: 80,
                     rlimits: Vec::new(),
+                    capture: false,
                 };
                 ExecSession::spawn(100 + offset, &req, tx, None, SecurityProfile::Default)
             }));
@@ -1591,6 +1593,7 @@ mod tests {
             rows: 24,
             cols: 80,
             rlimits: Vec::new(),
+            capture: false,
         };
         let _session = ExecSession::spawn(id, &req, tx, None, SecurityProfile::Default)
             .expect("spawn session on replacement runtime");
@@ -1692,6 +1695,7 @@ mod tests {
             rows: 24,
             cols: 80,
             rlimits: Vec::new(),
+            capture: false,
         };
 
         let session = ExecSession::spawn(7, &req, tx, None, SecurityProfile::Default)
@@ -1756,6 +1760,7 @@ mod tests {
             rows: 24,
             cols: 80,
             rlimits: Vec::new(),
+            capture: false,
         };
 
         let resolved = resolve_requested_user(&req, Some("0:0")).expect("resolve requested user");
@@ -1774,6 +1779,7 @@ mod tests {
             rows: 24,
             cols: 80,
             rlimits: Vec::new(),
+            capture: false,
         };
 
         let uid = unsafe { libc::getuid() };
@@ -1797,6 +1803,7 @@ mod tests {
             rows: 24,
             cols: 80,
             rlimits: Vec::new(),
+            capture: false,
         };
 
         let resolved = resolve_requested_user(&req, None).expect("resolve absent user");
@@ -1821,6 +1828,7 @@ mod tests {
             rows: 24,
             cols: 80,
             rlimits: Vec::new(),
+            capture: false,
         };
         let user = ResolvedUser {
             uid: 1000,
@@ -1850,6 +1858,7 @@ mod tests {
             rows: 24,
             cols: 80,
             rlimits: Vec::new(),
+            capture: false,
         };
         let root = resolve_user_spec(DEFAULT_USER_SPEC).expect("resolve implicit root");
 
@@ -1874,6 +1883,7 @@ mod tests {
             rows: 24,
             cols: 80,
             rlimits: Vec::new(),
+            capture: false,
         };
         let user = ResolvedUser {
             uid: 1000,
@@ -1902,6 +1912,7 @@ mod tests {
             rows: 24,
             cols: 80,
             rlimits: Vec::new(),
+            capture: false,
         };
 
         // Use the process-wide manager because other tests may have already

@@ -1024,6 +1024,7 @@ impl TryFrom<CloudSandboxSpec> for SandboxSpec {
             log_level: spec.runtime.log_level,
             metrics_sample_interval_ms: None,
             disable_metrics_sample: false,
+            disable_exec_log: false,
         };
 
         Ok(Self {

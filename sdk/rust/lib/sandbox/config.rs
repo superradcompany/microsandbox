@@ -1360,6 +1360,7 @@ mod tests {
                 log_level: Some(SandboxLogLevel::Trace),
                 metrics_sample_interval_ms: Some(750),
                 disable_metrics_sample: true,
+                disable_exec_log: true,
             },
             env: vec![EnvVar::new("A", "B")],
             labels: [("team".to_string(), "infra".to_string())]
@@ -1393,6 +1394,7 @@ mod tests {
         assert_eq!(config.spec.runtime.log_level, Some(SandboxLogLevel::Trace));
         assert_eq!(config.spec.runtime.metrics_sample_interval_ms, Some(750));
         assert!(config.spec.runtime.disable_metrics_sample);
+        assert!(config.spec.runtime.disable_exec_log);
         assert_eq!(config.spec.runtime.workdir.as_deref(), Some("/app"));
         assert_eq!(config.spec.runtime.shell.as_deref(), Some("/bin/bash"));
         assert_eq!(

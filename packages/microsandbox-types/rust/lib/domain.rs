@@ -1035,6 +1035,11 @@ pub struct SandboxRuntimeOptions {
 
     /// Force-disable metrics sampling regardless of `metrics_sample_interval_ms`.
     pub disable_metrics_sample: bool,
+
+    /// Do not record exec output to the sandbox's `exec.log` at all — not
+    /// even the startup command's. For workloads whose output must not reach
+    /// the host's disk; `logs` then has nothing to return.
+    pub disable_exec_log: bool,
 }
 
 /// Environment variable entry.
@@ -1691,6 +1696,7 @@ impl Default for SandboxRuntimeOptions {
             log_level: None,
             metrics_sample_interval_ms: Some(DEFAULT_METRICS_SAMPLE_INTERVAL_MS),
             disable_metrics_sample: false,
+            disable_exec_log: false,
         }
     }
 }

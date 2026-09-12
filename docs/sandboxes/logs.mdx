@@ -25,6 +25,16 @@ msb logs devbox --source system
 msb logs devbox --source all
 ```
 
+## What is recorded
+
+`exec.log` records the sandbox's **workload**: the command a detached `msb run` starts, the foreground command of an attached `msb run`, and the SDK's `exec_default` / `attach_default`. Other exec sessions (`msb exec`, an SDK `exec` or `attach`, and interactive shells above all) are **not** recorded unless they ask. A shell's transcript can carry anything typed or printed, and every chunk of it would otherwise be written to the host's disk.
+
+```bash
+msb exec devbox --capture -- ./migrate.sh
+```
+
+In the SDK, `.capture(true)` on the exec or attach options does the same. To record nothing at all, not even the workload's output, create the sandbox with `--no-exec-log` (`disable_exec_log()` in the SDK, or `sandbox_defaults.disable_exec_log` in `config.json`).
+
 ## Read from the SDK
 
 <CodeGroup>
@@ -88,9 +98,9 @@ recent, err := handle.Logs(ctx, m.LogOptions{
 
 | Source | Meaning |
 |--------|---------|
-| `stdout` | Captured from a non-interactive session's stdout |
-| `stderr` | Captured from a non-interactive session's stderr |
-| `output` | Captured from a PTY session, where stdout and stderr are merged |
+| `stdout` | Captured from a recorded non-interactive session's stdout |
+| `stderr` | Captured from a recorded non-interactive session's stderr |
+| `output` | Captured from a recorded PTY session, where stdout and stderr are merged |
 | `system` | Lifecycle markers plus runtime and kernel diagnostics |
 
 Interactive sessions use a PTY, so stdout and stderr are merged before microsandbox receives them. Non-interactive `exec` calls keep the streams separate.
@@ -114,7 +124,7 @@ msb logs nope --source system
 
 **Program produced no logs**
 
-`msb create` only boots a sandbox. Run something with `msb run`, `msb exec`, or an SDK `exec` call to produce user-program output.
+`msb create` only boots a sandbox, and an ad-hoc `msb exec` or SDK `exec` is not recorded unless it asks for capture (`--capture`, `.capture(true)`). Run the workload with `msb run`, or pass `--capture`. A sandbox created with `--no-exec-log` records nothing.
 
 ## On disk
 
@@ -122,7 +132,7 @@ Sandbox logs live under `<sandbox-dir>/logs/`:
 
 | File | Contents |
 |------|----------|
-| `exec.log` | User-program output as JSON Lines |
+| `exec.log` | The workload's output, and any exec that asked for capture, as JSON Lines |
 | `runtime.log` | Sandbox runtime diagnostics |
 | `kernel.log` | Guest kernel and agent console output |
 | `boot-error.json` | Structured startup failure details, when boot fails early |
