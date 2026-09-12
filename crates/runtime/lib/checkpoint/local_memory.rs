@@ -131,8 +131,11 @@ impl LocalMemoryCapture {
         let temporary = staging.path().join("memory");
         let mut reflink = false;
         if let Some(base) = baseline {
+            // This is a process-local handoff, not durable snapshot publication. On
+            // non-reflink filesystems the ordinary copy helper flushes the entire RAM
+            // backing, unnecessarily extending the source pause by seconds.
             let (_, strategy) =
-                microsandbox_utils::copy::fast_copy_with_strategy(&base.memory.path, &temporary)?;
+                microsandbox_utils::copy::fast_copy_without_sync(&base.memory.path, &temporary)?;
             reflink = strategy == microsandbox_utils::copy::FastCopyStrategy::Reflink;
             #[cfg(unix)]
             {
