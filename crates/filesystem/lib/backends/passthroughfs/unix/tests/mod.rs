@@ -6,6 +6,7 @@
 // `crate::backends::shared::platform::mode_u32` instead.
 #![allow(clippy::unnecessary_cast)]
 
+mod test_anchor_mode;
 mod test_bootstrap;
 mod test_concurrency;
 mod test_config;
@@ -146,6 +147,17 @@ impl TestSandbox {
             _tmp: tmp,
             root,
         }
+    }
+
+    /// Create a sandbox forced into anchor mode, as if the host root had no
+    /// volfs support. Only meaningful on macOS.
+    #[cfg(target_os = "macos")]
+    fn with_anchor_mode() -> Self {
+        let sb = Self::new();
+        sb.fs
+            .volfs_supported
+            .store(false, std::sync::atomic::Ordering::Release);
+        sb
     }
 
     /// Get a default Context (uid=0, gid=0 — root user).

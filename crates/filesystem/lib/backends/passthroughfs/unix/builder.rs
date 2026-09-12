@@ -220,6 +220,9 @@ impl PassthroughFsBuilder {
             unsafe { File::from_raw_fd(fd) }
         };
 
+        #[cfg(target_os = "macos")]
+        let volfs_supported = AtomicBool::new(super::probe_volfs_support(root_fd.as_raw_fd()));
+
         let cfg = cfg_probe;
 
         let quota = cfg.quota_bytes.map(|limit| {
@@ -246,6 +249,8 @@ impl PassthroughFsBuilder {
             has_openat2,
             #[cfg(target_os = "linux")]
             proc_self_fd,
+            #[cfg(target_os = "macos")]
+            volfs_supported,
             quota,
         })
     }

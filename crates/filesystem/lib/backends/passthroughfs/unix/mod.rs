@@ -234,6 +234,18 @@ pub struct PassthroughFs {
     #[cfg(target_os = "linux")]
     pub(crate) proc_self_fd: File,
 
+    /// Whether the share root's filesystem answers `/.vol/<dev>/<ino>` lookups.
+    ///
+    /// Probed once at construction. FSKit-backed filesystems on macOS 15+
+    /// (exFAT, for example) have no volfs; such shares resolve inodes by
+    /// anchor walk from `root_fd` instead of by identity path.
+    ///
+    /// Read by `anchor_mode`; consumed by the anchor-walk fallback added in a
+    /// later change.
+    #[cfg(target_os = "macos")]
+    #[allow(dead_code)]
+    pub(crate) volfs_supported: AtomicBool,
+
     /// Optional guest-write byte budget for this mount's subtree.
     pub(crate) quota: Option<super::quota::DirQuota>,
 }
@@ -385,6 +397,9 @@ impl PassthroughFs {
             unsafe { File::from_raw_fd(fd) }
         };
 
+        #[cfg(target_os = "macos")]
+        let volfs_supported = AtomicBool::new(probe_volfs_support(root_fd.as_raw_fd()));
+
         let quota = cfg.quota_bytes.map(|limit| {
             super::quota::DirQuota::new(
                 cfg.quota_root
@@ -409,12 +424,26 @@ impl PassthroughFs {
             has_openat2,
             #[cfg(target_os = "linux")]
             proc_self_fd,
+            #[cfg(target_os = "macos")]
+            volfs_supported,
             quota,
         })
     }
 }
 
 impl PassthroughFs {
+    /// Whether this share resolves inodes by anchor walk instead of `/.vol`.
+    ///
+    /// Unused outside tests until a later change wires the anchor-walk
+    /// fallback into inode resolution.
+    #[cfg(target_os = "macos")]
+    #[allow(dead_code)]
+    pub(crate) fn anchor_mode(&self) -> bool {
+        !self
+            .volfs_supported
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
     /// Register root inode (inode 1) in the inode table.
     ///
     /// Called during `init()`. The guest kernel sends GETATTR on the root inode
@@ -457,13 +486,9 @@ impl PassthroughFs {
             refcount: AtomicU64::new(2), // libfuse convention: root gets refcount 2
             #[cfg(target_os = "linux")]
             mnt_id,
-            #[cfg(target_os = "linux")]
             anchor_parent: AtomicU64::new(0),
-            #[cfg(target_os = "linux")]
             anchor_name: RwLock::new(Vec::new()),
-            #[cfg(target_os = "linux")]
             aliases: RwLock::new(std::collections::BTreeSet::new()),
-            #[cfg(target_os = "linux")]
             anchor_children: AtomicU64::new(0),
             #[cfg(target_os = "linux")]
             retained_fd: Mutex::new(None),
@@ -1094,6 +1119,36 @@ pub(crate) fn open_root(cfg: &PassthroughConfig) -> io::Result<File> {
     } else {
         open_dir_follow(&cfg.root_dir)
     }
+}
+
+/// Probe whether the filesystem holding `root_fd` supports volfs identity paths.
+///
+/// Opens `/.vol/<dev>/<ino>` for the root directory itself. FSKit-backed
+/// filesystems return ENOENT for every volfs path; a successful open means the
+/// backend can keep using identity paths for this share.
+#[cfg(target_os = "macos")]
+pub(crate) fn probe_volfs_support(root_fd: RawFd) -> bool {
+    let Ok(st) = platform::fstat(root_fd) else {
+        return false;
+    };
+    probe_volfs_path(platform::stat_dev(&st), platform::stat_ino(&st))
+}
+
+/// Open one volfs directory path and report whether it resolved.
+#[cfg(target_os = "macos")]
+pub(crate) fn probe_volfs_path(dev: u64, ino: u64) -> bool {
+    let path = inode::vol_path(dev, ino);
+    let fd = unsafe {
+        libc::open(
+            path.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return false;
+    }
+    unsafe { libc::close(fd) };
+    true
 }
 
 /// Open a directory by path, following symlinks (`O_DIRECTORY`).

@@ -17,10 +17,11 @@
 //! inode is `fstat`'d first and real host symlinks are rejected before reopen.
 
 #[cfg(target_os = "linux")]
-use std::os::fd::{FromRawFd, RawFd};
+use std::fs::File;
 #[cfg(target_os = "linux")]
-use std::{collections::HashSet, fs::File};
+use std::os::fd::{FromRawFd, RawFd};
 use std::{
+    collections::HashSet,
     ffi::CStr,
     io,
     os::fd::AsRawFd,
@@ -28,7 +29,6 @@ use std::{
 };
 
 use super::PassthroughFs;
-#[cfg(target_os = "linux")]
 use crate::backends::shared::inode_table::NamespaceAlias;
 use crate::{
     Entry,
@@ -226,7 +226,7 @@ pub(crate) fn do_lookup(fs: &PassthroughFs, parent: u64, name: &CStr) -> io::Res
     return do_lookup_linux(fs, parent, parent_fd.raw(), name);
 
     #[cfg(target_os = "macos")]
-    return do_lookup_macos(fs, parent_fd.raw(), name);
+    return do_lookup_macos(fs, parent, parent_fd.raw(), name);
 }
 
 /// Linux lookup: open → statx(AT_EMPTY_PATH) → patched_stat (3 syscalls).
@@ -353,13 +353,20 @@ pub(crate) fn register_created_fd(
     let alias = NamespaceAlias::new(parent, name.to_bytes());
     #[cfg(target_os = "macos")]
     let alt_key = InodeAltKey::new(platform::stat_ino(&st), platform::stat_dev(&st));
+    // macOS tracks `(parent, name)` anchors only for a share without volfs.
     #[cfg(target_os = "macos")]
-    let _ = (parent, name);
+    let alias = fs
+        .anchor_mode()
+        .then(|| NamespaceAlias::new(parent, name.to_bytes()));
     let mut inodes = fs.inodes.write().unwrap();
     if let Some(data) = inodes.get_alt(&alt_key).cloned() {
         data.refcount.fetch_add(1, Ordering::Acquire);
         #[cfg(target_os = "linux")]
         register_alias_locked(&mut inodes, &data, alias);
+        #[cfg(target_os = "macos")]
+        if let Some(alias) = alias {
+            register_alias_locked(&mut inodes, &data, alias);
+        }
         return Ok(Entry {
             inode: data.inode,
             generation: 0,
@@ -378,13 +385,9 @@ pub(crate) fn register_created_fd(
         refcount: std::sync::atomic::AtomicU64::new(1),
         #[cfg(target_os = "linux")]
         mnt_id,
-        #[cfg(target_os = "linux")]
         anchor_parent: std::sync::atomic::AtomicU64::new(0),
-        #[cfg(target_os = "linux")]
         anchor_name: std::sync::RwLock::new(Vec::new()),
-        #[cfg(target_os = "linux")]
         aliases: std::sync::RwLock::new(std::collections::BTreeSet::new()),
-        #[cfg(target_os = "linux")]
         anchor_children: std::sync::atomic::AtomicU64::new(0),
         #[cfg(target_os = "linux")]
         retained_fd: std::sync::Mutex::new(None),
@@ -394,6 +397,10 @@ pub(crate) fn register_created_fd(
     inodes.insert(inode_num, alt_key, data.clone());
     #[cfg(target_os = "linux")]
     register_alias_locked(&mut inodes, &data, alias);
+    #[cfg(target_os = "macos")]
+    if let Some(alias) = alias {
+        register_alias_locked(&mut inodes, &data, alias);
+    }
 
     Ok(Entry {
         inode: inode_num,
@@ -412,7 +419,12 @@ pub(crate) fn register_created_fd(
 /// path scheme references files by device+inode identity, making it
 /// stable across renames — similar to Linux's `/proc/self/fd/N`.
 #[cfg(target_os = "macos")]
-fn do_lookup_macos(fs: &PassthroughFs, parent_fd: i32, name: &CStr) -> io::Result<Entry> {
+fn do_lookup_macos(
+    fs: &PassthroughFs,
+    parent: u64,
+    parent_fd: i32,
+    name: &CStr,
+) -> io::Result<Entry> {
     let st = platform::fstatat_nofollow(parent_fd, name)?;
     let alt_key = InodeAltKey::new(platform::stat_ino(&st), platform::stat_dev(&st));
 
@@ -426,10 +438,13 @@ fn do_lookup_macos(fs: &PassthroughFs, parent_fd: i32, name: &CStr) -> io::Resul
         fs.cfg.bind_identity_map.as_ref(),
     )?;
 
-    // Fast path: most lookups hit an already-tracked inode and only need a
-    // refcount bump. We still recheck under the write lock below before
-    // inserting to close the concurrent registration race.
-    {
+    let anchor_mode = fs.anchor_mode();
+    let alias = anchor_mode.then(|| NamespaceAlias::new(parent, name.to_bytes()));
+
+    // Fast path (volfs mode only): most lookups hit an already-tracked inode
+    // and only need a refcount bump. Anchor mode always takes the write lock
+    // because it must record the alias.
+    if !anchor_mode {
         let inodes = fs.inodes.read().unwrap();
         if let Some(data) = inodes.get_alt(&alt_key) {
             data.refcount.fetch_add(1, Ordering::Acquire);
@@ -447,8 +462,11 @@ fn do_lookup_macos(fs: &PassthroughFs, parent_fd: i32, name: &CStr) -> io::Resul
     // Recheck under the write lock so concurrent lookups cannot register two
     // synthetic inode numbers for the same host identity.
     let mut inodes = fs.inodes.write().unwrap();
-    if let Some(data) = inodes.get_alt(&alt_key) {
+    if let Some(data) = inodes.get_alt(&alt_key).cloned() {
         data.refcount.fetch_add(1, Ordering::Acquire);
+        if let Some(alias) = alias {
+            register_alias_locked(&mut inodes, &data, alias);
+        }
         return Ok(Entry {
             inode: data.inode,
             generation: 0,
@@ -465,10 +483,16 @@ fn do_lookup_macos(fs: &PassthroughFs, parent_fd: i32, name: &CStr) -> io::Resul
         ino: platform::stat_ino(&st),
         dev: platform::stat_dev(&st),
         refcount: std::sync::atomic::AtomicU64::new(1),
-        #[cfg(target_os = "macos")]
+        anchor_parent: std::sync::atomic::AtomicU64::new(0),
+        anchor_name: std::sync::RwLock::new(Vec::new()),
+        aliases: std::sync::RwLock::new(std::collections::BTreeSet::new()),
+        anchor_children: std::sync::atomic::AtomicU64::new(0),
         unlinked_fd: std::sync::atomic::AtomicI64::new(-1),
     });
-    inodes.insert(inode_num, alt_key, data);
+    inodes.insert(inode_num, alt_key, data.clone());
+    if let Some(alias) = alias {
+        register_alias_locked(&mut inodes, &data, alias);
+    }
 
     Ok(Entry {
         inode: inode_num,
@@ -568,17 +592,7 @@ pub(crate) fn forget_one_locked(
                 .is_ok()
             {
                 if new == 0 {
-                    #[cfg(target_os = "linux")]
                     maybe_remove_inode_locked(inodes, inode);
-
-                    #[cfg(target_os = "macos")]
-                    {
-                        let ufd = data.unlinked_fd.swap(-1, Ordering::AcqRel);
-                        if ufd >= 0 {
-                            unsafe { libc::close(ufd as i32) };
-                        }
-                        inodes.remove(&inode);
-                    }
                 }
                 break;
             }
@@ -679,7 +693,7 @@ fn inode_alt_key(data: &InodeData) -> InodeAltKey {
     InodeAltKey::new(data.ino, data.dev, data.mnt_id)
 }
 
-#[cfg(target_os = "linux")]
+#[allow(dead_code)]
 fn current_anchor_alias(data: &InodeData) -> Option<NamespaceAlias> {
     let parent = data.anchor_parent.load(Ordering::Acquire);
     if parent == 0 {
@@ -692,7 +706,7 @@ fn current_anchor_alias(data: &InodeData) -> Option<NamespaceAlias> {
     })
 }
 
-#[cfg(target_os = "linux")]
+#[allow(dead_code)]
 fn candidate_aliases(
     data: &InodeData,
     current_anchor: Option<NamespaceAlias>,
@@ -713,7 +727,7 @@ fn candidate_aliases(
     result
 }
 
-#[cfg(target_os = "linux")]
+#[allow(dead_code)]
 fn build_alias_components_locked(
     inodes: &MultikeyBTreeMap<u64, InodeAltKey, Arc<InodeData>>,
     alias: &NamespaceAlias,
@@ -729,7 +743,7 @@ fn build_alias_components_locked(
     Ok(components)
 }
 
-#[cfg(target_os = "linux")]
+#[allow(dead_code)]
 pub(crate) fn build_anchor_components_locked(
     inodes: &MultikeyBTreeMap<u64, InodeAltKey, Arc<InodeData>>,
     inode: u64,
@@ -747,7 +761,7 @@ pub(crate) fn build_anchor_components_locked(
     build_alias_components_locked(inodes, &alias, seen)
 }
 
-#[cfg(target_os = "linux")]
+#[allow(dead_code)]
 fn validate_component(component: &[u8]) -> io::Result<()> {
     if component.is_empty() || component == b"." {
         return Err(platform::einval());
@@ -858,7 +872,7 @@ fn dup_retained_fd_linux(data: &InodeData) -> io::Result<Option<RawFd>> {
     Ok(Some(fd))
 }
 
-#[cfg(target_os = "linux")]
+#[allow(dead_code)]
 fn repair_anchor(fs: &PassthroughFs, inode: u64, alias: &NamespaceAlias) {
     let mut inodes = fs.inodes.write().unwrap();
     let Some(data) = inodes.get(&inode).cloned() else {
@@ -870,7 +884,6 @@ fn repair_anchor(fs: &PassthroughFs, inode: u64, alias: &NamespaceAlias) {
     set_anchor_locked(&mut inodes, &data, Some(alias));
 }
 
-#[cfg(target_os = "linux")]
 pub(crate) fn register_alias_locked(
     inodes: &mut MultikeyBTreeMap<u64, InodeAltKey, Arc<InodeData>>,
     data: &Arc<InodeData>,
@@ -882,7 +895,7 @@ pub(crate) fn register_alias_locked(
     }
 }
 
-#[cfg(target_os = "linux")]
+#[allow(dead_code)]
 pub(crate) fn remove_alias_locked(
     inodes: &mut MultikeyBTreeMap<u64, InodeAltKey, Arc<InodeData>>,
     data: &Arc<InodeData>,
@@ -901,7 +914,6 @@ pub(crate) fn remove_alias_locked(
     data.aliases.read().unwrap().is_empty()
 }
 
-#[cfg(target_os = "linux")]
 fn set_anchor_locked(
     inodes: &mut MultikeyBTreeMap<u64, InodeAltKey, Arc<InodeData>>,
     data: &Arc<InodeData>,
@@ -928,7 +940,6 @@ fn set_anchor_locked(
     }
 }
 
-#[cfg(target_os = "linux")]
 fn decrement_anchor_children_locked(
     inodes: &mut MultikeyBTreeMap<u64, InodeAltKey, Arc<InodeData>>,
     inode: u64,
@@ -954,7 +965,6 @@ fn decrement_anchor_children_locked(
     maybe_remove_inode_locked(inodes, inode);
 }
 
-#[cfg(target_os = "linux")]
 fn maybe_remove_inode_locked(
     inodes: &mut MultikeyBTreeMap<u64, InodeAltKey, Arc<InodeData>>,
     inode: u64,
@@ -975,7 +985,17 @@ fn maybe_remove_inode_locked(
 
     let anchor_parent = data.anchor_parent.load(Ordering::Acquire);
     if let Some(removed) = inodes.remove(&inode) {
-        let _ = removed.retained_fd.lock().unwrap().take();
+        #[cfg(target_os = "linux")]
+        {
+            let _ = removed.retained_fd.lock().unwrap().take();
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let ufd = removed.unlinked_fd.swap(-1, Ordering::AcqRel);
+            if ufd >= 0 {
+                unsafe { libc::close(ufd as i32) };
+            }
+        }
     }
 
     if anchor_parent != 0 {

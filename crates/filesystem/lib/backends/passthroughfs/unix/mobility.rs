@@ -899,6 +899,10 @@ fn inode_data_from_fd(
             ino,
             dev,
             refcount: std::sync::atomic::AtomicU64::new(saved.refcount),
+            anchor_parent: std::sync::atomic::AtomicU64::new(0),
+            anchor_name: RwLock::new(Vec::new()),
+            aliases: RwLock::new(BTreeSet::new()),
+            anchor_children: std::sync::atomic::AtomicU64::new(0),
             unlinked_fd: std::sync::atomic::AtomicI64::new(-1),
         }),
     ))
