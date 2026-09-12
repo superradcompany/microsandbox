@@ -66,15 +66,57 @@ pub(crate) fn do_unlink(
         None => None,
     };
 
+    // In anchor mode the alias must be dropped even for entries that cannot be
+    // opened at all (a symlink fails ELOOP, a socket ENXIO), so take the
+    // identity from the directory entry itself before the unlink, exactly as
+    // `do_rmdir` does.
+    #[cfg(target_os = "macos")]
+    let pre_unlink_stat = if fs.anchor_mode() {
+        platform::fstatat_nofollow(parent_fd.raw(), name).ok()
+    } else {
+        None
+    };
+
+    #[cfg(target_os = "macos")]
+    let pre_unlink_key = pre_unlink_stat.as_ref().map(|st| {
+        crate::backends::shared::inode_table::InodeAltKey::new(
+            platform::stat_ino(st),
+            platform::stat_dev(st),
+        )
+    });
+
+    // Opening a FIFO endpoint is never harmless: a read-open completes the
+    // rendezvous with a waiting writer, so this open could take bytes meant
+    // for the guest and then drop them when the descriptor is released.
+    // Removing a name needs no endpoint — there is no file content to keep
+    // reachable behind a FIFO — so the entry is simply not opened. The
+    // trade-off is that an unlinked FIFO keeps no descriptor, so once its
+    // last name is gone an operation that has only the inode to work from
+    // returns ENOENT where a regular file would still be served; retaining a
+    // reader instead would hold the FIFO open behind the guest's back and
+    // suppress its broken-pipe semantics. Handles keep their own descriptors
+    // and are unaffected.
+    #[cfg(target_os = "macos")]
+    let entry_is_fifo = pre_unlink_stat
+        .as_ref()
+        .is_some_and(|st| st.st_mode & libc::S_IFMT == libc::S_IFIFO);
+
     // Preserve writable access when the host allows it. A read-only fallback
     // still keeps readable files alive without requiring write permission to unlink.
+    // A FIFO is skipped outright, as explained above. `O_NONBLOCK` still guards
+    // the remaining cases, where the entry's type is not known in advance (volfs
+    // mode takes no pre-unlink stat) and a blocking open would park the FUSE
+    // worker. The flag is cleared again once the fd is verified, so a retained
+    // descriptor keeps the blocking semantics the guest expects.
     #[cfg(target_os = "macos")]
-    let pre_unlink_fd = {
+    let pre_unlink_fd = if entry_is_fifo {
+        None
+    } else {
         let mut fd = unsafe {
             libc::openat(
                 parent_fd.raw(),
                 name.as_ptr(),
-                libc::O_RDWR | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+                libc::O_RDWR | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK,
             )
         };
         if fd < 0 {
@@ -82,7 +124,7 @@ pub(crate) fn do_unlink(
                 libc::openat(
                     parent_fd.raw(),
                     name.as_ptr(),
-                    libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+                    libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK,
                 )
             };
         }
@@ -91,15 +133,12 @@ pub(crate) fn do_unlink(
 
     let ret = unsafe { libc::unlinkat(parent_fd.raw(), name.as_ptr(), 0) };
     if ret < 0 {
-        #[cfg(target_os = "linux")]
+        // Capture errno before the close: close(2) can overwrite it.
+        let err = io::Error::last_os_error();
         if let Some(fd) = pre_unlink_fd {
             unsafe { libc::close(fd) };
         }
-        #[cfg(target_os = "macos")]
-        if let Some(fd) = pre_unlink_fd {
-            unsafe { libc::close(fd) };
-        }
-        return Err(platform::linux_error(io::Error::last_os_error()));
+        return Err(platform::linux_error(err));
     }
 
     #[cfg(target_os = "linux")]
@@ -122,30 +161,85 @@ pub(crate) fn do_unlink(
         }
     }
 
-    // Keep a fallback even if a hard link remains: the host can remove that
-    // name without another FUSE unlink. open_inode_fd still reopens linked
-    // inodes through /.vol/ with the requested access flags. In anchor mode
-    // also drop the alias so no reopen tries the removed name.
+    // Volfs mode keeps a fallback even if a hard link remains: the host can
+    // remove that name without another FUSE unlink, and open_inode_fd still
+    // reopens linked inodes through /.vol/ with the requested access flags.
+    // Anchor mode keeps the fd only for an inode that lost its last tracked
+    // name, as Linux does, and drops the alias so no reopen tries the removed
+    // name — that part runs off the pre-unlink directory-entry identity, so it
+    // works for entries the pre-unlink open could not obtain an fd for.
     #[cfg(target_os = "macos")]
-    if let Some(fd) = pre_unlink_fd {
+    if fs.anchor_mode() {
+        // The key and the fd come from two syscalls, so the host can replace
+        // the name between them. A replacement's fd must never be retained as
+        // this inode's data: every later retained-fd read dups or stats it
+        // before any anchor verification runs. Keep it only when it is the
+        // same file the key names; the alias still goes away either way.
+        let verified_fd = match pre_unlink_fd {
+            Some(fd) => match (pre_unlink_key, platform::fstat(fd)) {
+                (Some(key), Ok(st))
+                    if platform::stat_ino(&st) == key.ino && platform::stat_dev(&st) == key.dev =>
+                {
+                    // The unlink itself already succeeded, so a failure to
+                    // restore the blocking flag cannot be reported to the
+                    // guest as a failed unlink. Keep the descriptor — dropping
+                    // it would cost the guest access to the data behind its
+                    // open handles — and say so in the log, because the
+                    // retained fd then reads non-blocking.
+                    if let Err(err) = inode::clear_nonblock_macos(fd) {
+                        tracing::warn!(
+                            ?err,
+                            "macos passthrough kept an unlinked descriptor with O_NONBLOCK set"
+                        );
+                    }
+                    Some(fd)
+                }
+                _ => {
+                    unsafe { libc::close(fd) };
+                    None
+                }
+            },
+            None => None,
+        };
+
+        let mut kept_fd = false;
+        if let Some(alt_key) = pre_unlink_key {
+            let alias = NamespaceAlias::new(parent, name.to_bytes());
+            let mut inodes = fs.inodes.write().unwrap();
+            if let Some(data) = inodes.get_alt(&alt_key).cloned() {
+                let detached = inode::remove_alias_locked(&mut inodes, &data, &alias);
+                if detached && let Some(fd) = verified_fd {
+                    inode::store_unlinked_fd(&data, fd);
+                    kept_fd = true;
+                }
+            }
+        }
+        if !kept_fd && let Some(fd) = verified_fd {
+            unsafe { libc::close(fd) };
+        }
+    } else if let Some(fd) = pre_unlink_fd {
         match platform::fstat(fd) {
             Ok(st) => {
                 let alt_key = crate::backends::shared::inode_table::InodeAltKey::new(
                     st.st_ino,
                     platform::stat_dev(&st),
                 );
-                let mut inodes = fs.inodes.write().unwrap();
+                // Volfs mode only reads the table here, exactly as it did
+                // before anchor mode existed.
+                let inodes = fs.inodes.read().unwrap();
                 match inodes.get_alt(&alt_key).cloned() {
-                    Some(data) if fs.anchor_mode() => {
-                        let alias = NamespaceAlias::new(parent, name.to_bytes());
-                        let detached = inode::remove_alias_locked(&mut inodes, &data, &alias);
-                        if detached {
-                            inode::store_unlinked_fd(&data, fd);
-                        } else {
-                            unsafe { libc::close(fd) };
+                    Some(data) => {
+                        // As above: the unlink has happened, so the descriptor
+                        // is kept and the flag failure is reported in the log
+                        // instead of being turned into a guest-visible error.
+                        if let Err(err) = inode::clear_nonblock_macos(fd) {
+                            tracing::warn!(
+                                ?err,
+                                "macos passthrough kept an unlinked descriptor with O_NONBLOCK set"
+                            );
                         }
+                        inode::store_unlinked_fd(&data, fd)
                     }
-                    Some(data) => inode::store_unlinked_fd(&data, fd),
                     None => unsafe {
                         libc::close(fd);
                     },
@@ -407,8 +501,11 @@ pub(crate) fn do_rename(
             None
         };
         // Keep the replaced target readable through open handles, as unlink does.
-        // O_NONBLOCK guards against a target that is a FIFO: without it, an
-        // open on a FIFO with no writer would block the FUSE worker.
+        // A FIFO target is never opened: a read-open would complete the
+        // rendezvous with a waiting writer and then discard its bytes, and a
+        // FIFO has no content to keep reachable anyway. For every other type
+        // `O_NONBLOCK` guards against a FIFO swapped in under the name between
+        // the stat and the open.
         let target_probe = if anchor_mode {
             match platform::fstatat_nofollow(new_fd.raw(), newname) {
                 Ok(st) => {
@@ -416,14 +513,50 @@ pub(crate) fn do_rename(
                         platform::stat_ino(&st),
                         platform::stat_dev(&st),
                     );
-                    let fd = unsafe {
-                        libc::openat(
-                            new_fd.raw(),
-                            newname.as_ptr(),
-                            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK,
-                        )
+                    let fd = if st.st_mode & libc::S_IFMT == libc::S_IFIFO {
+                        -1
+                    } else {
+                        unsafe {
+                            libc::openat(
+                                new_fd.raw(),
+                                newname.as_ptr(),
+                                libc::O_RDONLY
+                                    | libc::O_CLOEXEC
+                                    | libc::O_NOFOLLOW
+                                    | libc::O_NONBLOCK,
+                            )
+                        }
                     };
-                    Some((if fd >= 0 { Some(fd) } else { None }, key))
+                    // The stat and the open are two steps, so the name can be
+                    // replaced between them. Without this check the fd of the
+                    // replacement would be retained under the original
+                    // target's identity, and every later retained-fd access
+                    // would skip the anchor identity check.
+                    let fd = if fd >= 0 {
+                        match platform::fstat(fd) {
+                            Ok(opened)
+                                if platform::stat_ino(&opened) == key.ino
+                                    && platform::stat_dev(&opened) == key.dev =>
+                            {
+                                // Nothing has been mutated yet, so a failure
+                                // to restore the blocking flag aborts the
+                                // rename instead of handing the guest a
+                                // descriptor with flags it never asked for.
+                                if let Err(err) = inode::clear_nonblock_macos(fd) {
+                                    unsafe { libc::close(fd) };
+                                    return Err(err);
+                                }
+                                Some(fd)
+                            }
+                            _ => {
+                                unsafe { libc::close(fd) };
+                                None
+                            }
+                        }
+                    } else {
+                        None
+                    };
+                    Some((fd, key))
                 }
                 Err(err) if err.raw_os_error() == Some(libc::ENOENT) => None,
                 Err(err) => return Err(err),
@@ -442,10 +575,12 @@ pub(crate) fn do_rename(
                 )
             };
             if ret < 0 {
+                // Capture errno before the close: close(2) can overwrite it.
+                let err = io::Error::last_os_error();
                 if let Some((Some(fd), _)) = target_probe.as_ref() {
                     unsafe { libc::close(*fd) };
                 }
-                return Err(platform::linux_error(io::Error::last_os_error()));
+                return Err(platform::linux_error(err));
             }
         } else {
             // macOS uses renamex_np for RENAME_SWAP and RENAME_EXCL.
@@ -471,10 +606,12 @@ pub(crate) fn do_rename(
                 )
             };
             if ret < 0 {
+                // Capture errno before the close: close(2) can overwrite it.
+                let err = io::Error::last_os_error();
                 if let Some((Some(fd), _)) = target_probe.as_ref() {
                     unsafe { libc::close(*fd) };
                 }
-                return Err(platform::linux_error(io::Error::last_os_error()));
+                return Err(platform::linux_error(err));
             }
         }
 
@@ -484,6 +621,13 @@ pub(crate) fn do_rename(
             let mut inodes = fs.inodes.write().unwrap();
             let source_data = inodes.get_alt(&source_key).cloned();
 
+            // Each move registers the new alias before removing the old one.
+            // The reverse order can collect the new parent: if the guest has
+            // already forgotten it and the removed alias was its last
+            // dependent, the parent record disappears before the child is
+            // attached to it, and the child becomes unresolvable. Registering
+            // first raises the new parent's dependent count before the old
+            // parent's count drops, and a same-parent rename nets to zero.
             if flags & RENAME_EXCHANGE != 0 {
                 if let Some((fd, target_key)) = target_probe.as_ref()
                     && *target_key == source_key
@@ -494,25 +638,56 @@ pub(crate) fn do_rename(
                     return Ok(());
                 }
 
+                // An exchange moves two entries, and each move can drop the
+                // last anchored child of a directory the guest has already
+                // forgotten. Collecting that directory between the two moves
+                // would strand the second entry on a parent that is no longer
+                // in the table. Pinning both directories defers any such
+                // collection until both anchors are installed. Registering the
+                // new alias first is not enough on its own: an inode that
+                // already has an anchor keeps its dependency counts unchanged
+                // until the old alias goes away.
+                let pinned_olddir = inode::pin_anchor_parent_locked(&inodes, olddir);
+                let pinned_newdir = inode::pin_anchor_parent_locked(&inodes, newdir);
+
                 if let Some(source) = source_data.as_ref() {
-                    let _ = inode::remove_alias_locked(&mut inodes, source, &old_alias);
                     inode::register_alias_locked(&mut inodes, source, new_alias.clone());
+                    let _ = inode::remove_alias_locked(&mut inodes, source, &old_alias);
                 }
                 if let Some((fd, target_key)) = target_probe {
                     if target_key != source_key
                         && let Some(target) = inodes.get_alt(&target_key).cloned()
                     {
-                        let _ = inode::remove_alias_locked(&mut inodes, &target, &new_alias);
                         inode::register_alias_locked(&mut inodes, &target, old_alias);
+                        let _ = inode::remove_alias_locked(&mut inodes, &target, &new_alias);
                     }
                     if let Some(fd) = fd {
                         unsafe { libc::close(fd) };
                     }
                 }
+
+                if pinned_olddir {
+                    inode::unpin_anchor_parent_locked(&mut inodes, olddir);
+                }
+                if pinned_newdir {
+                    inode::unpin_anchor_parent_locked(&mut inodes, newdir);
+                }
             } else {
+                // POSIX: renaming one link of an inode onto another link of the
+                // same inode does nothing at all — both names survive — so the
+                // alias set must stay as it was.
+                if let Some((fd, target_key)) = target_probe.as_ref()
+                    && *target_key == source_key
+                {
+                    if let Some(fd) = fd {
+                        unsafe { libc::close(*fd) };
+                    }
+                    return Ok(());
+                }
+
                 if let Some(source) = source_data.as_ref() {
-                    let _ = inode::remove_alias_locked(&mut inodes, source, &old_alias);
                     inode::register_alias_locked(&mut inodes, source, new_alias.clone());
+                    let _ = inode::remove_alias_locked(&mut inodes, source, &old_alias);
                 }
                 if let Some((fd, target_key)) = target_probe {
                     let source_inode = source_data.as_ref().map(|data| data.inode);

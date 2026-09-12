@@ -574,10 +574,16 @@ pub(crate) fn do_readlink(fs: &PassthroughFs, _ctx: Context, ino: u64) -> io::Re
 
     #[cfg(target_os = "macos")]
     {
-        // On macOS we create real symlinks, so verify it's actually a symlink first.
-        let st = inode::stat_inode(fs, ino)?;
-        if platform::mode_file_type(st.st_mode) != platform::MODE_LNK {
-            return Err(platform::einval());
+        // On macOS we create real symlinks. In volfs mode the type is checked
+        // first because the identity path would otherwise open the target. In
+        // anchor mode the check is left to `readlinkat`, which answers EINVAL
+        // for anything that is not a symlink; a `stat_inode` pre-check there
+        // would only pay for a second anchor walk.
+        if !fs.anchor_mode() {
+            let st = inode::stat_inode(fs, ino)?;
+            if platform::mode_file_type(st.st_mode) != platform::MODE_LNK {
+                return Err(platform::einval());
+            }
         }
 
         let mut buf = vec![0u8; libc::PATH_MAX as usize];

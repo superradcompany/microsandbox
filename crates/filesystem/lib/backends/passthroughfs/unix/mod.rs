@@ -241,11 +241,28 @@ pub struct PassthroughFs {
     /// anchor walk from `root_fd` instead of by identity path.
     ///
     /// Read by `anchor_mode`, which gates the anchor-walk reopen fallback.
+    /// Atomic so tests can force the fallback on a volfs-capable host.
     #[cfg(target_os = "macos")]
     pub(crate) volfs_supported: AtomicBool,
 
     /// Optional guest-write byte budget for this mount's subtree.
     pub(crate) quota: Option<super::quota::DirQuota>,
+
+    /// Test-only hook fired immediately before a blocking FIFO open.
+    ///
+    /// That open is the one point where an anchor reopen waits on another
+    /// process, so tests synchronise on it instead of guessing with a sleep.
+    #[cfg(all(test, target_os = "macos"))]
+    pub(crate) before_blocking_fifo_open: RwLock<Option<Arc<dyn Fn() + Send + Sync>>>,
+
+    /// Test-only count of FIFO endpoint opens attempted by the anchor reopen
+    /// path.
+    ///
+    /// Opening a FIFO endpoint is a rendezvous, so the reopen path must do it
+    /// exactly once per guest open. Counting the attempt rather than the
+    /// result lets a test see an endpoint that was opened and thrown away.
+    #[cfg(all(test, target_os = "macos"))]
+    pub(crate) fifo_endpoint_opens: std::sync::atomic::AtomicUsize,
 }
 
 /// Open directory handle with a lazy point-in-time snapshot.
@@ -425,6 +442,10 @@ impl PassthroughFs {
             #[cfg(target_os = "macos")]
             volfs_supported,
             quota,
+            #[cfg(all(test, target_os = "macos"))]
+            before_blocking_fifo_open: RwLock::new(None),
+            #[cfg(all(test, target_os = "macos"))]
+            fifo_endpoint_opens: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 }

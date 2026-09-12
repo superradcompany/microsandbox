@@ -11,6 +11,8 @@
 //! (the host process lacks `CAP_CHOWN`). Size changes use real `ftruncate`, and timestamp
 //! changes use real `futimens`.
 
+#[cfg(target_os = "macos")]
+use std::ffi::CStr;
 use std::{
     fs::File,
     io,
@@ -20,6 +22,8 @@ use std::{
 
 use super::host_mode::{fchmod_mirror, fchmod_raw, host_strip_priv_bits, mirror_eligible_type};
 use super::{PassthroughFs, inode};
+#[cfg(target_os = "macos")]
+use crate::backends::shared::inode_table::InodeAltKey;
 use crate::{
     Context, SetattrValid,
     backends::shared::{init_binary, platform, stat_override},
@@ -240,7 +244,11 @@ pub(crate) fn do_setattr(
 
         #[cfg(target_os = "macos")]
         if guest_file_type == platform::MODE_LNK {
-            set_symlink_times_macos(fs, ino, &times)?;
+            // `fd` is the verified O_SYMLINK descriptor opened above. That
+            // holds because a FUSE handle on a symlink cannot exist: opening a
+            // symlink inode for I/O fails ELOOP, so `handle` is None here.
+            debug_assert!(handle.is_none(), "symlink setattr cannot carry a handle");
+            set_symlink_times_macos(fs, ino, fd, &times)?;
         } else {
             let ret = unsafe { libc::futimens(fd, times.as_ptr()) };
             if ret < 0 {
@@ -347,6 +355,56 @@ fn stat_handle(fs: &PassthroughFs, handle: u64) -> io::Result<stat64> {
     )
 }
 
+/// Open `name` under `parent_fd` with `O_SYMLINK` and confirm the opened link
+/// is the `expected` identity.
+///
+/// Split out of `open_symlink_inode_fd_macos` so this check can be exercised
+/// on its own. The parent-and-name resolution already refuses a name that no
+/// longer holds the tracked inode, so a test that replaces the entry before
+/// that step never reaches the open and proves nothing about the check here.
+/// This is the window the check covers: the entry is replaced after the name
+/// was verified and before the open.
+///
+/// `O_NONBLOCK` keeps a replacement FIFO from parking the caller, and the
+/// `fstat` comparison closes the substitution gap: on mismatch the fd is
+/// closed and `ENOENT` is returned instead of operating on the wrong file.
+#[cfg(target_os = "macos")]
+pub(crate) fn open_verified_symlink_fd(
+    parent_fd: i32,
+    name: &CStr,
+    expected: InodeAltKey,
+) -> io::Result<i32> {
+    let fd = unsafe {
+        libc::openat(
+            parent_fd,
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_SYMLINK | libc::O_NONBLOCK,
+        )
+    };
+    // Capture errno here, before any caller-owned fd drops: close(2) can
+    // clobber the syscall's errno.
+    if fd < 0 {
+        let err = io::Error::last_os_error();
+        return Err(platform::linux_error(err));
+    }
+    match platform::fstat(fd) {
+        Ok(st)
+            if platform::stat_ino(&st) == expected.ino
+                && platform::stat_dev(&st) == expected.dev =>
+        {
+            Ok(fd)
+        }
+        Ok(_) => {
+            unsafe { libc::close(fd) };
+            Err(platform::enoent())
+        }
+        Err(err) => {
+            unsafe { libc::close(fd) };
+            Err(err)
+        }
+    }
+}
+
 /// Open an `O_SYMLINK` fd on the tracked symlink inode.
 ///
 /// In anchor mode, the anchor's parent-plus-name pair is name-based, so a
@@ -367,34 +425,8 @@ pub(crate) fn open_symlink_inode_fd_macos(fs: &PassthroughFs, ino: u64) -> io::R
             inodes.get(&ino).cloned().ok_or_else(platform::ebadf)?
         };
         let (dir, name) = inode::anchor_parent_and_name_macos(fs, ino)?;
-        let fd = unsafe {
-            libc::openat(
-                dir.raw(),
-                name.as_ptr(),
-                libc::O_RDONLY | libc::O_CLOEXEC | libc::O_SYMLINK | libc::O_NONBLOCK,
-            )
-        };
-        // Capture errno here, before `dir` drops (its Drop calls `close`,
-        // which can clobber the syscall's errno).
-        if fd < 0 {
-            let err = io::Error::last_os_error();
-            return Err(platform::linux_error(err));
-        }
-        return match platform::fstat(fd) {
-            Ok(st)
-                if platform::stat_ino(&st) == data.ino && platform::stat_dev(&st) == data.dev =>
-            {
-                Ok(fd)
-            }
-            Ok(_) => {
-                unsafe { libc::close(fd) };
-                Err(platform::enoent())
-            }
-            Err(err) => {
-                unsafe { libc::close(fd) };
-                Err(err)
-            }
-        };
+        let expected = InodeAltKey::new(data.ino, data.dev);
+        return open_verified_symlink_fd(dir.raw(), &name, expected);
     }
 
     let inodes = fs.inodes.read().unwrap();
@@ -413,22 +445,24 @@ pub(crate) fn open_symlink_inode_fd_macos(fs: &PassthroughFs, ino: u64) -> io::R
     Ok(fd)
 }
 
+/// Apply symlink timestamps on macOS.
+///
+/// In anchor mode `fd` is used directly: `do_setattr` already opened the
+/// symlink through `open_symlink_inode_fd_macos`, which verified the fd's
+/// identity, so `futimens` on it is bound to the tracked inode instead of the
+/// name a `utimensat` would trust — and the anchor walk runs once instead of
+/// twice. Volfs mode keeps the identity-path `utimensat`.
 #[cfg(target_os = "macos")]
 fn set_symlink_times_macos(
     fs: &PassthroughFs,
     ino: u64,
+    fd: i32,
     times: &[libc::timespec; 2],
 ) -> io::Result<()> {
     if fs.anchor_mode() {
-        // `open_symlink_inode_fd_macos` already verifies the fd's identity,
-        // so `futimens` on it is bound to the tracked inode instead of the
-        // name a name-based `utimensat` would trust.
-        let fd = open_symlink_inode_fd_macos(fs, ino)?;
         let ret = unsafe { libc::futimens(fd, times.as_ptr()) };
-        let err = (ret < 0).then(io::Error::last_os_error);
-        unsafe { libc::close(fd) };
-        if let Some(err) = err {
-            return Err(platform::linux_error(err));
+        if ret < 0 {
+            return Err(platform::linux_error(io::Error::last_os_error()));
         }
         return Ok(());
     }

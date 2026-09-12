@@ -252,6 +252,10 @@ impl PassthroughFsBuilder {
             #[cfg(target_os = "macos")]
             volfs_supported,
             quota,
+            #[cfg(all(test, target_os = "macos"))]
+            before_blocking_fifo_open: std::sync::RwLock::new(None),
+            #[cfg(all(test, target_os = "macos"))]
+            fifo_endpoint_opens: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 }
