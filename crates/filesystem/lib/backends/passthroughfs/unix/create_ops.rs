@@ -480,9 +480,16 @@ pub(crate) fn do_link(
 
     #[cfg(target_os = "macos")]
     {
-        let inodes = fs.inodes.read().unwrap();
-        let data = inodes.get(&inode).ok_or_else(platform::ebadf)?;
-        let src_path = format!("/.vol/{}/{}\0", data.dev, data.ino);
+        // Compute the source path in a short-lived block so the inode-table
+        // read guard is dropped before get_inode_fd runs: in anchor mode that
+        // call can reach repair_anchor, which takes the write lock, and a
+        // nested read() on the same RwLock can deadlock against a queued
+        // writer.
+        let src_path = {
+            let inodes = fs.inodes.read().unwrap();
+            let data = inodes.get(&inode).ok_or_else(platform::ebadf)?;
+            format!("/.vol/{}/{}\0", data.dev, data.ino)
+        };
         let newparent_fd = inode::get_inode_fd(fs, newparent)?;
 
         let ret = unsafe {

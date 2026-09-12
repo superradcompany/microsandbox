@@ -240,10 +240,8 @@ pub struct PassthroughFs {
     /// (exFAT, for example) have no volfs; such shares resolve inodes by
     /// anchor walk from `root_fd` instead of by identity path.
     ///
-    /// Read by `anchor_mode`; consumed by the anchor-walk fallback added in a
-    /// later change.
+    /// Read by `anchor_mode`, which gates the anchor-walk reopen fallback.
     #[cfg(target_os = "macos")]
-    #[allow(dead_code)]
     pub(crate) volfs_supported: AtomicBool,
 
     /// Optional guest-write byte budget for this mount's subtree.
@@ -433,11 +431,7 @@ impl PassthroughFs {
 
 impl PassthroughFs {
     /// Whether this share resolves inodes by anchor walk instead of `/.vol`.
-    ///
-    /// Unused outside tests until a later change wires the anchor-walk
-    /// fallback into inode resolution.
     #[cfg(target_os = "macos")]
-    #[allow(dead_code)]
     pub(crate) fn anchor_mode(&self) -> bool {
         !self
             .volfs_supported
