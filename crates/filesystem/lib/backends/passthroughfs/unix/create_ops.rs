@@ -437,7 +437,9 @@ pub(crate) fn do_symlink(
 /// Create a hard link.
 ///
 /// On Linux, uses `/proc/self/fd/N` with `AT_SYMLINK_FOLLOW` to link by fd reference.
-/// On macOS, uses `/.vol/dev/ino` to reference the source inode by identity.
+/// On macOS, uses `/.vol/dev/ino` to reference the source inode by identity when
+/// volfs is available; in anchor mode the source is resolved to a (dirfd, name)
+/// pair by anchor walk.
 pub(crate) fn do_link(
     fs: &PassthroughFs,
     _ctx: Context,
@@ -480,29 +482,40 @@ pub(crate) fn do_link(
 
     #[cfg(target_os = "macos")]
     {
-        // Compute the source path in a short-lived block so the inode-table
-        // read guard is dropped before get_inode_fd runs: in anchor mode that
-        // call can reach repair_anchor, which takes the write lock, and a
-        // nested read() on the same RwLock can deadlock against a queued
-        // writer.
-        let src_path = {
+        // Both `get_inode_fd` and `anchor_parent_and_name_macos` may take the
+        // inode-table write lock (the latter via `repair_anchor`), so neither
+        // may run while a read guard on `fs.inodes` is held.
+        let newparent_fd = inode::get_inode_fd(fs, newparent)?;
+        if fs.anchor_mode() {
+            let (src_dir, src_name) = inode::anchor_parent_and_name_macos(fs, inode)?;
+            let ret = unsafe {
+                libc::linkat(
+                    src_dir.raw(),
+                    src_name.as_ptr(),
+                    newparent_fd.raw(),
+                    newname.as_ptr(),
+                    0,
+                )
+            };
+            if ret < 0 {
+                return Err(platform::linux_error(io::Error::last_os_error()));
+            }
+        } else {
             let inodes = fs.inodes.read().unwrap();
             let data = inodes.get(&inode).ok_or_else(platform::ebadf)?;
-            format!("/.vol/{}/{}\0", data.dev, data.ino)
-        };
-        let newparent_fd = inode::get_inode_fd(fs, newparent)?;
-
-        let ret = unsafe {
-            libc::linkat(
-                libc::AT_FDCWD,
-                src_path.as_ptr() as *const libc::c_char,
-                newparent_fd.raw(),
-                newname.as_ptr(),
-                0,
-            )
-        };
-        if ret < 0 {
-            return Err(platform::linux_error(io::Error::last_os_error()));
+            let src_path = format!("/.vol/{}/{}\0", data.dev, data.ino);
+            let ret = unsafe {
+                libc::linkat(
+                    libc::AT_FDCWD,
+                    src_path.as_ptr() as *const libc::c_char,
+                    newparent_fd.raw(),
+                    newname.as_ptr(),
+                    0,
+                )
+            };
+            if ret < 0 {
+                return Err(platform::linux_error(io::Error::last_os_error()));
+            }
         }
     }
 
@@ -567,23 +580,42 @@ pub(crate) fn do_readlink(fs: &PassthroughFs, _ctx: Context, ino: u64) -> io::Re
             return Err(platform::einval());
         }
 
-        let inodes = fs.inodes.read().unwrap();
-        let data = inodes.get(&ino).ok_or_else(platform::ebadf)?;
-        let path = format!("/.vol/{}/{}\0", data.dev, data.ino);
-
         let mut buf = vec![0u8; libc::PATH_MAX as usize];
-        let ret = unsafe {
-            libc::readlinkat(
-                libc::AT_FDCWD,
-                path.as_ptr() as *const libc::c_char,
-                buf.as_mut_ptr() as *mut libc::c_char,
-                buf.len(),
-            )
+        let len = if fs.anchor_mode() {
+            let (dir, name) = inode::anchor_parent_and_name_macos(fs, ino)?;
+            let ret = unsafe {
+                libc::readlinkat(
+                    dir.raw(),
+                    name.as_ptr(),
+                    buf.as_mut_ptr() as *mut libc::c_char,
+                    buf.len(),
+                )
+            };
+            // Capture errno here, before `dir` drops (its Drop calls
+            // `close`, which can clobber the syscall's errno).
+            if ret < 0 {
+                let err = io::Error::last_os_error();
+                return Err(platform::linux_error(err));
+            }
+            ret
+        } else {
+            let inodes = fs.inodes.read().unwrap();
+            let data = inodes.get(&ino).ok_or_else(platform::ebadf)?;
+            let path = format!("/.vol/{}/{}\0", data.dev, data.ino);
+            let ret = unsafe {
+                libc::readlinkat(
+                    libc::AT_FDCWD,
+                    path.as_ptr() as *const libc::c_char,
+                    buf.as_mut_ptr() as *mut libc::c_char,
+                    buf.len(),
+                )
+            };
+            if ret < 0 {
+                return Err(platform::linux_error(io::Error::last_os_error()));
+            }
+            ret
         };
-        if ret < 0 {
-            return Err(platform::linux_error(io::Error::last_os_error()));
-        }
-        buf.truncate(ret as usize);
+        buf.truncate(len as usize);
         Ok(buf)
     }
 }

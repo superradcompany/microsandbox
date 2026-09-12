@@ -347,8 +347,56 @@ fn stat_handle(fs: &PassthroughFs, handle: u64) -> io::Result<stat64> {
     )
 }
 
+/// Open an `O_SYMLINK` fd on the tracked symlink inode.
+///
+/// In anchor mode, the anchor's parent-plus-name pair is name-based, so a
+/// host-side replacement of the entry between the anchor walk and the
+/// `openat` could hand back a different file: a replacement regular file
+/// would then take xattr/chmod operations meant for the symlink, and a
+/// replacement FIFO would block the open. `O_NONBLOCK` prevents the FIFO
+/// hang, and the post-open `fstat` identity check (against the inode's
+/// tracked `(dev, ino)`, cloned out of the inode table before the anchor
+/// walk so no read guard is held across it) closes the file-substitution
+/// gap: on mismatch the fd is closed and `ENOENT` is returned instead of
+/// operating on the wrong file.
 #[cfg(target_os = "macos")]
 pub(crate) fn open_symlink_inode_fd_macos(fs: &PassthroughFs, ino: u64) -> io::Result<i32> {
+    if fs.anchor_mode() {
+        let data = {
+            let inodes = fs.inodes.read().unwrap();
+            inodes.get(&ino).cloned().ok_or_else(platform::ebadf)?
+        };
+        let (dir, name) = inode::anchor_parent_and_name_macos(fs, ino)?;
+        let fd = unsafe {
+            libc::openat(
+                dir.raw(),
+                name.as_ptr(),
+                libc::O_RDONLY | libc::O_CLOEXEC | libc::O_SYMLINK | libc::O_NONBLOCK,
+            )
+        };
+        // Capture errno here, before `dir` drops (its Drop calls `close`,
+        // which can clobber the syscall's errno).
+        if fd < 0 {
+            let err = io::Error::last_os_error();
+            return Err(platform::linux_error(err));
+        }
+        return match platform::fstat(fd) {
+            Ok(st)
+                if platform::stat_ino(&st) == data.ino && platform::stat_dev(&st) == data.dev =>
+            {
+                Ok(fd)
+            }
+            Ok(_) => {
+                unsafe { libc::close(fd) };
+                Err(platform::enoent())
+            }
+            Err(err) => {
+                unsafe { libc::close(fd) };
+                Err(err)
+            }
+        };
+    }
+
     let inodes = fs.inodes.read().unwrap();
     let data = inodes.get(&ino).ok_or_else(platform::ebadf)?;
     let path = inode::vol_path(data.dev, data.ino);
@@ -371,6 +419,20 @@ fn set_symlink_times_macos(
     ino: u64,
     times: &[libc::timespec; 2],
 ) -> io::Result<()> {
+    if fs.anchor_mode() {
+        // `open_symlink_inode_fd_macos` already verifies the fd's identity,
+        // so `futimens` on it is bound to the tracked inode instead of the
+        // name a name-based `utimensat` would trust.
+        let fd = open_symlink_inode_fd_macos(fs, ino)?;
+        let ret = unsafe { libc::futimens(fd, times.as_ptr()) };
+        let err = (ret < 0).then(io::Error::last_os_error);
+        unsafe { libc::close(fd) };
+        if let Some(err) = err {
+            return Err(platform::linux_error(err));
+        }
+        return Ok(());
+    }
+
     let inodes = fs.inodes.read().unwrap();
     let data = inodes.get(&ino).ok_or_else(platform::ebadf)?;
     let path = inode::vol_path(data.dev, data.ino);
