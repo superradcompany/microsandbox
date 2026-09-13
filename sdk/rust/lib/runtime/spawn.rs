@@ -3540,7 +3540,9 @@ mod tests {
         .unwrap();
         assert_eq!(ready, "ready\n");
         drop(lock);
-        let acquired = super::lock_disk_image_unix(disk.path(), false, None).unwrap();
+        // This particular child has execed, but another parallel test may still be in
+        // pre-exec with a transient copy. Keep our child alive while proving release.
+        let acquired = wait_for_unix_test_disk_release(disk.path()).await;
         assert!(child.try_wait().unwrap().is_none());
         child
             .stdin
@@ -3668,9 +3670,82 @@ mod tests {
         for disk in disks {
             // Retain the ProcessHandle across this acquisition: waiting or stopping must not
             // require the SDK caller to drop its original Sandbox object to release disks.
-            let _acquired = super::lock_disk_image_unix(disk, false, None).unwrap();
+            let _acquired = wait_for_unix_test_disk_release(disk).await;
         }
         assert!(handle.try_wait().unwrap().is_some());
+    }
+
+    #[cfg(unix)]
+    async fn wait_for_unix_test_disk_release(path: &Path) -> std::fs::File {
+        // Parallel tests can fork while our parent still owns these files. CLOEXEC only
+        // closes that unrelated child's copies when it execs, not when our child exits.
+        // Observe release rather than assuming waitpid fences every inherited reference.
+        // A genuinely leaked descriptor still fails this test within the bounded deadline.
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                match super::lock_disk_image_unix(path, false, None) {
+                    Ok(file) => return file,
+                    Err(error) => {
+                        assert!(
+                            error.to_string().contains("incompatible disk mode"),
+                            "unexpected disk-lock error: {error}"
+                        );
+                        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("disk lock was not released after child exit")
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unix_disk_lock_release_waits_for_unrelated_pre_exec_reference() {
+        use std::io::{Read, Write};
+        use std::os::fd::AsRawFd;
+        use std::os::unix::net::UnixStream;
+        use std::os::unix::process::CommandExt;
+
+        let disk = tempfile::NamedTempFile::new().unwrap();
+        let lock = super::lock_disk_image_unix(disk.path(), false, None).unwrap();
+        let (mut parent_gate, child_gate) = UnixStream::pair().unwrap();
+        for gate in [&parent_gate, &child_gate] {
+            gate.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+        }
+        let parent_fd = parent_gate.as_raw_fd();
+        let child_fd = child_gate.as_raw_fd();
+        let mut command = std::process::Command::new("true");
+        unsafe {
+            command.pre_exec(move || {
+                // Only async-signal-safe operations between fork and exec. Close the child's
+                // copy of the parent endpoint so a failed assertion also releases this gate.
+                libc::close(parent_fd);
+                let mut byte = 1_u8;
+                if libc::write(child_fd, (&byte as *const u8).cast(), 1) != 1
+                    || libc::read(child_fd, (&mut byte as *mut u8).cast(), 1) != 1
+                {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        // spawn waits for exec, so hold this unrelated process in another thread while
+        // the test closes its own lock and observes the inherited pre-exec reference.
+        let spawning = std::thread::spawn(move || command.spawn());
+        let mut ready = [0];
+        parent_gate.read_exact(&mut ready).unwrap();
+        drop(child_gate);
+        drop(lock);
+        assert!(super::lock_disk_image_unix(disk.path(), false, None).is_err());
+        let path = disk.path().to_owned();
+        let waiting = tokio::spawn(async move { wait_for_unix_test_disk_release(&path).await });
+        tokio::task::yield_now().await;
+        assert!(!waiting.is_finished());
+        parent_gate.write_all(&[1]).unwrap();
+        assert!(spawning.join().unwrap().unwrap().wait().unwrap().success());
+        let _acquired = waiting.await.unwrap();
     }
 
     #[cfg(unix)]
@@ -4888,7 +4963,13 @@ mod tests {
 
         let rendered = render_args(&config);
         assert!(rendered.contains(&"--rootfs-disk".to_string()));
-        assert!(rendered.iter().any(|arg| arg.ends_with("/test/rootfs.raw")));
+        // Compare path components, including native Windows separators.
+        let root_tail = Path::new("test").join("rootfs.raw");
+        assert!(
+            rendered
+                .iter()
+                .any(|arg| Path::new(arg).ends_with(&root_tail))
+        );
         assert!(rendered.contains(&"--rootfs-disk-format".to_string()));
         assert!(rendered.contains(&"raw".to_string()));
         assert!(

@@ -126,19 +126,19 @@ msb create docker:dind --name docker-app \
   --mount-owned /var/lib/docker:kind=disk,size=10G
 ```
 
+```typescript TypeScript
+const sb = await Sandbox.builder("app").image("alpine")
+  .volume("/data", (v) => v.owned())
+  .volume("/disk", (v) => v.owned({ kind: "disk", sizeMib: 1024 }))
+  .create();
+```
+
 ```rust Rust
 let sb = Sandbox::builder("app")
     .image("alpine")
     .volume("/data", |v| v.owned())
     .volume("/disk", |v| v.owned_with(|d| d.disk().size(1024_u32)))
     .create().await?;
-```
-
-```typescript TypeScript
-const sb = await Sandbox.builder("app").image("alpine")
-  .volume("/data", (v) => v.owned())
-  .volume("/disk", (v) => v.owned({ kind: "disk", sizeMib: 1024 }))
-  .create();
 ```
 
 ```python Python
