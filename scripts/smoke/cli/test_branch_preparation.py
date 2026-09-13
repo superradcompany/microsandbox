@@ -1,8 +1,11 @@
 """VM-free checks for the branch-preparation smoke fixture and its assertions."""
 
 import importlib.util
+import json
 from pathlib import Path
+from types import SimpleNamespace
 import unittest
+from unittest.mock import Mock, patch
 
 
 SPEC = importlib.util.spec_from_file_location(
@@ -54,6 +57,32 @@ class PreparationChecks(unittest.TestCase):
             'operation="local_memory_capture" incremental=true']
         fixture.require_first_incremental("child")
         self.assertIn("child", fixture.report["inherited_baseline"])
+
+    def capacity_fixture(self, states):
+        fixture = object.__new__(SMOKE.PreparationSmoke)
+        fixture.args = SimpleNamespace(timeout=90)
+        fixture.report = {}
+        fixture.persist = Mock()
+        fixture.run = Mock(side_effect=[(json.dumps(state), "") for state in states])
+        return fixture
+
+    def test_wait_for_guest_memory_and_cpu_capacity(self):
+        fixture = self.capacity_fixture([
+            dict(memory_bytes=230 * 1048576, cpus=1),
+            dict(memory_bytes=480 * 1048576, cpus=1),
+            dict(memory_bytes=480 * 1048576, cpus=2)])
+        with patch.object(SMOKE.time, "sleep"):
+            fixture.wait_guest_capacity("source", 512, 2)
+        self.assertEqual(fixture.run.call_count, 3)
+        self.assertEqual(fixture.report["guest_capacity_checks"][0]["observed"]["cpus"], 2)
+        compile(fixture.run.call_args.args[-1], "capacity-probe.py", "exec")
+
+    def test_guest_capacity_timeout_is_not_a_pass(self):
+        fixture = self.capacity_fixture([dict(memory_bytes=230 * 1048576, cpus=1)])
+        with patch.object(SMOKE.time, "monotonic", side_effect=[0, 31]):
+            with self.assertRaisesRegex(AssertionError, "did not converge"):
+                fixture.wait_guest_capacity("source", 512, 2)
+        fixture.persist.assert_not_called()
 
 
 if __name__ == "__main__":

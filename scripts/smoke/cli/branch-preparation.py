@@ -360,6 +360,30 @@ class PreparationSmoke(BASE.Smoke):
         if not result["valid"] or result["filesystem_bytes"] < minimum_disk_bytes:
             raise AssertionError(output)
 
+    def wait_guest_capacity(self, name, memory_mib, cpus):
+        # modify acknowledges the host target before Linux finishes onlining RAM/CPUs.
+        # Allocating the grown heap immediately can OOM-kill the worker during that gap.
+        # MemTotal excludes kernel reservations; this is a capacity gate for the workload,
+        # not an assertion that usable RAM must equal the configured VM allocation.
+        minimum_bytes = (memory_mib - 64) * 1048576
+        deadline = time.monotonic() + min(30, self.args.timeout)
+        probe = ("import json,os; print(json.dumps(dict(memory_bytes="
+                 "os.sysconf('SC_PHYS_PAGES')*os.sysconf('SC_PAGE_SIZE'),"
+                 "cpus=os.sysconf('SC_NPROCESSORS_ONLN'))))")
+        while True:
+            output = self.run("wait-capacity-" + name, "exec", name, "--", "python3", "-c",
+                              probe, timeout=min(5, self.args.timeout))[0]
+            capacity = json.loads(output)
+            if capacity["memory_bytes"] >= minimum_bytes and capacity["cpus"] >= cpus:
+                self.report.setdefault("guest_capacity_checks", []).append(dict(
+                    name=name, requested_memory_mib=memory_mib, requested_cpus=cpus,
+                    observed=capacity))
+                self.persist()
+                return
+            if time.monotonic() >= deadline:
+                raise AssertionError(f"guest capacity did not converge after resize: {capacity}")
+            time.sleep(0.05)
+
     def exercise(self):
         self.create("source", self.args.image, "--memory", "256M", "--max-memory", "768M",
                     "--cpus", "1", "--max-cpus", "2", "--root-disk", "1G",
@@ -400,6 +424,7 @@ class PreparationSmoke(BASE.Smoke):
 
         self.run("grow-memory-and-cpus", "modify", "source", "--memory", "512M",
                  "--cpus", "2", "--format", "json")
+        self.wait_guest_capacity("source", 512, 2)
         self.probe("populate-grown-ram", "source", "/grow")
         self.probe("advance-after-growth", "source", "/advance")
         self.progressing_branch("source", "grown")
@@ -461,6 +486,7 @@ class PreparationSmoke(BASE.Smoke):
             # the complete extra-memory validation in both cases.
             self.run("grow-restored-child", "modify", "great-grandchild", "--memory", "512M",
                      "--cpus", "2", "--format", "json")
+            self.wait_guest_capacity("great-grandchild", 512, 2)
             self.probe("populate-restored-grown-ram", "great-grandchild", "/grow")
             self.progressing_branch("great-grandchild", "grown-descendant")
             self.verify("grown-descendant", 0, "great", extra_bytes=256 * 1048576)
