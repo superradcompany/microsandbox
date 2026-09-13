@@ -369,6 +369,7 @@
               "examples/automation/dependency-audits",
               "examples/automation/parallel-batch-jobs",
               "examples/plugins/terraform",
+              "examples/browser-automation/browser-use",
               "examples/browser-automation/playwright",
               "examples/web-automation/scrapy",
               "examples/file-processing/libreoffice-pdf",

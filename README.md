@@ -382,6 +382,7 @@ Practical ways to put microsandbox to work:
 
 > • <img height="14" src="https://octicons-col.vercel.app/container/A770EF"> **[Docker in a Sandbox](https://docs.microsandbox.dev/examples/docker/docker-in-sandbox)**: Run Docker without touching the host daemon.<br />
 > • <img height="14" src="https://octicons-col.vercel.app/code/A770EF"> **[OpenCode](https://docs.microsandbox.dev/examples/agents/opencode)**: Give a coding agent an isolated project workspace.<br />
+> • <img height="14" src="https://octicons-col.vercel.app/globe/A770EF"> **[Browser Use](https://docs.microsandbox.dev/examples/browser-automation/browser-use)**: Run an AI browser agent inside a microVM.<br />
 > • <img height="14" src="https://octicons-col.vercel.app/globe/A770EF"> **[Playwright](https://docs.microsandbox.dev/examples/browser-automation/playwright)**: Run headless browser jobs inside a microVM.<br />
 > • <img height="14" src="https://octicons-col.vercel.app/cache/A770EF"> **[Warm Workers](https://docs.microsandbox.dev/examples/sandboxing/warm-workers)**: Snapshot a toolchain and launch clean workers.<br />
 > • <img height="14" src="https://octicons-col.vercel.app/database/A770EF"> **[Migration Rehearsal](https://docs.microsandbox.dev/examples/data/migration-rehearsal)**: Test a database migration, then restore the baseline.<br />
