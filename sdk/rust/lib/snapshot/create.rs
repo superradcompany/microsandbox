@@ -279,6 +279,7 @@ async fn capture_installed(
             &source_sandbox,
             labels,
             model,
+            record_integrity,
         )
         .await;
     }
@@ -421,6 +422,7 @@ async fn create_full_snapshot(
     source_sandbox: &str,
     labels: Vec<(String, String)>,
     model: sandbox_entity::Model,
+    record_integrity: bool,
 ) -> MicrosandboxResult<StagedSnapshot> {
     let dest_dir = destination.path;
     let total_started = Instant::now();
@@ -438,7 +440,8 @@ async fn create_full_snapshot(
     // The runtime owns capture and recovery even if this client disappears. Do not allocate an
     // artifact staging directory while waiting for it: there is nothing to stage until capture
     // succeeds. The guard also removes partial materialization on ordinary errors/cancellation.
-    let captured = capture_full_snapshot(local, source_sandbox, labels, model).await?;
+    let captured =
+        capture_full_snapshot(local, source_sandbox, labels, model, record_integrity).await?;
     let capture_us = capture_started.elapsed().as_micros();
     stage_full_snapshot(
         destination,
@@ -582,7 +585,8 @@ pub(super) async fn create_snapshot_archive(
     }
     if full {
         let capture_started = Instant::now();
-        let mut captured = capture_full_snapshot(local, &source_sandbox, labels, model).await?;
+        let mut captured =
+            capture_full_snapshot(local, &source_sandbox, labels, model, record_integrity).await?;
         lineage
             .validate_source(local, &source_sandbox)
             .await
@@ -824,6 +828,7 @@ async fn capture_full_snapshot(
     source_sandbox: &str,
     labels: Vec<(String, String)>,
     model: sandbox_entity::Model,
+    record_integrity: bool,
 ) -> MicrosandboxResult<CapturedFullSnapshot> {
     if model.status != SandboxStatus::Running {
         return Err(MicrosandboxError::unsupported(
@@ -842,9 +847,13 @@ async fn capture_full_snapshot(
     let root_disk = snapshot_root_disk(sandbox_config.spec.image.oci_root_disk(), source_sandbox)?;
 
     let checkpoint_id = format!("checkpoint_{:032x}", rand::random::<u128>());
-    let outcome =
-        crate::sandbox::control_checkpoint_create(local, source_sandbox, checkpoint_id.clone())
-            .await?;
+    let outcome = crate::sandbox::control_checkpoint_create(
+        local,
+        source_sandbox,
+        checkpoint_id.clone(),
+        record_integrity,
+    )
+    .await?;
     let checkpoint = outcome.checkpoint;
     let validated = (|| {
         if checkpoint.checkpoint_id != checkpoint_id {

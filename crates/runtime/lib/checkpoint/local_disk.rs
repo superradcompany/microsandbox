@@ -24,7 +24,7 @@ const MAX_RECEIPTS: usize = 32;
 #[serde(deny_unknown_fields)]
 struct DiskReceipt {
     filename: PathBuf,
-    root: String,
+    root: Option<String>,
     stamp: FileStamp,
 }
 
@@ -38,7 +38,7 @@ struct FileStamp {
 
 /// Retained handles prevent receipt identities being recycled while constructing the child.
 pub(super) struct LocalDiskAdmissions {
-    layers: Vec<(File, FileStamp, String)>,
+    layers: Vec<(File, FileStamp, Option<String>)>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -46,7 +46,7 @@ pub(super) struct LocalDiskAdmissions {
 //--------------------------------------------------------------------------------------------------
 
 impl LocalDiskAdmissions {
-    pub(super) fn publish(root: &Path, layers: &[(PathBuf, String)]) -> io::Result<()> {
+    pub(super) fn publish(root: &Path, layers: &[(PathBuf, Option<String>)]) -> io::Result<()> {
         let mut receipts = layers
             .iter()
             .map(|(path, root)| {
@@ -102,7 +102,9 @@ impl LocalDiskAdmissions {
             let expected = disks.iter().flat_map(|disk| &disk.layers).find(|layer| {
                 receipt.filename == Path::new(&format!("{}.{}", layer.layer_id, layer.format))
             });
-            if expected.is_none_or(|layer| layer.integrity_root != receipt.root) {
+            if expected.is_none_or(|layer| {
+                layer.integrity_root != receipt.root || layer.file_size != receipt.stamp.length
+            }) {
                 return Err(io::Error::other(
                     "local disk receipt does not match captured disk",
                 ));
@@ -127,7 +129,7 @@ impl LocalDiskAdmissions {
                 if candidate != *stamp {
                     return Err("local disk binding changed during child construction".into());
                 }
-                return Ok(Some(root.clone()));
+                return Ok(root.clone());
             }
         }
         Ok(None)
@@ -243,13 +245,14 @@ mod tests {
             let path = root.join("layers").join(format!("{id}.raw"));
             std::fs::write(&path, vec![0x55; index + 1]).unwrap();
             let integrity = sparse_file_integrity(&path).unwrap().root;
-            sources.push((path, integrity.clone()));
+            sources.push((path, Some(integrity.clone())));
             layers.push(DiskLayerRef {
+                file_size: (index + 1) as u64,
                 layer_id: id,
                 format: "raw".into(),
                 virtual_size: 4096,
                 predecessor: None,
-                integrity_root: integrity,
+                integrity_root: Some(integrity),
             });
         }
         LocalDiskAdmissions::publish(root, &sources).unwrap();
@@ -279,14 +282,14 @@ mod tests {
             .unwrap();
         assert_eq!(
             admissions.reuse_for(&linked).unwrap(),
-            Some(disk.layers[0].integrity_root.clone())
+            disk.layers[0].integrity_root.clone()
         );
         assert_eq!(admissions.reuse_for(&copied).unwrap(), None);
         assert!(link_exact(&copied, &linked).is_err());
         std::fs::remove_file(&source).unwrap();
         assert_eq!(
             admissions.reuse_for(&linked).unwrap(),
-            Some(disk.layers[0].integrity_root.clone())
+            disk.layers[0].integrity_root.clone()
         );
     }
 

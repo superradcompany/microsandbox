@@ -576,8 +576,8 @@ export class Sandbox implements AsyncDisposable {
   }
 
   /** Create an independent local CoW child without a durable full snapshot. */
-  async branch(name: string): Promise<Sandbox> {
-    const child = await withMappedErrors(() => this.inner.branch(name));
+  async branch(name: string, options: { recordIntegrity?: boolean } = {}): Promise<Sandbox> {
+    const child = await withMappedErrors(() => this.inner.branch(name, options.recordIntegrity));
     return new Sandbox(child, name, false);
   }
 

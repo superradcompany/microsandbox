@@ -66,6 +66,7 @@ pub(crate) struct CheckpointCoordinator {
     cached_baseline: Option<(MemoryManifest, super::CachedMemory)>,
     local_cache_root: Option<PathBuf>,
     local_baseline: Option<LocalMemoryPin>,
+    inherited_memory: Option<LocalMemoryPin>,
     boot_geometry: (u8, u8, u32, u32),
 }
 
@@ -427,8 +428,15 @@ impl CheckpointCoordinator {
             cached_baseline: None,
             local_cache_root: vm.memory_cache_dir.clone(),
             local_baseline: None,
+            inherited_memory: None,
             boot_geometry: (vm.vcpus, vm.max_cpus, vm.memory_mib, vm.max_memory_mib),
         })
+    }
+
+    /// Retain the admitted restore image before the VMM is constructed. Its parent's token is
+    /// not usable here; the first capture binds this pin to the new VMM's construction token.
+    pub(crate) fn inherit_local_memory(&mut self, memory: Option<LocalMemoryPin>) {
+        self.inherited_memory = memory;
     }
 
     /// Seal the owned disk at a crash-consistent cut without capturing RAM or guest execution.
@@ -469,7 +477,8 @@ impl CheckpointCoordinator {
         // Only the root block worker is drained and switched. Rollover inspects its state,
         // but no full CPU/device payload, RAM scan, guest handshake, or dirty-baseline update
         // is needed. The result is a crash-consistent disk cut, not an execution checkpoint.
-        let result = disk.rollover(vm, &self.runtime, &path, pause.get(), false);
+        // Disk-only packaging applies the caller's optional integrity policy after this cut.
+        let result = disk.rollover(vm, &self.runtime, &path, pause.get(), false, false);
         if user_pause.is_none() && !result.as_ref().is_err_and(|e| e.keep_paused) {
             vm.resume(pause).map_err(Failure::post_journal)?;
         }
@@ -501,8 +510,17 @@ impl CheckpointCoordinator {
         checkpoint_id: &str,
         intent: CaptureIntent,
         user_pause: Option<&UserPause>,
+        record_integrity: bool,
     ) -> Result<CheckpointResult, CheckpointFailure> {
-        self.capture_to(vm, checkpoint_id, intent, user_pause, None)
+        self.capture_to(
+            vm,
+            checkpoint_id,
+            intent,
+            user_pause,
+            None,
+            None,
+            record_integrity,
+        )
     }
 
     /// Capture a local handoff directly, without publishing a portable RAM closure.
@@ -513,6 +531,8 @@ impl CheckpointCoordinator {
         child_name: &str,
         reserved_cache: &Path,
         user_pause: Option<&UserPause>,
+        memory_backing: Option<&std::fs::File>,
+        record_integrity: bool,
     ) -> Result<CheckpointResult, CheckpointFailure> {
         let cache = self.local_cache_root.as_ref().ok_or_else(|| {
             CheckpointFailure::before_pause("runtime has no backend-resolved memory cache")
@@ -567,6 +587,8 @@ impl CheckpointCoordinator {
             CaptureIntent::FullSnapshot,
             user_pause,
             Some(&destination),
+            memory_backing,
+            record_integrity,
         )
     }
 
@@ -577,7 +599,21 @@ impl CheckpointCoordinator {
         intent: CaptureIntent,
         user_pause: Option<&UserPause>,
         local_destination: Option<&Path>,
+        _memory_backing: Option<&std::fs::File>,
+        record_integrity: bool,
     ) -> Result<CheckpointResult, CheckpointFailure> {
+        // All RAM captures pass through this executor-owned method. Consume the construction
+        // handoff before either durable or local capture can publish a newer token. Dirty
+        // tracking has run since the pristine mapping was installed, not since this adoption.
+        // Topology or tracking invalidation leaves no VMM token and selects full capture.
+        if let Some(mut inherited) = self.inherited_memory.take()
+            && let Some(baseline) = vm.retained_memory_baseline()
+        {
+            inherited.memory.generation = baseline.generation().get();
+            inherited.memory.topology = baseline.topology().get();
+            self.local_baseline = Some(inherited);
+            tracing::info!("adopted inherited local memory baseline");
+        }
         if let Some(paused) = user_pause {
             paused
                 .validate(vm)
@@ -645,6 +681,17 @@ impl CheckpointCoordinator {
                 .map(|baseline| baseline.capacity())
                 .transpose()
                 .and_then(|capacity| {
+                    #[cfg(target_os = "linux")]
+                    return LocalMemoryCapture::prepare_with_backing(
+                        self.local_cache_root
+                            .as_ref()
+                            .expect("validated local cache"),
+                        checkpoint_id,
+                        baseline,
+                        capacity,
+                        _memory_backing,
+                    );
+                    #[cfg(not(target_os = "linux"))]
                     LocalMemoryCapture::prepare(
                         self.local_cache_root
                             .as_ref()
@@ -739,6 +786,7 @@ impl CheckpointCoordinator {
             &final_path,
             local_destination.is_some(),
             prepared_local_memory,
+            record_integrity,
         );
         let paused_capture_us = paused_capture_started.elapsed().as_micros();
         let captured = match paused {
@@ -1093,6 +1141,7 @@ impl CheckpointCoordinator {
         final_path: &Path,
         local: bool,
         prepared_local_memory: Option<LocalMemoryCapture>,
+        record_integrity: bool,
     ) -> Result<PausedCapture, CheckpointFailure> {
         let mut timings = PausedCaptureTimings::default();
         let batch = Arc::new(CaptureObjectBatch::new(
@@ -1120,7 +1169,14 @@ impl CheckpointCoordinator {
                 })?;
                 let disk_started = Instant::now();
                 let rollover = disk
-                    .rollover(vm, &self.runtime, staging, pause_generation, local)
+                    .rollover(
+                        vm,
+                        &self.runtime,
+                        staging,
+                        pause_generation,
+                        local,
+                        record_integrity,
+                    )
                     .map_err(|error| CheckpointFailure {
                         freezer_unavailable: false,
                         message: error.to_string(),
@@ -1149,7 +1205,13 @@ impl CheckpointCoordinator {
                     .additional_disks
                     .get_mut(device_id)
                     .expect("registered additional disk was checked above")
-                    .capture(vm, &self.runtime, staging, pause_generation)
+                    .capture(
+                        vm,
+                        &self.runtime,
+                        staging,
+                        pause_generation,
+                        record_integrity,
+                    )
                     .map_err(CheckpointFailure::resumable)?;
                 timings.managed_disk_us += disk_started.elapsed().as_micros();
                 if !local {

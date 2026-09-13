@@ -1788,6 +1788,7 @@ mod tests {
         let pools = backend.db().await.unwrap();
         let mut config = test_config("abandoned");
         config.checkpoint_restore = Some(microsandbox_runtime::launch::CheckpointRestoreConfig {
+            memory_descriptor: false,
             network_gateway_mac: None,
             external_mount_policy: Default::default(),
             external_mounts: Vec::new(),

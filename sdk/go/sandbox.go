@@ -24,6 +24,19 @@ type Sandbox struct {
 	inner *ffi.Sandbox
 }
 
+// BranchOptions controls optional content integrity for one local branch.
+type BranchOptions struct {
+	RecordIntegrity bool
+}
+
+// BranchOption configures a local branch.
+type BranchOption func(*BranchOptions)
+
+// WithBranchIntegrity records disk content hashes; RAM backing remains unhashed.
+func WithBranchIntegrity() BranchOption {
+	return func(options *BranchOptions) { options.RecordIntegrity = true }
+}
+
 // BackendKind returns the backend retained by this sandbox.
 func (s *Sandbox) BackendKind() BackendKind { return BackendKind(s.inner.BackendKind()) }
 
@@ -942,8 +955,12 @@ func (h *SandboxHandle) RequestStop(ctx context.Context) error {
 }
 
 // Branch creates an independent local CoW child without publishing a durable full snapshot.
-func (h *SandboxHandle) Branch(ctx context.Context, name string) (*Sandbox, error) {
-	inner, err := ffi.BranchSandboxByName(ctx, h.name, name)
+func (h *SandboxHandle) Branch(ctx context.Context, name string, opts ...BranchOption) (*Sandbox, error) {
+	options := BranchOptions{}
+	for _, opt := range opts {
+		opt(&options)
+	}
+	inner, err := ffi.BranchSandboxByName(ctx, h.name, name, options.RecordIntegrity)
 	if err != nil {
 		return nil, wrapFFI(err)
 	}
@@ -1099,8 +1116,12 @@ func (s *Sandbox) Pause(ctx context.Context) error {
 }
 
 // Branch creates an independent local CoW child without publishing a durable full snapshot.
-func (s *Sandbox) Branch(ctx context.Context, name string) (*Sandbox, error) {
-	inner, err := s.inner.Branch(ctx, name)
+func (s *Sandbox) Branch(ctx context.Context, name string, opts ...BranchOption) (*Sandbox, error) {
+	options := BranchOptions{}
+	for _, opt := range opts {
+		opt(&options)
+	}
+	inner, err := s.inner.Branch(ctx, name, options.RecordIntegrity)
 	if err != nil {
 		return nil, wrapFFI(err)
 	}

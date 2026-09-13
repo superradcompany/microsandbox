@@ -20,6 +20,9 @@ pub struct BranchArgs {
     /// Suppress progress output.
     #[arg(short, long)]
     pub quiet: bool,
+    /// Compute and record disk content integrity for the captured layers.
+    #[arg(long)]
+    pub integrity: bool,
     /// Explicit destination resources, with the same defaults as restore.
     #[command(flatten)]
     pub resources: super::restore::RestoreResourceArgs,
@@ -32,7 +35,10 @@ pub struct BranchArgs {
 /// Branch source execution. The child's CoW memory is inherent to this operation.
 pub async fn run(args: BranchArgs) -> anyhow::Result<()> {
     let source = Sandbox::get(&args.source).await?;
-    let builder = args.resources.apply_branch(source.branch(&args.name))?;
+    let mut builder = args.resources.apply_branch(source.branch(&args.name))?;
+    if args.integrity {
+        builder = builder.record_integrity();
+    }
     let (mut progress, task) = builder.branch_with_progress()?;
     let mut display = if args.quiet {
         ui::PullProgressDisplay::quiet(&args.source)

@@ -42,6 +42,8 @@ pub(crate) struct PreparedCheckpointRestore {
 
 /// Agent identity and latch attempt restored with the guest memory image.
 pub(crate) struct RestoredAgentState {
+    /// Exact inherited RAM pin, handed once to the child's capture coordinator.
+    pub(crate) inherited_memory: Option<super::local_memory::LocalMemoryPin>,
     /// Host-only backend reconstruction diagnostics, populated before activation.
     pub(crate) external_mount_reports: Vec<ExternalMountReport>,
     /// Protocol generation spoken by the captured agent.
@@ -116,7 +118,11 @@ impl PreparedCheckpointRestore {
     }
 
     /// Decode a local handoff and pin its RAM before constructing any guest mappings.
-    pub(crate) fn open_local(root: PathBuf, expected_id: &str) -> Result<Self, String> {
+    pub(crate) fn open_local(
+        root: PathBuf,
+        expected_id: &str,
+        memory_descriptor: bool,
+    ) -> Result<Self, String> {
         let state = super::LocalBranchState::open(&root).map_err(|e| e.to_string())?;
         if state.id != expected_id {
             return Err("local branch identity differs".into());
@@ -140,8 +146,30 @@ impl PreparedCheckpointRestore {
             .iter()
             .find(|r| r.id == "guest:agentd")
             .ok_or("branch has no captured agent identity")?;
-        let agent = parse_restored_agent_resource(resource, &state.id)?;
-        let file = state.memory.pin().map_err(|e| e.to_string())?;
+        let mut agent = parse_restored_agent_resource(resource, &state.id)?;
+        if memory_descriptor != state.memory.memfd_lease.is_some() {
+            return Err("branch memory descriptor differs from handoff".into());
+        }
+        #[cfg(target_os = "linux")]
+        let transferred = if memory_descriptor {
+            use std::os::fd::FromRawFd;
+            // The strict launcher contract reserves this descriptor; consume it exactly once.
+            // Check existence before constructing an owned File, including manual invocations.
+            if unsafe { libc::fcntl(crate::launch::BRANCH_MEMORY_FD, libc::F_GETFD) } < 0 {
+                return Err("missing inherited branch memory".into());
+            }
+            Some(unsafe { std::fs::File::from_raw_fd(crate::launch::BRANCH_MEMORY_FD) })
+        } else {
+            None
+        };
+        #[cfg(not(target_os = "linux"))]
+        let transferred = None;
+        let pin = state
+            .memory
+            .pin_backing(transferred.as_ref())
+            .map_err(|e| e.to_string())?;
+        let file = pin.file().try_clone().map_err(|e| e.to_string())?;
+        agent.inherited_memory = Some(pin);
         let regions = state
             .memory
             .regions
@@ -152,8 +180,9 @@ impl PreparedCheckpointRestore {
                 file_offset: region.file_offset,
             })
             .collect();
-        let backing =
-            msb_krun::PrivateMemoryBacking::new(file, regions).map_err(|e| e.to_string())?;
+        let backing = msb_krun::PrivateMemoryBacking::new(file, regions)
+            .map_err(|e| e.to_string())?
+            .with_capture_baseline();
         Ok(Self {
             geometry: CheckpointGeometry {
                 vcpus: state.vcpus,
@@ -575,6 +604,7 @@ fn parse_restored_agent_resource(
         return Err("combined checkpoint has a dedicated guest bulk counter".into());
     }
     Ok(RestoredAgentState {
+        inherited_memory: None,
         external_mount_reports: Vec::new(),
         protocol_generation,
         ready,

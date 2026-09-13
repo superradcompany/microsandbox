@@ -15,6 +15,17 @@ func TestWithImage(t *testing.T) {
 	}
 }
 
+func TestBranchIntegrityOption(t *testing.T) {
+	var options BranchOptions
+	if options.RecordIntegrity {
+		t.Fatal("branch integrity must be opt-in")
+	}
+	WithBranchIntegrity()(&options)
+	if !options.RecordIntegrity {
+		t.Fatal("explicit branch integrity option was lost")
+	}
+}
+
 func TestDedicatedRestoreOptions(t *testing.T) {
 	var config RestoreConfig
 	WithForked()(&config)

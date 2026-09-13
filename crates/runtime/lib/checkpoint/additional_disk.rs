@@ -135,6 +135,7 @@ impl RuntimeOwnedAdditionalDisk {
         runtime: &tokio::runtime::Handle,
         checkpoint_root: &Path,
         pause_generation: u64,
+        record_integrity: bool,
     ) -> Result<RootDiskRollover, String> {
         // Quiescence waits for in-flight I/O and flushes format metadata before source inspection.
         // No backend rebind or named-volume journal mutation is needed: the source remains owned
@@ -157,7 +158,13 @@ impl RuntimeOwnedAdditionalDisk {
             .checked_mul(512)
             .ok_or_else(|| "additional disk capacity overflows bytes".to_string())?;
         let device_state = state.encode().map_err(|error| error.to_string())?;
-        let manifest = self.seal(runtime, checkpoint_root, pause_generation, virtual_size)?;
+        let manifest = self.seal(
+            runtime,
+            checkpoint_root,
+            pause_generation,
+            virtual_size,
+            record_integrity,
+        )?;
         Ok(RootDiskRollover {
             manifest,
             device_state,
@@ -170,6 +177,7 @@ impl RuntimeOwnedAdditionalDisk {
         checkpoint_root: &Path,
         pause_generation: u64,
         virtual_size: u64,
+        record_integrity: bool,
     ) -> Result<DiskGenerationManifest, String> {
         let generation = self
             .generation
@@ -213,9 +221,13 @@ impl RuntimeOwnedAdditionalDisk {
         let (file_bytes, strategy) =
             microsandbox_utils::copy::fast_copy_with_strategy(&self.source, &staged)
                 .map_err(|error| format!("copy managed disk {}: {error}", self.device_id))?;
-        let integrity = sparse_file_integrity(&staged)
-            .map_err(|error| error.to_string())?
-            .root;
+        let integrity = record_integrity
+            .then(|| {
+                sparse_file_integrity(&staged)
+                    .map(|integrity| integrity.root)
+                    .map_err(|error| error.to_string())
+            })
+            .transpose()?;
         let current = File::open(&self.source).map_err(|error| error.to_string())?;
         if SourceStamp::read(&self.file).map_err(|error| error.to_string())? != before
             || SourceStamp::read(&current).map_err(|error| error.to_string())? != before
@@ -237,6 +249,9 @@ impl RuntimeOwnedAdditionalDisk {
                 layer_id: layer_id.clone(),
                 format: self.format.into(),
                 virtual_size,
+                file_size: std::fs::metadata(&staged)
+                    .map_err(|error| error.to_string())?
+                    .len(),
                 predecessor: None,
                 integrity_root: integrity,
             }],
@@ -412,7 +427,7 @@ mod tests {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let first_root = dir.path().join("first");
         let first = provider
-            .seal(runtime.handle(), &first_root, 7, 1024 * 1024)
+            .seal(runtime.handle(), &first_root, 7, 1024 * 1024, true)
             .unwrap();
         let first_path = layer(&first_root, &first);
         let first_bytes = std::fs::read(&first_path).unwrap();
@@ -428,7 +443,7 @@ mod tests {
         writer.sync_all().unwrap();
         let second_root = dir.path().join("second");
         let second = provider
-            .seal(runtime.handle(), &second_root, 8, 1024 * 1024)
+            .seal(runtime.handle(), &second_root, 8, 1024 * 1024, true)
             .unwrap();
         assert_eq!(first.generation, 1);
         assert_eq!(second.generation, 2);
@@ -456,12 +471,20 @@ mod tests {
         let mut provider = provider(disk, &bootstrap);
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let target = dir.path().join("snapshot");
-        assert!(provider.seal(runtime.handle(), &target, 1, 8192).is_err());
+        assert!(
+            provider
+                .seal(runtime.handle(), &target, 1, 8192, true)
+                .is_err()
+        );
         assert!(!target.exists());
         assert_eq!(provider.generation, 0);
         std::fs::rename(&path, dir.path().join("original.raw")).unwrap();
         std::fs::write(&path, [0u8; 4096]).unwrap();
-        assert!(provider.seal(runtime.handle(), &target, 1, 4096).is_err());
+        assert!(
+            provider
+                .seal(runtime.handle(), &target, 1, 4096, true)
+                .is_err()
+        );
         assert!(!target.exists());
         assert_eq!(provider.generation, 0);
     }
@@ -482,7 +505,7 @@ mod tests {
         let mut invalid = provider(disk, &bootstrap);
         let refused = dir.path().join("refused");
         let error = invalid
-            .seal(runtime.handle(), &refused, 1, 131072)
+            .seal(runtime.handle(), &refused, 1, 131072, true)
             .unwrap_err();
         assert!(error.contains("backing file"));
         assert!(!refused.exists());
@@ -500,7 +523,9 @@ mod tests {
         let (disk, bootstrap) = fixture(&standalone, msb_krun::DiskImageFormat::Qcow2);
         let mut valid = provider(disk, &bootstrap);
         let captured = dir.path().join("captured");
-        let generation = valid.seal(runtime.handle(), &captured, 2, 131072).unwrap();
+        let generation = valid
+            .seal(runtime.handle(), &captured, 2, 131072, true)
+            .unwrap();
         assert_eq!(
             std::fs::read(layer(&captured, &generation)).unwrap(),
             std::fs::read(&standalone).unwrap()

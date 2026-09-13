@@ -130,8 +130,12 @@ impl CheckpointClosure {
             }
             for layer in &disk.layers {
                 let path = disk_layer_path(&root, layer);
-                open_regular(&path)?;
-                admitted_disks.admit(&path, &layer.integrity_root)?;
+                if open_regular(&path)?.metadata()?.len() != layer.file_size {
+                    return checkpoint_error("disk layer length differs from captured file size");
+                }
+                if let Some(expected) = &layer.integrity_root {
+                    admitted_disks.admit(&path, expected)?;
+                }
             }
             disks.push(disk);
         }
@@ -188,8 +192,8 @@ impl CheckpointClosure {
     }
 
     /// Reuse a disk root only while the candidate is the exact unchanged admitted file.
-    /// Copies, rewritten qcow headers, replaced names, and uncached layers require a new integrity
-    /// computation. Retained file handles are bounded independently of admitted chain depth.
+    /// Copies, rewritten qcow headers, replaced names, and uncached layers return no reusable root.
+    /// A later explicit integrity capture may compute one. Retained file handles are bounded.
     pub fn reused_disk_integrity(&self, path: &Path) -> ImageResult<Option<String>> {
         self.admitted_disks
             .reuse_for(path)
@@ -486,6 +490,62 @@ mod tests {
     }
 
     #[test]
+    fn optional_disk_integrity_retains_length_checks_and_detects_opted_in_corruption() {
+        use crate::checkpoint::{
+            DiskGenerationManifest, DiskLayerRef, LocalObjectStore, sparse_file_integrity,
+        };
+        for record_integrity in [false, true] {
+            let (directory, root) = fixture();
+            let mut checkpoint =
+                CheckpointClosure::inspect_manifest(directory.path(), Some(&root)).unwrap();
+            let store = LocalObjectStore::open(directory.path()).unwrap();
+            std::fs::create_dir(directory.path().join("layers")).unwrap();
+            let path = directory.path().join("layers/base.raw");
+            std::fs::write(&path, [17; 4096]).unwrap();
+            let disk = DiskGenerationManifest {
+                schema: "microsandbox.disk-generation/1".into(),
+                volume_id: "volume".into(),
+                device_id: "vdb".into(),
+                generation: 1,
+                pause_generation: checkpoint.pause_generation,
+                head: "base".into(),
+                layers: vec![DiskLayerRef {
+                    layer_id: "base".into(),
+                    format: "raw".into(),
+                    virtual_size: 4096,
+                    file_size: 4096,
+                    predecessor: None,
+                    integrity_root: record_integrity
+                        .then(|| sparse_file_integrity(&path).unwrap().root),
+                }],
+            };
+            checkpoint.disks = vec![
+                store
+                    .put_bytes(&disk.to_canonical_bytes().unwrap())
+                    .unwrap(),
+            ];
+            std::fs::write(
+                directory.path().join(CHECKPOINT_ROOT_FILE),
+                checkpoint.to_canonical_bytes().unwrap(),
+            )
+            .unwrap();
+            assert!(CheckpointClosure::open(directory.path(), None).is_ok());
+            // Same-length content changes are intentionally only detectable when opted in.
+            std::fs::write(&path, [18; 4096]).unwrap();
+            assert_eq!(
+                CheckpointClosure::open(directory.path(), None).is_err(),
+                record_integrity
+            );
+            std::fs::write(&path, [17; 4095]).unwrap();
+            let error = CheckpointClosure::open(directory.path(), None)
+                .err()
+                .unwrap()
+                .to_string();
+            assert!(error.contains("length"), "{error}");
+        }
+    }
+
+    #[test]
     fn opens_complete_valid_closure() {
         let (directory, expected) = fixture();
 
@@ -558,12 +618,13 @@ mod tests {
                 std::fs::write(&path, [0x55]).unwrap();
                 let integrity_root = super::super::sparse_file_integrity(&path).unwrap().root;
                 layers.push(DiskLayerRef {
+                    file_size: 1,
                     layer_id,
                     format: format.into(),
                     virtual_size: 4096,
                     predecessor: (index > 0)
                         .then(|| format!("volume_{volume}_layer_{}", index - 1)),
-                    integrity_root,
+                    integrity_root: Some(integrity_root),
                 });
                 paths.push(path);
             }

@@ -107,10 +107,12 @@ pub struct DiskLayerRef {
     pub format: String,
     /// Guest-visible virtual size.
     pub virtual_size: u64,
+    /// Exact physical file length; checked even when content integrity is not recorded.
+    pub file_size: u64,
     /// Immediate predecessor when present.
     pub predecessor: Option<String>,
-    /// Sparse-aware BLAKE3 Merkle identity of the exact physical layer.
-    pub integrity_root: String,
+    /// Optional content integrity of the exact physical layer, independent of layer identity.
+    pub integrity_root: Option<String>,
 }
 
 /// Immutable sealed disk generation.
@@ -253,10 +255,15 @@ impl DiskGenerationManifest {
             return manifest_error("disk head does not name the final layer");
         }
         for (index, layer) in self.layers.iter().enumerate() {
-            if !portable_member_id(&layer.layer_id) || layer.virtual_size == 0 {
+            if !portable_member_id(&layer.layer_id)
+                || layer.virtual_size == 0
+                || layer.file_size == 0
+            {
                 return manifest_error("disk layer has invalid identity or zero virtual size");
             }
-            validate_blake3_root(&layer.integrity_root)?;
+            if let Some(root) = &layer.integrity_root {
+                validate_blake3_root(root)?;
+            }
             match (index, layer.format.as_str(), layer.predecessor.as_deref()) {
                 (0, "raw" | "qcow2", None) => {}
                 (_, "qcow2", Some(parent))
@@ -561,11 +568,12 @@ mod tests {
             device_id: "vdb".into(),
             generation: 1,
             layers: vec![DiskLayerRef {
+                file_size: 4096,
                 layer_id: "../outside".into(),
                 format: "raw".into(),
                 virtual_size: 4096,
                 predecessor: None,
-                integrity_root: format!("blake3:{}", "0".repeat(64)),
+                integrity_root: Some(format!("blake3:{}", "0".repeat(64))),
             }],
             head: "../outside".into(),
             pause_generation: 1,
@@ -582,11 +590,12 @@ mod tests {
             device_id: "vdb".into(),
             generation: 1,
             layers: vec![DiskLayerRef {
+                file_size: 4096,
                 layer_id: "layer_test".into(),
                 format: "raw".into(),
                 virtual_size: 4096,
                 predecessor: None,
-                integrity_root: format!("blake3:{}", "0".repeat(64)),
+                integrity_root: Some(format!("blake3:{}", "0".repeat(64))),
             }],
             head: "layer_test".into(),
             pause_generation: 1,

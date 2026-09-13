@@ -119,9 +119,16 @@ pub(crate) async fn materialize_additional_disks(
             .ok_or_else(|| invalid("additional disk child has no storage parent"))?
             .to_path_buf();
         let expected_integrity = layer.integrity_root.clone();
+        let expected_size = layer.file_size;
         let qcow2 = layer.format == "qcow2";
         let worker = tokio::task::spawn_blocking(move || {
-            stage_additional_disk(&source, &staging_parent, &expected_integrity, qcow2)
+            stage_additional_disk(
+                &source,
+                &staging_parent,
+                expected_integrity.as_deref(),
+                expected_size,
+                qcow2,
+            )
         });
         publish_staged_additional_disk(worker, &target).await?;
         mounts.push(VolumeMount::DiskImage {
@@ -150,7 +157,8 @@ pub(crate) fn apply_additional_disks(config: &mut crate::SandboxConfig, mounts: 
 fn stage_additional_disk(
     source: &Path,
     staging_parent: &Path,
-    expected_integrity: &str,
+    expected_integrity: Option<&str>,
+    expected_size: u64,
     qcow2: bool,
 ) -> std::io::Result<tempfile::TempDir> {
     let staging = tempfile::Builder::new()
@@ -160,10 +168,18 @@ fn stage_additional_disk(
     // Never hard-link an immutable captured file into a writable child. Reflink where
     // available; the sparse-copy fallback preserves independence on other filesystems.
     microsandbox_utils::copy::fast_copy(source, &copy_to)?;
-    if microsandbox_image::checkpoint::sparse_file_integrity(&copy_to)
-        .map_err(std::io::Error::other)?
-        .root
-        != expected_integrity
+    // The copied file must still match the captured geometry when hashing is disabled.
+    if std::fs::metadata(&copy_to)?.len() != expected_size {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "additional disk length changed during child materialization",
+        ));
+    }
+    if let Some(expected_integrity) = expected_integrity
+        && microsandbox_image::checkpoint::sparse_file_integrity(&copy_to)
+            .map_err(std::io::Error::other)?
+            .root
+            != expected_integrity
     {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -247,7 +263,8 @@ mod tests {
             // Park before opening any destination. Dropping the test's release sender also
             // unblocks this worker if an assertion fails, so the test cannot strand a thread.
             release_rx.recv().map_err(std::io::Error::other)?;
-            let staged = stage_additional_disk(&source, &staging_parent, &integrity, false)?;
+            let staged =
+                stage_additional_disk(&source, &staging_parent, Some(&integrity), 8192, false)?;
             let _ = finished.send(staged.path().to_path_buf());
             Ok(staged)
         });
@@ -295,13 +312,16 @@ mod tests {
             pause_generation: 1,
             head: "layer_0123456789abcdef0123456789abcdef".into(),
             layers: vec![DiskLayerRef {
+                file_size: std::fs::metadata(&path).unwrap().len(),
                 layer_id: "layer_0123456789abcdef0123456789abcdef".into(),
                 format: "raw".into(),
                 virtual_size: 8192,
                 predecessor: None,
-                integrity_root: microsandbox_image::checkpoint::sparse_file_integrity(&path)
-                    .unwrap()
-                    .root,
+                integrity_root: Some(
+                    microsandbox_image::checkpoint::sparse_file_integrity(&path)
+                        .unwrap()
+                        .root,
+                ),
             }],
         };
         let mut resource = ResourceDescriptor {
@@ -406,10 +426,11 @@ mod tests {
             let mut disk = disk.clone();
             disk.layers[0].format = "qcow2".into();
             // These are integrity-valid artifacts: hashing alone must not authorize a host open.
-            disk.layers[0].integrity_root =
+            disk.layers[0].integrity_root = Some(
                 microsandbox_image::checkpoint::sparse_file_integrity(&path)
                     .unwrap()
-                    .root;
+                    .root,
+            );
             let error = materialize_additional_disks(
                 &[disk],
                 std::slice::from_ref(&resource),

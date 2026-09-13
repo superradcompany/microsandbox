@@ -9,7 +9,6 @@ This is a correctness smoke test, not a performance-comparison benchmark.
 import argparse
 import base64
 from datetime import datetime, timezone
-import hashlib
 import http.client
 import importlib.util
 import json
@@ -19,7 +18,6 @@ import shlex
 import shutil
 import signal
 import socket
-import stat
 import subprocess
 import sys
 import threading
@@ -160,11 +158,32 @@ class PreparationSmoke(BASE.Smoke):
                            probes=[], runtime_phases={}, backing_chains=[])
 
     def run(self, case, *args, **kwargs):
+        capture = args[:1] == ("branch",) or args[:2] == ("snapshot", "create")
+        if capture and getattr(self.args, "integrity", False):
+            args = (*args, "--integrity")
         started_at = utc_now()
         print(f"[{started_at}] {case}", flush=True)
         before = len(self.report["commands"])
         try:
-            return super().run(case, *args, **kwargs)
+            result = super().run(case, *args, **kwargs)
+            if capture and args[:2] == ("snapshot", "create") and "--full" in args:
+                # Inspect payload manifests, not just a successful CLI return or small root hash.
+                checked = 0
+                for checkpoint_path in self.home.joinpath("snapshots").rglob("checkpoint.json"):
+                    checkpoint = json.loads(checkpoint_path.read_text())
+                    for object_id in checkpoint["disks"]:
+                        algorithm, digest = object_id.split(":", 1)
+                        candidates = list(checkpoint_path.parent.joinpath("objects", algorithm).rglob(digest))
+                        assert len(candidates) == 1, candidates
+                        disk = json.loads(candidates[0].read_text())
+                        for layer in disk["layers"]:
+                            assert bool(layer["integrity_root"]) == getattr(self.args, "integrity", False), layer
+                            path = checkpoint_path.parent / "layers" / (layer["layer_id"] + "." + layer["format"])
+                            assert path.stat().st_size == layer["file_size"], layer
+                            checked += 1
+                assert checked, "full capture did not expose any disk layers"
+                self.report.setdefault("disk_integrity_checks", []).append(dict(case=case, recorded=getattr(self.args, "integrity", False), layers=checked))
+            return result
         finally:
             if len(self.report["commands"]) > before:
                 self.report["commands"][-1].update(started_at=started_at,
@@ -218,6 +237,11 @@ class PreparationSmoke(BASE.Smoke):
         self.remember(child)
         self.run("branch-" + child, "branch", source, "--name", child,
                  "--port", self.port_option(child))
+        journal = json.loads((self.home / "sandboxes" / child / "runtime" / "root-disk.json").read_text())
+        assert len(journal["layers"]) >= 2, journal
+        assert all(bool(layer["integrity_root"]) == getattr(self.args, "integrity", False)
+                   for layer in journal["layers"][:-1]), journal
+        assert journal["layers"][-1]["integrity_root"] is None, journal
 
     def progressing_branch(self, source, child):
         before = self.request(source)
@@ -270,6 +294,16 @@ class PreparationSmoke(BASE.Smoke):
                 if "timing" in line or "local_memory" in line]
             self.persist()
 
+    def require_first_incremental(self, name):
+        """A correct restored child must not silently fall back to a full first capture."""
+        self.harvest_phases(name)
+        phases = self.report["runtime_phases"][name]
+        captures = [line for line in phases if 'operation="local_memory_capture"' in line]
+        if not captures or "incremental=true" not in captures[0]:
+            raise AssertionError(f"{name}: first descendant was not incremental: {captures}")
+        self.report.setdefault("inherited_baseline", {})[name] = captures[0]
+        self.persist()
+
     def backing_chain(self, name, label):
         tool = shutil.which("qemu-img")
         if tool is None:
@@ -287,31 +321,37 @@ class PreparationSmoke(BASE.Smoke):
         if result.returncode != 0:
             raise AssertionError(f"{label}: broken backing chain: {result.stderr}")
 
-    def branch_without_ram_cache(self):
-        if sys.platform != "linux":
+    def check_anonymous_backing(self):
+        if not self.args.require_memfd:
             return
-        backend = (self.home / "cache" / "memory").resolve(strict=True)
-        namespace = (Path(f"/dev/shm/microsandbox-memory-{os.geteuid()}")
-                     / hashlib.sha256(os.fsencode(backend)).hexdigest())
-        if not namespace.exists():
-            self.report["ram_unavailable_fallback"] = "not applicable: no RAM namespace"
-            return
-        metadata = namespace.lstat()
-        if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.geteuid():
-            raise AssertionError("RAM fixture namespace is redirected or not owned")
-        original_mode = stat.S_IMODE(metadata.st_mode)
-        try:
-            # Only this fixture's namespace becomes read-only. Existing immutable
-            # backings remain readable; a new handoff must choose ordinary disk.
-            namespace.chmod(0o500)
-            self.branch("source", "disk-fallback")
-            self.verify("disk-fallback", 1)
-            self.verify("source", 1)
-        finally:
-            namespace.chmod(original_mode)
-        self.report["ram_unavailable_fallback"] = True
+        import fcntl
+        objects = {}
+        marker = b"MSB_HOME=" + os.fsencode(self.home)
+        for pid in self.runtime_pids():
+            proc = Path("/proc") / str(pid)
+            # Read only live fixture processes: a historical PID alone is not identity.
+            if marker not in (proc / "environ").read_bytes().split(b"\0"):
+                continue
+            for descriptor in (proc / "fd").iterdir():
+                try:
+                    if not os.readlink(descriptor).startswith("/memfd:msb-branch-memory"):
+                        continue
+                    with descriptor.open("rb") as backing:
+                        metadata = os.fstat(backing.fileno())
+                        seals = fcntl.fcntl(backing, fcntl.F_GET_SEALS)
+                        required = (fcntl.F_SEAL_WRITE | fcntl.F_SEAL_GROW |
+                                    fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_SEAL)
+                        if seals & required != required or not metadata.st_size:
+                            raise AssertionError("live branch backing is empty or mutable")
+                        objects[(metadata.st_dev, metadata.st_ino)] = dict(
+                            logical_bytes=metadata.st_size, allocated_bytes=metadata.st_blocks * 512,
+                            seals=seals)
+                except FileNotFoundError:
+                    continue  # Unrelated transient runtime descriptors may close during inspection.
+        if not objects:
+            raise AssertionError("repeated branch did not exercise sealed memfd backing")
+        self.report["anonymous_backings"] = list(objects.values())
         self.persist()
-        self.stop("disk-fallback")
 
     def cold_check(self, name, tag, minimum_disk_bytes=0):
         output = self.run("cold-disk-" + name, "exec", name, "--", "python3", "-c",
@@ -346,7 +386,7 @@ class PreparationSmoke(BASE.Smoke):
         self.verify("repeated", 1)
         self.verify("child", 0)
         self.verify("source", 1)
-        self.branch_without_ram_cache()
+        self.check_anonymous_backing()
 
         # A durable capture supersedes the retained local dirty baseline. The next
         # branch must capture a fresh complete generation, never reuse the old base.
@@ -380,6 +420,8 @@ class PreparationSmoke(BASE.Smoke):
         self.probe("private-child-write", "child", "/tag?value=child")
         self.progressing_branch("child", "grandchild")
         self.verify("grandchild", 0, "child")
+        if self.args.require_inherited_baseline:
+            self.require_first_incremental("child")
         self.probe("private-grandchild-write", "grandchild", "/tag?value=grandchild")
         self.verify("child", 0, "child")
         self.verify("source", 3, extra_bytes=256 * 1048576)
@@ -389,6 +431,42 @@ class PreparationSmoke(BASE.Smoke):
         self.run("remove-source", "remove", "source")
         self.verify("child", 0, "child")
         self.verify("grandchild", 0, "grandchild")
+
+        if self.args.require_inherited_baseline:
+            # A child's first capture can be durable rather than local. Its inherited file is
+            # not a portable object manifest; the durable producer must still emit a complete
+            # closure and retire the old local baseline before a later direct branch.
+            self.progressing_branch("child", "full-source")
+            self.run("first-child-durable-capture", "snapshot", "create", "child-full",
+                     "--from-sandbox", "full-source", "--group", "work", "--full")
+            self.probe("advance-after-child-full", "full-source", "/advance")
+            self.progressing_branch("full-source", "after-child-full")
+            self.verify("after-child-full", 1, "child")
+            self.restore("full-restored", "work:child-full", "--port", self.port_option("full-restored"))
+            self.verify("full-restored", 0, "child")
+            self.verify("child", 0, "child")
+            self.stop("full-restored")
+            self.stop("after-child-full")
+            self.stop("full-source")
+
+            # The immutable ancestor must remain usable after its original source is gone.
+            self.progressing_branch("grandchild", "great-grandchild")
+            self.verify("great-grandchild", 0, "grandchild")
+            self.require_first_incremental("grandchild")
+            self.probe("independent-great-grandchild", "great-grandchild", "/tag?value=great")
+            self.verify("grandchild", 0, "grandchild")
+
+            # Grow a restored child before its first descendant capture. Dirty tracking must
+            # either cover the new pages or request a full capture; stale inherited bytes fail
+            # the complete extra-memory validation in both cases.
+            self.run("grow-restored-child", "modify", "great-grandchild", "--memory", "512M",
+                     "--cpus", "2", "--format", "json")
+            self.probe("populate-restored-grown-ram", "great-grandchild", "/grow")
+            self.progressing_branch("great-grandchild", "grown-descendant")
+            self.verify("grown-descendant", 0, "great", extra_bytes=256 * 1048576)
+            self.verify("child", 0, "child")
+            self.stop("grown-descendant")
+            self.stop("great-grandchild")
 
         # Maintenance and a cold boot must resolve every child-owned ancestor after
         # deleting the source; a still-running VM's open descriptors can hide a
@@ -431,7 +509,14 @@ def main():
     parser.add_argument("--image", default="mirror.gcr.io/library/python:3.13-alpine3.22")
     parser.add_argument("--timeout", type=BASE.positive_seconds, default=90)
     parser.add_argument("--suite-timeout", type=BASE.positive_seconds, default=480)
+    parser.add_argument("--require-inherited-baseline", action="store_true",
+                        help="Require first descendant deltas and exercise inherited growth/lifetime")
+    parser.add_argument("--require-memfd", action="store_true",
+                        help="Require sealed anonymous backing on a Linux non-reflink test host")
+    parser.add_argument("--integrity", action="store_true", help="Opt every capture into disk content integrity")
     args = parser.parse_args()
+    if args.require_memfd and sys.platform != "linux":
+        parser.error("--require-memfd requires Linux")
     args.layout = "managed"
 
     def interrupted(_signum, _frame):

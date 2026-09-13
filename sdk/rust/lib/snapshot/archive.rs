@@ -4630,11 +4630,12 @@ mod tests {
             device_id: "vdb".into(),
             generation: 1,
             layers: vec![DiskLayerRef {
+                file_size: std::fs::metadata(&source_layer).unwrap().len(),
                 layer_id: layer_id.into(),
                 format: "qcow2".into(),
                 virtual_size: 4 * 1024 * 1024,
                 predecessor: None,
-                integrity_root: layer_integrity.root,
+                integrity_root: Some(layer_integrity.root),
             }],
             head: layer_id.into(),
             pause_generation: 11,

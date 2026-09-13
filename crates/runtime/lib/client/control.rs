@@ -42,12 +42,31 @@ pub enum ControlRequest {
     },
     /// Capture directly into a reserved child-owned local handoff directory.
     BranchCreate {
+        /// Opt into disk content hashes; RAM remains an unhashed local backing.
+        #[serde(default)]
+        record_integrity: bool,
         /// Unique capture identity matching the child's reservation.
         branch_id: String,
         /// Reserved sandbox name in this runtime's backend, never a host path.
         child_name: String,
         /// Cache in which the caller holds its handoff lock; must match the source runtime.
         memory_cache_dir: PathBuf,
+    },
+    /// Linux branch capture with one empty memory descriptor attached to the request.
+    /// The distinct operation prevents older runtimes from ignoring descriptor ownership.
+    BranchCreateMemfd {
+        /// Opt into disk content hashes; independent of memory descriptor ownership.
+        #[serde(default)]
+        record_integrity: bool,
+        /// Unique capture identity matching the child's reservation.
+        branch_id: String,
+        /// Reserved sandbox name in this runtime's backend.
+        child_name: String,
+        /// Backend-resolved cache holding the existing handoff reservation.
+        memory_cache_dir: PathBuf,
+        /// Transport-owned handle; never deserialized from a numeric descriptor in JSON.
+        #[serde(skip)]
+        backing: Option<std::sync::Arc<std::fs::File>>,
     },
     /// Retain a resident pause until an explicit resume or stop.
     Pause,
@@ -101,6 +120,9 @@ pub enum ControlRequest {
     /// Produce one same-epoch full checkpoint and return the source to its prior running
     /// state after root-last publication.
     CheckpointCreate {
+        /// Opt into disk content hashes; RAM objects remain content-addressed.
+        #[serde(default)]
+        record_integrity: bool,
         /// Caller-selected safe checkpoint identity.
         checkpoint_id: String,
         /// Why this checkpoint is being captured.
@@ -251,9 +273,15 @@ pub struct RootDiskGrowthResult {
 /// resize-capable and secrets-incapable.
 #[derive(Debug, Default, Clone, Copy, Serialize, Deserialize)]
 pub struct ControlCapabilities {
+    /// Capture accepts an explicit disk-integrity policy and unhashed disk manifests.
+    #[serde(default)]
+    pub optional_disk_integrity: bool,
     /// Direct local branch capture is supported on this host.
     #[serde(default)]
     pub branch_create: bool,
+    /// Linux request-side descriptor transfer for ephemeral branch backing.
+    #[serde(default)]
+    pub branch_memfd: bool,
     /// Resident pause/resume with identity-preserving clock correction.
     #[serde(default)]
     pub pause_resume: bool,
@@ -457,6 +485,7 @@ mod tests {
         let response = ControlResponse {
             ok: true,
             capabilities: Some(ControlCapabilities {
+                optional_disk_integrity: true,
                 root_disk_grow: true,
                 cpu_resize: true,
                 memory_resize: false,
@@ -464,6 +493,7 @@ mod tests {
                 checkpoint_create: true,
                 disk_checkpoint_create: true,
                 branch_create: true,
+                branch_memfd: false,
                 pause_resume: true,
                 disk_compact: true,
             }),
@@ -476,6 +506,30 @@ mod tests {
 
         let parsed: ControlResponse = serde_json::from_str(&json).unwrap();
         assert!(parsed.capabilities.unwrap().secrets_update);
+    }
+
+    #[test]
+    fn checkpoint_disk_integrity_defaults_off_and_round_trips_opt_in() {
+        for enabled in [false, true] {
+            let mut request = serde_json::json!({
+                "op": "checkpoint_create", "checkpoint_id": "fixture", "intent": "full_snapshot"
+            });
+            if enabled {
+                request["record_integrity"] = serde_json::json!(true);
+            }
+            let parsed: ControlRequest = serde_json::from_value(request).unwrap();
+            let ControlRequest::CheckpointCreate {
+                record_integrity, ..
+            } = parsed
+            else {
+                panic!("expected full checkpoint request");
+            };
+            assert_eq!(record_integrity, enabled);
+            assert_eq!(
+                serde_json::to_value(parsed).unwrap()["record_integrity"],
+                enabled
+            );
+        }
     }
 
     #[test]

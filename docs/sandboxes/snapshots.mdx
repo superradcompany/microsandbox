@@ -72,6 +72,10 @@ The SDK methods are Rust `source.branch("worker").await?`, Python `await source.
 
 Local branching still writes a consistent memory backing file, but skips portable RAM packaging and snapshot registration. It is not a saved recovery point. Use `snapshot create --full` when you need a durable, exportable snapshot.
 
+On Linux, eligible later branches use anonymous RAM-backed files (`memfd`) instead of named files in `/dev/shm`. Children own their backing independently, and Linux releases it after the last owner exits. Disk backing is retained when RAM is constrained or filesystem reflinks are available. This does not make separate captures share their backing automatically.
+
+You can branch a child again. While its inherited baseline remains valid, it reuses that memory backing and captures the pages changed since restore, without eagerly copying all RAM when the child starts. Preparing the next backing can still require a copy on filesystems without reflink support.
+
 ## Quick start
 
 You'll usually reach for the CLI first:
@@ -533,7 +537,11 @@ snapshots/
 
 ## Integrity verification
 
-By default, snapshot creation records structural metadata without hashing the writable layer. Opt in when you need a persistent content check. Current snapshots use a fixed 64 KiB-leaf BLAKE3 Merkle tree: known sparse holes collapse into precomputed zero subtrees, while allocated bytes are read and hashed.
+Disk content hashing is optional for disk snapshots, full snapshots and local branches. By default, capture records disk structure and file sizes without scanning the disk for a content hash. Use `--integrity` when you want a persistent disk-content check; already-recorded hashes are retained. Full snapshots still use content-addressed RAM objects. Local branches do not hash RAM.
+
+For example, `msb snapshot create saved --from-sandbox source --full --integrity` records disk integrity alongside the full capture. `msb branch source --name child --integrity` opts in for a local branch. SDKs expose this as `.record_integrity()` in Rust, `record_integrity=True` in Python, `{ recordIntegrity: true }` on TypeScript branches, and `WithBranchIntegrity()` in Go.
+
+Recorded disk integrity uses a fixed 64 KiB-leaf BLAKE3 Merkle tree: known sparse holes collapse into precomputed zero subtrees, while allocated bytes are read and hashed. Verification checks recorded hashes; without them, same-length disk-content corruption cannot be detected by the snapshot layer. File-size, structure and backing-chain checks still apply.
 
 <CodeGroup>
 ```typescript TypeScript

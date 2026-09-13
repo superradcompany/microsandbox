@@ -57,6 +57,23 @@ impl LocalBranchState {
         if state.architecture != std::env::consts::ARCH {
             return Err(io::Error::other("branch architecture differs"));
         }
+        for disk in &state.disks {
+            disk.validate().map_err(io::Error::other)?;
+            if disk.pause_generation != state.pause_generation {
+                return Err(io::Error::other(
+                    "branch disk belongs to a different pause epoch",
+                ));
+            }
+            for layer in &disk.layers {
+                let path = root
+                    .join("layers")
+                    .join(format!("{}.{}", layer.layer_id, layer.format));
+                let metadata = std::fs::symlink_metadata(path)?;
+                if !metadata.is_file() || metadata.len() != layer.file_size {
+                    return Err(io::Error::other("branch disk file type or length differs"));
+                }
+            }
+        }
         Ok(state)
     }
 

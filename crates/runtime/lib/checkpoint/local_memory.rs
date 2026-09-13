@@ -29,6 +29,9 @@ use super::{CachedMemoryRegion, MemoryCache};
 pub struct LocalMemory {
     /// Immutable backend-owned file, independent of the source sandbox directory.
     pub path: PathBuf,
+    /// Accounting lease for anonymous Linux backing; bytes arrive through an owned descriptor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memfd_lease: Option<PathBuf>,
     /// Native mapping geometry in guest-physical order.
     pub regions: Vec<CachedMemoryRegion>,
     /// Retained memory generation used only for incremental capture continuity.
@@ -45,10 +48,12 @@ pub struct LocalMemoryReservation {
     _ram: Option<File>,
 }
 
-#[cfg(feature = "runner")]
-pub(crate) struct LocalMemoryPin {
+/// Independent ownership of local RAM and, when applicable, its cross-process accounting lease.
+#[derive(Debug)]
+pub struct LocalMemoryPin {
     pub(crate) memory: LocalMemory,
     pub(crate) _file: File,
+    _lease: Option<File>,
 }
 
 #[cfg(feature = "runner")]
@@ -67,7 +72,7 @@ pub(super) struct LocalMemoryCapture {
     pub(super) prepare_us: u128,
     pub(super) ram_backed: bool,
     #[cfg(target_os = "linux")]
-    ram_publication: Option<super::local_memory_ram::RamPublication>,
+    ram_publication: Option<super::local_memory_budget::Reservation>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -95,12 +100,17 @@ impl LocalMemory {
         Ok(LocalMemoryReservation {
             _backend: file,
             #[cfg(target_os = "linux")]
-            _ram: super::local_memory_ram::reserve(root, id, cache.page_size),
+            _ram: super::local_memory_budget::handoff(root, id, cache.page_size).ok(),
         })
     }
 
     /// Reclaim only after pending handoff, retained-baseline and VM pins have been released.
     pub fn evict(&self) -> io::Result<bool> {
+        if self.memfd_lease.is_some() {
+            // Anonymous bytes are released by the kernel after the last descriptor/mapping.
+            // The next allocation reclaims the tiny unlocked accounting record.
+            return Ok(false);
+        }
         let handoff = microsandbox_utils::process_lock::open_lock_file(
             &self.path.with_extension("handoff-lock"),
         )?;
@@ -112,6 +122,17 @@ impl LocalMemory {
 
     /// Acquire independent backing ownership before launching or mapping a child.
     pub fn pin(&self) -> io::Result<File> {
+        if self.memfd_lease.is_some() {
+            return Err(io::Error::other(
+                "anonymous branch memory requires its transferred descriptor",
+            ));
+        }
+        let file_end = self.length()?;
+        open_pinned(&self.path, file_end)?
+            .ok_or_else(|| io::Error::other("local memory backing is missing"))
+    }
+
+    fn length(&self) -> io::Result<u64> {
         let mut file_end = 0;
         let mut guest_end = 0;
         for region in &self.regions {
@@ -133,15 +154,56 @@ impl LocalMemory {
         if file_end == 0 {
             return Err(io::Error::other("empty local memory"));
         }
-        open_pinned(&self.path, file_end)?
-            .ok_or_else(|| io::Error::other("local memory backing is missing"))
+        Ok(file_end)
+    }
+
+    /// Admit either named disk backing or an explicitly transferred, sealed anonymous object.
+    pub fn pin_backing(&self, transferred: Option<&File>) -> io::Result<LocalMemoryPin> {
+        if let Some(lease) = &self.memfd_lease {
+            #[cfg(target_os = "linux")]
+            {
+                if !self.path.as_os_str().is_empty() {
+                    return Err(io::Error::other("ambiguous memory backing"));
+                }
+                let file = transferred
+                    .ok_or_else(|| io::Error::other("missing branch memory descriptor"))?;
+                let pin = super::local_memory_budget::pin(lease)?;
+                let file = crate::memory_handoff::readonly(file, self.length()?)?;
+                return Ok(LocalMemoryPin {
+                    memory: self.clone(),
+                    _file: file,
+                    _lease: Some(pin),
+                });
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = (lease, transferred);
+                return Err(io::Error::other(
+                    "anonymous branch memory is only supported on Linux",
+                ));
+            }
+        }
+        Ok(LocalMemoryPin {
+            memory: self.clone(),
+            _file: self.pin()?,
+            _lease: None,
+        })
     }
 }
 
-#[cfg(feature = "runner")]
 impl LocalMemoryPin {
+    /// Exact generation metadata belonging to this owned backing.
+    pub fn memory(&self) -> &LocalMemory {
+        &self.memory
+    }
+    /// Descriptor retained until the new runtime owns its independent backing and accounting pin.
+    pub fn file(&self) -> &File {
+        &self._file
+    }
+
     /// Exact capture geometry includes kernel/device mappings and reserved hotplug ranges,
     /// not just the user-facing guest RAM size. The retained immutable file is authoritative.
+    #[cfg(feature = "runner")]
     pub(crate) fn capacity(&self) -> io::Result<u64> {
         let length = self
             .memory
@@ -183,12 +245,130 @@ impl LocalMemoryCapture {
     /// Prepare immutable baseline bytes while the source can still run. The caller must
     /// revalidate the baseline token after quiescing before using this sink for a delta.
     /// Unknown capture geometry retains ordinary disk backing; it must never be guessed from
-    /// guest-visible RAM sizing to admit a bounded tmpfs allocation.
+    /// guest-visible RAM sizing to admit a bounded anonymous allocation.
     pub(super) fn prepare(
         root: &Path,
         id: &str,
         baseline: Option<&LocalMemoryPin>,
         capacity: Option<u64>,
+    ) -> io::Result<Self> {
+        Self::prepare_with_copy(
+            root,
+            id,
+            baseline,
+            capacity,
+            &mut microsandbox_utils::copy::fast_copy_without_sync,
+        )
+    }
+
+    /// Only a descriptor-aware caller can select anonymous backing. An old request remains
+    /// disk-backed; no serialized pathname can silently stand in for descriptor ownership.
+    #[cfg(target_os = "linux")]
+    pub(super) fn prepare_with_backing(
+        root: &Path,
+        id: &str,
+        baseline: Option<&LocalMemoryPin>,
+        capacity: Option<u64>,
+        backing: Option<&File>,
+    ) -> io::Result<Self> {
+        Self::prepare_memfd_with_copy(
+            root,
+            id,
+            baseline,
+            capacity,
+            backing,
+            &mut microsandbox_utils::copy::sparse_copy_file_without_sync,
+        )
+    }
+
+    #[cfg(target_os = "linux")]
+    fn prepare_memfd_with_copy(
+        root: &Path,
+        id: &str,
+        baseline: Option<&LocalMemoryPin>,
+        capacity: Option<u64>,
+        backing: Option<&File>,
+        copy: &mut impl FnMut(&File, &File) -> io::Result<u64>,
+    ) -> io::Result<Self> {
+        use std::os::unix::fs::MetadataExt;
+        let started = Instant::now();
+        let (Some(backing), Some(capacity)) = (backing, capacity) else {
+            return Self::prepare(root, id, baseline, capacity);
+        };
+        crate::memory_handoff::validate_empty(backing)?;
+        let cache = MemoryCache::open_namespace(root.into(), "branches")?;
+        let reservation = match super::local_memory_budget::reserve(
+            root,
+            &cache.root,
+            id,
+            cache.page_size,
+            capacity,
+        ) {
+            Ok(reservation) => reservation,
+            Err(error) => {
+                tracing::debug!(%error, "anonymous memory accounting unavailable; retain disk backing");
+                None
+            }
+        };
+        let Some(reservation) = reservation else {
+            return Self::prepare(root, id, baseline, Some(capacity));
+        };
+        let baseline_bytes = baseline
+            .map(|b| b._file.metadata().map(|m| m.blocks().saturating_mul(512)))
+            .transpose()?
+            .unwrap_or(0);
+        if let Some(base) = baseline {
+            if base._file.metadata()?.len() > capacity {
+                return Err(io::Error::other("local baseline exceeds memory capacity"));
+            }
+            if let Err(error) = copy(&base._file, backing) {
+                // A capacity check is advisory: host pressure can change during allocation.
+                // Release partially populated RAM before one disk attempt, still before freeze.
+                if !matches!(
+                    error.raw_os_error(),
+                    Some(libc::ENOSPC | libc::EDQUOT | libc::ENOMEM)
+                ) {
+                    return Err(error);
+                }
+                tracing::warn!(target: "microsandbox_checkpoint_timing", operation = "local_memory_ram_fallback", %error, "anonymous backing allocation failed; prepare on disk");
+                backing.set_len(0)?;
+                drop(reservation);
+                let mut disk = Self::prepare(root, id, baseline, Some(capacity))?;
+                disk.prepare_us = started.elapsed().as_micros();
+                return Ok(disk);
+            }
+        }
+        Ok(Self {
+            staging: tempfile::Builder::new()
+                .prefix(".capture-")
+                .tempdir_in(&cache.root)?,
+            file: backing.try_clone()?,
+            path: PathBuf::new(),
+            regions: baseline
+                .map(|b| b.memory.regions.clone())
+                .unwrap_or_default(),
+            length: backing.metadata()?.len(),
+            incremental: baseline.is_some(),
+            page_size: cache.page_size,
+            capacity: Some(capacity),
+            baseline: baseline.map(|b| (b.memory.generation, b.memory.topology)),
+            reflink: false,
+            baseline_bytes,
+            prepare_us: started.elapsed().as_micros(),
+            ram_backed: true,
+            ram_publication: Some(reservation),
+        })
+    }
+
+    fn prepare_with_copy(
+        root: &Path,
+        id: &str,
+        baseline: Option<&LocalMemoryPin>,
+        capacity: Option<u64>,
+        copy: &mut impl FnMut(
+            &Path,
+            &Path,
+        ) -> io::Result<(u64, microsandbox_utils::copy::FastCopyStrategy)>,
     ) -> io::Result<Self> {
         let started = Instant::now();
         if capacity == Some(0) {
@@ -200,26 +380,6 @@ impl LocalMemoryCapture {
             return Err(io::Error::other("local baseline exceeds memory capacity"));
         }
         let cache = MemoryCache::open_namespace(root.into(), "branches")?;
-        #[cfg(target_os = "linux")]
-        let ram = match capacity {
-            Some(capacity) => {
-                super::local_memory_ram::prepare(root, &cache.root, id, cache.page_size, capacity)
-            }
-            None => None,
-        };
-        #[cfg(target_os = "linux")]
-        let (staging, path, ram_publication) = if let Some(ram) = ram {
-            (ram.staging, ram.path, Some(ram.publication))
-        } else {
-            (
-                tempfile::Builder::new()
-                    .prefix(".capture-")
-                    .tempdir_in(&cache.root)?,
-                cache.root.join(format!("{id}-{}.ram", cache.page_size)),
-                None,
-            )
-        };
-        #[cfg(not(target_os = "linux"))]
         let (staging, path) = (
             tempfile::Builder::new()
                 .prefix(".capture-")
@@ -243,8 +403,17 @@ impl LocalMemoryCapture {
             // This is a process-local handoff, not durable snapshot publication. On
             // non-reflink filesystems the ordinary copy helper flushes the entire RAM
             // backing, unnecessarily extending the source pause by seconds.
-            let (_, strategy) =
-                microsandbox_utils::copy::fast_copy_without_sync(&base.memory.path, &temporary)?;
+            #[cfg(target_os = "linux")]
+            let source = if base.memory.memfd_lease.is_some() {
+                use std::os::fd::AsRawFd;
+                PathBuf::from(format!("/proc/self/fd/{}", base._file.as_raw_fd()))
+            } else {
+                base.memory.path.clone()
+            };
+            #[cfg(not(target_os = "linux"))]
+            let source = base.memory.path.clone();
+            let copied = copy(&source, &temporary);
+            let (_, strategy) = copied?;
             reflink = strategy == microsandbox_utils::copy::FastCopyStrategy::Reflink;
             #[cfg(unix)]
             {
@@ -279,12 +448,9 @@ impl LocalMemoryCapture {
             baseline: baseline.map(|base| (base.memory.generation, base.memory.topology)),
             baseline_bytes,
             prepare_us: started.elapsed().as_micros(),
-            #[cfg(target_os = "linux")]
-            ram_backed: ram_publication.is_some(),
-            #[cfg(not(target_os = "linux"))]
             ram_backed: false,
             #[cfg(target_os = "linux")]
-            ram_publication,
+            ram_publication: None,
         })
     }
 
@@ -364,6 +530,24 @@ impl LocalMemoryCapture {
             }
         }
         self.file.set_len(self.length)?;
+        #[cfg(target_os = "linux")]
+        if let Some(publication) = self.ram_publication {
+            use std::os::unix::fs::MetadataExt;
+            let file = crate::memory_handoff::seal(&self.file)?;
+            let (lease, pin) =
+                publication.publish(file.metadata()?.blocks().saturating_mul(512))?;
+            return Ok(LocalMemoryPin {
+                memory: LocalMemory {
+                    path: PathBuf::new(),
+                    memfd_lease: Some(lease),
+                    regions: self.regions,
+                    generation,
+                    topology,
+                },
+                _file: file,
+                _lease: Some(pin),
+            });
+        }
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -378,6 +562,7 @@ impl LocalMemoryCapture {
         drop(self.file);
         let memory = LocalMemory {
             path: self.path,
+            memfd_lease: None,
             regions: self.regions,
             generation,
             topology,
@@ -385,17 +570,11 @@ impl LocalMemoryCapture {
         #[cfg(not(target_os = "linux"))]
         let file = open_pinned(&self.staging.path().join("memory"), self.length)?
             .ok_or_else(|| io::Error::other("capture staging disappeared"))?;
-        #[cfg(target_os = "linux")]
-        if let Some(publication) = &self.ram_publication {
-            publication.publish(self.staging.path(), &memory.path)?;
-        } else {
-            std::fs::hard_link(self.staging.path().join("memory"), &memory.path)?;
-        }
-        #[cfg(not(target_os = "linux"))]
         std::fs::hard_link(self.staging.path().join("memory"), &memory.path)?;
         Ok(LocalMemoryPin {
             memory,
             _file: file,
+            _lease: None,
         })
     }
 }
@@ -616,16 +795,18 @@ mod tests {
             .unwrap();
         let base = full.finish(1, 1).unwrap();
         let _reservation = LocalMemory::reserve(dir.path(), "changed").unwrap();
-        let prepared = LocalMemoryCapture::prepare(
+        let backing = crate::memory_handoff::create().unwrap();
+        let prepared = LocalMemoryCapture::prepare_with_backing(
             dir.path(),
             "changed",
             Some(&base),
             Some(base.capacity().unwrap()),
+            Some(&backing),
         )
         .unwrap();
         assert!(prepared.ram_backed);
         // The coordinator observes a different paused topology and drops, rather than grows,
-        // the reserved tmpfs capture. No unknown-size generation can exceed a RAM admission.
+        // the reserved anonymous capture. No unknown-size generation can exceed RAM admission.
         drop(prepared);
         let mut replacement =
             LocalMemoryCapture::prepare(dir.path(), "changed", None, None).unwrap();
@@ -637,6 +818,69 @@ mod tests {
             std::fs::read(&base.memory.path).unwrap(),
             vec![7; page as usize]
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn ram_copy_quota_and_space_failures_retry_once_on_disk() {
+        for errno in [libc::EDQUOT, libc::ENOSPC, libc::ENOMEM] {
+            let dir = tempfile::tempdir().unwrap();
+            let page = MemoryCache::open(dir.path()).unwrap().page_size;
+            let mut full = LocalMemoryCapture::prepare(dir.path(), "base", None, None).unwrap();
+            full.write_bytes(range(0, page), &vec![7; page as usize])
+                .unwrap();
+            let base = full.finish(1, 1).unwrap();
+            let _reservation = LocalMemory::reserve(dir.path(), "child").unwrap();
+            let mut attempts = 0;
+            let backing = crate::memory_handoff::create().unwrap();
+            let mut prepared = LocalMemoryCapture::prepare_memfd_with_copy(
+                dir.path(),
+                "child",
+                Some(&base),
+                Some(page),
+                Some(&backing),
+                &mut |_, mut destination| {
+                    attempts += 1;
+                    destination.write_all(&[0xde, 0xad])?;
+                    Err(io::Error::from_raw_os_error(errno))
+                },
+            )
+            .unwrap();
+            assert_eq!(attempts, 1);
+            assert_eq!(
+                backing.metadata().unwrap().len(),
+                0,
+                "partial RAM survived fallback"
+            );
+            assert!(!prepared.ram_backed);
+            assert_eq!(prepared.baseline(), Some((1, 1)));
+            prepared
+                .write_bytes(range(0, page), &vec![9; page as usize])
+                .unwrap();
+            let child = prepared.finish(2, 1).unwrap();
+            assert_eq!(
+                std::fs::read(&child.memory.path).unwrap(),
+                vec![9; page as usize]
+            );
+            assert_eq!(
+                std::fs::read(&base.memory.path).unwrap(),
+                vec![7; page as usize]
+            );
+
+            let mut disk_attempts = 0;
+            let result = LocalMemoryCapture::prepare_with_copy(
+                dir.path(),
+                "both-full",
+                Some(&base),
+                Some(page),
+                &mut |_, _| {
+                    disk_attempts += 1;
+                    Err(io::Error::from_raw_os_error(errno))
+                },
+            );
+            assert_eq!(result.err().unwrap().raw_os_error(), Some(errno));
+            assert_eq!(disk_attempts, 1, "disk failure must not loop");
+        }
     }
 
     #[test]
@@ -664,36 +908,50 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn ram_storage_requires_dual_reservation_and_keeps_pending_handoff_alive() {
+    fn memfd_storage_requires_reservation_and_survives_source_exit() {
         let dir = tempfile::tempdir().unwrap();
         let page = MemoryCache::open(dir.path()).unwrap().page_size;
-        let unreserved =
-            LocalMemoryCapture::prepare(dir.path(), "unreserved", None, Some(page)).unwrap();
+        let backing = crate::memory_handoff::create().unwrap();
+        let unreserved = LocalMemoryCapture::prepare_with_backing(
+            dir.path(),
+            "unreserved",
+            None,
+            Some(page),
+            Some(&backing),
+        )
+        .unwrap();
         assert!(!unreserved.ram_backed);
         let reservation = LocalMemory::reserve(dir.path(), "reserved").unwrap();
         assert!(reservation._ram.is_some());
-        let mut capture =
-            LocalMemoryCapture::prepare(dir.path(), "reserved", None, Some(page)).unwrap();
+        let mut capture = LocalMemoryCapture::prepare_with_backing(
+            dir.path(),
+            "reserved",
+            None,
+            Some(page),
+            Some(&backing),
+        )
+        .unwrap();
         assert!(capture.ram_backed);
         capture
             .write_bytes(range(0, page), &vec![7; page as usize])
             .unwrap();
         let source = capture.finish(1, 1).unwrap();
         let memory = source.memory.clone();
-        let ram_lock = std::fs::metadata(memory.path.with_extension("handoff-lock")).unwrap();
-        let reserved_lock = reservation._ram.as_ref().unwrap().metadata().unwrap();
-        use std::os::unix::fs::MetadataExt;
-        assert_eq!(
-            (ram_lock.dev(), ram_lock.ino()),
-            (reserved_lock.dev(), reserved_lock.ino())
-        );
+        assert!(memory.path.as_os_str().is_empty());
+        assert!(memory.memfd_lease.is_some());
         drop(source);
-        assert!(!memory.evict().unwrap());
-        let child = memory.pin().unwrap();
+        assert!(
+            memory.pin().is_err(),
+            "path-only consumers must reject anonymous backing"
+        );
+        let child = memory.pin_backing(Some(&backing)).unwrap();
         drop(reservation);
+        drop(backing);
         assert!(!memory.evict().unwrap());
+        let mut bytes = Vec::new();
+        child.file().read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, vec![7; page as usize]);
         drop(child);
-        assert!(memory.evict().unwrap());
     }
 
     #[cfg(target_os = "linux")]
@@ -702,21 +960,35 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let page = MemoryCache::open(dir.path()).unwrap().page_size;
         let reservation = LocalMemory::reserve(dir.path(), "writing").unwrap();
-        let mut capture =
-            LocalMemoryCapture::prepare(dir.path(), "writing", None, Some(page)).unwrap();
+        let backing = crate::memory_handoff::create().unwrap();
+        let mut capture = LocalMemoryCapture::prepare_with_backing(
+            dir.path(),
+            "writing",
+            None,
+            Some(page),
+            Some(&backing),
+        )
+        .unwrap();
         assert!(capture.ram_backed);
         drop(reservation);
         // A new capture triggers reclamation after the cancelled caller releases its guard.
         let next = LocalMemory::reserve(dir.path(), "next").unwrap();
-        let _other = LocalMemoryCapture::prepare(dir.path(), "next", None, Some(page)).unwrap();
+        let second = crate::memory_handoff::create().unwrap();
+        let _other = LocalMemoryCapture::prepare_with_backing(
+            dir.path(),
+            "next",
+            None,
+            Some(page),
+            Some(&second),
+        )
+        .unwrap();
         capture
             .write_bytes(range(0, page), &vec![9; page as usize])
             .unwrap();
         let captured = capture.finish(1, 1).unwrap();
-        assert_eq!(
-            std::fs::read(&captured.memory.path).unwrap(),
-            vec![9; page as usize]
-        );
+        let mut bytes = Vec::new();
+        captured.file().read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, vec![9; page as usize]);
         drop(next);
     }
 }

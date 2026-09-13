@@ -839,6 +839,17 @@ pub(super) async fn control_request_for_run(
     run: super::identity::SandboxRunIdentity,
     request: String,
 ) -> MicrosandboxResult<microsandbox_runtime::control::ControlResponse> {
+    control_request_for_run_with_memory(local, name, run, request, None).await
+}
+
+/// Optional descriptor travels with the first request byte on the already authenticated socket.
+pub(super) async fn control_request_for_run_with_memory(
+    local: &crate::backend::LocalBackend,
+    name: &str,
+    run: super::identity::SandboxRunIdentity,
+    request: String,
+    _memory: Option<&std::fs::File>,
+) -> MicrosandboxResult<microsandbox_runtime::control::ControlResponse> {
     let candidates = crate::runtime::sandbox_agent_socket_path_candidates_for(local, name)
         .into_iter()
         .map(|path| microsandbox_runtime::control::control_socket_path_for(&path));
@@ -860,6 +871,27 @@ pub(super) async fn control_request_for_run(
         )));
     }
     local.validate_control_run(name, run).await?;
+    #[cfg(target_os = "linux")]
+    let request = if let Some(memory) = _memory {
+        use std::os::fd::AsRawFd;
+        let first = *request
+            .as_bytes()
+            .first()
+            .ok_or_else(|| MicrosandboxError::Runtime("empty control request".into()))?;
+        loop {
+            stream.writable().await?;
+            match stream.try_io(tokio::io::Interest::WRITABLE, || {
+                microsandbox_runtime::memory_handoff::send_first(stream.as_raw_fd(), memory, first)
+            }) {
+                Ok(()) => break,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => continue,
+                Err(error) => return Err(error.into()),
+            }
+        }
+        request[1..].to_owned()
+    } else {
+        request
+    };
     let response = control_request_over_stream(stream, &request).await?;
     if !response.ok {
         return Err(MicrosandboxError::Runtime(format!(
@@ -1046,6 +1078,7 @@ pub(crate) async fn control_checkpoint_create(
     local: &crate::backend::LocalBackend,
     name: &str,
     checkpoint_id: String,
+    record_integrity: bool,
 ) -> MicrosandboxResult<CheckpointCaptureOutcome> {
     let capabilities =
         control_request_for(local, name, "{\"op\":\"capabilities\"}\n".into()).await?;
@@ -1061,9 +1094,19 @@ pub(crate) async fn control_checkpoint_create(
         ));
     }
     let request = microsandbox_runtime::control::ControlRequest::CheckpointCreate {
+        record_integrity,
         checkpoint_id,
         intent: microsandbox_runtime::control::CheckpointCaptureIntent::FullSnapshot,
     };
+    if !capabilities
+        .capabilities
+        .is_some_and(|c| c.optional_disk_integrity)
+    {
+        return Err(MicrosandboxError::Runtime(
+            "source runtime lacks optional disk integrity; restart with the matching runtime"
+                .into(),
+        ));
+    }
     let response = control_request_raw_for(
         local,
         name,
@@ -2867,9 +2910,10 @@ mod tests {
                     let request: serde_json::Value = serde_json::from_str(&line).unwrap();
                     let response = if request_index == 0 {
                         assert_eq!(request["op"], "capabilities");
-                        serde_json::json!({"ok":true,"capabilities":{"checkpoint_create":true,"cpu_resize":false,"memory_resize":false,"secrets_update":false}})
+                        serde_json::json!({"ok":true,"capabilities":{"optional_disk_integrity":true,"checkpoint_create":true,"cpu_resize":false,"memory_resize":false,"secrets_update":false}})
                     } else {
                         assert_eq!(request["op"], "checkpoint_create");
+                        assert_eq!(request["record_integrity"], label == "second");
                         serde_json::json!({"ok":resume_ok,"error":"source resume failed","checkpoint":{
                             "checkpoint_id":request["checkpoint_id"], "checkpoint_root":format!("sha256:{}", "a".repeat(64)),
                             "path":format!("/capture/{label}"), "memory_mode":"full", "memory_logical_bytes":4096, "memory_emitted_bytes":4096
@@ -2879,11 +2923,12 @@ mod tests {
                 }
             }));
         }
-        let first_capture = control_checkpoint_create(&first, "worker", "first-checkpoint".into())
-            .await
-            .unwrap();
+        let first_capture =
+            control_checkpoint_create(&first, "worker", "first-checkpoint".into(), false)
+                .await
+                .unwrap();
         let second_capture =
-            control_checkpoint_create(&second, "worker", "second-checkpoint".into())
+            control_checkpoint_create(&second, "worker", "second-checkpoint".into(), true)
                 .await
                 .unwrap();
         assert_eq!(

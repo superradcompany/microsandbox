@@ -687,6 +687,10 @@ impl LocalBackend {
         };
         creation_cleanup.retain_process(local_state.handle.clone());
         returned_config.checkpoint_restore = None;
+        #[cfg(target_os = "linux")]
+        {
+            returned_config.branch_memory = None;
+        }
         returned_config.snapshot_upper_layers.clear();
         let mut sandbox = Sandbox::from_local(backend.clone(), local_state, returned_config);
         // This is the readiness publication boundary: create_sandbox_inner returns only after
@@ -2135,6 +2139,7 @@ mod tests {
         }
         let mut config = builder.build().await.unwrap();
         config.checkpoint_restore = Some(microsandbox_runtime::launch::CheckpointRestoreConfig {
+            memory_descriptor: false,
             network_gateway_mac: None,
             external_mount_policy: Default::default(),
             external_mounts: Vec::new(),
@@ -2514,6 +2519,7 @@ mod tests {
         let pools = open_test_pools(&temp.path().join("test.db")).await;
         let mut config = test_config_with_rootfs("pending", bind_rootfs(temp.path().to_path_buf()));
         config.checkpoint_restore = Some(microsandbox_runtime::launch::CheckpointRestoreConfig {
+            memory_descriptor: false,
             network_gateway_mac: None,
             external_mount_policy: Default::default(),
             external_mounts: Vec::new(),

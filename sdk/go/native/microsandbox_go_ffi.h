@@ -201,6 +201,17 @@ char *msb_sandbox_branch(uint64_t cancel_id,
                          unsigned char *buf,
                          uintptr_t buf_len);
 
+/**
+ * Branch with explicit disk content integrity, retaining the original branch ABI.
+ */
+char *msb_sandbox_branch_with_options(uint64_t cancel_id,
+                                      Handle handle,
+                                      const char *source,
+                                      const char *child,
+                                      bool record_integrity,
+                                      unsigned char *buf,
+                                      uintptr_t buf_len);
+
 char *msb_sandbox_resume(uint64_t cancel_id, Handle handle, unsigned char *buf, uintptr_t buf_len);
 
 char *msb_sandbox_request_stop(uint64_t cancel_id,

@@ -195,13 +195,17 @@ impl JsSandboxHandle {
 
     /// Create an independent local CoW child without a durable full snapshot.
     #[napi]
-    pub async fn branch(&self, name: String) -> Result<crate::sandbox::Sandbox> {
+    pub async fn branch(
+        &self,
+        name: String,
+        record_integrity: Option<bool>,
+    ) -> Result<crate::sandbox::Sandbox> {
+        let mut builder = self.inner.branch(name);
+        if record_integrity.unwrap_or(false) {
+            builder = builder.record_integrity();
+        }
         Ok(crate::sandbox::Sandbox::from_rust(
-            self.inner
-                .branch(name)
-                .branch()
-                .await
-                .map_err(to_napi_error)?,
+            builder.branch().await.map_err(to_napi_error)?,
         ))
     }
 

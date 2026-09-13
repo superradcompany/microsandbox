@@ -533,6 +533,23 @@ pub async fn spawn_sandbox(
     );
     launch.block_writeback_limit_bytes = writeback_limit_bytes;
     launch.block_writeback_pool_bytes = writeback_pool_bytes;
+    #[cfg(target_os = "linux")]
+    let branch_memory_fd = config
+        .branch_memory
+        .as_ref()
+        .map(|pin| pin.file().as_raw_fd());
+    #[cfg(target_os = "linux")]
+    if launch
+        .checkpoint_restore
+        .as_ref()
+        .is_some_and(|r| r.memory_descriptor)
+        != branch_memory_fd.is_some()
+    {
+        release_metrics_reservation(config, metrics_reservation.as_ref());
+        return Err(MicrosandboxError::Runtime(
+            "branch restore is missing its owned memory descriptor".into(),
+        ));
+    }
     #[cfg(unix)]
     let config_file = match write_launch_config_fd(&launch) {
         Ok(file) => file,
@@ -617,6 +634,10 @@ pub async fn spawn_sandbox(
                     lifecycle_lock_fd,
                     microsandbox_runtime::vm::LIFECYCLE_LOCK_FD,
                 );
+                #[cfg(target_os = "linux")]
+                let mut memory_mapping = branch_memory_fd.map(|fd| {
+                    InheritedFdMapping::new(fd, microsandbox_runtime::vm::BRANCH_MEMORY_FD)
+                });
 
                 // Parent runtimes such as Vitest or Go tests can have enough
                 // open files that pipe/tempfile allocation lands on one of the
@@ -631,6 +652,10 @@ pub async fn spawn_sandbox(
                     move_reserved_source_fd(mapping, &mut next_spare_fd)?;
                 }
                 move_reserved_source_fd(&mut lifecycle_mapping, &mut next_spare_fd)?;
+                #[cfg(target_os = "linux")]
+                if let Some(mapping) = memory_mapping.as_mut() {
+                    move_reserved_source_fd(mapping, &mut next_spare_fd)?;
+                }
 
                 dup_inherited_fd(config_mapping.src, config_mapping.dst)?;
                 if let Some(mapping) = parent_watch_mapping {
@@ -640,6 +665,10 @@ pub async fn spawn_sandbox(
                     dup_inherited_fd(mapping.src, mapping.dst)?;
                 }
                 dup_inherited_fd(lifecycle_mapping.src, lifecycle_mapping.dst)?;
+                #[cfg(target_os = "linux")]
+                if let Some(mapping) = memory_mapping {
+                    dup_inherited_fd(mapping.src, mapping.dst)?;
+                }
 
                 Ok(())
             });
@@ -1293,6 +1322,7 @@ fn inherited_fd_source_needs_spare(src: i32, dst: i32) -> bool {
         && matches!(
             src,
             microsandbox_runtime::vm::CONFIG_FD
+                | microsandbox_runtime::vm::BRANCH_MEMORY_FD
                 | microsandbox_runtime::vm::PARENT_WATCH_FD
                 | microsandbox_runtime::vm::STARTUP_FD
                 | microsandbox_runtime::vm::LIFECYCLE_LOCK_FD
@@ -3297,6 +3327,10 @@ mod tests {
     #[cfg(unix)]
     fn test_inherited_fd_source_needs_spare_for_cross_reserved_fd() {
         assert!(super::inherited_fd_source_needs_spare(
+            microsandbox_runtime::vm::BRANCH_MEMORY_FD,
+            microsandbox_runtime::vm::CONFIG_FD,
+        ));
+        assert!(super::inherited_fd_source_needs_spare(
             microsandbox_runtime::vm::CONFIG_FD,
             microsandbox_runtime::vm::PARENT_WATCH_FD,
         ));
@@ -4360,6 +4394,7 @@ mod tests {
             },
         ];
         config.checkpoint_restore = Some(CheckpointRestoreConfig {
+            memory_descriptor: false,
             network_gateway_mac: None,
             external_mount_policy: Default::default(),
             external_mounts: Vec::new(),

@@ -3333,6 +3333,22 @@ pub unsafe extern "C" fn msb_sandbox_branch(
     buf: *mut c_uchar,
     buf_len: usize,
 ) -> *mut c_char {
+    unsafe {
+        msb_sandbox_branch_with_options(cancel_id, handle, source, child, false, buf, buf_len)
+    }
+}
+
+/// Branch with explicit disk content integrity, retaining the original branch ABI.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sandbox_branch_with_options(
+    cancel_id: u64,
+    handle: Handle,
+    source: *const c_char,
+    child: *const c_char,
+    record_integrity: bool,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
     run_c(cancel_id, buf, buf_len, || {
         let child = unsafe { cstr(child) }?;
         let source = unsafe { cstr(source) }?;
@@ -3342,17 +3358,18 @@ pub unsafe extern "C" fn msb_sandbox_branch(
             Some(get(handle)?)
         };
         Ok(Box::pin(async move {
-            let sb = if let Some(live) = live {
-                live.branch(child).branch().await.map_err(FfiError::from)?
+            let mut builder = if let Some(live) = live {
+                live.branch(child)
             } else {
                 Sandbox::get(&source)
                     .await
                     .map_err(FfiError::from)?
                     .branch(child)
-                    .branch()
-                    .await
-                    .map_err(FfiError::from)?
             };
+            if record_integrity {
+                builder = builder.record_integrity();
+            }
+            let sb = builder.branch().await.map_err(FfiError::from)?;
             let backend_kind = sb.backend_kind().as_str();
             let handle = register(sb)?;
             Ok(serde_json::json!({ "handle": handle, "backend_kind": backend_kind }).to_string())

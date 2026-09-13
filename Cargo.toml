@@ -91,8 +91,10 @@ microsandbox-protocol = { version = "=0.6.18", path = "crates/protocol" }
 microsandbox-runtime = { version = "=0.6.18", path = "crates/runtime", default-features = false }
 microsandbox-utils = { version = "=0.6.18", path = "crates/utils" }
 microsandbox-vsock = { version = "=0.6.18", path = "crates/vsock" }
-msb_krun = "=0.1.38"
-msb_krun_utils = "=0.1.38"
+# Keep the inherited-baseline API and its runtime types on the same companion revision.
+# Replace both Git pins together once this API is included in a published release.
+msb_krun = { version = "=0.1.38", git = "https://github.com/superradcompany/libkrun", rev = "a28e63a34e4c605f57cdda0bfb3faf589f416f90" }
+msb_krun_utils = { version = "=0.1.38", git = "https://github.com/superradcompany/libkrun", rev = "a28e63a34e4c605f57cdda0bfb3faf589f416f90" }
 test-macros = { path = "crates/testing/macros" }
 test-utils = { path = "crates/testing/utils" }
 

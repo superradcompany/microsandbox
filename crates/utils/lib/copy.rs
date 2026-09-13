@@ -164,7 +164,6 @@ pub fn sparse_copy(src: &Path, dst: &Path) -> io::Result<u64> {
 #[cfg(unix)]
 fn sparse_copy_impl(src: &Path, dst: &Path, sync_destination: bool) -> io::Result<u64> {
     let src_file = File::open(src)?;
-    let len = src_file.metadata()?.len();
 
     let dst_file = OpenOptions::new()
         .read(true)
@@ -172,6 +171,26 @@ fn sparse_copy_impl(src: &Path, dst: &Path, sync_destination: bool) -> io::Resul
         .create(true)
         .truncate(true)
         .open(dst)?;
+    sparse_copy_files(&src_file, &dst_file, sync_destination)
+}
+
+/// Copy an ephemeral Linux memory generation between already-owned files, preserving holes.
+/// The destination must be a distinct writable object. No durability flush is performed.
+#[cfg(target_os = "linux")]
+pub fn sparse_copy_file_without_sync(src: &File, dst: &File) -> io::Result<u64> {
+    use std::os::unix::fs::MetadataExt;
+    let source = src.metadata()?;
+    let target = dst.metadata()?;
+    if source.dev() == target.dev() && source.ino() == target.ino() {
+        return Err(io::Error::other("cannot copy memory backing onto itself"));
+    }
+    dst.set_len(0)?;
+    sparse_copy_files(src, dst, false)
+}
+
+#[cfg(unix)]
+fn sparse_copy_files(src_file: &File, dst_file: &File, sync_destination: bool) -> io::Result<u64> {
+    let len = src_file.metadata()?.len();
     // Establish destination as a fully-sparse hole of `len` bytes;
     // only data extents will materialize into allocated blocks below.
     dst_file.set_len(len)?;
@@ -832,6 +851,45 @@ mod tests {
         let (length, _) = fast_copy_without_sync(&src, &dst).unwrap();
         assert_eq!(length, 16);
         assert_eq!(std::fs::read(&dst).unwrap(), b"local generation");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn descriptor_copy_rejects_alias_before_truncating() {
+        let mut source = tempfile::tempfile().unwrap();
+        source.write_all(b"keep this generation").unwrap();
+        let alias = source.try_clone().unwrap();
+        assert!(sparse_copy_file_without_sync(&source, &alias).is_err());
+        assert_eq!(source.metadata().unwrap().len(), 20);
+        source.rewind().unwrap();
+        let mut bytes = Vec::new();
+        source.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"keep this generation");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn descriptor_copy_clears_old_contents_and_preserves_holes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("source");
+        let length = 8 * 1024 * 1024;
+        make_sparse(&path, length, &[0, 4 * 1024 * 1024]).unwrap();
+        let source = File::open(&path).unwrap();
+        let mut target = tempfile::tempfile().unwrap();
+        target
+            .write_all(&vec![0xEE; length as usize + 4096])
+            .unwrap();
+        assert_eq!(
+            sparse_copy_file_without_sync(&source, &target).unwrap(),
+            length
+        );
+        target.rewind().unwrap();
+        let mut bytes = Vec::new();
+        target.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, std::fs::read(path).unwrap());
+        if source.metadata().unwrap().blocks() * 512 < length / 2 {
+            assert!(target.metadata().unwrap().blocks() * 512 < length / 2);
+        }
     }
 
     #[cfg(target_os = "linux")]

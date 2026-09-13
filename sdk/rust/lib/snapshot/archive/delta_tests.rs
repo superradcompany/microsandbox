@@ -98,11 +98,12 @@ async fn fixture(
             std::fs::write(&layer_path, vec![17u8; 65536]).unwrap();
         }
         let layer = DiskLayerRef {
+            file_size: std::fs::metadata(&layer_path).unwrap().len(),
             layer_id: layer_id.clone(),
             format: format.into(),
             virtual_size: 65536,
             predecessor: layers.last().map(|layer| layer.layer_id.clone()),
-            integrity_root: sparse_file_integrity(&layer_path).unwrap().root,
+            integrity_root: Some(sparse_file_integrity(&layer_path).unwrap().root),
         };
         layers.push(layer);
         let disk = DiskGenerationManifest {
@@ -250,11 +251,12 @@ async fn with_additional_disks(
             device_id: format!("data_{number}"),
             generation,
             layers: vec![DiskLayerRef {
+                file_size: std::fs::metadata(&path).unwrap().len(),
                 layer_id: layer_id.clone(),
                 format: "raw".into(),
                 virtual_size: 65536,
                 predecessor: None,
-                integrity_root: sparse_file_integrity(&path).unwrap().root,
+                integrity_root: Some(sparse_file_integrity(&path).unwrap().root),
             }],
             head: layer_id,
             pause_generation: checkpoint.pause_generation,

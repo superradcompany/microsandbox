@@ -1073,12 +1073,22 @@ impl PySandbox {
     }
 
     /// Create an independent local CoW child without a durable full snapshot.
-    fn branch<'py>(&self, py: Python<'py>, name: String) -> PyResult<Bound<'py, PyAny>> {
+    #[pyo3(signature = (name, *, record_integrity = false))]
+    fn branch<'py>(
+        &self,
+        py: Python<'py>,
+        name: String,
+        record_integrity: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let sandbox = Self::clone_sandbox(&inner).await?;
+            let mut builder = sandbox.branch(name);
+            if record_integrity {
+                builder = builder.record_integrity();
+            }
             Ok(PySandbox::from_rust(
-                sandbox.branch(name).branch().await.map_err(to_py_err)?,
+                builder.branch().await.map_err(to_py_err)?,
             ))
         })
     }

@@ -41,6 +41,20 @@ class PreparationChecks(unittest.TestCase):
         with self.assertRaises(AssertionError):
             SMOKE.check_state(self.state(), "live", 2, "child", 256 * 1048576)
 
+    def test_first_descendant_must_actually_be_incremental(self):
+        fixture = object.__new__(SMOKE.PreparationSmoke)
+        fixture.report = {"runtime_phases": {"child": []}}
+        fixture.harvest_phases = lambda _name: None
+        fixture.persist = lambda: None
+        for phases in ([], ['operation="local_memory_capture" incremental=false']):
+            fixture.report["runtime_phases"]["child"] = phases
+            with self.assertRaises(AssertionError):
+                fixture.require_first_incremental("child")
+        fixture.report["runtime_phases"]["child"] = [
+            'operation="local_memory_capture" incremental=true']
+        fixture.require_first_incremental("child")
+        self.assertIn("child", fixture.report["inherited_baseline"])
+
 
 if __name__ == "__main__":
     unittest.main()

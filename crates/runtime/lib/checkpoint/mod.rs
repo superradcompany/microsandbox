@@ -13,7 +13,7 @@ mod local;
 mod local_disk;
 mod local_memory;
 #[cfg(target_os = "linux")]
-mod local_memory_ram;
+mod local_memory_budget;
 mod memory_cache;
 mod network;
 mod object_pipeline;
@@ -34,7 +34,7 @@ pub use disk::{
 };
 pub use external_mounts::ExternalMountAuthorization;
 pub use local::LocalBranchState;
-pub use local_memory::{LocalMemory, LocalMemoryReservation};
+pub use local_memory::{LocalMemory, LocalMemoryPin, LocalMemoryReservation};
 pub use memory_cache::{CachedMemory, CachedMemoryRegion, MemoryCache};
 pub use network::captured_gateway_mac;
 #[cfg(feature = "runner")]

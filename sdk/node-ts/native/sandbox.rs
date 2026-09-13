@@ -545,10 +545,14 @@ impl Sandbox {
 
     /// Create an independent local CoW child without a durable full snapshot.
     #[napi]
-    pub async fn branch(&self, name: String) -> Result<Sandbox> {
+    pub async fn branch(&self, name: String, record_integrity: Option<bool>) -> Result<Sandbox> {
         let sb = self.inner.get().await.ok_or_else(consumed_error)?;
+        let mut builder = sb.branch(name);
+        if record_integrity.unwrap_or(false) {
+            builder = builder.record_integrity();
+        }
         Ok(Sandbox::from_rust(
-            sb.branch(name).branch().await.map_err(to_napi_error)?,
+            builder.branch().await.map_err(to_napi_error)?,
         ))
     }
 

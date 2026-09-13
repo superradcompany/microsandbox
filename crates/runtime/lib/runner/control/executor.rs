@@ -72,11 +72,12 @@ impl RuntimeControlExecutor {
         agent_sock: &Path,
         workload_control: std::sync::Arc<crate::runner::workload_control::WorkloadControl>,
         resident_paused: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        inherited_memory: Option<crate::checkpoint::LocalMemoryPin>,
     ) -> Result<Self, String> {
         let runtime_boot_id = new_runtime_boot_id();
         persist_runtime_boot_id(runtime_dir, &runtime_boot_id)
             .map_err(|error| error.to_string())?;
-        let checkpoint = CheckpointCoordinator::open(
+        let mut checkpoint = CheckpointCoordinator::open(
             runtime_dir,
             vm_config,
             guest_bootstrap,
@@ -84,6 +85,7 @@ impl RuntimeControlExecutor {
             agent_sock,
             workload_control,
         )?;
+        checkpoint.inherit_local_memory(inherited_memory);
         Ok(Self {
             pause_observation: std::sync::RwLock::new(ControlResponse {
                 ok: true,
@@ -204,6 +206,19 @@ impl RuntimeControlExecutor {
         state: &mut ExecutorState,
         request: ControlRequest,
     ) -> ControlResponse {
+        let memory_backing = match &request {
+            ControlRequest::BranchCreateMemfd {
+                backing: Some(file),
+                ..
+            } if cfg!(target_os = "linux") => Some(file.clone()),
+            ControlRequest::BranchCreateMemfd { .. } => {
+                return control_error(
+                    "missing_memory_handoff",
+                    "branch requires a Linux memory descriptor",
+                );
+            }
+            _ => None,
+        };
         // Gate the authoritative operation, including idempotent Resume on a running VM.
         // Clients need no separate capability exchange, and refusal never changes ownership.
         if matches!(request, ControlRequest::Pause | ControlRequest::Resume)
@@ -221,6 +236,7 @@ impl RuntimeControlExecutor {
                 | ControlRequest::CheckpointCreate { .. }
                 | ControlRequest::DiskCheckpointCreate { .. }
                 | ControlRequest::BranchCreate { .. }
+                | ControlRequest::BranchCreateMemfd { .. }
                 | ControlRequest::DiskCompact { dry_run: false, .. }
                 | ControlRequest::Pause
                 | ControlRequest::Resume
@@ -233,6 +249,7 @@ impl RuntimeControlExecutor {
                     | ControlRequest::CheckpointCreate { .. }
                     | ControlRequest::DiskCheckpointCreate { .. }
                     | ControlRequest::BranchCreate { .. }
+                    | ControlRequest::BranchCreateMemfd { .. }
             );
         if mutation && state.lifecycle != RuntimeLifecycle::Running && !resident_operation {
             return control_error(
@@ -351,9 +368,17 @@ impl RuntimeControlExecutor {
                 }
             }
             ControlRequest::BranchCreate {
+                record_integrity,
                 branch_id,
                 child_name,
                 memory_cache_dir,
+            }
+            | ControlRequest::BranchCreateMemfd {
+                record_integrity,
+                branch_id,
+                child_name,
+                memory_cache_dir,
+                ..
             } => {
                 state.lifecycle = RuntimeLifecycle::Quiescing;
                 match state.checkpoint.branch(
@@ -362,6 +387,8 @@ impl RuntimeControlExecutor {
                     &child_name,
                     &memory_cache_dir,
                     state.user_pause.as_ref(),
+                    memory_backing.as_deref(),
+                    record_integrity,
                 ) {
                     Ok(result) => {
                         state.lifecycle = if state.user_pause.is_some() {
@@ -391,6 +418,7 @@ impl RuntimeControlExecutor {
             ControlRequest::CheckpointCreate {
                 checkpoint_id,
                 intent,
+                record_integrity,
             } => {
                 state.lifecycle = RuntimeLifecycle::Quiescing;
                 match state.checkpoint.capture(
@@ -408,6 +436,7 @@ impl RuntimeControlExecutor {
                         }
                     },
                     state.user_pause.as_ref(),
+                    record_integrity,
                 ) {
                     Ok(result) => {
                         state.lifecycle = if state.user_pause.is_some() {
@@ -502,6 +531,8 @@ impl RuntimeControlExecutor {
                     checkpoint_create: true,
                     disk_checkpoint_create: true,
                     branch_create: cfg!(any(unix, windows)),
+                    optional_disk_integrity: true,
+                    branch_memfd: cfg!(target_os = "linux"),
                     disk_compact: true,
                     root_disk_grow: true,
                     pause_resume: self.vm.clock_sync_supported(),
@@ -526,6 +557,7 @@ impl RuntimeControlExecutor {
             ControlRequest::CheckpointCreate { .. }
             | ControlRequest::DiskCheckpointCreate { .. }
             | ControlRequest::BranchCreate { .. }
+            | ControlRequest::BranchCreateMemfd { .. }
             | ControlRequest::Pause
             | ControlRequest::Resume
             | ControlRequest::PauseState

@@ -25,6 +25,8 @@ pub(crate) struct SandboxRunIdentity {
 #[derive(Clone, Debug)]
 #[cfg(feature = "local")]
 pub(crate) struct BranchSource {
+    /// Explicit disk integrity policy for this one capture, never inherited by descendants.
+    pub(crate) record_integrity: bool,
     pub(crate) name: String,
     pub(crate) run: SandboxRunIdentity,
 }

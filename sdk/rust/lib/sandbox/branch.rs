@@ -1,8 +1,8 @@
 //! Direct local execution branching through the existing control and restore paths.
 
-use std::sync::Arc;
 #[cfg(feature = "local")]
-use std::{fs::File, path::Path};
+use std::path::Path;
+use std::sync::Arc;
 
 #[cfg(feature = "local")]
 use microsandbox_runtime::checkpoint::LocalBranchState;
@@ -31,6 +31,7 @@ pub struct BranchBuilder {
     source: String,
     identity: SandboxIdentity,
     pub(crate) inner: SandboxBuilder,
+    record_integrity: bool,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -79,7 +80,14 @@ impl BranchBuilder {
             source: source.into(),
             identity,
             inner,
+            record_integrity: false,
         }
+    }
+
+    /// Record disk content integrity for the captured layers. Off by default; RAM is not hashed.
+    pub fn record_integrity(mut self) -> Self {
+        self.record_integrity = true;
+        self
     }
 
     /// Capture source execution and start an independent child; preserve source running/paused state.
@@ -88,7 +96,14 @@ impl BranchBuilder {
         if let Some(error) = self.inner.build_error.take() {
             return Err(error);
         }
-        branch(self.backend, &self.source, self.identity, self.inner.config).await
+        branch(
+            self.backend,
+            &self.source,
+            self.identity,
+            self.inner.config,
+            self.record_integrity,
+        )
+        .await
     }
 
     /// Branch with the shared startup progress and task cancellation contract.
@@ -120,6 +135,7 @@ async fn branch(
     _source: &str,
     _identity: SandboxIdentity,
     _options: super::SandboxConfig,
+    _record_integrity: bool,
 ) -> MicrosandboxResult<Sandbox> {
     Err(MicrosandboxError::InvalidConfig(
         "direct branching requires a local backend".into(),
@@ -132,6 +148,7 @@ async fn branch(
     source: &str,
     identity: SandboxIdentity,
     options: SandboxConfig,
+    record_integrity: bool,
 ) -> MicrosandboxResult<Sandbox> {
     let name = options.spec.name.clone();
     super::validate_sandbox_name(&name)?;
@@ -210,10 +227,24 @@ async fn branch(
             "source runtime does not support direct local branching".into(),
         ));
     }
+    if !capabilities
+        .capabilities
+        .is_some_and(|c| c.optional_disk_integrity)
+    {
+        return Err(MicrosandboxError::Runtime(
+            "source runtime lacks optional disk integrity; restart with the matching runtime"
+                .into(),
+        ));
+    }
+    #[cfg(target_os = "linux")]
+    if !capabilities.capabilities.is_some_and(|c| c.branch_memfd) {
+        return Err(MicrosandboxError::Runtime("source runtime lacks the memory-descriptor branch handoff; restart with the matching runtime".into()));
+    }
     config.spec.name = name;
     config.replace_existing = false;
     config.spec.patches.clear();
     config.branch_source = Some(super::identity::BranchSource {
+        record_integrity,
         name: source.into(),
         run,
     });
@@ -232,7 +263,8 @@ pub(crate) async fn capture_child(
     config: &mut SandboxConfig,
     source: &super::identity::BranchSource,
     child: &Path,
-) -> MicrosandboxResult<File> {
+) -> MicrosandboxResult<Arc<microsandbox_runtime::checkpoint::LocalMemoryPin>> {
+    let record_integrity = source.record_integrity;
     // Child reservation precedes capture; source transition ownership now excludes restart or
     // replacement until the exact selected generation has handed off its state.
     let _transition =
@@ -250,16 +282,31 @@ pub(crate) async fn capture_child(
         &id,
     )?;
     tokio::fs::write(child.join(".branch-reservation"), &id).await?;
+    #[cfg(not(target_os = "linux"))]
     let request = ControlRequest::BranchCreate {
+        record_integrity,
         branch_id: id.clone(),
         child_name: config.spec.name.clone(),
         memory_cache_dir: local.cache_dir().join("memory"),
     };
-    let response = modify::control_request_for_run(
+    #[cfg(target_os = "linux")]
+    let memory = Some(microsandbox_runtime::memory_handoff::create()?);
+    #[cfg(not(target_os = "linux"))]
+    let memory: Option<std::fs::File> = None;
+    #[cfg(target_os = "linux")]
+    let request = ControlRequest::BranchCreateMemfd {
+        record_integrity,
+        branch_id: id.clone(),
+        child_name: config.spec.name.clone(),
+        memory_cache_dir: local.cache_dir().join("memory"),
+        backing: None,
+    };
+    let response = modify::control_request_for_run_with_memory(
         local,
         &source.name,
         source.run,
         format!("{}\n", serde_json::to_string(&request)?),
+        memory.as_ref(),
     )
     .await?;
     local.validate_control_run(&source.name, source.run).await?;
@@ -274,7 +321,11 @@ pub(crate) async fn capture_child(
     if state.id != id {
         return Err(MicrosandboxError::Runtime("branch identity differs".into()));
     }
-    let pin = state.memory.pin()?;
+    let pin = Arc::new(state.memory.pin_backing(memory.as_ref())?);
+    #[cfg(target_os = "linux")]
+    if state.memory.memfd_lease.is_some() {
+        config.branch_memory = Some(pin.clone());
+    }
     config.spec.resources.cpus = state.vcpus;
     config.spec.resources.max_cpus = state.max_cpus;
     config.spec.resources.memory_mib = state.memory_mib;
@@ -342,6 +393,7 @@ pub(crate) async fn capture_child(
     .await?;
     crate::snapshot::apply_additional_disks(config, mounts);
     config.checkpoint_restore = Some(CheckpointRestoreConfig {
+        memory_descriptor: state.memory.memfd_lease.is_some(),
         network_gateway_mac: microsandbox_runtime::checkpoint::captured_gateway_mac(
             &state.resources,
         )

@@ -18,6 +18,8 @@ mod runner;
 // Exports
 //--------------------------------------------------------------------------------------------------
 
+#[cfg(all(feature = "client", target_os = "linux"))]
+pub use client::memory_handoff;
 #[cfg(feature = "client")]
 pub use client::{boot_error, control, ipc, launch, logging, maintenance, startup_progress};
 #[cfg(feature = "runner")]

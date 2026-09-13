@@ -51,7 +51,8 @@ use crate::launch::FileMountConfig;
 #[cfg(unix)]
 pub use crate::launch::LIFECYCLE_LOCK_FD;
 pub use crate::launch::{
-    CONFIG_FD, MetricsSlotHandoff, PARENT_WATCH_DETACH, PARENT_WATCH_FD, STARTUP_FD, StartupCommand,
+    BRANCH_MEMORY_FD, CONFIG_FD, MetricsSlotHandoff, PARENT_WATCH_DETACH, PARENT_WATCH_FD,
+    STARTUP_FD, StartupCommand,
 };
 use crate::logging::LogLevel;
 use crate::metrics::run_metrics_sampler;
@@ -1028,7 +1029,7 @@ fn run(
         bootstrap_frame,
         resolved_bootstrap,
         bind_identity_map,
-        restored_agent,
+        mut restored_agent,
     ) = match build_result {
         Ok(vm) => vm,
         Err(e) => {
@@ -1105,6 +1106,9 @@ fn run(
             &config.agent_sock_path,
             Arc::clone(&shared.workload_control),
             Arc::clone(&shared.resident_paused),
+            restored_agent
+                .as_mut()
+                .and_then(|agent| agent.inherited_memory.take()),
         );
         let context = super::control::ControlContext {
             executor: match executor {
@@ -1747,6 +1751,7 @@ fn build_vm(
                 crate::checkpoint::PreparedCheckpointRestore::open_local(
                     restore.closure.clone(),
                     &restore.checkpoint_id,
+                    restore.memory_descriptor,
                 )
             } else {
                 crate::checkpoint::PreparedCheckpointRestore::open(

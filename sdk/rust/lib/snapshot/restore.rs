@@ -128,6 +128,7 @@ pub(crate) async fn materialize_checkpoint_child_state(
 
     Ok(CheckpointChildMaterialization {
         restore: CheckpointRestoreConfig {
+            memory_descriptor: false,
             network_gateway_mac: microsandbox_runtime::checkpoint::captured_gateway_mac(
                 &child_closure.checkpoint().resources,
             )
@@ -662,11 +663,12 @@ mod tests {
             device_id: "vda".into(),
             generation: 1,
             layers: vec![DiskLayerRef {
+                file_size: std::fs::metadata(&source_layer).unwrap().len(),
                 layer_id: "layer_base".into(),
                 format: "raw".into(),
                 virtual_size: 4 * 1024 * 1024,
                 predecessor: None,
-                integrity_root: layer_integrity.root,
+                integrity_root: Some(layer_integrity.root),
             }],
             head: "layer_base".into(),
             pause_generation: 7,
@@ -697,6 +699,7 @@ mod tests {
         let checkpoint_root = ObjectId::from_bytes(&checkpoint_bytes).unwrap();
         std::fs::write(source.join("checkpoint.json"), checkpoint_bytes).unwrap();
         let restore = CheckpointRestoreConfig {
+            memory_descriptor: false,
             network_gateway_mac: None,
             external_mount_policy: Default::default(),
             external_mounts: Vec::new(),

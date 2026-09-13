@@ -126,6 +126,7 @@ typedef char *(*msb_sandbox_request_stop_fn)(uint64_t cancel_id, uint64_t handle
 typedef char *(*msb_sandbox_restore_warnings_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_pause_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_branch_fn)(uint64_t cancel_id, uint64_t handle, const char *source, const char *child, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_sandbox_branch_with_options_fn)(uint64_t cancel_id, uint64_t handle, const char *source, const char *child, bool record_integrity, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_resume_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_handle_pause_fn)(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_handle_resume_fn)(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len);
@@ -297,6 +298,7 @@ static msb_sandbox_request_stop_fn ptr_msb_sandbox_request_stop = NULL;
 static msb_sandbox_restore_warnings_fn ptr_msb_sandbox_restore_warnings = NULL;
 static msb_sandbox_pause_fn ptr_msb_sandbox_pause = NULL;
 static msb_sandbox_branch_fn ptr_msb_sandbox_branch = NULL;
+static msb_sandbox_branch_with_options_fn ptr_msb_sandbox_branch_with_options = NULL;
 static msb_sandbox_resume_fn ptr_msb_sandbox_resume = NULL;
 static msb_sandbox_handle_pause_fn ptr_msb_sandbox_handle_pause = NULL;
 static msb_sandbox_handle_resume_fn ptr_msb_sandbox_handle_resume = NULL;
@@ -490,6 +492,7 @@ const char *load_microsandbox(const char *path) {
 	RESOLVE_OPTIONAL(msb_sandbox_restore_warnings);
 	RESOLVE(msb_sandbox_pause);
 	RESOLVE(msb_sandbox_branch);
+	RESOLVE_OPTIONAL(msb_sandbox_branch_with_options);
 	RESOLVE(msb_sandbox_resume);
 	RESOLVE(msb_sandbox_handle_pause);
 	RESOLVE(msb_sandbox_handle_resume);
@@ -718,6 +721,10 @@ char *call_msb_sandbox_pause(uint64_t cancel_id, uint64_t handle, uint8_t *buf, 
 }
 char *call_msb_sandbox_branch(uint64_t cancel_id, uint64_t handle, const char *source, const char *child, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_sandbox_branch ? ptr_msb_sandbox_branch(cancel_id, handle, source, child, buf, buf_len) : NULL;
+}
+bool has_branch_integrity(void) { return ptr_msb_sandbox_branch_with_options != NULL; }
+char *call_msb_sandbox_branch_with_options(uint64_t cancel_id, uint64_t handle, const char *source, const char *child, bool record_integrity, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_sandbox_branch_with_options ? ptr_msb_sandbox_branch_with_options(cancel_id, handle, source, child, record_integrity, buf, buf_len) : NULL;
 }
 char *call_msb_sandbox_resume(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_sandbox_resume ? ptr_msb_sandbox_resume(cancel_id, handle, buf, buf_len) : NULL;
@@ -2712,23 +2719,31 @@ func (s *Sandbox) RestoreWarnings(ctx context.Context) (string, error) {
 }
 
 // Branch creates an independent local child through the host runtime.
-func (s *Sandbox) Branch(ctx context.Context, name string) (*Sandbox, error) {
-	return branchSandbox(ctx, uint64(s.h()), s.name, name)
+func (s *Sandbox) Branch(ctx context.Context, name string, recordIntegrity bool) (*Sandbox, error) {
+	return branchSandbox(ctx, uint64(s.h()), s.name, name, recordIntegrity)
 }
 
 // BranchSandboxByName branches execution without an agent connection to the source.
-func BranchSandboxByName(ctx context.Context, source, name string) (*Sandbox, error) {
-	return branchSandbox(ctx, 0, source, name)
+func BranchSandboxByName(ctx context.Context, source, name string, recordIntegrity bool) (*Sandbox, error) {
+	return branchSandbox(ctx, 0, source, name, recordIntegrity)
 }
 
-func branchSandbox(ctx context.Context, handle uint64, source, name string) (*Sandbox, error) {
+func branchSandbox(ctx context.Context, handle uint64, source, name string, recordIntegrity bool) (*Sandbox, error) {
 	if err := ensureLoaded(); err != nil {
 		return nil, err
 	}
 	cSource, cName := C.CString(source), C.CString(name)
+	if recordIntegrity && !bool(C.has_branch_integrity()) {
+		C.free(unsafe.Pointer(cSource))
+		C.free(unsafe.Pointer(cName))
+		return nil, &Error{Kind: KindUnsupportedOperation, Message: "native SDK does not support branch integrity; update the native SDK"}
+	}
 	defer C.free(unsafe.Pointer(cSource))
 	defer C.free(unsafe.Pointer(cName))
 	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		if recordIntegrity {
+			return C.call_msb_sandbox_branch_with_options(cancelID, C.uint64_t(handle), cSource, cName, C.bool(true), buf, bufLen)
+		}
 		return C.call_msb_sandbox_branch(cancelID, C.uint64_t(handle), cSource, cName, buf, bufLen)
 	})
 	if err != nil {
