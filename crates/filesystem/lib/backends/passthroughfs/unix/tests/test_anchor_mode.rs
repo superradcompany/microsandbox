@@ -559,6 +559,75 @@ fn test_anchor_hard_link() {
     assert_eq!(std::fs::read(sb.root.join("copy")).unwrap(), b"linked");
 }
 
+/// Install a one-shot hook that runs `swap` in the window between an anchor
+/// resolution and the name-bound syscall that follows it.
+fn swap_before_name_bound_syscall(sb: &TestSandbox, swap: impl Fn() + Send + Sync + 'static) {
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    *sb.fs.before_name_bound_syscall.write().unwrap() = Some(std::sync::Arc::new(move || {
+        if !done.swap(true, std::sync::atomic::Ordering::AcqRel) {
+            swap();
+        }
+    }));
+}
+
+/// The hard link source is named again by `linkat`, so a replacement that
+/// lands after the anchor was verified is what gets linked. The guest must be
+/// told ENOENT rather than handed an entry for the replacement.
+///
+/// The entry `linkat` created stays on the host: that is the accepted outcome.
+/// It is what an unchecked `linkat` would have left, and removing it by name
+/// would be a second name-based race against whatever is under that name by
+/// then.
+#[test]
+fn test_anchor_link_rejects_replaced_source() {
+    use std::os::unix::fs::MetadataExt;
+
+    let sb = TestSandbox::with_anchor_mode();
+    sb.host_create_file("a", b"original");
+    let a = sb.lookup_root("a").unwrap();
+
+    // Keep the original alive under another name so its inode number cannot be
+    // reused by the replacement.
+    let root = sb.root.clone();
+    swap_before_name_bound_syscall(&sb, move || {
+        std::fs::rename(root.join("a"), root.join("a.orig")).unwrap();
+        std::fs::write(root.join("a"), b"replacement").unwrap();
+    });
+
+    TestSandbox::assert_errno(
+        sb.fs
+            .link(sb.ctx(), a.inode, ROOT_INODE, &TestSandbox::cstr("copy")),
+        LINUX_ENOENT,
+    );
+    assert_eq!(std::fs::read(sb.root.join("a.orig")).unwrap(), b"original");
+
+    // Accepted outcome: the link exists and names the replacement, not the
+    // tracked file. This request returns no entry, but the surviving link
+    // remains discoverable through lookup and readdir.
+    let linked = std::fs::metadata(sb.root.join("copy")).unwrap();
+    let replacement = std::fs::metadata(sb.root.join("a")).unwrap();
+    let tracked = std::fs::metadata(sb.root.join("a.orig")).unwrap();
+    assert_eq!(linked.ino(), replacement.ino());
+    assert_ne!(linked.ino(), tracked.ino());
+}
+
+/// A destination that already exists keeps the POSIX answer of a plain
+/// `linkat`: EEXIST, with the destination untouched.
+#[test]
+fn test_anchor_link_existing_target_eexist() {
+    let sb = TestSandbox::with_anchor_mode();
+    sb.host_create_file("a", b"source");
+    sb.host_create_file("taken", b"occupied");
+    let a = sb.lookup_root("a").unwrap();
+
+    TestSandbox::assert_errno(
+        sb.fs
+            .link(sb.ctx(), a.inode, ROOT_INODE, &TestSandbox::cstr("taken")),
+        LINUX_EEXIST,
+    );
+    assert_eq!(std::fs::read(sb.root.join("taken")).unwrap(), b"occupied");
+}
+
 /// readlink on a nested symlink works through the anchor parent.
 #[test]
 fn test_anchor_readlink_nested() {

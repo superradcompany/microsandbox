@@ -20,10 +20,29 @@
 //!
 //! Residual guarantees in anchor mode: identity is always verified after the open,
 //! so a host-side replacement of an anchored name is refused rather than served;
-//! path-based resolution can still go stale while the walk runs if the host renames
-//! an intermediate directory (the same exposure the Linux backend has); and the hard
-//! link source and readlink are name-bound between the verification and the syscall,
-//! because macOS has no fd-relative form of either call.
+//! and path-based resolution can still go stale while the walk runs if the host
+//! renames an intermediate directory — that one exposure is shared with the
+//! Linux backend.
+//!
+//! The hard link source is name-bound in anchor mode, which is a macOS-only
+//! exposure: Linux links through `/proc/self/fd/N`, which is bound to the
+//! inode, while macOS has no fd-relative `linkat`. The source name is
+//! therefore resolved twice — once by the anchor verification, once by the
+//! syscall — and the created entry's identity is checked afterwards, reporting
+//! `ENOENT` when it does not hold the tracked inode.
+//!
+//! A source swapped before the `linkat` is detected even if the host puts the
+//! original name back afterwards: the created entry pins whichever inode the
+//! syscall captured, so the check still sees the replacement. That entry is
+//! left in place — it is the outcome an unchecked `linkat` would have had, and
+//! removing it by name would be a second name-based race — so the guest is
+//! refused while the host keeps the link.
+//!
+//! The check assumes `newname` still names the entry `linkat` created. A host
+//! that replaces the destination name before the `fstatat`, or between it and
+//! the `do_lookup` that follows, is a retained destination-name race: the
+//! source swap-and-restore alone is detected, this is not.
+//!
 //!
 //! ## Procfd Reopen
 //!
