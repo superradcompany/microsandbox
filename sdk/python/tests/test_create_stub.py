@@ -32,6 +32,7 @@ EXPECTED_KWARGS = [
     "scripts",
     "pull_policy",
     "log_level",
+    "disable_exec_log",
     "registry_auth",
     "registry_insecure",
     "registry_ca_certs",
@@ -116,6 +117,7 @@ def test_default_workload_methods_have_explicit_keyword_only_contracts() -> None
         "stdin",
         "tty",
         "rlimits",
+        "capture",
     ]
     assert [arg.arg for arg in exec_default_stream.args.kwonlyargs] == [
         "cwd",
@@ -125,12 +127,14 @@ def test_default_workload_methods_have_explicit_keyword_only_contracts() -> None
         "stdin",
         "tty",
         "rlimits",
+        "capture",
     ]
     assert [arg.arg for arg in attach_default.args.kwonlyargs] == [
         "cwd",
         "user",
         "env",
         "detach_keys",
+        "capture",
     ]
 
 
@@ -156,3 +160,35 @@ def test_lifecycle_convergence_methods_are_typed() -> None:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     }
     assert "connect_or_start" in handle_methods
+
+
+def test_capture_is_a_tri_state_keyword_on_every_exec_and_attach_method() -> None:
+    """`None` keeps the Rust default: off for an ad-hoc exec, on for the
+    default-workload helpers. A `False` default would silently turn capture
+    off for `exec_default` and `attach_default`."""
+    for name in (
+        "exec",
+        "exec_stream",
+        "shell",
+        "shell_stream",
+        "exec_default",
+        "exec_default_stream",
+        "attach",
+        "attach_default",
+    ):
+        method = _method(name)
+        kwonly = method.args.kwonlyargs
+        index = [arg.arg for arg in kwonly].index("capture")
+        assert ast.unparse(kwonly[index].annotation) == "bool | None", name
+        default = method.args.kw_defaults[index]
+        assert isinstance(default, ast.Constant) and default.value is None, name
+
+
+def test_disable_exec_log_defaults_off_on_every_create_method() -> None:
+    for name in ("create", "connect_or_create", "create_with_progress"):
+        method = _method(name)
+        kwonly = method.args.kwonlyargs
+        index = [arg.arg for arg in kwonly].index("disable_exec_log")
+        assert ast.unparse(kwonly[index].annotation) == "bool", name
+        default = method.args.kw_defaults[index]
+        assert isinstance(default, ast.Constant) and default.value is False, name

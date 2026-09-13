@@ -415,6 +415,7 @@ async def attach(
     user: str | None = None,
     env: Mapping[str, str] | None = None,
     detach_keys: str | None = None,
+    capture: bool | None = None,
 ) -> int
 ```
 
@@ -816,7 +817,7 @@ recent = await handle.logs(
 
 </Accordion>
 
-Read captured output from the sandbox's `exec.log`. Backed by an on-disk JSON Lines file the runtime writes via the relay tap. Works on running and stopped sandboxes alike; there is no protocol traffic. The same method is available on [`SandboxHandle`](#sandboxhandle) for callers that don't want to start the sandbox first.
+Read captured output from the sandbox's `exec.log`. Backed by an on-disk JSON Lines file the runtime writes via the relay tap. It holds the sandbox's workload output and any exec that asked with `capture=True`; a sandbox created with `disable_exec_log=True` records nothing. Works on running and stopped sandboxes alike; there is no protocol traffic. The same method is available on [`SandboxHandle`](#sandboxhandle) for callers that don't want to start the sandbox first.
 
 The default sources are `STDOUT`, `STDERR`, and `OUTPUT` (PTY-merged). Add `LogReadSource.SYSTEM` to include synthetic lifecycle markers and runtime/kernel diagnostic lines, or use `LogReadSource.ALL` as shorthand for all four. Timestamps are exposed as `float` ms since the Unix epoch (UTC) for parity with [`SandboxMetrics.timestamp_ms`](#sandboxmetrics).
 
@@ -1787,7 +1788,7 @@ async with session:
 
 <p className="msb-backref">Used by <a href="#sandbox-create">create()</a> · <a href="#sandbox-create_with_progress">create_with_progress()</a></p>
 
-<Tooltip tip="Microsandbox cloud accepts common OCI, resource, lifecycle, environment, policy, secret, script, and inline patch fields. Snapshots, replace, host ports, custom network infrastructure, local rootfs forms, hostname, resource ceilings, metrics sampling, and custom registry transport are local-only."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Microsandbox cloud accepts common OCI, resource, lifecycle, environment, policy, secret, script, and inline patch fields. Snapshots, replace, host ports, custom network infrastructure, local rootfs forms, hostname, resource ceilings, metrics sampling, exec-log recording, and custom registry transport are local-only."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 The keyword arguments accepted by [`create()`](#sandbox-create) and [`create_with_progress()`](#sandbox-create_with_progress). There is no `SandboxConfig` object you construct directly; these are passed as `**kwargs`.
 
@@ -1818,6 +1819,7 @@ The keyword arguments accepted by [`create()`](#sandbox-create) and [`create_wit
 | scripts | `Mapping[str, str]` | `{}` | Named scripts mounted at `/.msb/scripts/` and added to `PATH` |
 | pull_policy | [`PullPolicy`](#pullpolicy) | `IF_MISSING` | Image pull behavior |
 | log_level | [`LogLevel`](#loglevel) | - | Override log verbosity |
+| disable_exec_log | `bool` | `False` | Do not record exec output to `exec.log` at all, not even the workload's. `logs()` then returns nothing |
 | registry_auth | [`RegistryAuth`](#registryauth) | - | Private registry credentials |
 | registry_insecure | `bool` | `False` | Pull images over plain HTTP instead of HTTPS (local or self-hosted registries) |
 | registry_ca_certs | `list[bytes \| bytearray \| str \| os.PathLike]` | `[]` | Additional CA roots for image pulls. File paths are read when `create()` is called. |

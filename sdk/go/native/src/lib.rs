@@ -1066,6 +1066,9 @@ struct SandboxCreateOpts {
     log_level: Option<String>,
     #[serde(default)]
     quiet_logs: bool,
+    /// Keep the sandbox's `exec.log` closed: no exec output is recorded.
+    #[serde(default)]
+    disable_exec_log: bool,
     /// Named scripts that can be invoked via the agent.
     #[serde(default)]
     scripts: HashMap<String, String>,
@@ -2289,6 +2292,9 @@ pub unsafe extern "C" fn msb_sandbox_create(
             }
             if opts.quiet_logs {
                 builder = builder.quiet_logs();
+            }
+            if opts.disable_exec_log {
+                builder = builder.disable_exec_log();
             }
             for (k, v) in opts.scripts {
                 builder = builder.script(k, v);
@@ -4115,7 +4121,8 @@ pub unsafe extern "C" fn msb_sftp_close(
 // ---------------------------------------------------------------------------
 // Sandbox — exec (blocking, collected output)
 //
-// exec_opts_json: {"args":[...],"cwd":"...","timeout_secs":<int>}
+// exec_opts_json: {"args":[...],"cwd":"...","timeout_secs":<int>,"capture":<bool>}
+// `capture` absent keeps the call's default (off for exec, on for exec_default).
 // Output: {"stdout":"...","stderr":"...","exit_code":<int|null>}
 // ---------------------------------------------------------------------------
 
@@ -4129,6 +4136,8 @@ struct ExecOpts {
     user: Option<String>,
     #[serde(default)]
     env: HashMap<String, String>,
+    /// Record to `exec.log`. `None` keeps the Rust SDK's default for the call.
+    capture: Option<bool>,
 }
 
 #[unsafe(no_mangle)]
@@ -4157,6 +4166,9 @@ pub unsafe extern "C" fn msb_sandbox_exec(
                     }
                     if let Some(tty) = opts.tty {
                         b = b.tty(tty);
+                    }
+                    if let Some(capture) = opts.capture {
+                        b = b.capture(capture);
                     }
                     if let Some(secs) = opts.timeout_secs {
                         b = b.timeout(Duration::from_secs(secs));
@@ -4210,6 +4222,9 @@ pub unsafe extern "C" fn msb_sandbox_exec_default(
                     }
                     if let Some(tty) = opts.tty {
                         b = b.tty(tty);
+                    }
+                    if let Some(capture) = opts.capture {
+                        b = b.capture(capture);
                     }
                     if let Some(secs) = opts.timeout_secs {
                         b = b.timeout(Duration::from_secs(secs));
@@ -4978,7 +4993,7 @@ pub unsafe extern "C" fn msb_log_close(
 /// Start a streaming exec session. Returns `{"exec_handle":<u64>}`.
 /// The exec handle MUST be released with msb_exec_close when done.
 ///
-/// exec_opts_json: same schema as msb_sandbox_exec (args, cwd, timeout_secs).
+/// exec_opts_json: same schema as msb_sandbox_exec (args, cwd, timeout_secs, capture).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn msb_sandbox_exec_stream(
     cancel_id: u64,
@@ -5006,6 +5021,9 @@ pub unsafe extern "C" fn msb_sandbox_exec_stream(
                     }
                     if let Some(tty) = opts.tty {
                         b = b.tty(tty);
+                    }
+                    if let Some(capture) = opts.capture {
+                        b = b.capture(capture);
                     }
                     if let Some(cwd) = opts.cwd {
                         b = b.cwd(cwd);
@@ -5062,6 +5080,9 @@ pub unsafe extern "C" fn msb_sandbox_exec_default_stream(
                     }
                     if let Some(tty) = opts.tty {
                         b = b.tty(tty);
+                    }
+                    if let Some(capture) = opts.capture {
+                        b = b.capture(capture);
                     }
                     if let Some(cwd) = opts.cwd {
                         b = b.cwd(cwd);
@@ -6842,7 +6863,7 @@ pub unsafe extern "C" fn msb_agent_free_bytes(ptr: *mut c_uchar, len: usize) {
 // Attach / AttachShell — interactive PTY sessions
 //
 // These block the calling thread until the guest process exits.
-// opts_json is `{"args":[...],"cwd":...,"user":...,"env":{...},"detach_keys":...}`
+// opts_json is `{"args":[...],"cwd":...,"user":...,"env":{...},"detach_keys":...,"capture":<bool>}`
 // (all fields optional).
 // Returns `{"exit_code":<int>}`.
 // ---------------------------------------------------------------------------
@@ -6856,6 +6877,8 @@ struct AttachOpts {
     #[serde(default)]
     env: HashMap<String, String>,
     detach_keys: Option<String>,
+    /// Record to `exec.log`. `None` keeps the Rust SDK's default for the call.
+    capture: Option<bool>,
 }
 
 /// Attach to a sandbox with an interactive PTY session.
@@ -6895,6 +6918,9 @@ pub unsafe extern "C" fn msb_sandbox_attach(
                     }
                     if let Some(keys) = opts.detach_keys {
                         b = b.detach_keys(keys);
+                    }
+                    if let Some(capture) = opts.capture {
+                        b = b.capture(capture);
                     }
                     b
                 }) => r.map_err(FfiError::from),
@@ -6945,6 +6971,9 @@ pub unsafe extern "C" fn msb_sandbox_attach_default(
                     }
                     if let Some(keys) = opts.detach_keys {
                         builder = builder.detach_keys(keys);
+                    }
+                    if let Some(capture) = opts.capture {
+                        builder = builder.capture(capture);
                     }
                     builder
                 }) => result.map_err(FfiError::from),
@@ -7026,6 +7055,35 @@ mod tests {
         let opts: ExecOpts = serde_json::from_str(r#"{"tty":true}"#).unwrap();
 
         assert_eq!(opts.tty, Some(true));
+    }
+
+    /// Absent keeps the call's default; an explicit `false` must survive, since
+    /// it is how ExecDefault opts out of recording.
+    #[test]
+    fn exec_opts_capture_is_optional_and_keeps_false() {
+        let absent: ExecOpts = serde_json::from_str("{}").unwrap();
+        assert_eq!(absent.capture, None);
+        let off: ExecOpts = serde_json::from_str(r#"{"capture":false}"#).unwrap();
+        assert_eq!(off.capture, Some(false));
+        let on: ExecOpts = serde_json::from_str(r#"{"capture":true}"#).unwrap();
+        assert_eq!(on.capture, Some(true));
+    }
+
+    #[test]
+    fn attach_opts_capture_is_optional_and_keeps_false() {
+        let absent: AttachOpts = serde_json::from_str("{}").unwrap();
+        assert_eq!(absent.capture, None);
+        let off: AttachOpts = serde_json::from_str(r#"{"capture":false}"#).unwrap();
+        assert_eq!(off.capture, Some(false));
+    }
+
+    #[test]
+    fn sandbox_create_opts_parses_disable_exec_log() {
+        let absent: SandboxCreateOpts = serde_json::from_str(r#"{"image":"python:3.12"}"#).unwrap();
+        assert!(!absent.disable_exec_log);
+        let set: SandboxCreateOpts =
+            serde_json::from_str(r#"{"image":"python:3.12","disable_exec_log":true}"#).unwrap();
+        assert!(set.disable_exec_log);
     }
 
     #[test]
