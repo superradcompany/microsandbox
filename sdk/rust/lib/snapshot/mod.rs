@@ -370,9 +370,10 @@ pub(crate) async fn materialize_archive_for_child(
 }
 
 pub(crate) use restore::{
-    apply_additional_disks, materialize_additional_disks, materialize_checkpoint_child_disk_state,
-    materialize_checkpoint_child_state, materialize_checkpoint_disk_for_child,
-    materialize_checkpoint_for_child, materialize_file_snapshot_for_child, root_device,
+    adopt_local_branch_for_child, apply_additional_disks, materialize_additional_disks,
+    materialize_checkpoint_child_disk_state, materialize_checkpoint_child_state,
+    materialize_checkpoint_disk_for_child, materialize_checkpoint_for_child,
+    materialize_file_snapshot_for_child, root_device,
 };
 
 pub(crate) use create::CHECKPOINT_DIRECTORY;

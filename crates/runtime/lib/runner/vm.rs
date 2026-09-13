@@ -2542,12 +2542,11 @@ fn build_vm(
         .map_err(|e| RuntimeError::Custom(format!("build VM: {e}")))?;
     let restored_agent = if let Some(restore) = &config.vm.checkpoint_restore {
         let prepared = prepared_restore.expect("restore was admitted before device construction");
-        if let Some(admitted) = prepared.disk_closure() {
-            // Reuse this process's exact admitted file bindings before the closure is moved
-            // into RAM restoration. The later coordinator opens the completed journal.
-            crate::checkpoint::seed_restored_root_disk(&config.runtime_dir, &config.vm, admitted)
-                .map_err(RuntimeError::Custom)?;
-        }
+        // Local branches and durable restores both retain exact immutable disk bindings.
+        // Seed before moving the prepared sources into VM construction.
+        prepared
+            .seed_root_disk(&config.runtime_dir, &config.vm)
+            .map_err(RuntimeError::Custom)?;
         let cache_root = restore
             .forked
             .then(|| {

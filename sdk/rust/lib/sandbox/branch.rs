@@ -321,11 +321,9 @@ pub(crate) async fn capture_child(
                 .last()
                 .ok_or_else(|| MicrosandboxError::SnapshotIntegrity("branch disk is empty".into()))?
                 .virtual_size;
-            let materialized = crate::snapshot::materialize_file_snapshot_for_child(
-                &sources, size, child, &layout,
-            )
-            .await?;
-            config.snapshot_upper_layers = materialized.upper_layers;
+            config.snapshot_upper_layers =
+                crate::snapshot::adopt_local_branch_for_child(&sources, size, child, &layout)
+                    .await?;
         }
         _ => {
             return Err(MicrosandboxError::SnapshotIntegrity(

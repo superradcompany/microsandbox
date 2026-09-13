@@ -27,7 +27,8 @@ pub use manifest::{
     MemoryManifest, ResourceDescriptor, ResourceTreatment,
 };
 pub use qcow::{
-    create_qcow2_overlay, relocate_qcow2_backing, relocated_qcow2_header, validate_standalone_qcow2,
+    create_qcow2_overlay, qcow2_backing_basename, relocate_qcow2_backing, relocated_qcow2_header,
+    validate_standalone_qcow2,
 };
 pub use resolver::{CheckpointClosure, CheckpointObjectReadTiming};
 pub use store::{

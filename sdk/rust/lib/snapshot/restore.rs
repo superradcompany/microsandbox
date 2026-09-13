@@ -211,6 +211,83 @@ pub(crate) async fn materialize_file_snapshot_for_child(
     })
 }
 
+/// Adopt a local handoff using independent directory entries, without duplicating disk bytes.
+pub(crate) async fn adopt_local_branch_for_child(
+    sources: &[RootfsUpperLayerConfig],
+    virtual_size: u64,
+    child_stage: &Path,
+    root_disk: &SnapshotRootDisk,
+) -> MicrosandboxResult<Vec<RootfsUpperLayerConfig>> {
+    let directory = child_stage.join(".branch-restore").join("layers");
+    if sources.is_empty() || matches!(root_disk, SnapshotRootDisk::Tmpfs { .. }) {
+        return Err(MicrosandboxError::SnapshotIntegrity(
+            "local branch has no root layers".into(),
+        ));
+    }
+    for source in sources {
+        if source.path.parent() != Some(directory.as_path())
+            || !std::fs::symlink_metadata(&source.path)?.is_file()
+        {
+            return Err(MicrosandboxError::SnapshotIntegrity(
+                "local branch layer is not child-owned".into(),
+            ));
+        }
+    }
+    let backing_names = sources
+        .iter()
+        .skip(1)
+        .map(|layer| microsandbox_image::checkpoint::qcow2_backing_basename(&layer.path))
+        .collect::<std::io::Result<Vec<_>>>()?;
+    let mut layers: Vec<RootfsUpperLayerConfig> = Vec::with_capacity(sources.len() + 1);
+    for (index, source) in sources.iter().enumerate() {
+        let canonical = child_stage.join(source.path.file_name().expect("confined layer"));
+        let mut target = if index == 0 {
+            // Preserve the ordinary configured base for later cold startup.
+            checkpoint_layer_target(child_stage, root_disk, 0, &source.format)?
+        } else if let Some(name) = backing_names.get(index) {
+            child_stage.join(name)
+        } else {
+            canonical.clone()
+        };
+        if target.exists() || layers.iter().any(|layer| layer.path == target) {
+            target = canonical;
+        }
+        if target.exists() || layers.iter().any(|layer| layer.path == target) {
+            return Err(MicrosandboxError::SnapshotIntegrity(
+                "local branch layer name conflicts".into(),
+            ));
+        }
+        let previous = layers.last().map(|layer| layer.path.clone());
+        let unchanged_header = previous.as_ref().is_none_or(|path| {
+            path.file_name().and_then(|name| name.to_str())
+                == Some(backing_names[index - 1].as_str())
+        });
+        if unchanged_header {
+            tokio::fs::hard_link(&source.path, &target).await?;
+        } else {
+            // Old/imported names may conflict with the fixed cold-boot base or another owned
+            // filename. Relocate only that layer; never mutate a shared captured inode.
+            let source_path = source.path.clone();
+            let target_path = target.clone();
+            tokio::task::spawn_blocking(move || {
+                copy_child_disk_layer(&source_path, &target_path, previous.as_deref())
+            })
+            .await
+            .map_err(|error| {
+                MicrosandboxError::Custom(format!("local disk relocation task: {error}"))
+            })??;
+        }
+        layers.push(RootfsUpperLayerConfig {
+            path: target,
+            format: source.format.clone(),
+        });
+    }
+    // Exactly one owned name per chain layer remains after the consumed closure is removed.
+    // This retains compaction/growth's basename and reclamation contracts.
+    append_private_writable_head(&mut layers, virtual_size, child_stage, root_disk).await?;
+    Ok(layers)
+}
+
 //--------------------------------------------------------------------------------------------------
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
@@ -438,6 +515,94 @@ mod tests {
     };
 
     use super::*;
+
+    #[tokio::test]
+    async fn local_adoption_preserves_owned_layers_and_cold_boot_base() {
+        for (root_disk, base_name) in [
+            (SnapshotRootDisk::Managed, "upper.ext4"),
+            (SnapshotRootDisk::Flat, "rootfs.raw"),
+        ] {
+            for overlay_count in [0, 1, 3] {
+                let dir = tempfile::tempdir().unwrap();
+                let child = dir.path().join("child");
+                let layers = child.join(".branch-restore/layers");
+                std::fs::create_dir_all(&layers).unwrap();
+                let base = layers.join("layer_base.raw");
+                std::fs::write(&base, vec![29; 131072]).unwrap();
+                let mut sources = vec![RootfsUpperLayerConfig {
+                    path: base.clone(),
+                    format: "raw".into(),
+                }];
+                for index in 0..overlay_count {
+                    let alias = layers.join(if index == 0 {
+                        base_name.into()
+                    } else {
+                        format!("native-{}.qcow2", index - 1)
+                    });
+                    let previous = sources.last().unwrap();
+                    std::fs::hard_link(&previous.path, &alias).unwrap();
+                    let overlay = layers.join(format!("layer_overlay_{index}.qcow2"));
+                    microsandbox_image::checkpoint::create_qcow2_overlay(
+                        &overlay,
+                        131072,
+                        &alias,
+                        &previous.format,
+                    )
+                    .await
+                    .unwrap();
+                    sources.push(RootfsUpperLayerConfig {
+                        path: overlay,
+                        format: "qcow2".into(),
+                    });
+                }
+                let original = sources
+                    .iter()
+                    .map(|layer| std::fs::read(&layer.path).unwrap())
+                    .collect::<Vec<_>>();
+                let result = adopt_local_branch_for_child(&sources, 131072, &child, &root_disk)
+                    .await
+                    .unwrap();
+                assert_eq!(result.len(), sources.len() + 1);
+                assert_eq!(result[0].path, child.join(base_name));
+                assert_eq!(std::fs::read(&result[0].path).unwrap(), original[0]);
+                for ((source, bytes), owned) in sources.iter().zip(original).zip(&result) {
+                    assert_eq!(std::fs::read(&source.path).unwrap(), bytes);
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::MetadataExt;
+                        assert_eq!(
+                            std::fs::metadata(&source.path).unwrap().ino(),
+                            std::fs::metadata(&owned.path).unwrap().ino()
+                        );
+                    }
+                }
+                let head = &result.last().unwrap().path;
+                assert_eq!(head.parent(), Some(child.as_path()));
+                // Ordinary completion removes the entire transient closure. Exactly the listed
+                // owned chain remains, with no alias names left to defeat later reclamation.
+                std::fs::remove_dir_all(child.join(".branch-restore")).unwrap();
+                for pair in result.windows(2) {
+                    let predecessor =
+                        microsandbox_image::checkpoint::qcow2_backing_basename(&pair[1].path)
+                            .unwrap();
+                    assert_eq!(child.join(predecessor), pair[0].path);
+                }
+                let restored = dir.path().join("durable-child");
+                materialize_file_snapshot_for_child(
+                    &result[..result.len() - 1],
+                    131072,
+                    &restored,
+                    &root_disk,
+                )
+                .await
+                .unwrap();
+                assert_eq!(
+                    std::fs::read(child.join(base_name)).unwrap(),
+                    vec![29; 131072]
+                );
+            }
+        }
+    }
 
     #[test]
     fn checkpoint_layer_paths_preserve_root_layout() {

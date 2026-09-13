@@ -202,6 +202,16 @@ fn sparse_copy_impl(src: &Path, dst: &Path, sync_destination: bool) -> io::Resul
             break;
         }
 
+        #[cfg(target_os = "linux")]
+        if !sync_destination {
+            // Local handoffs require independent contents, not physically independent blocks.
+            // Keep the explicit/durable copy backend unchanged, but avoid a userspace bounce
+            // buffer when the kernel can transfer an ephemeral generation directly.
+            copy_local_extent(src_fd, dst_fd, data_start, data_end - data_start)?;
+        } else {
+            copy_extent(src_fd, dst_fd, data_start, data_end - data_start)?;
+        }
+        #[cfg(not(target_os = "linux"))]
         copy_extent(src_fd, dst_fd, data_start, data_end - data_start)?;
         off = data_end as i64;
     }
@@ -546,6 +556,52 @@ fn copy_extent(src_fd: RawFd, dst_fd: RawFd, off: u64, len: u64) -> io::Result<(
     read_write_extent(src_fd, dst_fd, off, len)
 }
 
+/// Preserve holes by transferring only the caller's allocated extent. A kernel copy may
+/// internally clone blocks; that is safe for immutable local generations and private children.
+#[cfg(target_os = "linux")]
+fn copy_local_extent(src_fd: RawFd, dst_fd: RawFd, off: u64, len: u64) -> io::Result<()> {
+    let mut copied = 0u64;
+    while copied < len {
+        let mut source_offset = (off + copied) as libc::loff_t;
+        let mut destination_offset = source_offset;
+        let count = (len - copied).min(32 * 1024 * 1024) as usize;
+        let result = unsafe {
+            libc::copy_file_range(
+                src_fd,
+                &mut source_offset,
+                dst_fd,
+                &mut destination_offset,
+                count,
+                0,
+            )
+        };
+        if result > 0 {
+            copied += result as u64;
+            continue;
+        }
+        if result == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "kernel copy reached EOF mid-extent",
+            ));
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() == io::ErrorKind::Interrupted {
+            continue;
+        }
+        if matches!(
+            error.raw_os_error(),
+            Some(libc::EXDEV | libc::ENOSYS | libc::EOPNOTSUPP | libc::EINVAL)
+        ) {
+            // A transfer can succeed partially before discovering an unsupported extent.
+            // Continue at the exact next byte, never restart or densify the whole file.
+            return read_write_extent(src_fd, dst_fd, off + copied, len - copied);
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
 /// Copy `len` bytes from `src_fd` at `off` to `dst_fd` at `off` with
 /// `pread`/`pwrite`.
 ///
@@ -776,6 +832,20 @@ mod tests {
         let (length, _) = fast_copy_without_sync(&src, &dst).unwrap();
         assert_eq!(length, 16);
         assert_eq!(std::fs::read(&dst).unwrap(), b"local generation");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn local_kernel_copy_reports_truncated_extent() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("source");
+        let dst = dir.path().join("destination");
+        std::fs::write(&src, b"short").unwrap();
+        let source = File::open(src).unwrap();
+        let destination = File::create(dst).unwrap();
+        let error =
+            copy_local_extent(source.as_raw_fd(), destination.as_raw_fd(), 0, 4096).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
     }
 
     #[cfg(windows)]

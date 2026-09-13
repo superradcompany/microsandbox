@@ -110,6 +110,8 @@ struct PausedCaptureTimings {
     managed_disk_us: u128,
     memory_plan_us: u128,
     memory_capture_us: u128,
+    memory_finish_us: u128,
+    memory_paused_prepare_us: u128,
     guest_bytes_read: u64,
     unplugged_bytes_skipped: u64,
     extent_overlay_us: u128,
@@ -467,7 +469,7 @@ impl CheckpointCoordinator {
         // Only the root block worker is drained and switched. Rollover inspects its state,
         // but no full CPU/device payload, RAM scan, guest handshake, or dirty-baseline update
         // is needed. The result is a crash-consistent disk cut, not an execution checkpoint.
-        let result = disk.rollover(vm, &self.runtime, &path, pause.get());
+        let result = disk.rollover(vm, &self.runtime, &path, pause.get(), false);
         if user_pause.is_none() && !result.as_ref().is_err_and(|e| e.keep_paused) {
             vm.resume(pause).map_err(Failure::post_journal)?;
         }
@@ -626,6 +628,48 @@ impl CheckpointCoordinator {
         std::fs::create_dir(&staging).map_err(CheckpointFailure::before_pause)?;
         let staging_us = staging_started.elapsed().as_micros();
 
+        // Preparing an immutable baseline does not read live guest RAM. Keep this potentially
+        // RAM-sized copy outside the freeze/pause window; dirty tracking continues until the
+        // authoritative paused plan below. The executor owns this coordinator exclusively.
+        let memory_prepare_started = Instant::now();
+        let prepared_local_memory = if local_destination.is_some() {
+            let baseline = self.local_baseline.as_ref().filter(|previous| {
+                vm.retained_memory_baseline().is_some_and(|baseline| {
+                    previous.memory.generation == baseline.generation().get()
+                        && previous.memory.topology == baseline.topology().get()
+                })
+            });
+            // Configured MiB excludes architecture-specific mappings (for example the x86
+            // kernel mapping). Only an observed immutable generation gives an exact bound.
+            let prepared = baseline
+                .map(|baseline| baseline.capacity())
+                .transpose()
+                .and_then(|capacity| {
+                    LocalMemoryCapture::prepare(
+                        self.local_cache_root
+                            .as_ref()
+                            .expect("validated local cache"),
+                        checkpoint_id,
+                        baseline,
+                        capacity,
+                    )
+                });
+            let sink = match prepared {
+                Ok(sink) => sink,
+                Err(error) => {
+                    let _ = std::fs::remove_dir_all(&staging);
+                    return Err(CheckpointFailure::before_pause(error));
+                }
+            };
+            Some(sink)
+        } else {
+            None
+        };
+        let memory_prepare_us = memory_prepare_started.elapsed().as_micros();
+        if let Some(prepared) = &prepared_local_memory {
+            tracing::info!(target: "microsandbox_checkpoint_timing", operation = "local_memory_prepare", prepare_us = prepared.prepare_us, baseline_bytes = prepared.baseline_bytes, reflink = prepared.reflink, ram_backed = prepared.ram_backed, "prepared immutable RAM backing before workload freeze");
+        }
+
         // The guest latch is acquired while vCPUs can still service agentd.
         // It remains held in captured guest memory so a restored child cannot
         // run application code before VM Generation ID activation completes.
@@ -694,6 +738,7 @@ impl CheckpointCoordinator {
             &staging,
             &final_path,
             local_destination.is_some(),
+            prepared_local_memory,
         );
         let paused_capture_us = paused_capture_started.elapsed().as_micros();
         let captured = match paused {
@@ -828,6 +873,9 @@ impl CheckpointCoordinator {
             operation = "capture",
             source_already_paused = user_pause.is_some(),
             checkpoint_id,
+            memory_prepare_us,
+            memory_paused_prepare_us = captured.timings.memory_paused_prepare_us,
+            memory_finish_us = captured.timings.memory_finish_us,
             memory_mode = ?captured.result.memory_mode,
             memory_logical_bytes = captured.result.memory_logical_bytes,
             memory_emitted_bytes = captured.result.memory_emitted_bytes,
@@ -1044,6 +1092,7 @@ impl CheckpointCoordinator {
         staging: &Path,
         final_path: &Path,
         local: bool,
+        prepared_local_memory: Option<LocalMemoryCapture>,
     ) -> Result<PausedCapture, CheckpointFailure> {
         let mut timings = PausedCaptureTimings::default();
         let batch = Arc::new(CaptureObjectBatch::new(
@@ -1071,7 +1120,7 @@ impl CheckpointCoordinator {
                 })?;
                 let disk_started = Instant::now();
                 let rollover = disk
-                    .rollover(vm, &self.runtime, staging, pause_generation)
+                    .rollover(vm, &self.runtime, staging, pause_generation, local)
                     .map_err(|error| CheckpointFailure {
                         freezer_unavailable: false,
                         message: error.to_string(),
@@ -1204,24 +1253,56 @@ impl CheckpointCoordinator {
         timings.execution_us = execution_started.elapsed().as_micros();
 
         if local {
+            let memory_plan_started = Instant::now();
             let (memory_plan, incremental) = self
                 .plan_local_memory(vm)
                 .map_err(CheckpointFailure::resumable)?;
+            timings.memory_plan_us = memory_plan_started.elapsed().as_micros();
             let captured = (|| {
-                let started = Instant::now();
-                let mut sink = LocalMemoryCapture::new(
-                    self.local_cache_root
-                        .as_ref()
-                        .expect("validated local cache"),
-                    checkpoint_id,
-                    if incremental {
-                        self.local_baseline.as_ref()
-                    } else {
-                        None
-                    },
-                )
-                .map_err(CheckpointFailure::resumable)?;
+                let prepare_started = Instant::now();
+                let baseline = if incremental {
+                    self.local_baseline.as_ref()
+                } else {
+                    None
+                };
+                let expected = baseline.map(|base| (base.memory.generation, base.memory.topology));
+                // A topology change or a Complete/FullRequired plan invalidates the prepared
+                // delta. Never apply a full capture to a copied baseline with stale geometry.
+                let mut sink = match prepared_local_memory {
+                    Some(prepared) if prepared.baseline() == expected => prepared,
+                    Some(mut prepared)
+                        if expected.is_none()
+                            && prepared.baseline().is_some_and(|(_, topology)| {
+                                topology == memory_plan.topology().get()
+                            }) =>
+                    {
+                        prepared
+                            .reset_to_full()
+                            .map_err(CheckpointFailure::resumable)?;
+                        prepared
+                    }
+                    previous => {
+                        // A different topology invalidates both bytes and the RAM reservation.
+                        // Release it before preparing an unbounded, disk-backed complete cut.
+                        drop(previous);
+                        let capacity = baseline
+                            .map(|baseline| baseline.capacity())
+                            .transpose()
+                            .map_err(CheckpointFailure::resumable)?;
+                        LocalMemoryCapture::prepare(
+                            self.local_cache_root
+                                .as_ref()
+                                .expect("validated local cache"),
+                            checkpoint_id,
+                            baseline,
+                            capacity,
+                        )
+                        .map_err(CheckpointFailure::resumable)?
+                    }
+                };
+                timings.memory_paused_prepare_us = prepare_started.elapsed().as_micros();
                 let reflink = sink.reflink;
+                let started = Instant::now();
                 let stats = vm
                     .capture_memory(
                         &memory_plan,
@@ -1230,10 +1311,12 @@ impl CheckpointCoordinator {
                         &mut sink,
                     )
                     .map_err(CheckpointFailure::resumable)?;
+                timings.memory_capture_us = started.elapsed().as_micros();
+                let finish_started = Instant::now();
                 let memory = sink
                     .finish(memory_plan.generation().get(), memory_plan.topology().get())
                     .map_err(CheckpointFailure::resumable)?;
-                timings.memory_capture_us = started.elapsed().as_micros();
+                timings.memory_finish_us = finish_started.elapsed().as_micros();
                 timings.guest_bytes_read = stats.guest_bytes_read;
                 timings.unplugged_bytes_skipped = stats.unplugged_bytes_skipped;
                 let state = super::LocalBranchState {
@@ -1256,7 +1339,7 @@ impl CheckpointCoordinator {
                 std::fs::write(staging.join("branch.json"), bytes)
                     .map_err(CheckpointFailure::resumable)?;
                 std::fs::rename(staging, final_path).map_err(CheckpointFailure::resumable)?;
-                tracing::info!(target: "microsandbox_checkpoint_timing", operation = "local_memory_capture", incremental, reflink, capture_us = timings.memory_capture_us, guest_bytes_read = stats.guest_bytes_read, unplugged_bytes_skipped = stats.unplugged_bytes_skipped);
+                tracing::info!(target: "microsandbox_checkpoint_timing", operation = "local_memory_capture", incremental, reflink, capture_us = timings.memory_capture_us, paused_prepare_us = timings.memory_paused_prepare_us, finish_us = timings.memory_finish_us, guest_bytes_read = stats.guest_bytes_read, unplugged_bytes_skipped = stats.unplugged_bytes_skipped);
                 Ok((memory, stats))
             })();
             let (memory, stats) = match captured {
