@@ -2477,7 +2477,7 @@ fn secret_disposition(
             placeholder_changed,
             live_secret_reconfigure_supported,
         );
-        return ModificationDisposition::Unsupported;
+        ModificationDisposition::Unsupported
     }
     #[cfg(feature = "net")]
     secret_disposition_net(
@@ -2535,7 +2535,7 @@ fn secret_reason(
             placeholder_changed,
             live_secret_reconfigure_supported,
         );
-        return Some(SECRETS_UNAVAILABLE_WITHOUT_NET.to_string());
+        Some(SECRETS_UNAVAILABLE_WITHOUT_NET.to_string())
     }
     #[cfg(feature = "net")]
     match secret_disposition(

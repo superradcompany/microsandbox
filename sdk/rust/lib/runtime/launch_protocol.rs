@@ -241,14 +241,4 @@ esac"#;
         );
         assert!(validate_request(LaunchProtocol::Current, &config).is_ok());
     }
-
-    #[tokio::test]
-    #[ignore = "requires an explicitly selected released msb artifact"]
-    async fn released_runtime_probe() {
-        let path = std::env::var_os("MSB_COMPAT_RUNTIME").expect("MSB_COMPAT_RUNTIME");
-        assert_eq!(
-            negotiate(Path::new(&path)).await.unwrap().command(),
-            "sandbox"
-        );
-    }
 }

@@ -34,4 +34,5 @@ def _msb_filename() -> str:
 
 def msb_path() -> Path:
     """Return the absolute path to the bundled ``msb`` binary."""
-    return Path(str(_BUNDLED.joinpath("bin", _msb_filename())))
+    # Python 3.10 namespace-package resources accept only one component per call.
+    return Path(str(_BUNDLED.joinpath("bin").joinpath(_msb_filename())))
