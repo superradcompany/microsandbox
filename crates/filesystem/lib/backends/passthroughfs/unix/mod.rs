@@ -222,8 +222,46 @@ pub struct PassthroughFs {
     #[cfg(target_os = "linux")]
     pub(crate) proc_self_fd: File,
 
+    /// Whether the share root's filesystem answers `/.vol/<dev>/<ino>` lookups.
+    ///
+    /// Probed once at construction. FSKit-backed filesystems on macOS 15+
+    /// (exFAT, for example) have no volfs; such shares resolve inodes by
+    /// anchor walk from `root_fd` instead of by identity path.
+    ///
+    /// Read by `anchor_mode`, which gates the anchor-walk reopen fallback.
+    /// Atomic so tests can force the fallback on a volfs-capable host.
+    #[cfg(target_os = "macos")]
+    pub(crate) volfs_supported: AtomicBool,
+
     /// Optional guest-write byte budget for this mount's subtree.
     pub(crate) quota: Option<super::quota::DirQuota>,
+
+    /// Test-only hook fired immediately before a blocking FIFO open.
+    ///
+    /// That open is the one point where an anchor reopen waits on another
+    /// process, so tests synchronise on it instead of guessing with a sleep.
+    #[cfg(all(test, target_os = "macos"))]
+    pub(crate) before_blocking_fifo_open: RwLock<Option<Arc<dyn Fn() + Send + Sync>>>,
+
+    /// Test-only count of FIFO endpoint opens attempted by the anchor reopen
+    /// path.
+    ///
+    /// Opening a FIFO endpoint is a rendezvous, so the reopen path must do it
+    /// exactly once per guest open. Counting the attempt rather than the
+    /// result lets a test see an endpoint that was opened and thrown away.
+    #[cfg(all(test, target_os = "macos"))]
+    pub(crate) fifo_endpoint_opens: std::sync::atomic::AtomicUsize,
+
+    /// Test-only hook fired between an anchor resolution and the name-bound
+    /// syscall that follows it.
+    ///
+    /// `linkat` names its source again after the anchor has verified it, so
+    /// tests need to act exactly in that window to prove the post-syscall
+    /// identity check does its job.
+    /// `readlinkat` names its entry again in the same way, and its own
+    /// post-call check is proved through this hook too.
+    #[cfg(all(test, target_os = "macos"))]
+    pub(crate) before_name_bound_syscall: RwLock<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 /// Open directory handle with a lazy point-in-time snapshot.
@@ -329,6 +367,9 @@ impl PassthroughFs {
             unsafe { File::from_raw_fd(fd) }
         };
 
+        #[cfg(target_os = "macos")]
+        let volfs_supported = AtomicBool::new(probe_volfs_support(root_fd.as_raw_fd()));
+
         let quota = cfg.quota_bytes.map(|limit| {
             super::quota::DirQuota::new(
                 cfg.quota_root
@@ -352,12 +393,40 @@ impl PassthroughFs {
             has_openat2,
             #[cfg(target_os = "linux")]
             proc_self_fd,
+            #[cfg(target_os = "macos")]
+            volfs_supported,
             quota,
+            #[cfg(all(test, target_os = "macos"))]
+            before_blocking_fifo_open: RwLock::new(None),
+            #[cfg(all(test, target_os = "macos"))]
+            fifo_endpoint_opens: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(all(test, target_os = "macos"))]
+            before_name_bound_syscall: RwLock::new(None),
         })
     }
 }
 
 impl PassthroughFs {
+    /// Run the test-only name-bound syscall hook, if one is installed.
+    ///
+    /// The guard is released before the callback runs, so a hook may call back
+    /// into the filesystem.
+    #[cfg(all(test, target_os = "macos"))]
+    pub(crate) fn run_name_bound_hook(&self) {
+        let hook = self.before_name_bound_syscall.read().unwrap().clone();
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
+    /// Whether this share resolves inodes by anchor walk instead of `/.vol`.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn anchor_mode(&self) -> bool {
+        !self
+            .volfs_supported
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
     /// Register root inode (inode 1) in the inode table.
     ///
     /// Called during `init()`. The guest kernel sends GETATTR on the root inode
@@ -400,13 +469,9 @@ impl PassthroughFs {
             refcount: AtomicU64::new(2), // libfuse convention: root gets refcount 2
             #[cfg(target_os = "linux")]
             mnt_id,
-            #[cfg(target_os = "linux")]
             anchor_parent: AtomicU64::new(0),
-            #[cfg(target_os = "linux")]
             anchor_name: RwLock::new(Vec::new()),
-            #[cfg(target_os = "linux")]
             aliases: RwLock::new(std::collections::BTreeSet::new()),
-            #[cfg(target_os = "linux")]
             anchor_children: AtomicU64::new(0),
             #[cfg(target_os = "linux")]
             retained_fd: Mutex::new(None),
@@ -978,6 +1043,36 @@ pub(crate) fn open_root(cfg: &PassthroughConfig) -> io::Result<File> {
     } else {
         open_dir_follow(&cfg.root_dir)
     }
+}
+
+/// Probe whether the filesystem holding `root_fd` supports volfs identity paths.
+///
+/// Opens `/.vol/<dev>/<ino>` for the root directory itself. FSKit-backed
+/// filesystems return ENOENT for every volfs path; a successful open means the
+/// backend can keep using identity paths for this share.
+#[cfg(target_os = "macos")]
+pub(crate) fn probe_volfs_support(root_fd: RawFd) -> bool {
+    let Ok(st) = platform::fstat(root_fd) else {
+        return false;
+    };
+    probe_volfs_path(platform::stat_dev(&st), platform::stat_ino(&st))
+}
+
+/// Open one volfs directory path and report whether it resolved.
+#[cfg(target_os = "macos")]
+pub(crate) fn probe_volfs_path(dev: u64, ino: u64) -> bool {
+    let path = inode::vol_path(dev, ino);
+    let fd = unsafe {
+        libc::open(
+            path.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return false;
+    }
+    unsafe { libc::close(fd) };
+    true
 }
 
 /// Open a directory by path, following symlinks (`O_DIRECTORY`).

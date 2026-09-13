@@ -425,7 +425,9 @@ pub(crate) fn do_symlink(
 /// Create a hard link.
 ///
 /// On Linux, uses `/proc/self/fd/N` with `AT_SYMLINK_FOLLOW` to link by fd reference.
-/// On macOS, uses `/.vol/dev/ino` to reference the source inode by identity.
+/// On macOS, uses `/.vol/dev/ino` to reference the source inode by identity when
+/// volfs is available; in anchor mode the source is resolved to a (dirfd, name)
+/// pair by anchor walk.
 pub(crate) fn do_link(
     fs: &PassthroughFs,
     _ctx: Context,
@@ -468,22 +470,70 @@ pub(crate) fn do_link(
 
     #[cfg(target_os = "macos")]
     {
-        let inodes = fs.inodes.read().unwrap();
-        let data = inodes.get(&inode).ok_or_else(platform::ebadf)?;
-        let src_path = format!("/.vol/{}/{}\0", data.dev, data.ino);
+        // Both `get_inode_fd` and `anchor_parent_and_name_macos` may take the
+        // inode-table write lock (the latter via `repair_anchor`), so neither
+        // may run while a read guard on `fs.inodes` is held.
         let newparent_fd = inode::get_inode_fd(fs, newparent)?;
+        if fs.anchor_mode() {
+            let expected = {
+                let inodes = fs.inodes.read().unwrap();
+                let data = inodes.get(&inode).ok_or_else(platform::ebadf)?;
+                (data.dev, data.ino)
+            };
+            let (src_dir, src_name) = inode::anchor_parent_and_name_macos(fs, inode)?;
 
-        let ret = unsafe {
-            libc::linkat(
-                libc::AT_FDCWD,
-                src_path.as_ptr() as *const libc::c_char,
-                newparent_fd.raw(),
-                newname.as_ptr(),
-                0,
-            )
-        };
-        if ret < 0 {
-            return Err(platform::linux_error(io::Error::last_os_error()));
+            #[cfg(test)]
+            fs.run_name_bound_hook();
+
+            let ret = unsafe {
+                libc::linkat(
+                    src_dir.raw(),
+                    src_name.as_ptr(),
+                    newparent_fd.raw(),
+                    newname.as_ptr(),
+                    0,
+                )
+            };
+            if ret < 0 {
+                // Capture errno before `src_dir` drops: its Drop closes the
+                // fd, and close(2) can clobber errno.
+                let err = io::Error::last_os_error();
+                return Err(platform::linux_error(err));
+            }
+
+            // macOS has no fd-relative `linkat` — linking `/dev/fd/N` answers
+            // EPERM — so the source name is resolved twice: once by the anchor
+            // verification, once by the syscall. Checking what the new entry
+            // actually holds detects a source swapped between the two, and the
+            // guest gets ENOENT instead of an entry for the replacement.
+            //
+            // The link `linkat` created is deliberately left in place. It is
+            // the same on-disk outcome an unchecked `linkat` would have
+            // produced, and removing it by name would be a second name-based
+            // race that could delete an entry another writer had put there in
+            // the meantime. Permissions therefore behave exactly as a plain
+            // `linkat`: nothing here needs rights the caller did not already
+            // have.
+            let st = platform::fstatat_nofollow(newparent_fd.raw(), newname)?;
+            if platform::stat_ino(&st) != expected.1 || platform::stat_dev(&st) != expected.0 {
+                return Err(platform::enoent());
+            }
+        } else {
+            let inodes = fs.inodes.read().unwrap();
+            let data = inodes.get(&inode).ok_or_else(platform::ebadf)?;
+            let src_path = format!("/.vol/{}/{}\0", data.dev, data.ino);
+            let ret = unsafe {
+                libc::linkat(
+                    libc::AT_FDCWD,
+                    src_path.as_ptr() as *const libc::c_char,
+                    newparent_fd.raw(),
+                    newname.as_ptr(),
+                    0,
+                )
+            };
+            if ret < 0 {
+                return Err(platform::linux_error(io::Error::last_os_error()));
+            }
         }
     }
 
@@ -542,29 +592,74 @@ pub(crate) fn do_readlink(fs: &PassthroughFs, _ctx: Context, ino: u64) -> io::Re
 
     #[cfg(target_os = "macos")]
     {
-        // On macOS we create real symlinks, so verify it's actually a symlink first.
-        let st = inode::stat_inode(fs, ino)?;
-        if platform::mode_file_type(st.st_mode) != platform::MODE_LNK {
-            return Err(platform::einval());
+        // On macOS we create real symlinks. In volfs mode the type is checked
+        // first because the identity path would otherwise open the target. In
+        // anchor mode the check is left to `readlinkat`, which answers EINVAL
+        // for anything that is not a symlink; a `stat_inode` pre-check there
+        // would only pay for a second anchor walk.
+        if !fs.anchor_mode() {
+            let st = inode::stat_inode(fs, ino)?;
+            if platform::mode_file_type(st.st_mode) != platform::MODE_LNK {
+                return Err(platform::einval());
+            }
         }
-
-        let inodes = fs.inodes.read().unwrap();
-        let data = inodes.get(&ino).ok_or_else(platform::ebadf)?;
-        let path = format!("/.vol/{}/{}\0", data.dev, data.ino);
 
         let mut buf = vec![0u8; libc::PATH_MAX as usize];
-        let ret = unsafe {
-            libc::readlinkat(
-                libc::AT_FDCWD,
-                path.as_ptr() as *const libc::c_char,
-                buf.as_mut_ptr() as *mut libc::c_char,
-                buf.len(),
-            )
+        let len = if fs.anchor_mode() {
+            let expected = {
+                let inodes = fs.inodes.read().unwrap();
+                let data = inodes.get(&ino).ok_or_else(platform::ebadf)?;
+                (data.dev, data.ino)
+            };
+            let (dir, name) = inode::anchor_parent_and_name_macos(fs, ino)?;
+
+            #[cfg(test)]
+            fs.run_name_bound_hook();
+
+            let ret = unsafe {
+                libc::readlinkat(
+                    dir.raw(),
+                    name.as_ptr(),
+                    buf.as_mut_ptr() as *mut libc::c_char,
+                    buf.len(),
+                )
+            };
+            // Capture errno here, before `dir` drops (its Drop calls
+            // `close`, which can clobber the syscall's errno).
+            if ret < 0 {
+                let err = io::Error::last_os_error();
+                return Err(platform::linux_error(err));
+            }
+
+            // macOS cannot read a link through a descriptor, so `readlinkat`
+            // resolves the name again after the anchor verified it. Checking
+            // the identity once more detects a substitution that is still in
+            // place when the check runs. It does not detect a swap that is put
+            // back: verify A, substitute B, read B's target, restore A, and
+            // the check passes on A while the answer came from B.
+            let st = platform::fstatat_nofollow(dir.raw(), &name)?;
+            if platform::stat_ino(&st) != expected.1 || platform::stat_dev(&st) != expected.0 {
+                return Err(platform::enoent());
+            }
+            ret
+        } else {
+            let inodes = fs.inodes.read().unwrap();
+            let data = inodes.get(&ino).ok_or_else(platform::ebadf)?;
+            let path = format!("/.vol/{}/{}\0", data.dev, data.ino);
+            let ret = unsafe {
+                libc::readlinkat(
+                    libc::AT_FDCWD,
+                    path.as_ptr() as *const libc::c_char,
+                    buf.as_mut_ptr() as *mut libc::c_char,
+                    buf.len(),
+                )
+            };
+            if ret < 0 {
+                return Err(platform::linux_error(io::Error::last_os_error()));
+            }
+            ret
         };
-        if ret < 0 {
-            return Err(platform::linux_error(io::Error::last_os_error()));
-        }
-        buf.truncate(ret as usize);
+        buf.truncate(len as usize);
         Ok(buf)
     }
 }
