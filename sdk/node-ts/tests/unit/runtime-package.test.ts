@@ -1,12 +1,12 @@
 import { spawnSync } from "node:child_process";
-import { copyFileSync, mkdirSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { constants, copyFileSync, cpSync, mkdirSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, expect, it } from "vitest";
 
-const entry = pathToFileURL(resolve("dist/index.js")).href;
-const nativeEntry = resolve("native/index.cjs");
+let entry: string;
+let nativeEntry: string;
 const executable = process.platform === "win32" ? "msb.exe" : "msb";
 const library = process.platform === "darwin" ? "libkrunfw.5.dylib"
   : process.platform === "win32" ? "libkrunfw.dll" : "libkrunfw.so.5.6.1";
@@ -23,6 +23,18 @@ function pair(home: string) {
 }
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), "msb-package-"));
+  // Discovery starts at the SDK's own location before consulting cwd. Copy the
+  // real SDK into the fixture so an installed CI platform package cannot leak
+  // into tests that deliberately remove their packaged runtime.
+  const sdkRoot = join(root, "node_modules", "microsandbox");
+  cpSync(resolve("dist"), join(sdkRoot, "dist"), { recursive: true });
+  mkdirSync(join(sdkRoot, "native"));
+  copyFileSync(resolve("package.json"), join(sdkRoot, "package.json"));
+  copyFileSync(resolve("native/index.cjs"), join(sdkRoot, "native/index.cjs"));
+  const addon = `microsandbox.${triple}.node`;
+  copyFileSync(resolve("native", addon), join(sdkRoot, "native", addon), constants.COPYFILE_FICLONE);
+  entry = pathToFileURL(join(sdkRoot, "dist/index.js")).href;
+  nativeEntry = join(sdkRoot, "native/index.cjs");
   packageRoot = join(root, "node_modules", "@superradcompany", `microsandbox-${triple}`);
   pair(packageRoot);
   writeFileSync(join(packageRoot, "package.json"), JSON.stringify({ name: `@superradcompany/microsandbox-${triple}` }));

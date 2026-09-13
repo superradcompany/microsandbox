@@ -1,19 +1,27 @@
-import { createRequire } from "node:module";
 import { chmodSync, cpSync, mkdirSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const require = createRequire(import.meta.url);
 const cli = resolve("bin/microsandbox.cjs");
-const { resolveMsb } = require(cli) as {
-  resolveMsb: (packaged: () => string | null) => { path: string; source: string } | null;
-};
 const executable = process.platform === "win32" ? "msb.exe" : "msb";
 const library = process.platform === "darwin" ? "libkrunfw.5.dylib"
   : process.platform === "win32" ? "libkrunfw.dll" : "libkrunfw.so.5.6.1";
 let root: string;
+
+function resolveMsb(packaged: () => string | null): { path: string; source: string } | null {
+  // Bun caches os.homedir(), so HOME must be set before the process starts.
+  // A fresh process also matches how users invoke the CLI with configuration.
+  const code = `import { createRequire } from 'node:module';
+    const { resolveMsb } = createRequire(import.meta.url)(${JSON.stringify(cli)});
+    console.log(JSON.stringify(resolveMsb(() => ${JSON.stringify(packaged())})));`;
+  const result = spawnSync(process.execPath, ["--input-type=module", "-e", code], {
+    env: process.env, encoding: "utf8", timeout: 30000,
+  });
+  if (result.status !== 0) throw new Error(result.stderr || String(result.error));
+  return JSON.parse(result.stdout);
+}
 
 function pair(home: string, marker = "runtime"): string {
   mkdirSync(join(home, "bin"), { recursive: true });

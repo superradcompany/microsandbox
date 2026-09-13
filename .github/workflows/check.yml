@@ -856,6 +856,7 @@ jobs:
         with:
           name: node-sdk-linux-x86_64
           path: |
+            sdk/node-ts/bin/microsandbox.cjs
             sdk/node-ts/native/index.cjs
             sdk/node-ts/native/index.d.ts
             sdk/node-ts/native/microsandbox.*.node
