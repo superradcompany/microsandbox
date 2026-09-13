@@ -54,7 +54,7 @@ All batch members are validated before publication. `SetHead: true` requires a u
 
 ## Disk maintenance and incremental export
 
-Exporting since a base omits its reusable disk layers and RAM objects. Full checkpoints keep the complete memory map and CPU/device state. The last-layers option only selects disk layers and leaves RAM payloads complete. Imports resolve dependencies from the batch or an explicitly named destination group. Use an external base for missing dependencies; direct restore still accepts an explicit base.
+Exporting since a base omits reusable root/owned-disk layers and RAM objects. Every disk shared with the base must retain its exact physical prefix; compaction of any such disk requires a new standalone baseline. New owned disks are included completely. Owned directory namespaces stay complete while unchanged file payloads can come from the base. Full checkpoints keep the complete memory map and CPU/device state. The last-layers option selects only the newest root-disk layers, retaining complete owned disks and RAM payloads. Imports resolve dependencies from the batch or an explicitly named destination group. Use an external base for missing dependencies; direct restore still accepts an explicit base. Selective export cannot be combined with whole-group/with-parents export.
 
 ```go
 worker, err := m.GetSandbox(ctx, "worker")
@@ -67,7 +67,11 @@ if err != nil { return err }
 snapshot, err := m.Snapshot.LoadWithBase(ctx, "changes.msb", "", "worker:checkpoint-a")
 ```
 
-The count includes the oldest base but excludes the writable head. A nil `Layers` selects all sealed layers; `DryRun: true` only resolves the plan. `LastLayers` is an alternative to `Since` for export. For direct restore use `RestoreSandbox(ctx, "changes.msb", "child", WithSnapshotBase("worker:checkpoint-a"))`. See [disk-chain maintenance](/sandboxes/snapshots#export-changes-and-compact-a-disk-chain) for dependency and retention rules.
+Compaction defaults to the managed or flat root and all sandbox-owned data disks, never named/external disks or directories. Set `Disk: "/data"` to select one owned disk, or `RootDiskOnly: true` for only the root; these selectors are mutually exclusive. `Disk: "/"` also selects the root. `Layers` limits each disk to up to N oldest sealed physical layers including the base, excluding the writable head; N must be at least two. A nil `Layers` selects all sealed layers. Chains with fewer than two sealed layers are unchanged. `DryRun: true` only resolves the plan. Results contain aggregate metrics and per-disk `Disks` entries keyed by `GuestPath`. With no eligible disks the default succeeds with an empty list and zero layer and byte counts. Compaction requires a running or fully stopped local sandbox; multi-disk commits can require [journal-based recovery](/sandboxes/snapshots#export-changes-and-compact-a-disk-chain).
+
+Per-disk `TotalUs` measures preparation/materialization only; aggregate `TotalUs` also includes journal adoption and backend switching, and `PauseUs` measures the shared VM pause. Timings are microseconds.
+
+`LastLayers` is an alternative to `Since` for export. For direct restore use `RestoreSandbox(ctx, "changes.msb", "child", WithSnapshotBase("worker:checkpoint-a"))`. See [disk-chain maintenance](/sandboxes/snapshots#export-changes-and-compact-a-disk-chain) for dependency and retention rules.
 
 ## Snapshot
 
@@ -800,12 +804,12 @@ Configures [`Snapshot.Create`](#snapshot-create). `FromSandbox` is required. An 
 |-------|------|-------------|
 | Name | `string` | Member name within its group; generated when empty |
 | Group | `string` | Destination snapshot group; defaults to the source sandbox's name |
-| FromSandbox | `string` | Name of the stopped or crashed sandbox to capture |
+| FromSandbox | `string` | Name of the source sandbox; disk capture supports running, paused, stopped, and crashed sources |
 | DestDir | `string` | Parent directory containing snapshot groups; empty = the default snapshots directory |
 | Labels | `map[string]string` | Arbitrary user labels recorded in the manifest |
 | Force | `bool` | Overwrite a direct archive output; rejected for installed group members |
 | RecordIntegrity | `bool` | Record content hashes so [`Verify`](#s-verify) can recompute them later |
-| Full | `bool` | Capture a running sandbox's full checkpoint instead of a stopped-sandbox disk snapshot |
+| Full | `bool` | Include memory and execution state from a running or paused source; `false` captures disk state from running, paused, stopped, or crashed sources |
 
 ### SnapshotSaveOptions<span className="msb-tag is-type" style={{marginLeft: "8px"}}>struct</span>
 

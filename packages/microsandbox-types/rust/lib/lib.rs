@@ -55,7 +55,10 @@ pub use modify::{
     SecretModificationPatch, SecretPlannedChange, SecretSource,
 };
 pub use registry::RegistryAuth;
-pub use snapshot::{DiskCompactionResult, ExternalMountRestorePolicy, ExternalMountWarning};
+pub use snapshot::{
+    DiskCompactionDiskResult, DiskCompactionResult, DiskCompactionTarget,
+    ExternalMountRestorePolicy, ExternalMountWarning,
+};
 pub use validation::{
     MAX_HOSTNAME_BYTES, MAX_SANDBOX_NAME_BYTES, hostname_from_sandbox_name, validate_hostname,
     validate_sandbox_name,

@@ -131,7 +131,7 @@ pub use crate::logs::{LogEntry, LogOptions, LogSource, LogStreamOptions};
 pub use attach::AttachOptionsBuilder;
 pub use branch::BranchBuilder;
 pub use builder::{RegistryConfigBuilder, SandboxBuilder};
-pub use compact::{DiskCompactionBuilder, DiskCompactionResult};
+pub use compact::{DiskCompactionBuilder, DiskCompactionDiskResult, DiskCompactionResult};
 pub use config::SandboxConfig;
 pub use exec::{ExecOptionsBuilder, ExecOutput, Rlimit, RlimitResource};
 pub use fs::{
@@ -702,7 +702,7 @@ impl Sandbox {
         SandboxModificationBuilder::new(self.backend.clone(), self.name.clone())
     }
 
-    /// Explicitly compact the root disk's sealed backing prefix.
+    /// Explicitly compact sealed backing layers of the root and sandbox-owned data disks.
     pub fn compact(&self) -> DiskCompactionBuilder {
         DiskCompactionBuilder::new(self.backend.clone(), self.name.clone())
     }

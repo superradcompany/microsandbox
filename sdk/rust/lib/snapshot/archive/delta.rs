@@ -50,6 +50,8 @@ pub(super) struct Dependencies {
 #[serde(tag = "kind", rename_all = "lowercase", deny_unknown_fields)]
 enum OwnedPayloadIdentity {
     Directory { digest: String, bytes: u64 },
+    // `bytes` is the guest-visible capacity; qcow2 container length differs. The hash binds
+    // the exact physical payload, including its archive-local backing header.
     Disk { integrity_root: String, bytes: u64 },
 }
 
@@ -63,7 +65,7 @@ struct RequiredOwnedPayload {
 struct PhysicalLayer {
     required: RequiredLayer,
     source: PathBuf,
-    /// Layer selectors address the root chain. Additional managed disks are exported whole.
+    /// Root selectors address this chain; owned `since` prefixes are planned separately.
     root_chain: bool,
 }
 
@@ -319,25 +321,119 @@ async fn verify_owned_payload(
     path: &Path,
     identity: &OwnedPayloadIdentity,
 ) -> MicrosandboxResult<()> {
-    let (bytes, matches) = match identity {
-        OwnedPayloadIdentity::Directory { digest, bytes } => (
-            *bytes,
-            hex::encode(Box::pin(file_sha256(path)).await?) == *digest,
-        ),
+    let metadata = std::fs::symlink_metadata(path)?;
+    if !metadata.file_type().is_file() {
+        return Err(source_error("borrowed owned payload is not a regular file"));
+    }
+    let matches = match identity {
+        OwnedPayloadIdentity::Directory { digest, bytes } => {
+            metadata.len() == *bytes && hex::encode(Box::pin(file_sha256(path)).await?) == *digest
+        }
         OwnedPayloadIdentity::Disk {
             integrity_root,
             bytes,
-        } => (
-            *bytes,
-            microsandbox_image::checkpoint::sparse_file_integrity(path)?.root == *integrity_root,
-        ),
+        } => {
+            let path = path.to_path_buf();
+            // The image reader uses thread-local futures. Keep it and the blocking physical
+            // hash on one worker so archive-loading futures remain Send for every SDK backend.
+            let (capacity, actual_integrity) = tokio::task::spawn_blocking(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()?;
+                let capacity =
+                    runtime.block_on(microsandbox_image::checkpoint::compact_layer_capacity(
+                        microsandbox_image::checkpoint::CompactLayer {
+                            path: path.clone(),
+                            qcow2: path
+                                .extension()
+                                .is_some_and(|extension| extension == "qcow2"),
+                        },
+                    ))?;
+                let integrity = microsandbox_image::checkpoint::sparse_file_integrity(&path)
+                    .map_err(std::io::Error::other)?;
+                Ok::<_, std::io::Error>((capacity, integrity.root))
+            })
+            .await
+            .map_err(|error| {
+                MicrosandboxError::Runtime(format!("owned disk payload verification: {error}"))
+            })??;
+            capacity == *bytes && actual_integrity == *integrity_root
+        }
     };
-    if !matches || std::fs::symlink_metadata(path)?.len() != bytes {
+    if !matches {
         return Err(source_error(
             "borrowed owned payload differs from its required identity",
         ));
     }
     Ok(())
+}
+
+/// Disk deltas require the same device's exact physical prefix. Equal content from a replaced
+/// or compacted representation is not a baseline; new devices are exported in full.
+fn owned_since_dependencies(
+    target: &Manifest,
+    baseline: &Manifest,
+) -> MicrosandboxResult<Vec<RequiredOwnedPayload>> {
+    use microsandbox_image::snapshot::OwnedVolumeData;
+
+    let baseline_volumes = baseline.owned_volumes()?;
+    let mut disk_prefixes = BTreeSet::new();
+    for volume in target.owned_volumes()? {
+        let OwnedVolumeData::Disk { generation } = &volume.data else {
+            continue;
+        };
+        let Some(base) = baseline_volumes
+            .iter()
+            .find(|base| base.mount_id == volume.mount_id)
+        else {
+            continue;
+        };
+        let OwnedVolumeData::Disk { generation: base } = &base.data else {
+            continue;
+        };
+        let mismatch = || {
+            MicrosandboxError::InvalidConfig(format!(
+                "owned disk {:?} baseline is not an exact physical prefix; export the new base first or save a complete archive",
+                volume.mount.guest,
+            ))
+        };
+        if base.device_id != generation.device_id {
+            return Err(mismatch());
+        }
+        let plan =
+            DiskLayerExportPlan::since(&generation.layers, &base.layers).map_err(|_| mismatch())?;
+        for layer in &generation.layers[plan.required()] {
+            disk_prefixes.insert(format!("{}.{}", layer.layer_id, layer.format));
+        }
+    }
+    let baseline_payloads = owned_payloads(baseline, Path::new(""))?
+        .into_iter()
+        .filter_map(|(payload, _)| match payload.identity {
+            identity @ OwnedPayloadIdentity::Directory { .. } => {
+                Some(serde_json::to_string(&identity))
+            }
+            OwnedPayloadIdentity::Disk { .. } => None,
+        })
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    owned_payloads(target, Path::new(""))?
+        .into_iter()
+        .filter_map(|(payload, _)| {
+            let required = match &payload.identity {
+                OwnedPayloadIdentity::Directory { .. } => {
+                    match serde_json::to_string(&payload.identity) {
+                        Ok(identity) => baseline_payloads.contains(&identity),
+                        Err(error) => return Some(Err(error.into())),
+                    }
+                }
+                OwnedPayloadIdentity::Disk { .. } => payload
+                    .path
+                    .rsplit('/')
+                    .next()
+                    .is_some_and(|name| disk_prefixes.contains(name)),
+            };
+            required.then_some(Ok(payload))
+        })
+        .collect()
 }
 
 fn regular_source(path: &Path) -> MicrosandboxResult<bool> {
@@ -456,15 +552,7 @@ pub(super) async fn selection(
             .filter(|layer| layer.root_chain)
             .collect::<Vec<_>>();
         let available = memory_objects(&base.snapshot)?;
-        let available_owned = owned_payloads(base.snapshot.manifest(), base.snapshot.path())?
-            .into_iter()
-            .map(|(payload, _)| serde_json::to_string(&payload.identity))
-            .collect::<Result<BTreeSet<_>, _>>()?;
-        for (payload, _) in owned_payloads(head.manifest(), head.path())? {
-            if available_owned.contains(&serde_json::to_string(&payload.identity)?) {
-                owned.push(payload);
-            }
-        }
+        owned = owned_since_dependencies(head.manifest(), base.snapshot.manifest())?;
         memory = memory_objects(head)?
             .intersection(&available)
             .cloned()
@@ -673,9 +761,35 @@ pub(super) async fn resolve(
         )
     })?;
     let base = Box::pin(open_base(local, base)).await?;
+    let required_disks = dependencies
+        .owned
+        .iter()
+        .filter(|payload| matches!(payload.identity, OwnedPayloadIdentity::Disk { .. }))
+        .collect::<Vec<_>>();
+    if !required_disks.is_empty() {
+        let target_manifest = Manifest::from_bytes(
+            &tokio::fs::read(
+                snapshots_dir
+                    .join(&inventory.head)
+                    .join(DESCRIPTOR_FILENAME),
+            )
+            .await?,
+        )
+        .map_err(source_error)?;
+        let expected_owned = owned_since_dependencies(&target_manifest, base.snapshot.manifest())?;
+        let expected_disks = expected_owned
+            .iter()
+            .filter(|payload| matches!(payload.identity, OwnedPayloadIdentity::Disk { .. }))
+            .collect::<Vec<_>>();
+        if expected_disks != required_disks {
+            return Err(source_error(
+                "supplied base is not the exact required owned disk prefix",
+            ));
+        }
+    }
     let available = physical_layers(base.snapshot.manifest(), base.snapshot.path())?;
-    // Incremental disk selectors describe only the root chain. Additional managed volumes
-    // are complete independent generations, regardless of their order in the checkpoint.
+    // This dependency list describes only the root chain. Owned prefixes have their own
+    // inventory; other additional disks stay complete regardless of checkpoint ordering.
     let available = available
         .iter()
         .filter(|layer| layer.root_chain)
@@ -769,6 +883,38 @@ async fn validate_resolved(
             return Err(source_error(
                 "omitted owned payload differs from target required inventory",
             ));
+        }
+    }
+    // Batch sources can satisfy a prefix without one explicit baseline, but the target must
+    // still omit only an oldest-first prefix of each owned device, never arbitrary layers.
+    let omitted: BTreeSet<_> = dependencies
+        .owned
+        .iter()
+        .map(|payload| payload.path.as_str())
+        .collect();
+    let namespace = if matches!(manifest.state, SnapshotState::Checkpoint(_)) {
+        "checkpoints"
+    } else {
+        "snapshots"
+    };
+    for volume in manifest.owned_volumes()? {
+        if let microsandbox_image::snapshot::OwnedVolumeData::Disk { generation } = volume.data {
+            let mut included = false;
+            for layer in generation.layers {
+                let path = format!(
+                    "{namespace}/{}/layers/{}.{}",
+                    manifest.snapshot_id, layer.layer_id, layer.format
+                );
+                if omitted.contains(path.as_str()) {
+                    if included {
+                        return Err(source_error(
+                            "owned disk dependencies are not an exact oldest-first prefix",
+                        ));
+                    }
+                } else {
+                    included = true;
+                }
+            }
         }
     }
     let target = target

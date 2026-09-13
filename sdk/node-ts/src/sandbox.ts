@@ -547,10 +547,10 @@ export class Sandbox implements AsyncDisposable {
     return modificationPlanFromJson(raw);
   }
 
-  /** Explicitly compact sealed root-disk layers without rewriting existing snapshots. */
+  /** Compact sealed root and owned-data disk layers without rewriting existing snapshots. */
   async compact(opts?: DiskCompactionOptions): Promise<DiskCompactionResult> {
     const raw = await withMappedErrors(() =>
-      this.inner.compact(opts?.layers, opts?.dryRun),
+      this.inner.compact(opts?.layers, opts?.dryRun, opts?.disk, opts?.rootDiskOnly),
     );
     return compactionResultFromJson(raw);
   }

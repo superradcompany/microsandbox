@@ -161,6 +161,17 @@ impl LocalBackend {
         }
 
         let mut config: SandboxConfig = serde_json::from_str(&model.config)?;
+        // Also cover starts after crashes or a stop performed by an older SDK. Lifecycle
+        // ownership alone can become available during Linux's deferred disk/KVM teardown.
+        // Observe only this sandbox's owned markers; actual shared-disk conflicts still fail
+        // in ordinary attachment admission instead of being retried indiscriminately.
+        #[cfg(unix)]
+        crate::runtime::owned_volumes::wait_for_disk_release(
+            &self.sandboxes_dir().join(name),
+            &config.spec.mounts,
+            Duration::from_secs(5),
+        )
+        .await?;
         // A failed or interrupted first restore is not a stopped ordinary VM. In particular,
         // its sealed base may be hard-linked to a snapshot and must never become a boot disk.
         Self::validate_completed_restore(&config)?;

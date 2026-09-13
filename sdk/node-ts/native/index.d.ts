@@ -1051,8 +1051,8 @@ export declare class Sandbox {
    * string; the TS wrapper parses it into a `SandboxModificationPlan`.
    */
   modify(options?: SandboxModifyOptions | undefined | null): Promise<string>
-  /** Compact the immutable disk prefix; the count includes the base, not the writable head. */
-  compact(layers?: number | undefined | null, dryRun?: boolean | undefined | null): Promise<string>
+  /** Compact root and owned-data disk prefixes; the limit includes the base, not the writable head. */
+  compact(layers?: number | undefined | null, dryRun?: boolean | undefined | null, disk?: string | undefined | null, rootDiskOnly?: boolean | undefined | null): Promise<string>
   /** Stream metrics snapshots at the requested interval (in milliseconds). */
   metricsStream(intervalMs: number): Promise<MetricsStream>
   /** Attach to the sandbox's effective OCI entrypoint and CMD. */
@@ -1450,8 +1450,8 @@ export declare class SandboxHandle {
    * string; the TS wrapper parses it into a `SandboxModificationPlan`.
    */
   modify(options?: SandboxModifyOptions | undefined | null): Promise<string>
-  /** Explicitly compact a running or stopped sandbox's immutable disk prefix. */
-  compact(layers?: number | undefined | null, dryRun?: boolean | undefined | null): Promise<string>
+  /** Compact root and owned-data disk prefixes of a running or stopped sandbox. */
+  compact(layers?: number | undefined | null, dryRun?: boolean | undefined | null, disk?: string | undefined | null, rootDiskOnly?: boolean | undefined | null): Promise<string>
   /** Start the sandbox (attached mode) — returns a live Sandbox handle. */
   start(): Promise<Sandbox>
   /** Start the sandbox (detached mode). */

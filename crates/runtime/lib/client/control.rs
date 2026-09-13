@@ -60,9 +60,12 @@ pub enum ControlRequest {
         /// Target capacity in bytes.
         size_bytes: u64,
     },
-    /// Explicitly consolidate the oldest sealed root-disk layers.
+    /// Explicitly consolidate sealed layers of the selected root and sandbox-owned disks.
     DiskCompact {
-        /// Oldest layer count including the base; omitted selects all sealed layers.
+        /// Select all eligible disks by default, or an explicit guest mount path/root.
+        #[serde(default)]
+        target: microsandbox_types::DiskCompactionTarget,
+        /// Up to this many oldest sealed layers per disk, including the base; minimum two.
         layers: Option<usize>,
         /// Resolve the selection without changing disk state.
         #[serde(default)]
@@ -266,6 +269,10 @@ pub struct ControlCapabilities {
     /// Explicit root-disk prefix compaction is supported.
     #[serde(default)]
     pub disk_compact: bool,
+    /// Root/owned-disk selectors and per-disk up-to layer limits are supported.
+    /// Absence means callers must not send the expanded default to an older root-only runtime.
+    #[serde(default)]
+    pub disk_compact_owned: bool,
     /// Live CPU online/offline targets are available.
     pub cpu_resize: bool,
 
@@ -469,6 +476,7 @@ mod tests {
                 branch_create: true,
                 pause_resume: true,
                 disk_compact: true,
+                disk_compact_owned: true,
             }),
             ..Default::default()
         };
@@ -476,6 +484,7 @@ mod tests {
         let json = serde_json::to_string(&response).unwrap();
         assert!(json.contains("\"secrets_update\":true"));
         assert!(json.contains("\"memory_resize\":false"));
+        assert!(json.contains("\"disk_compact_owned\":true"));
 
         let parsed: ControlResponse = serde_json::from_str(&json).unwrap();
         assert!(parsed.capabilities.unwrap().secrets_update);
@@ -486,6 +495,55 @@ mod tests {
         let parsed: ControlResponse = serde_json::from_str(r#"{"ok":true}"#).unwrap();
         assert!(parsed.ok);
         assert!(parsed.capabilities.is_none());
+    }
+
+    #[test]
+    fn compaction_target_defaults_to_all_and_roundtrips_explicit_selection() {
+        use microsandbox_types::DiskCompactionTarget;
+
+        let omitted: ControlRequest =
+            serde_json::from_str(r#"{"op":"disk_compact","layers":3}"#).unwrap();
+        assert!(matches!(
+            omitted,
+            ControlRequest::DiskCompact {
+                target: DiskCompactionTarget::All,
+                layers: Some(3),
+                dry_run: false,
+            }
+        ));
+        for target in [
+            DiskCompactionTarget::All,
+            DiskCompactionTarget::Root,
+            DiskCompactionTarget::Disk {
+                guest_path: "/data".into(),
+            },
+        ] {
+            let encoded = serde_json::to_string(&ControlRequest::DiskCompact {
+                target: target.clone(),
+                layers: Some(999),
+                dry_run: true,
+            })
+            .unwrap();
+            let decoded: ControlRequest = serde_json::from_str(&encoded).unwrap();
+            assert!(matches!(decoded, ControlRequest::DiskCompact {
+                target: actual, layers: Some(999), dry_run: true,
+            } if actual == target));
+        }
+        assert!(
+            serde_json::from_str::<ControlRequest>(
+                r#"{"op":"disk_compact","target":{"kind":"disk"}}"#
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn root_only_runtime_does_not_advertise_owned_compaction() {
+        let old: ControlCapabilities = serde_json::from_str(
+            r#"{"cpu_resize":false,"memory_resize":false,"secrets_update":false,"disk_compact":true}"#
+        ).unwrap();
+        assert!(old.disk_compact);
+        assert!(!old.disk_compact_owned);
     }
 }
 

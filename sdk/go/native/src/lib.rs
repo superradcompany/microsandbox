@@ -3207,6 +3207,9 @@ pub unsafe extern "C" fn msb_sandbox_compact(
         layers: Option<usize>,
         #[serde(default)]
         dry_run: bool,
+        disk: Option<String>,
+        #[serde(default)]
+        root_disk_only: bool,
     }
     run_c(cancel_id, buf, buf_len, || {
         let name = unsafe { cstr(name) }?;
@@ -3227,6 +3230,12 @@ pub unsafe extern "C" fn msb_sandbox_compact(
             };
             if let Some(layers) = opts.layers {
                 builder = builder.layers(layers);
+            }
+            if let Some(disk) = opts.disk {
+                builder = builder.disk(disk);
+            }
+            if opts.root_disk_only {
+                builder = builder.root_disk_only();
             }
             let result = if opts.dry_run {
                 builder.dry_run().await

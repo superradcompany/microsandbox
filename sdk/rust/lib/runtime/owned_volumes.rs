@@ -1,6 +1,12 @@
 //! Backing allocation and admission for sandbox-owned, unnamed volumes.
 
 use std::collections::HashSet;
+#[cfg(unix)]
+use std::fs::File;
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 use microsandbox_image::ext4::{Ext4FormatOptions, format_ext4};
@@ -117,13 +123,9 @@ pub(crate) fn validate(sandbox_dir: &Path, mounts: &[VolumeMount]) -> Microsandb
             continue;
         };
         let path = backing_path(sandbox_dir, guest, storage);
-        for component in [
-            path.parent().and_then(Path::parent),
-            path.parent(),
-            Some(path.as_path()),
-        ]
-        .into_iter()
-        .flatten()
+        for component in [path.parent().and_then(Path::parent), path.parent()]
+            .into_iter()
+            .flatten()
         {
             let metadata = std::fs::symlink_metadata(component).map_err(|error| {
                 MicrosandboxError::InvalidConfig(format!(
@@ -136,6 +138,31 @@ pub(crate) fn validate(sandbox_dir: &Path, mounts: &[VolumeMount]) -> Microsandb
                     "owned volume {guest} backing must not be a symlink"
                 )));
             }
+        }
+        if let OwnedVolumeStorage::Disk { capacity_mib } = storage {
+            let mount_id = microsandbox_types::owned_volume_mount_id(guest);
+            if let Some(chain) = microsandbox_runtime::checkpoint::load_runtime_owned_disk_chain(
+                &sandbox_dir.join("runtime"),
+                &mount_id,
+            )
+            .map_err(MicrosandboxError::InvalidConfig)?
+            {
+                if chain.device_id != mount_id
+                    || chain.virtual_size != u64::from(*capacity_mib) * 1024 * 1024
+                {
+                    return Err(MicrosandboxError::InvalidConfig(format!(
+                        "owned volume {guest} chain identity or capacity differs from its configuration"
+                    )));
+                }
+                // A restored or compacted chain need not retain its original disk.raw.
+                // Loading the journal validates its complete, confined physical closure.
+                continue;
+            }
+        }
+        if std::fs::symlink_metadata(&path)?.file_type().is_symlink() {
+            return Err(MicrosandboxError::InvalidConfig(format!(
+                "owned volume {guest} backing must not be a symlink"
+            )));
         }
         let metadata = std::fs::metadata(&path)?;
         let correct = match storage {
@@ -151,6 +178,132 @@ pub(crate) fn validate(sandbox_dir: &Path, mounts: &[VolumeMount]) -> Microsandb
         }
     }
     Ok(())
+}
+
+/// Lock the owned device's lifetime, not a data inode that checkpointing can replace.
+pub(crate) fn disk_lock_path(sandbox_dir: &Path, guest: &str) -> MicrosandboxResult<PathBuf> {
+    let path = owned_disk_lock_path(sandbox_dir, guest);
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+    {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error.into()),
+    }
+    if !std::fs::symlink_metadata(&path)?.file_type().is_file() {
+        return Err(MicrosandboxError::InvalidConfig(
+            "owned disk lock must be a regular file".into(),
+        ));
+    }
+    Ok(path)
+}
+
+/// Fence Unix owned-disk teardown after acquiring the sandbox's transition and lifecycle guards.
+///
+/// Linux may release the inherited lifecycle lock before deferred KVM/file teardown releases the
+/// disk locks, even with an already-zombie process leader. Inspect the resources themselves rather
+/// than a recycled PID. Only owned disks belong to this fence: named/external disks can legitimately
+/// have another owner after this runtime exits. Missing markers are not created by observation.
+#[cfg(unix)]
+pub(crate) fn try_acquire_disk_guards(
+    sandbox_dir: &Path,
+    mounts: &[VolumeMount],
+) -> MicrosandboxResult<Option<Vec<File>>> {
+    let mut guards = Vec::new();
+    for mount in mounts {
+        let VolumeMount::Owned {
+            guest,
+            storage: OwnedVolumeStorage::Disk { .. },
+            ..
+        } = mount
+        else {
+            continue;
+        };
+        let path = owned_disk_lock_path(sandbox_dir, guest);
+        // Match owned backing admission: a missing directory is fine for observation, but a
+        // redirected (including dangling) parent must not turn a different inode into the fence.
+        for parent in [path.parent().and_then(Path::parent), path.parent()]
+            .into_iter()
+            .flatten()
+        {
+            match std::fs::symlink_metadata(parent) {
+                Ok(metadata) if !metadata.file_type().is_dir() => {
+                    return Err(MicrosandboxError::InvalidConfig(format!(
+                        "owned disk lock parent must be a real directory: {}",
+                        parent.display()
+                    )));
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        let file = match std::fs::OpenOptions::new()
+            .read(true)
+            // A planted FIFO must not block this synchronous probe before fstat can reject it.
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
+            .open(&path)
+        {
+            Ok(file) => file,
+            // Never-started or already-removed sandboxes need no disk ownership release.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        if !file.metadata()?.is_file() {
+            return Err(MicrosandboxError::InvalidConfig(format!(
+                "owned disk lock is not a regular file: {}",
+                path.display()
+            )));
+        }
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::WouldBlock {
+                // Dropping partial acquisitions is important: a cancelled waiter must not
+                // retain one disk while another disk's owner is still completing shutdown.
+                return Ok(None);
+            }
+            return Err(error.into());
+        }
+        guards.push(file);
+    }
+    Ok(Some(guards))
+}
+
+/// Wait within the existing restart budget without weakening disk attachment admission.
+/// Caller retains transition and lifecycle ownership until the new process is launched.
+#[cfg(unix)]
+pub(crate) async fn wait_for_disk_release(
+    sandbox_dir: &Path,
+    mounts: &[VolumeMount],
+    timeout: std::time::Duration,
+) -> MicrosandboxResult<()> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if try_acquire_disk_guards(sandbox_dir, mounts)?.is_some() {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(MicrosandboxError::SandboxStillRunning(format!(
+                "owned disks for {} are still held after waiting for runtime teardown",
+                sandbox_dir.display()
+            )));
+        }
+        // This is an ownership observation, not an unconditional grace period. The usual
+        // released case returns above immediately; cancellation drops no persistent state.
+        tokio::time::sleep_until(
+            deadline.min(tokio::time::Instant::now() + std::time::Duration::from_millis(1)),
+        )
+        .await;
+    }
+}
+
+fn owned_disk_lock_path(sandbox_dir: &Path, guest: &str) -> PathBuf {
+    sandbox_dir
+        .join("owned-volumes")
+        .join(microsandbox_types::owned_volume_mount_id(guest))
+        .join(".disk-owner")
 }
 
 fn validate_tags(mounts: &[VolumeMount]) -> MicrosandboxResult<()> {
@@ -178,6 +331,135 @@ fn validate_tags(mounts: &[VolumeMount]) -> MicrosandboxResult<()> {
 mod tests {
     use super::*;
     use crate::sandbox::MountBuilder;
+
+    #[cfg(unix)]
+    fn disk_marker_fixture() -> (tempfile::TempDir, Vec<VolumeMount>) {
+        let directory = tempfile::tempdir().unwrap();
+        let mounts: Vec<_> = ["/data", "/logs"]
+            .into_iter()
+            .map(|guest| {
+                MountBuilder::new(guest)
+                    .owned_with(|owned| owned.disk().size(1_u32))
+                    .build()
+                    .unwrap()
+            })
+            .collect();
+        for mount in &mounts {
+            let path = owned_disk_lock_path(directory.path(), mount.guest());
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            disk_lock_path(directory.path(), mount.guest()).unwrap();
+        }
+        (directory, mounts)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn disk_teardown_probe_releases_partial_guards_and_never_creates_markers() {
+        let (directory, mounts) = disk_marker_fixture();
+        let last_owner = try_acquire_disk_guards(directory.path(), &mounts[1..])
+            .unwrap()
+            .unwrap();
+        assert!(
+            try_acquire_disk_guards(directory.path(), &mounts)
+                .unwrap()
+                .is_none()
+        );
+        // A failed multi-disk probe must not leave its first disk pinned.
+        assert!(
+            try_acquire_disk_guards(directory.path(), &mounts[..1])
+                .unwrap()
+                .is_some()
+        );
+        drop(last_owner);
+        let guards = try_acquire_disk_guards(directory.path(), &mounts)
+            .unwrap()
+            .unwrap();
+        assert_eq!(guards.len(), 2);
+        for guard in &guards {
+            assert_ne!(
+                unsafe { libc::fcntl(guard.as_raw_fd(), libc::F_GETFD) } & libc::FD_CLOEXEC,
+                0
+            );
+        }
+        drop(guards);
+        let absent = directory.path().join("never-created");
+        assert!(
+            try_acquire_disk_guards(&absent, &mounts)
+                .unwrap()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(!absent.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn disk_teardown_probe_refuses_symlink_and_non_file_markers() {
+        use std::os::unix::ffi::OsStrExt;
+        let (directory, mounts) = disk_marker_fixture();
+        let marker = owned_disk_lock_path(directory.path(), mounts[0].guest());
+        std::fs::remove_file(&marker).unwrap();
+        std::os::unix::fs::symlink(
+            owned_disk_lock_path(directory.path(), mounts[1].guest()),
+            &marker,
+        )
+        .unwrap();
+        assert!(try_acquire_disk_guards(directory.path(), &mounts).is_err());
+        std::fs::remove_file(&marker).unwrap();
+        std::fs::create_dir(&marker).unwrap();
+        assert!(try_acquire_disk_guards(directory.path(), &mounts).is_err());
+        std::fs::remove_dir(&marker).unwrap();
+        let fifo = std::ffi::CString::new(marker.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        assert!(try_acquire_disk_guards(directory.path(), &mounts).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn disk_teardown_probe_refuses_redirected_or_dangling_parents() {
+        let (directory, mounts) = disk_marker_fixture();
+        let marker = owned_disk_lock_path(directory.path(), mounts[0].guest());
+        let parent = marker.parent().unwrap();
+        let moved = directory.path().join("relocated");
+        std::fs::rename(parent, &moved).unwrap();
+        std::os::unix::fs::symlink(&moved, parent).unwrap();
+        assert!(try_acquire_disk_guards(directory.path(), &mounts).is_err());
+        std::fs::remove_file(parent).unwrap();
+        std::os::unix::fs::symlink(directory.path().join("absent"), parent).unwrap();
+        assert!(try_acquire_disk_guards(directory.path(), &mounts).is_err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn restart_disk_fence_is_bounded_cancel_safe_and_release_driven() {
+        use std::time::Duration;
+        let (directory, mounts) = disk_marker_fixture();
+        let owner = try_acquire_disk_guards(directory.path(), &mounts)
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            wait_for_disk_release(directory.path(), &mounts, Duration::from_millis(10)).await,
+            Err(MicrosandboxError::SandboxStillRunning(_))
+        ));
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(10),
+                wait_for_disk_release(directory.path(), &mounts, Duration::from_secs(5))
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            try_acquire_disk_guards(directory.path(), &mounts)
+                .unwrap()
+                .is_none()
+        );
+        drop(owner);
+        // A released resource succeeds even with zero remaining wait budget: no fixed sleep.
+        wait_for_disk_release(directory.path(), &mounts, Duration::ZERO)
+            .await
+            .unwrap();
+    }
 
     #[test]
     fn no_owned_mounts_leave_legacy_admission_unchanged() {

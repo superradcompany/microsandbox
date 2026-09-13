@@ -588,6 +588,7 @@ fn parse_one_disk_arg(entry: &str) -> Result<DiskMountSpec, String> {
     Ok(DiskMountSpec {
         id: id.to_string(),
         host: PathBuf::from(host),
+        layers: Vec::new(),
         guest: String::new(), // consumed only by agentd via env
         format,
         fstype: None, // ditto
@@ -615,6 +616,7 @@ mod tests {
             let parsed = parse_one_disk_arg(value).unwrap();
             assert_eq!(parsed.snapshot_owned, owned);
             assert_eq!(parsed.readonly, readonly);
+            assert!(parsed.layers.is_empty());
         }
         assert!(parse_one_disk_arg("disk:/host:raw:snapshot-owned:ro").is_err());
         assert!(parse_one_disk_arg("disk:/host:raw:snapshot-owned:snapshot-owned").is_err());

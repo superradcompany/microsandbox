@@ -247,24 +247,20 @@ impl CheckpointCoordinator {
     pub(crate) fn compact(
         &mut self,
         vm: &msb_krun::VmControl,
+        target: microsandbox_types::DiskCompactionTarget,
         layers: Option<usize>,
         dry_run: bool,
     ) -> Result<super::DiskCompactionResult, super::disk::RootDiskRolloverError> {
-        if self
-            .root_disk
-            .as_ref()
-            .is_some_and(|disk| disk.growth_pending())
-        {
-            return Err(super::disk::RootDiskRolloverError::pre_rebind(
-                "complete pending root-disk growth before compaction",
-            ));
-        }
-        match self.root_disk.as_mut() {
-            Some(disk) => disk.compact(Some(vm), &self.runtime, layers, dry_run),
-            None => Err(super::disk::RootDiskRolloverError::pre_rebind(
-                "this root has no runtime-owned disk chain",
-            )),
-        }
+        super::compaction::compact_live(
+            &mut self.root_disk,
+            &mut self.additional_disks,
+            &self.owned_mounts,
+            vm,
+            &self.runtime,
+            &target,
+            layers,
+            dry_run,
+        )
     }
 
     pub(crate) fn grow_root(
@@ -350,7 +346,8 @@ impl CheckpointCoordinator {
         let store = LocalObjectStore::open(runtime_dir.join("checkpoint-store"))
             .map_err(|error| error.to_string())?;
         let root_disk = RuntimeOwnedRootDisk::open(runtime_dir, vm)?;
-        let additional_disks = RuntimeOwnedAdditionalDisk::open_all(&vm.disks, guest_bootstrap)?;
+        let additional_disks =
+            RuntimeOwnedAdditionalDisk::open_all(&vm.disks, guest_bootstrap, runtime_dir)?;
         let owned_mounts = vm
             .owned_volumes
             .iter()
@@ -574,8 +571,7 @@ impl CheckpointCoordinator {
                         Failure::pre_rebind("owned disk lacks its capture provider")
                     })?;
                     let generation = disk
-                        .capture(vm, &self.runtime, &path, pause.get())
-                        .map_err(Failure::pre_rebind)?
+                        .capture(vm, &self.runtime, &path, pause.get())?
                         .manifest;
                     OwnedVolumeData::Disk { generation }
                 };
@@ -1258,7 +1254,12 @@ impl CheckpointCoordinator {
                     .get_mut(device_id)
                     .expect("registered additional disk was checked above")
                     .capture(vm, &self.runtime, staging, pause_generation)
-                    .map_err(CheckpointFailure::resumable)?;
+                    .map_err(|error| CheckpointFailure {
+                        message: error.to_string(),
+                        keep_paused: error.keep_paused,
+                        published: None,
+                        freezer_unavailable: false,
+                    })?;
                 timings.managed_disk_us += disk_started.elapsed().as_micros();
                 if !local {
                     let bytes = captured

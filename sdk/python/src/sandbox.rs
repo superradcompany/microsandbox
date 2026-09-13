@@ -846,18 +846,20 @@ impl PySandbox {
         })
     }
 
-    /// Compact the immutable root-disk prefix; layers includes the base, never the writable head.
-    #[pyo3(signature = (*, layers = None, dry_run = false))]
+    /// Compact root and owned-data disks; layers limits the oldest sealed prefix per disk.
+    #[pyo3(signature = (*, layers = None, dry_run = false, disk = None, root_disk_only = false))]
     fn compact<'py>(
         &self,
         py: Python<'py>,
         layers: Option<usize>,
         dry_run: bool,
+        disk: Option<String>,
+        root_disk_only: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let sandbox = Self::clone_sandbox(&inner).await?;
-            run_compact(sandbox.compact(), layers, dry_run).await
+            run_compact(sandbox.compact(), layers, dry_run, disk, root_disk_only).await
         })
     }
 
@@ -1503,9 +1505,17 @@ pub(crate) async fn run_compact(
     mut builder: microsandbox::sandbox::DiskCompactionBuilder,
     layers: Option<usize>,
     dry_run: bool,
+    disk: Option<String>,
+    root_disk_only: bool,
 ) -> PyResult<PyObject> {
     if let Some(layers) = layers {
         builder = builder.layers(layers);
+    }
+    if let Some(disk) = disk {
+        builder = builder.disk(disk);
+    }
+    if root_disk_only {
+        builder = builder.root_disk_only();
     }
     let result = if dry_run {
         builder.dry_run().await

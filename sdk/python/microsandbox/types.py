@@ -383,6 +383,37 @@ class SecretModifySpec(TypedDict, total=False):
     allowed_hosts: list[str]
 
 
+class DiskCompactionDiskResult(TypedDict):
+    """Per-disk physical counts; bytes are not reclaimed space.
+
+    ``total_us`` measures preparation/materialization, excluding journal adoption
+    and backend switching. Timings are microseconds.
+    """
+
+    guest_path: str
+    input_layers: int
+    selected_layers: int
+    output_layers: int
+    materialized_bytes: int
+    total_us: int
+
+
+class DiskCompactionResult(TypedDict):
+    """Aggregate compaction outcome, including unchanged selected disks.
+
+    ``total_us`` includes the shared journal/backend adoption phase.
+    """
+
+    dry_run: bool
+    input_layers: int
+    selected_layers: int
+    output_layers: int
+    materialized_bytes: int
+    total_us: int
+    pause_us: int
+    disks: list[DiskCompactionDiskResult]
+
+
 class ModificationConflict(TypedDict):
     """A conflict that prevents a sandbox modification from applying."""
 

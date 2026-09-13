@@ -87,8 +87,28 @@ impl LocalBackend {
                 )));
             }
             if let Some(_ownership) = try_acquire_lifecycle_guard(&run_dir, name)? {
-                // Both guards fence restart/removal during the final check. PID visibility is
-                // irrelevant: zombies own no runtime resources, and PIDs can be recycled.
+                // Both guards fence restart/removal, but Unix process-exit cleanup can release
+                // lifecycle ownership before the owned disk descriptors. A zombie leader does
+                // not prove that the remaining thread's deferred file cleanup has completed.
+                #[cfg(unix)]
+                let _disk_guards = if let Some(model) = model.as_ref() {
+                    let config: crate::sandbox::SandboxConfig =
+                        serde_json::from_str(&model.config)?;
+                    match crate::runtime::owned_volumes::try_acquire_disk_guards(
+                        &self.sandboxes_dir().join(name),
+                        &config.spec.mounts,
+                    )? {
+                        Some(guards) => guards,
+                        None => {
+                            drop(_ownership);
+                            drop(transition);
+                            tokio::time::sleep(Duration::from_millis(1)).await;
+                            continue;
+                        }
+                    }
+                } else {
+                    Vec::new()
+                };
                 if let Some(model) = model {
                     let terminal = matches!(
                         model.status,
@@ -98,7 +118,7 @@ impl LocalBackend {
                         .is_none_or(|run| run.status == run::RunStatus::Terminated);
                     if !terminal {
                         // A crashed runtime may not have published its terminal row. Ownership
-                        // release proves this generation is gone even if its PID is recycled.
+                        // and owned-disk release prove completion even if its PID is recycled.
                         let (status, reason) = Self::stale_runtime_terminal_state(model.status);
                         Self::mark_sandbox_runtime_stale(
                             self.db().await?.write(),
@@ -163,6 +183,143 @@ mod tests {
         .unwrap()
         .last_insert_id;
         (home, backend, id, run_id)
+    }
+
+    #[cfg(unix)]
+    async fn owned_disk_fixture(
+        name: &str,
+    ) -> (
+        tempfile::TempDir,
+        LocalBackend,
+        i32,
+        i32,
+        Vec<crate::sandbox::VolumeMount>,
+    ) {
+        let (home, backend, id, run_id) = fixture(name).await;
+        let mounts: Vec<_> = ["/data", "/logs"]
+            .into_iter()
+            .map(|guest| {
+                crate::sandbox::MountBuilder::new(guest)
+                    .owned_with(|owned| owned.disk().size(1_u32))
+                    .build()
+                    .unwrap()
+            })
+            .collect();
+        let config = SandboxConfig {
+            spec: microsandbox_types::SandboxSpec {
+                name: name.into(),
+                mounts: mounts.clone(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        sandbox::Entity::update_many()
+            .col_expr(
+                sandbox::Column::Config,
+                sea_orm::sea_query::Expr::value(serde_json::to_string(&config).unwrap()),
+            )
+            .filter(sandbox::Column::Id.eq(id))
+            .exec(backend.db().await.unwrap().write())
+            .await
+            .unwrap();
+        for mount in &mounts {
+            let directory = backend
+                .sandboxes_dir()
+                .join(name)
+                .join("owned-volumes")
+                .join(microsandbox_types::owned_volume_mount_id(mount.guest()));
+            std::fs::create_dir_all(directory).unwrap();
+            crate::runtime::owned_volumes::disk_lock_path(
+                &backend.sandboxes_dir().join(name),
+                mount.guest(),
+            )
+            .unwrap();
+        }
+        (home, backend, id, run_id, mounts)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stop_waits_for_every_owned_disk_after_lifecycle_release() {
+        use crate::backend::Backend;
+        use crate::runtime::owned_volumes::try_acquire_disk_guards;
+        let (_home, backend, _, _, mounts) = owned_disk_fixture("disk-teardown").await;
+        let directory = backend.sandboxes_dir().join("disk-teardown");
+        let mut disks = try_acquire_disk_guards(&directory, &mounts)
+            .unwrap()
+            .unwrap();
+        // Deterministically reproduce the kernel trace's critical state: terminal row and
+        // available lifecycle lock, but disk descriptors still owned by an exiting worker.
+        let lifecycle = try_acquire_lifecycle_guard(&backend.config().run_dir(), "disk-teardown")
+            .unwrap()
+            .unwrap();
+        drop(lifecycle);
+        let backend: std::sync::Arc<dyn Backend> = std::sync::Arc::new(backend);
+        let handle = backend
+            .sandboxes()
+            .get(backend.clone(), "disk-teardown")
+            .await
+            .unwrap();
+        for _ in 0..2 {
+            assert!(matches!(
+                handle.stop_with_timeout(Duration::from_millis(20)).await,
+                Err(MicrosandboxError::StopTimeout { .. })
+            ));
+            assert!(
+                try_acquire_disk_guards(&directory, &mounts)
+                    .unwrap()
+                    .is_none()
+            );
+            // Releasing just one device is insufficient; both must be available.
+            disks.pop();
+        }
+        handle.stop().await.unwrap();
+        assert_eq!(
+            try_acquire_disk_guards(&directory, &mounts)
+                .unwrap()
+                .unwrap()
+                .len(),
+            2
+        );
+        handle.remove().await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancelled_disk_teardown_stop_preserves_locks_and_rejects_new_run() {
+        use crate::runtime::owned_volumes::try_acquire_disk_guards;
+        let (_home, backend, id, run_id, mounts) = owned_disk_fixture("disk-new-run").await;
+        let directory = backend.sandboxes_dir().join("disk-new-run");
+        let owner = try_acquire_disk_guards(&directory, &mounts)
+            .unwrap()
+            .unwrap();
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(20),
+                backend.wait_stop_complete("disk-new-run", id, Some(run_id), false)
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            try_acquire_disk_guards(&directory, &mounts)
+                .unwrap()
+                .is_none()
+        );
+        run::Entity::insert(run::ActiveModel {
+            sandbox_id: Set(id),
+            status: Set(run::RunStatus::Terminated),
+            ..Default::default()
+        })
+        .exec(backend.db().await.unwrap().write())
+        .await
+        .unwrap();
+        let error = backend
+            .wait_stop_complete("disk-new-run", id, Some(run_id), false)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("refusing to follow run"));
+        drop(owner);
     }
 
     #[tokio::test]

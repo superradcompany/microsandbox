@@ -40,7 +40,7 @@ pub struct OwnedDirectoryPayload {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase", deny_unknown_fields)]
 pub enum OwnedVolumeData {
-    /// A standalone disk generation using the existing immutable layer store.
+    /// A complete immutable disk chain using the existing layer store.
     Disk {
         /// Captured bytes and their guest-visible block identity.
         generation: DiskGenerationManifest,
@@ -224,9 +224,10 @@ pub fn validate_owned_volumes(volumes: &[OwnedVolumeCapture]) -> ImageResult<()>
                 generation.validate()?;
                 if *capacity_mib == 0
                     || generation.device_id != volume.mount_id
-                    || generation.layers.len() != 1
-                    || generation.layers[0].format != "raw"
-                    || generation.layers[0].virtual_size != u64::from(*capacity_mib) * 1024 * 1024
+                    || generation
+                        .layers
+                        .iter()
+                        .any(|layer| layer.virtual_size != u64::from(*capacity_mib) * 1024 * 1024)
                 {
                     return invalid("owned disk generation differs from its storage specification");
                 }
@@ -388,6 +389,73 @@ mod tests {
                 },
                 files: Vec::new(),
             },
+        }
+    }
+
+    fn disk() -> OwnedVolumeCapture {
+        let mut volume = directory("/data");
+        volume.mount.storage = OwnedVolumeStorage::Disk { capacity_mib: 1 };
+        volume.data = OwnedVolumeData::Disk {
+            generation: DiskGenerationManifest {
+                schema: "microsandbox.disk-generation/1".into(),
+                volume_id: "owned".into(),
+                device_id: volume.mount_id.clone(),
+                generation: 2,
+                head: "head".into(),
+                pause_generation: 2,
+                layers: vec![
+                    crate::checkpoint::DiskLayerRef {
+                        layer_id: "base".into(),
+                        format: "raw".into(),
+                        virtual_size: 1024 * 1024,
+                        predecessor: None,
+                        integrity_root: format!("blake3:{}", "a".repeat(64)),
+                    },
+                    crate::checkpoint::DiskLayerRef {
+                        layer_id: "head".into(),
+                        format: "qcow2".into(),
+                        virtual_size: 1024 * 1024,
+                        predecessor: Some("base".into()),
+                        integrity_root: format!("blake3:{}", "b".repeat(64)),
+                    },
+                ],
+            },
+        };
+        volume
+    }
+
+    #[test]
+    fn owned_disk_accepts_complete_raw_and_compacted_qcow2_chains() {
+        let mut volume = disk();
+        validate_owned_volumes(std::slice::from_ref(&volume)).unwrap();
+        let OwnedVolumeData::Disk { generation } = &mut volume.data else {
+            unreachable!()
+        };
+        generation.layers[0].format = "qcow2".into();
+        validate_owned_volumes(std::slice::from_ref(&volume)).unwrap();
+        let OwnedVolumeData::Disk { generation } = &mut volume.data else {
+            unreachable!()
+        };
+        generation.layers.truncate(1);
+        generation.head = "base".into();
+        validate_owned_volumes(&[volume]).unwrap();
+    }
+
+    #[test]
+    fn owned_disk_chain_refuses_wrong_capacity_device_or_predecessor() {
+        for mismatch in ["capacity", "device", "predecessor", "raw-successor"] {
+            let mut volume = disk();
+            let OwnedVolumeData::Disk { generation } = &mut volume.data else {
+                unreachable!()
+            };
+            match mismatch {
+                "capacity" => generation.layers[1].virtual_size *= 2,
+                "device" => generation.device_id = "other".into(),
+                "predecessor" => generation.layers[1].predecessor = Some("missing".into()),
+                "raw-successor" => generation.layers[1].format = "raw".into(),
+                _ => unreachable!(),
+            }
+            assert!(validate_owned_volumes(&[volume]).is_err(), "{mismatch}");
         }
     }
 

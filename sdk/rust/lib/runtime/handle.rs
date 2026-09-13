@@ -63,8 +63,8 @@ pub struct ProcessHandle {
     /// `Reserved` if the runtime exits before activation.
     metrics_reservation: Option<MetricsReservationCleanup>,
 
-    /// Open disk-image lock files. Kept for the process lifetime so disk
-    /// images cannot be attached with incompatible write modes.
+    /// Parent-owned disk-image locks on Windows. Unix transfers the open-file descriptions
+    /// into the runtime at spawn; retaining a parent copy would keep a stopped VM's disk busy.
     _disk_locks: Vec<File>,
 }
 
@@ -170,6 +170,14 @@ impl ProcessHandle {
         #[cfg(windows)] job: Option<WindowsJob>,
         metrics_reservation: Option<MetricsReservationCleanup>,
     ) -> Self {
+        // A successful Unix spawn has already inherited these locked open-file descriptions.
+        // Close our copies, rather than issuing LOCK_UN (which would unlock the child's copy
+        // too). The runtime alone must determine when its disks become available again.
+        #[cfg(unix)]
+        let disk_locks = {
+            drop(disk_locks);
+            Vec::new()
+        };
         Self {
             pid,
             sandbox_name,

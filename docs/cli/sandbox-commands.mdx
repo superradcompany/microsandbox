@@ -404,6 +404,8 @@ Env and workdir changes on a running sandbox apply to future execs only; running
 
 A live resize may not apply instantly; `--format json` reports a per-resource `resize_status`. See [Live Modify](/sandboxes/tuning) for the change model, or use `msb modify --help` for the full flag list.
 
+For disk maintenance, use `msb modify api --compact` separately from configuration changes. This compacts the managed or flat root and all sandbox-owned data disks, never named/external disks or directories. Add `--layers N` to limit each disk to up to N oldest sealed physical layers including the base (minimum two, excluding the writable head); chains with fewer than two sealed layers are unchanged. `--disk /data` selects one owned disk and `--root-disk-only` selects just the root; these flags are mutually exclusive, and `--disk /` also selects the root. `--dry-run` reports the plan, including per-disk results, without writing. With no eligible disks the default is a no-op. Compaction requires a running or fully stopped local sandbox. See [disk-chain maintenance](/sandboxes/snapshots#export-changes-and-compact-a-disk-chain) for partial-commit recovery and retention rules.
+
 <a id="msb-exec"></a>
 
 ## msb sandbox exec

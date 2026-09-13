@@ -1020,19 +1020,33 @@ where
 
 /// Capability-gated disk maintenance over the existing control endpoint.
 pub(crate) async fn control_disk_compact(
+    local: &crate::backend::LocalBackend,
     name: &str,
+    target: microsandbox_types::DiskCompactionTarget,
     layers: Option<usize>,
     dry_run: bool,
 ) -> MicrosandboxResult<super::DiskCompactionResult> {
-    if !control_capabilities(name).await?.disk_compact {
+    // Discovery and mutation must use the same retained backend as the selected sandbox.
+    // An ambient backend may contain a different sandbox with this exact name.
+    let capabilities = control_request_for(local, name, "{\"op\":\"capabilities\"}\n".into())
+        .await?
+        .capabilities
+        .ok_or_else(|| {
+            crate::MicrosandboxError::Runtime("control response missing capabilities".into())
+        })?;
+    if !capabilities.disk_compact_owned {
         return Err(crate::MicrosandboxError::Runtime(
             "this running sandbox does not support disk compaction; restart with the updated runtime".into(),
         ));
     }
-    let request = microsandbox_runtime::control::ControlRequest::DiskCompact { layers, dry_run };
+    let request = microsandbox_runtime::control::ControlRequest::DiskCompact {
+        target,
+        layers,
+        dry_run,
+    };
     let mut line = serde_json::to_string(&request)?;
     line.push('\n');
-    let response = control_request(name, line).await?;
+    let response = control_request_for(local, name, line).await?;
     response.compaction.ok_or_else(|| {
         crate::MicrosandboxError::Runtime("control response omitted compaction result".into())
     })
@@ -2832,6 +2846,90 @@ mod tests {
         server.await.unwrap();
         assert_eq!(config.spec.resources.cpus, 2);
         assert_eq!(config.spec.resources.memory_mib, 768);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn compaction_uses_selected_backend_for_discovery_and_mutation() {
+        use microsandbox_types::DiskCompactionTarget;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let first_home = tempfile::tempdir_in("/tmp").unwrap();
+        let second_home = tempfile::tempdir_in("/tmp").unwrap();
+        let first = LocalBackend::builder()
+            .home(first_home.path())
+            .build()
+            .await
+            .unwrap();
+        let second = LocalBackend::builder()
+            .home(second_home.path())
+            .build()
+            .await
+            .unwrap();
+        let mut servers = Vec::new();
+        for (local, marker, target) in [
+            (&first, 1, DiskCompactionTarget::All),
+            (
+                &second,
+                2,
+                DiskCompactionTarget::Disk {
+                    guest_path: "/data".into(),
+                },
+            ),
+        ] {
+            let agent =
+                crate::runtime::sandbox_agent_socket_path_candidates_for(local, "worker").remove(0);
+            let path = microsandbox_runtime::control::control_socket_path_for(&agent);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let listener = tokio::net::UnixListener::bind(path).unwrap();
+            servers.push(tokio::spawn(async move {
+                for request_index in 0..2 {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    let mut stream = BufReader::new(stream);
+                    let mut line = String::new();
+                    stream.read_line(&mut line).await.unwrap();
+                    let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                    let response = if request_index == 0 {
+                        assert_eq!(request["op"], "capabilities");
+                        serde_json::json!({"ok": true, "capabilities": {
+                            "disk_compact_owned": true, "cpu_resize": false,
+                            "memory_resize": false, "secrets_update": false
+                        }})
+                    } else {
+                        assert_eq!(request["op"], "disk_compact");
+                        assert_eq!(request["target"], serde_json::to_value(target.clone()).unwrap());
+                        assert_eq!(request["layers"], 999);
+                        assert_eq!(request["dry_run"], true);
+                        serde_json::json!({"ok": true, "compaction": microsandbox_types::DiskCompactionResult {
+                            dry_run: true, total_us: marker, ..Default::default()
+                        }})
+                    };
+                    stream.get_mut().write_all(format!("{response}\n").as_bytes()).await.unwrap();
+                }
+            }));
+        }
+        for (local, marker, target) in [
+            (&first, 1, DiskCompactionTarget::All),
+            (
+                &second,
+                2,
+                DiskCompactionTarget::Disk {
+                    guest_path: "/data".into(),
+                },
+            ),
+        ] {
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                control_disk_compact(local, "worker", target, Some(999), true),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(result.total_us, marker);
+        }
+        for server in servers {
+            server.await.unwrap();
+        }
     }
 
     #[cfg(unix)]

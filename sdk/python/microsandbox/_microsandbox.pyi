@@ -8,6 +8,7 @@ from typing import Any, Literal
 
 from microsandbox.types import (
     BackendKind,
+    DiskCompactionResult,
     DiskImageFormat,
     ExecEventType,
     ExecOptions,
@@ -354,8 +355,13 @@ class Sandbox:
     async def ping(self) -> SandboxPingResult: ...
     async def touch(self) -> SandboxTouchResult: ...
     async def compact(
-        self, *, layers: int | None = None, dry_run: bool = False
-    ) -> dict[str, int | bool]: ...
+        self,
+        *,
+        layers: int | None = None,
+        dry_run: bool = False,
+        disk: str | None = None,
+        root_disk_only: bool = False,
+    ) -> DiskCompactionResult: ...
     async def modify(
         self,
         *,
@@ -464,8 +470,13 @@ class SandboxHandle:
     async def ping(self) -> SandboxPingResult: ...
     async def touch(self) -> SandboxTouchResult: ...
     async def compact(
-        self, *, layers: int | None = None, dry_run: bool = False
-    ) -> dict[str, int | bool]: ...
+        self,
+        *,
+        layers: int | None = None,
+        dry_run: bool = False,
+        disk: str | None = None,
+        root_disk_only: bool = False,
+    ) -> DiskCompactionResult: ...
     async def modify(
         self,
         *,
