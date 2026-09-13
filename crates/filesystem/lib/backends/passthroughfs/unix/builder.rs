@@ -239,6 +239,8 @@ impl PassthroughFsBuilder {
             before_blocking_fifo_open: std::sync::RwLock::new(None),
             #[cfg(all(test, target_os = "macos"))]
             fifo_endpoint_opens: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(all(test, target_os = "macos"))]
+            before_name_bound_syscall: std::sync::RwLock::new(None),
         })
     }
 }

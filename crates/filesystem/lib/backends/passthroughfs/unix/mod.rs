@@ -251,6 +251,15 @@ pub struct PassthroughFs {
     /// result lets a test see an endpoint that was opened and thrown away.
     #[cfg(all(test, target_os = "macos"))]
     pub(crate) fifo_endpoint_opens: std::sync::atomic::AtomicUsize,
+
+    /// Test-only hook fired between an anchor resolution and the name-bound
+    /// syscall that follows it.
+    ///
+    /// `linkat` names its source again after the anchor has verified it, so
+    /// tests need to act exactly in that window to prove the post-syscall
+    /// identity check does its job.
+    #[cfg(all(test, target_os = "macos"))]
+    pub(crate) before_name_bound_syscall: RwLock<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 /// Open directory handle with a lazy point-in-time snapshot.
@@ -389,11 +398,25 @@ impl PassthroughFs {
             before_blocking_fifo_open: RwLock::new(None),
             #[cfg(all(test, target_os = "macos"))]
             fifo_endpoint_opens: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(all(test, target_os = "macos"))]
+            before_name_bound_syscall: RwLock::new(None),
         })
     }
 }
 
 impl PassthroughFs {
+    /// Run the test-only name-bound syscall hook, if one is installed.
+    ///
+    /// The guard is released before the callback runs, so a hook may call back
+    /// into the filesystem.
+    #[cfg(all(test, target_os = "macos"))]
+    pub(crate) fn run_name_bound_hook(&self) {
+        let hook = self.before_name_bound_syscall.read().unwrap().clone();
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
     /// Whether this share resolves inodes by anchor walk instead of `/.vol`.
     #[cfg(target_os = "macos")]
     pub(crate) fn anchor_mode(&self) -> bool {

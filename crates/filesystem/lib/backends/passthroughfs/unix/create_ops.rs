@@ -475,7 +475,16 @@ pub(crate) fn do_link(
         // may run while a read guard on `fs.inodes` is held.
         let newparent_fd = inode::get_inode_fd(fs, newparent)?;
         if fs.anchor_mode() {
+            let expected = {
+                let inodes = fs.inodes.read().unwrap();
+                let data = inodes.get(&inode).ok_or_else(platform::ebadf)?;
+                (data.dev, data.ino)
+            };
             let (src_dir, src_name) = inode::anchor_parent_and_name_macos(fs, inode)?;
+
+            #[cfg(test)]
+            fs.run_name_bound_hook();
+
             let ret = unsafe {
                 libc::linkat(
                     src_dir.raw(),
@@ -486,7 +495,28 @@ pub(crate) fn do_link(
                 )
             };
             if ret < 0 {
-                return Err(platform::linux_error(io::Error::last_os_error()));
+                // Capture errno before `src_dir` drops: its Drop closes the
+                // fd, and close(2) can clobber errno.
+                let err = io::Error::last_os_error();
+                return Err(platform::linux_error(err));
+            }
+
+            // macOS has no fd-relative `linkat` — linking `/dev/fd/N` answers
+            // EPERM — so the source name is resolved twice: once by the anchor
+            // verification, once by the syscall. Checking what the new entry
+            // actually holds detects a source swapped between the two, and the
+            // guest gets ENOENT instead of an entry for the replacement.
+            //
+            // The link `linkat` created is deliberately left in place. It is
+            // the same on-disk outcome an unchecked `linkat` would have
+            // produced, and removing it by name would be a second name-based
+            // race that could delete an entry another writer had put there in
+            // the meantime. Permissions therefore behave exactly as a plain
+            // `linkat`: nothing here needs rights the caller did not already
+            // have.
+            let st = platform::fstatat_nofollow(newparent_fd.raw(), newname)?;
+            if platform::stat_ino(&st) != expected.1 || platform::stat_dev(&st) != expected.0 {
+                return Err(platform::enoent());
             }
         } else {
             let inodes = fs.inodes.read().unwrap();
@@ -591,6 +621,7 @@ pub(crate) fn do_readlink(fs: &PassthroughFs, _ctx: Context, ino: u64) -> io::Re
                 let err = io::Error::last_os_error();
                 return Err(platform::linux_error(err));
             }
+
             ret
         } else {
             let inodes = fs.inodes.read().unwrap();
