@@ -60,6 +60,8 @@ Named disk volumes are captured as immutable disk generations. Restored children
 
 [Owned volumes](/sandboxes/volumes#owned-volumes) are included automatically in snapshots and branches. Each child gets private directory or disk contents; no host mapping is needed. Full captures also preserve supported open directory-volume handles, including unlinked regular files.
 
+Snapshots containing owned directories cannot move between Unix (macOS/Linux) and Windows: their filesystem metadata is platform-specific. This restriction also applies to disk-only snapshots and archives containing owned directories. Owned disks do not have this directory-format restriction; full restore has its own execution-state compatibility requirements.
+
 ## Branch a running sandbox
 
 Use `branch` for an independent local child without first saving a full snapshot:

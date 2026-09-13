@@ -2,6 +2,8 @@
 //!
 //! Callers must exclude every writer until capture finishes. Payloads are separate files so
 //! filesystem device state stays bounded independently of the amount of application data.
+//! Directory metadata is platform-family-specific: Unix generations cannot be restored on
+//! Windows, or vice versa. This also applies when embedded in a disk-only snapshot archive.
 
 use std::{
     collections::{BTreeMap, BTreeSet},

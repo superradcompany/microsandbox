@@ -160,6 +160,8 @@ sb, err := m.CreateSandbox(ctx, "app", m.WithImage("alpine"),
 
 Disk-only snapshots capture owned data too. Full snapshots and branches retain it along with execution state. Restoring or branching creates private copies automatically; no mount mapping or inheritance flag is needed, and child writes never change the source's data. Use a named volume instead when data should outlive or be shared between sandboxes.
 
+Owned-directory snapshots retain platform-specific filesystem metadata and cannot move between Unix (macOS/Linux) and Windows. Owned disks do not have this directory-format restriction; full snapshots still require a compatible execution-state restore target.
+
 ## Named volumes
 
 <Tooltip tip="On microsandbox cloud, create named volumes before mounting them; create-on-mount, disk-kind volumes, and size are not available, and quota must be a whole number of GiB."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
