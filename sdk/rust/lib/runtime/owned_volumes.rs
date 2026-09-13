@@ -1,12 +1,13 @@
 //! Backing allocation and admission for sandbox-owned, unnamed volumes.
 
 use std::collections::HashSet;
-#[cfg(unix)]
 use std::fs::File;
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
+#[cfg(windows)]
+use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 use microsandbox_image::ext4::{Ext4FormatOptions, format_ext4};
@@ -200,13 +201,13 @@ pub(crate) fn disk_lock_path(sandbox_dir: &Path, guest: &str) -> MicrosandboxRes
     Ok(path)
 }
 
-/// Fence Unix owned-disk teardown after acquiring the sandbox's transition and lifecycle guards.
+/// Fence owned-disk teardown after acquiring the sandbox's transition and lifecycle guards.
 ///
 /// Linux may release the inherited lifecycle lock before deferred KVM/file teardown releases the
 /// disk locks, even with an already-zombie process leader. Inspect the resources themselves rather
 /// than a recycled PID. Only owned disks belong to this fence: named/external disks can legitimately
 /// have another owner after this runtime exits. Missing markers are not created by observation.
-#[cfg(unix)]
+/// Windows probes the exclusive sidecar rather than the actual disk image.
 pub(crate) fn try_acquire_disk_guards(
     sandbox_dir: &Path,
     mounts: &[VolumeMount],
@@ -222,6 +223,8 @@ pub(crate) fn try_acquire_disk_guards(
             continue;
         };
         let path = owned_disk_lock_path(sandbox_dir, guest);
+        #[cfg(windows)]
+        let path = super::spawn::windows_disk_lock_path(&path)?;
         // Match owned backing admission: a missing directory is fine for observation, but a
         // redirected (including dangling) parent must not turn a different inode into the fence.
         for parent in [path.parent().and_then(Path::parent), path.parent()]
@@ -235,20 +238,39 @@ pub(crate) fn try_acquire_disk_guards(
                         parent.display()
                     )));
                 }
-                Ok(_) => {}
+                Ok(metadata) => {
+                    #[cfg(windows)]
+                    if metadata.file_attributes()
+                        & windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT
+                        != 0
+                    {
+                        return Err(MicrosandboxError::InvalidConfig(
+                            "owned disk lock parent must not be a reparse point".into(),
+                        ));
+                    }
+                    #[cfg(unix)]
+                    let _ = metadata;
+                }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => return Err(error.into()),
             }
         }
-        let file = match std::fs::OpenOptions::new()
-            .read(true)
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        options
             // A planted FIFO must not block this synchronous probe before fstat can reject it.
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
-            .open(&path)
-        {
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK);
+        #[cfg(windows)]
+        options
+            .share_mode(0)
+            .custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT);
+        let file = match options.open(&path) {
             Ok(file) => file,
             // Never-started or already-removed sandboxes need no disk ownership release.
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            #[cfg(windows)]
+            Err(error) if matches!(error.raw_os_error(), Some(32 | 33)) => return Ok(None),
             Err(error) => return Err(error.into()),
         };
         if !file.metadata()?.is_file() {
@@ -257,6 +279,16 @@ pub(crate) fn try_acquire_disk_guards(
                 path.display()
             )));
         }
+        #[cfg(windows)]
+        if file.metadata()?.file_attributes()
+            & windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT
+            != 0
+        {
+            return Err(MicrosandboxError::InvalidConfig(
+                "owned disk lock must not be a reparse point".into(),
+            ));
+        }
+        #[cfg(unix)]
         if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
             let error = std::io::Error::last_os_error();
             if error.kind() == std::io::ErrorKind::WouldBlock {
@@ -273,7 +305,6 @@ pub(crate) fn try_acquire_disk_guards(
 
 /// Wait within the existing restart budget without weakening disk attachment admission.
 /// Caller retains transition and lifecycle ownership until the new process is launched.
-#[cfg(unix)]
 pub(crate) async fn wait_for_disk_release(
     sandbox_dir: &Path,
     mounts: &[VolumeMount],
@@ -332,7 +363,6 @@ mod tests {
     use super::*;
     use crate::sandbox::MountBuilder;
 
-    #[cfg(unix)]
     fn disk_marker_fixture() -> (tempfile::TempDir, Vec<VolumeMount>) {
         let directory = tempfile::tempdir().unwrap();
         let mounts: Vec<_> = ["/data", "/logs"]
@@ -348,11 +378,14 @@ mod tests {
             let path = owned_disk_lock_path(directory.path(), mount.guest());
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             disk_lock_path(directory.path(), mount.guest()).unwrap();
+            #[cfg(windows)]
+            drop(
+                File::create(super::super::spawn::windows_disk_lock_path(&path).unwrap()).unwrap(),
+            );
         }
         (directory, mounts)
     }
 
-    #[cfg(unix)]
     #[test]
     fn disk_teardown_probe_releases_partial_guards_and_never_creates_markers() {
         let (directory, mounts) = disk_marker_fixture();
@@ -375,6 +408,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(guards.len(), 2);
+        #[cfg(unix)]
         for guard in &guards {
             assert_ne!(
                 unsafe { libc::fcntl(guard.as_raw_fd(), libc::F_GETFD) } & libc::FD_CLOEXEC,
@@ -429,7 +463,6 @@ mod tests {
         assert!(try_acquire_disk_guards(directory.path(), &mounts).is_err());
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn restart_disk_fence_is_bounded_cancel_safe_and_release_driven() {
         use std::time::Duration;

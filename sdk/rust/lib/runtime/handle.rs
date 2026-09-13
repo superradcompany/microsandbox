@@ -63,8 +63,8 @@ pub struct ProcessHandle {
     /// `Reserved` if the runtime exits before activation.
     metrics_reservation: Option<MetricsReservationCleanup>,
 
-    /// Parent-owned disk-image locks on Windows. Unix transfers the open-file descriptions
-    /// into the runtime at spawn; retaining a parent copy would keep a stopped VM's disk busy.
+    /// Startup-owned Windows locks, cleared after duplication into the exact runtime process.
+    /// Unix transfers these at spawn. Established handles must not retain parent lock copies.
     _disk_locks: Vec<File>,
 }
 
@@ -122,6 +122,61 @@ impl StartupProcess {
 }
 
 impl ProcessHandle {
+    /// Transfer sidecar ownership while startup cancellation still owns and can reap the child.
+    #[cfg(windows)]
+    pub(crate) async fn handoff_disk_locks(&mut self) -> MicrosandboxResult<()> {
+        use std::os::windows::io::AsRawHandle;
+        use tokio::io::AsyncWriteExt;
+        use windows_sys::Win32::Foundation::{DUPLICATE_SAME_ACCESS, DuplicateHandle};
+        use windows_sys::Win32::System::Threading::GetCurrentProcess;
+
+        if self._disk_locks.is_empty() {
+            return Ok(());
+        }
+        let process = self
+            .child
+            .raw_handle()
+            .ok_or_else(|| std::io::Error::other("runtime exited before disk ownership handoff"))?;
+        let mut handles = Vec::with_capacity(self._disk_locks.len());
+        for lock in &self._disk_locks {
+            let mut duplicate = std::ptr::null_mut();
+            // No inheritable handles are created in either process. Other concurrent spawns
+            // cannot steal these locks. Partial failure leaves duplicates owned by the child;
+            // the startup guard must terminate/reap it before storage cleanup.
+            if unsafe {
+                DuplicateHandle(
+                    GetCurrentProcess(),
+                    lock.as_raw_handle(),
+                    process,
+                    &mut duplicate,
+                    0,
+                    0,
+                    DUPLICATE_SAME_ACCESS,
+                )
+            } == 0
+            {
+                return Err(std::io::Error::last_os_error().into());
+            }
+            handles.push(duplicate as usize);
+        }
+        let bytes = serde_json::to_vec(&handles)?;
+        if bytes.len() > microsandbox_runtime::disk_lock_handoff::MAX_MESSAGE_BYTES {
+            return Err(std::io::Error::other("disk lock handoff exceeds startup limit").into());
+        }
+        let mut stdin = self
+            .child
+            .stdin
+            .take()
+            .ok_or_else(|| std::io::Error::other("missing disk ownership startup pipe"))?;
+        stdin.write_all(&bytes).await?;
+        stdin.shutdown().await?;
+        drop(stdin); // EOF commits the complete message; the child cannot boot before it.
+        // The duplicates already hold the same file objects, even if the child has not yet
+        // read its message. Closing our copies never opens an ownership gap.
+        self._disk_locks.clear();
+        Ok(())
+    }
+
     /// Wait without a preparation deadline. The caller owns cancellation and process cleanup.
     pub(crate) async fn wait_for_preparation(
         &mut self,
@@ -249,6 +304,7 @@ impl ProcessHandle {
     pub async fn wait(&mut self) -> MicrosandboxResult<ExitStatus> {
         tracing::debug!(pid = self.pid, sandbox = %self.sandbox_name, "waiting for exit");
         let status = self.child.wait().await?;
+        self._disk_locks.clear();
         tracing::debug!(pid = self.pid, ?status, "process exited");
         self.cleanup_metrics_reservation();
         Ok(status)
@@ -256,7 +312,13 @@ impl ProcessHandle {
 
     /// Check if the process has exited without blocking.
     pub fn try_wait(&mut self) -> MicrosandboxResult<Option<ExitStatus>> {
-        Ok(self.child.try_wait()?)
+        let status = self.child.try_wait()?;
+        if status.is_some() {
+            // Also release startup-owned copies on failed handoff. Cleanup may retain this
+            // ProcessHandle while deleting the sandbox directory containing the sidecars.
+            self._disk_locks.clear();
+        }
+        Ok(status)
     }
 
     /// Reap a creator-owned process after startup has failed.
@@ -780,5 +842,155 @@ mod tests {
         let mut byte = [0_u8; 1];
         reader.read_exact(&mut byte).unwrap();
         assert_eq!(byte[0], microsandbox_runtime::vm::PARENT_WATCH_DETACH);
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::process::Stdio;
+    use std::time::Duration;
+
+    use super::*;
+
+    fn open_lock(path: &std::path::Path) -> File {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .share_mode(0)
+            .open(path)
+            .unwrap()
+    }
+
+    fn available(path: &std::path::Path) -> bool {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(path)
+            .is_ok()
+    }
+
+    fn child(directory: &std::path::Path, locks: Vec<File>) -> ProcessHandle {
+        let child = tokio::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "runtime::handle::windows_tests::disk_lock_child",
+                "--nocapture",
+            ])
+            .env("MSB_TEST_DISK_HANDOFF", directory)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap();
+        ProcessHandle::new(
+            child.id().unwrap(),
+            "disk-handoff-test".into(),
+            child,
+            locks,
+            None,
+            None,
+        )
+    }
+
+    async fn ready(directory: &std::path::Path) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !directory.join("ready").exists() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("child did not adopt disk locks");
+    }
+
+    #[test]
+    fn disk_lock_child() {
+        let Some(directory) = std::env::var_os("MSB_TEST_DISK_HANDOFF") else {
+            return;
+        };
+        let directory = std::path::PathBuf::from(directory);
+        // SAFETY: the fixture parent transfers new handles exclusively to this child.
+        let _locks =
+            unsafe { microsandbox_runtime::disk_lock_handoff::receive(std::io::stdin().lock()) }
+                .unwrap();
+        std::fs::write(directory.join("ready"), b"ready").unwrap();
+        while !directory.join("exit").exists() {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[tokio::test]
+    async fn transferred_locks_follow_child_not_retained_sdk_handle() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("disk.lock");
+        let mut process = child(directory.path(), vec![open_lock(&path)]);
+        process.handoff_disk_locks().await.unwrap();
+        assert!(process._disk_locks.is_empty());
+        ready(directory.path()).await;
+        assert!(!available(&path));
+        // An unrelated process must not inherit the transferred, non-inheritable lock.
+        let mut unrelated = tokio::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command", "Start-Sleep -Seconds 30"])
+            .spawn()
+            .unwrap();
+        std::fs::write(directory.path().join("exit"), b"exit").unwrap();
+        process.wait().await.unwrap();
+        assert!(available(&path));
+        assert!(unrelated.try_wait().unwrap().is_none());
+        unrelated.kill().await.unwrap();
+        // Cleanup must work while the original ProcessHandle is still retained.
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn detached_handle_drop_does_not_release_live_child_locks() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("disk.lock");
+        let mut process = child(directory.path(), vec![open_lock(&path)]);
+        process.handoff_disk_locks().await.unwrap();
+        ready(directory.path()).await;
+        process.disarm();
+        drop(process);
+        assert!(!available(&path));
+        std::fs::write(directory.path().join("exit"), b"exit").unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !available(&path) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_handoff_releases_parent_and_child_copies_before_cleanup() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("disk.lock");
+        let mut process = child(directory.path(), vec![open_lock(&path)]);
+        // DuplicateHandle succeeds, but sending cannot: exercise partial handoff cleanup.
+        drop(process.child.stdin.take());
+        assert!(process.handoff_disk_locks().await.is_err());
+        process.terminate_failed_startup().await.unwrap();
+        assert!(available(&path));
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancellation_after_transfer_releases_child_locks() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("disk.lock");
+        let mut process = child(directory.path(), vec![open_lock(&path)]);
+        process.handoff_disk_locks().await.unwrap();
+        ready(directory.path()).await;
+        drop(StartupProcess::new(process));
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !available(&path) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
     }
 }

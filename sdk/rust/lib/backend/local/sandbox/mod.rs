@@ -165,7 +165,6 @@ impl LocalBackend {
         // ownership alone can become available during Linux's deferred disk/KVM teardown.
         // Observe only this sandbox's owned markers; actual shared-disk conflicts still fail
         // in ordinary attachment admission instead of being retried indiscriminately.
-        #[cfg(unix)]
         crate::runtime::owned_volumes::wait_for_disk_release(
             &self.sandboxes_dir().join(name),
             &config.spec.mounts,

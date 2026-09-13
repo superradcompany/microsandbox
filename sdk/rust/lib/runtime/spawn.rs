@@ -594,6 +594,13 @@ pub async fn spawn_sandbox(
     // stdin — the VMM's implicit console auto-detects terminals and sets raw
     // mode, which corrupts the parent's terminal output (\n without \r).
     cmd.stdin(Stdio::null());
+    #[cfg(windows)]
+    if !disk_locks.is_empty() {
+        // A private, startup-only pipe is not a terminal. Old runtimes reject the flag rather
+        // than booting without adopting ownership. No public agent/control socket is added.
+        cmd.arg("--disk-locks-stdin");
+        cmd.stdin(Stdio::piped());
+    }
 
     #[cfg(unix)]
     {
@@ -746,6 +753,27 @@ pub async fn spawn_sandbox(
             .terminate_failed_startup()
             .await;
         return Err(startup_error_with_cleanup(error, cleanup));
+    }
+
+    #[cfg(windows)]
+    {
+        let handoff = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            startup_process.handle_mut().handoff_disk_locks(),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            Err(MicrosandboxError::Runtime(
+                "sandbox startup timeout during disk ownership handoff".into(),
+            ))
+        });
+        if let Err(error) = handoff {
+            let cleanup = startup_process
+                .handle_mut()
+                .terminate_failed_startup()
+                .await;
+            return Err(startup_error_with_cleanup(error, cleanup));
+        }
     }
 
     let startup_result = match tokio::time::timeout(
@@ -1964,7 +1992,7 @@ fn lock_disk_image_windows(
 }
 
 #[cfg(windows)]
-fn windows_disk_lock_path(path: &Path) -> MicrosandboxResult<PathBuf> {
+pub(crate) fn windows_disk_lock_path(path: &Path) -> MicrosandboxResult<PathBuf> {
     let file_name = path.file_name().ok_or_else(|| {
         MicrosandboxError::InvalidConfig(format!(
             "disk image path has no file name: {}",

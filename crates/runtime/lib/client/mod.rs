@@ -6,6 +6,8 @@
 
 pub mod boot_error;
 pub mod control;
+#[cfg(windows)]
+pub mod disk_lock_handoff;
 pub mod ipc;
 pub mod launch;
 pub mod logging;

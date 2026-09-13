@@ -18,6 +18,8 @@ mod runner;
 // Exports
 //--------------------------------------------------------------------------------------------------
 
+#[cfg(all(feature = "client", windows))]
+pub use client::disk_lock_handoff;
 #[cfg(feature = "client")]
 pub use client::{boot_error, control, ipc, launch, logging, maintenance, startup_progress};
 #[cfg(feature = "runner")]

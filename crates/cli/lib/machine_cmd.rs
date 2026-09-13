@@ -80,6 +80,11 @@ pub struct MachineArgs {
     #[arg(long = "startup-pipe", hide = true)]
     pub startup_pipe: Option<String>,
 
+    /// Adopt launcher-transferred disk locks from stdin before opening guest disks.
+    #[cfg(windows)]
+    #[arg(long = "disk-locks-stdin", hide = true)]
+    pub disk_locks_stdin: bool,
+
     /// Forward VM console output to stdout.
     #[arg(long = "forward")]
     pub forward_output: bool,
@@ -142,6 +147,20 @@ fn parse_agent_transport_profile(s: &str) -> Result<AgentTransportProfile, Strin
 
 /// Run the sandbox process. This function **never returns**.
 pub fn run(args: MachineArgs) -> ! {
+    // Keep these sidecar handles on this never-returning stack until process teardown. They
+    // are non-inheritable, so unrelated descendants cannot extend the sandbox's ownership.
+    #[cfg(windows)]
+    let _disk_locks = if args.disk_locks_stdin {
+        // SAFETY: the private startup pipe carries handles duplicated exclusively into this
+        // process by the launcher. No other runtime code has adopted them.
+        unsafe { microsandbox_runtime::disk_lock_handoff::receive(std::io::stdin().lock()) }
+            .unwrap_or_else(|error| {
+                eprintln!("failed to receive disk ownership: {error}");
+                std::process::exit(2);
+            })
+    } else {
+        Vec::new()
+    };
     let launch = match load_launch_config(&args) {
         Ok(launch) => launch,
         Err(err) => {
@@ -780,6 +799,8 @@ mod tests {
             lifecycle_lock_fd: None,
             #[cfg(windows)]
             startup_pipe: None,
+            #[cfg(windows)]
+            disk_locks_stdin: false,
             forward_output: false,
             vcpus: 1,
             memory_mib: 512,

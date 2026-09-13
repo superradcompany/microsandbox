@@ -90,7 +90,6 @@ impl LocalBackend {
                 // Both guards fence restart/removal, but Unix process-exit cleanup can release
                 // lifecycle ownership before the owned disk descriptors. A zombie leader does
                 // not prove that the remaining thread's deferred file cleanup has completed.
-                #[cfg(unix)]
                 let _disk_guards = if let Some(model) = model.as_ref() {
                     let config: crate::sandbox::SandboxConfig =
                         serde_json::from_str(&model.config)?;
@@ -185,7 +184,6 @@ mod tests {
         (home, backend, id, run_id)
     }
 
-    #[cfg(unix)]
     async fn owned_disk_fixture(
         name: &str,
     ) -> (
@@ -234,11 +232,24 @@ mod tests {
                 mount.guest(),
             )
             .unwrap();
+            #[cfg(windows)]
+            {
+                let marker = crate::runtime::owned_volumes::disk_lock_path(
+                    &backend.sandboxes_dir().join(name),
+                    mount.guest(),
+                )
+                .unwrap();
+                drop(
+                    std::fs::File::create(
+                        crate::runtime::spawn::windows_disk_lock_path(&marker).unwrap(),
+                    )
+                    .unwrap(),
+                );
+            }
         }
         (home, backend, id, run_id, mounts)
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn stop_waits_for_every_owned_disk_after_lifecycle_release() {
         use crate::backend::Backend;
@@ -284,7 +295,6 @@ mod tests {
         handle.remove().await.unwrap();
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn cancelled_disk_teardown_stop_preserves_locks_and_rejects_new_run() {
         use crate::runtime::owned_volumes::try_acquire_disk_guards;
