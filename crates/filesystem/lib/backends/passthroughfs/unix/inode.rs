@@ -43,6 +43,13 @@
 //! the `do_lookup` that follows, is a retained destination-name race: the
 //! source swap-and-restore alone is detected, this is not.
 //!
+//! readlink is name-bound in the same way: Linux reads a real symlink with
+//! `readlinkat(fd, "")`, which is identity-bound, while macOS cannot read a
+//! link through a descriptor at all, so its identity is checked again after
+//! the call too. Nothing pins the answer there, so a swap that is put back
+//! inside the window is not detected: verify A, substitute B, read B's target,
+//! restore A, and the check passes on A while the answer came from B.
+//!
 //!
 //! ## Procfd Reopen
 //!
