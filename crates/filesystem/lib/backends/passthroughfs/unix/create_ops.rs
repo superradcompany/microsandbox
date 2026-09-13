@@ -606,7 +606,16 @@ pub(crate) fn do_readlink(fs: &PassthroughFs, _ctx: Context, ino: u64) -> io::Re
 
         let mut buf = vec![0u8; libc::PATH_MAX as usize];
         let len = if fs.anchor_mode() {
+            let expected = {
+                let inodes = fs.inodes.read().unwrap();
+                let data = inodes.get(&ino).ok_or_else(platform::ebadf)?;
+                (data.dev, data.ino)
+            };
             let (dir, name) = inode::anchor_parent_and_name_macos(fs, ino)?;
+
+            #[cfg(test)]
+            fs.run_name_bound_hook();
+
             let ret = unsafe {
                 libc::readlinkat(
                     dir.raw(),
@@ -622,6 +631,16 @@ pub(crate) fn do_readlink(fs: &PassthroughFs, _ctx: Context, ino: u64) -> io::Re
                 return Err(platform::linux_error(err));
             }
 
+            // macOS cannot read a link through a descriptor, so `readlinkat`
+            // resolves the name again after the anchor verified it. Checking
+            // the identity once more detects a substitution that is still in
+            // place when the check runs. It does not detect a swap that is put
+            // back: verify A, substitute B, read B's target, restore A, and
+            // the check passes on A while the answer came from B.
+            let st = platform::fstatat_nofollow(dir.raw(), &name)?;
+            if platform::stat_ino(&st) != expected.1 || platform::stat_dev(&st) != expected.0 {
+                return Err(platform::enoent());
+            }
             ret
         } else {
             let inodes = fs.inodes.read().unwrap();

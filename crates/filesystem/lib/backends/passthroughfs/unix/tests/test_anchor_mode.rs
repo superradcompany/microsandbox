@@ -639,6 +639,26 @@ fn test_anchor_readlink_nested() {
     assert_eq!(sb.fs.readlink(sb.ctx(), l.inode).unwrap(), b"target-name");
 }
 
+/// `readlinkat` names the entry again, so a symlink replaced after the anchor
+/// was verified would otherwise have its target read and returned. The read
+/// must be refused instead.
+#[test]
+fn test_anchor_readlink_rejects_replaced_symlink() {
+    let sb = TestSandbox::with_anchor_mode();
+    std::os::unix::fs::symlink("target-one", sb.root.join("s")).unwrap();
+    let s = sb.lookup_root("s").unwrap();
+
+    // Keep the original link alive under another name so its inode number
+    // cannot be reused by the replacement.
+    let root = sb.root.clone();
+    swap_before_name_bound_syscall(&sb, move || {
+        std::fs::rename(root.join("s"), root.join("s.orig")).unwrap();
+        std::os::unix::fs::symlink("target-two", root.join("s")).unwrap();
+    });
+
+    TestSandbox::assert_errno(sb.fs.readlink(sb.ctx(), s.inode), LINUX_ENOENT);
+}
+
 /// setattr times on a symlink go through the anchor parent, and both atime
 /// and mtime land on the verified fd via `futimens` rather than a name-based
 /// `utimensat`.

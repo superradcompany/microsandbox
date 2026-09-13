@@ -258,6 +258,8 @@ pub struct PassthroughFs {
     /// `linkat` names its source again after the anchor has verified it, so
     /// tests need to act exactly in that window to prove the post-syscall
     /// identity check does its job.
+    /// `readlinkat` names its entry again in the same way, and its own
+    /// post-call check is proved through this hook too.
     #[cfg(all(test, target_os = "macos"))]
     pub(crate) before_name_bound_syscall: RwLock<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
