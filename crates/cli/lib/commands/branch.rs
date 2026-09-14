@@ -15,8 +15,11 @@ pub struct BranchArgs {
     /// Source sandbox name.
     pub source: String,
     /// Name of the new child sandbox.
-    #[arg(long)]
-    pub name: String,
+    #[arg(long, required_unless_present = "names", conflicts_with = "names")]
+    pub name: Option<String>,
+    /// Capture once for these independent children, in input order.
+    #[arg(long, num_args = 1.., conflicts_with = "name")]
+    pub names: Vec<String>,
     /// Suppress progress output.
     #[arg(short, long)]
     pub quiet: bool,
@@ -35,7 +38,39 @@ pub struct BranchArgs {
 /// Branch source execution. The child's CoW memory is inherent to this operation.
 pub async fn run(args: BranchArgs) -> anyhow::Result<()> {
     let source = Sandbox::get(&args.source).await?;
-    let mut builder = args.resources.apply_branch(source.branch(&args.name))?;
+    if !args.names.is_empty() {
+        let mut builder = args
+            .resources
+            .apply_branch_many(source.branch_many(args.names))?;
+        if args.integrity {
+            builder = builder.record_integrity();
+        }
+        let outcomes = builder.branch().await?;
+        let mut failed = 0;
+        for outcome in outcomes {
+            match outcome.result {
+                Ok(child) => {
+                    super::common::display_restore_warnings(&child).await;
+                    if !args.quiet {
+                        ui::success("Branched", child.name());
+                    }
+                    child.detach().await;
+                }
+                Err(error) => {
+                    failed += 1;
+                    eprintln!("{}: {error}", outcome.name);
+                }
+            }
+        }
+        anyhow::ensure!(
+            failed == 0,
+            "{failed} batch children failed; successful children were retained"
+        );
+        return Ok(());
+    }
+    let mut builder = args
+        .resources
+        .apply_branch(source.branch(args.name.expect("clap requires a child name")))?;
     if args.integrity {
         builder = builder.record_integrity();
     }
@@ -57,4 +92,37 @@ pub async fn run(args: BranchArgs) -> anyhow::Result<()> {
     }
     child.detach().await;
     Ok(())
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[derive(Parser)]
+    struct Command {
+        #[command(flatten)]
+        branch: BranchArgs,
+    }
+
+    #[test]
+    fn single_and_list_are_mutually_exclusive() {
+        let single = Command::try_parse_from(["msb", "source", "--name", "child"]).unwrap();
+        assert_eq!(single.branch.name.as_deref(), Some("child"));
+        let batch =
+            Command::try_parse_from(["msb", "source", "--names", "a", "b", "--integrity"]).unwrap();
+        assert_eq!(batch.branch.names, ["a", "b"]);
+        assert!(batch.branch.integrity);
+        for args in [
+            vec!["msb", "source"],
+            vec!["msb", "source", "--names"],
+            vec!["msb", "source", "--name", "a", "--names", "b"],
+        ] {
+            assert!(Command::try_parse_from(args).is_err());
+        }
+    }
 }

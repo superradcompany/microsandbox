@@ -488,6 +488,12 @@ struct FfiError {
     recovery: Option<Box<microsandbox::SnapshotSourceRecoveryError>>,
 }
 
+#[derive(serde::Deserialize)]
+struct BranchManyRequest {
+    names: Vec<String>,
+    source_identity: Option<String>,
+}
+
 impl FfiError {
     fn new(kind: &'static str, message: impl Into<String>) -> Self {
         Self {
@@ -3336,6 +3342,73 @@ pub unsafe extern "C" fn msb_sandbox_branch(
     unsafe {
         msb_sandbox_branch_with_options(cancel_id, handle, source, child, false, buf, buf_len)
     }
+}
+
+/// Capture once for a JSON request containing child names and return named outcomes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sandbox_branch_many(
+    cancel_id: u64,
+    handle: Handle,
+    source: *const c_char,
+    names: *const c_char,
+    record_integrity: bool,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let request: BranchManyRequest = serde_json::from_str(&unsafe { cstr(names) }?)
+            .map_err(|e| FfiError::invalid_argument(e.to_string()))?;
+        let source = unsafe { cstr(source) }?;
+        let live = if handle == 0 {
+            None
+        } else {
+            Some(get(handle)?)
+        };
+        Ok(Box::pin(async move {
+            let mut builder = if let Some(live) = live {
+                live.branch_many(request.names)
+            } else {
+                let source = Sandbox::get(&source).await.map_err(FfiError::from)?;
+                if let Some(expected) = request.source_identity.filter(|id| !id.is_empty())
+                    && source.id().as_str() != expected
+                {
+                    return Err(FfiError::from(MicrosandboxError::SandboxReplaced {
+                        name: source.name().to_string(),
+                        expected,
+                        actual: source.id().to_string(),
+                    }));
+                }
+                source.branch_many(request.names)
+            };
+            if record_integrity {
+                builder = builder.record_integrity();
+            }
+            let outcomes = builder.branch().await.map_err(FfiError::from)?;
+            let mut rows = Vec::with_capacity(outcomes.len());
+            for outcome in outcomes {
+                let row = match outcome.result {
+                    Ok(child) => {
+                        let kind = child.backend_kind().as_str();
+                        let id = child.id().to_string();
+                        match register(child) {
+                            Ok(handle) => {
+                                serde_json::json!({"name": outcome.name, "id": id, "handle": handle, "backend_kind": kind})
+                            }
+                            Err(error) => {
+                                serde_json::json!({"name": outcome.name, "error": {"kind": error.kind, "message": error.message}})
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        let error = FfiError::from(error);
+                        serde_json::json!({"name": outcome.name, "error": {"kind": error.kind, "message": error.message}})
+                    }
+                };
+                rows.push(row);
+            }
+            Ok(serde_json::json!({"outcomes": rows}).to_string())
+        }))
+    })
 }
 
 /// Branch with explicit disk content integrity, retaining the original branch ABI.

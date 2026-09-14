@@ -36,6 +36,14 @@ pub struct Sandbox {
     owns_lifecycle: bool,
 }
 
+/// One child result from a capture-once batch, in caller order.
+#[napi(object, object_from_js = false)]
+pub struct JsBranchOutcome {
+    pub name: String,
+    pub sandbox: Option<Sandbox>,
+    pub error: Option<String>,
+}
+
 /// One page returned by `Sandbox.list` / `Sandbox.listWith`.
 #[napi(object, object_from_js = false)]
 pub struct JsSandboxPage {
@@ -556,6 +564,23 @@ impl Sandbox {
         ))
     }
 
+    /// Capture once and return individual child startup outcomes.
+    #[napi]
+    pub async fn branch_many(
+        &self,
+        names: Vec<String>,
+        record_integrity: Option<bool>,
+    ) -> Result<Vec<JsBranchOutcome>> {
+        let sb = self.inner.get().await.ok_or_else(consumed_error)?;
+        let mut builder = sb.branch_many(names);
+        if record_integrity.unwrap_or(false) {
+            builder = builder.record_integrity();
+        }
+        Ok(branch_outcomes(
+            builder.branch().await.map_err(to_napi_error)?,
+        ))
+    }
+
     /// Explicit resident pause through host control.
     #[napi]
     pub async fn pause(&self) -> Result<()> {
@@ -758,6 +783,25 @@ impl Sandbox {
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
+
+pub(crate) fn branch_outcomes(
+    outcomes: Vec<microsandbox::sandbox::BranchOutcome>,
+) -> Vec<JsBranchOutcome> {
+    outcomes
+        .into_iter()
+        .map(|outcome| {
+            let (sandbox, error) = match outcome.result {
+                Ok(child) => (Some(Sandbox::from_rust(child)), None),
+                Err(error) => (None, Some(to_napi_error(error).reason)),
+            };
+            JsBranchOutcome {
+                name: outcome.name,
+                sandbox,
+                error,
+            }
+        })
+        .collect()
+}
 
 fn sandbox_page_to_js(page: microsandbox::sandbox::SandboxPage) -> JsSandboxPage {
     JsSandboxPage {

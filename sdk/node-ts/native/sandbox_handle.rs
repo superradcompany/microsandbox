@@ -209,6 +209,22 @@ impl JsSandboxHandle {
         ))
     }
 
+    /// Capture once and return individual child startup outcomes.
+    #[napi]
+    pub async fn branch_many(
+        &self,
+        names: Vec<String>,
+        record_integrity: Option<bool>,
+    ) -> Result<Vec<crate::sandbox::JsBranchOutcome>> {
+        let mut builder = self.inner.branch_many(names);
+        if record_integrity.unwrap_or(false) {
+            builder = builder.record_integrity();
+        }
+        Ok(crate::sandbox::branch_outcomes(
+            builder.branch().await.map_err(to_napi_error)?,
+        ))
+    }
+
     /// Explicit resident pause through host control.
     #[napi]
     pub async fn pause(&self) -> Result<()> {

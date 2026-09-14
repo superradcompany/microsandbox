@@ -64,6 +64,16 @@ impl LocalBranchState {
                     "branch disk belongs to a different pause epoch",
                 ));
             }
+        }
+        state.validate_files(root)?;
+        Ok(state)
+    }
+
+    /// Check one child's file bindings against already decoded immutable capture metadata.
+    /// The SDK may share decoded metadata within a batch; each VM still opens and admits
+    /// its own handoff independently through `open` at the runtime boundary.
+    pub fn validate_files(&self, root: &Path) -> io::Result<()> {
+        for disk in &self.disks {
             for layer in &disk.layers {
                 let path = root
                     .join("layers")
@@ -74,7 +84,7 @@ impl LocalBranchState {
                 }
             }
         }
-        Ok(state)
+        Ok(())
     }
 
     /// Read an existing bounded state object, checking its recorded identity.

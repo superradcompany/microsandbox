@@ -4,6 +4,7 @@ import os as _os
 
 from microsandbox._microsandbox import (
     BackendInfo,
+    BranchOutcome,
     ExecEvent,
     ExecHandle,
     ExecOutput,
@@ -204,6 +205,7 @@ __all__ = [
     "SandboxPingResult",
     "SandboxTouchResult",
     "ExternalMountWarning",
+    "BranchOutcome",
     "PullSession",
     "SandboxStatus",
     "ModificationPolicy",

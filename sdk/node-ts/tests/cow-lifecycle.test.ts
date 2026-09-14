@@ -36,3 +36,29 @@ it.skipIf(process.env.MSB_COW_LIVE !== "1")("captures a resident pause and resto
     for (const result of results) if (result.status === "rejected") throw result.reason;
   }
 }, 120_000);
+
+it.skipIf(process.env.MSB_BATCH_LIVE !== "1")("branches one capture through both SDK surfaces", async () => {
+  const name = `batch-node-${process.pid}`;
+  const source = await Sandbox.builder(name).image("mirror.gcr.io/library/alpine:3.20").rootDisk(512).memory(256).create();
+  const children: Sandbox[] = [];
+  try {
+    await source.exec("sh", ["-c", "echo original > /dev/shm/batch-marker"]);
+    for (const target of [source, await Sandbox.get(name)]) {
+      const names = [0, 1].map(i => `${name}-${children.length}-${i}`);
+      const outcomes = await target.branchMany(names);
+      for (const outcome of outcomes) if (outcome.sandbox) children.push(outcome.sandbox);
+      expect(outcomes.map(o => o.name)).toEqual(names);
+      for (const outcome of outcomes) {
+        expect(outcome.error).toBeUndefined();
+        expect((await outcome.sandbox!.exec("cat", ["/dev/shm/batch-marker"])).stdout().trim()).toBe("original");
+      }
+    }
+    await children[0]!.exec("sh", ["-c", "echo private > /dev/shm/batch-marker"]);
+    expect((await children[1]!.exec("cat", ["/dev/shm/batch-marker"])).stdout().trim()).toBe("original");
+    await expect(source.branchMany([])).rejects.toThrow();
+    await expect(source.branchMany([name + "-dup", name + "-dup"])).rejects.toThrow();
+  } finally {
+    const results = await Promise.allSettled([...children, source].map(s => s.stop()));
+    for (const result of results) if (result.status === "rejected") throw result.reason;
+  }
+}, 120_000);

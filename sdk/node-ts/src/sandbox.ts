@@ -1,4 +1,4 @@
-import { withMappedErrors } from "./internal/error-mapping.js";
+import { mapNapiError, withMappedErrors } from "./internal/error-mapping.js";
 import { validateStopTimeout } from "./internal/stop.js";
 import {
   compactionResultFromJson,
@@ -99,6 +99,11 @@ export interface SandboxTouchResult {
   readonly name: string;
   readonly activitySeq: number;
 }
+
+/** One named child or startup error from a capture-once batch, in input order. */
+export type BranchOutcome =
+  | { name: string; sandbox: Sandbox; error?: never }
+  | { name: string; sandbox?: never; error: Error };
 
 /** An unmapped external filesystem or a mismatch accepted during relaxed restore. */
 export interface ExternalMountWarning {
@@ -579,6 +584,14 @@ export class Sandbox implements AsyncDisposable {
   async branch(name: string, options: { recordIntegrity?: boolean } = {}): Promise<Sandbox> {
     const child = await withMappedErrors(() => this.inner.branch(name, options.recordIntegrity));
     return new Sandbox(child, name, false);
+  }
+
+  /** Capture once; return each named child's startup outcome in input order. */
+  async branchMany(names: string[], options: { recordIntegrity?: boolean } = {}): Promise<BranchOutcome[]> {
+    const outcomes = await withMappedErrors(() => this.inner.branchMany(names, options.recordIntegrity));
+    return outcomes.map(o => o.sandbox
+      ? { name: o.name, sandbox: new Sandbox(o.sandbox, o.name, false) }
+      : { name: o.name, error: mapNapiError(new Error(o.error ?? "Child startup failed")) as Error });
   }
 
   /** Suspend this resident VM without creating a snapshot. */

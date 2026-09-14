@@ -127,6 +127,7 @@ typedef char *(*msb_sandbox_restore_warnings_fn)(uint64_t cancel_id, uint64_t ha
 typedef char *(*msb_sandbox_pause_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_branch_fn)(uint64_t cancel_id, uint64_t handle, const char *source, const char *child, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_branch_with_options_fn)(uint64_t cancel_id, uint64_t handle, const char *source, const char *child, bool record_integrity, uint8_t *buf, size_t buf_len);
+typedef msb_sandbox_branch_with_options_fn msb_sandbox_branch_many_fn;
 typedef char *(*msb_sandbox_resume_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_handle_pause_fn)(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_handle_resume_fn)(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len);
@@ -299,6 +300,7 @@ static msb_sandbox_restore_warnings_fn ptr_msb_sandbox_restore_warnings = NULL;
 static msb_sandbox_pause_fn ptr_msb_sandbox_pause = NULL;
 static msb_sandbox_branch_fn ptr_msb_sandbox_branch = NULL;
 static msb_sandbox_branch_with_options_fn ptr_msb_sandbox_branch_with_options = NULL;
+static msb_sandbox_branch_with_options_fn ptr_msb_sandbox_branch_many = NULL;
 static msb_sandbox_resume_fn ptr_msb_sandbox_resume = NULL;
 static msb_sandbox_handle_pause_fn ptr_msb_sandbox_handle_pause = NULL;
 static msb_sandbox_handle_resume_fn ptr_msb_sandbox_handle_resume = NULL;
@@ -493,6 +495,7 @@ const char *load_microsandbox(const char *path) {
 	RESOLVE(msb_sandbox_pause);
 	RESOLVE(msb_sandbox_branch);
 	RESOLVE_OPTIONAL(msb_sandbox_branch_with_options);
+	RESOLVE_OPTIONAL(msb_sandbox_branch_many);
 	RESOLVE(msb_sandbox_resume);
 	RESOLVE(msb_sandbox_handle_pause);
 	RESOLVE(msb_sandbox_handle_resume);
@@ -723,6 +726,10 @@ char *call_msb_sandbox_branch(uint64_t cancel_id, uint64_t handle, const char *s
 	return ptr_msb_sandbox_branch ? ptr_msb_sandbox_branch(cancel_id, handle, source, child, buf, buf_len) : NULL;
 }
 bool has_branch_integrity(void) { return ptr_msb_sandbox_branch_with_options != NULL; }
+bool has_branch_many(void) { return ptr_msb_sandbox_branch_many != NULL; }
+char *call_msb_sandbox_branch_many(uint64_t cancel_id, uint64_t handle, const char *source, const char *names, bool record_integrity, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_sandbox_branch_many ? ptr_msb_sandbox_branch_many(cancel_id, handle, source, names, record_integrity, buf, buf_len) : NULL;
+}
 char *call_msb_sandbox_branch_with_options(uint64_t cancel_id, uint64_t handle, const char *source, const char *child, bool record_integrity, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_sandbox_branch_with_options ? ptr_msb_sandbox_branch_with_options(cancel_id, handle, source, child, record_integrity, buf, buf_len) : NULL;
 }
@@ -2716,6 +2723,77 @@ func (s *Sandbox) RestoreWarnings(ctx context.Context) (string, error) {
 	return call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
 		return C.call_msb_sandbox_restore_warnings(cancelID, s.h(), buf, bufLen)
 	})
+}
+
+// BranchOutcome holds one named child or its startup error.
+type BranchOutcome struct {
+	Name    string
+	Sandbox *Sandbox
+	Error   error
+}
+
+func (s *Sandbox) BranchMany(ctx context.Context, names []string, integrity bool) ([]BranchOutcome, error) {
+	// Zero selects name lookup in the shared native entry point. A closed live handle
+	// must not take that path, including when Close races with this call.
+	handle := s.handle.Load()
+	if handle == 0 {
+		return nil, &Error{Kind: KindInvalidHandle, Message: "sandbox handle already closed"}
+	}
+	return BranchManyByName(ctx, handle, s.name, "", names, integrity)
+}
+
+// BranchManyByName uses one native operation, never a loop of branch captures.
+func BranchManyByName(ctx context.Context, handle uint64, source, identity string, names []string, integrity bool) ([]BranchOutcome, error) {
+	if err := ensureLoaded(); err != nil {
+		return nil, err
+	}
+	if !bool(C.has_branch_many()) {
+		return nil, &Error{Kind: KindUnsupportedOperation, Message: "native SDK does not support batch branching; update the native SDK"}
+	}
+	if names == nil {
+		names = []string{}
+	}
+	encoded, err := json.Marshal(struct {
+		Names    []string `json:"names"`
+		Identity string   `json:"source_identity"`
+	}{names, identity})
+	if err != nil {
+		return nil, err
+	}
+	cSource, cNames := C.CString(source), C.CString(string(encoded))
+	defer C.free(unsafe.Pointer(cSource))
+	defer C.free(unsafe.Pointer(cNames))
+	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, size C.size_t) *C.char {
+		return C.call_msb_sandbox_branch_many(cancelID, C.uint64_t(handle), cSource, cNames, C.bool(integrity), buf, size)
+	})
+	if err != nil {
+		return nil, err
+	}
+	var response struct {
+		Outcomes []struct {
+			Name        string `json:"name"`
+			ID          string `json:"id"`
+			Handle      uint64 `json:"handle"`
+			BackendKind string `json:"backend_kind"`
+			Error       *Error `json:"error"`
+		} `json:"outcomes"`
+	}
+	if err := json.Unmarshal([]byte(out), &response); err != nil {
+		return nil, fmt.Errorf("parse batch branch response: %w", err)
+	}
+	results := make([]BranchOutcome, 0, len(response.Outcomes))
+	for _, row := range response.Outcomes {
+		item := BranchOutcome{Name: row.Name}
+		if row.Error != nil {
+			item.Error = row.Error
+		} else {
+			child := &Sandbox{name: row.Name, id: row.ID, backendKind: row.BackendKind}
+			child.handle.Store(row.Handle)
+			item.Sandbox = child
+		}
+		results = append(results, item)
+	}
+	return results, nil
 }
 
 // Branch creates an independent local child through the host runtime.

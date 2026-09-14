@@ -1522,6 +1522,45 @@ pub(crate) fn stage_checkpoint_closure(source: &Path, destination: &Path) -> std
     materialize_checkpoint_tree(source, destination, false)
 }
 
+/// Retain immutable local capture files without copying RAM or publishing a snapshot.
+pub(crate) fn stage_local_branch_closure(source: &Path, destination: &Path) -> std::io::Result<()> {
+    // Batch staging and children are on the same sandbox filesystem. Require links rather
+    // than silently copying large disk layers; RAM is outside this tree and stays pinned.
+    std::fs::create_dir_all(destination)?;
+    for member in [
+        "objects",
+        "layers",
+        "local-disk-admission.json",
+        "branch.json",
+    ] {
+        let path = source.join(member);
+        if member != "branch.json" && !path.try_exists()? {
+            continue;
+        }
+        link_local_branch_member(&path, &destination.join(member))?;
+    }
+    Ok(())
+}
+
+fn link_local_branch_member(source: &Path, destination: &Path) -> std::io::Result<()> {
+    let metadata = std::fs::symlink_metadata(source)?;
+    if metadata.is_file() {
+        std::fs::hard_link(source, destination)
+    } else if metadata.is_dir() {
+        std::fs::create_dir(destination)?;
+        for entry in std::fs::read_dir(source)? {
+            let entry = entry?;
+            link_local_branch_member(&entry.path(), &destination.join(entry.file_name()))?;
+        }
+        Ok(())
+    } else {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "local branch member is not a regular file or directory",
+        ))
+    }
+}
+
 fn materialize_checkpoint_tree(
     source: &Path,
     destination: &Path,

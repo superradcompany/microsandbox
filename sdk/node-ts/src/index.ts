@@ -46,6 +46,7 @@ export type {
   SandboxPingResult,
   SandboxTouchResult,
   ExternalMountWarning,
+  BranchOutcome,
 } from "./sandbox.js";
 export type {
   ChangeKind,

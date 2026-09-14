@@ -33,6 +33,14 @@ pub struct PySandbox {
     stop_identity: String,
 }
 
+/// One child outcome from a capture-once batch.
+#[pyclass(name = "BranchOutcome", get_all, frozen)]
+pub struct PyBranchOutcome {
+    name: String,
+    sandbox: Option<Py<PySandbox>>,
+    error: Option<Py<PyAny>>,
+}
+
 /// Result of observing a sandbox in a terminal non-running state.
 #[pyclass(name = "SandboxStopResult")]
 pub struct PySandboxStopResult {
@@ -1090,6 +1098,25 @@ impl PySandbox {
             Ok(PySandbox::from_rust(
                 builder.branch().await.map_err(to_py_err)?,
             ))
+        })
+    }
+
+    /// Capture once for all names; return an outcome for each child in input order.
+    #[pyo3(signature = (names, *, record_integrity = false))]
+    fn branch_many<'py>(
+        &self,
+        py: Python<'py>,
+        names: Vec<String>,
+        record_integrity: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let sandbox = Self::clone_sandbox(&inner).await?;
+            let mut builder = sandbox.branch_many(names);
+            if record_integrity {
+                builder = builder.record_integrity();
+            }
+            branch_outcomes(builder.branch().await.map_err(to_py_err)?)
         })
     }
 
@@ -2382,6 +2409,27 @@ fn convert_pull_progress(event: microsandbox::sandbox::PullProgress) -> PyPullEv
 //--------------------------------------------------------------------------------------------------
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
+
+pub(crate) fn branch_outcomes(
+    outcomes: Vec<microsandbox::sandbox::BranchOutcome>,
+) -> PyResult<Vec<PyBranchOutcome>> {
+    Python::with_gil(|py| {
+        outcomes
+            .into_iter()
+            .map(|outcome| {
+                let (sandbox, error) = match outcome.result {
+                    Ok(child) => (Some(Py::new(py, PySandbox::from_rust(child))?), None),
+                    Err(error) => (None, Some(to_py_err(error).into_value(py).into_any())),
+                };
+                Ok(PyBranchOutcome {
+                    name: outcome.name,
+                    sandbox,
+                    error,
+                })
+            })
+            .collect()
+    })
+}
 
 pub fn optional_duration(value: Option<f64>) -> PyResult<Option<std::time::Duration>> {
     let Some(value) = value else {

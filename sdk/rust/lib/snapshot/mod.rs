@@ -600,6 +600,7 @@ impl SnapshotBuilder {
 #[cfg(feature = "fuzzing")]
 pub use archive::fuzz_unpack_archive;
 pub use archive::{LoadOpts, SaveOpts};
+pub(crate) use create::stage_local_branch_closure;
 pub use group::{HeadUpdate, HeadUpdateReason};
 pub use microsandbox_image::snapshot::{
     CheckpointSnapshotState, DESCRIPTOR_FILENAME, DiskLayer, DiskLayerId, FileSnapshotState,

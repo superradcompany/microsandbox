@@ -1,7 +1,7 @@
 //! Restore a snapshot into a detached sandbox with explicit host resource bindings.
 
 use clap::Args;
-use microsandbox::sandbox::{BranchBuilder, RestoreBuilder, Sandbox};
+use microsandbox::sandbox::{BranchBuilder, BranchManyBuilder, RestoreBuilder, Sandbox};
 
 #[cfg(feature = "net")]
 use super::common::parse_port_mapping;
@@ -154,3 +154,4 @@ macro_rules! apply_resources {
 
 apply_resources!(apply_restore, RestoreBuilder);
 apply_resources!(apply_branch, BranchBuilder);
+apply_resources!(apply_branch_many, BranchManyBuilder);

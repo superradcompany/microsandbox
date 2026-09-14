@@ -29,6 +29,13 @@ type BranchOptions struct {
 	RecordIntegrity bool
 }
 
+// BranchOutcome contains either a running child or its startup error.
+type BranchOutcome struct {
+	Name    string
+	Sandbox *Sandbox
+	Error   error
+}
+
 // BranchOption configures a local branch.
 type BranchOption func(*BranchOptions)
 
@@ -954,6 +961,16 @@ func (h *SandboxHandle) RequestStop(ctx context.Context) error {
 	return wrapFFI(ffi.SandboxHandleVoidLifecycle(ctx, h.name, h.id, "request_stop", ffi.SandboxHandleLifecycleOptions{}))
 }
 
+// BranchMany captures once and returns each named child's startup outcome in input order.
+func (h *SandboxHandle) BranchMany(ctx context.Context, names []string, opts ...BranchOption) ([]BranchOutcome, error) {
+	options := BranchOptions{}
+	for _, opt := range opts {
+		opt(&options)
+	}
+	rows, err := ffi.BranchManyByName(ctx, 0, h.name, h.id, names, options.RecordIntegrity)
+	return wrapBranchOutcomes(rows, err)
+}
+
 // Branch creates an independent local CoW child without publishing a durable full snapshot.
 func (h *SandboxHandle) Branch(ctx context.Context, name string, opts ...BranchOption) (*Sandbox, error) {
 	options := BranchOptions{}
@@ -1131,6 +1148,32 @@ func (s *Sandbox) Branch(ctx context.Context, name string, opts ...BranchOption)
 // Resume controls resident execution without creating a snapshot.
 func (s *Sandbox) Resume(ctx context.Context) error {
 	return wrapFFI(s.inner.Resume(ctx))
+}
+
+// BranchMany captures once and returns each child's outcome in input order.
+// Validation/capture errors fail the call; individual startup failures are returned in Error.
+func (s *Sandbox) BranchMany(ctx context.Context, names []string, opts ...BranchOption) ([]BranchOutcome, error) {
+	options := BranchOptions{}
+	for _, opt := range opts {
+		opt(&options)
+	}
+	rows, err := s.inner.BranchMany(ctx, names, options.RecordIntegrity)
+	return wrapBranchOutcomes(rows, err)
+}
+
+func wrapBranchOutcomes(rows []ffi.BranchOutcome, err error) ([]BranchOutcome, error) {
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	results := make([]BranchOutcome, 0, len(rows))
+	for _, row := range rows {
+		item := BranchOutcome{Name: row.Name, Error: wrapFFI(row.Error)}
+		if row.Sandbox != nil {
+			item.Sandbox = &Sandbox{inner: row.Sandbox}
+		}
+		results = append(results, item)
+	}
+	return results, nil
 }
 
 // Kill force-kills the sandbox and waits until stopped state is observed.

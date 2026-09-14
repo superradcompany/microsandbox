@@ -293,6 +293,15 @@ Branch running execution into a new local CoW child without creating a durable f
 msb branch devbox --name experiment
 ```
 
+Use `--names` to capture once and start several independent children from the same state:
+
+```bash
+msb branch devbox --names alice bob charlie
+msb branch devbox --names worker-{1..10} # Bash/Zsh expand the names
+```
+
+Names are checked before capture. Up to four children start concurrently; results are reported in input order. One child's startup failure does not remove successful children. The command reports failed names and exits unsuccessfully if any child fails. Separate `--name` calls still capture separate points in time.
+
 <a id="msb-restart"></a>
 
 ## msb sandbox restart

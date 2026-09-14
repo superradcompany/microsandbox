@@ -68,7 +68,11 @@ msb branch baseline --name worker
 
 The child resumes the captured processes, memory, and disk state. Its private memory and managed-disk writes do not affect the source; external mounts remain shared host dependencies unless explicitly remapped. CoW memory is built in—no `--forked` flag is needed. A running source resumes after capture; a user-paused source stays paused. Branches work on supported Linux, macOS, and Windows hosts, require a new child name, and cannot inherit published host ports.
 
-The SDK methods are Rust `source.branch("worker").await?`, Python `await source.branch("worker")`, TypeScript `await source.branch("worker")`, and Go `source.Branch(ctx, "worker")`. They also work on sandbox handles returned by `get`.
+The SDK methods are Rust `source.branch("worker").branch().await?`, Python `await source.branch("worker")`, TypeScript `await source.branch("worker")`, and Go `source.Branch(ctx, "worker")`. They also work on sandbox handles returned by `get`.
+
+For children that should start from the same moment, use `msb branch baseline --names alice bob charlie`. This captures RAM, CPU/device state, and disks once, then starts up to four children concurrently; children share immutable backing and keep their own writes private. The source resumes after capture unless it was already paused. No durable snapshot is created, and deleting the source or one child does not invalidate the others.
+
+SDKs accept a list of names: Rust `source.branch_many(["alice", "bob"]).branch().await?`, Python `await source.branch_many(["alice", "bob"])`, TypeScript `await source.branchMany(["alice", "bob"])`, and Go `source.BranchMany(ctx, []string{"alice", "bob"})`. Validation or capture errors fail the call. Children can become ready in any order, but results follow input order and contain each child's name and either its sandbox or startup error; successful children are retained. Rust exposes that pair as `name` and `result`; Python/TypeScript use `name`, `sandbox`, and `error`; Go uses `Name`, `Sandbox`, and `Error`.
 
 Local branching still writes a consistent memory backing file, but skips portable RAM packaging and snapshot registration. It is not a saved recovery point. Use `snapshot create --full` when you need a durable, exportable snapshot.
 

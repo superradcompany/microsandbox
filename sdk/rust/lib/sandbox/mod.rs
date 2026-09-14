@@ -7,6 +7,7 @@
 
 pub(crate) mod attach;
 pub(crate) mod branch;
+mod branch_batch;
 mod builder;
 mod compact;
 pub(crate) mod config;
@@ -129,7 +130,7 @@ pub(crate) use types::validate_volume_mounts;
 
 pub use crate::logs::{LogEntry, LogOptions, LogSource, LogStreamOptions};
 pub use attach::AttachOptionsBuilder;
-pub use branch::BranchBuilder;
+pub use branch::{BranchBuilder, BranchManyBuilder, BranchOutcome};
 pub use builder::{RegistryConfigBuilder, SandboxBuilder};
 pub use compact::{DiskCompactionBuilder, DiskCompactionResult};
 pub use config::SandboxConfig;

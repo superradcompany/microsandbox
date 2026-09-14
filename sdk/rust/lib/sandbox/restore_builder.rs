@@ -203,6 +203,7 @@ macro_rules! resource_methods {
 
 resource_methods!(RestoreBuilder);
 resource_methods!(super::branch::BranchBuilder);
+resource_methods!(super::branch::BranchManyBuilder);
 
 //--------------------------------------------------------------------------------------------------
 // Tests

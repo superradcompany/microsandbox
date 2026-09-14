@@ -25,6 +25,9 @@ pub(crate) struct SandboxRunIdentity {
 #[derive(Clone, Debug)]
 #[cfg(feature = "local")]
 pub(crate) struct BranchSource {
+    /// Process-local shared capture. Never serialized or interpreted by older runtimes.
+    pub(crate) batch:
+        Option<std::sync::Arc<super::branch_batch::CaptureSlot<super::branch_batch::BatchCapture>>>,
     /// Explicit disk integrity policy for this one capture, never inherited by descendants.
     pub(crate) record_integrity: bool,
     pub(crate) name: String,

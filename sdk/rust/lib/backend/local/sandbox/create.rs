@@ -1419,7 +1419,7 @@ impl LocalBackend {
     }
 
     /// Validate sandbox-name-derived runtime paths for this backend.
-    pub(super) fn validate_sandbox_name_for_runtime(&self, name: &str) -> MicrosandboxResult<()> {
+    pub(crate) fn validate_sandbox_name_for_runtime(&self, name: &str) -> MicrosandboxResult<()> {
         validate_sandbox_name(name)?;
         crate::runtime::resolve_sandbox_agent_socket_path_for(self, name).map(|_| ())
     }

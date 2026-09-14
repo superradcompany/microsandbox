@@ -59,6 +59,7 @@ fn _microsandbox(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(resolved_msb_path, m)?)?;
     m.add_function(wrap_pyfunction!(metrics::all_sandbox_metrics, m)?)?;
     m.add_class::<sandbox::PySandbox>()?;
+    m.add_class::<sandbox::PyBranchOutcome>()?;
     m.add_class::<sandbox::PySandboxStopResult>()?;
     m.add_class::<sandbox::PySandboxPingResult>()?;
     m.add_class::<sandbox::PySandboxTouchResult>()?;
