@@ -524,6 +524,8 @@ impl CheckpointCoordinator {
     }
 
     /// Capture a local handoff directly, without publishing a portable RAM closure.
+    // Keep borrowed capture inputs explicit; this entry point does not own or retain them.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn branch(
         &mut self,
         vm: &msb_krun::VmControl,
@@ -592,6 +594,8 @@ impl CheckpointCoordinator {
         )
     }
 
+    // Durable and local capture share one executor-owned boundary and its borrowed inputs.
+    #[allow(clippy::too_many_arguments)]
     fn capture_to(
         &mut self,
         vm: &msb_krun::VmControl,

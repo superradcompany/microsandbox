@@ -56,10 +56,10 @@ pub struct SandboxBuilder {
     /// building so later shell overrides determine their shebang.
     config_scripts: BTreeMap<String, String>,
     /// Pending snapshot reference (path or bare name) supplied via
-    /// [`from_snapshot`]. Resolved during async `create()`.
+    /// [`snapshot_source`]. Resolved during async `create()`.
     pending_snapshot: Option<String>,
     /// Distinguishes a sparse-patch snapshot, which later builder calls may override, from an
-    /// explicit `from_snapshot` call that retains the established mutual-exclusion validation.
+    /// explicit `snapshot_source` call that retains the established mutual-exclusion validation.
     pending_snapshot_from_config: bool,
 }
 
@@ -1214,7 +1214,7 @@ impl SandboxBuilder {
     /// file, or a bare name resolved under the default snapshots directory. Disk snapshots cold
     /// boot; full snapshots resume their captured execution unless [`disk_only`](Self::disk_only)
     /// is selected.
-    pub(crate) fn from_snapshot(mut self, path_or_name: impl Into<String>) -> Self {
+    pub(crate) fn snapshot_source(mut self, path_or_name: impl Into<String>) -> Self {
         self.pending_snapshot = Some(path_or_name.into());
         self.pending_snapshot_from_config = false;
         self
@@ -1223,7 +1223,7 @@ impl SandboxBuilder {
     /// Cold-boot only the disk state carried by a full snapshot.
     ///
     /// This is a restore policy, not a different artifact kind. It must be combined with
-    /// [`from_snapshot`](Self::from_snapshot), and the selected artifact must contain checkpoint
+    /// [`snapshot_source`](Self::snapshot_source), and the selected artifact must contain checkpoint
     /// state. Memory, execution, and device state are deliberately ignored.
     pub(crate) fn disk_only(mut self) -> Self {
         self.config.snapshot_restore_mode = SnapshotRestoreMode::DiskOnly;
@@ -2663,7 +2663,7 @@ mod tests {
     async fn test_builder_from_snapshot_rejects_explicit_oci_image() {
         let err = SandboxBuilder::new("test")
             .image("alpine")
-            .from_snapshot("/tmp/missing-snapshot")
+            .snapshot_source("/tmp/missing-snapshot")
             .build()
             .await
             .unwrap_err();
@@ -2678,7 +2678,7 @@ mod tests {
     async fn test_builder_from_snapshot_rejects_explicit_root_disk() {
         let err = SandboxBuilder::new("test")
             .image_with(|i| i.oci("").root_disk(8192u32))
-            .from_snapshot("/tmp/missing-snapshot")
+            .snapshot_source("/tmp/missing-snapshot")
             .build()
             .await
             .unwrap_err();
@@ -2693,7 +2693,7 @@ mod tests {
     async fn test_builder_from_snapshot_rejects_explicit_disk_image() {
         let err = SandboxBuilder::new("test")
             .image_with(|i| i.disk("./rootfs.raw"))
-            .from_snapshot("/tmp/missing-snapshot")
+            .snapshot_source("/tmp/missing-snapshot")
             .build()
             .await
             .unwrap_err();
@@ -2708,7 +2708,7 @@ mod tests {
     async fn test_builder_from_snapshot_rejects_explicit_bind_rootfs() {
         let err = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
-            .from_snapshot("/tmp/missing-snapshot")
+            .snapshot_source("/tmp/missing-snapshot")
             .build()
             .await
             .unwrap_err();
@@ -2738,7 +2738,7 @@ mod tests {
         std::fs::write(&archive, b"validated by the local backend").unwrap();
 
         let config = SandboxBuilder::new("test")
-            .from_snapshot(archive.to_string_lossy())
+            .snapshot_source(archive.to_string_lossy())
             .build()
             .await
             .unwrap();
@@ -2899,7 +2899,7 @@ mod tests {
         let archive = directory.path().join("saved.msnap");
         std::fs::write(&archive, b"archive validation is deferred to the backend").unwrap();
         let config = SandboxBuilder::new("restore")
-            .from_snapshot(archive.to_string_lossy())
+            .snapshot_source(archive.to_string_lossy())
             .overlay(
                 SandboxConfigPatch::new().resources(
                     SandboxResourcesPatch::new()

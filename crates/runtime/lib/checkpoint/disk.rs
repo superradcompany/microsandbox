@@ -39,6 +39,10 @@ const FLAT_ROOT_DEVICE_ID: &str = "vda";
 // Types
 //--------------------------------------------------------------------------------------------------
 
+/// Borrowed lookup of integrity already admitted for an unchanged immutable layer.
+#[cfg(feature = "runner")]
+type AdmittedLayerLookup<'a> = dyn Fn(&Path) -> Result<Option<String>, String> + 'a;
+
 /// Runtime owner of a sandbox-owned writable-root chain.
 pub(crate) struct RuntimeOwnedRootDisk {
     state_path: PathBuf,
@@ -194,7 +198,7 @@ impl RuntimeOwnedRootDisk {
     fn open_with_admitted(
         runtime_dir: &Path,
         vm: &VmConfig,
-        admitted: Option<&dyn Fn(&Path) -> Result<Option<String>, String>>,
+        admitted: Option<&AdmittedLayerLookup<'_>>,
     ) -> Result<Option<Self>, String> {
         let Some(layout) = configured_layout(vm) else {
             return Ok(None);

@@ -85,7 +85,7 @@ fn serve_connection(
         let mut rest = String::new();
         BufReader::new(&mut *stream).read_line(&mut rest)?;
         let line = format!("{}{rest}", char::from(first));
-        return stream.write_all(&respond_with_memory(line.trim(), context, memory));
+        stream.write_all(&respond_with_memory(line.trim(), context, memory))
     }
     #[cfg(not(target_os = "linux"))]
     {
