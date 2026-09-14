@@ -152,6 +152,15 @@ impl PySnapshot {
     // Instance accessors
     //----------------------------------------------------------------------------------------------
 
+    /// Deprecated: use `reference`. Raises UnsupportedError for remote snapshots.
+    #[getter]
+    fn path(&self) -> PyResult<String> {
+        self.inner
+            .path()
+            .map(|path| path.to_string_lossy().into_owned())
+            .map_err(to_py_err)
+    }
+
     /// Stable reference accepted by `Sandbox.create(from_snapshot=...)`.
     #[getter]
     fn reference(&self) -> String {
@@ -562,6 +571,16 @@ impl PySnapshotHandle {
         self.inner.created_at().and_utc().timestamp_millis() as f64
     }
 
+    /// Deprecated: use `reference`. Raises UnsupportedError for remote snapshots.
+    #[getter]
+    fn path(&self) -> PyResult<String> {
+        self.inner
+            .path()
+            .map(|path| path.to_string_lossy().into_owned())
+            .map_err(to_py_err)
+    }
+
+    /// Stable reference accepted by `Sandbox.create(from_snapshot=...)`.
     #[getter]
     fn reference(&self) -> String {
         self.inner.reference().value().to_owned()

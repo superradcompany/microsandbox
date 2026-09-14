@@ -96,6 +96,7 @@ type SnapshotIntegrity struct {
 
 // SnapshotArtifact is a backend-neutral disk snapshot.
 type SnapshotArtifact struct {
+	path                *string
 	reference           string
 	referenceKind       string
 	digest              string
@@ -112,6 +113,7 @@ type SnapshotArtifact struct {
 
 func snapshotFromInfo(info *ffi.SnapshotInfo) *SnapshotArtifact {
 	return &SnapshotArtifact{
+		path:                cloneStringPtr(info.Path),
 		reference:           info.Reference,
 		referenceKind:       info.ReferenceKind,
 		digest:              info.Digest,
@@ -125,6 +127,16 @@ func snapshotFromInfo(info *ffi.SnapshotInfo) *SnapshotArtifact {
 		labels:              cloneMap(info.Labels),
 		sourceSandbox:       info.SourceSandbox,
 	}
+}
+
+// Path returns the local filesystem path. It panics for remote snapshots.
+//
+// Deprecated: use Reference for backend-neutral code.
+func (s *SnapshotArtifact) Path() string {
+	if s.path == nil {
+		panic("snapshot has no local filesystem path; use Reference() instead")
+	}
+	return *s.path
 }
 
 func (s *SnapshotArtifact) Reference() string           { return s.reference }
@@ -211,6 +223,7 @@ func (b *SnapshotCopyBuilder) Save(ctx context.Context) error {
 
 // SnapshotHandle is a lightweight handle returned by the active backend.
 type SnapshotHandle struct {
+	path                     *string
 	digest                   string
 	name                     *string
 	parentDigest             *string
@@ -232,6 +245,7 @@ type SnapshotHandle struct {
 
 func snapshotHandleFromInfo(info *ffi.SnapshotHandleInfo) *SnapshotHandle {
 	return &SnapshotHandle{
+		path:                     cloneStringPtr(info.Path),
 		digest:                   info.Digest,
 		name:                     info.Name,
 		parentDigest:             info.ParentDigest,
@@ -268,9 +282,20 @@ func (h *SnapshotHandle) Locality() string            { return h.locality }
 func (h *SnapshotHandle) Availability() string        { return h.availability }
 func (h *SnapshotHandle) MigrationState() string      { return h.migrationState }
 func (h *SnapshotHandle) MigrationErrorCode() *string { return cloneStringPtr(h.migrationErrorCode) }
-func (h *SnapshotHandle) Reference() string           { return h.reference }
-func (h *SnapshotHandle) ReferenceKind() string       { return h.referenceKind }
-func (h *SnapshotHandle) CreatedAt() time.Time        { return time.Unix(h.createdAtUnix, 0) }
+
+// Path returns the local filesystem path. It panics for remote snapshots.
+//
+// Deprecated: use Reference for backend-neutral code.
+func (h *SnapshotHandle) Path() string {
+	if h.path == nil {
+		panic("snapshot has no local filesystem path; use Reference() instead")
+	}
+	return *h.path
+}
+
+func (h *SnapshotHandle) Reference() string     { return h.reference }
+func (h *SnapshotHandle) ReferenceKind() string { return h.referenceKind }
+func (h *SnapshotHandle) CreatedAt() time.Time  { return time.Unix(h.createdAtUnix, 0) }
 
 func (h *SnapshotHandle) Open(ctx context.Context) (*SnapshotArtifact, error) {
 	info, err := ffi.SnapshotOpen(ctx, h.reference, h.referenceKind)

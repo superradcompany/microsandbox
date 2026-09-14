@@ -1,4 +1,5 @@
-import { withMappedErrors } from "./internal/error-mapping.js";
+import { UnsupportedError } from "./errors.js";
+import { mapNapiError, withMappedErrors } from "./internal/error-mapping.js";
 import {
   napi,
   type NapiSnapshot,
@@ -164,6 +165,21 @@ export class Snapshot {
   //--------------------------------------------------------------------------
   // Instance accessors
   //--------------------------------------------------------------------------
+
+  /** @deprecated Use `reference`. Throws UnsupportedError for remote snapshots. */
+  get path(): string {
+    try {
+      const path = this.inner.path;
+      if (path == null) {
+        throw new UnsupportedError(
+          "Snapshot has no local filesystem path; use reference instead.",
+        );
+      }
+      return path;
+    } catch (error) {
+      throw mapNapiError(error);
+    }
+  }
 
   /** Stable value accepted by `SandboxBuilder.fromSnapshot()`. */
   get reference(): string {

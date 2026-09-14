@@ -19,6 +19,10 @@ import type { SaveOpts, SnapshotScope, SnapshotVerifyReport } from "microsandbox
   on every backend, but currently reject with `UnsupportedError` in cloud.
 </Note>
 
+`Snapshot.path` and `SnapshotHandle.path` remain available for local snapshots.
+These accessors are deprecated and raise `UnsupportedError` if no local filesystem
+path exists. Use `reference` for backend-neutral code.
+
 
 ## Capture and boot
 

@@ -617,6 +617,7 @@ export interface NapiSnapshotCopyBuilder
 }
 
 export interface NapiSnapshot {
+  readonly path: string;
   readonly reference: string;
   readonly referenceKind: "id" | "path";
   readonly digest: string;
@@ -644,6 +645,7 @@ export interface NapiSnapshot {
 }
 
 export interface NapiSnapshotHandle {
+  readonly path: string;
   readonly digest: string;
   readonly name: string | null | undefined;
   readonly parentDigest: string | null | undefined;
@@ -667,6 +669,7 @@ export interface NapiSnapshotHandle {
 }
 
 export interface NapiSnapshotInfo {
+  readonly path?: string | null;
   readonly digest: string;
   readonly name: string | null | undefined;
   readonly parentDigest: string | null | undefined;

@@ -14,6 +14,10 @@ host volume. See [Snapshots](/sandboxes/snapshots) for concepts and walkthroughs
   API on every backend, but currently return `ErrUnsupportedOperation` in cloud.
 </Note>
 
+`SnapshotArtifact.Path()` and `SnapshotHandle.Path()` remain available for local
+snapshots. These accessors are deprecated and panic if no local filesystem path
+exists. Use `Reference()` for backend-neutral code.
+
 
 ## Snapshot functions
 

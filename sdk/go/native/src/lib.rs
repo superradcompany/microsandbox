@@ -5994,6 +5994,7 @@ fn snapshot_json(s: &Snapshot) -> serde_json::Value {
         ),
     };
     serde_json::json!({
+        "path": s.path().ok().map(|path| path.to_string_lossy().into_owned()),
         "reference": s.reference().value(),
         "reference_kind": s.reference().kind(),
         "digest": s.digest(),
@@ -6036,6 +6037,7 @@ fn snapshot_handle_json(h: &microsandbox::SnapshotHandle) -> serde_json::Value {
         "migration_state": h.migration_state(),
         "migration_error_code": h.migration_error_code(),
         "created_at_unix": h.created_at().and_utc().timestamp(),
+        "path": h.path().ok().map(|path| path.to_string_lossy().into_owned()),
         "reference": h.reference().value(),
         "reference_kind": h.reference().kind(),
     })

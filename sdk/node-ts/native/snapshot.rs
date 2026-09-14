@@ -81,6 +81,8 @@ pub struct JsSnapshotInfo {
     pub migration_state: String,
     pub migration_error_code: Option<String>,
     pub created_at: f64,
+    /// Local filesystem path, absent for remote snapshots.
+    pub path: Option<String>,
     pub reference: String,
     #[napi(ts_type = "'id' | 'path'")]
     pub reference_kind: String,
@@ -132,6 +134,15 @@ impl JsSnapshot {
     //----------------------------------------------------------------------------------------------
     // Instance accessors (mirror PyVolume's getter style)
     //----------------------------------------------------------------------------------------------
+
+    /// Deprecated: use `reference`. Throws when no local filesystem path exists.
+    #[napi(getter)]
+    pub fn path(&self) -> Result<String> {
+        self.inner
+            .path()
+            .map(|path| path.to_string_lossy().into_owned())
+            .map_err(to_napi_error)
+    }
 
     #[napi(getter)]
     pub fn reference(&self) -> String {
@@ -444,6 +455,15 @@ impl JsSnapshotHandle {
         self.inner.created_at().and_utc().timestamp_millis() as f64
     }
 
+    /// Deprecated: use `reference`. Throws when no local filesystem path exists.
+    #[napi(getter)]
+    pub fn path(&self) -> Result<String> {
+        self.inner
+            .path()
+            .map(|path| path.to_string_lossy().into_owned())
+            .map_err(to_napi_error)
+    }
+
     #[napi(getter)]
     pub fn reference(&self) -> String {
         self.inner.reference().value().to_owned()
@@ -527,6 +547,10 @@ fn snapshot_handle_to_info(h: &RustSnapshotHandle) -> JsSnapshotInfo {
         migration_state: h.migration_state().into(),
         migration_error_code: h.migration_error_code().map(str::to_string),
         created_at: h.created_at().and_utc().timestamp_millis() as f64,
+        path: h
+            .path()
+            .ok()
+            .map(|path| path.to_string_lossy().into_owned()),
         reference: h.reference().value().to_owned(),
         reference_kind: h.reference().kind().into(),
     }

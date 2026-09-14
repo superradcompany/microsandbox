@@ -39,6 +39,8 @@ async function snapshotFixture() {
 describe("native snapshot copy ownership", () => {
   it("consumes the builder before returning its save promise", async () => {
     const { path, manifest, snapshot } = await snapshotFixture();
+    expect(snapshot.path).toBe(path);
+    expect(snapshot.reference).toBe(path);
     const output = join(path, "copy.tar.zst");
     const builder = snapshot.copyTo(output);
     const saving = builder.save();
