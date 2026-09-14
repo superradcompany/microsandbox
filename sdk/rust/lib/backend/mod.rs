@@ -21,6 +21,7 @@
 //! for the resolution ladder + process-level config story.
 
 mod cloud;
+mod dispatch;
 mod local;
 mod misconfigured;
 mod profile;
@@ -29,7 +30,7 @@ pub(crate) mod snapshot;
 pub(crate) mod volume;
 
 pub use cloud::{CloudBackend, CloudBackendBuilder, DEFAULT_CLOUD_API_URL};
-use futures::future::BoxFuture;
+pub use dispatch::Backend;
 #[cfg(feature = "fuzzing")]
 #[doc(hidden)]
 pub use local::fuzz_unpack_local_snapshot_archive;
@@ -51,15 +52,9 @@ pub use volume::{
     VolumeHandleInner, VolumeHandleLocalState, VolumeInner, VolumeLocalState,
 };
 
-use std::{
-    sync::{Arc, OnceLock, RwLock},
-    time::Duration,
-};
+use std::sync::{Arc, OnceLock, RwLock};
 
 use serde::{Deserialize, Serialize};
-
-use crate::MicrosandboxResult;
-use crate::error::{Operation, UnsupportedReason};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -146,76 +141,6 @@ impl BackendSelectionSource {
             Self::ActiveProfile => "active_profile",
             Self::Default => "default",
         }
-    }
-}
-
-/// Top-level routing trait for SDK dispatch. Implementations route to
-/// resource-specific sub-traits (sandboxes, volumes, snapshots) via accessor
-/// methods.
-///
-/// Object-safe — handles hold an `Arc<dyn Backend>`. Every implementation must
-/// explicitly provide each resource-specific backend so that missing
-/// capabilities are caught at compile time.
-pub trait Backend: Send + Sync + 'static {
-    /// Return the kind of backend this is (`Local` or `Cloud`).
-    fn kind(&self) -> BackendKind;
-
-    /// Return a secret-safe description of this backend.
-    fn info(&self) -> BackendInfo {
-        BackendInfo {
-            kind: self.kind(),
-            api_url: None,
-            source: BackendSelectionSource::Programmatic,
-            profile: None,
-        }
-    }
-
-    /// Return the sandbox lifecycle backend.
-    fn sandboxes(&self) -> &dyn SandboxBackend;
-
-    /// Return the volume lifecycle backend.
-    fn volumes(&self) -> &dyn VolumeBackend;
-
-    /// Return the snapshot lifecycle backend.
-    fn snapshots(&self) -> &dyn SnapshotBackend;
-
-    /// Try downcast to a concrete `&LocalBackend` when in a local context.
-    ///
-    /// Used by helpers that need access to local-only state (DB pool, config
-    /// paths) without keeping a separate `Arc<LocalBackend>` alongside the
-    /// `Arc<dyn Backend>`. Returns `None` for cloud backends.
-    fn as_local(&self) -> Option<&LocalBackend> {
-        None
-    }
-
-    /// Bind agent dialing to a cloud handle's immutable sandbox UUID.
-    ///
-    /// Lifecycle methods keep their existing selectors. Backends without
-    /// cloud identities leave the handle's backend unchanged.
-    #[doc(hidden)]
-    fn with_agent_identity(&self, _name: &str, _id: &str) -> Option<Arc<dyn Backend>> {
-        None
-    }
-
-    /// Open a fresh agent connection to the named sandbox with an explicit
-    /// handshake timeout. Local dials the relay socket; cloud dials the
-    /// sandbox's agent WebSocket route.
-    /// Exec, attach, and guest-filesystem operations route through this
-    /// connection. The default errors as unsupported for backends that
-    /// cannot reach a sandbox agent.
-    fn dial_agent<'a>(
-        &'a self,
-        _name: &'a str,
-        _timeout: Duration,
-    ) -> BoxFuture<'a, MicrosandboxResult<crate::agent::AgentClient>> {
-        Box::pin(async {
-            Err(crate::MicrosandboxError::unsupported(
-                Operation::AgentConnect,
-                UnsupportedReason::NotAvailable(
-                    "this backend does not provide agent connectivity".into(),
-                ),
-            ))
-        })
     }
 }
 
