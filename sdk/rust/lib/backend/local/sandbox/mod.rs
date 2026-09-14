@@ -44,6 +44,7 @@ use crate::sandbox::{
     SandboxStatus, load_sandbox_record, validate_env, validate_hostname, validate_labels,
     validate_volume_mounts,
 };
+use create::{SandboxTransitionGuard, sandbox_runtime_endpoint_is_live};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -78,7 +79,14 @@ impl LocalBackend {
             Self::acquire_sandbox_transition_guard(&self.config().run_dir(), name).await?;
         let pools = self.db().await?;
         let write_db = pools.write();
-        let model = self.load_sandbox_record_reconciled(pools, name).await?;
+        let model = load_sandbox_record(pools.read(), name).await?;
+        let model = Self::reconcile_sandbox_runtime_state_with_transition(
+            pools,
+            model,
+            Some((&self.config().run_dir(), &self.config().sandboxes_dir())),
+            Some(&_transition_guard),
+        )
+        .await?;
         ensure_local_identity(name, expected_id, model.id)?;
         tracing::debug!(sandbox = name, status = ?model.status, "start_local: current status");
 
@@ -531,16 +539,6 @@ impl LocalBackend {
 //--------------------------------------------------------------------------------------------------
 
 impl LocalBackend {
-    /// Load a sandbox row by name and reconcile its runtime state.
-    async fn load_sandbox_record_reconciled(
-        &self,
-        pools: &DbPools,
-        name: &str,
-    ) -> MicrosandboxResult<sandbox_entity::Model> {
-        let sandbox = load_sandbox_record(pools.read(), name).await?;
-        self.reconcile_sandbox_runtime_state(pools, sandbox).await
-    }
-
     /// Reconcile a Starting/Running/Draining row against the owning process's
     /// liveness, marking it terminal when the runtime is gone.
     async fn reconcile_sandbox_runtime_state(
@@ -564,6 +562,17 @@ impl LocalBackend {
         sandbox: sandbox_entity::Model,
         socket_roots: Option<(&Path, &Path)>,
     ) -> MicrosandboxResult<sandbox_entity::Model> {
+        Self::reconcile_sandbox_runtime_state_with_transition(pools, sandbox, socket_roots, None)
+            .await
+    }
+
+    /// Reuse a start caller's transition ownership instead of trying to lock itself.
+    async fn reconcile_sandbox_runtime_state_with_transition(
+        pools: &DbPools,
+        sandbox: sandbox_entity::Model,
+        socket_roots: Option<(&Path, &Path)>,
+        held_transition: Option<&SandboxTransitionGuard>,
+    ) -> MicrosandboxResult<sandbox_entity::Model> {
         if !matches!(
             sandbox.status,
             SandboxStatus::Starting | SandboxStatus::Running | SandboxStatus::Draining
@@ -579,6 +588,22 @@ impl LocalBackend {
         {
             return Ok(sandbox);
         }
+
+        // A launcher owns Starting before the child records its PID. Prove that
+        // handoff abandoned with the same lock used by existing launchers.
+        let transition_guard = if sandbox.status == SandboxStatus::Starting
+            && held_transition.is_none()
+            && let Some((run_dir, _)) = socket_roots
+        {
+            let Some(guard) = Self::try_acquire_sandbox_transition_guard(run_dir, &sandbox.name)?
+            else {
+                return Ok(sandbox);
+            };
+            Some(guard)
+        } else {
+            None
+        };
+        let owns_transition = held_transition.is_some() || transition_guard.is_some();
 
         // A dead-PID snapshot is not sufficient: another process may already
         // have reconciled and restarted this name. Serialize on the runtime
@@ -607,11 +632,21 @@ impl LocalBackend {
         }
         let run = Self::load_active_run(pools.read(), sandbox.id).await?;
 
-        // No run record yet while Starting means the child has not inserted its PID. A Draining row with no
-        // active run, however, has already completed shutdown from the DB's point
-        // of view and should not keep stop callers polling forever.
+        // Only an unowned start can be declared abandoned without a run row.
+        // Older runtimes may expose an endpoint without holding lifecycle locks.
         let Some(run) = run else {
-            if sandbox.status == SandboxStatus::Draining {
+            let abandoned_start = sandbox.status == SandboxStatus::Starting && owns_transition;
+            if abandoned_start
+                && let Some((run_dir, sandboxes_dir)) = socket_roots
+                && sandbox_runtime_endpoint_is_live(
+                    run_dir,
+                    &sandboxes_dir.join(&sandbox.name),
+                    &sandbox.name,
+                )?
+            {
+                return Ok(sandbox);
+            }
+            if sandbox.status == SandboxStatus::Draining || abandoned_start {
                 if let Some((run_dir, sandboxes_dir)) = socket_roots {
                     crate::runtime::remove_sandbox_socket_artifacts_at(
                         run_dir,
@@ -1626,6 +1661,184 @@ mod tests {
             .await
             .unwrap(),
             "the start winner must publish readiness from Starting"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn abandoned_start_requires_launcher_and_runtime_ownership() {
+        for owner in ["none", "stale", "launcher", "runtime", "legacy", "caller"] {
+            let temp = tempfile::Builder::new()
+                .prefix("msb-abandoned")
+                .tempdir_in("/tmp")
+                .unwrap();
+            let pools = open_test_pools(&temp.path().join("test.db")).await;
+            let name = "before-pid";
+            let id = LocalBackend::insert_sandbox_record(pools.write(), &test_config(name))
+                .await
+                .unwrap();
+            LocalBackend::update_sandbox_status(pools.write(), id, SandboxStatus::Starting)
+                .await
+                .unwrap();
+            let run_dir = temp.path().join("run");
+            let sandboxes_dir = temp.path().join("sandboxes");
+            let disk = sandboxes_dir.join(name).join("upper.ext4");
+            std::fs::create_dir_all(disk.parent().unwrap()).unwrap();
+            std::fs::write(&disk, b"persistent contents").unwrap();
+            let launcher = if matches!(owner, "launcher" | "caller") {
+                Some(
+                    LocalBackend::acquire_sandbox_transition_guard(&run_dir, name)
+                        .await
+                        .unwrap(),
+                )
+            } else {
+                None
+            };
+            let runtime = if owner == "runtime" {
+                Some(
+                    microsandbox_runtime::ipc::try_acquire_lifecycle_guard(&run_dir, name)
+                        .unwrap()
+                        .unwrap(),
+                )
+            } else {
+                None
+            };
+            if owner == "stale" {
+                let path =
+                    microsandbox_runtime::ipc::sandbox_socket_paths(&run_dir, name).legacy_agent;
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, b"stale endpoint").unwrap();
+            }
+            let legacy = if owner == "legacy" {
+                std::fs::create_dir_all(&run_dir).unwrap();
+                let path =
+                    microsandbox_runtime::ipc::sandbox_socket_paths(&run_dir, name).legacy_agent;
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                Some(std::os::unix::net::UnixListener::bind(path).unwrap())
+            } else {
+                None
+            };
+            let sandbox = sandbox_entity::Entity::find_by_id(id)
+                .one(pools.read())
+                .await
+                .unwrap()
+                .unwrap();
+            let reconciled = LocalBackend::reconcile_sandbox_runtime_state_with_transition(
+                &pools,
+                sandbox,
+                Some((&run_dir, &sandboxes_dir)),
+                if owner == "caller" {
+                    launcher.as_ref()
+                } else {
+                    None
+                },
+            )
+            .await
+            .unwrap();
+            let expected = if matches!(owner, "none" | "stale" | "caller") {
+                SandboxStatus::Crashed
+            } else {
+                SandboxStatus::Starting
+            };
+            assert_eq!(reconciled.status, expected, "owner: {owner}");
+            assert_eq!(std::fs::read(&disk).unwrap(), b"persistent contents");
+            assert!(
+                LocalBackend::load_latest_run(pools.read(), id)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+
+            // A launcher dying before PID publication must become recoverable on the next read.
+            if owner == "launcher" {
+                drop(launcher);
+                let reconciled = LocalBackend::reconcile_sandbox_runtime_state_with_paths(
+                    &pools,
+                    reconciled,
+                    Some((&run_dir, &sandboxes_dir)),
+                )
+                .await
+                .unwrap();
+                assert_eq!(reconciled.status, SandboxStatus::Crashed);
+                assert_eq!(std::fs::read(&disk).unwrap(), b"persistent contents");
+            }
+            drop((runtime, legacy));
+        }
+    }
+
+    #[tokio::test]
+    async fn abandoned_start_preserves_a_capturable_persistent_checkpoint() {
+        #[cfg(unix)]
+        let temp = tempfile::Builder::new()
+            .prefix("msb-checkpoint")
+            .tempdir_in("/tmp")
+            .unwrap();
+        #[cfg(not(unix))]
+        let temp = tempdir().unwrap();
+        let backend = Arc::new(
+            LocalBackend::builder()
+                .home(temp.path())
+                .build()
+                .await
+                .unwrap(),
+        );
+        let pools = backend.db().await.unwrap();
+        let mut config = test_config_with_rootfs(
+            "abandoned",
+            RootfsSource::Oci(OciRootfsSource {
+                reference: "docker.io/library/alpine:3.20".into(),
+                root_disk: None,
+            }),
+        );
+        config.manifest_digest = Some(format!("sha256:{}", "a".repeat(64)));
+        let id = LocalBackend::insert_sandbox_record(pools.write(), &config)
+            .await
+            .unwrap();
+        LocalBackend::update_sandbox_status(pools.write(), id, SandboxStatus::Starting)
+            .await
+            .unwrap();
+        let disk = backend
+            .config()
+            .sandboxes_dir()
+            .join("abandoned")
+            .join("upper.ext4");
+        std::fs::create_dir_all(disk.parent().unwrap()).unwrap();
+        std::fs::write(&disk, b"persistent checkpoint payload").unwrap();
+        let sandbox = sandbox_entity::Entity::find_by_id(id)
+            .one(pools.read())
+            .await
+            .unwrap()
+            .unwrap();
+        let reconciled = backend
+            .reconcile_sandbox_runtime_state(pools, sandbox)
+            .await
+            .unwrap();
+        assert_eq!(reconciled.status, SandboxStatus::Crashed);
+        let snapshot_dir = temp.path().join("checkpoint");
+        let backend: Arc<dyn Backend> = backend;
+        let snapshot = crate::backend::with_backend(backend, async {
+            crate::snapshot::Snapshot::builder("checkpoint")
+                .from_sandbox("abandoned")
+                .dest_dir(&snapshot_dir)
+                .record_integrity()
+                .create()
+                .await
+        })
+        .await
+        .unwrap();
+        assert!(
+            snapshot
+                .manifest()
+                .state
+                .as_file()
+                .unwrap()
+                .upper
+                .integrity
+                .is_some()
+        );
+        assert_eq!(
+            std::fs::read(snapshot.path().join("upper.ext4")).unwrap(),
+            std::fs::read(&disk).unwrap()
         );
     }
 

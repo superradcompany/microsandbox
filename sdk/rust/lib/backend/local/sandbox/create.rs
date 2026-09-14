@@ -1070,6 +1070,21 @@ impl LocalBackend {
         }
     }
 
+    /// Try launcher ownership without waiting for an ongoing boot.
+    pub(crate) fn try_acquire_sandbox_transition_guard(
+        run_dir: &Path,
+        name: &str,
+    ) -> MicrosandboxResult<Option<SandboxTransitionGuard>> {
+        let path = sandbox_transition_lock_path(run_dir, name);
+        std::fs::create_dir_all(path.parent().expect("transition lock has a parent"))?;
+        let file = microsandbox_utils::process_lock::open_lock_file(&path)?;
+        if microsandbox_utils::process_lock::try_lock_exclusive(&file)? {
+            Ok(Some(SandboxTransitionGuard { _file: file }))
+        } else {
+            Ok(None)
+        }
+    }
+
     /// Stop the prior sandbox before recreating it.
     ///
     /// Sends SIGTERM with the configured grace, then escalates to SIGKILL
@@ -1382,7 +1397,7 @@ fn sandbox_transition_lock_path(run_dir: &Path, name: &str) -> PathBuf {
 /// untracked namespace. A successful connection is direct evidence that an
 /// older runtime (which predates lifecycle locks) still owns the name.
 #[cfg(unix)]
-fn sandbox_runtime_endpoint_is_live(
+pub(super) fn sandbox_runtime_endpoint_is_live(
     run_dir: &Path,
     sandbox_dir: &Path,
     name: &str,
@@ -1398,8 +1413,10 @@ fn sandbox_runtime_endpoint_is_live(
         fallback_agent,
         fallback_control,
     ] {
-        if std::fs::symlink_metadata(&path).is_err() {
-            continue;
+        match std::fs::symlink_metadata(&path) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
         }
         match std::os::unix::net::UnixStream::connect(&path) {
             Ok(_) => return Ok(true),
@@ -1407,6 +1424,9 @@ fn sandbox_runtime_endpoint_is_live(
                 if matches!(
                     error.kind(),
                     std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
+                ) || matches!(
+                    error.raw_os_error(),
+                    Some(libc::ENOTSOCK | libc::EPROTOTYPE)
                 ) => {}
             Err(error) => return Err(error),
         }
@@ -1415,7 +1435,7 @@ fn sandbox_runtime_endpoint_is_live(
 }
 
 #[cfg(not(unix))]
-fn sandbox_runtime_endpoint_is_live(
+pub(super) fn sandbox_runtime_endpoint_is_live(
     _run_dir: &Path,
     _sandbox_dir: &Path,
     _name: &str,
