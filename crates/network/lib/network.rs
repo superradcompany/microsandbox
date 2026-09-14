@@ -6,6 +6,7 @@
 //! the networking stack.
 
 use std::net::{Ipv4Addr, Ipv6Addr, UdpSocket};
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
@@ -19,7 +20,7 @@ use microsandbox_types::{
 };
 use msb_krun::backends::net::NetBackend;
 
-use crate::config::ResolvedNetworkConfig;
+use crate::config::{ConnectionLimit, ResolvedNetworkConfig};
 use crate::netstack::{
     backend::SmoltcpBackend,
     poll::{self, GatewayIps, PollLoopConfig},
@@ -28,6 +29,13 @@ use crate::netstack::{
 use crate::policy::{NetworkPolicy, NetworkProfile};
 use crate::secrets::handle::SecretsHandle;
 use crate::tls::state::{TlsState, TlsStateError};
+
+//--------------------------------------------------------------------------------------------------
+// Constants
+//--------------------------------------------------------------------------------------------------
+
+/// Default connection cap for multi-tenant deployments; explicit settings override it.
+const DEFAULT_MULTI_TENANT_MAX_CONNECTIONS: NonZeroUsize = NonZeroUsize::new(1024).unwrap();
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -308,7 +316,7 @@ impl SmoltcpNetwork {
         let tls_state = self.tls_state.clone();
         let published_ports = config.ports.clone();
         let strict = config.strict;
-        let max_connections = config.max_connections;
+        let max_connections = config.max_connections.and_then(ConnectionLimit::cap);
         let secrets = self.secrets.clone();
         let outbound_proxy = self.config.outbound_proxy().cloned().map(Arc::new);
 
@@ -513,6 +521,11 @@ fn enforce_deployment_profile(config: &mut ResolvedNetworkConfig, profile: Deplo
     config.clear_outbound_proxy();
 
     let config = config.config_mut();
+    config
+        .max_connections
+        .get_or_insert(ConnectionLimit::Limited(
+            DEFAULT_MULTI_TENANT_MAX_CONNECTIONS,
+        ));
     let interface_overridden = config.interface.mac.is_some()
         || config.interface.mtu.is_some()
         || config.interface.ipv4_address.is_some()
@@ -699,7 +712,7 @@ mod tests {
             address: "127.0.0.1:1080".parse().unwrap(),
             credentials: None,
         });
-        config.max_connections = std::num::NonZeroUsize::new(257);
+        config.max_connections = Some(ConnectionLimit::from(257));
         config.policy = NetworkPolicy::allow_all();
         let mut resolved = resolved(config);
 
@@ -713,7 +726,7 @@ mod tests {
         assert!(config.dns.rebind_protection);
         assert!(!config.trust_host_cas);
         assert!(config.outbound_proxy.is_none());
-        assert_eq!(config.max_connections, std::num::NonZeroUsize::new(257));
+        assert_eq!(config.max_connections, Some(ConnectionLimit::from(257)));
         assert!(resolved.config().outbound_proxy.is_none());
         assert!(resolved.outbound_proxy().is_none());
         // Tenant policy stays intact and is intersected with the platform
@@ -722,17 +735,42 @@ mod tests {
     }
 
     #[test]
-    fn deployment_profile_preserves_optional_connection_limits() {
-        for requested in [None, Some(0), Some(64), Some(4096)] {
-            let mut config = NetworkConfig::default();
-            config.max_connections = requested.and_then(std::num::NonZeroUsize::new);
-            let mut config = resolved(config);
-            enforce_deployment_profile(&mut config, DeploymentProfile::MultiTenant);
-            assert_eq!(
-                config.config().max_connections,
-                requested.and_then(std::num::NonZeroUsize::new)
-            );
-            assert!(config.config().dns.rebind_protection);
+    fn deployment_profile_defaults_and_explicit_connection_limits() {
+        for profile in [
+            DeploymentProfile::SingleTenant,
+            DeploymentProfile::MultiTenant,
+        ] {
+            for requested in [None, Some(0), Some(64), Some(4096)] {
+                let config: NetworkConfig =
+                    serde_json::from_value(serde_json::json!({"max_connections": requested}))
+                        .unwrap();
+                let mut config = resolved(config);
+                // Exercise the serialized runtime launch boundary as well.
+                config = serde_json::from_value(serde_json::to_value(config).unwrap()).unwrap();
+                enforce_deployment_profile(&mut config, profile);
+                let expected = requested
+                    .or(match profile {
+                        DeploymentProfile::SingleTenant => None,
+                        DeploymentProfile::MultiTenant => Some(1024),
+                    })
+                    .and_then(NonZeroUsize::new);
+                assert_eq!(
+                    config
+                        .config()
+                        .max_connections
+                        .and_then(ConnectionLimit::cap),
+                    expected
+                );
+                // Applying the profile again must preserve the resolved value.
+                enforce_deployment_profile(&mut config, profile);
+                assert_eq!(
+                    config
+                        .config()
+                        .max_connections
+                        .and_then(ConnectionLimit::cap),
+                    expected
+                );
+            }
         }
     }
 
@@ -1008,7 +1046,7 @@ mod tests {
         for limit in [10000, usize::MAX] {
             let mut config = NetworkConfig::default();
             config.tls.enabled = false;
-            config.max_connections = std::num::NonZeroUsize::new(limit);
+            config.max_connections = Some(ConnectionLimit::from(limit));
             let net = SmoltcpNetwork::build(
                 resolved(config),
                 0,

@@ -3,7 +3,6 @@
 //! Used by `SandboxBuilder::network(|n| n.port(8080, 80).policy(...))`.
 
 use std::net::IpAddr;
-use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -15,7 +14,9 @@ use microsandbox_types::{
 use microsandbox_utils::size::Bytes;
 use zeroize::Zeroizing;
 
-use crate::config::{DnsConfig, InterfaceOverrides, NetworkConfig, PortProtocol, PublishedPort};
+use crate::config::{
+    ConnectionLimit, DnsConfig, InterfaceOverrides, NetworkConfig, PortProtocol, PublishedPort,
+};
 use crate::dns::Nameserver;
 use crate::policy::{BuildError, NetworkPolicy};
 use crate::secrets::config::{
@@ -275,9 +276,9 @@ impl NetworkBuilder {
         self
     }
 
-    /// Set the maximum number of concurrent connections.
+    /// Set the maximum number of concurrent connections; zero explicitly selects unlimited.
     pub fn max_connections(mut self, max: usize) -> Self {
-        self.config.max_connections = NonZeroUsize::new(max);
+        self.config.max_connections = Some(ConnectionLimit::from(max));
         self
     }
 
@@ -969,7 +970,7 @@ mod tests {
                 .max_connections(limit)
                 .build()
                 .unwrap();
-            assert_eq!(config.max_connections, NonZeroUsize::new(limit));
+            assert_eq!(config.max_connections, Some(ConnectionLimit::from(limit)));
         }
     }
 
