@@ -40,12 +40,15 @@ impl JsSnapshotCopyBuilder {
 
     /// Write the configured snapshot archive.
     /// Returns an unsupported-operation error when artifact archives are unavailable.
-    // SAFETY: the Rust builder is removed before the first await, so no mutable
-    // reference to the JavaScript object crosses the asynchronous boundary.
-    #[napi]
-    pub async unsafe fn save(&mut self) -> Result<()> {
-        self.take_inner()?.save().await.map_err(to_napi_error)?;
-        Ok(())
+    #[napi(ts_return_type = "Promise<void>")]
+    pub fn save<'env>(&mut self, env: &'env Env) -> Result<PromiseRaw<'env, ()>> {
+        // Consume the builder on the JS thread. The future owns its state and
+        // never holds a reference to this JavaScript object.
+        let builder = self.take_inner();
+        env.spawn_future(async move {
+            builder?.save().await.map_err(to_napi_error)?;
+            Ok(())
+        })
     }
 }
 
