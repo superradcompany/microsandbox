@@ -4,10 +4,9 @@
 //! between smoltcp sockets and proxy task channels, and cleans up closed
 //! connections.
 
-use std::num::NonZeroUsize;
-
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 

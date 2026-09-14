@@ -6,7 +6,6 @@
 //! the networking stack.
 
 use std::net::{Ipv4Addr, Ipv6Addr, UdpSocket};
-use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
@@ -20,9 +19,7 @@ use microsandbox_types::{
 };
 use msb_krun::backends::net::NetBackend;
 
-use crate::config::{
-    HostNetworkLimits, HostNetworkLimitsError, MAX_NETWORK_CONNECTIONS, ResolvedNetworkConfig,
-};
+use crate::config::{HostNetworkLimits, HostNetworkLimitsError, ResolvedNetworkConfig};
 use crate::netstack::{
     backend::SmoltcpBackend,
     poll::{self, GatewayIps, PollLoopConfig},
@@ -160,7 +157,7 @@ impl SmoltcpNetwork {
     /// sockets, resolvers, or TLS state are created. The requested tenant policy
     /// remains separate and is intersected with the platform's public-network
     /// policy by the poll loop. The host process can configure its connection
-    /// ceiling with `MSB_HOST_MAX_TCP_CONNECTIONS` (1–4096; default 256).
+    /// ceiling with `MSB_HOST_MAX_TCP_CONNECTIONS` (unset or zero means uncapped).
     ///
     /// # Errors
     ///
@@ -212,15 +209,6 @@ impl SmoltcpNetwork {
         let resolved_config = config;
         let config = resolved_config.config();
 
-        if let Some(configured) = config.max_connections
-            && configured.get() > MAX_NETWORK_CONNECTIONS
-        {
-            return Err(NetworkInitError::MaxConnectionsExceeded {
-                configured: configured.get(),
-                limit: MAX_NETWORK_CONNECTIONS,
-            });
-        }
-
         let guest_mac = config
             .interface
             .mac
@@ -253,12 +241,9 @@ impl SmoltcpNetwork {
         };
         let gateway_ipv6 = guest_ipv6.map(gateway_from_guest_ipv6);
 
-        let queue_capacity = config
-            .max_connections
-            .map(NonZeroUsize::get)
-            .unwrap_or(DEFAULT_QUEUE_CAPACITY)
-            .max(DEFAULT_QUEUE_CAPACITY);
-        let shared = Arc::new(SharedState::new(queue_capacity));
+        // Packet queue capacity is independent of the optional connection cap:
+        // a large cap must not allocate a correspondingly large packet queue.
+        let shared = Arc::new(SharedState::new(DEFAULT_QUEUE_CAPACITY));
         // Every write path validates rate limiters (`NetworkBuilder::build`),
         // but a stored config bypasses the builder: fail startup cleanly
         // instead of panicking on a corrupted spec.
@@ -728,6 +713,8 @@ fn host_has_ipv6_route() -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroUsize;
+
     use super::*;
     use crate::config::{EnvNetworkSecretResolver, NetworkConfig, PortProtocol, PublishedPort};
     use crate::dns::Nameserver;
@@ -1113,30 +1100,19 @@ mod tests {
     }
 
     #[test]
-    fn build_rejects_excessive_max_connections() {
-        let mut config = NetworkConfig {
-            max_connections: std::num::NonZeroUsize::new(MAX_NETWORK_CONNECTIONS + 1),
-            ..NetworkConfig::default()
-        };
-        config.tls.enabled = false;
-
-        let err = match SmoltcpNetwork::build(
-            resolved(config),
-            0,
-            DeploymentProfile::SingleTenant,
-            routes(true, false),
-        ) {
-            Ok(_) => panic!("excessive max_connections should fail"),
-            Err(err) => err,
-        };
-
-        assert!(matches!(
-            err,
-            NetworkInitError::MaxConnectionsExceeded {
-                configured,
-                limit: MAX_NETWORK_CONNECTIONS
-            } if configured == MAX_NETWORK_CONNECTIONS + 1
-        ));
+    fn large_host_cap_does_not_preallocate_or_prevent_startup() {
+        for limit in [10000, usize::MAX] {
+            let mut config = NetworkConfig::default();
+            config.tls.enabled = false;
+            let net = SmoltcpNetwork::build_with_limits(
+                resolved(config),
+                0,
+                DeploymentProfile::MultiTenant,
+                routes(true, false),
+                HostNetworkLimits::new(NonZeroUsize::new(limit)),
+            );
+            assert!(net.is_ok(), "large explicit cap should allow startup");
+        }
     }
 
     /// A stored config bypasses the builder's validation, so an invalid

@@ -5,10 +5,9 @@
 //! [`SmoltcpDevice`]) to smoltcp's TCP/IP stack and services connections
 //! through tokio proxy tasks.
 
-use std::num::NonZeroUsize;
-
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 

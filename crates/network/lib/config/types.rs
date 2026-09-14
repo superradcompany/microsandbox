@@ -3,9 +3,8 @@
 //! These types represent the user-facing declarative network configuration
 //! for sandbox networking. Designed for the smoltcp in-process engine.
 
-use std::num::NonZeroUsize;
-
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::num::NonZeroUsize;
 
 use ipnetwork::{Ipv4Network, Ipv6Network};
 use microsandbox_types::{NetworkRateLimiterConfig, TlsConfig};
@@ -15,17 +14,6 @@ use crate::dns::Nameserver;
 use crate::policy::NetworkPolicy;
 use crate::proxy::{OutboundProxy, ResolvedOutboundProxy};
 use crate::secrets::config::SecretsConfig;
-
-//--------------------------------------------------------------------------------------------------
-// Constants
-//--------------------------------------------------------------------------------------------------
-
-/// Maximum accepted value for [`NetworkConfig::max_connections`].
-///
-/// The smoltcp stack allocates per-connection socket buffers, so unusually
-/// large values can become a host-memory footgun before policy has a chance
-/// to reject traffic.
-pub const MAX_NETWORK_CONNECTIONS: usize = 4096;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -71,7 +59,7 @@ pub struct NetworkConfig {
     #[serde(default)]
     pub secrets: SecretsConfig,
 
-    /// Optional guest connection cap. Omitted or zero means uncapped; maximum: 4096.
+    /// Optional guest connection cap. Omitted or zero means uncapped.
     #[serde(default, deserialize_with = "deserialize_connection_limit")]
     pub max_connections: Option<NonZeroUsize>,
 
@@ -267,6 +255,13 @@ impl Default for DnsConfig {
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
+
+fn deserialize_connection_limit<'de, D>(deserializer: D) -> Result<Option<NonZeroUsize>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<usize>::deserialize(deserializer)?.and_then(NonZeroUsize::new))
+}
 
 fn default_true() -> bool {
     true
@@ -516,13 +511,6 @@ mod tests {
             PortProtocol::Udp
         );
     }
-}
-
-fn deserialize_connection_limit<'de, D>(deserializer: D) -> Result<Option<NonZeroUsize>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    Ok(Option::<usize>::deserialize(deserializer)?.and_then(NonZeroUsize::new))
 }
 
 #[cfg(test)]
