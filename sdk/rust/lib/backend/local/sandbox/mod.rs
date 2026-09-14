@@ -143,16 +143,36 @@ impl LocalBackend {
         // terminal DB state just before process exit. Preserve upgrade safety
         // by waiting for that recorded owner before the new runtime acquires
         // and cleans the deterministic socket namespace.
-        if let Some(pid) = Self::load_latest_run(pools.read(), model.id)
-            .await?
-            .and_then(|run| run.pid)
-            .filter(|pid| Self::pid_is_alive(*pid))
-        {
+        let previous_run = Self::load_latest_run(pools.read(), model.id).await?;
+        #[cfg(windows)]
+        let previous_owner = previous_run
+            .as_ref()
+            .map(|run| {
+                crate::runtime::ownership::recorded_owner(
+                    &self.sandboxes_dir().join(name).join("runtime"),
+                    run,
+                )
+            })
+            .transpose()?
+            .flatten();
+        if let Some(pid) = previous_run.and_then(|run| run.pid) {
+            let alive = || -> MicrosandboxResult<bool> {
+                #[cfg(windows)]
+                if let Some(owner) = &previous_owner {
+                    return Ok(owner
+                        .process
+                        .as_ref()
+                        .map(|process| process.alive())
+                        .transpose()?
+                        .unwrap_or(false));
+                }
+                Ok(!Self::pid_has_exited(pid))
+            };
             let start = std::time::Instant::now();
-            while start.elapsed() < Duration::from_secs(5) && !Self::pid_has_exited(pid) {
+            while start.elapsed() < Duration::from_secs(5) && alive()? {
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
-            if !Self::pid_has_exited(pid) {
+            if alive()? {
                 return Err(crate::MicrosandboxError::SandboxStillRunning(format!(
                     "cannot start sandbox {name:?}: previous runtime pid {pid} is still alive"
                 )));
@@ -501,6 +521,36 @@ impl LocalBackend {
 
     /// Connect to the named sandbox's agent endpoint and send `core.shutdown`.
     async fn request_agent_shutdown(&self, name: &str, expected_id: i32) -> MicrosandboxResult<()> {
+        #[cfg(windows)]
+        let owner = Self::load_latest_run(self.db().await?.read(), expected_id)
+            .await?
+            .map(|run| {
+                crate::runtime::ownership::recorded_owner(
+                    &self.sandboxes_dir().join(name).join("runtime"),
+                    &run,
+                )
+            })
+            .transpose()?
+            .flatten();
+        #[cfg(windows)]
+        let client = if let Some(owner) = &owner {
+            let process = owner.process.as_ref().ok_or_else(|| {
+                crate::MicrosandboxError::Runtime("runtime exited before shutdown dispatch".into())
+            })?;
+            let path =
+                crate::runtime::sandbox_agent_socket_path_candidates_for(self, name).remove(0);
+            process
+                .connect_agent(&path, AGENT_SHUTDOWN_CONNECT_TIMEOUT)
+                .await?
+        } else {
+            crate::sandbox::fs::agent::connect_agent_with_timeout(
+                self,
+                name,
+                AGENT_SHUTDOWN_CONNECT_TIMEOUT,
+            )
+            .await?
+        };
+        #[cfg(not(windows))]
         let client = crate::sandbox::fs::agent::connect_agent_with_timeout(
             self,
             name,
@@ -639,12 +689,31 @@ impl LocalBackend {
             return Ok(sandbox);
         }
 
+        // Old Windows runtimes can publish Terminated before the process releases resources.
+        #[cfg(windows)]
+        let run = Self::load_latest_run(pools.read(), sandbox.id).await?;
+        #[cfg(not(windows))]
         let run = Self::load_active_run(pools.read(), sandbox.id).await?;
-        if run
+        #[allow(unused_mut)]
+        let mut alive = run
             .as_ref()
             .and_then(|run| run.pid)
-            .is_some_and(Self::pid_is_alive)
+            .is_some_and(Self::pid_is_alive);
+        #[cfg(windows)]
+        if let (Some((_, sandboxes_dir)), Some(run)) = (socket_roots, &run)
+            && let Some(owner) = crate::runtime::ownership::recorded_owner(
+                &sandboxes_dir.join(&sandbox.name).join("runtime"),
+                run,
+            )?
         {
+            alive = owner
+                .process
+                .as_ref()
+                .map(|process| process.alive())
+                .transpose()?
+                .unwrap_or(false);
+        }
+        if alive {
             return Ok(sandbox);
         }
 
@@ -685,6 +754,10 @@ impl LocalBackend {
         ) {
             return Ok(sandbox);
         }
+        // Old Windows runtimes can publish Terminated before the process releases resources.
+        #[cfg(windows)]
+        let run = Self::load_latest_run(pools.read(), sandbox.id).await?;
+        #[cfg(not(windows))]
         let run = Self::load_active_run(pools.read(), sandbox.id).await?;
 
         // An unowned Starting claim with no run is an abandoned launcher. Both guards above
@@ -722,7 +795,23 @@ impl LocalBackend {
             return Ok(sandbox);
         };
 
-        if run.pid.is_some_and(Self::pid_is_alive) {
+        #[allow(unused_mut)]
+        let mut alive = run.pid.is_some_and(Self::pid_is_alive);
+        #[cfg(windows)]
+        if let Some((_, sandboxes_dir)) = socket_roots
+            && let Some(owner) = crate::runtime::ownership::recorded_owner(
+                &sandboxes_dir.join(&sandbox.name).join("runtime"),
+                &run,
+            )?
+        {
+            alive = owner
+                .process
+                .as_ref()
+                .map(|process| process.alive())
+                .transpose()?
+                .unwrap_or(false);
+        }
+        if alive {
             return Ok(sandbox);
         }
 

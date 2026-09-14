@@ -9,6 +9,8 @@ mod launch_contract;
 mod launch_input;
 #[cfg(feature = "net")]
 mod network_slot;
+#[cfg(windows)]
+pub(crate) mod ownership;
 // The pure identity helpers stay compiled (and unit-tested) on every platform;
 // only Windows has call sites outside the tests.
 #[cfg_attr(not(windows), allow(dead_code))]

@@ -38,6 +38,9 @@ pub struct ProcessHandle {
     /// PID of the sandbox process.
     pid: u32,
 
+    #[cfg(windows)]
+    pub(crate) ownership: Option<(super::ownership::RuntimeProcess, bool)>,
+
     /// Name of the sandbox this process manages.
     sandbox_name: String,
 
@@ -172,6 +175,8 @@ impl ProcessHandle {
     ) -> Self {
         Self {
             pid,
+            #[cfg(windows)]
+            ownership: None,
             sandbox_name,
             child,
             startup_reader: None,

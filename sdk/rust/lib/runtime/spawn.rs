@@ -785,6 +785,18 @@ pub async fn spawn_sandbox(
     ));
 
     #[cfg(windows)]
+    {
+        let process = super::ownership::RuntimeProcess::capture(_pid as i32)?.ok_or_else(|| {
+            MicrosandboxError::Runtime("runtime exited during ownership capture".into())
+        })?;
+        // Released Windows runtimes started owning the lifecycle lock in v0.6.16.
+        startup_process.handle_mut().ownership = Some((
+            process,
+            launch_contract.machine || launch_contract.patch >= 16,
+        ));
+    }
+
+    #[cfg(windows)]
     if let Err(err) = job_assignment {
         let error = crate::MicrosandboxError::Runtime(format!(
             "failed to assign sandbox process to Windows job: {err}"

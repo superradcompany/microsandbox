@@ -993,6 +993,19 @@ impl LocalBackend {
                 return Err(error);
             }
         }
+        #[cfg(windows)]
+        if let Some((process, lifecycle_lock)) = &startup_process.handle_mut().ownership {
+            let run = Self::load_latest_run(self.db().await?.read(), sandbox_id)
+                .await?
+                .ok_or_else(|| {
+                    crate::MicrosandboxError::Runtime("ready runtime has no run record".into())
+                })?;
+            process.publish(
+                &self.sandboxes_dir().join(&config.spec.name).join("runtime"),
+                &run,
+                *lifecycle_lock,
+            )?;
+        }
         // Even detached launches remain creator-owned until catalog publication and validation
         // finish. Cancellation or failure before that boundary must terminate this exact child.
         let handle = Some(Arc::new(Mutex::new(startup_process.into_handle())));
