@@ -217,10 +217,21 @@ mod linux {
             None::<&str>,
         )?;
 
-        // /dev/fd → /proc/self/fd
-        if !Path::new("/dev/fd").exists() {
-            unix_fs::symlink("/proc/self/fd", "/dev/fd")
-                .map_err(|e| AgentdError::Init(format!("failed to symlink /dev/fd: {e}")))?;
+        // devtmpfs hides any links from the image and does not create these aliases.
+        for (target, link) in [
+            ("/proc/self/fd", "/dev/fd"),
+            ("/proc/self/fd/0", "/dev/stdin"),
+            ("/proc/self/fd/1", "/dev/stdout"),
+            ("/proc/self/fd/2", "/dev/stderr"),
+        ] {
+            match unix_fs::symlink(target, link) {
+                Ok(()) => {}
+                // A link may already exist even when its descriptor is closed.
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(e) => {
+                    return Err(AgentdError::Init(format!("failed to symlink {link}: {e}")));
+                }
+            }
         }
 
         Ok(())
