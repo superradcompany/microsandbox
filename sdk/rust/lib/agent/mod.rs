@@ -10,6 +10,7 @@ pub(crate) mod pool;
 use std::ops::Deref;
 use std::path::Path;
 use std::time::Duration;
+
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     time::Instant,
@@ -23,58 +24,6 @@ use tokio::{
 pub struct AgentClient {
     inner: Option<microsandbox_agent_client::AgentClient>,
     return_ticket: Option<pool::ReturnTicket>,
-}
-
-//--------------------------------------------------------------------------------------------------
-// Functions
-//--------------------------------------------------------------------------------------------------
-
-/// Resolve a sandbox name to its agent socket path and connect.
-///
-/// The socket lives under the SDK's configured runtime directory at a short,
-/// name-derived path. Sandbox names are limited to 128 UTF-8 bytes.
-pub async fn connect_sandbox(name: &str) -> AgentClientResult<AgentClient> {
-    connect_sandbox_with_timeout(name, Duration::from_secs(10)).await
-}
-
-/// Resolve a sandbox name to its agent socket path and connect with an explicit
-/// handshake timeout.
-///
-/// Sandbox names are limited to 128 UTF-8 bytes.
-pub async fn connect_sandbox_with_timeout(
-    name: &str,
-    timeout: Duration,
-) -> AgentClientResult<AgentClient> {
-    if let Some(message) = crate::sandbox::sandbox_name_validation_message(name) {
-        return Err(AgentClientError::InvalidSandboxName(message));
-    }
-
-    let mut last_error = None;
-    for sock_path in crate::runtime::sandbox_agent_socket_path_candidates(name) {
-        if !agent_endpoint_may_exist(&sock_path) {
-            continue;
-        }
-
-        match AgentClient::connect_with_timeout(&sock_path, timeout).await {
-            Ok(client) => return Ok(client),
-            Err(error) => last_error = Some(error),
-        }
-    }
-
-    match last_error {
-        Some(error) => Err(error),
-        None => Err(AgentClientError::SandboxNotFound(name.to_string())),
-    }
-}
-
-#[cfg(unix)]
-fn agent_endpoint_may_exist(path: &Path) -> bool {
-    path.exists()
-}
-
-#[cfg(windows)]
-fn agent_endpoint_may_exist(_path: &Path) -> bool {
-    true
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -202,14 +151,6 @@ impl Deref for AgentClient {
     }
 }
 
-//--------------------------------------------------------------------------------------------------
-// Re-Exports
-//--------------------------------------------------------------------------------------------------
-
-pub use bridge::{AgentBridge, BridgeFrame, StreamHandle};
-pub use microsandbox_agent_client::{AgentClientError, AgentClientResult, AgentProtocol};
-pub use microsandbox_protocol::codec::RawFrame;
-
 impl Drop for AgentClient {
     fn drop(&mut self) {
         if let (Some(ticket), Some(inner)) = (self.return_ticket.take(), self.inner.take()) {
@@ -217,3 +158,63 @@ impl Drop for AgentClient {
         }
     }
 }
+
+//--------------------------------------------------------------------------------------------------
+// Functions
+//--------------------------------------------------------------------------------------------------
+
+/// Resolve a sandbox name to its agent socket path and connect.
+///
+/// The socket lives under the SDK's configured runtime directory at a short,
+/// name-derived path. Sandbox names are limited to 128 UTF-8 bytes.
+pub async fn connect_sandbox(name: &str) -> AgentClientResult<AgentClient> {
+    connect_sandbox_with_timeout(name, Duration::from_secs(10)).await
+}
+
+/// Resolve a sandbox name to its agent socket path and connect with an explicit
+/// handshake timeout.
+///
+/// Sandbox names are limited to 128 UTF-8 bytes.
+pub async fn connect_sandbox_with_timeout(
+    name: &str,
+    timeout: Duration,
+) -> AgentClientResult<AgentClient> {
+    if let Some(message) = crate::sandbox::sandbox_name_validation_message(name) {
+        return Err(AgentClientError::InvalidSandboxName(message));
+    }
+
+    let mut last_error = None;
+    for sock_path in crate::runtime::sandbox_agent_socket_path_candidates(name) {
+        if !agent_endpoint_may_exist(&sock_path) {
+            continue;
+        }
+
+        match AgentClient::connect_with_timeout(&sock_path, timeout).await {
+            Ok(client) => return Ok(client),
+            Err(error) => last_error = Some(error),
+        }
+    }
+
+    match last_error {
+        Some(error) => Err(error),
+        None => Err(AgentClientError::SandboxNotFound(name.to_string())),
+    }
+}
+
+#[cfg(unix)]
+fn agent_endpoint_may_exist(path: &Path) -> bool {
+    path.exists()
+}
+
+#[cfg(windows)]
+fn agent_endpoint_may_exist(_path: &Path) -> bool {
+    true
+}
+
+//--------------------------------------------------------------------------------------------------
+// Re-Exports
+//--------------------------------------------------------------------------------------------------
+
+pub use bridge::{AgentBridge, BridgeFrame, StreamHandle};
+pub use microsandbox_agent_client::{AgentClientError, AgentClientResult, AgentProtocol};
+pub use microsandbox_protocol::codec::RawFrame;
