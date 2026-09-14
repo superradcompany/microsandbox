@@ -118,16 +118,6 @@
 
 The `msb` CLI provides a complete interface for managing sandboxes, snapshots, images, and volumes.
 
-Top-level verbs are the recommended everyday form. Sandbox operations also live under the canonical `sandbox` group, with `sbx` as its short alias. These commands are equivalent:
-
-```sh
-msb run alpine -- echo hello
-msb sandbox run alpine -- echo hello
-msb sbx run alpine -- echo hello
-```
-
-Use `msb sandbox --help` to explore the group.
-
 #### <img height="14" src="https://octicons-col.vercel.app/play/A770EF">&nbsp;&nbsp;Run a Command
 
 > ```sh
