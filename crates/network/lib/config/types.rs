@@ -3,6 +3,8 @@
 //! These types represent the user-facing declarative network configuration
 //! for sandbox networking. Designed for the smoltcp in-process engine.
 
+use std::num::NonZeroUsize;
+
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use ipnetwork::{Ipv4Network, Ipv6Network};
@@ -69,9 +71,9 @@ pub struct NetworkConfig {
     #[serde(default)]
     pub secrets: SecretsConfig,
 
-    /// Max concurrent guest connections. Default: 256, maximum: 4096.
-    #[serde(default)]
-    pub max_connections: Option<usize>,
+    /// Optional guest connection cap. Omitted or zero means uncapped; maximum: 4096.
+    #[serde(default, deserialize_with = "deserialize_connection_limit")]
+    pub max_connections: Option<NonZeroUsize>,
 
     /// Egress and ingress rate limits. `None` means unlimited in both directions.
     #[serde(default)]
@@ -513,5 +515,43 @@ mod tests {
             serde_json::from_str::<PortProtocol>("\"Udp\"").unwrap(),
             PortProtocol::Udp
         );
+    }
+}
+
+fn deserialize_connection_limit<'de, D>(deserializer: D) -> Result<Option<NonZeroUsize>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<usize>::deserialize(deserializer)?.and_then(NonZeroUsize::new))
+}
+
+#[cfg(test)]
+mod connection_limit_tests {
+    use super::*;
+
+    #[test]
+    fn wire_limits_normalize_zero_and_preserve_positive_caps() {
+        for value in [
+            serde_json::json!({}),
+            serde_json::json!({"max_connections": null}),
+            serde_json::json!({"max_connections": 0}),
+        ] {
+            let config: NetworkConfig = serde_json::from_value(value).unwrap();
+            assert_eq!(config.max_connections, None);
+        }
+
+        let config: NetworkConfig =
+            serde_json::from_value(serde_json::json!({"max_connections": 64})).unwrap();
+        assert_eq!(config.max_connections, NonZeroUsize::new(64));
+        assert_eq!(serde_json::to_value(config).unwrap()["max_connections"], 64);
+
+        for value in [serde_json::json!(-1), serde_json::json!("unlimited")] {
+            assert!(
+                serde_json::from_value::<NetworkConfig>(
+                    serde_json::json!({"max_connections": value})
+                )
+                .is_err()
+            );
+        }
     }
 }

@@ -6,6 +6,7 @@
 //! the networking stack.
 
 use std::net::{Ipv4Addr, Ipv6Addr, UdpSocket};
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
@@ -212,10 +213,10 @@ impl SmoltcpNetwork {
         let config = resolved_config.config();
 
         if let Some(configured) = config.max_connections
-            && configured > MAX_NETWORK_CONNECTIONS
+            && configured.get() > MAX_NETWORK_CONNECTIONS
         {
             return Err(NetworkInitError::MaxConnectionsExceeded {
-                configured,
+                configured: configured.get(),
                 limit: MAX_NETWORK_CONNECTIONS,
             });
         }
@@ -254,6 +255,7 @@ impl SmoltcpNetwork {
 
         let queue_capacity = config
             .max_connections
+            .map(NonZeroUsize::get)
             .unwrap_or(DEFAULT_QUEUE_CAPACITY)
             .max(DEFAULT_QUEUE_CAPACITY);
         let shared = Arc::new(SharedState::new(queue_capacity));
@@ -577,22 +579,22 @@ fn enforce_deployment_profile(
     let requested_max_connections = config.max_connections;
     let connection_limit_clamped = config
         .max_connections
-        .is_some_and(|limit| limit > host_max_connections);
+        .zip(host_max_connections)
+        .is_some_and(|(requested, host)| requested > host);
 
     config.interface = Default::default();
     config.ports.clear();
     config.dns.nameservers.clear();
     config.dns.rebind_protection = true;
     config.trust_host_cas = false;
-    config.max_connections = Some(
-        config
-            .max_connections
-            .unwrap_or(host_max_connections)
-            .min(host_max_connections),
-    );
+    config.max_connections = match (config.max_connections, host_max_connections) {
+        (Some(requested), Some(host)) => Some(requested.min(host)),
+        (requested, None) => requested,
+        (None, host) => host,
+    };
 
     tracing::debug!(
-        host_max_connections,
+        ?host_max_connections,
         requested_max_connections,
         effective_max_connections = config.max_connections,
         "applied host TCP connection budget"
@@ -770,7 +772,7 @@ mod tests {
             address: "127.0.0.1:1080".parse().unwrap(),
             credentials: None,
         });
-        config.max_connections = Some(crate::config::DEFAULT_HOST_MAX_TCP_CONNECTIONS + 1);
+        config.max_connections = std::num::NonZeroUsize::new(257);
         config.policy = NetworkPolicy::allow_all();
         let mut resolved = resolved(config);
 
@@ -788,10 +790,7 @@ mod tests {
         assert!(config.dns.rebind_protection);
         assert!(!config.trust_host_cas);
         assert!(config.outbound_proxy.is_none());
-        assert_eq!(
-            config.max_connections,
-            Some(crate::config::DEFAULT_HOST_MAX_TCP_CONNECTIONS)
-        );
+        assert_eq!(config.max_connections, std::num::NonZeroUsize::new(257));
         assert!(resolved.config().outbound_proxy.is_none());
         assert!(resolved.outbound_proxy().is_none());
         // Tenant policy stays intact and is intersected with the platform
@@ -800,8 +799,27 @@ mod tests {
     }
 
     #[test]
+    fn uncapped_host_preserves_omitted_or_explicit_tenant_limits() {
+        for requested in [None, Some(0), Some(64), Some(4096)] {
+            let mut config = NetworkConfig::default();
+            config.max_connections = requested.and_then(std::num::NonZeroUsize::new);
+            let mut config = resolved(config);
+            enforce_deployment_profile(
+                &mut config,
+                DeploymentProfile::MultiTenant,
+                HostNetworkLimits::default(),
+            );
+            assert_eq!(
+                config.config().max_connections,
+                requested.and_then(std::num::NonZeroUsize::new)
+            );
+            assert!(config.config().dns.rebind_protection);
+        }
+    }
+
+    #[test]
     fn host_budget_allows_more_connections_without_tenant_escalation() {
-        let limits = HostNetworkLimits::new(1024).unwrap();
+        let limits = HostNetworkLimits::new(std::num::NonZeroUsize::new(1024));
         for (requested, effective) in [
             (None, 1024),
             (Some(64), 64),
@@ -810,11 +828,14 @@ mod tests {
             (Some(4096), 1024),
         ] {
             let mut config = NetworkConfig::default();
-            config.max_connections = requested;
+            config.max_connections = requested.and_then(std::num::NonZeroUsize::new);
             config.dns.rebind_protection = false;
             let mut config = resolved(config);
             enforce_deployment_profile(&mut config, DeploymentProfile::MultiTenant, limits);
-            assert_eq!(config.config().max_connections, Some(effective));
+            assert_eq!(
+                config.config().max_connections,
+                std::num::NonZeroUsize::new(effective)
+            );
             assert!(config.config().dns.rebind_protection);
             assert!(config.config().interface.mac.is_none());
         }
@@ -1094,7 +1115,7 @@ mod tests {
     #[test]
     fn build_rejects_excessive_max_connections() {
         let mut config = NetworkConfig {
-            max_connections: Some(MAX_NETWORK_CONNECTIONS + 1),
+            max_connections: std::num::NonZeroUsize::new(MAX_NETWORK_CONNECTIONS + 1),
             ..NetworkConfig::default()
         };
         config.tls.enabled = false;

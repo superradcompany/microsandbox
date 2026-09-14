@@ -3,6 +3,7 @@
 //! Used by `SandboxBuilder::network(|n| n.port(8080, 80).policy(...))`.
 
 use std::net::IpAddr;
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -285,7 +286,7 @@ impl NetworkBuilder {
                 limit: MAX_NETWORK_CONNECTIONS,
             });
         } else {
-            self.config.max_connections = Some(max);
+            self.config.max_connections = NonZeroUsize::new(max);
         }
         self
     }
@@ -365,10 +366,10 @@ impl NetworkBuilder {
             return Err(err);
         }
         if let Some(max) = self.config.max_connections
-            && max > MAX_NETWORK_CONNECTIONS
+            && max.get() > MAX_NETWORK_CONNECTIONS
         {
             return Err(BuildError::MaxConnectionsExceeded {
-                configured: max,
+                configured: max.get(),
                 limit: MAX_NETWORK_CONNECTIONS,
             });
         }

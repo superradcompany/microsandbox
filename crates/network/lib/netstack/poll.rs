@@ -5,6 +5,8 @@
 //! [`SmoltcpDevice`]) to smoltcp's TCP/IP stack and services connections
 //! through tokio proxy tasks.
 
+use std::num::NonZeroUsize;
+
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
@@ -233,7 +235,7 @@ pub fn smoltcp_poll_loop(
     tls_state: Option<Arc<TlsState>>,
     published_ports: Vec<PublishedPort>,
     strict: bool,
-    max_connections: Option<usize>,
+    max_connections: Option<NonZeroUsize>,
     tokio_handle: tokio::runtime::Handle,
     secrets: SecretsHandle,
     outbound_proxy: Option<Arc<ResolvedOutboundProxy>>,
@@ -2304,7 +2306,7 @@ mod tests {
         let mut device = SmoltcpDevice::new(shared.clone(), config.mtu);
         let mut iface = create_interface(&mut device, &config);
         let mut sockets = SocketSet::new(vec![]);
-        let mut tracker = ConnectionTracker::new(Some(1));
+        let mut tracker = ConnectionTracker::new(NonZeroUsize::new(1));
         let now = smoltcp_now();
         handshake(
             &mut tracker,
@@ -2354,7 +2356,7 @@ mod tests {
         let mut device = SmoltcpDevice::new(shared.clone(), config.mtu);
         let mut iface = create_interface(&mut device, &config);
         let mut sockets = SocketSet::new(vec![]);
-        let mut tracker = ConnectionTracker::new(Some(1));
+        let mut tracker = ConnectionTracker::new(NonZeroUsize::new(1));
         let now = smoltcp_now();
         ingress(
             build_arp_request_frame(GUEST_MAC, GUEST_IP, GATEWAY_IP),
@@ -2399,7 +2401,7 @@ mod tests {
         let mut device = SmoltcpDevice::new(shared.clone(), config.mtu);
         let mut iface = create_interface(&mut device, &config);
         let mut sockets = SocketSet::new(vec![]);
-        let mut tracker = ConnectionTracker::new(Some(1));
+        let mut tracker = ConnectionTracker::new(NonZeroUsize::new(1));
         let now = smoltcp_now();
         let (_, guest_seq) = handshake(
             &mut tracker,
@@ -2465,7 +2467,7 @@ mod tests {
         // Once the table is full, new guest connections are refused. Uses a
         // small max to avoid 256 full handshakes; the gating logic is
         // identical to the 256 default.
-        let mut tracker = ConnectionTracker::new(Some(4));
+        let mut tracker = ConnectionTracker::new(NonZeroUsize::new(4));
         let mut sockets = SocketSet::new(vec![]);
         let shared = Arc::new(SharedState::new(64));
         let config = leak_poll_config();

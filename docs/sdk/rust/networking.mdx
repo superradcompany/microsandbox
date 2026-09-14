@@ -859,7 +859,7 @@ Require hostname-based policy allows to use an inspectable request authority. De
 fn max_connections(self, max: usize) -> Self
 ```
 
-Limit the maximum number of concurrent network connections from the sandbox. Default: `256`.
+Limit the maximum number of concurrent network connections from the sandbox. By default, no connection-count cap is requested. Passing zero also removes the requested cap. An explicit host operator cap still applies.
 
 <p className="msb-label">Parameters</p>
 

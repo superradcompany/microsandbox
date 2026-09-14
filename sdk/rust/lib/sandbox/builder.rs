@@ -1786,6 +1786,7 @@ mod tests {
     use microsandbox_types::{PortProtocol, SecretSource};
     #[cfg(feature = "net")]
     use std::net::{IpAddr, Ipv4Addr};
+    use std::num::NonZeroUsize;
 
     #[test]
     fn deployment_profile_sets_sandbox_spec() {
@@ -2513,7 +2514,7 @@ mod tests {
         assert_eq!(config.spec.network.ports[0].protocol, PortProtocol::Tcp);
         let network = config.local_network_config().unwrap();
         assert_eq!(network.secrets.secrets.len(), 1);
-        assert_eq!(network.max_connections, Some(128));
+        assert_eq!(network.max_connections, NonZeroUsize::new(128));
         assert!(network.strict);
     }
 
