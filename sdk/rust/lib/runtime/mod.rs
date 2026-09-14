@@ -12,7 +12,6 @@ mod network_slot;
 #[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) mod reap;
 pub(crate) mod spawn;
-pub(crate) mod startup_timing;
 
 //--------------------------------------------------------------------------------------------------
 // Re-Exports

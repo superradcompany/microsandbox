@@ -350,12 +350,7 @@ pub async fn spawn_sandbox(
     // Stopped-safe preparation: a `--next-start` upper grow persists only the
     // desired size, so the file itself grows here, before any virtio device
     // attaches the image.
-    super::startup_timing::measure(
-        &config.spec.name,
-        "writable_disk_grow",
-        prepare_oci_upper(config, &sandbox_dir),
-    )
-    .await?;
+    prepare_oci_upper(config, &sandbox_dir).await?;
 
     // Write scripts to the runtime scripts directory.
     for (name, content) in &config.spec.runtime.scripts {

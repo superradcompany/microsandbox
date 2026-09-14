@@ -15,7 +15,6 @@ mod http;
 mod pool_tests;
 pub(in crate::backend) mod sandbox;
 mod snapshot;
-mod timing;
 mod volume;
 mod ws_io;
 
@@ -398,26 +397,14 @@ impl Backend for CloudBackend {
                 .as_ref()
                 .is_some_and(|(bound_name, _)| bound_name == name);
             if bound && let Some(client) = self.agent_pool.take() {
-                tracing::debug!(
-                    sandbox_name = name,
-                    sandbox_id = self.agent_identity.as_ref().map(|(_, id)| id.as_str()),
-                    "reused completed cloud agent connection"
-                );
                 return Ok(client);
             }
             let ticket = bound.then(|| self.agent_pool.ticket());
-            let mut timing = timing::ConnectionTiming::new(name);
             let result = tokio::time::timeout(timeout, async {
-                timing.stage("identity");
-                let lookup_started = std::time::Instant::now();
                 let id = match &self.agent_identity {
                     Some((bound_name, id)) if bound_name == name => id.clone(),
                     _ => self.get_sandbox(name).await?.id,
                 };
-                tracing::debug!(sandbox_id = %id, elapsed_seconds = lookup_started.elapsed().as_secs_f64(),
-                    lookup_skipped = self.agent_identity.as_ref().is_some_and(|(bound_name, _)| bound_name == name),
-                    "cloud agent identity resolved");
-                timing.identity(&id);
                 let url = self.agent_ws_url(&id)?;
                 let mut request = url
                     .into_client_request()
@@ -435,43 +422,30 @@ impl Backend for CloudBackend {
                     })?,
                 );
 
-                timing.stage("websocket");
-                let websocket_started = std::time::Instant::now();
                 let connector = cloud_agent_tls_connector()?;
                 let (socket, _) =
                     connect_async_tls_with_config(request, None, false, Some(connector))
                         .await
                         .map_err(|e| {
-                            tracing::debug!(sandbox_id = %id, elapsed_seconds = websocket_started.elapsed().as_secs_f64(), success = false, "cloud agent websocket finished");
                             MicrosandboxError::Runtime(format!("cloud agent websocket: {e}"))
                         })?;
 
-                tracing::debug!(sandbox_id = %id, elapsed_seconds = websocket_started.elapsed().as_secs_f64(), success = true, "cloud agent websocket finished");
-                timing.stage("handshake");
-                let handshake_started = std::time::Instant::now();
                 let client = crate::agent::AgentClient::connect_stream_with_timeout(
                     self::ws_io::WsByteStream::new(socket),
                     timeout,
                 )
                 .await;
-                tracing::debug!(sandbox_id = %id, elapsed_seconds = handshake_started.elapsed().as_secs_f64(), success = client.is_ok(), "cloud agent handshake finished");
                 client.map_err(Into::into)
             })
             .await;
             match result {
-                Ok(result) => {
-                    timing.finish(if result.is_ok() { "success" } else { "error" });
-                    result.map(|client| match ticket {
-                        Some(ticket) => client.with_return_ticket(ticket),
-                        None => client,
-                    })
-                }
-                Err(_) => {
-                    timing.finish("timeout");
-                    Err(MicrosandboxError::Runtime(format!(
-                        "timed out connecting to cloud sandbox agent {name:?} after {timeout:?}"
-                    )))
-                }
+                Ok(result) => result.map(|client| match ticket {
+                    Some(ticket) => client.with_return_ticket(ticket),
+                    None => client,
+                }),
+                Err(_) => Err(MicrosandboxError::Runtime(format!(
+                    "timed out connecting to cloud sandbox agent {name:?} after {timeout:?}"
+                ))),
             }
         })
     }
