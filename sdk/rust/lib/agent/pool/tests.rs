@@ -1,10 +1,15 @@
-use super::*;
 use microsandbox_protocol::{
     codec,
     core::Ready,
     message::{Message, MessageType},
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
+
+use super::*;
+
+//--------------------------------------------------------------------------------------------------
+// Functions
+//--------------------------------------------------------------------------------------------------
 
 async fn connection(pool: &Arc<AgentPool>) -> (AgentClient, DuplexStream) {
     let ticket = pool.ticket();
@@ -42,6 +47,10 @@ async fn closed(mut peer: DuplexStream) {
         0
     );
 }
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
 
 #[tokio::test]
 async fn only_completed_leases_return_and_checkout_resets_completion() {

@@ -1786,6 +1786,7 @@ mod tests {
     use microsandbox_types::{PortProtocol, SecretSource};
     #[cfg(feature = "net")]
     use std::net::{IpAddr, Ipv4Addr};
+    #[cfg(feature = "net")]
     use std::num::NonZeroUsize;
 
     #[test]

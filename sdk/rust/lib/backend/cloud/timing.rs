@@ -2,6 +2,10 @@
 
 use std::time::Instant;
 
+//--------------------------------------------------------------------------------------------------
+// Types
+//--------------------------------------------------------------------------------------------------
+
 /// Emits one terminal event when a polled connection attempt finishes or is dropped.
 pub(super) struct ConnectionTiming<'a> {
     name: &'a str,
@@ -10,6 +14,10 @@ pub(super) struct ConnectionTiming<'a> {
     stage: &'static str,
     outcome: &'static str,
 }
+
+//--------------------------------------------------------------------------------------------------
+// Methods
+//--------------------------------------------------------------------------------------------------
 
 impl<'a> ConnectionTiming<'a> {
     pub(super) fn new(name: &'a str) -> Self {
@@ -34,6 +42,10 @@ impl<'a> ConnectionTiming<'a> {
         self.outcome = outcome;
     }
 }
+
+//--------------------------------------------------------------------------------------------------
+// Trait Implementations
+//--------------------------------------------------------------------------------------------------
 
 impl Drop for ConnectionTiming<'_> {
     fn drop(&mut self) {
