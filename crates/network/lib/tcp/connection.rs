@@ -20,6 +20,9 @@ use tokio::sync::mpsc;
 // Constants
 //--------------------------------------------------------------------------------------------------
 
+/// Log target for opt-in profiling events.
+const PROFILING_TARGET: &str = "microsandbox::profiling";
+
 /// TCP socket receive buffer size (64 KiB).
 const TCP_RX_BUF_SIZE: usize = 65536;
 
@@ -75,6 +78,7 @@ pub struct ConnectionTracker {
     connection_keys: HashSet<(SocketAddr, SocketAddr)>,
     /// Max concurrent connections (from NetworkConfig).
     max_connections: Option<NonZeroUsize>,
+    rejected_connections: u64,
 }
 
 /// Maximum number of poll iterations to attempt flushing remaining data
@@ -201,6 +205,7 @@ impl ConnectionTracker {
             connections: HashMap::new(),
             connection_keys: HashSet::new(),
             max_connections,
+            rejected_connections: 0,
         }
     }
 
@@ -237,6 +242,7 @@ impl ConnectionTracker {
                 .max_connections
                 .is_some_and(|max| self.connections.len() >= max.get())
             {
+                self.rejected_connections = self.rejected_connections.saturating_add(1);
                 return false;
             }
         }
@@ -424,6 +430,37 @@ impl ConnectionTracker {
         }
 
         new
+    }
+
+    /// Record bounded-cardinality diagnostics once per maintenance interval.
+    pub fn trace_stats(&self, sockets: &SocketSet<'_>) {
+        if !tracing::enabled!(target: PROFILING_TARGET, tracing::Level::TRACE) {
+            return;
+        }
+        let closing = self
+            .connections
+            .keys()
+            .filter(|&&handle| {
+                matches!(
+                    sockets.get::<tcp::Socket>(handle).state(),
+                    tcp::State::CloseWait
+                        | tcp::State::FinWait1
+                        | tcp::State::FinWait2
+                        | tcp::State::Closing
+                        | tcp::State::LastAck
+                        | tcp::State::TimeWait
+                )
+            })
+            .count();
+        tracing::trace!(
+            target: PROFILING_TARGET,
+            limit = ?self.max_connections,
+            tracked = self.connections.len(),
+            closing,
+            rejected_total = self.rejected_connections,
+            socket_buffer_bytes = self.connections.len() * (TCP_RX_BUF_SIZE + TCP_TX_BUF_SIZE),
+            "TCP connection budget"
+        );
     }
 
     /// Remove closed connections and their sockets.

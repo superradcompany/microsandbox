@@ -1,4 +1,5 @@
-import { withMappedErrors } from "./internal/error-mapping.js";
+import { UnsupportedError } from "./errors.js";
+import { mapNapiError, withMappedErrors } from "./internal/error-mapping.js";
 import type {
   NapiSnapshotHandle,
   NapiSnapshotInfo,
@@ -72,6 +73,21 @@ export class SnapshotHandle {
     this.createdAt = new Date(inner.createdAt);
     this.reference = inner.reference;
     this.referenceKind = inner.referenceKind;
+  }
+
+  /** @deprecated Use `reference`. Throws UnsupportedError for remote snapshots. */
+  get path(): string {
+    try {
+      const path = this.inner.path;
+      if (path == null) {
+        throw new UnsupportedError(
+          "Snapshot has no local filesystem path; use reference instead.",
+        );
+      }
+      return path;
+    } catch (error) {
+      throw mapNapiError(error);
+    }
   }
 
   /** Open and metadata-validate the underlying artifact. */

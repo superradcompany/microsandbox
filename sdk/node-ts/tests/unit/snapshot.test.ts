@@ -242,3 +242,16 @@ describe("Snapshot native projections", () => {
     expect(save).toHaveBeenCalledOnce();
   });
 });
+
+describe("legacy snapshot paths", () => {
+  it.each(["id", "path"])("rejects remote %s references", (referenceKind) => {
+    expect(() => projectedSnapshot({ referenceKind }).path).toThrow("no local filesystem path");
+    const handle = new SnapshotHandle({ reference: "/remote/snapshot", referenceKind, createdAt: 0 } as never);
+    expect(() => handle.path).toThrow("no local filesystem path");
+  });
+  it("preserves local paths on snapshots and listed handles", () => {
+    expect(projectedSnapshot({ path: "/local/snapshot" }).path).toBe("/local/snapshot");
+    const handle = new SnapshotHandle({ path: "/local/snapshot", reference: "/local/snapshot", referenceKind: "path", createdAt: 0 } as never);
+    expect(handle.path).toBe("/local/snapshot");
+  });
+});

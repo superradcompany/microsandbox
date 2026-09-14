@@ -144,3 +144,28 @@ func TestSnapshotStateProjectionDistinguishesMissingAndMerkleIntegrity(t *testin
 		t.Fatalf("Merkle integrity projection = %#v", got)
 	}
 }
+
+func TestLegacySnapshotPaths(t *testing.T) {
+	path := "/local/snapshot"
+	snapshot := snapshotFromInfo(&ffi.SnapshotInfo{Path: &path, Reference: path, ReferenceKind: "path"})
+	handle := snapshotHandleFromInfo(&ffi.SnapshotHandleInfo{Path: &path, Reference: path, ReferenceKind: "path"})
+	if snapshot.Path() != path || handle.Path() != path {
+		t.Fatal("legacy accessors did not preserve local path")
+	}
+	for _, kind := range []string{"id", "path"} {
+		t.Run(kind, func(t *testing.T) {
+			remoteSnapshot := snapshotFromInfo(&ffi.SnapshotInfo{Reference: "/remote/snapshot", ReferenceKind: kind})
+			remoteHandle := snapshotHandleFromInfo(&ffi.SnapshotHandleInfo{Reference: "/remote/snapshot", ReferenceKind: kind})
+			for name, accessor := range map[string]func() string{"snapshot": remoteSnapshot.Path, "handle": remoteHandle.Path} {
+				t.Run(name, func(t *testing.T) {
+					defer func() {
+						if recover() == nil {
+							t.Fatal("remote path accessor must panic")
+						}
+					}()
+					accessor()
+				})
+			}
+		})
+	}
+}

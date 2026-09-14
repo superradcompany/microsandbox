@@ -1663,7 +1663,7 @@ type NetworkOptions struct {
 	DenyDomains         []string                   `json:"deny_domains,omitempty"`
 	DenyDomainSuffixes  []string                   `json:"deny_domain_suffixes,omitempty"`
 	TLS                 *TLSOptions                `json:"tls,omitempty"`
-	Strict             *bool                      `json:"strict,omitempty"`
+	Strict              *bool                      `json:"strict,omitempty"`
 	Ports               map[uint16]uint16          `json:"ports,omitempty"`
 	PortBindings        []PortBindingOptions       `json:"port_bindings,omitempty"`
 	IPv4Pool            string                     `json:"ipv4_pool,omitempty"`
@@ -4748,6 +4748,7 @@ func ImageSave(ctx context.Context, references []string, outputPath string, form
 // ---------------------------------------------------------------------------
 
 type SnapshotInfo struct {
+	Path                      *string           `json:"path"`
 	Reference                 string            `json:"reference"`
 	ReferenceKind             string            `json:"reference_kind"`
 	Digest                    string            `json:"digest"`
@@ -4773,6 +4774,7 @@ type SnapshotInfo struct {
 }
 
 type SnapshotHandleInfo struct {
+	Path                     *string `json:"path"`
 	Digest                   string  `json:"digest"`
 	Name                     *string `json:"name"`
 	ParentDigest             *string `json:"parent_digest"`

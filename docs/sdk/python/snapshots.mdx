@@ -14,6 +14,10 @@ disk-only and require a sandbox that is not running.
   API on every backend, but currently raise `UnsupportedError` in cloud.
 </Note>
 
+`Snapshot.path` and `SnapshotHandle.path` remain available for local snapshots.
+These accessors are deprecated and raise `UnsupportedError` if no local filesystem
+path exists. Use `reference` for backend-neutral code.
+
 
 ## Take a snapshot
 

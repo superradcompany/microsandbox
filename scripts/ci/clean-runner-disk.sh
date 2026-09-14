@@ -13,6 +13,11 @@ rm -rf "${HOME}/.microsandbox"
 # KVM test jobs consume prebuilt artifacts, so their build caches are
 # expendable. Reclaim them before unpacking the multi-gigabyte nextest archive.
 rm -rf "${HOME}/.cargo/registry" "${HOME}/.cargo/git"
+# Go marks downloaded module directories read-only. Restore owner write
+# permission on directories before removal; do not follow module symlinks.
+if [[ -d "${HOME}/go/pkg/mod" && ! -L "${HOME}/go/pkg/mod" ]]; then
+  find -P "${HOME}/go/pkg/mod" -type d -exec chmod u+w {} +
+fi
 rm -rf "${HOME}/go/pkg/mod" "${HOME}/.cache/go-build"
 
 # Self-hosted x64 runners share one root disk across multiple runner users.

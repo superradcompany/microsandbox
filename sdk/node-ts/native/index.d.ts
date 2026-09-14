@@ -1523,6 +1523,8 @@ export declare class Snapshot {
   static get(nameOrDigest: string): Promise<SnapshotHandle>
   static list(): Promise<Array<SnapshotInfo>>
   static remove(pathOrName: string, opts?: SnapshotRemoveOptions | undefined | null): Promise<void>
+  /** Deprecated: use `reference`. Throws when no local filesystem path exists. */
+  get path(): string
   get reference(): string
   get referenceKind(): 'id' | 'path'
   get digest(): string
@@ -1632,6 +1634,8 @@ export declare class SnapshotHandle {
   get migrationState(): string
   get migrationErrorCode(): string | null
   get createdAt(): number
+  /** Deprecated: use `reference`. Throws when no local filesystem path exists. */
+  get path(): string
   get reference(): string
   get referenceKind(): 'id' | 'path'
   open(): Promise<Snapshot>
@@ -2458,6 +2462,8 @@ export interface SnapshotInfo {
   migrationState: string
   migrationErrorCode?: string
   createdAt: number
+  /** Local filesystem path, absent for remote snapshots. */
+  path?: string
   reference: string
   referenceKind: 'id' | 'path'
 }
