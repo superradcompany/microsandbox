@@ -28,10 +28,14 @@ afterEach(async () => {
   }
 });
 
-describe("AgentClient over a Unix socket relay", () => {
+describe("AgentClient over a local relay", () => {
   it("rejects relay id ranges with no usable ids", async () => {
     const relay = await startRelay(async (socket) => {
-      await writeHandshake(socket, 0, 1);
+      // Rejection happens at the range, before the client reads a ready frame.
+      // Sending more bytes races the expected disconnect on Windows pipes.
+      const range = Buffer.alloc(8);
+      range.writeUInt32BE(1, 4);
+      await write(socket, range);
     });
 
     await expect(connectUnix(relay.path)).rejects.toThrow(
@@ -334,7 +338,10 @@ async function startRelay(
   handler: (socket: net.Socket) => Promise<void>,
 ): Promise<{ path: string }> {
   const dir = await mkdtemp(path.join(os.tmpdir(), "msb-agent-client-"));
-  const sockPath = path.join(dir, "agent.sock");
+  // Node uses named pipes for local IPC on Windows.
+  const sockPath = process.platform === "win32"
+    ? `\\\\.\\pipe\\msb-agent-test-${path.basename(dir)}`
+    : path.join(dir, "agent.sock");
   const sockets = new Set<net.Socket>();
   const failures: unknown[] = [];
   const server = net.createServer((socket) => {

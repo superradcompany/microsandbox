@@ -3210,7 +3210,13 @@ mod tests {
             .build()
             .await
             .unwrap_err();
-        assert!(datagram.to_string().contains("Unix host"));
+        assert!(matches!(
+            datagram,
+            crate::MicrosandboxError::Unsupported {
+                op: crate::Operation::SandboxCreate,
+                reason: crate::UnsupportedReason::RequiresUnixHost,
+            }
+        ));
     }
 
     #[cfg(feature = "net")]

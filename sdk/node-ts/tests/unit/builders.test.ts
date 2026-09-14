@@ -529,7 +529,7 @@ describe("SandboxBuilder.build", () => {
     expect((cleared.runtime as { cmd: string[] }).cmd).toEqual([]);
   });
 
-  it("collects stream and datagram vsock routes", async () => {
+  it.skipIf(process.platform === "win32")("collects stream and datagram vsock routes", async () => {
     const cfg = await Sandbox.builder("x")
       .image("alpine")
       .vsock("/run/host-api.sock", 5000)
@@ -543,6 +543,18 @@ describe("SandboxBuilder.build", () => {
       { hostSocket: "/run/host-api.sock", port: 5000, socketType: "stream" },
       { hostSocket: "/run/events.sock", port: 5001, socketType: "dgram" },
     ]);
+  });
+
+  it.runIf(process.platform === "win32")("collects named-pipe streams and rejects datagrams", async () => {
+    // Windows routes use local named pipes; datagrams require a Unix host.
+    const pipe = String.raw`\\.\pipe\host-api`;
+    const cfg = await Sandbox.builder("x").image("alpine").vsock(pipe, 5000).build();
+    expect(cfg.vsock).toMatchObject({
+      routes: [{ hostSocket: pipe, port: 5000, socketType: "stream" }],
+    });
+    await expect(
+      Sandbox.builder("x").image("alpine").vsockDgram(pipe, 5001).build(),
+    ).rejects.toThrow("unix hosts only");
   });
 
   it("keeps libkrunfwPath as a chainable compatibility alias", async () => {

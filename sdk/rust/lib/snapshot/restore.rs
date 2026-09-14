@@ -490,6 +490,8 @@ mod tests {
         let source_layer = layers.join("layer_base.raw");
         let layer_file = std::fs::File::create(&source_layer).unwrap();
         layer_file.set_len(4 * 1024 * 1024).unwrap();
+        // Windows cannot clone a fixture while its writable handle remains open.
+        drop(layer_file);
         let layer_integrity = sparse_file_integrity(&source_layer).unwrap();
         let disk = DiskGenerationManifest {
             schema: "microsandbox.disk-generation/1".into(),

@@ -4621,7 +4621,12 @@ mod tests {
 
         let rendered = render_args(&config);
         assert!(rendered.contains(&"--rootfs-disk".to_string()));
-        assert!(rendered.iter().any(|arg| arg.ends_with("/test/rootfs.raw")));
+        // Compare path components so Windows separators remain valid.
+        assert!(
+            rendered
+                .iter()
+                .any(|arg| Path::new(arg).ends_with(Path::new("test").join("rootfs.raw")))
+        );
         assert!(rendered.contains(&"--rootfs-disk-format".to_string()));
         assert!(rendered.contains(&"raw".to_string()));
         assert!(

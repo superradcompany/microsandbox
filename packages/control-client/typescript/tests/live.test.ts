@@ -34,7 +34,9 @@ it.skipIf(!endpoint)("live runtime: JSON and fragmented/native/raw/checked CBOR,
     const jsonCaps = await legacy(endpoint!, { op: "capabilities" });
     expect(jsonCaps).toMatchObject({ ok: true, control_protocols: ["json", "cbor"] });
     const caps = await client.requestTyped(new GetCapabilities());
-    expect(jsonCaps.capabilities).toEqual(caps);
+    // Release runtimes also expose JSON-only checkpoint and lifecycle features.
+    // The capabilities shared with framed control must agree exactly.
+    expect(jsonCaps.capabilities).toMatchObject(caps);
     memory = await client.requestTyped(new GetMemoryState());
     cpu = await client.requestTyped(new GetCpuState());
     expect(typeof memory.current_mib).toBe("bigint");
@@ -67,7 +69,7 @@ it.skipIf(!endpoint)("live runtime: JSON and fragmented/native/raw/checked CBOR,
     await client.writeUnchecked(encodeFrame({ id: 0xffffffff, flags: 0, body: encodeEnvelope({ v: 1, t: "control.capabilities", p: encodeRecord({}) }) }));
     expect(await client.requestTyped(new GetCapabilities())).toEqual(caps);
     if (caps.secrets_update) expect(await client.requestTyped(new UpdateSecrets([]))).toEqual({ outcome: "complete", applied_count: 0 });
-    else await expect(client.requestTyped(new UpdateSecrets([]))).rejects.toMatchObject({ code: "peer", peerError: { code: "unsupported_operation", effect: "none" } });
+    else await expect(client.requestTyped(new UpdateSecrets([]))).rejects.toMatchObject({ code: "peer", peerError: { code: "secrets_update_unavailable", effect: "none" } });
     console.log(JSON.stringify({ live: "control", mode: "json+cbor", concurrentReads: 48, maxMemoryMiB: String(memory.max_mib), possibleCpus: cpu.possible }));
   } finally {
     // A fresh cleanup connection also verifies independent redial after earlier
@@ -122,7 +124,12 @@ async function legacy(path: string, request: unknown): Promise<Record<string, un
       socket.once("error", reject); socket.once("connect", resolve);
     });
     socket.write(JSON.stringify(request) + "\n");
-    for await (const chunk of socket) chunks.push(chunk as Buffer);
+    for await (const chunk of socket) {
+      chunks.push(chunk as Buffer);
+      // JSON replies are newline framed. Windows can report EPIPE at closure,
+      // so finish at the complete reply instead of waiting for a clean EOF.
+      if (Buffer.concat(chunks).includes(0x0a)) break;
+    }
     return JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>;
   } finally { socket.destroy(); }
 }

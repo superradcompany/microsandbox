@@ -22,8 +22,11 @@ for (const name of ["protocol-client", "agent-client", "control-client"]) {
     };
     const host = ts.createCompilerHost(options);
     const originalRead = host.readFile.bind(host), originalExists = host.fileExists.bind(host);
-    host.readFile = name => name === filename ? match[1] : originalRead(name);
-    host.fileExists = name => name === filename || originalExists(name);
+    // TypeScript uses forward slashes even when path.join produces Windows separators.
+    const canonical = name => host.getCanonicalFileName(path.normalize(name));
+    const isExample = name => canonical(name) === canonical(filename);
+    host.readFile = name => isExample(name) ? match[1] : originalRead(name);
+    host.fileExists = name => isExample(name) || originalExists(name);
     const diagnostics = ts.getPreEmitDiagnostics(ts.createProgram([filename], options, host));
     if (diagnostics.length) {
       process.stderr.write(ts.formatDiagnosticsWithColorAndContext(diagnostics, {
