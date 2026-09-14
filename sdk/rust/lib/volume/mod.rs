@@ -799,7 +799,8 @@ pub(crate) async fn lock_volume_name(local: &LocalBackend, name: &str) -> Micros
     // A sibling create can hold this lock while awaiting its guest's readiness. Never block
     // the task polling both creates, and keep the file owned by this future during each wait
     // so cancellation releases it without leaving a background lock-acquisition worker.
-    #[cfg(unix)]
+    // Use the shared primitive on Windows too: a no-op would let batch siblings provision
+    // the same name concurrently before either publishes its volume record.
     while !microsandbox_utils::process_lock::try_lock_exclusive(&file)? {
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }

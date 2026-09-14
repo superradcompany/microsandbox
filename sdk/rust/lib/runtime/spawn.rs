@@ -5287,7 +5287,6 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn named_volume_waiter_yields_and_cancellation_releases_partial_locks() {
         use microsandbox_utils::process_lock::try_lock_exclusive;
