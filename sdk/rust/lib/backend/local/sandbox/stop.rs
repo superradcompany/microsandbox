@@ -35,7 +35,13 @@ impl LocalBackend {
             }
             Err(error) => return Err(error),
         };
-        let run_id = self.latest_stop_run(id).await?.map(|run| run.id);
+        let latest = self.latest_stop_run(id).await?;
+        let run_id = latest.as_ref().map(|run| run.id);
+        #[cfg(target_os = "linux")]
+        let departing = super::process_exit::RuntimeExit::capture(
+            latest.as_ref().and_then(|run| run.pid),
+            &microsandbox_runtime::ipc::lifecycle_lock_path(&run_dir, name),
+        )?;
         // Ownership, not a potentially recycled PID, decides whether there is a
         // runtime to signal. A stale Running row must still converge successfully.
         if try_acquire_lifecycle_guard(&run_dir, name)?.is_none()
@@ -50,6 +56,14 @@ impl LocalBackend {
         }
         // Exit cleanup also needs transition ownership. Never retain this guard while waiting.
         drop(transition);
+        #[cfg(target_os = "linux")]
+        if let Some(departing) = departing {
+            // Do not poll the external upper's lock: a different sandbox may legitimately
+            // own it by now. Wait only for the process selected before shutdown dispatch.
+            while !departing.has_exited()? {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        }
         self.wait_stop_complete(name, id, run_id, model.ephemeral)
             .await
     }

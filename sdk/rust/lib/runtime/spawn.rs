@@ -1822,6 +1822,19 @@ fn lock_disk_mounts(
         });
     }
 
+    if let RootfsSource::Oci(oci) = &config.spec.image
+        && let Some(microsandbox_types::RootDisk::DiskImage { path, .. }) = &oci.root_disk
+    {
+        // This is an external writable upper, not the shared read-only OCI base. Admit it
+        // through the same exclusion and runtime-owned handoff as other writable disks.
+        requests.push(DiskLockRequest {
+            path: path.clone(),
+            readonly: false,
+            label: format!("OCI writable root disk {}", path.display()),
+            volume_name: None,
+        });
+    }
+
     for mount in &config.spec.mounts {
         match mount {
             VolumeMount::Owned {
@@ -5786,6 +5799,205 @@ mod tests {
         let err =
             super::lock_disk_mounts(&config, &HashMap::new(), Path::new("unused")).unwrap_err();
         assert!(err.to_string().contains("more than once per sandbox"));
+    }
+
+    fn oci_upper_lock_config(name: &str, path: PathBuf) -> SandboxConfig {
+        SandboxConfig {
+            spec: microsandbox_types::SandboxSpec {
+                name: name.into(),
+                image: RootfsSource::Oci(OciRootfsSource {
+                    reference: "alpine".into(),
+                    root_disk: Some(microsandbox_types::RootDisk::DiskImage {
+                        path,
+                        format: DiskImageFormat::Raw,
+                        fstype: Some("ext4".into()),
+                    }),
+                }),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn oci_upper_lock_excludes_concurrent_sandbox_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let disk = dir.path().join("upper.ext4");
+        std::fs::write(&disk, b"disk").unwrap();
+        let gate = std::sync::Barrier::new(2);
+        let outcomes = std::thread::scope(|scope| {
+            let workers = ["first", "second"].map(|name| {
+                let config = oci_upper_lock_config(name, disk.clone());
+                let gate = &gate;
+                scope.spawn(move || {
+                    gate.wait();
+                    let locks =
+                        super::lock_disk_mounts(&config, &HashMap::new(), Path::new("unused"));
+                    // The winner must retain ownership until both contenders have tried.
+                    gate.wait();
+                    locks
+                        .map(|locks| locks.len())
+                        .map_err(|error| error.to_string())
+                })
+            });
+            workers.map(|worker| worker.join().unwrap())
+        });
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|result| matches!(result, Ok(1)))
+                .count(),
+            1
+        );
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|result| result
+                    .as_ref()
+                    .is_err_and(|error| error.contains("incompatible disk mode")))
+                .count(),
+            1
+        );
+        let config = oci_upper_lock_config("third", disk);
+        assert_eq!(
+            super::lock_disk_mounts(&config, &HashMap::new(), Path::new("unused"))
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn oci_upper_lock_rejects_duplicate_mount_and_releases_partial_acquisition() {
+        let dir = tempfile::tempdir().unwrap();
+        let disk = dir.path().join("upper.ext4");
+        std::fs::write(&disk, b"disk").unwrap();
+        let mut config = oci_upper_lock_config("duplicate", disk.clone());
+        config.spec.mounts.push(VolumeMount::DiskImage {
+            host: dir.path().join(".").join("upper.ext4"),
+            guest: "/data".into(),
+            format: DiskImageFormat::Raw,
+            fstype: None,
+            options: MountOptions {
+                readonly: true,
+                ..Default::default()
+            },
+        });
+        let error =
+            super::lock_disk_mounts(&config, &HashMap::new(), Path::new("unused")).unwrap_err();
+        assert!(error.to_string().contains("more than once per sandbox"));
+        // Failure after acquiring the upper must not leave it reserved for a failed launch.
+        config.spec.mounts.clear();
+        assert_eq!(
+            super::lock_disk_mounts(&config, &HashMap::new(), Path::new("unused"))
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn oci_upper_lock_excludes_readonly_attachment_and_leaves_plain_oci_unlocked() {
+        let dir = tempfile::tempdir().unwrap();
+        let disk = dir.path().join("upper.ext4");
+        std::fs::write(&disk, b"disk").unwrap();
+        let owner = oci_upper_lock_config("owner", disk.clone());
+        let locks = super::lock_disk_mounts(&owner, &HashMap::new(), Path::new("unused")).unwrap();
+
+        let mut reader = oci_upper_lock_config("reader", disk.clone());
+        reader.spec.image = RootfsSource::Oci(OciRootfsSource {
+            reference: "alpine".into(),
+            root_disk: None,
+        });
+        // Shared OCI image layers do not require attachment locks. The explicit upper
+        // does: even a read-only mount in another VM must conflict with its writer.
+        assert!(
+            super::lock_disk_mounts(&reader, &HashMap::new(), Path::new("unused"))
+                .unwrap()
+                .is_empty()
+        );
+        reader.spec.mounts.push(VolumeMount::DiskImage {
+            host: disk,
+            guest: "/data".into(),
+            format: DiskImageFormat::Raw,
+            fstype: None,
+            options: MountOptions {
+                readonly: true,
+                ..Default::default()
+            },
+        });
+        let error =
+            super::lock_disk_mounts(&reader, &HashMap::new(), Path::new("unused")).unwrap_err();
+        assert!(error.to_string().contains("incompatible disk mode"));
+        drop(locks);
+        assert_eq!(
+            super::lock_disk_mounts(&reader, &HashMap::new(), Path::new("unused"))
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn oci_upper_lock_excludes_canonical_path_alias() {
+        let dir = tempfile::tempdir().unwrap();
+        let disk = dir.path().join("upper.ext4");
+        std::fs::write(&disk, b"disk").unwrap();
+        let owner = oci_upper_lock_config("owner", disk);
+        let _locks = super::lock_disk_mounts(&owner, &HashMap::new(), Path::new("unused")).unwrap();
+        let alias = oci_upper_lock_config("alias", dir.path().join(".").join("upper.ext4"));
+        let error =
+            super::lock_disk_mounts(&alias, &HashMap::new(), Path::new("unused")).unwrap_err();
+        assert!(error.to_string().contains("incompatible disk mode"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn oci_upper_lock_excludes_symlink_and_hardlink_aliases() {
+        let dir = tempfile::tempdir().unwrap();
+        let disk = dir.path().join("upper.ext4");
+        std::fs::write(&disk, b"disk").unwrap();
+        let symlink = dir.path().join("symlink.ext4");
+        let hardlink = dir.path().join("hardlink.ext4");
+        std::os::unix::fs::symlink(&disk, &symlink).unwrap();
+        std::fs::hard_link(&disk, &hardlink).unwrap();
+        let owner = oci_upper_lock_config("owner", disk);
+        let _locks = super::lock_disk_mounts(&owner, &HashMap::new(), Path::new("unused")).unwrap();
+        for path in [symlink, hardlink] {
+            let config = oci_upper_lock_config("alias", path);
+            let error =
+                super::lock_disk_mounts(&config, &HashMap::new(), Path::new("unused")).unwrap_err();
+            assert!(error.to_string().contains("incompatible disk mode"));
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn oci_upper_lock_handoff_releases_while_creator_handle_is_retained() {
+        use std::os::fd::AsRawFd;
+
+        let disk = tempfile::NamedTempFile::new().unwrap();
+        let config = oci_upper_lock_config("owner", disk.path().into());
+        let locks = super::lock_disk_mounts(&config, &HashMap::new(), Path::new("unused")).unwrap();
+        assert_eq!(locks.len(), 1);
+        let fd = locks[0].as_raw_fd();
+        assert_ne!(
+            unsafe { libc::fcntl(fd, libc::F_GETFD) } & libc::FD_CLOEXEC,
+            0
+        );
+        let mut command = unix_disk_lock_test_command();
+        unsafe {
+            command.pre_exec(move || {
+                let mut next_spare_fd = microsandbox_runtime::vm::LIFECYCLE_LOCK_FD + 1;
+                super::inherit_disk_lock_fds(&[fd], &mut next_spare_fd)
+            });
+        }
+        let child = command.spawn().unwrap();
+        assert_ne!(
+            unsafe { libc::fcntl(fd, libc::F_GETFD) } & libc::FD_CLOEXEC,
+            0
+        );
+        assert_unix_disk_lock_child_handoff(child, locks, &[disk.path()]).await;
     }
 
     #[test]
