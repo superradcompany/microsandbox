@@ -36,7 +36,7 @@ use self::http::urlencoding;
 use super::{
     Backend, BackendInfo, BackendKind, BackendSelectionSource, SandboxBackend, VolumeBackend,
 };
-use crate::{MicrosandboxError, MicrosandboxResult};
+use crate::{MicrosandboxError, MicrosandboxResult, timing};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -373,9 +373,15 @@ impl Backend for CloudBackend {
             // establishment, and the agent handshake. In particular, a peer
             // that accepts TCP but never completes TLS/HTTP upgrade must not
             // leave exec, filesystem, or attach calls hanging indefinitely.
-            tokio::time::timeout(timeout, async {
-                let sandbox = self.get_sandbox(name).await?;
-                let url = self.agent_ws_url(&sandbox.id)?;
+            let mut timing = timing::ConnectionTiming::new(name);
+            let result = tokio::time::timeout(timeout, async {
+                timing.stage("identity");
+                let lookup_started = std::time::Instant::now();
+                let id = self.get_sandbox(name).await?.id;
+                tracing::trace!(target: timing::TARGET, sandbox_id = %id, elapsed_seconds = lookup_started.elapsed().as_secs_f64(),
+                    "cloud agent identity resolved");
+                timing.identity(&id);
+                let url = self.agent_ws_url(&id)?;
                 let mut request = url
                     .into_client_request()
                     .map_err(|e| MicrosandboxError::Runtime(format!("cloud agent request: {e}")))?;
@@ -392,27 +398,41 @@ impl Backend for CloudBackend {
                     })?,
                 );
 
+                timing.stage("websocket");
+                let websocket_started = std::time::Instant::now();
                 let connector = cloud_agent_tls_connector()?;
                 let (socket, _) =
                     connect_async_tls_with_config(request, None, false, Some(connector))
                         .await
                         .map_err(|e| {
+                            tracing::trace!(target: timing::TARGET, sandbox_id = %id, elapsed_seconds = websocket_started.elapsed().as_secs_f64(), success = false, "cloud agent websocket finished");
                             MicrosandboxError::Runtime(format!("cloud agent websocket: {e}"))
                         })?;
 
-                crate::agent::AgentClient::connect_stream_with_timeout(
+                tracing::trace!(target: timing::TARGET, sandbox_id = %id, elapsed_seconds = websocket_started.elapsed().as_secs_f64(), success = true, "cloud agent websocket finished");
+                timing.stage("handshake");
+                let handshake_started = std::time::Instant::now();
+                let client = crate::agent::AgentClient::connect_stream_with_timeout(
                     self::ws_io::WsByteStream::new(socket),
                     timeout,
                 )
-                .await
-                .map_err(Into::into)
+                .await;
+                tracing::trace!(target: timing::TARGET, sandbox_id = %id, elapsed_seconds = handshake_started.elapsed().as_secs_f64(), success = client.is_ok(), "cloud agent handshake finished");
+                client.map_err(Into::into)
             })
-            .await
-            .map_err(|_| {
-                MicrosandboxError::Runtime(format!(
-                    "timed out connecting to cloud sandbox agent {name:?} after {timeout:?}"
-                ))
-            })?
+            .await;
+            match result {
+                Ok(result) => {
+                    timing.finish(if result.is_ok() { "success" } else { "error" });
+                    result
+                }
+                Err(_) => {
+                    timing.finish("timeout");
+                    Err(MicrosandboxError::Runtime(format!(
+                        "timed out connecting to cloud sandbox agent {name:?} after {timeout:?}"
+                    )))
+                }
+            }
         })
     }
 }

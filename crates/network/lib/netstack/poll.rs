@@ -627,6 +627,7 @@ pub fn smoltcp_poll_loop(
         // so checking once per second is more than sufficient.
         if last_cleanup.elapsed() >= std::time::Duration::from_secs(1) {
             conn_tracker.cleanup_closed(&mut sockets);
+            conn_tracker.trace_stats(&sockets);
             port_publisher.cleanup_closed(&mut sockets);
             udp_relay.cleanup_expired();
             udp_fragments.cleanup_expired();

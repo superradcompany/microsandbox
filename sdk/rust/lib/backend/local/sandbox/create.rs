@@ -35,6 +35,7 @@ use crate::sandbox::{
     apply_patches, build_upper_tree, remove_dir_if_exists, validate_env, validate_hostname,
     validate_labels, validate_sandbox_name, validate_volume_mounts,
 };
+use crate::timing::{self, TARGET};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -85,6 +86,7 @@ impl LocalBackend {
     /// impl and the pull-progress shims forward the Arc they were handed so
     /// the returned [`Sandbox`] routes follow-up calls through this same
     /// backend.
+    #[tracing::instrument(target = TARGET, level = "trace", name = "sandbox_local_create", skip_all, fields(sandbox_name = %config.spec.name))]
     pub(crate) async fn create_sandbox(
         &self,
         backend: Arc<dyn Backend>,
@@ -92,6 +94,7 @@ impl LocalBackend {
         mode: SpawnMode,
         progress: Option<PullProgressSender>,
     ) -> MicrosandboxResult<Sandbox> {
+        let timing_name = config.spec.name.clone();
         tracing::debug!(
             sandbox = %config.spec.name,
             image = ?config.spec.image,
@@ -125,9 +128,12 @@ impl LocalBackend {
         // Transition ownership is deliberately separate from the runtime lifecycle lock: this
         // guard serializes database/storage mutation and launcher-to-runtime handoff, while the
         // lifecycle lock remains owned by the VM for its entire runtime generation.
-        let _transition_guard =
-            Self::acquire_sandbox_transition_guard(&self.config().run_dir(), &config.spec.name)
-                .await?;
+        let _transition_guard = timing::measure(
+            &timing_name,
+            "transition_lock",
+            Self::acquire_sandbox_transition_guard(&self.config().run_dir(), &config.spec.name),
+        )
+        .await?;
         Self::prepare_create_target(db, &config, &sandbox_dir, &self.config().run_dir()).await?;
 
         // Resolve OCI images before spawning the sandbox process.
@@ -154,16 +160,28 @@ impl LocalBackend {
                 pull_result,
                 metadata_reference,
                 cached_metadata,
-            } = self
-                .resolve_oci_image_for_create(
+            } = timing::measure(
+                &timing_name,
+                "image_resolution",
+                self.resolve_oci_image_for_create(
                     &reference,
                     config.spec.pull_policy,
                     overrides,
                     expected_snapshot_manifest_digest.as_deref(),
                     image_materialization,
                     progress,
-                )
-                .await?;
+                ),
+            )
+            .await?;
+
+            tracing::trace!(
+                target: timing::TARGET,
+                sandbox_name = %timing_name,
+                layers_cached = pull_result.cached,
+                layer_count = pull_result.layer_diff_ids.len(),
+                materialization = ?image_materialization,
+                "sandbox image resolved"
+            );
 
             // Snapshot overlays are meaningful only against the exact base
             // image digest captured in their descriptor.
@@ -262,7 +280,14 @@ impl LocalBackend {
             };
 
             let upper_tree = if !config.spec.patches.is_empty() {
-                Some(build_upper_tree(&config.spec.patches, &layer_erofs_paths).await?)
+                Some(
+                    timing::measure(
+                        &timing_name,
+                        "patch_tree",
+                        build_upper_tree(&config.spec.patches, &layer_erofs_paths),
+                    )
+                    .await?,
+                )
             } else {
                 None
             };
@@ -272,11 +297,15 @@ impl LocalBackend {
             tokio::fs::create_dir_all(&sandbox_dir).await?;
             let upper_path = sandbox_dir.join("upper.ext4");
             if let Some((base, target_mib, clone)) = flat_spec {
-                crate::sandbox::flat_rootfs::create_private_flat_rootfs(
-                    base,
-                    sandbox_dir.join(crate::sandbox::flat_rootfs::FLAT_ROOTFS_FILENAME),
-                    target_mib,
-                    clone,
+                timing::measure(
+                    &timing_name,
+                    "flat_root_clone",
+                    crate::sandbox::flat_rootfs::create_private_flat_rootfs(
+                        base,
+                        sandbox_dir.join(crate::sandbox::flat_rootfs::FLAT_ROOTFS_FILENAME),
+                        target_mib,
+                        clone,
+                    ),
                 )
                 .await?;
                 if let RootfsSource::Oci(oci) = &mut config.spec.image
@@ -308,8 +337,12 @@ impl LocalBackend {
                         let upper_size_mib =
                             size_mib.unwrap_or(crate::sandbox::config::DEFAULT_OCI_UPPER_SIZE_MIB);
                         if !upper_path.exists() || upper_tree.is_some() {
-                            Self::create_upper_ext4(&upper_path, upper_size_mib, upper_tree)
-                                .await?;
+                            timing::measure(
+                                &timing_name,
+                                "writable_disk_create",
+                                Self::create_upper_ext4(&upper_path, upper_size_mib, upper_tree),
+                            )
+                            .await?;
                         }
                     }
                     // The builder rejects patches with tmpfs root disks and
@@ -372,20 +405,30 @@ impl LocalBackend {
         // Sandbox-time named-volume creation is one-shot create intent. Provision
         // before inserting the sandbox row so volume conflicts or incompatibilities
         // cannot leave a stopped sandbox that never booted.
-        let created_named_volumes = ensure_named_volumes(self, &config).await?;
+        let created_named_volumes = timing::measure(
+            &timing_name,
+            "named_volumes",
+            ensure_named_volumes(self, &config),
+        )
+        .await?;
 
         // Claim the persisted identity in Starting state. Running is published only after the
         // guest agent and all create-time validation are ready for callers.
         let write_db = db.write();
         let persisted_config = config.clone_for_persistence();
-        let sandbox_id =
-            match Self::insert_starting_sandbox_record(write_db, &persisted_config).await {
-                Ok(sandbox_id) => sandbox_id,
-                Err(err) => {
-                    rollback_created_named_volumes(self, &created_named_volumes).await;
-                    return Err(err);
-                }
-            };
+        let sandbox_id = match timing::measure(
+            &timing_name,
+            "persist_start",
+            Self::insert_starting_sandbox_record(write_db, &persisted_config),
+        )
+        .await
+        {
+            Ok(sandbox_id) => sandbox_id,
+            Err(err) => {
+                rollback_created_named_volumes(self, &created_named_volumes).await;
+                return Err(err);
+            }
+        };
         tracing::debug!(sandbox_id, sandbox = %config.spec.name, "create_local: db record inserted");
 
         // Spawn the sandbox process and create the bridge. On failure, return the provisional
@@ -511,17 +554,25 @@ impl LocalBackend {
         mode: SpawnMode,
         lifecycle_guard: Option<microsandbox_runtime::ipc::SandboxLifecycleGuard>,
     ) -> MicrosandboxResult<(crate::backend::SandboxLocalState, SandboxConfig)> {
-        let (mut handle, agent_sock_path) =
-            spawn_sandbox(self, &config, sandbox_id, mode, lifecycle_guard).await?;
+        let (mut handle, agent_sock_path) = timing::measure(
+            &config.spec.name,
+            "process_launch",
+            spawn_sandbox(self, &config, sandbox_id, mode, lifecycle_guard),
+        )
+        .await?;
         let log_dir = self.sandboxes_dir().join(&config.spec.name).join("logs");
 
         // Wait for the relay socket to become available.
-        let client =
-            Self::wait_for_relay(&agent_sock_path, &log_dir, &mut handle, &config.spec.name)
-                .await?;
+        let client = timing::measure(
+            &config.spec.name,
+            "agent_ready",
+            Self::wait_for_relay(&agent_sock_path, &log_dir, &mut handle, &config.spec.name),
+        )
+        .await?;
 
         if let Ok(ready) = client.ready() {
             tracing::info!(
+                sandbox_name = %config.spec.name,
                 boot_time_ms = ready.boot_time_ns / 1_000_000,
                 init_time_ms = ready.init_time_ns / 1_000_000,
                 ready_time_ms = ready.ready_time_ns / 1_000_000,
