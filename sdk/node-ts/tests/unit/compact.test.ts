@@ -1,9 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { compactionResultFromJson, type DiskCompactionOptions } from "../../src/compact.js";
-import { Sandbox } from "../../src/sandbox.js";
-import { SandboxHandle } from "../../src/sandbox-handle.js";
-import type { NapiSandbox, NapiSandboxHandle } from "../../src/internal/napi.js";
+// CI runs these tests from build artifacts without the TypeScript source tree.
+import { compactionResultFromJson, type DiskCompactionOptions } from "../../dist/compact.js";
+import { Sandbox } from "../../dist/sandbox.js";
+import { SandboxHandle } from "../../dist/sandbox-handle.js";
+import type { NapiSandbox, NapiSandboxHandle } from "../../dist/internal/napi.js";
 
 describe("disk compaction contract", () => {
   it("retains per-disk outcomes alongside aggregate metrics", () => {
