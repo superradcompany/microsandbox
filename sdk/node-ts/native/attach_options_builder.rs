@@ -21,6 +21,8 @@ pub struct JsAttachOptions {
     pub env: HashMap<String, String>,
     pub detach_keys: Option<String>,
     pub rlimits: Vec<JsRlimit>,
+    /// Whether this session's output is recorded to the sandbox's `exec.log`.
+    pub capture: bool,
 }
 
 /// Fluent builder for interactive attach options.
@@ -33,6 +35,8 @@ pub struct JsAttachOptionsBuilder {
     env: Vec<(String, String)>,
     detach_keys: Option<String>,
     rlimits: Vec<JsRlimit>,
+    /// `None` until `capture()` is called — see `JsExecOptionsBuilder`.
+    capture: Option<bool>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -51,6 +55,7 @@ impl JsAttachOptionsBuilder {
             env: Vec::new(),
             detach_keys: None,
             rlimits: Vec::new(),
+            capture: None,
         }
     }
 
@@ -114,6 +119,18 @@ impl JsAttachOptionsBuilder {
         self
     }
 
+    /// Record this session's output to the sandbox's `exec.log` (default:
+    /// false). An interactive session's transcript can carry anything typed
+    /// or printed, so it is recorded only when asked; the sandbox's workload
+    /// (`attachDefault*`) is recorded without asking.
+    #[napi]
+    pub fn capture(&mut self, enabled: bool) -> &Self {
+        let prev = self.take_inner();
+        self.inner = Some(prev.capture(enabled));
+        self.capture = Some(enabled);
+        self
+    }
+
     #[napi]
     pub fn rlimit(&mut self, resource: String, limit: u32) -> Result<&Self> {
         let res = parse_rlimit_resource(&resource)?;
@@ -150,6 +167,7 @@ impl JsAttachOptionsBuilder {
             env: self.env.iter().cloned().collect(),
             detach_keys: self.detach_keys.clone(),
             rlimits: self.rlimits.clone(),
+            capture: self.capture.unwrap_or(false),
         }
     }
 }
@@ -167,5 +185,16 @@ impl JsAttachOptionsBuilder {
         self.inner
             .take()
             .ok_or_else(|| napi::Error::from_reason("AttachOptionsBuilder already consumed"))
+    }
+
+    /// Internal: extract the underlying Rust builder for the sandbox's
+    /// workload (`attachDefaultWith`), recorded unless the caller explicitly
+    /// set `capture(false)`. See `JsExecOptionsBuilder::take_inner_builder_for_workload`.
+    pub(crate) fn take_inner_builder_for_workload(&mut self) -> Result<RustAttachOptionsBuilder> {
+        let builder = self.take_inner_builder()?;
+        Ok(match self.capture {
+            None => builder.capture(true),
+            Some(_) => builder,
+        })
     }
 }

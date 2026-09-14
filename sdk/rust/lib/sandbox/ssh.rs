@@ -1060,6 +1060,9 @@ impl SshSession {
             stdin: StdinMode::Pipe,
             tty: pty.is_some(),
             rlimits: Vec::new(),
+            // An SSH session is ad-hoc and usually interactive: not recorded to
+            // `exec.log`, like any exec that does not ask.
+            capture: false,
         };
         let rows = pty.as_ref().map(|p| p.rows).unwrap_or(24);
         let cols = pty.as_ref().map(|p| p.cols).unwrap_or(80);

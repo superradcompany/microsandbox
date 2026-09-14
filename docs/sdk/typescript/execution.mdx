@@ -734,6 +734,18 @@ Allocate a pseudo-terminal
 
 `(enabled: boolean) => this`
 
+#### <span className="msb-recv">execOptions.</span><span className="msb-hn">capture()</span>
+
+```typescript
+capture(enabled)
+```
+
+Record this command's output to the sandbox's `exec.log`, where `logs()` reads it. Default: `false`. An ad-hoc exec's output, a shell's above all, can carry anything typed or printed, so it is written to the host's disk only when asked. The sandbox's workload (`execDefault`, `execDefaultWith`, `attachDefault`, `attachDefaultWith`) is recorded without asking; pass `capture(false)` there to opt out. No effect on a sandbox built with `disableExecLog()`.
+
+<p className="msb-label">Returns</p>
+
+`(enabled: boolean) => this`
+
 #### <span className="msb-recv">execOptions.</span><span className="msb-hn">rlimit()</span>
 
 ```typescript
@@ -849,6 +861,18 @@ Detach key sequence (e.g. `"ctrl-]"` or `"ctrl-p,ctrl-q"`)
 <p className="msb-label">Returns</p>
 
 `(spec: string) => this`
+
+#### <span className="msb-recv">attachOptions.</span><span className="msb-hn">capture()</span>
+
+```typescript
+capture(enabled)
+```
+
+Record this session's output to the sandbox's `exec.log`. Default: `false`: an interactive session's transcript can carry anything typed or printed, so it is recorded only when asked. `attachDefault` / `attachDefaultWith` record the workload without asking; pass `capture(false)` to opt out.
+
+<p className="msb-label">Returns</p>
+
+`(enabled: boolean) => this`
 
 #### <span className="msb-recv">attachOptions.</span><span className="msb-hn">rlimit()</span>
 

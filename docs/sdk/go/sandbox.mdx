@@ -441,7 +441,7 @@ for _, e := range entries {
 
 </Accordion>
 
-Read persisted output from the sandbox's `exec.log`. Backed by an on-disk file, so it works for running and stopped sandboxes alike without guest-agent protocol traffic. The default sources are stdout and stderr; add `LogSourceOutput` for PTY-merged output or `LogSourceSystem` for runtime and kernel diagnostics. The same method exists on [`SandboxHandle`](#sandboxhandle) for callers that don't want to start the sandbox first.
+Read persisted output from the sandbox's `exec.log`. It holds the sandbox's workload output (`ExecDefault`, `AttachDefault`) and any command that asked with [`WithExecCapture(true)`](/sdk/go/execution#withexeccapture); a sandbox created with [`WithDisableExecLog()`](#withdisableexeclog) records nothing. Backed by an on-disk file, so it works for running and stopped sandboxes alike without guest-agent protocol traffic. The default sources are stdout and stderr; add `LogSourceOutput` for PTY-merged output or `LogSourceSystem` for runtime and kernel diagnostics. The same method exists on [`SandboxHandle`](#sandboxhandle) for callers that don't want to start the sandbox first.
 
 <p className="msb-label">Parameters</p>
 
@@ -1559,6 +1559,16 @@ func WithQuietLogs() SandboxOption
 
 Suppress sandbox-level log output entirely.
 
+#### <span className="msb-recv"></span><span className="msb-hn">WithDisableExecLog()</span>
+
+<Tooltip tip="Applies to local sandboxes; microsandbox cloud does not accept this setting."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+```go
+func WithDisableExecLog() SandboxOption
+```
+
+Do not record exec output to the sandbox's `exec.log` at all, not even the workload's. For workloads whose output must not reach the host's disk; [`Logs`](#logs) then returns no user-program output.
+
 #### <span className="msb-recv"></span><span className="msb-hn">WithScripts()</span>
 
 ```go
@@ -2009,6 +2019,23 @@ Add environment variables for the attached session, merged on top of the sandbox
   <div className="msb-param">
     <div className="msb-param-key"><code>env</code><span className="msb-type">map[string]string</span></div>
     <div className="msb-param-desc">Environment variables to set.</div>
+  </div>
+</div>
+
+#### <span className="msb-hn">WithAttachCapture()</span>
+
+```go
+func WithAttachCapture(enabled bool) AttachOption
+```
+
+Record the attached session's output to the sandbox's `exec.log`. Default: off for `AttachWith`, since an interactive transcript can carry anything typed or printed. `AttachDefault` attaches to the sandbox's workload and records it unless `WithAttachCapture(false)` opts out.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>enabled</code><span className="msb-type">bool</span></div>
+    <div className="msb-param-desc"><code>true</code> to record the session; <code>false</code> to opt <code>AttachDefault</code> out.</div>
   </div>
 </div>
 

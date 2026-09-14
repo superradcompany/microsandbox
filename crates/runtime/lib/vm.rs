@@ -170,6 +170,10 @@ pub struct Config {
     /// Whether to forward VM console output to stdout.
     pub forward_output: bool,
 
+    /// Do not open `exec.log` at all, so no exec session is recorded — not
+    /// even the startup command's.
+    pub disable_exec_log: bool,
+
     /// Idle timeout in seconds (None = no idle timeout).
     pub idle_timeout_secs: Option<u64>,
 
@@ -657,9 +661,12 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
     }
 
     // Attach the exec.log writer so the ring reader can capture the
-    // primary session's stdout/stderr. Failure to open the file is
-    // non-fatal — log capture is best-effort and must not block boot.
-    let exec_log_writer: Option<Arc<crate::exec_log::LogWriter>> =
+    // stdout/stderr of sessions that asked for it. Failure to open the file
+    // is non-fatal — log capture is best-effort and must not block boot.
+    let exec_log_writer: Option<Arc<crate::exec_log::LogWriter>> = if config.disable_exec_log {
+        tracing::info!("exec_log: capture disabled for this sandbox");
+        None
+    } else {
         match crate::exec_log::LogWriter::open(&config.log_dir) {
             Ok(writer) => {
                 let arc = Arc::new(writer);
@@ -670,7 +677,8 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
                 tracing::warn!(error = %err, "exec_log: open failed, capture disabled");
                 None
             }
-        };
+        }
+    };
 
     // Shared termination reason — background tasks store the reason before
     // triggering exit; the exit observer reads it for the DB update.

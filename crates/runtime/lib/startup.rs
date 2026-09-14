@@ -46,6 +46,9 @@ pub(crate) async fn run_startup_command(
         rows: 24,
         cols: 80,
         rlimits: Vec::new(),
+        // The startup command is the sandbox's workload: its output is what
+        // `exec.log` and `msb logs` are for.
+        capture: true,
     };
 
     let (_id, mut rx) = client

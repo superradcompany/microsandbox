@@ -339,6 +339,11 @@ pub struct SandboxOpts {
     )]
     pub no_net: bool,
 
+    /// Do not record exec output to this sandbox's `exec.log` — not even the
+    /// workload's. `msb logs` then has nothing to show.
+    #[arg(long = "no-exec-log")]
+    pub no_exec_log: bool,
+
     /// High-level network profile. Repeatable and comma-separated. Profiles
     /// (`public`, `private`, `host`) compose and automatically enable gateway
     /// DNS. `all` and `none` are terminal policies and cannot be combined with
@@ -1257,6 +1262,9 @@ fn apply_sandbox_opts_inner(
         builder = builder.replace_with_timeout(d);
     } else if opts.replace {
         builder = builder.replace();
+    }
+    if opts.no_exec_log {
+        builder = builder.disable_exec_log();
     }
 
     // --- Environment ---

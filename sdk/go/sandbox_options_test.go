@@ -2,11 +2,14 @@ package microsandbox
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/superradcompany/microsandbox/sdk/go/internal/ffi"
 )
 
 func TestLifecycleConvergenceOptions(t *testing.T) {
@@ -360,6 +363,7 @@ func TestFFIWireShape_ScalarKnobs(t *testing.T) {
 		WithDetached(),
 		WithEphemeral(true),
 		WithQuietLogs(),
+		WithDisableExecLog(),
 		WithLogLevel(LogLevelDebug),
 		WithPullPolicy(PullPolicyAlways),
 		WithMaxDuration(45*time.Second),
@@ -384,6 +388,7 @@ func TestFFIWireShape_ScalarKnobs(t *testing.T) {
 		{"detached", true},
 		{"ephemeral", true},
 		{"quiet_logs", true},
+		{"disable_exec_log", true},
 		{"log_level", "debug"},
 		{"pull_policy", "always"},
 		{"max_duration_secs", float64(45)},
@@ -750,7 +755,7 @@ func TestFFIWireShape_NetworkCustomRules(t *testing.T) {
 			DNS: &DNSConfig{
 				Nameservers: []string{"1.1.1.1:53"},
 			},
-			Strict:  true,
+			Strict:   true,
 			IPv4Pool: "172.31.240.0/24",
 			IPv6Pool: "fd7a:115c:a1e0:100::/56",
 		}),
@@ -990,5 +995,44 @@ func TestFFIWireShape_KitchenSinkDoesNotPanic(t *testing.T) {
 	body, _ := json.Marshal(got)
 	if !strings.Contains(string(body), "python:3.12") {
 		t.Fatalf("kitchen-sink payload missing image: %s", body)
+	}
+}
+
+// The capture key is a pointer on the wire: unset omits it, so the native side
+// keeps the call's default, and an explicit false is sent, so ExecDefault can
+// opt out of recording.
+func TestFFIWireShape_ExecAndAttachCapture(t *testing.T) {
+	off, on := false, true
+	cases := []struct {
+		name string
+		v    any
+		want string
+	}{
+		{"exec unset", ffi.ExecOptions{}, ""},
+		{"exec false", ffi.ExecOptions{Capture: &off}, "false"},
+		{"exec true", ffi.ExecOptions{Capture: &on}, "true"},
+		{"attach unset", ffi.AttachOptions{}, ""},
+		{"attach false", ffi.AttachOptions{Capture: &off}, "false"},
+	}
+	for _, c := range cases {
+		raw, err := json.Marshal(c.v)
+		if err != nil {
+			t.Fatalf("%s: marshal: %v", c.name, err)
+		}
+		var out map[string]any
+		if err := json.Unmarshal(raw, &out); err != nil {
+			t.Fatalf("%s: unmarshal: %v", c.name, err)
+		}
+		got, present := out["capture"]
+		switch c.want {
+		case "":
+			if present {
+				t.Errorf("%s: capture = %v, want the key omitted", c.name, got)
+			}
+		default:
+			if !present || fmt.Sprint(got) != c.want {
+				t.Errorf("%s: capture = %v (present %v), want %s", c.name, got, present, c.want)
+			}
+		}
 	}
 }

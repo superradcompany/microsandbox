@@ -230,7 +230,7 @@ impl Sandbox {
         &self,
         builder: &mut JsExecOptionsBuilder,
     ) -> Result<ExecOutput> {
-        let opts_builder = builder.take_inner_builder()?;
+        let opts_builder = builder.take_inner_builder_for_workload()?;
         let guard = self.inner.lock().await;
         let sb = guard.as_ref().ok_or_else(consumed_error)?;
         let output = sb
@@ -255,7 +255,7 @@ impl Sandbox {
         &self,
         builder: &mut JsExecOptionsBuilder,
     ) -> Result<JsExecHandle> {
-        let opts_builder = builder.take_inner_builder()?;
+        let opts_builder = builder.take_inner_builder_for_workload()?;
         let guard = self.inner.lock().await;
         let sb = guard.as_ref().ok_or_else(consumed_error)?;
         let handle = sb
@@ -476,7 +476,7 @@ impl Sandbox {
         &self,
         builder: &mut JsAttachOptionsBuilder,
     ) -> Result<i32> {
-        let opts_builder = builder.take_inner_builder()?;
+        let opts_builder = builder.take_inner_builder_for_workload()?;
         let guard = self.inner.lock().await;
         let sb = guard.as_ref().ok_or_else(consumed_error)?;
         sb.attach_default_with(|_default| opts_builder)

@@ -62,6 +62,7 @@ Common flags:
 | `--no-tty` | Disable PTY allocation and run non-interactively |
 | `--replace` | Replace an existing sandbox with the same name |
 | `--no-net` | Disable network access |
+| `--no-exec-log` | Do not record exec output to `exec.log`, not even the workload's |
 | `--deployment-profile` | Select `single-tenant` or `multi-tenant` host-runtime isolation; managed backends may override it |
 | `--net` | Add a high-level network profile (`public`, `private`, `host`, `all`, or `none`) |
 | `--net-rule` | Add a network policy rule |
@@ -366,6 +367,7 @@ msb exec devbox -- ls -la /app
 | `-u`, `--user` | Run the command as the specified guest user |
 | `--timeout` | Kill the command after this duration (e.g. `30s`, `5m`, `1h`) |
 | `--rlimit` | Set a POSIX resource limit (e.g. `nofile=1024`, `nproc=64`) |
+| `--capture` | Record this command's output to `exec.log`, where `msb logs` shows it (off by default) |
 | `-q`, `--quiet` | Suppress progress output |
 
 <Tip>
@@ -395,7 +397,7 @@ Host-to-sandbox and sandbox-to-host forms follow `docker cp` syntax. Same-sandbo
 
 <Tooltip tip="On microsandbox cloud, use msb logs -f for a live stream. Bounded and historical reads remain local-only."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
-Read captured output from a sandbox. Local sandboxes store their captured stdio under `<sandbox-dir>/logs/exec.log` as JSON Lines, plus runtime/kernel diagnostics in `runtime.log`/`kernel.log`; these bounded reads work on running and stopped sandboxes. On microsandbox cloud, `msb logs -f <name>` streams a running sandbox through the cloud API. Cloud bounded reads and the `--tail`, `--since`, and `--until` filters are not yet available.
+Read captured output from a sandbox. Only the sandbox's workload is recorded by default: an `msb exec` asks with `--capture`, and `--no-exec-log` at creation records nothing (see [Logs](/sandboxes/logs)). Local sandboxes store their captured stdio under `<sandbox-dir>/logs/exec.log` as JSON Lines, plus runtime/kernel diagnostics in `runtime.log`/`kernel.log`; these bounded reads work on running and stopped sandboxes. On microsandbox cloud, `msb logs -f <name>` streams a running sandbox through the cloud API. Cloud bounded reads and the `--tail`, `--since`, and `--until` filters are not yet available.
 
 ```bash
 # Captured user-program output (default sources: stdout + stderr + output)

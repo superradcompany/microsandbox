@@ -188,6 +188,16 @@ output = sandbox.ssh_exec("long-running-agent", inactivity_timeout: 1_800)
 persistent = sandbox.ssh_exec("long-running-agent", inactivity_timeout: 0)
 ```
 
+`exec` and `shell` record their output to the sandbox's `exec.log`, where
+`sandbox.logs` reads it, only when asked with `capture: true`. An exec or shell
+session is not recorded by default, because its output can carry anything typed
+or printed. Create a sandbox with `disable_exec_log: true` to record nothing at
+all, not even the workload's output:
+
+```ruby
+sandbox.shell("./migrate.sh", capture: true)
+```
+
 Streaming exec, logs, metrics, and filesystem handles; interactive SSH/SFTP;
 live modification plans; and the complete Rust network and mount builders are
 not currently exposed. Use the Rust SDK when those APIs are required.

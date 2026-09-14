@@ -526,6 +526,7 @@ class ExecOptions(TypedDict, total=False):
     stdin_data: bytes
     tty: bool
     rlimits: list[Rlimit]
+    capture: bool
 
 
 # --------------------------------------------------------------------------------------------------

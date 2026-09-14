@@ -137,6 +137,27 @@ handle.destroy(force: false, timeout: nil) # => nil
 
 Stop and remove this exact sandbox. A stale handle refuses to destroy a replacement that reused the name.
 
+## Exec output and logs
+
+`sandbox.exec` and `sandbox.shell` record their output to the sandbox's `exec.log`, where `sandbox.logs` reads it, only when asked. An exec or shell session is not recorded by default: its output, a shell's above all, can carry anything typed or printed, and would otherwise reach the host's disk.
+
+```ruby
+sandbox.shell("./migrate.sh", capture: true)          # recorded
+sandbox.exec("env", capture: false)                   # not recorded (the default)
+```
+
+`capture:` accepts `true`, `false`, or `nil`; `nil` or omitting it keeps the default.
+
+<Tooltip tip="Applies to local sandboxes; microsandbox cloud does not accept this setting."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+To record nothing at all, not even the workload's output, create the sandbox with `disable_exec_log: true` (or `.disable_exec_log` on the builder). `sandbox.logs` then returns nothing.
+
+```ruby
+sandbox = Microsandbox::Sandbox.create("private", image: "alpine", disable_exec_log: true)
+```
+
+See [Logs](/sandboxes/logs) for what is recorded across SDKs.
+
 ## Identity errors
 
 Ruby currently surfaces stale identity protection through `Microsandbox::Error`. The message includes `was replaced`; unlike Rust, TypeScript, Python, and Go, the Ruby SDK does not yet expose a dedicated `SandboxReplacedError` subclass.

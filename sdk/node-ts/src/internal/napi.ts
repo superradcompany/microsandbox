@@ -194,6 +194,7 @@ export interface NapiSandboxBuilderSetters {
   ephemeral(enabled: boolean): this;
   metricsSampleIntervalMs(ms: number): this;
   disableMetricsSample(): this;
+  disableExecLog(): this;
   workdir(path: string): this;
   shell(shell: string): this;
   security(profile: "default" | "restricted"): this;
@@ -862,6 +863,7 @@ export interface NapiExecOptionsBuilder {
   stdinPipe(): this;
   stdinBytes(data: Buffer): this;
   tty(enabled: boolean): this;
+  capture(enabled: boolean): this;
   rlimit(resource: string, limit: number): this;
   rlimitRange(resource: string, soft: number, hard: number): this;
 }
@@ -883,6 +885,7 @@ export interface NapiAttachOptionsBuilder {
   env(key: string, value: string): this;
   envs(vars: Record<string, string>): this;
   detachKeys(spec: string): this;
+  capture(enabled: boolean): this;
   rlimit(resource: string, limit: number): this;
   rlimitRange(resource: string, soft: number, hard: number): this;
 }

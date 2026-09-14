@@ -56,6 +56,7 @@ type SandboxConfig struct {
 	Init               *InitConfig
 	LogLevel           LogLevel
 	QuietLogs          bool
+	DisableExecLog     bool
 	Scripts            map[string]string
 	PullPolicy         PullPolicy
 	MaxDuration        time.Duration
@@ -835,6 +836,13 @@ func WithQuietLogs() SandboxOption {
 	return func(o *SandboxConfig) { o.QuietLogs = true }
 }
 
+// WithDisableExecLog keeps the sandbox's exec.log closed: no exec output is
+// recorded, not even the workload's, and Logs then returns no user-program
+// output. For workloads whose output must not reach the host's disk.
+func WithDisableExecLog() SandboxOption {
+	return func(o *SandboxConfig) { o.DisableExecLog = true }
+}
+
 // WithScripts attaches named scripts that can be invoked via the agent.
 // Multiple calls merge; later entries overwrite earlier ones with the same name.
 func WithScripts(scripts map[string]string) SandboxOption {
@@ -1529,6 +1537,9 @@ type ExecConfig struct {
 	TTY       bool
 	User      string
 	Env       map[string]string
+	// Capture records the command's output to the sandbox's exec.log. nil
+	// keeps the call's default: off for Exec/Shell, on for ExecDefault.
+	Capture *bool
 }
 
 // ExecOption is a functional option for Exec.
@@ -1556,6 +1567,17 @@ func WithExecStdinPipe() ExecOption {
 // Enable it for interactive programs such as shells, editors, and top.
 func WithExecTTY(enabled bool) ExecOption {
 	return func(o *ExecConfig) { o.TTY = enabled }
+}
+
+// WithExecCapture records the command's output to the sandbox's exec.log,
+// where Logs reads it. Off by default for Exec, ExecStream, Shell and
+// ShellStream: an ad-hoc command's output (a shell's above all) can carry
+// anything typed or printed, so it reaches the host's disk only when asked.
+// ExecDefault and ExecDefaultStream run the sandbox's workload and record it
+// unless WithExecCapture(false) opts out. Has no effect on a sandbox created
+// with WithDisableExecLog.
+func WithExecCapture(enabled bool) ExecOption {
+	return func(o *ExecConfig) { o.Capture = &enabled }
 }
 
 // WithExecUser sets the user to run the command as (UID or name).
@@ -1588,6 +1610,9 @@ type AttachConfig struct {
 	User       string
 	Env        map[string]string
 	DetachKeys string
+	// Capture records the session's output to the sandbox's exec.log. nil
+	// keeps the call's default: off for AttachWith, on for AttachDefault.
+	Capture *bool
 }
 
 // AttachOption is a functional option for AttachWith.
@@ -1614,6 +1639,14 @@ func WithAttachEnv(env map[string]string) AttachOption {
 			o.Env[k] = v
 		}
 	}
+}
+
+// WithAttachCapture records the attached session's output to the sandbox's
+// exec.log. Off by default for AttachWith: an interactive transcript can carry
+// anything typed or printed. AttachDefault attaches to the sandbox's workload
+// and records it unless WithAttachCapture(false) opts out.
+func WithAttachCapture(enabled bool) AttachOption {
+	return func(o *AttachConfig) { o.Capture = &enabled }
 }
 
 // WithAttachDetachKeys sets the detach key sequence. Uses Docker-style syntax:

@@ -37,6 +37,9 @@ pub struct AttachOptions {
 
     /// Resource limits.
     pub(crate) rlimits: Vec<Rlimit>,
+
+    /// Record the session's output to the sandbox's `exec.log`.
+    pub(crate) capture: bool,
 }
 
 /// Builder for `AttachOptions`.
@@ -136,6 +139,16 @@ impl AttachOptionsBuilder {
             soft,
             hard,
         });
+        self
+    }
+
+    /// Record this session's output to the sandbox's `exec.log` (default:
+    /// false). An interactive session's transcript can carry anything typed
+    /// or printed, so it is recorded only when asked; the sandbox's workload
+    /// ([`Sandbox::attach_default`](super::Sandbox::attach_default)) asks by
+    /// default.
+    pub fn capture(mut self, enabled: bool) -> Self {
+        self.options.capture = enabled;
         self
     }
 
@@ -305,6 +318,7 @@ pub(crate) mod agent {
             true,
             rows,
             cols,
+            opts.capture,
         );
         let (id, mut rx) = client.stream(MessageType::ExecRequest, &req).await?;
 
@@ -496,6 +510,7 @@ pub(crate) mod agent {
             true,
             rows,
             cols,
+            opts.capture,
         );
         let (id, mut rx) = client.stream(MessageType::ExecRequest, &req).await?;
 

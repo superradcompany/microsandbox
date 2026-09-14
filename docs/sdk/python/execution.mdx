@@ -22,6 +22,7 @@ async def exec(
     stdin: Stdin | bytes | None = None,
     tty: bool = False,
     rlimits: list[Rlimit] | None = None,
+    capture: bool | None = None,
 ) -> ExecOutput
 ```
 
@@ -82,6 +83,10 @@ Run a command inside the sandbox and wait for it to complete, buffering all stdo
     <div className="msb-param-key"><code>rlimits</code><a className="msb-type" href="#rlimit">list[Rlimit] | None</a></div>
     <div className="msb-param-desc">POSIX resource limits applied to the process.</div>
   </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>capture</code><span className="msb-type">bool | None</span></div>
+    <div className="msb-param-desc">Record this command's output to the sandbox's <code>exec.log</code>, where <code>logs()</code> reads it. <code>None</code> (the default) means off for <code>exec</code> and <code>shell</code>: an ad-hoc command's output, a shell's above all, can carry anything typed or printed, so it reaches the host's disk only when asked. The default-workload helpers (<code>exec_default</code>, <code>attach_default</code>) record unless passed <code>capture=False</code>. No effect on a sandbox created with <code>disable_exec_log=True</code>.</div>
+  </div>
 </div>
 
 <p className="msb-label">Returns</p>
@@ -106,6 +111,7 @@ async def shell(
     stdin: Stdin | bytes | None = None,
     tty: bool = False,
     rlimits: list[Rlimit] | None = None,
+    capture: bool | None = None,
 ) -> ExecOutput
 ```
 
@@ -128,7 +134,7 @@ Run a command through the sandbox's configured shell (defaults to `/bin/sh`). Sh
     <div className="msb-param-desc">Shell command string (e.g. <code>"ls -la /app &amp;&amp; echo done"</code>).</div>
   </div>
   <div className="msb-param">
-    <div className="msb-param-key"><code>cwd, user, env, timeout, stdin, tty, rlimits</code></div>
+    <div className="msb-param-key"><code>cwd, user, env, timeout, stdin, tty, rlimits, capture</code></div>
     <div className="msb-param-desc">Same per-call options as <a className="msb-type" href="#sandbox-exec">exec()</a>.</div>
   </div>
 </div>
@@ -158,6 +164,7 @@ async def exec_stream(
     stdin: Stdin | bytes | None = None,
     tty: bool = False,
     rlimits: list[Rlimit] | None = None,
+    capture: bool | None = None,
 ) -> ExecHandle
 ```
 
@@ -192,7 +199,7 @@ Run a command with streaming output. Returns an [`ExecHandle`](#exechandle) that
     <div className="msb-param-desc">Command arguments, or a typed options mapping.</div>
   </div>
   <div className="msb-param">
-    <div className="msb-param-key"><code>cwd, user, env, timeout, stdin, tty, rlimits</code></div>
+    <div className="msb-param-key"><code>cwd, user, env, timeout, stdin, tty, rlimits, capture</code></div>
     <div className="msb-param-desc">Same per-call options as <a className="msb-type" href="#sandbox-exec">exec()</a>.</div>
   </div>
 </div>
@@ -219,6 +226,7 @@ async def shell_stream(
     stdin: Stdin | bytes | None = None,
     tty: bool = False,
     rlimits: list[Rlimit] | None = None,
+    capture: bool | None = None,
 ) -> ExecHandle
 ```
 
@@ -247,7 +255,7 @@ Streaming variant of [`shell()`](#sandbox-shell): runs `script` through the conf
     <div className="msb-param-desc">Shell command string.</div>
   </div>
   <div className="msb-param">
-    <div className="msb-param-key"><code>cwd, user, env, timeout, stdin, tty, rlimits</code></div>
+    <div className="msb-param-key"><code>cwd, user, env, timeout, stdin, tty, rlimits, capture</code></div>
     <div className="msb-param-desc">Same per-call options as <a className="msb-type" href="#sandbox-exec">exec()</a>.</div>
   </div>
 </div>
@@ -274,6 +282,7 @@ async def attach(
     user: str | None = None,
     env: Mapping[str, str] | None = None,
     detach_keys: str | None = None,
+    capture: bool | None = None,
 ) -> int
 ```
 
@@ -591,6 +600,7 @@ Typed dictionary for passing arguments and per-call options together as the seco
 | stdin_data | `bytes` | Inline stdin bytes when `stdin` is omitted |
 | tty | `bool` | Whether to allocate a pseudo-terminal |
 | rlimits | `list[`[`Rlimit`](#rlimit)`]` | POSIX resource limits |
+| capture | `bool` | Record the command's output to `exec.log` (off by default for `exec`/`shell`) |
 
 ### ExecOutput
 

@@ -122,6 +122,21 @@ class MicrosandboxIntegrationTest < Test::Unit::TestCase
     sandbox&.stop
   end
 
+  # Capture is opt-in per exec: only the session that asked lands in the
+  # sandbox's exec.log, where `logs` reads it.
+  def test_exec_output_is_logged_only_when_captured
+    sandbox = create_sandbox("capture")
+    sandbox.shell("echo ruby-uncaptured-marker")
+    sandbox.shell("echo ruby-captured-marker", capture: true)
+
+    data = sandbox.logs.map(&:data).join
+
+    assert_include data, "ruby-captured-marker"
+    assert_not_include data, "ruby-uncaptured-marker"
+  ensure
+    sandbox&.stop
+  end
+
   def test_assert_eventually_enforces_timeout
     started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
 

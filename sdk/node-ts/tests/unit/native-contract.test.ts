@@ -34,6 +34,7 @@ describe("native Sandbox lifecycle contract", () => {
   it("exports the durable CMD setter and convergent terminal", () => {
     const proto = napi.SandboxBuilder.prototype as Record<string, unknown>;
     expect(typeof proto.cmd).toBe("function");
+    expect(typeof proto.disableExecLog).toBe("function");
     expect(typeof proto.connectOrCreate).toBe("function");
   });
 
@@ -76,5 +77,14 @@ describe("native image cache contract", () => {
     ]) {
       expect(typeof fns[fn], fn).toBe("function");
     }
+  });
+});
+
+describe("native exec-log capture contract", () => {
+  it("exports capture() on the exec and attach option builders", () => {
+    const exec = napi.ExecOptionsBuilder.prototype as Record<string, unknown>;
+    const attach = napi.AttachOptionsBuilder.prototype as Record<string, unknown>;
+    expect(typeof exec.capture).toBe("function");
+    expect(typeof attach.capture).toBe("function");
   });
 });

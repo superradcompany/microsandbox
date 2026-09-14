@@ -37,6 +37,11 @@ pub struct LaunchConfig {
     /// Directory for log files.
     pub log_dir: PathBuf,
 
+    /// Do not record exec output to `exec.log` at all. Defaults to `false`
+    /// for launchers that predate the field.
+    #[serde(default)]
+    pub disable_exec_log: bool,
+
     /// Runtime directory (scripts, heartbeat).
     pub runtime_dir: PathBuf,
 

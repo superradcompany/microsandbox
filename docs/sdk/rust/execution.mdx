@@ -612,6 +612,23 @@ Allocate a pseudo-terminal. Enable for interactive programs (shells, editors, `t
   </div>
 </div>
 
+#### <span className="msb-recv">exec_options.</span><span className="msb-hn">capture()</span>
+
+```rust
+fn capture(self, enabled: bool) -> Self
+```
+
+Record this command's output to the sandbox's `exec.log`, where `logs()` reads it. Default: `false`. An ad-hoc exec's output, a shell's above all, can carry anything typed or printed, so it is written to the host's disk only when asked. The sandbox's workload (`exec_default`, `attach_default`) is recorded without asking; pass `.capture(false)` there to opt out. The attach options have the same method. No effect on a sandbox built with `disable_exec_log()`.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>enabled</code><span className="msb-type">bool</span></div>
+    <div className="msb-param-desc"><code>true</code> to record this session's output.</div>
+  </div>
+</div>
+
 #### <span className="msb-recv">exec_options.</span><span className="msb-hn">stdin_null()</span>
 
 ```rust

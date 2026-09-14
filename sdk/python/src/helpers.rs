@@ -42,6 +42,7 @@ const KNOWN_CREATE_KWARGS: &[&str] = &[
     "scripts",
     "pull_policy",
     "log_level",
+    "disable_exec_log",
     "registry_auth",
     "registry_insecure",
     "registry_ca_certs",
@@ -434,6 +435,9 @@ pub fn sandbox_builder_from_args(
     }
     if let Some(ephemeral) = extract_opt::<bool>(kwargs, "ephemeral")? {
         builder = builder.ephemeral(ephemeral);
+    }
+    if extract_opt::<bool>(kwargs, "disable_exec_log")?.unwrap_or(false) {
+        builder = builder.disable_exec_log();
     }
 
     // Environment variables.

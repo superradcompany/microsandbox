@@ -104,7 +104,8 @@ pub struct AgentRelay {
     /// Cached `core.ready` frame bytes (length-prefixed wire format).
     ready_frame: Option<Vec<u8>>,
     /// Optional `exec.log` writer. When set, the ring reader task
-    /// captures the primary session's stdout/stderr to JSON Lines.
+    /// captures the stdout/stderr of every exec session that asked for it
+    /// (`ExecRequest::capture`) to JSON Lines.
     log_writer: Option<Arc<LogWriter>>,
     /// Shared user-volume bind identity map to install before `core.ready`.
     #[cfg(unix)]
@@ -241,9 +242,9 @@ impl AgentRelay {
     /// Attach a log writer for `exec.log` capture.
     ///
     /// Must be called before [`run()`](Self::run). When attached, the
-    /// ring reader captures the primary session's stdout/stderr into
-    /// the writer's JSON Lines file (see
-    /// `design/runtime/sandbox-logs.md` D3 / D3a). The
+    /// ring reader captures the stdout/stderr of exec sessions that asked
+    /// for it (`ExecRequest::capture`) into the writer's JSON Lines file.
+    /// The
     /// `--- sandbox started ---` marker is **not** written here — it
     /// is written from [`wait_ready`](Self::wait_ready) once agentd
     /// signals `core.ready`, so the marker only appears when the
@@ -433,8 +434,8 @@ impl AgentRelay {
         let clock_sync_handle = spawn_clock_sync_task(agent_tx.clone());
 
         // Spawn the ring reader task (tx_ring → guest frames → clients).
-        // When a log writer is attached, the reader also captures
-        // every exec session's stdout/stderr into `exec.log` (tagged
+        // When a log writer is attached, the reader also captures the
+        // stdout/stderr of exec sessions that asked for it into `exec.log` (tagged
         // with a relay-monotonic session id so readers can group or
         // filter by session — the protocol correlation id can be
         // reused across slot recycling, so we mint our own).
@@ -673,8 +674,51 @@ fn decode_frame(buf: &[u8]) -> RuntimeResult<Message> {
     codec::decode_message_frame(buf).map_err(|e| RuntimeError::Custom(format!("decode frame: {e}")))
 }
 
-/// Tap a guest-originated frame into `exec.log` if it belongs to the
-/// primary session. Best-effort: any decode error is logged and
+/// Whether an exec session is recorded to `exec.log`, and if so whether it
+/// runs under a pty (`Some(is_pty)`).
+///
+/// Capture is opt-in per session: the runtime's startup command asks for it,
+/// so a sandbox's workload is recorded; any other exec — an interactive shell
+/// above all — is recorded only when its caller set `ExecRequest::capture`.
+/// Shell transcripts can carry anything typed or printed, and each chunk of
+/// output would otherwise cost a write on the relay's routing path.
+fn capture_of(request: &ExecRequest) -> Option<bool> {
+    request.capture.then_some(request.tty)
+}
+
+/// Record a starting exec session's capture in the registry, or forget it.
+///
+/// **Forgetting matters as much as recording.** A correlation id is reused
+/// once its client slot is recycled, and a captured session whose client went
+/// away before its terminal frame leaves its entry behind. An uncaptured
+/// session starting under the same id must not inherit that entry, or its
+/// output is written to `exec.log` after all.
+fn register_session(
+    registry: &mut HashMap<u32, SessionInfo>,
+    id: u32,
+    capture: Option<bool>,
+    next_session_id: &AtomicU64,
+) {
+    match capture {
+        Some(is_pty) => {
+            let session_id = next_session_id.fetch_add(1, Ordering::SeqCst);
+            registry.insert(id, SessionInfo { session_id, is_pty });
+        }
+        None => {
+            registry.remove(&id);
+        }
+    }
+}
+
+/// Forget the capture of every session a disconnected client still had open.
+fn forget_sessions(registry: &mut HashMap<u32, SessionInfo>, ids: &HashSet<u32>) {
+    for id in ids {
+        registry.remove(id);
+    }
+}
+
+/// Tap a guest-originated frame into `exec.log` if it belongs to a
+/// captured session (see [`capture_of`]). Best-effort: any decode error is logged and
 /// dropped — capture failures must never disrupt the routing path.
 fn tap_frame_into_log(frame: &RawFrame, writer: &LogWriter, session_registry: &SessionRegistry) {
     // Decode the message envelope to learn the type. The full CBOR
@@ -768,11 +812,10 @@ async fn ring_writer_task(shared: Arc<ConsoleSharedState>, mut rx: mpsc::Receive
 /// Background task that reads frames from the tx_ring (written by the guest
 /// agent) and routes them to the correct client based on correlation ID range.
 ///
-/// When `log_writer` is `Some`, the task also taps the primary session's
-/// `ExecStdout` / `ExecStderr` payloads into `exec.log`. The "primary"
-/// session is the first one whose `ExecRequest` arrives after the relay
-/// starts, recorded via CAS into `primary_session_id`. See
-/// `design/runtime/sandbox-logs.md` D3a.
+/// When `log_writer` is `Some`, the task also taps the `ExecStdout` /
+/// `ExecStderr` payloads of captured sessions into `exec.log`. A session is
+/// captured when its `ExecRequest` set `capture`, which the runtime does for
+/// the sandbox's startup command; see [`capture_of`].
 async fn ring_reader_task(
     shared: Arc<ConsoleSharedState>,
     clients: Arc<Mutex<HashMap<u32, ClientState>>>,
@@ -841,7 +884,7 @@ async fn ring_reader_task(
 
             let is_terminal = (frame.flags & FLAG_TERMINAL) != 0;
 
-            // Tap every exec session's stdout/stderr into `exec.log`
+            // Tap captured exec sessions' stdout/stderr into `exec.log`
             // when a log writer is attached. The CBOR decode is only
             // done when there is a writer, so the no-capture path is
             // unchanged.
@@ -984,12 +1027,14 @@ async fn client_reader_task(
             let _ = drain_tx.try_send(());
         }
 
-        // Register each ExecRequest in the session registry: assign a
-        // relay-monotonic session id and record the pty flag. The
-        // monotonic id is what users see in `exec.log` entries — it's
-        // unique per session within the relay's lifetime, unlike the
-        // protocol correlation id which can be reused after slot
-        // recycling.
+        // Register each ExecRequest that asked to be captured in the
+        // session registry: assign a relay-monotonic session id and record
+        // the pty flag. The monotonic id is what users see in `exec.log`
+        // entries — it's unique per session within the relay's lifetime,
+        // unlike the protocol correlation id which can be reused after slot
+        // recycling. A session that did not ask is routed as usual and never
+        // registered, and any stale entry under its id is cleared, so the tap
+        // never sees it (see `register_session`).
         //
         // FLAG_SESSION_START is set on both ExecRequest and FsRequest,
         // so we decode the type to disambiguate.
@@ -999,16 +1044,13 @@ async fn client_reader_task(
             && msg.t == MessageType::ExecRequest
         {
             is_exec_session_start = true;
-            let pty = msg.payload::<ExecRequest>().map(|r| r.tty).unwrap_or(false);
-            let session_id = next_session_id.fetch_add(1, Ordering::SeqCst);
+            let capture = msg
+                .payload::<ExecRequest>()
+                .ok()
+                .as_ref()
+                .and_then(capture_of);
             if let Ok(mut registry) = session_registry.lock() {
-                registry.insert(
-                    frame.id,
-                    SessionInfo {
-                        session_id,
-                        is_pty: pty,
-                    },
-                );
+                register_session(&mut registry, frame.id, capture, &next_session_id);
             }
         }
 
@@ -1042,6 +1084,15 @@ async fn client_reader_task(
             HashSet::new()
         }
     };
+
+    // Their capture ends here too: the slot and its correlation ids are about
+    // to be reused, and a terminal frame that would have cleared the entries
+    // may never arrive. See `register_session`.
+    if !active_sessions.is_empty()
+        && let Ok(mut registry) = session_registry.lock()
+    {
+        forget_sessions(&mut registry, &active_sessions);
+    }
 
     if !active_sessions.is_empty() {
         tracing::info!(
@@ -1177,6 +1228,56 @@ mod tests {
         assert!(!is_client_frame_allowed(0, 0, 10, 20));
         assert!(!is_client_frame_allowed(9, FLAG_SESSION_START, 10, 20));
         assert!(!is_client_frame_allowed(20, FLAG_TERMINAL, 10, 20));
+    }
+
+    fn exec_request(tty: bool, capture: bool) -> ExecRequest {
+        ExecRequest {
+            cmd: "/bin/sh".into(),
+            args: Vec::new(),
+            env: Vec::new(),
+            cwd: None,
+            user: None,
+            tty,
+            rows: 24,
+            cols: 80,
+            rlimits: Vec::new(),
+            capture,
+        }
+    }
+
+    /// The stale-entry case: a captured client disconnects before its
+    /// terminal frame, and a new client reuses the correlation id for a
+    /// session that did not ask. Without clearing, it would be recorded.
+    #[test]
+    fn an_uncaptured_session_does_not_inherit_a_stale_entry_under_its_id() {
+        let mut registry = HashMap::new();
+        let ids = AtomicU64::new(1);
+        register_session(&mut registry, 42, Some(true), &ids);
+        assert!(registry.contains_key(&42));
+        register_session(&mut registry, 42, None, &ids);
+        assert!(
+            !registry.contains_key(&42),
+            "the uncaptured session inherited the old capture"
+        );
+    }
+
+    #[test]
+    fn a_disconnected_clients_sessions_are_forgotten() {
+        let mut registry = HashMap::new();
+        let ids = AtomicU64::new(1);
+        for id in [7, 8, 9] {
+            register_session(&mut registry, id, Some(false), &ids);
+        }
+        forget_sessions(&mut registry, &HashSet::from([7, 8]));
+        assert_eq!(registry.keys().copied().collect::<Vec<_>>(), vec![9]);
+    }
+
+    #[test]
+    fn capture_of_records_only_sessions_that_asked() {
+        assert_eq!(capture_of(&exec_request(false, false)), None);
+        assert_eq!(capture_of(&exec_request(true, false)), None);
+        assert_eq!(capture_of(&exec_request(false, true)), Some(false));
+        assert_eq!(capture_of(&exec_request(true, true)), Some(true));
     }
 
     #[test]

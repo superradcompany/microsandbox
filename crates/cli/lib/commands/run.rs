@@ -333,6 +333,9 @@ async fn exec_in_sandbox(
     interactive: bool,
     opts: &ExecOpts,
 ) -> anyhow::Result<i32> {
+    // An attached `msb run` runs the workload here rather than as the
+    // runtime's startup command, so it asks for capture itself: `msb logs`
+    // shows a sandbox's workload whichever way it was started.
     if interactive {
         let rlimits = opts.rlimits.clone();
         let detach_keys = opts.detach_keys.clone();
@@ -343,7 +346,7 @@ async fn exec_in_sandbox(
             if has_opts {
                 Ok(sandbox
                     .attach_with(cmd, |a| {
-                        let mut a = a.args(cmd_args);
+                        let mut a = a.args(cmd_args).capture(true);
                         for (resource, soft, hard) in rlimits {
                             a = a.rlimit_range(resource, soft, hard);
                         }
@@ -354,7 +357,9 @@ async fn exec_in_sandbox(
                     })
                     .await?)
             } else {
-                Ok(sandbox.attach(cmd, cmd_args).await?)
+                Ok(sandbox
+                    .attach_with(cmd, |a| a.args(cmd_args).capture(true))
+                    .await?)
             }
         };
 
@@ -373,7 +378,7 @@ async fn exec_in_sandbox(
         let output: ExecOutput = if has_opts {
             sandbox
                 .exec_with(cmd, |e| {
-                    let mut e = e.args(cmd_args);
+                    let mut e = e.args(cmd_args).capture(true);
                     if tty {
                         e = e.tty(true);
                     }
@@ -387,7 +392,9 @@ async fn exec_in_sandbox(
                 })
                 .await?
         } else {
-            sandbox.exec(cmd, cmd_args).await?
+            sandbox
+                .exec_with(cmd, |e| e.args(cmd_args).capture(true))
+                .await?
         };
 
         std::io::stdout().write_all(output.stdout_bytes())?;
