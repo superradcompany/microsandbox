@@ -77,6 +77,8 @@ hex = { workspace = true, optional = true }
 libc.workspace = true
 microsandbox-db = { workspace = true, optional = true }
 microsandbox-agent-client = { workspace = true, features = ["named-pipe", "uds"] }
+microsandbox-control-client = { workspace = true, features = ["named-pipe", "uds"] }
+microsandbox-protocol-client.workspace = true
 microsandbox-image = { workspace = true, optional = true }
 microsandbox-metrics = { workspace = true, optional = true }
 microsandbox-migration = { workspace = true, optional = true }
@@ -87,6 +89,8 @@ microsandbox-types.workspace = true
 microsandbox-utils.workspace = true
 nix = { workspace = true, features = ["process", "signal", "term"], optional = true }
 notify.workspace = true
+object.workspace = true
+semver.workspace = true
 rand = { workspace = true, optional = true }
 rayon = { workspace = true, optional = true }
 reqwest = { workspace = true, features = ["query"], optional = true }
@@ -103,6 +107,7 @@ tar = { workspace = true, optional = true }
 tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tokio-util = { workspace = true, features = ["rt"] }
 tokio-tungstenite = { workspace = true, optional = true }
 tracing.workspace = true
 typed-path.workspace = true

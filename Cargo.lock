@@ -3851,6 +3851,7 @@ dependencies = [
  "keyring",
  "libc",
  "microsandbox-agent-client",
+ "microsandbox-control-client",
  "microsandbox-db",
  "microsandbox-filesystem",
  "microsandbox-image",
@@ -3858,11 +3859,13 @@ dependencies = [
  "microsandbox-migration",
  "microsandbox-network",
  "microsandbox-protocol",
+ "microsandbox-protocol-client",
  "microsandbox-runtime",
  "microsandbox-types",
  "microsandbox-utils",
  "nix 0.31.3",
  "notify",
+ "object",
  "rand 0.10.2",
  "rayon",
  "rcgen",
@@ -3873,6 +3876,7 @@ dependencies = [
  "rustls-platform-verifier",
  "scopeguard",
  "sea-orm",
+ "semver",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -3883,6 +3887,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tokio-tungstenite",
+ "tokio-util",
  "tracing",
  "typed-path",
  "windows-sys 0.61.2",
@@ -3898,6 +3903,7 @@ dependencies = [
  "libc",
  "memmap2",
  "microsandbox-protocol",
+ "microsandbox-protocol-client",
  "nix 0.31.3",
  "serde",
  "tempfile",
@@ -3967,6 +3973,22 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "windows-sys 0.61.2",
+ "zeroize",
+]
+
+[[package]]
+name = "microsandbox-control-client"
+version = "0.6.18"
+dependencies = [
+ "ciborium",
+ "microsandbox-protocol",
+ "microsandbox-protocol-client",
+ "microsandbox-utils",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-util",
  "zeroize",
 ]
 
@@ -4172,6 +4194,19 @@ dependencies = [
  "strum 0.28.0",
  "thiserror 2.0.20",
  "tokio",
+ "zeroize",
+]
+
+[[package]]
+name = "microsandbox-protocol-client"
+version = "0.6.18"
+dependencies = [
+ "microsandbox-protocol",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "zeroize",
 ]
 
 [[package]]
@@ -4195,13 +4230,16 @@ dependencies = [
 name = "microsandbox-runtime"
 version = "0.6.18"
 dependencies = [
+ "base64 0.23.1",
  "bytes",
  "chrono",
+ "ciborium-ll",
  "clap",
  "crossbeam-queue",
  "hex",
  "libc",
  "microsandbox-agent-client",
+ "microsandbox-control-client",
  "microsandbox-db",
  "microsandbox-filesystem",
  "microsandbox-image",
@@ -4209,6 +4247,7 @@ dependencies = [
  "microsandbox-migration",
  "microsandbox-network",
  "microsandbox-protocol",
+ "microsandbox-protocol-client",
  "microsandbox-types",
  "microsandbox-utils",
  "microsandbox-vsock",
@@ -4223,6 +4262,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
+ "tokio-util",
  "tracing",
  "windows-sys 0.61.2",
  "zeroize",

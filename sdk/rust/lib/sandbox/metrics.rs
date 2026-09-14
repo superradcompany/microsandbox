@@ -17,7 +17,7 @@ use microsandbox_db::DbReadConnection;
 #[cfg(feature = "local")]
 use microsandbox_metrics::{LiveMetric, LiveMetricState, MetricsRegistry};
 #[cfg(feature = "local")]
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+use sea_orm::{ColumnTrait, QueryFilter};
 
 use crate::MicrosandboxResult;
 #[cfg(feature = "local")]
@@ -158,7 +158,8 @@ pub(crate) async fn local_metrics(
         return Err(MicrosandboxError::MetricsDisabled(name.to_string()));
     }
     let pools = local.db().await?;
-    let model = sandbox_entity::Entity::find()
+    let model = microsandbox_db::catalog::sandbox_query(pools.read())
+        .await?
         .filter(sandbox_entity::Column::Name.eq(name))
         .one(pools.read())
         .await?
@@ -197,10 +198,14 @@ pub(crate) fn local_metrics_stream(
             ticker.tick().await;
             let item = match backend.as_local() {
                 Some(local) => match local.db().await {
-                    Ok(pools) => match sandbox_entity::Entity::find()
-                        .filter(sandbox_entity::Column::Name.eq(&name))
-                        .one(pools.read())
-                        .await
+                    Ok(pools) => match async {
+                        microsandbox_db::catalog::sandbox_query(pools.read())
+                            .await?
+                            .filter(sandbox_entity::Column::Name.eq(&name))
+                            .one(pools.read())
+                            .await
+                    }
+                    .await
                     {
                         Ok(Some(model)) => {
                             let effective =
@@ -298,7 +303,8 @@ pub async fn all_sandbox_metrics_reports_local(
         return Ok(Vec::new());
     }
     let pools = local.db().await?;
-    let models = sandbox_entity::Entity::find()
+    let models = microsandbox_db::catalog::sandbox_query(pools.read())
+        .await?
         .filter(sandbox_entity::Column::Id.is_in(ids))
         .all(pools.read())
         .await?;
@@ -337,7 +343,8 @@ pub async fn sandbox_metrics_report_local(
     name: &str,
 ) -> MicrosandboxResult<Option<SandboxMetricsReport>> {
     let pools = local.db().await?;
-    let model = sandbox_entity::Entity::find()
+    let model = microsandbox_db::catalog::sandbox_query(pools.read())
+        .await?
         .filter(sandbox_entity::Column::Name.eq(name))
         .one(pools.read())
         .await?
@@ -449,7 +456,7 @@ fn model_effective_config(model: &sandbox_entity::Model) -> Option<SandboxConfig
         .active_config
         .as_deref()
         .and_then(|json| serde_json::from_str(json).ok())
-        .or_else(|| serde_json::from_str(&model.config).ok())
+        .or_else(|| crate::db::config::decode(&model.config).ok())
 }
 
 #[cfg(feature = "local")]

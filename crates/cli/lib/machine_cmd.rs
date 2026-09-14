@@ -430,7 +430,8 @@ fn load_launch_config(args: &MachineArgs) -> Result<LaunchConfig, String> {
             .map_err(|e| format!("failed to read --config-file {}: {e}", path.display()))?,
         None => return Err("missing --config-file for `msb machine`".to_string()),
     };
-    let config = LaunchConfig::decode(&bytes)?;
+    let config = LaunchConfig::from_json(&bytes)
+        .map_err(|error| format!("invalid launch config: {error}"))?;
     if args.restore != (config.execution == microsandbox_runtime::launch::ExecutionIntent::Restore)
     {
         return Err("--restore and launch execution intent disagree".into());

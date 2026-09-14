@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use microsandbox_agent_client::AgentClient;
+use microsandbox_agent_client::OptimizedAgentClient as AgentClient;
 use microsandbox_image::checkpoint::{
     AdmittedObject, CaptureIntent, CaptureObjectBatch, CheckpointGeometry, CheckpointManifest,
     ContentRef, DeviceStateRef, LocalObjectStore, MemoryCaptureMode, MemoryExtent,

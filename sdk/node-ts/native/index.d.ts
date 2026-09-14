@@ -2334,6 +2334,9 @@ export interface RegistryConfig {
   caCertsPath?: string
 }
 
+/** Read an executable's embedded runtime version without starting it. */
+export declare function resolveRuntimeVersion(executable: string): Promise<string | null>
+
 /** A single rlimit entry. */
 export interface Rlimit {
   resource: string

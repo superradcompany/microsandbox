@@ -41,6 +41,11 @@ pub const LIFECYCLE_LOCK_FD: i32 = 99;
 /// Control byte sent by the owner to stop parent-watch monitoring without stopping the sandbox.
 pub const PARENT_WATCH_DETACH: u8 = 1;
 
+mod compatibility;
+#[cfg(test)]
+#[path = "launch/tests.rs"]
+mod compatibility_tests;
+
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
@@ -513,5 +518,22 @@ mod tests {
         assert_eq!(decoded.sandbox_slot, u16::MAX);
         encoded["sandbox_slot"] = serde_json::json!(u32::from(u16::MAX) + 1);
         assert!(serde_json::from_value::<LaunchConfig>(encoded).is_err());
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Methods
+//--------------------------------------------------------------------------------------------------
+
+impl LaunchConfig {
+    /// Decode current or historical v0.6.x process-launch JSON.
+    ///
+    /// Older environment-based bootstrap is translated at this boundary. An
+    /// explicit typed bootstrap remains authoritative, including empty values.
+    /// Missing historical lease policies inherit the process CPU placement and
+    /// use lease directories derived from the caller's runtime artifact root.
+    pub fn from_json(bytes: &[u8]) -> Result<Self, String> {
+        let config = compatibility::decode(bytes)?;
+        Self::decode(&serde_json::to_vec(&config).map_err(|e| e.to_string())?)
     }
 }

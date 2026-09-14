@@ -824,13 +824,9 @@ jobs:
           name: msb-linux-x86_64
           path: build/
 
-      - name: Check agent client package
-        working-directory: packages/agent-client/typescript
+      - name: Check shared protocol, agent, control, and types packages
+        working-directory: packages
         run: npm ci && npm run build && npm run typecheck && npm test
-
-      - name: Check microsandbox types package
-        working-directory: packages/microsandbox-types/typescript
-        run: npm ci && npm run build && npm run typecheck
 
       - name: Build Node SDK
         working-directory: sdk/node-ts

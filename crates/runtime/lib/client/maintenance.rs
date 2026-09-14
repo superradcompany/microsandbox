@@ -27,9 +27,12 @@ use microsandbox_db::entity::{
 };
 use sea_orm::sea_query::{Expr, OnConflict};
 use sea_orm::{
-    ColumnTrait, Condition, ConnectionTrait, DbErr, EntityTrait, QueryFilter, QueryOrder,
-    QuerySelect, Set,
+    ColumnTrait, Condition, ConnectionTrait, DbErr, EntityTrait, FromQueryResult, QueryFilter,
+    QueryOrder, QuerySelect, Select, Set, UpdateMany,
 };
+
+#[cfg(test)]
+use sea_orm::{DbBackend, Statement};
 
 use crate::{RuntimeError, RuntimeResult};
 
@@ -66,6 +69,16 @@ const MAX_TERMINAL_EPHEMERAL_ROWS: u64 = 250;
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
+
+// Lifecycle maintenance only needs columns present throughout v0.6.x. Selecting
+// the current ORM model would also require later columns such as active_config.
+#[derive(FromQueryResult)]
+struct LifecycleSandbox {
+    id: i32,
+    name: String,
+    status: sandbox_entity::SandboxStatus,
+    ephemeral: bool,
+}
 
 /// Outcome of attempting to clean a single terminal ephemeral sandbox.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -216,7 +229,7 @@ pub async fn run_sandbox_lifecycle_maintenance(
 
     // Phase 1: stale active reconciliation. Mark sandboxes whose owning
     // runtime died (dead PID) as terminal.
-    let active = sandbox_entity::Entity::find()
+    let active = lifecycle_sandboxes()
         .filter(sandbox_entity::Column::Status.is_in([
             sandbox_entity::SandboxStatus::Starting,
             sandbox_entity::SandboxStatus::Running,
@@ -224,6 +237,7 @@ pub async fn run_sandbox_lifecycle_maintenance(
         ]))
         .order_by_asc(sandbox_entity::Column::Id)
         .limit(limits.max_stale_active)
+        .into_model::<LifecycleSandbox>()
         .all(db)
         .await?;
 
@@ -245,7 +259,7 @@ pub async fn run_sandbox_lifecycle_maintenance(
     // Phase 2: terminal ephemeral cleanup driven by the (ephemeral, status)
     // index, never a config scan.
     if !report.timed_out {
-        let candidates = sandbox_entity::Entity::find()
+        let candidates = lifecycle_sandboxes()
             .filter(sandbox_entity::Column::Ephemeral.eq(true))
             .filter(sandbox_entity::Column::Status.is_in([
                 sandbox_entity::SandboxStatus::Stopped,
@@ -253,6 +267,7 @@ pub async fn run_sandbox_lifecycle_maintenance(
             ]))
             .order_by_asc(sandbox_entity::Column::Id)
             .limit(limits.max_terminal_ephemeral)
+            .into_model::<LifecycleSandbox>()
             .all(db)
             .await?;
 
@@ -284,7 +299,7 @@ pub async fn run_sandbox_lifecycle_maintenance(
 pub async fn active_sandboxes_for_schema_rollback(
     db: &DbWriteConnection,
 ) -> RuntimeResult<Vec<ActiveSandbox>> {
-    let sandboxes = sandbox_entity::Entity::find()
+    let sandboxes = lifecycle_sandboxes()
         .filter(sandbox_entity::Column::Status.is_in([
             sandbox_entity::SandboxStatus::Created,
             sandbox_entity::SandboxStatus::Starting,
@@ -293,6 +308,7 @@ pub async fn active_sandboxes_for_schema_rollback(
             sandbox_entity::SandboxStatus::Paused,
         ]))
         .order_by_asc(sandbox_entity::Column::Name)
+        .into_model::<LifecycleSandbox>()
         .all(db)
         .await?;
 
@@ -349,7 +365,9 @@ async fn cleanup_terminal_ephemeral_sandbox_inner(
     sandbox_id: i32,
     owner_holds_guard: bool,
 ) -> RuntimeResult<CleanupOutcome> {
-    let Some(sandbox) = sandbox_entity::Entity::find_by_id(sandbox_id)
+    let Some(sandbox) = lifecycle_sandboxes()
+        .filter(sandbox_entity::Column::Id.eq(sandbox_id))
+        .into_model::<LifecycleSandbox>()
         .one(db)
         .await?
     else {
@@ -383,7 +401,9 @@ async fn cleanup_terminal_ephemeral_sandbox_inner(
 
     // Status can change while waiting for another lifecycle operation. Re-read
     // under ownership before removing any name-derived filesystem state.
-    let Some(sandbox) = sandbox_entity::Entity::find_by_id(sandbox_id)
+    let Some(sandbox) = lifecycle_sandboxes()
+        .filter(sandbox_entity::Column::Id.eq(sandbox_id))
+        .into_model::<LifecycleSandbox>()
         .one(db)
         .await?
     else {
@@ -718,13 +738,34 @@ async fn seed_install_exclusive_lease(
     }
 }
 
+fn lifecycle_sandboxes() -> Select<sandbox_entity::Entity> {
+    sandbox_entity::Entity::find().select_only().columns([
+        sandbox_entity::Column::Id,
+        sandbox_entity::Column::Name,
+        sandbox_entity::Column::Status,
+        sandbox_entity::Column::Ephemeral,
+    ])
+}
+
+/// Build a terminal-state update without upgrading a historical SDK's database.
+/// Clear active_config when the column exists; never retry an arbitrary failed
+/// update under a guessed schema or modify migration history.
+pub(crate) async fn terminal_sandbox_update(
+    db: &DbWriteConnection,
+) -> RuntimeResult<UpdateMany<sandbox_entity::Entity>> {
+    Ok(
+        microsandbox_db::catalog::clear_runtime_fields(db, sandbox_entity::Entity::update_many())
+            .await?,
+    )
+}
+
 /// Reconcile one active sandbox whose owning runtime may have died. Returns
 /// `true` when the sandbox was marked terminal.
 async fn reconcile_stale_active(
     db: &DbWriteConnection,
     sandboxes_dir: &Path,
     run_dir: &Path,
-    sandbox: &sandbox_entity::Model,
+    sandbox: &LifecycleSandbox,
 ) -> RuntimeResult<bool> {
     // A creator may have persisted Starting but not spawned its child yet. On Windows it also
     // briefly releases the runtime lock for handoff; transition ownership closes both gaps.
@@ -735,7 +776,9 @@ async fn reconcile_stale_active(
     let Some(_guard) = crate::ipc::try_acquire_lifecycle_guard(run_dir, &sandbox.name)? else {
         return Ok(false);
     };
-    let Some(sandbox) = sandbox_entity::Entity::find_by_id(sandbox.id)
+    let Some(sandbox) = lifecycle_sandboxes()
+        .filter(sandbox_entity::Column::Id.eq(sandbox.id))
+        .into_model::<LifecycleSandbox>()
         .one(db)
         .await?
     else {
@@ -767,16 +810,9 @@ async fn reconcile_stale_active(
             remove_runtime_socket_artifacts(run_dir, sandboxes_dir, &sandbox.name)?;
             let now = chrono::Utc::now().naive_utc();
             let (terminal_status, _) = stale_runtime_terminal_state(sandbox.status);
-            let result = sandbox_entity::Entity::update_many()
+            let result = terminal_sandbox_update(db)
+                .await?
                 .col_expr(sandbox_entity::Column::Status, Expr::value(terminal_status))
-                .col_expr(
-                    sandbox_entity::Column::ActiveConfig,
-                    Expr::value(Option::<String>::None),
-                )
-                .col_expr(
-                    sandbox_entity::Column::NetworkSlot,
-                    Expr::value(Option::<u16>::None),
-                )
                 .col_expr(sandbox_entity::Column::UpdatedAt, Expr::value(now))
                 .filter(sandbox_entity::Column::Id.eq(sandbox.id))
                 .filter(sandbox_entity::Column::Status.eq(sandbox.status))
@@ -821,16 +857,9 @@ async fn reconcile_stale_active(
 
     // Reconcile only while still active so a concurrent lifecycle transition
     // is not clobbered.
-    let result = sandbox_entity::Entity::update_many()
+    let result = terminal_sandbox_update(db)
+        .await?
         .col_expr(sandbox_entity::Column::Status, Expr::value(terminal_status))
-        .col_expr(
-            sandbox_entity::Column::ActiveConfig,
-            Expr::value(Option::<String>::None),
-        )
-        .col_expr(
-            sandbox_entity::Column::NetworkSlot,
-            Expr::value(Option::<u16>::None),
-        )
         .col_expr(sandbox_entity::Column::UpdatedAt, Expr::value(now))
         .filter(sandbox_entity::Column::Id.eq(sandbox.id))
         .filter(sandbox_entity::Column::Status.is_in([
@@ -954,6 +983,105 @@ mod tests {
         .unwrap();
         Migrator::up(db.inner(), None).await.unwrap();
         (dir, db)
+    }
+
+    #[tokio::test]
+    async fn lifecycle_works_without_active_config_and_preserves_schema() {
+        let (dir, db) = test_db().await;
+        let stopped = insert_sandbox(
+            &db,
+            "historical-persistent",
+            sandbox_entity::SandboxStatus::Draining,
+            false,
+        )
+        .await;
+        let ephemeral = insert_sandbox(
+            &db,
+            "historical-ephemeral",
+            sandbox_entity::SandboxStatus::Stopped,
+            true,
+        )
+        .await;
+        let stale = insert_sandbox(
+            &db,
+            "historical-stale",
+            sandbox_entity::SandboxStatus::Draining,
+            false,
+        )
+        .await;
+        db.execute_raw(Statement::from_string(
+            DbBackend::Sqlite,
+            "ALTER TABLE sandbox DROP COLUMN active_config".to_owned(),
+        ))
+        .await
+        .unwrap();
+        let history = || {
+            Statement::from_string(
+                DbBackend::Sqlite,
+                "SELECT version FROM seaql_migrations ORDER BY version".to_owned(),
+            )
+        };
+        let before = db.query_all_raw(history()).await.unwrap();
+        terminal_sandbox_update(&db)
+            .await
+            .unwrap()
+            .col_expr(
+                sandbox_entity::Column::Status,
+                Expr::value(sandbox_entity::SandboxStatus::Stopped),
+            )
+            .filter(sandbox_entity::Column::Id.eq(stopped))
+            .exec(&db)
+            .await
+            .unwrap();
+        let sandboxes = dir.path().join("sandboxes");
+        let run = dir.path().join("run");
+        std::fs::create_dir_all(&sandboxes).unwrap();
+        std::fs::create_dir_all(&run).unwrap();
+        assert_eq!(
+            cleanup_terminal_ephemeral_sandbox(&db, &sandboxes, &run, stopped)
+                .await
+                .unwrap(),
+            CleanupOutcome::SkippedPersistent
+        );
+        assert_eq!(
+            cleanup_terminal_ephemeral_sandbox(&db, &sandboxes, &run, ephemeral)
+                .await
+                .unwrap(),
+            CleanupOutcome::Removed
+        );
+        let report =
+            run_sandbox_lifecycle_maintenance(&db, &sandboxes, &run, MaintenanceLimits::default())
+                .await
+                .unwrap();
+        assert_eq!(report.errors, 0);
+        assert_eq!(report.reconciled, 1);
+        let row = lifecycle_sandboxes()
+            .filter(sandbox_entity::Column::Id.eq(stale))
+            .into_model::<LifecycleSandbox>()
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.status, sandbox_entity::SandboxStatus::Stopped);
+        let versions = |rows: Vec<sea_orm::QueryResult>| {
+            rows.into_iter()
+                .map(|row| row.try_get::<String>("", "version").unwrap())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            versions(before),
+            versions(db.query_all_raw(history()).await.unwrap())
+        );
+        assert!(
+            db.query_one_raw(Statement::from_string(
+                DbBackend::Sqlite,
+                "SELECT name FROM pragma_table_info('sandbox') WHERE name = 'active_config'"
+                    .to_owned()
+            ))
+            .await
+            .unwrap()
+            .is_none()
+        );
     }
 
     async fn insert_sandbox(
@@ -1403,7 +1531,9 @@ mod tests {
             false,
         )
         .await;
-        let model = sandbox_entity::Entity::find_by_id(id)
+        let model = lifecycle_sandboxes()
+            .filter(sandbox_entity::Column::Id.eq(id))
+            .into_model::<LifecycleSandbox>()
             .one(&db)
             .await
             .unwrap()

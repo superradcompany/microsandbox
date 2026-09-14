@@ -854,7 +854,8 @@ async fn ensure_volume_not_referenced_by_active_sandbox<C>(
 where
     C: ConnectionTrait,
 {
-    let sandboxes = sandbox_entity::Entity::find()
+    let sandboxes = microsandbox_db::catalog::sandbox_query(db)
+        .await?
         .filter(sandbox_entity::Column::Status.is_in([
             // A cancelled create can retain its provisional row while the runtime still
             // owns startup. Its named mounts are no less live than a Running sandbox's.
@@ -867,7 +868,7 @@ where
         .await?;
 
     for sandbox in sandboxes {
-        let config: SandboxConfig = serde_json::from_str(&sandbox.config)?;
+        let config: SandboxConfig = crate::db::config::decode(&sandbox.config)?;
         if config.spec.mounts.iter().any(|mount| {
             matches!(
                 mount,

@@ -3,6 +3,7 @@
 mod host;
 mod runtime;
 mod verify;
+mod version;
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -17,5 +18,6 @@ mod windows;
 
 pub use host::*;
 pub use runtime::*;
+pub use version::{Version, resolve_runtime_version};
 #[cfg(windows)]
 pub use windows::*;

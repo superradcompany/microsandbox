@@ -125,6 +125,8 @@ The project is a Cargo workspace. Published crates (in dependency order):
 | `microsandbox-utils` | `crates/utils` | Shared utilities |
 | `microsandbox-types` | `packages/microsandbox-types/rust` | Shared task and wire contract types |
 | `microsandbox-protocol` | `crates/protocol` | Wire protocol definitions ([versioning](./crates/protocol/VERSIONING.md)) |
+| `microsandbox-protocol-client` | `packages/protocol-client/rust` | Generic framed protocol engine and byte transports |
+| `microsandbox-control-client` | `packages/control-client/rust` | Framed control and explicit JSON compatibility |
 | `microsandbox-agent-client` | `packages/agent-client/rust` | Transport-agnostic client for the agent protocol |
 | `microsandbox-agentd` | `crates/agentd` | In-guest agent (guest binary is built separately for musl) |
 | `microsandbox-db` | `crates/db` | Database layer |
@@ -158,6 +160,8 @@ The `examples/rust/*` projects are workspace members as well.
 | `microsandbox` (npm) | `sdk/node-ts` | TypeScript/Node.js SDK (NAPI bindings, plus per-platform sub-packages) |
 | `microsandbox` (PyPI) | `sdk/python` | Python SDK (PyO3 bindings) |
 | `github.com/superradcompany/microsandbox/sdk/go` | `sdk/go` | Go SDK (CGO over `microsandbox-go`), versioned via `sdk/go/vX.Y.Z` tags |
+| `@microsandbox/protocol-client` (npm) | `packages/protocol-client/typescript` | Generic framed protocol engine and byte transports |
+| `@microsandbox/control-client` (npm) | `packages/control-client/typescript` | Framed control and explicit JSON compatibility |
 | `@microsandbox/agent-client` (npm) | `packages/agent-client/typescript` | Transport-agnostic client for the agent protocol |
 | `@microsandbox/types` (npm) | `packages/microsandbox-types/typescript` | Shared task and wire contract types |
 | `microsandbox-mcp` (npm) | `mcp/` (submodule) | MCP server for AI agents |
@@ -264,12 +268,14 @@ Dispatch the **Release version bump** workflow (`.github/workflows/release-bump.
 
 - `Cargo.toml` (workspace `version` field and path-dependency versions — all crates inherit from this)
 - `sdk/node-ts/package.json` and its per-platform sub-packages
+- `packages/protocol-client/typescript/package.json`
 - `packages/agent-client/typescript/package.json`
+- `packages/control-client/typescript/package.json`
 - `packages/microsandbox-types/typescript/package.json`
 - `sdk/go/setup.go` (`sdkVersion`)
 - `examples/typescript/*/package.json` (`microsandbox` dependency pins)
 
-The workflow then regenerates `Cargo.lock` and the npm lockfiles and opens a PR titled `chore: release vX.Y.Z`.
+The workflow then regenerates `Cargo.lock`, the shared `packages/package-lock.json`, and the SDK npm lockfile and opens a PR titled `chore: release vX.Y.Z`.
 
 `microsandbox-mcp` is versioned in its own repository (the `mcp/` submodule). Bump it there and advance the `mcp/` (and, when changed, `skills/`) submodule pointers in the release PR — `release.yml` publishes whatever `microsandbox-mcp` version the submodule pointer holds.
 
@@ -287,9 +293,9 @@ The release workflow (`.github/workflows/release.yml`) will:
 1. Build shared `agentd` and `libkrunfw` artifacts once, then build full-release `msb`, `msb-metrics`, Go FFI, Node, and Python artifacts in parallel for each release platform (linux-x86_64, linux-aarch64, darwin-aarch64, windows-x86_64, windows-aarch64)
 2. Create Unix platform bundles (`.tar.gz`) and Windows platform bundles (`.zip`) with SHA256 checksums
 3. Create a GitHub release with the bundles and installer scripts (`install.sh` and `install.ps1`)
-4. Publish the npm packages: `microsandbox` (+ platform sub-packages), `@microsandbox/agent-client`, and `@microsandbox/types`
+4. Build all shared TypeScript packages through the `packages` workspace; publish `@microsandbox/types` and `@microsandbox/protocol-client`, wait for indexing, then publish `@microsandbox/agent-client` and `@microsandbox/control-client` and wait for indexing before the existing platform and root SDK publication steps
 5. Publish the MCP server to npm (`microsandbox-mcp`, from the `mcp/` submodule)
-6. Discover and publish all 16 Rust crates to crates.io in dependency waves, waiting only for the sparse-index entries required by the next wave
+6. Discover and publish all 18 Rust crates to crates.io in dependency waves, waiting only for the sparse-index entries required by the next wave
 7. Publish the Python SDK to PyPI (`microsandbox`)
 8. Tag the Go SDK (`sdk/go/vX.Y.Z`)
 9. Build and publish Docker images to GHCR

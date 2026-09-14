@@ -18,7 +18,6 @@ use futures::{StreamExt, future::BoxFuture, stream};
 use microsandbox_db::pool::DbPools;
 use microsandbox_db::{DbReadConnection, DbWriteConnection};
 use microsandbox_image::{Digest, GlobalCache};
-use microsandbox_protocol::message::MessageType;
 use sea_orm::{
     ColumnTrait, Condition, EntityTrait, ExprTrait, QueryFilter, QueryOrder, QuerySelect,
     sea_query::Expr,
@@ -160,7 +159,7 @@ impl LocalBackend {
             }
         }
 
-        let mut config: SandboxConfig = serde_json::from_str(&model.config)?;
+        let mut config: SandboxConfig = crate::db::config::decode(&model.config)?;
         // A failed or interrupted first restore is not a stopped ordinary VM. In particular,
         // its sealed base may be hard-linked to a snapshot and must never become a boot disk.
         Self::validate_completed_restore(&config)?;
@@ -290,6 +289,7 @@ impl LocalBackend {
                 "cannot gracefully stop paused sandbox {name:?}; resume it first or explicitly kill it"
             )));
         }
+        self.invalidate_control_session(model.id);
         self.request_agent_shutdown(name, model.id).await?;
         if model.status == SandboxStatus::Running {
             Self::mark_sandbox_draining_if_running(self.db().await?.write(), model.id).await?;
@@ -315,6 +315,7 @@ impl LocalBackend {
             return Ok(());
         }
 
+        self.invalidate_control_session(model.id);
         let mut pids = Vec::new();
         if let Some(pid) = pid.filter(|p| Self::pid_is_alive(*p)) {
             Self::kill_pid(pid)?;
@@ -425,7 +426,8 @@ impl LocalBackend {
         transition_owned: bool,
     ) -> MicrosandboxResult<(sandbox_entity::Model, Option<i32>)> {
         let pools = self.db().await?;
-        let model = sandbox_entity::Entity::find()
+        let model = microsandbox_db::catalog::sandbox_query(pools.read())
+            .await?
             .filter(sandbox_entity::Column::Name.eq(name))
             .one(pools.read())
             .await?
@@ -449,7 +451,7 @@ impl LocalBackend {
         query: &SandboxListBuilder,
     ) -> MicrosandboxResult<(Vec<(sandbox_entity::Model, Option<i32>)>, Option<String>)> {
         let pools = self.db().await?;
-        let mut select = sandbox_entity::Entity::find();
+        let mut select = microsandbox_db::catalog::sandbox_query(pools.read()).await?;
 
         if let Some(cursor) = query.cursor.as_deref() {
             select = select.filter(sandbox_entity::Column::Id.lt(decode_list_cursor(cursor)?));
@@ -510,7 +512,13 @@ impl LocalBackend {
         // connecting and before sending so a concurrent remove/recreate
         // cannot redirect a stale receiver's shutdown to the replacement.
         self.sandbox_handle_state(name, Some(expected_id)).await?;
-        client.send(0, MessageType::Shutdown, &()).await?;
+        client
+            .send(
+                0,
+                microsandbox_protocol::message::MessageType::Shutdown,
+                &(),
+            )
+            .await?;
         Ok(())
     }
 
@@ -593,12 +601,19 @@ impl LocalBackend {
     ) -> MicrosandboxResult<sandbox_entity::Model> {
         let run_dir = self.config().run_dir();
         let sandboxes_dir = self.config().sandboxes_dir();
-        Self::reconcile_sandbox_runtime_state_with_paths(
+        let sandbox = Self::reconcile_sandbox_runtime_state_with_paths(
             pools,
             sandbox,
             Some((&run_dir, &sandboxes_dir)),
         )
-        .await
+        .await?;
+        if !matches!(
+            sandbox.status,
+            SandboxStatus::Running | SandboxStatus::Draining
+        ) {
+            self.control_sessions.invalidate_sandbox(sandbox.id);
+        }
+        Ok(sandbox)
     }
 
     /// Reconcile runtime state with optional exact socket roots.
@@ -656,7 +671,9 @@ impl LocalBackend {
         } else {
             None
         };
-        let Some(sandbox) = sandbox_entity::Entity::find_by_id(sandbox.id)
+        let Some(sandbox) = microsandbox_db::catalog::sandbox_query(pools.read())
+            .await?
+            .filter(sandbox_entity::Column::Id.eq(sandbox.id))
             .one(pools.read())
             .await?
         else {
@@ -694,7 +711,9 @@ impl LocalBackend {
                 )
                 .await?;
 
-                return sandbox_entity::Entity::find_by_id(sandbox.id)
+                return microsandbox_db::catalog::sandbox_query(pools.read())
+                    .await?
+                    .filter(sandbox_entity::Column::Id.eq(sandbox.id))
                     .one(pools.read())
                     .await?
                     .ok_or_else(|| crate::MicrosandboxError::SandboxNotFound(sandbox.name));
@@ -724,7 +743,9 @@ impl LocalBackend {
         )
         .await?;
 
-        sandbox_entity::Entity::find_by_id(sandbox.id)
+        microsandbox_db::catalog::sandbox_query(pools.read())
+            .await?
+            .filter(sandbox_entity::Column::Id.eq(sandbox.id))
             .one(pools.read())
             .await?
             .ok_or_else(|| crate::MicrosandboxError::SandboxNotFound(sandbox.name))
@@ -837,25 +858,21 @@ impl LocalBackend {
 
             // Only reconcile an active row. This prevents a concurrent start()
             // from having its newly-terminal or newly-running status overwritten.
-            sandbox_entity::Entity::update_many()
-                .col_expr(sandbox_entity::Column::Status, Expr::value(terminal_status))
-                .col_expr(
-                    sandbox_entity::Column::ActiveConfig,
-                    Expr::value(Option::<String>::None),
-                )
-                .col_expr(
-                    sandbox_entity::Column::NetworkSlot,
-                    Expr::value(Option::<u16>::None),
-                )
-                .col_expr(sandbox_entity::Column::UpdatedAt, Expr::value(now))
-                .filter(sandbox_entity::Column::Id.eq(sandbox_id))
-                .filter(sandbox_entity::Column::Status.is_in([
-                    SandboxStatus::Starting,
-                    SandboxStatus::Running,
-                    SandboxStatus::Draining,
-                ]))
-                .exec(&txn)
-                .await?;
+            microsandbox_db::catalog::clear_runtime_fields(
+                &txn,
+                sandbox_entity::Entity::update_many(),
+            )
+            .await?
+            .col_expr(sandbox_entity::Column::Status, Expr::value(terminal_status))
+            .col_expr(sandbox_entity::Column::UpdatedAt, Expr::value(now))
+            .filter(sandbox_entity::Column::Id.eq(sandbox_id))
+            .filter(sandbox_entity::Column::Status.is_in([
+                SandboxStatus::Starting,
+                SandboxStatus::Running,
+                SandboxStatus::Draining,
+            ]))
+            .exec(&txn)
+            .await?;
 
             Ok((txn, ()))
         })
@@ -897,14 +914,7 @@ impl LocalBackend {
                     Expr::value(chrono::Utc::now().naive_utc()),
                 );
             if !status.has_active_runtime_state() {
-                update = update.col_expr(
-                    sandbox_entity::Column::ActiveConfig,
-                    Expr::value(Option::<String>::None),
-                );
-                update = update.col_expr(
-                    sandbox_entity::Column::NetworkSlot,
-                    Expr::value(Option::<u16>::None),
-                );
+                update = microsandbox_db::catalog::clear_runtime_fields(&txn, update).await?;
             }
             update
                 .filter(sandbox_entity::Column::Id.eq(sandbox_id))
@@ -921,7 +931,20 @@ impl LocalBackend {
         sandbox_id: i32,
         config: &SandboxConfig,
     ) -> MicrosandboxResult<()> {
-        let config_json = serde_json::to_string(config)?;
+        if !microsandbox_db::catalog::has_column(db, "sandbox", "active_config").await? {
+            return Ok(());
+        }
+        let original = microsandbox_db::catalog::sandbox_query(db)
+            .await?
+            .filter(sandbox_entity::Column::Id.eq(sandbox_id))
+            .one(db)
+            .await?
+            .ok_or_else(|| {
+                crate::MicrosandboxError::Runtime(
+                    "sandbox disappeared before recording its active configuration".into(),
+                )
+            })?;
+        let config_json = crate::db::encoding::encode_like(config, &original.config)?;
         sandbox_entity::Entity::update_many()
             .col_expr(
                 sandbox_entity::Column::ActiveConfig,

@@ -5,6 +5,8 @@
 //! [`crate::sandbox::SandboxConfig`].
 
 pub(crate) mod handle;
+mod launch_contract;
+mod launch_input;
 #[cfg(feature = "net")]
 mod network_slot;
 // The pure identity helpers stay compiled (and unit-tested) on every platform;

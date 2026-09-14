@@ -1467,7 +1467,8 @@ impl LocalBackend {
         sandbox_dir: &Path,
         run_dir: &Path,
     ) -> MicrosandboxResult<()> {
-        let existing = sandbox_entity::Entity::find()
+        let existing = microsandbox_db::catalog::sandbox_query(pools.read())
+            .await?
             .filter(sandbox_entity::Column::Name.eq(&config.spec.name))
             .one(pools.read())
             .await?;
@@ -1727,7 +1728,7 @@ impl LocalBackend {
         config: &SandboxConfig,
         status: SandboxStatus,
     ) -> MicrosandboxResult<i32> {
-        let config_json = serde_json::to_string(config)?;
+        let config_json = crate::db::writing::encode_new(db, config).await?;
         let labels = config.spec.labels.clone();
 
         db.transaction(|txn| {

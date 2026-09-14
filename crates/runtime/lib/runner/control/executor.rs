@@ -87,7 +87,7 @@ impl RuntimeControlExecutor {
         Ok(Self {
             pause_observation: std::sync::RwLock::new(ControlResponse {
                 ok: true,
-                pause: Some(super::PauseControlState {
+                pause: Some(crate::control::PauseControlState {
                     paused: false,
                     recovery_required: false,
                     capture_unavailable: None,
@@ -443,7 +443,15 @@ impl RuntimeControlExecutor {
             state.lifecycle != RuntimeLifecycle::Running,
             std::sync::atomic::Ordering::Release,
         );
-        if mutation && response.ok {
+        // A partially applied secret batch changes authoritative state too.
+        let partial = matches!(
+            response.secret_result,
+            Some(microsandbox_protocol::control::SecretsResult::Failed {
+                applied_count: 1..,
+                ..
+            })
+        );
+        if mutation && (response.ok || partial) {
             match state.revision.checked_add(1) {
                 Some(revision) => state.revision = revision,
                 None => {
@@ -494,6 +502,7 @@ impl RuntimeControlExecutor {
 
         match request {
             ControlRequest::Capabilities => ControlResponse {
+                control_protocols: Some(vec!["json".into(), "cbor".into()]),
                 ok: true,
                 capabilities: Some(ControlCapabilities {
                     cpu_resize: self.vm.cpu_resize_supported(),
@@ -549,31 +558,26 @@ impl RuntimeControlExecutor {
 
     #[cfg(feature = "net")]
     fn handle_secrets_update(&self, changes: Vec<SecretLiveChange>) -> ControlResponse {
-        let Some(secrets) = &self.secrets else {
-            return control_error(
-                "secrets_update_unavailable",
-                "live secret reconfiguration is not available for this sandbox",
-            );
-        };
-        for change in changes {
-            let result = match change {
-                SecretLiveChange::Rotate { name, value } => {
-                    secrets.rotate_value(&name, value.0.clone())
-                }
-                SecretLiveChange::Remove { name } => {
-                    secrets.remove(&name);
-                    Ok(())
-                }
-                SecretLiveChange::SetAllowedHosts { name, hosts } => {
-                    secrets.set_allowed_hosts(&name, &hosts)
-                }
-            };
-            if let Err(error) = result {
-                return control_error("secrets_update_failed", error.to_string());
-            }
-        }
+        let changes = serde_json::from_value(
+            serde_json::to_value(changes).expect("secret changes serialize"),
+        )
+        .expect("shared secret change schema");
+        let response = super::handler::apply_secret_changes(self.secrets.as_ref(), changes);
         ControlResponse {
-            ok: true,
+            ok: response.json.ok,
+            error: response.json.error,
+            error_code: (!response.json.ok).then(|| {
+                if self.secrets.is_some() {
+                    "secrets_update_failed"
+                } else {
+                    "secrets_update_unavailable"
+                }
+                .into()
+            }),
+            secret_result: match response.framed {
+                super::handler::Reply::Secrets(result) => Some(result),
+                _ => None,
+            },
             ..Default::default()
         }
     }
@@ -612,7 +616,7 @@ fn new_runtime_boot_id() -> String {
 fn pause_response(state: &ExecutorState) -> ControlResponse {
     ControlResponse {
         ok: true,
-        pause: Some(super::PauseControlState {
+        pause: Some(crate::control::PauseControlState {
             paused: state.user_pause.is_some(),
             recovery_required: state.lifecycle == RuntimeLifecycle::Quiesced
                 && state.user_pause.is_none(),

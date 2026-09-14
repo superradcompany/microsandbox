@@ -341,6 +341,16 @@ try {
 - The `microsandbox` and `msb` bin shims forward to the resolved `msb` binary. They do not install runtime files.
 - If no platform package is present, reinstall with optional dependencies enabled, install the matching `@superradcompany/microsandbox-<platform>` package, or set `MSB_PATH`.
 
+## Inspect a runtime version
+
+```typescript
+import { resolveRuntimeVersion } from "microsandbox";
+
+const version = await resolveRuntimeVersion("/path/to/msb");
+```
+
+This reads the embedded semantic version without executing the file or requiring firmware. It returns a version string, or `null` for older executables without the section. File access failures, malformed executable metadata and invalid version sections reject the promise. There is no implicit `--version` subprocess fallback, and normal sandbox launch does not perform this optional inspection.
+
 ## More Documentation
 
 - [Sandbox lifecycle](https://docs.microsandbox.dev/sdk/typescript/sandbox)
@@ -375,3 +385,5 @@ npm start
 ## License
 
 Apache-2.0
+
+The size helpers and `Mebibytes` type are re-exported from `@microsandbox/types/size`, so values can be passed directly between this SDK and the standalone control client. The local npm workspace links that shared package with a versioned dependency for publishing. `npm ci`, `npm run build:ts`, and `npm run typecheck` work from this directory; the build and typecheck scripts build the shared types first.

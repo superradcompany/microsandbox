@@ -4,6 +4,12 @@
 //! per D6.7. This module just re-exports the entity types and pool aliases so
 //! the rest of the crate has one place to import them from.
 
+pub(crate) mod admission;
+pub(crate) mod config;
+pub(crate) mod encoding;
+mod json;
+pub(crate) mod writing;
+
 pub use microsandbox_db::entity;
 #[allow(unused_imports)]
 pub use microsandbox_db::pool::DbPools;

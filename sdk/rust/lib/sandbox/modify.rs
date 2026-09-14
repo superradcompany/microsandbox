@@ -5,13 +5,14 @@ use std::sync::Arc;
 use microsandbox_types::{
     EnvVar, RootDisk, RootfsSource, SecretSubstitution, SecretViolationAction,
 };
-use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set, sea_query::Expr};
 
-use crate::backend::Backend;
+use crate::backend::{Backend, ControlSession};
 use crate::db::entity::{sandbox as sandbox_entity, sandbox_label as sandbox_label_entity};
 use crate::error::{Operation, UnsupportedReason};
 use crate::size::Mebibytes;
 use crate::{MicrosandboxError, MicrosandboxResult};
+use microsandbox_control_client::{SecretsResult, SetCpuTarget, SetMemoryTarget, UpdateSecrets};
 
 use super::{SandboxConfig, SandboxStatus};
 
@@ -96,7 +97,8 @@ struct LiveControl {
     /// Host understands root growth; the runtime separately preflights its guest.
     root_disk_grow: bool,
     /// CPU and memory resize targets are served.
-    resize: bool,
+    cpu_resize: bool,
+    memory_resize: bool,
 
     /// Secret rotation, removal, and allowed-host updates are served.
     secrets: bool,
@@ -250,7 +252,8 @@ impl SandboxModificationBuilder {
         let status = handle.status_snapshot();
         let config = handle.config()?;
         let active = handle.active_config().ok().flatten();
-        let live = live_control(&self.name, status).await;
+        let (live, _) =
+            live_control(&self.backend, &self.name, status, &self.patch, self.policy).await?;
         Ok(build_plan(
             self.name,
             status,
@@ -262,7 +265,7 @@ impl SandboxModificationBuilder {
         ))
     }
 
-    /// Apply supported changes atomically.
+    /// Apply supported changes, preserving any earlier live effects on failure.
     ///
     /// Live-capable changes apply to the running VM first (CPU count through
     /// guest CPU hotplug when the target fits inside the active `max_cpus`);
@@ -286,7 +289,9 @@ impl SandboxModificationBuilder {
         // offline disk growth or a restart-backed modification bypass its launch gate.
         crate::LocalBackend::validate_completed_restore(&config)?;
         let mut active = handle.active_config().ok().flatten();
-        let live = live_control(&self.name, status).await;
+        let mut active_json = handle.active_config_json().map(str::to_owned);
+        let (live, session) =
+            live_control(&self.backend, &self.name, status, &self.patch, self.policy).await?;
         let mut plan = build_plan(
             self.name.clone(),
             status,
@@ -298,12 +303,23 @@ impl SandboxModificationBuilder {
         );
 
         validate_apply_supported(&plan)?;
+        if let Some(local) = handle.local() {
+            // Refuse an unrepresentable persisted change before stopping a VM,
+            // growing a disk, or issuing any live control mutation.
+            let mut prospective = config.clone();
+            apply_patch_to_config(&mut prospective, &self.patch);
+            apply_secret_patch_to_config(&mut prospective, &self.patch)?;
+            crate::db::encoding::encode_like(&prospective, &local.config_json)?;
+        }
         let restart_required = plan_requires_restart(&plan) && running_status(status);
         if restart_required {
             handle.stop().await?;
         }
         if !restart_required && let Some(target) = live_cpu_target(&plan, &self.patch) {
-            let state = control_cpu_target(&self.name, u32::from(target)).await?;
+            let state = control_session(&session)?
+                .request(&SetCpuTarget::new(u32::from(target)))
+                .await
+                .map_err(crate::MicrosandboxError::ControlClient)?;
             plan.resize_status.push(ResourceResizeStatus {
                 resource: ResourceKind::Cpus,
                 requested: target.to_string(),
@@ -321,11 +337,22 @@ impl SandboxModificationBuilder {
             // enforcement applies immediately either way.
             if let Some(active) = active.as_mut() {
                 active.spec.resources.cpus = target;
-                persist_active_config(&self.backend, &handle, active).await?;
+                persist_active_config(
+                    &self.backend,
+                    control_session(&session)?,
+                    &mut active_json,
+                    active,
+                )
+                .await?;
             }
         }
         if !restart_required && let Some(target_mib) = live_memory_target(&plan, &self.patch) {
-            let state = control_memory_target(&self.name, u64::from(target_mib)).await?;
+            let state = control_session(&session)?
+                .request(&SetMemoryTarget {
+                    total_mib: u64::from(target_mib),
+                })
+                .await
+                .map_err(crate::MicrosandboxError::ControlClient)?;
             plan.resize_status.push(ResourceResizeStatus {
                 resource: ResourceKind::Memory,
                 requested: format_mib(target_mib),
@@ -342,19 +369,31 @@ impl SandboxModificationBuilder {
             // (plugging blocks) continues asynchronously in the guest.
             if let Some(active) = active.as_mut() {
                 active.spec.resources.memory_mib = state.target_mib as u32;
-                persist_active_config(&self.backend, &handle, active).await?;
+                persist_active_config(
+                    &self.backend,
+                    control_session(&session)?,
+                    &mut active_json,
+                    active,
+                )
+                .await?;
             }
         }
         if !restart_required {
             let updates = live_secret_updates(&plan, &self.patch)?;
             if !updates.is_empty() {
-                control_secrets_update(&self.name, updates).await?;
+                control_secrets_update(control_session(&session)?, updates).await?;
                 // The running network layer changed: mirror the secret patch
                 // into the active snapshot so inspect does not report the
                 // already-live change as pending.
                 if let Some(active) = active.as_mut() {
                     apply_secret_patch_to_config(active, &self.patch)?;
-                    persist_active_config(&self.backend, &handle, active).await?;
+                    persist_active_config(
+                        &self.backend,
+                        control_session(&session)?,
+                        &mut active_json,
+                        active,
+                    )
+                    .await?;
                 }
             }
         }
@@ -382,7 +421,13 @@ impl SandboxModificationBuilder {
                     ..Default::default()
                 };
                 apply_patch_to_config(active, &disk_patch);
-                persist_active_config(&self.backend, &handle, active).await?;
+                persist_active_config(
+                    &self.backend,
+                    control_session(&session)?,
+                    &mut active_json,
+                    active,
+                )
+                .await?;
             }
         }
         // Grow the real upper.ext4 before persisting the new desired size:
@@ -508,7 +553,7 @@ fn build_plan(
         status,
         config,
         active,
-        live.resize,
+        live,
         &patch,
         policy,
         &mut changes,
@@ -684,41 +729,48 @@ fn control_socket_paths(
         .collect()
 }
 
-/// Whether the running sandbox exposes the runtime control socket. Its absence
-/// means the runtime predates live control or the VM booted without any
-/// live-mutable capacity, so everything classifies as restart-required.
-fn control_socket_exists(name: &str) -> bool {
-    #[cfg(unix)]
-    return control_socket_path_candidates(name)
-        .into_iter()
-        .any(|path| path.exists());
-
-    #[cfg(not(unix))]
-    control_socket_path(name).is_ok_and(|path| path.exists())
-}
-
 /// Discover which live-control operations the running sandbox serves.
-async fn live_control(name: &str, status: SandboxStatus) -> LiveControl {
-    if !running_status(status) || !control_socket_exists(name) {
-        return LiveControl::default();
+async fn live_control(
+    backend: &Arc<dyn Backend>,
+    name: &str,
+    status: SandboxStatus,
+    patch: &SandboxModificationPatch,
+    policy: ModificationPolicy,
+) -> MicrosandboxResult<(LiveControl, Option<ControlSession>)> {
+    let needs_control = patch.root_disk_size_mib.is_some()
+        || patch.cpus.is_some()
+        || patch.memory_mib.is_some()
+        || !patch.secrets.is_empty()
+        || !patch.secrets_remove.is_empty();
+    if !running_status(status) || !needs_control || policy == ModificationPolicy::NextStart {
+        return Ok((LiveControl::default(), None));
     }
-    match control_capabilities(name).await {
-        Ok(caps) => LiveControl {
+    let Some(local) = backend.as_local() else {
+        return Ok((LiveControl::default(), None));
+    };
+    let Some(session) = local.control_session(name).await? else {
+        return Ok((LiveControl::default(), None));
+    };
+    let caps = session.capabilities();
+    Ok((
+        LiveControl {
             root_disk_grow: caps.root_disk_grow,
-            resize: caps.cpu_resize || caps.memory_resize,
+            cpu_resize: caps.cpu_resize,
+            memory_resize: caps.memory_resize,
             secrets: caps.secrets_update,
         },
-        // Runtimes that predate the capabilities op served the socket only
-        // when they could resize; live secret ops did not exist yet.
-        Err(_) => LiveControl {
-            root_disk_grow: false,
-            resize: true,
-            secrets: false,
-        },
-    }
+        Some(session),
+    ))
 }
 
-/// Ask the sandbox process which live-control operations it serves.
+fn control_session(session: &Option<ControlSession>) -> MicrosandboxResult<&ControlSession> {
+    session.as_ref().ok_or_else(|| {
+        crate::MicrosandboxError::ControlClient(Arc::new(
+            microsandbox_control_client::ControlClientError::RuntimeChanged,
+        ))
+    })
+}
+
 pub(super) async fn control_capabilities(
     name: &str,
 ) -> MicrosandboxResult<microsandbox_runtime::control::ControlCapabilities> {
@@ -1124,45 +1176,27 @@ pub(crate) async fn control_disk_checkpoint_create(
 /// never logged; failures surface the runtime's error, which carries secret
 /// names only.
 async fn control_secrets_update(
-    name: &str,
+    session: &ControlSession,
     changes: Vec<microsandbox_runtime::control::SecretLiveChange>,
 ) -> MicrosandboxResult<()> {
-    let request = microsandbox_runtime::control::ControlRequest::SecretsUpdate { changes };
-    let mut line = serde_json::to_string(&request)?;
-    line.push('\n');
-    control_request(name, line).await?;
-    Ok(())
-}
-
-/// Ask the sandbox process to converge on `total_mib` of usable guest memory.
-async fn control_memory_target(
-    name: &str,
-    total_mib: u64,
-) -> MicrosandboxResult<microsandbox_runtime::control::MemoryControlState> {
-    let response = control_request(
-        name,
-        format!("{{\"op\":\"memory_target\",\"total_mib\":{total_mib}}}\n"),
-    )
-    .await?;
-    response.memory.ok_or_else(|| {
-        crate::MicrosandboxError::Runtime("control response missing memory state".to_string())
-    })
-}
-
-/// Ask the sandbox process to converge on `online` CPUs. Enforcement applies
-/// immediately in the VMM; the guest driver converges asynchronously.
-pub(crate) async fn control_cpu_target(
-    name: &str,
-    online: u32,
-) -> MicrosandboxResult<microsandbox_runtime::control::CpuControlState> {
-    let response = control_request(
-        name,
-        format!("{{\"op\":\"cpu_target\",\"online\":{online}}}\n"),
-    )
-    .await?;
-    response.cpu.ok_or_else(|| {
-        crate::MicrosandboxError::Runtime("control response missing cpu state".to_string())
-    })
+    match session
+        .request(&UpdateSecrets::new(serde_json::from_value(
+            serde_json::to_value(changes)?,
+        )?))
+        .await
+        .map_err(crate::MicrosandboxError::ControlClient)?
+    {
+        SecretsResult::Complete { .. } => Ok(()),
+        SecretsResult::Failed {
+            applied_count,
+            failed_index,
+            error,
+        } => Err(crate::MicrosandboxError::ControlSecretBatch {
+            applied_count,
+            failed_index,
+            error,
+        }),
+    }
 }
 
 fn validate_apply_supported(plan: &SandboxModificationPlan) -> MicrosandboxResult<()> {
@@ -1576,7 +1610,7 @@ async fn persist_config(
         .as_local()
         .ok_or_else(|| crate::MicrosandboxError::local_only(Operation::SandboxModify))?;
 
-    let config_json = serde_json::to_string(config)?;
+    let config_json = crate::db::encoding::encode_like(config, &local.config_json)?;
     let labels = config.spec.labels.clone();
     let write_db = local_backend.db().await?.write();
 
@@ -1585,14 +1619,15 @@ async fn persist_config(
             let config_json = config_json.clone();
             let labels = labels.clone();
             async move {
-                sandbox_entity::ActiveModel {
-                    id: Set(local.db_id),
-                    config: Set(config_json),
-                    updated_at: Set(Some(chrono::Utc::now().naive_utc())),
-                    ..Default::default()
-                }
-                .update(&txn)
-                .await?;
+                sandbox_entity::Entity::update_many()
+                    .col_expr(sandbox_entity::Column::Config, Expr::value(config_json))
+                    .col_expr(
+                        sandbox_entity::Column::UpdatedAt,
+                        Expr::value(chrono::Utc::now().naive_utc()),
+                    )
+                    .filter(sandbox_entity::Column::Id.eq(local.db_id))
+                    .exec(&txn)
+                    .await?;
 
                 sandbox_label_entity::Entity::delete_many()
                     .filter(sandbox_label_entity::Column::SandboxId.eq(local.db_id))
@@ -1618,26 +1653,21 @@ async fn persist_config(
 
 async fn persist_active_config(
     backend: &Arc<dyn Backend>,
-    handle: &super::SandboxHandle,
+    session: &ControlSession,
+    expected: &mut Option<String>,
     active: &SandboxConfig,
 ) -> MicrosandboxResult<()> {
-    let local = handle
-        .local()
-        .ok_or_else(|| crate::MicrosandboxError::local_only(Operation::SandboxModify))?;
     let local_backend = backend
         .as_local()
         .ok_or_else(|| crate::MicrosandboxError::local_only(Operation::SandboxModify))?;
-
-    let active_json = serde_json::to_string(active)?;
-    sandbox_entity::ActiveModel {
-        id: Set(local.db_id),
-        active_config: Set(Some(active_json)),
-        updated_at: Set(Some(chrono::Utc::now().naive_utc())),
-        ..Default::default()
-    }
-    .update(local_backend.db().await?.write())
-    .await?;
-
+    let json = session
+        .persist_active_config(
+            local_backend.db().await?.write(),
+            expected.as_deref(),
+            active,
+        )
+        .await?;
+    *expected = Some(json);
     Ok(())
 }
 
@@ -1652,7 +1682,7 @@ fn push_resource_changes(
     status: SandboxStatus,
     config: &SandboxConfig,
     active: Option<&SandboxConfig>,
-    live_control_supported: bool,
+    live_control: LiveControl,
     patch: &SandboxModificationPatch,
     policy: ModificationPolicy,
     changes: &mut Vec<PlannedChange>,
@@ -1668,7 +1698,7 @@ fn push_resource_changes(
         // VM actually booted with. The active config snapshot is the authority;
         // older runtimes without one classify as restart-required.
         let active_max_cpus = active.map(|active| active.spec.resources.max_cpus);
-        let live = live_control_supported && active_max_cpus.is_some_and(|max| cpus <= max);
+        let live = live_control.cpu_resize && active_max_cpus.is_some_and(|max| cpus <= max);
         let reason = match (resource_disposition(status, policy, live), active_max_cpus) {
             (ModificationDisposition::RequiresRestart, Some(max)) if cpus > max => Some(format!(
                 "cpus {cpus} exceeds the active max capacity {max}; restart with a larger max_cpus"
@@ -1704,9 +1734,10 @@ fn push_resource_changes(
     {
         // Memory changes live through virtio-mem when the target fits inside
         // the active hotpluggable capacity AND the running sandbox exposes a
-        // runtime control socket (older runtimes and Windows do not).
+        // runtime control capability for memory resize.
         let active_max_memory = active.map(|active| active.spec.resources.max_memory_mib);
-        let live = live_control_supported && active_max_memory.is_some_and(|max| memory_mib <= max);
+        let live =
+            live_control.memory_resize && active_max_memory.is_some_and(|max| memory_mib <= max);
         let reason = match (
             resource_disposition(status, policy, live),
             active_max_memory,
@@ -2697,6 +2728,7 @@ fn format_mib(mib: u32) -> String {
 
 #[cfg(test)]
 mod tests {
+    use sea_orm::ActiveModelTrait;
     use tempfile::tempdir;
 
     use super::*;
@@ -2980,49 +3012,6 @@ mod tests {
         );
     }
 
-    #[test]
-    #[cfg(unix)]
-    fn new_control_client_selects_old_runtime_socket() {
-        let temp = tempfile::Builder::new()
-            .prefix("msb-control")
-            .tempdir_in("/tmp")
-            .unwrap();
-        let run_dir = temp.path().join("run");
-        let paths = microsandbox_runtime::ipc::sandbox_socket_paths(&run_dir, "old-runtime");
-        std::fs::create_dir_all(paths.legacy_control.parent().unwrap()).unwrap();
-        let _listener = std::os::unix::net::UnixListener::bind(&paths.legacy_control).unwrap();
-
-        let selected = control_socket_paths(vec![paths.agent.clone(), paths.legacy_agent.clone()])
-            .into_iter()
-            .find(|path| path.exists())
-            .unwrap();
-
-        assert_eq!(selected, paths.legacy_control);
-        std::os::unix::net::UnixStream::connect(selected).unwrap();
-    }
-
-    #[tokio::test]
-    #[cfg(unix)]
-    async fn new_control_client_skips_stale_canonical_socket() {
-        let temp = tempfile::Builder::new()
-            .prefix("msb-control-fallback")
-            .tempdir_in("/tmp")
-            .unwrap();
-        let run_dir = temp.path().join("run");
-        let paths = microsandbox_runtime::ipc::sandbox_socket_paths(&run_dir, "old-runtime");
-        std::fs::create_dir_all(&paths.canonical_dir).unwrap();
-        let stale = std::os::unix::net::UnixListener::bind(&paths.control).unwrap();
-        drop(stale);
-        std::fs::create_dir_all(paths.legacy_control.parent().unwrap()).unwrap();
-        let _live = tokio::net::UnixListener::bind(&paths.legacy_control).unwrap();
-
-        let stream = connect_control_socket(vec![paths.control, paths.legacy_control])
-            .await
-            .unwrap();
-
-        assert!(stream.peer_addr().is_ok());
-    }
-
     fn config(cpus: u8, memory_mib: u32) -> SandboxConfig {
         let mut config = SandboxConfig::default();
         config.spec.name = "api".to_string();
@@ -3188,7 +3177,8 @@ mod tests {
             Some(&active),
             LiveControl {
                 root_disk_grow: false,
-                resize: true,
+                cpu_resize: true,
+                memory_resize: true,
                 secrets: false,
             },
             patch.clone(),
@@ -3226,7 +3216,8 @@ mod tests {
                 Some(&active),
                 LiveControl {
                     root_disk_grow: false,
-                    resize: live_memory_supported,
+                    cpu_resize: live_memory_supported,
+                    memory_resize: live_memory_supported,
                     secrets: false,
                 },
                 patch.clone(),
@@ -3241,6 +3232,51 @@ mod tests {
                 assert_eq!(live_memory_target(&plan, &patch), Some(1024));
             } else {
                 assert_eq!(live_memory_target(&plan, &patch), None);
+            }
+        }
+    }
+
+    #[test]
+    fn cpu_and_memory_capabilities_are_independent() {
+        let mut active = config(1, 256);
+        active.spec.resources.max_cpus = 2;
+        active.spec.resources.max_memory_mib = 512;
+        for (cpu_resize, memory_resize) in [(true, false), (false, true)] {
+            let plan = build_plan(
+                "api".into(),
+                SandboxStatus::Running,
+                &active,
+                Some(&active),
+                LiveControl {
+                    root_disk_grow: false,
+                    cpu_resize,
+                    memory_resize,
+                    secrets: false,
+                },
+                SandboxModificationPatch {
+                    cpus: Some(2),
+                    memory_mib: Some(512),
+                    ..Default::default()
+                },
+                ModificationPolicy::NoRestart,
+            );
+            for (field, supported) in [("cpus", cpu_resize), ("memory", memory_resize)] {
+                let change = plan
+                    .changes
+                    .iter()
+                    .find_map(|change| match change {
+                        PlannedChange::Config(change) if change.field == field => Some(change),
+                        _ => None,
+                    })
+                    .unwrap();
+                assert_eq!(
+                    change.disposition,
+                    if supported {
+                        ModificationDisposition::Live
+                    } else {
+                        ModificationDisposition::RequiresRestart
+                    }
+                );
             }
         }
     }
@@ -3261,7 +3297,8 @@ mod tests {
             Some(&active),
             LiveControl {
                 root_disk_grow: false,
-                resize: true,
+                cpu_resize: true,
+                memory_resize: true,
                 secrets: false,
             },
             patch.clone(),
@@ -3560,7 +3597,8 @@ mod tests {
             None,
             LiveControl {
                 root_disk_grow: false,
-                resize: true,
+                cpu_resize: true,
+                memory_resize: true,
                 secrets: true,
             },
             patch.clone(),
@@ -3614,7 +3652,8 @@ mod tests {
                     None,
                     LiveControl {
                         root_disk_grow: true,
-                        resize: false,
+                        cpu_resize: false,
+                        memory_resize: false,
                         secrets: false,
                     },
                     SandboxModificationPatch {
@@ -4274,7 +4313,8 @@ mod tests {
             None,
             LiveControl {
                 root_disk_grow: false,
-                resize: false,
+                cpu_resize: false,
+                memory_resize: false,
                 secrets: true,
             },
             patch,
@@ -4300,7 +4340,8 @@ mod tests {
             None,
             LiveControl {
                 root_disk_grow: false,
-                resize: false,
+                cpu_resize: false,
+                memory_resize: false,
                 secrets: true,
             },
             removal_patch,
@@ -4332,7 +4373,8 @@ mod tests {
             None,
             LiveControl {
                 root_disk_grow: false,
-                resize: false,
+                cpu_resize: false,
+                memory_resize: false,
                 secrets: true,
             },
             patch,
@@ -4368,7 +4410,8 @@ mod tests {
             None,
             LiveControl {
                 root_disk_grow: false,
-                resize: false,
+                cpu_resize: false,
+                memory_resize: false,
                 secrets: true,
             },
             patch,
@@ -4746,7 +4789,8 @@ mod tests {
             None,
             LiveControl {
                 root_disk_grow: false,
-                resize: false,
+                cpu_resize: false,
+                memory_resize: false,
                 secrets: true,
             },
             patch.clone(),
@@ -4815,7 +4859,8 @@ mod tests {
             None,
             LiveControl {
                 root_disk_grow: false,
-                resize: false,
+                cpu_resize: false,
+                memory_resize: false,
                 secrets: true,
             },
             patch.clone(),
@@ -4866,7 +4911,8 @@ mod tests {
             None,
             LiveControl {
                 root_disk_grow: false,
-                resize: false,
+                cpu_resize: false,
+                memory_resize: false,
                 secrets: true,
             },
             patch.clone(),
@@ -4887,7 +4933,8 @@ mod tests {
             None,
             LiveControl {
                 root_disk_grow: false,
-                resize: false,
+                cpu_resize: false,
+                memory_resize: false,
                 secrets: true,
             },
             removal_patch.clone(),

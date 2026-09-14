@@ -37,6 +37,8 @@ embed-binaries = ["runner", "microsandbox-filesystem/embed-binaries"]
 net = ["dep:microsandbox-network", "msb_krun?/net"]
 
 [dependencies]
+base64.workspace = true
+ciborium-ll.workspace = true
 bytes = { workspace = true, optional = true }
 chrono.workspace = true
 clap = { workspace = true, features = ["derive"], optional = true }
@@ -64,6 +66,7 @@ sha2.workspace = true
 tempfile = { workspace = true, optional = true }
 thiserror.workspace = true
 tokio = { workspace = true, optional = true }
+tokio-util = { workspace = true, features = ["rt"] }
 tracing.workspace = true
 zeroize.workspace = true
 
@@ -79,6 +82,8 @@ features = ["named-pipe"]
 optional = true
 
 [dev-dependencies]
+microsandbox-protocol-client.workspace = true
+microsandbox-control-client.workspace = true
 microsandbox-migration.workspace = true
 tempfile.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["test-util"] }

@@ -15,8 +15,11 @@
 //! the bulk of the old global config singleton plus the SQLite pool, so multiple
 //! backends can hold different configurations for tests / migrations.
 
+mod control;
 mod control_lookup;
 mod sandbox;
+
+pub(crate) use control::ControlSession;
 
 use std::{
     collections::{HashMap, HashSet},
@@ -28,7 +31,8 @@ use std::{
 };
 
 use microsandbox_db::pool::DbPools;
-use microsandbox_migration::{Migrator, MigratorTrait, schema_metadata};
+use microsandbox_migration::schema_metadata;
+use microsandbox_migration::{Migrator, MigratorTrait};
 use microsandbox_types::DeploymentProfile;
 use microsandbox_utils::process_lock::{lock_exclusive, open_lock_file, unlock};
 use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, DbErr, Statement};
@@ -58,6 +62,7 @@ pub struct LocalBackend {
     db: OnceCell<DbPools>,
     selection_source: BackendSelectionSource,
     profile: Option<String>,
+    control_sessions: control::ControlSessions,
 }
 
 /// Fluent builder for [`LocalBackend`]. Construct via [`LocalBackend::builder`].
@@ -140,6 +145,7 @@ impl LocalBackend {
             db: OnceCell::new(),
             selection_source,
             profile,
+            control_sessions: control::ControlSessions::default(),
         }
     }
 
@@ -162,8 +168,16 @@ impl LocalBackend {
         self.db
             .get_or_try_init(|| async {
                 let db_dir = self.config.home().join(microsandbox_utils::DB_SUBDIR);
-                connect_and_migrate(&db_dir, &self.config.database, &self.config.snapshots_dir())
-                    .await
+                let pools = connect_and_migrate(
+                    &db_dir,
+                    &self.config.database,
+                    &self.config.snapshots_dir(),
+                )
+                .await?;
+                self.control_sessions
+                    .bind_database(&db_dir.join(microsandbox_utils::DB_FILENAME))
+                    .map_err(MicrosandboxError::ControlClient)?;
+                Ok(pools)
             })
             .await
     }
@@ -444,6 +458,7 @@ impl LocalBackendBuilder {
             db: OnceCell::new(),
             selection_source: BackendSelectionSource::Programmatic,
             profile: None,
+            control_sessions: control::ControlSessions::default(),
         }
     }
 
@@ -678,8 +693,23 @@ async fn connect_and_migrate(
     microsandbox_runtime::maintenance::refuse_if_install_exclusive_held(pools.write())
         .await
         .map_err(|err| MicrosandboxError::Runtime(err.to_string()))?;
-    refuse_schema_ahead(pools.write().inner()).await?;
-    Migrator::up(pools.write().inner(), None).await?;
+    let initialize = crate::db::admission::requires_initialization(pools.write()).await?;
+    if !initialize {
+        let count = pools
+            .read()
+            .query_one_raw(Statement::from_string(
+                DatabaseBackend::Sqlite,
+                "SELECT COUNT(*) FROM seaql_migrations",
+            ))
+            .await?
+            .expect("COUNT returns one row")
+            .try_get_by_index::<i64>(0)?;
+        if count != schema_metadata::migration_ids().count() as i64 {
+            return Ok(pools);
+        }
+    } else {
+        Migrator::up(pools.write().inner(), None).await?;
+    }
 
     // Descriptor translation mutates the same installation state as schema
     // migration. Keep both gates held until every discovered artifact is
@@ -911,6 +941,7 @@ mod tests {
         );
 
         let backend = LocalBackend {
+            control_sessions: Default::default(),
             config: Arc::new(config),
             db: OnceCell::new(),
             selection_source: BackendSelectionSource::Programmatic,
@@ -978,6 +1009,7 @@ mod tests {
             db: OnceCell::new(),
             selection_source: BackendSelectionSource::Programmatic,
             profile: None,
+            control_sessions: control::ControlSessions::default(),
         };
         let mut config = SandboxConfig::default();
         config.spec.name = "profile-test".into();
@@ -998,6 +1030,7 @@ mod tests {
             db: OnceCell::new(),
             selection_source: BackendSelectionSource::Programmatic,
             profile: None,
+            control_sessions: control::ControlSessions::default(),
         };
         let mut config = SandboxConfig::default();
         config.spec.deployment_profile = DeploymentProfile::MultiTenant;
@@ -1203,7 +1236,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_connect_and_migrate_upgrades_v0_6_15_prefix() {
+    async fn test_connect_preserves_v0_6_15_catalog_for_its_cli() {
         let tmp = tempfile::tempdir().unwrap();
         let db_dir = tmp.path().join("db");
         let db_path = db_dir.join(microsandbox_utils::DB_FILENAME);
@@ -1265,8 +1298,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(network_slot_migration.is_some());
-        assert!(network_slot_column.is_some());
+        assert!(network_slot_migration.is_none());
+        assert!(network_slot_column.is_none());
     }
 
     #[tokio::test]

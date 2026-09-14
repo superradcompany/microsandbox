@@ -1831,7 +1831,8 @@ pub(super) async fn load_sandbox_record(
     db: &DbReadConnection,
     name: &str,
 ) -> MicrosandboxResult<sandbox_entity::Model> {
-    sandbox_entity::Entity::find()
+    microsandbox_db::catalog::sandbox_query(db)
+        .await?
         .filter(sandbox_entity::Column::Name.eq(name))
         .one(db)
         .await?

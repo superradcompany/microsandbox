@@ -184,6 +184,32 @@ pub enum MicrosandboxError {
     #[error("agent client error: {0}")]
     AgentClient(#[from] crate::agent::AgentClientError),
 
+    /// A runtime control operation failed; the source retains delivery certainty
+    /// and the original peer response. Shared setup failures use one owned source.
+    #[error("control client error: {0}")]
+    ControlClient(#[source] std::sync::Arc<microsandbox_control_client::ControlClientError>),
+
+    /// The run or active configuration changed after a live control operation.
+    /// The live operation may have applied; callers must inspect fresh state
+    /// before deciding whether to submit a new modification.
+    #[error(
+        "runtime or active configuration changed while recording a live control result; the live change may already have applied"
+    )]
+    ControlStateChanged,
+
+    /// The runtime applied an ordered prefix of a secret batch before failure.
+    #[error(
+        "secret update stopped after {applied_count} applied entries; failed index {failed_index}"
+    )]
+    ControlSecretBatch {
+        /// Number of successfully completed entries, including no-ops.
+        applied_count: u32,
+        /// First failed entry; subsequent entries were not applied.
+        failed_index: u32,
+        /// Structured peer failure; earlier entries remain applied.
+        error: microsandbox_protocol::control::ControlError,
+    },
+
     /// A nix/errno error occurred.
     #[cfg(all(feature = "local", unix))]
     #[error("nix error: {0}")]

@@ -432,6 +432,7 @@ pub const GUEST_TLS_HOST_CAS_PATH: &str = "/.msb/tls/host-cas.pem";
 pub mod bootstrap;
 pub mod bulk;
 pub mod codec;
+pub mod control;
 pub mod core;
 pub mod exec;
 pub mod fs;
@@ -440,5 +441,6 @@ pub mod message;
 pub mod tcp;
 #[doc(hidden)]
 pub mod transport;
+pub mod wire;
 
 pub use error::*;

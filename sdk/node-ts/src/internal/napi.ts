@@ -87,6 +87,7 @@ export interface NativeBindings {
   ) => Promise<void>;
   readonly install: () => Promise<void>;
   readonly isInstalled: () => boolean;
+  readonly resolveRuntimeVersion: (executable: string) => Promise<string | null>;
   readonly allSandboxMetrics: () => Promise<Record<string, NapiSandboxMetrics>>;
   readonly AgentClient: NapiAgentClientStatic;
 }

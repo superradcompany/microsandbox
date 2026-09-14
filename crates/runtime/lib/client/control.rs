@@ -158,6 +158,12 @@ pub struct SecretValue(pub String);
 /// The reply to any control request.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ControlResponse {
+    /// In-process completion metadata for the framed adapter; never emitted in JSON.
+    #[serde(skip)]
+    pub secret_result: Option<microsandbox_protocol::control::SecretsResult>,
+    /// Available transports on this same endpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_protocols: Option<Vec<String>>,
     /// Completed local handoff, deliberately not a portable checkpoint identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<PathBuf>,

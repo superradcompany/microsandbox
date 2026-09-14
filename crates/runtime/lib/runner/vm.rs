@@ -930,24 +930,21 @@ fn run(
                     .exec(&exit_db)
                     .await;
 
-                // Mark sandbox as stopped.
-                let _ = sandbox_entity::Entity::update_many()
-                    .col_expr(
-                        sandbox_entity::Column::Status,
-                        Expr::value(sandbox_entity::SandboxStatus::Stopped),
-                    )
-                    .col_expr(
-                        sandbox_entity::Column::ActiveConfig,
-                        Expr::value(Option::<String>::None),
-                    )
-                    .col_expr(
-                        sandbox_entity::Column::NetworkSlot,
-                        Expr::value(Option::<u16>::None),
-                    )
-                    .col_expr(sandbox_entity::Column::UpdatedAt, Expr::value(now))
-                    .filter(sandbox_entity::Column::Id.eq(exit_sandbox_id))
-                    .exec(&exit_db)
-                    .await;
+                // Preserve old catalogs while releasing current runtime-owned fields.
+                match crate::maintenance::terminal_sandbox_update(&exit_db).await {
+                    Ok(update) => {
+                        let _ = update
+                            .col_expr(
+                                sandbox_entity::Column::Status,
+                                Expr::value(sandbox_entity::SandboxStatus::Stopped),
+                            )
+                            .col_expr(sandbox_entity::Column::UpdatedAt, Expr::value(now))
+                            .filter(sandbox_entity::Column::Id.eq(exit_sandbox_id))
+                            .exec(&exit_db)
+                            .await;
+                    }
+                    Err(error) => tracing::warn!(%error, "terminal sandbox update failed"),
+                }
 
                 // Self-clean: if this sandbox was created ephemeral, drop its
                 // persisted row + directory now that it is terminal. Reads

@@ -257,7 +257,8 @@ async fn capture_installed(
     let db = local.db().await?.read();
 
     // Look up the sandbox row + parse its persisted config.
-    let model = sandbox_entity::Entity::find()
+    let model = microsandbox_db::catalog::sandbox_query(db)
+        .await?
         .filter(sandbox_entity::Column::Name.eq(&source_sandbox))
         .one(db)
         .await?

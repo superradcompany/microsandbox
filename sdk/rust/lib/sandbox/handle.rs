@@ -264,7 +264,7 @@ impl SandboxHandle {
     /// raw JSON, or [`cloud`](Self::cloud) to access the typed cloud state.
     pub fn config(&self) -> MicrosandboxResult<SandboxConfig> {
         match &self.inner {
-            SandboxHandleInner::Local(s) => Ok(serde_json::from_str(&s.config_json)?),
+            SandboxHandleInner::Local(s) => Ok(crate::db::config::decode(&s.config_json)?),
             SandboxHandleInner::Cloud(_) => Err(MicrosandboxError::local_only(
                 Operation::SandboxHandleConfig,
             )),
@@ -274,9 +274,8 @@ impl SandboxHandle {
     /// Parse the active configuration snapshot, when one is available.
     pub fn active_config(&self) -> MicrosandboxResult<Option<SandboxConfig>> {
         self.active_config_json()
-            .map(serde_json::from_str)
+            .map(crate::db::config::decode)
             .transpose()
-            .map_err(Into::into)
     }
 
     /// Start planning a sandbox modification from this handle.
@@ -948,7 +947,7 @@ fn is_local_ephemeral_handle(inner: &SandboxHandleInner) -> bool {
         return false;
     };
 
-    serde_json::from_str::<SandboxConfig>(&state.config_json)
+    crate::db::config::decode(&state.config_json)
         .map(|config| config.spec.lifecycle.ephemeral)
         .unwrap_or(false)
 }

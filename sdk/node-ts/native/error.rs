@@ -48,6 +48,9 @@ fn error_type_str(err: &MicrosandboxError) -> &'static str {
             ..
         }) => "UnsupportedOperation",
         MicrosandboxError::AgentClient(_) => "AgentClient",
+        MicrosandboxError::ControlClient(_) => "Runtime",
+        MicrosandboxError::ControlStateChanged => "Runtime",
+        MicrosandboxError::ControlSecretBatch { .. } => "Runtime",
         #[cfg(unix)]
         MicrosandboxError::Nix(_) => "Nix",
         #[cfg(windows)]

@@ -105,6 +105,8 @@ Backward-compatibility detection is a required part of working on this project. 
 
 The goal is detection and reporting, not automatically preserving compatibility. Do not silently add compatibility layers, migrations, legacy codecs, fallback paths, or downgrade behavior. When a material risk is found, explain the affected releases, components, persisted artifacts, users or workflows, the likely failure mode, and the available options; then wait for human direction as required by the Design Principles above.
 
+By explicit user direction on 2026-09-13, the historical SDK/runtime compatibility target for this work is v0.6.x, with v0.6.0 as the floor, against the current implementation candidate in both directions. Releases older than v0.6.0, including all v0.4.x and v0.5.x releases, are excluded from required compatibility. Preserve their historical results as diagnostic evidence. This supersedes the earlier exact-v0.5.0 exclusion. Existing codecs and capability gates are not removed or changed by this scope decision. The known v0.6.9 ↔ v0.6.10 exception remains unchanged; other v0.6.x failures are not waived.
+
 Before changing an existing cross-version boundary, determine:
 
 - What older component, binary, sandbox, or persisted state may interact with the change.

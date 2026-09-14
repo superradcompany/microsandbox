@@ -93,6 +93,7 @@ pub struct Message {
     Eq,
     Hash,
     strum::IntoStaticStr,
+    strum::AsRefStr,
     strum::EnumString,
     strum::EnumIter,
 )]

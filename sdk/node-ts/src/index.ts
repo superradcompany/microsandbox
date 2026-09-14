@@ -413,7 +413,7 @@ export type PullProgressEvent = NapiPullProgressEvent;
 export type PullProgressStream = NapiPullProgressStream;
 
 // Setup + module-level helpers
-export { Setup, install, isInstalled, setup } from "./setup.js";
+export { Setup, install, isInstalled, resolveRuntimeVersion, setup } from "./setup.js";
 export { allSandboxMetrics } from "./all-metrics.js";
 
 /** Override the `libkrunfw` shared library path used by subsequently created local sandboxes. */

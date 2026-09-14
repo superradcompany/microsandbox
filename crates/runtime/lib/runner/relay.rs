@@ -72,6 +72,12 @@ use crate::console::ConsoleSharedState;
 use crate::exec_log::{LogSource, LogWriter};
 use crate::{RuntimeError, RuntimeResult};
 
+#[path = "relay/envelope.rs"]
+mod envelope;
+#[cfg(test)]
+#[path = "relay/namespace_tests.rs"]
+mod namespace_tests;
+
 //--------------------------------------------------------------------------------------------------
 // Types: capture
 //--------------------------------------------------------------------------------------------------
@@ -4217,6 +4223,16 @@ async fn client_reader_task(
                 id_start,
                 id_end_exclusive
             );
+            break;
+        }
+
+        // Raw bulk records and local arena messages have their own codecs.
+        // All guest-bound CBOR envelopes must stay outside the host namespace.
+        if frame.flags != FLAG_BULK
+            && (!is_shutdown || frame.data.len() > LEN_PREFIX_SIZE + FRAME_HEADER_SIZE)
+            && envelope::inspect(&frame.data[LEN_PREFIX_SIZE + FRAME_HEADER_SIZE..]).is_err()
+        {
+            tracing::warn!("agent relay: rejecting invalid or host-control envelope slot={slot}");
             break;
         }
 

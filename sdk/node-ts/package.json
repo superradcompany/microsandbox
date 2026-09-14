@@ -69,5 +69,11 @@
     "native/index.d.ts",
     "bin/microsandbox.cjs",
     "README.md"
+  ],
+  "dependencies": {
+    "@microsandbox/types": "0.6.18"
+  },
+  "workspaces": [
+    "../../packages/microsandbox-types/typescript"
   ]
 }

@@ -12,6 +12,9 @@ pub type AgentClientResult<T> = std::result::Result<T, AgentClientError>;
 /// Errors raised by [`AgentClient`](super::AgentClient).
 #[derive(Debug, thiserror::Error)]
 pub enum AgentClientError {
+    /// Shared-router failure, retaining its delivery uncertainty.
+    #[error(transparent)]
+    Client(#[from] microsandbox_protocol_client::ClientError),
     /// Failed to open the Unix socket connection to the relay.
     #[error("connect {path}: {source}")]
     Connect {

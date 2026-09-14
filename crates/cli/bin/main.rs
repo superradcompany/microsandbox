@@ -1,5 +1,8 @@
 //! Entry point for the `msb` CLI binary.
 
+mod embedded_version;
+mod legacy_machine;
+
 use std::io::{IsTerminal, Write};
 
 use clap::{CommandFactory, Parser, Subcommand};
@@ -56,7 +59,7 @@ const TOP_LEVEL_COMMAND_GROUPS: &[CommandGroup] = &[
 #[derive(Parser)]
 #[command(
     name = "msb",
-    version,
+    version = embedded_version::version(),
     about = format!("Microsandbox CLI v{}", env!("CARGO_PKG_VERSION")),
     styles = microsandbox_cli::styles::styles()
 )]
@@ -269,7 +272,7 @@ fn main() {
         return;
     }
 
-    let cli = Cli::parse();
+    let cli = Cli::parse_from(legacy_machine::normalize(std::env::args_os()));
     let log_level = cli.logs.selected_level();
 
     let exit_code = match cli.command.into_canonical() {

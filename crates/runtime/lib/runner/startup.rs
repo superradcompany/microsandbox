@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use microsandbox_agent_client::AgentClient;
+use microsandbox_agent_client::{AgentClient, TypedMessage};
 use microsandbox_protocol::{
     exec::{ExecExited, ExecFailed, ExecRequest},
     message::MessageType,
@@ -48,20 +48,24 @@ pub(crate) async fn run_startup_command(
         rlimits: Vec::new(),
     };
 
-    let (_id, mut rx) = client
-        .stream(MessageType::ExecRequest, &request)
+    let mut rx = client
+        .stream(TypedMessage::new(MessageType::ExecRequest, &request))
         .await
         .map_err(|err| RuntimeError::Custom(format!("startup command dispatch: {err}")))?;
 
-    while let Some(message) = rx.recv().await {
-        match message.t {
-            MessageType::ExecExited => {
+    while let Some(message) = rx
+        .recv()
+        .await
+        .map_err(|err| RuntimeError::Custom(format!("startup command stream: {err}")))?
+    {
+        match MessageType::from_wire_str(&message.t) {
+            Some(MessageType::ExecExited) => {
                 let exited = message
                     .payload::<ExecExited>()
                     .map_err(|err| RuntimeError::Custom(format!("startup command exit: {err}")))?;
                 return Ok(StartupCommandExit::Exited(exited.code));
             }
-            MessageType::ExecFailed => {
+            Some(MessageType::ExecFailed) => {
                 let failed = message.payload::<ExecFailed>().map_err(|err| {
                     RuntimeError::Custom(format!("startup command failure: {err}"))
                 })?;
