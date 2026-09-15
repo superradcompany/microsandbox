@@ -367,6 +367,23 @@ mod tests {
         );
     }
 
+    fn wait_for_lock<T>(name: &str, mut acquire: impl FnMut() -> io::Result<T>) -> T {
+        // An unrelated parallel test may fork while this parent owns the lock.
+        // CLOEXEC releases that child's copy at exec, not when our owner closes it.
+        // Wait for actual availability; a leaked reference still hits the deadline.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match acquire() {
+                Ok(lock) => return lock,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    assert!(Instant::now() < deadline, "{name} lock was not released");
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                Err(error) => panic!("failed to acquire {name} lock: {error}"),
+            }
+        }
+    }
+
     #[test]
     fn exit_barrier_waits_past_lifecycle_release_without_following_next_disk_owner() {
         let home = tempfile::tempdir().unwrap();
@@ -399,16 +416,15 @@ mod tests {
         drop(lock);
         child.stdin.as_mut().unwrap().write_all(b"l").unwrap();
         wait_line(&mut output, "lifecycle-released");
-        assert!(
+        drop(wait_for_lock("lifecycle", || {
             microsandbox_runtime::ipc::try_acquire_lifecycle_guard(home.path(), "exit")
-                .unwrap()
-                .is_some()
-        );
+                .and_then(|guard| guard.ok_or_else(|| io::ErrorKind::WouldBlock.into()))
+        }));
         assert!(lock_disk(disk.path()).is_err());
         assert!(!barrier.has_exited().unwrap());
         child.stdin.as_mut().unwrap().write_all(b"d").unwrap();
         wait_line(&mut output, "disk-released");
-        let _next_owner = lock_disk(disk.path()).unwrap();
+        let _next_owner = wait_for_lock("disk", || lock_disk(disk.path()));
         assert!(!barrier.has_exited().unwrap());
         child.stdin.as_mut().unwrap().write_all(b"x").unwrap();
         wait_exit(&barrier);
@@ -456,7 +472,7 @@ mod tests {
         child.kill().unwrap();
         wait_exit(&barrier);
         wait_exit(&late);
-        let _reused = lock_disk(disk.path()).unwrap();
+        let _reused = wait_for_lock("disk", || lock_disk(disk.path()));
         assert!(!child.wait().unwrap().success());
     }
 

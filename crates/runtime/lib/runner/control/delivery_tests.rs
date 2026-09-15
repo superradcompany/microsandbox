@@ -252,6 +252,14 @@ async fn lost_secret_reply(framed: bool, partial: bool) {
             }
         }
         assert_eq!(failed_writes, 1);
+        // A reply can reach the client before the blocking dispatcher drops its
+        // input budget. Transport completion alone does not fence that cleanup.
+        // Reclaim every permit under the outer deadline so a real leak still fails.
+        let reclaimed = Arc::clone(&dispatcher.bytes)
+            .acquire_many_owned(RUNTIME_BYTES as u32)
+            .await
+            .unwrap();
+        drop(reclaimed);
         assert_eq!(dispatcher.bytes.available_permits(), RUNTIME_BYTES);
         worker.abort();
         let _ = worker.await;
