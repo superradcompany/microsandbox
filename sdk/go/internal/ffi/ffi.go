@@ -6,7 +6,7 @@
 // The library is loaded at runtime via dlopen/dlsym rather than linked at
 // build time. This means `go build` succeeds with no Rust toolchain on the
 // host — the library bytes are embedded in the SDK (see internal/bundle)
-// and extracted to disk by microsandbox.EnsureInstalled before dlopen.
+// and extracted to disk automatically before the first dlopen.
 //
 // Layout of this file:
 //   - C preamble: typedefs, function-pointer globals, load_microsandbox(),
@@ -102,6 +102,7 @@ typedef void     (*msb_set_sdk_msb_path_fn)(const char *path);
 typedef uint64_t (*msb_cancel_alloc_fn)(void);
 typedef void     (*msb_cancel_trigger_fn)(uint64_t id);
 typedef void     (*msb_cancel_unregister_fn)(uint64_t id);
+typedef char *(*msb_runtime_setup_fn)(uint64_t cancel_id, const char *operation, const char *config_json, const char *options_json, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_default_backend_info_fn)(uint8_t *buf, size_t buf_len);
 
 typedef char *(*msb_sandbox_create_fn)(uint64_t cancel_id, const char *name, const char *opts_json, bool connect_or_create, uint8_t *buf, size_t buf_len);
@@ -277,6 +278,7 @@ static char *(*ptr_msb_creation_progress_recv)(uint64_t, uint64_t, uint8_t *, si
 static char *(*ptr_msb_creation_progress_close)(uint64_t, uint8_t *, size_t) = NULL;
 static msb_sandbox_handle_lifecycle_fn ptr_msb_sandbox_handle_lifecycle = NULL;
 static msb_sandbox_lookup_fn     ptr_msb_sandbox_lookup     = NULL;
+static msb_runtime_setup_fn ptr_msb_runtime_setup = NULL;
 static msb_default_backend_info_fn ptr_msb_default_backend_info = NULL;
 static msb_sandbox_connect_fn    ptr_msb_sandbox_connect    = NULL;
 static msb_sandbox_start_fn      ptr_msb_sandbox_start      = NULL;
@@ -464,6 +466,7 @@ const char *load_microsandbox(const char *path) {
 	RESOLVE(msb_cancel_trigger);
 	RESOLVE(msb_cancel_unregister);
 	RESOLVE_OPTIONAL(msb_default_backend_info);
+	RESOLVE_OPTIONAL(msb_runtime_setup);
 	RESOLVE(msb_sandbox_create);
 	RESOLVE(msb_sandbox_restore);
 	RESOLVE_OPTIONAL(msb_creation_progress_open);
@@ -657,6 +660,10 @@ char *call_msb_sandbox_lookup(uint64_t cancel_id, const char *name, uint8_t *buf
 	return ptr_msb_sandbox_lookup ? ptr_msb_sandbox_lookup(cancel_id, name, buf, buf_len) : NULL;
 }
 
+bool has_msb_runtime_setup(void) { return ptr_msb_runtime_setup != NULL; }
+char *call_msb_runtime_setup(uint64_t cancel_id, const char *operation, const char *config_json, const char *options_json, uint8_t *buf, size_t buf_len) {
+    return ptr_msb_runtime_setup(cancel_id, operation, config_json, options_json, buf, buf_len);
+}
 char *call_msb_default_backend_info(uint8_t *buf, size_t buf_len) {
 	return ptr_msb_default_backend_info ? ptr_msb_default_backend_info(buf, buf_len) : NULL;
 }
@@ -5548,4 +5555,24 @@ func SnapshotGroupHead(ctx context.Context, selector string) (*SnapshotHeadUpdat
 		return nil, fmt.Errorf("parse snapshot group head: %w", err)
 	}
 	return &update, nil
+}
+
+// RuntimeSetup calls the shared resolver/installer after bootstrapping the SDK library.
+func RuntimeSetup(ctx context.Context, operation, configJSON, optionsJSON string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if err := ensureLoaded(); err != nil {
+		return "", err
+	}
+	if !bool(C.has_msb_runtime_setup()) {
+		return "", fmt.Errorf("loaded native SDK does not support runtime setup; rebuild the SDK library")
+	}
+	op, config, options := C.CString(operation), C.CString(configJSON), C.CString(optionsJSON)
+	defer C.free(unsafe.Pointer(op))
+	defer C.free(unsafe.Pointer(config))
+	defer C.free(unsafe.Pointer(options))
+	return call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_runtime_setup(cancelID, op, config, options, buf, bufLen)
+	})
 }

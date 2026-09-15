@@ -29,8 +29,8 @@
 
 ##
 
-- <img height="14" src="https://octicons-col.vercel.app/shield-lock/A770EF"> **Hardware Isolation**: Hardware-level isolation with microVM technology.
-- <img height="14" src="https://octicons-col.vercel.app/repo-forked/A770EF"> **Branch & Snapshot**: Save running sandbox state and restore later. Fork live sandboxes.
+- <img height="14" src="https://octicons-col.vercel.app/shield-lock/A770EF"> **Hardware Isolation**: Hardware-level isolation with tiny virtual machines.
+- <img height="14" src="https://octicons-col.vercel.app/repo-forked/A770EF"> **Branch & Snapshot**: Fork live sandboxes. Save running sandbox state and restore later.
 - <img height="14" src="https://octicons-col.vercel.app/globe/A770EF"> **Cross Platform**: Runs on Linux, macOS, and Windows.
 - <img height="14" src="https://octicons-col.vercel.app/package/A770EF"> **OCI Compatible**: Runs standard container images from Docker Hub, GHCR, or any OCI registry.
 - <img height="14" src="https://octicons-col.vercel.app/container/A770EF"> **Docker-Like Workflows**: Familiar image, command, shell, and volume workflows.
@@ -348,7 +348,7 @@ The SDK lets you create and control sandboxes directly from your application. `S
 >     ctx := context.Background()
 >
 >     // Downloads the microsandbox runtime to ~/.microsandbox/ on first run.
->     if err := microsandbox.EnsureInstalled(ctx); err != nil {
+>     if _, err := microsandbox.EnsureRuntime(ctx, microsandbox.RuntimeConfig{}, microsandbox.InstallOptions{}); err != nil {
 >         log.Fatal(err)
 >     }
 >

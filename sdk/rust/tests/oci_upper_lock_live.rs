@@ -1,6 +1,7 @@
 //! Opt-in OCI writable-upper attachment qualification with real VMs.
-//! Set an isolated MSB_HOME, the freshly built MSB_PATH, matching MSB_AGENTD_PATH and
-//! MSB_LIBKRUNFW_PATH. Test disks use the project's portable ext4 formatter.
+//! CI uses the standard `msb_test` isolated-home setup and installed candidate binary.
+//! For manual runs, set an isolated MSB_HOME, the freshly built MSB_PATH, matching
+//! MSB_AGENTD_PATH and MSB_LIBKRUNFW_PATH. Test disks use the portable ext4 formatter.
 //! On Windows use `scripts/smoke/oci-upper-lock.ps1`: build with Cargo, then run
 //! the test executable directly. Cargo's Job Object does not permit the breakaway
 //! required by detached VMs, so running this matrix inside `cargo test` is invalid.
@@ -9,18 +10,22 @@
 
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use microsandbox::Sandbox;
 use microsandbox::sandbox::SandboxBuilder;
 use microsandbox_types::DiskImageFormat;
+use test_utils::msb_test;
 
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
 
-struct Cleanup(Vec<String>);
+struct Cleanup {
+    binary: PathBuf,
+    names: Vec<String>,
+}
 
 //--------------------------------------------------------------------------------------------------
 // Trait Implementations
@@ -29,12 +34,12 @@ struct Cleanup(Vec<String>);
 impl Drop for Cleanup {
     fn drop(&mut self) {
         // Scope emergency cleanup to this test's exact names, including unfinished creates.
-        let binary = std::env::var("MSB_PATH").expect("candidate runtime path");
-        for name in &self.0 {
-            let _ = std::process::Command::new(&binary)
+        // Never read fallible setup or panic while unwinding an assertion failure.
+        for name in &self.names {
+            let _ = std::process::Command::new(&self.binary)
                 .args(["stop", "--force", name])
                 .output();
-            let _ = std::process::Command::new(&binary)
+            let _ = std::process::Command::new(&self.binary)
                 .args(["remove", name])
                 .output();
         }
@@ -138,9 +143,37 @@ fn disk_is_attached(disk: &Path) -> bool {
 // Tests
 //--------------------------------------------------------------------------------------------------
 
-#[tokio::test]
-#[ignore = "requires a matching VM runtime and isolated MSB_HOME"]
+#[msb_test]
 async fn oci_upper_attachment_lifecycle_live() {
+    // Validate manual-run prerequisites before creating disks, VMs or cleanup guards.
+    // In nextest CI, msb_test supplies these using the installed candidate runtime.
+    let binary = PathBuf::from(
+        std::env::var_os("MSB_PATH")
+            .expect("set MSB_PATH to the candidate msb binary, or use MSB_TEST_ISOLATE_HOME"),
+    );
+    assert!(
+        binary.is_file(),
+        "candidate msb binary missing: {}",
+        binary.display()
+    );
+    let home = PathBuf::from(
+        std::env::var_os("MSB_HOME")
+            .expect("set an isolated MSB_HOME, or use MSB_TEST_ISOLATE_HOME"),
+    );
+    assert!(
+        home.is_dir(),
+        "isolated MSB_HOME missing: {}",
+        home.display()
+    );
+    let probe = std::process::Command::new(&binary)
+        .arg("--version")
+        .output()
+        .expect("candidate msb binary must be executable");
+    assert!(
+        probe.status.success(),
+        "candidate msb --version failed: {}",
+        String::from_utf8_lossy(&probe.stderr)
+    );
     let prefix = format!("oci-lock-{}", std::process::id());
     let names: Vec<_> = [
         "a",
@@ -160,7 +193,12 @@ async fn oci_upper_attachment_lifecycle_live() {
     let sibling_disk = disk_dir.path().join("sibling.ext4");
     format_upper(&disk);
     format_upper(&sibling_disk);
-    let mut cleanup = Cleanup(names.clone());
+    // Keep disk storage alive through cleanup, even if the assertion task panics.
+    let disk_path = disk_dir.path().to_owned();
+    let mut cleanup = Cleanup {
+        binary: binary.clone(),
+        names: names.clone(),
+    };
 
     // Keep admission probes and acquisition on one executor: a concurrent probe
     // could itself briefly reserve the disk and make nonblocking admission fail.
@@ -179,12 +217,12 @@ async fn oci_upper_attachment_lifecycle_live() {
         assert_running(&owner).await;
         let sibling = builder(&names[2], &sibling_disk).create().await.unwrap();
 
-        let canonical_alias = disk_dir.path().join(".").join("upper.ext4");
+        let canonical_alias = disk_path.join(".").join("upper.ext4");
         assert_conflict(contender.0, &canonical_alias).await;
         #[cfg(unix)]
         {
-            let symlink = disk_dir.path().join("symlink.ext4");
-            let hardlink = disk_dir.path().join("hardlink.ext4");
+            let symlink = disk_path.join("symlink.ext4");
+            let hardlink = disk_path.join("hardlink.ext4");
             std::os::unix::fs::symlink(&disk, &symlink).unwrap();
             std::fs::hard_link(&disk, &hardlink).unwrap();
             assert_conflict(contender.0, &symlink).await;
@@ -211,7 +249,7 @@ async fn oci_upper_attachment_lifecycle_live() {
         Sandbox::remove(&names[3]).await.unwrap();
 
         // CLI creation returns only after detachment. Its SDK process is gone at this point.
-        let output = tokio::process::Command::new(std::env::var("MSB_PATH").unwrap())
+        let output = tokio::process::Command::new(&binary)
             .args(["create", "mirror.gcr.io/library/alpine", "--name", &names[4], "--memory", "256M", "--cpus", "1", "--root-disk"])
             .arg(format!("{}:format=raw,fstype=ext4", disk.display())).output().await.unwrap();
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
@@ -268,17 +306,30 @@ async fn oci_upper_attachment_lifecycle_live() {
 
     // Yield during cleanup so cancelled creation tasks can release transition
     // ownership. Blocking CLI calls in Drop would starve those tasks after panic.
-    let binary = std::env::var("MSB_PATH").unwrap();
-    for name in &cleanup.0 {
-        let _ = tokio::process::Command::new(&binary)
+    for name in &cleanup.names {
+        let _ = tokio::process::Command::new(&cleanup.binary)
             .args(["stop", "--force", name])
             .output()
             .await;
-        let _ = tokio::process::Command::new(&binary)
+        let _ = tokio::process::Command::new(&cleanup.binary)
             .args(["remove", name])
             .output()
             .await;
     }
-    cleanup.0.clear();
+    cleanup.names.clear();
     result.expect("OCI upper lifecycle assertions failed");
+}
+
+#[test]
+fn cleanup_does_not_panic_if_the_binary_disappears() {
+    let directory = tempfile::tempdir().unwrap();
+    let result = std::panic::catch_unwind(|| {
+        let _cleanup = Cleanup {
+            binary: directory.path().join("missing-msb"),
+            names: vec!["unused-test-name".into()],
+        };
+        panic!("original assertion failure");
+    });
+    // A second panic from Drop would abort this process instead of reaching here.
+    assert!(result.is_err());
 }

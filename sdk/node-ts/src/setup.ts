@@ -1,50 +1,104 @@
-import { withMappedErrors } from "./internal/error-mapping.js";
+import { mapNapiError, withMappedErrors } from "./internal/error-mapping.js";
 import { napi } from "./internal/napi.js";
 
-export class Setup {
-  private readonly inner = new napi.Setup();
+/** Per-call overrides layered on persisted configuration and the runtime home. */
+export interface RuntimeConfig {
+  home?: string;
+  msbPath?: string;
+  libkrunfwPath?: string;
+}
 
-  /** Override the install root (default: `~/.microsandbox`). */
-  baseDir(path: string): this {
-    this.inner.baseDir(path);
-    return this;
-  }
+/** Source of a resolved executable and firmware pair. */
+export type RuntimeOrigin =
+  | "environment"
+  | "sdk_package"
+  | "configuration"
+  | "home"
+  | "installed";
 
-  /** Pin a specific runtime version (default: package's pinned version). */
-  version(version: string): this {
-    this.inner.version(version);
-    return this;
-  }
+/** The selected executable, matching firmware library, and resolution source. */
+export interface ResolvedRuntime {
+  msbPath: string;
+  libkrunfwPath: string;
+  origin: RuntimeOrigin;
+}
 
-  /** Skip the post-install verification step. */
-  skipVerify(enabled: boolean): this {
-    this.inner.skipVerify(enabled);
-    return this;
-  }
+/** Explicit acquisition options; ensureRuntime ignores them when a pair resolves. */
+export interface InstallOptions {
+  source?: "release_download" | "archive" | "directory" | "embedded_archive";
+  sourcePath?: string;
+  version?: string;
+  force?: boolean;
+  verify?: boolean;
+  expectedArchiveSha256?: string;
+}
 
-  /** Re-download even if the binaries are already present. */
-  force(enabled: boolean): this {
-    this.inner.force(enabled);
-    return this;
-  }
+function configJson(config: RuntimeConfig): string {
+  return JSON.stringify({
+    home: config.home,
+    msb_path: config.msbPath,
+    libkrunfw_path: config.libkrunfwPath,
+  });
+}
 
-  async install(): Promise<void> {
-    await withMappedErrors(() => this.inner.install());
+function optionsJson(options: InstallOptions): string {
+  return JSON.stringify({
+    source: options.source,
+    source_path: options.sourcePath,
+    version: options.version,
+    force: options.force,
+    verify: options.verify,
+    expected_archive_sha256: options.expectedArchiveSha256,
+  });
+}
+
+function runtimeFromJson(json: string): ResolvedRuntime {
+  const result = JSON.parse(json) as {
+    msb_path: string;
+    libkrunfw_path: string;
+    origin: RuntimeOrigin;
+  };
+  return {
+    msbPath: result.msb_path,
+    libkrunfwPath: result.libkrunfw_path,
+    origin: result.origin,
+  };
+}
+
+/** Resolve an existing pair without installing host binaries; throws if absent or incomplete. */
+export function resolveRuntime(config: RuntimeConfig = {}): ResolvedRuntime {
+  try {
+    return runtimeFromJson(napi.resolveRuntime(configJson(config)));
+  } catch (error) {
+    throw mapNapiError(error);
   }
 }
 
-/** Begin a customizable install. */
-export function setup(): Setup {
-  return new Setup();
+/** Whether a complete pair resolves, including explicit overrides and package fallbacks. */
+export function isRuntimeInstalled(config: RuntimeConfig = {}): boolean {
+  return napi.isRuntimeInstalled(configJson(config));
 }
 
-/** Download and install msb + libkrunfw under non-empty `$MSB_HOME`,
- * or `~/.microsandbox/` when the override is unset or empty. */
-export async function install(): Promise<void> {
-  await withMappedErrors(() => napi.install());
+/** Install from the selected source and return the installed pair. */
+export async function installRuntime(
+  config: RuntimeConfig = {},
+  options: InstallOptions = {},
+): Promise<ResolvedRuntime> {
+  return runtimeFromJson(
+    await withMappedErrors(() =>
+      napi.installRuntime(configJson(config), optionsJson(options)),
+    ),
+  );
 }
 
-/** True when the runtime binaries are present and runnable. */
-export function isInstalled(): boolean {
-  return napi.isInstalled();
+/** Resolve first; install only when absent, propagating incomplete-pair errors. */
+export async function ensureRuntime(
+  config: RuntimeConfig = {},
+  options: InstallOptions = {},
+): Promise<ResolvedRuntime> {
+  return runtimeFromJson(
+    await withMappedErrors(() =>
+      napi.ensureRuntime(configJson(config), optionsJson(options)),
+    ),
+  );
 }

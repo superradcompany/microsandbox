@@ -21,8 +21,8 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
-	if err := microsandbox.EnsureInstalled(ctx); err != nil {
-		log.Fatalf("EnsureInstalled: %v", err)
+	if _, err := microsandbox.EnsureRuntime(ctx, microsandbox.RuntimeConfig{}, microsandbox.InstallOptions{}); err != nil {
+		log.Fatalf("EnsureRuntime: %v", err)
 	}
 
 	name := fmt.Sprintf("go-sdk-vol-%d", time.Now().Unix())

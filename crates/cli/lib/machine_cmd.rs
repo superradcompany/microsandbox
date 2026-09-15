@@ -36,6 +36,9 @@ use microsandbox_runtime::{
 /// `--config-file` for manual invocation). See issue #997.
 #[derive(Debug, Args)]
 pub struct MachineArgs {
+    /// Set by legacy command routing, never inferred from a missing execution field.
+    #[arg(skip)]
+    pub legacy_launch: bool,
     /// Require captured execution; runtimes without this protocol reject the invocation.
     #[arg(long, hide = true)]
     pub restore: bool,
@@ -450,7 +453,11 @@ fn load_launch_config(args: &MachineArgs) -> Result<LaunchConfig, String> {
             .map_err(|e| format!("failed to read --config-file {}: {e}", path.display()))?,
         None => return Err("missing --config-file for `msb machine`".to_string()),
     };
-    let config = LaunchConfig::decode(&bytes)?;
+    let config = if args.legacy_launch {
+        microsandbox_runtime::launch_protocol::decode_legacy(&bytes)?
+    } else {
+        LaunchConfig::decode(&bytes)?
+    };
     if args.restore != (config.execution == microsandbox_runtime::launch::ExecutionIntent::Restore)
     {
         return Err("--restore and launch execution intent disagree".into());
@@ -786,6 +793,7 @@ mod tests {
         let _ = config_fd;
 
         MachineArgs {
+            legacy_launch: false,
             restore: false,
             agent_transport: AgentTransportProfile::Auto,
             sandbox_name: "test".to_string(),
@@ -916,6 +924,29 @@ mod tests {
         assert_eq!(
             loaded.writeback_lease_dir,
             PathBuf::from("/tmp/writeback-leases")
+        );
+    }
+
+    #[test]
+    fn legacy_launch_decoding_is_explicit_and_cannot_restore() {
+        use microsandbox_runtime::launch_protocol::LaunchProtocol;
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let bytes = LaunchProtocol::Legacy {
+            file_mounts: true,
+            resolved_network: true,
+        }
+        .encode(&LaunchConfig::default())
+        .unwrap();
+        std::fs::write(file.path(), bytes).unwrap();
+        let mut args = args_with(None, Some(file.path().to_path_buf()));
+        assert!(load_launch_config(&args).is_err());
+        args.legacy_launch = true;
+        assert!(load_launch_config(&args).is_ok());
+        args.restore = true;
+        assert!(
+            load_launch_config(&args)
+                .unwrap_err()
+                .contains("intent disagree")
         );
     }
 

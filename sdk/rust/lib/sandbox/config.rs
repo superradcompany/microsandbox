@@ -195,7 +195,7 @@ pub struct SandboxConfig {
     /// Path to a file snapshot's writable root disk to copy into the new
     /// sandbox at create time, replacing fresh root-disk provisioning.
     ///
-    /// Transient: set by `SandboxBuilder::from_snapshot` and consumed
+    /// Transient: set by `SandboxBuilder::with_snapshot_source` and consumed
     /// during `create_with_mode`. Never persisted.
     #[serde(skip)]
     pub(crate) snapshot_upper_source: Option<PathBuf>,

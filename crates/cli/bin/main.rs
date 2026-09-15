@@ -79,6 +79,10 @@ enum Commands {
     #[command(hide = true)]
     Machine(Box<MachineArgs>),
 
+    /// Report launch wire capabilities without initializing a backend.
+    #[command(name = "__launch-protocol", hide = true)]
+    LaunchProtocol,
+
     /// Manage sandboxes (also available as top-level commands).
     #[command(visible_alias = "sbx")]
     Sandbox(sandbox::SandboxArgs),
@@ -269,16 +273,29 @@ fn main() {
         return;
     }
 
-    let cli = Cli::parse();
+    let mut argv: Vec<_> = std::env::args_os().collect();
+    let legacy_launch = microsandbox_cli::launch_compat::route_legacy_launch(&mut argv);
+    let cli = Cli::parse_from(argv);
     let log_level = cli.logs.selected_level();
 
     let exit_code = match cli.command.into_canonical() {
+        Commands::LaunchProtocol => {
+            println!(
+                "{}",
+                serde_json::to_string(&microsandbox_runtime::launch_protocol::LaunchCapabilities {
+                    protocols: vec![2, 1]
+                })
+                .expect("serialize capabilities")
+            );
+            return;
+        }
         // Sandbox process entry — never returns (VMM takes over).
         // Always install tracing for sandbox processes: default to info when
         // no explicit level is set so lifecycle events and VMM diagnostics
         // are captured in runtime.log for post-mortem debugging.
         Commands::Machine(args) => {
             let mut args = *args;
+            args.legacy_launch = legacy_launch;
             let sandbox_level = args
                 .log_level
                 .or(log_level)
@@ -636,7 +653,9 @@ fn run_async_command_anyhow(
         }
 
         match command {
-            Commands::Machine(_) => unreachable!("handled before Tokio starts"),
+            Commands::Machine(_) | Commands::LaunchProtocol => {
+                unreachable!("handled before Tokio starts")
+            }
             Commands::SandboxShortcut(_) => unreachable!("normalized before dispatch"),
             Commands::SchemaBaseline(_) => unreachable!("handled before backend resolution"),
             Commands::Context(args) => context::run(args),
@@ -967,6 +986,18 @@ mod sandbox_command_tests {
         ];
         let cli = Cli::try_parse_from(["msb", "machine"].into_iter().chain(internal)).unwrap();
         assert!(matches!(cli.command, Commands::Machine(_)));
+        let mut legacy: Vec<std::ffi::OsString> = ["msb", "sandbox"]
+            .into_iter()
+            .chain(internal)
+            .map(Into::into)
+            .collect();
+        assert!(microsandbox_cli::launch_compat::route_legacy_launch(
+            &mut legacy
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(legacy).unwrap().command,
+            Commands::Machine(_)
+        ));
         for group in ["sandbox", "sbx"] {
             assert!(Cli::try_parse_from(["msb", group].into_iter().chain(internal)).is_err());
         }

@@ -1,8 +1,9 @@
 """Resolve paths to bundled msb and libkrunfw binaries.
 
 The Python SDK bundles msb + libkrunfw inside the wheel at
-``microsandbox/_bundled/{bin,lib}/``.  At runtime these paths are resolved
-via ``importlib.resources`` so they work regardless of install location.
+``microsandbox/_bundled/{bin,lib}/``.  Package paths are discovered
+via ``importlib.resources`` and registered as fallbacks after the resolved
+runtime home (``MSB_HOME``, or ``~/.microsandbox`` by default).
 
 To override the resolved msb binary (e.g. for local dev against an
 unreleased build), set the ``MSB_PATH`` env var. The Rust resolver
@@ -33,4 +34,5 @@ def _msb_filename() -> str:
 
 def msb_path() -> Path:
     """Return the absolute path to the bundled ``msb`` binary."""
-    return Path(str(_BUNDLED.joinpath("bin", _msb_filename())))
+    # Python 3.10 namespace-package resources accept only one component per call.
+    return Path(str(_BUNDLED.joinpath("bin").joinpath(_msb_filename())))

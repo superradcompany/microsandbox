@@ -27,8 +27,8 @@
 #     expected native package version for runtime mismatch checks)
 #   - examples/typescript/*/package.json (microsandbox dep pin in every
 #     TypeScript example)
-#   - sdk/go/setup.go (sdkVersion constant; consumed by EnsureInstalled to
-#     resolve the GitHub release artefact URL for libmicrosandbox_go_ffi)
+#   - sdk/go/setup.go (sdkVersion constant; consumed by FFI bootstrap to
+#     name the per-version cache directory for libmicrosandbox_go_ffi)
 #
 # Cargo.lock entries for workspace-versioned crates are bumped by sed,
 # but the script does not do a full cargo-driven regen — run `cargo

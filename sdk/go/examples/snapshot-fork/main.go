@@ -24,8 +24,8 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	if err := microsandbox.EnsureInstalled(ctx); err != nil {
-		log.Fatalf("EnsureInstalled: %v", err)
+	if _, err := microsandbox.EnsureRuntime(ctx, microsandbox.RuntimeConfig{}, microsandbox.InstallOptions{}); err != nil {
+		log.Fatalf("EnsureRuntime: %v", err)
 	}
 
 	suffix := time.Now().Unix()

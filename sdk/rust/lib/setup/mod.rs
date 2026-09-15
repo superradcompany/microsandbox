@@ -1,5 +1,6 @@
 //! Setup and installation utilities for microsandbox runtime dependencies.
 
+mod bindings;
 mod host;
 mod runtime;
 mod verify;
@@ -15,6 +16,8 @@ mod windows;
 // Re-Exports
 //--------------------------------------------------------------------------------------------------
 
+#[doc(hidden)]
+pub use bindings::{binding_install_options, binding_runtime_config};
 pub use host::*;
 pub use runtime::*;
 #[cfg(windows)]

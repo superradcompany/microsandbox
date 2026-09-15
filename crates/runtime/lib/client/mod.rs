@@ -10,6 +10,7 @@ pub mod control;
 pub mod disk_lock_handoff;
 pub mod ipc;
 pub mod launch;
+pub mod launch_protocol;
 pub mod logging;
 pub mod maintenance;
 pub mod startup_progress;

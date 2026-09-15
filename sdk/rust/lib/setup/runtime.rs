@@ -7,6 +7,7 @@ use std::{
 
 use flate2::read::GzDecoder;
 use futures::StreamExt;
+use serde::Serialize;
 use sha2::{Digest as _, Sha256};
 use tar::Archive;
 
@@ -33,12 +34,24 @@ const EMBEDDED_RUNTIME_ARCHIVE: Option<&[u8]> = None;
 // Types
 //--------------------------------------------------------------------------------------------------
 
+/// Snapshot process-wide paths before resolving; tests can supply candidates without
+/// mutating environment variables or the set-once SDK bridge.
+#[derive(Default)]
+struct RuntimeCandidates {
+    env_msb: Option<PathBuf>,
+    env_library: Option<PathBuf>,
+    explicit_msb: Option<PathBuf>,
+    explicit_library: Option<PathBuf>,
+    packaged_msb: Option<PathBuf>,
+}
+
 /// Where a resolved host runtime pair came from.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RuntimeOrigin {
     /// Explicit `MSB_PATH` and optional `MSB_LIBKRUNFW_PATH` environment configuration.
     Environment,
-    /// Paths supplied by a language SDK package.
+    /// Paths supplied by an SDK package or explicit process-level setter.
     SdkPackage,
     /// Paths from [`GlobalConfig`].
     Configuration,
@@ -49,7 +62,7 @@ pub enum RuntimeOrigin {
 }
 
 /// The matched host runtime pair used for local sandbox execution.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct ResolvedRuntime {
     /// Path to the `msb` executable.
     pub msb_path: PathBuf,
@@ -110,59 +123,22 @@ impl Default for InstallOptions {
 
 /// Resolve a complete `msb` and `libkrunfw` pair without network access.
 ///
+/// Explicit overrides take precedence, followed by the resolved home and then
+/// automatically discovered SDK package binaries.
+///
 /// This operation never creates directories, extracts archives, or accesses
 /// the network. A partial installation is never repaired implicitly.
 pub fn resolve_runtime(config: &GlobalConfig) -> MicrosandboxResult<ResolvedRuntime> {
-    if std::env::var_os("MSB_LIBKRUNFW_PATH").is_some() && std::env::var_os("MSB_PATH").is_none() {
-        return Err(MicrosandboxError::RuntimeIncomplete(
-            "MSB_LIBKRUNFW_PATH requires MSB_PATH so the pair is explicit".into(),
-        ));
-    }
-
-    if let Some(msb) = std::env::var_os("MSB_PATH").map(PathBuf::from) {
-        let library = std::env::var_os("MSB_LIBKRUNFW_PATH")
-            .map(PathBuf::from)
-            .or_else(|| adjacent_library(&msb));
-        return require_pair(msb, library, RuntimeOrigin::Environment);
-    }
-
-    if let Some(msb) = crate::config::sdk_msb_path() {
-        let library = crate::config::sdk_libkrunfw_path().or_else(|| adjacent_library(&msb));
-        return require_pair(msb, library, RuntimeOrigin::SdkPackage);
-    }
-
-    if let Some(msb) = config.paths.msb.clone() {
-        let library = config
-            .paths
-            .libkrunfw
-            .clone()
-            .or_else(|| adjacent_library(&msb));
-        return require_pair(msb, library, RuntimeOrigin::Configuration);
-    }
-    if config.paths.libkrunfw.is_some() {
-        return Err(MicrosandboxError::RuntimeIncomplete(
-            "config.paths.libkrunfw requires config.paths.msb".into(),
-        ));
-    }
-
-    let home_runtime = runtime_in_home(config);
-    match pair_presence(&home_runtime.msb_path, &home_runtime.libkrunfw_path) {
-        PairPresence::Complete => return Ok(home_runtime),
-        PairPresence::Partial => {
-            return Err(MicrosandboxError::RuntimeIncomplete(format!(
-                "expected both {} and {}",
-                home_runtime.msb_path.display(),
-                home_runtime.libkrunfw_path.display()
-            )));
-        }
-        PairPresence::Absent => {}
-    }
-
-    Err(MicrosandboxError::RuntimeNotInstalled(format!(
-        "expected {} and {}; run setup::install_runtime or set MSB_PATH and MSB_LIBKRUNFW_PATH",
-        home_runtime.msb_path.display(),
-        home_runtime.libkrunfw_path.display()
-    )))
+    resolve_runtime_candidates(
+        config,
+        RuntimeCandidates {
+            env_msb: std::env::var_os("MSB_PATH").map(PathBuf::from),
+            env_library: std::env::var_os("MSB_LIBKRUNFW_PATH").map(PathBuf::from),
+            explicit_msb: crate::config::sdk_msb_path(),
+            explicit_library: crate::config::sdk_libkrunfw_path(),
+            packaged_msb: crate::config::sdk_packaged_msb_path(),
+        },
+    )
 }
 
 /// Install a complete host runtime pair from an explicit source.
@@ -269,6 +245,89 @@ fn require_pair(
             format!("expected both {} and {}", msb.display(), library.display()),
         )),
     }
+}
+
+fn resolve_runtime_candidates(
+    config: &GlobalConfig,
+    candidates: RuntimeCandidates,
+) -> MicrosandboxResult<ResolvedRuntime> {
+    if candidates.env_library.is_some() && candidates.env_msb.is_none() {
+        return Err(MicrosandboxError::RuntimeIncomplete(
+            "MSB_LIBKRUNFW_PATH requires MSB_PATH so the pair is explicit".into(),
+        ));
+    }
+
+    if let Some(msb) = candidates.env_msb {
+        let library = candidates.env_library.or_else(|| adjacent_library(&msb));
+        return require_pair(msb, library, RuntimeOrigin::Environment);
+    }
+
+    if let Some(msb) = candidates.explicit_msb {
+        let library = candidates
+            .explicit_library
+            .clone()
+            .or_else(|| adjacent_library(&msb));
+        return require_pair(msb, library, RuntimeOrigin::SdkPackage);
+    }
+
+    if let Some(msb) = config.paths.msb.clone() {
+        let library = candidates
+            .explicit_library
+            .clone()
+            .or_else(|| config.paths.libkrunfw.clone())
+            .or_else(|| adjacent_library(&msb));
+        return require_pair(msb, library, RuntimeOrigin::Configuration);
+    }
+    if config.paths.libkrunfw.is_some() {
+        return Err(MicrosandboxError::RuntimeIncomplete(
+            "config.paths.libkrunfw requires config.paths.msb".into(),
+        ));
+    }
+
+    let home_runtime = runtime_in_home(config);
+    // A caller-selected library stays an explicit override even when the executable
+    // is discovered in home rather than supplied by the language package.
+    if home_runtime.msb_path.is_file()
+        && let Some(library) = candidates.explicit_library.clone()
+    {
+        return require_pair(
+            home_runtime.msb_path,
+            Some(library),
+            RuntimeOrigin::Configuration,
+        );
+    }
+    match pair_presence(&home_runtime.msb_path, &home_runtime.libkrunfw_path) {
+        PairPresence::Complete => return Ok(home_runtime),
+        PairPresence::Partial => {
+            return Err(MicrosandboxError::RuntimeIncomplete(format!(
+                "expected both {} and {}",
+                home_runtime.msb_path.display(),
+                home_runtime.libkrunfw_path.display()
+            )));
+        }
+        PairPresence::Absent => {}
+    }
+
+    // Do not let a package mask a partial home installation. Only an absent home
+    // reaches this fallback, which must also provide a complete runtime pair.
+    if let Some(msb) = candidates.packaged_msb {
+        let library = candidates
+            .explicit_library
+            .or_else(|| adjacent_library(&msb));
+        return require_pair(msb, library, RuntimeOrigin::SdkPackage);
+    }
+
+    if candidates.explicit_library.is_some() {
+        return Err(MicrosandboxError::RuntimeIncomplete(
+            "explicit library override has no resolvable msb executable".into(),
+        ));
+    }
+
+    Err(MicrosandboxError::RuntimeNotInstalled(format!(
+        "expected {} and {}; run setup::install_runtime or set MSB_PATH and MSB_LIBKRUNFW_PATH",
+        home_runtime.msb_path.display(),
+        home_runtime.libkrunfw_path.display()
+    )))
 }
 
 fn runtime_in_home(config: &GlobalConfig) -> ResolvedRuntime {
@@ -606,6 +665,236 @@ mod tests {
             .unwrap()
             .finish()
             .expect("finish test runtime archive")
+    }
+
+    fn pair_fixture(root: &Path, name: &str) -> (GlobalConfig, PathBuf) {
+        let config = GlobalConfig {
+            home: Some(root.join(name)),
+            ..Default::default()
+        };
+        let runtime = runtime_in_home(&config);
+        fs::create_dir_all(runtime.msb_path.parent().unwrap()).unwrap();
+        fs::create_dir_all(runtime.libkrunfw_path.parent().unwrap()).unwrap();
+        fs::write(&runtime.msb_path, b"an older installed runtime").unwrap();
+        fs::write(&runtime.libkrunfw_path, b"matching firmware").unwrap();
+        (config, runtime.msb_path)
+    }
+
+    #[test]
+    fn home_precedes_package_without_inspecting_versions() {
+        let temp = tempfile::tempdir().unwrap();
+        let (config, home_msb) = pair_fixture(temp.path(), "home");
+        let (_, packaged_msb) = pair_fixture(temp.path(), "package");
+        let runtime = resolve_runtime_candidates(
+            &config,
+            RuntimeCandidates {
+                packaged_msb: Some(packaged_msb),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(runtime.msb_path, home_msb);
+        assert_eq!(runtime.origin, RuntimeOrigin::Home);
+    }
+
+    #[test]
+    fn package_is_used_only_when_home_is_absent() {
+        let temp = tempfile::tempdir().unwrap();
+        let (_, packaged_msb) = pair_fixture(temp.path(), "package");
+        let config = GlobalConfig {
+            home: Some(temp.path().join("absent")),
+            ..Default::default()
+        };
+        let runtime = resolve_runtime_candidates(
+            &config,
+            RuntimeCandidates {
+                packaged_msb: Some(packaged_msb.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(runtime.msb_path, packaged_msb);
+        assert_eq!(runtime.origin, RuntimeOrigin::SdkPackage);
+        assert!(!config.home().exists(), "resolution must remain read-only");
+    }
+
+    #[test]
+    fn neither_half_of_a_partial_home_is_masked_by_package() {
+        let temp = tempfile::tempdir().unwrap();
+        let (_, packaged_msb) = pair_fixture(temp.path(), "package");
+        for remove_msb in [false, true] {
+            let (config, _) =
+                pair_fixture(temp.path(), if remove_msb { "no-msb" } else { "no-lib" });
+            let home = runtime_in_home(&config);
+            fs::remove_file(if remove_msb {
+                &home.msb_path
+            } else {
+                &home.libkrunfw_path
+            })
+            .unwrap();
+            assert!(matches!(
+                resolve_runtime_candidates(
+                    &config,
+                    RuntimeCandidates {
+                        packaged_msb: Some(packaged_msb.clone()),
+                        ..Default::default()
+                    }
+                ),
+                Err(MicrosandboxError::RuntimeIncomplete(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn explicit_paths_precede_home_and_package_and_fail_closed() {
+        let temp = tempfile::tempdir().unwrap();
+        let (mut config, _) = pair_fixture(temp.path(), "home");
+        let (_, packaged_msb) = pair_fixture(temp.path(), "package");
+        let (_, configured_msb) = pair_fixture(temp.path(), "configured");
+        let (_, explicit_msb) = pair_fixture(temp.path(), "explicit");
+        let (_, env_msb) = pair_fixture(temp.path(), "environment");
+        config.paths.msb = Some(configured_msb.clone());
+        for (environment, explicit, expected) in [
+            (Some(env_msb.clone()), Some(explicit_msb.clone()), env_msb),
+            (None, Some(explicit_msb.clone()), explicit_msb),
+            (None, None, configured_msb),
+        ] {
+            let runtime = resolve_runtime_candidates(
+                &config,
+                RuntimeCandidates {
+                    env_msb: environment,
+                    explicit_msb: explicit,
+                    packaged_msb: Some(packaged_msb.clone()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(runtime.msb_path, expected);
+        }
+        assert!(matches!(
+            resolve_runtime_candidates(
+                &config,
+                RuntimeCandidates {
+                    env_msb: Some(temp.path().join("missing")),
+                    packaged_msb: Some(packaged_msb),
+                    ..Default::default()
+                }
+            ),
+            Err(MicrosandboxError::RuntimeIncomplete(_))
+        ));
+    }
+
+    #[test]
+    fn explicit_library_override_applies_to_home_or_package() {
+        let temp = tempfile::tempdir().unwrap();
+        let (home, _) = pair_fixture(temp.path(), "home");
+        let (_, packaged_msb) = pair_fixture(temp.path(), "package");
+        let library = temp.path().join("user-library");
+        fs::write(&library, b"explicit firmware").unwrap();
+        for config in [
+            home,
+            GlobalConfig {
+                home: Some(temp.path().join("absent")),
+                ..Default::default()
+            },
+        ] {
+            let runtime = resolve_runtime_candidates(
+                &config,
+                RuntimeCandidates {
+                    explicit_library: Some(library.clone()),
+                    packaged_msb: Some(packaged_msb.clone()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(runtime.libkrunfw_path, library);
+        }
+    }
+
+    #[test]
+    fn explicit_library_without_any_executable_does_not_trigger_installation() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = GlobalConfig {
+            home: Some(temp.path().join("absent")),
+            ..Default::default()
+        };
+        assert!(matches!(
+            resolve_runtime_candidates(
+                &config,
+                RuntimeCandidates {
+                    explicit_library: Some(temp.path().join("library")),
+                    ..Default::default()
+                }
+            ),
+            Err(MicrosandboxError::RuntimeIncomplete(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn ensure_reuses_home_even_when_embedded_install_is_requested() {
+        let temp = tempfile::tempdir().unwrap();
+        let (config, home_msb) = pair_fixture(temp.path(), "home");
+        // This also works without the feature: resolution wins before inspecting
+        // the install source, force flag, digest, or requested release version.
+        let runtime = ensure_runtime(
+            &config,
+            InstallOptions {
+                source: InstallSource::EmbeddedArchive,
+                force: true,
+                expected_archive_sha256: Some("invalid".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(runtime.msb_path, home_msb);
+        // Read the fixture-owned path after checking the returned selection. A
+        // resolver result must never choose which file this assertion reads.
+        assert_eq!(fs::read(&home_msb).unwrap(), b"an older installed runtime");
+    }
+
+    #[cfg(feature = "embed-binaries")]
+    #[tokio::test]
+    async fn embedded_archive_is_installed_only_by_explicit_ensure() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("absent");
+        let expected_msb = home
+            .join(BIN_SUBDIR)
+            .join(microsandbox_utils::msb_binary_filename(
+                std::env::consts::OS,
+            ));
+        let expected_library = home
+            .join(LIB_SUBDIR)
+            .join(microsandbox_utils::libkrunfw_filename(std::env::consts::OS));
+        let config = GlobalConfig {
+            home: Some(home),
+            ..Default::default()
+        };
+        assert!(matches!(
+            resolve_runtime(&config),
+            Err(MicrosandboxError::RuntimeNotInstalled(_))
+        ));
+        assert!(!config.home().exists());
+        let runtime = ensure_runtime(
+            &config,
+            InstallOptions {
+                source: InstallSource::EmbeddedArchive,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(runtime.origin, RuntimeOrigin::Installed);
+        // Assert exact destinations before checking fixture-owned paths. Archive
+        // contents and resolver results cannot redirect these filesystem probes.
+        assert_eq!(runtime.msb_path, expected_msb);
+        assert_eq!(runtime.libkrunfw_path, expected_library);
+        assert!(expected_msb.is_file());
+        assert!(expected_library.is_file());
+        assert_eq!(
+            resolve_runtime(&config).unwrap().origin,
+            RuntimeOrigin::Home
+        );
     }
 
     #[tokio::test]

@@ -5,6 +5,7 @@
 //! [`crate::sandbox::SandboxConfig`].
 
 pub(crate) mod handle;
+mod launch_protocol;
 #[cfg(feature = "net")]
 mod network_slot;
 pub(crate) mod owned_volumes;

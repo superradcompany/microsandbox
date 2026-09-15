@@ -37,6 +37,7 @@
 
 mod creation_progress;
 mod restore;
+mod setup;
 
 use std::{
     collections::HashMap,
@@ -556,6 +557,8 @@ impl From<MicrosandboxError> for FfiError {
             MicrosandboxError::MetricsDisabled(_) => error_kind::METRICS_DISABLED,
             MicrosandboxError::MetricsUnavailable(_) => error_kind::METRICS_UNAVAILABLE,
             MicrosandboxError::Unsupported { .. } => error_kind::UNSUPPORTED_OPERATION,
+            MicrosandboxError::RuntimeNotInstalled(_) => "runtime_not_installed",
+            MicrosandboxError::RuntimeIncomplete(_) => "runtime_incomplete",
             MicrosandboxError::Io(_) => error_kind::IO,
             _ => error_kind::INTERNAL,
         };
@@ -733,7 +736,7 @@ pub unsafe extern "C" fn msb_free_string(ptr: *mut c_char) {
 // ---------------------------------------------------------------------------
 
 /// Push the SDK-resolved msb binary path into the Rust resolver's tier 2.
-/// Called once from setup.EnsureInstalled after the install dir is known.
+/// An explicit process-level override; automatic home discovery does not set it.
 /// Set-once: subsequent calls are ignored (matches the OnceLock in
 /// microsandbox::config). Null or invalid-UTF-8 paths are silently ignored
 /// since the resolver's lower tiers (~/.microsandbox/bin/msb, PATH) still

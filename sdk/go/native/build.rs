@@ -21,4 +21,5 @@ fn main() {
     println!("cargo:rerun-if-changed=src/lib.rs");
     println!("cargo:rerun-if-changed=src/creation_progress.rs");
     println!("cargo:rerun-if-changed=src/restore.rs");
+    println!("cargo:rerun-if-changed=src/setup.rs");
 }

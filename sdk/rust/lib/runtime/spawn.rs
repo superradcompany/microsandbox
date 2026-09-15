@@ -321,6 +321,8 @@ pub async fn spawn_sandbox(
     let resolved_runtime = crate::setup::resolve_runtime(global)?;
     let msb_path = resolved_runtime.msb_path;
     let libkrunfw_path = resolved_runtime.libkrunfw_path;
+    let launch_protocol = super::launch_protocol::negotiate(&msb_path).await?;
+    super::launch_protocol::validate_request(launch_protocol, config)?;
     #[cfg(windows)]
     crate::setup::verify_windows_host_prerequisites()?;
     tracing::debug!(
@@ -535,8 +537,16 @@ pub async fn spawn_sandbox(
     );
     launch.block_writeback_limit_bytes = writeback_limit_bytes;
     launch.block_writeback_pool_bytes = writeback_pool_bytes;
+    visible[0] = launch_protocol.command().into();
+    let launch_bytes = match launch_protocol.encode(&launch) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            release_metrics_reservation(config, metrics_reservation.as_ref());
+            return Err(MicrosandboxError::Runtime(error));
+        }
+    };
     #[cfg(unix)]
-    let config_file = match write_launch_config_fd(&launch) {
+    let config_file = match write_launch_config_fd(&launch_bytes) {
         Ok(file) => file,
         Err(err) => {
             release_metrics_reservation(config, metrics_reservation.as_ref());
@@ -558,7 +568,7 @@ pub async fn spawn_sandbox(
     }
 
     #[cfg(windows)]
-    let _config_file = match write_launch_config_file(&launch, &runtime_dir) {
+    let _config_file = match write_launch_config_file(&launch_bytes, &runtime_dir) {
         Ok(file) => {
             visible.push(OsString::from("--config-file"));
             visible.push(file.path().as_os_str().to_os_string());
@@ -1207,35 +1217,31 @@ fn create_pipe() -> MicrosandboxResult<Pipe> {
     Ok(Pipe { read_fd, write_fd })
 }
 
-/// Serialize the [`LaunchConfig`] as JSON into an anonymous temp file, rewound
+/// Write the negotiated launch JSON into an anonymous temp file, rewound
 /// to offset 0. The file is unlinked on creation, so there is no path to clean
 /// up or race on; it is `dup2`'d onto
 /// [`CONFIG_FD`](microsandbox_runtime::vm::CONFIG_FD) for the child to read.
 #[cfg(unix)]
-fn write_launch_config_fd(launch: &LaunchConfig) -> MicrosandboxResult<std::fs::File> {
+fn write_launch_config_fd(json: &[u8]) -> MicrosandboxResult<std::fs::File> {
     let mut file = tempfile::tempfile()?;
-    let json = serde_json::to_vec(launch)
-        .map_err(|e| crate::MicrosandboxError::Runtime(format!("serialize launch config: {e}")))?;
-    file.write_all(&json)?;
+    file.write_all(json)?;
     file.flush()?;
     file.seek(SeekFrom::Start(0))?;
     Ok(file)
 }
 
-/// Serialize the [`LaunchConfig`] as JSON to a short-lived named file for Windows.
+/// Write the negotiated launch JSON to a short-lived named file for Windows.
 ///
 /// Windows does not have the Unix anonymous-fd handoff used above, so the
 /// launcher keeps the file handle alive until the child reports startup and
 /// passes only the path on argv.
 #[cfg(windows)]
 fn write_launch_config_file(
-    launch: &LaunchConfig,
+    json: &[u8],
     runtime_dir: &Path,
 ) -> MicrosandboxResult<tempfile::NamedTempFile> {
     let mut file = tempfile::NamedTempFile::new_in(runtime_dir)?;
-    let json = serde_json::to_vec(launch)
-        .map_err(|e| crate::MicrosandboxError::Runtime(format!("serialize launch config: {e}")))?;
-    file.write_all(&json)?;
+    file.write_all(json)?;
     file.flush()?;
     file.as_file_mut().seek(SeekFrom::Start(0))?;
     Ok(file)

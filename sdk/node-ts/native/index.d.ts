@@ -1567,17 +1567,6 @@ export declare class SecretBuilder {
 }
 export type JsSecretBuilder = SecretBuilder
 
-/** Builder for installing the runtime binaries. */
-export declare class Setup {
-  constructor()
-  baseDir(path: string): this
-  version(version: string): this
-  skipVerify(enabled: boolean): this
-  force(enabled: boolean): this
-  install(): Promise<void>
-}
-export type JsSetup = Setup
-
 /** High-level SFTP client session. */
 export declare class SftpClient {
   /** Read a file into memory. */
@@ -2076,14 +2065,14 @@ export declare function imageRemove(reference: string, force?: boolean | undefin
  */
 export declare function imageSave(references: Array<string>, outputPath: string, format?: string | undefined | null): Promise<void>
 
-/**
- * Download and install msb + libkrunfw under non-empty $MSB_HOME, or
- * ~/.microsandbox/ when the override is unset or empty.
- */
-export declare function install(): Promise<void>
-
-/** Check if msb and libkrunfw are installed and available. */
-export declare function isInstalled(): boolean
+/** Resolve the existing runtime pair without installing host binaries. */
+export declare function resolveRuntime(configJson: string): string
+/** Check whether a complete runtime pair resolves. */
+export declare function isRuntimeInstalled(configJson: string): boolean
+/** Explicitly install a runtime pair from the selected source. */
+export declare function installRuntime(configJson: string, optionsJson: string): Promise<string>
+/** Reuse a resolved pair and install only when it is wholly absent. */
+export declare function ensureRuntime(configJson: string, optionsJson: string): Promise<string>
 
 /** Secret-safe backend diagnostics returned to JavaScript. */
 export interface JsBackendInfo {
@@ -2517,6 +2506,9 @@ export interface SecretSubstitution {
  * API key (with an optional URL override), or a profile.
  */
 export declare function setDefaultBackend(kind: string, url?: string | undefined | null, apiKey?: string | undefined | null, profile?: string | undefined | null): void
+
+/** Register the platform package executable as a fallback after the runtime home. */
+export declare function setPackagedMsbPath(path: string): void
 
 /**
  * Set the `libkrunfw` shared library path resolved by the JS SDK.
