@@ -583,7 +583,8 @@ pub struct NetworkSpec {
     pub secrets: Option<SecretsConfig>,
 
     /// TCP connection cap. `max_connections` is a deprecated configuration alias.
-    #[serde(alias = "max_connections")]
+    // Keep saved configurations readable by releases that predate the TCP-specific name.
+    #[serde(rename = "max_connections", alias = "max_tcp_connections")]
     pub max_tcp_connections: Option<usize>,
 
     /// Max concurrent UDP relay sessions. Omitted is unlimited for single-tenant and 1024 for multi-tenant; zero means unlimited.

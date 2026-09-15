@@ -81,6 +81,10 @@ pub struct TcpConnectionTracker {
     rejected_connections: u64,
 }
 
+/// Deprecated name for [`TcpConnectionTracker`].
+#[deprecated(note = "use TcpConnectionTracker instead")]
+pub type ConnectionTracker = TcpConnectionTracker;
+
 /// Maximum number of poll iterations to attempt flushing remaining data
 /// after the proxy task has exited before force-aborting the socket.
 const DEFERRED_CLOSE_LIMIT: u16 = 64;

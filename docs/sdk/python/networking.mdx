@@ -24,6 +24,7 @@ Network(
     ipv4_pool: str | None = None,
     ipv6_pool: str | None = None,
     max_tcp_connections: int | None = None,
+    max_udp_connections: int | None = None,
     on_secret_violation: ViolationAction | ViolationPolicy = ViolationAction.BLOCK_AND_LOG,
 )
 ```

@@ -222,6 +222,7 @@ wrapMethodWithErrorMap(napi.VolumeBuilder, "create");
       }
       const config = remapKeys(JSON.parse(json));
       // Preserve the deprecated read accessor on built configurations.
+      config.network.maxTcpConnections = config.network.maxConnections;
       Object.defineProperty(config.network, "maxConnections", {
         get: () => config.network.maxTcpConnections,
         enumerable: false,
@@ -286,6 +287,7 @@ hideMethod(napi.SandboxBuilder, "attachWithBuilder");
       }
       const config = remapKeys(JSON.parse(json));
       // Preserve the deprecated read accessor on built configurations.
+      config.maxTcpConnections = config.maxConnections;
       Object.defineProperty(config, "maxConnections", {
         get: () => config.maxTcpConnections,
         enumerable: false,

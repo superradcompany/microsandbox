@@ -71,7 +71,8 @@ pub struct NetworkConfig {
 
     /// TCP connection cap. `None` uses the deployment profile's default.
     #[serde(default)]
-    #[serde(alias = "max_connections")]
+    // Keep saved configurations readable by releases that predate the TCP-specific name.
+    #[serde(rename = "max_connections", alias = "max_tcp_connections")]
     pub max_tcp_connections: Option<ConnectionLimit>,
 
     /// UDP relay session cap. Omitted is unlimited for single-tenant and 1024 for multi-tenant; zero means unlimited.
@@ -602,8 +603,8 @@ mod connection_limit_tests {
                 );
                 assert_eq!(config.max_udp_connections, Some(ConnectionLimit::from(7)));
                 let serialized = serde_json::to_value(&config).unwrap();
-                assert_eq!(serialized["max_tcp_connections"], value);
-                assert!(serialized.get("max_connections").is_none());
+                assert_eq!(serialized["max_connections"], value);
+                assert!(serialized.get("max_tcp_connections").is_none());
                 let spec: microsandbox_types::NetworkSpec =
                     serde_json::from_value(serialized).unwrap();
                 assert_eq!(spec.max_tcp_connections, Some(value));
@@ -614,6 +615,30 @@ mod connection_limit_tests {
                 serde_json::json!({"max_connections": value, "max_tcp_connections": 64});
             assert!(serde_json::from_value::<NetworkConfig>(duplicate.clone()).is_err());
             assert!(serde_json::from_value::<microsandbox_types::NetworkSpec>(duplicate).is_err());
+        }
+    }
+
+    #[test]
+    fn older_readers_retain_persisted_tcp_caps() {
+        // The relevant field from the pre-rename NetworkSpec/NetworkConfig schema.
+        // Older serde readers ignore unknown fields, making a changed key unsafe.
+        #[derive(serde::Deserialize)]
+        struct LegacyNetworkConfig {
+            max_connections: Option<usize>,
+        }
+        for limit in [0, 7, 1024] {
+            let config = NetworkConfig {
+                max_tcp_connections: Some(ConnectionLimit::from(limit)),
+                max_udp_connections: Some(ConnectionLimit::from(9)),
+                ..Default::default()
+            };
+            let wire = serde_json::to_value(&config).unwrap();
+            let legacy: LegacyNetworkConfig = serde_json::from_value(wire.clone()).unwrap();
+            assert_eq!(legacy.max_connections, Some(limit));
+            let spec: microsandbox_types::NetworkSpec = serde_json::from_value(wire).unwrap();
+            let legacy: LegacyNetworkConfig =
+                serde_json::from_value(serde_json::to_value(spec).unwrap()).unwrap();
+            assert_eq!(legacy.max_connections, Some(limit));
         }
     }
 
@@ -633,10 +658,7 @@ mod connection_limit_tests {
             config.max_tcp_connections,
             Some(ConnectionLimit::Limited(NonZeroUsize::new(64).unwrap()))
         );
-        assert_eq!(
-            serde_json::to_value(config).unwrap()["max_tcp_connections"],
-            64
-        );
+        assert_eq!(serde_json::to_value(config).unwrap()["max_connections"], 64);
 
         for value in [serde_json::json!(-1), serde_json::json!("unlimited")] {
             assert!(

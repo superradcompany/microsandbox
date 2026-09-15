@@ -1941,7 +1941,8 @@ Built network configuration produced by `NetworkBuilder.build()`. Keys are camel
 | tls | [`TlsConfig`](#tlsconfig) ` \| null` | TLS interception |
 | secrets | `readonly SecretEntry[]` | Secret entries |
 | secretViolation | [`ViolationAction`](/sdk/typescript/secrets#violationaction) ` \| null` | Action on disallowed secret use |
-| maxTcpConnections | `number \| null` | Maximum concurrent connections |
+| maxTcpConnections | `number \| null` | Maximum concurrent TCP connections |
+| maxUdpConnections | `number \| null` (optional) | Maximum concurrent UDP relay sessions |
 | strict | `boolean` | Strict hostname policy mode |
 | rateLimiter | [`NetworkRateLimiterConfig`](#networkratelimiterconfig) ` \| null` | Local rate limits grouped by direction |
 | interface | `{ ipv4Pool?, ipv6Pool?, ipv4Address?, ipv6Address?, mac?, mtu? }` | Optional interface overrides |
