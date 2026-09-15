@@ -389,7 +389,8 @@ impl LocalBackend {
         expected_id: Option<i32>,
     ) -> MicrosandboxResult<()> {
         let (model, pid) = self.sandbox_handle_state(name, expected_id).await?;
-        let handle = SandboxHandle::from_local_model(backend, model, pid);
+        let path = self.sandboxes_dir().join(&model.name);
+        let handle = SandboxHandle::from_local_model(backend, model, pid, path);
         handle.remove().await
     }
 
@@ -1061,7 +1062,8 @@ impl SandboxBackend for LocalBackend {
     ) -> BoxFuture<'a, MicrosandboxResult<SandboxHandle>> {
         Box::pin(async move {
             let (model, pid) = self.sandbox_handle_state(name, None).await?;
-            Ok(SandboxHandle::from_local_model(backend, model, pid))
+            let path = self.sandboxes_dir().join(&model.name);
+            Ok(SandboxHandle::from_local_model(backend, model, pid, path))
         })
     }
 
@@ -1074,7 +1076,10 @@ impl SandboxBackend for LocalBackend {
             let (rows, next_cursor) = self.list_sandbox_handle_state(&query).await?;
             let sandboxes = rows
                 .into_iter()
-                .map(|(model, pid)| SandboxHandle::from_local_model(backend.clone(), model, pid))
+                .map(|(model, pid)| {
+                    let path = self.sandboxes_dir().join(&model.name);
+                    SandboxHandle::from_local_model(backend.clone(), model, pid, path)
+                })
                 .collect();
             Ok(SandboxPage {
                 sandboxes,

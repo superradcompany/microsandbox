@@ -295,15 +295,31 @@ fn print_compaction_summary(snap: &Snapshot) {
     let Some(state) = snap.state().as_file() else {
         return;
     };
-    let upper_path = snap.path().join(&state.upper.file);
-    let Ok(allocated) = microsandbox_utils::extent::allocated_file_bytes(&upper_path) else {
+    let Some(allocated) = allocated_upper_bytes(snap, state) else {
         return;
     };
     println!(
         "Compacted: {} allocated of {} apparent",
-        format_size(allocated),
-        format_size(state.upper.size_bytes)
+        ui::format_size(allocated),
+        ui::format_size(state.upper.size_bytes)
     );
+}
+
+/// Bytes actually allocated on the host for a file-state snapshot's upper
+/// layer, or `None` if the file can't be stat'd (e.g. missing or on a
+/// filesystem without hole/extent support).
+fn allocated_upper_bytes(snap: &Snapshot, state: &microsandbox::FileSnapshotState) -> Option<u64> {
+    let upper_path = snap.path().join(&state.upper.file);
+    microsandbox_utils::extent::allocated_file_bytes(&upper_path).ok()
+}
+
+/// "Size on Disk" row for `msb snapshot inspect`: actual allocated bytes,
+/// falling back to "unknown" when the upper file can't be stat'd.
+fn format_size_on_disk(snap: &Snapshot, state: &microsandbox::FileSnapshotState) -> String {
+    match allocated_upper_bytes(snap, state) {
+        Some(allocated) => ui::format_size(allocated),
+        None => "unknown".to_string(),
+    }
 }
 
 async fn list(args: SnapshotListArgs) -> anyhow::Result<()> {
@@ -362,7 +378,7 @@ async fn list(args: SnapshotListArgs) -> anyhow::Result<()> {
         let name = s.name().unwrap_or("-").to_string();
         let size = s
             .size_bytes()
-            .map(format_size)
+            .map(ui::format_size)
             .unwrap_or_else(|| "-".to_string());
         let created = ui::format_datetime(&s.created_at().and_utc());
         let digest = short_digest(s.digest());
@@ -397,7 +413,8 @@ async fn inspect(args: SnapshotInspectArgs) -> anyhow::Result<()> {
             ui::detail_kv("Format", format_str(state.format));
             ui::detail_kv("Filesystem", &state.fstype);
             ui::detail_kv("Upper File", &state.upper.file);
-            ui::detail_kv("Upper Size", &format_size(state.upper.size_bytes));
+            ui::detail_kv("Upper Size", &ui::format_size(state.upper.size_bytes));
+            ui::detail_kv("Size on Disk", &format_size_on_disk(&snap, state));
             ui::detail_kv("Integrity", &format_integrity(&state.upper.integrity));
         }
         microsandbox::SnapshotState::Checkpoint(state) => {
@@ -553,21 +570,6 @@ fn format_scope(scope: microsandbox::SnapshotScope) -> &'static str {
     match scope {
         microsandbox::SnapshotScope::Disk => "disk",
         microsandbox::SnapshotScope::Resumable => "resumable",
-    }
-}
-
-fn format_size(bytes: u64) -> String {
-    const KIB: u64 = 1024;
-    const MIB: u64 = KIB * 1024;
-    const GIB: u64 = MIB * 1024;
-    if bytes >= GIB {
-        format!("{:.1} GiB", bytes as f64 / GIB as f64)
-    } else if bytes >= MIB {
-        format!("{:.1} MiB", bytes as f64 / MIB as f64)
-    } else if bytes >= KIB {
-        format!("{:.1} KiB", bytes as f64 / KIB as f64)
-    } else {
-        format!("{bytes} B")
     }
 }
 

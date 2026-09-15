@@ -102,12 +102,14 @@ impl SandboxHandle {
         backend: Arc<dyn Backend>,
         model: sandbox_entity::Model,
         pid: Option<i32>,
+        path: std::path::PathBuf,
     ) -> Self {
         let name = model.name.clone();
         Self {
             backend,
             inner: SandboxHandleInner::Local(SandboxHandleLocalState {
                 db_id: model.id,
+                path,
                 status: model.status,
                 config_json: model.config,
                 active_config_json: model.active_config,
@@ -271,6 +273,27 @@ impl SandboxHandle {
             .map(serde_json::from_str)
             .transpose()
             .map_err(Into::into)
+    }
+
+    /// Host path to the file backing this sandbox's writable root disk, when
+    /// there is one. **Local handles only** — returns `None` for cloud
+    /// handles, for `RootDisk::Tmpfs` (RAM-backed, no file), and if the
+    /// stored configuration can't be parsed.
+    pub fn disk_path(&self) -> Option<std::path::PathBuf> {
+        let local = self.local()?;
+        let config: SandboxConfig = serde_json::from_str(&local.config_json).ok()?;
+        match &config.spec.image {
+            super::RootfsSource::Bind { .. } => None,
+            super::RootfsSource::DiskImage { path, .. } => Some(path.clone()),
+            super::RootfsSource::Oci(oci) => match &oci.root_disk {
+                Some(super::RootDisk::Tmpfs { .. }) => None,
+                Some(super::RootDisk::DiskImage { path, .. }) => Some(path.clone()),
+                Some(super::RootDisk::Flat { .. }) => {
+                    Some(local.path.join(super::flat_rootfs::FLAT_ROOTFS_FILENAME))
+                }
+                Some(super::RootDisk::Managed { .. }) | None => Some(local.path.join("upper.ext4")),
+            },
+        }
     }
 
     /// Start planning a sandbox modification from this handle.

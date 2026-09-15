@@ -7,7 +7,7 @@
 //! constructed inside each backend's trait impl and wrapped with the
 //! `Arc<dyn Backend>` the caller passes in.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -105,6 +105,8 @@ pub enum SandboxIdentity {
 pub struct SandboxHandleLocalState {
     /// SQLite row id for this sandbox.
     pub db_id: i32,
+    /// Sandbox directory on the host (`<sandboxes_dir>/<name>`).
+    pub path: PathBuf,
     /// Sandbox lifecycle status at handle-creation time.
     pub status: SandboxStatus,
     /// Serialized `SandboxConfig` as stored in the database.
