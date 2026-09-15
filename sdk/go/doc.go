@@ -9,12 +9,12 @@
 //	go get github.com/superradcompany/microsandbox/sdk/go
 //
 // The SDK works out of the box: the FFI library is embedded in the Go
-// binary and loads on first use. EnsureInstalled is optional and only
+// binary and loads on first use. EnsureRuntime is optional and only
 // governs the msb + libkrunfw runtime download into the install dir
 // ($MSB_HOME, default ~/.microsandbox).
 // Call it at startup if you want install errors surfaced up front:
 //
-//	if err := microsandbox.EnsureInstalled(ctx); err != nil {
+//	if _, err := microsandbox.EnsureRuntime(ctx, microsandbox.RuntimeConfig{}, microsandbox.InstallOptions{}); err != nil {
 //	    log.Fatal(err)
 //	}
 package microsandbox

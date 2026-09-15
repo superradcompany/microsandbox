@@ -44,6 +44,9 @@ pub(super) fn encode(launch: &LaunchConfig, contract: LaunchContract) -> Microsa
     if launch.execution != microsandbox_runtime::launch::ExecutionIntent::Boot {
         return unsupported("execution restore");
     }
+    if !launch.owned_volumes.is_empty() {
+        return unsupported("sandbox-owned volumes");
+    }
     if !launch.file_mounts.is_empty() {
         return unsupported("isolated file mounts");
     }
@@ -409,6 +412,45 @@ fn unsupported<T>(feature: &str) -> MicrosandboxResult<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn owned_storage_is_never_silently_dropped_for_released_runtimes() {
+        let launch = LaunchConfig {
+            owned_volumes: vec![microsandbox_types::VolumeMount::Owned {
+                guest: "/data".into(),
+                storage: microsandbox_types::OwnedVolumeStorage::Directory { quota_mib: None },
+                options: Default::default(),
+                stat_virtualization: microsandbox_types::StatVirtualization::Strict,
+                host_permissions: microsandbox_types::HostPermissions::Private,
+            }],
+            ..Default::default()
+        };
+        for patch in 0..=18 {
+            assert!(
+                encode(
+                    &launch,
+                    LaunchContract {
+                        patch,
+                        machine: false
+                    }
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("sandbox-owned volumes")
+            );
+        }
+        assert_eq!(
+            encode(
+                &launch,
+                LaunchContract {
+                    patch: 18,
+                    machine: true
+                }
+            )
+            .unwrap(),
+            serde_json::to_value(&launch).unwrap()
+        );
+    }
 
     #[test]
     fn legacy_input_retains_guest_root_mounts_environment_and_cwd() {

@@ -10,6 +10,8 @@ For the full API reference and longer guides, use the docs site:
 - [SDK overview](https://docs.microsandbox.dev/sdk/overview)
 - [Repository examples](../../examples/python)
 
+A complete runtime in the configured home (`MSB_HOME`, or `~/.microsandbox` by default) takes precedence over wheel binaries. Explicit binary paths still win. A partial home installation errors instead of falling back to the wheel. This also applies to the packaged CLI entry points.
+
 ## Features
 
 - Hardware VM isolation with a guest Linux kernel
@@ -321,10 +323,10 @@ except MicrosandboxError as exc:
 Installed wheels bundle the runtime files. The setup helpers are useful for source checkouts, shared runtime installs, and surfacing setup failures at process startup.
 
 ```python
-from microsandbox import install, is_installed
+from microsandbox import ensure_runtime
 
-if not is_installed():
-    await install()
+runtime = await ensure_runtime()
+print(runtime.msb_path, runtime.libkrunfw_path)
 ```
 
 ## More Documentation

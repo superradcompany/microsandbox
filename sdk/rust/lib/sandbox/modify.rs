@@ -771,15 +771,6 @@ fn control_session(session: &Option<ControlSession>) -> MicrosandboxResult<&Cont
     })
 }
 
-pub(super) async fn control_capabilities(
-    name: &str,
-) -> MicrosandboxResult<microsandbox_runtime::control::ControlCapabilities> {
-    let response = control_request(name, "{\"op\":\"capabilities\"}\n".to_string()).await?;
-    response.capabilities.ok_or_else(|| {
-        crate::MicrosandboxError::Runtime("control response missing capabilities".to_string())
-    })
-}
-
 /// Open the runtime control pipe within its connection budget. Restore callers
 /// additionally bound this wait by their remaining startup deadline.
 #[cfg(windows)]
@@ -891,6 +882,17 @@ pub(super) async fn control_request_for_run(
     run: super::identity::SandboxRunIdentity,
     request: String,
 ) -> MicrosandboxResult<microsandbox_runtime::control::ControlResponse> {
+    control_request_for_run_with_memory(local, name, run, request, None).await
+}
+
+/// Optional descriptor travels with the first request byte on the already authenticated socket.
+pub(super) async fn control_request_for_run_with_memory(
+    local: &crate::backend::LocalBackend,
+    name: &str,
+    run: super::identity::SandboxRunIdentity,
+    request: String,
+    _memory: Option<&std::fs::File>,
+) -> MicrosandboxResult<microsandbox_runtime::control::ControlResponse> {
     let candidates = crate::runtime::sandbox_agent_socket_path_candidates_for(local, name)
         .into_iter()
         .map(|path| microsandbox_runtime::control::control_socket_path_for(&path));
@@ -912,6 +914,27 @@ pub(super) async fn control_request_for_run(
         )));
     }
     local.validate_control_run(name, run).await?;
+    #[cfg(target_os = "linux")]
+    let request = if let Some(memory) = _memory {
+        use std::os::fd::AsRawFd;
+        let first = *request
+            .as_bytes()
+            .first()
+            .ok_or_else(|| MicrosandboxError::Runtime("empty control request".into()))?;
+        loop {
+            stream.writable().await?;
+            match stream.try_io(tokio::io::Interest::WRITABLE, || {
+                microsandbox_runtime::memory_handoff::send_first(stream.as_raw_fd(), memory, first)
+            }) {
+                Ok(()) => break,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => continue,
+                Err(error) => return Err(error.into()),
+            }
+        }
+        request[1..].to_owned()
+    } else {
+        request
+    };
     let response = control_request_over_stream(stream, &request).await?;
     if !response.ok {
         return Err(MicrosandboxError::Runtime(format!(
@@ -1072,19 +1095,33 @@ where
 
 /// Capability-gated disk maintenance over the existing control endpoint.
 pub(crate) async fn control_disk_compact(
+    local: &crate::backend::LocalBackend,
     name: &str,
+    target: microsandbox_types::DiskCompactionTarget,
     layers: Option<usize>,
     dry_run: bool,
 ) -> MicrosandboxResult<super::DiskCompactionResult> {
-    if !control_capabilities(name).await?.disk_compact {
+    // Discovery and mutation must use the same retained backend as the selected sandbox.
+    // An ambient backend may contain a different sandbox with this exact name.
+    let capabilities = control_request_for(local, name, "{\"op\":\"capabilities\"}\n".into())
+        .await?
+        .capabilities
+        .ok_or_else(|| {
+            crate::MicrosandboxError::Runtime("control response missing capabilities".into())
+        })?;
+    if !capabilities.disk_compact_owned {
         return Err(crate::MicrosandboxError::Runtime(
             "this running sandbox does not support disk compaction; restart with the updated runtime".into(),
         ));
     }
-    let request = microsandbox_runtime::control::ControlRequest::DiskCompact { layers, dry_run };
+    let request = microsandbox_runtime::control::ControlRequest::DiskCompact {
+        target,
+        layers,
+        dry_run,
+    };
     let mut line = serde_json::to_string(&request)?;
     line.push('\n');
-    let response = control_request(name, line).await?;
+    let response = control_request_for(local, name, line).await?;
     response.compaction.ok_or_else(|| {
         crate::MicrosandboxError::Runtime("control response omitted compaction result".into())
     })
@@ -1098,6 +1135,7 @@ pub(crate) async fn control_checkpoint_create(
     local: &crate::backend::LocalBackend,
     name: &str,
     checkpoint_id: String,
+    record_integrity: bool,
 ) -> MicrosandboxResult<CheckpointCaptureOutcome> {
     let capabilities =
         control_request_for(local, name, "{\"op\":\"capabilities\"}\n".into()).await?;
@@ -1113,9 +1151,19 @@ pub(crate) async fn control_checkpoint_create(
         ));
     }
     let request = microsandbox_runtime::control::ControlRequest::CheckpointCreate {
+        record_integrity,
         checkpoint_id,
         intent: microsandbox_runtime::control::CheckpointCaptureIntent::FullSnapshot,
     };
+    if !capabilities
+        .capabilities
+        .is_some_and(|c| c.optional_disk_integrity)
+    {
+        return Err(MicrosandboxError::Runtime(
+            "source runtime lacks optional disk integrity; restart with the matching runtime"
+                .into(),
+        ));
+    }
     let response = control_request_raw_for(
         local,
         name,
@@ -2508,7 +2556,7 @@ fn secret_disposition(
             placeholder_changed,
             live_secret_reconfigure_supported,
         );
-        return ModificationDisposition::Unsupported;
+        ModificationDisposition::Unsupported
     }
     #[cfg(feature = "net")]
     secret_disposition_net(
@@ -2566,7 +2614,7 @@ fn secret_reason(
             placeholder_changed,
             live_secret_reconfigure_supported,
         );
-        return Some(SECRETS_UNAVAILABLE_WITHOUT_NET.to_string());
+        Some(SECRETS_UNAVAILABLE_WITHOUT_NET.to_string())
     }
     #[cfg(feature = "net")]
     match secret_disposition(
@@ -2868,6 +2916,90 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn compaction_uses_selected_backend_for_discovery_and_mutation() {
+        use microsandbox_types::DiskCompactionTarget;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let first_home = tempfile::tempdir_in("/tmp").unwrap();
+        let second_home = tempfile::tempdir_in("/tmp").unwrap();
+        let first = LocalBackend::builder()
+            .home(first_home.path())
+            .build()
+            .await
+            .unwrap();
+        let second = LocalBackend::builder()
+            .home(second_home.path())
+            .build()
+            .await
+            .unwrap();
+        let mut servers = Vec::new();
+        for (local, marker, target) in [
+            (&first, 1, DiskCompactionTarget::All),
+            (
+                &second,
+                2,
+                DiskCompactionTarget::Disk {
+                    guest_path: "/data".into(),
+                },
+            ),
+        ] {
+            let agent =
+                crate::runtime::sandbox_agent_socket_path_candidates_for(local, "worker").remove(0);
+            let path = microsandbox_runtime::control::control_socket_path_for(&agent);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let listener = tokio::net::UnixListener::bind(path).unwrap();
+            servers.push(tokio::spawn(async move {
+                for request_index in 0..2 {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    let mut stream = BufReader::new(stream);
+                    let mut line = String::new();
+                    stream.read_line(&mut line).await.unwrap();
+                    let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                    let response = if request_index == 0 {
+                        assert_eq!(request["op"], "capabilities");
+                        serde_json::json!({"ok": true, "capabilities": {
+                            "disk_compact_owned": true, "cpu_resize": false,
+                            "memory_resize": false, "secrets_update": false
+                        }})
+                    } else {
+                        assert_eq!(request["op"], "disk_compact");
+                        assert_eq!(request["target"], serde_json::to_value(target.clone()).unwrap());
+                        assert_eq!(request["layers"], 999);
+                        assert_eq!(request["dry_run"], true);
+                        serde_json::json!({"ok": true, "compaction": microsandbox_types::DiskCompactionResult {
+                            dry_run: true, total_us: marker, ..Default::default()
+                        }})
+                    };
+                    stream.get_mut().write_all(format!("{response}\n").as_bytes()).await.unwrap();
+                }
+            }));
+        }
+        for (local, marker, target) in [
+            (&first, 1, DiskCompactionTarget::All),
+            (
+                &second,
+                2,
+                DiskCompactionTarget::Disk {
+                    guest_path: "/data".into(),
+                },
+            ),
+        ] {
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                control_disk_compact(local, "worker", target, Some(999), true),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(result.total_us, marker);
+        }
+        for server in servers {
+            server.await.unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn full_checkpoint_uses_selected_backend_and_retains_post_publish_failure() {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
@@ -2899,9 +3031,10 @@ mod tests {
                     let request: serde_json::Value = serde_json::from_str(&line).unwrap();
                     let response = if request_index == 0 {
                         assert_eq!(request["op"], "capabilities");
-                        serde_json::json!({"ok":true,"capabilities":{"checkpoint_create":true,"cpu_resize":false,"memory_resize":false,"secrets_update":false}})
+                        serde_json::json!({"ok":true,"capabilities":{"optional_disk_integrity":true,"checkpoint_create":true,"cpu_resize":false,"memory_resize":false,"secrets_update":false}})
                     } else {
                         assert_eq!(request["op"], "checkpoint_create");
+                        assert_eq!(request["record_integrity"], label == "second");
                         serde_json::json!({"ok":resume_ok,"error":"source resume failed","checkpoint":{
                             "checkpoint_id":request["checkpoint_id"], "checkpoint_root":format!("sha256:{}", "a".repeat(64)),
                             "path":format!("/capture/{label}"), "memory_mode":"full", "memory_logical_bytes":4096, "memory_emitted_bytes":4096
@@ -2911,11 +3044,12 @@ mod tests {
                 }
             }));
         }
-        let first_capture = control_checkpoint_create(&first, "worker", "first-checkpoint".into())
-            .await
-            .unwrap();
+        let first_capture =
+            control_checkpoint_create(&first, "worker", "first-checkpoint".into(), false)
+                .await
+                .unwrap();
         let second_capture =
-            control_checkpoint_create(&second, "worker", "second-checkpoint".into())
+            control_checkpoint_create(&second, "worker", "second-checkpoint".into(), true)
                 .await
                 .unwrap();
         assert_eq!(

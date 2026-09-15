@@ -36,6 +36,14 @@ pub struct Sandbox {
     owns_lifecycle: bool,
 }
 
+/// One child result from a capture-once batch, in caller order.
+#[napi(object, object_from_js = false)]
+pub struct JsBranchOutcome {
+    pub name: String,
+    pub sandbox: Option<Sandbox>,
+    pub error: Option<String>,
+}
+
 /// One page returned by `Sandbox.list` / `Sandbox.listWith`.
 #[napi(object, object_from_js = false)]
 pub struct JsSandboxPage {
@@ -429,12 +437,25 @@ impl Sandbox {
         run_modify(builder, modify_dry_run(options.as_ref())).await
     }
 
-    /// Compact the immutable disk prefix; the count includes the base, not the writable head.
+    /// Compact root and owned-data disk prefixes; the limit includes the base, not the writable head.
     #[napi]
-    pub async fn compact(&self, layers: Option<f64>, dry_run: Option<bool>) -> Result<String> {
+    pub async fn compact(
+        &self,
+        layers: Option<f64>,
+        dry_run: Option<bool>,
+        disk: Option<String>,
+        root_disk_only: Option<bool>,
+    ) -> Result<String> {
         let sb = self.inner.get().await.ok_or_else(consumed_error)?;
         let builder = sb.compact();
-        run_compact(builder, layers, dry_run.unwrap_or(false)).await
+        run_compact(
+            builder,
+            layers,
+            dry_run.unwrap_or(false),
+            disk,
+            root_disk_only.unwrap_or(false),
+        )
+        .await
     }
 
     /// Stream metrics snapshots at the requested interval (in milliseconds).
@@ -545,10 +566,31 @@ impl Sandbox {
 
     /// Create an independent local CoW child without a durable full snapshot.
     #[napi]
-    pub async fn branch(&self, name: String) -> Result<Sandbox> {
+    pub async fn branch(&self, name: String, record_integrity: Option<bool>) -> Result<Sandbox> {
         let sb = self.inner.get().await.ok_or_else(consumed_error)?;
+        let mut builder = sb.branch(name);
+        if record_integrity.unwrap_or(false) {
+            builder = builder.record_integrity();
+        }
         Ok(Sandbox::from_rust(
-            sb.branch(name).branch().await.map_err(to_napi_error)?,
+            builder.branch().await.map_err(to_napi_error)?,
+        ))
+    }
+
+    /// Capture once and return individual child startup outcomes.
+    #[napi]
+    pub async fn branch_many(
+        &self,
+        names: Vec<String>,
+        record_integrity: Option<bool>,
+    ) -> Result<Vec<JsBranchOutcome>> {
+        let sb = self.inner.get().await.ok_or_else(consumed_error)?;
+        let mut builder = sb.branch_many(names);
+        if record_integrity.unwrap_or(false) {
+            builder = builder.record_integrity();
+        }
+        Ok(branch_outcomes(
+            builder.branch().await.map_err(to_napi_error)?,
         ))
     }
 
@@ -754,6 +796,25 @@ impl Sandbox {
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
+
+pub(crate) fn branch_outcomes(
+    outcomes: Vec<microsandbox::sandbox::BranchOutcome>,
+) -> Vec<JsBranchOutcome> {
+    outcomes
+        .into_iter()
+        .map(|outcome| {
+            let (sandbox, error) = match outcome.result {
+                Ok(child) => (Some(Sandbox::from_rust(child)), None),
+                Err(error) => (None, Some(to_napi_error(error).reason)),
+            };
+            JsBranchOutcome {
+                name: outcome.name,
+                sandbox,
+                error,
+            }
+        })
+        .collect()
+}
 
 fn sandbox_page_to_js(page: microsandbox::sandbox::SandboxPage) -> JsSandboxPage {
     JsSandboxPage {
@@ -1103,9 +1164,17 @@ pub(crate) async fn run_compact(
     mut builder: microsandbox::sandbox::DiskCompactionBuilder,
     layers: Option<f64>,
     dry_run: bool,
+    disk: Option<String>,
+    root_disk_only: bool,
 ) -> Result<String> {
     if let Some(layers) = checked_layer_count(layers)? {
         builder = builder.layers(layers);
+    }
+    if let Some(disk) = disk {
+        builder = builder.disk(disk);
+    }
+    if root_disk_only {
+        builder = builder.root_disk_only();
     }
     let result = if dry_run {
         builder.dry_run().await

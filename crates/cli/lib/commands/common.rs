@@ -175,6 +175,11 @@ pub struct SandboxOpts {
     #[arg(long = "mount-named", value_name = "NAME:DEST[:OPTIONS]")]
     pub mount_named: Vec<String>,
 
+    /// Create a private volume removed with this sandbox (`DEST[:OPTIONS]`).
+    /// Defaults to a directory; use `kind=disk,size=10G` for an ext4 disk.
+    #[arg(long = "mount-owned", value_name = "DEST[:OPTIONS]")]
+    pub mount_owned: Vec<String>,
+
     /// Set the default working directory for commands.
     #[arg(short, long)]
     pub workdir: Option<String>,
@@ -1009,6 +1014,7 @@ impl SandboxOpts {
             || !self.mount_file.is_empty()
             || !self.mount_disk.is_empty()
             || !self.mount_named.is_empty()
+            || !self.mount_owned.is_empty()
             || self.workdir.is_some()
             || self.shell.is_some()
             || !self.env.is_empty()
@@ -1321,6 +1327,9 @@ fn apply_sandbox_opts_inner(
     }
     for mount_str in &opts.mount_named {
         builder = apply_explicit_named_mount(builder, mount_str)?;
+    }
+    for mount_str in &opts.mount_owned {
+        builder = apply_owned_mount(builder, mount_str)?;
     }
 
     // --- Tmpfs ---
@@ -2060,6 +2069,61 @@ pub fn apply_explicit_named_mount(
         common_options.quota_mib = None;
         apply_common_mount_options(mount, common_options)
     }))
+}
+
+/// Apply an unnamed private directory or disk mount.
+pub fn apply_owned_mount(builder: SandboxBuilder, spec: &str) -> anyhow::Result<SandboxBuilder> {
+    let (guest, mount) = owned_mount_from_spec(spec)?;
+    Ok(builder.volume(guest, move |_| mount))
+}
+
+/// Validate ownership options before `install` persists a runnable alias.
+pub fn validate_mount_owned_spec(spec: &str) -> anyhow::Result<()> {
+    let (_, builder) = owned_mount_from_spec(spec)?;
+    let mut mount = builder.build()?;
+    microsandbox_types::canonicalize_volume_mounts(std::slice::from_mut(&mut mount))?;
+    Ok(())
+}
+
+fn owned_mount_from_spec(spec: &str) -> anyhow::Result<(String, MountBuilder)> {
+    let (guest, text) = match spec.split_once(':') {
+        Some((guest, options)) => (guest, Some(options)),
+        None => (spec, None),
+    };
+    if !guest.starts_with('/') || guest.contains(',') {
+        anyhow::bail!("mount-owned must be an absolute guest path with optional :options");
+    }
+    let options = parse_cli_mount_options(
+        text,
+        CliMountOptionSupport {
+            policies: true,
+            size: true,
+            quota: true,
+            named_kind: true,
+            owner: true,
+            ..Default::default()
+        },
+    )?;
+    if options.follow_root_symlinks {
+        anyhow::bail!("mount-owned does not accept follow-root-symlinks");
+    }
+    // Keep storage options in the owned sub-builder; applying .size() to the
+    // outer mount builder would accidentally select tmpfs-only semantics.
+    let mount = MountBuilder::new(guest).owned_with(|mut volume| {
+        if options.named_kind == Some(VolumeKind::Disk) {
+            volume = volume.disk();
+        }
+        if let Some(size) = options.size_mib {
+            volume = volume.size(size);
+        }
+        if let Some(quota) = options.quota_mib {
+            volume = volume.quota(quota);
+        }
+        volume
+    });
+    let mut common = options;
+    common.quota_mib = None;
+    Ok((guest.to_owned(), apply_common_mount_options(mount, common)))
 }
 
 /// Apply common read/mount behavior options to a mount builder.
@@ -4258,6 +4322,90 @@ mod tests {
                 assert_eq!(create.capacity_mib(), Some(2048));
             }
             other => panic!("expected Named, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn owned_mount_cli_supports_directory_and_disk_without_a_name() {
+        for (spec, disk) in [
+            ("/data:quota=512M,noexec", false),
+            ("/data:kind=disk,size=1G,ro", true),
+        ] {
+            let mount = build_explicit(spec, apply_owned_mount).await;
+            let VolumeMount::Owned {
+                guest,
+                storage,
+                options,
+                ..
+            } = mount
+            else {
+                panic!("expected owned mount")
+            };
+            assert_eq!(guest, "/data");
+            if disk {
+                assert_eq!(
+                    storage,
+                    microsandbox::sandbox::OwnedVolumeStorage::Disk { capacity_mib: 1024 }
+                );
+                assert!(options.readonly);
+            } else {
+                assert_eq!(
+                    storage,
+                    microsandbox::sandbox::OwnedVolumeStorage::Directory {
+                        quota_mib: Some(512)
+                    }
+                );
+                assert!(options.noexec);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn owned_mount_cli_rejects_name_and_inapplicable_options() {
+        for spec in [
+            "named:/data",
+            "/data:kind=disk",
+            "/data:kind=disk,size=0",
+            "/data:size=1G",
+            "/data:kind=disk,size=1G,quota=1G",
+            "/data:fstype=xfs",
+            "/data:format=qcow2",
+            "/data:follow-root-symlinks",
+        ] {
+            let result =
+                apply_owned_mount(SandboxBuilder::new("invalid-owned").image("alpine"), spec);
+            if let Ok(builder) = result {
+                assert!(
+                    builder.build().await.is_err(),
+                    "{spec} unexpectedly accepted"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn owned_install_validation_checks_storage_and_guest_path_synchronously() {
+        for spec in [
+            "/data",
+            "/data:quota=1G,nodev",
+            "/data:kind=disk,size=1G,ro",
+        ] {
+            validate_mount_owned_spec(spec).unwrap();
+        }
+        for spec in [
+            "/",
+            "/data/..",
+            "/data\0bad",
+            "/data:kind=disk",
+            "/data:kind=disk,size=0",
+            "/data:size=1G",
+            "/data:kind=disk,size=1G,stat-virt=strict",
+            "/data:kind=disk,size=1G,quota=0",
+        ] {
+            assert!(
+                validate_mount_owned_spec(spec).is_err(),
+                "accepted {spec:?}"
+            );
         }
     }
 

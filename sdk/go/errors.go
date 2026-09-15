@@ -136,7 +136,7 @@ const (
 	ErrCancelled
 
 	// ErrLibraryNotLoaded indicates the microsandbox library has not been
-	// loaded. Call EnsureInstalled() before using any SDK functions.
+	// loaded. SDK operations load the embedded FFI library automatically.
 	ErrLibraryNotLoaded
 
 	// ErrMetricsDisabled indicates metrics sampling is disabled for this sandbox.
@@ -164,6 +164,10 @@ const (
 
 	// ErrStopTimeout indicates graceful shutdown exceeded its budget without requesting a kill.
 	ErrStopTimeout
+	// ErrRuntimeNotInstalled indicates no runtime pair resolves.
+	ErrRuntimeNotInstalled
+	// ErrRuntimeIncomplete indicates a partial or invalid explicitly selected runtime.
+	ErrRuntimeIncomplete
 )
 
 func (k ErrorKind) String() string {
@@ -232,6 +236,10 @@ func (k ErrorKind) String() string {
 		return "BufferTooSmall"
 	case ErrCancelled:
 		return "Cancelled"
+	case ErrRuntimeNotInstalled:
+		return "RuntimeNotInstalled"
+	case ErrRuntimeIncomplete:
+		return "RuntimeIncomplete"
 	case ErrLibraryNotLoaded:
 		return "LibraryNotLoaded"
 	case ErrMetricsDisabled:
@@ -411,6 +419,10 @@ func kindFromFFI(kind string) ErrorKind {
 		return ErrBufferTooSmall
 	case ffi.KindCancelled:
 		return ErrCancelled
+	case "runtime_not_installed":
+		return ErrRuntimeNotInstalled
+	case "runtime_incomplete":
+		return ErrRuntimeIncomplete
 	case ffi.KindLibraryNotLoaded:
 		return ErrLibraryNotLoaded
 	case ffi.KindMetricsDisabled:

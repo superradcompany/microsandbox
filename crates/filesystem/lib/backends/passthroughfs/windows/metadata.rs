@@ -7,6 +7,14 @@ use super::*;
 //--------------------------------------------------------------------------------------------------
 
 impl PassthroughFs {
+    pub(super) fn inode_metadata(&self, data: &InodeData) -> io::Result<std::fs::Metadata> {
+        if let Some(file) = data.retained.lock().unwrap().as_ref() {
+            file.metadata().map_err(host_error)
+        } else {
+            self.safe_metadata(&data.path())
+        }
+    }
+
     pub(super) fn safe_metadata(&self, path: &Path) -> io::Result<std::fs::Metadata> {
         ensure_lexically_under_root(&self.root, path)?;
         safe_metadata_under_root(&self.root, path)
@@ -18,12 +26,20 @@ impl PassthroughFs {
         data: &InodeData,
     ) -> io::Result<stat64> {
         if !self.cfg.stat_virtualization_enabled() {
-            return Ok(host_stat_from_metadata(metadata, data.inode));
+            return self.owned_stat_link_count(host_stat_from_metadata(metadata, data.inode), data);
         }
 
-        if let Some(store) = &self.stat_store {
+        if let Some(override_stat) = owned_metadata::read_retained_stat(data)? {
             let mut st = host_stat_from_metadata(metadata, data.inode);
-            if let Some(override_stat) = store.read(&data.path)? {
+            apply_override_stat(&mut st, override_stat);
+            return self.owned_stat_link_count(st, data);
+        }
+
+        if let Some(store) = &self.stat_store
+            && data.retained.lock().unwrap().is_none()
+        {
+            let mut st = host_stat_from_metadata(metadata, data.inode);
+            if let Some(override_stat) = store.read(&data.path())? {
                 apply_override_stat(&mut st, override_stat);
             } else if let Some((uid, gid)) = self.cfg.default_owner {
                 // No per-file override: a host-created file. Present the
@@ -31,7 +47,7 @@ impl PassthroughFs {
                 st.st_uid = uid;
                 st.st_gid = gid;
             }
-            return Ok(st);
+            return self.owned_stat_link_count(st, data);
         }
 
         // Storeless path (e.g. relaxed mode with no persistent stat store):
@@ -45,7 +61,7 @@ impl PassthroughFs {
             st.st_uid = uid;
             st.st_gid = gid;
         }
-        Ok(st)
+        self.owned_stat_link_count(st, data)
     }
 
     pub(super) fn entry_from_metadata(
@@ -68,13 +84,17 @@ impl PassthroughFs {
         metadata: &std::fs::Metadata,
         data: &InodeData,
     ) -> io::Result<OverrideStat> {
+        if let Some(stat) = owned_metadata::read_retained_stat(data)? {
+            return Ok(stat);
+        }
         if let Some(store) = &self.stat_store
-            && let Some(override_stat) = store.read(&data.path)?
+            && data.retained.lock().unwrap().is_none()
+            && let Some(override_stat) = store.read(&data.path())?
         {
             return Ok(override_stat);
         }
 
-        if self.stat_store.is_some() {
+        if self.stat_store.is_some() && data.retained.lock().unwrap().is_none() {
             // No stored entry yet: a host-created file. Seed the mutation
             // baseline with the configured default owner (falling back to 0:0)
             // so a later setattr persists that owner instead of resetting it to
@@ -118,21 +138,33 @@ impl PassthroughFs {
             meta.rdev = u64::from(rdev);
         }
 
-        if let Some(store) = &self.stat_store {
-            store.write(&data.path, uid, gid, mode, rdev)?;
+        let stat = OverrideStat::new(uid, gid, mode, rdev);
+        let retained_stat = owned_metadata::write_retained_stat(data, stat)?;
+        if let Some(store) = &self.stat_store
+            && !retained_stat
+            && data.retained.lock().unwrap().is_none()
+        {
+            store.write(&data.path(), uid, gid, mode, rdev)?;
         }
+        self.propagate_owned_sidecar_stat(data, stat)?;
 
         if (self.cfg.mirror_host_permissions() || !self.cfg.stat_virtualization_enabled())
             && mirror_eligible_type(mode & S_IFMT)
         {
-            apply_host_permissions(&data.path, mode)?;
+            if let Some(file) = data.retained.lock().unwrap().as_ref() {
+                let mut permissions = file.metadata().map_err(host_error)?.permissions();
+                permissions.set_readonly(mode & 0o222 == 0);
+                file.set_permissions(permissions).map_err(host_error)?;
+            } else {
+                apply_host_permissions(&data.path(), mode)?;
+            }
         }
 
         Ok(())
     }
 
     pub(super) fn clear_priv_bits(&self, data: &InodeData) -> io::Result<()> {
-        let metadata = self.safe_metadata(&data.path)?;
+        let metadata = self.inode_metadata(data)?;
         let current = self.current_override(&metadata, data)?;
         let mode = current.mode & !(S_ISUID | S_ISGID);
         if mode != current.mode {
@@ -147,7 +179,7 @@ impl PassthroughFs {
         }
 
         let data = self.inode(inode)?;
-        let metadata = self.safe_metadata(&data.path)?;
+        let metadata = self.inode_metadata(&data)?;
         Ok((
             self.stat_from_metadata(&metadata, data.as_ref())?,
             self.cfg.attr_timeout,
@@ -179,7 +211,7 @@ impl PassthroughFs {
         }
 
         let data = self.inode(inode)?;
-        let metadata = self.safe_metadata(&data.path)?;
+        let metadata = self.inode_metadata(&data)?;
         if metadata.file_type().is_dir() && valid.contains(SetattrValid::SIZE) {
             return Err(linux_error(LINUX_EISDIR));
         }
@@ -196,11 +228,7 @@ impl PassthroughFs {
                 self.quota_charge_growth(metadata.len(), size)?;
                 file.set_len(size).map_err(host_error)?;
             } else {
-                let file = StdOpenOptions::new()
-                    .write(true)
-                    .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
-                    .open(&data.path)
-                    .map_err(host_error)?;
+                let file = self.open_inode_file(&data, LINUX_O_WRONLY as u32)?;
                 reject_reparse_metadata(&file.metadata().map_err(host_error)?)?;
                 self.quota_charge_growth(metadata.len(), size)?;
                 file.set_len(size).map_err(host_error)?;
@@ -258,11 +286,15 @@ impl PassthroughFs {
                     .set_times(times)
                     .map_err(host_error)?;
             } else {
-                let file = StdOpenOptions::new()
-                    .write(true)
-                    .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
-                    .open(&data.path)
-                    .map_err(host_error)?;
+                let file = if data.retained.lock().unwrap().is_some() {
+                    self.open_inode_file(&data, LINUX_O_WRONLY as u32)?
+                } else {
+                    StdOpenOptions::new()
+                        .write(true)
+                        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
+                        .open(data.path())
+                        .map_err(host_error)?
+                };
                 reject_reparse_metadata(&file.metadata().map_err(host_error)?)?;
                 file.set_times(times).map_err(host_error)?;
             }

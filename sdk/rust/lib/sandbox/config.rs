@@ -195,8 +195,8 @@ pub struct SandboxConfig {
     /// Path to a file snapshot's writable root disk to copy into the new
     /// sandbox at create time, replacing fresh root-disk provisioning.
     ///
-    /// Transient: set by `SandboxBuilder::from_snapshot` and consumed
-    /// during `create_with_mode`. Never persisted.
+    /// Transient: populated during snapshot preparation and consumed when creating
+    /// the sandbox's root disk. Never persisted.
     #[serde(skip)]
     pub(crate) snapshot_upper_source: Option<PathBuf>,
 
@@ -207,6 +207,14 @@ pub struct SandboxConfig {
     #[serde(skip)]
     #[cfg(feature = "local")]
     pub(crate) snapshot_root_layer_sources: Vec<RootfsUpperLayerConfig>,
+
+    /// Installed file snapshot's required owned payloads, consumed into child storage.
+    #[serde(skip)]
+    #[cfg(feature = "local")]
+    pub(crate) snapshot_owned_source: Option<(
+        PathBuf,
+        Vec<microsandbox_image::snapshot::OwnedVolumeCapture>,
+    )>,
 
     /// Guest-visible capacity of `snapshot_root_layer_sources`.
     #[serde(skip)]
@@ -239,6 +247,11 @@ pub struct SandboxConfig {
     #[serde(skip)]
     #[cfg(feature = "local")]
     pub(crate) branch_source: Option<super::identity::BranchSource>,
+    /// Transient ownership passed to a Linux child; never stored in launch JSON or the database.
+    #[serde(skip)]
+    #[cfg(all(feature = "local", target_os = "linux"))]
+    pub(crate) branch_memory:
+        Option<std::sync::Arc<microsandbox_runtime::checkpoint::LocalMemoryPin>>,
 
     /// Restore captured RAM through private CoW mappings; never a cold-boot policy.
     #[serde(skip)]
@@ -313,6 +326,10 @@ impl SandboxConfig {
         {
             config.checkpoint_restore = None;
             config.branch_source = None;
+            #[cfg(target_os = "linux")]
+            {
+                config.branch_memory = None;
+            }
             config.forked = false;
         }
         config.snapshot_restore_mode = SnapshotRestoreMode::Full;
@@ -321,6 +338,7 @@ impl SandboxConfig {
         #[cfg(feature = "local")]
         {
             config.snapshot_root_layer_sources.clear();
+            config.snapshot_owned_source = None;
         }
         config.snapshot_root_virtual_size = None;
         #[cfg(feature = "local")]
@@ -699,6 +717,7 @@ fn guest_mount_is(mount: &VolumeMount, path: &str) -> bool {
     match mount {
         VolumeMount::Bind { guest, .. }
         | VolumeMount::Named { guest, .. }
+        | VolumeMount::Owned { guest, .. }
         | VolumeMount::Tmpfs { guest, .. }
         | VolumeMount::DiskImage { guest, .. } => {
             Utf8UnixPath::new(guest).normalize() == Utf8UnixPath::new(path).normalize()
@@ -796,6 +815,8 @@ impl Default for SandboxConfig {
             snapshot_upper_source: None,
             #[cfg(feature = "local")]
             snapshot_root_layer_sources: Vec::new(),
+            #[cfg(feature = "local")]
+            snapshot_owned_source: None,
             snapshot_root_virtual_size: None,
             snapshot_archive_source: None,
             snapshot_parent: None,
@@ -804,6 +825,8 @@ impl Default for SandboxConfig {
             checkpoint_restore: None,
             #[cfg(feature = "local")]
             branch_source: None,
+            #[cfg(all(feature = "local", target_os = "linux"))]
+            branch_memory: None,
             forked: false,
             snapshot_restore_mode: SnapshotRestoreMode::Full,
             external_mount_policy: microsandbox_types::ExternalMountRestorePolicy::Strict,
@@ -1785,6 +1808,7 @@ mod tests {
                 },
                 snapshot_restore_mode: restore_mode,
                 checkpoint_restore: Some(CheckpointRestoreConfig {
+                    memory_descriptor: false,
                     network_gateway_mac: None,
                     external_mount_policy: Default::default(),
                     external_mounts: Vec::new(),

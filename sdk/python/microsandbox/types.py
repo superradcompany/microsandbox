@@ -219,6 +219,7 @@ class ViolationAction(StrEnum):
 class MountKind(StrEnum):
     BIND = "bind"
     NAMED = "named"
+    OWNED = "owned"
     TMPFS = "tmpfs"
     DISK = "disk"
 
@@ -380,6 +381,37 @@ class SecretModifySpec(TypedDict, total=False):
     store: str
     placeholder: str
     allowed_hosts: list[str]
+
+
+class DiskCompactionDiskResult(TypedDict):
+    """Per-disk physical counts; bytes are not reclaimed space.
+
+    ``total_us`` measures preparation/materialization, excluding journal adoption
+    and backend switching. Timings are microseconds.
+    """
+
+    guest_path: str
+    input_layers: int
+    selected_layers: int
+    output_layers: int
+    materialized_bytes: int
+    total_us: int
+
+
+class DiskCompactionResult(TypedDict):
+    """Aggregate compaction outcome, including unchanged selected disks.
+
+    ``total_us`` includes the shared journal/backend adoption phase.
+    """
+
+    dry_run: bool
+    input_layers: int
+    selected_layers: int
+    output_layers: int
+    materialized_bytes: int
+    total_us: int
+    pause_us: int
+    disks: list[DiskCompactionDiskResult]
 
 
 class ModificationConflict(TypedDict):
@@ -625,7 +657,7 @@ class MountConfig:
     """Volume mount configuration.
 
     ``stat_virtualization`` and ``host_permissions`` are only meaningful for
-    virtiofs-backed mounts (``BIND`` and ``NAMED``). Setting either on a
+    virtiofs-backed mounts (``BIND``, ``NAMED`` and directory-backed ``OWNED``). Setting either on a
     ``TMPFS`` or ``DISK`` mount raises ``ValueError`` at serialization time.
     """
 
@@ -649,6 +681,8 @@ class MountConfig:
     #: Must be set together with ``override_gid``. BIND/NAMED mounts only.
     override_uid: int | None = None
     override_gid: int | None = None
+    #: Backing kind for storage allocated and removed with the sandbox.
+    owned_kind: VolumeKind | None = None
 
     def _to_dict(self) -> dict:
         # Validate every supplied enum before selecting a mount arm. This
@@ -665,6 +699,13 @@ class MountConfig:
             if self.named_kind is not None
             else None
         )
+        owned_kind = (
+            _enum_value(self.owned_kind, VolumeKind, "MountConfig.owned_kind")
+            if self.owned_kind is not None
+            else None
+        )
+        if owned_kind is not None and self.kind != MountKind.OWNED:
+            raise ValueError("owned_kind is only valid for OWNED mounts")
         disk_format = (
             _enum_value(self.format, DiskImageFormat, "MountConfig.format")
             if self.format is not None
@@ -715,6 +756,35 @@ class MountConfig:
                 d["size_mib"] = self.size_mib
             if self.quota_mib is not None:
                 d["quota_mib"] = self.quota_mib
+        elif self.kind == MountKind.OWNED:
+            if any(value is not None for value in (
+                self.bind, self.named, self.named_mode, self.named_kind,
+                self.disk, self.format, self.fstype,
+            )):
+                raise ValueError(
+                    "OWNED mounts cannot specify a source, name, mode, format or fstype"
+                )
+            # A separate selector makes old native bindings reject the mount;
+            # never encode ownership as an optional field on a named volume.
+            d["owned"] = owned_kind or VolumeKind.DIRECTORY.value
+            if self.size_mib is not None:
+                d["size_mib"] = _owned_volume_size(self.size_mib, "size_mib")
+            if self.quota_mib is not None:
+                d["quota_mib"] = _owned_volume_size(self.quota_mib, "quota_mib")
+            if d["owned"] == VolumeKind.DISK.value:
+                if not self.size_mib:
+                    raise ValueError("disk-backed OWNED mounts require positive size_mib")
+                if self.quota_mib is not None:
+                    raise ValueError("quota_mib is only valid for directory-backed OWNED mounts")
+                if any(value is not None for value in (
+                    self.stat_virtualization, self.host_permissions,
+                    self.override_uid, self.override_gid,
+                )):
+                    raise ValueError(
+                        "metadata policies are not supported for disk-backed OWNED mounts"
+                    )
+            elif self.size_mib is not None:
+                raise ValueError("size_mib is only valid for disk-backed OWNED mounts")
         elif self.kind == MountKind.TMPFS:
             d["tmpfs"] = True
             if self.size_mib is not None:
@@ -731,7 +801,9 @@ class MountConfig:
             raise ValueError(f"unknown MountKind: {self.kind!r}")
 
         # Per-mount policies — only valid for virtiofs-backed kinds.
-        if self.kind in (MountKind.BIND, MountKind.NAMED):
+        if self.kind in (MountKind.BIND, MountKind.NAMED) or (
+            self.kind == MountKind.OWNED and owned_kind != VolumeKind.DISK.value
+        ):
             if stat_virtualization is not None:
                 d["stat_virtualization"] = stat_virtualization
             if host_permissions is not None:
@@ -758,8 +830,9 @@ class MountConfig:
             or self.override_gid is not None
         ):
             raise ValueError(
-                f"stat_virtualization/host_permissions/override_uid/override_gid are only "
-                f"valid for BIND/NAMED mounts (got kind={self.kind.value})"
+                "stat_virtualization/host_permissions/override_uid/override_gid are only "
+                "valid for BIND/NAMED or directory-backed OWNED mounts "
+                f"(got kind={self.kind.value})"
             )
         return d
 
@@ -773,6 +846,13 @@ def _enum_value(value: enum.Enum, expected: type[enum.Enum], field_name: str) ->
 
 def _mount_owner_id(value: object, field_name: str) -> int:
     """Validate an owner ID without accepting bool or lossy numeric coercions."""
+    if type(value) is not int or not 0 <= value <= 0xFFFFFFFF:
+        raise ValueError(f"{field_name} must be an integer between 0 and 4294967295")
+    return value
+
+
+def _owned_volume_size(value: object, field_name: str) -> int:
+    """Preserve capacities and quotas across the unsigned native boundary."""
     if type(value) is not int or not 0 <= value <= 0xFFFFFFFF:
         raise ValueError(f"{field_name} must be an integer between 0 and 4294967295")
     return value

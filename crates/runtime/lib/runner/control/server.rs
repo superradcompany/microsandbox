@@ -149,16 +149,50 @@ pub(crate) async fn listen_unix(
         let dispatcher = Arc::clone(&dispatcher);
         tokio::spawn(async move {
             let _permit = permit;
-            if let Err(error) = serve(&mut stream, dispatcher).await {
+            #[cfg(target_os = "linux")]
+            let result = serve_unix(&mut stream, dispatcher).await;
+            #[cfg(not(target_os = "linux"))]
+            let result = serve(&mut stream, dispatcher).await;
+            if let Err(error) = result {
                 tracing::debug!("control: connection ended: {error}");
             }
         });
     }
 }
 
+#[cfg(any(not(target_os = "linux"), test))]
 pub(crate) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
     stream: &mut S,
     dispatcher: Arc<Dispatcher>,
+) -> io::Result<()> {
+    serve_opened(stream, dispatcher, None).await
+}
+
+/// Receive ancillary rights before Tokio reads the first byte and discards them.
+#[cfg(target_os = "linux")]
+async fn serve_unix(
+    stream: &mut tokio::net::UnixStream,
+    dispatcher: Arc<Dispatcher>,
+) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    let opening = timeout(
+        DEFAULT_SETUP_TIMEOUT,
+        stream.async_io(tokio::io::Interest::READABLE, || {
+            crate::memory_handoff::receive_first(stream.as_raw_fd())
+        }),
+    )
+    .await
+    .map_err(|_| expired())??;
+    let Some(opening) = opening else {
+        return Ok(());
+    };
+    serve_opened(stream, dispatcher, Some(opening)).await
+}
+
+async fn serve_opened<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
+    dispatcher: Arc<Dispatcher>,
+    opening: Option<(u8, Option<std::fs::File>)>,
 ) -> io::Result<()> {
     let id = NEXT_CONNECTION.fetch_add(1, Ordering::Relaxed);
     let cancelled = CancellationToken::new();
@@ -168,15 +202,34 @@ pub(crate) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
         cancelled: cancelled.clone(),
     };
     let (mut reader, mut writer) = tokio::io::split(stream);
-    let first = timeout(DEFAULT_SETUP_TIMEOUT, first_byte(&mut reader))
-        .await
-        .map_err(|_| expired())??;
+    let (first, memory) = match opening {
+        Some((first, memory)) => (Some(first), memory),
+        None => (
+            timeout(DEFAULT_SETUP_TIMEOUT, first_byte(&mut reader))
+                .await
+                .map_err(|_| expired())??,
+            None,
+        ),
+    };
     let Some(first) = first else {
         return Ok(());
     }; // Windows Path::exists probe
     if first != 0 {
         let mut reader = BufReader::with_capacity(4096, &mut reader);
-        return json(&mut reader, &mut writer, first, dispatcher, id, cancelled).await;
+        return json(
+            &mut reader,
+            &mut writer,
+            first,
+            dispatcher,
+            id,
+            cancelled,
+            memory,
+        )
+        .await;
+    }
+    // Descriptor transfer is a one-shot JSON branch operation, never a framed handshake.
+    if memory.is_some() {
+        return Err(invalid());
     }
     let bytes = Arc::new(Semaphore::new(CONNECTION_BYTES));
     let (opening, _opening_budget) = timeout(
@@ -268,6 +321,7 @@ async fn json<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin>(
     dispatcher: Arc<Dispatcher>,
     id: u64,
     cancelled: CancellationToken,
+    memory: Option<std::fs::File>,
 ) -> io::Result<()> {
     // Preserve the inspected byte and the historical unbounded line contract.
     // In particular a JSON batch larger than 4 MiB does not become a CBOR frame.
@@ -294,7 +348,7 @@ async fn json<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin>(
     };
     let (reply, mut replies) = mpsc::channel(1);
     let job = Job {
-        input: Input::JsonWire(request),
+        input: Input::JsonWire(request, memory),
         reply,
         output_budget: None,
         lease: None,
@@ -407,4 +461,90 @@ fn expired() -> io::Error {
         io::ErrorKind::TimedOut,
         "control setup or frame deadline expired",
     )
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(all(test, target_os = "linux"))]
+mod descriptor_tests {
+    use super::super::handler::{Handler, Response};
+    use super::*;
+    use std::os::fd::AsRawFd;
+    use std::sync::atomic::AtomicBool;
+    use std::time::Duration;
+
+    struct MemoryHandler(Arc<AtomicBool>);
+
+    impl Handler for MemoryHandler {
+        fn handle(&self, _: ControlRequest) -> Response {
+            panic!("expected JSON memory handoff")
+        }
+
+        fn handle_json_with_memory(
+            &self,
+            value: serde_json::Value,
+            memory: Option<std::fs::File>,
+        ) -> Vec<u8> {
+            assert_eq!(value["op"], "branch_create_memfd");
+            crate::memory_handoff::validate_empty(&memory.unwrap()).unwrap();
+            self.0.store(true, Ordering::SeqCst);
+            b"{\"ok\":true}\n".to_vec()
+        }
+    }
+
+    #[tokio::test]
+    async fn unix_listener_delivers_memory_with_the_first_json_byte() {
+        let (mut sender, mut receiver) = tokio::net::UnixStream::pair().unwrap();
+        let called = Arc::new(AtomicBool::new(false));
+        let dispatcher = Dispatcher::new(Arc::new(MemoryHandler(called.clone())));
+        let worker = tokio::spawn(dispatcher.clone().run());
+        let server = tokio::spawn(async move { serve_unix(&mut receiver, dispatcher).await });
+        let file = crate::memory_handoff::create().unwrap();
+        sender
+            .async_io(tokio::io::Interest::WRITABLE, || {
+                crate::memory_handoff::send_first(sender.as_raw_fd(), &file, b'{')
+            })
+            .await
+            .unwrap();
+        // The queued job retains the descriptor after the sender closes its file handle.
+        drop(file);
+        sender
+            .write_all(b"\"op\":\"branch_create_memfd\"}\n")
+            .await
+            .unwrap();
+        let mut response = Vec::new();
+        timeout(Duration::from_secs(5), sender.read_to_end(&mut response))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(response, b"{\"ok\":true}\n");
+        server.await.unwrap().unwrap();
+        assert!(called.load(Ordering::SeqCst));
+        worker.abort();
+    }
+
+    #[tokio::test]
+    async fn framed_handshake_cannot_carry_memory() {
+        let (sender, mut receiver) = tokio::net::UnixStream::pair().unwrap();
+        let called = Arc::new(AtomicBool::new(false));
+        let dispatcher = Dispatcher::new(Arc::new(MemoryHandler(called.clone())));
+        let server = tokio::spawn(async move { serve_unix(&mut receiver, dispatcher).await });
+        let file = crate::memory_handoff::create().unwrap();
+        sender
+            .async_io(tokio::io::Interest::WRITABLE, || {
+                crate::memory_handoff::send_first(sender.as_raw_fd(), &file, 0)
+            })
+            .await
+            .unwrap();
+        assert!(
+            timeout(Duration::from_secs(5), server)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_err()
+        );
+        assert!(!called.load(Ordering::SeqCst));
+    }
 }

@@ -6806,6 +6806,7 @@ mod tests {
     }
     fn restored_agent(attempt_id: &str) -> RestoredAgentState {
         RestoredAgentState {
+            inherited_memory: None,
             external_mount_reports: Vec::new(),
             protocol_generation: microsandbox_protocol::message::PROTOCOL_VERSION,
             ready: Ready {

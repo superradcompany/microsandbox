@@ -57,7 +57,7 @@ pub(crate) struct Lease {
 pub(crate) enum Input {
     #[cfg(test)]
     Json(ControlRequest),
-    JsonWire(serde_json::Value),
+    JsonWire(serde_json::Value, Option<std::fs::File>),
     Framed {
         frame: RawFrame,
         generation: u8,
@@ -151,7 +151,12 @@ impl Dispatcher {
 
     fn execute(&self, job: Job) {
         let bytes = match &job.input {
-            Input::JsonWire(value) => Ok(self.handler.handle_json(value.clone())),
+            Input::JsonWire(_, _) => {
+                let Input::JsonWire(value, memory) = job.input else {
+                    unreachable!()
+                };
+                Ok(self.handler.handle_json_with_memory(value, memory))
+            }
             #[cfg(test)]
             Input::Json(_) => {
                 let Input::Json(request) = job.input else {

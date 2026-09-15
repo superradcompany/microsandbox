@@ -9,6 +9,7 @@ use std::str::FromStr;
 use ipnetwork::{IpNetwork, Ipv4Network, Ipv6Network};
 use microsandbox_types_macros::ConfigPatch;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use typed_path::{Utf8Component, Utf8UnixComponent, Utf8UnixPath};
 use zeroize::Zeroizing;
 
@@ -364,12 +365,43 @@ pub struct NamedVolumeCreate {
     pub labels: Vec<(String, String)>,
 }
 
+/// Storage for a volume whose lifetime belongs exclusively to its sandbox.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub enum OwnedVolumeStorage {
+    /// A private directory exposed through virtiofs.
+    Directory {
+        /// Guest-write budget in MiB; `None` uses the directory-mount default.
+        quota_mib: Option<u32>,
+    },
+    /// A private ext4 disk exposed through virtio-blk.
+    Disk {
+        /// Required, positive capacity in MiB.
+        capacity_mib: u32,
+    },
+}
+
 /// A volume mount specification for a sandbox.
 #[derive(Clone)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "ts", ts(tag = "type"))]
 pub enum VolumeMount {
+    /// An unnamed private volume removed with its owning sandbox.
+    Owned {
+        /// Guest mount path, also the stable identity within the sandbox.
+        guest: String,
+        /// Directory or ext4 disk storage.
+        storage: OwnedVolumeStorage,
+        /// Guest mount behavior.
+        options: MountOptions,
+        /// Guest-visible stat virtualization policy for directory storage.
+        stat_virtualization: StatVirtualization,
+        /// Host permission propagation policy for directory storage.
+        host_permissions: HostPermissions,
+    },
     /// Bind mount a host directory into the guest.
     Bind {
         /// Host path to bind mount.
@@ -1410,6 +1442,7 @@ impl VolumeMount {
     pub fn guest(&self) -> &str {
         match self {
             Self::Bind { guest, .. }
+            | Self::Owned { guest, .. }
             | Self::Named { guest, .. }
             | Self::Tmpfs { guest, .. }
             | Self::DiskImage { guest, .. } => guest,
@@ -1419,6 +1452,7 @@ impl VolumeMount {
     fn guest_mut(&mut self) -> &mut String {
         match self {
             Self::Bind { guest, .. }
+            | Self::Owned { guest, .. }
             | Self::Named { guest, .. }
             | Self::Tmpfs { guest, .. }
             | Self::DiskImage { guest, .. } => guest,
@@ -1437,6 +1471,33 @@ impl VolumeMount {
 //--------------------------------------------------------------------------------------------------
 // Functions: Volume Mounts
 //--------------------------------------------------------------------------------------------------
+
+/// Portable private-volume identity derived from an already canonical guest path.
+/// The ASCII hint is diagnostic; the suffix keeps distinct paths distinct.
+pub fn owned_volume_mount_id(guest: &str) -> String {
+    use std::fmt::Write as _;
+    let slug: String = guest
+        .trim_start_matches('/')
+        .chars()
+        .take(11)
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || character == '-' {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let mut id = if slug.is_empty() {
+        String::new()
+    } else {
+        format!("{slug}_")
+    };
+    for byte in Sha256::digest(guest.as_bytes()).iter().take(4) {
+        let _ = write!(id, "{byte:02x}");
+    }
+    id
+}
 
 /// Canonicalizes guest paths and orders mounts from parent to child.
 ///
@@ -1783,6 +1844,24 @@ impl Serialize for VolumeMount {
         use serde::ser::SerializeMap;
 
         match self {
+            Self::Owned {
+                guest,
+                storage,
+                options,
+                stat_virtualization,
+                host_permissions,
+            } => {
+                // A distinct tag is intentional: older runtimes must reject ownership,
+                // not reinterpret a private mount as an external or named volume.
+                let mut map = serializer.serialize_map(Some(6))?;
+                map.serialize_entry("type", "Owned")?;
+                map.serialize_entry("guest", guest)?;
+                map.serialize_entry("storage", storage)?;
+                map.serialize_entry("options", options)?;
+                map.serialize_entry("stat_virtualization", stat_virtualization)?;
+                map.serialize_entry("host_permissions", host_permissions)?;
+                map.end()
+            }
             Self::Bind {
                 host,
                 guest,
@@ -1867,6 +1946,16 @@ impl<'de> Deserialize<'de> for VolumeMount {
         #[derive(Deserialize)]
         #[serde(tag = "type")]
         enum VolumeMountHelper {
+            Owned {
+                guest: String,
+                storage: OwnedVolumeStorage,
+                #[serde(default)]
+                options: MountOptions,
+                #[serde(default = "default_strict")]
+                stat_virtualization: StatVirtualization,
+                #[serde(default = "default_private")]
+                host_permissions: HostPermissions,
+            },
             Bind {
                 host: PathBuf,
                 guest: String,
@@ -1921,6 +2010,19 @@ impl<'de> Deserialize<'de> for VolumeMount {
 
         let helper = VolumeMountHelper::deserialize(deserializer)?;
         Ok(match helper {
+            VolumeMountHelper::Owned {
+                guest,
+                storage,
+                options,
+                stat_virtualization,
+                host_permissions,
+            } => Self::Owned {
+                guest,
+                storage,
+                options,
+                stat_virtualization,
+                host_permissions,
+            },
             VolumeMountHelper::Bind {
                 host,
                 guest,
@@ -1987,6 +2089,20 @@ impl<'de> Deserialize<'de> for VolumeMount {
 impl fmt::Debug for VolumeMount {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Owned {
+                guest,
+                storage,
+                options,
+                stat_virtualization,
+                host_permissions,
+            } => f
+                .debug_struct("Owned")
+                .field("guest", guest)
+                .field("storage", storage)
+                .field("options", options)
+                .field("stat_virtualization", stat_virtualization)
+                .field("host_permissions", host_permissions)
+                .finish(),
             Self::Bind {
                 host,
                 guest,

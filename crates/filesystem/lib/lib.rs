@@ -29,6 +29,10 @@ pub use backends::passthroughfs::ExternalCheckpointOptions;
 pub use backends::passthroughfs::{
     HostPermissions, PassthroughConfig, PassthroughFs, StatVirtualization,
 };
+#[cfg(any(unix, windows))]
+pub use backends::passthroughfs::{
+    OwnedDirectoryCheckpoint, OwnedDirectoryPayload, OwnedDirectorySnapshot,
+};
 #[cfg(windows)]
 pub use backends::singlefilefs::SingleFileFs;
 #[cfg(any(unix, windows))]

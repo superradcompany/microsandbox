@@ -142,18 +142,20 @@ impl PySandboxHandle {
         })
     }
 
-    /// Compact the immutable root-disk prefix, running or stopped.
-    #[pyo3(signature = (*, layers = None, dry_run = false))]
+    /// Compact root and owned-data disks, running or stopped.
+    #[pyo3(signature = (*, layers = None, dry_run = false, disk = None, root_disk_only = false))]
     fn compact<'py>(
         &self,
         py: Python<'py>,
         layers: Option<usize>,
         dry_run: bool,
+        disk: Option<String>,
+        root_disk_only: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let builder = inner.clone().compact();
-            crate::sandbox::run_compact(builder, layers, dry_run).await
+            crate::sandbox::run_compact(builder, layers, dry_run, disk, root_disk_only).await
         })
     }
 
@@ -378,13 +380,41 @@ impl PySandboxHandle {
     }
 
     /// Create an independent local CoW child without a durable full snapshot.
-    fn branch<'py>(&self, py: Python<'py>, name: String) -> PyResult<Bound<'py, PyAny>> {
+    #[pyo3(signature = (name, *, record_integrity = false))]
+    fn branch<'py>(
+        &self,
+        py: Python<'py>,
+        name: String,
+        record_integrity: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let guard = inner.clone();
+            let mut builder = guard.branch(name);
+            if record_integrity {
+                builder = builder.record_integrity();
+            }
             Ok(PySandbox::from_rust(
-                guard.branch(name).branch().await.map_err(to_py_err)?,
+                builder.branch().await.map_err(to_py_err)?,
             ))
+        })
+    }
+
+    /// Capture once for all names; return individual child outcomes in input order.
+    #[pyo3(signature = (names, *, record_integrity = false))]
+    fn branch_many<'py>(
+        &self,
+        py: Python<'py>,
+        names: Vec<String>,
+        record_integrity: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let mut builder = inner.branch_many(names);
+            if record_integrity {
+                builder = builder.record_integrity();
+            }
+            crate::sandbox::branch_outcomes(builder.branch().await.map_err(to_py_err)?)
         })
     }
 

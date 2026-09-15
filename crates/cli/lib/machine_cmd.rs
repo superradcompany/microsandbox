@@ -36,6 +36,9 @@ use microsandbox_runtime::{
 /// `--config-file` for manual invocation). See issue #997.
 #[derive(Debug, Args)]
 pub struct MachineArgs {
+    /// Set by legacy command routing, never inferred from a missing execution field.
+    #[arg(skip)]
+    pub legacy_launch: bool,
     /// Require captured execution; runtimes without this protocol reject the invocation.
     #[arg(long, hide = true)]
     pub restore: bool,
@@ -79,6 +82,11 @@ pub struct MachineArgs {
     #[cfg(windows)]
     #[arg(long = "startup-pipe", hide = true)]
     pub startup_pipe: Option<String>,
+
+    /// Adopt launcher-transferred disk locks from stdin before opening guest disks.
+    #[cfg(windows)]
+    #[arg(long = "disk-locks-stdin", hide = true)]
+    pub disk_locks_stdin: bool,
 
     /// Forward VM console output to stdout.
     #[arg(long = "forward")]
@@ -142,6 +150,20 @@ fn parse_agent_transport_profile(s: &str) -> Result<AgentTransportProfile, Strin
 
 /// Run the sandbox process. This function **never returns**.
 pub fn run(args: MachineArgs) -> ! {
+    // Keep these sidecar handles on this never-returning stack until process teardown. They
+    // are non-inheritable, so unrelated descendants cannot extend the sandbox's ownership.
+    #[cfg(windows)]
+    let _disk_locks = if args.disk_locks_stdin {
+        // SAFETY: the private startup pipe carries handles duplicated exclusively into this
+        // process by the launcher. No other runtime code has adopted them.
+        unsafe { microsandbox_runtime::disk_lock_handoff::receive(std::io::stdin().lock()) }
+            .unwrap_or_else(|error| {
+                eprintln!("failed to receive disk ownership: {error}");
+                std::process::exit(2);
+            })
+    } else {
+        Vec::new()
+    };
     let launch = match load_launch_config(&args) {
         Ok(launch) => launch,
         Err(err) => {
@@ -326,6 +348,7 @@ pub fn run(args: MachineArgs) -> ! {
         rootfs_disk_spec,
         rootfs_disk_runtime_owned: launch.rootfs.disk_runtime_owned,
         mounts: launch.mounts,
+        owned_volumes: launch.owned_volumes,
         file_mounts: launch.file_mounts,
         disks,
         vsock: launch.vsock,
@@ -430,8 +453,11 @@ fn load_launch_config(args: &MachineArgs) -> Result<LaunchConfig, String> {
             .map_err(|e| format!("failed to read --config-file {}: {e}", path.display()))?,
         None => return Err("missing --config-file for `msb machine`".to_string()),
     };
-    let config = LaunchConfig::from_json(&bytes)
-        .map_err(|error| format!("invalid launch config: {error}"))?;
+    let config = if args.legacy_launch {
+        microsandbox_runtime::launch_protocol::decode_legacy(&bytes)?
+    } else {
+        LaunchConfig::decode(&bytes)?
+    };
     if args.restore != (config.execution == microsandbox_runtime::launch::ExecutionIntent::Restore)
     {
         return Err("--restore and launch execution intent disagree".into());
@@ -553,10 +579,17 @@ fn parse_one_disk_arg(entry: &str) -> Result<DiskMountSpec, String> {
 
     // This must-understand suffix is emitted only by the trusted launcher after ownership
     // resolution. Older runtimes reject it as an unknown format instead of assuming ownership.
+    let (rest, lifecycle_owned) = match rest.strip_suffix(":lifecycle-owned") {
+        Some(rest) => (rest, true),
+        None => (rest, false),
+    };
     let (rest, snapshot_owned) = match rest.strip_suffix(":snapshot-owned") {
         Some(rest) => (rest, true),
         None => (rest, false),
     };
+    if lifecycle_owned && !snapshot_owned {
+        return Err("lifecycle-owned disks must also be snapshot-owned".into());
+    }
     let (rest, readonly) = match rest.strip_suffix(":ro") {
         Some(rest) => (rest, true),
         None => (rest, false),
@@ -581,11 +614,13 @@ fn parse_one_disk_arg(entry: &str) -> Result<DiskMountSpec, String> {
     Ok(DiskMountSpec {
         id: id.to_string(),
         host: PathBuf::from(host),
+        layers: Vec::new(),
         guest: String::new(), // consumed only by agentd via env
         format,
         fstype: None, // ditto
         readonly,
         snapshot_owned,
+        lifecycle_owned,
     })
 }
 
@@ -607,6 +642,7 @@ mod tests {
             let parsed = parse_one_disk_arg(value).unwrap();
             assert_eq!(parsed.snapshot_owned, owned);
             assert_eq!(parsed.readonly, readonly);
+            assert!(parsed.layers.is_empty());
         }
         assert!(parse_one_disk_arg("disk:/host:raw:snapshot-owned:ro").is_err());
         assert!(parse_one_disk_arg("disk:/host:raw:snapshot-owned:snapshot-owned").is_err());
@@ -757,6 +793,7 @@ mod tests {
         let _ = config_fd;
 
         MachineArgs {
+            legacy_launch: false,
             restore: false,
             agent_transport: AgentTransportProfile::Auto,
             sandbox_name: "test".to_string(),
@@ -770,6 +807,8 @@ mod tests {
             lifecycle_lock_fd: None,
             #[cfg(windows)]
             startup_pipe: None,
+            #[cfg(windows)]
+            disk_locks_stdin: false,
             forward_output: false,
             vcpus: 1,
             memory_mib: 512,
@@ -885,6 +924,29 @@ mod tests {
         assert_eq!(
             loaded.writeback_lease_dir,
             PathBuf::from("/tmp/writeback-leases")
+        );
+    }
+
+    #[test]
+    fn legacy_launch_decoding_is_explicit_and_cannot_restore() {
+        use microsandbox_runtime::launch_protocol::LaunchProtocol;
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let bytes = LaunchProtocol::Legacy {
+            file_mounts: true,
+            resolved_network: true,
+        }
+        .encode(&LaunchConfig::default())
+        .unwrap();
+        std::fs::write(file.path(), bytes).unwrap();
+        let mut args = args_with(None, Some(file.path().to_path_buf()));
+        assert!(load_launch_config(&args).is_err());
+        args.legacy_launch = true;
+        assert!(load_launch_config(&args).is_ok());
+        args.restore = true;
+        assert!(
+            load_launch_config(&args)
+                .unwrap_err()
+                .contains("intent disagree")
         );
     }
 

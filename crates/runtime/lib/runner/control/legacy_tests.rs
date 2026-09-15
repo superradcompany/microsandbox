@@ -51,6 +51,7 @@ fn secrets_update_round_trips_through_json() {
 #[test]
 fn checkpoint_request_round_trips_through_json() {
     let request = ControlRequest::CheckpointCreate {
+        record_integrity: false,
         checkpoint_id: "checkpoint_0123456789abcdef".into(),
         intent: CheckpointCaptureIntent::FullSnapshot,
     };
@@ -61,6 +62,7 @@ fn checkpoint_request_round_trips_through_json() {
     assert!(matches!(
         parsed,
         ControlRequest::CheckpointCreate {
+            record_integrity: false,
             checkpoint_id,
             intent: CheckpointCaptureIntent::FullSnapshot,
         } if checkpoint_id == "checkpoint_0123456789abcdef"
@@ -90,6 +92,9 @@ fn capabilities_response_serializes_flags() {
     let response = ControlResponse {
         ok: true,
         capabilities: Some(ControlCapabilities {
+            optional_disk_integrity: true,
+            branch_memfd: false,
+            disk_compact_owned: true,
             branch_create: true,
             pause_resume: true,
             root_disk_grow: true,

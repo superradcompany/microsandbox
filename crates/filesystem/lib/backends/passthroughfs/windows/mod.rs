@@ -31,10 +31,14 @@ mod inode;
 mod metadata;
 mod mobility;
 mod ops;
+mod owned_metadata;
 mod remove_ops;
 mod stat_store;
 
 use inode::{DirHandle, DirSnapshotEntry, HandleData, InodeData, InodeTable};
+pub(super) use owned_metadata::{
+    capture_owned_metadata, clear_owned_payload_metadata, owned_component, restore_owned_metadata,
+};
 
 pub use builder::{HostPermissions, PassthroughConfig, StatVirtualization};
 

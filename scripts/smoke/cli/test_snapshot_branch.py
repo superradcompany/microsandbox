@@ -64,7 +64,7 @@ class SnapshotBranchSmokeTests(unittest.TestCase):
     def run_history(smoke, rows):
         database = smoke.home / "db/msb.db"
         database.parent.mkdir(parents=True)
-        with sqlite3.connect(database) as db:
+        with contextlib.closing(sqlite3.connect(database)) as db, db:
             db.execute('CREATE TABLE "run" (pid INTEGER, status TEXT)')
             db.executemany('INSERT INTO "run" (pid, status) VALUES (?, ?)', rows)
         return database
@@ -157,8 +157,8 @@ class SnapshotBranchSmokeTests(unittest.TestCase):
         row = self.report(smoke)["commands"][-1]
         self.assertTrue(row["timed_out"])
         self.assertIsNone(row["exit"])
-        self.assertEqual(next(smoke.logs.glob("*slow.stdout.log")).read_text(), "partial\ufffd\n")
-        self.assertEqual(next(smoke.logs.glob("*slow.stderr.log")).read_text(), "waiting\ufffd")
+        self.assertEqual(next(smoke.logs.glob("*slow.stdout.log")).read_text(encoding="utf-8"), "partial\ufffd\n")
+        self.assertEqual(next(smoke.logs.glob("*slow.stderr.log")).read_text(encoding="utf-8"), "waiting\ufffd")
 
     def test_expired_suite_deadline_still_allows_bounded_cleanup(self):
         smoke = self.smoke()
@@ -286,6 +286,21 @@ class SnapshotBranchSmokeTests(unittest.TestCase):
         self.assertEqual(smoke.runtime_pids(), [])
         self.assertFalse((smoke.home / "db/msb.db").exists())
         self.process.assert_not_called()
+
+    def test_runtime_history_connection_is_closed_even_when_query_fails(self):
+        smoke = self.smoke()
+        self.run_history(smoke, [])
+        for error in [None, sqlite3.OperationalError("query failed")]:
+            connection = mock.Mock()
+            connection.execute.return_value = []
+            connection.execute.side_effect = error
+            with mock.patch.object(HARNESS.sqlite3, "connect", return_value=connection):
+                if error is None:
+                    self.assertEqual(smoke.runtime_pids(), [])
+                else:
+                    with self.assertRaisesRegex(sqlite3.OperationalError, "query failed"):
+                        smoke.runtime_pids()
+            connection.close.assert_called_once_with()
 
     def test_runtime_pids_reports_process_inspection_failure(self):
         smoke = self.smoke()

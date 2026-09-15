@@ -31,8 +31,8 @@ const (
 func TestMain(m *testing.M) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
-	if err := microsandbox.EnsureInstalled(ctx); err != nil {
-		fmt.Fprintf(os.Stderr, "microsandbox: EnsureInstalled: %v\n", err)
+	if _, err := microsandbox.EnsureRuntime(ctx, microsandbox.RuntimeConfig{}, microsandbox.InstallOptions{}); err != nil {
+		fmt.Fprintf(os.Stderr, "microsandbox: EnsureRuntime: %v\n", err)
 		os.Exit(1)
 	}
 	os.Exit(m.Run())

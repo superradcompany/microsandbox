@@ -132,6 +132,41 @@ pub fn relocate_qcow2_backing(path: &Path, backing: &Path) -> std::io::Result<()
     file.sync_all()
 }
 
+/// Read a confined qcow2 backing basename without following the named dependency.
+///
+/// Local hardlink materialization uses this to preserve existing relative chains. Nonportable
+/// names require explicit relocation; this helper never treats a header path as authority.
+pub fn qcow2_backing_basename(path: &Path) -> std::io::Result<String> {
+    let invalid = || std::io::Error::other("local qcow backing must be a confined basename");
+    let mut file = std::fs::File::open(path)?;
+    let mut header = [0u8; 24];
+    file.read_exact(&mut header)?;
+    let version = u32::from_be_bytes(header[4..8].try_into().unwrap());
+    let offset = u64::from_be_bytes(header[8..16].try_into().unwrap());
+    let length = u32::from_be_bytes(header[16..20].try_into().unwrap()) as usize;
+    let bits = u32::from_be_bytes(header[20..24].try_into().unwrap());
+    if &header[..4] != b"QFI\xfb"
+        || !matches!(version, 2 | 3)
+        || !(9..=21).contains(&bits)
+        || length == 0
+        || length > 1023
+        || offset < 72
+        || offset
+            .checked_add(length as u64)
+            .is_none_or(|end| end > 1u64 << bits)
+    {
+        return Err(invalid());
+    }
+    file.seek(SeekFrom::Start(offset))?;
+    let mut name = vec![0; length];
+    file.read_exact(&mut name)?;
+    let name = String::from_utf8(name).map_err(|_| invalid())?;
+    if name == "." || name == ".." || name.contains(['/', '\\', '\0', ':']) {
+        return Err(invalid());
+    }
+    Ok(name)
+}
+
 /// Create and durably publish one empty qcow2 head over `backing`.
 ///
 /// The header carries only the backing file name for ordinary tooling. Runtime attachment still

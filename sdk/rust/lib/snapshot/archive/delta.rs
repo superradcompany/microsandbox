@@ -42,12 +42,30 @@ struct RequiredLayer {
 pub(super) struct Dependencies {
     disks: Vec<RequiredLayer>,
     memory: Vec<ObjectId>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    owned: Vec<RequiredOwnedPayload>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase", deny_unknown_fields)]
+enum OwnedPayloadIdentity {
+    Directory { digest: String, bytes: u64 },
+    // `bytes` is the guest-visible capacity; qcow2 container length differs. The hash binds
+    // the exact physical payload, including its archive-local backing header.
+    Disk { integrity_root: String, bytes: u64 },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RequiredOwnedPayload {
+    path: String,
+    identity: OwnedPayloadIdentity,
 }
 
 struct PhysicalLayer {
     required: RequiredLayer,
     source: PathBuf,
-    /// Layer selectors address the root chain. Additional managed disks are exported whole.
+    /// Root selectors address this chain; owned `since` prefixes are planned separately.
     root_chain: bool,
 }
 
@@ -63,9 +81,14 @@ pub(super) struct BaseSnapshot {
 pub(super) struct Sources {
     disks: BTreeMap<String, PathBuf>,
     memory: BTreeMap<ObjectId, PathBuf>,
+    owned: BTreeMap<String, PathBuf>,
 }
 
-type SourceIndex = (Vec<(String, PathBuf)>, Vec<(ObjectId, PathBuf)>);
+type SourceIndex = (
+    Vec<(String, PathBuf)>,
+    Vec<(ObjectId, PathBuf)>,
+    Vec<(String, PathBuf)>,
+);
 
 //--------------------------------------------------------------------------------------------------
 // Methods
@@ -81,7 +104,7 @@ impl Sources {
         let manifest = manifest.clone();
         let directory = directory.to_path_buf();
         let archive_stage = archive_stage.map(Path::to_path_buf);
-        let (disks, memory) = tokio::task::spawn_blocking(move || {
+        let (disks, memory, owned) = tokio::task::spawn_blocking(move || {
             inspect_sources(&manifest, &directory, archive_stage.as_deref())
         })
         .await
@@ -95,6 +118,9 @@ impl Sources {
         }
         for (identity, path) in memory {
             self.memory.entry(identity).or_insert(path);
+        }
+        for (identity, path) in owned {
+            self.owned.entry(identity).or_insert(path);
         }
         Ok(())
     }
@@ -115,6 +141,14 @@ impl Sources {
         for object in &dependencies.memory {
             if !self.memory.contains_key(object) {
                 missing.push(format!("RAM object {object}"));
+            }
+        }
+        for payload in &dependencies.owned {
+            if !self
+                .owned
+                .contains_key(&serde_json::to_string(&payload.identity)?)
+            {
+                missing.push(format!("owned payload {}", payload.path));
             }
         }
         if !missing.is_empty() {
@@ -164,6 +198,7 @@ fn inspect_sources(
             let expected = ObjectId::new(&state.checkpoint_root).map_err(source_error)?;
             let checkpoint = CheckpointClosure::inspect_manifest(&root, Some(&expected))
                 .map_err(source_error)?;
+            super::super::validate_checkpoint_owned_inventory(manifest, &checkpoint)?;
             let ram = MemoryManifest::from_bytes(&read_metadata_object(&root, &checkpoint.memory)?)
                 .map_err(source_error)?;
             let mut metadata = BTreeSet::from([
@@ -205,7 +240,206 @@ fn inspect_sources(
             }
         }
     }
-    Ok((disks, memory))
+    let owned = owned_payloads(manifest, directory)?
+        .into_iter()
+        .filter_map(|(payload, path)| match regular_source(&path) {
+            Ok(true) => Some(
+                serde_json::to_string(&payload.identity)
+                    .map(|identity| (identity, path))
+                    .map_err(Into::into),
+            ),
+            Ok(false) => None,
+            Err(error) => Some(Err(error)),
+        })
+        .collect::<MicrosandboxResult<Vec<_>>>()?;
+    Ok((disks, memory, owned))
+}
+
+/// Namespace descriptors always travel in full, so omissions cannot hide deletions or renames.
+/// Only immutable bulk content is reused from an explicitly supplied base.
+fn owned_payloads(
+    manifest: &Manifest,
+    directory: &Path,
+) -> MicrosandboxResult<Vec<(RequiredOwnedPayload, PathBuf)>> {
+    use microsandbox_image::snapshot::OwnedVolumeData;
+    let checkpoint = matches!(manifest.state, SnapshotState::Checkpoint(_));
+    let root = if checkpoint {
+        directory.join(CHECKPOINT_DIRECTORY)
+    } else {
+        directory.to_path_buf()
+    };
+    let prefix = format!(
+        "{}/{}",
+        if checkpoint {
+            "checkpoints"
+        } else {
+            "snapshots"
+        },
+        manifest.snapshot_id
+    );
+    let mut payloads = Vec::new();
+    for volume in manifest.owned_volumes()? {
+        match &volume.data {
+            OwnedVolumeData::Directory { files, .. } => {
+                for file in files {
+                    let relative = volume.directory_path().join("files").join(&file.digest);
+                    payloads.push((
+                        RequiredOwnedPayload {
+                            path: format!("{prefix}/{}", super::portable_archive_path(&relative)?),
+                            identity: OwnedPayloadIdentity::Directory {
+                                digest: file.digest.clone(),
+                                bytes: file.bytes,
+                            },
+                        },
+                        root.join(relative),
+                    ));
+                }
+            }
+            OwnedVolumeData::Disk { generation } => {
+                for layer in &generation.layers {
+                    // This dependency identity predates optional capture hashes. A hashless
+                    // owned layer remains included in the archive; do not omit it as borrowed
+                    // data or consult a relative host path during manifest-only planning.
+                    let Some(integrity_root) = &layer.integrity_root else {
+                        continue;
+                    };
+                    let relative =
+                        Path::new("layers").join(format!("{}.{}", layer.layer_id, layer.format));
+                    payloads.push((
+                        RequiredOwnedPayload {
+                            path: format!("{prefix}/{}", super::portable_archive_path(&relative)?),
+                            identity: OwnedPayloadIdentity::Disk {
+                                integrity_root: integrity_root.clone(),
+                                bytes: layer.virtual_size,
+                            },
+                        },
+                        root.join(relative),
+                    ));
+                }
+            }
+        }
+    }
+    payloads.sort_by(|left, right| left.0.path.cmp(&right.0.path));
+    Ok(payloads)
+}
+
+async fn verify_owned_payload(
+    path: &Path,
+    identity: &OwnedPayloadIdentity,
+) -> MicrosandboxResult<()> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if !metadata.file_type().is_file() {
+        return Err(source_error("borrowed owned payload is not a regular file"));
+    }
+    let matches = match identity {
+        OwnedPayloadIdentity::Directory { digest, bytes } => {
+            metadata.len() == *bytes && hex::encode(Box::pin(file_sha256(path)).await?) == *digest
+        }
+        OwnedPayloadIdentity::Disk {
+            integrity_root,
+            bytes,
+        } => {
+            let path = path.to_path_buf();
+            // The image reader uses thread-local futures. Keep it and the blocking physical
+            // hash on one worker so archive-loading futures remain Send for every SDK backend.
+            let (capacity, actual_integrity) = tokio::task::spawn_blocking(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()?;
+                let capacity =
+                    runtime.block_on(microsandbox_image::checkpoint::compact_layer_capacity(
+                        microsandbox_image::checkpoint::CompactLayer {
+                            path: path.clone(),
+                            qcow2: path
+                                .extension()
+                                .is_some_and(|extension| extension == "qcow2"),
+                        },
+                    ))?;
+                let integrity = microsandbox_image::checkpoint::sparse_file_integrity(&path)
+                    .map_err(std::io::Error::other)?;
+                Ok::<_, std::io::Error>((capacity, integrity.root))
+            })
+            .await
+            .map_err(|error| {
+                MicrosandboxError::Runtime(format!("owned disk payload verification: {error}"))
+            })??;
+            capacity == *bytes && actual_integrity == *integrity_root
+        }
+    };
+    if !matches {
+        return Err(source_error(
+            "borrowed owned payload differs from its required identity",
+        ));
+    }
+    Ok(())
+}
+
+/// Disk deltas require the same device's exact physical prefix. Equal content from a replaced
+/// or compacted representation is not a baseline; new devices are exported in full.
+fn owned_since_dependencies(
+    target: &Manifest,
+    baseline: &Manifest,
+) -> MicrosandboxResult<Vec<RequiredOwnedPayload>> {
+    use microsandbox_image::snapshot::OwnedVolumeData;
+
+    let baseline_volumes = baseline.owned_volumes()?;
+    let mut disk_prefixes = BTreeSet::new();
+    for volume in target.owned_volumes()? {
+        let OwnedVolumeData::Disk { generation } = &volume.data else {
+            continue;
+        };
+        let Some(base) = baseline_volumes
+            .iter()
+            .find(|base| base.mount_id == volume.mount_id)
+        else {
+            continue;
+        };
+        let OwnedVolumeData::Disk { generation: base } = &base.data else {
+            continue;
+        };
+        let mismatch = || {
+            MicrosandboxError::InvalidConfig(format!(
+                "owned disk {:?} baseline is not an exact physical prefix; export the new base first or save a complete archive",
+                volume.mount.guest,
+            ))
+        };
+        if base.device_id != generation.device_id {
+            return Err(mismatch());
+        }
+        let plan =
+            DiskLayerExportPlan::since(&generation.layers, &base.layers).map_err(|_| mismatch())?;
+        for layer in &generation.layers[plan.required()] {
+            disk_prefixes.insert(format!("{}.{}", layer.layer_id, layer.format));
+        }
+    }
+    let baseline_payloads = owned_payloads(baseline, Path::new(""))?
+        .into_iter()
+        .filter_map(|(payload, _)| match payload.identity {
+            identity @ OwnedPayloadIdentity::Directory { .. } => {
+                Some(serde_json::to_string(&identity))
+            }
+            OwnedPayloadIdentity::Disk { .. } => None,
+        })
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    owned_payloads(target, Path::new(""))?
+        .into_iter()
+        .filter_map(|(payload, _)| {
+            let required = match &payload.identity {
+                OwnedPayloadIdentity::Directory { .. } => {
+                    match serde_json::to_string(&payload.identity) {
+                        Ok(identity) => baseline_payloads.contains(&identity),
+                        Err(error) => return Some(Err(error.into())),
+                    }
+                }
+                OwnedPayloadIdentity::Disk { .. } => payload
+                    .path
+                    .rsplit('/')
+                    .next()
+                    .is_some_and(|name| disk_prefixes.contains(name)),
+            };
+            required.then_some(Ok(payload))
+        })
+        .collect()
 }
 
 fn regular_source(path: &Path) -> MicrosandboxResult<bool> {
@@ -285,6 +519,12 @@ pub(super) async fn resolve_sources(
             )));
         }
     }
+    for payload in &dependencies.owned {
+        let source = &sources.owned[&serde_json::to_string(&payload.identity)?];
+        let target = inventory_entry_target(&payload.path, snapshots_dir, cache_dir)?;
+        copy_dependency(source, &target).await?;
+        verify_owned_payload(&target, &payload.identity).await?;
+    }
     validate_resolved(local, inventory, snapshots_dir, cache_dir, &dependencies).await
 }
 
@@ -307,6 +547,7 @@ pub(super) async fn selection(
         .filter(|layer| layer.root_chain)
         .collect::<Vec<_>>();
     let mut memory = Vec::new();
+    let mut owned = Vec::new();
     let required = if let Some(base) = &opts.since {
         // Base archives carry buffered decoder/verification futures; keep them off the caller's
         // stack, including when this planner is nested inside a direct restore or SDK call.
@@ -317,6 +558,7 @@ pub(super) async fn selection(
             .filter(|layer| layer.root_chain)
             .collect::<Vec<_>>();
         let available = memory_objects(&base.snapshot)?;
+        owned = owned_since_dependencies(head.manifest(), base.snapshot.manifest())?;
         memory = memory_objects(head)?
             .intersection(&available)
             .cloned()
@@ -347,7 +589,7 @@ pub(super) async fn selection(
         .map_err(|error| MicrosandboxError::InvalidConfig(error.to_string()))?
         .required()
     };
-    if required.is_empty() && memory.is_empty() {
+    if required.is_empty() && memory.is_empty() && owned.is_empty() {
         return Ok(None);
     }
     Ok(Some(Dependencies {
@@ -356,6 +598,7 @@ pub(super) async fn selection(
             .map(|layer| layer.required.clone())
             .collect(),
         memory,
+        owned,
     }))
 }
 
@@ -423,9 +666,16 @@ pub(super) fn validate(inventory: &ArchiveInventory) -> MicrosandboxResult<Optio
         ));
     }
     let dependencies: Dependencies = serde_json::from_value(extension.unwrap().clone())?;
-    if (dependencies.disks.is_empty() && dependencies.memory.is_empty())
+    if (dependencies.disks.is_empty()
+        && dependencies.memory.is_empty()
+        && dependencies.owned.is_empty())
         || dependencies.disks.len() > 256
         || dependencies.memory.len() > inventory.entries.len()
+        || dependencies.owned.len() > inventory.entries.len()
+        || dependencies
+            .owned
+            .windows(2)
+            .any(|pair| pair[0].path >= pair[1].path)
         || dependencies
             .memory
             .windows(2)
@@ -441,7 +691,9 @@ pub(super) fn validate(inventory: &ArchiveInventory) -> MicrosandboxResult<Optio
         .map(|entry| (entry.path.as_str(), entry))
         .collect();
     let paths = dependency_paths(&inventory.head, &dependencies);
-    if paths.len() != dependencies.disks.len() + dependencies.memory.len() {
+    if paths.len()
+        != dependencies.disks.len() + dependencies.memory.len() + dependencies.owned.len()
+    {
         return Err(MicrosandboxError::SnapshotIntegrity(
             "duplicate snapshot dependency".into(),
         ));
@@ -454,7 +706,16 @@ pub(super) fn validate(inventory: &ArchiveInventory) -> MicrosandboxResult<Optio
             .memory
             .binary_search_by(|id| memory_archive_path(&inventory.head, id).cmp(path))
             .is_ok();
-        let valid_kind = if is_memory {
+        let is_owned = dependencies
+            .owned
+            .iter()
+            .any(|payload| payload.path == *path);
+        let valid_kind = if is_owned {
+            matches!(
+                entry.kind.as_str(),
+                "owned-directory-payload" | "owned-disk-layer" | "checkpoint-disk-layer"
+            )
+        } else if is_memory {
             entry.kind == "checkpoint-object"
         } else {
             matches!(
@@ -506,9 +767,35 @@ pub(super) async fn resolve(
         )
     })?;
     let base = Box::pin(open_base(local, base)).await?;
+    let required_disks = dependencies
+        .owned
+        .iter()
+        .filter(|payload| matches!(payload.identity, OwnedPayloadIdentity::Disk { .. }))
+        .collect::<Vec<_>>();
+    if !required_disks.is_empty() {
+        let target_manifest = Manifest::from_bytes(
+            &tokio::fs::read(
+                snapshots_dir
+                    .join(&inventory.head)
+                    .join(DESCRIPTOR_FILENAME),
+            )
+            .await?,
+        )
+        .map_err(source_error)?;
+        let expected_owned = owned_since_dependencies(&target_manifest, base.snapshot.manifest())?;
+        let expected_disks = expected_owned
+            .iter()
+            .filter(|payload| matches!(payload.identity, OwnedPayloadIdentity::Disk { .. }))
+            .collect::<Vec<_>>();
+        if expected_disks != required_disks {
+            return Err(source_error(
+                "supplied base is not the exact required owned disk prefix",
+            ));
+        }
+    }
     let available = physical_layers(base.snapshot.manifest(), base.snapshot.path())?;
-    // Incremental disk selectors describe only the root chain. Additional managed volumes
-    // are complete independent generations, regardless of their order in the checkpoint.
+    // This dependency list describes only the root chain. Owned prefixes have their own
+    // inventory; other additional disks stay complete regardless of checkpoint ordering.
     let available = available
         .iter()
         .filter(|layer| layer.root_chain)
@@ -564,6 +851,21 @@ pub(super) async fn resolve(
         }
     }
 
+    let available_owned = owned_payloads(base.snapshot.manifest(), base.snapshot.path())?
+        .into_iter()
+        .map(|(payload, path)| Ok((serde_json::to_string(&payload.identity)?, path)))
+        .collect::<MicrosandboxResult<BTreeMap<_, _>>>()?;
+    for payload in &dependencies.owned {
+        let source = available_owned
+            .get(&serde_json::to_string(&payload.identity)?)
+            .ok_or_else(|| {
+                source_error(format!("base is missing owned payload {}", payload.path))
+            })?;
+        let target = inventory_entry_target(&payload.path, snapshots_dir, cache_dir)?;
+        copy_dependency(source, &target).await?;
+        verify_owned_payload(&target, &payload.identity).await?;
+    }
+
     validate_resolved(local, inventory, snapshots_dir, cache_dir, &dependencies).await
 }
 
@@ -581,6 +883,46 @@ async fn validate_resolved(
         Manifest::from_bytes(&tokio::fs::read(artifact.join(DESCRIPTOR_FILENAME)).await?)
             .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
     let target = physical_layers(&manifest, &artifact)?;
+    let target_owned = owned_payloads(&manifest, &artifact)?;
+    for payload in &dependencies.owned {
+        if !target_owned.iter().any(|(expected, _)| expected == payload) {
+            return Err(source_error(
+                "omitted owned payload differs from target required inventory",
+            ));
+        }
+    }
+    // Batch sources can satisfy a prefix without one explicit baseline, but the target must
+    // still omit only an oldest-first prefix of each owned device, never arbitrary layers.
+    let omitted: BTreeSet<_> = dependencies
+        .owned
+        .iter()
+        .map(|payload| payload.path.as_str())
+        .collect();
+    let namespace = if matches!(manifest.state, SnapshotState::Checkpoint(_)) {
+        "checkpoints"
+    } else {
+        "snapshots"
+    };
+    for volume in manifest.owned_volumes()? {
+        if let microsandbox_image::snapshot::OwnedVolumeData::Disk { generation } = volume.data {
+            let mut included = false;
+            for layer in generation.layers {
+                let path = format!(
+                    "{namespace}/{}/layers/{}.{}",
+                    manifest.snapshot_id, layer.layer_id, layer.format
+                );
+                if omitted.contains(path.as_str()) {
+                    if included {
+                        return Err(source_error(
+                            "owned disk dependencies are not an exact oldest-first prefix",
+                        ));
+                    }
+                } else {
+                    included = true;
+                }
+            }
+        }
+    }
     let target = target
         .iter()
         .filter(|layer| layer.root_chain)
@@ -679,6 +1021,12 @@ fn dependency_paths(head: &str, dependencies: &Dependencies) -> BTreeSet<String>
                 .memory
                 .iter()
                 .map(|id| memory_archive_path(head, id)),
+        )
+        .chain(
+            dependencies
+                .owned
+                .iter()
+                .map(|payload| payload.path.clone()),
         )
         .collect()
 }

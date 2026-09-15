@@ -3,17 +3,15 @@ import type { NetworkConfig } from "../network-config.js";
 import type { NetworkPolicy } from "../policy/types.js";
 import { msbPath } from "./resolve-binary.js";
 
-// Resolve the bundled runtime binary once and push it into the Rust
-// resolver's SDK tier. User-provided MSB_PATH still wins — Rust reads it
-// natively as its highest-precedence tier — so we don't duplicate the
-// env-var read here.
+// Register only the package fallback. Rust resolves explicit overrides and
+// the current runtime home before considering this executable.
 const resolvedMsbPath = msbPath();
 
 const require = createRequire(import.meta.url);
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const native = require("../../native/index.cjs") as NativeBindings;
 
-if (resolvedMsbPath) native.setRuntimeMsbPath?.(resolvedMsbPath);
+if (resolvedMsbPath) native.setPackagedMsbPath(resolvedMsbPath);
 
 export const napi = native;
 
@@ -23,6 +21,7 @@ export const napi = native;
 // dependency on the generated d.ts.
 
 export interface NativeBindings {
+  readonly setPackagedMsbPath: (path: string) => void;
   readonly setRuntimeMsbPath?: (path: string) => void;
   readonly setRuntimeLibkrunfwPath?: (path: string) => void;
   readonly setDefaultBackend?: (
@@ -70,7 +69,6 @@ export interface NativeBindings {
   readonly RegistryConfigBuilder: NapiBuilderCtor<NapiRegistryConfigBuilder>;
   readonly ImageBuilder: NapiBuilderCtor<NapiImageBuilder>;
   readonly RootDiskBuilder: NapiBuilderCtor<NapiRootDiskBuilder>;
-  readonly Setup: new () => NapiSetup;
   readonly imageGet: (reference: string) => Promise<NapiImageHandle>;
   readonly imageList: () => Promise<NapiImageInfo[]>;
   readonly imageInspect: (reference: string) => Promise<NapiImageDetail>;
@@ -85,9 +83,11 @@ export interface NativeBindings {
     outputPath: string,
     format?: string,
   ) => Promise<void>;
-  readonly install: () => Promise<void>;
-  readonly isInstalled: () => boolean;
   readonly resolveRuntimeVersion: (executable: string) => Promise<string | null>;
+  readonly resolveRuntime: (configJson: string) => string;
+  readonly isRuntimeInstalled: (configJson: string) => boolean;
+  readonly installRuntime: (configJson: string, optionsJson: string) => Promise<string>;
+  readonly ensureRuntime: (configJson: string, optionsJson: string) => Promise<string>;
   readonly allSandboxMetrics: () => Promise<Record<string, NapiSandboxMetrics>>;
   readonly AgentClient: NapiAgentClientStatic;
 }
@@ -311,7 +311,7 @@ export interface NapiSandbox {
   ping(): Promise<NapiSandboxPingResult>;
   touch(): Promise<NapiSandboxTouchResult>;
   modify(opts?: NapiSandboxModifyOptions): Promise<string>;
-  compact(layers?: number, dryRun?: boolean): Promise<string>;
+  compact(layers?: number, dryRun?: boolean, disk?: string, rootDiskOnly?: boolean): Promise<string>;
   attach(cmd: string, args?: string[]): Promise<number>;
   attachDefault(): Promise<number>;
   attachDefaultWithBuilder(builder: NapiAttachOptionsBuilder): Promise<number>;
@@ -319,7 +319,8 @@ export interface NapiSandbox {
   attachShell(): Promise<number>;
   restoreWarnings(): Promise<Array<{ guestPath: string; reason: string; staleInodes: bigint[] }>>;
   stop(): Promise<void>;
-  branch(name: string): Promise<NapiSandbox>;
+  branch(name: string, recordIntegrity?: boolean): Promise<NapiSandbox>;
+  branchMany(names: string[], recordIntegrity?: boolean): Promise<{name: string; sandbox?: NapiSandbox; error?: string}[]>;
   pause(): Promise<void>;
   resume(): Promise<void>;
   requestStop(): Promise<void>;
@@ -350,14 +351,15 @@ export interface NapiSandboxHandle {
   ping(): Promise<NapiSandboxPingResult>;
   touch(): Promise<NapiSandboxTouchResult>;
   modify(opts?: NapiSandboxModifyOptions): Promise<string>;
-  compact(layers?: number, dryRun?: boolean): Promise<string>;
+  compact(layers?: number, dryRun?: boolean, disk?: string, rootDiskOnly?: boolean): Promise<string>;
   start(): Promise<NapiSandbox>;
   startDetached(): Promise<NapiSandbox>;
   connect(): Promise<NapiSandbox>;
   connectWithTimeout(timeoutMs: number): Promise<NapiSandbox>;
   connectOrStart(detached?: boolean): Promise<NapiSandbox>;
   stop(): Promise<void>;
-  branch(name: string): Promise<NapiSandbox>;
+  branch(name: string, recordIntegrity?: boolean): Promise<NapiSandbox>;
+  branchMany(names: string[], recordIntegrity?: boolean): Promise<{name: string; sandbox?: NapiSandbox; error?: string}[]>;
   pause(): Promise<void>;
   resume(): Promise<void>;
   requestStop(): Promise<void>;
@@ -804,14 +806,6 @@ export interface NapiImagePruneReport {
   readonly bytesReclaimed: number | null | undefined;
 }
 
-export interface NapiSetup {
-  baseDir(path: string): NapiSetup;
-  version(version: string): NapiSetup;
-  skipVerify(enabled: boolean): NapiSetup;
-  force(enabled: boolean): NapiSetup;
-  install(): Promise<void>;
-}
-
 export interface NapiExecHandle extends AsyncIterable<NapiExecEvent> {
   readonly id: Promise<string>;
   recv(): Promise<NapiExecEvent | null>;
@@ -1213,10 +1207,18 @@ export interface NapiBuiltNetworkPolicyDestination {
   readonly group?: string;
 }
 
+/** Storage allocated for one sandbox and removed with it. */
+export interface NapiOwnedVolumeOptions {
+  kind?: "dir" | "disk";
+  sizeMib?: number;
+  quotaMib?: number;
+}
+
 export interface NapiMountBuilder {
   captured(): this;
   bind(host: string): this;
   named(name: string): this;
+  owned(options?: NapiOwnedVolumeOptions): this;
   namedWith(
     name: string,
     mode?: "existing" | "create" | "ensure-exists",
@@ -1241,7 +1243,7 @@ export interface NapiMountBuilder {
 }
 
 export interface NapiVolumeMount {
-  readonly kind: "bind" | "named" | "tmpfs" | "disk";
+  readonly kind: "bind" | "named" | "owned" | "tmpfs" | "disk";
   readonly guest: string;
   readonly readonly: boolean;
   readonly noexec: boolean;
@@ -1251,6 +1253,7 @@ export interface NapiVolumeMount {
   readonly name?: string;
   readonly namedMode?: "existing" | "create" | "ensure-exists";
   readonly namedKind?: "dir" | "disk";
+  readonly ownedKind?: "dir" | "disk";
   readonly sizeMib?: number;
   readonly quotaMib?: number;
   readonly format?: string;

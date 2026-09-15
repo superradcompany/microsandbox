@@ -129,10 +129,23 @@ impl JsSandboxHandle {
         crate::sandbox::run_modify(builder, crate::sandbox::modify_dry_run(options.as_ref())).await
     }
 
-    /// Explicitly compact a running or stopped sandbox's immutable disk prefix.
+    /// Compact root and owned-data disk prefixes of a running or stopped sandbox.
     #[napi]
-    pub async fn compact(&self, layers: Option<f64>, dry_run: Option<bool>) -> Result<String> {
-        crate::sandbox::run_compact(self.inner.compact(), layers, dry_run.unwrap_or(false)).await
+    pub async fn compact(
+        &self,
+        layers: Option<f64>,
+        dry_run: Option<bool>,
+        disk: Option<String>,
+        root_disk_only: Option<bool>,
+    ) -> Result<String> {
+        crate::sandbox::run_compact(
+            self.inner.compact(),
+            layers,
+            dry_run.unwrap_or(false),
+            disk,
+            root_disk_only.unwrap_or(false),
+        )
+        .await
     }
 
     /// Start the sandbox (attached mode) — returns a live Sandbox handle.
@@ -195,13 +208,33 @@ impl JsSandboxHandle {
 
     /// Create an independent local CoW child without a durable full snapshot.
     #[napi]
-    pub async fn branch(&self, name: String) -> Result<crate::sandbox::Sandbox> {
+    pub async fn branch(
+        &self,
+        name: String,
+        record_integrity: Option<bool>,
+    ) -> Result<crate::sandbox::Sandbox> {
+        let mut builder = self.inner.branch(name);
+        if record_integrity.unwrap_or(false) {
+            builder = builder.record_integrity();
+        }
         Ok(crate::sandbox::Sandbox::from_rust(
-            self.inner
-                .branch(name)
-                .branch()
-                .await
-                .map_err(to_napi_error)?,
+            builder.branch().await.map_err(to_napi_error)?,
+        ))
+    }
+
+    /// Capture once and return individual child startup outcomes.
+    #[napi]
+    pub async fn branch_many(
+        &self,
+        names: Vec<String>,
+        record_integrity: Option<bool>,
+    ) -> Result<Vec<crate::sandbox::JsBranchOutcome>> {
+        let mut builder = self.inner.branch_many(names);
+        if record_integrity.unwrap_or(false) {
+            builder = builder.record_integrity();
+        }
+        Ok(crate::sandbox::branch_outcomes(
+            builder.branch().await.map_err(to_napi_error)?,
         ))
     }
 

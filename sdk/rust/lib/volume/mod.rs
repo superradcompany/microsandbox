@@ -589,7 +589,7 @@ pub(crate) async fn create_local(
         .as_local()
         .ok_or_else(|| MicrosandboxError::local_only(Operation::VolumeCreate))?;
     let pools = local_backend.db().await?;
-    let _name_lock = lock_volume_name(local_backend, &config.name)?;
+    let _name_lock = lock_volume_name(local_backend, &config.name).await?;
 
     // Check for existing volume.
     let existing = volume_entity::Entity::find()
@@ -702,7 +702,7 @@ pub(crate) async fn remove_local(backend: Arc<dyn Backend>, name: &str) -> Micro
         .await?
         .ok_or_else(|| MicrosandboxError::VolumeNotFound(name.into()))?;
     let handle = VolumeHandle::from_local_model(backend.clone(), model);
-    let _name_lock = lock_volume_name(local_backend, name)?;
+    let _name_lock = lock_volume_name(local_backend, name).await?;
     let _disk_lock = lock_disk_volume_for_remove(&handle)?;
     ensure_volume_not_referenced_by_active_sandbox(pools.read(), name).await?;
 
@@ -783,7 +783,7 @@ pub(crate) async fn provision_volume_path(
 }
 
 #[cfg(feature = "local")]
-pub(crate) fn lock_volume_name(local: &LocalBackend, name: &str) -> MicrosandboxResult<File> {
+pub(crate) async fn lock_volume_name(local: &LocalBackend, name: &str) -> MicrosandboxResult<File> {
     let volumes_dir = local.volumes_dir();
     std::fs::create_dir_all(&volumes_dir)?;
     let locks_dir = volumes_dir.join(".locks");
@@ -796,9 +796,13 @@ pub(crate) fn lock_volume_name(local: &LocalBackend, name: &str) -> Microsandbox
         .write(true)
         .open(&path)?;
 
-    #[cfg(unix)]
-    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
-        return Err(std::io::Error::last_os_error().into());
+    // A sibling create can hold this lock while awaiting its guest's readiness. Never block
+    // the task polling both creates, and keep the file owned by this future during each wait
+    // so cancellation releases it without leaving a background lock-acquisition worker.
+    // Use the shared primitive on Windows too: a no-op would let batch siblings provision
+    // the same name concurrently before either publishes its volume record.
+    while !microsandbox_utils::process_lock::try_lock_exclusive(&file)? {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
 
     Ok(file)
@@ -1064,6 +1068,7 @@ mod tests {
         if status == SandboxStatus::Starting {
             config.checkpoint_restore =
                 Some(microsandbox_runtime::launch::CheckpointRestoreConfig {
+                    memory_descriptor: false,
                     network_gateway_mac: None,
                     external_mount_policy: Default::default(),
                     external_mounts: Vec::new(),

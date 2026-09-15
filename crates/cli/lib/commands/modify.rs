@@ -22,13 +22,26 @@ pub struct ModifyArgs {
     /// Sandbox to modify.
     pub name: String,
 
-    /// Compact the root disk's sealed backing layers without changing snapshots.
+    /// Compact sealed layers of the root and sandbox-owned data disks without changing snapshots.
     #[arg(long, conflicts_with_all = ["cpus", "max_cpus", "memory", "max_memory", "root_disk", "oci_upper_size", "env", "env_remove", "labels", "label_remove", "workdir", "secrets", "secret_remove", "next_start", "restart"])]
     pub compact: bool,
 
-    /// Oldest physical layers to merge, including the base, excluding the writable head.
+    /// Merge up to N oldest sealed physical layers per disk, including the base (minimum 2).
     #[arg(long, requires = "compact", value_name = "N")]
     pub layers: Option<usize>,
+
+    /// Compact only this owned disk's guest mount path (`/` selects the root).
+    #[arg(
+        long,
+        requires = "compact",
+        conflicts_with = "root_disk_only",
+        value_name = "GUEST"
+    )]
+    pub disk: Option<String>,
+
+    /// Compact only the root disk.
+    #[arg(long, requires = "compact", conflicts_with = "disk")]
+    pub root_disk_only: bool,
 
     /// Desired effective vCPU count.
     #[arg(long)]
@@ -119,6 +132,12 @@ pub async fn run(args: ModifyArgs) -> anyhow::Result<()> {
         if let Some(layers) = args.layers {
             compact = compact.layers(layers);
         }
+        if let Some(disk) = args.disk {
+            compact = compact.disk(disk);
+        }
+        if args.root_disk_only {
+            compact = compact.root_disk_only();
+        }
         let result = if args.dry_run {
             compact.dry_run().await?
         } else {
@@ -136,6 +155,16 @@ pub async fn run(args: ModifyArgs) -> anyhow::Result<()> {
                 result.materialized_bytes,
                 result.pause_us as f64 / 1000.0
             );
+            for disk in &result.disks {
+                println!(
+                    "  {}: {} → {} layers ({} selected, {} bytes materialized)",
+                    disk.guest_path,
+                    disk.input_layers,
+                    disk.output_layers,
+                    disk.selected_layers,
+                    disk.materialized_bytes
+                );
+            }
         }
         return Ok(());
     }
@@ -756,8 +785,19 @@ mod tests {
         let args = parse_modify_args(&["api", "--compact", "--layers", "3", "--dry-run"]);
         assert!(args.compact && args.dry_run);
         assert_eq!(args.layers, Some(3));
+        assert!(!args.root_disk_only && args.disk.is_none());
+        assert_eq!(
+            parse_modify_args(&["api", "--compact", "--disk", "/data"])
+                .disk
+                .as_deref(),
+            Some("/data")
+        );
+        assert!(parse_modify_args(&["api", "--compact", "--root-disk-only"]).root_disk_only);
         for flags in [
             vec!["api", "--layers", "3"],
+            vec!["api", "--disk", "/data"],
+            vec!["api", "--root-disk-only"],
+            vec!["api", "--compact", "--disk", "/", "--root-disk-only"],
             vec!["api", "--compact", "--cpus", "2"],
             vec!["api", "--compact", "--restart"],
         ] {

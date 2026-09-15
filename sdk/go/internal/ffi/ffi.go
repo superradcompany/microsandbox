@@ -6,7 +6,7 @@
 // The library is loaded at runtime via dlopen/dlsym rather than linked at
 // build time. This means `go build` succeeds with no Rust toolchain on the
 // host — the library bytes are embedded in the SDK (see internal/bundle)
-// and extracted to disk by microsandbox.EnsureInstalled before dlopen.
+// and extracted to disk automatically before the first dlopen.
 //
 // Layout of this file:
 //   - C preamble: typedefs, function-pointer globals, load_microsandbox(),
@@ -102,6 +102,7 @@ typedef void     (*msb_set_sdk_msb_path_fn)(const char *path);
 typedef uint64_t (*msb_cancel_alloc_fn)(void);
 typedef void     (*msb_cancel_trigger_fn)(uint64_t id);
 typedef void     (*msb_cancel_unregister_fn)(uint64_t id);
+typedef char *(*msb_runtime_setup_fn)(uint64_t cancel_id, const char *operation, const char *config_json, const char *options_json, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_default_backend_info_fn)(uint8_t *buf, size_t buf_len);
 
 typedef char *(*msb_sandbox_create_fn)(uint64_t cancel_id, const char *name, const char *opts_json, bool connect_or_create, uint8_t *buf, size_t buf_len);
@@ -126,6 +127,8 @@ typedef char *(*msb_sandbox_request_stop_fn)(uint64_t cancel_id, uint64_t handle
 typedef char *(*msb_sandbox_restore_warnings_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_pause_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_branch_fn)(uint64_t cancel_id, uint64_t handle, const char *source, const char *child, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_sandbox_branch_with_options_fn)(uint64_t cancel_id, uint64_t handle, const char *source, const char *child, bool record_integrity, uint8_t *buf, size_t buf_len);
+typedef msb_sandbox_branch_with_options_fn msb_sandbox_branch_many_fn;
 typedef char *(*msb_sandbox_resume_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_handle_pause_fn)(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_handle_resume_fn)(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len);
@@ -277,6 +280,7 @@ static char *(*ptr_msb_creation_progress_recv)(uint64_t, uint64_t, uint8_t *, si
 static char *(*ptr_msb_creation_progress_close)(uint64_t, uint8_t *, size_t) = NULL;
 static msb_sandbox_handle_lifecycle_fn ptr_msb_sandbox_handle_lifecycle = NULL;
 static msb_sandbox_lookup_fn     ptr_msb_sandbox_lookup     = NULL;
+static msb_runtime_setup_fn ptr_msb_runtime_setup = NULL;
 static msb_default_backend_info_fn ptr_msb_default_backend_info = NULL;
 static msb_sandbox_connect_fn    ptr_msb_sandbox_connect    = NULL;
 static msb_sandbox_start_fn      ptr_msb_sandbox_start      = NULL;
@@ -297,6 +301,8 @@ static msb_sandbox_request_stop_fn ptr_msb_sandbox_request_stop = NULL;
 static msb_sandbox_restore_warnings_fn ptr_msb_sandbox_restore_warnings = NULL;
 static msb_sandbox_pause_fn ptr_msb_sandbox_pause = NULL;
 static msb_sandbox_branch_fn ptr_msb_sandbox_branch = NULL;
+static msb_sandbox_branch_with_options_fn ptr_msb_sandbox_branch_with_options = NULL;
+static msb_sandbox_branch_with_options_fn ptr_msb_sandbox_branch_many = NULL;
 static msb_sandbox_resume_fn ptr_msb_sandbox_resume = NULL;
 static msb_sandbox_handle_pause_fn ptr_msb_sandbox_handle_pause = NULL;
 static msb_sandbox_handle_resume_fn ptr_msb_sandbox_handle_resume = NULL;
@@ -464,6 +470,7 @@ const char *load_microsandbox(const char *path) {
 	RESOLVE(msb_cancel_trigger);
 	RESOLVE(msb_cancel_unregister);
 	RESOLVE_OPTIONAL(msb_default_backend_info);
+	RESOLVE_OPTIONAL(msb_runtime_setup);
 	RESOLVE(msb_sandbox_create);
 	RESOLVE(msb_sandbox_restore);
 	RESOLVE_OPTIONAL(msb_creation_progress_open);
@@ -490,6 +497,8 @@ const char *load_microsandbox(const char *path) {
 	RESOLVE_OPTIONAL(msb_sandbox_restore_warnings);
 	RESOLVE(msb_sandbox_pause);
 	RESOLVE(msb_sandbox_branch);
+	RESOLVE_OPTIONAL(msb_sandbox_branch_with_options);
+	RESOLVE_OPTIONAL(msb_sandbox_branch_many);
 	RESOLVE(msb_sandbox_resume);
 	RESOLVE(msb_sandbox_handle_pause);
 	RESOLVE(msb_sandbox_handle_resume);
@@ -657,6 +666,10 @@ char *call_msb_sandbox_lookup(uint64_t cancel_id, const char *name, uint8_t *buf
 	return ptr_msb_sandbox_lookup ? ptr_msb_sandbox_lookup(cancel_id, name, buf, buf_len) : NULL;
 }
 
+bool has_msb_runtime_setup(void) { return ptr_msb_runtime_setup != NULL; }
+char *call_msb_runtime_setup(uint64_t cancel_id, const char *operation, const char *config_json, const char *options_json, uint8_t *buf, size_t buf_len) {
+    return ptr_msb_runtime_setup(cancel_id, operation, config_json, options_json, buf, buf_len);
+}
 char *call_msb_default_backend_info(uint8_t *buf, size_t buf_len) {
 	return ptr_msb_default_backend_info ? ptr_msb_default_backend_info(buf, buf_len) : NULL;
 }
@@ -718,6 +731,14 @@ char *call_msb_sandbox_pause(uint64_t cancel_id, uint64_t handle, uint8_t *buf, 
 }
 char *call_msb_sandbox_branch(uint64_t cancel_id, uint64_t handle, const char *source, const char *child, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_sandbox_branch ? ptr_msb_sandbox_branch(cancel_id, handle, source, child, buf, buf_len) : NULL;
+}
+bool has_branch_integrity(void) { return ptr_msb_sandbox_branch_with_options != NULL; }
+bool has_branch_many(void) { return ptr_msb_sandbox_branch_many != NULL; }
+char *call_msb_sandbox_branch_many(uint64_t cancel_id, uint64_t handle, const char *source, const char *names, bool record_integrity, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_sandbox_branch_many ? ptr_msb_sandbox_branch_many(cancel_id, handle, source, names, record_integrity, buf, buf_len) : NULL;
+}
+char *call_msb_sandbox_branch_with_options(uint64_t cancel_id, uint64_t handle, const char *source, const char *child, bool record_integrity, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_sandbox_branch_with_options ? ptr_msb_sandbox_branch_with_options(cancel_id, handle, source, child, record_integrity, buf, buf_len) : NULL;
 }
 char *call_msb_sandbox_resume(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_sandbox_resume ? ptr_msb_sandbox_resume(cancel_id, handle, buf, buf_len) : NULL;
@@ -1755,6 +1776,7 @@ type MountSpec struct {
 	Named              string  `json:"named,omitempty"`
 	NamedMode          string  `json:"named_mode,omitempty"`
 	NamedKind          string  `json:"named_kind,omitempty"`
+	Owned              string  `json:"owned,omitempty"`
 	Tmpfs              bool    `json:"tmpfs,omitempty"`
 	Disk               string  `json:"disk,omitempty"`
 	Format             string  `json:"format,omitempty"`
@@ -2711,24 +2733,103 @@ func (s *Sandbox) RestoreWarnings(ctx context.Context) (string, error) {
 	})
 }
 
+// BranchOutcome holds one named child or its startup error.
+type BranchOutcome struct {
+	Name    string
+	Sandbox *Sandbox
+	Error   error
+}
+
+func (s *Sandbox) BranchMany(ctx context.Context, names []string, integrity bool) ([]BranchOutcome, error) {
+	// Zero selects name lookup in the shared native entry point. A closed live handle
+	// must not take that path, including when Close races with this call.
+	handle := s.handle.Load()
+	if handle == 0 {
+		return nil, &Error{Kind: KindInvalidHandle, Message: "sandbox handle already closed"}
+	}
+	return BranchManyByName(ctx, handle, s.name, "", names, integrity)
+}
+
+// BranchManyByName uses one native operation, never a loop of branch captures.
+func BranchManyByName(ctx context.Context, handle uint64, source, identity string, names []string, integrity bool) ([]BranchOutcome, error) {
+	if err := ensureLoaded(); err != nil {
+		return nil, err
+	}
+	if !bool(C.has_branch_many()) {
+		return nil, &Error{Kind: KindUnsupportedOperation, Message: "native SDK does not support batch branching; update the native SDK"}
+	}
+	if names == nil {
+		names = []string{}
+	}
+	encoded, err := json.Marshal(struct {
+		Names    []string `json:"names"`
+		Identity string   `json:"source_identity"`
+	}{names, identity})
+	if err != nil {
+		return nil, err
+	}
+	cSource, cNames := C.CString(source), C.CString(string(encoded))
+	defer C.free(unsafe.Pointer(cSource))
+	defer C.free(unsafe.Pointer(cNames))
+	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, size C.size_t) *C.char {
+		return C.call_msb_sandbox_branch_many(cancelID, C.uint64_t(handle), cSource, cNames, C.bool(integrity), buf, size)
+	})
+	if err != nil {
+		return nil, err
+	}
+	var response struct {
+		Outcomes []struct {
+			Name        string `json:"name"`
+			ID          string `json:"id"`
+			Handle      uint64 `json:"handle"`
+			BackendKind string `json:"backend_kind"`
+			Error       *Error `json:"error"`
+		} `json:"outcomes"`
+	}
+	if err := json.Unmarshal([]byte(out), &response); err != nil {
+		return nil, fmt.Errorf("parse batch branch response: %w", err)
+	}
+	results := make([]BranchOutcome, 0, len(response.Outcomes))
+	for _, row := range response.Outcomes {
+		item := BranchOutcome{Name: row.Name}
+		if row.Error != nil {
+			item.Error = row.Error
+		} else {
+			child := &Sandbox{name: row.Name, id: row.ID, backendKind: row.BackendKind}
+			child.handle.Store(row.Handle)
+			item.Sandbox = child
+		}
+		results = append(results, item)
+	}
+	return results, nil
+}
+
 // Branch creates an independent local child through the host runtime.
-func (s *Sandbox) Branch(ctx context.Context, name string) (*Sandbox, error) {
-	return branchSandbox(ctx, uint64(s.h()), s.name, name)
+func (s *Sandbox) Branch(ctx context.Context, name string, recordIntegrity bool) (*Sandbox, error) {
+	return branchSandbox(ctx, uint64(s.h()), s.name, name, recordIntegrity)
 }
 
 // BranchSandboxByName branches execution without an agent connection to the source.
-func BranchSandboxByName(ctx context.Context, source, name string) (*Sandbox, error) {
-	return branchSandbox(ctx, 0, source, name)
+func BranchSandboxByName(ctx context.Context, source, name string, recordIntegrity bool) (*Sandbox, error) {
+	return branchSandbox(ctx, 0, source, name, recordIntegrity)
 }
 
-func branchSandbox(ctx context.Context, handle uint64, source, name string) (*Sandbox, error) {
+func branchSandbox(ctx context.Context, handle uint64, source, name string, recordIntegrity bool) (*Sandbox, error) {
 	if err := ensureLoaded(); err != nil {
 		return nil, err
 	}
 	cSource, cName := C.CString(source), C.CString(name)
+	if recordIntegrity && !bool(C.has_branch_integrity()) {
+		C.free(unsafe.Pointer(cSource))
+		C.free(unsafe.Pointer(cName))
+		return nil, &Error{Kind: KindUnsupportedOperation, Message: "native SDK does not support branch integrity; update the native SDK"}
+	}
 	defer C.free(unsafe.Pointer(cSource))
 	defer C.free(unsafe.Pointer(cName))
 	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		if recordIntegrity {
+			return C.call_msb_sandbox_branch_with_options(cancelID, C.uint64_t(handle), cSource, cName, C.bool(true), buf, bufLen)
+		}
 		return C.call_msb_sandbox_branch(cancelID, C.uint64_t(handle), cSource, cName, buf, bufLen)
 	})
 	if err != nil {
@@ -5547,4 +5648,24 @@ func SnapshotGroupHead(ctx context.Context, selector string) (*SnapshotHeadUpdat
 		return nil, fmt.Errorf("parse snapshot group head: %w", err)
 	}
 	return &update, nil
+}
+
+// RuntimeSetup calls the shared resolver/installer after bootstrapping the SDK library.
+func RuntimeSetup(ctx context.Context, operation, configJSON, optionsJSON string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if err := ensureLoaded(); err != nil {
+		return "", err
+	}
+	if !bool(C.has_msb_runtime_setup()) {
+		return "", fmt.Errorf("loaded native SDK does not support runtime setup; rebuild the SDK library")
+	}
+	op, config, options := C.CString(operation), C.CString(configJSON), C.CString(optionsJSON)
+	defer C.free(unsafe.Pointer(op))
+	defer C.free(unsafe.Pointer(config))
+	defer C.free(unsafe.Pointer(options))
+	return call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_runtime_setup(cancelID, op, config, options, buf, bufLen)
+	})
 }

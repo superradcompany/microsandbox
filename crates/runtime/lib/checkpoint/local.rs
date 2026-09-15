@@ -33,6 +33,9 @@ pub struct LocalBranchState {
     pub resources: Vec<ResourceDescriptor>,
     /// Complete sealed disk generations.
     pub disks: Vec<DiskGenerationManifest>,
+    /// Required owned storage. Older strict local handoff readers reject this field.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub owned_volumes: Vec<microsandbox_image::snapshot::OwnedVolumeCapture>,
     /// Complete, immutable, mmap-ready RAM; never a partial memory manifest.
     pub memory: LocalMemory,
     /// Boot CPU count and configured capacity, not a mutable guest online count.
@@ -57,7 +60,53 @@ impl LocalBranchState {
         if state.architecture != std::env::consts::ARCH {
             return Err(io::Error::other("branch architecture differs"));
         }
+        for disk in &state.disks {
+            disk.validate().map_err(io::Error::other)?;
+            if disk.pause_generation != state.pause_generation {
+                return Err(io::Error::other(
+                    "branch disk belongs to a different pause epoch",
+                ));
+            }
+        }
+        state.validate_files(root)?;
+        microsandbox_image::snapshot::validate_owned_volumes(&state.owned_volumes)
+            .map_err(io::Error::other)?;
+        microsandbox_image::snapshot::validate_owned_resources(
+            &state.owned_volumes,
+            &state.resources,
+        )
+        .map_err(io::Error::other)?;
+        for volume in &state.owned_volumes {
+            if let microsandbox_image::snapshot::OwnedVolumeData::Disk { generation } = &volume.data
+                && (generation.pause_generation != state.pause_generation
+                    || !state.disks.contains(generation))
+            {
+                return Err(io::Error::other(
+                    "owned disk is absent from the branch capture epoch",
+                ));
+            }
+        }
+        microsandbox_image::snapshot::verify_owned_directory_payloads(root, &state.owned_volumes)
+            .map_err(io::Error::other)?;
         Ok(state)
+    }
+
+    /// Check one child's file bindings against already decoded immutable capture metadata.
+    /// The SDK may share decoded metadata within a batch; each VM still opens and admits
+    /// its own handoff independently through `open` at the runtime boundary.
+    pub fn validate_files(&self, root: &Path) -> io::Result<()> {
+        for disk in &self.disks {
+            for layer in &disk.layers {
+                let path = root
+                    .join("layers")
+                    .join(format!("{}.{}", layer.layer_id, layer.format));
+                let metadata = std::fs::symlink_metadata(path)?;
+                if !metadata.is_file() || metadata.len() != layer.file_size {
+                    return Err(io::Error::other("branch disk file type or length differs"));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Read an existing bounded state object, checking its recorded identity.

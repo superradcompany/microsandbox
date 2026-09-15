@@ -46,7 +46,7 @@ pub enum LayerSelectionError {
 /// A prefix of an oldest-first runtime chain to consolidate into one base.
 ///
 /// The last runtime layer is writable even when the sandbox is stopped. It is never selected.
-/// A missing count means all sealed layers; fewer than two sealed layers then produces a no-op.
+/// A count is an upper bound on sealed inputs. Fewer than two sealed layers produces a no-op.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DiskCompactionPlan {
     input_layers: usize,
@@ -68,21 +68,15 @@ pub struct DiskLayerExportPlan {
 //--------------------------------------------------------------------------------------------------
 
 impl DiskCompactionPlan {
-    /// Resolve an optional count of oldest layers, including the base but not the writable head.
+    /// Resolve an optional upper bound of oldest layers, including the base but not the writable head.
     pub fn new(runtime_layers: usize, layers: Option<usize>) -> Result<Self, LayerSelectionError> {
         let sealed = runtime_layers
             .checked_sub(1)
             .ok_or(LayerSelectionError::EmptyChain)?;
         let prefix_layers = match layers {
             Some(0 | 1) => return Err(LayerSelectionError::TooFewLayersToCompact),
-            Some(requested) if requested > sealed => {
-                return Err(LayerSelectionError::CompactionIncludesWritableHead {
-                    requested,
-                    sealed,
-                });
-            }
-            Some(requested) => requested,
-            None if sealed < 2 => 0,
+            _ if sealed < 2 => 0,
+            Some(requested) => requested.min(sealed),
             None => sealed,
         };
         Ok(Self {
@@ -197,18 +191,20 @@ mod tests {
     }
 
     #[test]
-    fn insufficient_default_selection_is_a_noop_not_a_conversion() {
+    fn insufficient_sealed_layers_are_a_noop_not_a_conversion() {
         for count in [1, 2] {
-            let plan = DiskCompactionPlan::new(count, None).unwrap();
-            assert!(plan.is_noop());
-            assert_eq!(plan.prefix(), 0..0);
-            assert_eq!(plan.retained(), 0..count);
-            assert_eq!(plan.output_layers(), count);
+            for requested in [None, Some(2), Some(usize::MAX)] {
+                let plan = DiskCompactionPlan::new(count, requested).unwrap();
+                assert!(plan.is_noop());
+                assert_eq!(plan.prefix(), 0..0);
+                assert_eq!(plan.retained(), 0..count);
+                assert_eq!(plan.output_layers(), count);
+            }
         }
     }
 
     #[test]
-    fn explicit_compaction_never_silently_clamps() {
+    fn explicit_compaction_uses_up_to_available_sealed_layers() {
         assert_eq!(
             DiskCompactionPlan::new(0, None),
             Err(LayerSelectionError::EmptyChain)
@@ -220,13 +216,10 @@ mod tests {
             );
         }
         for count in [5, 6, usize::MAX] {
-            assert_eq!(
-                DiskCompactionPlan::new(5, Some(count)),
-                Err(LayerSelectionError::CompactionIncludesWritableHead {
-                    requested: count,
-                    sealed: 4
-                })
-            );
+            let plan = DiskCompactionPlan::new(5, Some(count)).unwrap();
+            assert_eq!(plan.prefix(), 0..4);
+            assert_eq!(plan.retained(), 4..5);
+            assert_eq!(plan.output_layers(), 2);
         }
     }
 

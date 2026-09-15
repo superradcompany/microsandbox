@@ -40,7 +40,10 @@ pub const MAX_DESCRIPTOR_BYTES: usize = 1024 * 1024;
 /// Maximum physical depth of one file-state closure.
 pub const MAX_FILE_LAYERS: usize = 256;
 /// Must-understand extensions implemented by this runtime.
-pub const SUPPORTED_REQUIRES: &[&str] = &[super::RESTORE_DEFAULTS_EXTENSION];
+pub const SUPPORTED_REQUIRES: &[&str] = &[
+    super::RESTORE_DEFAULTS_EXTENSION,
+    super::OWNED_VOLUMES_EXTENSION,
+];
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -475,6 +478,7 @@ impl Manifest {
             validate_json_value(value, 0)?;
         }
         self.restore_defaults()?;
+        self.owned_volumes()?;
         Ok(())
     }
 
@@ -903,6 +907,55 @@ mod tests {
             serde_json::json!({"user":""}),
         );
         assert!(manifest.validate().is_err());
+    }
+
+    #[test]
+    fn owned_inventory_is_required_but_empty_inventory_keeps_released_bytes() {
+        use super::super::{
+            OWNED_VOLUMES_EXTENSION, OwnedDirectoryPayload, OwnedMountSnapshot, OwnedVolumeCapture,
+            OwnedVolumeData,
+        };
+        let mut manifest = descriptor();
+        let original = manifest.to_canonical_bytes().unwrap();
+        manifest.set_owned_volumes(Vec::new()).unwrap();
+        assert_eq!(manifest.to_canonical_bytes().unwrap(), original);
+        let mount = microsandbox_types::VolumeMount::Owned {
+            guest: "/cache".into(),
+            storage: microsandbox_types::OwnedVolumeStorage::Directory { quota_mib: None },
+            options: Default::default(),
+            stat_virtualization: microsandbox_types::StatVirtualization::Strict,
+            host_permissions: microsandbox_types::HostPermissions::Private,
+        };
+        manifest
+            .set_owned_volumes(vec![OwnedVolumeCapture {
+                mount_id: microsandbox_types::owned_volume_mount_id(mount.guest()),
+                mount: OwnedMountSnapshot::from_mount(&mount).unwrap(),
+                data: OwnedVolumeData::Directory {
+                    descriptor: OwnedDirectoryPayload {
+                        digest: "a".repeat(64),
+                        bytes: 20,
+                    },
+                    files: Vec::new(),
+                },
+            }])
+            .unwrap();
+        assert!(
+            manifest
+                .requires
+                .iter()
+                .any(|key| key == OWNED_VOLUMES_EXTENSION)
+        );
+        assert!(manifest.unsupported_requires().is_empty());
+        let restored = Manifest::from_bytes(&manifest.to_canonical_bytes().unwrap()).unwrap();
+        assert_eq!(
+            restored.owned_volumes().unwrap(),
+            manifest.owned_volumes().unwrap()
+        );
+        manifest.requires.clear();
+        assert!(
+            manifest.validate().is_err(),
+            "ownership cannot be advisory extension data"
+        );
     }
 
     #[test]

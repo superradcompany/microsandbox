@@ -27,6 +27,8 @@ use microsandbox_types::DeploymentProfile;
 
 /// Fixed fd carrying the bulk `msb machine` config as NUL-terminated argument records.
 pub const CONFIG_FD: i32 = 96;
+/// Fixed descriptor carrying sealed Linux local-branch memory into the child runtime.
+pub const BRANCH_MEMORY_FD: i32 = 95;
 
 /// Fixed fd used to pass the attached-parent watchdog pipe into `msb machine`.
 pub const PARENT_WATCH_FD: i32 = 97;
@@ -160,6 +162,11 @@ pub struct LaunchConfig {
     /// Additional virtio-fs mounts as `tag:host_path[:opts]`.
     pub mounts: Vec<String>,
 
+    /// Private volume intent resolved by the owning sandbox's launcher.
+    /// Kept distinct from capture-eligible shared named disks.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub owned_volumes: Vec<microsandbox_types::VolumeMount>,
+
     /// Isolated host-file mounts handled by the single-file backend.
     #[serde(default)]
     pub file_mounts: Vec<FileMountConfig>,
@@ -205,6 +212,10 @@ pub struct LaunchConfig {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CheckpointRestoreConfig {
+    /// Require the sealed memory object inherited at BRANCH_MEMORY_FD, not a serialized path.
+    /// Kept inside this strict envelope so an older runtime rejects it instead of cold booting.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub memory_descriptor: bool,
     /// Captured virtual gateway identity; never derives from the child's host slot.
     #[serde(default)]
     pub network_gateway_mac: Option<[u8; 6]>,
@@ -383,6 +394,11 @@ impl LaunchConfig {
                 if config.startup.is_some() {
                     return Err("restore cannot execute a fresh startup command".into());
                 }
+                if restore.memory_descriptor
+                    && (!restore.local_branch || !cfg!(target_os = "linux"))
+                {
+                    return Err("memory descriptor requires a Linux local branch".into());
+                }
             }
             _ => return Err("execution intent and checkpoint restore source disagree".into()),
         }
@@ -398,10 +414,23 @@ impl LaunchConfig {
 mod tests {
     use super::*;
 
+    #[test]
+    fn memory_descriptor_cannot_be_used_as_a_durable_or_cold_restore() {
+        let mut value = restore_request();
+        value["checkpoint_restore"]["memory_descriptor"] = true.into();
+        assert!(decode(value.clone()).is_err());
+        value["checkpoint_restore"]["local_branch"] = true.into();
+        value["checkpoint_restore"]["checkpoint_root"] = "".into();
+        assert_eq!(decode(value.clone()).is_ok(), cfg!(target_os = "linux"));
+        value["execution"] = "boot".into();
+        assert!(decode(value).is_err());
+    }
+
     fn restore_request() -> serde_json::Value {
         serde_json::to_value(LaunchConfig {
             execution: ExecutionIntent::Restore,
             checkpoint_restore: Some(CheckpointRestoreConfig {
+                memory_descriptor: false,
                 network_gateway_mac: None,
                 external_mount_policy: Default::default(),
                 external_mounts: Vec::new(),

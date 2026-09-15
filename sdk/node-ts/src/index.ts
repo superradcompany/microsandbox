@@ -46,6 +46,7 @@ export type {
   SandboxPingResult,
   SandboxTouchResult,
   ExternalMountWarning,
+  BranchOutcome,
 } from "./sandbox.js";
 export type {
   ChangeKind,
@@ -107,7 +108,7 @@ export {
 
 // Snapshots
 export { Snapshot, SnapshotArchive } from "./snapshot.js";
-export type { DiskCompactionOptions, DiskCompactionResult } from "./compact.js";
+export type { DiskCompactionOptions, DiskCompactionDiskResult, DiskCompactionResult } from "./compact.js";
 import { Snapshot as _Snapshot, type SnapshotBuilder as _SnapBT } from "./snapshot.js";
 /**
  * Native fluent builder for a snapshot. `new SnapshotBuilder(name)`
@@ -413,7 +414,8 @@ export type PullProgressEvent = NapiPullProgressEvent;
 export type PullProgressStream = NapiPullProgressStream;
 
 // Setup + module-level helpers
-export { Setup, install, isInstalled, resolveRuntimeVersion, setup } from "./setup.js";
+export { resolveRuntimeVersion, resolveRuntime, isRuntimeInstalled, installRuntime, ensureRuntime } from "./setup.js";
+export type { RuntimeConfig, InstallOptions, ResolvedRuntime, RuntimeOrigin } from "./setup.js";
 export { allSandboxMetrics } from "./all-metrics.js";
 
 /** Override the `libkrunfw` shared library path used by subsequently created local sandboxes. */
@@ -507,10 +509,12 @@ export type {
 // consistent with what each other native builder emits (TlsConfig /
 // DnsConfig / SecretEntry / VolumeMount / Patch — all flat shapes
 // with `kind` discriminator + per-variant fields).
-export type VolumeMountKind = "bind" | "named" | "tmpfs" | "disk";
+export type { NapiOwnedVolumeOptions as OwnedVolumeOptions } from "./internal/napi.js";
+export type VolumeMountKind = "bind" | "named" | "owned" | "tmpfs" | "disk";
 export const VolumeMountKinds: readonly VolumeMountKind[] = [
   "bind",
   "named",
+  "owned",
   "tmpfs",
   "disk",
 ] as const;

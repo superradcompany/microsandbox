@@ -28,6 +28,9 @@ use super::{
 };
 use crate::backends::{mobility, passthroughfs::quota::QuotaState};
 
+#[path = "owned_mobility.rs"]
+mod owned;
+
 //--------------------------------------------------------------------------------------------------
 // Constants
 //--------------------------------------------------------------------------------------------------
@@ -116,14 +119,15 @@ pub(super) struct PreparedState {
 // Functions: Public operations
 //--------------------------------------------------------------------------------------------------
 
-pub(super) fn capture(fs: &PassthroughFs) -> io::Result<Vec<u8>> {
+fn capture_linked(fs: &PassthroughFs, excluded: &BTreeSet<u64>) -> io::Result<PassthroughState> {
     let inodes = fs.inodes.read().unwrap();
     let inode_states = inodes
         .by_inode
         .iter()
+        .filter(|(inode, _)| !excluded.contains(inode))
         .map(|(inode, data)| {
-            let relative = data
-                .path
+            let path = data.path();
+            let relative = path
                 .strip_prefix(&fs.root)
                 .map_err(|_| invalid_state("tracked inode escaped passthrough root"))?;
             let components = relative
@@ -151,6 +155,7 @@ pub(super) fn capture(fs: &PassthroughFs) -> io::Result<Vec<u8>> {
         .read()
         .unwrap()
         .iter()
+        .filter(|(_, data)| !excluded.contains(&data.inode))
         .map(|(handle, data)| FileHandleState {
             handle: *handle,
             inode: data.inode,
@@ -202,6 +207,14 @@ pub(super) fn capture(fs: &PassthroughFs) -> io::Result<Vec<u8>> {
         files,
         dirs,
     };
+    Ok(state)
+}
+
+pub(super) fn capture(fs: &PassthroughFs) -> io::Result<Vec<u8>> {
+    if fs.cfg.owned_checkpoint.is_some() {
+        return owned::capture(fs);
+    }
+    let state = capture_linked(fs, &BTreeSet::new())?;
     if fs.cfg.external_checkpoint.is_none() {
         return mobility::encode(KIND, &state);
     }
@@ -250,6 +263,9 @@ pub(super) fn capture(fs: &PassthroughFs) -> io::Result<Vec<u8>> {
 }
 
 pub(super) fn prepare(fs: &PassthroughFs, bytes: &[u8]) -> io::Result<PreparedState> {
+    if fs.cfg.owned_checkpoint.is_some() {
+        return owned::prepare(fs, bytes);
+    }
     if let Some(options) = &fs.cfg.external_checkpoint {
         let mut external: ExternalState = mobility::decode(EXTERNAL_KIND, bytes)?;
         validate_external_shape(&external)?;
@@ -538,7 +554,7 @@ fn file_change_time(file: &File) -> io::Result<i64> {
     Ok(info.ChangeTime)
 }
 
-fn file_identity(file: &File) -> io::Result<(u32, u64)> {
+pub(super) fn file_identity(file: &File) -> io::Result<(u32, u64)> {
     let mut info = BY_HANDLE_FILE_INFORMATION::default();
     // The borrowed File keeps the handle live for the entire query; the API fills
     // only this initialized information struct and never takes ownership.
@@ -671,14 +687,25 @@ fn rebuild(
         }
         let data = Arc::new(InodeData {
             inode: saved.inode,
-            path: path.clone(),
+            path: RwLock::new(path.clone()),
+            identity: fs.owned_identity(&path)?,
             virtual_meta: RwLock::new(VirtualMetadata {
                 uid: saved.uid,
                 gid: saved.gid,
                 mode: saved.mode,
                 rdev: saved.rdev,
             }),
+            retained: Mutex::new(None),
+            retained_stat: Mutex::new(None),
+            lookups: std::sync::atomic::AtomicU64::new(0),
         });
+        if let Some(identity) = data.identity
+            && inodes.by_identity.insert(identity, data.clone()).is_some()
+        {
+            return Err(invalid_state(
+                "owned aliases have conflicting logical inode ids",
+            ));
+        }
         inodes.by_inode.insert(saved.inode, Arc::clone(&data));
         inodes.by_path.insert(path.clone(), data);
         inode_paths.insert(saved.inode, path);

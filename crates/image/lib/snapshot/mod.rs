@@ -10,6 +10,7 @@
 pub mod manifest;
 #[doc(hidden)]
 pub mod migration;
+mod owned;
 mod restore_defaults;
 
 //--------------------------------------------------------------------------------------------------
@@ -24,5 +25,10 @@ pub use manifest::{
     SPARSE_SHA256_V1, SUPPORTED_REQUIRES, SnapshotCapture, SnapshotConsistency, SnapshotDescriptor,
     SnapshotFormat, SnapshotId, SnapshotRootDisk, SnapshotScope, SnapshotState, UpperIntegrity,
     UpperLayer, layer_path,
+};
+pub use owned::{
+    OWNED_VOLUMES_EXTENSION, OwnedDirectoryPayload, OwnedMountSnapshot, OwnedVolumeCapture,
+    OwnedVolumeData, validate_owned_resources, validate_owned_volumes,
+    verify_owned_directory_payloads,
 };
 pub use restore_defaults::{RESTORE_DEFAULTS_EXTENSION, RestoreDefaults};

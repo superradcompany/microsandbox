@@ -1,5 +1,8 @@
 //! Durable passthrough filesystem state and destination-local handle reconstruction.
 
+#[path = "owned_mobility.rs"]
+mod owned;
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::File,
@@ -142,7 +145,10 @@ pub(super) struct PreparedState {
 //--------------------------------------------------------------------------------------------------
 
 pub(super) fn capture(fs: &PassthroughFs) -> io::Result<Vec<u8>> {
-    let inode_states = capture_inodes(fs)?;
+    if fs.cfg.owned_checkpoint.is_some() {
+        return owned::capture(fs);
+    }
+    let inode_states = capture_inodes(fs, &BTreeSet::new())?;
     let inode_ids = inode_states
         .iter()
         .map(|state| state.inode)
@@ -241,6 +247,9 @@ pub(super) fn capture(fs: &PassthroughFs) -> io::Result<Vec<u8>> {
 }
 
 pub(super) fn prepare(fs: &PassthroughFs, bytes: &[u8]) -> io::Result<PreparedState> {
+    if fs.cfg.owned_checkpoint.is_some() {
+        return owned::prepare(fs, bytes);
+    }
     if let Some(options) = &fs.cfg.external_checkpoint {
         let mut external: ExternalState = mobility::decode(EXTERNAL_KIND, bytes)?;
         validate_external_shape(&external)?;
@@ -520,10 +529,13 @@ fn object_identity(fs: &PassthroughFs, saved: &InodeState) -> io::Result<ObjectI
 //--------------------------------------------------------------------------------------------------
 
 #[cfg(target_os = "linux")]
-fn capture_inodes(fs: &PassthroughFs) -> io::Result<Vec<InodeState>> {
+fn capture_inodes(fs: &PassthroughFs, excluded: &BTreeSet<u64>) -> io::Result<Vec<InodeState>> {
     let inodes = fs.inodes.read().unwrap();
     let mut states = Vec::new();
     for (inode_id, data) in inodes.iter() {
+        if excluded.contains(inode_id) {
+            continue;
+        }
         if data.retained_fd.lock().unwrap().is_some() {
             return Err(invalid_state(
                 "open-unlinked passthrough objects are not checkpointable",
@@ -544,7 +556,7 @@ fn capture_inodes(fs: &PassthroughFs) -> io::Result<Vec<InodeState>> {
 }
 
 #[cfg(target_os = "macos")]
-fn capture_inodes(fs: &PassthroughFs) -> io::Result<Vec<InodeState>> {
+fn capture_inodes(fs: &PassthroughFs, excluded: &BTreeSet<u64>) -> io::Result<Vec<InodeState>> {
     let root_path = fd_path(fs.root_fd.as_raw_fd())?;
     let tracked = fs
         .inodes
@@ -555,6 +567,9 @@ fn capture_inodes(fs: &PassthroughFs) -> io::Result<Vec<InodeState>> {
         .collect::<Vec<_>>();
     let mut states = Vec::with_capacity(tracked.len());
     for (inode_id, data) in tracked {
+        if excluded.contains(&inode_id) {
+            continue;
+        }
         if data.unlinked_fd.load(Ordering::Acquire) >= 0 {
             return Err(invalid_state(
                 "open-unlinked passthrough objects are not checkpointable",

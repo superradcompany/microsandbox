@@ -2,7 +2,7 @@
 """Small live snapshot/branch regression suite; no benchmark repetitions or shared VM state."""
 
 import argparse
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 import csv
 import io
 import json
@@ -92,7 +92,7 @@ class Smoke:
         stdout, stderr, code, timed_out = "", "", None, False
         try:
             result = subprocess.run(command, env=self.env, cwd=self.root, capture_output=True,
-                                    text=True, timeout=limit)
+                                    text=True, encoding="utf-8", errors="replace", timeout=limit)
             stdout, stderr, code = result.stdout, result.stderr, result.returncode
         except subprocess.TimeoutExpired as error:
             stdout, stderr = output_text(error.stdout), output_text(error.stderr)
@@ -100,8 +100,10 @@ class Smoke:
         finally:
             elapsed = round((time.monotonic() - started) * 1000, 2)
             prefix = f"{len(self.report['commands']):03d}-{case}"
-            (self.logs / f"{prefix}.stdout.log").write_text(stdout)
-            (self.logs / f"{prefix}.stderr.log").write_text(stderr)
+            # Preserve replacement characters from partial/invalid timeout output even on
+            # Windows hosts whose default text encoding cannot represent them.
+            (self.logs / f"{prefix}.stdout.log").write_text(stdout, encoding="utf-8")
+            (self.logs / f"{prefix}.stderr.log").write_text(stderr, encoding="utf-8")
             row = dict(case=case, phase=phase, argv=command[1:], ms=elapsed, exit=code,
                        expected_failure=expected_failure, timed_out=timed_out)
             self.report["commands"].append(row)
@@ -254,7 +256,9 @@ class Smoke:
         database = self.home / "db/msb.db"
         if not database.exists():
             return []
-        with sqlite3.connect(database.as_uri() + "?mode=ro", uri=True, timeout=2) as db:
+        # A sqlite connection's own context manager only ends the transaction; it does
+        # not close the handle. Windows refuses fixture deletion while it remains open.
+        with closing(sqlite3.connect(database.as_uri() + "?mode=ro", uri=True, timeout=2)) as db:
             pids = sorted({row[0] for row in db.execute('SELECT pid FROM "run" WHERE pid > 0')})
         remaining = []
         for pid in pids:

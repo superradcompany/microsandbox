@@ -33,6 +33,14 @@ pub struct PySandbox {
     stop_identity: String,
 }
 
+/// One child outcome from a capture-once batch.
+#[pyclass(name = "BranchOutcome", get_all, frozen)]
+pub struct PyBranchOutcome {
+    name: String,
+    sandbox: Option<Py<PySandbox>>,
+    error: Option<Py<PyAny>>,
+}
+
 /// Result of observing a sandbox in a terminal non-running state.
 #[pyclass(name = "SandboxStopResult")]
 pub struct PySandboxStopResult {
@@ -846,18 +854,20 @@ impl PySandbox {
         })
     }
 
-    /// Compact the immutable root-disk prefix; layers includes the base, never the writable head.
-    #[pyo3(signature = (*, layers = None, dry_run = false))]
+    /// Compact root and owned-data disks; layers limits the oldest sealed prefix per disk.
+    #[pyo3(signature = (*, layers = None, dry_run = false, disk = None, root_disk_only = false))]
     fn compact<'py>(
         &self,
         py: Python<'py>,
         layers: Option<usize>,
         dry_run: bool,
+        disk: Option<String>,
+        root_disk_only: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let sandbox = Self::clone_sandbox(&inner).await?;
-            run_compact(sandbox.compact(), layers, dry_run).await
+            run_compact(sandbox.compact(), layers, dry_run, disk, root_disk_only).await
         })
     }
 
@@ -1073,13 +1083,42 @@ impl PySandbox {
     }
 
     /// Create an independent local CoW child without a durable full snapshot.
-    fn branch<'py>(&self, py: Python<'py>, name: String) -> PyResult<Bound<'py, PyAny>> {
+    #[pyo3(signature = (name, *, record_integrity = false))]
+    fn branch<'py>(
+        &self,
+        py: Python<'py>,
+        name: String,
+        record_integrity: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let sandbox = Self::clone_sandbox(&inner).await?;
+            let mut builder = sandbox.branch(name);
+            if record_integrity {
+                builder = builder.record_integrity();
+            }
             Ok(PySandbox::from_rust(
-                sandbox.branch(name).branch().await.map_err(to_py_err)?,
+                builder.branch().await.map_err(to_py_err)?,
             ))
+        })
+    }
+
+    /// Capture once for all names; return an outcome for each child in input order.
+    #[pyo3(signature = (names, *, record_integrity = false))]
+    fn branch_many<'py>(
+        &self,
+        py: Python<'py>,
+        names: Vec<String>,
+        record_integrity: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let sandbox = Self::clone_sandbox(&inner).await?;
+            let mut builder = sandbox.branch_many(names);
+            if record_integrity {
+                builder = builder.record_integrity();
+            }
+            branch_outcomes(builder.branch().await.map_err(to_py_err)?)
         })
     }
 
@@ -1503,9 +1542,17 @@ pub(crate) async fn run_compact(
     mut builder: microsandbox::sandbox::DiskCompactionBuilder,
     layers: Option<usize>,
     dry_run: bool,
+    disk: Option<String>,
+    root_disk_only: bool,
 ) -> PyResult<PyObject> {
     if let Some(layers) = layers {
         builder = builder.layers(layers);
+    }
+    if let Some(disk) = disk {
+        builder = builder.disk(disk);
+    }
+    if root_disk_only {
+        builder = builder.root_disk_only();
     }
     let result = if dry_run {
         builder.dry_run().await
@@ -2372,6 +2419,27 @@ fn convert_pull_progress(event: microsandbox::sandbox::PullProgress) -> PyPullEv
 //--------------------------------------------------------------------------------------------------
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
+
+pub(crate) fn branch_outcomes(
+    outcomes: Vec<microsandbox::sandbox::BranchOutcome>,
+) -> PyResult<Vec<PyBranchOutcome>> {
+    Python::with_gil(|py| {
+        outcomes
+            .into_iter()
+            .map(|outcome| {
+                let (sandbox, error) = match outcome.result {
+                    Ok(child) => (Some(Py::new(py, PySandbox::from_rust(child))?), None),
+                    Err(error) => (None, Some(to_py_err(error).into_value(py).into_any())),
+                };
+                Ok(PyBranchOutcome {
+                    name: outcome.name,
+                    sandbox,
+                    error,
+                })
+            })
+            .collect()
+    })
+}
 
 pub fn optional_duration(value: Option<f64>) -> PyResult<Option<std::time::Duration>> {
     let Some(value) = value else {

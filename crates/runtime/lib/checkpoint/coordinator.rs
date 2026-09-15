@@ -13,6 +13,9 @@ use microsandbox_image::checkpoint::{
     ContentRef, DeviceStateRef, LocalObjectStore, MemoryCaptureMode, MemoryExtent,
     MemoryExtentContent, MemoryManifest, ObjectId, ResourceDescriptor, ResourceTreatment,
 };
+use microsandbox_image::snapshot::{
+    OwnedDirectoryPayload, OwnedMountSnapshot, OwnedVolumeCapture, OwnedVolumeData,
+};
 use microsandbox_protocol::bootstrap::GuestBootstrap;
 use microsandbox_protocol::core::{
     CoreError, CoreErrorKind, Ready, WorkloadFailureDisposition, WorkloadFreeze, WorkloadFrozen,
@@ -57,6 +60,8 @@ pub(crate) struct CheckpointCoordinator {
     workload_control: Arc<WorkloadControl>,
     root_disk: Option<RuntimeOwnedRootDisk>,
     additional_disks: BTreeMap<String, RuntimeOwnedAdditionalDisk>,
+    owned_mounts: BTreeMap<String, OwnedMountSnapshot>,
+    owned_directories: BTreeMap<String, microsandbox_filesystem::OwnedDirectoryCheckpoint>,
     unsupported_additional_disks: BTreeMap<String, String>,
     fs_resource_bindings: BTreeMap<String, BTreeMap<String, String>>,
     network_resource_binding: Option<BTreeMap<String, String>>,
@@ -66,6 +71,7 @@ pub(crate) struct CheckpointCoordinator {
     cached_baseline: Option<(MemoryManifest, super::CachedMemory)>,
     local_cache_root: Option<PathBuf>,
     local_baseline: Option<LocalMemoryPin>,
+    inherited_memory: Option<LocalMemoryPin>,
     boot_geometry: (u8, u8, u32, u32),
 }
 
@@ -110,6 +116,8 @@ struct PausedCaptureTimings {
     managed_disk_us: u128,
     memory_plan_us: u128,
     memory_capture_us: u128,
+    memory_finish_us: u128,
+    memory_paused_prepare_us: u128,
     guest_bytes_read: u64,
     unplugged_bytes_skipped: u64,
     extent_overlay_us: u128,
@@ -242,24 +250,20 @@ impl CheckpointCoordinator {
     pub(crate) fn compact(
         &mut self,
         vm: &msb_krun::VmControl,
+        target: microsandbox_types::DiskCompactionTarget,
         layers: Option<usize>,
         dry_run: bool,
     ) -> Result<super::DiskCompactionResult, super::disk::RootDiskRolloverError> {
-        if self
-            .root_disk
-            .as_ref()
-            .is_some_and(|disk| disk.growth_pending())
-        {
-            return Err(super::disk::RootDiskRolloverError::pre_rebind(
-                "complete pending root-disk growth before compaction",
-            ));
-        }
-        match self.root_disk.as_mut() {
-            Some(disk) => disk.compact(Some(vm), &self.runtime, layers, dry_run),
-            None => Err(super::disk::RootDiskRolloverError::pre_rebind(
-                "this root has no runtime-owned disk chain",
-            )),
-        }
+        super::compaction::compact_live(
+            &mut self.root_disk,
+            &mut self.additional_disks,
+            &self.owned_mounts,
+            vm,
+            &self.runtime,
+            &target,
+            layers,
+            dry_run,
+        )
     }
 
     pub(crate) fn grow_root(
@@ -338,13 +342,40 @@ impl CheckpointCoordinator {
         runtime: tokio::runtime::Handle,
         agent_sock: &Path,
         workload_control: Arc<WorkloadControl>,
+        owned_directories: BTreeMap<String, microsandbox_filesystem::OwnedDirectoryCheckpoint>,
     ) -> Result<Self, String> {
         let root = runtime_dir.join("checkpoints");
         std::fs::create_dir_all(&root).map_err(|error| error.to_string())?;
         let store = LocalObjectStore::open(runtime_dir.join("checkpoint-store"))
             .map_err(|error| error.to_string())?;
         let root_disk = RuntimeOwnedRootDisk::open(runtime_dir, vm)?;
-        let additional_disks = RuntimeOwnedAdditionalDisk::open_all(&vm.disks, guest_bootstrap)?;
+        let additional_disks =
+            RuntimeOwnedAdditionalDisk::open_all(&vm.disks, guest_bootstrap, runtime_dir)?;
+        let owned_mounts = vm
+            .owned_volumes
+            .iter()
+            .map(|mount| {
+                let tag = microsandbox_types::owned_volume_mount_id(mount.guest());
+                if !guest_bootstrap
+                    .dir_mounts
+                    .iter()
+                    .any(|binding| binding.guest_path == mount.guest() && binding.tag == tag)
+                    && !guest_bootstrap
+                        .disk_mounts
+                        .iter()
+                        .any(|binding| binding.guest_path == mount.guest() && binding.id == tag)
+                {
+                    return Err(format!(
+                        "owned mount {} has no matching guest binding",
+                        mount.guest()
+                    ));
+                }
+                Ok((
+                    tag,
+                    OwnedMountSnapshot::from_mount(mount).map_err(|error| error.to_string())?,
+                ))
+            })
+            .collect::<Result<BTreeMap<_, _>, String>>()?;
         let unsupported_additional_disks = vm
             .disks
             .iter()
@@ -403,6 +434,8 @@ impl CheckpointCoordinator {
             workload_control,
             root_disk,
             additional_disks,
+            owned_mounts,
+            owned_directories,
             unsupported_additional_disks,
             fs_resource_bindings,
             network_resource_binding,
@@ -425,8 +458,15 @@ impl CheckpointCoordinator {
             cached_baseline: None,
             local_cache_root: vm.memory_cache_dir.clone(),
             local_baseline: None,
+            inherited_memory: None,
             boot_geometry: (vm.vcpus, vm.max_cpus, vm.memory_mib, vm.max_memory_mib),
         })
+    }
+
+    /// Retain the admitted restore image before the VMM is constructed. Its parent's token is
+    /// not usable here; the first capture binds this pin to the new VMM's construction token.
+    pub(crate) fn inherit_local_memory(&mut self, memory: Option<LocalMemoryPin>) {
+        self.inherited_memory = memory;
     }
 
     /// Seal the owned disk at a crash-consistent cut without capturing RAM or guest execution.
@@ -443,7 +483,7 @@ impl CheckpointCoordinator {
         if let Some(paused) = user_pause {
             paused.validate(vm).map_err(Failure::pre_rebind)?;
         }
-        let disk = self.root_disk.as_mut().ok_or_else(|| {
+        let disk = self.root_disk.as_ref().ok_or_else(|| {
             Failure::pre_rebind("disk-only capture requires an owned managed or flat root disk")
         })?;
         if disk.growth_pending() {
@@ -451,8 +491,44 @@ impl CheckpointCoordinator {
                 "complete pending root-disk growth before snapshotting",
             ));
         }
+        // Owned storage requires one guest-synced namespace cut, while legacy
+        // root-only capture keeps its existing crash-consistent behavior.
+        let acquired_workload;
+        let workload = if self.owned_mounts.is_empty() {
+            None
+        } else if let Some(paused) = user_pause {
+            Some(paused.workload.as_ref().ok_or_else(|| {
+                Failure::pre_rebind("owned storage capture requires a guest-synced pause")
+            })?)
+        } else {
+            acquired_workload = self.freeze_workload(vm, checkpoint_id).map_err(|error| {
+                if error.keep_paused {
+                    Failure::post_journal(error)
+                } else {
+                    Failure::pre_rebind(error)
+                }
+            })?;
+            Some(&acquired_workload)
+        };
+        if workload.is_some_and(|workload| !workload.external_mounts_synced) {
+            if user_pause.is_none() {
+                self.thaw_workload(workload.expect("checked workload"))
+                    .map_err(Failure::post_journal)?;
+            }
+            return Err(Failure::pre_rebind(
+                "owned storage capture requires an acknowledged root and volume writeback boundary",
+            ));
+        }
         let path = self.root.join(checkpoint_id);
-        std::fs::create_dir(&path).map_err(Failure::pre_rebind)?;
+        if let Err(error) = std::fs::create_dir(&path) {
+            if user_pause.is_none()
+                && let Some(workload) = workload
+            {
+                self.thaw_workload(workload)
+                    .map_err(Failure::post_journal)?;
+            }
+            return Err(Failure::pre_rebind(error));
+        }
         let paused_at = Instant::now();
         let pause = match user_pause
             .map(|p| Ok(p.generation))
@@ -461,19 +537,79 @@ impl CheckpointCoordinator {
             Ok(pause) => pause,
             Err(error) => {
                 let _ = std::fs::remove_dir_all(&path);
+                if user_pause.is_none()
+                    && let Some(workload) = workload
+                {
+                    self.thaw_workload(workload)
+                        .map_err(Failure::post_journal)?;
+                }
                 return Err(Failure::pre_rebind(error));
             }
         };
-        // Only the root block worker is drained and switched. Rollover inspects its state,
-        // but no full CPU/device payload, RAM scan, guest handshake, or dirty-baseline update
-        // is needed. The result is a crash-consistent disk cut, not an execution checkpoint.
-        let result = disk.rollover(vm, &self.runtime, &path, pause.get());
+        // Keep every owned provider quiesced until all bytes are sealed. No RAM scan or
+        // execution serialization is needed for this cold-boot storage artifact.
+        let result: Result<_, Failure> = (|| {
+            if !self.owned_directories.is_empty() {
+                std::fs::create_dir_all(path.join("owned")).map_err(Failure::pre_rebind)?;
+            }
+            let captured = self.root_disk.as_mut().expect("validated root").rollover(
+                vm,
+                &self.runtime,
+                &path,
+                pause.get(),
+                false,
+                false,
+            )?;
+            let mut owned_volumes = Vec::new();
+            for (tag, mount) in &self.owned_mounts {
+                let data = if let Some(directory) = self.owned_directories.get(tag) {
+                    directory
+                        .prepare_capture(&path.join("owned").join(tag))
+                        .map_err(Failure::pre_rebind)?;
+                    let device = self
+                        .fs_resource_bindings
+                        .iter()
+                        .find(|(_, binding)| binding.get("guest_tag") == Some(tag))
+                        .map(|(device, _)| device)
+                        .ok_or_else(|| {
+                            Failure::pre_rebind("owned directory lacks its transport")
+                        })?;
+                    vm.capture_virtio_device_state(TYPE_FS, device)
+                        .map_err(Failure::pre_rebind)?;
+                    owned_directory_data(directory.finish_capture().map_err(Failure::pre_rebind)?)
+                        .map_err(Failure::pre_rebind)?
+                } else {
+                    let disk = self.additional_disks.get_mut(tag).ok_or_else(|| {
+                        Failure::pre_rebind("owned disk lacks its capture provider")
+                    })?;
+                    let generation = disk
+                        .capture(vm, &self.runtime, &path, pause.get(), false)?
+                        .manifest;
+                    OwnedVolumeData::Disk { generation }
+                };
+                owned_volumes.push(OwnedVolumeCapture {
+                    mount_id: tag.clone(),
+                    mount: mount.clone(),
+                    data,
+                });
+            }
+            Ok((captured, owned_volumes))
+        })();
+        for directory in self.owned_directories.values() {
+            let _ = directory.cancel_capture();
+        }
         if user_pause.is_none() && !result.as_ref().is_err_and(|e| e.keep_paused) {
             vm.resume(pause).map_err(Failure::post_journal)?;
+            if let Some(workload) = workload
+                && let Err(error) = self.thaw_workload(workload)
+            {
+                let _ = vm.pause();
+                return Err(Failure::post_journal(error));
+            }
         }
         let pause_us = paused_at.elapsed().as_micros();
         match result {
-            Ok(captured) => {
+            Ok((captured, owned_volumes)) => {
                 tracing::info!(target: "microsandbox_checkpoint_timing", operation = "capture_disk",
                     checkpoint_id, source_already_paused = user_pause.is_some(), pause_us,
                     total_us = started.elapsed().as_micros(), "disk-only checkpoint timing");
@@ -481,6 +617,7 @@ impl CheckpointCoordinator {
                     checkpoint_id: checkpoint_id.into(),
                     path,
                     disk: captured.manifest,
+                    owned_volumes,
                 })
             }
             Err(error) => {
@@ -499,11 +636,22 @@ impl CheckpointCoordinator {
         checkpoint_id: &str,
         intent: CaptureIntent,
         user_pause: Option<&UserPause>,
+        record_integrity: bool,
     ) -> Result<CheckpointResult, CheckpointFailure> {
-        self.capture_to(vm, checkpoint_id, intent, user_pause, None)
+        self.capture_to(
+            vm,
+            checkpoint_id,
+            intent,
+            user_pause,
+            None,
+            None,
+            record_integrity,
+        )
     }
 
     /// Capture a local handoff directly, without publishing a portable RAM closure.
+    // Keep borrowed capture inputs explicit; this entry point does not own or retain them.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn branch(
         &mut self,
         vm: &msb_krun::VmControl,
@@ -511,6 +659,8 @@ impl CheckpointCoordinator {
         child_name: &str,
         reserved_cache: &Path,
         user_pause: Option<&UserPause>,
+        memory_backing: Option<&std::fs::File>,
+        record_integrity: bool,
     ) -> Result<CheckpointResult, CheckpointFailure> {
         let cache = self.local_cache_root.as_ref().ok_or_else(|| {
             CheckpointFailure::before_pause("runtime has no backend-resolved memory cache")
@@ -565,9 +715,13 @@ impl CheckpointCoordinator {
             CaptureIntent::FullSnapshot,
             user_pause,
             Some(&destination),
+            memory_backing,
+            record_integrity,
         )
     }
 
+    // Durable and local capture share one executor-owned boundary and its borrowed inputs.
+    #[allow(clippy::too_many_arguments)]
     fn capture_to(
         &mut self,
         vm: &msb_krun::VmControl,
@@ -575,7 +729,21 @@ impl CheckpointCoordinator {
         intent: CaptureIntent,
         user_pause: Option<&UserPause>,
         local_destination: Option<&Path>,
+        _memory_backing: Option<&std::fs::File>,
+        record_integrity: bool,
     ) -> Result<CheckpointResult, CheckpointFailure> {
+        // All RAM captures pass through this executor-owned method. Consume the construction
+        // handoff before either durable or local capture can publish a newer token. Dirty
+        // tracking has run since the pristine mapping was installed, not since this adoption.
+        // Topology or tracking invalidation leaves no VMM token and selects full capture.
+        if let Some(mut inherited) = self.inherited_memory.take()
+            && let Some(baseline) = vm.retained_memory_baseline()
+        {
+            inherited.memory.generation = baseline.generation().get();
+            inherited.memory.topology = baseline.topology().get();
+            self.local_baseline = Some(inherited);
+            tracing::info!("adopted inherited local memory baseline");
+        }
         if let Some(paused) = user_pause {
             paused
                 .validate(vm)
@@ -626,6 +794,59 @@ impl CheckpointCoordinator {
         std::fs::create_dir(&staging).map_err(CheckpointFailure::before_pause)?;
         let staging_us = staging_started.elapsed().as_micros();
 
+        // Preparing an immutable baseline does not read live guest RAM. Keep this potentially
+        // RAM-sized copy outside the freeze/pause window; dirty tracking continues until the
+        // authoritative paused plan below. The executor owns this coordinator exclusively.
+        let memory_prepare_started = Instant::now();
+        let prepared_local_memory = if local_destination.is_some() {
+            let baseline = self.local_baseline.as_ref().filter(|previous| {
+                vm.retained_memory_baseline().is_some_and(|baseline| {
+                    previous.memory.generation == baseline.generation().get()
+                        && previous.memory.topology == baseline.topology().get()
+                })
+            });
+            // Configured MiB excludes architecture-specific mappings (for example the x86
+            // kernel mapping). Only an observed immutable generation gives an exact bound.
+            let prepared = baseline
+                .map(|baseline| baseline.capacity())
+                .transpose()
+                .and_then(|capacity| {
+                    #[cfg(target_os = "linux")]
+                    return LocalMemoryCapture::prepare_with_backing(
+                        self.local_cache_root
+                            .as_ref()
+                            .expect("validated local cache"),
+                        checkpoint_id,
+                        baseline,
+                        capacity,
+                        _memory_backing,
+                    );
+                    #[cfg(not(target_os = "linux"))]
+                    LocalMemoryCapture::prepare(
+                        self.local_cache_root
+                            .as_ref()
+                            .expect("validated local cache"),
+                        checkpoint_id,
+                        baseline,
+                        capacity,
+                    )
+                });
+            let sink = match prepared {
+                Ok(sink) => sink,
+                Err(error) => {
+                    let _ = std::fs::remove_dir_all(&staging);
+                    return Err(CheckpointFailure::before_pause(error));
+                }
+            };
+            Some(sink)
+        } else {
+            None
+        };
+        let memory_prepare_us = memory_prepare_started.elapsed().as_micros();
+        if let Some(prepared) = &prepared_local_memory {
+            tracing::info!(target: "microsandbox_checkpoint_timing", operation = "local_memory_prepare", prepare_us = prepared.prepare_us, baseline_bytes = prepared.baseline_bytes, reflink = prepared.reflink, ram_backed = prepared.ram_backed, "prepared immutable RAM backing before workload freeze");
+        }
+
         // The guest latch is acquired while vCPUs can still service agentd.
         // It remains held in captured guest memory so a restored child cannot
         // run application code before VM Generation ID activation completes.
@@ -648,11 +869,13 @@ impl CheckpointCoordinator {
             }
         };
         let freeze_us = freeze_started.elapsed().as_micros();
-        if self.fs_resource_bindings.values().any(|binding| {
-            binding
-                .get("role")
-                .is_some_and(|role| role == "external_bind")
-        }) && !workload.external_mounts_synced
+        if (!self.owned_mounts.is_empty()
+            || self.fs_resource_bindings.values().any(|binding| {
+                binding
+                    .get("role")
+                    .is_some_and(|role| role == "external_bind" || role == "owned_directory")
+            }))
+            && !workload.external_mounts_synced
         {
             let _ = std::fs::remove_dir_all(&staging);
             if user_pause.is_none() {
@@ -694,8 +917,13 @@ impl CheckpointCoordinator {
             &staging,
             &final_path,
             local_destination.is_some(),
+            prepared_local_memory,
+            record_integrity,
         );
         let paused_capture_us = paused_capture_started.elapsed().as_micros();
+        for directory in self.owned_directories.values() {
+            let _ = directory.cancel_capture();
+        }
         let captured = match paused {
             Ok(captured) => captured,
             Err(mut failure) => {
@@ -828,6 +1056,9 @@ impl CheckpointCoordinator {
             operation = "capture",
             source_already_paused = user_pause.is_some(),
             checkpoint_id,
+            memory_prepare_us,
+            memory_paused_prepare_us = captured.timings.memory_paused_prepare_us,
+            memory_finish_us = captured.timings.memory_finish_us,
             memory_mode = ?captured.result.memory_mode,
             memory_logical_bytes = captured.result.memory_logical_bytes,
             memory_emitted_bytes = captured.result.memory_emitted_bytes,
@@ -883,16 +1114,30 @@ impl CheckpointCoordinator {
         }
         let gate_deadline = Instant::now() + WORKLOAD_CONTROL_TIMEOUT;
         let (gate, host_input) = self.gate_input(gate_deadline)?;
-        let external_mount_tags = self
+        let mut external_mount_tags = self
             .fs_resource_bindings
             .values()
             .filter(|binding| {
                 binding
                     .get("role")
-                    .is_some_and(|role| role == "external_bind")
+                    .is_some_and(|role| role == "external_bind" || role == "owned_directory")
             })
             .filter_map(|binding| binding.get("guest_tag").cloned())
             .collect::<Vec<_>>();
+        if !self.owned_mounts.is_empty() {
+            external_mount_tags.push("path:/".into());
+            external_mount_tags.extend(
+                self.owned_mounts
+                    .values()
+                    .filter(|mount| {
+                        matches!(
+                            mount.storage,
+                            microsandbox_types::OwnedVolumeStorage::Disk { .. }
+                        )
+                    })
+                    .map(|mount| format!("path:{}", mount.guest)),
+            );
+        }
         // Gating keeps its original deadline. The external-only request budget begins
         // after gating and includes freezer work, the guest's 20s flush, and output cut.
         let deadline = freeze_request_deadline(
@@ -1044,6 +1289,8 @@ impl CheckpointCoordinator {
         staging: &Path,
         final_path: &Path,
         local: bool,
+        prepared_local_memory: Option<LocalMemoryCapture>,
+        record_integrity: bool,
     ) -> Result<PausedCapture, CheckpointFailure> {
         let mut timings = PausedCaptureTimings::default();
         let batch = Arc::new(CaptureObjectBatch::new(
@@ -1058,6 +1305,15 @@ impl CheckpointCoordinator {
         let mut pending_devices = Vec::with_capacity(inventory.len());
         let mut disk_roots = Vec::new();
         let mut local_disks = Vec::new();
+        let mut owned_volumes = Vec::new();
+        if !self.owned_directories.is_empty() {
+            std::fs::create_dir_all(staging.join("owned")).map_err(CheckpointFailure::resumable)?;
+        }
+        for (tag, directory) in &self.owned_directories {
+            directory
+                .prepare_capture(&staging.join("owned").join(tag))
+                .map_err(CheckpointFailure::resumable)?;
+        }
         for (device_type, device_id) in inventory {
             let runtime_owned_root = self
                 .root_disk
@@ -1071,7 +1327,14 @@ impl CheckpointCoordinator {
                 })?;
                 let disk_started = Instant::now();
                 let rollover = disk
-                    .rollover(vm, &self.runtime, staging, pause_generation)
+                    .rollover(
+                        vm,
+                        &self.runtime,
+                        staging,
+                        pause_generation,
+                        local,
+                        record_integrity,
+                    )
                     .map_err(|error| CheckpointFailure {
                         freezer_unavailable: false,
                         message: error.to_string(),
@@ -1100,8 +1363,19 @@ impl CheckpointCoordinator {
                     .additional_disks
                     .get_mut(device_id)
                     .expect("registered additional disk was checked above")
-                    .capture(vm, &self.runtime, staging, pause_generation)
-                    .map_err(CheckpointFailure::resumable)?;
+                    .capture(
+                        vm,
+                        &self.runtime,
+                        staging,
+                        pause_generation,
+                        record_integrity,
+                    )
+                    .map_err(|error| CheckpointFailure {
+                        message: error.to_string(),
+                        keep_paused: error.keep_paused,
+                        published: None,
+                        freezer_unavailable: false,
+                    })?;
                 timings.managed_disk_us += disk_started.elapsed().as_micros();
                 if !local {
                     let bytes = captured
@@ -1158,6 +1432,30 @@ impl CheckpointCoordinator {
                 bytes,
             });
         }
+        for (tag, mount) in &self.owned_mounts {
+            let data = if let Some(directory) = self.owned_directories.get(tag) {
+                owned_directory_data(
+                    directory
+                        .finish_capture()
+                        .map_err(CheckpointFailure::resumable)?,
+                )
+                .map_err(CheckpointFailure::resumable)?
+            } else {
+                let generation = local_disks
+                    .iter()
+                    .find(|disk| disk.device_id == *tag)
+                    .ok_or_else(|| {
+                        CheckpointFailure::resumable(format!("owned disk {tag} was not captured"))
+                    })?
+                    .clone();
+                OwnedVolumeData::Disk { generation }
+            };
+            owned_volumes.push(OwnedVolumeCapture {
+                mount_id: tag.clone(),
+                mount: mount.clone(),
+                data,
+            });
+        }
         let device_refs = if local {
             pending_devices
                 .iter()
@@ -1204,24 +1502,56 @@ impl CheckpointCoordinator {
         timings.execution_us = execution_started.elapsed().as_micros();
 
         if local {
+            let memory_plan_started = Instant::now();
             let (memory_plan, incremental) = self
                 .plan_local_memory(vm)
                 .map_err(CheckpointFailure::resumable)?;
+            timings.memory_plan_us = memory_plan_started.elapsed().as_micros();
             let captured = (|| {
-                let started = Instant::now();
-                let mut sink = LocalMemoryCapture::new(
-                    self.local_cache_root
-                        .as_ref()
-                        .expect("validated local cache"),
-                    checkpoint_id,
-                    if incremental {
-                        self.local_baseline.as_ref()
-                    } else {
-                        None
-                    },
-                )
-                .map_err(CheckpointFailure::resumable)?;
+                let prepare_started = Instant::now();
+                let baseline = if incremental {
+                    self.local_baseline.as_ref()
+                } else {
+                    None
+                };
+                let expected = baseline.map(|base| (base.memory.generation, base.memory.topology));
+                // A topology change or a Complete/FullRequired plan invalidates the prepared
+                // delta. Never apply a full capture to a copied baseline with stale geometry.
+                let mut sink = match prepared_local_memory {
+                    Some(prepared) if prepared.baseline() == expected => prepared,
+                    Some(mut prepared)
+                        if expected.is_none()
+                            && prepared.baseline().is_some_and(|(_, topology)| {
+                                topology == memory_plan.topology().get()
+                            }) =>
+                    {
+                        prepared
+                            .reset_to_full()
+                            .map_err(CheckpointFailure::resumable)?;
+                        prepared
+                    }
+                    previous => {
+                        // A different topology invalidates both bytes and the RAM reservation.
+                        // Release it before preparing an unbounded, disk-backed complete cut.
+                        drop(previous);
+                        let capacity = baseline
+                            .map(|baseline| baseline.capacity())
+                            .transpose()
+                            .map_err(CheckpointFailure::resumable)?;
+                        LocalMemoryCapture::prepare(
+                            self.local_cache_root
+                                .as_ref()
+                                .expect("validated local cache"),
+                            checkpoint_id,
+                            baseline,
+                            capacity,
+                        )
+                        .map_err(CheckpointFailure::resumable)?
+                    }
+                };
+                timings.memory_paused_prepare_us = prepare_started.elapsed().as_micros();
                 let reflink = sink.reflink;
+                let started = Instant::now();
                 let stats = vm
                     .capture_memory(
                         &memory_plan,
@@ -1230,10 +1560,12 @@ impl CheckpointCoordinator {
                         &mut sink,
                     )
                     .map_err(CheckpointFailure::resumable)?;
+                timings.memory_capture_us = started.elapsed().as_micros();
+                let finish_started = Instant::now();
                 let memory = sink
                     .finish(memory_plan.generation().get(), memory_plan.topology().get())
                     .map_err(CheckpointFailure::resumable)?;
-                timings.memory_capture_us = started.elapsed().as_micros();
+                timings.memory_finish_us = finish_started.elapsed().as_micros();
                 timings.guest_bytes_read = stats.guest_bytes_read;
                 timings.unplugged_bytes_skipped = stats.unplugged_bytes_skipped;
                 let state = super::LocalBranchState {
@@ -1244,6 +1576,7 @@ impl CheckpointCoordinator {
                     devices: device_refs,
                     resources,
                     disks: local_disks,
+                    owned_volumes,
                     memory: memory.memory.clone(),
                     vcpus: self.boot_geometry.0,
                     max_cpus: self.boot_geometry.1,
@@ -1256,7 +1589,7 @@ impl CheckpointCoordinator {
                 std::fs::write(staging.join("branch.json"), bytes)
                     .map_err(CheckpointFailure::resumable)?;
                 std::fs::rename(staging, final_path).map_err(CheckpointFailure::resumable)?;
-                tracing::info!(target: "microsandbox_checkpoint_timing", operation = "local_memory_capture", incremental, reflink, capture_us = timings.memory_capture_us, guest_bytes_read = stats.guest_bytes_read, unplugged_bytes_skipped = stats.unplugged_bytes_skipped);
+                tracing::info!(target: "microsandbox_checkpoint_timing", operation = "local_memory_capture", incremental, reflink, capture_us = timings.memory_capture_us, paused_prepare_us = timings.memory_paused_prepare_us, finish_us = timings.memory_finish_us, guest_bytes_read = stats.guest_bytes_read, unplugged_bytes_skipped = stats.unplugged_bytes_skipped);
                 Ok((memory, stats))
             })();
             let (memory, stats) = match captured {
@@ -1396,6 +1729,7 @@ impl CheckpointCoordinator {
             execution_state: execution_id,
             memory: memory_id,
             disks: disk_roots,
+            owned_volumes,
             devices: device_refs,
             resources,
             requires: Vec::new(),
@@ -1717,6 +2051,28 @@ where
         return Err("workload control reply belongs to another checkpoint attempt".into());
     }
     Ok(payload)
+}
+
+fn owned_directory_data(
+    snapshot: microsandbox_filesystem::OwnedDirectorySnapshot,
+) -> Result<OwnedVolumeData, String> {
+    let descriptor = snapshot
+        .descriptor_bytes()
+        .map_err(|error| error.to_string())?;
+    Ok(OwnedVolumeData::Directory {
+        descriptor: OwnedDirectoryPayload {
+            digest: snapshot.digest().map_err(|error| error.to_string())?,
+            bytes: descriptor.len() as u64,
+        },
+        files: snapshot
+            .payloads()
+            .into_iter()
+            .map(|payload| OwnedDirectoryPayload {
+                digest: payload.digest,
+                bytes: payload.bytes,
+            })
+            .collect(),
+    })
 }
 
 fn admit_resources(

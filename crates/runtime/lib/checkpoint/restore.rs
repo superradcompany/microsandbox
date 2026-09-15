@@ -36,11 +36,14 @@ pub(crate) struct PreparedCheckpointRestore {
     devices: Vec<PreparedDeviceRestore>,
     memory: Option<CheckpointMemoryRestore>,
     local_memory: Option<msb_krun::PrivateMemoryBacking>,
+    local_disks: Option<super::local_disk::LocalDiskAdmissions>,
     agent: RestoredAgentState,
 }
 
 /// Agent identity and latch attempt restored with the guest memory image.
 pub(crate) struct RestoredAgentState {
+    /// Exact inherited RAM pin, handed once to the child's capture coordinator.
+    pub(crate) inherited_memory: Option<super::local_memory::LocalMemoryPin>,
     /// Host-only backend reconstruction diagnostics, populated before activation.
     pub(crate) external_mount_reports: Vec<ExternalMountReport>,
     /// Protocol generation spoken by the captured agent.
@@ -100,17 +103,32 @@ impl PreparedCheckpointRestore {
         blocks
     }
 
-    /// Borrow disk admission while the prepared durable restore owns its validated closure.
-    pub(crate) fn disk_closure(&self) -> Option<&CheckpointClosure> {
-        self.memory.as_ref().map(|memory| &memory.closure)
+    /// Seed the journal while this runtime retains the exact admitted immutable files.
+    pub(crate) fn seed_root_disk(
+        &self,
+        runtime_dir: &std::path::Path,
+        vm: &crate::vm::VmConfig,
+    ) -> Result<(), String> {
+        if let Some(memory) = &self.memory {
+            super::disk::seed_restored_root_disk(runtime_dir, vm, &memory.closure)?;
+        } else if let Some(admitted) = &self.local_disks {
+            super::disk::seed_local_root_disk(runtime_dir, vm, admitted)?;
+        }
+        Ok(())
     }
 
     /// Decode a local handoff and pin its RAM before constructing any guest mappings.
-    pub(crate) fn open_local(root: PathBuf, expected_id: &str) -> Result<Self, String> {
+    pub(crate) fn open_local(
+        root: PathBuf,
+        expected_id: &str,
+        memory_descriptor: bool,
+    ) -> Result<Self, String> {
         let state = super::LocalBranchState::open(&root).map_err(|e| e.to_string())?;
         if state.id != expected_id {
             return Err("local branch identity differs".into());
         }
+        let local_disks = super::local_disk::LocalDiskAdmissions::open(&root, &state.disks)
+            .map_err(|e| e.to_string())?;
         let read = |id: &ObjectId, limit| {
             super::LocalBranchState::read_object(&root, id, limit).map_err(|e| e.to_string())
         };
@@ -128,8 +146,30 @@ impl PreparedCheckpointRestore {
             .iter()
             .find(|r| r.id == "guest:agentd")
             .ok_or("branch has no captured agent identity")?;
-        let agent = parse_restored_agent_resource(resource, &state.id)?;
-        let file = state.memory.pin().map_err(|e| e.to_string())?;
+        let mut agent = parse_restored_agent_resource(resource, &state.id)?;
+        if memory_descriptor != state.memory.memfd_lease.is_some() {
+            return Err("branch memory descriptor differs from handoff".into());
+        }
+        #[cfg(target_os = "linux")]
+        let transferred = if memory_descriptor {
+            use std::os::fd::FromRawFd;
+            // The strict launcher contract reserves this descriptor; consume it exactly once.
+            // Check existence before constructing an owned File, including manual invocations.
+            if unsafe { libc::fcntl(crate::launch::BRANCH_MEMORY_FD, libc::F_GETFD) } < 0 {
+                return Err("missing inherited branch memory".into());
+            }
+            Some(unsafe { std::fs::File::from_raw_fd(crate::launch::BRANCH_MEMORY_FD) })
+        } else {
+            None
+        };
+        #[cfg(not(target_os = "linux"))]
+        let transferred = None;
+        let pin = state
+            .memory
+            .pin_backing(transferred.as_ref())
+            .map_err(|e| e.to_string())?;
+        let file = pin.file().try_clone().map_err(|e| e.to_string())?;
+        agent.inherited_memory = Some(pin);
         let regions = state
             .memory
             .regions
@@ -140,8 +180,9 @@ impl PreparedCheckpointRestore {
                 file_offset: region.file_offset,
             })
             .collect();
-        let backing =
-            msb_krun::PrivateMemoryBacking::new(file, regions).map_err(|e| e.to_string())?;
+        let backing = msb_krun::PrivateMemoryBacking::new(file, regions)
+            .map_err(|e| e.to_string())?
+            .with_capture_baseline();
         Ok(Self {
             geometry: CheckpointGeometry {
                 vcpus: state.vcpus,
@@ -153,6 +194,7 @@ impl PreparedCheckpointRestore {
             devices,
             memory: None,
             local_memory: Some(backing),
+            local_disks,
             agent,
         })
     }
@@ -214,6 +256,7 @@ impl PreparedCheckpointRestore {
                 progress: None,
             }),
             local_memory: None,
+            local_disks: None,
             agent,
         })
     }
@@ -414,7 +457,7 @@ impl msb_krun::VmMemoryRestoreSource for CheckpointMemoryRestore {
 //--------------------------------------------------------------------------------------------------
 
 impl RestoredAgentState {
-    /// Persist health after backend reconstruction and before public activation.
+    /// Atomically publish health after backend reconstruction and before public activation.
     pub(crate) fn publish_mount_warnings(
         &self,
         runtime_dir: &std::path::Path,
@@ -434,15 +477,13 @@ impl RestoredAgentState {
         let sandbox_dir = runtime_dir
             .parent()
             .ok_or("runtime has no host-only parent")?;
-        let path = sandbox_dir.join(".restore-mount-warnings.tmp");
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-            .map_err(|e| e.to_string())?;
+        let mut file = tempfile::NamedTempFile::new_in(sandbox_dir).map_err(|e| e.to_string())?;
         file.write_all(&serde_json::to_vec(&warnings).map_err(|e| e.to_string())?)
             .map_err(|e| e.to_string())?;
-        file.sync_all().map_err(|e| e.to_string())?;
+        // These warnings are diagnostics, not recovery state. Readers need a complete atomic
+        // replacement, but a disk flush must not delay guest activation. Closing the handle
+        // before replacement also permits renaming on Windows; TempPath cleans up on failure.
+        let path = file.into_temp_path();
         super::replace_file(&path, &sandbox_dir.join("restore-mount-warnings.json"))
             .map_err(|e| e.to_string())
     }
@@ -563,6 +604,7 @@ fn parse_restored_agent_resource(
         return Err("combined checkpoint has a dedicated guest bulk counter".into());
     }
     Ok(RestoredAgentState {
+        inherited_memory: None,
         external_mount_reports: Vec::new(),
         protocol_generation,
         ready,
@@ -669,6 +711,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(retained, warnings);
+        // A later healthy activation replaces old warnings, including an empty result.
+        restored.external_mount_reports.clear();
+        restored.publish_mount_warnings(&runtime).unwrap();
+        let bytes = std::fs::read(sandbox.path().join("restore-mount-warnings.json")).unwrap();
+        assert_eq!(bytes, b"[]");
+        assert_eq!(std::fs::read_dir(sandbox.path()).unwrap().count(), 2);
     }
 
     #[test]

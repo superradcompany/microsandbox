@@ -15,6 +15,16 @@ class MicrosandboxError(Exception):
     code: str = "microsandbox-error"
 
 
+class RuntimeNotInstalledError(MicrosandboxError):
+    """No complete host runtime pair could be found."""
+    code = "runtime-not-installed"
+
+
+class RuntimeIncompleteError(MicrosandboxError):
+    """The selected host runtime is partial or an explicit binary path is invalid."""
+    code = "runtime-incomplete"
+
+
 class InvalidConfigError(MicrosandboxError):
     """Invalid sandbox configuration."""
     code = "invalid-config"

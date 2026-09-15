@@ -85,6 +85,7 @@ impl LaunchContract {
     pub fn legacy_env(self) -> bool {
         self.patch < 10
     }
+    #[cfg(any(unix, test))]
     pub fn lifecycle_lock_argument(self) -> bool {
         self.patch >= 9
     }

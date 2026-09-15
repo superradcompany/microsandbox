@@ -216,6 +216,10 @@ The live check requires working virtualization and Python (`python3` on Linux/ma
 
 The warm live target is under 60 seconds per layout, excluding compilation and image-pull setup; this is a target, not a guarantee or a performance benchmark. Per-command and suite deadlines bound failures separately. The existing Linux/KVM CLI smoke CI job runs managed and flat layouts and uploads reports/logs even on failure. This compact check complements, rather than replaces, the larger live invariant and benchmark matrices under `scripts/smoke/cli/`.
 
+For inherited-memory branch coverage, run `python3 scripts/smoke/cli/branch-preparation.py --binary build/msb --require-inherited-baseline`. This checks continuous RAM/disk writes, first-grandchild incremental capture, further descendants after source deletion, growth before a child's first branch, paused sources, interleaved durable capture, optional RAM-cache fallback, compaction, and cold restart. It retains runtime phase logs and checks the actual capture mode, not just command success.
+
+For Linux descriptor-backed branching, also run the runtime `memory_handoff::`, `control::`, `launch::`, and `checkpoint::` unit tests. Live qualification must verify sealed memfd ownership, source deletion, private-write isolation, further descendants, and cancellation. Measure concurrent fan-out separately from single-branch latency; report proportional set size and unique backing allocation separately, since adding them would count shared RAM twice.
+
 ## Benchmarking
 
 The benchmark suite lives in its own repository:

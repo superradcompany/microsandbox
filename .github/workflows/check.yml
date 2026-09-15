@@ -835,7 +835,7 @@ jobs:
           npm ci --ignore-scripts
           npm run build:ci
 
-      - name: Build MCP server
+      - name: Build and test MCP server
         working-directory: mcp
         run: |
           node -e "
@@ -845,13 +845,14 @@ jobs:
             fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2));
           "
           npm install --no-package-lock --ignore-scripts
-          npm run build
+          npm test
 
       - name: Upload Node SDK artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: node-sdk-linux-x86_64
           path: |
+            sdk/node-ts/bin/microsandbox.cjs
             sdk/node-ts/native/index.cjs
             sdk/node-ts/native/index.d.ts
             sdk/node-ts/native/microsandbox.*.node
@@ -1565,11 +1566,14 @@ jobs:
           integration_config="$RUNNER_TEMP/msb-integration-config.json"
           printf '%s\n' '{"runtime":{"block_writeback":{"mode":"auto","pool_mib":4096}}}' > "$integration_config"
           export MSB_CONFIG_PATH="$integration_config"
+          # Control compatibility and binary-replacement fixtures require caller-selected
+          # historical binaries, existing VMs, and dummy secrets. Keep these manual native
+          # qualification cases out of the batch of self-provisioning integration tests.
           cargo-nextest nextest run \
             --archive-file build/rust-integration-tests.tar.zst \
             --workspace-remap "${{ github.workspace }}" \
             --run-ignored=only \
-            -E 'not (binary(=creation_progress_live) or binary(=eager_lifecycle_live))' \
+            -E 'not (binary(=creation_progress_live) or binary(=eager_lifecycle_live) or test(/^backend::local::control::.*::live_/) or test(/^runtime::launch_contract::tests::released_/))' \
             --test-threads 2
 
       # These tests require a captured guest and scoped fault injection; run every case

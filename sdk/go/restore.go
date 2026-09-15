@@ -31,6 +31,9 @@ func RestoreSandbox(ctx context.Context, snapshot, name string, opts ...RestoreO
 	for _, opt := range opts {
 		opt(&config)
 	}
+	if err := validateOwnedMounts(config.Volumes); err != nil {
+		return nil, err
+	}
 	inner, err := ffi.RestoreSandbox(ctx, name, buildFFIRestoreOptions(snapshot, config))
 	if err != nil {
 		return nil, wrapFFI(err)

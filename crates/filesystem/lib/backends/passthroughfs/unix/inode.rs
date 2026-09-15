@@ -496,7 +496,7 @@ pub(crate) fn forget_one_locked(
 
                     #[cfg(target_os = "macos")]
                     {
-                        let ufd = data.unlinked_fd.load(Ordering::Acquire);
+                        let ufd = data.unlinked_fd.swap(-1, Ordering::AcqRel);
                         if ufd >= 0 {
                             unsafe { libc::close(ufd as i32) };
                         }

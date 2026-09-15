@@ -22,7 +22,7 @@ void msb_free_string(char *ptr);
 
 /**
  * Push the SDK-resolved msb binary path into the Rust resolver's tier 2.
- * Called once from setup.EnsureInstalled after the install dir is known.
+ * An explicit process-level override; automatic home discovery does not set it.
  * Set-once: subsequent calls are ignored (matches the OnceLock in
  * microsandbox::config). Null or invalid-UTF-8 paths are silently ignored
  * since the resolver's lower tiers (~/.microsandbox/bin/msb, PATH) still
@@ -200,6 +200,28 @@ char *msb_sandbox_branch(uint64_t cancel_id,
                          const char *child,
                          unsigned char *buf,
                          uintptr_t buf_len);
+
+/**
+ * Capture once for a JSON request containing child names and return named outcomes.
+ */
+char *msb_sandbox_branch_many(uint64_t cancel_id,
+                              Handle handle,
+                              const char *source,
+                              const char *names,
+                              bool record_integrity,
+                              unsigned char *buf,
+                              uintptr_t buf_len);
+
+/**
+ * Branch with explicit disk content integrity, retaining the original branch ABI.
+ */
+char *msb_sandbox_branch_with_options(uint64_t cancel_id,
+                                      Handle handle,
+                                      const char *source,
+                                      const char *child,
+                                      bool record_integrity,
+                                      unsigned char *buf,
+                                      uintptr_t buf_len);
 
 char *msb_sandbox_resume(uint64_t cancel_id, Handle handle, unsigned char *buf, uintptr_t buf_len);
 
@@ -1025,5 +1047,18 @@ char *msb_sandbox_restore(uint64_t cancel_id,
                           const char *opts_json,
                           unsigned char *buf,
                           uintptr_t buf_len);
+
+/**
+ * Resolve, install, or ensure a runtime pair, returning its JSON description.
+ *
+ * # Safety
+ * Input strings must be NUL-terminated and the output buffer writable for `buf_len` bytes.
+ */
+char *msb_runtime_setup(uint64_t cancel_id,
+                        const char *operation,
+                        const char *config_json,
+                        const char *options_json,
+                        unsigned char *buf,
+                        uintptr_t buf_len);
 
 #endif  /* MICROSANDBOX_GO_FFI_H */

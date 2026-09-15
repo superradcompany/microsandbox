@@ -98,6 +98,39 @@ describe("intoRootfsSource", () => {
 });
 
 describe("MountBuilder", () => {
+  it("preserves owned storage without a named or host source", () => {
+    const directory = new MountBuilder("/cache")
+      .owned({ quotaMib: 512 }).owner(0, 0).build();
+    expect(directory).toMatchObject({
+      kind: "owned", ownedKind: "dir", quotaMib: 512,
+      overrideUid: 0, overrideGid: 0,
+    });
+    expect(directory.host).toBeUndefined();
+    expect(directory.name).toBeUndefined();
+    const disk = new MountBuilder("/data")
+      .owned({ kind: "disk", sizeMib: 10240 }).noexec().nosuid().nodev().build();
+    expect(disk).toMatchObject({
+      kind: "owned", ownedKind: "disk", sizeMib: 10240,
+      noexec: true, nosuid: true, nodev: true,
+    });
+    expect(disk.host).toBeUndefined();
+    expect(disk.name).toBeUndefined();
+    expect(disk.statVirtualization).toBeUndefined();
+  });
+
+  it("rejects invalid owned storage settings", () => {
+    expect(() => new MountBuilder("/data").owned({ kind: "disk" }).build()).toThrow();
+    expect(() => new MountBuilder("/data").owned({ kind: "disk", sizeMib: 0 }).build()).toThrow();
+    expect(() => new MountBuilder("/data").owned({ sizeMib: 64 }).build()).toThrow();
+    expect(() => new MountBuilder("/data").owned({ kind: "disk", sizeMib: 64, quotaMib: 0 }).build()).toThrow();
+    expect(() => new MountBuilder("/data").owned({ kind: "disk", sizeMib: 64 }).owner(0, 0).build()).toThrow();
+    for (const size of [-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, 2 ** 32]) {
+      expect(() => new MountBuilder("/data").owned({ kind: "disk", sizeMib: size })).toThrow();
+    }
+    expect(() => new MountBuilder("/data").owned({ name: "shared" } as never)).toThrow(/unsupported owned/);
+    expect(() => new MountBuilder("/data").owned({ kind: "directory" } as never)).toThrow(/invalid owned/);
+  });
+
   it("builds a bind mount with default writeable flag", () => {
     const m = new MountBuilder("/data").bind("/host/data").build();
     expect(m).toEqual({

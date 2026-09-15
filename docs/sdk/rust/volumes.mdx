@@ -6,6 +6,19 @@ keywords: ["Rust SDK", "Rust volumes", "microsandbox volumes"]
 
 Create, manage, and mount named volumes. See [Volumes](/sandboxes/volumes) for usage examples.
 
+## Sandbox-owned mounts
+
+Local storage can belong directly to a sandbox, with no volume name or separate cleanup:
+
+```rust
+let sb = Sandbox::builder("worker").image("alpine")
+    .volume("/cache", |v| v.owned())
+    .volume("/data", |v| v.owned_with(|d| d.disk().size(1024_u32)))
+    .create().await?;
+```
+
+`.owned()` creates an empty directory. `.owned_with(...)` accepts `.directory().quota(...)` or `.disk().size(...)`; disks are raw ext4 and require a positive size. Common mount flags stay on `MountBuilder`. The backing survives stop/start, is captured by snapshots and branches, and is removed with the sandbox. Restore makes private copies automatically. Cloud rejects owned mounts.
+
 ## Volume
 
 #### <span className="msb-recv">Volume::</span><span className="msb-hn">get_default()</span>

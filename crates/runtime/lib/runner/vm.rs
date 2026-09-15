@@ -51,7 +51,8 @@ use crate::launch::FileMountConfig;
 #[cfg(unix)]
 pub use crate::launch::LIFECYCLE_LOCK_FD;
 pub use crate::launch::{
-    CONFIG_FD, MetricsSlotHandoff, PARENT_WATCH_DETACH, PARENT_WATCH_FD, STARTUP_FD, StartupCommand,
+    BRANCH_MEMORY_FD, CONFIG_FD, MetricsSlotHandoff, PARENT_WATCH_DETACH, PARENT_WATCH_FD,
+    STARTUP_FD, StartupCommand,
 };
 use crate::logging::LogLevel;
 use crate::metrics::run_metrics_sampler;
@@ -250,6 +251,10 @@ pub struct DiskMountSpec {
     /// Host path to the disk image file.
     pub host: PathBuf,
 
+    /// Runtime-recovered owned backing, ordered base to head. Empty means the ordinary single
+    /// `host` image; this field is never supplied through the cross-process launch contract.
+    pub layers: Vec<UpperLayerSpec>,
+
     /// Guest mount path. Not needed by the VMM, but carried here for
     /// logging/validation; agentd reads the canonical value from bootstrap.
     pub guest: String,
@@ -264,8 +269,11 @@ pub struct DiskMountSpec {
     pub readonly: bool,
 
     /// The trusted launcher established managed ownership and retained the disk mutation lock.
-    /// Only named disk volumes and this sandbox's restored private copies may set this flag.
+    /// Managed named disks, lifecycle-owned disks, and restored private copies may set this flag.
     pub snapshot_owned: bool,
+
+    /// Backing is collected with this sandbox, not a shared named disk.
+    pub lifecycle_owned: bool,
 }
 
 /// VM hardware and rootfs configuration.
@@ -343,6 +351,9 @@ pub struct VmConfig {
 
     /// Additional mounts as `tag:host_path[:opts]` strings.
     pub mounts: Vec<String>,
+
+    /// Required private volumes retained in every snapshot and branch.
+    pub owned_volumes: Vec<microsandbox_types::VolumeMount>,
 
     /// Isolated host-file mounts backed by synthetic one-entry filesystems.
     pub file_mounts: Vec<FileMountConfig>,
@@ -440,6 +451,7 @@ type VmBuildOutput = (
     GuestBootstrap,
     BindIdentityMapRegistration,
     Option<crate::checkpoint::RestoredAgentState>,
+    std::collections::BTreeMap<String, microsandbox_filesystem::OwnedDirectoryCheckpoint>,
 );
 
 /// Public runtime endpoints held back until a restored guest is activated.
@@ -664,6 +676,7 @@ fn run(
     crate::checkpoint::recover_runtime_owned_root(&config.runtime_dir, &mut config.vm).map_err(
         |error| RuntimeError::Custom(format!("recover runtime-owned root disk: {error}")),
     )?;
+    recover_owned_disk_layers(&config.runtime_dir, &mut config.vm.disks)?;
     // Heartbeats are per boot, while the runtime directory persists across starts.
     heartbeat::clear_stale(&config.runtime_dir)?;
     if config.vm.checkpoint_restore.is_some() {
@@ -1025,7 +1038,8 @@ fn run(
         bootstrap_frame,
         resolved_bootstrap,
         bind_identity_map,
-        restored_agent,
+        mut restored_agent,
+        owned_directory_checkpoints,
     ) = match build_result {
         Ok(vm) => vm,
         Err(e) => {
@@ -1102,6 +1116,10 @@ fn run(
             &config.agent_sock_path,
             Arc::clone(&shared.workload_control),
             Arc::clone(&shared.resident_paused),
+            restored_agent
+                .as_mut()
+                .and_then(|agent| agent.inherited_memory.take()),
+            owned_directory_checkpoints,
         );
         let context = super::control::ControlContext {
             executor: match executor {
@@ -1646,6 +1664,84 @@ fn validate_upper_layers(spec: &UpperSpec) -> RuntimeResult<Vec<UpperLayerSpec>>
     Ok(spec.layers.clone())
 }
 
+/// Resolve a journal before attachment or capture registration. Its nominal initial raw file
+/// may have been retired by restore or compaction, so it is not a fallback for an invalid chain.
+fn recover_owned_disk_layers(runtime_dir: &Path, disks: &mut [DiskMountSpec]) -> RuntimeResult<()> {
+    for disk in disks.iter_mut().filter(|disk| disk.lifecycle_owned) {
+        let chain = crate::checkpoint::load_runtime_owned_disk_chain(runtime_dir, &disk.id)
+            .map_err(|error| {
+                RuntimeError::Custom(format!("recover owned disk {}: {error}", disk.id))
+            })?;
+        let Some(chain) = chain else { continue };
+        if chain.device_id != disk.id {
+            return Err(RuntimeError::Custom(format!(
+                "owned disk {} journal has a different device identity",
+                disk.id
+            )));
+        }
+        disk.layers = chain
+            .layers
+            .into_iter()
+            .map(|layer| {
+                Ok(UpperLayerSpec {
+                    path: layer.path,
+                    format: validate_disk_format(Some(&layer.format)).map_err(|error| {
+                        RuntimeError::Custom(format!(
+                            "owned disk {} layer format: {error}",
+                            disk.id
+                        ))
+                    })?,
+                })
+            })
+            .collect::<RuntimeResult<Vec<_>>>()?;
+        if disk.layers.is_empty() {
+            return Err(RuntimeError::Custom(format!(
+                "owned disk {} journal has no layers",
+                disk.id
+            )));
+        }
+        validate_disk_mount_layers(disk)?;
+    }
+    Ok(())
+}
+
+/// Only owned journals may replace one mount's physical image with an explicit dependency chain.
+fn validate_disk_mount_layers(disk: &DiskMountSpec) -> RuntimeResult<Option<Vec<UpperLayerSpec>>> {
+    if disk.layers.is_empty() {
+        if !disk.host.exists() {
+            return Err(RuntimeError::Custom(format!(
+                "disk {}: host path not found: {}",
+                disk.id,
+                disk.host.display()
+            )));
+        }
+        return Ok(None);
+    }
+    if !disk.lifecycle_owned || !disk.snapshot_owned {
+        return Err(RuntimeError::Custom(format!(
+            "disk {}: explicit mount chains require owned storage",
+            disk.id
+        )));
+    }
+    let layers = validate_upper_layers(&UpperSpec {
+        layers: disk.layers.clone(),
+        read_only: disk.readonly,
+    })?;
+    for layer in &layers {
+        if !std::fs::symlink_metadata(&layer.path)?
+            .file_type()
+            .is_file()
+        {
+            return Err(RuntimeError::Custom(format!(
+                "owned disk {}: layer is not a regular file: {}",
+                disk.id,
+                layer.path.display()
+            )));
+        }
+    }
+    Ok(Some(layers))
+}
+
 fn writeback_limited_disk_paths(vm: &VmConfig) -> RuntimeResult<Vec<PathBuf>> {
     if vm.block_writeback_limit_bytes.is_none() {
         return Ok(Vec::new());
@@ -1678,12 +1774,13 @@ fn writeback_limited_disk_paths(vm: &VmConfig) -> RuntimeResult<Vec<PathBuf>> {
         }
     }
 
-    paths.extend(
-        vm.disks
-            .iter()
-            .filter(|disk| is_writeback_limited_disk(disk.format, disk.readonly))
-            .map(|disk| disk.host.clone()),
-    );
+    paths.extend(vm.disks.iter().filter_map(|disk| {
+        let (path, format) = disk
+            .layers
+            .last()
+            .map_or((&disk.host, disk.format), |head| (&head.path, head.format));
+        is_writeback_limited_disk(format, disk.readonly).then(|| path.clone())
+    }));
     Ok(paths)
 }
 
@@ -1734,6 +1831,7 @@ fn build_vm(
     // as a dedicated bulk port. Once dual-port is selected it returns to the small control queue.
     let agent_queue_size = agent_primary_queue_size(bulk_console_backend.is_some());
     let vm = &config.vm;
+    let mut owned_directory_checkpoints = std::collections::BTreeMap::new();
     // Decode once before constructing devices: unavailable disks need the exact
     // captured capacity/features, never guessed geometry or a temporary backing.
     let prepared_restore = vm
@@ -1744,6 +1842,7 @@ fn build_vm(
                 crate::checkpoint::PreparedCheckpointRestore::open_local(
                     restore.closure.clone(),
                     &restore.checkpoint_id,
+                    restore.memory_descriptor,
                 )
             } else {
                 crate::checkpoint::PreparedCheckpointRestore::open(
@@ -2140,6 +2239,30 @@ fn build_vm(
         // Keep the host path as a PathBuf so mount failures can format it
         // without relying on the string-only mount spec field.
         let host_path = PathBuf::from(&parsed.host_path);
+        let owned_mount = vm.owned_volumes.iter().find(|mount| {
+            matches!(
+                mount,
+                microsandbox_types::VolumeMount::Owned {
+                    storage: microsandbox_types::OwnedVolumeStorage::Directory { .. },
+                    ..
+                }
+            ) && microsandbox_types::owned_volume_mount_id(mount.guest()) == tag
+                && vm
+                    .bootstrap
+                    .dir_mounts
+                    .iter()
+                    .any(|binding| binding.tag == tag && binding.guest_path == mount.guest())
+        });
+        let owned_checkpoint =
+            owned_mount.map(|_| microsandbox_filesystem::OwnedDirectoryCheckpoint::default());
+        if let Some(checkpoint) = &owned_checkpoint {
+            if let Some(restore) = &vm.checkpoint_restore {
+                checkpoint
+                    .set_restore(&restore.closure.join("owned").join(&tag))
+                    .map_err(|error| RuntimeError::Custom(format!("owned mount {tag}: {error}")))?;
+            }
+            owned_directory_checkpoints.insert(tag.clone(), checkpoint.clone());
+        }
         // Explicit guest owner for host files with no per-file override. Parsing
         // guarantees uid/gid come as a pair, so this is Some only when both are set.
         let override_owner = match (parsed.override_uid, parsed.override_gid) {
@@ -2166,7 +2289,8 @@ fn build_vm(
         }
         let cfg = PassthroughConfig {
             root_dir: host_path.clone(),
-            external_checkpoint: Some(external_options),
+            external_checkpoint: owned_checkpoint.is_none().then_some(external_options),
+            owned_checkpoint,
             inject_init: false,
             stat_virtualization: parsed.stat_virtualization,
             host_permissions: parsed.host_permissions,
@@ -2182,7 +2306,7 @@ fn build_vm(
             ..Default::default()
         };
         let backend = match PassthroughFs::new(cfg) {
-            Err(error) if relaxed && restore_binding.is_some()
+            Err(error) if owned_mount.is_none() && relaxed && restore_binding.is_some()
                 && matches!(error.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::NotADirectory) => {
                 external_mount_reports.last_mut().expect("restore report").unavailable = Some(format!("external export cannot be opened: {error}; filesystem operations return EIO"));
                 builder = builder.fs(move |fs| fs.tag(&tag).custom(Box::new(microsandbox_filesystem::UnavailableFs::default())));
@@ -2265,13 +2389,7 @@ fn build_vm(
             });
             continue;
         };
-        if !disk.host.exists() {
-            return Err(RuntimeError::Custom(format!(
-                "disk {}: host path not found: {}",
-                disk.id,
-                disk.host.display()
-            )));
-        }
+        let layers = validate_disk_mount_layers(disk)?;
         tracing::debug!(
             id = %disk.id,
             guest = %disk.guest,
@@ -2283,11 +2401,22 @@ fn build_vm(
         );
         let id = disk.id.clone();
         let host = disk.host.clone();
-        let format = disk.format;
+        let format = layers
+            .as_ref()
+            .and_then(|layers| layers.last())
+            .map_or(disk.format, |head| head.format);
         let readonly = disk.readonly;
+        let direct_io = layers.is_some()
+            && cfg!(target_os = "linux")
+            && matches!(format, msb_krun::DiskImageFormat::Qcow2);
         let writeback_limit = writeback_limit.cloned();
         builder = builder.disk(move |d| {
-            let mut d = d.id(&id).path(&host).format(format).read_only(readonly);
+            let d = d.id(&id);
+            let d = match layers {
+                Some(layers) => attach_upper_layers(d, layers).direct_io(direct_io),
+                None => d.path(&host),
+            };
+            let mut d = d.format(format).read_only(readonly);
             if readonly {
                 // Read-only images can skip host-side sync entirely.
                 d = d
@@ -2539,12 +2668,11 @@ fn build_vm(
         .map_err(|e| RuntimeError::Custom(format!("build VM: {e}")))?;
     let restored_agent = if let Some(restore) = &config.vm.checkpoint_restore {
         let prepared = prepared_restore.expect("restore was admitted before device construction");
-        if let Some(admitted) = prepared.disk_closure() {
-            // Reuse this process's exact admitted file bindings before the closure is moved
-            // into RAM restoration. The later coordinator opens the completed journal.
-            crate::checkpoint::seed_restored_root_disk(&config.runtime_dir, &config.vm, admitted)
-                .map_err(RuntimeError::Custom)?;
-        }
+        // Local branches and durable restores both retain exact immutable disk bindings.
+        // Seed before moving the prepared sources into VM construction.
+        prepared
+            .seed_root_disk(&config.runtime_dir, &config.vm)
+            .map_err(RuntimeError::Custom)?;
         let cache_root = restore
             .forked
             .then(|| {
@@ -2580,6 +2708,7 @@ fn build_vm(
         bootstrap,
         bind_identity_map,
         restored_agent,
+        owned_directory_checkpoints,
     ))
 }
 
@@ -3572,7 +3701,8 @@ mod tests {
         bind_identity_map_for_mount, bootstrap_trampoline_backend, read_parent_watchdog_signal,
     };
     use super::{
-        UpperLayerSpec, UpperSpec, prepare_runtime_restore_namespace, validate_upper_layers,
+        DiskMountSpec, UpperLayerSpec, UpperSpec, prepare_runtime_restore_namespace,
+        recover_owned_disk_layers, validate_disk_mount_layers, validate_upper_layers,
     };
 
     use microsandbox_filesystem::{Context, DynFileSystem, FsOptions};
@@ -3588,6 +3718,102 @@ mod tests {
             uid: 0,
             gid: 0,
             pid: 1,
+        }
+    }
+
+    fn owned_disk_spec(directory: &std::path::Path, readonly: bool) -> DiskMountSpec {
+        DiskMountSpec {
+            id: microsandbox_types::owned_volume_mount_id("/data"),
+            host: directory.join("disk.raw"),
+            layers: Vec::new(),
+            guest: "/data".into(),
+            format: msb_krun::DiskImageFormat::Raw,
+            fstype: Some("ext4".into()),
+            readonly,
+            snapshot_owned: true,
+            lifecycle_owned: true,
+        }
+    }
+
+    #[test]
+    fn owned_disk_attachment_uses_explicit_layers_without_the_nominal_raw_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut disk = owned_disk_spec(temp.path(), true);
+        for (name, format) in [
+            ("sealed.raw", msb_krun::DiskImageFormat::Raw),
+            ("head.qcow2", msb_krun::DiskImageFormat::Qcow2),
+        ] {
+            let path = temp.path().join(name);
+            std::fs::write(&path, b"attachment path fixture").unwrap();
+            disk.layers.push(UpperLayerSpec { path, format });
+        }
+        assert!(!disk.host.exists());
+        assert_eq!(
+            validate_disk_mount_layers(&disk).unwrap(),
+            Some(disk.layers.clone())
+        );
+        assert!(disk.readonly);
+        disk.lifecycle_owned = false;
+        assert!(validate_disk_mount_layers(&disk).is_err());
+        disk.lifecycle_owned = true;
+        std::fs::remove_file(&disk.layers[0].path).unwrap();
+        assert!(validate_disk_mount_layers(&disk).is_err());
+    }
+
+    #[test]
+    fn owned_disk_start_recovers_journal_without_changing_readonly_or_falling_back() {
+        for readonly in [false, true] {
+            let home = tempfile::tempdir().unwrap();
+            let runtime = home.path().join("runtime");
+            let id = microsandbox_types::owned_volume_mount_id("/data");
+            let directory = home.path().join("owned-volumes").join(&id);
+            std::fs::create_dir_all(&directory).unwrap();
+            let base = directory.join("sealed.raw");
+            let head = directory.join("head.qcow2");
+            std::fs::write(&base, vec![37; 1024 * 1024]).unwrap();
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(microsandbox_image::checkpoint::create_qcow2_overlay(
+                    &head,
+                    1024 * 1024,
+                    &base,
+                    "raw",
+                ))
+                .unwrap();
+            crate::checkpoint::seed_runtime_owned_disk_chain(
+                &runtime,
+                &id,
+                &directory.join("disk.raw"),
+                &[
+                    crate::checkpoint::RuntimeOwnedRootLayer {
+                        path: base.clone(),
+                        format: "raw".into(),
+                    },
+                    crate::checkpoint::RuntimeOwnedRootLayer {
+                        path: head.clone(),
+                        format: "qcow2".into(),
+                    },
+                ],
+                readonly,
+            )
+            .unwrap();
+            let mut disks = vec![owned_disk_spec(&directory, readonly)];
+            recover_owned_disk_layers(&runtime, &mut disks).unwrap();
+            assert_eq!(disks[0].readonly, readonly);
+            assert_eq!(disks[0].layers.len(), 2);
+            assert_eq!(disks[0].layers[0].path, base);
+            assert_eq!(disks[0].layers[1].path, head);
+            assert!(!disks[0].host.exists());
+            // Even an existing nominal image cannot replace a missing journal dependency.
+            std::fs::write(&disks[0].host, vec![99; 1024 * 1024]).unwrap();
+            std::fs::remove_file(&base).unwrap();
+            assert!(recover_owned_disk_layers(&runtime, &mut disks).is_err());
+            let mut external = owned_disk_spec(&directory, readonly);
+            external.lifecycle_owned = false;
+            recover_owned_disk_layers(&runtime, std::slice::from_mut(&mut external)).unwrap();
+            assert!(external.layers.is_empty());
         }
     }
 

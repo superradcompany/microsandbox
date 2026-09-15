@@ -288,7 +288,7 @@ impl SandboxHandle {
         SandboxModificationBuilder::new(self.backend.clone(), self.name.clone())
     }
 
-    /// Explicitly compact the root disk's sealed backing prefix, running or stopped.
+    /// Compact sealed backing layers of the root and sandbox-owned data disks, running or stopped.
     pub fn compact(&self) -> super::DiskCompactionBuilder {
         super::DiskCompactionBuilder::new(self.backend.clone(), self.name.clone())
     }

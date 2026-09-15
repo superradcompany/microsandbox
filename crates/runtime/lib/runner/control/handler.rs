@@ -19,6 +19,17 @@ pub struct ControlContext {
 pub(crate) trait Handler: Send + Sync + 'static {
     fn handle(&self, request: ControlRequest) -> Response;
 
+    fn handle_json_with_memory(
+        &self,
+        value: serde_json::Value,
+        memory: Option<std::fs::File>,
+    ) -> Vec<u8> {
+        if memory.is_some() {
+            return b"{\"ok\":false,\"error\":\"unexpected control descriptor\"}\n".to_vec();
+        }
+        self.handle_json(value)
+    }
+
     fn handle_json(&self, value: serde_json::Value) -> Vec<u8> {
         let response = match serde_json::from_value(value) {
             Ok(request) => self.handle(request).json,
@@ -83,6 +94,14 @@ impl Reply {
 //--------------------------------------------------------------------------------------------------
 
 impl Handler for ControlContext {
+    fn handle_json_with_memory(
+        &self,
+        value: serde_json::Value,
+        memory: Option<std::fs::File>,
+    ) -> Vec<u8> {
+        super::legacy::respond_with_memory(&value.to_string(), self, memory)
+    }
+
     fn handle_json(&self, value: serde_json::Value) -> Vec<u8> {
         super::legacy::respond_to_line(&value.to_string(), self)
     }

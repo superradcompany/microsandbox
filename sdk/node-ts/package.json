@@ -41,7 +41,7 @@
     "postbuild:native:ci": "npm run typecheck:native",
     "build:native:debug": "napi build --platform --js index.cjs --dts index.d.ts --output-dir native",
     "postbuild:native:debug": "npm run typecheck:native",
-    "build:ts": "tsc -p tsconfig.json",
+    "build:ts": "npm run build --workspace @microsandbox/types && tsc -p tsconfig.json",
     "build": "npm run build:native && npm run build:ts",
     "build:ci": "npm run build:native:ci && npm run build:ts",
     "test": "vitest run",

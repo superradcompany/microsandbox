@@ -6,6 +6,7 @@ import type {
   HostPermissions,
   MountOptions,
   NetworkPolicy,
+  OwnedVolumeStorage,
   SandboxLogLevel,
   SandboxPolicy,
   SecretSubstitution,
@@ -102,6 +103,28 @@ export type CloudRootfsSource = {
 };
 
 export type CloudVolumeMount = {
+  "type": "owned";
+  /**
+   * Absolute guest mount path.
+   */
+  guest: string;
+  /**
+   * Private directory or ext4 storage.
+   */
+  storage: OwnedVolumeStorage;
+  /**
+   * Guest mount options.
+   */
+  options: MountOptions;
+  /**
+   * Directory stat policy.
+   */
+  stat_virtualization: StatVirtualization;
+  /**
+   * Directory host permission policy.
+   */
+  host_permissions: HostPermissions;
+} | {
   "type": "bind";
   /**
    * Host directory to bind into the guest.

@@ -191,6 +191,20 @@ where
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
 
+#[cfg(target_os = "macos")]
+impl Drop for InodeData {
+    fn drop(&mut self) {
+        // A prepared restore may be validated and discarded without receiving a guest
+        // FORGET. The inode must release its retained descriptor in that path as well.
+        let fd = self
+            .unlinked_fd
+            .swap(-1, std::sync::atomic::Ordering::AcqRel);
+        if fd >= 0 {
+            unsafe { libc::close(fd as i32) };
+        }
+    }
+}
+
 impl InodeAltKey {
     /// Create a new alternate key from stat fields.
     #[cfg(target_os = "linux")]

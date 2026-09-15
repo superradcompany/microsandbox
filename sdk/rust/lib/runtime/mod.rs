@@ -9,6 +9,7 @@ mod launch_contract;
 mod launch_input;
 #[cfg(feature = "net")]
 mod network_slot;
+pub(crate) mod owned_volumes;
 #[cfg(windows)]
 pub(crate) mod ownership;
 // The pure identity helpers stay compiled (and unit-tested) on every platform;
