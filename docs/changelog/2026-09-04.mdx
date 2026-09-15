@@ -1,0 +1,31 @@
+---
+title: "Week of September 4, 2026"
+description: "Outbound SOCKS proxies for sandbox traffic, SOCKS5 UDP relay and proxy authentication, and a fix for upgrades from earlier releases."
+icon: "bolt"
+---
+
+<Tip>
+  **Released this week:** [v0.6.17](https://github.com/superradcompany/microsandbox/releases/tag/v0.6.17)
+</Tip>
+
+## New features
+
+**Outbound SOCKS proxies**
+
+Sandboxes can now route their outbound TCP traffic through an external SOCKS4 or SOCKS5 proxy, such as mitmproxy. Guest applications connect to their normal destinations; microsandbox forwards eligible connections through the proxy on the host. With your own CA certificates installed in the sandbox, you can log and inspect the traffic. Configure the proxy through the CLI or the Rust, TypeScript, Python, Go, and Ruby SDKs.
+
+```bash
+msb run python --proxy socks5://127.0.0.1:1080
+```
+
+See [Proxy](/networking/outbound-proxy).
+
+**SOCKS5 UDP relay and proxy authentication**
+
+SOCKS5 proxies now carry non-DNS UDP traffic in addition to TCP. Both proxy types also support authentication. SOCKS4 accepts an optional user ID, and SOCKS5 accepts a username and a password read from a host environment variable. The password stays out of your code and shell history.
+
+See [SOCKS4 user ID](/networking/outbound-proxy#socks4-user-id) and [SOCKS5 credentials](/networking/outbound-proxy#socks5-credentials).
+
+## Bug fixes
+
+- Upgrading an existing installation from an earlier release works again. microsandbox now preserves the released database migration order, so databases created by v0.6.15 upgrade cleanly.

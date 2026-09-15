@@ -53,7 +53,7 @@ The TypeScript and Rust examples disable the network device. Python `Network.non
 
 <Tooltip tip="Managed cloud deployments choose the platform isolation profile; per-sandbox and local-operator profile overrides are not accepted."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
-`single-tenant` is the default and preserves the network configuration requested by the sandbox. `multi-tenant` adds a host-runtime isolation floor: traffic must pass both the platform public-network policy and the sandbox's policy, DNS rebinding protection is forced on, custom DNS servers and interface overrides are removed, host CA import and published ports are disabled, and connection limits are capped. Sandbox policy can further restrict this floor but cannot broaden it.
+`single-tenant` is the default and preserves the network configuration requested by the sandbox. `multi-tenant` adds a host-runtime isolation floor: traffic must pass both the platform public-network policy and the sandbox's policy, and DNS rebinding protection is forced on. Custom DNS servers and interface overrides are removed, host CA import and published ports are disabled, and connection limits are capped. Sandbox policy can further restrict this floor but cannot broaden it.
 
 <CodeGroup>
 ```typescript TypeScript
