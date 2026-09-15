@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
+use microsandbox::snapshot::CloneOpts as RustCloneOpts;
 use microsandbox::snapshot::SaveOpts as RustSaveOpts;
 use microsandbox::{
     Snapshot as RustSnapshot, SnapshotFormat as RustSnapshotFormat,
@@ -52,6 +53,7 @@ impl PySnapshot {
         force = false,
         record_integrity = false,
         resumable = false,
+        compact = false,
     ))]
     fn create<'py>(
         py: Python<'py>,
@@ -62,6 +64,7 @@ impl PySnapshot {
         force: bool,
         record_integrity: bool,
         resumable: bool,
+        compact: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let mut builder = RustSnapshot::builder(name).from_sandbox(&from_sandbox);
@@ -82,7 +85,55 @@ impl PySnapshot {
             if resumable {
                 builder = builder.resumable();
             }
+            if compact {
+                builder = builder.compact();
+            }
             let snap = builder.create().await.map_err(to_py_err)?;
+            Ok(PySnapshot::from_rust(snap))
+        })
+    }
+
+    /// Clone an existing snapshot (path, name, or digest) into a new one.
+    ///
+    /// Never mutates the source: writes a new artifact under `new_name`,
+    /// leaving the source and anything referencing its digest untouched.
+    /// `compact=True` also reclaims host disk space for blocks the guest
+    /// filesystem has already freed. `root_disk_size_mib`, when given,
+    /// grows the clone's root disk (grow-only — a target at or below the
+    /// source's current size raises).
+    #[allow(clippy::too_many_arguments)]
+    #[staticmethod]
+    #[pyo3(signature = (
+        source,
+        new_name,
+        *,
+        dest_dir = None,
+        labels = None,
+        force = false,
+        compact = false,
+        root_disk_size_mib = None,
+    ))]
+    fn clone<'py>(
+        py: Python<'py>,
+        source: String,
+        new_name: String,
+        dest_dir: Option<PathBuf>,
+        labels: Option<HashMap<String, String>>,
+        force: bool,
+        compact: bool,
+        root_disk_size_mib: Option<u32>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let opts = RustCloneOpts {
+                dest_dir,
+                labels: labels.map(|m| m.into_iter().collect()).unwrap_or_default(),
+                force,
+                compact,
+                root_disk_size_mib,
+            };
+            let snap = RustSnapshot::clone_snapshot(&source, &new_name, opts)
+                .await
+                .map_err(to_py_err)?;
             Ok(PySnapshot::from_rust(snap))
         })
     }

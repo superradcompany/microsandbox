@@ -885,6 +885,18 @@ class Snapshot:
         force: bool = False,
         record_integrity: bool = False,
         resumable: bool = False,
+        compact: bool = False,
+    ) -> Snapshot: ...
+    @staticmethod
+    async def clone(
+        source: str,
+        new_name: str,
+        *,
+        dest_dir: str | os.PathLike[str] | None = None,
+        labels: dict[str, str] | None = None,
+        force: bool = False,
+        compact: bool = False,
+        root_disk_size_mib: int | None = None,
     ) -> Snapshot: ...
     @staticmethod
     async def open(path_or_name: str) -> Snapshot: ...

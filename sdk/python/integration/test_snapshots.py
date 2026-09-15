@@ -73,3 +73,38 @@ async def test_snapshot_create_open_list_and_boot(sandbox_name):
         await remove_sandbox(fork_name)
         await remove_sandbox(base_name)
         await remove_snapshot(snapshot_name)
+
+
+@pytest.mark.asyncio
+async def test_snapshot_clone_compacts_and_grows_root_disk(sandbox_name):
+    base_name = sandbox_name("py-sdk-clone-base")
+    snapshot_name = sandbox_name("py-sdk-clone-snap")
+    cloned_name = sandbox_name("py-sdk-clone-cloned")
+
+    await remove_sandbox(base_name)
+    await remove_snapshot(cloned_name)
+    await remove_snapshot(snapshot_name)
+
+    base = await Sandbox.create(base_name, image=IMAGE, cpus=1, memory=512, replace=True)
+    try:
+        await base.stop()
+
+        base_handle = await Sandbox.get(base_name)
+        snapshot = await base_handle.snapshot(snapshot_name)
+
+        cloned = await Snapshot.clone(
+            snapshot_name,
+            cloned_name,
+            compact=True,
+            root_disk_size_mib=8192,
+        )
+        assert cloned.digest != snapshot.digest
+        assert cloned.parent == snapshot.digest
+        assert cloned.size_bytes == 8192 * 1024 * 1024
+
+        with pytest.raises(Exception):
+            await Snapshot.clone(snapshot_name, cloned_name + "-too-small", root_disk_size_mib=1)
+    finally:
+        await remove_snapshot(cloned_name)
+        await remove_sandbox(base_name)
+        await remove_snapshot(snapshot_name)
