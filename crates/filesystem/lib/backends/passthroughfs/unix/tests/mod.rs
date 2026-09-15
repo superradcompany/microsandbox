@@ -1,9 +1,11 @@
+mod test_anchor_mode;
 mod test_bootstrap;
 mod test_concurrency;
 mod test_config;
 mod test_corrupt_xattr;
 mod test_create_ops;
 mod test_dir_ops;
+mod test_exfat_fixture;
 mod test_file_ops;
 mod test_flag_translation;
 mod test_host_permissions;
@@ -44,6 +46,8 @@ const LINUX_EPERM: i32 = 1;
 const LINUX_ENOENT: i32 = 2;
 #[allow(dead_code)]
 const LINUX_EIO: i32 = 5;
+#[cfg(target_os = "macos")]
+const LINUX_ENXIO: i32 = 6;
 const LINUX_EBADF: i32 = 9;
 const LINUX_EACCES: i32 = 13;
 const LINUX_EEXIST: i32 = 17;
@@ -62,6 +66,8 @@ const LINUX_EOPNOTSUPP: i32 = 95;
 /// Linux open flags (FUSE always passes Linux values, even on macOS).
 const LINUX_O_RDWR: u32 = 2;
 const LINUX_O_TRUNC: u32 = 0x200;
+#[cfg(target_os = "macos")]
+const LINUX_O_NONBLOCK: u32 = 0x800;
 
 /// Root inode number (FUSE convention).
 const ROOT_INODE: u64 = 1;
@@ -131,6 +137,17 @@ impl TestSandbox {
             _tmp: tmp,
             root,
         }
+    }
+
+    /// Create a sandbox forced into anchor mode, as if the host root had no
+    /// volfs support. Only meaningful on macOS.
+    #[cfg(target_os = "macos")]
+    fn with_anchor_mode() -> Self {
+        let sb = Self::new();
+        sb.fs
+            .volfs_supported
+            .store(false, std::sync::atomic::Ordering::Release);
+        sb
     }
 
     /// Get a default Context (uid=0, gid=0 — root user).

@@ -5,13 +5,13 @@
 
 #[cfg(target_os = "macos")]
 use std::sync::atomic::AtomicI64;
-use std::{borrow::Borrow, collections::BTreeMap, sync::atomic::AtomicU64};
-#[cfg(target_os = "linux")]
 use std::{
-    collections::BTreeSet,
-    fs::File,
-    sync::{Mutex, RwLock},
+    borrow::Borrow,
+    collections::{BTreeMap, BTreeSet},
+    sync::{RwLock, atomic::AtomicU64},
 };
+#[cfg(target_os = "linux")]
+use std::{fs::File, sync::Mutex};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -48,7 +48,6 @@ pub(crate) struct InodeAltKey {
 }
 
 /// One namespace alias for a tracked passthrough inode.
-#[cfg(target_os = "linux")]
 #[derive(Clone, PartialOrd, Ord, PartialEq, Eq, Debug)]
 pub(crate) struct NamespaceAlias {
     pub parent: u64,
@@ -75,19 +74,27 @@ pub(crate) struct InodeData {
     pub mnt_id: u64,
 
     /// Current anchor parent inode for secure reopen-from-root.
-    #[cfg(target_os = "linux")]
+    ///
+    /// Tracked on both platforms; on macOS populated only for shares in
+    /// anchor mode.
     pub anchor_parent: AtomicU64,
 
     /// Current anchor name under `anchor_parent`.
-    #[cfg(target_os = "linux")]
+    ///
+    /// Tracked on both platforms; on macOS populated only for shares in
+    /// anchor mode.
     pub anchor_name: RwLock<Vec<u8>>,
 
     /// All known live aliases for this inode within the exported namespace.
-    #[cfg(target_os = "linux")]
+    ///
+    /// Tracked on both platforms; on macOS populated only for shares in
+    /// anchor mode.
     pub aliases: RwLock<BTreeSet<NamespaceAlias>>,
 
     /// Number of descendant anchors that currently depend on this inode.
-    #[cfg(target_os = "linux")]
+    ///
+    /// Tracked on both platforms; on macOS populated only for shares in
+    /// anchor mode.
     pub anchor_children: AtomicU64,
 
     /// Retained fd for detached objects that lost their last visible alias.
@@ -186,6 +193,23 @@ where
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
 
+/// Close the retained fd when the last reference to the inode goes away.
+///
+/// The fd is a raw number, so nothing else would close it when the inode table
+/// is cleared on `destroy()` or dropped without a FORGET from the guest. Every
+/// other owner hands the fd over: `store_unlinked_fd` closes the value it
+/// replaces, and inode removal now relies on this destructor, so the fd is
+/// closed exactly once.
+#[cfg(target_os = "macos")]
+impl Drop for InodeData {
+    fn drop(&mut self) {
+        let fd = self.unlinked_fd.load(std::sync::atomic::Ordering::Acquire);
+        if fd >= 0 {
+            unsafe { libc::close(fd as i32) };
+        }
+    }
+}
+
 impl InodeAltKey {
     /// Create a new alternate key from stat fields.
     #[cfg(target_os = "linux")]
@@ -200,7 +224,6 @@ impl InodeAltKey {
     }
 }
 
-#[cfg(target_os = "linux")]
 impl NamespaceAlias {
     pub fn new(parent: u64, name: &[u8]) -> Self {
         Self {

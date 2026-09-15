@@ -204,6 +204,9 @@ impl PassthroughFsBuilder {
             unsafe { File::from_raw_fd(fd) }
         };
 
+        #[cfg(target_os = "macos")]
+        let volfs_supported = AtomicBool::new(super::probe_volfs_support(root_fd.as_raw_fd()));
+
         let cfg = cfg_probe;
 
         let quota = cfg.quota_bytes.map(|limit| {
@@ -229,7 +232,15 @@ impl PassthroughFsBuilder {
             has_openat2,
             #[cfg(target_os = "linux")]
             proc_self_fd,
+            #[cfg(target_os = "macos")]
+            volfs_supported,
             quota,
+            #[cfg(all(test, target_os = "macos"))]
+            before_blocking_fifo_open: std::sync::RwLock::new(None),
+            #[cfg(all(test, target_os = "macos"))]
+            fifo_endpoint_opens: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(all(test, target_os = "macos"))]
+            before_name_bound_syscall: std::sync::RwLock::new(None),
         })
     }
 }
