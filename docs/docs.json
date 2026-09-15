@@ -349,7 +349,7 @@
             ]
           },
           {
-            "group": "CI/CD & Automation",
+            "group": "CI/CD & Jobs",
             "icon": "code-pull-request",
             "pages": [
               "examples/ci-cd/github-actions-runner",
