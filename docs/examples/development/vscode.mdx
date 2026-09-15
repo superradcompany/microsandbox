@@ -1,0 +1,173 @@
+---
+title: Using with VS Code
+sidebarTitle: VS Code
+description: Edit files and run development tools inside a local sandbox with VS Code Remote-SSH
+icon: "code"
+---
+
+Use VS Code on your host to work inside a local microsandbox. Microsandbox serves SSH on the host and forwards commands and file operations into the guest, so you do not need to install an SSH daemon in the sandbox.
+
+<Note>
+  This guide uses local sandboxes. `msb ssh serve` is not available with the cloud backend.
+</Note>
+
+## Prerequisites
+
+- Install [VS Code and the Remote-SSH extension](https://code.visualstudio.com/docs/remote/ssh).
+- Have OpenSSH available on your host.
+- Have a local sandbox ready. This guide uses `devbox`; replace it with your sandbox name, such as `msb-748c0698`.
+- Use a guest image that meets [VS Code's Linux requirements](https://code.visualstudio.com/docs/remote/linux). Minimal images may need additional packages; Alpine is not supported by Remote-SSH. Allow enough memory for VS Code Server and your development tools.
+
+Run the setup commands below in a terminal on your **host**, where `msb` is installed.
+
+## Step 1: Authorize your SSH key
+
+If you already have an SSH key, authorize its public key:
+
+```bash
+msb ssh authorize --file ~/.ssh/id_ed25519.pub
+```
+
+If you do not have a key at that path, create one first with `ssh-keygen -t ed25519`, then run the authorization command. Use your own key path if it differs from the example.
+
+## Step 2: Serve the sandbox
+
+```bash
+msb ssh serve devbox
+```
+
+The SSH listener binds to `127.0.0.1:2222` by default. Leave this terminal running while you use VS Code. Open another host terminal for the next steps.
+
+## Step 3: Add an SSH configuration
+
+Add this entry to `~/.ssh/config` on your host:
+
+```sshconfig
+Host devbox.msb
+  HostName 127.0.0.1
+  Port 2222
+  User root
+  IdentityFile ~/.ssh/id_ed25519
+  IdentitiesOnly yes
+```
+
+`devbox.msb` is a convenient SSH alias. The running `msb ssh serve devbox` command determines which sandbox receives the connection.
+
+Test the connection from the host:
+
+```bash
+ssh devbox.msb
+```
+
+On the first connection, SSH asks whether to trust the host key. Verify that it belongs to the sandbox you are serving, then type `yes` and press Enter. Once you reach the sandbox shell, run `exit` to return to your host.
+
+## Step 4: Connect from VS Code
+
+1. Open the Command Palette and run **Remote-SSH: Connect to Host...**.
+2. Select **devbox.msb**.
+3. Choose **Linux** if prompted for the remote platform.
+4. Wait for VS Code Server to finish setting up in the sandbox.
+5. Use **File > Open Folder...** to open your project directory inside the sandbox.
+
+The integrated terminal in this remote window runs inside the sandbox. Install the development tools and remote extensions your project needs there. Files you edit are sandbox files; connecting does not copy your host project into the guest.
+
+For an application running inside the sandbox, use VS Code's **Ports** view to forward its listening port to your host.
+
+<Note>
+  Leave **Remote.SSH: Remote Server Listen On Socket** disabled. Microsandbox supports local and dynamic TCP forwarding, which Remote-SSH can use, but does not support Unix socket forwarding.
+</Note>
+
+## Troubleshooting
+
+Use the symptom below to find the relevant checks and solution.
+
+| Symptom | What to check or change |
+| --- | --- |
+| Host key changed; forwarding disabled | [Remove the stale host entry after verifying the change](#remote-host-key-has-changed-port-forwarding-is-disabled). |
+| Authenticity prompt | [Verify and accept the sandbox's key](#the-authenticity-of-the-host-cannot-be-established). |
+| Permission denied | [Authorize the public key matching your SSH identity](#permission-denied-publickey). |
+| Connection refused or port occupied | [Keep the listener running or choose another port](#connection-refused-or-address-already-in-use). |
+| Session disconnects when idle | [Adjust the SSH inactivity timeout](#session-disconnects-when-idle). |
+| VS Code Server installation fails | [Check guest requirements, storage, and downloads](#vs-code-server-fails-to-install-or-start). |
+| Terminal works; extension host fails | [Check extension logs, libraries, architecture, and memory](#the-terminal-works-but-the-extension-host-fails). |
+
+### Remote host key has changed, port forwarding is disabled
+
+VS Code may report `MitmPortForwardingDisabled` when the key saved for `127.0.0.1:2222` differs from the key presented by the sandbox. This can happen when you serve a different sandbox on the same port or recreate a sandbox. SSH disables forwarding after detecting the mismatch, preventing VS Code from connecting normally.
+
+If the change was expected, keep `msb ssh serve` running and remove only the stale entry in another **host terminal**:
+
+```bash
+ssh-keygen -R '[127.0.0.1]:2222'
+ssh devbox.msb
+```
+
+Verify the new host key, accept it, then reconnect in VS Code. If your configuration uses `localhost` instead of `127.0.0.1`, use `ssh-keygen -R '[localhost]:2222'` instead. Removing `devbox.msb` does not clear the address-and-port entry used by the configuration above.
+
+If you use a custom known-hosts file, pass its path with `ssh-keygen -f`. If the key changes unexpectedly or on every connection, investigate which sandbox is being served and whether its stored host key is being replaced before accepting it. Do not disable host-key checking to work around this error.
+
+### The authenticity of the host cannot be established
+
+This is the first-use trust prompt, including after you remove a stale key. In VS Code's input box, type `yes` and press Enter after verifying the key. This prompt comes from the host SSH client; it is not a command to run inside the VM.
+
+### Permission denied (publickey)
+
+Confirm that `IdentityFile` points to the private key whose public key you authorized in Step 1. Run `ssh devbox.msb` from the host to check authentication before retrying VS Code.
+
+### Connection refused or address already in use
+
+Keep the serving terminal open. If another listener already uses port `2222`, choose another port and update `Port` in the SSH configuration to match:
+
+```bash
+msb ssh serve devbox --port 2223
+```
+
+Use a separate alias and port for each sandbox you serve simultaneously.
+
+### Session disconnects when idle
+
+SSH connections default to a 10-minute inactivity timeout. For a development session that should stay connected without SSH traffic, restart the listener with:
+
+```bash
+msb ssh serve devbox --no-inactivity-timeout
+```
+
+This changes the SSH transport timeout, not the sandbox lifecycle idle timeout. See [SSH inactivity timeout](/sandboxes/ssh#inactivity-timeout).
+
+### VS Code Server fails to install or start
+
+Open the **Remote - SSH** output channel in VS Code for the detailed error. Check the guest's libraries and tools against the [Linux prerequisites](https://code.visualstudio.com/docs/remote/linux), along with available memory, disk space, and download access.
+
+### The terminal works, but the extension host fails
+
+A working shell confirms that SSH can execute commands. It does not confirm that the separate process running remote extensions can start and stay running. An extension-host error alone is not enough to identify the cause.
+
+1. In VS Code, open **View > Output** and select **Log (Remote Extension Host)**, if available. Also collect the **Remote - SSH** output and the names of the failing extensions.
+2. Check the guest image and CPU architecture. Extensions with native binaries must support the guest architecture, and may need libraries beyond VS Code Server's own prerequisites. See [Linux extension compatibility](https://code.visualstudio.com/docs/remote/linux).
+3. Check memory and disk space. Microsoft recommends at least **2 GB RAM and two CPU cores** for a remote host; language servers and builds may need more. A killed process can indicate memory pressure, but confirm it with the guest logs.
+4. Temporarily disable the remote extensions and reload the window. If the problem disappears, re-enable them one at a time to identify the extension that triggers it.
+
+Run these diagnostics **inside the sandbox**, using the working terminal:
+
+```bash
+cat /etc/os-release
+uname -m
+ldd --version
+free -h
+df -h / /tmp
+dmesg | tail -n 80
+```
+
+Some minimal images lack these tools, and access to kernel logs may be restricted. Share the available output with the sandbox memory allocation, Microsandbox and VS Code versions, and the first relevant extension-host error. Missing-library errors, unsupported executable formats, and out-of-memory messages require different fixes; resetting SSH host keys will not address them.
+
+Match the fix to the evidence in the logs:
+
+| Evidence | Solution |
+| --- | --- |
+| Missing shared library or `GLIBC` / `GLIBCXX` version error | Install the required library in the guest, or use a compatible newer image. Check the affected extension's requirements as well as VS Code's. |
+| `Exec format error` | Check `uname -m` and install an extension or tool build that supports that guest architecture. |
+| Kernel log reports an out-of-memory kill | Increase sandbox memory and reduce concurrent language servers or builds, then reconnect. Exit code 137 alone does not prove an out-of-memory kill. |
+| Failure disappears with remote extensions disabled | Update or replace the extension that triggers the failure, and report its log to the extension maintainer. |
+| `ENOSPC` while writing files | Free space on the affected guest filesystem or increase its storage. If the error is from a file watcher, check watcher limits instead. |
+
+See [SSH](/sandboxes/ssh) for SFTP, forwarding, and the `ProxyCommand` alternative.

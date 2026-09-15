@@ -146,7 +146,7 @@ SOCKS4 carries TCP only. SOCKS5 carries TCP and non-DNS UDP. `--socks5-username`
 
 `--net-rule` takes one or more comma-separated rule tokens. The token grammar is:
 
-```
+```text
 <action>[:<direction>]@<target>[:<proto>[:<ports>]]
 ```
 
@@ -227,16 +227,9 @@ msb stop -t 30 devbox          # 30s grace before force kill
 msb stop --label app=engine    # Stop every sandbox labeled app=engine
 ```
 
-Graceful shutdown gives the sandbox a chance to finish writing any
-pending data to disk before it exits, so files written inside the
-sandbox aren't lost across a later `msb start`. If the sandbox is
-still running after the timeout, it is force-killed.
+Graceful shutdown gives the sandbox a chance to finish writing any pending data to disk before it exits, so files written inside the sandbox aren't lost across a later `msb start`. If the sandbox is still running after the timeout, it is force-killed.
 
-`--force` and a timeout that elapses both end in a force-kill. Pending
-writes that the workload hasn't `fsync`'d at that point may be lost, with the
-same durability semantics as a sudden power loss on a physical
-machine. For durable writes, workloads should `fsync` important data
-themselves.
+`--force` and a timeout that elapses both end in a force-kill. Pending writes that the workload hasn't `fsync`'d at that point may be lost, with the same durability semantics as a sudden power loss on a physical machine. For durable writes, workloads should `fsync` important data themselves.
 
 | Flag | Description |
 |------|-------------|
@@ -508,7 +501,7 @@ msb metrics --format json   # One-shot JSON output
 
 | Flag | Description |
 |------|-------------|
-| `-w`, `--watch` | Continuously refresh the table in place. Ctrl-C to quit. Requires a terminal |
+| `-w`, `--watch` | Continuously refresh the table in place. Ctrl+C to quit. Requires a terminal |
 | `-f`, `--follow` | Stream one JSON Lines object per sandbox per interval to stdout |
 | `--interval` | Refresh interval for `--watch`/`--follow` (e.g. `500ms`, `2s`). Default `1s` |
 | `-a`, `--all` | Include `exited` rows: terminal metrics preserved in the registry until the slot is reused |

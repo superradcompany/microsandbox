@@ -318,10 +318,16 @@
         "tab": "Examples",
         "groups": [
           {
-            "group": "Agents",
+            "group": "Overview",
+            "icon": "flask",
+            "pages": [
+              "examples/overview"
+            ]
+          },
+          {
+            "group": "AI Agents",
             "icon": "robot",
             "pages": [
-              "examples/overview",
               "examples/agents/claude-code",
               "examples/agents/codex",
               "examples/agents/opencode",
@@ -333,57 +339,70 @@
             ]
           },
           {
-            "group": "CI/CD",
+            "group": "Dev Environments",
+            "icon": "code",
+            "pages": [
+              "examples/development/vscode",
+              "examples/development/code-server",
+              "examples/development/jupyterlab",
+              "examples/development/vnc-desktop"
+            ]
+          },
+          {
+            "group": "CI/CD & Jobs",
             "icon": "code-pull-request",
             "pages": [
               "examples/ci-cd/github-actions-runner",
               "examples/ci-cd/pr-checks",
               "examples/ci-cd/compose-tests",
-              "examples/ci-cd/preview-deploys"
-            ]
-          },
-          {
-            "group": "Docker",
-            "icon": "docker",
-            "pages": [
-              "examples/docker/docker-in-sandbox",
-              "examples/docker/docker",
-              "examples/docker/local-images"
-            ]
-          },
-          {
-            "group": "Sandbox Workflows",
-            "icon": "shield-halved",
-            "pages": [
-              "examples/sandboxing/warm-workers",
-              "examples/development/vnc-desktop",
-              "examples/guest/systemd-services",
-              "examples/development/code-server",
-              "examples/development/jupyterlab"
-            ]
-          },
-          {
-            "group": "Automation & Tooling",
-            "icon": "gears",
-            "pages": [
+              "examples/ci-cd/preview-deploys",
               "examples/automation/dependency-audits",
               "examples/automation/parallel-batch-jobs",
-              "examples/plugins/terraform",
+              "examples/sandboxing/warm-workers"
+            ]
+          },
+          {
+            "group": "Browser & Web Automation",
+            "icon": "globe",
+            "pages": [
               "examples/browser-automation/browser-use",
               "examples/browser-automation/playwright",
-              "examples/web-automation/scrapy",
+              "examples/web-automation/scrapy"
+            ]
+          },
+          {
+            "group": "File Processing",
+            "icon": "file",
+            "pages": [
               "examples/file-processing/libreoffice-pdf",
               "examples/file-processing/ffmpeg"
             ]
           },
           {
-            "group": "Data & Observability",
+            "group": "Docker & System Tools",
+            "icon": "docker",
+            "pages": [
+              "examples/docker/docker-in-sandbox",
+              "examples/docker/docker",
+              "examples/docker/local-images",
+              "examples/guest/systemd-services",
+              "examples/plugins/terraform"
+            ]
+          },
+          {
+            "group": "Data & Storage",
             "icon": "database",
             "pages": [
               "examples/data/juicefs-s3",
               "examples/data/postgresql",
               "examples/data/migration-rehearsal",
-              "examples/data/redis",
+              "examples/data/redis"
+            ]
+          },
+          {
+            "group": "Observability",
+            "icon": "chart-line",
+            "pages": [
               "examples/metrics-backends/grafana-cloud",
               "examples/metrics-backends/grafana-alloy",
               "examples/metrics-backends/otel-collector",
@@ -412,8 +431,16 @@
             "icon": "clock-rotate-left",
             "pages": [
               {
-                "group": "August 2026",
+                "group": "September 2026",
                 "expanded": true,
+                "pages": [
+                  "changelog/2026-09-11",
+                  "changelog/2026-09-04"
+                ]
+              },
+              {
+                "group": "August 2026",
+                "expanded": false,
                 "pages": [
                   "changelog/2026-08-28",
                   "changelog/2026-08-26",
