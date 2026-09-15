@@ -31,8 +31,8 @@ fn legacy_module_paths_alias_canonical_modules() {
         microsandbox_network::config::NetworkBuilder,
     >();
     assert_same_type::<
-        microsandbox_network::conn::ConnectionTracker,
-        microsandbox_network::tcp::connection::ConnectionTracker,
+        microsandbox_network::conn::TcpConnectionTracker,
+        microsandbox_network::tcp::connection::TcpConnectionTracker,
     >();
     assert_same_type::<
         microsandbox_network::icmp_relay::IcmpRelay,

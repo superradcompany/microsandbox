@@ -485,10 +485,20 @@ pub struct SandboxOpts {
     #[arg(long = "net-ingress-ops-burst", value_name = "COUNT")]
     pub net_ingress_ops_burst: Option<u64>,
 
-    /// Limit the number of concurrent network connections.
+    /// Deprecated alias for --max-tcp-connections.
+    #[cfg(feature = "net")]
+    #[arg(long, conflicts_with = "max_tcp_connections")]
+    pub max_connections: Option<usize>,
+
+    /// Limit TCP connections; zero means unlimited.
     #[cfg(feature = "net")]
     #[arg(long)]
-    pub max_connections: Option<usize>,
+    pub max_tcp_connections: Option<usize>,
+
+    /// Limit UDP relay sessions (default: unlimited single-tenant, 1024 multi-tenant; zero means unlimited).
+    #[cfg(feature = "net")]
+    #[arg(long)]
+    pub max_udp_connections: Option<usize>,
 
     /// Require hostname-based network allows to use inspectable request authority.
     #[cfg(feature = "net")]
@@ -775,6 +785,8 @@ impl SandboxOpts {
             || self.net_ingress_ops.is_some()
             || self.net_ingress_ops_burst.is_some()
             || self.max_connections.is_some()
+            || self.max_tcp_connections.is_some()
+            || self.max_udp_connections.is_some()
             || self.trust_host_cas
             || self.tls_intercept
             || !self.tls_intercept_port.is_empty()
@@ -1021,6 +1033,8 @@ impl SandboxOpts {
             || self.net_ingress_ops.is_some()
             || self.net_ingress_ops_burst.is_some()
             || self.max_connections.is_some()
+            || self.max_tcp_connections.is_some()
+            || self.max_udp_connections.is_some()
             || self.net_strict
             || self.trust_host_cas
             || self.proxy.is_some()
@@ -2407,7 +2421,8 @@ fn apply_network_opts(
             }
             builder = builder.prepend_network_policy_rules(rules);
         }
-        let max_conn = opts.max_connections;
+        let max_conn = opts.max_tcp_connections.or(opts.max_connections);
+        let max_udp_conn = opts.max_udp_connections;
         let ipv4_pool = opts
             .net_ipv4_pool
             .as_deref()
@@ -2459,7 +2474,10 @@ fn apply_network_opts(
                 });
             }
             if let Some(max) = max_conn {
-                n = n.max_connections(max);
+                n = n.max_tcp_connections(max);
+            }
+            if let Some(max) = max_udp_conn {
+                n = n.max_udp_connections(max);
             }
             if let Some(pool) = ipv4_pool {
                 n = n.ipv4_pool(pool);
@@ -3149,6 +3167,29 @@ mod tests {
     };
 
     use super::*;
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn tcp_limit_flags_are_aliases_but_mutually_exclusive() {
+        for flag in ["--max-connections", "--max-tcp-connections"] {
+            let matches = SandboxOpts::augment_args(Command::new("test"))
+                .try_get_matches_from(["test", flag, "0", "--max-udp-connections", "7"])
+                .unwrap();
+            let opts = SandboxOpts::from_arg_matches(&matches).unwrap();
+            assert_eq!(opts.max_tcp_connections.or(opts.max_connections), Some(0));
+            assert_eq!(opts.max_udp_connections, Some(7));
+        }
+        let err = SandboxOpts::augment_args(Command::new("test"))
+            .try_get_matches_from([
+                "test",
+                "--max-connections",
+                "0",
+                "--max-tcp-connections",
+                "64",
+            ])
+            .unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
 
     #[cfg(feature = "net")]
     #[test]

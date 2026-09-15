@@ -378,7 +378,8 @@ type NetworkConfig struct {
     PortBindings             []PortBinding
     IPv4Pool                 string
     IPv6Pool                 string
-    MaxConnections           *uint
+    MaxTCPConnections           *uint
+    MaxUDPConnections        *uint
     RateLimiter              *NetworkRateLimiterConfig
     OnSecretViolation        ViolationAction
     TrustHostCAs             *bool
@@ -402,7 +403,9 @@ The full network stack configuration passed via [`WithNetwork`](#m-withnetwork).
 | PortBindings | `[]`[`PortBinding`](#portbinding) | Host to guest mappings with explicit bind addresses |
 | IPv4Pool | `string` | Pool used to derive per-sandbox `/30` guest subnets. Defaults to `172.16.0.0/12` |
 | IPv6Pool | `string` | Pool used to derive per-sandbox `/64` guest prefixes. Defaults to `fd42:6d73:62::/48` |
-| MaxConnections | `*uint` | Cap on concurrent network connections from the sandbox |
+| MaxTCPConnections | `*uint` | TCP connection cap; zero means unlimited |
+| MaxConnections | `*uint` | Deprecated TCP alias; cannot be combined with MaxTCPConnections |
+| MaxUDPConnections | `*uint` | UDP relay session cap; defaults to unlimited for single-tenant and 1,024 for multi-tenant; zero means unlimited. At capacity, the least recently active session is evicted. |
 | RateLimiter | [`*NetworkRateLimiterConfig`](#networkratelimiterconfig) | Rate limits grouped by direction. `nil` means unlimited |
 | OnSecretViolation | [`ViolationAction`](/sdk/go/secrets#violationactionstring-enum) | Sandbox-wide action when a secret is sent to a disallowed host. Per-secret overrides via `SecretEntry.OnViolation` |
 | TrustHostCAs | `*bool` | Ship the host's extra CA bundles into the guest. Opt-in for corporate MITM proxies whose gateway CA is unknown to the guest's stock bundle |

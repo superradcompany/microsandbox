@@ -55,7 +55,7 @@ The TypeScript and Rust examples disable the network device. Python `Network.non
 
 `single-tenant` is the default and preserves the network configuration requested by the sandbox. `multi-tenant` adds a host-runtime isolation floor: traffic must pass both the platform public-network policy and the sandbox's policy, and DNS rebinding protection is forced on. Custom DNS servers and interface overrides are removed, host CA import and published ports are disabled. Sandbox policy can further restrict this floor but cannot broaden it.
 
-The per-sandbox `maxConnections` setting optionally limits concurrent TCP
+The per-sandbox `maxTcpConnections` setting optionally limits concurrent TCP
 connections. When omitted, `single-tenant` has no connection-count cap and
 `multi-tenant` defaults to 1,024. An explicit positive value overrides either
 default; zero explicitly selects unlimited. These are runtime defaults, not

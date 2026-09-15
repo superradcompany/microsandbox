@@ -396,7 +396,9 @@ struct NetworkConfigInput {
     tls: Option<TlsInput>,
     strict: Option<bool>,
     trust_host_cas: Option<bool>,
-    max_connections: Option<usize>,
+    #[serde(alias = "max_connections")]
+    max_tcp_connections: Option<usize>,
+    max_udp_connections: Option<usize>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, ConfigPatch)]
@@ -1711,8 +1713,11 @@ fn materialize_network_patch(
     if let Some(enabled) = input.trust_host_cas {
         patch = patch.trust_host_cas(enabled);
     }
-    if let Some(max) = input.max_connections {
-        patch = patch.max_connections(max);
+    if let Some(max) = input.max_tcp_connections {
+        patch = patch.max_tcp_connections(max);
+    }
+    if let Some(max) = input.max_udp_connections {
+        patch = patch.max_udp_connections(max);
     }
     Ok(patch)
 }
@@ -1789,6 +1794,24 @@ fn parse_duration_millis(value: &str) -> anyhow::Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn network_config_tcp_aliases_reject_duplicate_names() {
+        for key in ["max_connections", "max_tcp_connections"] {
+            let config: NetworkConfigInput = serde_json::from_value(serde_json::json!({
+                key: 0, "max_udp_connections": 7
+            }))
+            .unwrap();
+            assert_eq!(config.max_tcp_connections, Some(0));
+            assert_eq!(config.max_udp_connections, Some(7));
+        }
+        assert!(
+            serde_json::from_value::<NetworkConfigInput>(serde_json::json!({
+                "max_connections": 0, "max_tcp_connections": 64
+            }))
+            .is_err()
+        );
+    }
 
     fn write_config(dir: &Path, name: &str, contents: &str) -> PathBuf {
         let path = dir.join(name);
@@ -2068,7 +2091,7 @@ network:
     verify_upstream: false
     block_quic: true
   trust_host_cas: true
-  max_connections: 10
+  max_tcp_connections: 10
 secrets:
   TOKEN:
     value: lower
@@ -2092,7 +2115,7 @@ tls:
   bypass: ["higher.example.com"]
 strict: true
 trust_host_cas: false
-max_connections: 20
+max_tcp_connections: 20
 "#,
         );
         let ports = write_config(dir.path(), "ports.yaml", "ports: [\"9000:9000\"]\n");
@@ -2136,7 +2159,7 @@ ADD:
         assert_eq!(tls.block_quic, Some(true));
         assert_eq!(network.strict, Some(true));
         assert_eq!(network.trust_host_cas, Some(false));
-        assert_eq!(network.max_connections, Some(20));
+        assert_eq!(network.max_tcp_connections, Some(20));
 
         let secrets = input.secrets.unwrap();
         let token = &secrets["TOKEN"];
@@ -2536,7 +2559,7 @@ network:
   policy: public
   allow: ["api.openai.com"]
   strict: true
-  max_connections: 64
+  max_tcp_connections: 64
 secrets:
   TOKEN:
     value: "literal-test-value"
@@ -2558,7 +2581,7 @@ secrets:
             config.spec.runtime.scripts.get("start").unwrap(),
             "#!/bin/bash\npython app.py\n"
         );
-        assert_eq!(config.spec.network.max_connections, Some(64));
+        assert_eq!(config.spec.network.max_tcp_connections, Some(64));
         assert!(config.spec.network.strict);
         assert_eq!(config.spec.network.ports.len(), 0);
         assert!(config.spec.network.tls.as_ref().unwrap().enabled);

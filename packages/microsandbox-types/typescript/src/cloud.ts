@@ -627,7 +627,11 @@ export type CloudNetworkSpec = {
   /**
    * Max concurrent guest connections.
    */
-  max_connections: number | null;
+  /** @deprecated Use max_tcp_connections instead. */
+  max_connections?: number | null;
+  max_tcp_connections?: number | null;
+  /** UDP session cap. Omitted is unlimited for single-tenant and 1024 for multi-tenant; zero means unlimited. */
+  max_udp_connections?: number | null;
 };
 
 export type CloudSecretsConfig = {

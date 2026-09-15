@@ -276,9 +276,21 @@ impl NetworkBuilder {
         self
     }
 
-    /// Set the maximum number of concurrent connections; zero explicitly selects unlimited.
-    pub fn max_connections(mut self, max: usize) -> Self {
-        self.config.max_connections = Some(ConnectionLimit::from(max));
+    /// Deprecated alias for [`Self::max_tcp_connections`].
+    #[deprecated(note = "use max_tcp_connections instead")]
+    pub fn max_connections(self, max: usize) -> Self {
+        self.max_tcp_connections(max)
+    }
+
+    /// Set the TCP connection cap; zero explicitly selects unlimited.
+    pub fn max_tcp_connections(mut self, max: usize) -> Self {
+        self.config.max_tcp_connections = Some(ConnectionLimit::from(max));
+        self
+    }
+
+    /// Set the UDP relay session limit; zero selects unlimited. Defaults to unlimited for single-tenant and 1024 for multi-tenant.
+    pub fn max_udp_connections(mut self, max: usize) -> Self {
+        self.config.max_udp_connections = Some(ConnectionLimit::from(max));
         self
     }
 
@@ -953,6 +965,43 @@ impl From<ViolationAction> for ViolationActionBuilder {
 mod tests {
     use super::*;
 
+    #[test]
+    #[allow(deprecated)]
+    fn deprecated_tcp_builder_delegates_to_the_new_name() {
+        let canonical_last = NetworkBuilder::new()
+            .max_connections(0)
+            .max_tcp_connections(64)
+            .build()
+            .unwrap();
+        assert_eq!(
+            canonical_last.max_tcp_connections,
+            Some(ConnectionLimit::from(64))
+        );
+        let legacy_last = NetworkBuilder::new()
+            .max_tcp_connections(64)
+            .max_connections(0)
+            .build()
+            .unwrap();
+        assert_eq!(
+            legacy_last.max_tcp_connections,
+            Some(ConnectionLimit::Unlimited)
+        );
+        let config = NetworkBuilder::new()
+            .max_connections(0)
+            .max_udp_connections(7)
+            .build()
+            .unwrap();
+        assert_eq!(config.max_tcp_connections, Some(ConnectionLimit::Unlimited));
+        assert_eq!(config.max_udp_connections, Some(ConnectionLimit::from(7)));
+        assert!(
+            NetworkBuilder::new()
+                .max_tcp_connections(1)
+                .max_tcp_connections(2)
+                .build()
+                .is_ok()
+        );
+    }
+
     /// Network builder happy path returns the config unchanged.
     #[test]
     fn network_builder_happy_path_returns_config() {
@@ -967,10 +1016,13 @@ mod tests {
     fn network_builder_preserves_explicit_large_caps() {
         for limit in [10000, usize::MAX] {
             let config = NetworkBuilder::new()
-                .max_connections(limit)
+                .max_tcp_connections(limit)
                 .build()
                 .unwrap();
-            assert_eq!(config.max_connections, Some(ConnectionLimit::from(limit)));
+            assert_eq!(
+                config.max_tcp_connections,
+                Some(ConnectionLimit::from(limit))
+            );
         }
     }
 

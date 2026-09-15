@@ -334,6 +334,8 @@ func buildFFINetwork(n *NetworkConfig) *ffi.NetworkOptions {
 		IPv4Pool:            n.IPv4Pool,
 		IPv6Pool:            n.IPv6Pool,
 		MaxConnections:      n.MaxConnections,
+		MaxTCPConnections:   n.MaxTCPConnections,
+		MaxUDPConnections:   n.MaxUDPConnections,
 		RateLimiter:         buildFFINetworkRateLimiter(n.RateLimiter),
 		OnSecretViolation:   string(n.OnSecretViolation),
 		TrustHostCAs:        n.TrustHostCAs,
