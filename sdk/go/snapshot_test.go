@@ -68,6 +68,65 @@ func TestFFIWireShape_SnapshotCreateDestDir(t *testing.T) {
 	}
 }
 
+func TestSnapshotCloneEmptySource(t *testing.T) {
+	_, err := Snapshot.Clone(context.Background(), "", "slim", SnapshotCloneOptions{})
+	if !IsKind(err, ErrInvalidConfig) {
+		t.Fatalf("err = %v, want ErrInvalidConfig", err)
+	}
+	if !strings.Contains(err.Error(), "source") {
+		t.Fatalf("error should name the missing field: %q", err.Error())
+	}
+}
+
+func TestSnapshotCloneEmptyNewName(t *testing.T) {
+	_, err := Snapshot.Clone(context.Background(), "bloated", "", SnapshotCloneOptions{})
+	if !IsKind(err, ErrInvalidConfig) {
+		t.Fatalf("err = %v, want ErrInvalidConfig", err)
+	}
+	if !strings.Contains(err.Error(), "newName") {
+		t.Fatalf("error should name the missing field: %q", err.Error())
+	}
+}
+
+func marshalSnapshotCloneOptions(t *testing.T, opts ffi.SnapshotCloneOptions) map[string]any {
+	t.Helper()
+	raw, err := json.Marshal(opts)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	return out
+}
+
+func TestFFIWireShape_SnapshotCloneCompactAndRootDisk(t *testing.T) {
+	got := marshalSnapshotCloneOptions(t, ffi.SnapshotCloneOptions{
+		Compact:         true,
+		RootDiskSizeMib: 8192,
+	})
+	if v := mustField(t, got, "compact"); v != true {
+		t.Fatalf("compact = %v, want true", v)
+	}
+	if v := mustField(t, got, "root_disk_size_mib"); v != float64(8192) {
+		t.Fatalf("root_disk_size_mib = %v, want 8192", v)
+	}
+	if _, present := got["dest_dir"]; present {
+		t.Fatal("dest_dir must not appear in payload when unset")
+	}
+}
+
+func TestFFIWireShape_SnapshotCloneDefaultsOmitCompactAndRootDisk(t *testing.T) {
+	got := marshalSnapshotCloneOptions(t, ffi.SnapshotCloneOptions{})
+	if _, present := got["compact"]; present {
+		t.Fatal("compact must not appear in payload when unset")
+	}
+	if _, present := got["root_disk_size_mib"]; present {
+		t.Fatal("root_disk_size_mib must not appear in payload when unset")
+	}
+}
+
 func TestSnapshotStateProjectionDistinguishesMissingAndMerkleIntegrity(t *testing.T) {
 	format := "raw"
 	fstype := "ext4"

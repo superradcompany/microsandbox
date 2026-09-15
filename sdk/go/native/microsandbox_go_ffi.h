@@ -729,6 +729,13 @@ char *msb_snapshot_create(uint64_t cancel_id,
                           unsigned char *buf,
                           uintptr_t buf_len);
 
+char *msb_snapshot_clone(uint64_t cancel_id,
+                         const char *source,
+                         const char *new_name,
+                         const char *opts_json,
+                         unsigned char *buf,
+                         uintptr_t buf_len);
+
 char *msb_snapshot_open(uint64_t cancel_id,
                         const char *path_or_name,
                         unsigned char *buf,
