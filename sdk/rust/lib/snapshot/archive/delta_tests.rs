@@ -779,6 +779,9 @@ async fn owned_qcow2_delta_borrows_exact_prefix_and_survives_source_deletion() {
         .await
         .is_err()
     );
+    // Release the closure's read handles before deliberately mutating its file:
+    // Windows prevents write access while those handles pin the checkpoint.
+    drop(closure);
     // Changing a relative backing name changes physical identity, even with unchanged guest data.
     microsandbox_image::checkpoint::relocate_qcow2_backing(&borrowed, Path::new("different.raw"))
         .unwrap();

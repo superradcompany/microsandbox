@@ -401,7 +401,14 @@ mod tests {
         assert!(
             tokio::time::timeout(
                 Duration::from_millis(20),
-                backend.wait_stop_complete("disk-new-run", id, Some(run_id), false)
+                backend.wait_stop_complete(
+                    "disk-new-run",
+                    id,
+                    Some(run_id),
+                    false,
+                    #[cfg(windows)]
+                    None,
+                )
             )
             .await
             .is_err()
@@ -420,7 +427,14 @@ mod tests {
         .await
         .unwrap();
         let error = backend
-            .wait_stop_complete("disk-new-run", id, Some(run_id), false)
+            .wait_stop_complete(
+                "disk-new-run",
+                id,
+                Some(run_id),
+                false,
+                #[cfg(windows)]
+                None,
+            )
             .await
             .unwrap_err();
         assert!(error.to_string().contains("refusing to follow run"));

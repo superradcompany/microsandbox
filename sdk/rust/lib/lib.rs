@@ -15,7 +15,6 @@ pub mod agent;
 pub mod backend;
 #[cfg(feature = "local")]
 pub mod config;
-#[cfg(feature = "local")]
 #[allow(dead_code)]
 pub(crate) mod db;
 #[cfg(feature = "local")]

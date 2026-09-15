@@ -44,6 +44,9 @@ beforeEach(() => {
   writeFileSync(join(packageRoot, "package.json"), JSON.stringify({ name: `@superradcompany/microsandbox-${triple}` }));
   env = { ...process.env, HOME: root, USERPROFILE: root };
   for (const name of ["MSB_HOME", "MSB_PATH", "MSB_LIBKRUNFW_PATH", "MSB_CONFIG_PATH"]) delete env[name];
+  // Windows native home discovery uses the known-folder API, not USERPROFILE.
+  // Select an isolated home explicitly so the user's real install cannot leak in.
+  if (process.platform === "win32") env.MSB_HOME = join(root, ".microsandbox");
 });
 afterEach(() => rmSync(root, { recursive: true, force: true }));
 function installed(before = "") {
@@ -60,8 +63,8 @@ function installed(before = "") {
   expect(result.status, result.stderr).toBe(0);
   return result.stdout.trim();
 }
-it.each(["default", "custom"])("native SDK prefers %s home over an incomplete package", (kind) => {
-  const home = join(root, kind === "default" ? ".microsandbox" : "custom");
+it.each([process.platform === "win32" ? "isolated" : "default", "custom"])("native SDK prefers %s home over an incomplete package", (kind) => {
+  const home = join(root, kind === "custom" ? "custom" : ".microsandbox");
   if (kind === "custom") env.MSB_HOME = home;
   pair(home);
   unlinkSync(join(packageRoot, "lib", library));

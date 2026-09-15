@@ -25,6 +25,7 @@ mod cloud;
 #[cfg(feature = "local")]
 mod local;
 
+#[cfg(feature = "local")]
 pub(crate) use local::ControlSession;
 mod misconfigured;
 mod profile;
