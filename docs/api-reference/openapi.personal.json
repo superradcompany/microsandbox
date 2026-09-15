@@ -21,7 +21,7 @@
         "tags": [
           "Account"
         ],
-        "summary": "Get the current user",
+        "summary": "Get your profile",
         "operationId": "get_me",
         "responses": {
           "200": {
@@ -48,7 +48,7 @@
         "tags": [
           "Account"
         ],
-        "summary": "Delete the current user",
+        "summary": "Delete your account",
         "description": "Deletes the account's personal information, signs out active sessions, removes\norganization memberships, and revokes pending invitations sent by the user.\nAudit history is retained.\n\nRequires fresh credential proof: the current password (password-backed\naccounts) or a TOTP code (MFA-enabled accounts). At least one must be\nsupplied; both being valid is fine but a single matching proof is enough.\n\nReturns `409 Conflict` if the user is the sole owner of an organization -\nownership must be transferred first.",
         "operationId": "delete_me",
         "requestBody": {
@@ -92,7 +92,7 @@
         "tags": [
           "Account"
         ],
-        "summary": "Update the current user",
+        "summary": "Update your profile",
         "operationId": "update_me",
         "requestBody": {
           "content": {
@@ -131,7 +131,7 @@
         "tags": [
           "Organization"
         ],
-        "summary": "List the current user's organizations",
+        "summary": "List your organizations",
         "operationId": "list_orgs",
         "responses": {
           "200": {
@@ -418,7 +418,7 @@
         "tags": [
           "Members"
         ],
-        "summary": "Remove an organization member",
+        "summary": "Remove a member",
         "operationId": "remove_member",
         "parameters": [
           {
@@ -475,7 +475,7 @@
         "tags": [
           "Members"
         ],
-        "summary": "Change an organization member's role",
+        "summary": "Change a member's role",
         "operationId": "update_member_role",
         "parameters": [
           {
@@ -541,7 +541,7 @@
         "tags": [
           "Invites"
         ],
-        "summary": "Accept an organization invite",
+        "summary": "Accept an invite",
         "operationId": "accept_invite",
         "parameters": [
           {
@@ -587,7 +587,7 @@
         "tags": [
           "Invites"
         ],
-        "summary": "Decline an organization invite",
+        "summary": "Decline an invite",
         "operationId": "decline_invite",
         "parameters": [
           {
@@ -633,7 +633,7 @@
         "tags": [
           "Invites"
         ],
-        "summary": "List pending organization invites",
+        "summary": "List pending invites",
         "operationId": "list_invites",
         "parameters": [
           {
@@ -677,7 +677,7 @@
         "tags": [
           "Invites"
         ],
-        "summary": "Invite an organization member",
+        "summary": "Invite a member",
         "operationId": "create_invite",
         "parameters": [
           {
@@ -736,7 +736,7 @@
         "tags": [
           "Invites"
         ],
-        "summary": "Cancel an organization invite",
+        "summary": "Cancel an invite",
         "operationId": "cancel_invite",
         "parameters": [
           {
@@ -996,7 +996,7 @@
         "tags": [
           "Credentials"
         ],
-        "summary": "List personal access tokens",
+        "summary": "List personal tokens",
         "description": "Returns metadata without token values.",
         "operationId": "list_pats",
         "responses": {
@@ -1029,7 +1029,7 @@
         "tags": [
           "Credentials"
         ],
-        "summary": "Revoke a personal access token",
+        "summary": "Revoke a personal token",
         "description": "Returns not found when the token is missing or already revoked.",
         "operationId": "revoke_pat",
         "parameters": [
@@ -1232,7 +1232,8 @@
         "tags": [
           "Sandboxes"
         ],
-        "summary": "Check whether a sandbox slug is valid and available",
+        "summary": "Check sandbox name availability",
+        "description": "Check whether the sandbox slug is valid and available.",
         "operationId": "check_slug",
         "parameters": [
           {
@@ -1281,7 +1282,8 @@
         "tags": [
           "Sandboxes"
         ],
-        "summary": "Suggest an available sandbox slug",
+        "summary": "Suggest a sandbox name",
+        "description": "Generate an available sandbox slug.",
         "operationId": "suggest_slug",
         "parameters": [
           {
@@ -2751,7 +2753,7 @@
         "tags": [
           "Volumes"
         ],
-        "summary": "List files",
+        "summary": "List directory contents",
         "operationId": "list",
         "parameters": [
           {
@@ -2785,7 +2787,7 @@
         ],
         "responses": {
           "200": {
-            "description": "List files",
+            "description": "List directory contents",
             "content": {
               "application/json": {
                 "schema": {
@@ -3125,7 +3127,7 @@
         "tags": [
           "Volumes"
         ],
-        "summary": "Check whether a file exists",
+        "summary": "Check if a file exists",
         "operationId": "exists",
         "parameters": [
           {
@@ -3159,7 +3161,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Check whether a file exists",
+            "description": "Check if a file exists",
             "content": {
               "application/json": {
                 "schema": {
@@ -3194,7 +3196,7 @@
         "tags": [
           "Volumes"
         ],
-        "summary": "Check whether files exist",
+        "summary": "Check if files exist",
         "operationId": "exists_batch",
         "parameters": [
           {
@@ -3229,7 +3231,7 @@
         },
         "responses": {
           "200": {
-            "description": "Check whether files exist",
+            "description": "Check if files exist",
             "content": {
               "application/json": {
                 "schema": {
@@ -3410,7 +3412,7 @@
         "tags": [
           "Volumes"
         ],
-        "summary": "Get file information",
+        "summary": "Get file details",
         "operationId": "stat",
         "parameters": [
           {
@@ -3444,7 +3446,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Get file information",
+            "description": "Get file details",
             "content": {
               "application/json": {
                 "schema": {
@@ -3660,7 +3662,8 @@
         "tags": [
           "Billing"
         ],
-        "summary": "Cancel the subscription at the end of the billing period",
+        "summary": "Cancel the subscription",
+        "description": "Cancellation takes effect at the end of the billing period.",
         "operationId": "cancel_subscription",
         "parameters": [
           {

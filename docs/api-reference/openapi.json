@@ -2453,7 +2453,7 @@
         "tags": [
           "Volumes"
         ],
-        "summary": "List files",
+        "summary": "List directory contents",
         "operationId": "list",
         "parameters": [
           {
@@ -2478,7 +2478,7 @@
         ],
         "responses": {
           "200": {
-            "description": "List files",
+            "description": "List directory contents",
             "content": {
               "application/json": {
                 "schema": {
@@ -3097,7 +3097,7 @@
         "tags": [
           "Volumes"
         ],
-        "summary": "Check whether a file exists",
+        "summary": "Check if a file exists",
         "operationId": "exists",
         "parameters": [
           {
@@ -3122,7 +3122,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Check whether a file exists",
+            "description": "Check if a file exists",
             "content": {
               "application/json": {
                 "schema": {
@@ -3474,7 +3474,7 @@
         "tags": [
           "Volumes"
         ],
-        "summary": "Get file information",
+        "summary": "Get file details",
         "operationId": "stat",
         "parameters": [
           {
@@ -3499,7 +3499,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Get file information",
+            "description": "Get file details",
             "content": {
               "application/json": {
                 "schema": {
