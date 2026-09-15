@@ -11,6 +11,7 @@ edition.workspace = true
 path = "lib/lib.rs"
 
 [dependencies]
+ignore.workspace = true
 libc.workspace = true
 microsandbox-utils.workspace = true
 msb_krun.workspace = true

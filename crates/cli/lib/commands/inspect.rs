@@ -54,6 +54,18 @@ fn mount_flags_suffix(options: MountOptions) -> String {
     format!(" ({})", flags.join(","))
 }
 
+/// Render the deny-list suffix for a bind mount in `msb inspect` output.
+///
+/// Returns an empty string when there is no deny list so common mounts stay
+/// terse; otherwise renders `[deny=a, b]` with the patterns comma-joined.
+fn deny_suffix(deny: &[String]) -> String {
+    if deny.is_empty() {
+        String::new()
+    } else {
+        format!(" [deny={}]", deny.join(", "))
+    }
+}
+
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
@@ -256,6 +268,7 @@ pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
                         host_permissions,
                         follow_root_symlinks,
                         quota_mib,
+                        deny,
                     } => {
                         let flags = mount_flags_suffix(*options);
                         let suffix = mount_policy_suffix(
@@ -266,8 +279,9 @@ pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
                         let quota = quota_mib
                             .map(|mib| format!(" [quota={mib}MiB]"))
                             .unwrap_or_default();
+                        let deny = deny_suffix(deny);
                         println!(
-                            "  {guest:<16}\u{2192} {}{flags}{suffix}{quota}",
+                            "  {guest:<16}\u{2192} {}{flags}{suffix}{quota}{deny}",
                             host.display()
                         );
                     }
@@ -463,5 +477,25 @@ mod tests {
         let changes = pending_config_changes(SandboxStatus::Stopped, Some(&desired), Some(&active));
 
         assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn deny_suffix_empty_list_is_terse() {
+        assert_eq!(deny_suffix(&[]), "");
+    }
+
+    #[test]
+    fn deny_suffix_single_pattern() {
+        assert_eq!(deny_suffix(&[".env".to_string()]), " [deny=.env]");
+    }
+
+    #[test]
+    fn deny_suffix_multiple_patterns_are_comma_joined() {
+        let patterns = vec![
+            ".env".to_string(),
+            "*.log".to_string(),
+            "sub/secret".to_string(),
+        ];
+        assert_eq!(deny_suffix(&patterns), " [deny=.env, *.log, sub/secret]");
     }
 }

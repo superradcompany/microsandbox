@@ -1646,6 +1646,7 @@ type MountConfig struct {
 	NamedMode string
 	NamedKind string
 	QuotaMiB  uint32
+	Deny      []string
 	Tmpfs     bool
 	Disk      string
 	Format    string
@@ -1719,6 +1720,12 @@ type MountOptions struct {
 	// keeps the runtime's protective default. Bind mounts only; named volume
 	// quotas go through NamedVolumeOptions.QuotaMiB instead.
 	QuotaMiB uint32
+
+	// Deny is a host-side deny-list of gitignore-style patterns for a bind mount.
+	// Matching entries are hidden from the guest (ENOENT) and writes to them are
+	// forbidden (EACCES). Patterns are relative to the mount root and may be
+	// component names (".env", "*.log") or paths ("sub/secret"). Bind mounts only.
+	Deny []string
 }
 
 // NamedVolumeOptions tunes sandbox-time named volume provisioning.
@@ -1775,6 +1782,7 @@ func (mountFactory) Bind(hostPath string, opts MountOptions) MountConfig {
 		HostPermissions:    opts.HostPermissions,
 		Owner:              opts.Owner,
 		QuotaMiB:           opts.QuotaMiB,
+		Deny:               opts.Deny,
 	}
 }
 
@@ -1789,6 +1797,7 @@ func (mountFactory) Named(name string, opts MountOptions) MountConfig {
 		Nodev:              opts.Nodev,
 		StatVirtualization: opts.StatVirtualization,
 		HostPermissions:    opts.HostPermissions,
+		Deny:               opts.Deny,
 		Owner:              opts.Owner,
 	}
 }
@@ -1809,6 +1818,7 @@ func (mountFactory) NamedWith(name string, opts MountOptions, namedOpts NamedVol
 		Nodev:              opts.Nodev,
 		StatVirtualization: opts.StatVirtualization,
 		HostPermissions:    opts.HostPermissions,
+		Deny:               opts.Deny,
 		Owner:              opts.Owner,
 	}
 }

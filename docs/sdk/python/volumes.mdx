@@ -97,6 +97,10 @@ Create a new named volume. `VolumeKind.DIRECTORY` creates a host directory; `Vol
     <div className="msb-param-key"><code>labels</code><span className="msb-type">dict[str, str] | None</span></div>
     <div className="msb-param-desc">Metadata labels.</div>
   </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>deny</code><span className="msb-type">list[str] | None</span></div>
+    <div className="msb-param-desc">Host-side deny-list of gitignore-style patterns. Matching entries are hidden from the guest and writes to them are forbidden. Bind mounts only.</div>
+  </div>
 </div>
 
 <p className="msb-label">Returns</p>
@@ -214,6 +218,7 @@ def bind(
     host_permissions: HostPermissions | None = None,
     uid: int | None = None,
     gid: int | None = None,
+    deny: list[str] | None = None,
 ) -> MountConfig
 ```
 
@@ -809,6 +814,7 @@ Frozen dataclass representing a mount configuration. Build one with a [mount fac
 | noexec | `bool` | `False` | Whether direct execution from the mount is disabled |
 | nosuid | `bool` | `False` | Whether setuid/setgid privilege elevation is ignored |
 | nodev | `bool` | `False` | Whether device files on the mount are ignored |
+| deny | `list[str] \| None` | `None` | Host-side deny-list of gitignore-style patterns. Matching entries are hidden from the guest and writes to them are forbidden. Bind mounts only. |
 | disk | `str \| None` | `None` | Host path to a disk image for disk mounts |
 | format | [`DiskImageFormat`](#diskimageformat)` \| None` | `None` | Disk image format for disk mounts |
 | fstype | `str \| None` | `None` | Inner filesystem type for disk mounts |

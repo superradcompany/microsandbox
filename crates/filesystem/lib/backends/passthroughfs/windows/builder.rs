@@ -90,6 +90,11 @@ pub struct PassthroughConfig {
     /// `None` keeps the legacy `0:0` fallback. Only consulted while stat
     /// virtualization is enabled.
     pub default_owner: Option<(u32, u32)>,
+
+    /// Gitignore-style patterns whose matching paths are hidden from the guest.
+    ///
+    /// Empty means no paths are denied.
+    pub deny: Vec<String>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -175,6 +180,8 @@ impl PassthroughFs {
             )
         });
 
+        let deny = super::super::deny::DenyList::new(&root, &cfg.deny, cfg.readonly)?;
+
         Ok(Self {
             cfg,
             root,
@@ -186,6 +193,7 @@ impl PassthroughFs {
             init_file,
             stat_store,
             quota,
+            deny,
         })
     }
 
@@ -249,6 +257,7 @@ impl Default for PassthroughConfig {
             quota_bytes: None,
             quota_root: None,
             default_owner: None,
+            deny: Vec::new(),
         }
     }
 }

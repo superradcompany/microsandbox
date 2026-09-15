@@ -161,7 +161,7 @@ impl PyVolume {
     /// Create a bind mount config.
     #[staticmethod]
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (path, *, readonly = false, noexec = false, nosuid = false, nodev = false, stat_virtualization = None, host_permissions = None, uid = None, gid = None))]
+    #[pyo3(signature = (path, *, readonly = false, noexec = false, nosuid = false, nodev = false, stat_virtualization = None, host_permissions = None, uid = None, gid = None, deny = None))]
     fn bind(
         py: Python<'_>,
         path: String,
@@ -173,6 +173,7 @@ impl PyVolume {
         host_permissions: Option<Py<PyAny>>,
         uid: Option<Py<PyAny>>,
         gid: Option<Py<PyAny>>,
+        deny: Option<Vec<String>>,
     ) -> PyResult<PyObject> {
         let kwargs = PyDict::new(py);
         kwargs.set_item("kind", mount_kind(py, "BIND")?)?;
@@ -182,6 +183,9 @@ impl PyVolume {
         kwargs.set_item("nosuid", nosuid)?;
         kwargs.set_item("nodev", nodev)?;
         set_mount_metadata_options(py, &kwargs, stat_virtualization, host_permissions, uid, gid)?;
+        if let Some(deny) = deny.filter(|d| !d.is_empty()) {
+            kwargs.set_item("deny", deny)?;
+        }
         Ok(mount_config_class(py)?.call((), Some(&kwargs))?.unbind())
     }
 

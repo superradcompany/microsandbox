@@ -64,6 +64,10 @@ pub(crate) fn do_create(
         return Err(platform::eacces());
     }
 
+    if fs.deny_matches_name(parent, name.to_bytes(), false) {
+        return Err(platform::eacces());
+    }
+
     // Snapshot the quota baseline before creating the file, so the new file's
     // bytes are charged as guest growth rather than absorbed into the baseline.
     fs.quota_ensure_baseline();
@@ -173,6 +177,10 @@ pub(crate) fn do_mkdir(
         return Err(platform::eacces());
     }
 
+    if fs.deny_matches_name(parent, name.to_bytes(), true) {
+        return Err(platform::eacces());
+    }
+
     let parent_fd = inode::get_inode_fd(fs, parent)?;
     let dir_mode = mode & !umask & 0o7777;
 
@@ -231,6 +239,10 @@ pub(crate) fn do_mknod(
     }
 
     if fs.is_reserved_init_name(parent, name.to_bytes()) {
+        return Err(platform::eacces());
+    }
+
+    if fs.deny_matches_name(parent, name.to_bytes(), false) {
         return Err(platform::eacces());
     }
 
@@ -324,6 +336,10 @@ pub(crate) fn do_symlink(
     }
 
     if fs.is_reserved_init_name(parent, name.to_bytes()) {
+        return Err(platform::eacces());
+    }
+
+    if fs.deny_matches_name(parent, name.to_bytes(), false) {
         return Err(platform::eacces());
     }
 
@@ -442,6 +458,10 @@ pub(crate) fn do_link(
         return Err(platform::eacces());
     }
 
+    if fs.deny_matches_name(newparent, newname.to_bytes(), false) {
+        return Err(platform::eacces());
+    }
+
     if fs.is_virtual_init_inode(inode) {
         return Err(platform::eacces());
     }
@@ -470,13 +490,13 @@ pub(crate) fn do_link(
     {
         let inodes = fs.inodes.read().unwrap();
         let data = inodes.get(&inode).ok_or_else(platform::ebadf)?;
-        let src_path = format!("/.vol/{}/{}\0", data.dev, data.ino);
+        let src_path = platform::vol_path(data.dev, data.ino);
         let newparent_fd = inode::get_inode_fd(fs, newparent)?;
 
         let ret = unsafe {
             libc::linkat(
                 libc::AT_FDCWD,
-                src_path.as_ptr() as *const libc::c_char,
+                src_path.as_ptr(),
                 newparent_fd.raw(),
                 newname.as_ptr(),
                 0,
@@ -550,13 +570,13 @@ pub(crate) fn do_readlink(fs: &PassthroughFs, _ctx: Context, ino: u64) -> io::Re
 
         let inodes = fs.inodes.read().unwrap();
         let data = inodes.get(&ino).ok_or_else(platform::ebadf)?;
-        let path = format!("/.vol/{}/{}\0", data.dev, data.ino);
+        let path = platform::vol_path(data.dev, data.ino);
 
         let mut buf = vec![0u8; libc::PATH_MAX as usize];
         let ret = unsafe {
             libc::readlinkat(
                 libc::AT_FDCWD,
-                path.as_ptr() as *const libc::c_char,
+                path.as_ptr(),
                 buf.as_mut_ptr() as *mut libc::c_char,
                 buf.len(),
             )

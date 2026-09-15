@@ -42,6 +42,8 @@ use crate::{
     stat64, statvfs64,
 };
 
+use super::deny::{self, DenyList};
+
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
@@ -177,6 +179,11 @@ pub struct PassthroughConfig {
     /// Single-file mounts anchor pathname resolution at the parent directory,
     /// while accounting only the selected file. `None` uses `root_dir`.
     pub quota_root: Option<PathBuf>,
+
+    /// Gitignore-style patterns whose matching paths are hidden from the guest.
+    ///
+    /// Empty means no paths are denied.
+    pub deny: Vec<String>,
 }
 
 /// Passthrough filesystem backend.
@@ -189,6 +196,11 @@ pub struct PassthroughFs {
 
     /// Open file descriptor for the root directory.
     pub(crate) root_fd: File,
+
+    /// Canonical host path of the mount root, used to strip the root prefix
+    /// when reconstructing mount-relative paths for deny matching (macOS only).
+    #[cfg(target_os = "macos")]
+    pub(crate) root_path: PathBuf,
 
     /// Inode table with dual-key lookup (FUSE inode + host identity).
     pub(crate) inodes: RwLock<MultikeyBTreeMap<u64, InodeAltKey, Arc<InodeData>>>,
@@ -224,6 +236,9 @@ pub struct PassthroughFs {
 
     /// Optional guest-write byte budget for this mount's subtree.
     pub(crate) quota: Option<super::quota::DirQuota>,
+
+    /// Matcher for the deny list (empty = allow everything).
+    pub(crate) deny: DenyList,
 }
 
 /// Open directory handle with a lazy point-in-time snapshot.
@@ -338,9 +353,20 @@ impl PassthroughFs {
             )
         });
 
+        let deny_patterns = cfg.deny.clone();
+
+        let deny = DenyList::new(&cfg.root_dir, &deny_patterns, cfg.readonly)?;
+
+        // Canonical host path of the mount root for deny path-pattern matching.
+        #[cfg(target_os = "macos")]
+        let root_path =
+            platform::path_from_fd(root_fd.as_raw_fd()).unwrap_or_else(|_| cfg.root_dir.clone());
+
         Ok(Self {
             cfg,
             root_fd,
+            #[cfg(target_os = "macos")]
+            root_path,
             inodes: RwLock::new(MultikeyBTreeMap::new()),
             next_inode: AtomicU64::new(3), // 1=root, 2=init
             handles: RwLock::new(BTreeMap::new()),
@@ -353,6 +379,7 @@ impl PassthroughFs {
             #[cfg(target_os = "linux")]
             proc_self_fd,
             quota,
+            deny,
         })
     }
 }
@@ -437,6 +464,84 @@ impl PassthroughFs {
             CachePolicy::Always => OpenOptions::CACHE_DIR,
         }
     }
+}
+
+impl PassthroughFs {
+    /// Whether `name` in `parent` is denied by the deny list.
+    ///
+    /// `is_dir` defines whether the entry is a directory, enabling support for
+    /// dir-only deny patterns.
+    ///
+    /// Fails closed (returns `true`) when the parent-inode path cannot be
+    /// reconstructed under active path patterns, so a deny list is never
+    /// silently bypassed on an unresolvable path.
+    fn deny_matches_name(&self, parent: u64, name: &[u8], is_dir: bool) -> bool {
+        // The structural `.` and `..` entries must never be denied, otherwise a
+        // `.*` or `*` pattern would break path walks and directory listings.
+        if name == b"." || name == b".." {
+            return false;
+        }
+        if !self.deny.needs_path_reconstruction() {
+            return self.deny.matches_basename(name, is_dir);
+        }
+        let root = self.deny_root();
+        let Some(parent_components) =
+            crate::backends::passthroughfs::unix::inode::parent_path_components(
+                &self.inodes,
+                parent,
+                root,
+            )
+        else {
+            // Fail closed
+            return true;
+        };
+        self.deny_matches_name_in_dir(Some(&parent_components), name, is_dir)
+    }
+
+    /// Whether `name` under a parent whose mount-relative components are
+    /// already known is denied by the deny list.
+    ///
+    /// Lets callers that check many names in the same directory (readdir) reuse
+    /// the parent's resolved components instead of reconstructing them (an
+    /// inode-table walk on Linux, an `F_GETPATH` syscall on macOS) once per
+    /// entry.
+    ///
+    /// `parent_components` is the parent's mount-relative components as produced
+    /// by [`inode::parent_path_components`], used only when a path pattern is
+    /// active. The caller is responsible for the parent-path resolution and its
+    /// fail-closed handling.
+    fn deny_matches_name_in_dir(
+        &self,
+        parent_components: Option<&[Vec<u8>]>,
+        name: &[u8],
+        is_dir: bool,
+    ) -> bool {
+        // The structural `.` and `..` entries must never be denied.
+        if name == b"." || name == b".." {
+            return false;
+        }
+        if !self.deny.needs_path_reconstruction() {
+            return self.deny.matches_basename(name, is_dir);
+        }
+        let mut components = parent_components.unwrap_or_default().to_vec();
+        components.push(name.to_vec());
+        self.deny
+            .matches_path(deny::join_path(&components).as_os_str().as_bytes(), is_dir)
+    }
+
+    /// Canonical mount root used to strip the root prefix when reconstructing
+    /// a mount-relative path on macOS.
+    #[cfg(target_os = "macos")]
+    fn deny_root(&self) -> &Path {
+        &self.root_path
+    }
+
+    /// Linux reconstructs mount-relative paths from the inode anchor chain,
+    /// so no separate root is needed.
+    #[cfg(target_os = "linux")]
+    fn deny_root(&self) -> &Path {
+        Path::new("/")
+    }
 
     /// Whether this mount exposes the synthetic init binary.
     pub(crate) fn injects_init(&self) -> bool {
@@ -516,6 +621,7 @@ impl Default for PassthroughConfig {
             bind_identity_map: None,
             quota_bytes: None,
             quota_root: None,
+            deny: Vec::new(),
         }
     }
 }

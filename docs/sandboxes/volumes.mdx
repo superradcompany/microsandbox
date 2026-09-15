@@ -380,10 +380,31 @@ Mounts use normal Linux behavior by default: writable, executable, suid-enabled,
 - `noexec` when files on the mount should not be executed directly.
 - `nosuid` when setuid/setgid bits should be ignored.
 - `nodev` when device files should be ignored.
+- `deny=<pattern>` when some host paths should be hidden.
+
+For stronger in-guest hardening, create the sandbox with the restricted security profile. Restricted sandboxes set `no_new_privs`, drop mount-admin capability from user commands, and force `nosuid,nodev` on user mounts. This profile is incompatible with workloads such as `sudo` and Docker-in-Docker.
+
+### `noexec`
 
 `noexec` does not stop interpreters from reading scripts from the mount, for example `sh /app/src/script.sh`.
 
-For stronger in-guest hardening, create the sandbox with the restricted security profile. Restricted sandboxes set `no_new_privs`, drop mount-admin capability from user commands, and force `nosuid,nodev` on user mounts. This profile is incompatible with workloads such as `sudo` and Docker-in-Docker.
+### `deny=<pattern>`
+
+This option hides host paths from the guest matching a gitignore-style pattern. Matching entries are invisible (ENOENT) and writes to them are forbidden (EACCES). Patterns are relative to the mount root and may be names (`.env`, `*.log`) or paths (`sub/secret`). Repeatable to deny several patterns. Matching follows the case-sensitivity of the mount/filesystem: on a case-insensitive host mount/filesystem (Windows NTFS, default macOS APFS) a pattern such as `.env` also hides `.ENV` and `.Env`; on a case-sensitive host (Linux ext4, a case-sensitive APFS volume) matching is exact. **Patterns are location-based, not confidentiality guarantees.** A path pattern like `sub/.env` is checked against each entry's mount-relative path at lookup time; a guest with a writable mount can `rename` an ancestor directory (for example `mv sub x`) so that the denied path no longer matches and the file is served. Use **name-only patterns** (`.env`, `*.log`) when you need a denied entry to stay hidden regardless of the directory it lives in, and prefer `ro` mounts when the guest should not be able to alter the tree at all.
+
+On the CLI, patterns are transported as part of the `SOURCE:DEST[:OPTIONS]` mount string, so a pattern must not contain the mount-spec delimiter characters `,` or `:` (nor newline or NUL). This means a file whose name contains `,` or `:` cannot be hidden by a `deny` pattern.
+
+Matching is by **path, not by inode**. A host-created hard link to a denied file under a non-denied name is served, because only the name being looked up is checked. Likewise a symlink's **target is not re-checked**: a symlink named `link` pointing at a denied relative path (for example `.env`) resolves and is served, because the deny list sees the symlink's own name, not its target. These are inherent to name-based deny lists; use name-only patterns and `ro` mounts when you need defense against host-created hard links or guest-created symlinks.
+
+**Negations** (gitignore `!`) are supported, so a broad deny plus explicit allows can act as an allowlist: `deny=*` with `deny=!keep.txt` hides everything except `keep.txt`.
+
+**Performance.** Deny checking adds work to name-taking operations (lookup, create, readdir, ...), and how much depends on the pattern kinds in the list:
+
+- **Name-only patterns** (`.env`, `*.log`) are the cheapest. Each entry is matched by its single component name; no extra filesystem calls are made beyond the operation itself.
+- **Directory-only patterns** (`node_modules/`) must know whether an entry is a directory to hide it but not a same-named file, so they add a type lookup per operation (an `fstatat` on Unix lookups and per readdir entry when the filesystem does not supply a dirent type, a metadata query per readdir entry on Windows). Skip them unless you need to hide a directory while leaving a same-named file visible.
+- **Path patterns** (`sub/secret`, `**/env.secret`) must match against the entry's full mount-relative path, which is reconstructed per operation. On Linux this is an in-memory walk of the inode table (no extra syscalls); on macOS it resolves the parent path through `/.vol`/`F_GETPATH`, which is real per-operation syscall work, most visible on directories with many entries. During `readdir` the parent path is resolved once per directory and reused for all entries. Use name-only patterns when you do not need to match across directories.
+
+In practice the overhead matters most for `readdir`-heavy and lookup-heavy workloads on very large directories with a long path-pattern list. Name-only patterns keep the deny fast path.
 
 ### Fallback guest ownership
 
@@ -397,7 +418,7 @@ CLI mount flags use `SOURCE:DEST[:OPTIONS]`. The `:` before `OPTIONS` starts the
 
 | Flag | Source | Options |
 |------|--------|---------|
-| `--mount-dir` | Host directory | `ro`, `rw`, `noexec`, `nosuid`, `nodev`, `stat-virt=strict\|relaxed\|off`, `host-perms=private\|mirror`, `quota=<size>`, paired `uid=<N>,gid=<N>` |
+| `--mount-dir` | Host directory | `ro`, `rw`, `noexec`, `nosuid`, `nodev`, `stat-virt=strict\|relaxed\|off`, `host-perms=private\|mirror`, `quota=<size>`, paired `uid=<N>,gid=<N>`, `deny=<pattern>` (repeatable) |
 | `--mount-file` | Host file | `ro`, `rw`, `noexec`, `nosuid`, `nodev`, `stat-virt=strict\|relaxed\|off`, `host-perms=private\|mirror`, `quota=<size>`, paired `uid=<N>,gid=<N>` |
 | `--mount-named` | Named volume | `ro`, `rw`, `noexec`, `nosuid`, `nodev`, `kind=dir\|disk`, `size=<size>` for `kind=disk`, `quota=<size>` for directory volumes; directory-backed named volumes also support `stat-virt=strict\|relaxed\|off`, `host-perms=private\|mirror`, paired `uid=<N>,gid=<N>` |
 | `--mount-disk` | Host disk image | `ro`, `rw`, `noexec`, `nosuid`, `nodev`, `format=raw\|qcow2\|vmdk`, `fstype=<type>` |

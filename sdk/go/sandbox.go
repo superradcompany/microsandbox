@@ -185,6 +185,7 @@ func buildFFICreateOptions(o SandboxConfig) ffi.CreateOptions {
 				Nodev:              m.Nodev,
 				SizeMiB:            m.SizeMiB,
 				QuotaMiB:           m.QuotaMiB,
+				Deny:               m.Deny,
 				StatVirtualization: string(m.StatVirtualization),
 				HostPermissions:    string(m.HostPermissions),
 			}

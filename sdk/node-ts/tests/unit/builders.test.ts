@@ -335,6 +335,32 @@ describe("MountBuilder", () => {
     const builder = new MountBuilder("/data").bind("/host/with,comma");
     expect(() => builder.build()).toThrow(/must not contain ','/);
   });
+
+  it("propagates deny on a bind mount", () => {
+    const m = new MountBuilder("/data")
+      .bind("/host/data")
+      .deny([".env", "sub/secret"])
+      .build();
+    expect(m).toMatchObject({
+      kind: "bind",
+      deny: [".env", "sub/secret"],
+    });
+  });
+
+  it("omits deny when not set", () => {
+    const m = new MountBuilder("/data").bind("/host/data").build();
+    expect(m.deny).toBeUndefined();
+  });
+
+  it("rejects deny on a named mount at build time", () => {
+    const builder = new MountBuilder("/cache").named("v1").deny([".env"]);
+    expect(() => builder.build()).toThrow(InvalidConfigError);
+  });
+
+  it("rejects deny patterns with forbidden separators", () => {
+    const builder = new MountBuilder("/data").bind("/host").deny(["a,b"]);
+    expect(() => builder.build()).toThrow(InvalidConfigError);
+  });
 });
 
 describe("PatchBuilder", () => {

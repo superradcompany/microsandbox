@@ -1595,6 +1595,7 @@ mod tests {
                     host_permissions: crate::sandbox::HostPermissions::Private,
                     follow_root_symlinks: false,
                     quota_mib: None,
+                    deny: Vec::new(),
                 }],
                 ..Default::default()
             },
@@ -1623,6 +1624,7 @@ mod tests {
                     host_permissions: crate::sandbox::HostPermissions::Private,
                     follow_root_symlinks: false,
                     quota_mib: None,
+                    deny: Vec::new(),
                 }],
                 ..Default::default()
             },

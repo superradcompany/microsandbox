@@ -62,7 +62,7 @@ pub(crate) fn do_readdir(
         #[allow(clippy::readonly_write_lock)]
         let file = data.file.write().unwrap();
         let inject_init = fs.injects_init() && inode == 1;
-        *snapshot_lock = Some(build_snapshot(file.as_raw_fd(), inject_init)?);
+        *snapshot_lock = Some(build_snapshot(fs, inode, file.as_raw_fd(), inject_init)?);
     }
 
     let snapshot = snapshot_lock.as_ref().unwrap();
@@ -90,7 +90,7 @@ pub(crate) fn do_readdir_for_each(
         #[allow(clippy::readonly_write_lock)]
         let file = data.file.write().unwrap();
         let inject_init = fs.injects_init() && inode == 1;
-        *snapshot_lock = Some(build_snapshot(file.as_raw_fd(), inject_init)?);
+        *snapshot_lock = Some(build_snapshot(fs, inode, file.as_raw_fd(), inject_init)?);
     }
 
     let snapshot = snapshot_lock.as_ref().unwrap();
@@ -158,7 +158,7 @@ pub(crate) fn do_readdirplus_for_each(
         #[allow(clippy::readonly_write_lock)]
         let file = data.file.write().unwrap();
         let inject_init = fs.injects_init() && inode == 1;
-        *snapshot_lock = Some(build_snapshot(file.as_raw_fd(), inject_init)?);
+        *snapshot_lock = Some(build_snapshot(fs, inode, file.as_raw_fd(), inject_init)?);
     }
 
     let snapshot = snapshot_lock.as_ref().unwrap();
@@ -291,8 +291,38 @@ fn no_lookup_entry() -> Entry {
 }
 
 /// Build a point-in-time directory snapshot with stable synthetic offsets.
-fn build_snapshot(fd: i32, inject_init: bool) -> io::Result<DirSnapshot> {
+fn build_snapshot(
+    fs: &PassthroughFs,
+    parent: u64,
+    fd: i32,
+    inject_init: bool,
+) -> io::Result<DirSnapshot> {
     let mut entries = read_dir_entries(fd)?;
+
+    // When a path pattern (interior `/`) is active, resolve the parent's
+    // mount-relative components once so they aren't reconstructed (an inode
+    // table walk on Linux, an `F_GETPATH` syscall on macOS) for every entry in
+    // the directory. Fail closed: an unresolvable parent path under active path
+    // patterns denies the whole directory, matching the per-name behavior.
+    let parent_components = if fs.deny.needs_path_reconstruction() {
+        let root = fs.deny_root();
+        match inode::parent_path_components(&fs.inodes, parent, root) {
+            Some(components) => Some(components),
+            None => {
+                return Ok(DirSnapshot {
+                    entries: Vec::new(),
+                });
+            }
+        }
+    } else {
+        None
+    };
+
+    // Filter out entries matching the deny list.
+    entries.retain(|entry| {
+        let is_dir = entry.file_type == platform::DIRENT_DIR;
+        !fs.deny_matches_name_in_dir(parent_components.as_deref(), &entry.name, is_dir)
+    });
 
     if inject_init
         && !entries
@@ -312,6 +342,20 @@ fn build_snapshot(fd: i32, inject_init: bool) -> io::Result<DirSnapshot> {
     }
 
     Ok(DirSnapshot { entries })
+}
+
+/// Resolve the dirent type of `name` within directory `dirfd`. If the
+/// filesystem did not supply one (`DT_UNKNOWN`), use `fstatat` without
+/// following symlinks so a dir-only deny pattern still hides directories.
+fn resolve_dirent_type(dirfd: i32, d_type: u32, name: &[u8]) -> u32 {
+    if d_type != libc::DT_UNKNOWN as u32 {
+        return d_type;
+    }
+    std::ffi::CString::new(name)
+        .ok()
+        .and_then(|c| platform::fstatat_nofollow(dirfd, &c).ok())
+        .map(|st| platform::dirent_type_from_mode(platform::mode_file_type(st.st_mode)))
+        .unwrap_or(libc::DT_UNKNOWN as u32)
 }
 
 /// Read all directory entries from a file descriptor on Linux.
@@ -349,11 +393,15 @@ fn read_dir_entries(fd: i32) -> io::Result<Vec<PassthroughDirEntry>> {
                 .position(|&b| b == 0)
                 .unwrap_or(name_slice.len());
 
+            // When the filesystem did not supply a dirent type, resolve it via
+            // `fstatat` to support dir-only deny patterns.
+            let file_type = resolve_dirent_type(fd, d_type, &name_slice[..name_len]);
+
             entries.push(PassthroughDirEntry {
                 inode: d_ino,
                 name: name_slice[..name_len].to_vec(),
                 offset: 0,
-                file_type: d_type,
+                file_type,
             });
 
             pos += d_reclen as usize;
@@ -402,11 +450,15 @@ fn read_dir_entries(fd: i32) -> io::Result<Vec<PassthroughDirEntry>> {
         let name =
             unsafe { std::slice::from_raw_parts(entry.d_name.as_ptr() as *const u8, name_len) };
 
+        // When the filesystem did not supply a dirent type, resolve it via
+        // `fstatat` to support dir-only deny patterns.
+        let file_type = resolve_dirent_type(libc::dirfd(dirp), entry.d_type as u32, name);
+
         entries.push(PassthroughDirEntry {
             inode: entry.d_ino,
             name: name.to_vec(),
             offset: 0,
-            file_type: entry.d_type as u32,
+            file_type,
         });
     }
 

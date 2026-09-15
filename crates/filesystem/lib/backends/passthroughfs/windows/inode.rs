@@ -102,7 +102,24 @@ impl PassthroughFs {
             return Ok(init_entry(self.cfg.entry_timeout, self.cfg.attr_timeout));
         }
 
+        // Determine the child's type so a dir-only deny pattern like
+        // `node_modules/` hides the directory but not a same-named file. Only
+        // needed when a dir-only pattern is active. If the child cannot be
+        // stat'ed, treat it as a non-dir and let the lookup below surface the
+        // real error.
         let path = self.child_path(parent, name)?;
+        let is_dir = if self.deny.has_dir_only_patterns() {
+            self.safe_metadata(&path)
+                .map(|m| m.file_type().is_dir())
+                .unwrap_or(false)
+        } else {
+            false
+        };
+
+        if self.deny_matches_name(parent, name, is_dir) {
+            return Err(linux_error(LINUX_ENOENT));
+        }
+
         self.entry_for_path(path)
     }
 
