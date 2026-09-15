@@ -10,6 +10,7 @@
 pub mod boot_error_render;
 pub mod commands;
 pub mod exec_error_render;
+pub mod launch_compat;
 pub mod log_args;
 pub mod machine_cmd;
 #[cfg(feature = "net")]

@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Instant;
 
 use chrono::Utc;
@@ -70,6 +71,9 @@ struct FileSnapshotMetadata<'a> {
 struct SnapshotDiskSource {
     path: PathBuf,
     format: SnapshotFormat,
+    /// Only a runtime-sealed generation supplies a reusable physical identity. A stopped
+    /// mutable source gets a fresh identity even when its filename has not changed.
+    sealed_layer_id: Option<DiskLayerId>,
 }
 
 struct SnapshotDiskClosure {
@@ -77,6 +81,21 @@ struct SnapshotDiskClosure {
     virtual_size: u64,
     /// A live capture owns immutable runtime staging until artifact publication completes.
     capture_root: Option<PathBuf>,
+    owned_volumes: Vec<microsandbox_image::snapshot::OwnedVolumeCapture>,
+}
+
+//--------------------------------------------------------------------------------------------------
+// Methods
+//--------------------------------------------------------------------------------------------------
+
+impl SnapshotDiskSource {
+    fn artifact_layer_id(&self) -> MicrosandboxResult<DiskLayerId> {
+        match &self.sealed_layer_id {
+            Some(id) => Ok(id.clone()),
+            None => DiskLayerId::new(format!("layer_{:032x}", rand::random::<u128>()))
+                .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string())),
+        }
+    }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -296,14 +315,14 @@ async fn capture_installed(
     let _lifecycle_guard = if live {
         None
     } else {
-        Some(
+        Some(Arc::new(
             crate::runtime::acquire_sandbox_lifecycle_guard(
                 &local.config().run_dir(),
                 &source_sandbox,
                 std::time::Duration::from_secs(5),
             )
             .await?,
-        )
+        ))
     };
     let current = sandbox_entity::Entity::find()
         .filter(sandbox_entity::Column::Name.eq(&source_sandbox))
@@ -350,6 +369,8 @@ async fn capture_installed(
         current.id,
         current.status,
         &root_disk,
+        &sandbox_config.spec.mounts,
+        _lifecycle_guard.clone(),
     )
     .await?;
 
@@ -615,14 +636,14 @@ pub(super) async fn create_snapshot_archive(
     let _lifecycle_guard = if live {
         None
     } else {
-        Some(
+        Some(Arc::new(
             crate::runtime::acquire_sandbox_lifecycle_guard(
                 &local.config().run_dir(),
                 &source_sandbox,
                 std::time::Duration::from_secs(5),
             )
             .await?,
-        )
+        ))
     };
     let current = sandbox_entity::Entity::find()
         .filter(sandbox_entity::Column::Name.eq(&source_sandbox))
@@ -661,6 +682,8 @@ pub(super) async fn create_snapshot_archive(
         current.id,
         current.status,
         &root_disk,
+        &sandbox_config.spec.mounts,
+        _lifecycle_guard.clone(),
     )
     .await?;
     lineage.validate_source(local, &source_sandbox).await?;
@@ -717,6 +740,7 @@ pub(super) async fn create_snapshot_archive(
             &labels,
             &name,
             &source_paths,
+            _disk.capture_root.as_deref(),
             &owned_out,
             plain_tar,
             force,
@@ -870,6 +894,10 @@ async fn capture_full_snapshot(
                 "runtime checkpoint closure has another capture identity".into(),
             ));
         }
+        validate_owned_inventory(
+            &sandbox_config.spec.mounts,
+            &closure.checkpoint().owned_volumes,
+        )?;
 
         let snapshot_id = SnapshotId::new(format!("snap_{:032x}", rand::random::<u128>()))
             .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
@@ -931,6 +959,7 @@ async fn capture_full_snapshot(
         manifest.set_restore_defaults(microsandbox_image::snapshot::RestoreDefaults {
             user: sandbox_config.spec.runtime.user.clone(),
         })?;
+        manifest.set_owned_volumes(closure.checkpoint().owned_volumes.clone())?;
         manifest
             .validate()
             .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
@@ -1034,8 +1063,7 @@ async fn build_artifact(
     let mut captured: Vec<(DiskLayerId, SnapshotFormat, PathBuf)> =
         Vec::with_capacity(disk.sources.len());
     for source in &disk.sources {
-        let layer_id = DiskLayerId::new(format!("layer_{:032x}", rand::random::<u128>()))
-            .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+        let layer_id = source.artifact_layer_id()?;
         let destination = dir.join(layer_path(&layer_id, source.format));
         let source_path = source.path.clone();
         let destination_for_copy = destination.clone();
@@ -1050,6 +1078,9 @@ async fn build_artifact(
         captured.push((layer_id, source.format, destination));
     }
     let copy_us = copy_started.elapsed().as_micros();
+    if let Some(source) = &disk.capture_root {
+        copy_owned_payloads(source, dir, &disk.owned_volumes)?;
+    }
 
     let payload_sync_started = Instant::now();
     for (_, _, destination) in &captured {
@@ -1152,9 +1183,9 @@ fn new_file_manifest(
         .iter()
         .zip(integrities)
         .map(|(source, integrity)| {
-            DiskLayerId::new(format!("layer_{:032x}", rand::random::<u128>()))
+            source
+                .artifact_layer_id()
                 .map(|layer_id| (layer_id, source.format, integrity))
-                .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))
         })
         .collect::<MicrosandboxResult<Vec<_>>>()?;
     new_file_manifest_with_id(
@@ -1222,7 +1253,7 @@ fn new_file_manifest_with_id(
             }
         })
         .collect();
-    let manifest = Manifest {
+    let mut manifest = Manifest {
         schema: SCHEMA.into(),
         snapshot_id,
         scope: SnapshotScope::Disk,
@@ -1237,6 +1268,8 @@ fn new_file_manifest_with_id(
             created_at: Utc::now().to_rfc3339(),
             source_lineage: Some(source_sandbox.to_string()),
             source_checkpoint: None,
+            // Stopped or crashed captures carry no guest-sync proof. Owned inventory alone
+            // must not upgrade the conservative classification of disk-only snapshots.
             consistency: SnapshotConsistency::CrashConsistent,
         },
         image: ImageRef {
@@ -1248,6 +1281,7 @@ fn new_file_manifest_with_id(
         requires: Vec::new(),
         extensions: BTreeMap::new(),
     };
+    manifest.set_owned_volumes(disk.owned_volumes.clone())?;
     manifest
         .validate()
         .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
@@ -1278,6 +1312,7 @@ fn snapshot_root_disk(
 
 /// Resident runtimes return a sealed closure while retaining their lifecycle lock.
 /// Stopped callers own that lock themselves. Packaging never reads a live writable head.
+#[allow(clippy::too_many_arguments)]
 async fn capture_disk_source(
     local: &LocalBackend,
     sandbox_dir: &Path,
@@ -1285,9 +1320,40 @@ async fn capture_disk_source(
     source_id: i32,
     status: SandboxStatus,
     root_disk: &SnapshotRootDisk,
+    mounts: &[microsandbox_types::VolumeMount],
+    lifecycle_guard: Option<Arc<microsandbox_runtime::ipc::SandboxLifecycleGuard>>,
 ) -> MicrosandboxResult<SnapshotDiskClosure> {
     if !matches!(status, SandboxStatus::Running | SandboxStatus::Paused) {
-        return snapshot_disk_closure(sandbox_dir, root_disk);
+        let lifecycle_guard = lifecycle_guard.ok_or_else(|| {
+            MicrosandboxError::Runtime("stopped disk capture requires lifecycle ownership".into())
+        })?;
+        let sandbox_dir = sandbox_dir.to_path_buf();
+        let root_disk = root_disk.clone();
+        let mounts = mounts.to_vec();
+        return tokio::task::spawn_blocking(move || {
+            // These synchronous helpers own a current-thread runtime. Run the whole cut away
+            // from Tokio's async executor, and retain ownership even if its await is canceled.
+            let _lifecycle_guard = lifecycle_guard;
+            let mut disk = snapshot_disk_closure(&sandbox_dir, &root_disk)?;
+            if mounts
+                .iter()
+                .any(|mount| matches!(mount, microsandbox_types::VolumeMount::Owned { .. }))
+            {
+                // Staging belongs to the worker until its complete closure is returned. An
+                // error or a canceled caller drops it only after all capture work has stopped.
+                let staging = tempfile::Builder::new()
+                    .prefix(".owned-disk-snapshot-")
+                    .tempdir_in(&sandbox_dir)?;
+                disk.owned_volumes =
+                    capture_stopped_owned_volumes(&sandbox_dir, staging.path(), &mounts)?;
+                disk.capture_root = Some(staging.keep());
+            }
+            Ok(disk)
+        })
+        .await
+        .map_err(|error| {
+            MicrosandboxError::Runtime(format!("stopped disk capture task: {error}"))
+        })?;
     }
     let id = format!("disk_{:032x}", rand::random::<u128>());
     let captured =
@@ -1302,6 +1368,30 @@ async fn capture_disk_source(
             ));
         }
     };
+    let disk = validate_live_disk_capture(captured, &id, expected_path, expected_device, mounts)?;
+    // A live runtime owns the lifecycle lock, not this SDK call. If the source was replaced
+    // between lookup and capture, never publish its disk under the original image/config.
+    let current = sandbox_entity::Entity::find()
+        .filter(sandbox_entity::Column::Name.eq(source))
+        .one(local.db().await?.read())
+        .await?;
+    if !current.is_some_and(|model| model.id == source_id) {
+        return Err(MicrosandboxError::Runtime(
+            "snapshot source was replaced during disk capture; retry with the current sandbox"
+                .into(),
+        ));
+    }
+    Ok(disk)
+}
+
+/// Adopt only the closure bound to this operation before validating its fallible contents.
+fn validate_live_disk_capture(
+    captured: microsandbox_runtime::control::DiskCheckpointControlState,
+    id: &str,
+    expected_path: PathBuf,
+    expected_device: &str,
+    mounts: &[microsandbox_types::VolumeMount],
+) -> MicrosandboxResult<SnapshotDiskClosure> {
     if captured.checkpoint_id != id
         || captured.path != expected_path
         || captured.disk.device_id != expected_device
@@ -1310,10 +1400,19 @@ async fn capture_disk_source(
             "disk capture identity, path, or root device mismatch".into(),
         ));
     }
+    // Once the runtime response identifies our sealed generation, every later failure must
+    // reclaim it. Never adopt a returned locator that failed the operation identity checks.
+    let mut capture = SnapshotDiskClosure {
+        sources: Vec::new(),
+        virtual_size: 0,
+        capture_root: Some(expected_path),
+        owned_volumes: captured.owned_volumes,
+    };
     captured
         .disk
         .validate()
         .map_err(|e| MicrosandboxError::SnapshotIntegrity(e.to_string()))?;
+    validate_owned_inventory(mounts, &capture.owned_volumes)?;
     let sources = captured
         .disk
         .layers
@@ -1334,6 +1433,10 @@ async fn capture_disk_source(
                     .join("layers")
                     .join(format!("{}.{}", layer.layer_id, layer.format)),
                 format,
+                sealed_layer_id: Some(
+                    DiskLayerId::new(layer.layer_id.clone())
+                        .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?,
+                ),
             })
         })
         .collect::<MicrosandboxResult<Vec<_>>>()?;
@@ -1344,20 +1447,190 @@ async fn capture_disk_source(
         .ok_or_else(|| MicrosandboxError::SnapshotIntegrity("empty disk capture".into()))?
         .virtual_size;
     let mut disk = validate_snapshot_disk_sources(sources, size)?;
-    disk.capture_root = Some(expected_path);
-    // A live runtime owns the lifecycle lock, not this SDK call. If the source was replaced
-    // between lookup and capture, never publish its disk under the original image/config.
-    let current = sandbox_entity::Entity::find()
-        .filter(sandbox_entity::Column::Name.eq(source))
-        .one(local.db().await?.read())
-        .await?;
-    if !current.is_some_and(|model| model.id == source_id) {
-        return Err(MicrosandboxError::Runtime(
-            "snapshot source was replaced during disk capture; retry with the current sandbox"
+    disk.capture_root = capture.capture_root.take();
+    disk.owned_volumes = std::mem::take(&mut capture.owned_volumes);
+    Ok(disk)
+}
+
+pub(crate) fn validate_owned_inventory(
+    mounts: &[microsandbox_types::VolumeMount],
+    volumes: &[microsandbox_image::snapshot::OwnedVolumeCapture],
+) -> MicrosandboxResult<()> {
+    use microsandbox_image::snapshot::OwnedMountSnapshot;
+    let expected = mounts
+        .iter()
+        .filter(|mount| matches!(mount, microsandbox_types::VolumeMount::Owned { .. }))
+        .map(|mount| {
+            Ok((
+                microsandbox_types::owned_volume_mount_id(mount.guest()),
+                OwnedMountSnapshot::from_mount(mount)?,
+            ))
+        })
+        .collect::<MicrosandboxResult<BTreeMap<_, _>>>()?;
+    microsandbox_image::snapshot::validate_owned_volumes(volumes)?;
+    let actual = volumes
+        .iter()
+        .map(|volume| (volume.mount_id.clone(), volume.mount.clone()))
+        .collect::<BTreeMap<_, _>>();
+    if actual != expected {
+        return Err(MicrosandboxError::SnapshotIntegrity(
+            "runtime capture omits or changes required owned storage; use a matching runtime"
                 .into(),
         ));
     }
-    Ok(disk)
+    Ok(())
+}
+
+/// The portable descriptor and execution closure must require exactly the same owned backing.
+pub(crate) fn validate_checkpoint_owned_inventory(
+    manifest: &Manifest,
+    checkpoint: &microsandbox_image::checkpoint::CheckpointManifest,
+) -> MicrosandboxResult<()> {
+    if manifest.owned_volumes()? != checkpoint.owned_volumes {
+        return Err(MicrosandboxError::SnapshotIntegrity(
+            "snapshot descriptor and checkpoint owned storage inventories disagree".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn capture_stopped_owned_volumes(
+    sandbox: &Path,
+    destination: &Path,
+    mounts: &[microsandbox_types::VolumeMount],
+) -> MicrosandboxResult<Vec<microsandbox_image::snapshot::OwnedVolumeCapture>> {
+    use microsandbox_image::snapshot::{
+        OwnedDirectoryPayload, OwnedMountSnapshot, OwnedVolumeCapture, OwnedVolumeData,
+    };
+    use microsandbox_types::{OwnedVolumeStorage, VolumeMount};
+    let mut volumes = Vec::new();
+    for mount in mounts {
+        let VolumeMount::Owned {
+            storage, options, ..
+        } = mount
+        else {
+            continue;
+        };
+        let mount_id = microsandbox_types::owned_volume_mount_id(mount.guest());
+        let parent = sandbox.join("owned-volumes").join(&mount_id);
+        for path in [sandbox.join("owned-volumes"), parent.clone()] {
+            if !std::fs::symlink_metadata(path)?.file_type().is_dir() {
+                return Err(MicrosandboxError::SnapshotIntegrity(
+                    "owned backing parent is missing or not a directory".into(),
+                ));
+            }
+        }
+        let data = match storage {
+            OwnedVolumeStorage::Directory { .. } => {
+                std::fs::create_dir_all(destination.join("owned"))?;
+                let snapshot = microsandbox_filesystem::OwnedDirectorySnapshot::capture(
+                    &parent.join("data"),
+                    &destination.join("owned").join(&mount_id),
+                )?;
+                OwnedVolumeData::Directory {
+                    descriptor: OwnedDirectoryPayload {
+                        digest: snapshot.digest()?,
+                        bytes: snapshot.descriptor_bytes()?.len() as u64,
+                    },
+                    files: snapshot
+                        .payloads()
+                        .into_iter()
+                        .map(|payload| OwnedDirectoryPayload {
+                            digest: payload.digest,
+                            bytes: payload.bytes,
+                        })
+                        .collect(),
+                }
+            }
+            OwnedVolumeStorage::Disk { capacity_mib } => {
+                let virtual_size = u64::from(*capacity_mib) * 1024 * 1024;
+                // The nominal raw file is only the initial generation. After a checkpoint
+                // or compaction the runtime journal owns the complete backing chain.
+                let generation = microsandbox_runtime::checkpoint::capture_stopped_owned_disk(
+                    &sandbox.join("runtime"),
+                    &mount_id,
+                    &parent.join("disk.raw"),
+                    options.readonly,
+                    destination,
+                )
+                .map_err(MicrosandboxError::SnapshotIntegrity)?;
+                if virtual_size == 0
+                    || generation.layers.last().map(|layer| layer.virtual_size)
+                        != Some(virtual_size)
+                {
+                    return Err(MicrosandboxError::SnapshotIntegrity(
+                        "owned disk differs from its configured capacity".into(),
+                    ));
+                }
+                OwnedVolumeData::Disk { generation }
+            }
+        };
+        volumes.push(OwnedVolumeCapture {
+            mount_id,
+            mount: OwnedMountSnapshot::from_mount(mount)?,
+            data,
+        });
+    }
+    validate_owned_inventory(mounts, &volumes)?;
+    Ok(volumes)
+}
+
+/// Copy required owned payloads into an unpublished artifact and verify the copies.
+fn copy_owned_payloads(
+    source: &Path,
+    destination: &Path,
+    volumes: &[microsandbox_image::snapshot::OwnedVolumeCapture],
+) -> MicrosandboxResult<()> {
+    use microsandbox_image::snapshot::OwnedVolumeData;
+    for volume in volumes {
+        let paths = match &volume.data {
+            OwnedVolumeData::Directory { .. } => {
+                // Even an empty namespace has a complete payload container.
+                std::fs::create_dir_all(destination.join(volume.directory_path()).join("files"))?;
+                volume
+                    .directory_payloads()
+                    .into_iter()
+                    .map(|(path, _)| path)
+                    .collect::<Vec<_>>()
+            }
+            OwnedVolumeData::Disk { generation } => generation
+                .layers
+                .iter()
+                .map(|layer| {
+                    Path::new("layers").join(format!("{}.{}", layer.layer_id, layer.format))
+                })
+                .collect(),
+        };
+        for path in paths {
+            let target = destination.join(&path);
+            std::fs::create_dir_all(target.parent().expect("owned payload has a parent"))?;
+            copy_checkpoint_file(&source.join(path), &target)?;
+        }
+    }
+    microsandbox_image::snapshot::verify_owned_directory_payloads(destination, volumes)?;
+    for volume in volumes {
+        if let OwnedVolumeData::Disk { generation } = &volume.data {
+            for layer in &generation.layers {
+                let target = destination
+                    .join("layers")
+                    .join(format!("{}.{}", layer.layer_id, layer.format));
+                if std::fs::metadata(&target)?.len() != layer.file_size {
+                    return Err(MicrosandboxError::SnapshotIntegrity(
+                        "copied owned disk length differs".into(),
+                    ));
+                }
+                if let Some(expected) = &layer.integrity_root
+                    && microsandbox_image::checkpoint::sparse_file_integrity(&target)?.root
+                        != *expected
+                {
+                    return Err(MicrosandboxError::SnapshotIntegrity(
+                        "copied owned disk integrity differs".into(),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn snapshot_disk_closure(
@@ -1400,6 +1673,7 @@ fn snapshot_disk_closure(
                 Ok(SnapshotDiskSource {
                     path: layer.path,
                     format,
+                    sealed_layer_id: None,
                 })
             })
             .collect::<MicrosandboxResult<Vec<_>>>()?;
@@ -1423,6 +1697,7 @@ fn snapshot_disk_closure(
         vec![SnapshotDiskSource {
             path,
             format: SnapshotFormat::Raw,
+            sealed_layer_id: None,
         }],
         virtual_size,
     )
@@ -1455,6 +1730,7 @@ fn validate_snapshot_disk_sources(
         sources,
         virtual_size,
         capture_root: None,
+        owned_volumes: Vec::new(),
     })
 }
 
@@ -1530,6 +1806,7 @@ pub(crate) fn stage_local_branch_closure(source: &Path, destination: &Path) -> s
     for member in [
         "objects",
         "layers",
+        "owned",
         "local-disk-admission.json",
         "branch.json",
     ] {
@@ -1575,7 +1852,7 @@ fn materialize_checkpoint_tree(
     }
     std::fs::create_dir_all(destination)?;
 
-    for member in ["objects", "layers"] {
+    for member in ["objects", "layers", "owned"] {
         let source_member = source.join(member);
         match std::fs::symlink_metadata(&source_member) {
             Ok(metadata) if metadata.file_type().is_dir() => {
@@ -1788,6 +2065,27 @@ mod tests {
 
     use super::*;
 
+    const CAPTURE_BASE_ID: &str = "layer_00000000000000000000000000000001";
+
+    #[test]
+    fn batch_staging_retains_owned_payloads_after_the_first_child_is_removed() {
+        let source = tempfile::tempdir().unwrap();
+        let batch = tempfile::tempdir().unwrap();
+        let sibling = tempfile::tempdir().unwrap();
+        let payload = "owned/mount-test/payloads/data";
+        std::fs::create_dir_all(source.path().join("owned/mount-test/payloads")).unwrap();
+        std::fs::write(source.path().join(payload), b"captured owned data").unwrap();
+        std::fs::write(source.path().join("branch.json"), b"{}").unwrap();
+        stage_local_branch_closure(source.path(), batch.path()).unwrap();
+        source.close().unwrap();
+        stage_local_branch_closure(batch.path(), sibling.path()).unwrap();
+        batch.close().unwrap();
+        assert_eq!(
+            std::fs::read(sibling.path().join(payload)).unwrap(),
+            b"captured owned data"
+        );
+    }
+
     async fn fixture_source(local: &LocalBackend) {
         let mut config = SandboxConfig::default();
         config.spec.name = "box".into();
@@ -1812,6 +2110,133 @@ mod tests {
             root_disk,
             user: None,
         }
+    }
+
+    fn disk_capture_fixture(
+        root: &Path,
+    ) -> microsandbox_runtime::control::DiskCheckpointControlState {
+        use microsandbox_image::checkpoint::{DiskGenerationManifest, DiskLayerRef};
+
+        std::fs::create_dir_all(root.join("layers")).unwrap();
+        std::fs::write(
+            root.join(format!("layers/{CAPTURE_BASE_ID}.raw")),
+            b"sealed root",
+        )
+        .unwrap();
+        let disk = DiskGenerationManifest {
+            schema: "microsandbox.disk-generation/1".into(),
+            volume_id: "root".into(),
+            device_id: "vdb".into(),
+            generation: 1,
+            layers: vec![DiskLayerRef {
+                layer_id: CAPTURE_BASE_ID.into(),
+                format: "raw".into(),
+                file_size: b"sealed root".len() as u64,
+                virtual_size: 4096,
+                predecessor: None,
+                integrity_root: Some(format!("blake3:{}", "a".repeat(64))),
+            }],
+            head: CAPTURE_BASE_ID.into(),
+            pause_generation: 1,
+        };
+        disk.validate().unwrap();
+        microsandbox_runtime::control::DiskCheckpointControlState {
+            checkpoint_id: "disk_capture".into(),
+            path: root.to_path_buf(),
+            disk,
+            owned_volumes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn disk_capture_owned_inventory_failure_reclaims_adopted_staging() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("capture");
+        let captured = disk_capture_fixture(&root);
+        let mount = microsandbox_types::VolumeMount::Owned {
+            guest: "/data".into(),
+            storage: microsandbox_types::OwnedVolumeStorage::Directory { quota_mib: None },
+            options: Default::default(),
+            stat_virtualization: microsandbox_types::StatVirtualization::Strict,
+            host_permissions: microsandbox_types::HostPermissions::Private,
+        };
+
+        let result =
+            validate_live_disk_capture(captured, "disk_capture", root.clone(), "vdb", &[mount]);
+
+        assert!(matches!(
+            result,
+            Err(MicrosandboxError::SnapshotIntegrity(_))
+        ));
+        assert!(!root.exists());
+        assert!(temp.path().exists());
+    }
+
+    #[test]
+    fn disk_capture_manifest_and_payload_failures_reclaim_adopted_staging() {
+        for malformed_manifest in [true, false] {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().join("capture");
+            let mut captured = disk_capture_fixture(&root);
+            if malformed_manifest {
+                captured.disk.generation = 0;
+            } else {
+                std::fs::remove_file(root.join(format!("layers/{CAPTURE_BASE_ID}.raw"))).unwrap();
+            }
+
+            let result =
+                validate_live_disk_capture(captured, "disk_capture", root.clone(), "vdb", &[]);
+
+            assert!(matches!(
+                result,
+                Err(MicrosandboxError::SnapshotIntegrity(_))
+            ));
+            assert!(!root.exists());
+        }
+    }
+
+    #[test]
+    fn disk_capture_identity_failure_never_adopts_untrusted_staging() {
+        for mismatch in ["id", "path", "device"] {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().join("capture");
+            let unrelated = temp.path().join("unrelated");
+            std::fs::create_dir(&unrelated).unwrap();
+            std::fs::write(unrelated.join("keep"), b"unrelated").unwrap();
+            let mut captured = disk_capture_fixture(&root);
+            match mismatch {
+                "id" => captured.checkpoint_id = "other".into(),
+                "path" => captured.path = unrelated.clone(),
+                "device" => captured.disk.device_id = "vda".into(),
+                _ => unreachable!(),
+            }
+
+            let result =
+                validate_live_disk_capture(captured, "disk_capture", root.clone(), "vdb", &[]);
+
+            assert!(matches!(
+                result,
+                Err(MicrosandboxError::SnapshotIntegrity(_))
+            ));
+            assert!(root.join(format!("layers/{CAPTURE_BASE_ID}.raw")).exists());
+            assert!(unrelated.join("keep").exists());
+        }
+    }
+
+    #[test]
+    fn disk_capture_success_retains_staging_until_closure_drop() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("capture");
+        let captured = disk_capture_fixture(&root);
+
+        let disk =
+            validate_live_disk_capture(captured, "disk_capture", root.clone(), "vdb", &[]).unwrap();
+
+        assert!(root.join(format!("layers/{CAPTURE_BASE_ID}.raw")).exists());
+        assert_eq!(disk.capture_root.as_deref(), Some(root.as_path()));
+        assert_eq!(disk.sources.len(), 1);
+        drop(disk);
+        assert!(!root.exists());
     }
 
     #[test]
@@ -1870,6 +2295,7 @@ mod tests {
             disks: Vec::new(),
             devices: Vec::new(),
             resources: Vec::new(),
+            owned_volumes: Vec::new(),
             requires: Vec::new(),
         };
         let bytes = checkpoint.to_canonical_bytes().unwrap();
@@ -2165,6 +2591,283 @@ mod tests {
     }
 
     #[test]
+    fn stopped_owned_capture_copies_empty_namespace_and_seals_disk_bytes() {
+        use microsandbox_types::{
+            HostPermissions, OwnedVolumeStorage, StatVirtualization, VolumeMount,
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let sandbox = temp.path().join("sandbox");
+        let source_data = sandbox
+            .join("owned-volumes")
+            .join(microsandbox_types::owned_volume_mount_id("/cache"))
+            .join("data");
+        let source_disk = sandbox
+            .join("owned-volumes")
+            .join(microsandbox_types::owned_volume_mount_id("/data"))
+            .join("disk.raw");
+        std::fs::create_dir_all(&source_data).unwrap();
+        std::fs::create_dir_all(source_disk.parent().unwrap()).unwrap();
+        std::fs::write(&source_disk, vec![11; 1024 * 1024]).unwrap();
+        let mount = |guest: &str, storage| VolumeMount::Owned {
+            guest: guest.into(),
+            storage,
+            options: Default::default(),
+            stat_virtualization: StatVirtualization::Strict,
+            host_permissions: HostPermissions::Private,
+        };
+        let mounts = vec![
+            mount("/cache", OwnedVolumeStorage::Directory { quota_mib: None }),
+            mount("/data", OwnedVolumeStorage::Disk { capacity_mib: 1 }),
+        ];
+        let capture = temp.path().join("capture");
+        let volumes = capture_stopped_owned_volumes(&sandbox, &capture, &mounts).unwrap();
+        std::fs::write(sandbox.join("upper.ext4"), b"stopped root bytes").unwrap();
+        let mut disk = snapshot_disk_closure(&sandbox, &SnapshotRootDisk::Managed).unwrap();
+        disk.owned_volumes = volumes.clone();
+        let manifest = new_file_manifest(
+            &disk,
+            vec![None],
+            "docker.io/library/alpine:3.20".into(),
+            format!("sha256:{}", "a".repeat(64)),
+            "sandbox",
+            SnapshotRootDisk::Managed,
+        )
+        .unwrap();
+        assert_eq!(manifest.owned_volumes().unwrap().len(), 2);
+        assert_eq!(
+            manifest.capture.consistency,
+            SnapshotConsistency::CrashConsistent
+        );
+        std::fs::write(source_data.join("later"), b"after the cut").unwrap();
+        let chain = microsandbox_runtime::checkpoint::load_runtime_owned_disk_chain(
+            &sandbox.join("runtime"),
+            &microsandbox_types::owned_volume_mount_id("/data"),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(chain.layers.len(), 2);
+        assert_ne!(
+            chain.layers.last().unwrap().path,
+            source_disk,
+            "the source must write to a new private head after sealing its raw base"
+        );
+        let artifact = temp.path().join("artifact");
+        copy_owned_payloads(&capture, &artifact, &volumes).unwrap();
+        let directory = microsandbox_filesystem::OwnedDirectorySnapshot::open(
+            &artifact.join(volumes[0].directory_path()),
+        )
+        .unwrap();
+        let child = temp.path().join("private-data");
+        directory
+            .materialize(&artifact.join(volumes[0].directory_path()), &child)
+            .unwrap();
+        assert_eq!(std::fs::read_dir(child).unwrap().count(), 0);
+        let microsandbox_image::snapshot::OwnedVolumeData::Disk { generation } = &volumes[1].data
+        else {
+            unreachable!()
+        };
+        assert_eq!(
+            std::fs::read(
+                artifact
+                    .join("layers")
+                    .join(format!("{}.raw", generation.head))
+            )
+            .unwrap(),
+            vec![11; 1024 * 1024]
+        );
+        std::fs::remove_file(source_disk).unwrap();
+        assert!(
+            capture_stopped_owned_volumes(&sandbox, &temp.path().join("missing"), &mounts).is_err()
+        );
+    }
+
+    fn stopped_async_capture_fixture(sandbox: &Path) -> Vec<microsandbox_types::VolumeMount> {
+        use microsandbox_types::{OwnedVolumeStorage, VolumeMount};
+
+        let owned = sandbox.join("owned-volumes");
+        let data = owned.join(microsandbox_types::owned_volume_mount_id("/data"));
+        let cache = owned
+            .join(microsandbox_types::owned_volume_mount_id("/cache"))
+            .join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(sandbox.join("upper.ext4"), vec![91; 65536]).unwrap();
+        std::fs::write(data.join("disk.raw"), vec![11; 1024 * 1024]).unwrap();
+        std::fs::write(cache.join("kept"), b"namespace bytes").unwrap();
+        [
+            ("/data", OwnedVolumeStorage::Disk { capacity_mib: 1 }),
+            ("/cache", OwnedVolumeStorage::Directory { quota_mib: None }),
+        ]
+        .into_iter()
+        .map(|(guest, storage)| VolumeMount::Owned {
+            guest: guest.into(),
+            storage,
+            options: Default::default(),
+            stat_virtualization: microsandbox_types::StatVirtualization::Strict,
+            host_permissions: microsandbox_types::HostPermissions::Private,
+        })
+        .collect()
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn stopped_capture_dispatches_owned_chains_off_the_async_executor() {
+        let temp = tempfile::tempdir().unwrap();
+        let local = LocalBackend::builder()
+            .home(temp.path().join("home"))
+            .build()
+            .await
+            .unwrap();
+        let sandbox = temp.path().join("sandbox");
+        let mounts = stopped_async_capture_fixture(&sandbox);
+        let run = temp.path().join("run");
+        let guard = Arc::new(
+            microsandbox_runtime::ipc::try_acquire_lifecycle_guard(&run, "box")
+                .unwrap()
+                .unwrap(),
+        );
+        for layers in [1, 2] {
+            let capture = capture_disk_source(
+                &local,
+                &sandbox,
+                "box",
+                1,
+                SandboxStatus::Stopped,
+                &SnapshotRootDisk::Managed,
+                &mounts,
+                Some(Arc::clone(&guard)),
+            )
+            .await
+            .unwrap();
+            assert!(
+                microsandbox_runtime::ipc::try_acquire_lifecycle_guard(&run, "box")
+                    .unwrap()
+                    .is_none()
+            );
+            let root = capture.capture_root.clone().unwrap();
+            assert!(root.is_dir());
+            let generation = capture
+                .owned_volumes
+                .iter()
+                .find_map(|volume| match &volume.data {
+                    microsandbox_image::snapshot::OwnedVolumeData::Disk { generation } => {
+                        Some(generation)
+                    }
+                    _ => None,
+                })
+                .unwrap();
+            assert_eq!(generation.layers.len(), layers);
+            let mut copy = temp.path().join(format!("copy-{layers}"));
+            copy_owned_payloads(&root, &copy, &capture.owned_volumes).unwrap();
+            let directory = capture
+                .owned_volumes
+                .iter()
+                .find(|volume| {
+                    matches!(
+                        volume.data,
+                        microsandbox_image::snapshot::OwnedVolumeData::Directory { .. }
+                    )
+                })
+                .unwrap();
+            copy.push(directory.directory_path());
+            microsandbox_filesystem::OwnedDirectorySnapshot::open(&copy).unwrap();
+            drop(capture);
+            assert!(!root.exists());
+        }
+        drop(guard);
+        assert!(
+            microsandbox_runtime::ipc::try_acquire_lifecycle_guard(&run, "box")
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn canceled_stopped_capture_retains_worker_lease_and_reclaims_its_staging() {
+        // Occupy the sole blocking worker so cancellation occurs deterministically after the
+        // real capture has been dispatched but before it can begin touching disk state.
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap()
+            .block_on(async {
+                let temp = tempfile::tempdir().unwrap();
+                let local = LocalBackend::builder()
+                    .home(temp.path().join("home"))
+                    .build()
+                    .await
+                    .unwrap();
+                let sandbox = temp.path().join("sandbox");
+                let mounts = stopped_async_capture_fixture(&sandbox);
+                let run = temp.path().join("run");
+                let guard = Arc::new(
+                    microsandbox_runtime::ipc::try_acquire_lifecycle_guard(&run, "box")
+                        .unwrap()
+                        .unwrap(),
+                );
+                let weak = Arc::downgrade(&guard);
+                let (started, ready) = tokio::sync::oneshot::channel();
+                let (release, wait) = std::sync::mpsc::channel();
+                let blocker = tokio::task::spawn_blocking(move || {
+                    started.send(()).unwrap();
+                    wait.recv_timeout(std::time::Duration::from_secs(5))
+                        .unwrap();
+                });
+                ready.await.unwrap();
+                let mut capture = Box::pin(capture_disk_source(
+                    &local,
+                    &sandbox,
+                    "box",
+                    1,
+                    SandboxStatus::Stopped,
+                    &SnapshotRootDisk::Managed,
+                    &mounts,
+                    Some(Arc::clone(&guard)),
+                ));
+                assert!(futures::poll!(capture.as_mut()).is_pending());
+                drop(capture);
+                drop(guard);
+                assert!(
+                    weak.upgrade().is_some(),
+                    "queued worker must retain lifecycle ownership"
+                );
+                assert!(
+                    microsandbox_runtime::ipc::try_acquire_lifecycle_guard(&run, "box")
+                        .unwrap()
+                        .is_none()
+                );
+                release.send(()).unwrap();
+                blocker.await.unwrap();
+                // The sentinel runs after the detached capture on the same one-thread queue.
+                tokio::task::spawn_blocking(|| {}).await.unwrap();
+                assert!(weak.upgrade().is_none());
+                assert!(
+                    microsandbox_runtime::ipc::try_acquire_lifecycle_guard(&run, "box")
+                        .unwrap()
+                        .is_some()
+                );
+                assert!(std::fs::read_dir(&sandbox).unwrap().all(|entry| {
+                    !entry
+                        .unwrap()
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".owned-disk-snapshot-")
+                }));
+                let chain = microsandbox_runtime::checkpoint::load_runtime_owned_disk_chain(
+                    &sandbox.join("runtime"),
+                    &microsandbox_types::owned_volume_mount_id("/data"),
+                )
+                .unwrap()
+                .unwrap();
+                assert_eq!(
+                    chain.layers.len(),
+                    2,
+                    "cancellation does not interrupt journal adoption"
+                );
+            });
+    }
+
+    #[test]
     fn snapshot_root_layout_preserves_owned_kinds() {
         assert_eq!(
             snapshot_root_disk(None, "sb").unwrap(),
@@ -2228,9 +2931,11 @@ mod tests {
         std::fs::write(&source, b"snapshot payload").unwrap();
         let disk = SnapshotDiskClosure {
             capture_root: None,
+            owned_volumes: Vec::new(),
             sources: vec![SnapshotDiskSource {
                 path: source,
                 format: SnapshotFormat::Raw,
+                sealed_layer_id: None,
             }],
             virtual_size: b"snapshot payload".len() as u64,
         };
@@ -2266,6 +2971,225 @@ mod tests {
             &with.state.as_file().unwrap().layers[0].payload.integrity,
             Some(microsandbox_image::snapshot::UpperIntegrity::FileMerkleBlake3V1 { .. })
         ));
+        assert_ne!(
+            without.state.as_file().unwrap().layers[0].layer_id,
+            with.state.as_file().unwrap().layers[0].layer_id,
+            "a mutable stopped source must not reuse an earlier capture's physical identity"
+        );
+    }
+
+    #[tokio::test]
+    async fn live_disk_publication_preserves_sealed_prefix_for_incremental_export() {
+        use super::super::archive::{
+            SaveOpts, load_snapshot_with_base, save_direct_file_snapshot, save_snapshot,
+        };
+        use microsandbox_image::checkpoint::{
+            DiskLayerExportPlan, DiskLayerRef, sparse_file_integrity,
+        };
+
+        for (root_disk, device) in [
+            (SnapshotRootDisk::Managed, "vdb"),
+            (SnapshotRootDisk::Flat, "vda"),
+        ] {
+            for record_integrity in [false, true] {
+                let temp = tempfile::tempdir().unwrap();
+                let local = LocalBackend::builder()
+                    .home(temp.path().join("home"))
+                    .build()
+                    .await
+                    .unwrap();
+                let base_cut = temp.path().join("base-cut");
+                let mut base = disk_capture_fixture(&base_cut);
+                let raw_path = base_cut.join(format!("layers/{CAPTURE_BASE_ID}.raw"));
+                std::fs::write(&raw_path, vec![91; 65536]).unwrap();
+                base.disk.device_id = device.into();
+                base.disk.layers[0].virtual_size = 65536;
+                base.disk.layers[0].file_size = std::fs::metadata(&raw_path).unwrap().len();
+                base.disk.layers[0].integrity_root =
+                    Some(sparse_file_integrity(&raw_path).unwrap().root);
+                let generation = base.disk.clone();
+                let base = validate_live_disk_capture(base, "disk_capture", base_cut, device, &[])
+                    .unwrap();
+
+                let head_cut = temp.path().join("head-cut");
+                let mut head = disk_capture_fixture(&head_cut);
+                let head_raw = head_cut.join(format!("layers/{CAPTURE_BASE_ID}.raw"));
+                std::fs::copy(&raw_path, &head_raw).unwrap();
+                let head_id = "layer_00000000000000000000000000000002";
+                let head_path = head_cut.join(format!("layers/{head_id}.qcow2"));
+                microsandbox_image::checkpoint::create_qcow2_overlay(
+                    &head_path, 65536, &head_raw, "raw",
+                )
+                .await
+                .unwrap();
+                head.disk = generation;
+                head.disk.generation = 2;
+                head.disk.pause_generation = 2;
+                head.disk.head = head_id.into();
+                head.disk.layers.push(DiskLayerRef {
+                    layer_id: head_id.into(),
+                    format: "qcow2".into(),
+                    virtual_size: 65536,
+                    predecessor: Some(CAPTURE_BASE_ID.into()),
+                    file_size: std::fs::metadata(&head_path).unwrap().len(),
+                    integrity_root: Some(sparse_file_integrity(&head_path).unwrap().root),
+                });
+                let head = validate_live_disk_capture(head, "disk_capture", head_cut, device, &[])
+                    .unwrap();
+                let source_bytes = head
+                    .sources
+                    .iter()
+                    .map(|source| std::fs::read(&source.path).unwrap())
+                    .collect::<Vec<_>>();
+                let mut manifests = Vec::new();
+                let base_dir = temp.path().join("base");
+                let head_dir = temp.path().join("head");
+                for (directory, cut) in [(&base_dir, &base), (&head_dir, &head)] {
+                    let (_, manifest) = build_artifact(
+                        directory,
+                        cut,
+                        &BTreeMap::new(),
+                        record_integrity,
+                        file_metadata(root_disk.clone()),
+                    )
+                    .await
+                    .unwrap();
+                    manifests.push(manifest);
+                }
+                let base_file = manifests[0].state.as_file().unwrap();
+                let head_file = manifests[1].state.as_file().unwrap();
+                assert_eq!(base_file.layers[0].layer_id.as_str(), CAPTURE_BASE_ID);
+                assert_eq!(head_file.head.as_str(), head_id);
+                assert_eq!(
+                    DiskLayerExportPlan::since(&head_file.layers, &base_file.layers)
+                        .unwrap()
+                        .required(),
+                    0..1,
+                );
+                // Direct creation takes a separate descriptor path but must retain the same IDs.
+                let direct = new_file_manifest(
+                    &head,
+                    head_file
+                        .layers
+                        .iter()
+                        .map(|layer| layer.payload.integrity.clone())
+                        .collect(),
+                    manifests[1].image.reference.clone(),
+                    manifests[1].image.manifest_digest.clone(),
+                    "box",
+                    root_disk.clone(),
+                )
+                .unwrap();
+                assert_eq!(direct.state.as_file().unwrap().layers, head_file.layers);
+                let direct_archive = temp.path().join("direct.msb");
+                save_direct_file_snapshot(
+                    &direct,
+                    &BTreeMap::new(),
+                    "direct",
+                    &head
+                        .sources
+                        .iter()
+                        .map(|source| source.path.clone())
+                        .collect::<Vec<_>>(),
+                    None,
+                    &direct_archive,
+                    true,
+                    false,
+                )
+                .await
+                .unwrap();
+                let baseline = temp.path().join("base.msb");
+                let delta = temp.path().join("delta.msb");
+                save_snapshot(
+                    &local,
+                    base_dir.to_str().unwrap(),
+                    &baseline,
+                    SaveOpts {
+                        plain_tar: true,
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+                save_snapshot(
+                    &local,
+                    head_dir.to_str().unwrap(),
+                    &delta,
+                    SaveOpts {
+                        plain_tar: true,
+                        since: Some(base_dir.to_str().unwrap().into()),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+                // Neither writer may rebase or otherwise modify a shared sealed source inode.
+                for (source, expected) in head.sources.iter().zip(&source_bytes) {
+                    assert_eq!(&std::fs::read(&source.path).unwrap(), expected);
+                }
+                drop(base);
+                drop(head);
+                std::fs::remove_dir_all(&base_dir).unwrap();
+                std::fs::remove_dir_all(&head_dir).unwrap();
+                assert!(
+                    load_snapshot_with_base(&local, &delta, None, None)
+                        .await
+                        .is_err()
+                );
+                for (archive, base) in [
+                    (&delta, Some(baseline.to_str().unwrap())),
+                    (&direct_archive, None),
+                ] {
+                    let loaded = load_snapshot_with_base(&local, archive, None, base)
+                        .await
+                        .unwrap();
+                    let loaded =
+                        super::super::store::open_snapshot(&local, loaded.path().to_str().unwrap())
+                            .await
+                            .unwrap();
+                    loaded.verify().await.unwrap();
+                    let file = loaded.manifest().state.as_file().unwrap();
+                    assert_eq!(file.layers, head_file.layers);
+                    for (layer, expected) in file.layers.iter().zip(&source_bytes) {
+                        assert_eq!(
+                            &std::fs::read(loaded.path().join(file.layer_path(layer))).unwrap(),
+                            expected
+                        );
+                    }
+                    let sources = file
+                        .layers
+                        .iter()
+                        .map(
+                            |layer| microsandbox_runtime::launch::RootfsUpperLayerConfig {
+                                path: loaded.path().join(file.layer_path(layer)),
+                                format: match layer.format {
+                                    SnapshotFormat::Raw => "raw",
+                                    SnapshotFormat::Qcow2 => "qcow2",
+                                }
+                                .into(),
+                            },
+                        )
+                        .collect::<Vec<_>>();
+                    let child = super::super::restore::materialize_file_snapshot_for_child(
+                        &sources,
+                        file.virtual_size,
+                        &temp.path().join(format!("child-{}", loaded.id())),
+                        &root_disk,
+                    )
+                    .await
+                    .unwrap();
+                    assert_eq!(child.upper_layers.len(), 3);
+                    assert_eq!(
+                        std::fs::read(&child.upper_layers[0].path).unwrap(),
+                        source_bytes[0]
+                    );
+                    // Child rebasing is private; published archive members remain byte-identical.
+                    for (source, expected) in sources.iter().zip(&source_bytes) {
+                        assert_eq!(&std::fs::read(&source.path).unwrap(), expected);
+                    }
+                }
+            }
+        }
     }
 
     #[tokio::test]
@@ -2280,14 +3204,17 @@ mod tests {
             .unwrap();
         let disk = SnapshotDiskClosure {
             capture_root: None,
+            owned_volumes: Vec::new(),
             sources: vec![
                 SnapshotDiskSource {
                     path: raw,
                     format: SnapshotFormat::Raw,
+                    sealed_layer_id: None,
                 },
                 SnapshotDiskSource {
                     path: qcow,
                     format: SnapshotFormat::Qcow2,
+                    sealed_layer_id: None,
                 },
             ],
             virtual_size: 4096,

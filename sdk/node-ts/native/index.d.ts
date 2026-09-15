@@ -394,7 +394,7 @@ export type JsMetricsStream = MetricsStream
 /**
  * Fluent builder for a sandbox volume mount.
  *
- * Pick exactly one mount kind via `.bind()`, `.named()`, `.tmpfs()`, or
+ * Pick exactly one mount kind via `.bind()`, `.named()`, `.owned()`, `.tmpfs()`, or
  * `.disk(...)`, then chain modifiers (`.readonly()`, `.noexec()`, `.nosuid()`, `.nodev()`,
  * `.size(mib)` for tmpfs, `.format(fmt)` / `.fstype(s)` for disk).
  * Validation is deferred to the terminal `.build()` call.
@@ -409,6 +409,11 @@ export declare class MountBuilder {
   named(name: string): this
   /** Mount a named volume with explicit existence behavior. */
   namedWith(name: string, mode?: string | undefined | null, kind?: string | undefined | null, sizeMib?: number | undefined | null, quotaMib?: number | undefined | null): this
+  /**
+   * Allocate storage retained across restarts and removed with this sandbox.
+   * Defaults to a directory; disk storage requires a positive `sizeMib`.
+   */
+  owned(options?: { kind?: 'dir' | 'disk'; sizeMib?: number; quotaMib?: number }): this
   /** Mount an in-memory tmpfs at the guest path. */
   tmpfs(): this
   /** Mount a host disk image file as a virtio-blk device. */
@@ -441,19 +446,19 @@ export declare class MountBuilder {
    * Set the guest stat virtualization policy.
    *
    * Accepts `"strict"`, `"relaxed"`, or `"off"`. Valid only for bind and
-   * directory-backed named volume mounts.
+   * directory-backed named or owned volume mounts.
    */
   statVirtualization(policy: string): this
   /**
    * Set the host permission propagation policy.
    *
    * Accepts `"private"` or `"mirror"`. Valid only for bind and
-   * directory-backed named volume mounts.
+   * directory-backed named or owned volume mounts.
    */
   hostPermissions(policy: string): this
   /**
    * Present host files that carry no per-file stat override as this guest
-   * owner. Valid only for bind and directory-backed named volume mounts.
+   * owner. Valid only for bind and directory-backed named or owned volume mounts.
    */
   owner(uid: number, gid: number): this
   /**
@@ -1046,8 +1051,8 @@ export declare class Sandbox {
    * string; the TS wrapper parses it into a `SandboxModificationPlan`.
    */
   modify(options?: SandboxModifyOptions | undefined | null): Promise<string>
-  /** Compact the immutable disk prefix; the count includes the base, not the writable head. */
-  compact(layers?: number | undefined | null, dryRun?: boolean | undefined | null): Promise<string>
+  /** Compact root and owned-data disk prefixes; the limit includes the base, not the writable head. */
+  compact(layers?: number | undefined | null, dryRun?: boolean | undefined | null, disk?: string | undefined | null, rootDiskOnly?: boolean | undefined | null): Promise<string>
   /** Stream metrics snapshots at the requested interval (in milliseconds). */
   metricsStream(intervalMs: number): Promise<MetricsStream>
   /** Attach to the sandbox's effective OCI entrypoint and CMD. */
@@ -1447,8 +1452,8 @@ export declare class SandboxHandle {
    * string; the TS wrapper parses it into a `SandboxModificationPlan`.
    */
   modify(options?: SandboxModifyOptions | undefined | null): Promise<string>
-  /** Explicitly compact a running or stopped sandbox's immutable disk prefix. */
-  compact(layers?: number | undefined | null, dryRun?: boolean | undefined | null): Promise<string>
+  /** Compact root and owned-data disk prefixes of a running or stopped sandbox. */
+  compact(layers?: number | undefined | null, dryRun?: boolean | undefined | null, disk?: string | undefined | null, rootDiskOnly?: boolean | undefined | null): Promise<string>
   /** Start the sandbox (attached mode) — returns a live Sandbox handle. */
   start(): Promise<Sandbox>
   /** Start the sandbox (detached mode). */
@@ -1565,17 +1570,6 @@ export declare class SecretBuilder {
   build(): SecretEntry
 }
 export type JsSecretBuilder = SecretBuilder
-
-/** Builder for installing the runtime binaries. */
-export declare class Setup {
-  constructor()
-  baseDir(path: string): this
-  version(version: string): this
-  skipVerify(enabled: boolean): this
-  force(enabled: boolean): this
-  install(): Promise<void>
-}
-export type JsSetup = Setup
 
 /** High-level SFTP client session. */
 export declare class SftpClient {
@@ -2075,14 +2069,14 @@ export declare function imageRemove(reference: string, force?: boolean | undefin
  */
 export declare function imageSave(references: Array<string>, outputPath: string, format?: string | undefined | null): Promise<void>
 
-/**
- * Download and install msb + libkrunfw under non-empty $MSB_HOME, or
- * ~/.microsandbox/ when the override is unset or empty.
- */
-export declare function install(): Promise<void>
-
-/** Check if msb and libkrunfw are installed and available. */
-export declare function isInstalled(): boolean
+/** Resolve the existing runtime pair without installing host binaries. */
+export declare function resolveRuntime(configJson: string): string
+/** Check whether a complete runtime pair resolves. */
+export declare function isRuntimeInstalled(configJson: string): boolean
+/** Explicitly install a runtime pair from the selected source. */
+export declare function installRuntime(configJson: string, optionsJson: string): Promise<string>
+/** Reuse a resolved pair and install only when it is wholly absent. */
+export declare function ensureRuntime(configJson: string, optionsJson: string): Promise<string>
 
 /** Secret-safe backend diagnostics returned to JavaScript. */
 export interface JsBackendInfo {
@@ -2524,6 +2518,9 @@ export interface SecretSubstitution {
  */
 export declare function setDefaultBackend(kind: string, url?: string | undefined | null, apiKey?: string | undefined | null, profile?: string | undefined | null): void
 
+/** Register the platform package executable as a fallback after the runtime home. */
+export declare function setPackagedMsbPath(path: string): void
+
 /**
  * Set the `libkrunfw` shared library path resolved by the JS SDK.
  *
@@ -2710,22 +2707,30 @@ export interface VolumeMount {
   name?: string
   namedMode?: string
   namedKind?: string
+  /** Storage kind for sandbox-owned mounts: `"dir"` or `"disk"`. */
+  ownedKind?: string
   sizeMib?: number
   quotaMib?: number
   format?: string
   fstype?: string
-  /** `"strict" | "relaxed" | "off"` for bind/named mounts; `None` for tmpfs/disk. */
+  /**
+   * `"strict" | "relaxed" | "off"` for bind/named and owned-directory mounts;
+   * `None` for tmpfs, host disks, or owned disks.
+   */
   statVirtualization?: string
-  /** `"private" | "mirror"` for bind/named mounts; `None` for tmpfs/disk. */
+  /**
+   * `"private" | "mirror"` for bind/named and owned-directory mounts;
+   * `None` for tmpfs, host disks, or owned disks.
+   */
   hostPermissions?: string
   /**
-   * Guest owner uid for host-created files under bind/named mounts; `None`
-   * when unset or for tmpfs/disk. Set together with `override_gid`.
+   * Guest owner uid for host-created files under bind/named or owned-directory mounts;
+   * `None` when unset or for tmpfs/disks. Set together with `override_gid`.
    */
   overrideUid?: number
   /**
-   * Guest owner gid for host-created files under bind/named mounts; `None`
-   * when unset or for tmpfs/disk. Set together with `override_uid`.
+   * Guest owner gid for host-created files under bind/named or owned-directory mounts;
+   * `None` when unset or for tmpfs/disks. Set together with `override_uid`.
    */
   overrideGid?: number
 }

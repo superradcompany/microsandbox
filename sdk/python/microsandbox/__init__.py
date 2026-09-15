@@ -1,7 +1,5 @@
 """microsandbox — Python SDK for secure, fast microVM-based sandboxing."""
 
-import os as _os
-
 from microsandbox._microsandbox import (
     BackendInfo,
     BranchOutcome,
@@ -47,16 +45,14 @@ from microsandbox._microsandbox import (
     backend_scope,
     default_backend_info,
     default_backend_kind,
-    install,
-    is_installed,
     set_default_backend,
     version,
 )
 from microsandbox._microsandbox import (
-    set_runtime_libkrunfw_path as set_libkrunfw_path,
+    set_packaged_msb_path as _set_packaged_msb_path,
 )
 from microsandbox._microsandbox import (
-    set_runtime_msb_path as _set_runtime_msb_path,
+    set_runtime_libkrunfw_path as set_libkrunfw_path,
 )
 from microsandbox._runtime import msb_path as _msb_path
 from microsandbox.agent import (
@@ -83,6 +79,8 @@ from microsandbox.errors import (
     NoDefaultCommandError,
     PathNotFoundError,
     PublishedSnapshotArtifact,
+    RuntimeIncompleteError,
+    RuntimeNotInstalledError,
     SandboxAlreadyExistsError,
     SandboxNotFoundError,
     SandboxNotRunningError,
@@ -97,6 +95,16 @@ from microsandbox.errors import (
     UnsupportedOperationError,
     VolumeNotFoundError,
 )
+from microsandbox.setup import (
+    InstallOptions,
+    ResolvedRuntime,
+    RuntimeConfig,
+    RuntimeOrigin,
+    ensure_runtime,
+    install_runtime,
+    is_runtime_installed,
+    resolve_runtime,
+)
 from microsandbox.types import (
     Action,
     BackendKind,
@@ -107,6 +115,8 @@ from microsandbox.types import (
     DestGroup,
     Destination,
     Direction,
+    DiskCompactionDiskResult,
+    DiskCompactionResult,
     DiskImageFormat,
     ExecEventType,
     ExecOptions,
@@ -186,12 +196,11 @@ from microsandbox.types import (
     VsockSocketType,
 )
 
-# Pass the bundled msb path to Rust explicitly. `MSB_PATH` remains a user
-# override and is still honored first by the native resolver.
-if "MSB_PATH" not in _os.environ:
-    _bundled_msb = _msb_path()
-    if _bundled_msb.exists():
-        _set_runtime_msb_path(str(_bundled_msb))
+# Register package discovery separately from explicit user overrides. Rust checks
+# the resolved runtime home before this candidate on each resolution.
+_bundled_msb = _msb_path()
+if _bundled_msb.is_file():
+    _set_packaged_msb_path(str(_bundled_msb))
 
 __all__ = [
     # Backend selection
@@ -210,6 +219,8 @@ __all__ = [
     "SandboxStatus",
     "ModificationPolicy",
     "SandboxModificationPlan",
+    "DiskCompactionDiskResult",
+    "DiskCompactionResult",
     "ConfigPlannedChange",
     "SecretPlannedChange",
     "PlannedChange",
@@ -346,6 +357,8 @@ __all__ = [
     "MicrosandboxError",
     "InvalidConfigError",
     "NoDefaultCommandError",
+    "RuntimeNotInstalledError",
+    "RuntimeIncompleteError",
     "CloudHttpError",
     "SandboxNotFoundError",
     "SandboxReplacedError",
@@ -373,8 +386,14 @@ __all__ = [
     "UnsupportedOperationError",
     "UnsupportedError",
     # Setup
-    "install",
-    "is_installed",
+    "resolve_runtime",
+    "is_runtime_installed",
+    "install_runtime",
+    "ensure_runtime",
+    "RuntimeConfig",
+    "InstallOptions",
+    "ResolvedRuntime",
+    "RuntimeOrigin",
     "set_libkrunfw_path",
     "set_default_backend",
     "backend_scope",

@@ -5,8 +5,10 @@
 //! [`crate::sandbox::SandboxConfig`].
 
 pub(crate) mod handle;
+mod launch_protocol;
 #[cfg(feature = "net")]
 mod network_slot;
+pub(crate) mod owned_volumes;
 // The pure identity helpers stay compiled (and unit-tested) on every platform;
 // only Windows has call sites outside the tests.
 #[cfg_attr(not(windows), allow(dead_code))]

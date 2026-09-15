@@ -1,8 +1,10 @@
 //! Child-owned materialization for full snapshot restore.
 
 mod additional_disks;
+mod owned;
 
 pub(crate) use additional_disks::{apply_additional_disks, materialize_additional_disks};
+pub(crate) use owned::materialize_owned_volumes;
 
 use std::path::{Path, PathBuf};
 
@@ -307,22 +309,26 @@ async fn materialize_closure_disks(
     root: &SnapshotRootDisk,
     choices: &crate::sandbox::restore_resources::RestoreResources,
 ) -> MicrosandboxResult<Vec<microsandbox_types::VolumeMount>> {
-    let Some(layer) = closure.disks().first().and_then(|disk| disk.layers.first()) else {
-        return Ok(Vec::new());
-    };
-    let layer_path = closure.disk_layer_path(layer);
-    let source = layer_path.parent().and_then(Path::parent).ok_or_else(|| {
-        MicrosandboxError::SnapshotIntegrity("invalid disk closure location".into())
-    })?;
-    additional_disks::materialize_additional_disks(
-        closure.disks(),
-        &closure.checkpoint().resources,
+    let source = closure.root();
+    let mut mounts = owned::materialize_owned_volumes(
+        &closure.checkpoint().owned_volumes,
         source,
         child,
-        root_device(root),
         choices,
     )
-    .await
+    .await?;
+    mounts.extend(
+        additional_disks::materialize_additional_disks(
+            closure.disks(),
+            &closure.checkpoint().resources,
+            source,
+            child,
+            root_device(root),
+            choices,
+        )
+        .await?,
+    );
+    Ok(mounts)
 }
 
 fn validate_checkpoint_identity(
@@ -693,6 +699,7 @@ mod tests {
             disks: vec![disk_id],
             devices: Vec::new(),
             resources: Vec::new(),
+            owned_volumes: Vec::new(),
             requires: Vec::new(),
         };
         let checkpoint_bytes = checkpoint.to_canonical_bytes().unwrap();

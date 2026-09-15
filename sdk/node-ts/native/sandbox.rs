@@ -437,12 +437,25 @@ impl Sandbox {
         run_modify(builder, modify_dry_run(options.as_ref())).await
     }
 
-    /// Compact the immutable disk prefix; the count includes the base, not the writable head.
+    /// Compact root and owned-data disk prefixes; the limit includes the base, not the writable head.
     #[napi]
-    pub async fn compact(&self, layers: Option<f64>, dry_run: Option<bool>) -> Result<String> {
+    pub async fn compact(
+        &self,
+        layers: Option<f64>,
+        dry_run: Option<bool>,
+        disk: Option<String>,
+        root_disk_only: Option<bool>,
+    ) -> Result<String> {
         let sb = self.inner.get().await.ok_or_else(consumed_error)?;
         let builder = sb.compact();
-        run_compact(builder, layers, dry_run.unwrap_or(false)).await
+        run_compact(
+            builder,
+            layers,
+            dry_run.unwrap_or(false),
+            disk,
+            root_disk_only.unwrap_or(false),
+        )
+        .await
     }
 
     /// Stream metrics snapshots at the requested interval (in milliseconds).
@@ -1151,9 +1164,17 @@ pub(crate) async fn run_compact(
     mut builder: microsandbox::sandbox::DiskCompactionBuilder,
     layers: Option<f64>,
     dry_run: bool,
+    disk: Option<String>,
+    root_disk_only: bool,
 ) -> Result<String> {
     if let Some(layers) = checked_layer_count(layers)? {
         builder = builder.layers(layers);
+    }
+    if let Some(disk) = disk {
+        builder = builder.disk(disk);
+    }
+    if root_disk_only {
+        builder = builder.root_disk_only();
     }
     let result = if dry_run {
         builder.dry_run().await

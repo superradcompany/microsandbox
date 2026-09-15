@@ -55,6 +55,10 @@ pub struct SandboxSocketPaths {
 /// until it exits, including after `SIGKILL`. On Windows the sandbox process
 /// acquires a `LockFileEx` byte-range lock itself and retains this file for its
 /// entire runtime generation.
+///
+/// Availability fences this lock, not every other inherited descriptor: Unix process-exit
+/// cleanup can release it before deferred disk/KVM teardown finishes. Callers that need disks
+/// reusable must also observe the appropriate disk ownership guards.
 pub struct SandboxLifecycleGuard {
     #[cfg(unix)]
     file: File,

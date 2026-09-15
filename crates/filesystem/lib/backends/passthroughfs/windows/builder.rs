@@ -93,6 +93,9 @@ pub struct PassthroughConfig {
 
     /// Explicit external-mount checkpoint policy and destination diagnostic report.
     pub external_checkpoint: Option<super::super::ExternalCheckpointOptions>,
+
+    /// Sandbox-owned directory capture and private restore context.
+    pub owned_checkpoint: Option<super::super::OwnedDirectoryCheckpoint>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -130,6 +133,9 @@ impl PassthroughFs {
         cfg: PassthroughConfig,
         probe_name: Option<&CStr>,
     ) -> io::Result<Self> {
+        if cfg.owned_checkpoint.is_some() && cfg.external_checkpoint.is_some() {
+            return Err(linux_error(LINUX_EINVAL));
+        }
         // Reject contradictory metadata policy before resolving or probing the
         // host root. Direct backend callers must receive the same guarantee as
         // the SDK and runtime boundaries.
@@ -254,6 +260,7 @@ impl Default for PassthroughConfig {
             quota_root: None,
             default_owner: None,
             external_checkpoint: None,
+            owned_checkpoint: None,
         }
     }
 }

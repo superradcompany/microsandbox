@@ -277,7 +277,7 @@ mod tests {
         link_exact(&source, &linked).unwrap();
         link_exact(&source, &linked).unwrap();
         std::fs::copy(&source, &copied).unwrap();
-        let admissions = LocalDiskAdmissions::open(dir.path(), &[disk.clone()])
+        let admissions = LocalDiskAdmissions::open(dir.path(), std::slice::from_ref(&disk))
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -313,7 +313,7 @@ mod tests {
     fn local_receipt_cache_is_optional_bounded_and_selects_larger_files() {
         let dir = tempfile::tempdir().unwrap();
         let disk = fixture(dir.path(), MAX_RECEIPTS + 1);
-        let admissions = LocalDiskAdmissions::open(dir.path(), &[disk.clone()])
+        let admissions = LocalDiskAdmissions::open(dir.path(), std::slice::from_ref(&disk))
             .unwrap()
             .unwrap();
         assert_eq!(admissions.layers.len(), MAX_RECEIPTS);

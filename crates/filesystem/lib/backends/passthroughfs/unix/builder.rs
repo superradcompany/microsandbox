@@ -166,6 +166,7 @@ impl PassthroughFsBuilder {
         }
 
         let cfg_probe = super::PassthroughConfig {
+            owned_checkpoint: None,
             external_checkpoint: None,
             root_dir: root_dir.clone(),
             no_symlink_root: self.no_symlink_root,

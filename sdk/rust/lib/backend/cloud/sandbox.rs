@@ -529,9 +529,18 @@ fn reject_dropped_cloud_create_fields(config: &SandboxConfig) -> MicrosandboxRes
     {
         return Err(unsupported("named volume inline create"));
     }
+    if config
+        .spec
+        .mounts
+        .iter()
+        .any(|mount| matches!(mount, microsandbox_types::VolumeMount::Owned { .. }))
+    {
+        return Err(unsupported("sandbox-owned volumes"));
+    }
     if config.spec.mounts.iter().any(|mount| {
         let options = match mount {
             microsandbox_types::VolumeMount::Bind { options, .. }
+            | microsandbox_types::VolumeMount::Owned { options, .. }
             | microsandbox_types::VolumeMount::Named { options, .. }
             | microsandbox_types::VolumeMount::Tmpfs { options, .. }
             | microsandbox_types::VolumeMount::DiskImage { options, .. } => options,
@@ -792,6 +801,7 @@ mod tests {
                 .iter()
                 .map(|mount| match mount {
                     microsandbox_types::CloudVolumeMount::Bind { guest, .. }
+                    | microsandbox_types::CloudVolumeMount::Owned { guest, .. }
                     | microsandbox_types::CloudVolumeMount::Named { guest, .. }
                     | microsandbox_types::CloudVolumeMount::Tmpfs { guest, .. }
                     | microsandbox_types::CloudVolumeMount::DiskImage { guest, .. } => {
@@ -833,6 +843,7 @@ mod tests {
             .iter()
             .map(|mount| match mount {
                 microsandbox_types::CloudVolumeMount::Bind { guest, .. }
+                | microsandbox_types::CloudVolumeMount::Owned { guest, .. }
                 | microsandbox_types::CloudVolumeMount::Named { guest, .. }
                 | microsandbox_types::CloudVolumeMount::Tmpfs { guest, .. }
                 | microsandbox_types::CloudVolumeMount::DiskImage { guest, .. } => guest.as_str(),
@@ -1086,6 +1097,24 @@ mod tests {
         });
 
         assert_unsupported_config_field(config, "named volume inline create");
+    }
+
+    #[test]
+    fn cloud_create_rejects_owned_storage_before_sending_request() {
+        for mount in [
+            crate::sandbox::MountBuilder::new("/data")
+                .owned()
+                .build()
+                .unwrap(),
+            crate::sandbox::MountBuilder::new("/data")
+                .owned_with(|v| v.disk().size(512_u32))
+                .build()
+                .unwrap(),
+        ] {
+            let mut config = base_cloud_config();
+            config.spec.mounts.push(mount);
+            assert_unsupported_config_field(config, "sandbox-owned volumes");
+        }
     }
 
     #[test]

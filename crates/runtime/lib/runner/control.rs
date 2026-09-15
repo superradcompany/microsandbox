@@ -427,6 +427,7 @@ mod tests {
                 pause_resume: true,
                 root_disk_grow: true,
                 disk_compact: true,
+                disk_compact_owned: true,
                 cpu_resize: true,
                 memory_resize: false,
                 secrets_update: true,

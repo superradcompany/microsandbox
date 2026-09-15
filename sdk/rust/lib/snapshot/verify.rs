@@ -125,6 +125,34 @@ impl MerkleAccumulator {
 //--------------------------------------------------------------------------------------------------
 
 pub(super) async fn verify_snapshot(snap: &Snapshot) -> MicrosandboxResult<SnapshotVerifyReport> {
+    if matches!(snap.manifest().state, SnapshotState::File(_)) {
+        let owned = snap.manifest().owned_volumes()?;
+        microsandbox_image::snapshot::verify_owned_directory_payloads(snap.path(), &owned)?;
+        for volume in &owned {
+            if let microsandbox_image::snapshot::OwnedVolumeData::Disk { generation } = &volume.data
+            {
+                for layer in &generation.layers {
+                    let path = snap
+                        .path()
+                        .join("layers")
+                        .join(format!("{}.{}", layer.layer_id, layer.format));
+                    if std::fs::metadata(&path)?.len() != layer.file_size {
+                        return Err(MicrosandboxError::SnapshotIntegrity(
+                            "owned disk payload length differs".into(),
+                        ));
+                    }
+                    if let Some(expected) = &layer.integrity_root
+                        && microsandbox_image::checkpoint::sparse_file_integrity(&path)?.root
+                            != *expected
+                    {
+                        return Err(MicrosandboxError::SnapshotIntegrity(
+                            "owned disk payload integrity differs".into(),
+                        ));
+                    }
+                }
+            }
+        }
+    }
     let SnapshotState::File(file_state) = &snap.manifest().state else {
         let SnapshotState::Checkpoint(checkpoint_state) = &snap.manifest().state else {
             unreachable!("snapshot state is a closed enum")
@@ -132,6 +160,7 @@ pub(super) async fn verify_snapshot(snap: &Snapshot) -> MicrosandboxResult<Snaps
         let checkpoint = verify_checkpoint_closure(
             snap.path().join(super::create::CHECKPOINT_DIRECTORY),
             checkpoint_state.checkpoint_root.clone(),
+            snap.manifest().clone(),
         )
         .await?;
         return Ok(SnapshotVerifyReport {
@@ -208,12 +237,14 @@ pub(super) async fn verify_file_payload(
 async fn verify_checkpoint_closure(
     closure_path: PathBuf,
     expected_root: String,
+    manifest: microsandbox_image::snapshot::Manifest,
 ) -> MicrosandboxResult<CheckpointVerifyStatus> {
     tokio::task::spawn_blocking(move || {
         let expected = ObjectId::new(&expected_root)
             .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
         let closure = CheckpointClosure::open_portable(closure_path, Some(&expected))
             .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+        super::validate_checkpoint_owned_inventory(&manifest, closure.checkpoint())?;
         closure
             .verify_memory_objects()
             .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;

@@ -114,6 +114,8 @@ pub enum HostPermissions {
 /// Configuration for the passthrough filesystem backend.
 #[derive(Debug, Clone)]
 pub struct PassthroughConfig {
+    /// Seal owned namespace/data and reconstruct private linked or detached objects.
+    pub owned_checkpoint: Option<super::OwnedDirectoryCheckpoint>,
     /// Capture external-object identity and apply explicit destination reconciliation.
     pub external_checkpoint: Option<super::ExternalCheckpointOptions>,
     /// Path to the root directory on the host.
@@ -306,6 +308,13 @@ impl PassthroughFs {
         cfg: PassthroughConfig,
         probe_name: Option<&CStr>,
     ) -> io::Result<Self> {
+        if cfg.owned_checkpoint.is_some() && (cfg.external_checkpoint.is_some() || cfg.inject_init)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "owned directory checkpoints require an ordinary, non-external directory backend",
+            ));
+        }
         // Open the root directory, contained beneath the anchor when one is set.
         let root_fd = open_root(&cfg)?;
 
@@ -528,6 +537,7 @@ impl PassthroughConfig {
 impl Default for PassthroughConfig {
     fn default() -> Self {
         Self {
+            owned_checkpoint: None,
             external_checkpoint: None,
             root_dir: PathBuf::new(),
             no_symlink_root: false,

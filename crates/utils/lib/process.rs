@@ -16,8 +16,9 @@ use windows_sys::Win32::System::Threading::{
 /// Return whether `pid` names a live, runnable process.
 ///
 /// This intentionally treats zombies as not alive. `kill(pid, 0)` reports
-/// success for zombies because the PID still exists, but a zombie sandbox
-/// runtime has already exited and can only be reaped by its parent.
+/// success for zombies because the PID still exists. This is not a resource-teardown
+/// barrier: on Linux a zombie leader can still have another thread releasing the shared
+/// file table, including disk locks. Lifecycle callers must fence those resources separately.
 pub fn pid_is_alive(pid: i32) -> bool {
     if pid <= 0 {
         return false;

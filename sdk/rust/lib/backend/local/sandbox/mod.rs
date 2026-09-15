@@ -6,6 +6,8 @@
 //! methods; [`LocalBackend::create_sandbox`] is its entry point.
 
 mod create;
+#[cfg(target_os = "linux")]
+mod process_exit;
 mod stop;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -161,6 +163,16 @@ impl LocalBackend {
         }
 
         let mut config: SandboxConfig = serde_json::from_str(&model.config)?;
+        // Also cover starts after crashes or a stop performed by an older SDK. Lifecycle
+        // ownership alone can become available during Linux's deferred disk/KVM teardown.
+        // Observe only this sandbox's owned markers; actual shared-disk conflicts still fail
+        // in ordinary attachment admission instead of being retried indiscriminately.
+        crate::runtime::owned_volumes::wait_for_disk_release(
+            &self.sandboxes_dir().join(name),
+            &config.spec.mounts,
+            Duration::from_secs(5),
+        )
+        .await?;
         // A failed or interrupted first restore is not a stopped ordinary VM. In particular,
         // its sealed base may be hard-linked to a snapshot and must never become a boot disk.
         Self::validate_completed_restore(&config)?;
@@ -316,6 +328,13 @@ impl LocalBackend {
         }
 
         let mut pids = Vec::new();
+        #[cfg(target_os = "linux")]
+        let exit_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        #[cfg(target_os = "linux")]
+        let departing = process_exit::RuntimeExit::capture(
+            pid,
+            &microsandbox_runtime::ipc::lifecycle_lock_path(&self.config().run_dir(), name),
+        )?;
         if let Some(pid) = pid.filter(|p| Self::pid_is_alive(*p)) {
             Self::kill_pid(pid)?;
             pids.push(pid);
@@ -334,6 +353,21 @@ impl LocalBackend {
         }
 
         let all_dead = pids.is_empty() || pids.iter().all(|pid| Self::pid_has_exited(*pid));
+        #[cfg(target_os = "linux")]
+        if let Some(departing) = departing {
+            tokio::time::timeout_at(exit_deadline, async {
+                while !departing.has_exited()? {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+                Ok::<_, std::io::Error>(())
+            })
+            .await
+            .map_err(|_| {
+                crate::MicrosandboxError::Runtime(format!(
+                    "sandbox {name:?} runtime has not finished releasing resources after kill"
+                ))
+            })??;
+        }
         if all_dead {
             let db = self.db().await?.write();
             if let Err(e) = Self::update_sandbox_status(db, model.id, SandboxStatus::Stopped).await

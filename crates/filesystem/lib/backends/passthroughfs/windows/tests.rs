@@ -803,7 +803,7 @@ fn strict_uses_ads_and_does_not_create_sidecar() {
     let data = fs.inode(entry.inode).unwrap();
 
     assert!(!temp.path.join(FALLBACK_METADATA_DIR_NAME).exists());
-    assert_override(&data.path, 111, 222, S_IFREG | 0o644, 0);
+    assert_override(&data.path(), 111, 222, S_IFREG | 0o644, 0);
 }
 
 #[test]
@@ -949,7 +949,7 @@ fn ads_metadata_follows_rename_without_sidecar_move() {
         )
         .unwrap();
     let old_data = fs.inode(entry.inode).unwrap();
-    let old_path = old_data.path.clone();
+    let old_path = old_data.path();
     let attr = stat64 {
         st_uid: 700,
         st_gid: 701,
@@ -974,7 +974,7 @@ fn ads_metadata_follows_rename_without_sidecar_move() {
     );
     let renamed = fs.lookup(context(), ROOT_INODE, c"new.txt").unwrap();
     let data = fs.inode(renamed.inode).unwrap();
-    assert_override(&data.path, 700, 701, S_IFREG | 0o600, 0);
+    assert_override(&data.path(), 700, 701, S_IFREG | 0o600, 0);
     let (st, _) = fs.getattr(context(), renamed.inode, None).unwrap();
     assert_eq!(st.st_uid, 700);
     assert_eq!(st.st_gid, 701);
@@ -1026,7 +1026,7 @@ fn corrupt_stat_metadata_fails_closed() {
         .stat_store
         .as_ref()
         .unwrap()
-        .override_file_path(&data.path)
+        .override_file_path(&data.path())
         .unwrap();
     std::fs::write(override_path, b"bad").unwrap();
 
@@ -1117,8 +1117,8 @@ fn unlink_removes_ads_metadata_with_file() {
         )
         .unwrap();
     let data = fs.inode(entry.inode).unwrap();
-    assert_override(&data.path, 0, 0, S_IFREG | 0o644, 0);
-    let ads_path = ads_override_path(&data.path);
+    assert_override(&data.path(), 0, 0, S_IFREG | 0o644, 0);
+    let ads_path = ads_override_path(&data.path());
 
     fs.unlink(context(), ROOT_INODE, c"gone.txt").unwrap();
 
@@ -1575,4 +1575,284 @@ fn setattr_preserves_default_owner_for_host_created_file() {
     assert_eq!(st.st_uid, 1000);
     assert_eq!(st.st_gid, 1000);
     assert_eq!(st.st_mode & 0o7777, 0o640);
+}
+
+fn owned_fs_for(path: &Path, checkpoint: crate::OwnedDirectoryCheckpoint) -> PassthroughFs {
+    let fs = PassthroughFs::new(PassthroughConfig {
+        root_dir: path.into(),
+        inject_init: false,
+        owned_checkpoint: Some(checkpoint),
+        ..Default::default()
+    })
+    .unwrap();
+    fs.init(FsOptions::empty()).unwrap();
+    fs
+}
+
+fn owned_read(fs: &PassthroughFs, inode: u64, handle: u64) -> Vec<u8> {
+    let mut output = CaptureWriter { bytes: Vec::new() };
+    fs.read(context(), inode, handle, &mut output, 4096, 0, None, 0)
+        .unwrap();
+    output.bytes
+}
+
+fn owned_write(fs: &PassthroughFs, inode: u64, handle: u64, bytes: &[u8]) {
+    let mut input = SourceReader {
+        bytes: bytes.to_vec(),
+        pos: 0,
+    };
+    assert_eq!(
+        fs.write(
+            context(),
+            inode,
+            handle,
+            &mut input,
+            bytes.len() as u32,
+            0,
+            None,
+            false,
+            false,
+            0
+        )
+        .unwrap(),
+        bytes.len()
+    );
+}
+
+#[test]
+fn owned_detached_roundtrip_keeps_handle_metadata_and_private_generations() {
+    let temp = TempDir::new();
+    let root = temp.path.join("source");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join("file"), b"before").unwrap();
+    std::fs::write(root.join("never-looked-up"), b"whole namespace").unwrap();
+    let checkpoint = crate::OwnedDirectoryCheckpoint::default();
+    let source = owned_fs_for(&root, checkpoint.clone());
+    let inode = source.lookup(context(), ROOT_INODE, c"file").unwrap().inode;
+    let handle = source
+        .open(context(), inode, false, LINUX_O_RDWR as u32)
+        .unwrap()
+        .0
+        .unwrap();
+    source
+        .setattr(
+            context(),
+            inode,
+            stat64 {
+                st_uid: 1234,
+                st_gid: 2345,
+                st_mode: 0o640,
+                ..Default::default()
+            },
+            None,
+            SetattrValid::UID | SetattrValid::GID | SetattrValid::MODE,
+        )
+        .unwrap();
+    source.unlink(context(), ROOT_INODE, c"file").unwrap();
+    owned_write(&source, inode, handle, b"after!");
+    std::fs::write(root.join("file"), b"replacement").unwrap();
+    assert_eq!(
+        source.getattr(context(), inode, None).unwrap().0.st_uid,
+        1234
+    );
+    let reopened = source.open(context(), inode, false, 0).unwrap().0.unwrap();
+    assert_eq!(owned_read(&source, inode, reopened), b"after!");
+    let generation = temp.path.join("generation");
+    checkpoint.prepare_capture(&generation).unwrap();
+    let state = source.capture_state().unwrap();
+    let snapshot = checkpoint.finish_capture().unwrap();
+    drop(source);
+    std::fs::remove_dir_all(&root).unwrap();
+
+    let child = temp.path.join("child");
+    snapshot.materialize(&generation, &child).unwrap();
+    let restored_checkpoint = crate::OwnedDirectoryCheckpoint::default();
+    restored_checkpoint.set_restore(&generation).unwrap();
+    let destination = owned_fs_for(&child, restored_checkpoint.clone());
+    destination.restore_state(&state).unwrap();
+    assert_eq!(owned_read(&destination, inode, handle), b"after!");
+    assert_eq!(std::fs::read(child.join("file")).unwrap(), b"replacement");
+    assert_eq!(
+        std::fs::read(child.join("never-looked-up")).unwrap(),
+        b"whole namespace"
+    );
+    owned_write(&destination, inode, handle, b"child!");
+    destination
+        .setattr(
+            context(),
+            inode,
+            stat64 {
+                st_size: 4,
+                st_uid: 3456,
+                ..Default::default()
+            },
+            None,
+            SetattrValid::SIZE | SetattrValid::UID,
+        )
+        .unwrap();
+    assert_eq!(owned_read(&destination, inode, handle), b"chil");
+    assert_eq!(
+        destination
+            .getattr(context(), inode, None)
+            .unwrap()
+            .0
+            .st_uid,
+        3456
+    );
+
+    let sibling = temp.path.join("sibling");
+    snapshot.materialize(&generation, &sibling).unwrap();
+    let sibling_checkpoint = crate::OwnedDirectoryCheckpoint::default();
+    sibling_checkpoint.set_restore(&generation).unwrap();
+    let other = owned_fs_for(&sibling, sibling_checkpoint);
+    other.restore_state(&state).unwrap();
+    assert_eq!(owned_read(&other, inode, handle), b"after!");
+    restored_checkpoint
+        .prepare_capture(&temp.path.join("second"))
+        .unwrap();
+    destination.capture_state().unwrap();
+    assert!(
+        !restored_checkpoint
+            .finish_capture()
+            .unwrap()
+            .payloads()
+            .is_empty()
+    );
+}
+
+#[test]
+fn owned_detached_reclaims_only_after_last_lookup_and_open_handle() {
+    let temp = TempDir::new();
+    std::fs::write(temp.path.join("file"), b"data").unwrap();
+    let source = owned_fs_for(&temp.path, crate::OwnedDirectoryCheckpoint::default());
+    let inode = source.lookup(context(), ROOT_INODE, c"file").unwrap().inode;
+    source.lookup(context(), ROOT_INODE, c"file").unwrap();
+    let handle = source
+        .open(context(), inode, false, LINUX_O_RDWR as u32)
+        .unwrap()
+        .0
+        .unwrap();
+    source.unlink(context(), ROOT_INODE, c"file").unwrap();
+    source.forget(context(), inode, 1);
+    source
+        .release(context(), inode, 0, handle, false, false, None)
+        .unwrap();
+    assert!(source.inode(inode).is_ok());
+    source.forget(context(), inode, 1);
+    assert!(source.inode(inode).is_err());
+}
+
+#[test]
+fn owned_retained_hardlink_aliases_share_one_restored_object() {
+    for remove_alias in [false, true] {
+        let temp = TempDir::new();
+        let root = temp.path.join("source");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("file"), b"before").unwrap();
+        std::fs::hard_link(root.join("file"), root.join("alias")).unwrap();
+        let checkpoint = crate::OwnedDirectoryCheckpoint::default();
+        let source = owned_fs_for(&root, checkpoint.clone());
+        let inode = source.lookup(context(), ROOT_INODE, c"file").unwrap().inode;
+        let handle = source
+            .open(context(), inode, false, LINUX_O_RDWR as u32)
+            .unwrap()
+            .0
+            .unwrap();
+        let alias = remove_alias.then(|| {
+            let inode = source
+                .lookup(context(), ROOT_INODE, c"alias")
+                .unwrap()
+                .inode;
+            let handle = source
+                .open(context(), inode, false, LINUX_O_RDWR as u32)
+                .unwrap()
+                .0
+                .unwrap();
+            (inode, handle)
+        });
+        source.unlink(context(), ROOT_INODE, c"file").unwrap();
+        if remove_alias {
+            source.unlink(context(), ROOT_INODE, c"alias").unwrap();
+        }
+        let generation = temp.path.join("generation");
+        checkpoint.prepare_capture(&generation).unwrap();
+        let state = source.capture_state().unwrap();
+        let snapshot = checkpoint.finish_capture().unwrap();
+        drop(source);
+        std::fs::remove_dir_all(&root).unwrap();
+        let child = temp.path.join("child");
+        snapshot.materialize(&generation, &child).unwrap();
+        let restored_checkpoint = crate::OwnedDirectoryCheckpoint::default();
+        restored_checkpoint.set_restore(&generation).unwrap();
+        let restored = owned_fs_for(&child, restored_checkpoint);
+        restored.restore_state(&state).unwrap();
+        owned_write(&restored, inode, handle, b"shared");
+        if let Some((inode, handle)) = alias {
+            assert_eq!(owned_read(&restored, inode, handle), b"shared");
+        } else {
+            assert_eq!(std::fs::read(child.join("alias")).unwrap(), b"shared");
+        }
+    }
+}
+
+#[test]
+fn owned_rename_replacement_and_cached_descendants_survive_capture() {
+    let temp = TempDir::new();
+    let root = temp.path.join("source");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::create_dir(root.join("directory")).unwrap();
+    std::fs::write(root.join("directory/file"), b"child").unwrap();
+    std::fs::write(root.join("target"), b"old").unwrap();
+    std::fs::write(root.join("new"), b"new").unwrap();
+    let checkpoint = crate::OwnedDirectoryCheckpoint::default();
+    let source = owned_fs_for(&root, checkpoint.clone());
+    let directory = source
+        .lookup(context(), ROOT_INODE, c"directory")
+        .unwrap()
+        .inode;
+    let child_inode = source.lookup(context(), directory, c"file").unwrap().inode;
+    let old_inode = source
+        .lookup(context(), ROOT_INODE, c"target")
+        .unwrap()
+        .inode;
+    let old_handle = source
+        .open(context(), old_inode, false, LINUX_O_RDWR as u32)
+        .unwrap()
+        .0
+        .unwrap();
+    source
+        .rename(context(), ROOT_INODE, c"new", ROOT_INODE, c"target", 0)
+        .unwrap();
+    source
+        .rename(context(), ROOT_INODE, c"directory", ROOT_INODE, c"moved", 0)
+        .unwrap();
+    assert_eq!(
+        source
+            .getattr(context(), child_inode, None)
+            .unwrap()
+            .0
+            .st_size,
+        5
+    );
+    assert_eq!(owned_read(&source, old_inode, old_handle), b"old");
+    let generation = temp.path.join("generation");
+    checkpoint.prepare_capture(&generation).unwrap();
+    let state = source.capture_state().unwrap();
+    let snapshot = checkpoint.finish_capture().unwrap();
+    let child = temp.path.join("child");
+    snapshot.materialize(&generation, &child).unwrap();
+    let restore = crate::OwnedDirectoryCheckpoint::default();
+    restore.set_restore(&generation).unwrap();
+    let destination = owned_fs_for(&child, restore);
+    destination.restore_state(&state).unwrap();
+    assert_eq!(owned_read(&destination, old_inode, old_handle), b"old");
+    assert_eq!(std::fs::read(child.join("target")).unwrap(), b"new");
+    assert_eq!(
+        destination
+            .getattr(context(), child_inode, None)
+            .unwrap()
+            .0
+            .st_size,
+        5
+    );
 }

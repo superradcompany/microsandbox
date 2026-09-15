@@ -63,6 +63,15 @@ pub(crate) async fn materialize_additional_disks(
             .binding
             .get("guest_path")
             .ok_or_else(|| invalid("additional disk has no guest mount path"))?;
+        if binding
+            .binding
+            .get("lifecycle_owned")
+            .is_some_and(|owned| owned == "true")
+        {
+            // Required owned inventory is materialized separately and is never selected
+            // through the external captured-disk or dangerous-inheritance switches.
+            continue;
+        }
         if !guest.starts_with('/')
             || guest == "/"
             || !guests.insert(guest.clone())
@@ -154,7 +163,7 @@ pub(crate) fn apply_additional_disks(config: &mut crate::SandboxConfig, mounts: 
     }
 }
 
-fn stage_additional_disk(
+pub(super) fn stage_additional_disk(
     source: &Path,
     staging_parent: &Path,
     expected_integrity: Option<&str>,
@@ -212,7 +221,7 @@ fn stage_additional_disk(
     Ok(staging)
 }
 
-async fn publish_staged_additional_disk(
+pub(super) async fn publish_staged_additional_disk(
     worker: tokio::task::JoinHandle<std::io::Result<tempfile::TempDir>>,
     target: &Path,
 ) -> MicrosandboxResult<()> {

@@ -26,14 +26,17 @@ type SnapshotCreateOptions struct {
 	Labels          map[string]string
 	Force           bool
 	RecordIntegrity bool
-	Full            bool
+	// Full includes memory and execution state from a running or paused source.
+	// False captures disk state from running, paused, stopped, or crashed sources.
+	Full bool
 }
 
 // SnapshotSaveOptions configures Snapshot.Save.
 type SnapshotSaveOptions struct {
 	// Since omits disk layers and RAM objects supplied by a base snapshot or standalone archive.
 	Since string
-	// LastLayers includes the newest N sealed disk layers. Mutually exclusive with Since.
+	// LastLayers includes the newest N sealed root-disk layers; owned disks remain complete.
+	// Mutually exclusive with Since and WithParents.
 	LastLayers  *uint32
 	WithParents bool
 	WithImage   bool

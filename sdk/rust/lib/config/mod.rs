@@ -29,6 +29,8 @@ use serde::{Deserialize, Serialize};
 use crate::error::Operation;
 use crate::{MicrosandboxError, MicrosandboxResult};
 
+mod runtime_paths;
+
 //--------------------------------------------------------------------------------------------------
 // Constants
 //--------------------------------------------------------------------------------------------------
@@ -115,15 +117,11 @@ const REGISTRY_KEYRING_SERVICE: &str = "dev.microsandbox.registry";
 // Statics: Layer 1 (process-level)
 //--------------------------------------------------------------------------------------------------
 
-/// SDK-provided path to the bundled `msb` binary. Set via [`set_sdk_msb_path`]
-/// by FFI bindings that ship a binary inside their language package and need
-/// an in-process channel that doesn't fight user env. Tier 2 of the
-/// resolution ladder (below `MSB_PATH` env, above config + filesystem
-/// fallbacks).
+/// Explicit process-level executable override, below `MSB_PATH` and above
+/// configuration and filesystem candidates. Package discovery uses its own fallback.
 static SDK_MSB_PATH: OnceLock<PathBuf> = OnceLock::new();
 
-/// SDK-provided path to the bundled `libkrunfw` dylib. Set via
-/// [`set_sdk_libkrunfw_path`]. Tier 2 of the libkrunfw resolution ladder.
+/// Explicit process-level firmware override set via [`set_sdk_libkrunfw_path`].
 static SDK_LIBKRUNFW_PATH: OnceLock<PathBuf> = OnceLock::new();
 
 //--------------------------------------------------------------------------------------------------
@@ -907,7 +905,9 @@ pub fn delete_registry_keyring_auth(hostname: &str) -> MicrosandboxResult<()> {
     remove_registry_keyring_auth(hostname).map_err(MicrosandboxError::Custom)
 }
 
-/// Set the `msb` binary path resolved by an SDK package.
+/// Set an explicit process-level `msb` path.
+///
+/// Automatic package discovery should use [`set_sdk_packaged_msb_path`] instead.
 ///
 /// This is an internal SDK bridge for runtimes where mutating `process.env`
 /// does not update the native process environment. User-provided `MSB_PATH`
@@ -1861,3 +1861,10 @@ mod tests {
         assert_eq!(insecure, vec!["localhost:5050"]);
     }
 }
+
+//--------------------------------------------------------------------------------------------------
+// Re-Exports
+//--------------------------------------------------------------------------------------------------
+
+pub(crate) use runtime_paths::sdk_packaged_msb_path;
+pub use runtime_paths::set_sdk_packaged_msb_path;

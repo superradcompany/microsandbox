@@ -54,9 +54,18 @@ pub(crate) async fn resolve_external_mounts(
             .binding
             .get("device_id")
             .ok_or_else(|| integrity("disk resource lacks device identity"))?;
+        let expected_id = if resource
+            .binding
+            .get("lifecycle_owned")
+            .is_some_and(|value| value == "true")
+        {
+            microsandbox_types::owned_volume_mount_id(guest)
+        } else {
+            crate::runtime::spawn::guest_mount_tag(guest)
+        };
         if guest == "/"
             || !guest.starts_with('/')
-            || crate::runtime::spawn::guest_mount_tag(guest) != *id
+            || expected_id != *id
             || !disk_ids.insert(id.clone())
             || !paths.insert(guest.clone())
         {
@@ -69,7 +78,11 @@ pub(crate) async fn resolve_external_mounts(
             .find(|mount| mount.guest() == guest)
         {
             match selected {
-                VolumeMount::DiskImage { .. } => {}
+                VolumeMount::DiskImage { .. }
+                | VolumeMount::Owned {
+                    storage: microsandbox_types::OwnedVolumeStorage::Disk { .. },
+                    ..
+                } => {}
                 VolumeMount::Named { name, .. } => {
                     let db = local.db().await?;
                     let model = volume::Entity::find()
@@ -95,7 +108,7 @@ pub(crate) async fn resolve_external_mounts(
         resource
             .binding
             .get("role")
-            .is_some_and(|role| role == "external_bind")
+            .is_some_and(|role| role == "external_bind" || role == "owned_directory")
     }) {
         let mount: microsandbox_protocol::bootstrap::BootstrapDirMount = serde_json::from_str(
             resource
@@ -122,8 +135,25 @@ pub(crate) async fn resolve_external_mounts(
             .find(|candidate| candidate.guest() == mount.guest_path)
             .cloned();
         let explicitly_mapped = explicit.is_some();
+        let owned = resource
+            .binding
+            .get("role")
+            .is_some_and(|role| role == "owned_directory");
+        if owned
+            && !matches!(
+                explicit,
+                Some(VolumeMount::Owned {
+                    storage: microsandbox_types::OwnedVolumeStorage::Directory { .. },
+                    ..
+                })
+            )
+        {
+            return Err(integrity(
+                "required owned directory has no privately materialized backing",
+            ));
+        }
         let (selected, remapped) = match explicit {
-            Some(selected) => (Some(selected), !restore.local_branch),
+            Some(selected) => (Some(selected), !owned && !restore.local_branch),
             None if config.restore_resources.inherit => (
                 authorized_source_mount(local, resource, &mount.guest_path).await?,
                 false,
@@ -134,7 +164,9 @@ pub(crate) async fn resolve_external_mounts(
         let unavailable = selected.is_none();
         if let Some(selected) = selected {
             let options = match &selected {
-                VolumeMount::Bind { options, .. } | VolumeMount::Named { options, .. } => options,
+                VolumeMount::Bind { options, .. }
+                | VolumeMount::Named { options, .. }
+                | VolumeMount::Owned { options, .. } => options,
                 _ => {
                     return Err(MicrosandboxError::InvalidConfig(format!(
                         "external mount {} requires a directory volume mapping",

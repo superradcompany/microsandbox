@@ -8,6 +8,22 @@ Create, manage, and mount named volumes. See [Volumes](/sandboxes/volumes) for u
 
 ## MountBuilder
 
+Use `owned()` for local storage allocated for one sandbox. It starts empty, survives stop/start and reboot, and is deleted with the sandbox. Owned mounts do not appear in `Volume.list()` and cannot be shared or removed independently. Cloud rejects owned mounts.
+
+```typescript
+const sb = await Sandbox.builder("worker")
+  .image("python")
+  .volume("/cache", mount => mount.owned({ quotaMib: 2048 }))
+  .volume("/data", mount => mount.owned({ kind: "disk", sizeMib: 10240 }))
+  .create();
+```
+
+```typescript
+owned(options?: OwnedVolumeOptions): this
+```
+
+`OwnedVolumeOptions` accepts `kind` (`"dir"` by default or `"disk"`), `quotaMib` for directory storage, and `sizeMib` for disk storage. Disk storage requires a positive capacity and uses raw ext4. Common flags such as `readonly()`, `noexec()`, `nosuid()`, and `nodev()` stay on `MountBuilder`; metadata policies and `owner()` apply only to directories. A built mount reports `kind: "owned"` and `ownedKind: "dir" | "disk"` without a host path or volume name. Mounting over an existing image directory hides its contents without copying them.
+
 Sandbox mount callbacks receive a fluent `MountBuilder`. For bind and directory-backed named-volume mounts, use `owner(uid, gid)` to choose the guest owner shown for host files that do not carry a per-file stat override.
 
 ```typescript

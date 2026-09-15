@@ -10,6 +10,8 @@ For the full API reference and longer guides, use the docs site:
 - [SDK overview](https://docs.microsandbox.dev/sdk/overview)
 - [Repository examples](../../examples/typescript)
 
+A complete runtime in the configured home (`MSB_HOME`, or `~/.microsandbox` by default) takes precedence over platform-package binaries. Explicit binary paths still win. A partial home installation errors instead of falling back to the package. This also applies to the `msb` and `microsandbox` CLI entry points.
+
 ## Features
 
 - Hardware VM isolation with a guest Linux kernel
@@ -59,11 +61,10 @@ npm install microsandbox
 Runtime setup is normally included. To provision `msb` + `libkrunfw` separately, use the [CLI installer](https://docs.microsandbox.dev/getting-started/quickstart) or explicitly install them from your application:
 
 ```typescript
-import { install, isInstalled } from "microsandbox";
+import { ensureRuntime } from "microsandbox";
 
-if (!isInstalled()) {
-  await install();
-}
+const runtime = await ensureRuntime();
+console.log(runtime.msbPath, runtime.libkrunfwPath);
 ```
 
 Use `MSB_PATH` and `MSB_LIBKRUNFW_PATH` to select an external runtime; this does not remove the npm package's bundled files. See [Runtime setup](https://docs.microsandbox.dev/sdk/setup) for custom paths and versions.

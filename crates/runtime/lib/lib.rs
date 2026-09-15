@@ -18,10 +18,14 @@ mod runner;
 // Exports
 //--------------------------------------------------------------------------------------------------
 
+#[cfg(all(feature = "client", windows))]
+pub use client::disk_lock_handoff;
 #[cfg(all(feature = "client", target_os = "linux"))]
 pub use client::memory_handoff;
 #[cfg(feature = "client")]
-pub use client::{boot_error, control, ipc, launch, logging, maintenance, startup_progress};
+pub use client::{
+    boot_error, control, ipc, launch, launch_protocol, logging, maintenance, startup_progress,
+};
 #[cfg(feature = "runner")]
 pub use runner::{console, cpu, exec_log, heartbeat, metrics, policy, relay, vm};
 #[cfg(all(feature = "client", not(feature = "runner")))]

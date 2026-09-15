@@ -75,6 +75,9 @@ func createSandboxWithMode(ctx context.Context, name string, connectOrCreate boo
 	if err := resolveRegistryCACertPaths(&o); err != nil {
 		return nil, err
 	}
+	if err := validateOwnedMounts(o.Volumes); err != nil {
+		return nil, err
+	}
 
 	ffiOpts := buildFFICreateOptions(o)
 
@@ -195,6 +198,7 @@ func buildFFICreateOptions(o SandboxConfig) ffi.CreateOptions {
 				Named:              m.Named,
 				NamedMode:          m.NamedMode,
 				NamedKind:          m.NamedKind,
+				Owned:              m.Owned,
 				Tmpfs:              m.Tmpfs,
 				Disk:               m.Disk,
 				Format:             m.Format,

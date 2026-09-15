@@ -6,7 +6,7 @@ use napi_derive::napi;
 use microsandbox::VolumeKind as RustVolumeKind;
 use microsandbox::sandbox::{
     DiskImageFormat as RustDiskImageFormat, HostPermissions as RustHostPermissions,
-    MountBuilder as RustMountBuilder, NamedVolumeMode as RustNamedVolumeMode,
+    MountBuilder as RustMountBuilder, NamedVolumeMode as RustNamedVolumeMode, OwnedVolumeStorage,
     StatVirtualization as RustStatVirtualization, VolumeMount as RustVolumeMount,
 };
 use microsandbox::size::Mebibytes;
@@ -33,25 +33,29 @@ pub struct JsBuiltVolumeMount {
     pub name: Option<String>,
     pub named_mode: Option<String>,
     pub named_kind: Option<String>,
+    /// Storage kind for sandbox-owned mounts: `"dir"` or `"disk"`.
+    pub owned_kind: Option<String>,
     pub size_mib: Option<u32>,
     pub quota_mib: Option<u32>,
     pub format: Option<String>,
     pub fstype: Option<String>,
-    /// `"strict" | "relaxed" | "off"` for bind/named mounts; `None` for tmpfs/disk.
+    /// `"strict" | "relaxed" | "off"` for bind/named and owned-directory mounts;
+    /// `None` for tmpfs, host disks, or owned disks.
     pub stat_virtualization: Option<String>,
-    /// `"private" | "mirror"` for bind/named mounts; `None` for tmpfs/disk.
+    /// `"private" | "mirror"` for bind/named and owned-directory mounts;
+    /// `None` for tmpfs, host disks, or owned disks.
     pub host_permissions: Option<String>,
-    /// Guest owner uid for host-created files under bind/named mounts; `None`
-    /// when unset or for tmpfs/disk. Set together with `override_gid`.
+    /// Guest owner uid for host-created files under bind/named or owned-directory mounts;
+    /// `None` when unset or for tmpfs/disks. Set together with `override_gid`.
     pub override_uid: Option<u32>,
-    /// Guest owner gid for host-created files under bind/named mounts; `None`
-    /// when unset or for tmpfs/disk. Set together with `override_uid`.
+    /// Guest owner gid for host-created files under bind/named or owned-directory mounts;
+    /// `None` when unset or for tmpfs/disks. Set together with `override_uid`.
     pub override_gid: Option<u32>,
 }
 
 /// Fluent builder for a sandbox volume mount.
 ///
-/// Pick exactly one mount kind via `.bind()`, `.named()`, `.tmpfs()`, or
+/// Pick exactly one mount kind via `.bind()`, `.named()`, `.owned()`, `.tmpfs()`, or
 /// `.disk(...)`, then chain modifiers (`.readonly()`, `.noexec()`, `.nosuid()`, `.nodev()`,
 /// `.size(mib)` for tmpfs, `.format(fmt)` / `.fstype(s)` for disk).
 /// Validation is deferred to the terminal `.build()` call.
@@ -141,6 +145,60 @@ impl JsMountBuilder {
                 v = v.quota(quota_mib);
             }
             v
+        }));
+        Ok(self)
+    }
+
+    /// Allocate storage retained across restarts and removed with this sandbox.
+    /// Defaults to a directory; disk storage requires a positive `sizeMib`.
+    #[napi(
+        ts_args_type = "options?: { kind?: 'dir' | 'disk'; sizeMib?: number; quotaMib?: number }"
+    )]
+    pub fn owned(&mut self, options: Option<Object<'_>>) -> Result<&Self> {
+        let mut kind = "dir".to_string();
+        let mut size_mib = None;
+        let mut quota_mib = None;
+        if let Some(options) = options {
+            // Reject stray sources and unsupported settings rather than silently
+            // creating storage with a different ownership or capacity contract.
+            for key in Object::keys(&options)? {
+                if !matches!(key.as_str(), "kind" | "sizeMib" | "quotaMib") {
+                    return Err(napi::Error::from_reason(format!(
+                        "unsupported owned volume option: {key}"
+                    )));
+                }
+            }
+            kind = options
+                .get_named_property::<Option<String>>("kind")?
+                .unwrap_or(kind);
+            size_mib = options
+                .get_named_property::<Option<f64>>("sizeMib")?
+                .map(|value| validate_owned_size("sizeMib", value))
+                .transpose()?;
+            quota_mib = options
+                .get_named_property::<Option<f64>>("quotaMib")?
+                .map(|value| validate_owned_size("quotaMib", value))
+                .transpose()?;
+        }
+        if !matches!(kind.as_str(), "dir" | "disk") {
+            return Err(napi::Error::from_reason(format!(
+                "invalid owned volume kind {kind:?} (expected dir | disk)"
+            )));
+        }
+        let previous = self.take_inner();
+        self.inner = Some(previous.owned_with(|mut owned| {
+            owned = if kind == "disk" {
+                owned.disk()
+            } else {
+                owned.directory()
+            };
+            if let Some(size) = size_mib {
+                owned = owned.size(size);
+            }
+            if let Some(quota) = quota_mib {
+                owned = owned.quota(quota);
+            }
+            owned
         }));
         Ok(self)
     }
@@ -242,7 +300,7 @@ impl JsMountBuilder {
     /// Set the guest stat virtualization policy.
     ///
     /// Accepts `"strict"`, `"relaxed"`, or `"off"`. Valid only for bind and
-    /// directory-backed named volume mounts.
+    /// directory-backed named or owned volume mounts.
     #[napi]
     pub fn stat_virtualization(&mut self, policy: String) -> Result<&Self> {
         let p = match policy.as_str() {
@@ -263,7 +321,7 @@ impl JsMountBuilder {
     /// Set the host permission propagation policy.
     ///
     /// Accepts `"private"` or `"mirror"`. Valid only for bind and
-    /// directory-backed named volume mounts.
+    /// directory-backed named or owned volume mounts.
     #[napi]
     pub fn host_permissions(&mut self, policy: String) -> Result<&Self> {
         let p = match policy.as_str() {
@@ -281,7 +339,7 @@ impl JsMountBuilder {
     }
 
     /// Present host files that carry no per-file stat override as this guest
-    /// owner. Valid only for bind and directory-backed named volume mounts.
+    /// owner. Valid only for bind and directory-backed named or owned volume mounts.
     #[napi]
     pub fn owner(&mut self, uid: f64, gid: f64) -> Result<&Self> {
         // N-API's direct u32 conversion follows JavaScript's ToUint32 rules,
@@ -316,6 +374,16 @@ fn validate_owner_id(name: &str, value: f64) -> Result<u32> {
     if !value.is_finite() || value.fract() != 0.0 || !(0.0..=u32::MAX as f64).contains(&value) {
         return Err(napi::Error::from_reason(format!(
             "mount owner {name} must be an integer between 0 and {}",
+            u32::MAX
+        )));
+    }
+    Ok(value as u32)
+}
+
+fn validate_owned_size(name: &str, value: f64) -> Result<u32> {
+    if !value.is_finite() || value.fract() != 0.0 || !(0.0..=u32::MAX as f64).contains(&value) {
+        return Err(napi::Error::from_reason(format!(
+            "owned volume {name} must be an integer between 0 and {}",
             u32::MAX
         )));
     }
@@ -360,6 +428,7 @@ fn to_built_mount(mount: RustVolumeMount) -> JsBuiltVolumeMount {
             name: None,
             named_mode: None,
             named_kind: None,
+            owned_kind: None,
             size_mib: None,
             quota_mib,
             format: None,
@@ -401,12 +470,47 @@ fn to_built_mount(mount: RustVolumeMount) -> JsBuiltVolumeMount {
                 name: Some(name),
                 named_mode,
                 named_kind,
+                owned_kind: None,
                 size_mib,
                 quota_mib,
                 format: None,
                 fstype: None,
                 stat_virtualization: Some(sv_str(stat_virtualization)),
                 host_permissions: Some(hp_str(host_permissions)),
+                override_uid: options.override_uid,
+                override_gid: options.override_gid,
+            }
+        }
+        RustVolumeMount::Owned {
+            guest,
+            storage,
+            options,
+            stat_virtualization,
+            host_permissions,
+        } => {
+            let (kind, size_mib, quota_mib) = match storage {
+                OwnedVolumeStorage::Directory { quota_mib } => ("dir", None, quota_mib),
+                OwnedVolumeStorage::Disk { capacity_mib } => ("disk", Some(capacity_mib), None),
+            };
+            let directory = kind == "dir";
+            JsBuiltVolumeMount {
+                kind: "owned".into(),
+                guest,
+                readonly: options.readonly,
+                noexec: options.noexec,
+                nosuid: options.nosuid,
+                nodev: options.nodev,
+                host: None,
+                name: None,
+                named_mode: None,
+                named_kind: None,
+                owned_kind: Some(kind.into()),
+                size_mib,
+                quota_mib,
+                format: None,
+                fstype: None,
+                stat_virtualization: directory.then(|| sv_str(stat_virtualization)),
+                host_permissions: directory.then(|| hp_str(host_permissions)),
                 override_uid: options.override_uid,
                 override_gid: options.override_gid,
             }
@@ -426,6 +530,7 @@ fn to_built_mount(mount: RustVolumeMount) -> JsBuiltVolumeMount {
             name: None,
             named_mode: None,
             named_kind: None,
+            owned_kind: None,
             size_mib,
             quota_mib: None,
             format: None,
@@ -452,6 +557,7 @@ fn to_built_mount(mount: RustVolumeMount) -> JsBuiltVolumeMount {
             name: None,
             named_mode: None,
             named_kind: None,
+            owned_kind: None,
             size_mib: None,
             quota_mib: None,
             format: Some(

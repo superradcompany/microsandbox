@@ -6,16 +6,50 @@ use serde::{Deserialize, Serialize};
 // Types
 //--------------------------------------------------------------------------------------------------
 
-/// Measured outcome or dry-run projection of an explicit root-disk compaction.
+/// Disks eligible for explicit maintenance. Named and external disks are never included.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum DiskCompactionTarget {
+    /// The managed/flat root, when present, and every sandbox-owned data disk.
+    #[default]
+    All,
+    /// Only the managed or flat root disk.
+    Root,
+    /// Only the sandbox-owned data disk mounted at this guest path.
+    Disk {
+        /// Canonical absolute guest mount path; `/` selects the root.
+        guest_path: String,
+    },
+}
+
+/// Per-disk outcome; a selected count below two means the chain was unchanged.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct DiskCompactionDiskResult {
+    /// Guest mount path; `/` identifies the root disk.
+    pub guest_path: String,
+    /// Physical layers before compaction, including the writable head.
+    pub input_layers: usize,
+    /// Oldest sealed physical layers selected, including the base.
+    pub selected_layers: usize,
+    /// Physical layers after compaction, including the writable head.
+    pub output_layers: usize,
+    /// Guest bytes materialized; not reclaimed disk space.
+    pub materialized_bytes: u64,
+    /// This disk's preparation/materialization duration in microseconds, excluding journal
+    /// adoption and backend switching. Those shared phases are included in the aggregate timing.
+    pub total_us: u64,
+}
+
+/// Aggregate outcome or dry-run projection of explicit disk compaction.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct DiskCompactionResult {
     /// Whether only selection was performed.
     pub dry_run: bool,
-    /// Physical layers before compaction, including the writable head.
+    /// Sum of physical layers before compaction, including each writable head.
     pub input_layers: usize,
-    /// Selected oldest layers, including the base, excluding the writable head.
+    /// Sum of selected oldest sealed layers, including each base, excluding writable heads.
     pub selected_layers: usize,
-    /// Physical layers after compaction, including the writable head.
+    /// Sum of physical layers after compaction, including each writable head.
     pub output_layers: usize,
     /// Guest bytes materialized; not a disk-space saving estimate.
     pub materialized_bytes: u64,
@@ -23,7 +57,10 @@ pub struct DiskCompactionResult {
     pub total_us: u64,
     /// Measured VM pause through resume, zero for stopped sources and dry runs.
     pub pause_us: u64,
+    /// Individual selected disks, including unchanged chains with fewer than two sealed layers.
+    pub disks: Vec<DiskCompactionDiskResult>,
 }
+
 /// How full restore validates authorized external filesystem mappings and captured objects.
 ///
 /// This policy does not authorize or inherit host resources. Intentionally unmapped
@@ -47,4 +84,60 @@ pub struct ExternalMountWarning {
     pub reason: String,
     /// Permanently invalid captured node IDs; empty when the whole export is unavailable.
     pub stale_inodes: Vec<u64>,
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compaction_targets_have_closed_wire_shapes() {
+        for (target, json) in [
+            (DiskCompactionTarget::All, r#"{"kind":"all"}"#),
+            (DiskCompactionTarget::Root, r#"{"kind":"root"}"#),
+            (
+                DiskCompactionTarget::Disk {
+                    guest_path: "/data".into(),
+                },
+                r#"{"kind":"disk","guest_path":"/data"}"#,
+            ),
+        ] {
+            assert_eq!(serde_json::to_string(&target).unwrap(), json);
+            assert_eq!(
+                serde_json::from_str::<DiskCompactionTarget>(json).unwrap(),
+                target
+            );
+        }
+        assert!(serde_json::from_str::<DiskCompactionTarget>(r#"{"kind":"disk"}"#).is_err());
+        assert!(
+            serde_json::from_str::<DiskCompactionTarget>(
+                r#"{"kind":"disk","guest_path":"/data","external":true}"#
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn compaction_result_preserves_per_disk_metrics() {
+        let result = DiskCompactionResult {
+            dry_run: true,
+            disks: vec![DiskCompactionDiskResult {
+                guest_path: "/data".into(),
+                input_layers: 1,
+                output_layers: 1,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let encoded = serde_json::to_string(&result).unwrap();
+        let decoded: DiskCompactionResult = serde_json::from_str(&encoded).unwrap();
+        assert!(decoded.dry_run);
+        assert_eq!(decoded.disks[0].guest_path, "/data");
+        assert_eq!(decoded.disks[0].selected_layers, 0);
+        assert!(serde_json::from_str::<DiskCompactionResult>(r#"{"dry_run":false,"input_layers":1,"selected_layers":0,"output_layers":1,"materialized_bytes":0,"total_us":0,"pause_us":0}"#).is_err());
+    }
 }

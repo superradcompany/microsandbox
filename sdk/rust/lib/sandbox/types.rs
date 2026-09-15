@@ -71,6 +71,7 @@ pub struct MountBuilder {
 
 /// Internal kind for the mount builder.
 enum MountKind {
+    Owned(OwnedVolumeStorage),
     Bind(PathBuf),
     Named {
         name: String,
@@ -116,6 +117,14 @@ enum RootDiskKind {
 /// Sub-builder for [`MountBuilder::named_with`].
 pub struct NamedVolumeBuilder {
     create: NamedVolumeCreate,
+}
+
+/// Storage settings for [`MountBuilder::owned_with`].
+#[derive(Default)]
+pub struct OwnedVolumeBuilder {
+    disk: bool,
+    capacity_mib: Option<u32>,
+    quota_mib: Option<u32>,
 }
 
 impl NamedVolumeBuilder {
@@ -202,6 +211,56 @@ pub struct PatchBuilder {
 // Methods
 //--------------------------------------------------------------------------------------------------
 
+impl OwnedVolumeBuilder {
+    /// Use a private directory (the default).
+    pub fn directory(mut self) -> Self {
+        self.disk = false;
+        self
+    }
+
+    /// Use a private raw ext4 disk. A positive size is required.
+    pub fn disk(mut self) -> Self {
+        self.disk = true;
+        self
+    }
+
+    /// Set the ext4 disk capacity in MiB or with a `SizeExt` helper.
+    pub fn size(mut self, size: impl Into<Mebibytes>) -> Self {
+        self.capacity_mib = Some(size.into().as_u32());
+        self
+    }
+
+    /// Set the private directory's guest-write quota.
+    pub fn quota(mut self, quota: impl Into<Mebibytes>) -> Self {
+        self.quota_mib = Some(quota.into().as_u32());
+        self
+    }
+
+    fn build(self) -> crate::MicrosandboxResult<OwnedVolumeStorage> {
+        use crate::MicrosandboxError::InvalidConfig;
+        if self.disk {
+            if self.quota_mib.is_some() {
+                return Err(InvalidConfig(
+                    "owned disk volumes do not accept a directory quota".into(),
+                ));
+            }
+            let capacity_mib = self.capacity_mib.filter(|n| *n > 0).ok_or_else(|| {
+                InvalidConfig("owned disk volumes require a positive size".into())
+            })?;
+            Ok(OwnedVolumeStorage::Disk { capacity_mib })
+        } else {
+            if self.capacity_mib.is_some() {
+                return Err(InvalidConfig(
+                    "owned directory volumes do not accept a disk size".into(),
+                ));
+            }
+            Ok(OwnedVolumeStorage::Directory {
+                quota_mib: self.quota_mib,
+            })
+        }
+    }
+}
+
 impl MountBuilder {
     /// Create a new mount builder for the given guest path.
     pub fn new(guest: impl Into<String>) -> Self {
@@ -221,8 +280,29 @@ impl MountBuilder {
     }
 
     /// Bind mount from a host path.
+    ///
+    /// For a private backing collected with the sandbox, use [`Self::owned`].
     pub fn bind(mut self, host: impl Into<PathBuf>) -> Self {
         self.mount = MountKind::Bind(host.into());
+        self
+    }
+
+    /// Create an empty private directory, retained until this sandbox is removed.
+    pub fn owned(mut self) -> Self {
+        self.mount = MountKind::Owned(OwnedVolumeStorage::Directory { quota_mib: None });
+        self
+    }
+
+    /// Configure storage owned exclusively by this sandbox.
+    ///
+    /// `.owned_with(|v| v.disk().size(10.gib()))` creates an ext4 data disk.
+    pub fn owned_with(mut self, f: impl FnOnce(OwnedVolumeBuilder) -> OwnedVolumeBuilder) -> Self {
+        match f(OwnedVolumeBuilder::default()).build() {
+            Ok(storage) => self.mount = MountKind::Owned(storage),
+            Err(error) => {
+                self.error.get_or_insert(error);
+            }
+        }
         self
     }
 
@@ -334,8 +414,8 @@ impl MountBuilder {
 
     /// Set the guest stat virtualization policy. Default: [`StatVirtualization::Strict`].
     ///
-    /// Valid only for bind and named-directory/file mounts. Calling this on
-    /// a tmpfs or disk-image mount produces an error at `.build()` time.
+    /// Valid for bind mounts and directory-backed named or owned mounts. Calling this
+    /// on a tmpfs or any disk-backed mount produces an error at `.build()` time.
     pub fn stat_virtualization(mut self, policy: StatVirtualization) -> Self {
         self.stat_virtualization = Some(policy);
         self
@@ -355,8 +435,8 @@ impl MountBuilder {
 
     /// Set the host permission propagation policy. Default: [`HostPermissions::Private`].
     ///
-    /// Valid only for bind and named-directory/file mounts. Calling this on
-    /// a tmpfs or disk-image mount produces an error at `.build()` time.
+    /// Valid for bind mounts and directory-backed named or owned mounts. Calling this
+    /// on a tmpfs or any disk-backed mount produces an error at `.build()` time.
     pub fn host_permissions(mut self, policy: HostPermissions) -> Self {
         self.host_permissions = Some(policy);
         self
@@ -368,7 +448,7 @@ impl MountBuilder {
     /// Files created outside the guest (directly on the host) have no override,
     /// so by default they surface with the runtime's fallback owner. Pinning an
     /// owner here makes them appear as `(uid, gid)` instead. Valid only for bind
-    /// and named-directory/file mounts (requires stat virtualization).
+    /// mounts and directory-backed named or owned mounts (requires stat virtualization).
     pub fn owner(mut self, uid: u32, gid: u32) -> Self {
         self.options.override_uid = Some(uid);
         self.options.override_gid = Some(gid);
@@ -392,8 +472,8 @@ impl MountBuilder {
     ///
     /// Bounds how much the guest may add beyond the directory's existing
     /// contents. Without this, a protective default is applied. Valid only for
-    /// bind mounts; for named volumes use
-    /// [`named_with`](Self::named_with) with the named builder's `quota`.
+    /// bind mounts; for named or owned directories use [`named_with`](Self::named_with)
+    /// or [`owned_with`](Self::owned_with) with the storage builder's `quota`.
     ///
     /// ```ignore
     /// .bind("./data").quota(2.gib())   // guest may add up to 2 GiB
@@ -413,6 +493,11 @@ impl MountBuilder {
     pub(crate) fn build_restore(
         mut self,
     ) -> crate::MicrosandboxResult<Result<VolumeMount, String>> {
+        if matches!(self.mount, MountKind::Owned(_)) {
+            return Err(crate::MicrosandboxError::InvalidConfig(
+                "owned volumes are restored from captured storage and cannot be supplied as restore overrides".into(),
+            ));
+        }
         if !matches!(self.mount, MountKind::Captured) {
             return self.build().map(Ok);
         }
@@ -459,7 +544,17 @@ impl MountBuilder {
         // Reject options set on the wrong kind.
         let is_tmpfs = matches!(self.mount, MountKind::Tmpfs);
         let is_disk = matches!(self.mount, MountKind::Disk(_));
-        let is_virtiofs = matches!(self.mount, MountKind::Bind(_) | MountKind::Named { .. });
+        let is_virtiofs = matches!(
+            self.mount,
+            MountKind::Bind(_)
+                | MountKind::Named { .. }
+                | MountKind::Owned(OwnedVolumeStorage::Directory { .. })
+        );
+        if self.follow_root_symlinks && matches!(self.mount, MountKind::Owned(_)) {
+            return Err(crate::MicrosandboxError::InvalidConfig(
+                "owned volumes cannot follow host root symlinks".into(),
+            ));
+        }
         if self.size_mib.is_some() && !is_tmpfs {
             return Err(crate::MicrosandboxError::InvalidConfig(
                 ".size() is only valid for tmpfs mounts".into(),
@@ -468,8 +563,8 @@ impl MountBuilder {
         let is_bind = matches!(self.mount, MountKind::Bind(_));
         if self.quota_mib.is_some() && !is_bind {
             return Err(crate::MicrosandboxError::InvalidConfig(
-                ".quota() is only valid for bind mounts; for named volumes use \
-                 .named_with(|v| v.quota(..))"
+                ".quota() is only valid for bind mounts; for named or owned directories use \
+                 .named_with(name, |v| v.quota(..)) or .owned_with(|v| v.quota(..))"
                     .into(),
             ));
         }
@@ -485,19 +580,20 @@ impl MountBuilder {
         }
         if self.stat_virtualization.is_some() && !is_virtiofs {
             return Err(crate::MicrosandboxError::InvalidConfig(
-                ".stat_virtualization() is only valid for bind and directory-backed named volume mounts"
+                ".stat_virtualization() is only valid for bind and directory-backed named or owned volume mounts"
                     .into(),
             ));
         }
         if self.host_permissions.is_some() && !is_virtiofs {
             return Err(crate::MicrosandboxError::InvalidConfig(
-                ".host_permissions() is only valid for bind and directory-backed named volume mounts"
+                ".host_permissions() is only valid for bind and directory-backed named or owned volume mounts"
                     .into(),
             ));
         }
         if has_mount_owner(&self.options) && !is_virtiofs {
             return Err(crate::MicrosandboxError::InvalidConfig(
-                ".owner() is only valid for bind and directory-backed named volume mounts".into(),
+                ".owner() is only valid for bind and directory-backed named or owned volume mounts"
+                    .into(),
             ));
         }
         if let MountKind::Named {
@@ -549,6 +645,13 @@ impl MountBuilder {
         validate_mount_ownership(&self.options, Some(stat_virtualization))?;
 
         let mount = match self.mount {
+            MountKind::Owned(storage) => VolumeMount::Owned {
+                guest: self.guest,
+                storage,
+                options: self.options,
+                stat_virtualization,
+                host_permissions,
+            },
             MountKind::Bind(host) => {
                 // The spawn → VM wire format encodes mount specs as
                 // `tag:host[:opts]`. Embedded separators in the host
@@ -606,7 +709,7 @@ impl MountBuilder {
             }
             MountKind::Unset => {
                 return Err(crate::MicrosandboxError::InvalidConfig(
-                    "MountBuilder: no mount type set (call .bind(), .named(), .tmpfs(), or .disk())"
+                    "MountBuilder: no mount type set (call .bind(), .named(), .owned(), .tmpfs(), or .disk())"
                         .into(),
                 ));
             }
@@ -1175,6 +1278,30 @@ pub(crate) fn validate_volume_mounts(mounts: &mut [VolumeMount]) -> crate::Micro
 
 fn validate_volume_mount(mount: &VolumeMount) -> crate::MicrosandboxResult<()> {
     match mount {
+        VolumeMount::Owned {
+            guest,
+            storage,
+            options,
+            stat_virtualization,
+            host_permissions,
+        } => match storage {
+            OwnedVolumeStorage::Directory { .. } => {
+                validate_virtiofs_policies(*stat_virtualization, *host_permissions, options)?
+            }
+            OwnedVolumeStorage::Disk { capacity_mib } => {
+                if *capacity_mib == 0 {
+                    return Err(crate::MicrosandboxError::InvalidConfig(
+                        "owned disk volumes require a positive size".into(),
+                    ));
+                }
+                validate_named_disk_mount_options(
+                    guest,
+                    *stat_virtualization,
+                    *host_permissions,
+                    options,
+                )?;
+            }
+        },
         VolumeMount::Bind {
             host,
             options,
@@ -1314,7 +1441,8 @@ fn validate_mount_ownership(
 fn validate_non_virtiofs_ownership(options: &MountOptions) -> crate::MicrosandboxResult<()> {
     if has_mount_owner(options) {
         return Err(crate::MicrosandboxError::InvalidConfig(
-            "mount owner is only valid for bind and directory-backed named volume mounts".into(),
+            "mount owner is only valid for bind and directory-backed named or owned volume mounts"
+                .into(),
         ));
     }
     Ok(())
@@ -1397,6 +1525,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn owned_mounts_cannot_allocate_replacements_during_restore() {
+        for mount in [
+            MountBuilder::new("/cache").owned(),
+            MountBuilder::new("/data").owned_with(|owned| owned.disk().size(64u32)),
+        ] {
+            let error = mount.build_restore().unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("cannot be supplied as restore overrides")
+            );
+        }
+    }
+
+    #[test]
     fn test_disk_image_format_from_extension() {
         assert_eq!(
             DiskImageFormat::from_extension("qcow2"),
@@ -1444,6 +1587,52 @@ mod tests {
             .build()
             .unwrap_err();
         assert!(err.to_string().contains(".size() is only valid for tmpfs"));
+    }
+
+    #[test]
+    fn owned_mount_roundtrips_lifetime_and_storage_without_a_host_path() {
+        for mount in [
+            MountBuilder::new("/data").owned().build().unwrap(),
+            MountBuilder::new("/disk")
+                .owned_with(|v| v.disk().size(512_u32))
+                .noexec()
+                .build()
+                .unwrap(),
+        ] {
+            let json = serde_json::to_value(&mount).unwrap();
+            assert_eq!(json["type"], "Owned");
+            assert!(json.get("name").is_none());
+            assert!(json.get("host").is_none());
+            let restored: VolumeMount = serde_json::from_value(json.clone()).unwrap();
+            assert_eq!(serde_json::to_value(restored).unwrap(), json);
+        }
+    }
+
+    #[test]
+    fn owned_mount_rejects_incompatible_storage_and_host_policies() {
+        for mount in [
+            MountBuilder::new("/data").owned_with(|v| v.disk()),
+            MountBuilder::new("/data").owned_with(|v| v.disk().size(0_u32)),
+            MountBuilder::new("/data").owned_with(|v| v.directory().size(64_u32)),
+            MountBuilder::new("/data").owned_with(|v| v.disk().size(64_u32).quota(0_u32)),
+            MountBuilder::new("/data")
+                .owned()
+                .format(DiskImageFormat::Raw),
+            MountBuilder::new("/data")
+                .owned()
+                .follow_root_symlinks(true),
+            MountBuilder::new("/data")
+                .owned_with(|v| v.disk().size(64_u32))
+                .owner(0, 0),
+            MountBuilder::new("/data")
+                .owned_with(|v| v.disk().size(64_u32))
+                .host_permissions(HostPermissions::Private),
+            MountBuilder::new("/data")
+                .owned_with(|v| v.disk().size(64_u32))
+                .stat_virtualization(StatVirtualization::Strict),
+        ] {
+            assert!(mount.build().is_err());
+        }
     }
 
     #[test]
@@ -2231,6 +2420,6 @@ mod tests {
 
 pub use microsandbox_types::{
     DeploymentProfile, DiskImageFormat, FlatClone, HostPermissions, MountOptions,
-    NamedVolumeCreate, NamedVolumeMode, OciRootfsSource, Patch, RootDisk, RootfsSource,
-    SecurityProfile, StatVirtualization, VolumeKind, VolumeMount,
+    NamedVolumeCreate, NamedVolumeMode, OciRootfsSource, OwnedVolumeStorage, Patch, RootDisk,
+    RootfsSource, SecurityProfile, StatVirtualization, VolumeKind, VolumeMount,
 };

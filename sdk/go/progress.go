@@ -50,6 +50,9 @@ func CreateSandboxWithProgress(ctx context.Context, name string, opts ...Sandbox
 			return nil, err
 		}
 		options := buildFFICreateOptions(config)
+		if err := validateOwnedMounts(config.Volumes); err != nil {
+			return nil, err
+		}
 		options.CreationProgress = id
 		return ffi.CreateSandbox(ctx, name, options)
 	})
@@ -63,6 +66,9 @@ func RestoreSandboxWithProgress(ctx context.Context, snapshot, name string, opts
 			opt(&config)
 		}
 		options := buildFFIRestoreOptions(snapshot, config)
+		if err := validateOwnedMounts(config.Volumes); err != nil {
+			return nil, err
+		}
 		options.CreationProgress = id
 		return ffi.RestoreSandbox(ctx, name, options)
 	})

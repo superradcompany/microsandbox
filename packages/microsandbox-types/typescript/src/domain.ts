@@ -93,6 +93,20 @@ export type MountOptions = {
   override_gid?: number | null;
 };
 
+export type OwnedVolumeStorage = {
+  "kind": "directory";
+  /**
+   * Guest-write budget in MiB; `None` uses the directory-mount default.
+   */
+  quota_mib: number | null;
+} | {
+  "kind": "disk";
+  /**
+   * Required, positive capacity in MiB.
+   */
+  capacity_mib: number;
+};
+
 export type StatVirtualization = "strict" | "relaxed" | "off";
 
 export type HostPermissions = "private" | "mirror";

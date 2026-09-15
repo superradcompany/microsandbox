@@ -908,6 +908,77 @@ fn apply_mount<B: ResourceBuilder>(
     let override_uid = extract_opt::<u32>(mount, "override_uid")?;
     let override_gid = extract_opt::<u32>(mount, "override_gid")?;
 
+    if let Some(kind) = extract_opt::<String>(mount, "owned")? {
+        // The selector is exclusive at the native boundary too: callers can
+        // invoke the extension directly without using MountConfig._to_dict().
+        for key in [
+            "bind",
+            "named",
+            "named_mode",
+            "named_kind",
+            "tmpfs",
+            "disk",
+            "format",
+            "fstype",
+        ] {
+            if mount.contains(key)? {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "owned mount cannot specify {key}"
+                )));
+            }
+        }
+        if !matches!(kind.as_str(), "dir" | "disk") {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "invalid owned volume kind: {kind}"
+            )));
+        }
+        if override_uid.is_some() != override_gid.is_some() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "override_uid and override_gid must be specified together",
+            ));
+        }
+        let size_mib = extract_opt::<u32>(mount, "size_mib")?;
+        let quota_mib = extract_opt::<u32>(mount, "quota_mib")?;
+        return Ok(builder.volume(&guest_path, |v| {
+            let mut m = v.owned_with(|mut owned| {
+                owned = if kind == "disk" {
+                    owned.disk()
+                } else {
+                    owned.directory()
+                };
+                if let Some(size) = size_mib {
+                    owned = owned.size(size);
+                }
+                if let Some(quota) = quota_mib {
+                    owned = owned.quota(quota);
+                }
+                owned
+            });
+            if readonly {
+                m = m.readonly();
+            }
+            if noexec {
+                m = m.noexec();
+            }
+            if nosuid {
+                m = m.nosuid();
+            }
+            if nodev {
+                m = m.nodev();
+            }
+            if let Some(policy) = stat_virt {
+                m = m.stat_virtualization(policy);
+            }
+            if let Some(policy) = host_perms {
+                m = m.host_permissions(policy);
+            }
+            if let (Some(uid), Some(gid)) = (override_uid, override_gid) {
+                m = m.owner(uid, gid);
+            }
+            m
+        }));
+    }
+
     if let Some(bind_path) = extract_opt::<String>(mount, "bind")? {
         let quota_mib = extract_opt::<u32>(mount, "quota_mib")?;
         Ok(builder.volume(&guest_path, |v| {
@@ -1054,7 +1125,7 @@ fn apply_mount<B: ResourceBuilder>(
         }))
     } else {
         Err(pyo3::exceptions::PyValueError::new_err(
-            "mount must have one of: bind, named, tmpfs, disk",
+            "mount must have one of: bind, named, owned, tmpfs, disk",
         ))
     }
 }

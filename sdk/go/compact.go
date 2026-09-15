@@ -9,25 +9,43 @@ import (
 
 // DiskCompactionOptions selects explicit maintenance, never persisted desired configuration.
 type DiskCompactionOptions struct {
-	// Layers counts the oldest physical layers including the base, excluding the writable head.
-	// Nil selects all sealed layers; an explicit count must be at least two.
+	// Layers limits the oldest sealed physical layers per disk including the base, excluding the writable head.
+	// Nil selects all sealed layers; the limit must be at least two. Chains with fewer than two sealed layers are skipped.
 	Layers *uint32 `json:"layers,omitempty"`
 	DryRun bool    `json:"dry_run,omitempty"`
+	// Disk selects one owned disk by guest path; "/" selects the root. Conflicts with RootDiskOnly.
+	Disk string `json:"disk,omitempty"`
+	// RootDiskOnly excludes owned data disks. Conflicts with Disk.
+	RootDiskOnly bool `json:"root_disk_only,omitempty"`
 }
 
-// DiskCompactionResult reports physical counts and measured durations in microseconds.
-// MaterializedBytes is work performed, not an estimate of reclaimed disk space.
-type DiskCompactionResult struct {
-	DryRun            bool   `json:"dry_run"`
+// DiskCompactionDiskResult reports one selected disk, including unchanged short chains.
+type DiskCompactionDiskResult struct {
+	GuestPath         string `json:"guest_path"`
 	InputLayers       uint32 `json:"input_layers"`
 	SelectedLayers    uint32 `json:"selected_layers"`
 	OutputLayers      uint32 `json:"output_layers"`
 	MaterializedBytes uint64 `json:"materialized_bytes"`
-	TotalUs           uint64 `json:"total_us"`
-	PauseUs           uint64 `json:"pause_us"`
+	// TotalUs measures preparation/materialization, excluding journal adoption and backend switching.
+	TotalUs uint64 `json:"total_us"`
 }
 
-// Compact merges the selected sealed prefix without rewriting existing snapshots.
+// DiskCompactionResult reports physical counts and measured durations in microseconds.
+// MaterializedBytes is work performed, not an estimate of reclaimed disk space.
+// TotalUs covers the whole operation, including shared journal/backend adoption.
+type DiskCompactionResult struct {
+	DryRun            bool                       `json:"dry_run"`
+	InputLayers       uint32                     `json:"input_layers"`
+	SelectedLayers    uint32                     `json:"selected_layers"`
+	OutputLayers      uint32                     `json:"output_layers"`
+	MaterializedBytes uint64                     `json:"materialized_bytes"`
+	TotalUs           uint64                     `json:"total_us"`
+	PauseUs           uint64                     `json:"pause_us"`
+	Disks             []DiskCompactionDiskResult `json:"disks"`
+}
+
+// Compact merges selected sealed prefixes without rewriting existing snapshots.
+// By default it covers the root and all sandbox-owned data disks, never named/external disks or directories.
 func (s *Sandbox) Compact(ctx context.Context, opts DiskCompactionOptions) (*DiskCompactionResult, error) {
 	data, err := json.Marshal(opts)
 	if err != nil {

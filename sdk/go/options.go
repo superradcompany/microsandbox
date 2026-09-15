@@ -1677,6 +1677,7 @@ type MountConfig struct {
 	Named     string
 	NamedMode string
 	NamedKind string
+	Owned     string
 	QuotaMiB  uint32
 	Tmpfs     bool
 	Disk      string
@@ -1713,7 +1714,7 @@ type MountOwner struct {
 	GID uint32
 }
 
-// MountKind discriminates between the four mount flavours.
+// MountKind discriminates between the mount flavours.
 type MountKind uint8
 
 const (
@@ -1725,6 +1726,8 @@ const (
 	MountKindTmpfs
 	// MountKindDisk is a host disk image (raw / qcow2 / ...).
 	MountKindDisk
+	// MountKindOwned is storage removed with its sandbox.
+	MountKindOwned
 )
 
 // Kind reports which flavour of mount this is.
@@ -1759,6 +1762,22 @@ type NamedVolumeOptions struct {
 	Kind     string // "dir" or "disk"; empty means dir.
 	SizeMiB  uint32
 	QuotaMiB uint32
+}
+
+// OwnedVolumeOptions configures storage allocated for one sandbox. It survives
+// stop/start and is removed with that sandbox. The default kind is a directory.
+type OwnedVolumeOptions struct {
+	Kind     VolumeKind
+	SizeMiB  uint32 // Required positive capacity for disk storage.
+	QuotaMiB uint32 // Directory quota; zero leaves the quota unset.
+	Readonly bool
+	Noexec   bool
+	Nosuid   bool
+	Nodev    bool
+	// Metadata policies and Owner apply only to directory storage.
+	StatVirtualization StatVirtualization
+	HostPermissions    HostPermissions
+	Owner              *MountOwner
 }
 
 // TmpfsOptions tunes the Tmpfs factory.
@@ -1842,6 +1861,22 @@ func (mountFactory) NamedWith(name string, opts MountOptions, namedOpts NamedVol
 		StatVirtualization: opts.StatVirtualization,
 		HostPermissions:    opts.HostPermissions,
 		Owner:              opts.Owner,
+	}
+}
+
+// Owned returns a mount whose storage is allocated once and removed with the
+// sandbox. No separately named volume is created or shared.
+func (mountFactory) Owned(opts OwnedVolumeOptions) MountConfig {
+	kind := opts.Kind
+	if kind == "" {
+		kind = VolumeKindDir
+	}
+	return MountConfig{
+		kind: MountKindOwned, Owned: string(kind),
+		SizeMiB: opts.SizeMiB, QuotaMiB: opts.QuotaMiB,
+		Readonly: opts.Readonly, Noexec: opts.Noexec, Nosuid: opts.Nosuid, Nodev: opts.Nodev,
+		StatVirtualization: opts.StatVirtualization,
+		HostPermissions:    opts.HostPermissions, Owner: opts.Owner,
 	}
 }
 

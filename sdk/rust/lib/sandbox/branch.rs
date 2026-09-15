@@ -291,9 +291,12 @@ pub(super) async fn prepare_branch(
             "source uses host-backed proxy, TLS or secret resources; explicit compatible authorization is required (or dangerously_inherit_resources for this local source)".into(),
         ));
     }
-    // Inheritance never copies a source's writable disks into the child configuration.
-    // Captured disk selection below materializes independent child-owned files instead.
-    config.spec.mounts.clear();
+    // Owned declarations contain no source host path. Retain them as the required inventory
+    // until capture proves that every one has independent child backing; clear external mounts.
+    config
+        .spec
+        .mounts
+        .retain(|mount| matches!(mount, microsandbox_types::VolumeMount::Owned { .. }));
     config.spec.mounts.extend(options.spec.mounts);
     if !options.restore_resources.inherit || !options.spec.network.ports.is_empty() {
         config.spec.network.ports = options.spec.network.ports;
@@ -458,6 +461,9 @@ async fn adopt_capture(
     state: &LocalBranchState,
     pin: Arc<microsandbox_runtime::checkpoint::LocalMemoryPin>,
 ) -> MicrosandboxResult<Arc<microsandbox_runtime::checkpoint::LocalMemoryPin>> {
+    // Every sibling must retain the captured owned inventory, not just the child
+    // that established the batch. External-resource choices cannot replace it.
+    crate::snapshot::validate_owned_inventory(&config.spec.mounts, &state.owned_volumes)?;
     #[cfg(target_os = "linux")]
     if state.memory.memfd_lease.is_some() {
         config.branch_memory = Some(pin.clone());
@@ -518,15 +524,24 @@ async fn adopt_capture(
             ));
         }
     }
-    let mounts = crate::snapshot::materialize_additional_disks(
-        &state.disks,
-        &state.resources,
+    let mut mounts = crate::snapshot::materialize_owned_volumes(
+        &state.owned_volumes,
         &closure,
         child,
-        root_device,
         &config.restore_resources,
     )
     .await?;
+    mounts.extend(
+        crate::snapshot::materialize_additional_disks(
+            &state.disks,
+            &state.resources,
+            &closure,
+            child,
+            root_device,
+            &config.restore_resources,
+        )
+        .await?,
+    );
     crate::snapshot::apply_additional_disks(config, mounts);
     config.checkpoint_restore = Some(CheckpointRestoreConfig {
         memory_descriptor: state.memory.memfd_lease.is_some(),

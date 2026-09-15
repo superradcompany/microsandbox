@@ -13,6 +13,9 @@ use microsandbox_image::checkpoint::{
     ContentRef, DeviceStateRef, LocalObjectStore, MemoryCaptureMode, MemoryExtent,
     MemoryExtentContent, MemoryManifest, ObjectId, ResourceDescriptor, ResourceTreatment,
 };
+use microsandbox_image::snapshot::{
+    OwnedDirectoryPayload, OwnedMountSnapshot, OwnedVolumeCapture, OwnedVolumeData,
+};
 use microsandbox_protocol::bootstrap::GuestBootstrap;
 use microsandbox_protocol::core::{
     CoreError, CoreErrorKind, Ready, WorkloadFailureDisposition, WorkloadFreeze, WorkloadFrozen,
@@ -57,6 +60,8 @@ pub(crate) struct CheckpointCoordinator {
     workload_control: Arc<WorkloadControl>,
     root_disk: Option<RuntimeOwnedRootDisk>,
     additional_disks: BTreeMap<String, RuntimeOwnedAdditionalDisk>,
+    owned_mounts: BTreeMap<String, OwnedMountSnapshot>,
+    owned_directories: BTreeMap<String, microsandbox_filesystem::OwnedDirectoryCheckpoint>,
     unsupported_additional_disks: BTreeMap<String, String>,
     fs_resource_bindings: BTreeMap<String, BTreeMap<String, String>>,
     network_resource_binding: Option<BTreeMap<String, String>>,
@@ -245,24 +250,20 @@ impl CheckpointCoordinator {
     pub(crate) fn compact(
         &mut self,
         vm: &msb_krun::VmControl,
+        target: microsandbox_types::DiskCompactionTarget,
         layers: Option<usize>,
         dry_run: bool,
     ) -> Result<super::DiskCompactionResult, super::disk::RootDiskRolloverError> {
-        if self
-            .root_disk
-            .as_ref()
-            .is_some_and(|disk| disk.growth_pending())
-        {
-            return Err(super::disk::RootDiskRolloverError::pre_rebind(
-                "complete pending root-disk growth before compaction",
-            ));
-        }
-        match self.root_disk.as_mut() {
-            Some(disk) => disk.compact(Some(vm), &self.runtime, layers, dry_run),
-            None => Err(super::disk::RootDiskRolloverError::pre_rebind(
-                "this root has no runtime-owned disk chain",
-            )),
-        }
+        super::compaction::compact_live(
+            &mut self.root_disk,
+            &mut self.additional_disks,
+            &self.owned_mounts,
+            vm,
+            &self.runtime,
+            &target,
+            layers,
+            dry_run,
+        )
     }
 
     pub(crate) fn grow_root(
@@ -341,13 +342,40 @@ impl CheckpointCoordinator {
         runtime: tokio::runtime::Handle,
         agent_sock: &Path,
         workload_control: Arc<WorkloadControl>,
+        owned_directories: BTreeMap<String, microsandbox_filesystem::OwnedDirectoryCheckpoint>,
     ) -> Result<Self, String> {
         let root = runtime_dir.join("checkpoints");
         std::fs::create_dir_all(&root).map_err(|error| error.to_string())?;
         let store = LocalObjectStore::open(runtime_dir.join("checkpoint-store"))
             .map_err(|error| error.to_string())?;
         let root_disk = RuntimeOwnedRootDisk::open(runtime_dir, vm)?;
-        let additional_disks = RuntimeOwnedAdditionalDisk::open_all(&vm.disks, guest_bootstrap)?;
+        let additional_disks =
+            RuntimeOwnedAdditionalDisk::open_all(&vm.disks, guest_bootstrap, runtime_dir)?;
+        let owned_mounts = vm
+            .owned_volumes
+            .iter()
+            .map(|mount| {
+                let tag = microsandbox_types::owned_volume_mount_id(mount.guest());
+                if !guest_bootstrap
+                    .dir_mounts
+                    .iter()
+                    .any(|binding| binding.guest_path == mount.guest() && binding.tag == tag)
+                    && !guest_bootstrap
+                        .disk_mounts
+                        .iter()
+                        .any(|binding| binding.guest_path == mount.guest() && binding.id == tag)
+                {
+                    return Err(format!(
+                        "owned mount {} has no matching guest binding",
+                        mount.guest()
+                    ));
+                }
+                Ok((
+                    tag,
+                    OwnedMountSnapshot::from_mount(mount).map_err(|error| error.to_string())?,
+                ))
+            })
+            .collect::<Result<BTreeMap<_, _>, String>>()?;
         let unsupported_additional_disks = vm
             .disks
             .iter()
@@ -406,6 +434,8 @@ impl CheckpointCoordinator {
             workload_control,
             root_disk,
             additional_disks,
+            owned_mounts,
+            owned_directories,
             unsupported_additional_disks,
             fs_resource_bindings,
             network_resource_binding,
@@ -453,7 +483,7 @@ impl CheckpointCoordinator {
         if let Some(paused) = user_pause {
             paused.validate(vm).map_err(Failure::pre_rebind)?;
         }
-        let disk = self.root_disk.as_mut().ok_or_else(|| {
+        let disk = self.root_disk.as_ref().ok_or_else(|| {
             Failure::pre_rebind("disk-only capture requires an owned managed or flat root disk")
         })?;
         if disk.growth_pending() {
@@ -461,8 +491,44 @@ impl CheckpointCoordinator {
                 "complete pending root-disk growth before snapshotting",
             ));
         }
+        // Owned storage requires one guest-synced namespace cut, while legacy
+        // root-only capture keeps its existing crash-consistent behavior.
+        let acquired_workload;
+        let workload = if self.owned_mounts.is_empty() {
+            None
+        } else if let Some(paused) = user_pause {
+            Some(paused.workload.as_ref().ok_or_else(|| {
+                Failure::pre_rebind("owned storage capture requires a guest-synced pause")
+            })?)
+        } else {
+            acquired_workload = self.freeze_workload(vm, checkpoint_id).map_err(|error| {
+                if error.keep_paused {
+                    Failure::post_journal(error)
+                } else {
+                    Failure::pre_rebind(error)
+                }
+            })?;
+            Some(&acquired_workload)
+        };
+        if workload.is_some_and(|workload| !workload.external_mounts_synced) {
+            if user_pause.is_none() {
+                self.thaw_workload(workload.expect("checked workload"))
+                    .map_err(Failure::post_journal)?;
+            }
+            return Err(Failure::pre_rebind(
+                "owned storage capture requires an acknowledged root and volume writeback boundary",
+            ));
+        }
         let path = self.root.join(checkpoint_id);
-        std::fs::create_dir(&path).map_err(Failure::pre_rebind)?;
+        if let Err(error) = std::fs::create_dir(&path) {
+            if user_pause.is_none()
+                && let Some(workload) = workload
+            {
+                self.thaw_workload(workload)
+                    .map_err(Failure::post_journal)?;
+            }
+            return Err(Failure::pre_rebind(error));
+        }
         let paused_at = Instant::now();
         let pause = match user_pause
             .map(|p| Ok(p.generation))
@@ -471,20 +537,79 @@ impl CheckpointCoordinator {
             Ok(pause) => pause,
             Err(error) => {
                 let _ = std::fs::remove_dir_all(&path);
+                if user_pause.is_none()
+                    && let Some(workload) = workload
+                {
+                    self.thaw_workload(workload)
+                        .map_err(Failure::post_journal)?;
+                }
                 return Err(Failure::pre_rebind(error));
             }
         };
-        // Only the root block worker is drained and switched. Rollover inspects its state,
-        // but no full CPU/device payload, RAM scan, guest handshake, or dirty-baseline update
-        // is needed. The result is a crash-consistent disk cut, not an execution checkpoint.
-        // Disk-only packaging applies the caller's optional integrity policy after this cut.
-        let result = disk.rollover(vm, &self.runtime, &path, pause.get(), false, false);
+        // Keep every owned provider quiesced until all bytes are sealed. No RAM scan or
+        // execution serialization is needed for this cold-boot storage artifact.
+        let result: Result<_, Failure> = (|| {
+            if !self.owned_directories.is_empty() {
+                std::fs::create_dir_all(path.join("owned")).map_err(Failure::pre_rebind)?;
+            }
+            let captured = self.root_disk.as_mut().expect("validated root").rollover(
+                vm,
+                &self.runtime,
+                &path,
+                pause.get(),
+                false,
+                false,
+            )?;
+            let mut owned_volumes = Vec::new();
+            for (tag, mount) in &self.owned_mounts {
+                let data = if let Some(directory) = self.owned_directories.get(tag) {
+                    directory
+                        .prepare_capture(&path.join("owned").join(tag))
+                        .map_err(Failure::pre_rebind)?;
+                    let device = self
+                        .fs_resource_bindings
+                        .iter()
+                        .find(|(_, binding)| binding.get("guest_tag") == Some(tag))
+                        .map(|(device, _)| device)
+                        .ok_or_else(|| {
+                            Failure::pre_rebind("owned directory lacks its transport")
+                        })?;
+                    vm.capture_virtio_device_state(TYPE_FS, device)
+                        .map_err(Failure::pre_rebind)?;
+                    owned_directory_data(directory.finish_capture().map_err(Failure::pre_rebind)?)
+                        .map_err(Failure::pre_rebind)?
+                } else {
+                    let disk = self.additional_disks.get_mut(tag).ok_or_else(|| {
+                        Failure::pre_rebind("owned disk lacks its capture provider")
+                    })?;
+                    let generation = disk
+                        .capture(vm, &self.runtime, &path, pause.get(), false)?
+                        .manifest;
+                    OwnedVolumeData::Disk { generation }
+                };
+                owned_volumes.push(OwnedVolumeCapture {
+                    mount_id: tag.clone(),
+                    mount: mount.clone(),
+                    data,
+                });
+            }
+            Ok((captured, owned_volumes))
+        })();
+        for directory in self.owned_directories.values() {
+            let _ = directory.cancel_capture();
+        }
         if user_pause.is_none() && !result.as_ref().is_err_and(|e| e.keep_paused) {
             vm.resume(pause).map_err(Failure::post_journal)?;
+            if let Some(workload) = workload
+                && let Err(error) = self.thaw_workload(workload)
+            {
+                let _ = vm.pause();
+                return Err(Failure::post_journal(error));
+            }
         }
         let pause_us = paused_at.elapsed().as_micros();
         match result {
-            Ok(captured) => {
+            Ok((captured, owned_volumes)) => {
                 tracing::info!(target: "microsandbox_checkpoint_timing", operation = "capture_disk",
                     checkpoint_id, source_already_paused = user_pause.is_some(), pause_us,
                     total_us = started.elapsed().as_micros(), "disk-only checkpoint timing");
@@ -492,6 +617,7 @@ impl CheckpointCoordinator {
                     checkpoint_id: checkpoint_id.into(),
                     path,
                     disk: captured.manifest,
+                    owned_volumes,
                 })
             }
             Err(error) => {
@@ -743,11 +869,13 @@ impl CheckpointCoordinator {
             }
         };
         let freeze_us = freeze_started.elapsed().as_micros();
-        if self.fs_resource_bindings.values().any(|binding| {
-            binding
-                .get("role")
-                .is_some_and(|role| role == "external_bind")
-        }) && !workload.external_mounts_synced
+        if (!self.owned_mounts.is_empty()
+            || self.fs_resource_bindings.values().any(|binding| {
+                binding
+                    .get("role")
+                    .is_some_and(|role| role == "external_bind" || role == "owned_directory")
+            }))
+            && !workload.external_mounts_synced
         {
             let _ = std::fs::remove_dir_all(&staging);
             if user_pause.is_none() {
@@ -793,6 +921,9 @@ impl CheckpointCoordinator {
             record_integrity,
         );
         let paused_capture_us = paused_capture_started.elapsed().as_micros();
+        for directory in self.owned_directories.values() {
+            let _ = directory.cancel_capture();
+        }
         let captured = match paused {
             Ok(captured) => captured,
             Err(mut failure) => {
@@ -983,16 +1114,30 @@ impl CheckpointCoordinator {
         }
         let gate_deadline = Instant::now() + WORKLOAD_CONTROL_TIMEOUT;
         let (gate, host_input) = self.gate_input(gate_deadline)?;
-        let external_mount_tags = self
+        let mut external_mount_tags = self
             .fs_resource_bindings
             .values()
             .filter(|binding| {
                 binding
                     .get("role")
-                    .is_some_and(|role| role == "external_bind")
+                    .is_some_and(|role| role == "external_bind" || role == "owned_directory")
             })
             .filter_map(|binding| binding.get("guest_tag").cloned())
             .collect::<Vec<_>>();
+        if !self.owned_mounts.is_empty() {
+            external_mount_tags.push("path:/".into());
+            external_mount_tags.extend(
+                self.owned_mounts
+                    .values()
+                    .filter(|mount| {
+                        matches!(
+                            mount.storage,
+                            microsandbox_types::OwnedVolumeStorage::Disk { .. }
+                        )
+                    })
+                    .map(|mount| format!("path:{}", mount.guest)),
+            );
+        }
         // Gating keeps its original deadline. The external-only request budget begins
         // after gating and includes freezer work, the guest's 20s flush, and output cut.
         let deadline = freeze_request_deadline(
@@ -1160,6 +1305,15 @@ impl CheckpointCoordinator {
         let mut pending_devices = Vec::with_capacity(inventory.len());
         let mut disk_roots = Vec::new();
         let mut local_disks = Vec::new();
+        let mut owned_volumes = Vec::new();
+        if !self.owned_directories.is_empty() {
+            std::fs::create_dir_all(staging.join("owned")).map_err(CheckpointFailure::resumable)?;
+        }
+        for (tag, directory) in &self.owned_directories {
+            directory
+                .prepare_capture(&staging.join("owned").join(tag))
+                .map_err(CheckpointFailure::resumable)?;
+        }
         for (device_type, device_id) in inventory {
             let runtime_owned_root = self
                 .root_disk
@@ -1216,7 +1370,12 @@ impl CheckpointCoordinator {
                         pause_generation,
                         record_integrity,
                     )
-                    .map_err(CheckpointFailure::resumable)?;
+                    .map_err(|error| CheckpointFailure {
+                        message: error.to_string(),
+                        keep_paused: error.keep_paused,
+                        published: None,
+                        freezer_unavailable: false,
+                    })?;
                 timings.managed_disk_us += disk_started.elapsed().as_micros();
                 if !local {
                     let bytes = captured
@@ -1271,6 +1430,30 @@ impl CheckpointCoordinator {
                 device_type: *device_type,
                 device_id: device_id.clone(),
                 bytes,
+            });
+        }
+        for (tag, mount) in &self.owned_mounts {
+            let data = if let Some(directory) = self.owned_directories.get(tag) {
+                owned_directory_data(
+                    directory
+                        .finish_capture()
+                        .map_err(CheckpointFailure::resumable)?,
+                )
+                .map_err(CheckpointFailure::resumable)?
+            } else {
+                let generation = local_disks
+                    .iter()
+                    .find(|disk| disk.device_id == *tag)
+                    .ok_or_else(|| {
+                        CheckpointFailure::resumable(format!("owned disk {tag} was not captured"))
+                    })?
+                    .clone();
+                OwnedVolumeData::Disk { generation }
+            };
+            owned_volumes.push(OwnedVolumeCapture {
+                mount_id: tag.clone(),
+                mount: mount.clone(),
+                data,
             });
         }
         let device_refs = if local {
@@ -1393,6 +1576,7 @@ impl CheckpointCoordinator {
                     devices: device_refs,
                     resources,
                     disks: local_disks,
+                    owned_volumes,
                     memory: memory.memory.clone(),
                     vcpus: self.boot_geometry.0,
                     max_cpus: self.boot_geometry.1,
@@ -1545,6 +1729,7 @@ impl CheckpointCoordinator {
             execution_state: execution_id,
             memory: memory_id,
             disks: disk_roots,
+            owned_volumes,
             devices: device_refs,
             resources,
             requires: Vec::new(),
@@ -1866,6 +2051,28 @@ where
         return Err("workload control reply belongs to another checkpoint attempt".into());
     }
     Ok(payload)
+}
+
+fn owned_directory_data(
+    snapshot: microsandbox_filesystem::OwnedDirectorySnapshot,
+) -> Result<OwnedVolumeData, String> {
+    let descriptor = snapshot
+        .descriptor_bytes()
+        .map_err(|error| error.to_string())?;
+    Ok(OwnedVolumeData::Directory {
+        descriptor: OwnedDirectoryPayload {
+            digest: snapshot.digest().map_err(|error| error.to_string())?,
+            bytes: descriptor.len() as u64,
+        },
+        files: snapshot
+            .payloads()
+            .into_iter()
+            .map(|payload| OwnedDirectoryPayload {
+                digest: payload.digest,
+                bytes: payload.bytes,
+            })
+            .collect(),
+    })
 }
 
 fn admit_resources(

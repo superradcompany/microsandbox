@@ -157,6 +157,11 @@ pub struct LaunchConfig {
     /// Additional virtio-fs mounts as `tag:host_path[:opts]`.
     pub mounts: Vec<String>,
 
+    /// Private volume intent resolved by the owning sandbox's launcher.
+    /// Kept distinct from capture-eligible shared named disks.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub owned_volumes: Vec<microsandbox_types::VolumeMount>,
+
     /// Isolated host-file mounts handled by the single-file backend.
     #[serde(default)]
     pub file_mounts: Vec<FileMountConfig>,

@@ -338,6 +338,16 @@ impl LocalBackend {
             .await?;
             config.snapshot_upper_layers = materialized.upper_layers;
         }
+        if let Some((source, owned)) = config.snapshot_owned_source.take() {
+            let mounts = crate::snapshot::materialize_owned_volumes(
+                &owned,
+                &source,
+                &sandbox_dir,
+                &config.restore_resources,
+            )
+            .await?;
+            crate::snapshot::apply_additional_disks(&mut config, mounts);
+        }
         // Archive descriptors are intentionally inspected only while streaming into child
         // staging, after outer builder dispatch has selected its provisional mode. Re-evaluate
         // ownership here, before process creation, so a discovered full restore never receives an
@@ -634,12 +644,31 @@ impl LocalBackend {
         // before inserting the sandbox row so volume conflicts or incompatibilities
         // cannot leave a stopped sandbox that never booted.
         let created_named_volumes = Arc::new(ensure_named_volumes(self, &config).await?);
+        let has_owned_volumes = config
+            .spec
+            .mounts
+            .iter()
+            .any(|mount| matches!(mount, microsandbox_types::VolumeMount::Owned { .. }));
         let mut creation_cleanup = CreationCleanup::new(
             backend.clone(),
             config.spec.name.clone(),
             _transition_guard,
             created_named_volumes.clone(),
+            has_owned_volumes,
+            child_stage_guard.as_mut(),
         );
+        if let Err(error) = crate::runtime::owned_volumes::prepare(
+            &sandbox_dir,
+            &config.spec.mounts,
+            config.snapshot_parent.is_some() || config.checkpoint_restore.is_some(),
+        )
+        .await
+        {
+            // Preparation still holds the initial lifecycle lock locally. Release it so
+            // awaited cleanup can prove the name is free before a CLI caller exits.
+            drop(lifecycle_guard);
+            return Err(creation_cleanup.finish_owned_failure(error).await);
+        }
 
         // Claim the persisted identity in Starting state. Running is published only after the
         // guest agent and all create-time validation are ready for callers.
@@ -652,6 +681,12 @@ impl LocalBackend {
                 Ok(sandbox_id) => sandbox_id,
                 Err(err) => {
                     rollback_created_named_volumes(self, &created_named_volumes).await;
+                    if has_owned_volumes {
+                        // A failed commit may have an uncertain catalog outcome. Staging
+                        // already belongs to cleanup's writer-side ownership recheck.
+                        drop(lifecycle_guard);
+                        return Err(creation_cleanup.finish_owned_failure(err).await);
+                    }
                     return Err(err);
                 }
             };
@@ -682,7 +717,7 @@ impl LocalBackend {
                 )
                 .await
                 .map_err(|cleanup| crate::MicrosandboxError::Runtime(format!("{e}; {cleanup}")))?;
-                return Err(e);
+                return Err(creation_cleanup.finish_owned_failure(e).await);
             }
         };
         creation_cleanup.retain_process(local_state.handle.clone());
@@ -704,10 +739,11 @@ impl LocalBackend {
         .await?
         {
             sandbox.terminate_creation_owner().await;
-            return Err(crate::MicrosandboxError::Runtime(format!(
+            let error = crate::MicrosandboxError::Runtime(format!(
                 "sandbox {:?} lost its Starting state before readiness publication",
                 sandbox.name()
-            )));
+            ));
+            return Err(creation_cleanup.finish_owned_failure(error).await);
         }
         if let Err(err) = Self::update_sandbox_active_config(
             write_db,
@@ -717,7 +753,7 @@ impl LocalBackend {
         .await
         {
             sandbox.terminate_creation_owner().await;
-            return Err(err);
+            return Err(creation_cleanup.finish_owned_failure(err).await);
         }
 
         if let (Some(_reference), Some(manifest_digest)) = (
@@ -737,7 +773,7 @@ impl LocalBackend {
             )
             .await
             .map_err(|cleanup| crate::MicrosandboxError::Runtime(format!("{err}; {cleanup}")))?;
-            return Err(err);
+            return Err(creation_cleanup.finish_owned_failure(err).await);
         }
 
         // Validate that the configured workdir exists inside the guest and is a
@@ -761,7 +797,7 @@ impl LocalBackend {
                     .map_err(|cleanup| {
                         crate::MicrosandboxError::Runtime(format!("{error}; {cleanup}"))
                     })?;
-                    return Err(error);
+                    return Err(creation_cleanup.finish_owned_failure(error).await);
                 }
                 Err(_) => {
                     let error = crate::MicrosandboxError::InvalidConfig(format!(
@@ -778,7 +814,7 @@ impl LocalBackend {
                     .map_err(|cleanup| {
                         crate::MicrosandboxError::Runtime(format!("{error}; {cleanup}"))
                     })?;
-                    return Err(error);
+                    return Err(creation_cleanup.finish_owned_failure(error).await);
                 }
             }
         }
@@ -795,7 +831,7 @@ impl LocalBackend {
             .await
             {
                 sandbox.terminate_creation_owner().await;
-                return Err(error);
+                return Err(creation_cleanup.finish_owned_failure(error).await);
             }
             if let Err(error) = remove_dir_if_exists(&closure) {
                 tracing::warn!(error = %error, path = %closure.display(), "failed to remove consumed checkpoint closure");

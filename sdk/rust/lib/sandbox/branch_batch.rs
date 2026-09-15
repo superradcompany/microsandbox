@@ -357,8 +357,8 @@ mod tests {
         .await
         .unwrap();
         assert!(outcomes[0].is_err());
-        for index in 1..4 {
-            assert_eq!(*outcomes[index].as_ref().unwrap(), index);
+        for (index, outcome) in outcomes.iter().enumerate().skip(1) {
+            assert_eq!(*outcome.as_ref().unwrap(), index);
         }
     }
 

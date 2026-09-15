@@ -42,13 +42,13 @@ impl PassthroughFs {
             return Ok(init_entry(self.cfg.entry_timeout, self.cfg.attr_timeout));
         }
         let data = self.inode(entry.inode)?;
-        let metadata = self.safe_metadata(&data.path)?;
+        let metadata = self.inode_metadata(&data)?;
         self.entry_from_metadata(&metadata, data.as_ref())
     }
 
     pub(super) fn dir_entries(&self, inode: u64) -> io::Result<Vec<(DirEntry<'static>, Entry)>> {
         let data = self.inode(inode)?;
-        let metadata = self.safe_metadata(&data.path)?;
+        let metadata = self.safe_metadata(&data.path())?;
         if !metadata.file_type().is_dir() {
             return Err(linux_error(LINUX_ENOTDIR));
         }
@@ -85,7 +85,7 @@ impl PassthroughFs {
             ));
         }
 
-        for entry in std::fs::read_dir(&data.path).map_err(host_error)? {
+        for entry in std::fs::read_dir(data.path()).map_err(host_error)? {
             let entry = entry.map_err(host_error)?;
             let name = entry.file_name();
             let name = name.to_str().ok_or_else(|| linux_error(LINUX_EINVAL))?;
@@ -99,7 +99,7 @@ impl PassthroughFs {
 
             let path = entry.path();
             let metadata = self.safe_metadata(&path)?;
-            let child = self.intern_path(path);
+            let child = self.intern_path(path)?;
             let full_entry = self.entry_from_metadata(&metadata, child.as_ref())?;
             let dir_entry = DirEntry {
                 ino: child.inode,
@@ -114,7 +114,8 @@ impl PassthroughFs {
     }
 
     pub(super) fn parent_entry(&self, data: &InodeData) -> io::Result<Entry> {
-        let parent_path = data.path.parent().unwrap_or(&self.root);
+        let path = data.path();
+        let parent_path = path.parent().unwrap_or(&self.root);
         let parent_path = if data.inode == ROOT_INODE || !parent_path.starts_with(&self.root) {
             self.root.clone()
         } else {

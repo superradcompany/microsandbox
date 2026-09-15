@@ -142,18 +142,20 @@ impl PySandboxHandle {
         })
     }
 
-    /// Compact the immutable root-disk prefix, running or stopped.
-    #[pyo3(signature = (*, layers = None, dry_run = false))]
+    /// Compact root and owned-data disks, running or stopped.
+    #[pyo3(signature = (*, layers = None, dry_run = false, disk = None, root_disk_only = false))]
     fn compact<'py>(
         &self,
         py: Python<'py>,
         layers: Option<usize>,
         dry_run: bool,
+        disk: Option<String>,
+        root_disk_only: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let builder = inner.clone().compact();
-            crate::sandbox::run_compact(builder, layers, dry_run).await
+            crate::sandbox::run_compact(builder, layers, dry_run, disk, root_disk_only).await
         })
     }
 

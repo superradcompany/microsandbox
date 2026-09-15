@@ -1,4 +1,4 @@
-//! Same-epoch immutable copies of launcher-owned additional block volumes.
+//! Same-epoch capture of owned chains and independent named block volumes.
 
 use std::collections::BTreeMap;
 use std::fs::{File, Metadata};
@@ -12,7 +12,8 @@ use microsandbox_image::checkpoint::{
 };
 use microsandbox_protocol::bootstrap::GuestBootstrap;
 
-use super::disk::RootDiskRollover;
+use super::disk::{RootDiskRollover, RootDiskRolloverError};
+use super::owned_disk::RuntimeOwnedDisk;
 use crate::vm::DiskMountSpec;
 
 //--------------------------------------------------------------------------------------------------
@@ -22,6 +23,8 @@ use crate::vm::DiskMountSpec;
 /// The launcher keeps the managed volume's disk lock for the VM lifetime. This provider retains
 /// the source inode too, and only copies it after the virtio worker has drained and flushed.
 pub(super) struct RuntimeOwnedAdditionalDisk {
+    /// Only lifecycle-owned disks may replace their backend and authoritative journal.
+    owned: Option<RuntimeOwnedDisk>,
     device_id: String,
     source: PathBuf,
     file: File,
@@ -48,6 +51,7 @@ impl RuntimeOwnedAdditionalDisk {
     pub(super) fn open_all(
         disks: &[DiskMountSpec],
         bootstrap: &GuestBootstrap,
+        runtime_dir: &Path,
     ) -> Result<BTreeMap<String, Self>, String> {
         let mut providers = BTreeMap::new();
         for disk in disks.iter().filter(|disk| disk.snapshot_owned) {
@@ -85,8 +89,17 @@ impl RuntimeOwnedAdditionalDisk {
                     disk.id
                 ));
             }
-            let source = disk
-                .host
+            let owned = disk
+                .lifecycle_owned
+                .then(|| RuntimeOwnedDisk::open(runtime_dir, &disk.id, &disk.host, disk.readonly))
+                .transpose()?;
+            // disk.raw is a stable launch binding, not necessarily the active file after restore
+            // or compaction. Retain a real head handle without reopening a retired raw path.
+            let selected = owned
+                .as_ref()
+                .and_then(|chain| chain.layers().last().map(|layer| layer.path.clone()))
+                .unwrap_or_else(|| disk.host.clone());
+            let source = selected
                 .canonicalize()
                 .map_err(|error| format!("resolve managed disk {}: {error}", disk.id))?;
             let file = File::open(&source).map_err(|error| error.to_string())?;
@@ -107,7 +120,11 @@ impl RuntimeOwnedAdditionalDisk {
             if let Some(fstype) = &mount.fstype {
                 binding.insert("fstype".into(), fstype.clone());
             }
+            if disk.lifecycle_owned {
+                binding.insert("lifecycle_owned".into(), "true".into());
+            }
             let provider = Self {
+                owned,
                 device_id: disk.id.clone(),
                 source,
                 file,
@@ -129,7 +146,34 @@ impl RuntimeOwnedAdditionalDisk {
         &self.binding
     }
 
+    pub(super) fn owned_mut(&mut self) -> Option<&mut RuntimeOwnedDisk> {
+        self.owned.as_mut()
+    }
+
     pub(super) fn capture(
+        &mut self,
+        vm: &msb_krun::VmControl,
+        runtime: &tokio::runtime::Handle,
+        checkpoint_root: &Path,
+        pause_generation: u64,
+        record_integrity: bool,
+    ) -> Result<RootDiskRollover, RootDiskRolloverError> {
+        if let Some(owned) = &mut self.owned {
+            // Owned disks retain their journal's required integrity checks. The optional
+            // capture policy below applies to copied external/named disks, not that journal.
+            return owned.rollover(vm, runtime, checkpoint_root, pause_generation);
+        }
+        self.capture_copy(
+            vm,
+            runtime,
+            checkpoint_root,
+            pause_generation,
+            record_integrity,
+        )
+        .map_err(RootDiskRolloverError::pre_rebind)
+    }
+
+    fn capture_copy(
         &mut self,
         vm: &msb_krun::VmControl,
         runtime: &tokio::runtime::Handle,
@@ -344,6 +388,8 @@ mod tests {
             fstype: None,
             readonly: false,
             snapshot_owned: true,
+            lifecycle_owned: false,
+            layers: Vec::new(),
         };
         let bootstrap = GuestBootstrap {
             disk_mounts: vec![BootstrapDiskMount {
@@ -362,7 +408,13 @@ mod tests {
     }
 
     fn provider(disk: DiskMountSpec, bootstrap: &GuestBootstrap) -> RuntimeOwnedAdditionalDisk {
-        RuntimeOwnedAdditionalDisk::open_all(&[disk], bootstrap)
+        let parent = disk.host.parent().unwrap();
+        let runtime = if disk.lifecycle_owned {
+            parent.parent().unwrap().parent().unwrap().join("runtime")
+        } else {
+            parent.join("runtime")
+        };
+        RuntimeOwnedAdditionalDisk::open_all(&[disk], bootstrap, &runtime)
             .unwrap()
             .pop_first()
             .unwrap()
@@ -384,20 +436,42 @@ mod tests {
         let (mut disk, mut bootstrap) = fixture(&path, msb_krun::DiskImageFormat::Raw);
         disk.snapshot_owned = false;
         assert!(
-            RuntimeOwnedAdditionalDisk::open_all(&[disk.clone()], &bootstrap)
-                .unwrap()
-                .is_empty()
+            RuntimeOwnedAdditionalDisk::open_all(
+                &[disk.clone()],
+                &bootstrap,
+                &dir.path().join("runtime")
+            )
+            .unwrap()
+            .is_empty()
         );
         disk.snapshot_owned = true;
         disk.format = msb_krun::DiskImageFormat::Vmdk;
         assert!(
-            RuntimeOwnedAdditionalDisk::open_all(&[disk.clone()], &bootstrap)
-                .unwrap()
-                .is_empty()
+            RuntimeOwnedAdditionalDisk::open_all(
+                &[disk.clone()],
+                &bootstrap,
+                &dir.path().join("runtime")
+            )
+            .unwrap()
+            .is_empty()
         );
         disk.format = msb_krun::DiskImageFormat::Raw;
         let registered = provider(disk.clone(), &bootstrap);
         assert_eq!(registered.binding()["managed_disk"], "true");
+        assert!(!registered.binding().contains_key("lifecycle_owned"));
+        disk.lifecycle_owned = true;
+        let owned_path = dir
+            .path()
+            .join("owned-volumes")
+            .join(&disk.id)
+            .join("disk.raw");
+        std::fs::create_dir_all(owned_path.parent().unwrap()).unwrap();
+        std::fs::copy(&disk.host, &owned_path).unwrap();
+        disk.host = owned_path;
+        assert_eq!(
+            provider(disk.clone(), &bootstrap).binding()["lifecycle_owned"],
+            "true"
+        );
         assert_eq!(registered.binding()["guest_path"], "/data");
         assert_eq!(registered.binding()["fstype"], "ext4");
         assert_eq!(
@@ -406,12 +480,29 @@ mod tests {
             bootstrap.disk_mounts[0].flags
         );
         bootstrap.disk_mounts[0].flags.readonly = true;
-        assert!(RuntimeOwnedAdditionalDisk::open_all(&[disk.clone()], &bootstrap).is_err());
+        assert!(
+            RuntimeOwnedAdditionalDisk::open_all(
+                &[disk.clone()],
+                &bootstrap,
+                &dir.path().join("runtime")
+            )
+            .is_err()
+        );
         bootstrap.disk_mounts[0].flags.readonly = false;
         bootstrap.disk_mounts.push(bootstrap.disk_mounts[0].clone());
-        assert!(RuntimeOwnedAdditionalDisk::open_all(&[disk.clone()], &bootstrap).is_err());
+        assert!(
+            RuntimeOwnedAdditionalDisk::open_all(
+                &[disk.clone()],
+                &bootstrap,
+                &dir.path().join("runtime")
+            )
+            .is_err()
+        );
         bootstrap.disk_mounts.clear();
-        assert!(RuntimeOwnedAdditionalDisk::open_all(&[disk], &bootstrap).is_err());
+        assert!(
+            RuntimeOwnedAdditionalDisk::open_all(&[disk], &bootstrap, &dir.path().join("runtime"))
+                .is_err()
+        );
     }
 
     #[test]

@@ -127,11 +127,34 @@ struct RootDiskLayer {
     integrity_root: Option<String>,
 }
 
+/// Prepared storage only; it does not change the existing root-journal representation.
+pub(super) struct RootDiskCompaction {
+    stage: Option<tempfile::TempDir>,
+    next: Option<RootDiskState>,
+    pub(super) result: DiskCompactionResult,
+}
+
+/// Keep old entries until the caller has successfully rebound every selected device.
+pub(super) struct RetiredRootDisk {
+    parent: PathBuf,
+    paths: Vec<PathBuf>,
+}
+
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
 
 impl RuntimeOwnedRootDisk {
+    pub(super) fn read(runtime_dir: &Path) -> Result<Option<Self>, String> {
+        let state_path = runtime_dir.join(ROOT_DISK_STATE_FILE);
+        if !state_path.exists() {
+            return Ok(None);
+        }
+        Ok(Some(Self {
+            state: read_state(&state_path)?,
+            state_path,
+        }))
+    }
     pub(crate) fn growth_pending(&self) -> bool {
         self.state.growth_target.is_some()
     }
@@ -217,7 +240,7 @@ impl RuntimeOwnedRootDisk {
                 device_id: layout.device_id().into(),
                 layout,
                 published_generation: 0,
-                launch_base: None,
+                launch_base: restored_launch_base(runtime_dir, layout, &layers),
                 growth_target: None,
                 layers: layers
                     .into_iter()
@@ -263,13 +286,12 @@ impl RuntimeOwnedRootDisk {
         &self.state.device_id
     }
 
-    pub(crate) fn compact(
-        &mut self,
-        #[cfg(feature = "runner")] vm: Option<&msb_krun::VmControl>,
+    pub(super) fn prepare_compaction(
+        &self,
         runtime: &tokio::runtime::Handle,
         layers: Option<usize>,
         dry_run: bool,
-    ) -> Result<DiskCompactionResult, RootDiskRolloverError> {
+    ) -> Result<RootDiskCompaction, RootDiskRolloverError> {
         if self.growth_pending() {
             return Err(RootDiskRolloverError::pre_rebind(
                 "complete pending root-disk growth before compaction",
@@ -286,7 +308,11 @@ impl RuntimeOwnedRootDisk {
             ..Default::default()
         };
         if dry_run || plan.is_noop() {
-            return Ok(result);
+            return Ok(RootDiskCompaction {
+                stage: None,
+                next: None,
+                result,
+            });
         }
         let parent = self.state_path.parent().expect("root journal has parent");
         let stage = tempfile::Builder::new()
@@ -363,6 +389,28 @@ impl RuntimeOwnedRootDisk {
             next.layers.push(replacement);
         }
         sync_directory(stage.path()).map_err(RootDiskRolloverError::pre_rebind)?;
+        result.total_us = started.elapsed().as_micros() as u64;
+        Ok(RootDiskCompaction {
+            stage: Some(stage),
+            next: Some(next),
+            result,
+        })
+    }
+
+    /// Retain single-root behavior while exposing preparation to the shared-pause coordinator.
+    pub(crate) fn compact(
+        &mut self,
+        #[cfg(feature = "runner")] vm: Option<&msb_krun::VmControl>,
+        runtime: &tokio::runtime::Handle,
+        layers: Option<usize>,
+        dry_run: bool,
+    ) -> Result<DiskCompactionResult, RootDiskRolloverError> {
+        let started = Instant::now();
+        let prepared = self.prepare_compaction(runtime, layers, dry_run)?;
+        let mut result = prepared.result.clone();
+        if prepared.next.is_none() {
+            return Ok(result);
+        }
         #[cfg(feature = "runner")]
         let (pause, backend, paused_at) = {
             let paused_at = Instant::now();
@@ -370,9 +418,8 @@ impl RuntimeOwnedRootDisk {
                 .map(|vm| vm.pause())
                 .transpose()
                 .map_err(RootDiskRolloverError::pre_rebind)?;
-            let prepared = prepare_backend(&next);
-            let backend = match prepared {
-                Ok(backend) => backend,
+            let backend = match prepared.prepare_backend() {
+                Ok(backend) => backend.expect("nonempty compaction checked above"),
                 Err(error) => {
                     if let (Some(vm), Some(pause)) = (vm, pause) {
                         vm.resume(pause)
@@ -388,7 +435,10 @@ impl RuntimeOwnedRootDisk {
         {
             // Stopped SDK maintenance validates the same explicit closure without importing
             // hypervisor types. No header-selected backing paths may be opened implicitly.
-            let layers = next
+            let layers = prepared
+                .next
+                .as_ref()
+                .expect("nonempty compaction checked above")
                 .layers
                 .iter()
                 .map(|layer| CompactLayer {
@@ -402,11 +452,7 @@ impl RuntimeOwnedRootDisk {
                 ))
                 .map_err(RootDiskRolloverError::pre_rebind)?;
         }
-        // Preserve the files before attempting the durable commit. Even a directory fsync error
-        // may occur after rename, so uncertain publication must retain data and recover forward.
-        let _published_directory = stage.keep();
-        write_state(&self.state_path, &next).map_err(RootDiskRolloverError::post_journal)?;
-        let old = std::mem::replace(&mut self.state, next);
+        let retired = prepared.commit(self)?;
         #[cfg(feature = "runner")]
         {
             if let (Some(vm), Some(pause)) = (vm, pause) {
@@ -419,13 +465,7 @@ impl RuntimeOwnedRootDisk {
                 drop(backend);
             }
         }
-        // Only retire this sandbox's directory entries. Other snapshots/children keep their own
-        // hardlinks. Failed unlinks are harmless retained storage, never a reason to undo commit.
-        for layer in old.layers {
-            if layer.path.starts_with(parent) {
-                let _ = std::fs::remove_file(layer.path);
-            }
-        }
+        retired.cleanup();
         result.total_us = started.elapsed().as_micros() as u64;
         Ok(result)
     }
@@ -561,6 +601,74 @@ impl RuntimeOwnedRootDisk {
             manifest,
             device_state: encoded_state,
         })
+    }
+}
+
+impl RootDiskCompaction {
+    pub(super) fn is_noop(&self) -> bool {
+        self.next.is_none()
+    }
+
+    pub(super) fn validate_stopped(&self, runtime: &tokio::runtime::Handle) -> Result<(), String> {
+        if let Some(next) = &self.next {
+            let layers = next
+                .layers
+                .iter()
+                .map(|layer| CompactLayer {
+                    path: layer.path.clone(),
+                    qcow2: layer.format == RootDiskFormat::Qcow2,
+                })
+                .collect::<Vec<_>>();
+            runtime
+                .block_on(microsandbox_image::checkpoint::validate_compact_chain(
+                    &layers,
+                ))
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+    /// The changing suffix is opened only while the VM is quiesced (or fully stopped).
+    #[cfg(feature = "runner")]
+    pub(super) fn prepare_backend(&self) -> Result<Option<msb_krun::PreparedBlockBackend>, String> {
+        self.next.as_ref().map(prepare_backend).transpose()
+    }
+
+    pub(super) fn commit(
+        self,
+        disk: &mut RuntimeOwnedRootDisk,
+    ) -> Result<RetiredRootDisk, RootDiskRolloverError> {
+        let parent = disk
+            .state_path
+            .parent()
+            .expect("root journal has parent")
+            .to_path_buf();
+        let Some(next) = self.next else {
+            return Ok(RetiredRootDisk {
+                parent,
+                paths: Vec::new(),
+            });
+        };
+        // Preserve the existing commit ordering and schema. A directory-sync failure can
+        // follow a successful rename, so neither closure may be removed on uncertainty.
+        let _published = self.stage.expect("prepared root state owns staging").keep();
+        write_state(&disk.state_path, &next).map_err(RootDiskRolloverError::post_journal)?;
+        let old = std::mem::replace(&mut disk.state, next);
+        Ok(RetiredRootDisk {
+            parent,
+            paths: old.layers.into_iter().map(|layer| layer.path).collect(),
+        })
+    }
+}
+
+impl RetiredRootDisk {
+    pub(super) fn cleanup(self) {
+        // Same ownership boundary as before: only this root journal's directory entries.
+        // Snapshots and children retain their own hardlinks; unlink errors merely retain data.
+        for path in self.paths {
+            if path.starts_with(&self.parent) {
+                let _ = std::fs::remove_file(path);
+            }
+        }
     }
 }
 
@@ -988,6 +1096,29 @@ fn configured_layers(vm: &VmConfig, layout: RootDiskLayout) -> Result<Vec<UpperL
             }]
         })
         .unwrap_or_default())
+}
+
+/// SDK restore materialization names compacted bases differently from ordinary launch bindings.
+/// Preserve the latter in the existing journal field: later starts intentionally discard the
+/// transient restore chain and let this journal select the actual files. Arbitrary explicit
+/// chains retain their original base identity; a matching basename outside this child is not
+/// sufficient to opt into the SDK's managed-root naming contract.
+#[cfg(feature = "runner")]
+fn restored_launch_base(
+    runtime_dir: &Path,
+    layout: RootDiskLayout,
+    layers: &[UpperLayerSpec],
+) -> Option<PathBuf> {
+    let base = layers.first()?;
+    if !matches!(base.format, msb_krun::DiskImageFormat::Qcow2) {
+        return None;
+    }
+    let sandbox = runtime_dir.parent()?;
+    let (restored, ordinary) = match layout {
+        RootDiskLayout::ManagedUpper => ("upper-sealed-000.qcow2", "upper.ext4"),
+        RootDiskLayout::FlatRoot => ("root-sealed-000.qcow2", "rootfs.raw"),
+    };
+    (base.path == sandbox.join(restored)).then(|| sandbox.join(ordinary))
 }
 
 #[cfg(feature = "runner")]
@@ -1722,6 +1853,7 @@ mod tests {
             ],
             devices: Vec::new(),
             resources: Vec::new(),
+            owned_volumes: Vec::new(),
             requires: Vec::new(),
         };
         let bytes = checkpoint.to_canonical_bytes().unwrap();
@@ -1763,6 +1895,7 @@ mod tests {
             rootfs_upper_spec: None,
             mounts: Vec::new(),
             file_mounts: Vec::new(),
+            owned_volumes: Vec::new(),
             disks: Vec::new(),
             vsock: Vec::new(),
             #[cfg(unix)]
@@ -1855,6 +1988,139 @@ mod tests {
             RuntimeOwnedRootDisk::open(&runtime, &vm).unwrap().unwrap();
             assert_eq!(std::fs::read(&journal).unwrap(), first);
             assert_eq!(std::fs::read(child_base).unwrap(), vec![17; 131072]);
+        }
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "runner")]
+    async fn compacted_restore_roots_recover_their_ordinary_launch_binding() {
+        use super::*;
+        use microsandbox_image::checkpoint::{create_qcow2_overlay, materialize_compact_prefix};
+
+        for layout in [RootDiskLayout::ManagedUpper, RootDiskLayout::FlatRoot] {
+            for full in [false, true] {
+                let directory = tempfile::tempdir().unwrap();
+                let runtime = directory.path().join("runtime");
+                std::fs::create_dir(&runtime).unwrap();
+                let raw = directory.path().join("source.raw");
+                std::fs::write(&raw, vec![43u8; 131072]).unwrap();
+                let sealed = directory.path().join("source.qcow2");
+                create_qcow2_overlay(&sealed, 131072, &raw, "raw")
+                    .await
+                    .unwrap();
+                let (restored, ordinary) = match layout {
+                    RootDiskLayout::ManagedUpper => ("upper-sealed-000.qcow2", "upper.ext4"),
+                    RootDiskLayout::FlatRoot => ("root-sealed-000.qcow2", "rootfs.raw"),
+                };
+                let base = directory.path().join(restored);
+                materialize_compact_prefix(
+                    &[
+                        CompactLayer {
+                            path: raw,
+                            qcow2: false,
+                        },
+                        CompactLayer {
+                            path: sealed,
+                            qcow2: true,
+                        },
+                    ],
+                    &base,
+                )
+                .await
+                .unwrap();
+                let head = directory.path().join("private-head.qcow2");
+                create_qcow2_overlay(&head, 131072, &base, "qcow2")
+                    .await
+                    .unwrap();
+                let layers = vec![
+                    UpperLayerSpec {
+                        path: base.clone(),
+                        format: msb_krun::DiskImageFormat::Qcow2,
+                    },
+                    UpperLayerSpec {
+                        path: head.clone(),
+                        format: msb_krun::DiskImageFormat::Qcow2,
+                    },
+                ];
+                let vm = root_vm(layout, layers.clone());
+                if full {
+                    let admitted =
+                        admitted_fixture(&directory.path().join("snapshot"), &layers[..1]);
+                    seed_restored_root_disk(&runtime, &vm, &admitted).unwrap();
+                } else {
+                    // Disk-only restore does not invoke the execution-admission seed helper.
+                    RuntimeOwnedRootDisk::open(&runtime, &vm).unwrap().unwrap();
+                }
+                let journal = runtime.join(ROOT_DISK_STATE_FILE);
+                let original = std::fs::read(&journal).unwrap();
+                let nominal = directory.path().join(ordinary);
+                assert!(
+                    !nominal.exists(),
+                    "restart must not require a fictitious raw image"
+                );
+                assert_eq!(
+                    read_state(&journal).unwrap().launch_base,
+                    Some(nominal.clone())
+                );
+
+                // Persisted SDK config no longer contains the transient restored layer list.
+                let mut restart = root_vm(
+                    layout,
+                    vec![UpperLayerSpec {
+                        path: nominal,
+                        format: msb_krun::DiskImageFormat::Raw,
+                    }],
+                );
+                recover_runtime_owned_root(&runtime, &mut restart).unwrap();
+                let recovered = configured_layers(&restart, layout).unwrap();
+                assert_eq!(recovered[0].path, base);
+                assert_eq!(recovered[1].path, head);
+                assert_eq!(std::fs::read(&journal).unwrap(), original);
+
+                let mut unrelated = root_vm(
+                    layout,
+                    vec![UpperLayerSpec {
+                        path: directory.path().join("unrelated.raw"),
+                        format: msb_krun::DiskImageFormat::Raw,
+                    }],
+                );
+                assert!(
+                    recover_runtime_owned_root(&runtime, &mut unrelated)
+                        .unwrap_err()
+                        .contains("configured base layer")
+                );
+                assert_eq!(std::fs::read(&journal).unwrap(), original);
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "runner")]
+    fn restored_binding_does_not_alias_arbitrary_explicit_chains() {
+        use super::*;
+        for layout in [RootDiskLayout::ManagedUpper, RootDiskLayout::FlatRoot] {
+            let directory = tempfile::tempdir().unwrap();
+            let runtime = directory.path().join("child/runtime");
+            let filename = match layout {
+                RootDiskLayout::ManagedUpper => "upper-sealed-000.qcow2",
+                RootDiskLayout::FlatRoot => "root-sealed-000.qcow2",
+            };
+            for path in [
+                directory.path().join("other-child").join(filename),
+                directory.path().join("child/custom.qcow2"),
+            ] {
+                assert!(
+                    restored_launch_base(
+                        &runtime,
+                        layout,
+                        &[UpperLayerSpec {
+                            path,
+                            format: msb_krun::DiskImageFormat::Qcow2,
+                        }]
+                    )
+                    .is_none()
+                );
+            }
         }
     }
 
@@ -2077,7 +2343,8 @@ mod tests {
             )
             .unwrap();
             let before = std::fs::read(&journal).unwrap();
-            assert!(compact_stopped_root(&root, Some(4), false).is_err());
+            let clamped = compact_stopped_root(&root, Some(4), true).unwrap();
+            assert_eq!((clamped.selected_layers, clamped.output_layers), (3, 2));
             let plan = compact_stopped_root(&root, Some(2), true).unwrap();
             assert_eq!(
                 (plan.input_layers, plan.selected_layers, plan.output_layers),

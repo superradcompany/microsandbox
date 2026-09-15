@@ -123,6 +123,17 @@ pub(crate) fn bindings(
                     serde_json::to_string(&mount).map_err(|e| e.to_string())?,
                 ),
             ]);
+            if vm
+                .owned_volumes
+                .iter()
+                .any(|owned| owned.guest() == mount.guest_path)
+            {
+                // The portable inventory authorizes private reconstruction; source-local
+                // external mount grants must never become ownership authority.
+                binding.insert("role".into(), "owned_directory".into());
+                binding.remove("source_sandbox");
+                binding.remove("source_binding_token");
+            }
             if let Some(file) = file {
                 binding.insert("filename".into(), file.filename.clone());
             }

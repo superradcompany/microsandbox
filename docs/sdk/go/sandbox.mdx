@@ -1967,9 +1967,7 @@ Set how long [`Kill`](#sb-kill) waits for stopped-state observation. The default
   </div>
 </div>
 
-<span id="withskipdownload"></span>
-
-The setup-only `WithSkipDownload()` option is documented under [Runtime setup](/sdk/setup#customize-installation).
+Use `ResolveRuntime(RuntimeConfig{})` to require a pre-provisioned runtime without downloading. See [Runtime setup](/sdk/setup#customize-installation).
 
 <p className="msb-member-group">Attach options</p>
 
@@ -3252,6 +3250,6 @@ Discriminator for [`PatchConfig`](#patchconfig). Prefer the [`Patch`](#patch) fa
 | `PatchKindCopyFile` | `"copy_file"` |
 | `PatchKindCopyDir` | `"copy_dir"` |
 
-### SetupOption
+### InstallOptions
 
-The setup-only `SetupOption` type is documented under [Runtime setup](/sdk/setup#customize-installation).
+The setup-only `InstallOptions` type is documented under [Runtime setup](/sdk/setup#customize-installation).

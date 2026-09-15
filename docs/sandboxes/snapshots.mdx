@@ -58,6 +58,10 @@ Strict validation checks the mount at restore time; it does not lock the host di
 
 Named disk volumes are captured as immutable disk generations. Restored children receive private copies; the source volume is unchanged. Arbitrary external disk-image mounts are not implicitly converted into snapshot-owned volumes.
 
+[Owned volumes](/sandboxes/volumes#owned-volumes) are included automatically in snapshots and branches. Each child gets private directory or disk contents; no host mapping is needed. Full captures also preserve supported open directory-volume handles, including unlinked regular files.
+
+Snapshots containing owned directories cannot move between Unix (macOS/Linux) and Windows: their filesystem metadata is platform-specific. This restriction also applies to disk-only snapshots and archives containing owned directories. Owned disks do not have this directory-format restriction; full restore has its own execution-state compatibility requirements.
+
 ## Branch a running sandbox
 
 Use `branch` for an independent local child without first saving a full snapshot:
@@ -211,7 +215,7 @@ msb snapshot create after-pip-install --from-sandbox baseline --dest-dir /mnt/bi
 ```
 </CodeGroup>
 
-The default disk mode captures only the owned managed or flat root disk. Live captures are crash-consistent: unsaved application buffers and tmpfs contents are not included. Use `--full` when you need memory too. Disk snapshotting preserves the complete raw/qcow2 chain, and every restored child receives a fresh private writable head. Use `--output ./saved.msb` (or `-o ./saved.msb`) in either mode to write an archive without installing a snapshot directory.
+The default disk mode captures the managed or flat root disk and owned volumes. Live captures are crash-consistent: unsaved application buffers and tmpfs contents are not included. Use `--full` when you need memory too. Disk snapshotting preserves the complete raw/qcow2 chain, and every restored child receives a fresh private writable head. Use `--output ./saved.msb` (or `-o ./saved.msb`) in either mode to write an archive without installing a snapshot directory.
 
 ## Capture a running sandbox
 
@@ -270,27 +274,35 @@ Full restore and branching preserve the virtual gateway's identity so cached ARP
 
 ## Export changes and compact a disk chain
 
-Repeated full checkpoints add disk layers. You choose when to export changes and when to compact; neither happens automatically.
+Repeated disk and full checkpoints add disk layers. You choose when to export changes and when to compact; neither happens automatically.
 
 ```bash
 msb snapshot create checkpoint-b --from-sandbox worker --full
 msb snapshot save worker:checkpoint-b changes.msb --since worker:checkpoint-a
 msb modify worker --compact --layers 3 --dry-run
 msb modify worker --compact --layers 3
+msb modify worker --compact --disk /data --layers 3
+msb modify worker --compact --root-disk-only
 ```
 
-`--layers 3` merges the oldest three physical layers, **including the base**. It never includes the writable head, even when stopped. Omit `--layers` to merge all sealed layers; a chain with fewer than two sealed layers is unchanged. Managed and flat roots support compaction, running or stopped. Existing snapshots remain valid and retain their storage until you remove them separately.
+Compaction defaults to the managed or flat root plus every sandbox-owned data disk. Named volumes, external disks, and owned directories are never included. `--disk /data` selects one owned disk by guest mount path; `--disk /` and `--root-disk-only` select only the root. The two selector flags cannot be combined. Explicitly selecting a directory, named/external disk, or absent root fails before compaction.
 
-`--since` omits disk layers and, for full checkpoints, RAM objects already supplied by the base. The disk base must be an exact physical prefix. Each archive still includes its complete memory map and CPU/device state; it does not replay earlier memory images. Alternatively, `--last-layers 2` selects only disk layers and keeps all required RAM objects. Import these smaller archives with their bases in the same batch, into a named group containing their dependencies, or with an explicit external base. Direct restore still accepts an explicit base:
+`--layers 3` merges **up to** the oldest three sealed physical layers per selected disk, **including the base**. It never includes the writable head, even when stopped. The limit must be at least two. Omit `--layers` to merge all sealed layers; a chain with fewer than two sealed layers is unchanged. Compaction is local-only and requires a running or fully stopped sandbox; paused and draining sources are rejected. Results contain aggregate and per-disk counts. With no eligible disks the default selection succeeds with an empty disk list, zero layer and byte counts, and no VM pause. Existing snapshots remain valid and retain their storage until you remove them separately.
+
+Multi-disk compaction is not an all-or-nothing transaction: each disk has its own durable journal. If a disk commit or backend switch fails, the error names the affected disk and any already committed disks; a running VM remains paused for recovery. Do not assume rollback or blindly retry. Restart the sandbox so each disk reopens from its journal. Existing snapshots are unchanged by this recovery.
+
+The aggregate `total_us` covers the whole operation, and `pause_us` measures the shared live VM pause. Each per-disk `total_us` measures preparation and materialization only, excluding journal adoption and backend switching. All timings are microseconds; materialized bytes measure work performed, not reclaimed disk space.
+
+`--since` omits root and owned-disk layers and, for full checkpoints, RAM objects already supplied by the base. The base must be an exact physical prefix for the root and every owned disk present in both snapshots. A newly added owned disk is exported completely. Owned directory namespaces are always complete; unchanged immutable file payloads can be supplied by the base. Each full archive still includes its complete memory map and CPU/device state; it does not replay earlier memory images. Alternatively, `--last-layers 2` selects the newest root-disk layers while retaining complete owned disks and all required RAM objects. Import these smaller archives with their bases in the same batch, into a named group containing their dependencies, or with an explicit external base. Direct restore still accepts an explicit base:
 
 ```bash
 msb snapshot load changes.msb --base worker:checkpoint-a --group imported
 msb restore changes.msb --name child --snapshot-base worker:checkpoint-a
 ```
 
-An explicit external base can also be a standalone snapshot archive. Dependent archives can supply one another within a batch; they need not be loaded in dependency order. Loads resolve disk and RAM dependencies without starting a VM; only the final sandbox creation resumes execution. Missing or incorrect dependencies fail before publication or execution. Loaded snapshots and restored children own their required files, so removing the base later does not break them. Direct restore skips installing an intermediate snapshot. Add `--disk-only` to cold-boot only disk state. After compaction, export a new standalone baseline before resuming incremental exports: the old physical prefix no longer matches. Do not combine compaction with unrelated `modify` options, or incremental export with `--with-parents`.
+An explicit external base can also be a standalone snapshot archive. Dependent archives can supply one another within a batch; they need not be loaded in dependency order. Loads resolve disk and RAM dependencies without starting a VM; only the final sandbox creation resumes execution. Missing or incorrect dependencies fail before publication or execution. Loaded snapshots and restored children own their required files, so removing the base later does not break them. Direct restore skips installing an intermediate snapshot. Add `--disk-only` to cold-boot only disk state. After compacting any root or owned-disk prefix, export a new standalone baseline before using `--since` again: a mismatch in any matched disk refuses the export rather than silently including that disk in full. Do not combine compaction with unrelated `modify` options, or `--since`/`--last-layers` with each other or `--with-parents`/whole-group exports.
 
-Current development limitation: successive disk-only captures reassign layer IDs, so their `--since` export can reject the base even when physical layers were unchanged. Use standalone disk-only exports for now. Full-checkpoint incremental exports and imports are unaffected by this capture issue.
+Live runtime-sealed disk and full checkpoints preserve reusable sealed ancestry. Independently captured stopped root snapshots may receive new layer identities even when bytes are unchanged, including when recapturing a restored chain. Use a standalone export when such a capture does not match the base's exact physical prefix.
 
 ## Capture directly to an archive
 

@@ -268,6 +268,34 @@ pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
             ui::detail_header("Mounts");
             for mount in &config.spec.mounts {
                 match mount {
+                    VolumeMount::Owned {
+                        guest,
+                        storage,
+                        options,
+                        stat_virtualization,
+                        host_permissions,
+                    } => {
+                        let flags = mount_flags_suffix(*options);
+                        let detail = match storage {
+                            microsandbox::sandbox::OwnedVolumeStorage::Directory { quota_mib } => {
+                                let quota = quota_mib
+                                    .map(|mib| format!(" [quota={mib}MiB]"))
+                                    .unwrap_or_default();
+                                format!(
+                                    "directory{}{quota}",
+                                    mount_policy_suffix(
+                                        *stat_virtualization,
+                                        *host_permissions,
+                                        false
+                                    )
+                                )
+                            }
+                            microsandbox::sandbox::OwnedVolumeStorage::Disk { capacity_mib } => {
+                                format!("ext4 disk ({capacity_mib} MiB)")
+                            }
+                        };
+                        println!("  {guest:<16}\u{2192} owned {detail}{flags}");
+                    }
                     VolumeMount::Bind {
                         host,
                         guest,

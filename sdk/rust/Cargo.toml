@@ -60,6 +60,7 @@ embed-binaries = [
 net = ["dep:microsandbox-network", "microsandbox-runtime?/net"]
 
 [dependencies]
+microsandbox-filesystem = { workspace = true, optional = true }
 anyhow = { workspace = true, optional = true }
 astral-tokio-tar = { workspace = true, optional = true }
 async-compression = { workspace = true, features = ["tokio", "zstd", "gzip"], optional = true }
@@ -113,9 +114,6 @@ flate2.workspace = true
 microsandbox-utils.workspace = true
 tar.workspace = true
 tempfile.workspace = true
-
-[target.'cfg(windows)'.dependencies]
-microsandbox-filesystem = { workspace = true, optional = true }
 
 [dev-dependencies]
 ipnetwork.workspace = true

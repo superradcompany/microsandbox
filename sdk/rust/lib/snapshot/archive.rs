@@ -11,6 +11,7 @@
 
 mod batch;
 mod delta;
+mod owned;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 #[cfg(windows)]
@@ -487,11 +488,13 @@ pub(super) async fn save_snapshot(
 ///
 /// The payload is read from the sandbox's pinned upper file and is never copied
 /// into an installed snapshot directory or added to `snapshot_index`.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn save_direct_file_snapshot(
     manifest: &microsandbox_image::snapshot::Manifest,
     labels: &BTreeMap<String, String>,
     suggested_name: &str,
     source_layers: &[PathBuf],
+    owned_source: Option<&Path>,
     out: &Path,
     plain_tar: bool,
     force: bool,
@@ -537,6 +540,7 @@ pub(super) async fn save_direct_file_snapshot(
                 labels,
                 suggested_name,
                 source_layers,
+                owned_source,
             )
             .await?;
             let mut inner = builder.into_inner().await?;
@@ -550,6 +554,7 @@ pub(super) async fn save_direct_file_snapshot(
                 labels,
                 suggested_name,
                 source_layers,
+                owned_source,
             )
             .await?;
             let mut inner = builder.into_inner().await?;
@@ -697,6 +702,7 @@ async fn write_direct_archive_entries<W>(
     labels: &BTreeMap<String, String>,
     suggested_name: &str,
     source_layers: &[PathBuf],
+    owned_source: Option<&Path>,
 ) -> MicrosandboxResult<()>
 where
     W: tokio::io::AsyncWrite + Unpin + Send,
@@ -761,6 +767,31 @@ where
             sparse_ranges: layer_transport.sparse_ranges,
             transport_integrity: Some(layer_transport.transport_integrity),
         });
+    }
+    let owned_volumes = manifest.owned_volumes()?;
+    if !owned_volumes.is_empty() {
+        let source = owned_source.ok_or_else(|| {
+            MicrosandboxError::SnapshotIntegrity(
+                "direct snapshot has no owned payload source".into(),
+            )
+        })?;
+        for member in owned::members(manifest.snapshot_id.as_str(), source, &owned_volumes, false)?
+        {
+            let written =
+                append_artifact_file(builder, &member.source, &member.archive_path, member.kind)
+                    .await?;
+            entries.push(ArchiveEntry {
+                path: member.archive_path,
+                owner_snapshot: Some(manifest.snapshot_id.to_string()),
+                kind: member.kind.into(),
+                included: true,
+                encoded_size: written.encoded_size,
+                apparent_size: written.apparent_size,
+                sparse_ranges: written.sparse_ranges,
+                integrity: None,
+                transport_integrity: Some(written.transport_integrity),
+            });
+        }
     }
     if !labels.is_empty() {
         let metadata_bytes = super::metadata::encode(labels)?;
@@ -866,6 +897,7 @@ where
         manifest.snapshot_id.as_str(),
         checkpoint_closure,
         &state.checkpoint_root,
+        manifest,
     )? {
         let written =
             append_artifact_file(builder, &member.source, &member.archive_path, member.kind)
@@ -1126,6 +1158,8 @@ pub(crate) async fn materialize_archive_for_child_with_base(
     if let SnapshotState::Checkpoint(state) = &manifest.state {
         let member_dir = child_stage.join(&member.snapshot_id);
         let extracted_closure = member_dir.join(CHECKPOINT_DIRECTORY);
+        let checkpoint = CheckpointClosure::inspect_manifest(&extracted_closure, None)?;
+        super::validate_checkpoint_owned_inventory(&manifest, &checkpoint)?;
         if disk_only {
             let materialized = super::materialize_checkpoint_child_disk_state(
                 &extracted_closure,
@@ -1208,11 +1242,18 @@ pub(crate) async fn materialize_archive_for_child_with_base(
             .into(),
         })
         .collect::<Vec<_>>();
-    let materialized = super::materialize_file_snapshot_for_child(
+    let mut materialized = super::materialize_file_snapshot_for_child(
         &sources,
         file.virtual_size,
         child_stage,
         &manifest.root_disk,
+    )
+    .await?;
+    materialized.disk_mounts = super::materialize_owned_volumes(
+        &manifest.owned_volumes()?,
+        &child_stage.join(&member.snapshot_id),
+        child_stage,
+        choices,
     )
     .await?;
     if archive_layers.exists() {
@@ -1318,6 +1359,23 @@ where
                     )
                     .await?;
                     set_archive_transport(&mut inventory, &payload_name, written)?;
+                }
+                for member in checkpoint_members.get(snapshot_id).into_iter().flatten() {
+                    if inventory
+                        .entries
+                        .iter()
+                        .any(|entry| entry.path == member.archive_path && !entry.included)
+                    {
+                        continue;
+                    }
+                    let written = append_artifact_file(
+                        builder,
+                        &member.source,
+                        &member.archive_path,
+                        member.kind,
+                    )
+                    .await?;
+                    set_archive_transport(&mut inventory, &member.archive_path, written)?;
                 }
             }
             SnapshotState::Checkpoint(_) => {
@@ -1480,6 +1538,19 @@ async fn build_archive_inventory(
                         transport_integrity: None,
                     });
                 }
+                for member in checkpoint_members.get(snapshot_id).into_iter().flatten() {
+                    entries.push(ArchiveEntry {
+                        path: member.archive_path.clone(),
+                        owner_snapshot: Some(snapshot_id.into()),
+                        kind: member.kind.into(),
+                        included: true,
+                        encoded_size: archive_encoded_size(&member.source).await?,
+                        apparent_size: member.apparent_size,
+                        sparse_ranges: Vec::new(),
+                        integrity: None,
+                        transport_integrity: None,
+                    });
+                }
             }
             SnapshotState::Checkpoint(_) => {
                 for member in checkpoint_members
@@ -1581,6 +1652,17 @@ fn collect_checkpoint_archive_members(
                     snapshot.id().as_str(),
                     &snapshot.path().join(CHECKPOINT_DIRECTORY),
                     &state.checkpoint_root,
+                    snapshot.manifest(),
+                )?,
+            );
+        } else {
+            collected.insert(
+                snapshot.id().to_string(),
+                owned::members(
+                    snapshot.id().as_str(),
+                    snapshot.path(),
+                    &snapshot.manifest().owned_volumes()?,
+                    false,
                 )?,
             );
         }
@@ -1597,11 +1679,13 @@ fn checkpoint_archive_members(
     snapshot_id: &str,
     closure_root: &Path,
     checkpoint_root: &str,
+    manifest: &microsandbox_image::snapshot::Manifest,
 ) -> MicrosandboxResult<Vec<CheckpointArchiveMember>> {
     let expected = ObjectId::new(checkpoint_root)
         .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
     let closure = CheckpointClosure::open_portable(closure_root, Some(&expected))
         .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+    super::validate_checkpoint_owned_inventory(manifest, closure.checkpoint())?;
     let prefix = format!("checkpoints/{snapshot_id}");
     let checkpoint_path = closure_root.join("checkpoint.json");
     let mut members = vec![CheckpointArchiveMember {
@@ -1651,6 +1735,12 @@ fn checkpoint_archive_members(
             });
         }
     }
+    members.extend(owned::members(
+        snapshot_id,
+        closure_root,
+        &checkpoint.owned_volumes,
+        true,
+    )?);
     members.sort_by(|left, right| left.archive_path.cmp(&right.archive_path));
     Ok(members)
 }
@@ -2158,6 +2248,11 @@ where
             continue;
         }
         let (target, descriptor, inventory) = match components.as_slice() {
+            components if owned::archive_target(components, snapshots_dir).is_some() => (
+                owned::archive_target(components, snapshots_dir).expect("validated owned member"),
+                false,
+                false,
+            ),
             ["archive.json"] => (snapshots_dir.join(".archive.json"), false, true),
             ["snapshots", snapshot_id, name]
                 if microsandbox_image::snapshot::SnapshotId::new(*snapshot_id).is_ok()
@@ -2281,6 +2376,12 @@ where
 
         let entry_size = header.entry_size()?;
         let kind = archive_member_kind(&components);
+        if kind == "owned-directory-payload" && components.last() == Some(&"directory.bin") {
+            // The descriptor represents empty directories too; there may be no files/ tar
+            // member from which to infer the generation's required payload container.
+            tokio::fs::create_dir_all(target.parent().expect("validated owned path").join("files"))
+                .await?;
+        }
         let observation = match entry_type {
             EntryType::Directory => unreachable!("directories were handled above"),
             EntryType::GNUSparse => {
@@ -2667,6 +2768,9 @@ fn validate_archive_entry_type(entry_type: EntryType, path: &Path) -> Microsandb
 }
 
 fn validate_archive_directory(components: &[&str], path: &Path) -> MicrosandboxResult<()> {
+    if owned::valid_directory(components) {
+        return Ok(());
+    }
     let valid = match components {
         ["snapshots" | "layers" | "files" | "images" | "cache" | "checkpoints"] => true,
         ["snapshots", snapshot_id] => {
@@ -2702,6 +2806,9 @@ fn validate_archive_directory(components: &[&str], path: &Path) -> MicrosandboxR
 
 fn archive_member_kind(components: &[&str]) -> &'static str {
     match components {
+        ["snapshots" | "checkpoints", _, "owned", _, "directory.bin"]
+        | ["snapshots" | "checkpoints", _, "owned", _, "files", _] => "owned-directory-payload",
+        ["snapshots", _, "layers", _] => "owned-disk-layer",
         ["archive.json"] => "archive-inventory",
         ["snapshots", _, name] if *name == super::metadata::METADATA_FILENAME => {
             "snapshot-metadata"
@@ -3220,6 +3327,9 @@ fn inventory_entry_target(
 ) -> MicrosandboxResult<PathBuf> {
     let path = Path::new(archive_path);
     let components = normal_utf8_components(path)?;
+    if let Some(target) = owned::archive_target(&components, snapshots_dir) {
+        return Ok(target);
+    }
     match components.as_slice() {
         ["snapshots", snapshot_id, name]
             if microsandbox_image::snapshot::SnapshotId::new(*snapshot_id).is_ok() =>
@@ -3339,6 +3449,19 @@ fn validate_inventory_snapshot_bindings(
                 snapshot.0,
                 &snapshot.1.path().join(CHECKPOINT_DIRECTORY),
                 &state.checkpoint_root,
+                snapshot.1.manifest(),
+            )? {
+                checkpoint_entries.insert(
+                    member.archive_path,
+                    (snapshot.0.to_string(), member.kind.to_string()),
+                );
+            }
+        } else {
+            for member in owned::members(
+                snapshot.0,
+                snapshot.1.path(),
+                &snapshot.1.manifest().owned_volumes()?,
+                false,
             )? {
                 checkpoint_entries.insert(
                     member.archive_path,
@@ -3409,7 +3532,11 @@ fn validate_inventory_snapshot_bindings(
                     )));
                 }
             }
-            "checkpoint-root" | "checkpoint-object" | "checkpoint-disk-layer" => {
+            "checkpoint-root"
+            | "checkpoint-object"
+            | "checkpoint-disk-layer"
+            | "owned-directory-payload"
+            | "owned-disk-layer" => {
                 let owner = entry.owner_snapshot.as_deref().ok_or_else(|| {
                     MicrosandboxError::Custom(
                         "checkpoint closure member has no owner snapshot".into(),
@@ -4437,6 +4564,7 @@ mod tests {
                     &BTreeMap::new(),
                     "test-snapshot",
                     std::slice::from_ref(&source),
+                    None,
                     &archive,
                     plain_tar,
                     false,
@@ -4532,6 +4660,7 @@ mod tests {
             &BTreeMap::new(),
             "chained-snapshot",
             &[raw, qcow],
+            None,
             &archive,
             false,
             false,
@@ -4660,6 +4789,7 @@ mod tests {
             disks: vec![disk_id],
             devices: Vec::new(),
             resources: Vec::new(),
+            owned_volumes: Vec::new(),
             requires: Vec::new(),
         };
         let checkpoint_bytes = checkpoint.to_canonical_bytes().unwrap();

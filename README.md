@@ -30,7 +30,7 @@
 ##
 
 - <img height="14" src="https://octicons-col.vercel.app/shield-lock/A770EF"> **Hardware Isolation**: Hardware-level isolation with tiny virtual machines.
-- <img height="14" src="https://octicons-col.vercel.app/repo-forked/A770EF"> **Branch & Snapshot**: Save running sandbox state and restore later. Fork live sandboxes.
+- <img height="14" src="https://octicons-col.vercel.app/repo-forked/A770EF"> **Branch & Snapshot**: Fork live sandboxes. Save running sandbox state and restore later.
 - <img height="14" src="https://octicons-col.vercel.app/globe/A770EF"> **Cross Platform**: Runs on Linux, macOS, and Windows.
 - <img height="14" src="https://octicons-col.vercel.app/package/A770EF"> **OCI Compatible**: Runs standard container images from Docker Hub, GHCR, or any OCI registry.
 - <img height="14" src="https://octicons-col.vercel.app/container/A770EF"> **Docker-Like Workflows**: Familiar image, command, shell, and volume workflows.
@@ -117,16 +117,6 @@
 ## <a href="./#gh-dark-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/terminal/ffffff" alt="cli-dark"></a><a href="./#gh-light-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/terminal/000000" alt="cli"></a>&nbsp;&nbsp;CLI
 
 The `msb` CLI provides a complete interface for managing sandboxes, snapshots, images, and volumes.
-
-Top-level verbs are the recommended everyday form. Sandbox operations also live under the canonical `sandbox` group, with `sbx` as its short alias. These commands are equivalent:
-
-```sh
-msb run alpine -- echo hello
-msb sandbox run alpine -- echo hello
-msb sbx run alpine -- echo hello
-```
-
-Use `msb sandbox --help` to explore the group.
 
 #### <img height="14" src="https://octicons-col.vercel.app/play/A770EF">&nbsp;&nbsp;Run a Command
 
@@ -358,7 +348,7 @@ The SDK lets you create and control sandboxes directly from your application. `S
 >     ctx := context.Background()
 >
 >     // Downloads the microsandbox runtime to ~/.microsandbox/ on first run.
->     if err := microsandbox.EnsureInstalled(ctx); err != nil {
+>     if _, err := microsandbox.EnsureRuntime(ctx, microsandbox.RuntimeConfig{}, microsandbox.InstallOptions{}); err != nil {
 >         log.Fatal(err)
 >     }
 >

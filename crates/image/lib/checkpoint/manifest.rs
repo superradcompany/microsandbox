@@ -215,6 +215,9 @@ pub struct CheckpointManifest {
     pub memory: ObjectId,
     /// Sealed disk-generation manifests.
     pub disks: Vec<ObjectId>,
+    /// Required lifetime-owned backing. Older strict checkpoint readers refuse this field.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub owned_volumes: Vec<crate::snapshot::OwnedVolumeCapture>,
     /// Device transport/state objects.
     pub devices: Vec<DeviceStateRef>,
     /// Frozen resource plan used for admission and restore.
@@ -335,6 +338,15 @@ impl CheckpointManifest {
         }
         if self.requires.windows(2).any(|pair| pair[0] >= pair[1]) {
             return manifest_error("checkpoint requires must be sorted and unique");
+        }
+        crate::snapshot::validate_owned_volumes(&self.owned_volumes)?;
+        crate::snapshot::validate_owned_resources(&self.owned_volumes, &self.resources)?;
+        for volume in &self.owned_volumes {
+            if let crate::snapshot::OwnedVolumeData::Disk { generation } = &volume.data
+                && generation.pause_generation != self.pause_generation
+            {
+                return manifest_error("owned disk belongs to another checkpoint epoch");
+            }
         }
         Ok(())
     }
@@ -503,6 +515,7 @@ mod tests {
             disks: Vec::new(),
             devices: Vec::new(),
             resources: Vec::new(),
+            owned_volumes: Vec::new(),
             requires: Vec::new(),
         };
         let bytes = manifest.to_canonical_bytes().unwrap();

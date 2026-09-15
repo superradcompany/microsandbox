@@ -97,6 +97,7 @@ impl CheckpointClosure {
         }
 
         let memory_bytes = read_object_verified(&root, &checkpoint.memory, MAX_MANIFEST_BYTES)?;
+        crate::snapshot::verify_owned_directory_payloads(&root, &checkpoint.owned_volumes)?;
         let memory = MemoryManifest::from_bytes(&memory_bytes)?;
         if memory.architecture != checkpoint.architecture
             || memory.pause_generation != checkpoint.pause_generation
@@ -139,6 +140,13 @@ impl CheckpointClosure {
             }
             disks.push(disk);
         }
+        for volume in &checkpoint.owned_volumes {
+            if let crate::snapshot::OwnedVolumeData::Disk { generation } = &volume.data
+                && !disks.contains(generation)
+            {
+                return checkpoint_error("owned disk is absent from the checkpoint closure");
+            }
+        }
 
         Ok(Self {
             root,
@@ -153,6 +161,11 @@ impl CheckpointClosure {
     /// Return the immutable root identity computed from canonical `checkpoint.json` bytes.
     pub fn root_id(&self) -> &ObjectId {
         &self.root_id
+    }
+
+    /// Root of this verified immutable closure.
+    pub fn root(&self) -> &Path {
+        &self.root
     }
 
     /// Return the validated composite manifest.
@@ -455,6 +468,7 @@ mod tests {
             execution_state: execution_id,
             memory: memory_id,
             disks: Vec::new(),
+            owned_volumes: Vec::new(),
             devices: vec![DeviceStateRef {
                 device_type: 4,
                 device_id: "rng".into(),

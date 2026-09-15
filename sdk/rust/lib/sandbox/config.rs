@@ -208,6 +208,14 @@ pub struct SandboxConfig {
     #[cfg(feature = "local")]
     pub(crate) snapshot_root_layer_sources: Vec<RootfsUpperLayerConfig>,
 
+    /// Installed file snapshot's required owned payloads, consumed into child storage.
+    #[serde(skip)]
+    #[cfg(feature = "local")]
+    pub(crate) snapshot_owned_source: Option<(
+        PathBuf,
+        Vec<microsandbox_image::snapshot::OwnedVolumeCapture>,
+    )>,
+
     /// Guest-visible capacity of `snapshot_root_layer_sources`.
     #[serde(skip)]
     pub(crate) snapshot_root_virtual_size: Option<u64>,
@@ -330,6 +338,7 @@ impl SandboxConfig {
         #[cfg(feature = "local")]
         {
             config.snapshot_root_layer_sources.clear();
+            config.snapshot_owned_source = None;
         }
         config.snapshot_root_virtual_size = None;
         #[cfg(feature = "local")]
@@ -708,6 +717,7 @@ fn guest_mount_is(mount: &VolumeMount, path: &str) -> bool {
     match mount {
         VolumeMount::Bind { guest, .. }
         | VolumeMount::Named { guest, .. }
+        | VolumeMount::Owned { guest, .. }
         | VolumeMount::Tmpfs { guest, .. }
         | VolumeMount::DiskImage { guest, .. } => {
             Utf8UnixPath::new(guest).normalize() == Utf8UnixPath::new(path).normalize()
@@ -805,6 +815,8 @@ impl Default for SandboxConfig {
             snapshot_upper_source: None,
             #[cfg(feature = "local")]
             snapshot_root_layer_sources: Vec::new(),
+            #[cfg(feature = "local")]
+            snapshot_owned_source: None,
             snapshot_root_virtual_size: None,
             snapshot_archive_source: None,
             snapshot_parent: None,

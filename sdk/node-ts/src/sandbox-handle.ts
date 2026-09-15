@@ -121,10 +121,10 @@ export class SandboxHandle {
     return modificationPlanFromJson(raw);
   }
 
-  /** Explicitly compact the sealed root-disk prefix, running or stopped. */
+  /** Compact sealed root and owned-data disk layers, running or stopped. */
   async compact(opts?: DiskCompactionOptions): Promise<DiskCompactionResult> {
     const raw = await withMappedErrors(() =>
-      this.inner.compact(opts?.layers, opts?.dryRun),
+      this.inner.compact(opts?.layers, opts?.dryRun, opts?.disk, opts?.rootDiskOnly),
     );
     return compactionResultFromJson(raw);
   }

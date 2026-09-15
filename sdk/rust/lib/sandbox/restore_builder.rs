@@ -35,7 +35,7 @@ impl Sandbox {
 
 impl RestoreBuilder {
     fn new(snapshot: impl Into<String>) -> Self {
-        let mut inner = SandboxBuilder::new("").snapshot_source(snapshot);
+        let mut inner = SandboxBuilder::new("").with_snapshot_source(snapshot);
         // Global creation defaults must not silently authorize host access or override the
         // captured exec user. Destination bindings come only from this operation's builder.
         inner.config.spec.mounts.clear();

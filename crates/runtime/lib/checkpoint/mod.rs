@@ -4,6 +4,7 @@
 mod additional_disk;
 #[cfg(feature = "runner")]
 mod capture_pipeline;
+mod compaction;
 #[cfg(feature = "runner")]
 mod coordinator;
 mod disk;
@@ -17,6 +18,7 @@ mod local_memory_budget;
 mod memory_cache;
 mod network;
 mod object_pipeline;
+mod owned_disk;
 #[cfg(feature = "runner")]
 mod restore;
 
@@ -24,6 +26,7 @@ mod restore;
 // Re-Exports
 //--------------------------------------------------------------------------------------------------
 
+pub use compaction::compact_stopped_disks;
 #[cfg(feature = "runner")]
 pub(crate) use coordinator::{CheckpointCoordinator, CheckpointResult, UserPause};
 #[cfg(feature = "runner")]
@@ -37,6 +40,9 @@ pub use local::LocalBranchState;
 pub use local_memory::{LocalMemory, LocalMemoryPin, LocalMemoryReservation};
 pub use memory_cache::{CachedMemory, CachedMemoryRegion, MemoryCache};
 pub use network::captured_gateway_mac;
+pub use owned_disk::{
+    capture_stopped_owned_disk, load_runtime_owned_disk_chain, seed_runtime_owned_disk_chain,
+};
 #[cfg(feature = "runner")]
 pub(crate) use restore::{ExternalMountReport, PreparedCheckpointRestore, RestoredAgentState};
 

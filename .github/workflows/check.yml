@@ -839,7 +839,7 @@ jobs:
           npm ci --ignore-scripts
           npm run build:ci
 
-      - name: Build MCP server
+      - name: Build and test MCP server
         working-directory: mcp
         run: |
           node -e "
@@ -849,13 +849,14 @@ jobs:
             fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2));
           "
           npm install --no-package-lock --ignore-scripts
-          npm run build
+          npm test
 
       - name: Upload Node SDK artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: node-sdk-linux-x86_64
           path: |
+            sdk/node-ts/bin/microsandbox.cjs
             sdk/node-ts/native/index.cjs
             sdk/node-ts/native/index.d.ts
             sdk/node-ts/native/microsandbox.*.node
