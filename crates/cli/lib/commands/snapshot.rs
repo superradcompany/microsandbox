@@ -47,12 +47,6 @@ pub enum SnapshotCommands {
     Load(SnapshotLoadArgs),
 
     /// Clone an existing snapshot into a new one.
-    ///
-    /// Never mutates the source snapshot: writes a new artifact under
-    /// `new-name`, leaving the source and anything referencing its digest
-    /// untouched. Pass `--compact` to also reclaim host disk space for
-    /// blocks the guest filesystem has already freed, and `--root-disk` to
-    /// grow the clone's root disk (grow-only).
     Clone(SnapshotCloneArgs),
 }
 
