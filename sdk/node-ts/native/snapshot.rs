@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use microsandbox::snapshot::CloneOpts as RustCloneOpts;
 use microsandbox::snapshot::SaveOpts as RustSaveOpts;
 use microsandbox::{
     Snapshot as RustSnapshot, SnapshotFormat as RustSnapshotFormat,
@@ -58,6 +59,26 @@ pub struct JsSnapshotVerifyReport {
 #[napi(object, js_name = "SnapshotRemoveOptions")]
 pub struct JsSnapshotRemoveOpts {
     pub force: Option<bool>,
+}
+
+/// Options for `Snapshot.clone()`.
+#[derive(Default)]
+#[napi(object, js_name = "CloneOpts")]
+pub struct JsCloneOpts {
+    /// Parent directory to create the new artifact in, instead of the
+    /// default snapshots directory.
+    pub dest_dir: Option<String>,
+    /// Labels for the new snapshot. Not inherited from the source.
+    pub labels: Option<Vec<crate::snapshot_builder::JsSnapshotLabel>>,
+    /// Overwrite an existing artifact at the destination.
+    pub force: Option<bool>,
+    /// Deallocate host storage for blocks the guest ext4 filesystem has
+    /// already freed, while cloning.
+    pub compact: Option<bool>,
+    /// Grow the cloned upper's ext4 filesystem to this size in MiB,
+    /// offline, before recording the artifact. Grow-only: a target at or
+    /// below the source's current size errors.
+    pub root_disk_size_mib: Option<u32>,
 }
 
 /// Snapshot index info from the local DB cache.
@@ -174,6 +195,35 @@ impl JsSnapshot {
             .await
             .map_err(to_napi_error)?;
         Ok(JsSnapshotHandle::from_rust(h))
+    }
+
+    /// Clone an existing snapshot (path, name, or digest) into a new one.
+    ///
+    /// Never mutates the source: writes a new artifact under `newName`,
+    /// leaving the source and anything referencing its digest untouched.
+    #[napi]
+    pub async fn clone(
+        source: String,
+        new_name: String,
+        opts: Option<JsCloneOpts>,
+    ) -> Result<JsSnapshot> {
+        let opts = opts.unwrap_or_default();
+        let rust_opts = RustCloneOpts {
+            dest_dir: opts.dest_dir.map(PathBuf::from),
+            labels: opts
+                .labels
+                .unwrap_or_default()
+                .into_iter()
+                .map(|l| (l.key, l.value))
+                .collect(),
+            force: opts.force.unwrap_or(false),
+            compact: opts.compact.unwrap_or(false),
+            root_disk_size_mib: opts.root_disk_size_mib,
+        };
+        let snap = RustSnapshot::clone_snapshot(&source, &new_name, rust_opts)
+            .await
+            .map_err(to_napi_error)?;
+        Ok(JsSnapshot::from_rust(snap))
     }
 
     //----------------------------------------------------------------------------------------------

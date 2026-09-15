@@ -1,6 +1,7 @@
 import { withMappedErrors } from "./internal/error-mapping.js";
 import {
   napi,
+  type NapiCloneOpts,
   type NapiSnapshot,
   type NapiSnapshotBuilderSetters,
   type NapiSnapshotInfo,
@@ -57,6 +58,26 @@ export interface SaveOpts {
   withImage?: boolean;
   /** Skip zstd compression and write a plain `.tar`. */
   plainTar?: boolean;
+}
+
+/**
+ * Options for `Snapshot.clone`.
+ */
+export interface CloneOpts {
+  /** Parent directory to create the new artifact in, instead of the default snapshots directory. */
+  destDir?: string;
+  /** Labels for the new snapshot. Not inherited from the source. */
+  labels?: Record<string, string>;
+  /** Overwrite an existing artifact at the destination. */
+  force?: boolean;
+  /** Deallocate host storage for blocks the guest ext4 filesystem has already freed, while cloning. */
+  compact?: boolean;
+  /**
+   * Grow the cloned upper's ext4 filesystem to this size in MiB, offline,
+   * before recording the artifact. Grow-only: a target at or below the
+   * source's current size throws.
+   */
+  rootDiskSizeMib?: number;
 }
 
 /** Result of an explicit `Snapshot.verify()` call. */
@@ -200,6 +221,32 @@ export class Snapshot {
   static async load(archive: string, dest?: string): Promise<SnapshotHandle> {
     const raw = await withMappedErrors(() => napi.Snapshot.load(archive, dest));
     return new SnapshotHandle(raw);
+  }
+
+  /**
+   * Clone an existing snapshot (path, name, or digest) into a new one.
+   *
+   * Never mutates the source: writes a new artifact under `newName`,
+   * leaving the source and anything referencing its digest untouched.
+   */
+  static async clone(
+    source: string,
+    newName: string,
+    opts?: CloneOpts,
+  ): Promise<Snapshot> {
+    const nativeOpts: NapiCloneOpts | undefined = opts && {
+      destDir: opts.destDir,
+      labels: opts.labels
+        ? Object.entries(opts.labels).map(([key, value]) => ({ key, value }))
+        : undefined,
+      force: opts.force,
+      compact: opts.compact,
+      rootDiskSizeMib: opts.rootDiskSizeMib,
+    };
+    const inner = await withMappedErrors(() =>
+      napi.Snapshot.clone(source, newName, nativeOpts),
+    );
+    return new Snapshot(inner);
   }
 
   //--------------------------------------------------------------------------

@@ -578,6 +578,7 @@ export interface NapiSnapshotStatic {
   reindex(dir?: string): Promise<number>;
   save(name: string, out: string, opts?: NapiSaveOpts): Promise<void>;
   load(archive: string, dest?: string): Promise<NapiSnapshotHandle>;
+  clone(source: string, newName: string, opts?: NapiCloneOpts): Promise<NapiSnapshot>;
 }
 
 export type NapiSnapshotBuilderCtor = new (name: string) => NapiSnapshotBuilder;
@@ -589,6 +590,7 @@ export interface NapiSnapshotBuilderSetters {
   force(): this;
   recordIntegrity(): this;
   resumable(): this;
+  compact(): this;
 }
 
 export interface NapiSnapshotBuilder extends NapiSnapshotBuilderSetters {
@@ -667,6 +669,19 @@ export interface NapiSaveOpts {
 
 export interface NapiSnapshotRemoveOptions {
   force?: boolean;
+}
+
+export interface NapiCloneOpts {
+  destDir?: string;
+  labels?: NapiSnapshotLabel[];
+  force?: boolean;
+  compact?: boolean;
+  rootDiskSizeMib?: number;
+}
+
+export interface NapiSnapshotLabel {
+  key: string;
+  value: string;
 }
 
 export interface NapiSnapshotVerifyReport {
