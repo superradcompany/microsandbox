@@ -65,7 +65,7 @@ msb run --name browser-use-task --replace \
   mcr.microsoft.com/playwright/python:v1.61.0-noble -- sh -lc '
     apt-get update -qq && apt-get install -y -qq libnss3-tools &&
     mkdir -p "$HOME/.pki/nssdb" &&
-    certutil -d sql:"$HOME/.pki/nssdb" -N --empty-password 2>/dev/null;
+    certutil -d sql:"$HOME/.pki/nssdb" -N --empty-password &&
     certutil -d sql:"$HOME/.pki/nssdb" -A -n microsandbox-egress -t "C,," -i /.msb/tls/ca.pem &&
     pip install --disable-pip-version-check browser-use==0.13.10 &&
     CHROME_PATH="$(find /ms-playwright -path "*/chrome-linux/chrome" -type f | head -n 1)" \
@@ -83,7 +83,7 @@ msb run --name browser-use-task --replace `
   mcr.microsoft.com/playwright/python:v1.61.0-noble -- sh -lc '
     apt-get update -qq && apt-get install -y -qq libnss3-tools &&
     mkdir -p "$HOME/.pki/nssdb" &&
-    certutil -d sql:"$HOME/.pki/nssdb" -N --empty-password 2>/dev/null;
+    certutil -d sql:"$HOME/.pki/nssdb" -N --empty-password &&
     certutil -d sql:"$HOME/.pki/nssdb" -A -n microsandbox-egress -t "C,," -i /.msb/tls/ca.pem &&
     pip install --disable-pip-version-check browser-use==0.13.10 &&
     CHROME_PATH="$(find /ms-playwright -path "*/chrome-linux/chrome" -type f | head -n 1)" \
@@ -105,7 +105,7 @@ The agent prints its final result and exits. The Browser Use browser session use
 
 <Step title="Clean up">
 
-Remove the stopped sandbox and clear the host key:
+Remove the stopped sandbox and unset the API key:
 
 <CodeGroup>
 ```sh macOS & Linux
