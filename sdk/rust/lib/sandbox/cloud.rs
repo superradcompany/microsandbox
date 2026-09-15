@@ -34,6 +34,9 @@ impl Sandbox {
         name: String,
         config: SandboxConfig,
     ) -> Self {
+        let backend = backend
+            .with_agent_identity(&name, &state.id)
+            .unwrap_or(backend);
         Self {
             backend,
             inner: Arc::new(crate::backend::SandboxInner::Cloud(state)),

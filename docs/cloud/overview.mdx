@@ -21,6 +21,14 @@ msb context
 
 `msb context` confirms that subsequent commands will run on cloud and shows what selected the backend without exposing the API key. For profiles, SDK selection, and precedence, see [Backends](/operations/backends).
 
+## Sandbox identity
+
+Looking up a sandbox by name selects the sandbox currently using that name.
+The returned object retains that sandbox's ID for lifecycle operations, commands,
+and file access. If the sandbox is deleted and its name reused, operations on
+an old object fail instead of reaching the replacement. Fetch the sandbox by
+name again to select the replacement; you do not need to manage IDs yourself.
+
 ## Same code, different backend
 
 Everything from the [quickstart](/getting-started/quickstart) works unchanged. With cloud selected and the API key exported, this creates a sandbox on cloud instead of your machine:
