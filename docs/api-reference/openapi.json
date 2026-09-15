@@ -94,7 +94,7 @@
           "Sandboxes"
         ],
         "summary": "Create a sandbox",
-        "description": "Create a microVM sandbox for the organization associated with the API key.",
+        "description": "Create a sandbox, optionally start it immediately, and optionally wait until it is ready.",
         "operationId": "create_sandbox",
         "parameters": [
           {
@@ -326,8 +326,8 @@
         "tags": [
           "Sandboxes"
         ],
-        "summary": "Destroy a sandbox by name",
-        "description": "Stop and permanently destroy a sandbox selected by its organization-scoped name.",
+        "summary": "Delete a sandbox by name",
+        "description": "Delete a sandbox selected by its organization-scoped name. Resource cleanup continues asynchronously.",
         "operationId": "delete_by_name",
         "parameters": [
           {
@@ -342,7 +342,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Sandbox destroyed",
+            "description": "Sandbox scheduled for deletion",
             "content": {
               "application/json": {
                 "schema": {
@@ -379,23 +379,6 @@
                   "error": {
                     "code": "sandbox_not_found",
                     "message": "resource not found",
-                    "details": null
-                  }
-                }
-              }
-            }
-          },
-          "502": {
-            "description": "Orchestrator unreachable",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "orchestrator_unreachable",
-                    "message": "orchestrator unreachable",
                     "details": null
                   }
                 }
@@ -745,8 +728,8 @@
         "tags": [
           "Sandboxes"
         ],
-        "summary": "Destroy a sandbox",
-        "description": "Stop and permanently destroy a sandbox.",
+        "summary": "Delete a sandbox",
+        "description": "Delete a sandbox. Resource cleanup continues asynchronously.",
         "operationId": "delete_sandbox",
         "parameters": [
           {
@@ -762,7 +745,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Sandbox destroyed",
+            "description": "Sandbox scheduled for deletion",
             "content": {
               "application/json": {
                 "schema": {
@@ -804,23 +787,6 @@
                 }
               }
             }
-          },
-          "502": {
-            "description": "Sandbox orchestrator unreachable",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "example": {
-                  "error": {
-                    "code": "orchestrator_unreachable",
-                    "message": "orchestrator unreachable",
-                    "details": null
-                  }
-                }
-              }
-            }
           }
         },
         "security": [
@@ -833,7 +799,7 @@
         "tags": [
           "Sandboxes"
         ],
-        "summary": "Rename a sandbox",
+        "summary": "Update a sandbox",
         "description": "Rename a sandbox by updating its display name or slug.",
         "operationId": "update_sandbox",
         "parameters": [
@@ -950,7 +916,7 @@
         "tags": [
           "Sandboxes"
         ],
-        "summary": "Per-sandbox metrics",
+        "summary": "Get sandbox metrics",
         "operationId": "get_metrics",
         "parameters": [
           {
@@ -1345,7 +1311,7 @@
         "tags": [
           "Sandboxes"
         ],
-        "summary": "Mounted volumes",
+        "summary": "List mounted volumes",
         "operationId": "list_volumes",
         "parameters": [
           {
@@ -1392,6 +1358,682 @@
           },
           "404": {
             "description": "Sandbox not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "sandbox_not_found",
+                    "message": "resource not found",
+                    "details": null
+                  }
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/v1/sandboxes/snapshot-candidates": {
+      "get": {
+        "tags": [
+          "Snapshots"
+        ],
+        "summary": "List snapshot candidates",
+        "description": "List persistent, stopped sandboxes supported by the current disk snapshot policy.",
+        "operationId": "list_snapshot_candidates",
+        "parameters": [
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Pagination cursor",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size (default 20, max 100)",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Paginated snapshot candidates",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaginatedSnapshotCandidateResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "invalid_api_key",
+                    "message": "unauthorized",
+                    "details": null
+                  }
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/v1/snapshot-operations": {
+      "get": {
+        "tags": [
+          "Snapshots"
+        ],
+        "summary": "List snapshot operations",
+        "description": "List asynchronous snapshot operations requested by this organization.",
+        "operationId": "list_operations",
+        "parameters": [
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Pagination cursor",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size (default 20, max 100)",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "exclude_redundant",
+            "in": "query",
+            "description": "Hide successful managed operations and superseded host-volume operations represented in snapshot inventory",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Explicit snapshot operations",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaginatedSnapshotOperationResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "invalid_api_key",
+                    "message": "unauthorized",
+                    "details": null
+                  }
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/v1/snapshot-operations/{operation_id}": {
+      "get": {
+        "tags": [
+          "Snapshots"
+        ],
+        "summary": "Get a snapshot operation",
+        "description": "Poll an asynchronous snapshot operation.",
+        "operationId": "get_operation",
+        "parameters": [
+          {
+            "name": "operation_id",
+            "in": "path",
+            "description": "Snapshot operation id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Snapshot operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CloudSnapshotOperation"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "invalid_api_key",
+                    "message": "unauthorized",
+                    "details": null
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Snapshot operation not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "sandbox_not_found",
+                    "message": "resource not found",
+                    "details": null
+                  }
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/v1/snapshots": {
+      "get": {
+        "tags": [
+          "Snapshots"
+        ],
+        "summary": "List snapshots",
+        "description": "List the organization's managed disk snapshots.",
+        "operationId": "list",
+        "parameters": [
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Pagination cursor",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size (default 20, max 100)",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Managed snapshots",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaginatedSnapshotResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "invalid_api_key",
+                    "message": "unauthorized",
+                    "details": null
+                  }
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "Snapshots"
+        ],
+        "summary": "Create a snapshot",
+        "description": "Create a managed or host-volume disk snapshot asynchronously.",
+        "operationId": "create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CloudCreateSnapshotRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Snapshot capture queued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CloudSnapshotOperation"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid snapshot request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "invalid_request",
+                    "message": "invalid request",
+                    "details": null
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "invalid_api_key",
+                    "message": "unauthorized",
+                    "details": null
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Source sandbox not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "sandbox_not_found",
+                    "message": "resource not found",
+                    "details": null
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Snapshot destination already exists",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "name_already_exists",
+                    "message": "'name' already exists",
+                    "details": null
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unsupported or ineligible snapshot request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/v1/snapshots/by-name/{name}": {
+      "get": {
+        "tags": [
+          "Snapshots"
+        ],
+        "summary": "Get a snapshot by name",
+        "description": "Retrieve a managed disk snapshot by its organization-unique name.",
+        "operationId": "get_by_name",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Managed snapshot name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Managed snapshot",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CloudSnapshot"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "invalid_api_key",
+                    "message": "unauthorized",
+                    "details": null
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Snapshot not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "sandbox_not_found",
+                    "message": "resource not found",
+                    "details": null
+                  }
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "Snapshots"
+        ],
+        "summary": "Delete a snapshot by name",
+        "description": "Delete a managed disk snapshot by its organization-unique name.",
+        "operationId": "delete_by_name",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Managed snapshot name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Snapshot deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MessageResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "invalid_api_key",
+                    "message": "unauthorized",
+                    "details": null
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Snapshot not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "sandbox_not_found",
+                    "message": "resource not found",
+                    "details": null
+                  }
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/v1/snapshots/{snapshot_id}": {
+      "get": {
+        "tags": [
+          "Snapshots"
+        ],
+        "summary": "Get a snapshot",
+        "description": "Retrieve a managed disk snapshot by its immutable identifier.",
+        "operationId": "get",
+        "parameters": [
+          {
+            "name": "snapshot_id",
+            "in": "path",
+            "description": "Managed snapshot id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Managed snapshot",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CloudSnapshot"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "invalid_api_key",
+                    "message": "unauthorized",
+                    "details": null
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Snapshot not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "sandbox_not_found",
+                    "message": "resource not found",
+                    "details": null
+                  }
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "Snapshots"
+        ],
+        "summary": "Delete a snapshot",
+        "description": "Delete a managed disk snapshot by its immutable identifier.",
+        "operationId": "delete",
+        "parameters": [
+          {
+            "name": "snapshot_id",
+            "in": "path",
+            "description": "Managed snapshot id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Snapshot deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MessageResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "invalid_api_key",
+                    "message": "unauthorized",
+                    "details": null
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Snapshot not found",
             "content": {
               "application/json": {
                 "schema": {
@@ -1465,7 +2107,7 @@
         "tags": [
           "Volumes"
         ],
-        "summary": "Create a named volume",
+        "summary": "Create a volume",
         "description": "Create a named persistent volume with optional capacity and labels.",
         "operationId": "create_volume",
         "requestBody": {
@@ -1548,26 +2190,12 @@
         ]
       }
     },
-    "/v1/volumes/default": {
-      "get": {
-        "tags": [
-          "Volumes"
-        ],
-        "operationId": "get_default",
-        "responses": {},
-        "security": [
-          {
-            "api_key": []
-          }
-        ]
-      }
-    },
     "/v1/volumes/{id}": {
       "delete": {
         "tags": [
           "Volumes"
         ],
-        "summary": "Schedule a volume for deletion",
+        "summary": "Delete a volume",
         "description": "Schedule an unused named volume for deletion.",
         "operationId": "delete_volume",
         "parameters": [
@@ -1655,7 +2283,7 @@
         "tags": [
           "Volumes"
         ],
-        "summary": "Set or clear a volume's storage cap",
+        "summary": "Update a volume",
         "description": "Update a named volume's capacity limit or labels.",
         "operationId": "update_volume",
         "parameters": [
@@ -1767,338 +2395,12 @@
         ]
       }
     },
-    "/v1/volumes/{id}/files": {
-      "get": {
-        "tags": [
-          "Volumes"
-        ],
-        "operationId": "list",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "description": "Volume UUID",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          },
-          {
-            "name": "x-msb-file-path",
-            "in": "header",
-            "description": "URL-safe base64 encoded volume-relative UTF-8 path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {},
-        "security": [
-          {
-            "api_key": []
-          }
-        ]
-      },
-      "delete": {
-        "tags": [
-          "Volumes"
-        ],
-        "operationId": "remove",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "description": "Volume UUID",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          },
-          {
-            "name": "x-msb-file-path",
-            "in": "header",
-            "description": "URL-safe base64 encoded volume-relative UTF-8 path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "x-msb-file-recursive",
-            "in": "header",
-            "description": "Recursively remove a directory",
-            "required": false,
-            "schema": {
-              "type": [
-                "boolean",
-                "null"
-              ]
-            }
-          }
-        ],
-        "responses": {},
-        "security": [
-          {
-            "api_key": []
-          }
-        ]
-      }
-    },
-    "/v1/volumes/{id}/files/content": {
-      "get": {
-        "tags": [
-          "Volumes"
-        ],
-        "operationId": "read",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "description": "Volume UUID",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          },
-          {
-            "name": "x-msb-file-path",
-            "in": "header",
-            "description": "URL-safe base64 encoded volume-relative UTF-8 path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {},
-        "security": [
-          {
-            "api_key": []
-          }
-        ]
-      },
-      "put": {
-        "tags": [
-          "Volumes"
-        ],
-        "operationId": "write",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "description": "Volume UUID",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          },
-          {
-            "name": "x-msb-file-path",
-            "in": "header",
-            "description": "URL-safe base64 encoded volume-relative UTF-8 path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {},
-        "security": [
-          {
-            "api_key": []
-          }
-        ]
-      }
-    },
-    "/v1/volumes/{id}/files/copy": {
-      "post": {
-        "tags": [
-          "Volumes"
-        ],
-        "operationId": "copy",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "description": "Volume UUID",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/FileMoveRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {},
-        "security": [
-          {
-            "api_key": []
-          }
-        ]
-      }
-    },
-    "/v1/volumes/{id}/files/exists": {
-      "get": {
-        "tags": [
-          "Volumes"
-        ],
-        "operationId": "exists",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "description": "Volume UUID",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          },
-          {
-            "name": "x-msb-file-path",
-            "in": "header",
-            "description": "URL-safe base64 encoded volume-relative UTF-8 path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {},
-        "security": [
-          {
-            "api_key": []
-          }
-        ]
-      }
-    },
-    "/v1/volumes/{id}/files/mkdir": {
-      "post": {
-        "tags": [
-          "Volumes"
-        ],
-        "operationId": "mkdir",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "description": "Volume UUID",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/FilePathRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {},
-        "security": [
-          {
-            "api_key": []
-          }
-        ]
-      }
-    },
-    "/v1/volumes/{id}/files/rename": {
-      "post": {
-        "tags": [
-          "Volumes"
-        ],
-        "operationId": "rename",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "description": "Volume UUID",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/FileMoveRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {},
-        "security": [
-          {
-            "api_key": []
-          }
-        ]
-      }
-    },
-    "/v1/volumes/{id}/files/stat": {
-      "get": {
-        "tags": [
-          "Volumes"
-        ],
-        "operationId": "stat",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "description": "Volume UUID",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          },
-          {
-            "name": "x-msb-file-path",
-            "in": "header",
-            "description": "URL-safe base64 encoded volume-relative UTF-8 path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {},
-        "security": [
-          {
-            "api_key": []
-          }
-        ]
-      }
-    },
     "/v1/volumes/{id}/metrics": {
       "get": {
         "tags": [
           "Volumes"
         ],
-        "summary": "Per-volume JuiceFS performance",
+        "summary": "Get volume metrics",
         "operationId": "get_metrics",
         "parameters": [
           {
@@ -2293,7 +2595,7 @@
         "tags": [
           "Billing"
         ],
-        "summary": "Billing summary for the key's org",
+        "summary": "Get billing summary",
         "operationId": "get_billing",
         "responses": {
           "200": {
@@ -2336,7 +2638,7 @@
         "tags": [
           "Billing"
         ],
-        "summary": "List invoices for the key's org",
+        "summary": "List invoices",
         "operationId": "list_invoices",
         "responses": {
           "200": {
@@ -2382,7 +2684,7 @@
         "tags": [
           "Billing"
         ],
-        "summary": "Get a single invoice",
+        "summary": "Get an invoice",
         "operationId": "get_invoice",
         "parameters": [
           {
@@ -2453,7 +2755,7 @@
         "tags": [
           "Billing"
         ],
-        "summary": "List available billing plans",
+        "summary": "List billing plans",
         "operationId": "list_plans",
         "responses": {
           "200": {
@@ -2814,11 +3116,11 @@
           "Organization"
         ],
         "summary": "Get the current organization",
-        "description": "The slug-prefixed `GET /v1/orgs/:slug` returns the user's role; here the\nkey is treated as `Owner` (matches `OrgContext` semantics), so the\nreturned role is informational rather than a real per-user binding.",
+        "description": "Returns the organization associated with the current credential.",
         "operationId": "get_org",
         "responses": {
           "200": {
-            "description": "Organization bound to this API key",
+            "description": "Current organization",
             "content": {
               "application/json": {
                 "schema": {
@@ -2940,7 +3242,7 @@
       },
       "BillingPlan": {
         "type": "object",
-        "description": "Billing plan definition with resource quotas.\n\n`name` is the plan's identity, an arbitrary catalog string (no fixed enum) -\n\"free\"/\"builder\"/… are just the names we ship. Every quota is `Option`:\n`None` = unlimited (counts/budgets) or the system/node max (per-sandbox\nvcpu/memory/disk). There is no magic 0.",
+        "description": "Billing plan definition with resource quotas.\n\n`name` is the plan's identity, an arbitrary catalog string (no fixed enum) -\n\"free\"/\"builder\"/… are just the names we ship. Every quota is `Option`:\n`None` = unlimited (counts/budgets) or the platform default (per-sandbox\nvCPU/memory/disk). There is no magic 0.",
         "required": [
           "id",
           "name",
@@ -3039,6 +3341,14 @@
             ],
             "format": "int32"
           },
+          "max_snapshot_storage_gib": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Per-org managed-snapshot storage hard cap (GiB), compared against the\nsummed compressed archive size of the org's managed snapshots."
+          },
           "max_total_storage_gib": {
             "type": [
               "integer",
@@ -3108,6 +3418,14 @@
               "null"
             ],
             "format": "double"
+          },
+          "usage_snapshot_storage_gib_month_usd": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Managed-snapshot storage rate (USD/GiB-month), separate from volumes."
           },
           "usage_storage_gib_month_usd": {
             "type": [
@@ -3193,6 +3511,13 @@
             "format": "double"
           },
           "usage_memory_gib_hour_usd": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "usage_snapshot_storage_gib_month_usd": {
             "type": [
               "number",
               "null"
@@ -3341,14 +3666,259 @@
           }
         }
       },
+      "CheckpointSnapshotState": {
+        "type": "object",
+        "description": "Immutable checkpoint-manifest-backed snapshot state.",
+        "required": [
+          "checkpoint_id",
+          "manifest"
+        ],
+        "properties": {
+          "checkpoint_id": {
+            "type": "string",
+            "description": "Stable identifier for the captured cut."
+          },
+          "manifest": {
+            "type": "string",
+            "description": "SHA-256 identity of the disk or composite checkpoint manifest."
+          }
+        },
+        "additionalProperties": false
+      },
       "CloudCreateSandboxRequest": {
-        "allOf": [
+        "oneOf": [
           {
-            "$ref": "#/components/schemas/CloudSandboxSpec",
-            "description": "The cloud sandbox specification, flattened onto the request body."
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/CloudSandboxSpec",
+                "description": "Settings shared by every sandbox source."
+              },
+              {
+                "type": "object",
+                "required": [
+                  "reference"
+                ],
+                "properties": {
+                  "patches": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/components/schemas/CloudPatch"
+                    },
+                    "description": "Rootfs patches applied before VM start."
+                  },
+                  "pull_policy": {
+                    "$ref": "#/components/schemas/CloudPullPolicy",
+                    "description": "OCI image pull policy."
+                  },
+                  "reference": {
+                    "type": "string",
+                    "description": "OCI image reference."
+                  },
+                  "resources": {
+                    "$ref": "#/components/schemas/CloudSandboxResources",
+                    "description": "CPU, memory, and writable-disk resources."
+                  }
+                }
+              },
+              {
+                "type": "object",
+                "description": "Create a sandbox from an OCI image.",
+                "required": [
+                  "source"
+                ],
+                "properties": {
+                  "source": {
+                    "type": "string",
+                    "enum": [
+                      "oci"
+                    ]
+                  }
+                }
+              }
+            ],
+            "description": "Create a sandbox from an OCI image."
+          },
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/CloudSandboxSpec",
+                "description": "Settings shared by every sandbox source."
+              },
+              {
+                "type": "object",
+                "required": [
+                  "path"
+                ],
+                "properties": {
+                  "patches": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/components/schemas/CloudPatch"
+                    },
+                    "description": "Rootfs patches applied before VM start."
+                  },
+                  "path": {
+                    "type": "string",
+                    "description": "Host directory used as the root filesystem."
+                  },
+                  "resources": {
+                    "$ref": "#/components/schemas/CloudSandboxComputeResources",
+                    "description": "CPU and memory resources."
+                  }
+                }
+              },
+              {
+                "type": "object",
+                "description": "Create a sandbox from a host directory.",
+                "required": [
+                  "source"
+                ],
+                "properties": {
+                  "source": {
+                    "type": "string",
+                    "enum": [
+                      "bind"
+                    ]
+                  }
+                }
+              }
+            ],
+            "description": "Create a sandbox from a host directory."
+          },
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/CloudSandboxSpec",
+                "description": "Settings shared by every sandbox source."
+              },
+              {
+                "type": "object",
+                "required": [
+                  "path",
+                  "format"
+                ],
+                "properties": {
+                  "format": {
+                    "$ref": "#/components/schemas/CloudDiskImageFormat",
+                    "description": "Disk image format."
+                  },
+                  "fstype": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Inner filesystem type, when it cannot be detected automatically."
+                  },
+                  "patches": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/components/schemas/CloudPatch"
+                    },
+                    "description": "Rootfs patches applied before VM start."
+                  },
+                  "path": {
+                    "type": "string",
+                    "description": "Host path to the disk image."
+                  },
+                  "resources": {
+                    "$ref": "#/components/schemas/CloudSandboxComputeResources",
+                    "description": "CPU and memory resources."
+                  }
+                }
+              },
+              {
+                "type": "object",
+                "description": "Create a sandbox from a disk image file.",
+                "required": [
+                  "source"
+                ],
+                "properties": {
+                  "source": {
+                    "type": "string",
+                    "enum": [
+                      "disk_image"
+                    ]
+                  }
+                }
+              }
+            ],
+            "description": "Create a sandbox from a disk image file."
+          },
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/CloudSandboxSpec",
+                "description": "Settings shared by every sandbox source."
+              },
+              {
+                "type": "object",
+                "required": [
+                  "disk_snapshot_ref"
+                ],
+                "properties": {
+                  "disk_snapshot_ref": {
+                    "$ref": "#/components/schemas/CloudSnapshotLocation",
+                    "description": "Disk snapshot to restore."
+                  },
+                  "pull_policy": {
+                    "$ref": "#/components/schemas/CloudPullPolicy",
+                    "description": "Pull policy used if the snapshot's pinned base image must be fetched."
+                  },
+                  "resources": {
+                    "$ref": "#/components/schemas/CloudSandboxComputeResources",
+                    "description": "CPU and memory resources."
+                  }
+                }
+              },
+              {
+                "type": "object",
+                "description": "Create a fresh-booted sandbox from a disk snapshot.",
+                "required": [
+                  "source"
+                ],
+                "properties": {
+                  "source": {
+                    "type": "string",
+                    "enum": [
+                      "disk_snapshot"
+                    ]
+                  }
+                }
+              }
+            ],
+            "description": "Create a fresh-booted sandbox from a disk snapshot."
           }
         ],
-        "description": "Wire shape of a cloud sandbox create request body.\n\nFlattens [`CloudSandboxSpec`] onto the request body, so on the wire this is\nbyte-identical to `CloudSandboxSpec`. The generated bindings surface the\nflattened shape as `CloudSandboxSpec` directly."
+        "description": "Wire shape of a cloud sandbox create request body.\n\nEach root filesystem origin is a distinct source variant. The common\nsandbox settings remain flat beside the source-specific fields. Legacy\nrequests carrying an `image` object are accepted during migration."
+      },
+      "CloudCreateSnapshotRequest": {
+        "oneOf": [
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/CloudSnapshotSpec",
+                "description": "Settings shared by every snapshot kind."
+              },
+              {
+                "type": "object",
+                "description": "Capture disk state only.",
+                "required": [
+                  "kind"
+                ],
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "disk"
+                    ]
+                  }
+                }
+              }
+            ],
+            "description": "Capture disk state only."
+          }
+        ],
+        "description": "Wire shape of a cloud snapshot create request body."
       },
       "CloudDiskImageFormat": {
         "type": "string",
@@ -3358,6 +3928,26 @@
           "raw",
           "vmdk"
         ]
+      },
+      "CloudErrorDetails": {
+        "type": "object",
+        "description": "Nested cloud API error details.",
+        "properties": {
+          "code": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Machine-readable error code."
+          },
+          "message": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Human-readable error message."
+          }
+        }
       },
       "CloudHostPattern": {
         "oneOf": [
@@ -3421,17 +4011,12 @@
       },
       "CloudNetworkSpec": {
         "type": "object",
-        "description": "Cloud network specification: a subset of the domain [`NetworkSpec`].\nInterface overrides, host port mapping, DNS, TLS interception, rate limits,\nand host-CA trust are not part of this type. `deny_unknown_fields` - posting\nan omitted field is an error, not a silent drop.",
+        "description": "Cloud network specification: a subset of the domain [`crate::domain::NetworkSpec`].\nInterface overrides, host port mapping, DNS, TLS interception, rate limits,\nand host-CA trust are not part of this type. Unknown fields are ignored for\ncompatibility with newer clients; accepting them does not enable their behavior.",
         "properties": {
           "enabled": {
             "type": "boolean",
             "description": "Whether networking is enabled for this sandbox.",
             "default": true
-          },
-          "strict": {
-            "type": "boolean",
-            "description": "Require hostname-based policy allows to use inspectable application authority.",
-            "default": false
           },
           "max_connections": {
             "type": [
@@ -3465,9 +4050,13 @@
               }
             ],
             "default": null
+          },
+          "strict": {
+            "type": "boolean",
+            "description": "Require hostname-based policy allows to use inspectable application authority.",
+            "default": false
           }
-        },
-        "additionalProperties": false
+        }
       },
       "CloudPatch": {
         "oneOf": [
@@ -3728,7 +4317,7 @@
             }
           }
         ],
-        "description": "Rootfs patch applied before VM start. Twin of [`Patch`], internally tagged\nwith a snake_case `type` instead of the domain's external PascalCase tag."
+        "description": "Filesystem change applied before the sandbox starts. The type field selects the operation."
       },
       "CloudPullPolicy": {
         "type": "string",
@@ -3788,23 +4377,23 @@
           "rttime"
         ]
       },
-      "CloudRootfsSource": {
+      "CloudSandboxComputeResources": {
         "type": "object",
-        "description": "Root filesystem source. The hosted cloud accepts OCI images only.",
-        "required": [
-          "type",
-          "reference"
-        ],
+        "description": "CPU and memory request shared by sources without a managed writable disk.",
         "properties": {
-          "type": {
-            "type": "string",
-            "enum": [
-              "oci"
-            ]
+          "memory_mib": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Guest memory in MiB.",
+            "default": 512,
+            "minimum": 0
           },
-          "reference": {
-            "type": "string",
-            "description": "OCI image reference, e.g. `python:3.12`."
+          "vcpus": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Number of virtual CPUs.",
+            "default": 1,
+            "minimum": 0
           }
         }
       },
@@ -3840,7 +4429,7 @@
       },
       "CloudSandboxRuntimeOptions": {
         "type": "object",
-        "description": "Cloud guest runtime options: a subset of [`SandboxRuntimeOptions`]. The\nhostname and the metrics-sampling knobs are not part of this type.\n`deny_unknown_fields`.",
+        "description": "Cloud guest runtime options: a subset of [`crate::domain::SandboxRuntimeOptions`]. The\nhostname and the metrics-sampling knobs are not part of this type.\nUnknown fields are ignored for compatibility with newer clients.",
         "properties": {
           "cmd": {
             "type": [
@@ -3911,12 +4500,14 @@
             "description": "Working directory for guest commands.",
             "default": null
           }
-        },
-        "additionalProperties": false
+        }
       },
       "CloudSandboxSpec": {
         "type": "object",
-        "description": "Cloud sandbox specification carried on create routes.",
+        "description": "Settings shared by every cloud sandbox creation source.",
+        "required": [
+          "name"
+        ],
         "properties": {
           "env": {
             "type": "array",
@@ -3925,9 +4516,6 @@
             },
             "description": "Environment variables visible to commands in the sandbox.",
             "default": []
-          },
-          "image": {
-            "$ref": "#/components/schemas/CloudRootfsSource"
           },
           "init": {
             "oneOf": [
@@ -3986,36 +4574,8 @@
               }
             ],
             "default": {
-              "enabled": true
-            }
-          },
-          "patches": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/CloudPatch"
-            },
-            "description": "Rootfs patches applied before VM start.",
-            "default": []
-          },
-          "pull_policy": {
-            "oneOf": [
-              {
-                "$ref": "#/components/schemas/CloudPullPolicy",
-                "description": "Pull policy for OCI images."
-              }
-            ],
-            "default": "if_missing"
-          },
-          "resources": {
-            "oneOf": [
-              {
-                "$ref": "#/components/schemas/CloudSandboxResources",
-                "description": "CPU, memory, and user-facing disk resources."
-              }
-            ],
-            "default": {
-              "memory_mib": 512,
-              "vcpus": 1
+              "enabled": true,
+              "strict": false
             }
           },
           "rlimits": {
@@ -4172,6 +4732,264 @@
           "on_violation": {
             "$ref": "#/components/schemas/CloudViolationAction",
             "description": "Default action when a placeholder leaks to a disallowed host."
+          }
+        }
+      },
+      "CloudSnapshot": {
+        "oneOf": [
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/CloudSnapshotDetails",
+                "description": "Fields shared by every snapshot kind."
+              },
+              {
+                "type": "object",
+                "description": "A disk-only snapshot.",
+                "required": [
+                  "kind"
+                ],
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "disk"
+                    ]
+                  }
+                }
+              }
+            ],
+            "description": "A disk-only snapshot."
+          }
+        ],
+        "description": "Wire shape of a completed cloud snapshot."
+      },
+      "CloudSnapshotDetails": {
+        "type": "object",
+        "description": "Fields shared by every completed cloud snapshot kind.",
+        "required": [
+          "name",
+          "location",
+          "digest",
+          "size_bytes",
+          "manifest",
+          "labels",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Creation timestamp."
+          },
+          "digest": {
+            "type": "string",
+            "description": "Snapshot identity: the `sha256:` digest of the canonical descriptor."
+          },
+          "labels": {
+            "type": "object",
+            "description": "User-defined labels stored on the snapshot.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "location": {
+            "$ref": "#/components/schemas/CloudSnapshotLocation",
+            "description": "Where the snapshot artifact resides."
+          },
+          "manifest": {
+            "$ref": "#/components/schemas/SnapshotManifest",
+            "description": "Canonical snapshot descriptor."
+          },
+          "name": {
+            "type": "string",
+            "description": "Snapshot name."
+          },
+          "sandbox_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Identifier of the sandbox the snapshot was captured from, when known."
+          },
+          "size_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Stored payload size in bytes.",
+            "minimum": 0
+          }
+        }
+      },
+      "CloudSnapshotKind": {
+        "type": "string",
+        "description": "Kind of cloud snapshot artifact or capture operation.",
+        "enum": [
+          "disk"
+        ]
+      },
+      "CloudSnapshotLocation": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "Held in managed snapshot storage.",
+            "required": [
+              "id",
+              "type"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "description": "Identifier of the stored artifact."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "managed"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Stored in a directory on a mounted host volume.",
+            "required": [
+              "path",
+              "type"
+            ],
+            "properties": {
+              "path": {
+                "type": "string",
+                "description": "Artifact directory path on the host volume."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "host_volume"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "Public locator for a managed or host-volume cloud snapshot."
+      },
+      "CloudSnapshotOperation": {
+        "type": "object",
+        "description": "Wire shape of the asynchronous snapshot operation returned by snapshot\ncapture endpoints.",
+        "required": [
+          "id",
+          "kind",
+          "status",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "completed_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "Timestamp of the terminal status, when the operation has finished."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Creation timestamp."
+          },
+          "error": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/CloudErrorDetails",
+                "description": "Error details for a failed operation."
+              }
+            ]
+          },
+          "id": {
+            "type": "string",
+            "description": "Server-side operation identifier."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/CloudSnapshotKind",
+            "description": "Kind of snapshot being captured."
+          },
+          "result": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/CloudSnapshot",
+                "description": "The resulting snapshot, present once the operation succeeds."
+              }
+            ]
+          },
+          "status": {
+            "$ref": "#/components/schemas/CloudSnapshotOperationStatus",
+            "description": "Current operation status."
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Timestamp of the most recent status change."
+          }
+        }
+      },
+      "CloudSnapshotOperationStatus": {
+        "type": "string",
+        "description": "Status of an asynchronous cloud snapshot operation.",
+        "enum": [
+          "queued",
+          "in_progress",
+          "succeeded",
+          "failed"
+        ]
+      },
+      "CloudSnapshotSpec": {
+        "type": "object",
+        "description": "Settings shared by every cloud snapshot capture kind.",
+        "required": [
+          "sandbox_id",
+          "name"
+        ],
+        "properties": {
+          "dest_dir": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Directory on a mounted host volume to write the artifact into. `None`\nstores the snapshot in managed snapshot storage."
+          },
+          "force": {
+            "type": "boolean",
+            "description": "Replace an existing snapshot with the same name."
+          },
+          "labels": {
+            "type": "object",
+            "description": "User-defined labels stored on the snapshot.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "name": {
+            "type": "string",
+            "description": "Snapshot name."
+          },
+          "record_integrity": {
+            "type": "boolean",
+            "description": "Record payload integrity metadata during capture."
+          },
+          "sandbox_id": {
+            "type": "string",
+            "description": "Immutable identifier of the sandbox to capture."
           }
         }
       },
@@ -4408,13 +5226,13 @@
             }
           }
         ],
-        "description": "Cloud volume mount. Internal-tagged mirror of the domain [`VolumeMount`];\nthe transient `create` field is not carried on the wire."
+        "description": "Persistent volume mounted at a path inside the sandbox."
       },
       "CreateSandboxRequest": {
         "allOf": [
           {
             "$ref": "#/components/schemas/CloudCreateSandboxRequest",
-            "description": "The microsandbox sandbox specification - image, resources, runtime, env,\nmounts, network, lifecycle - flattened onto the request body."
+            "description": "The microsandbox create request - source, resources, runtime, env,\nmounts, network, and lifecycle - flattened onto the request body."
           },
           {
             "type": "object",
@@ -4433,7 +5251,7 @@
             }
           }
         ],
-        "description": "What the user sends in `POST /v1/sandboxes`.\n\nThe body *is* a microsandbox [`CloudSandboxSpec`] - carried verbatim through the\nshared [`CloudCreateSandboxRequest`] envelope (flattened onto the wire) so it\ncan never drift from the cross-repo contract - plus the cloud-only fields\nthat have no place in the shared spec: the globally-unique SSH `slug` and the\nregistry-credential selection. (Writable-disk size now lives in the spec's\n`resources.disk_size_mib`.)"
+        "description": "What the user sends in `POST /v1/sandboxes`.\n\nThe body carries the shared microsandbox [`CloudCreateSandboxRequest`] union.\nIts source-specific and common [`CloudSandboxSpec`] fields stay flat on the\nwire beside the cloud-only SSH `slug` and registry-credential selection."
       },
       "CreateVolumeRequest": {
         "type": "object",
@@ -4540,7 +5358,7 @@
             }
           }
         ],
-        "description": "Traffic destination filter for a [`Rule`].\n\nThe `Cidr`, `Domain`, and `DomainSuffix` leaves carry their canonical\nstring form (e.g. `\"10.0.0.0/8\"`, `\"example.com\"`); the local network\nengine re-parses and validates them into its richer internal types at\nload time."
+        "description": "Traffic destination matched by a network rule, such as an IP range or domain name."
       },
       "DestinationGroup": {
         "type": "string",
@@ -4796,31 +5614,29 @@
           }
         }
       },
-      "FileMoveRequest": {
+      "FileSnapshotState": {
         "type": "object",
+        "description": "Concrete file-backed snapshot state.",
         "required": [
-          "from",
-          "to"
+          "format",
+          "fstype",
+          "upper"
         ],
         "properties": {
-          "from": {
-            "type": "string"
+          "format": {
+            "$ref": "#/components/schemas/SnapshotFormat",
+            "description": "On-disk payload format."
           },
-          "to": {
-            "type": "string"
+          "fstype": {
+            "type": "string",
+            "description": "Filesystem type inside the payload."
+          },
+          "upper": {
+            "$ref": "#/components/schemas/UpperLayer",
+            "description": "File-backed upper-layer binding."
           }
-        }
-      },
-      "FilePathRequest": {
-        "type": "object",
-        "required": [
-          "path"
-        ],
-        "properties": {
-          "path": {
-            "type": "string"
-          }
-        }
+        },
+        "additionalProperties": false
       },
       "HandoffInit": {
         "type": "object",
@@ -4865,6 +5681,25 @@
           "private",
           "mirror"
         ]
+      },
+      "ImageRef": {
+        "type": "object",
+        "description": "Reference to the pinned OCI image used by the snapshot.",
+        "required": [
+          "ref",
+          "manifest_digest"
+        ],
+        "properties": {
+          "manifest_digest": {
+            "type": "string",
+            "description": "Pinned OCI manifest digest."
+          },
+          "ref": {
+            "type": "string",
+            "description": "Human-readable image reference."
+          }
+        },
+        "additionalProperties": false
       },
       "InterceptCaConfig": {
         "type": "object",
@@ -5082,6 +5917,26 @@
             "description": "Whether setuid and setgid privilege elevation from files on the mount is ignored.",
             "default": false
           },
+          "override_gid": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Guest gid presented for host files under this mount that carry no\nper-file stat override. See [`override_uid`](Self::override_uid); the two\nmust be set together.",
+            "default": null,
+            "minimum": 0
+          },
+          "override_uid": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Guest uid presented for host files under this mount that carry no\nper-file stat override.\n\nHost-created files (written outside the guest) have no override, so\nwithout this they surface with the runtime's fallback owner. When set,\nsuch files are presented as this uid instead. Must be set together with\n[`override_gid`](Self::override_gid). `None` keeps the fallback.",
+            "default": null,
+            "minimum": 0
+          },
           "readonly": {
             "type": "boolean",
             "description": "Whether the mount is read-only.\n\nGuest writes fail with the kernel's read-only filesystem behavior. Virtiofs-backed mounts also reject writes on the host-side filesystem server as defense in depth.",
@@ -5289,6 +6144,81 @@
           }
         }
       },
+      "PaginatedSnapshotCandidateResponse": {
+        "type": "object",
+        "description": "Paginated list of sandboxes eligible for snapshots.",
+        "required": [
+          "data",
+          "has_more"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SandboxResponse"
+            }
+          },
+          "has_more": {
+            "type": "boolean"
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "PaginatedSnapshotOperationResponse": {
+        "type": "object",
+        "description": "Paginated list of snapshot operations.",
+        "required": [
+          "data",
+          "has_more"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SnapshotOperationListItem"
+            }
+          },
+          "has_more": {
+            "type": "boolean"
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "PaginatedSnapshotResponse": {
+        "type": "object",
+        "description": "Paginated list of managed snapshots.",
+        "required": [
+          "data",
+          "has_more"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CloudSnapshot"
+            }
+          },
+          "has_more": {
+            "type": "boolean"
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
       "PoolUsage": {
         "type": "object",
         "description": "An org's monthly pool usage against its hard-cap pools - the shared home of\nthe exhaustion predicates, whether read per-org (embedded in `QuotaUsage`)\nor in the quota monitor's batched sweep (`OrgPoolUsage`).",
@@ -5413,6 +6343,7 @@
               "total_sandboxes",
               "concurrent_ephemeral_running",
               "concurrent_persistent_running",
+              "snapshot_storage_bytes",
               "is_suspended"
             ],
             "properties": {
@@ -5486,6 +6417,14 @@
                 "format": "int32",
                 "description": "Maximum total sandboxes the org can have."
               },
+              "max_snapshot_storage_gib": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int32",
+                "description": "Per-org managed-snapshot storage hard cap (GiB)."
+              },
               "max_total_storage_gib": {
                 "type": [
                   "integer",
@@ -5514,6 +6453,11 @@
                 "type": "boolean",
                 "description": "Snapshot of [`PoolUsage::pool_exhausted`] at read time, for API\nconsumers - true when this org's sandboxes are being stopped and starts\nrefused."
               },
+              "snapshot_storage_bytes": {
+                "type": "integer",
+                "format": "int64",
+                "description": "Exact summed compressed archive size (bytes) of the org's managed\nsnapshots - the value snapshot quota enforcement compares."
+              },
               "total_sandboxes": {
                 "type": "integer",
                 "format": "int64",
@@ -5522,7 +6466,7 @@
             }
           }
         ],
-        "description": "Resolved quota limits and current usage for an organization.\n\nLimits are resolved via COALESCE: per-org override > plan. Every limit is\n`Option`: `None` = unlimited (counts/budgets) or the system/node max\n(per-sandbox vcpu/memory/disk). There is no magic 0."
+        "description": "Resolved quota limits and current usage for an organization.\n\nLimits are resolved via COALESCE: per-org override > plan. Every limit is\n`Option`: `None` = unlimited (counts/budgets) or the platform default\n(per-sandbox vCPU/memory/disk). The API materializes resource defaults in\nresponses. There is no magic 0."
       },
       "RegistrySelection": {
         "oneOf": [
@@ -5939,7 +6883,6 @@
         "required": [
           "enabled",
           "ports",
-          "strict",
           "trust_host_cas"
         ],
         "properties": {
@@ -5995,9 +6938,6 @@
               "$ref": "#/components/schemas/SandboxSecretResponse"
             }
           },
-          "strict": {
-            "type": "boolean"
-          },
           "tls": {
             "oneOf": [
               {
@@ -6043,7 +6983,7 @@
       },
       "SandboxResponse": {
         "type": "object",
-        "description": "The API view of a [`Sandbox`]: an explicit allowlist of user-facing fields.\nInternal columns (registry selection, sync bookkeeping, resolved refs) never\nappear; the resolved spec surfaces only as the curated [`SandboxSpecResponse`].",
+        "description": "Sandbox details and resolved configuration.",
         "required": [
           "id",
           "org_id",
@@ -6271,7 +7211,7 @@
       },
       "SandboxSpecResponse": {
         "type": "object",
-        "description": "A curated, user-facing projection of a sandbox's resolved spec. Built from\n[`ResolvedSandboxSpec`]; omits every internal resolution (secret\nvalues/vault paths, volume ids).",
+        "description": "Resolved sandbox configuration. Secret values are omitted.",
         "required": [
           "resources",
           "runtime",
@@ -6465,6 +7405,198 @@
           "restricted"
         ]
       },
+      "SnapshotDestinationKind": {
+        "type": "string",
+        "description": "Type of storage used by a snapshot.",
+        "enum": [
+          "managed",
+          "host_volume"
+        ]
+      },
+      "SnapshotFormat": {
+        "type": "string",
+        "description": "On-disk format of a file-state upper layer.",
+        "enum": [
+          "raw",
+          "qcow2"
+        ]
+      },
+      "SnapshotManifest": {
+        "type": "object",
+        "description": "Final schema-1 snapshot descriptor.\n\nField order is identity-bearing. Do not reorder these fields.\n\nGenerated bindings and API schemas expose this type as `SnapshotManifest`.",
+        "required": [
+          "schema",
+          "artifact",
+          "scope",
+          "created_at",
+          "image",
+          "state",
+          "labels",
+          "extensions",
+          "requires"
+        ],
+        "properties": {
+          "artifact": {
+            "type": "string",
+            "description": "Artifact kind. Exactly [`SNAPSHOT_ARTIFACT_KIND`]."
+          },
+          "created_at": {
+            "type": "string",
+            "description": "Normalized RFC 3339 creation timestamp."
+          },
+          "extensions": {
+            "type": "object",
+            "description": "Namespaced additive extension values."
+          },
+          "image": {
+            "$ref": "#/components/schemas/ImageRef",
+            "description": "Pinned base image."
+          },
+          "labels": {
+            "type": "object",
+            "description": "User-supplied labels, sorted by key in canonical form.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "parent": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Exact snapshot identity of the logical lineage parent."
+          },
+          "requires": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Sorted unique must-understand extension keys."
+          },
+          "schema": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Schema version. Exactly [`SCHEMA_VERSION`].",
+            "minimum": 0
+          },
+          "scope": {
+            "$ref": "#/components/schemas/SnapshotScope",
+            "description": "Snapshot payload scope."
+          },
+          "source_sandbox": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Informational source-sandbox name."
+          },
+          "state": {
+            "$ref": "#/components/schemas/SnapshotState",
+            "description": "Closed file/checkpoint state variant."
+          }
+        },
+        "additionalProperties": false
+      },
+      "SnapshotOperationListItem": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CloudSnapshotOperation",
+            "description": "Public operation state and result."
+          },
+          {
+            "type": "object",
+            "required": [
+              "snapshot_name",
+              "destination_kind",
+              "sandbox_name"
+            ],
+            "properties": {
+              "destination_kind": {
+                "$ref": "#/components/schemas/SnapshotDestinationKind",
+                "description": "Storage destination selected for the snapshot."
+              },
+              "sandbox_id": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Source sandbox identifier, absent after sandbox deletion."
+              },
+              "sandbox_name": {
+                "type": "string",
+                "description": "Source sandbox name retained for operation history."
+              },
+              "snapshot_name": {
+                "type": "string",
+                "description": "Snapshot name requested by the user."
+              }
+            }
+          }
+        ],
+        "description": "An explicit snapshot operation with enough request context to display it."
+      },
+      "SnapshotScope": {
+        "type": "string",
+        "description": "Snapshot payload scope.",
+        "enum": [
+          "disk",
+          "resumable"
+        ]
+      },
+      "SnapshotState": {
+        "oneOf": [
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/FileSnapshotState",
+                "description": "Concrete file-backed disk state."
+              },
+              {
+                "type": "object",
+                "required": [
+                  "kind"
+                ],
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "file"
+                    ]
+                  }
+                }
+              }
+            ],
+            "description": "Concrete file-backed disk state."
+          },
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/CheckpointSnapshotState",
+                "description": "Manifest-backed disk or resumable state."
+              },
+              {
+                "type": "object",
+                "required": [
+                  "kind"
+                ],
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "checkpoint"
+                    ]
+                  }
+                }
+              }
+            ],
+            "description": "Manifest-backed disk or resumable state."
+          }
+        ],
+        "description": "Closed snapshot state family."
+      },
       "StatVirtualization": {
         "type": "string",
         "description": "Stat virtualization policy for a virtiofs-backed volume mount.\n\nSerializes/deserializes as the lowercase variant name (`\"strict\"`, `\"relaxed\"`, `\"off\"`) so persisted JSON aligns with the CLI grammar (`stat-virt=strict|relaxed|off`) and the NAPI string contract.",
@@ -6476,7 +7608,7 @@
       },
       "StorageBreakdown": {
         "type": "object",
-        "description": "Per-volume durable-storage usage breakdown for an org over a window:\nper-(volume, day) rows plus a directory of the volumes they reference. The\nstorage sibling of [`UsageBreakdown`](crate::UsageBreakdown). Deleted volumes'\naccruals persist, so `rows` may reference `volume_id`s absent from `volumes`;\nthe client labels those as deleted.",
+        "description": "Per-volume durable-storage usage breakdown for an org over a window:\nper-(volume, day) rows plus a directory of the volumes they reference. The\nstorage sibling of [`UsageBreakdown`](crate::UsageBreakdown). Deleted volumes'\nintervals persist, so `rows` may reference `volume_id`s absent from `volumes`;\nthe client labels those as deleted.",
         "required": [
           "rows",
           "volumes"
@@ -6498,7 +7630,7 @@
       },
       "StorageDailyUsage": {
         "type": "object",
-        "description": "Durable-storage usage for one volume on one UTC day, computed on read from\n`storage_accruals`. `mib_seconds` is Σ(used_mib × overlap_seconds) over the\nday; display converts to GiB-hours or an average GiB. Sum over days for a\nvolume's period total; sum over volumes for the daily series. The storage\nsibling of [`SandboxDailyUsage`](crate::SandboxDailyUsage).",
+        "description": "Durable-storage usage for one volume on one UTC day, computed on read from\n`storage_metering_intervals`. `mib_seconds` is Σ(used_mib × overlap_seconds)\nover the day; display converts to GiB-hours or an average GiB. Sum over days\nfor a volume's period total; sum over volumes for the daily series. The\nstorage sibling of [`SandboxDailyUsage`](crate::SandboxDailyUsage).",
         "required": [
           "volume_id",
           "day",
@@ -6632,6 +7764,117 @@
           }
         }
       },
+      "UpperIntegrity": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "Ordinary SHA-256 retained only for exact legacy compatibility and\narchive metadata. New file snapshots never emit this variant.",
+            "required": [
+              "digest",
+              "algorithm"
+            ],
+            "properties": {
+              "algorithm": {
+                "type": "string",
+                "enum": [
+                  "sha256"
+                ]
+              },
+              "digest": {
+                "type": "string",
+                "description": "Algorithm output in qualified digest form."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Released logical-byte sparse SHA-256 representation.",
+            "required": [
+              "digest",
+              "algorithm"
+            ],
+            "properties": {
+              "algorithm": {
+                "type": "string",
+                "enum": [
+                  "msb-sparse-sha256-v1"
+                ]
+              },
+              "digest": {
+                "type": "string",
+                "description": "Algorithm output in qualified digest form."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Current sparse-aware fixed-leaf BLAKE3 Merkle representation.",
+            "required": [
+              "root",
+              "logical_size",
+              "leaf_size",
+              "algorithm"
+            ],
+            "properties": {
+              "algorithm": {
+                "type": "string",
+                "enum": [
+                  "msb-file-merkle-blake3-v1"
+                ]
+              },
+              "leaf_size": {
+                "type": "integer",
+                "format": "int32",
+                "description": "Fixed leaf size. Exactly [`FILE_MERKLE_BLAKE3_LEAF_SIZE`].",
+                "minimum": 0
+              },
+              "logical_size": {
+                "type": "integer",
+                "format": "int64",
+                "description": "Exact logical file length bound into the final root.",
+                "minimum": 0
+              },
+              "root": {
+                "type": "string",
+                "description": "Domain-separated Merkle root in qualified digest form."
+              }
+            }
+          }
+        ],
+        "description": "Content integrity descriptor for a file-state upper layer."
+      },
+      "UpperLayer": {
+        "type": "object",
+        "description": "Captured file-state upper-layer metadata.",
+        "required": [
+          "file",
+          "size_bytes"
+        ],
+        "properties": {
+          "file": {
+            "type": "string",
+            "description": "One normal filename relative to the artifact directory."
+          },
+          "integrity": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/UpperIntegrity",
+                "description": "Optional semantic payload integrity. The field itself is required so\nreaders distinguish an intentional `null` from a malformed descriptor."
+              }
+            ]
+          },
+          "size_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Apparent file size, including sparse holes.",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
       "UsageBreakdown": {
         "type": "object",
         "description": "Compute-on-read usage breakdown for an org over a window: per-(sandbox, day)\nquantity rows plus a directory of the sandboxes they reference. The frontend\ngroups `rows` by sandbox (for the per-sandbox table) or by day (for the\nchart) and labels them via `sandboxes`.",
@@ -6741,13 +7984,21 @@
             "format": "int64",
             "description": "End-of-period spend projection: `total_cents` linearly extrapolated over\nthe billing period. Equals `total_cents` when the period can't be\nextrapolated (no future end, or zero elapsed). Never below `total_cents`."
           },
+          "snapshot_storage_gib": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Current managed-snapshot storage (GiB), or `None` when never metered."
+          },
           "storage_gib": {
             "type": [
               "number",
               "null"
             ],
             "format": "double",
-            "description": "Current durable-storage usage (GiB) for the org, from the latest hourly\nreading. `None` when storage hasn't been sampled (juicefs-ops disabled or\nno volumes). Drives the storage allowance bar; cost is in `line_items`."
+            "description": "Current volume-storage usage (GiB), or `None` when never metered."
           },
           "total_cents": {
             "type": "integer",
@@ -6757,7 +8008,7 @@
       },
       "VolumeIdentity": {
         "type": "object",
-        "description": "Minimal volume display info - the directory that turns the `volume_id`s in a\n[`StorageBreakdown`](crate::StorageBreakdown)'s rows into human labels. A\ndeleted volume's accruals outlive its row, so a breakdown may reference ids\nabsent from this directory; the client labels those as deleted.",
+        "description": "Minimal volume display info - the directory that turns the `volume_id`s in a\n[`StorageBreakdown`](crate::StorageBreakdown)'s rows into human labels. A\ndeleted volume's intervals outlive its row, so a breakdown may reference ids\nabsent from this directory; the client labels those as deleted.",
         "required": [
           "id"
         ],
@@ -6777,7 +8028,7 @@
       },
       "VolumeKind": {
         "type": "string",
-        "description": "What kind of volume this is - its storage source / role. The host volume is\nthe org's single shared \"host disk\"; managed volumes are user-created, named,\nplatform-provisioned (JuiceFS over our object store). (A future `External`\nvariant - bring-your-own S3/GCS - is intentionally out of scope for now.)",
+        "description": "Volume role: the organization's shared host volume or a named managed volume.",
         "enum": [
           "host",
           "managed"
@@ -6818,7 +8069,7 @@
       },
       "VolumeResponse": {
         "type": "object",
-        "description": "Volume metadata returned in list/create responses. The GCS storage path is\nderived (not stored) and never exposed.",
+        "description": "Volume details and usage.",
         "required": [
           "id",
           "kind",

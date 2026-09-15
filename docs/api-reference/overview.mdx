@@ -25,21 +25,17 @@ The sidebar separates endpoints by who the request represents:
 API keys and personal tokens are both sent as bearer tokens:
 
 ```bash
-MSB_API_URL=https://api.microsandbox.dev
-curl "$MSB_API_URL/v1/sandboxes" \
+curl https://api.microsandbox.dev/v1/sandboxes \
   -H "Authorization: Bearer $MSB_API_KEY"
 ```
 
 API keys are created in the [dashboard](https://dashboard.microsandbox.dev/access/api-keys). API-key paths infer the organization from the key. Personal-token paths include the organization slug when the request needs an organization.
 
-## Base URLs
+## Base URL
 
-| Environment | URL |
-| --- | --- |
-| Production | `https://api.microsandbox.dev` |
-| Staging | `https://api.msbx.fyi` |
-
-Each endpoint page uses the URL for the current docs environment.
+```text
+https://api.microsandbox.dev
+```
 
 ## Errors
 

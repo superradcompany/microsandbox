@@ -278,7 +278,7 @@ Use a fixed policy only when representative measurements justify a different per
 
 `pool_mib` is a live pressure budget, not eagerly allocated RAM. Every eligible writable disk in the same `MSB_HOME` receives a weighted max-min fair share: disks with a smaller configured maximum keep that smaller value, and the remaining pool is divided equally across the rest. Creating another sandbox never fails merely because this pool is full. Existing VMMs observe membership changes within 250 ms; if a disk already owns more dirty data than its new share, libkrun retires accounted ranges and pauses later writes until it converges below the target. A guest write already reserved before the target changed is allowed to complete safely. `fixed` and an explicitly pooled `auto` policy are unsupported on other hosts.
 
-Hardware CRC32C, the guest kernel preemption model, x2APIC, APICv/AVIC capability, vCPU affinity mechanics, and the pure-Rust ext4 writer are implementation or capability details rather than user policy, so they intentionally have no global config keys. The [performance guide](/sandboxes/optimization#automatic) explains how those automatic layers interact with the configurable policy.
+See the [performance guide](/sandboxes/optimization) for choosing and measuring runtime settings.
 
 ## `registries`
 

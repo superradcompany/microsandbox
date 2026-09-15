@@ -10,7 +10,7 @@ prunes unreferenced schemas.
 Usage:
   scripts/sync-docs-openapi.py            # rewrite docs/api-reference/openapi.json
   scripts/sync-docs-openapi.py --check    # exit 1 if the checked-in spec is stale
-  scripts/sync-docs-openapi.py --environment staging --audience all
+  scripts/sync-docs-openapi.py --environment staging --audience all  # build/docs-openapi/
   scripts/sync-docs-openapi.py --source /path/to/openapi.json
 """
 
@@ -344,6 +344,13 @@ def curate(spec: dict, *, server_url: str, audience_name: str) -> dict:
             key = (method.upper(), path)
             if operation_audience(op) != audience_name:
                 continue
+            if not op.get("responses"):
+                print(
+                    f"warning: omitting {method.upper()} {path}: "
+                    "upstream has no response documentation",
+                    file=sys.stderr,
+                )
+                continue
             op = copy.deepcopy(op)
             if key in SUMMARY_OVERRIDES:
                 op["summary"] = SUMMARY_OVERRIDES[key]
@@ -469,7 +476,12 @@ def validate_partition(spec: dict) -> None:
 
 def output_path(environment: str, audience: str) -> Path:
     filename = AUDIENCES[audience]["outputs"][environment]
-    return REPO / "docs" / "api-reference" / filename
+    directory = (
+        REPO / "docs" / "api-reference"
+        if environment == "production"
+        else REPO / "build" / "docs-openapi"
+    )
+    return directory / filename
 
 
 def render(spec: dict, *, environment: str, audience: str) -> str:

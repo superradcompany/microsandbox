@@ -242,16 +242,10 @@ the loss through `collector.collections.dropped` and continues running.
 
 ### Scaling
 
-The registry remains about 512 KiB regardless of sandbox count. Buffered
-collections account for most collector memory at scale.
-
-| `--max-buffered` | Worst-case heap per exporter at 1,000 sandboxes |
-| --- | --- |
-| `60` (default) | about 21 MB |
-| `20` | about 7 MB |
-
-Worst-case heap is `--max-buffered × active sandboxes × about 350 B` and occurs
-only when a slow backend fills the buffer.
+Collector memory grows with the number of active sandboxes and buffered
+collections. Lower `--max-buffered` to reduce memory use during backend
+outages, at the cost of dropping samples sooner. Monitor
+`collector.collections.dropped` when choosing a buffer size.
 
 ### Shutdown
 

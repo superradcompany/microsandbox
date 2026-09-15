@@ -395,12 +395,6 @@ A copy fallback is correct but slower to provision.
 Read [Linux troubleshooting](/troubleshooting/linux#interrupt-acceleration)
 before changing a KVM module because the change affects every VM on the host.
 
-## Automatic
-
-microsandbox automatically selects compatible filesystem, guest-kernel,
-interrupt, and vCPU-affinity optimizations. These implementation details do
-not have user-facing settings.
-
 ## Measure
 
 - Cache or materialize the same image before each test unless cold-start cost
