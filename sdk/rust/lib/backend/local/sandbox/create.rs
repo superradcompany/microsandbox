@@ -2283,10 +2283,27 @@ mod tests {
         }
 
         drop(runtime_owner);
-        local
-            .rollback_failed_startup(write_db, sandbox_id, &config.spec.name, &created)
-            .await
-            .unwrap();
+        // A concurrent test's fork may still hold a CLOEXEC copy until exec. A pending
+        // cleanup is correct in that interval; only retry that explicit ownership refusal.
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                match local
+                    .rollback_failed_startup(write_db, sandbox_id, &config.spec.name, &created)
+                    .await
+                {
+                    Ok(()) => break,
+                    Err(error) => {
+                        assert!(
+                            error.to_string().contains("startup cleanup pending"),
+                            "{error}"
+                        );
+                        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("runtime ownership was not released before rollback");
         if with_created_volume {
             assert!(!volume_path.exists());
             assert!(

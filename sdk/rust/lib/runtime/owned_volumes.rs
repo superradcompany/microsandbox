@@ -488,8 +488,15 @@ mod tests {
                 .is_none()
         );
         drop(owner);
-        // A released resource succeeds even with zero remaining wait budget: no fixed sleep.
-        wait_for_disk_release(directory.path(), &mounts, Duration::ZERO)
+        // Parallel Unix tests may temporarily inherit the owner's CLOEXEC descriptors
+        // between fork and exec. Dropping our copy alone does not fence those children.
+        wait_for_disk_release(directory.path(), &mounts, Duration::from_secs(5))
+            .await
+            .unwrap();
+        // Test zero-budget admission on markers that have never been locked: even a
+        // successful probe of the first fixture could itself be inherited by a fork.
+        let (unowned_directory, unowned_mounts) = disk_marker_fixture();
+        wait_for_disk_release(unowned_directory.path(), &unowned_mounts, Duration::ZERO)
             .await
             .unwrap();
     }

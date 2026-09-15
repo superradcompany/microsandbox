@@ -3579,9 +3579,10 @@ mod tests {
             Some(microsandbox_runtime::vm::STARTUP_FD),
             Some(microsandbox_runtime::vm::LIFECYCLE_LOCK_FD),
         ] {
-            let selected =
-                high_fd(super::lock_disk_image_unix(&selected_path, false, None).unwrap());
-            let unrelated = super::lock_disk_image_unix(&unrelated_path, false, None).unwrap();
+            // The previous iteration's last test-owned copy may itself have been forked
+            // before being dropped. Fence that transient ownership at reuse as well.
+            let selected = high_fd(wait_for_unix_test_disk_release(&selected_path).await);
+            let unrelated = wait_for_unix_test_disk_release(&unrelated_path).await;
             let config = high_fd(tempfile::tempfile().unwrap());
             let selected_fd = selected.as_raw_fd();
             let config_fd = config.as_raw_fd();
@@ -3634,12 +3635,15 @@ mod tests {
             // The selected child must retain its lock after the creator lets go, even when
             // its original descriptor was overwritten by a fixed runtime handoff mapping.
             assert!(super::lock_disk_image_unix(&selected_path, false, None).is_err());
-            let available = super::lock_disk_image_unix(&unrelated_path, false, None)
-                .expect("child inherited an unrelated launch's disk lock");
+            // Other parallel tests can still be between fork and exec with transient copies
+            // of our CLOEXEC descriptors. Keep this child alive while waiting: a real leak
+            // into this execed child must time out, not be hidden by killing it first.
+            let available = wait_for_unix_test_disk_release(&unrelated_path).await;
+            assert!(child.try_wait().unwrap().is_none());
+            assert!(super::lock_disk_image_unix(&selected_path, false, None).is_err());
             drop(available);
             child.kill().await.unwrap();
-            let released = super::lock_disk_image_unix(&selected_path, false, None)
-                .expect("selected disk stayed locked after its owner exited");
+            let released = wait_for_unix_test_disk_release(&selected_path).await;
             drop(released);
         }
     }
@@ -6011,8 +6015,29 @@ mod tests {
         }
     }
 
-    #[test]
-    fn oci_upper_lock_excludes_concurrent_sandbox_names() {
+    async fn wait_for_test_oci_disk_mounts(config: &SandboxConfig) -> Vec<std::fs::File> {
+        // Keep exercising the complete collection/acquisition path, but allow unrelated
+        // parallel Unix children to exec and close transient copies of the old locks.
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                match super::lock_disk_mounts(config, &HashMap::new(), Path::new("unused")) {
+                    Ok(locks) => return locks,
+                    Err(error) => {
+                        assert!(
+                            error.to_string().contains("incompatible disk mode"),
+                            "unexpected disk-lock error: {error}"
+                        );
+                        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("OCI upper locks were not released")
+    }
+
+    #[tokio::test]
+    async fn oci_upper_lock_excludes_concurrent_sandbox_names() {
         let dir = tempfile::tempdir().unwrap();
         let disk = dir.path().join("upper.ext4");
         std::fs::write(&disk, b"disk").unwrap();
@@ -6051,16 +6076,11 @@ mod tests {
             1
         );
         let config = oci_upper_lock_config("third", disk);
-        assert_eq!(
-            super::lock_disk_mounts(&config, &HashMap::new(), Path::new("unused"))
-                .unwrap()
-                .len(),
-            1
-        );
+        assert_eq!(wait_for_test_oci_disk_mounts(&config).await.len(), 1);
     }
 
-    #[test]
-    fn oci_upper_lock_rejects_duplicate_mount_and_releases_partial_acquisition() {
+    #[tokio::test]
+    async fn oci_upper_lock_rejects_duplicate_mount_and_releases_partial_acquisition() {
         let dir = tempfile::tempdir().unwrap();
         let disk = dir.path().join("upper.ext4");
         std::fs::write(&disk, b"disk").unwrap();
@@ -6080,16 +6100,11 @@ mod tests {
         assert!(error.to_string().contains("more than once per sandbox"));
         // Failure after acquiring the upper must not leave it reserved for a failed launch.
         config.spec.mounts.clear();
-        assert_eq!(
-            super::lock_disk_mounts(&config, &HashMap::new(), Path::new("unused"))
-                .unwrap()
-                .len(),
-            1
-        );
+        assert_eq!(wait_for_test_oci_disk_mounts(&config).await.len(), 1);
     }
 
-    #[test]
-    fn oci_upper_lock_excludes_readonly_attachment_and_leaves_plain_oci_unlocked() {
+    #[tokio::test]
+    async fn oci_upper_lock_excludes_readonly_attachment_and_leaves_plain_oci_unlocked() {
         let dir = tempfile::tempdir().unwrap();
         let disk = dir.path().join("upper.ext4");
         std::fs::write(&disk, b"disk").unwrap();
@@ -6122,12 +6137,7 @@ mod tests {
             super::lock_disk_mounts(&reader, &HashMap::new(), Path::new("unused")).unwrap_err();
         assert!(error.to_string().contains("incompatible disk mode"));
         drop(locks);
-        assert_eq!(
-            super::lock_disk_mounts(&reader, &HashMap::new(), Path::new("unused"))
-                .unwrap()
-                .len(),
-            1
-        );
+        assert_eq!(wait_for_test_oci_disk_mounts(&reader).await.len(), 1);
     }
 
     #[test]
@@ -6284,6 +6294,14 @@ mod tests {
         std::fs::remove_file(&base).unwrap();
         assert!(super::lock_disk_mounts(&config, &HashMap::new(), &sandbox).is_err());
         drop(locks);
+        // A parallel fork can temporarily retain the marker even though this test dropped
+        // its last copy. Verify release of that same marker without racing its next opener.
+        #[cfg(unix)]
+        let _released = wait_for_unix_test_disk_release(
+            &crate::runtime::owned_volumes::disk_lock_path(&sandbox, "/data").unwrap(),
+        )
+        .await;
+        #[cfg(windows)]
         assert!(super::lock_disk_mounts(&config, &HashMap::new(), &sandbox).is_ok());
     }
 

@@ -362,6 +362,25 @@ mod tests {
         fixture.assert_preserved();
     }
 
+    async fn finish_test_owned_failure(cleanup: &mut CreationCleanup) -> crate::MicrosandboxError {
+        // Cleanup drops its lifecycle probe before rollback reacquires ownership.
+        // Parallel fork/exec tests can transiently retain that probe, correctly
+        // leaving cleanup pending. Retry only that refusal, with the guard still armed.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let error = cleanup
+                    .finish_owned_failure(crate::MicrosandboxError::Custom("startup failed".into()))
+                    .await;
+                if !error.to_string().contains("startup cleanup pending") {
+                    break error;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("runtime ownership was not released before cleanup")
+    }
+
     #[tokio::test]
     async fn owned_cleanup_removes_storage_when_mixed_named_rollback_deletes_row() {
         // Exercise both ordinary startup rollback and cancellation cleanup doing the rollback.
@@ -390,9 +409,7 @@ mod tests {
                     .await
                     .unwrap();
             }
-            let error = cleanup
-                .finish_owned_failure(crate::MicrosandboxError::Custom("startup failed".into()))
-                .await;
+            let error = finish_test_owned_failure(&mut cleanup).await;
             assert_eq!(error.to_string(), "startup failed");
             assert!(!fixture.sandbox_dir.exists());
             assert!(!fixture.backend.volume_path("created").exists());
@@ -437,9 +454,7 @@ mod tests {
                     "CREATE TRIGGER retain_sandbox BEFORE DELETE ON sandbox BEGIN SELECT RAISE(ABORT, 'retained'); END;",
                 ).await.unwrap();
             }
-            let error = cleanup
-                .finish_owned_failure(crate::MicrosandboxError::Custom("startup failed".into()))
-                .await;
+            let error = finish_test_owned_failure(&mut cleanup).await;
             assert_eq!(error.to_string(), "startup failed");
             let row = sandbox_entity::Entity::find_by_id(id)
                 .one(pools.write())
