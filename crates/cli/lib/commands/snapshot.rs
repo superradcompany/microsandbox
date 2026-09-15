@@ -45,6 +45,14 @@ pub enum SnapshotCommands {
 
     /// Load a snapshot archive into the snapshots directory.
     Load(SnapshotLoadArgs),
+
+    /// Compact an existing snapshot into a new one, reclaiming host disk
+    /// space for blocks the guest filesystem has already freed.
+    ///
+    /// Never mutates the source snapshot: writes a new artifact under
+    /// `new-name`, leaving the source and anything referencing its digest
+    /// untouched.
+    Compact(SnapshotCompactArgs),
 }
 
 /// Arguments for `msb snapshot create`.
@@ -82,6 +90,15 @@ pub struct SnapshotCreateArgs {
     /// misleading disk-only artifact.
     #[arg(long)]
     pub resumable: bool,
+
+    /// Reclaim host disk space for blocks the guest filesystem has already
+    /// freed, before recording the artifact.
+    ///
+    /// Never changes guest-visible content and never fails snapshot
+    /// creation if compaction itself fails — it's a size optimization on
+    /// top of a snapshot that's created either way.
+    #[arg(long)]
+    pub compact: bool,
 
     /// Suppress output.
     #[arg(short, long)]
@@ -175,6 +192,34 @@ pub struct SnapshotLoadArgs {
     pub dest: Option<std::path::PathBuf>,
 }
 
+/// Arguments for `msb snapshot compact`.
+#[derive(Debug, Args)]
+pub struct SnapshotCompactArgs {
+    /// Snapshot to compact (path, name, or digest).
+    pub source: String,
+
+    /// Name for the new, compacted snapshot.
+    pub new_name: String,
+
+    /// Parent directory to create the new artifact in, instead of the
+    /// default snapshots directory.
+    #[arg(long = "dest-dir", value_name = "DIR")]
+    pub dest_dir: Option<std::path::PathBuf>,
+
+    /// Add a `key=value` label to the new snapshot. May be repeated. Not
+    /// inherited from the source.
+    #[arg(long = "label", value_name = "K=V")]
+    pub labels: Vec<String>,
+
+    /// Overwrite an existing artifact at the destination.
+    #[arg(short = 'f', long)]
+    pub force: bool,
+
+    /// Suppress output.
+    #[arg(short, long)]
+    pub quiet: bool,
+}
+
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
@@ -190,6 +235,7 @@ pub async fn run(args: SnapshotArgs) -> anyhow::Result<()> {
         SnapshotCommands::Reindex(args) => reindex(args).await,
         SnapshotCommands::Save(args) => save(args).await,
         SnapshotCommands::Load(args) => load(args).await,
+        SnapshotCommands::Compact(args) => compact(args).await,
     }
 }
 
@@ -213,6 +259,9 @@ async fn create(args: SnapshotCreateArgs) -> anyhow::Result<()> {
     if args.resumable {
         builder = builder.resumable();
     }
+    if args.compact {
+        builder = builder.compact();
+    }
 
     let spinner = if args.quiet {
         ui::Spinner::quiet()
@@ -226,6 +275,9 @@ async fn create(args: SnapshotCreateArgs) -> anyhow::Result<()> {
             if !args.quiet {
                 println!("{}", snap.digest());
                 println!("{}", snap.path().display());
+                if args.compact {
+                    print_compaction_summary(&snap);
+                }
             }
             Ok(())
         }
@@ -234,6 +286,24 @@ async fn create(args: SnapshotCreateArgs) -> anyhow::Result<()> {
             Err(e.into())
         }
     }
+}
+
+/// Best-effort "how much did compaction actually help" line: compares the upper file's apparent
+/// size against what the host has allocated for it. Purely informational — a stat failure here
+/// must never affect the command's success.
+fn print_compaction_summary(snap: &Snapshot) {
+    let Some(state) = snap.state().as_file() else {
+        return;
+    };
+    let upper_path = snap.path().join(&state.upper.file);
+    let Ok(allocated) = microsandbox_utils::extent::allocated_file_bytes(&upper_path) else {
+        return;
+    };
+    println!(
+        "Compacted: {} allocated of {} apparent",
+        format_size(allocated),
+        format_size(state.upper.size_bytes)
+    );
 }
 
 async fn list(args: SnapshotListArgs) -> anyhow::Result<()> {
@@ -431,6 +501,43 @@ async fn load(args: SnapshotLoadArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
+async fn compact(args: SnapshotCompactArgs) -> anyhow::Result<()> {
+    let mut labels = Vec::new();
+    for label in &args.labels {
+        let (k, v) = label
+            .split_once('=')
+            .ok_or_else(|| anyhow::anyhow!("invalid --label '{label}': expected K=V"))?;
+        labels.push((k.to_string(), v.to_string()));
+    }
+    let opts = microsandbox::snapshot::CompactOpts {
+        dest_dir: args.dest_dir.clone(),
+        labels,
+        force: args.force,
+    };
+
+    let spinner = if args.quiet {
+        ui::Spinner::quiet()
+    } else {
+        ui::Spinner::start("Compacting", &args.source)
+    };
+
+    match Snapshot::compact(&args.source, &args.new_name, opts).await {
+        Ok(snap) => {
+            spinner.finish_success("Compacted");
+            if !args.quiet {
+                println!("{}", snap.digest());
+                println!("{}", snap.path().display());
+                print_compaction_summary(&snap);
+            }
+            Ok(())
+        }
+        Err(e) => {
+            spinner.finish_clear();
+            Err(e.into())
+        }
+    }
+}
+
 //--------------------------------------------------------------------------------------------------
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
@@ -520,6 +627,26 @@ mod tests {
     }
 
     #[test]
+    fn create_parses_compact_flag() {
+        let args = parse_snapshot_args(&["create", "clean", "--from", "box", "--compact"]);
+        let SnapshotCommands::Create(args) = args.command else {
+            panic!("expected create command");
+        };
+        assert_eq!(args.name, "clean");
+        assert_eq!(args.from, "box");
+        assert!(args.compact);
+    }
+
+    #[test]
+    fn create_defaults_compact_to_false() {
+        let args = parse_snapshot_args(&["create", "clean", "--from", "box"]);
+        let SnapshotCommands::Create(args) = args.command else {
+            panic!("expected create command");
+        };
+        assert!(!args.compact);
+    }
+
+    #[test]
     fn create_parses_dest_dir() {
         let args =
             parse_snapshot_args(&["create", "clean", "--from", "box", "--dest-dir", "/mnt/big"]);
@@ -566,5 +693,40 @@ mod tests {
             args.dest.as_deref(),
             Some(std::path::Path::new("/tmp/snaps"))
         );
+    }
+
+    #[test]
+    fn compact_parses_source_and_new_name() {
+        let parsed = parse_snapshot_args(&["compact", "bloated", "slim"]);
+        let SnapshotCommands::Compact(args) = parsed.command else {
+            panic!("expected compact command");
+        };
+        assert_eq!(args.source, "bloated");
+        assert_eq!(args.new_name, "slim");
+        assert!(!args.force);
+        assert!(args.labels.is_empty());
+    }
+
+    #[test]
+    fn compact_parses_dest_dir_label_and_force() {
+        let parsed = parse_snapshot_args(&[
+            "compact",
+            "bloated",
+            "slim",
+            "--dest-dir",
+            "/mnt/big",
+            "--label",
+            "stage=deps",
+            "--force",
+        ]);
+        let SnapshotCommands::Compact(args) = parsed.command else {
+            panic!("expected compact command");
+        };
+        assert_eq!(
+            args.dest_dir.as_deref(),
+            Some(std::path::Path::new("/mnt/big"))
+        );
+        assert_eq!(args.labels, vec!["stage=deps".to_string()]);
+        assert!(args.force);
     }
 }

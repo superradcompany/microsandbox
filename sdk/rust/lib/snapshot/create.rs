@@ -34,6 +34,7 @@ pub(super) async fn create_snapshot(
         force,
         record_integrity,
         resumable,
+        compact,
     } = config;
 
     if resumable {
@@ -123,6 +124,7 @@ pub(super) async fn create_snapshot(
         manifest_digest_str,
         &source_sandbox,
         record_integrity,
+        compact,
     )
     .await;
     let (digest, manifest) = match built {
@@ -151,17 +153,18 @@ pub(super) async fn create_snapshot(
     Ok(Snapshot::from_parts(dest_dir, digest, manifest))
 }
 
-/// Build the artifact contents (upper copy, integrity, descriptor) into
-/// `dir`. Pure staging: the caller promotes or discards the directory.
-async fn build_artifact(
+/// Copy `src_upper` into `dir` (sparse-aware), optionally compact the copy, and optionally
+/// record its content integrity. Shared by sandbox-sourced creation
+/// ([`build_artifact`]) and snapshot-sourced compaction
+/// ([`super::compact::build_compacted_artifact`]) — the only difference between those two
+/// callers is what they copy from and what manifest they build around the result.
+pub(super) async fn prepare_upper(
     dir: &std::path::Path,
     src_upper: &std::path::Path,
-    labels: Vec<(String, String)>,
-    image_reference: String,
-    manifest_digest_str: String,
-    source_sandbox: &str,
     record_integrity: bool,
-) -> MicrosandboxResult<(String, Manifest)> {
+    compact: bool,
+) -> MicrosandboxResult<(std::path::PathBuf, u64, Option<microsandbox_image::snapshot::UpperIntegrity>)>
+{
     // Copy the upper layer (sparse-aware, see microsandbox_utils::copy).
     let dst_upper = dir.join(DEFAULT_UPPER_FILE);
     let src_upper_clone = src_upper.to_path_buf();
@@ -184,6 +187,43 @@ async fn build_artifact(
     .await
     .map_err(|e| MicrosandboxError::Custom(format!("snapshot upper fsync task: {e}")))??;
 
+    // Reclaim host disk space for blocks the guest ext4 filesystem has
+    // already freed. Runs on the private staged copy, before integrity is
+    // computed, so a sparse-aware Merkle pass sees the punched holes as
+    // holes. Never fails snapshot creation: this is a size optimization,
+    // not a correctness requirement, so a compaction error is logged and
+    // otherwise ignored.
+    if compact {
+        let dst_upper_for_compact = dst_upper.clone();
+        let compacted = tokio::task::spawn_blocking(move || {
+            microsandbox_image::ext4::compact_image(&dst_upper_for_compact)
+        })
+        .await
+        .map_err(|e| MicrosandboxError::Custom(format!("snapshot compact task: {e}")));
+        match compacted {
+            Ok(Ok(outcome)) => {
+                if outcome.skipped_dirty {
+                    tracing::debug!(
+                        snapshot = %dir.display(),
+                        "skipped --compact: upper needs journal recovery"
+                    );
+                } else {
+                    tracing::debug!(
+                        snapshot = %dir.display(),
+                        bytes_reclaimed = outcome.bytes_reclaimed,
+                        "compacted snapshot upper"
+                    );
+                }
+            }
+            Ok(Err(e)) => {
+                tracing::warn!(error = %e, snapshot = %dir.display(), "snapshot compaction failed; continuing uncompacted");
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, snapshot = %dir.display(), "snapshot compaction task failed; continuing uncompacted");
+            }
+        }
+    }
+
     // Persistent payload integrity is deliberately opt-in: large allocated
     // uppers make any independent content pass observable. When requested,
     // the sparse-aware Merkle construction skips known all-hole subtrees.
@@ -192,6 +232,24 @@ async fn build_artifact(
     } else {
         None
     };
+
+    Ok((dst_upper, copied_len, integrity))
+}
+
+/// Build the artifact contents (upper copy, integrity, descriptor) into
+/// `dir`. Pure staging: the caller promotes or discards the directory.
+async fn build_artifact(
+    dir: &std::path::Path,
+    src_upper: &std::path::Path,
+    labels: Vec<(String, String)>,
+    image_reference: String,
+    manifest_digest_str: String,
+    source_sandbox: &str,
+    record_integrity: bool,
+    compact: bool,
+) -> MicrosandboxResult<(String, Manifest)> {
+    let (_dst_upper, copied_len, integrity) =
+        prepare_upper(dir, src_upper, record_integrity, compact).await?;
 
     // Build the manifest.
     let mut label_map: BTreeMap<String, String> = BTreeMap::new();
@@ -285,7 +343,7 @@ fn oci_reference_string(config: &SandboxConfig) -> MicrosandboxResult<String> {
     }
 }
 
-fn resolve_destination(
+pub(super) fn resolve_destination(
     local: &LocalBackend,
     name: &str,
     dest_dir: Option<PathBuf>,
@@ -393,6 +451,7 @@ mod tests {
             "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
             "box",
             false,
+            false,
         )
         .await
         .unwrap();
@@ -408,6 +467,7 @@ mod tests {
             "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
             "box",
             true,
+            false,
         )
         .await
         .unwrap();
@@ -415,5 +475,71 @@ mod tests {
             &with.state.as_file().unwrap().upper.integrity,
             Some(microsandbox_image::snapshot::UpperIntegrity::FileMerkleBlake3V1 { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn compact_runs_on_a_real_ext4_upper_and_composes_with_integrity() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.ext4");
+        microsandbox_image::ext4::format_ext4(
+            &source,
+            &microsandbox_image::ext4::Ext4FormatOptions {
+                size_bytes: 256 * 1024 * 1024,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let dir = temp.path().join("compacted");
+        std::fs::create_dir(&dir).unwrap();
+        let (_, manifest) = build_artifact(
+            &dir,
+            &source,
+            Vec::new(),
+            "docker.io/library/alpine:3.20".into(),
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            "box",
+            true,
+            true,
+        )
+        .await
+        .unwrap();
+
+        // compact must not change the apparent size or break integrity recording.
+        let state = manifest.state.as_file().unwrap();
+        assert_eq!(state.upper.size_bytes, 256 * 1024 * 1024);
+        assert!(matches!(
+            &state.upper.integrity,
+            Some(microsandbox_image::snapshot::UpperIntegrity::FileMerkleBlake3V1 { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn compact_failure_does_not_fail_snapshot_creation() {
+        let temp = tempfile::tempdir().unwrap();
+        // Not a real ext4 image, so compact_image will error internally —
+        // build_artifact must swallow that and still produce an artifact.
+        let source = temp.path().join("source.ext4");
+        std::fs::write(&source, b"not an ext4 image").unwrap();
+
+        let dir = temp.path().join("compact-failure");
+        std::fs::create_dir(&dir).unwrap();
+        let (_, manifest) = build_artifact(
+            &dir,
+            &source,
+            Vec::new(),
+            "docker.io/library/alpine:3.20".into(),
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            "box",
+            false,
+            true,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            manifest.state.as_file().unwrap().upper.size_bytes,
+            b"not an ext4 image".len() as u64
+        );
     }
 }

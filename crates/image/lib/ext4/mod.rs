@@ -1,3 +1,4 @@
+mod compact;
 mod format;
 mod formatter;
 mod jbd2;
@@ -10,6 +11,7 @@ mod rootfs;
 // Re-Exports
 //--------------------------------------------------------------------------------------------------
 
+pub use compact::{CompactOutcome, compact_image};
 pub use formatter::{Ext4Error, Ext4FormatOptions, format_ext4, format_ext4_with_tree};
 pub use resizer::{GrowOutcome, grow_image};
 pub use rootfs::{

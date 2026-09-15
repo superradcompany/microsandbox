@@ -12,6 +12,7 @@
 //! qcow2 backing chains landing later.
 
 mod archive;
+mod compact;
 mod create;
 #[doc(hidden)]
 pub mod downgrade;
@@ -53,6 +54,7 @@ pub struct SnapshotBuilder {
     force: bool,
     record_integrity: bool,
     resumable: bool,
+    compact: bool,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -81,6 +83,7 @@ impl Snapshot {
             force: false,
             record_integrity: false,
             resumable: false,
+            compact: false,
         }
     }
 
@@ -210,6 +213,25 @@ impl Snapshot {
         let backend = crate::backend::default_backend();
         let local = backend.as_local().ok_or_else(snapshots_require_local)?;
         archive::load_snapshot(local, archive_path, dest).await
+    }
+
+    /// Compact `source` (path, name, or digest) into a new snapshot named
+    /// `new_name`, reclaiming host disk space for blocks the guest
+    /// filesystem has already freed.
+    ///
+    /// Always writes a new artifact rather than mutating `source` in
+    /// place: `source` and anything referencing it by digest are left
+    /// untouched. If `source` recorded content integrity, the new
+    /// artifact's integrity is recomputed fresh (no conflict, since it's
+    /// a brand-new digest).
+    pub async fn compact(
+        source: &str,
+        new_name: &str,
+        opts: compact::CompactOpts,
+    ) -> MicrosandboxResult<Self> {
+        let backend = crate::backend::default_backend();
+        let local = backend.as_local().ok_or_else(snapshots_require_local)?;
+        compact::compact_snapshot(local, source, new_name, opts).await
     }
 }
 
@@ -382,6 +404,16 @@ impl SnapshotBuilder {
         self
     }
 
+    /// Deallocate host storage for blocks the guest ext4 filesystem has
+    /// already freed, before recording the artifact.
+    ///
+    /// Opt-in: never changes guest-visible content, only host disk usage,
+    /// and never fails snapshot creation if compaction itself fails.
+    pub fn compact(mut self) -> Self {
+        self.compact = true;
+        self
+    }
+
     /// Build the [`SnapshotConfig`].
     pub fn build(self) -> MicrosandboxResult<SnapshotConfig> {
         let source_sandbox = self.source_sandbox.ok_or_else(|| {
@@ -397,6 +429,7 @@ impl SnapshotBuilder {
             force: self.force,
             record_integrity: self.record_integrity,
             resumable: self.resumable,
+            compact: self.compact,
         })
     }
 
@@ -411,6 +444,7 @@ impl SnapshotBuilder {
 //--------------------------------------------------------------------------------------------------
 
 pub use archive::SaveOpts;
+pub use compact::CompactOpts;
 #[cfg(feature = "fuzzing")]
 pub use archive::fuzz_unpack_archive;
 pub use microsandbox_image::snapshot::{

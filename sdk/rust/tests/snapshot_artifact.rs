@@ -1569,3 +1569,128 @@ async fn list_dir_skips_dot_prefixed_staging_directories() {
     assert_eq!(snaps.len(), 1);
     assert!(snaps[0].path().ends_with("real"));
 }
+
+#[tokio::test]
+async fn compact_writes_a_new_artifact_and_leaves_source_untouched() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    let backend = isolated_backend(&home).await;
+
+    microsandbox::with_backend(backend, async {
+        let (src_dir, src_digest) = make_artifact(tmp.path(), "source", b"the upper bytes");
+        let src_bytes_before = std::fs::read(src_dir.join(DEFAULT_UPPER_FILE)).unwrap();
+
+        let dest_parent = tmp.path().join("dest");
+        let compacted = Snapshot::compact(
+            src_dir.to_string_lossy().as_ref(),
+            "compacted",
+            microsandbox::snapshot::CompactOpts {
+                dest_dir: Some(dest_parent.clone()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_ne!(compacted.digest(), src_digest, "must be a new artifact identity");
+        assert_eq!(compacted.manifest().parent.as_deref(), Some(src_digest.as_str()));
+        assert_eq!(compacted.path(), dest_parent.join("compacted"));
+
+        // Source is completely untouched.
+        let src_bytes_after = std::fs::read(src_dir.join(DEFAULT_UPPER_FILE)).unwrap();
+        assert_eq!(src_bytes_before, src_bytes_after);
+        let reopened_src = Snapshot::open(src_dir.to_string_lossy().as_ref())
+            .await
+            .unwrap();
+        assert_eq!(reopened_src.digest(), src_digest);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn compact_recomputes_integrity_when_source_recorded_it() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    let backend = isolated_backend(&home).await;
+
+    microsandbox::with_backend(backend, async {
+        let (src_dir, _) =
+            make_artifact_with_integrity(tmp.path(), "source-with-integrity", b"payload bytes", true);
+
+        let dest_parent = tmp.path().join("dest");
+        let compacted = Snapshot::compact(
+            src_dir.to_string_lossy().as_ref(),
+            "compacted-with-integrity",
+            microsandbox::snapshot::CompactOpts {
+                dest_dir: Some(dest_parent),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(
+            &compacted.state().as_file().unwrap().upper.integrity,
+            Some(UpperIntegrity::FileMerkleBlake3V1 { .. })
+        ));
+        let report = compacted.verify().await.unwrap();
+        assert!(matches!(
+            report.upper,
+            microsandbox::snapshot::UpperVerifyStatus::Verified { .. }
+        ));
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn compact_rejects_snapshot_with_unsupported_requires() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    let backend = isolated_backend(&home).await;
+
+    microsandbox::with_backend(backend, async {
+        let (src_dir, _) =
+            make_artifact_with_unknown_require(tmp.path(), "future-snap", b"upper");
+
+        let err = Snapshot::compact(
+            src_dir.to_string_lossy().as_ref(),
+            "compacted-future",
+            microsandbox::snapshot::CompactOpts {
+                dest_dir: Some(tmp.path().join("dest")),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("msb.future/1"), "unexpected error: {err}");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn compact_rejects_resumable_scope_snapshot() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    let backend = isolated_backend(&home).await;
+
+    microsandbox::with_backend(backend, async {
+        let (src_dir, _) =
+            make_artifact_with_scope(tmp.path(), "ckpt", b"upper", SnapshotScope::Resumable);
+
+        let err = Snapshot::compact(
+            src_dir.to_string_lossy().as_ref(),
+            "compacted-ckpt",
+            microsandbox::snapshot::CompactOpts {
+                dest_dir: Some(tmp.path().join("dest")),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("file-state"),
+            "unexpected error: {err}"
+        );
+    })
+    .await;
+}
