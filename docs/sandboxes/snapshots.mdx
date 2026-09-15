@@ -216,6 +216,8 @@ msb snapshot reindex
 
 `list` and `get` use a local index for fast lookup. If the index gets out of sync, `reindex` rebuilds it from the snapshot artifacts on disk.
 
+`msb inspect <sandbox>` and `msb snapshot inspect <snapshot>` both print a **Size on Disk** row alongside the apparent size, comparing what the host has actually allocated against the upper file's logical size — useful for spotting how sparse (or not) a snapshot really is before deciding whether to compact it.
+
 ## Move snapshots between machines
 
 The snapshot directory is the whole artifact; there is no hidden daemon state. Copy the directory directly, or save it as an archive:
@@ -310,6 +312,114 @@ msb snapshot inspect after-pip-install --verify
 </CodeGroup>
 
 `msb snapshot save` and `msb snapshot load` preserve recorded integrity but do not silently execute it. They still enforce the archive grammar, path confinement, entry sizes, descriptor identities, and ordinary archive-entry hashes. Run `msb snapshot verify` explicitly after receiving a snapshot when your workflow requires an independent payload scan. Released `msb-sparse-sha256-v1` descriptors remain readable and verifiable, but ordinary open, boot, save, load, and upgrade paths do not pay their full logical-size SHA cost.
+
+## Compact and grow a snapshot's disk
+
+A snapshot's upper file can carry host disk blocks the guest ext4 filesystem has already freed (deleted files, package-manager cache churn, etc.). Compaction punches holes for those blocks — sparse-aware, so file size on disk shrinks while the recorded apparent size and guest-visible content are unchanged. Pass `--compact` at create time to compact the freshly captured upper before it's recorded:
+
+<CodeGroup>
+```typescript TypeScript
+import { Snapshot } from "microsandbox";
+
+const snap = await Snapshot.builder("after-pip-install")
+  .fromSandbox("baseline")
+  .compact()
+  .create();
+```
+
+```rust Rust
+use microsandbox::Snapshot;
+
+let snap = Snapshot::builder("after-pip-install")
+    .from_sandbox("baseline")
+    .compact()
+    .create()
+    .await?;
+```
+
+```python Python
+from microsandbox import Snapshot
+
+snap = await Snapshot.create(
+    "after-pip-install",
+    from_sandbox="baseline",
+    compact=True,
+)
+```
+
+```go Go
+snap, err := m.Snapshot.Create(ctx,
+    m.SnapshotCreateOptions{
+        Name:        "after-pip-install",
+        FromSandbox: "baseline",
+        Compact:     true,
+    },
+)
+```
+
+```bash CLI
+msb snapshot create after-pip-install --from baseline --compact
+```
+
+</CodeGroup>
+
+Compaction is a size optimization, not a correctness requirement: it never changes guest-visible content, and a compaction failure never fails snapshot creation.
+
+To compact an *existing* snapshot, or to change its root disk size, clone it into a new artifact instead. Cloning never mutates the source — it always writes a fresh snapshot under a new name, so the original (and anything with a `parent` reference to its digest) stays untouched:
+
+<CodeGroup>
+```typescript TypeScript
+import { Snapshot } from "microsandbox";
+
+const slim = await Snapshot.clone("bloated", "slim", {
+  compact: true,
+  rootDiskSizeMib: 8192, // grow-only
+});
+```
+
+```rust Rust
+use microsandbox::Snapshot;
+use microsandbox::snapshot::CloneOpts;
+
+let slim = Snapshot::clone_snapshot(
+    "bloated",
+    "slim",
+    CloneOpts {
+        compact: true,
+        root_disk_size_mib: Some(8192), // grow-only
+        ..Default::default()
+    },
+)
+.await?;
+```
+
+```python Python
+from microsandbox import Snapshot
+
+slim = await Snapshot.clone(
+    "bloated",
+    "slim",
+    compact=True,
+    root_disk_size_mib=8192,  # grow-only
+)
+```
+
+```go Go
+slim, err := m.Snapshot.Clone(ctx, "bloated", "slim",
+    m.SnapshotCloneOptions{
+        Compact:         true,
+        RootDiskSizeMib: 8192, // grow-only
+    },
+)
+```
+
+```bash CLI
+msb snapshot clone bloated slim --compact --root-disk 8G
+```
+
+</CodeGroup>
+
+`--root-disk` (`rootDiskSizeMib` / `root_disk_size_mib`) grows the clone's ext4 filesystem in place, offline — the same underlying resize used by [`msb modify --root-disk`](/cli/sandbox-commands#msb-modify). It's grow-only: a target at or below the source's current size is rejected rather than silently ignored.
 
 ## Use cases
 

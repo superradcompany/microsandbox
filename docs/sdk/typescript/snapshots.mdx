@@ -502,6 +502,54 @@ console.log("loaded", h.digest);
 
 ---
 
+#### <span className="msb-recv">Snapshot.</span><span className="msb-hn">clone()</span>
+<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
+
+```typescript
+static clone(source: string, newName: string, opts?: CloneOpts): Promise<Snapshot>
+```
+
+Clone `source` (path, name, or digest) into a new snapshot named `newName`. Always writes a new artifact rather than mutating `source` in place: `source` and anything referencing it by digest are left untouched. With `opts.compact`, also reclaims host disk space for blocks the guest filesystem has already freed. With `opts.rootDiskSizeMib`, grows the clone's root disk in place (grow-only). If `source` recorded content integrity, the new artifact's integrity is recomputed fresh.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>source</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Path, name, or digest of the snapshot to clone.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>newName</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Bare name for the new snapshot.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>opts</code><a className="msb-type" href="#cloneopts">CloneOpts</a></div>
+    <div className="msb-param-desc">Destination directory, labels, force, compaction, and root disk size.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#snapshot">Promise&lt;Snapshot&gt;</a></div>
+    <div className="msb-param-desc">The cloned artifact.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```typescript
+const slim = await Snapshot.clone("bloated", "slim", {
+  compact: true,
+  rootDiskSizeMib: 8192,
+});
+```
+
+</Accordion>
+
+---
+
 <p className="msb-member-group">Instance methods</p>
 
 #### <span className="msb-recv">snap.</span><span className="msb-hn">verify()</span>
@@ -713,6 +761,17 @@ Request a `"resumable"` snapshot (disk plus VM state). Accepted by the builder, 
 
 ---
 
+#### <span className="msb-recv">snapshot.</span><span className="msb-hn">compact()</span>
+<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
+
+```typescript
+compact(): this
+```
+
+Deallocate host storage for blocks the guest ext4 filesystem has already freed, before recording the artifact. Never changes guest-visible content — it only reclaims host disk space the guest no longer considers in use — and a compaction failure never fails snapshot creation.
+
+---
+
 #### <span className="msb-recv">snapshot.</span><span className="msb-hn">create()</span>
 
 ```typescript
@@ -755,6 +814,22 @@ Bundle options for [`Snapshot.save()`](#snapshot-save). All fields default to `f
 | `withParents` | `boolean` | Walk the parent chain and include each ancestor in the archive. |
 | `withImage` | `boolean` | Include the OCI image cache so the archive boots offline. |
 | `plainTar` | `boolean` | Skip zstd compression and write a plain `.tar`. |
+
+---
+
+### CloneOpts <span className="msb-tag is-type">interface</span>
+
+Options for [`Snapshot.clone()`](#snapshot-clone). All fields optional; an empty object clones into the default snapshots directory without compacting or resizing.
+
+<p className="msb-backref">Used by <a href="#snapshot-clone">Snapshot.clone()</a></p>
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `destDir` | `string` | Parent directory for the new artifact. Defaults to the snapshots directory. |
+| `labels` | `Record<string, string>` | Labels for the new snapshot. Not inherited from the source. |
+| `force` | `boolean` | Overwrite an existing artifact at the destination. |
+| `compact` | `boolean` | Deallocate host storage for blocks the guest ext4 filesystem has already freed, while cloning. |
+| `rootDiskSizeMib` | `number` | Grow the clone's ext4 filesystem to this size in MiB, offline, before recording the artifact. Grow-only: a target at or below the source's current size throws. |
 
 ---
 

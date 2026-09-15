@@ -207,6 +207,7 @@ async def create(
     force: bool = False,
     record_integrity: bool = False,
     resumable: bool = False,
+    compact: bool = False,
 ) -> Snapshot
 ```
 
@@ -242,6 +243,10 @@ Create a snapshot from a stopped or crashed sandbox. `name` is resolved under th
   <div className="msb-param">
     <div className="msb-param-key"><code>resumable</code><span className="msb-type">bool</span></div>
     <div className="msb-param-desc">Request a <code>"resumable"</code> snapshot (disk plus VM state). Accepted, but currently fails with an <code>Unsupported</code> error; resumable snapshots have not landed yet. Default <code>False</code>.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>compact</code><span className="msb-type">bool</span></div>
+    <div className="msb-param-desc">Deallocate host storage for blocks the guest ext4 filesystem has already freed, before recording the artifact. Never changes guest-visible content, and a compaction failure never fails creation. Default <code>False</code>.</div>
   </div>
 </div>
 
@@ -564,6 +569,82 @@ Unpack a snapshot archive (`.tar.zst` or `.tar`) into the snapshots directory. S
 ```python
 h = await Snapshot.load("/tmp/after-pip-install.tar.zst")
 print(h.path)
+```
+
+</Accordion>
+
+---
+
+#### <span className="msb-recv">Snapshot.</span><span className="msb-hn">clone()</span>
+<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
+
+```python
+@staticmethod
+async def clone(
+    source: str,
+    new_name: str,
+    *,
+    dest_dir: str | os.PathLike[str] | None = None,
+    labels: dict[str, str] | None = None,
+    force: bool = False,
+    compact: bool = False,
+    root_disk_size_mib: int | None = None,
+) -> Snapshot
+```
+
+Clone `source` (path, name, or digest) into a new snapshot named `new_name`. Always writes a new artifact rather than mutating `source` in place: `source` and anything referencing it by digest are left untouched. With `compact=True`, also reclaims host disk space for blocks the guest filesystem has already freed. With `root_disk_size_mib`, grows the clone's root disk in place (grow-only). If `source` recorded content integrity, the new artifact's integrity is recomputed fresh.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>source</code><span className="msb-type">str</span></div>
+    <div className="msb-param-desc">Path, name, or digest of the snapshot to clone.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>new_name</code><span className="msb-type">str</span></div>
+    <div className="msb-param-desc">Bare name for the new snapshot.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>dest_dir</code><span className="msb-type">str | os.PathLike[str] | None</span></div>
+    <div className="msb-param-desc">Parent directory to create the new artifact in. Defaults to the snapshots directory.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>labels</code><span className="msb-type">dict[str, str] | None</span></div>
+    <div className="msb-param-desc">Labels for the new snapshot. Not inherited from the source.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>force</code><span className="msb-type">bool</span></div>
+    <div className="msb-param-desc">Overwrite an existing artifact at the destination. Default <code>False</code>.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>compact</code><span className="msb-type">bool</span></div>
+    <div className="msb-param-desc">Deallocate host storage for blocks the guest ext4 filesystem has already freed, while cloning. Default <code>False</code>.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>root_disk_size_mib</code><span className="msb-type">int | None</span></div>
+    <div className="msb-param-desc">Grow the clone's ext4 filesystem to this size in MiB, offline, before recording the artifact. Grow-only: a target at or below the source's current size raises.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#snapshot">Snapshot</a></div>
+    <div className="msb-param-desc">The cloned artifact.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```python
+slim = await Snapshot.clone(
+    "bloated",
+    "slim",
+    compact=True,
+    root_disk_size_mib=8192,
+)
 ```
 
 </Accordion>
