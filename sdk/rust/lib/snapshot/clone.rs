@@ -1,4 +1,4 @@
-//! Compact an existing snapshot's upper layer into a new snapshot artifact.
+//! Clone an existing snapshot's upper layer into a new snapshot artifact.
 //!
 //! Unlike `--compact` on [`Snapshot::create`], this never mutates the source snapshot in place:
 //! punching holes changes the raw bytes of the upper image (stale-but-freed garbage -> logical
@@ -28,9 +28,9 @@ use super::Snapshot;
 // Types
 //--------------------------------------------------------------------------------------------------
 
-/// Options for [`compact_snapshot`].
+/// Options for [`clone_snapshot`].
 #[derive(Debug, Clone, Default)]
-pub struct CompactOpts {
+pub struct CloneOpts {
     /// Parent directory to create the new artifact in. `None` = the default snapshots directory.
     pub dest_dir: Option<PathBuf>,
 
@@ -39,22 +39,28 @@ pub struct CompactOpts {
 
     /// Overwrite an existing artifact at the destination.
     pub force: bool,
+
+    /// Deallocate host storage for blocks the guest ext4 filesystem has already freed, while
+    /// cloning. Opt-in: never changes guest-visible content, only host disk usage, and never
+    /// fails the clone if compaction itself fails.
+    pub compact: bool,
 }
 
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-pub(super) async fn compact_snapshot(
+pub(super) async fn clone_snapshot(
     local: &LocalBackend,
     source: &str,
     new_name: &str,
-    opts: CompactOpts,
+    opts: CloneOpts,
 ) -> MicrosandboxResult<Snapshot> {
-    let CompactOpts {
+    let CloneOpts {
         dest_dir,
         labels,
         force,
+        compact,
     } = opts;
 
     // Validate the destination before touching the source, same ordering
@@ -70,18 +76,18 @@ pub(super) async fn compact_snapshot(
     let unsupported = src.manifest().unsupported_requires();
     if !unsupported.is_empty() {
         return Err(MicrosandboxError::InvalidConfig(format!(
-            "snapshot '{source}' requires extensions this binary doesn't understand ({}); refusing to compact",
+            "snapshot '{source}' requires extensions this binary doesn't understand ({}); refusing to clone",
             unsupported.join(", ")
         )));
     }
     let src_state = src.manifest().state.as_file().ok_or_else(|| {
         MicrosandboxError::InvalidConfig(format!(
-            "snapshot '{source}' is not a file-state snapshot; only disk snapshots can be compacted"
+            "snapshot '{source}' is not a file-state snapshot; only disk snapshots can be cloned"
         ))
     })?;
     if src_state.format != SnapshotFormat::Raw || src_state.fstype != "ext4" {
         return Err(MicrosandboxError::InvalidConfig(format!(
-            "snapshot '{source}' is not a raw ext4 snapshot; compaction only supports raw ext4 uppers"
+            "snapshot '{source}' is not a raw ext4 snapshot; cloning only supports raw ext4 uppers"
         )));
     }
     let src_upper = src.path().join(&src_state.upper.file);
@@ -104,7 +110,7 @@ pub(super) async fn compact_snapshot(
     }
     tokio::fs::create_dir_all(&staging_dir).await?;
 
-    let built = build_compacted_artifact(&staging_dir, &src, &src_upper, labels, record_integrity).await;
+    let built = build_cloned_artifact(&staging_dir, &src, &src_upper, labels, record_integrity, compact).await;
     let (digest, manifest) = match built {
         Ok(v) => v,
         Err(e) => {
@@ -128,19 +134,20 @@ pub(super) async fn compact_snapshot(
     Ok(Snapshot::from_parts(dest_dir, digest, manifest))
 }
 
-/// Build the compacted artifact contents into `dir`. Pure staging: the caller promotes or
-/// discards the directory. Always compacts (that's the point of this entry point) and always
-/// recomputes integrity fresh when the source had it — a brand-new `snapshot.json` from a fresh
-/// digest, so there's no stale-digest hazard the way there would be compacting in place.
-async fn build_compacted_artifact(
+/// Build the cloned artifact contents into `dir`. Pure staging: the caller promotes or
+/// discards the directory. Always recomputes integrity fresh when the source had it — a
+/// brand-new `snapshot.json` from a fresh digest, so there's no stale-digest hazard the way
+/// there would be compacting in place.
+async fn build_cloned_artifact(
     dir: &std::path::Path,
     src: &Snapshot,
     src_upper: &std::path::Path,
     labels: Vec<(String, String)>,
     record_integrity: bool,
+    compact: bool,
 ) -> MicrosandboxResult<(String, Manifest)> {
     let (_dst_upper, copied_len, integrity) =
-        prepare_upper(dir, src_upper, record_integrity, true).await?;
+        prepare_upper(dir, src_upper, record_integrity, compact).await?;
 
     let mut label_map: BTreeMap<String, String> = BTreeMap::new();
     for (k, v) in labels {

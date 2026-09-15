@@ -1571,7 +1571,7 @@ async fn list_dir_skips_dot_prefixed_staging_directories() {
 }
 
 #[tokio::test]
-async fn compact_writes_a_new_artifact_and_leaves_source_untouched() {
+async fn clone_writes_a_new_artifact_and_leaves_source_untouched() {
     let tmp = TempDir::new().unwrap();
     let home = tmp.path().join("home");
     let backend = isolated_backend(&home).await;
@@ -1581,10 +1581,10 @@ async fn compact_writes_a_new_artifact_and_leaves_source_untouched() {
         let src_bytes_before = std::fs::read(src_dir.join(DEFAULT_UPPER_FILE)).unwrap();
 
         let dest_parent = tmp.path().join("dest");
-        let compacted = Snapshot::compact(
+        let cloned = Snapshot::clone_snapshot(
             src_dir.to_string_lossy().as_ref(),
-            "compacted",
-            microsandbox::snapshot::CompactOpts {
+            "cloned",
+            microsandbox::snapshot::CloneOpts {
                 dest_dir: Some(dest_parent.clone()),
                 ..Default::default()
             },
@@ -1592,9 +1592,9 @@ async fn compact_writes_a_new_artifact_and_leaves_source_untouched() {
         .await
         .unwrap();
 
-        assert_ne!(compacted.digest(), src_digest, "must be a new artifact identity");
-        assert_eq!(compacted.manifest().parent.as_deref(), Some(src_digest.as_str()));
-        assert_eq!(compacted.path(), dest_parent.join("compacted"));
+        assert_ne!(cloned.digest(), src_digest, "must be a new artifact identity");
+        assert_eq!(cloned.manifest().parent.as_deref(), Some(src_digest.as_str()));
+        assert_eq!(cloned.path(), dest_parent.join("cloned"));
 
         // Source is completely untouched.
         let src_bytes_after = std::fs::read(src_dir.join(DEFAULT_UPPER_FILE)).unwrap();
@@ -1608,7 +1608,7 @@ async fn compact_writes_a_new_artifact_and_leaves_source_untouched() {
 }
 
 #[tokio::test]
-async fn compact_recomputes_integrity_when_source_recorded_it() {
+async fn clone_recomputes_integrity_when_source_recorded_it() {
     let tmp = TempDir::new().unwrap();
     let home = tmp.path().join("home");
     let backend = isolated_backend(&home).await;
@@ -1618,10 +1618,10 @@ async fn compact_recomputes_integrity_when_source_recorded_it() {
             make_artifact_with_integrity(tmp.path(), "source-with-integrity", b"payload bytes", true);
 
         let dest_parent = tmp.path().join("dest");
-        let compacted = Snapshot::compact(
+        let cloned = Snapshot::clone_snapshot(
             src_dir.to_string_lossy().as_ref(),
-            "compacted-with-integrity",
-            microsandbox::snapshot::CompactOpts {
+            "cloned-with-integrity",
+            microsandbox::snapshot::CloneOpts {
                 dest_dir: Some(dest_parent),
                 ..Default::default()
             },
@@ -1630,10 +1630,10 @@ async fn compact_recomputes_integrity_when_source_recorded_it() {
         .unwrap();
 
         assert!(matches!(
-            &compacted.state().as_file().unwrap().upper.integrity,
+            &cloned.state().as_file().unwrap().upper.integrity,
             Some(UpperIntegrity::FileMerkleBlake3V1 { .. })
         ));
-        let report = compacted.verify().await.unwrap();
+        let report = cloned.verify().await.unwrap();
         assert!(matches!(
             report.upper,
             microsandbox::snapshot::UpperVerifyStatus::Verified { .. }
@@ -1643,7 +1643,7 @@ async fn compact_recomputes_integrity_when_source_recorded_it() {
 }
 
 #[tokio::test]
-async fn compact_rejects_snapshot_with_unsupported_requires() {
+async fn clone_rejects_snapshot_with_unsupported_requires() {
     let tmp = TempDir::new().unwrap();
     let home = tmp.path().join("home");
     let backend = isolated_backend(&home).await;
@@ -1652,10 +1652,10 @@ async fn compact_rejects_snapshot_with_unsupported_requires() {
         let (src_dir, _) =
             make_artifact_with_unknown_require(tmp.path(), "future-snap", b"upper");
 
-        let err = Snapshot::compact(
+        let err = Snapshot::clone_snapshot(
             src_dir.to_string_lossy().as_ref(),
-            "compacted-future",
-            microsandbox::snapshot::CompactOpts {
+            "cloned-future",
+            microsandbox::snapshot::CloneOpts {
                 dest_dir: Some(tmp.path().join("dest")),
                 ..Default::default()
             },
@@ -1668,7 +1668,7 @@ async fn compact_rejects_snapshot_with_unsupported_requires() {
 }
 
 #[tokio::test]
-async fn compact_rejects_resumable_scope_snapshot() {
+async fn clone_rejects_resumable_scope_snapshot() {
     let tmp = TempDir::new().unwrap();
     let home = tmp.path().join("home");
     let backend = isolated_backend(&home).await;
@@ -1677,10 +1677,10 @@ async fn compact_rejects_resumable_scope_snapshot() {
         let (src_dir, _) =
             make_artifact_with_scope(tmp.path(), "ckpt", b"upper", SnapshotScope::Resumable);
 
-        let err = Snapshot::compact(
+        let err = Snapshot::clone_snapshot(
             src_dir.to_string_lossy().as_ref(),
-            "compacted-ckpt",
-            microsandbox::snapshot::CompactOpts {
+            "cloned-ckpt",
+            microsandbox::snapshot::CloneOpts {
                 dest_dir: Some(tmp.path().join("dest")),
                 ..Default::default()
             },

@@ -46,13 +46,13 @@ pub enum SnapshotCommands {
     /// Load a snapshot archive into the snapshots directory.
     Load(SnapshotLoadArgs),
 
-    /// Compact an existing snapshot into a new one, reclaiming host disk
-    /// space for blocks the guest filesystem has already freed.
+    /// Clone an existing snapshot into a new one.
     ///
     /// Never mutates the source snapshot: writes a new artifact under
     /// `new-name`, leaving the source and anything referencing its digest
-    /// untouched.
-    Compact(SnapshotCompactArgs),
+    /// untouched. Pass `--compact` to also reclaim host disk space for
+    /// blocks the guest filesystem has already freed.
+    Clone(SnapshotCloneArgs),
 }
 
 /// Arguments for `msb snapshot create`.
@@ -192,13 +192,13 @@ pub struct SnapshotLoadArgs {
     pub dest: Option<std::path::PathBuf>,
 }
 
-/// Arguments for `msb snapshot compact`.
+/// Arguments for `msb snapshot clone`.
 #[derive(Debug, Args)]
-pub struct SnapshotCompactArgs {
-    /// Snapshot to compact (path, name, or digest).
+pub struct SnapshotCloneArgs {
+    /// Snapshot to clone (path, name, or digest).
     pub source: String,
 
-    /// Name for the new, compacted snapshot.
+    /// Name for the new, cloned snapshot.
     pub new_name: String,
 
     /// Parent directory to create the new artifact in, instead of the
@@ -214,6 +214,15 @@ pub struct SnapshotCompactArgs {
     /// Overwrite an existing artifact at the destination.
     #[arg(short = 'f', long)]
     pub force: bool,
+
+    /// Reclaim host disk space for blocks the guest filesystem has already
+    /// freed, while cloning.
+    ///
+    /// Never changes guest-visible content and never fails the clone if
+    /// compaction itself fails — it's a size optimization on top of a clone
+    /// that's created either way.
+    #[arg(long)]
+    pub compact: bool,
 
     /// Suppress output.
     #[arg(short, long)]
@@ -235,7 +244,7 @@ pub async fn run(args: SnapshotArgs) -> anyhow::Result<()> {
         SnapshotCommands::Reindex(args) => reindex(args).await,
         SnapshotCommands::Save(args) => save(args).await,
         SnapshotCommands::Load(args) => load(args).await,
-        SnapshotCommands::Compact(args) => compact(args).await,
+        SnapshotCommands::Clone(args) => clone_snapshot(args).await,
     }
 }
 
@@ -518,7 +527,7 @@ async fn load(args: SnapshotLoadArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn compact(args: SnapshotCompactArgs) -> anyhow::Result<()> {
+async fn clone_snapshot(args: SnapshotCloneArgs) -> anyhow::Result<()> {
     let mut labels = Vec::new();
     for label in &args.labels {
         let (k, v) = label
@@ -526,25 +535,28 @@ async fn compact(args: SnapshotCompactArgs) -> anyhow::Result<()> {
             .ok_or_else(|| anyhow::anyhow!("invalid --label '{label}': expected K=V"))?;
         labels.push((k.to_string(), v.to_string()));
     }
-    let opts = microsandbox::snapshot::CompactOpts {
+    let opts = microsandbox::snapshot::CloneOpts {
         dest_dir: args.dest_dir.clone(),
         labels,
         force: args.force,
+        compact: args.compact,
     };
 
     let spinner = if args.quiet {
         ui::Spinner::quiet()
     } else {
-        ui::Spinner::start("Compacting", &args.source)
+        ui::Spinner::start("Cloning", &args.source)
     };
 
-    match Snapshot::compact(&args.source, &args.new_name, opts).await {
+    match Snapshot::clone_snapshot(&args.source, &args.new_name, opts).await {
         Ok(snap) => {
-            spinner.finish_success("Compacted");
+            spinner.finish_success("Cloned");
             if !args.quiet {
                 println!("{}", snap.digest());
                 println!("{}", snap.path().display());
-                print_compaction_summary(&snap);
+                if args.compact {
+                    print_compaction_summary(&snap);
+                }
             }
             Ok(())
         }
@@ -698,21 +710,22 @@ mod tests {
     }
 
     #[test]
-    fn compact_parses_source_and_new_name() {
-        let parsed = parse_snapshot_args(&["compact", "bloated", "slim"]);
-        let SnapshotCommands::Compact(args) = parsed.command else {
-            panic!("expected compact command");
+    fn clone_parses_source_and_new_name() {
+        let parsed = parse_snapshot_args(&["clone", "bloated", "slim"]);
+        let SnapshotCommands::Clone(args) = parsed.command else {
+            panic!("expected clone command");
         };
         assert_eq!(args.source, "bloated");
         assert_eq!(args.new_name, "slim");
         assert!(!args.force);
+        assert!(!args.compact);
         assert!(args.labels.is_empty());
     }
 
     #[test]
-    fn compact_parses_dest_dir_label_and_force() {
+    fn clone_parses_dest_dir_label_force_and_compact() {
         let parsed = parse_snapshot_args(&[
-            "compact",
+            "clone",
             "bloated",
             "slim",
             "--dest-dir",
@@ -720,9 +733,10 @@ mod tests {
             "--label",
             "stage=deps",
             "--force",
+            "--compact",
         ]);
-        let SnapshotCommands::Compact(args) = parsed.command else {
-            panic!("expected compact command");
+        let SnapshotCommands::Clone(args) = parsed.command else {
+            panic!("expected clone command");
         };
         assert_eq!(
             args.dest_dir.as_deref(),
@@ -730,5 +744,6 @@ mod tests {
         );
         assert_eq!(args.labels, vec!["stage=deps".to_string()]);
         assert!(args.force);
+        assert!(args.compact);
     }
 }

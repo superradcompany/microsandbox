@@ -12,7 +12,7 @@
 //! qcow2 backing chains landing later.
 
 mod archive;
-mod compact;
+mod clone;
 mod create;
 #[doc(hidden)]
 pub mod downgrade;
@@ -215,23 +215,23 @@ impl Snapshot {
         archive::load_snapshot(local, archive_path, dest).await
     }
 
-    /// Compact `source` (path, name, or digest) into a new snapshot named
-    /// `new_name`, reclaiming host disk space for blocks the guest
-    /// filesystem has already freed.
+    /// Clone `source` (path, name, or digest) into a new snapshot named
+    /// `new_name`. With [`CloneOpts::compact`], also reclaims host disk
+    /// space for blocks the guest filesystem has already freed.
     ///
     /// Always writes a new artifact rather than mutating `source` in
     /// place: `source` and anything referencing it by digest are left
     /// untouched. If `source` recorded content integrity, the new
     /// artifact's integrity is recomputed fresh (no conflict, since it's
     /// a brand-new digest).
-    pub async fn compact(
+    pub async fn clone_snapshot(
         source: &str,
         new_name: &str,
-        opts: compact::CompactOpts,
+        opts: clone::CloneOpts,
     ) -> MicrosandboxResult<Self> {
         let backend = crate::backend::default_backend();
         let local = backend.as_local().ok_or_else(snapshots_require_local)?;
-        compact::compact_snapshot(local, source, new_name, opts).await
+        clone::clone_snapshot(local, source, new_name, opts).await
     }
 }
 
@@ -444,7 +444,7 @@ impl SnapshotBuilder {
 //--------------------------------------------------------------------------------------------------
 
 pub use archive::SaveOpts;
-pub use compact::CompactOpts;
+pub use clone::CloneOpts;
 #[cfg(feature = "fuzzing")]
 pub use archive::fuzz_unpack_archive;
 pub use microsandbox_image::snapshot::{

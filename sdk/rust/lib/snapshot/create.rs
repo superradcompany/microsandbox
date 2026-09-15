@@ -155,8 +155,8 @@ pub(super) async fn create_snapshot(
 
 /// Copy `src_upper` into `dir` (sparse-aware), optionally compact the copy, and optionally
 /// record its content integrity. Shared by sandbox-sourced creation
-/// ([`build_artifact`]) and snapshot-sourced compaction
-/// ([`super::compact::build_compacted_artifact`]) — the only difference between those two
+/// ([`build_artifact`]) and snapshot-sourced cloning
+/// ([`super::clone::build_cloned_artifact`]) — the only difference between those two
 /// callers is what they copy from and what manifest they build around the result.
 pub(super) async fn prepare_upper(
     dir: &std::path::Path,
