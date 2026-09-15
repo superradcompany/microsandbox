@@ -339,7 +339,7 @@
             ]
           },
           {
-            "group": "Development Environments",
+            "group": "Dev Environments",
             "icon": "code",
             "pages": [
               "examples/development/vscode",
