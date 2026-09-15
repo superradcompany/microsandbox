@@ -153,8 +153,8 @@ pub(super) async fn create_snapshot(
     Ok(Snapshot::from_parts(dest_dir, digest, manifest))
 }
 
-/// Copy `src_upper` into `dir` (sparse-aware), optionally compact the copy, and optionally
-/// record its content integrity. Shared by sandbox-sourced creation
+/// Copy `src_upper` into `dir` (sparse-aware), optionally resize and/or compact the copy, and
+/// optionally record its content integrity. Shared by sandbox-sourced creation
 /// ([`build_artifact`]) and snapshot-sourced cloning
 /// ([`super::clone::build_cloned_artifact`]) — the only difference between those two
 /// callers is what they copy from and what manifest they build around the result.
@@ -163,6 +163,7 @@ pub(super) async fn prepare_upper(
     src_upper: &std::path::Path,
     record_integrity: bool,
     compact: bool,
+    resize_to_mib: Option<u32>,
 ) -> MicrosandboxResult<(std::path::PathBuf, u64, Option<microsandbox_image::snapshot::UpperIntegrity>)>
 {
     // Copy the upper layer (sparse-aware, see microsandbox_utils::copy).
@@ -186,6 +187,14 @@ pub(super) async fn prepare_upper(
     })
     .await
     .map_err(|e| MicrosandboxError::Custom(format!("snapshot upper fsync task: {e}")))??;
+
+    // Grow the copy in place before compaction/integrity so both see the final geometry.
+    // Offline and grow-only, same as the live sandbox `--root-disk` path (see
+    // `crate::sandbox::upper`); shrink is refused outright rather than silently ignored.
+    let mut upper_len = copied_len;
+    if let Some(target_mib) = resize_to_mib {
+        upper_len = resize_upper(dst_upper.clone(), target_mib, upper_len).await?;
+    }
 
     // Reclaim host disk space for blocks the guest ext4 filesystem has
     // already freed. Runs on the private staged copy, before integrity is
@@ -233,7 +242,39 @@ pub(super) async fn prepare_upper(
         None
     };
 
-    Ok((dst_upper, copied_len, integrity))
+    Ok((dst_upper, upper_len, integrity))
+}
+
+/// Grow `dst_upper` (already the target file, post-copy) to `target_mib` in place. Offline,
+/// grow-only: a target at or below `current_len` is a hard error rather than a silent no-op,
+/// since a caller passing `resize_to_mib` explicitly asked for a resize.
+async fn resize_upper(
+    dst_upper: std::path::PathBuf,
+    target_mib: u32,
+    current_len: u64,
+) -> MicrosandboxResult<u64> {
+    const BYTES_PER_MIB: u64 = 1024 * 1024;
+    let target_bytes = u64::from(target_mib) * BYTES_PER_MIB;
+    if target_bytes <= current_len {
+        return Err(MicrosandboxError::InvalidConfig(format!(
+            "--root-disk {target_mib} MiB is not larger than the current {} MiB; shrink is not supported",
+            current_len / BYTES_PER_MIB
+        )));
+    }
+
+    tokio::task::spawn_blocking(move || microsandbox_image::ext4::grow_image(&dst_upper, target_bytes))
+        .await
+        .map_err(|e| MicrosandboxError::Custom(format!("snapshot resize task: {e}")))?
+        .map(|_outcome| target_bytes)
+        .map_err(|err| match err {
+            microsandbox_image::ext4::Ext4Error::ExceedsGdtCapacity { max_size_bytes, .. } => {
+                MicrosandboxError::InvalidConfig(format!(
+                    "cannot grow root disk to {target_mib} MiB: the source upper can grow to at most {} MiB in place",
+                    max_size_bytes / BYTES_PER_MIB
+                ))
+            }
+            other => MicrosandboxError::Custom(format!("failed to grow root disk: {other}")),
+        })
 }
 
 /// Build the artifact contents (upper copy, integrity, descriptor) into
@@ -249,7 +290,7 @@ async fn build_artifact(
     compact: bool,
 ) -> MicrosandboxResult<(String, Manifest)> {
     let (_dst_upper, copied_len, integrity) =
-        prepare_upper(dir, src_upper, record_integrity, compact).await?;
+        prepare_upper(dir, src_upper, record_integrity, compact, None).await?;
 
     // Build the manifest.
     let mut label_map: BTreeMap<String, String> = BTreeMap::new();

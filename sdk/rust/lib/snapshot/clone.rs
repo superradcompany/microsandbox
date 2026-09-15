@@ -44,6 +44,11 @@ pub struct CloneOpts {
     /// cloning. Opt-in: never changes guest-visible content, only host disk usage, and never
     /// fails the clone if compaction itself fails.
     pub compact: bool,
+
+    /// Grow the cloned upper's ext4 filesystem to this size in MiB, offline, before recording
+    /// the artifact. `None` keeps the source's size. Grow-only: a target at or below the
+    /// source's current size is a hard error, same as the live sandbox `--root-disk` path.
+    pub root_disk_size_mib: Option<u32>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -61,6 +66,7 @@ pub(super) async fn clone_snapshot(
         labels,
         force,
         compact,
+        root_disk_size_mib,
     } = opts;
 
     // Validate the destination before touching the source, same ordering
@@ -110,7 +116,16 @@ pub(super) async fn clone_snapshot(
     }
     tokio::fs::create_dir_all(&staging_dir).await?;
 
-    let built = build_cloned_artifact(&staging_dir, &src, &src_upper, labels, record_integrity, compact).await;
+    let built = build_cloned_artifact(
+        &staging_dir,
+        &src,
+        &src_upper,
+        labels,
+        record_integrity,
+        compact,
+        root_disk_size_mib,
+    )
+    .await;
     let (digest, manifest) = match built {
         Ok(v) => v,
         Err(e) => {
@@ -145,9 +160,10 @@ async fn build_cloned_artifact(
     labels: Vec<(String, String)>,
     record_integrity: bool,
     compact: bool,
+    root_disk_size_mib: Option<u32>,
 ) -> MicrosandboxResult<(String, Manifest)> {
     let (_dst_upper, copied_len, integrity) =
-        prepare_upper(dir, src_upper, record_integrity, compact).await?;
+        prepare_upper(dir, src_upper, record_integrity, compact, root_disk_size_mib).await?;
 
     let mut label_map: BTreeMap<String, String> = BTreeMap::new();
     for (k, v) in labels {

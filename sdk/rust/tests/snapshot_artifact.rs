@@ -1694,3 +1694,79 @@ async fn clone_rejects_resumable_scope_snapshot() {
     })
     .await;
 }
+
+fn real_ext4_bytes(dir: &Path, size_bytes: u64) -> Vec<u8> {
+    let path = dir.join("real.ext4");
+    microsandbox_image::ext4::format_ext4(
+        &path,
+        &microsandbox_image::ext4::Ext4FormatOptions {
+            size_bytes,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    std::fs::read(&path).unwrap()
+}
+
+#[tokio::test]
+async fn clone_grows_root_disk_when_requested() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    let backend = isolated_backend(&home).await;
+
+    microsandbox::with_backend(backend, async {
+        let ext4_bytes = real_ext4_bytes(tmp.path(), 256 * 1024 * 1024);
+        let (src_dir, _) = make_artifact(tmp.path(), "source", &ext4_bytes);
+
+        let dest_parent = tmp.path().join("dest");
+        let cloned = Snapshot::clone_snapshot(
+            src_dir.to_string_lossy().as_ref(),
+            "grown",
+            microsandbox::snapshot::CloneOpts {
+                dest_dir: Some(dest_parent),
+                root_disk_size_mib: Some(512),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let state = cloned.state().as_file().unwrap();
+        assert_eq!(state.upper.size_bytes, 512 * 1024 * 1024);
+        let cloned_upper = cloned.path().join(&state.upper.file);
+        assert_eq!(
+            std::fs::metadata(&cloned_upper).unwrap().len(),
+            512 * 1024 * 1024
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn clone_rejects_root_disk_at_or_below_source_size() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    let backend = isolated_backend(&home).await;
+
+    microsandbox::with_backend(backend, async {
+        let ext4_bytes = real_ext4_bytes(tmp.path(), 256 * 1024 * 1024);
+        let (src_dir, _) = make_artifact(tmp.path(), "source", &ext4_bytes);
+
+        let err = Snapshot::clone_snapshot(
+            src_dir.to_string_lossy().as_ref(),
+            "shrink-attempt",
+            microsandbox::snapshot::CloneOpts {
+                dest_dir: Some(tmp.path().join("dest")),
+                root_disk_size_mib: Some(128),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("shrink is not supported"),
+            "unexpected error: {err}"
+        );
+    })
+    .await;
+}

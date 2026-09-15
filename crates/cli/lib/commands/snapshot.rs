@@ -51,7 +51,8 @@ pub enum SnapshotCommands {
     /// Never mutates the source snapshot: writes a new artifact under
     /// `new-name`, leaving the source and anything referencing its digest
     /// untouched. Pass `--compact` to also reclaim host disk space for
-    /// blocks the guest filesystem has already freed.
+    /// blocks the guest filesystem has already freed, and `--root-disk` to
+    /// grow the clone's root disk (grow-only).
     Clone(SnapshotCloneArgs),
 }
 
@@ -223,6 +224,11 @@ pub struct SnapshotCloneArgs {
     /// that's created either way.
     #[arg(long)]
     pub compact: bool,
+
+    /// Grow the cloned root disk to this size, such as `8G` (grow-only;
+    /// the source's current size is the floor).
+    #[arg(long = "root-disk", value_name = "SIZE")]
+    pub root_disk: Option<String>,
 
     /// Suppress output.
     #[arg(short, long)]
@@ -535,11 +541,17 @@ async fn clone_snapshot(args: SnapshotCloneArgs) -> anyhow::Result<()> {
             .ok_or_else(|| anyhow::anyhow!("invalid --label '{label}': expected K=V"))?;
         labels.push((k.to_string(), v.to_string()));
     }
+    let root_disk_size_mib = args
+        .root_disk
+        .as_ref()
+        .map(|size| ui::parse_size_mib(size).map_err(anyhow::Error::msg))
+        .transpose()?;
     let opts = microsandbox::snapshot::CloneOpts {
         dest_dir: args.dest_dir.clone(),
         labels,
         force: args.force,
         compact: args.compact,
+        root_disk_size_mib,
     };
 
     let spinner = if args.quiet {
@@ -745,5 +757,23 @@ mod tests {
         assert_eq!(args.labels, vec!["stage=deps".to_string()]);
         assert!(args.force);
         assert!(args.compact);
+    }
+
+    #[test]
+    fn clone_parses_root_disk_flag() {
+        let parsed = parse_snapshot_args(&["clone", "bloated", "slim", "--root-disk", "8G"]);
+        let SnapshotCommands::Clone(args) = parsed.command else {
+            panic!("expected clone command");
+        };
+        assert_eq!(args.root_disk.as_deref(), Some("8G"));
+    }
+
+    #[test]
+    fn clone_defaults_root_disk_to_none() {
+        let parsed = parse_snapshot_args(&["clone", "bloated", "slim"]);
+        let SnapshotCommands::Clone(args) = parsed.command else {
+            panic!("expected clone command");
+        };
+        assert!(args.root_disk.is_none());
     }
 }
