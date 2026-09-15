@@ -21,20 +21,6 @@ msb context
 
 `msb context` confirms that subsequent commands will run on cloud and shows what selected the backend without exposing the API key. For profiles, SDK selection, and precedence, see [Backends](/operations/backends).
 
-## Command connections
-
-SDK command calls on the same live sandbox handle can reuse a completed command's
-agent connection. Concurrent commands use separate connections. At most one idle
-connection is retained per handle; it closes after five idle seconds, and a
-connection older than 30 seconds is not reused. Long-running commands are not
-interrupted by these reuse limits.
-
-Reused calls use the existing authenticated relay session. A new connection
-performs authentication again. Stop, start, and remove calls invalidate that
-handle's idle connection. Cancelled or incomplete commands discard their
-connection so the relay can clean up their sessions. Commands whose result is
-lost are returned as errors and are never automatically replayed.
-
 ## Same code, different backend
 
 Everything from the [quickstart](/getting-started/quickstart) works unchanged. With cloud selected and the API key exported, this creates a sandbox on cloud instead of your machine:

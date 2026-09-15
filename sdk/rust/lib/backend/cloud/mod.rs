@@ -11,8 +11,6 @@
 //! issues today. No OAuth or session credentials are honored here.
 
 mod http;
-#[cfg(test)]
-mod pool_tests;
 pub(in crate::backend) mod sandbox;
 mod snapshot;
 mod volume;
@@ -87,9 +85,6 @@ pub struct CloudBackend {
     http: reqwest::Client,
     selection_source: BackendSelectionSource,
     profile: Option<String>,
-    /// UUID captured by a live handle; absent on an unbound backend.
-    agent_identity: Option<(String, String)>,
-    agent_pool: Arc<crate::agent::pool::AgentPool>,
 }
 
 /// Fluent builder for `CloudBackend`. Use for tuned construction.
@@ -335,8 +330,6 @@ impl CloudBackendBuilder {
             http,
             selection_source: BackendSelectionSource::Programmatic,
             profile: None,
-            agent_identity: None,
-            agent_pool: Arc::default(),
         })
     }
 }
@@ -371,13 +364,6 @@ impl Backend for CloudBackend {
         self
     }
 
-    fn with_agent_identity(&self, name: &str, id: &str) -> Option<Arc<dyn Backend>> {
-        let mut bound = self.clone();
-        bound.agent_identity = Some((name.to_owned(), id.to_owned()));
-        bound.agent_pool = Arc::default();
-        Some(Arc::new(bound))
-    }
-
     /// Open an agent connection over `GET /v1/sandboxes/:id/agent`.
     ///
     /// The route upgrades to a WebSocket that pipes bytes to and from the
@@ -392,22 +378,11 @@ impl Backend for CloudBackend {
             // establishment, and the agent handshake. In particular, a peer
             // that accepts TCP but never completes TLS/HTTP upgrade must not
             // leave exec, filesystem, or attach calls hanging indefinitely.
-            let bound = self
-                .agent_identity
-                .as_ref()
-                .is_some_and(|(bound_name, _)| bound_name == name);
-            if bound && let Some(client) = self.agent_pool.take() {
-                return Ok(client);
-            }
-            let ticket = bound.then(|| self.agent_pool.ticket());
             let mut timing = timing::ConnectionTiming::new(name);
             let result = tokio::time::timeout(timeout, async {
                 timing.stage("identity");
                 let lookup_started = std::time::Instant::now();
-                let id = match &self.agent_identity {
-                    Some((bound_name, id)) if bound_name == name => id.clone(),
-                    _ => self.get_sandbox(name).await?.id,
-                };
+                let id = self.get_sandbox(name).await?.id;
                 tracing::trace!(target: timing::TARGET, sandbox_id = %id, elapsed_seconds = lookup_started.elapsed().as_secs_f64(),
                     "cloud agent identity resolved");
                 timing.identity(&id);
@@ -454,10 +429,7 @@ impl Backend for CloudBackend {
             match result {
                 Ok(result) => {
                     timing.finish(if result.is_ok() { "success" } else { "error" });
-                    result.map(|client| match ticket {
-                        Some(ticket) => client.with_return_ticket(ticket),
-                        None => client,
-                    })
+                    result
                 }
                 Err(_) => {
                     timing.finish("timeout");
@@ -509,123 +481,6 @@ mod tests {
     use tokio_rustls::TlsAcceptor;
 
     use super::*;
-
-    #[tokio::test]
-    async fn stalled_cloud_upgrade_timeout_and_cancellation_close_transport() {
-        use tokio::io::AsyncReadExt;
-
-        for cancel in [false, true] {
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let backend = CloudBackend::new(
-                format!("http://{}", listener.local_addr().unwrap()),
-                "test-key",
-            )
-            .unwrap()
-            .with_agent_identity("sandbox", "captured-id")
-            .unwrap();
-            let (accepted, ready) = tokio::sync::oneshot::channel();
-            let server = tokio::spawn(async move {
-                let (mut stream, _) = listener.accept().await.unwrap();
-                let mut request = Vec::new();
-                while !request.ends_with(b"\r\n\r\n") {
-                    request.push(stream.read_u8().await.unwrap());
-                    assert!(request.len() < 16_384);
-                }
-                accepted.send(()).unwrap();
-                // Deliberately never send the WebSocket upgrade response.
-                // Both timeout and caller cancellation must close this socket.
-                stream.read(&mut [0u8; 1]).await.unwrap()
-            });
-            let mut dial = backend.dial_agent("sandbox", Duration::from_millis(500));
-            tokio::select! {
-                result = &mut dial => panic!("dial ended before upgrade stall: {:?}", result.err()),
-                result = ready => result.unwrap(),
-            }
-            if cancel {
-                drop(dial);
-            } else {
-                let error = dial.await.err().expect("stalled upgrade must time out");
-                assert!(
-                    error
-                        .to_string()
-                        .contains("timed out connecting to cloud sandbox agent")
-                );
-            }
-            assert_eq!(
-                tokio::time::timeout(Duration::from_secs(2), server)
-                    .await
-                    .unwrap()
-                    .unwrap(),
-                0,
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn cloud_handle_agent_calls_use_captured_identity_without_lookup() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://{}", listener.local_addr().unwrap());
-        let server = tokio::spawn(async move {
-            let mut paths = Vec::new();
-            for _ in 0..3 {
-                let (mut stream, _) = listener.accept().await.unwrap();
-                let mut request = Vec::new();
-                loop {
-                    let byte = stream.read_u8().await.unwrap();
-                    request.push(byte);
-                    if request.ends_with(b"\r\n\r\n") {
-                        break;
-                    }
-                    assert!(request.len() < 16_384);
-                }
-                let request = String::from_utf8(request).unwrap();
-                paths.push(request.lines().next().unwrap().to_owned());
-                // A missing UUID must fail; it must never retry by name and
-                // accidentally connect to a replacement sandbox.
-                stream
-                    .write_all(
-                        b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-                    )
-                    .await
-                    .unwrap();
-            }
-            paths
-        });
-        let backend: Arc<dyn Backend> = Arc::new(CloudBackend::new(url, "test-key").unwrap());
-        let make_handle = |backend, id: &str| {
-            crate::sandbox::Sandbox::from_cloud_state(
-                backend,
-                crate::backend::SandboxCloudState {
-                    id: id.to_owned(),
-                    org_id: "test-org".to_owned(),
-                    created_at: chrono::Utc::now(),
-                },
-                "reused-name".to_owned(),
-                crate::sandbox::SandboxConfig::default(),
-            )
-        };
-        let original = make_handle(backend, "original-id");
-        // Lifecycle factories can receive a previously bound backend. The new
-        // handle must capture its own identity without mutating the old one.
-        let replacement = make_handle(original.backend().clone(), "replacement-id");
-        assert!(original.exec("node", ["-v"]).await.is_err());
-        assert!(replacement.exec("node", ["-v"]).await.is_err());
-        assert!(original.fs().stat("/tmp").await.is_err());
-        let paths = tokio::time::timeout(Duration::from_secs(2), server)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            paths,
-            [
-                "GET /v1/sandboxes/original-id/agent HTTP/1.1",
-                "GET /v1/sandboxes/replacement-id/agent HTTP/1.1",
-                "GET /v1/sandboxes/original-id/agent HTTP/1.1",
-            ]
-        );
-    }
 
     #[cfg(unix)]
     const TLS_TEST_CHILD_URL: &str = "MSB_TEST_CLOUD_AGENT_TLS_CHILD_URL";

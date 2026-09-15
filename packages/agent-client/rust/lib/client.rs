@@ -285,12 +285,6 @@ impl AgentClient {
         })
     }
 
-    /// Whether either transport task has ended. A healthy observation does not
-    /// guarantee the next write succeeds; callers must never replay an ambiguous request.
-    pub fn is_closed(&self) -> bool {
-        self.reader_handle.is_finished() || self.writer_handle.is_finished()
-    }
-
     /// Close the connection. Drops the writer and aborts the reader task;
     /// any in-flight requests resolve with [`AgentClientError::Closed`].
     pub async fn close(self) {

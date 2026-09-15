@@ -1,4 +1,4 @@
-//! Agent transport and connection-pool lifecycle.
+//! Agent transport and sandbox endpoint resolution.
 
 use std::ops::Deref;
 use std::path::Path;
@@ -9,17 +9,14 @@ use tokio::{
     time::Instant,
 };
 
-use super::{AgentClientError, AgentClientResult, pool};
+use super::{AgentClientError, AgentClientResult};
 
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
 
 /// Client for communicating with `agentd` through a running sandbox's relay.
-pub struct AgentClient {
-    inner: Option<microsandbox_agent_client::AgentClient>,
-    pub(super) return_ticket: Option<pool::ReturnTicket>,
-}
+pub struct AgentClient(microsandbox_agent_client::AgentClient);
 
 //--------------------------------------------------------------------------------------------------
 // Methods
@@ -30,7 +27,7 @@ impl AgentClient {
     pub async fn connect(sock_path: impl AsRef<Path>) -> AgentClientResult<Self> {
         microsandbox_agent_client::AgentClient::connect(sock_path)
             .await
-            .map(Self::from_inner)
+            .map(Self)
     }
 
     /// Connect over an arbitrary byte-stream transport with an explicit
@@ -47,7 +44,7 @@ impl AgentClient {
     {
         microsandbox_agent_client::AgentClient::connect_stream_with_timeout(stream, timeout)
             .await
-            .map(Self::from_inner)
+            .map(Self)
     }
 
     /// Connect to an arbitrary agent relay socket path with an explicit
@@ -58,7 +55,7 @@ impl AgentClient {
     ) -> AgentClientResult<Self> {
         microsandbox_agent_client::AgentClient::connect_with_timeout(sock_path, timeout)
             .await
-            .map(Self::from_inner)
+            .map(Self)
     }
 
     /// Connect to an arbitrary agent relay socket path with an explicit
@@ -69,7 +66,7 @@ impl AgentClient {
     ) -> AgentClientResult<Self> {
         microsandbox_agent_client::AgentClient::connect_with_deadline(sock_path, deadline)
             .await
-            .map(Self::from_inner)
+            .map(Self)
     }
 
     /// Resolve a sandbox name to its agent socket path and connect.
@@ -108,29 +105,8 @@ impl AgentClient {
     }
 
     /// Close the connection.
-    pub async fn close(mut self) {
-        self.return_ticket = None;
-        if let Some(inner) = self.inner.take() {
-            inner.close().await;
-        }
-    }
-
-    pub(super) fn from_inner(inner: microsandbox_agent_client::AgentClient) -> Self {
-        Self {
-            inner: Some(inner),
-            return_ticket: None,
-        }
-    }
-
-    pub(crate) fn with_return_ticket(mut self, ticket: pool::ReturnTicket) -> Self {
-        self.return_ticket = Some(ticket);
-        self
-    }
-
-    pub(crate) fn completed_exec(&self) {
-        if let Some(ticket) = &self.return_ticket {
-            ticket.complete();
-        }
+    pub async fn close(self) {
+        self.0.close().await;
     }
 }
 
@@ -142,15 +118,7 @@ impl Deref for AgentClient {
     type Target = microsandbox_agent_client::AgentClient;
 
     fn deref(&self) -> &Self::Target {
-        self.inner.as_ref().expect("agent client already closed")
-    }
-}
-
-impl Drop for AgentClient {
-    fn drop(&mut self) {
-        if let (Some(ticket), Some(inner)) = (self.return_ticket.take(), self.inner.take()) {
-            ticket.recycle(inner);
-        }
+        &self.0
     }
 }
 

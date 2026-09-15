@@ -1,6 +1,6 @@
 //! Backend dispatch contract.
 
-use std::{sync::Arc, time::Duration};
+use std::time::Duration;
 
 use futures::future::BoxFuture;
 
@@ -53,15 +53,6 @@ pub trait Backend: Send + Sync + 'static {
     /// paths) without keeping a separate `Arc<LocalBackend>` alongside the
     /// `Arc<dyn Backend>`. Returns `None` for cloud backends.
     fn as_local(&self) -> Option<&LocalBackend> {
-        None
-    }
-
-    /// Bind agent dialing to a cloud handle's immutable sandbox UUID.
-    ///
-    /// Lifecycle methods keep their existing selectors. Backends without
-    /// cloud identities leave the handle's backend unchanged.
-    #[doc(hidden)]
-    fn with_agent_identity(&self, _name: &str, _id: &str) -> Option<Arc<dyn Backend>> {
         None
     }
 
