@@ -37,7 +37,7 @@ impl LocalBackend {
         };
         let latest = self.latest_stop_run(id).await?;
         let run_id = latest.as_ref().map(|run| run.id);
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         let departing = super::process_exit::RuntimeExit::capture(
             latest.as_ref().and_then(|run| run.pid),
             &microsandbox_runtime::ipc::lifecycle_lock_path(&run_dir, name),
@@ -56,7 +56,7 @@ impl LocalBackend {
         }
         // Exit cleanup also needs transition ownership. Never retain this guard while waiting.
         drop(transition);
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         if let Some(departing) = departing {
             // Do not poll the external upper's lock: a different sandbox may legitimately
             // own it by now. Wait only for the process selected before shutdown dispatch.
