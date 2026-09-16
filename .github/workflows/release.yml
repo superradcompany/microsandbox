@@ -1277,10 +1277,9 @@ jobs:
 
           # Copy napi-generated bindings into the root package's native/ dir
           # (use darwin-arm64; all platforms emit identical JS and types).
-          # napi build emits index.d.ts; rename to index.d.cts so nodenext
-          # resolution finds it next to the .cjs binding.
+          # Keep the declaration path aligned with package.json exports/files.
           cp node-artifacts/node-sdk-darwin-arm64/native/index.cjs sdk/node-ts/native/index.cjs
-          cp node-artifacts/node-sdk-darwin-arm64/native/index.d.ts sdk/node-ts/native/index.d.cts
+          cp node-artifacts/node-sdk-darwin-arm64/native/index.d.ts sdk/node-ts/native/index.d.ts
 
       - name: Build shared TypeScript packages in dependency order
         working-directory: packages
@@ -1443,15 +1442,23 @@ jobs:
           VERSION="${GITHUB_REF_NAME#v}"
           node scripts/ci/wait-for-npm-packages.mjs "$VERSION" microsandbox
 
-      - name: Build and publish MCP server
+      - name: Build MCP server
+        working-directory: mcp
+        run: |
+          # The pinned MCP source has no lockfile. Disable dependency lifecycle
+          # scripts during resolution and keep publishing credentials out of build.
+          if [ -f package-lock.json ]; then
+            npm ci --ignore-scripts
+          else
+            npm install --ignore-scripts
+          fi
+          npm run build
+
+      - name: Publish MCP server
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         working-directory: mcp
-        run: |
-          rm -f package-lock.json
-          npm install
-          npm run build
-          node ../scripts/ci/publish-npm-package.mjs .
+        run: node ../scripts/ci/publish-npm-package.mjs .
 
   # ---------------------------------------------------------------------------
   # Publish Rust crates to crates.io
