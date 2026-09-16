@@ -1,0 +1,195 @@
+name: SDK Runtime Compatibility
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  baseline:
+    name: Pin published compatibility baseline
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Resolve and verify released runtime
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/compatibility/baseline.py --output compatibility-baseline
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: compatibility-baseline
+          path: compatibility-baseline/
+          if-no-files-found: error
+          retention-days: 3
+
+  prepare:
+    name: Prepare ${{ matrix.language }} SDK pair
+    needs: baseline
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [rust, python, node, go, ruby]
+    env:
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: compatibility-baseline
+          path: compatibility-baseline/
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: msb-linux-x86_64
+          path: build/
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        if: matrix.language == 'rust' || matrix.language == 'ruby'
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+        if: matrix.language == 'rust' || matrix.language == 'ruby'
+        with:
+          key: compatibility-${{ matrix.language }}
+          cache-bin: false
+      - name: Install native build dependencies
+        if: matrix.language == 'rust' || matrix.language == 'ruby'
+        run: scripts/ci/install-apt-packages.sh libcap-ng-dev
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        if: matrix.language == 'node'
+        with:
+          node-version: 22
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        if: matrix.language == 'go'
+        with:
+          go-version: stable
+          cache: false
+      - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1
+        if: matrix.language == 'ruby'
+        with:
+          ruby-version: '3.3'
+      - name: Install Ruby extension build dependencies
+        if: matrix.language == 'ruby'
+        run: gem install rake rake-compiler rb_sys --no-document
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: matrix.language == 'python'
+        with:
+          name: python-wheel-linux-x86_64
+          path: compatibility-artifacts/python/
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: matrix.language == 'go'
+        with:
+          name: go-ffi-linux-x86_64
+          path: compatibility-artifacts/go/
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: matrix.language == 'node'
+        with:
+          name: node-sdk-linux-x86_64
+          path: sdk/node-ts/
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: matrix.language == 'node'
+        with:
+          name: node-sdk-shared-types
+          path: packages/microsandbox-types/typescript/
+      - name: Prepare exact SDK packages and native libraries
+        run: |
+          mkdir -p compatibility-artifacts
+          python3 scripts/compatibility/prepare.py \
+            --language '${{ matrix.language }}' \
+            --workspace "$GITHUB_WORKSPACE" \
+            --baseline compatibility-baseline \
+            --artifacts compatibility-artifacts \
+            --output compatibility-payload
+          tar -czf compatibility-payload.tar.gz --exclude=./rust-target -C compatibility-payload .
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: compatibility-sdk-${{ matrix.language }}
+          path: compatibility-payload.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3
+
+  live:
+    name: Live ${{ matrix.language }} cross-version compatibility
+    needs: prepare
+    # PR-controlled code runs in a fresh hosted VM, not a persistent self-hosted machine.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        language: [rust, python, node, go, ruby]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Require accessible KVM
+        run: |
+          test -c /dev/kvm
+          sudo chmod 0666 /dev/kvm
+          python3 - <<'PY'
+          import fcntl, os
+          fd = os.open('/dev/kvm', os.O_RDWR)
+          try:
+              assert fcntl.ioctl(fd, 0xAE00, 0) == 12, 'unsupported KVM API'
+          finally:
+              os.close(fd)
+          PY
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: compatibility-baseline
+          path: compatibility-baseline/
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: msb-linux-x86_64
+          path: build/
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: compatibility-sdk-${{ matrix.language }}
+          path: compatibility-sdk/
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        if: matrix.language == 'node'
+        with:
+          node-version: 22
+      - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1
+        if: matrix.language == 'ruby'
+        with:
+          ruby-version: '3.3'
+      - name: Run isolated runtime/SDK pairings
+        run: |
+          mkdir -p compatibility-sdk/payload
+          tar -xzf compatibility-sdk/compatibility-payload.tar.gz -C compatibility-sdk/payload
+          python3 scripts/compatibility/run.py \
+            --payload compatibility-sdk/payload \
+            --baseline compatibility-baseline \
+            --runtime build \
+            --commit "$GITHUB_SHA" \
+            --output compatibility-results
+      - name: Upload compatibility evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: compatibility-results-${{ matrix.language }}
+          path: |
+            compatibility-results/*.json
+            compatibility-results/*.jsonl
+            compatibility-results/*.log
+          if-no-files-found: error
+          retention-days: 14
+
+  result:
+    name: Compatibility Result
+    if: always()
+    needs: [baseline, prepare, live]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require completed qualification
+        env:
+          RESULTS: ${{ toJson(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          results = json.loads(os.environ['RESULTS'])
+          failed = {name: job['result'] for name, job in results.items() if job['result'] != 'success'}
+          if failed:
+              raise SystemExit(f'Compatibility qualification incomplete: {failed}')
+          PY

@@ -1,0 +1,18 @@
+[package]
+name = "msb-sdk-runtime-compat"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "msb-sdk-runtime-compat"
+path = "bin/main.rs"
+
+# This fixture is copied into an isolated build directory by the matrix runner.
+# Keeping its own workspace prevents baseline builds from using workspace SDKs.
+[workspace]
+
+[dependencies]
+microsandbox = { version = "=0.7.0", default-features = false, features = ["local", "net"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "net", "io-util"] }

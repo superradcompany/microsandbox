@@ -1425,6 +1425,13 @@ jobs:
           chmod +x build/msb
           python3 scripts/smoke/cli/previous_release_upgrade.py
 
+  # Actual mixed-version launches are distinct from opening an old database.
+  sdk-runtime-compat:
+    name: SDK Runtime Compatibility
+    needs: [build-linux-x86_64, python-wheel-build, node-sdk-build, go-ffi-build, changes]
+    if: needs.changes.outputs.code == 'true'
+    uses: ./.github/workflows/sdk-runtime-compat.yml
+
   # ---------------------------------------------------------------------------
   # CLI smoke tests (requires KVM)
   #
@@ -1470,6 +1477,7 @@ jobs:
           python3 -m unittest discover -s scripts/ci -p test_runner_storage.py
           python3 -m unittest discover -s scripts/smoke/cli -p test_snapshot_branch.py
           python3 -m unittest discover -s scripts/smoke/cli -p test_restore_resource_intent.py
+          python3 -m unittest discover -s scripts/compatibility -p 'test_*.py'
 
       - name: Snapshot and branch live smoke
         # The short operation deadline excludes image setup and bounded cleanup.
@@ -2051,6 +2059,7 @@ jobs:
       - ruby-platform-smoke-clean
       - go-quality
       - previous-release-upgrade-smoke
+      - sdk-runtime-compat
       - cli-smoke-test
       - integration-test
       - node-sdk-test
@@ -2061,7 +2070,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Aggregate results
+        env:
+          CODE_CHANGED: ${{ needs.changes.outputs.code }}
+          COMPAT_RESULT: ${{ needs.sdk-runtime-compat.result }}
         run: |
+          # A missing/conditionally skipped compatibility lane is not evidence
+          # of compatibility. Docs-only PRs retain the existing inexpensive path.
+          if [[ "$CODE_CHANGED" == "true" && "$COMPAT_RESULT" != "success" ]]; then
+            echo "::error::SDK/runtime compatibility did not complete successfully: $COMPAT_RESULT"
+            exit 1
+          fi
           results='${{ toJson(needs.*.result) }}'
           echo "needs results: $results"
           if echo "$results" | grep -qE '"failure"|"cancelled"'; then
