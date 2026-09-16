@@ -656,7 +656,7 @@ pub struct CloudNetworkSpec {
     pub strict: bool,
 
     /// Max concurrent TCP connections.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     // Keep outbound requests compatible with existing cloud servers.
     #[serde(rename = "max_connections", alias = "max_tcp_connections")]
     pub max_tcp_connections: Option<usize>,
