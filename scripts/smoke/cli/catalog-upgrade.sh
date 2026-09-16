@@ -7,7 +7,9 @@ set -euo pipefail
 : "${MSB_CATALOG_OLD_FW:?set its matching libkrunfw path}"
 : "${MSB_CATALOG_NEW_BIN:?set the candidate executable path}"
 : "${MSB_CATALOG_NEW_FW:?set its matching libkrunfw path}"
-command -v sqlite3 >/dev/null
+if ! command -v sqlite3 >/dev/null; then
+    command -v python3 >/dev/null
+fi
 
 # Keep paths short enough for historical Unix socket names. Never use the real home.
 test_home=$(mktemp -d /tmp/msb-cat.XXXXXX)
@@ -21,7 +23,22 @@ old() {
 current() {
     env MSB_PATH="$MSB_CATALOG_NEW_BIN" MSB_LIBKRUNFW_PATH="$MSB_CATALOG_NEW_FW" "$MSB_CATALOG_NEW_BIN" "$@"
 }
-sql() { sqlite3 "$test_home/db/msb.db" "$1"; }
+sql() {
+    if command -v sqlite3 >/dev/null; then
+        sqlite3 "$test_home/db/msb.db" "$1"
+    else
+        # Minimal Linux development images may only have Python's SQLite module.
+        python3 - "$test_home/db/msb.db" "$1" <<'PY'
+import pathlib
+import sqlite3
+import sys
+
+with sqlite3.connect(pathlib.Path(sys.argv[1]).as_uri() + "?mode=ro", uri=True) as db:
+    for row in db.execute(sys.argv[2]):
+        print("|".join("" if value is None else str(value) for value in row))
+PY
+    fi
+}
 cleanup() {
     for name in catalog-seed catalog-restored; do
         current stop "$name" >/dev/null 2>&1 || true

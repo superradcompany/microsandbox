@@ -119,6 +119,30 @@ mod tests {
         );
         let backend: Arc<dyn crate::backend::Backend> = local.clone();
         crate::backend::with_backend(backend, async {
+            #[cfg(feature = "net")]
+            {
+                // A newer SDK must not silently omit a security/resource
+                // request that the selected historical runtime cannot honor.
+                let rejected = crate::Sandbox::builder("catalog-unsupported")
+                    .image("alpine:3.21").cpus(1).memory(256u32).max_duration(120)
+                    .network(|network| network.max_udp_connections(0))
+                    .create().await;
+                let error = match rejected {
+                    Ok(unexpected) => {
+                        unexpected.stop().await.unwrap();
+                        crate::Sandbox::remove("catalog-unsupported").await.unwrap();
+                        panic!("historical runtime accepted an unsupported UDP limit");
+                    }
+                    Err(error) => error.to_string(),
+                };
+                assert!(error.contains("max_udp_connections") || error.contains("UDP connection limits"), "{error}");
+                assert!(matches!(crate::Sandbox::get("catalog-unsupported").await,
+                    Err(MicrosandboxError::SandboxNotFound(_))));
+                assert!(!local.config().sandboxes_dir().join("catalog-unsupported").exists());
+                let after = Migrator::get_applied_migrations(local.db().await.unwrap().write().inner()).await.unwrap();
+                assert_eq!(after.iter().map(|migration| migration.name()).collect::<Vec<_>>(), before.iter().map(|migration| migration.name()).collect::<Vec<_>>());
+                println!("historical runtime 0.6.{expected}: unsupported UDP request refused without a sandbox or schema change");
+            }
             for count in [0, 1, 3] {
                 let name = format!("catalog-mounts-{count}");
                 let started = std::time::Instant::now();
@@ -176,6 +200,64 @@ mod tests {
         .unwrap();
         Migrator::up(pools.write().inner(), Some(25)).await.unwrap();
         pools
+    }
+
+    #[cfg(feature = "net")]
+    #[tokio::test]
+    async fn unsupported_replacement_preserves_the_existing_sandbox() {
+        use std::sync::Arc;
+
+        // macOS's default temporary root can exceed historical socket limits.
+        #[cfg(unix)]
+        let home = tempfile::tempdir_in("/tmp").unwrap();
+        #[cfg(not(unix))]
+        let home = tempfile::tempdir().unwrap();
+        let pools = historical(home.path()).await;
+        let original = include_str!("../../db/fixtures/config-0.6.18.json")
+            .replace("catalog-fixture", "preserved");
+        pools.write().execute_raw(sea_orm::Statement::from_sql_and_values(
+            sea_orm::DbBackend::Sqlite,
+            "INSERT INTO sandbox (id, name, config, status, ephemeral) VALUES (1, 'preserved', ?, 'Stopped', 0)",
+            [original.clone().into()],
+        )).await.unwrap();
+        let sandbox_dir = home.path().join("sandboxes/preserved");
+        std::fs::create_dir_all(&sandbox_dir).unwrap();
+        std::fs::write(sandbox_dir.join("sentinel"), "existing data").unwrap();
+        let local = Arc::new(
+            LocalBackend::builder()
+                .home(home.path())
+                .build()
+                .await
+                .unwrap(),
+        );
+        let backend: Arc<dyn crate::backend::Backend> = local;
+        let result = crate::backend::with_backend(backend, async {
+            crate::Sandbox::builder("preserved")
+                .image("alpine:3.21")
+                .network(|network| network.max_udp_connections(0))
+                .replace()
+                .create()
+                .await
+        })
+        .await;
+        let error = result
+            .err()
+            .expect("unsupported replacement must fail")
+            .to_string();
+        assert!(error.contains("max_udp_connections"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(sandbox_dir.join("sentinel")).unwrap(),
+            "existing data"
+        );
+        let row = pools.read().query_one_raw(sea_orm::Statement::from_string(
+            sea_orm::DbBackend::Sqlite, "SELECT config FROM sandbox WHERE id = 1 AND name = 'preserved' AND status = 'Stopped'"
+        )).await.unwrap().unwrap();
+        assert_eq!(row.try_get_by_index::<String>(0).unwrap(), original);
+        assert!(
+            !crate::db::admission::is_current(pools.read())
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test]
