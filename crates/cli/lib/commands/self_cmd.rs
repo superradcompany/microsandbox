@@ -220,6 +220,11 @@ struct DowngradeOperation {
     journal: DowngradeOperationJournal,
 }
 
+enum SnapshotArtifactDowngradePlan {
+    V066(microsandbox::backend::local_snapshot_downgrade::DowngradePlan),
+    ReleasedFlat(microsandbox::backend::local_snapshot_downgrade::ReleasedFlatDowngradePlan),
+}
+
 /// Durable Windows-only handoff from a self-management command to its retryable
 /// activation helper. Task Scheduler keeps invoking the helper until target
 /// verification and command-specific cleanup both succeed.
@@ -859,16 +864,22 @@ async fn install_update_release(
     let bin_dir = base_dir.join(microsandbox_utils::BIN_SUBDIR);
     let lib_dir = base_dir.join(microsandbox_utils::LIB_SUBDIR);
     let spinner = ui::Spinner::start("Updating", &format!("to {display_version}"));
-    let result = microsandbox::setup::Setup::builder()
-        .base_dir(base_dir.to_path_buf())
-        .version(target_version.to_string())
-        .force(true)
-        .build()
-        .install()
-        .await;
+    let config = microsandbox::config::GlobalConfig {
+        home: Some(base_dir.to_path_buf()),
+        ..Default::default()
+    };
+    let result = microsandbox::setup::install_runtime(
+        &config,
+        microsandbox::setup::InstallOptions {
+            version: target_version.to_string(),
+            force: true,
+            ..Default::default()
+        },
+    )
+    .await;
 
     match result {
-        Ok(()) => {
+        Ok(_) => {
             spinner.finish_clear();
             done(&format!("Updated msb in {}", bin_dir.display()));
             done(&format!("Updated libkrunfw in {}/", lib_dir.display()));
@@ -1097,19 +1108,41 @@ async fn run_downgrade_with_db(
         }
 
         if ctx.operation.phase() < DowngradePhase::DatabaseReverted {
-            let reverses_snapshots = fresh_plan.rollback.iter().any(|migration| {
+            if fresh_plan
+                .rollback
+                .iter()
+                .any(|migration| migration.id == schema_metadata::SNAPSHOT_GROUPS_MIGRATION_ID)
+            {
+                // Refuse before any artifact rewrite. A grouped tree cannot be represented
+                // by the target's flat namespace, even if its rebuildable index is missing.
+                refuse_snapshot_group_downgrade(ctx.db.inner(), ctx.snapshots_dir).await?;
+            }
+            let reverses_legacy_snapshots = fresh_plan.rollback.iter().any(|migration| {
                 migration.id == schema_metadata::SNAPSHOT_ARTIFACT_TRANSITION_MIGRATION_ID
             });
-            let snapshot_plan = if reverses_snapshots
+            let reverses_final_snapshots = fresh_plan
+                .rollback
+                .iter()
+                .any(|migration| migration.id == schema_metadata::SNAPSHOT_IDENTITY_MIGRATION_ID);
+            let snapshot_plan = if (reverses_legacy_snapshots || reverses_final_snapshots)
                 && ctx.operation.phase() < DowngradePhase::ArtifactsReverted
             {
                 let spinner = ui::Spinner::start("Checking", "retained snapshot graph");
-                let result =
+                let result = if reverses_legacy_snapshots {
                     microsandbox::backend::local_snapshot_downgrade::preflight_managed_v066(
                         ctx.db.inner(),
                         ctx.snapshots_dir,
                     )
-                    .await;
+                    .await
+                    .map(SnapshotArtifactDowngradePlan::V066)
+                } else {
+                    microsandbox::backend::local_snapshot_downgrade::preflight_managed_released_flat(
+                        ctx.db.inner(),
+                        ctx.snapshots_dir,
+                    )
+                    .await
+                    .map(SnapshotArtifactDowngradePlan::ReleasedFlat)
+                };
                 match result {
                     Ok(plan) => {
                         spinner.finish_success("Checked");
@@ -1176,13 +1209,25 @@ async fn run_downgrade_with_db(
                     .set_phase(DowngradePhase::ArtifactsReverting)?;
                 if let Some(plan) = snapshot_plan {
                     let spinner = ui::Spinner::start("Reverting", "snapshot artifacts");
-                    match microsandbox::backend::local_snapshot_downgrade::execute_managed_v066(
-                        ctx.db.inner(),
-                        ctx.operation.recovery_dir(),
-                        plan,
-                    )
-                    .await
-                    {
+                    let result = match plan {
+                        SnapshotArtifactDowngradePlan::V066(plan) => {
+                            microsandbox::backend::local_snapshot_downgrade::execute_managed_v066(
+                                ctx.db.inner(),
+                                ctx.operation.recovery_dir(),
+                                plan,
+                            )
+                            .await
+                        }
+                        SnapshotArtifactDowngradePlan::ReleasedFlat(plan) => {
+                            microsandbox::backend::local_snapshot_downgrade::execute_managed_released_flat(
+                                ctx.db.inner(),
+                                ctx.operation.recovery_dir(),
+                                plan,
+                            )
+                            .await
+                        }
+                    };
+                    match result {
                         Ok(report) => {
                             spinner.finish_success(&format!("Reverted {}", report.artifacts,))
                         }
@@ -1345,15 +1390,20 @@ async fn prepare_windows_update_recovery(
 
     let result = async {
         let bundle_digest = fetch_release_bundle_digest(target_version).await?;
-        microsandbox::setup::Setup::builder()
-            .base_dir(staged_dir.clone())
-            .version(target_version.to_string())
-            .allow_ci_local_bundle(false)
-            .expected_bundle_sha256(bundle_digest)
-            .force(true)
-            .build()
-            .install()
-            .await?;
+        let config = microsandbox::config::GlobalConfig {
+            home: Some(staged_dir.clone()),
+            ..Default::default()
+        };
+        microsandbox::setup::install_runtime(
+            &config,
+            microsandbox::setup::InstallOptions {
+                version: target_version.to_string(),
+                force: true,
+                expected_archive_sha256: Some(bundle_digest),
+                ..Default::default()
+            },
+        )
+        .await?;
         verify_installed_msb_version(&staged_dir, target_version).await?;
 
         prepare_windows_self_swap_recovery(
@@ -2276,15 +2326,20 @@ async fn prepare_downgrade_operation(
     let staged_target = stage_directory.join("target");
 
     let stage_result = async {
-        microsandbox::setup::Setup::builder()
-            .base_dir(staged_target.clone())
-            .version(target.to_string())
-            .allow_ci_local_bundle(false)
-            .expected_bundle_sha256(bundle_digest)
-            .force(true)
-            .build()
-            .install()
-            .await?;
+        let config = microsandbox::config::GlobalConfig {
+            home: Some(staged_target.clone()),
+            ..Default::default()
+        };
+        microsandbox::setup::install_runtime(
+            &config,
+            microsandbox::setup::InstallOptions {
+                version: target.to_string(),
+                force: true,
+                expected_archive_sha256: Some(bundle_digest),
+                ..Default::default()
+            },
+        )
+        .await?;
         verify_installed_msb_version(&staged_target, target).await?;
         let baseline = load_staged_schema_baseline(&staged_target, target).await?;
 
@@ -2480,6 +2535,34 @@ async fn applied_migrations(db: &DatabaseConnection) -> anyhow::Result<Vec<Strin
         .iter()
         .map(|metadata| metadata.id.to_string())
         .collect())
+}
+
+async fn refuse_snapshot_group_downgrade(
+    db: &DatabaseConnection,
+    snapshots_dir: &Path,
+) -> anyhow::Result<()> {
+    let grouped = optional_count(
+        db,
+        "SELECT COUNT(*) FROM snapshot_index WHERE group_path IS NOT NULL OR group_name IS NOT NULL",
+    ).await?;
+    let mut grouped_on_disk = false;
+    if snapshots_dir.exists() {
+        for entry in fs::read_dir(snapshots_dir)? {
+            let path = entry?.path();
+            // The metadata file is the on-disk namespace marker. Refuse even an empty or
+            // unindexed group rather than making it disappear from the older CLI.
+            if path.join("group.json").exists() {
+                grouped_on_disk = true;
+                break;
+            }
+        }
+    }
+    if grouped > 0 || grouped_on_disk {
+        anyhow::bail!(
+            "snapshot groups prevent downgrade: retain this version or export and remove snapshot groups before retrying"
+        );
+    }
+    Ok(())
 }
 
 async fn user_data_warnings(db: &DatabaseConnection) -> anyhow::Result<Vec<String>> {
@@ -3468,6 +3551,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn downgrade_refuses_unindexed_group_before_artifact_mutation() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = sea_orm::Database::connect("sqlite::memory:").await.unwrap();
+        Migrator::up(&db, None).await.unwrap();
+        let snapshots = dir.path().join("snapshots");
+        let group = snapshots.join("unindexed");
+        fs::create_dir_all(&group).unwrap();
+        let state = br#"{"schema":"microsandbox.snapshot-group/1","head":null}"#;
+        fs::write(group.join("group.json"), state).unwrap();
+        let error = refuse_snapshot_group_downgrade(&db, &snapshots)
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("snapshot groups prevent downgrade")
+        );
+        assert_eq!(fs::read(group.join("group.json")).unwrap(), state);
+    }
+
+    #[tokio::test]
     async fn rollback_schema_steps_through_latest_migrations() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("msb.db");
@@ -3480,10 +3584,40 @@ mod tests {
         .unwrap();
         Migrator::up(db.inner(), None).await.unwrap();
 
-        // The backdated network-slot migration was released after the
-        // owner-compatibility marker, so it is the first migration rolled back.
-        // It leaves its compatible SQLite column and constraints in place, but
-        // removes the migration record.
+        // Empty databases can drop grouped addressing without discarding any instances.
+        rollback_schema(db.inner(), 1).await.unwrap();
+
+        // With no snapshot
+        // artifacts to translate, rollback removes its two rebuildable index
+        // projections before touching any migration from the released prefix.
+        rollback_schema(db.inner(), 1).await.unwrap();
+
+        let rows = db
+            .query_all_raw(Statement::from_sql_and_values(
+                DatabaseBackend::Sqlite,
+                "SELECT version FROM seaql_migrations WHERE version = ?",
+                [schema_metadata::SNAPSHOT_IDENTITY_MIGRATION_ID.into()],
+            ))
+            .await
+            .unwrap();
+        assert!(rows.is_empty(), "snapshot identity should be rolled back");
+
+        let columns = db
+            .query_all_raw(Statement::from_string(
+                DatabaseBackend::Sqlite,
+                "PRAGMA table_info(snapshot_index)",
+            ))
+            .await
+            .unwrap();
+        assert!(!columns.iter().any(|row| {
+            matches!(
+                row.try_get_by_index::<String>(1).unwrap().as_str(),
+                "snapshot_id" | "descriptor_digest"
+            )
+        }));
+
+        // The backdated network-slot migration shipped after the owner marker.
+        // Its rollback retains the compatible column but removes its record.
         rollback_schema(db.inner(), 1).await.unwrap();
 
         let rows = db

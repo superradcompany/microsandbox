@@ -1,7 +1,7 @@
 //! Entity definition for the `maintenance_lease` table.
 //!
 //! A single-row coordination primitive used by host-runtime sandbox
-//! lifecycle maintenance. Each `msb sandbox` process performs a cheap
+//! lifecycle maintenance. Each `msb machine` process performs a cheap
 //! read-gated lease attempt on startup; only the runtime that wins the
 //! lease runs the bounded maintenance sweep, so a burst of sandbox starts
 //! does not turn into N concurrent full scans.

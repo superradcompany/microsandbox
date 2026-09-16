@@ -21,6 +21,7 @@ use super::Backend;
 use crate::MicrosandboxResult;
 use crate::agent::AgentClient;
 use crate::logs::{BootError, LogEntry, LogOptions, LogStreamOptions};
+#[cfg(feature = "local")]
 use crate::runtime::ProcessHandle;
 use crate::sandbox::exec::{ExecHandle, ExecOptions, ExecOutput};
 use crate::sandbox::fs::{FsEntry, FsMetadata, FsReadStream, FsWriteSink};
@@ -32,6 +33,7 @@ use crate::sandbox::{
 
 // Keep the pre-split path `crate::backend::sandbox::cloud_status_to_sandbox_status`
 // working for callers like `sandbox/handle.rs`.
+#[cfg(feature = "cloud")]
 pub(crate) use super::cloud::sandbox::{
     cloud_status_to_sandbox_status, sandbox_config_from_cloud_spec,
 };
@@ -68,6 +70,7 @@ pub struct SandboxLocalState {
     /// SQLite row id for this sandbox.
     pub db_id: i32,
     /// Owned libkrun process handle, when this `Sandbox` owns the lifecycle.
+    #[cfg(feature = "local")]
     pub handle: Option<Arc<tokio::sync::Mutex<ProcessHandle>>>,
     /// UDS connection to the in-VM agentd relay.
     pub client: Arc<AgentClient>,
@@ -149,20 +152,20 @@ pub struct SandboxHandleCloudState {
 /// `Sandbox::create`) resolve the backend via
 /// [`default_backend`](super::default_backend) and forward it through.
 pub trait SandboxBackend: Send + Sync {
-    /// Default time to wait for graceful stop convergence.
+    /// Suggested budget for callers choosing a bounded graceful-stop observation.
     ///
-    /// Local and custom backends retain the SDK's existing ten-second
-    /// default. Backends whose stop path includes durable persistence work may
-    /// override this without changing the backend-neutral sandbox API.
+    /// Backends whose stop path includes durable persistence work may suggest a longer budget.
+    /// `SandboxHandle::stop` waits without a deadline; `stop_with_timeout` uses the caller's
+    /// explicit budget. Neither operation applies this hint implicitly.
     fn default_stop_timeout(&self) -> Duration {
         DEFAULT_STOP_TIMEOUT
     }
 
-    /// Whether a graceful stop timeout should escalate to force termination.
+    /// Backend preference for callers implementing an explicit timeout-escalation policy.
     ///
-    /// Local and custom backends retain the existing escalation behavior.
-    /// Backends whose accepted stop may continue asynchronously can return
-    /// `false` and surface an observation timeout instead.
+    /// The SDK's graceful-stop methods never escalate implicitly. Callers must explicitly
+    /// choose `kill` for force termination; a backend whose accepted stop continues
+    /// asynchronously can return `false` to advise against that policy.
     #[doc(hidden)]
     fn should_force_kill_after_stop_timeout(&self) -> bool {
         true
@@ -577,7 +580,7 @@ pub trait SandboxBackend: Send + Sync {
         })
     }
 
-    /// Copy a guest file out to the host.
+    /// Copy a guest file out to the host with buffered atomic publication.
     fn fs_copy_to_host<'a>(
         &'a self,
         backend: Arc<dyn Backend>,

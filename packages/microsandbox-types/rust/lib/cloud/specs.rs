@@ -7,9 +7,9 @@ use serde::{Deserialize, Serialize};
 
 use super::CloudSecretsConfig;
 use crate::domain::{
-    DiskImageFormat, HostPermissions, MountOptions, NetworkPolicy, Patch, PullPolicy, Rlimit,
-    RlimitResource, SandboxLogLevel, StatVirtualization, VolumeMount, default_private,
-    default_strict,
+    DiskImageFormat, HostPermissions, MountOptions, NetworkPolicy, OwnedVolumeStorage, Patch,
+    PullPolicy, Rlimit, RlimitResource, SandboxLogLevel, StatVirtualization, VolumeMount,
+    default_private, default_strict,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -440,6 +440,19 @@ pub enum CloudRootfsSource {
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CloudVolumeMount {
+    /// Sandbox-owned storage; currently rejected by cloud sandbox creation.
+    Owned {
+        /// Absolute guest mount path.
+        guest: String,
+        /// Private directory or ext4 storage.
+        storage: OwnedVolumeStorage,
+        /// Guest mount options.
+        options: MountOptions,
+        /// Directory stat policy.
+        stat_virtualization: StatVirtualization,
+        /// Directory host permission policy.
+        host_permissions: HostPermissions,
+    },
     /// Bind mount a host directory into the guest.
     Bind {
         /// Host directory to bind into the guest.
@@ -513,6 +526,19 @@ pub enum CloudVolumeMount {
 impl From<CloudVolumeMount> for VolumeMount {
     fn from(m: CloudVolumeMount) -> Self {
         match m {
+            CloudVolumeMount::Owned {
+                guest,
+                storage,
+                options,
+                stat_virtualization,
+                host_permissions,
+            } => VolumeMount::Owned {
+                guest,
+                storage,
+                options,
+                stat_virtualization,
+                host_permissions,
+            },
             CloudVolumeMount::Bind {
                 host,
                 guest,
@@ -575,6 +601,19 @@ impl From<CloudVolumeMount> for VolumeMount {
 impl From<VolumeMount> for CloudVolumeMount {
     fn from(m: VolumeMount) -> Self {
         match m {
+            VolumeMount::Owned {
+                guest,
+                storage,
+                options,
+                stat_virtualization,
+                host_permissions,
+            } => CloudVolumeMount::Owned {
+                guest,
+                storage,
+                options,
+                stat_virtualization,
+                host_permissions,
+            },
             VolumeMount::Bind {
                 host,
                 guest,
@@ -648,7 +687,7 @@ pub struct CloudNetworkSpec {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub policy: Option<NetworkPolicy>,
 
-    /// Secret-injection config.
+    /// Secret-substitution config.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub secrets: Option<CloudSecretsConfig>,
 

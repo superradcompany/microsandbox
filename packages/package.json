@@ -1,0 +1,10 @@
+{
+  "name": "@microsandbox/shared-packages",
+  "private": true,
+  "workspaces": ["protocol-client/typescript", "agent-client/typescript", "microsandbox-types/typescript", "control-client/typescript"],
+  "scripts": {
+    "build": "npm run build -w @microsandbox/types && npm run build -w @microsandbox/protocol-client && npm run build -w @microsandbox/agent-client && npm run build -w @microsandbox/control-client",
+    "typecheck": "node protocol-fixtures/sync-rust-fixtures.mjs && npm run typecheck --workspaces && node protocol-fixtures/check-readmes.mjs",
+    "test": "npm test --workspaces --if-present"
+  }
+}

@@ -10,12 +10,52 @@ use super::Backend;
 use crate::MicrosandboxResult;
 use crate::sandbox::SandboxConfig;
 use crate::snapshot::{
-    Manifest, SaveOpts, Snapshot, SnapshotConfig, SnapshotHandle, SnapshotReference,
-    SnapshotVerifyReport,
+    HeadUpdate, LoadOpts, Manifest, SaveOpts, Snapshot, SnapshotArchive, SnapshotConfig,
+    SnapshotHandle, SnapshotReference, SnapshotVerifyReport,
 };
 
 /// Backend implementation for snapshot lifecycle operations.
 pub trait SnapshotBackend: Send + Sync {
+    /// Capture directly to an archive; unsupported backends must reject before capture.
+    fn create_archive<'a>(
+        &'a self,
+        _config: SnapshotConfig,
+        _out: &'a Path,
+        _plain_tar: bool,
+    ) -> BoxFuture<'a, MicrosandboxResult<SnapshotArchive>> {
+        Box::pin(async {
+            Err(crate::MicrosandboxError::local_only(
+                crate::Operation::SnapshotOps,
+            ))
+        })
+    }
+
+    /// Validate and import one batch with explicit local dependency/head policy.
+    fn load_many<'a>(
+        &'a self,
+        _backend: Arc<dyn Backend>,
+        _archives: &'a [PathBuf],
+        _opts: LoadOpts,
+    ) -> BoxFuture<'a, MicrosandboxResult<Vec<SnapshotHandle>>> {
+        Box::pin(async {
+            Err(crate::MicrosandboxError::local_only(
+                crate::Operation::SnapshotOps,
+            ))
+        })
+    }
+
+    /// Read or select a local group head.
+    fn group_head<'a>(
+        &'a self,
+        _selector: &'a str,
+    ) -> BoxFuture<'a, MicrosandboxResult<HeadUpdate>> {
+        Box::pin(async {
+            Err(crate::MicrosandboxError::local_only(
+                crate::Operation::SnapshotOps,
+            ))
+        })
+    }
+
     /// Create a snapshot and return the completed artifact/resource.
     fn create<'a>(
         &'a self,

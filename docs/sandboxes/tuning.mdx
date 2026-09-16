@@ -23,7 +23,7 @@ The live paths come first, but `modify` also plans changes that need a restart o
 | Existing secret material or removal | Live | Adding a secret or changing its placeholder needs a restart |
 | Environment and workdir | Future execs | Processes that are already running keep their current values |
 | `max_cpus` and `max_memory` | Restart or next start | These ceilings are fixed when the VM boots |
-| Root disk size | Restart or next start | Managed and flat OCI disks grow only; tmpfs changes on boot |
+| Root disk size | Live, restart or next start | Managed and flat ext4 roots grow only; tmpfs changes on boot |
 | Named volumes, mount tmpfs, and user disk images | Outside `modify` | Capacity is managed where the storage is defined |
 
 The default policy applies only changes that can complete without restarting. If a patch contains one restart-required change, microsandbox rejects the whole patch and the old configuration stays intact.
@@ -325,7 +325,8 @@ let plan = sb.modify()
     .secret(|secret| secret
         .env("GITHUB_TOKEN")
         .source(SecretSource::Env { var: "GITHUB_TOKEN".into() })
-        .allow_host("api.github.com"))
+        .allow("api.github.com"))
+    .remove_secret("OLD_TOKEN")
     .apply()
     .await?;
 ```
@@ -355,6 +356,38 @@ plan, err := sb.Modify(ctx, m.ModifyOptions{
 
 Adding a new secret or changing its guest-visible placeholder requires a restart because existing processes cannot receive a new placeholder. Removing a secret does not require recreating the sandbox. See [Secrets](/sandboxes/secrets) for sources, host allow lists, and storage behavior.
 
+### Root disk growth
+
+Grow an owned managed or flat ext4 root without restarting, including roots backed by checkpoint layers:
+
+<CodeGroup>
+```bash CLI
+msb modify worker --root-disk 8G
+```
+
+```typescript TypeScript
+await sandbox.modify({ rootDiskSize: 8192 });
+```
+
+```rust Rust
+sb.modify().root_disk_size(8192).apply().await?;
+```
+
+```python Python
+await sb.modify(root_disk_size=8192)
+```
+
+```go Go
+_, err := sb.Modify(ctx, m.ModifyOptions{RootDiskSizeMiB: 8192})
+```
+</CodeGroup>
+
+Microsandbox briefly pauses the VM to extend its writable disk, resumes it, then asks ext4 to make the space usable. Existing snapshots and sealed backing layers stay unchanged. A stopped sandbox grows before the new size is persisted.
+
+Growth is explicit and grow-only. The ext4 image must have enough reserved metadata headroom; older runtimes and filesystems without online-resize support return an error instead of silently restarting. User-supplied disks and cloud sandboxes remain unsupported. Use `--next-start` to defer growth or `--restart` to use stopped growth.
+
+If the disk grows but guest filesystem expansion fails, the error reports incomplete growth. Retry the same target, or stop and restart to finish recovery. Microsandbox never truncates the disk to roll back; snapshots and compaction stay blocked until recovery completes.
+
 ## Changes that need a boot boundary
 
 Some settings define VM capacity or disk layout and cannot change in place:
@@ -362,7 +395,6 @@ Some settings define VM capacity or disk layout and cannot change in place:
 | Change | Apply now | Defer safely |
 | --- | --- | --- |
 | Raise `max_cpus` or `max_memory` | `--restart` | `--next-start` |
-| Grow a managed or flat OCI root disk | `--restart` | `--next-start` |
 | Resize a tmpfs root disk | On restart | `--next-start` |
 | Add a new secret or change its placeholder | `--restart` | `--next-start` |
 

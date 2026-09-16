@@ -1,117 +1,66 @@
-use std::path::PathBuf;
-
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
 use crate::error::to_napi_error;
 
 //--------------------------------------------------------------------------------------------------
-// Types
-//--------------------------------------------------------------------------------------------------
-
-/// Builder for installing the runtime binaries.
-#[napi(js_name = "Setup")]
-pub struct JsSetup {
-    base_dir: Option<PathBuf>,
-    version: Option<String>,
-    skip_verify: bool,
-    force: bool,
-}
-
-//--------------------------------------------------------------------------------------------------
-// Methods
-//--------------------------------------------------------------------------------------------------
-
-#[napi]
-impl JsSetup {
-    #[napi(constructor)]
-    pub fn new() -> Self {
-        Self {
-            base_dir: None,
-            version: None,
-            skip_verify: false,
-            force: false,
-        }
-    }
-
-    #[napi(js_name = "baseDir")]
-    pub fn base_dir(&mut self, path: String) -> &Self {
-        self.base_dir = Some(PathBuf::from(path));
-        self
-    }
-
-    #[napi]
-    pub fn version(&mut self, version: String) -> &Self {
-        self.version = Some(version);
-        self
-    }
-
-    #[napi(js_name = "skipVerify")]
-    pub fn skip_verify(&mut self, enabled: bool) -> &Self {
-        self.skip_verify = enabled;
-        self
-    }
-
-    #[napi]
-    pub fn force(&mut self, enabled: bool) -> &Self {
-        self.force = enabled;
-        self
-    }
-
-    #[napi]
-    pub async fn install(&self) -> Result<()> {
-        let skip = self.skip_verify;
-        let force = self.force;
-        match (self.base_dir.clone(), self.version.clone()) {
-            (Some(dir), Some(v)) => microsandbox::setup::Setup::builder()
-                .base_dir(dir)
-                .version(v)
-                .skip_verify(skip)
-                .force(force)
-                .build()
-                .install()
-                .await
-                .map_err(to_napi_error),
-            (Some(dir), None) => microsandbox::setup::Setup::builder()
-                .base_dir(dir)
-                .skip_verify(skip)
-                .force(force)
-                .build()
-                .install()
-                .await
-                .map_err(to_napi_error),
-            (None, Some(v)) => microsandbox::setup::Setup::builder()
-                .version(v)
-                .skip_verify(skip)
-                .force(force)
-                .build()
-                .install()
-                .await
-                .map_err(to_napi_error),
-            (None, None) => microsandbox::setup::Setup::builder()
-                .skip_verify(skip)
-                .force(force)
-                .build()
-                .install()
-                .await
-                .map_err(to_napi_error),
-        }
-    }
-}
-
-//--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-/// Check if msb and libkrunfw are installed and available.
+/// Read an executable's embedded runtime version without starting it.
 #[napi]
-pub fn is_installed() -> bool {
-    microsandbox::setup::is_installed()
+pub async fn resolve_runtime_version(executable: String) -> Result<Option<String>> {
+    // File access can block on external storage; keep it off the async workers.
+    tokio::task::spawn_blocking(move || {
+        microsandbox::setup::resolve_runtime_version(executable)
+            .map(|version| version.map(|version| version.to_string()))
+            .map_err(to_napi_error)
+    })
+    .await
+    .map_err(|error| Error::from_reason(format!("runtime version reader failed: {error}")))?
 }
 
-/// Download and install msb + libkrunfw under non-empty $MSB_HOME, or
-/// ~/.microsandbox/ when the override is unset or empty.
+/// Resolve the existing runtime pair without installing host binaries.
 #[napi]
-pub async fn install() -> Result<()> {
-    microsandbox::setup::install().await.map_err(to_napi_error)
+pub fn resolve_runtime(config_json: String) -> Result<String> {
+    let config =
+        microsandbox::setup::binding_runtime_config(&config_json).map_err(to_napi_error)?;
+    let runtime = microsandbox::setup::resolve_runtime(&config).map_err(to_napi_error)?;
+    serialize_runtime(runtime)
+}
+
+/// Check whether a complete runtime pair resolves.
+#[napi]
+pub fn is_runtime_installed(config_json: String) -> bool {
+    resolve_runtime(config_json).is_ok()
+}
+
+/// Explicitly install a runtime pair from the selected source.
+#[napi]
+pub async fn install_runtime(config_json: String, options_json: String) -> Result<String> {
+    let config =
+        microsandbox::setup::binding_runtime_config(&config_json).map_err(to_napi_error)?;
+    let options =
+        microsandbox::setup::binding_install_options(&options_json).map_err(to_napi_error)?;
+    let runtime = microsandbox::setup::install_runtime(&config, options)
+        .await
+        .map_err(to_napi_error)?;
+    serialize_runtime(runtime)
+}
+
+/// Reuse a resolved pair and install only when it is wholly absent.
+#[napi]
+pub async fn ensure_runtime(config_json: String, options_json: String) -> Result<String> {
+    let config =
+        microsandbox::setup::binding_runtime_config(&config_json).map_err(to_napi_error)?;
+    let options =
+        microsandbox::setup::binding_install_options(&options_json).map_err(to_napi_error)?;
+    let runtime = microsandbox::setup::ensure_runtime(&config, options)
+        .await
+        .map_err(to_napi_error)?;
+    serialize_runtime(runtime)
+}
+
+fn serialize_runtime(runtime: microsandbox::setup::ResolvedRuntime) -> Result<String> {
+    serde_json::to_string(&runtime).map_err(|error| Error::from_reason(error.to_string()))
 }

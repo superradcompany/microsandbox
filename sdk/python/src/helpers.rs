@@ -17,7 +17,6 @@ use crate::snapshot::{PySnapshot, PySnapshotHandle};
 /// `detached` is consumed by the callers in `sandbox.rs`, not here.
 const KNOWN_CREATE_KWARGS: &[&str] = &[
     "image",
-    "from_snapshot",
     "memory",
     "cpus",
     "max_memory",
@@ -54,13 +53,29 @@ const KNOWN_CREATE_KWARGS: &[&str] = &[
     "network",
     "proxy",
     "secrets",
-    "on_secret_violation",
+    "secret_violation_action",
     "detached",
 ];
 
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
+
+/// Shared parsing vocabulary; restore applies its own resource authorization rules.
+trait ResourceBuilder: Sized {
+    fn volume(
+        self,
+        guest: impl Into<String>,
+        configure: impl FnOnce(
+            microsandbox::sandbox::MountBuilder,
+        ) -> microsandbox::sandbox::MountBuilder,
+    ) -> Self;
+    fn port(self, host: u16, guest: u16) -> Self;
+    fn port_bind(self, bind: std::net::IpAddr, host: u16, guest: u16) -> Self;
+    fn port_udp_bind(self, bind: std::net::IpAddr, host: u16, guest: u16) -> Self;
+    fn vsock(self, path: impl AsRef<std::path::Path>, port: u32) -> Self;
+    fn vsock_dgram(self, path: impl AsRef<std::path::Path>, port: u32) -> Self;
+}
 
 /// Tuple returned by [`parse_init_kwarg`]: `(cmd, args, env)`.
 type ParsedInit = (String, Vec<String>, Vec<(String, String)>);
@@ -153,6 +168,174 @@ pub(crate) fn str_enum_member(py: Python<'_>, enum_name: &str, value: &str) -> P
 // Functions: Config Conversion
 //--------------------------------------------------------------------------------------------------
 
+/// Parse restore-only options without importing fresh-boot defaults or setters.
+pub(crate) fn restore_builder_from_args(
+    snapshot: &Bound<'_, PyAny>,
+    name: String,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<microsandbox::sandbox::RestoreBuilder> {
+    let snapshot = if let Ok(value) = snapshot.extract::<PyRef<'_, PySnapshot>>() {
+        value.rust_reference()
+    } else if let Ok(value) = snapshot.extract::<PyRef<'_, PySnapshotHandle>>() {
+        value.rust_reference()
+    } else if let Ok(value) = snapshot.extract::<String>() {
+        SnapshotReference::auto(value)
+    } else {
+        let path = snapshot
+            .call_method0("__fspath__")
+            .and_then(|path| path.extract::<String>())
+            .map_err(|_| {
+                pyo3::exceptions::PyTypeError::new_err(
+                    "snapshot must be Snapshot, SnapshotHandle, str, or os.PathLike[str]",
+                )
+            })?;
+        SnapshotReference::path(path)
+    };
+    let mut builder = microsandbox::Sandbox::restore_ref(snapshot).name(name);
+    let Some(kwargs) = kwargs else {
+        return Ok(builder);
+    };
+    for (key, _) in kwargs.iter() {
+        let key = key.extract::<String>()?;
+        if ![
+            "cpus",
+            "memory",
+            "network_policy",
+            "max_connections",
+            "disable_network",
+            "security",
+            "max_duration",
+            "idle_timeout",
+            "forked",
+            "disk_only",
+            "snapshot_base",
+            "log_level",
+            "user",
+            "volumes",
+            "captured_volumes",
+            "ports",
+            "vsock",
+            "external_mount_policy",
+            "dangerously_inherit_resources",
+        ]
+        .contains(&key.as_str())
+        {
+            return Err(pyo3::exceptions::PyTypeError::new_err(format!(
+                "unexpected restore option: {key}"
+            )));
+        }
+    }
+    if let Some(cpus) = extract_opt::<u8>(kwargs, "cpus")? {
+        builder = builder.cpus(cpus);
+    }
+    if let Some(memory) = extract_opt::<u32>(kwargs, "memory")? {
+        builder = builder.memory(memory);
+    }
+    if let Some(value) = kwargs.get_item("network_policy")?.filter(|v| !v.is_none()) {
+        // Accept only the existing policy value, not a Network config that could alter bootstrap.
+        let policy = config_dict(&value, "NetworkPolicy")?;
+        let net = PyDict::new(kwargs.py());
+        net.set_item("custom_policy", policy)?;
+        if let Some(policy) = parse_network_policy(&net)? {
+            builder = builder.network_policy(policy);
+        }
+    }
+    if let Some(count) = extract_opt::<usize>(kwargs, "max_connections")? {
+        builder = builder.max_connections(count);
+    }
+    if extract_opt::<bool>(kwargs, "disable_network")?.unwrap_or(false) {
+        builder = builder.disable_network();
+    }
+    if let Some(value) = kwargs.get_item("security")?.filter(|v| !v.is_none()) {
+        let profile = extract_str_enum(&value, "SecurityProfile")?;
+        builder = builder.security(match profile.as_str() {
+            "default" => SecurityProfile::Default,
+            "restricted" => SecurityProfile::Restricted,
+            _ => {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "invalid security profile",
+                ));
+            }
+        });
+    }
+    if let Some(seconds) = restore_duration(kwargs, "max_duration")? {
+        builder = builder.max_duration(seconds);
+    }
+    if let Some(seconds) = restore_duration(kwargs, "idle_timeout")? {
+        builder = builder.idle_timeout(seconds);
+    }
+    if extract_opt::<bool>(kwargs, "forked")?.unwrap_or(false) {
+        builder = builder.forked();
+    }
+    if extract_opt::<bool>(kwargs, "disk_only")?.unwrap_or(false) {
+        builder = builder.disk_only();
+    }
+    if extract_opt::<bool>(kwargs, "dangerously_inherit_resources")?.unwrap_or(false) {
+        builder = builder.dangerously_inherit_resources();
+    }
+    if let Some(base) = extract_opt::<String>(kwargs, "snapshot_base")? {
+        builder = builder.snapshot_base(base);
+    }
+    if let Some(user) = extract_opt::<String>(kwargs, "user")? {
+        builder = builder.user(user);
+    }
+    if let Some(value) = kwargs.get_item("log_level")?.filter(|v| !v.is_none()) {
+        let level = extract_str_enum(&value, "LogLevel")?;
+        builder = builder.log_level(match level.as_str() {
+            "trace" => LogLevel::Trace,
+            "debug" => LogLevel::Debug,
+            "info" => LogLevel::Info,
+            "warn" => LogLevel::Warn,
+            "error" => LogLevel::Error,
+            _ => return Err(pyo3::exceptions::PyValueError::new_err("invalid log_level")),
+        });
+    }
+    if let Some(policy) = extract_opt::<String>(kwargs, "external_mount_policy")? {
+        builder = builder.external_mount_policy(match policy.as_str() {
+            "strict" => microsandbox::sandbox::ExternalMountRestorePolicy::Strict,
+            "relaxed" => microsandbox::sandbox::ExternalMountRestorePolicy::Relaxed,
+            _ => {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "external_mount_policy must be strict or relaxed",
+                ));
+            }
+        });
+    }
+    if let Some(volumes) = kwargs.get_item("volumes")?.filter(|v| !v.is_none()) {
+        for (guest, mount) in require_mapping_dict(&volumes, "volumes")?.iter() {
+            let mount = config_dict(&mount, "MountConfig")?;
+            builder = apply_mount(builder, guest.extract()?, &mount)?;
+        }
+    }
+    if let Some(paths) = extract_opt::<Vec<String>>(kwargs, "captured_volumes")? {
+        for guest in paths {
+            builder = builder.volume(guest, |mount| mount.captured());
+        }
+    }
+    if let Some(ports) = kwargs.get_item("ports")?.filter(|v| !v.is_none()) {
+        builder = apply_ports(builder, &ports, PortBindingSource::PublicConfig)?;
+    }
+    if let Some(vsock) = kwargs.get_item("vsock")?.filter(|v| !v.is_none()) {
+        builder = apply_vsock_routes(builder, &vsock)?;
+    }
+    Ok(builder)
+}
+
+/// Keep explicit zero, and reject non-finite or negative durations before native conversion.
+fn restore_duration(kwargs: &Bound<'_, PyDict>, name: &str) -> PyResult<Option<u64>> {
+    extract_opt::<f64>(kwargs, name)?
+        .map(|seconds| {
+            if !seconds.is_finite() || seconds < 0.0 || seconds >= u64::MAX as f64 {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "{name} must be finite, non-negative, and fit in seconds"
+                )));
+            }
+            // Do not truncate a positive sub-second limit into immediate expiry.
+            Ok(seconds.ceil() as u64)
+        })
+        .transpose()
+}
+
 /// Build a `SandboxBuilder` from the `(name, **kwargs)` form of
 /// `Sandbox.create`.
 ///
@@ -168,7 +351,7 @@ pub fn sandbox_builder_from_args(
 ) -> PyResult<SandboxBuilder> {
     let Some(kwargs) = kwargs else {
         return Err(pyo3::exceptions::PyValueError::new_err(
-            "image= or from_snapshot= is required",
+            "image= is required; use Sandbox.restore() for snapshots",
         ));
     };
 
@@ -177,41 +360,13 @@ pub fn sandbox_builder_from_args(
     let image_present = kwargs
         .get_item("image")?
         .is_some_and(|value| !value.is_none());
-    let snapshot_present = kwargs
-        .get_item("from_snapshot")?
-        .is_some_and(|value| !value.is_none());
-    if image_present && snapshot_present {
+    if !image_present {
         return Err(pyo3::exceptions::PyValueError::new_err(
-            "pass either image= or from_snapshot=, not both",
+            "image= is required; use Sandbox.restore() for snapshots",
         ));
     }
-    if !image_present && !snapshot_present {
-        return Err(pyo3::exceptions::PyValueError::new_err(
-            "image= or from_snapshot= is required",
-        ));
-    }
-
     let mut builder = microsandbox::Sandbox::builder(name);
-
-    if snapshot_present {
-        // Boot from a snapshot. Accept a stable snapshot reference, str, or PathLike.
-        let snap_obj = kwargs.get_item("from_snapshot")?.unwrap();
-        let snapshot_reference = if let Ok(snapshot) = snap_obj.extract::<PyRef<'_, PySnapshot>>() {
-            snapshot.rust_reference()
-        } else if let Ok(handle) = snap_obj.extract::<PyRef<'_, PySnapshotHandle>>() {
-            handle.rust_reference()
-        } else if let Ok(reference) = snap_obj.extract::<String>() {
-            SnapshotReference::auto(reference)
-        } else if let Ok(fspath) = snap_obj.call_method0("__fspath__") {
-            let path = fspath.extract::<String>()?;
-            SnapshotReference::path(path)
-        } else {
-            return Err(pyo3::exceptions::PyTypeError::new_err(
-                "from_snapshot must be Snapshot, SnapshotHandle, str, or os.PathLike",
-            ));
-        };
-        builder = builder.from_snapshot_ref(snapshot_reference);
-    } else {
+    {
         let image_obj = kwargs.get_item("image")?.unwrap();
         // Accept an open image reference/path or the concrete ImageSource
         // configuration type. Arbitrary objects with similarly named
@@ -301,6 +456,7 @@ pub fn sandbox_builder_from_args(
             .map_err(pyo3::exceptions::PyValueError::new_err)?;
         builder = builder.thp(policy);
     }
+
     if let Some(workdir) = extract_opt::<String>(kwargs, "workdir")? {
         builder = builder.workdir(workdir);
     }
@@ -602,15 +758,11 @@ pub fn sandbox_builder_from_args(
 
     // Secret violation action (top-level kwarg). This is applied after
     // `network=` so the explicit shorthand takes precedence when both are set.
-    if let Some(violation_obj) = kwargs.get_item("on_secret_violation")?
+    if let Some(violation_obj) = kwargs.get_item("secret_violation_action")?
         && !violation_obj.is_none()
     {
         let action = parse_violation_action_obj(&violation_obj)?;
-        builder = builder.network(|n| {
-            n.on_secret_violation(|_| {
-                microsandbox_network::builder::ViolationActionBuilder::from_action(action)
-            })
-        });
+        builder = builder.network(|n| n.secret_violation_action(action));
     }
 
     Ok(builder)
@@ -809,11 +961,11 @@ fn extract_root_disk(image_obj: &Bound<'_, PyAny>) -> PyResult<Option<RootDiskSp
 // Functions: Mount
 //--------------------------------------------------------------------------------------------------
 
-fn apply_mount(
-    builder: microsandbox::sandbox::SandboxBuilder,
+fn apply_mount<B: ResourceBuilder>(
+    builder: B,
     guest_path: String,
     mount: &Bound<'_, PyDict>,
-) -> PyResult<microsandbox::sandbox::SandboxBuilder> {
+) -> PyResult<B> {
     let readonly = extract_opt::<bool>(mount, "readonly")?.unwrap_or(false);
     let noexec = extract_opt::<bool>(mount, "noexec")?.unwrap_or(false);
     let nosuid = extract_opt::<bool>(mount, "nosuid")?.unwrap_or(false);
@@ -826,6 +978,77 @@ fn apply_mount(
         .transpose()?;
     let override_uid = extract_opt::<u32>(mount, "override_uid")?;
     let override_gid = extract_opt::<u32>(mount, "override_gid")?;
+
+    if let Some(kind) = extract_opt::<String>(mount, "owned")? {
+        // The selector is exclusive at the native boundary too: callers can
+        // invoke the extension directly without using MountConfig._to_dict().
+        for key in [
+            "bind",
+            "named",
+            "named_mode",
+            "named_kind",
+            "tmpfs",
+            "disk",
+            "format",
+            "fstype",
+        ] {
+            if mount.contains(key)? {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "owned mount cannot specify {key}"
+                )));
+            }
+        }
+        if !matches!(kind.as_str(), "dir" | "disk") {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "invalid owned volume kind: {kind}"
+            )));
+        }
+        if override_uid.is_some() != override_gid.is_some() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "override_uid and override_gid must be specified together",
+            ));
+        }
+        let size_mib = extract_opt::<u32>(mount, "size_mib")?;
+        let quota_mib = extract_opt::<u32>(mount, "quota_mib")?;
+        return Ok(builder.volume(&guest_path, |v| {
+            let mut m = v.owned_with(|mut owned| {
+                owned = if kind == "disk" {
+                    owned.disk()
+                } else {
+                    owned.directory()
+                };
+                if let Some(size) = size_mib {
+                    owned = owned.size(size);
+                }
+                if let Some(quota) = quota_mib {
+                    owned = owned.quota(quota);
+                }
+                owned
+            });
+            if readonly {
+                m = m.readonly();
+            }
+            if noexec {
+                m = m.noexec();
+            }
+            if nosuid {
+                m = m.nosuid();
+            }
+            if nodev {
+                m = m.nodev();
+            }
+            if let Some(policy) = stat_virt {
+                m = m.stat_virtualization(policy);
+            }
+            if let Some(policy) = host_perms {
+                m = m.host_permissions(policy);
+            }
+            if let (Some(uid), Some(gid)) = (override_uid, override_gid) {
+                m = m.owner(uid, gid);
+            }
+            m
+        }));
+    }
 
     if let Some(bind_path) = extract_opt::<String>(mount, "bind")? {
         let quota_mib = extract_opt::<u32>(mount, "quota_mib")?;
@@ -973,7 +1196,7 @@ fn apply_mount(
         }))
     } else {
         Err(pyo3::exceptions::PyValueError::new_err(
-            "mount must have one of: bind, named, tmpfs, disk",
+            "mount must have one of: bind, named, owned, tmpfs, disk",
         ))
     }
 }
@@ -1087,10 +1310,7 @@ fn apply_patch(
 // Functions: Network
 //--------------------------------------------------------------------------------------------------
 
-fn apply_network(
-    mut builder: microsandbox::sandbox::SandboxBuilder,
-    net: &Bound<'_, PyDict>,
-) -> PyResult<microsandbox::sandbox::SandboxBuilder> {
+fn parse_network_policy(net: &Bound<'_, PyDict>) -> PyResult<Option<NetworkPolicy>> {
     // Parse bulk deny-Domain rules up-front so PyValueError propagates
     // cleanly rather than being swallowed inside the builder closure.
     let mut bulk_deny_rules: Vec<microsandbox_network::policy::Rule> = Vec::new();
@@ -1115,8 +1335,6 @@ fn apply_network(
             ));
         }
     }
-    let mut policy_set = false;
-
     if let Some(legacy) = net.get_item("policy")?
         && !legacy.is_none()
     {
@@ -1232,20 +1450,29 @@ fn apply_network(
             default_ingress,
             rules: combined,
         };
-        builder = builder.network(|n| n.policy(policy));
-        policy_set = true;
+        return Ok(Some(policy));
     }
 
     // No custom policy was specified, but legacy DNS block
     // entries were. Use permissive defaults so the rest of the network
     // keeps working — preserves the legacy "full network minus blocked
     // domains" semantics.
-    if !policy_set && !bulk_deny_rules.is_empty() {
+    if !bulk_deny_rules.is_empty() {
         let policy = NetworkPolicy {
             default_egress: microsandbox_network::policy::Action::Allow,
             default_ingress: microsandbox_network::policy::Action::Allow,
             rules: bulk_deny_rules,
         };
+        return Ok(Some(policy));
+    }
+    Ok(None)
+}
+
+fn apply_network(
+    mut builder: microsandbox::sandbox::SandboxBuilder,
+    net: &Bound<'_, PyDict>,
+) -> PyResult<microsandbox::sandbox::SandboxBuilder> {
+    if let Some(policy) = parse_network_policy(net)? {
         builder = builder.network(|n| n.policy(policy));
     }
 
@@ -1331,15 +1558,11 @@ fn apply_network(
     }
 
     // Secret violation action (sandbox-level, not per-secret).
-    if let Some(violation_obj) = net.get_item("on_secret_violation")?
+    if let Some(violation_obj) = net.get_item("secret_violation_action")?
         && !violation_obj.is_none()
     {
         let action = parse_serialized_violation_action(&violation_obj)?;
-        builder = builder.network(|n| {
-            n.on_secret_violation(|_| {
-                microsandbox_network::builder::ViolationActionBuilder::from_action(action)
-            })
-        });
+        builder = builder.network(|n| n.secret_violation_action(action));
     }
 
     // TLS config.
@@ -1404,11 +1627,11 @@ fn apply_network(
     Ok(builder)
 }
 
-fn apply_ports(
-    mut builder: microsandbox::sandbox::SandboxBuilder,
+fn apply_ports<B: ResourceBuilder>(
+    mut builder: B,
     ports: &Bound<'_, PyAny>,
     source: PortBindingSource,
-) -> PyResult<microsandbox::sandbox::SandboxBuilder> {
+) -> PyResult<B> {
     if let Some(ports_dict) = mapping_to_dict(ports)? {
         for (host_obj, guest_obj) in ports_dict.iter() {
             let host_port: u16 = host_obj.extract()?;
@@ -1528,10 +1751,10 @@ fn apply_rate_limiter(
 
 /// Apply the compact `{host_socket: port}` stream shorthand or a sequence of
 /// typed `VsockRoute` values for stream/datagram routes.
-fn apply_vsock_routes(
-    mut builder: microsandbox::sandbox::SandboxBuilder,
+fn apply_vsock_routes<B: ResourceBuilder>(
+    mut builder: B,
     routes: &Bound<'_, PyAny>,
-) -> PyResult<microsandbox::sandbox::SandboxBuilder> {
+) -> PyResult<B> {
     if let Some(routes_dict) = mapping_to_dict(routes)? {
         for (host_socket, port) in routes_dict.iter() {
             builder = builder.vsock(host_socket.extract::<String>()?, port.extract::<u32>()?);
@@ -1574,15 +1797,13 @@ fn apply_secret(
 ) -> PyResult<microsandbox::sandbox::SandboxBuilder> {
     let env_var: String = extract_required(secret, "env_var")?;
     let value: String = extract_required(secret, "value")?;
-    let allow_hosts: Vec<String> = extract_opt(secret, "allow_hosts")?.unwrap_or_default();
-    let allow_host_patterns: Vec<String> =
-        extract_opt(secret, "allow_host_patterns")?.unwrap_or_default();
-    if allow_hosts.is_empty() && allow_host_patterns.is_empty() {
+    let allow: Vec<String> = extract_opt(secret, "allow")?.unwrap_or_default();
+    if allow.is_empty() {
         return Err(pyo3::exceptions::PyValueError::new_err(
             "SecretEntry requires at least one allowed host or allowed host pattern",
         ));
     }
-    let on_violation = if let Some(violation_obj) = secret.get_item("on_violation")?
+    let violation_action = if let Some(violation_obj) = secret.get_item("violation_action")?
         && !violation_obj.is_none()
     {
         Some(parse_serialized_violation_action(&violation_obj)?)
@@ -1591,33 +1812,35 @@ fn apply_secret(
     };
 
     let placeholder: Option<String> = extract_opt(secret, "placeholder")?;
-    let require_tls: Option<bool> = extract_opt(secret, "require_tls")?;
+    let require_tls: Option<bool> = extract_opt(secret, "require_tls_identity")?;
+    let passthrough: Vec<String> = extract_opt(secret, "passthrough")?.unwrap_or_default();
 
-    let (inject_headers, inject_basic_auth, inject_query_params, inject_body) =
-        if let Some(injection_obj) = secret.get_item("injection")? {
-            let injection: Bound<'_, PyDict> = injection_obj.downcast::<PyDict>()?.clone();
+    let (substitute_headers, substitute_query, substitute_body) =
+        if let Some(substitution_obj) = secret.get_item("substitution")? {
+            let substitution: Bound<'_, PyDict> = substitution_obj.downcast::<PyDict>()?.clone();
             (
-                extract_opt::<bool>(&injection, "headers")?,
-                extract_opt::<bool>(&injection, "basic_auth")?,
-                extract_opt::<bool>(&injection, "query_params")?,
-                extract_opt::<bool>(&injection, "body")?,
+                extract_opt::<bool>(&substitution, "headers")?,
+                extract_opt::<bool>(&substitution, "query")?,
+                extract_opt::<bool>(&substitution, "body")?,
             )
         } else {
-            (None, None, None, None)
+            (None, None, None)
         };
 
     Ok(builder.secret(|s| {
         let mut s = s.env(&env_var).value(value.clone());
-        for host in &allow_hosts {
-            s = s.allow_host(host);
+        for host in &allow {
+            s = if host == "*" {
+                s.allow_any_host_dangerous(true)
+            } else {
+                s.allow(host)
+            };
         }
-        for pattern in &allow_host_patterns {
-            s = s.allow_host_pattern(pattern);
+        for host in &passthrough {
+            s = s.allow_passthrough_for(host);
         }
-        if let Some(action) = on_violation {
-            s = s.on_violation(|_| {
-                microsandbox_network::builder::ViolationActionBuilder::from_action(action)
-            });
+        if let Some(action) = violation_action {
+            s = s.violation_action(action);
         }
         if let Some(ref ph) = placeholder {
             s = s.placeholder(ph);
@@ -1625,17 +1848,14 @@ fn apply_secret(
         if let Some(req) = require_tls {
             s = s.require_tls_identity(req);
         }
-        if let Some(v) = inject_headers {
-            s = s.inject_headers(v);
+        if let Some(v) = substitute_headers {
+            s = s.substitute_in_headers(v);
         }
-        if let Some(v) = inject_basic_auth {
-            s = s.inject_basic_auth(v);
+        if let Some(v) = substitute_query {
+            s = s.substitute_in_query(v);
         }
-        if let Some(v) = inject_query_params {
-            s = s.inject_query(v);
-        }
-        if let Some(v) = inject_body {
-            s = s.inject_body(v);
+        if let Some(v) = substitute_body {
+            s = s.substitute_in_body(v);
         }
         s
     }))
@@ -1662,8 +1882,8 @@ fn reject_unknown_kwargs(kwargs: &Bound<'_, PyDict>) -> PyResult<()> {
     let listed = unknown
         .iter()
         .map(|k| {
-            if k == "snapshot" {
-                "'snapshot' (did you mean 'from_snapshot'?)".to_string()
+            if k == "snapshot" || k == "from_snapshot" {
+                format!("'{k}' (use Sandbox.restore() for snapshots)")
             } else {
                 format!("'{k}'")
             }
@@ -1946,13 +2166,12 @@ fn maybe_group_destination(raw: &str) -> Option<microsandbox_network::policy::De
 
 fn parse_violation_action(
     s: &str,
-) -> PyResult<microsandbox_network::secrets::config::ViolationAction> {
-    use microsandbox_network::secrets::config::{HostPattern, ViolationAction};
+) -> PyResult<microsandbox_network::secrets::config::SecretViolationAction> {
+    use microsandbox_network::secrets::config::SecretViolationAction;
     match s {
-        "block" => Ok(ViolationAction::Block),
-        "block-and-log" => Ok(ViolationAction::BlockAndLog),
-        "block-and-terminate" => Ok(ViolationAction::BlockAndTerminate),
-        "passthrough" => Ok(ViolationAction::Passthrough(vec![HostPattern::Any])),
+        "block" => Ok(SecretViolationAction::Block),
+        "block-and-log" => Ok(SecretViolationAction::BlockAndLog),
+        "block-and-terminate" => Ok(SecretViolationAction::BlockAndTerminate),
         _ => Err(pyo3::exceptions::PyValueError::new_err(format!(
             "unknown violation action: {s}"
         ))),
@@ -1961,79 +2180,17 @@ fn parse_violation_action(
 
 fn parse_violation_action_obj(
     obj: &Bound<'_, PyAny>,
-) -> PyResult<microsandbox_network::secrets::config::ViolationAction> {
-    if let Ok(s) = extract_str_enum(obj, "ViolationAction") {
-        return parse_violation_action(&s);
-    }
-    if !is_exact_sdk_type(obj, "ViolationPolicy")? {
-        return Err(pyo3::exceptions::PyTypeError::new_err(
-            "expected ViolationAction or ViolationPolicy",
-        ));
-    }
-
-    // Convert the concrete policy exactly once. Fallback policies flatten to
-    // a ViolationAction member; passthrough policies become a trusted dict.
-    let converted = obj.call_method0("_to_dict")?;
-    parse_serialized_violation_action(&converted)
+) -> PyResult<microsandbox_network::secrets::config::SecretViolationAction> {
+    let s = extract_str_enum(obj, "ViolationAction")?;
+    parse_violation_action(&s)
 }
 
 /// Parse a violation policy after a concrete SDK config has serialized it.
 fn parse_serialized_violation_action(
     obj: &Bound<'_, PyAny>,
-) -> PyResult<microsandbox_network::secrets::config::ViolationAction> {
-    if let Ok(s) = extract_str_enum(obj, "ViolationAction") {
-        return parse_violation_action(&s);
-    }
-
-    let dict = obj.downcast::<PyDict>().map_err(|_| {
-        pyo3::exceptions::PyTypeError::new_err(
-            "serialized violation policy must be ViolationAction or dict",
-        )
-    })?;
-    if let Some(passthrough_obj) = dict.get_item("passthrough")?
-        && !passthrough_obj.is_none()
-    {
-        let passthrough: &Bound<'_, PyDict> = passthrough_obj.downcast()?;
-        return parse_passthrough_policy(passthrough);
-    }
-
-    Err(pyo3::exceptions::PyValueError::new_err(
-        "expected ViolationAction or ViolationPolicy",
-    ))
-}
-
-fn parse_passthrough_policy(
-    dict: &Bound<'_, PyDict>,
-) -> PyResult<microsandbox_network::secrets::config::ViolationAction> {
-    use microsandbox_network::secrets::config::{HostPattern, ViolationAction};
-
-    if let Some(fallback) = extract_opt::<String>(dict, "fallback")?
-        && matches!(
-            parse_violation_action(&fallback)?,
-            ViolationAction::Passthrough(_)
-        )
-    {
-        return Err(pyo3::exceptions::PyValueError::new_err(
-            "passthrough fallback must be a blocking action",
-        ));
-    }
-
-    let hosts: Vec<String> = extract_opt(dict, "hosts")?.unwrap_or_default();
-    let host_patterns: Vec<String> = extract_opt(dict, "host_patterns")?.unwrap_or_default();
-    let all_hosts = extract_opt::<bool>(dict, "all_hosts")?.unwrap_or(false);
-
-    let mut patterns = Vec::new();
-    for host in hosts {
-        patterns.push(HostPattern::Exact(host));
-    }
-    for pattern in host_patterns {
-        patterns.push(HostPattern::Wildcard(pattern));
-    }
-    if all_hosts {
-        patterns.push(HostPattern::Any);
-    }
-
-    Ok(ViolationAction::Passthrough(patterns))
+) -> PyResult<microsandbox_network::secrets::config::SecretViolationAction> {
+    let s = extract_str_enum(obj, "ViolationAction")?;
+    parse_violation_action(&s)
 }
 
 fn extract_opt<'py, T: FromPyObject<'py>>(
@@ -2054,3 +2211,40 @@ fn extract_required<'py, T: FromPyObject<'py>>(
         .ok_or_else(|| pyo3::exceptions::PyValueError::new_err(format!("{key} is required")))?
         .extract()
 }
+
+//--------------------------------------------------------------------------------------------------
+// Macros
+//--------------------------------------------------------------------------------------------------
+
+macro_rules! resource_builder {
+    ($builder:ty) => {
+        impl ResourceBuilder for $builder {
+            fn volume(
+                self,
+                guest: impl Into<String>,
+                configure: impl FnOnce(
+                    microsandbox::sandbox::MountBuilder,
+                ) -> microsandbox::sandbox::MountBuilder,
+            ) -> Self {
+                self.volume(guest, configure)
+            }
+            fn port(self, host: u16, guest: u16) -> Self {
+                self.port(host, guest)
+            }
+            fn port_bind(self, bind: std::net::IpAddr, host: u16, guest: u16) -> Self {
+                self.port_bind(bind, host, guest)
+            }
+            fn port_udp_bind(self, bind: std::net::IpAddr, host: u16, guest: u16) -> Self {
+                self.port_udp_bind(bind, host, guest)
+            }
+            fn vsock(self, path: impl AsRef<std::path::Path>, port: u32) -> Self {
+                self.vsock(path, port)
+            }
+            fn vsock_dgram(self, path: impl AsRef<std::path::Path>, port: u32) -> Self {
+                self.vsock_dgram(path, port)
+            }
+        }
+    };
+}
+resource_builder!(SandboxBuilder);
+resource_builder!(microsandbox::sandbox::RestoreBuilder);

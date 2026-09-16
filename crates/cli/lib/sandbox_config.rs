@@ -6,14 +6,14 @@ use std::path::{Path, PathBuf};
 
 use base64::Engine;
 use microsandbox::sandbox::{
-    DiskImageFormat, EnvVar, HandoffInit, HostPermissions, MountBuilder, NetworkSpecPatch, Patch,
-    PullPolicy, Rlimit, RlimitResource, SandboxBuilder, SandboxConfigPatch, SandboxPolicyPatch,
-    SandboxResourcesPatch, SandboxRuntimeOptionsPatch, SecurityProfile, StatVirtualization,
-    VolumeMount,
+    DiskImageFormat, EnvVar, HandoffInit, HostPermissions, MountBuilder, Patch, PullPolicy, Rlimit,
+    RlimitResource, SandboxBuilder, SandboxConfigPatch, SandboxPolicyPatch, SandboxResourcesPatch,
+    SandboxRuntimeOptionsPatch, SecurityProfile, StatVirtualization, VolumeMount,
 };
 #[cfg(feature = "net")]
 use microsandbox::sandbox::{
-    DnsConfigPatch, NetworkPolicy, NetworkProfile, SecretsConfigPatch, TlsConfigPatch,
+    DnsConfigPatch, NetworkPolicy, NetworkProfile, NetworkSpecPatch, SecretsConfigPatch,
+    TlsConfigPatch,
 };
 use microsandbox_image::RegistryAuth;
 use microsandbox_types_macros::ConfigPatch;
@@ -126,6 +126,7 @@ struct SandboxConfigInput {
     network: Option<NetworkInput>,
     #[config_patch(merge_with = merge_secrets)]
     secrets: Option<BTreeMap<String, SecretInput>>,
+    secret_violation_action: Option<microsandbox_types::SecretViolationAction>,
     #[config_patch(merge)]
     scripts: Option<BTreeMap<String, String>>,
     ports: Option<Vec<String>>,
@@ -420,8 +421,12 @@ struct TlsInput {
 #[serde(default, deny_unknown_fields)]
 struct SecretInput {
     value: Option<SecretValueInput>,
+    placeholder: Option<String>,
     allow: Option<Vec<String>>,
-    inject: Option<Vec<SecretInjectionInput>>,
+    #[config_patch(nested)]
+    substitution: Option<SecretSubstitutionInput>,
+    passthrough: Option<Vec<String>>,
+    violation_action: Option<microsandbox_types::SecretViolationAction>,
     require_tls_identity: Option<bool>,
 }
 
@@ -436,12 +441,12 @@ enum SecretValueInput {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum SecretInjectionInput {
-    Headers,
-    BasicAuth,
-    QueryParams,
+#[derive(Debug, Clone, Default, Deserialize, ConfigPatch)]
+#[serde(default, deny_unknown_fields)]
+struct SecretSubstitutionInput {
+    headers: Option<bool>,
+    query: Option<bool>,
+    body: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -738,14 +743,19 @@ pub fn resolve(sources: &SandboxConfigSources) -> anyhow::Result<ResolvedSandbox
         validate_script_name(name)?;
     }
 
-    let mut config_patch = materialize_config_patch(&input)?;
+    let config_patch = materialize_config_patch(&input)?;
     #[cfg(feature = "net")]
-    {
-        let network = materialize_network_patch(input.network.as_ref(), input.secrets.as_ref())?;
-        config_patch = config_patch.network(network);
-    }
+    let config_patch = {
+        let network = materialize_network_patch(
+            input.network.as_ref(),
+            input.secrets.as_ref(),
+            input.secret_violation_action.as_ref(),
+        )?;
+        config_patch.network(network)
+    };
     #[cfg(not(feature = "net"))]
-    if input.network.is_some() || input.secrets.is_some() {
+    if input.network.is_some() || input.secrets.is_some() || input.secret_violation_action.is_some()
+    {
         anyhow::bail!("network and secret config require an msb build with networking enabled");
     }
 
@@ -1574,6 +1584,7 @@ fn validate_script_name(name: &str) -> anyhow::Result<()> {
 fn materialize_network_patch(
     input: Option<&NetworkInput>,
     secrets: Option<&BTreeMap<String, SecretInput>>,
+    violation_action: Option<&microsandbox_types::SecretViolationAction>,
 ) -> anyhow::Result<NetworkSpecPatch> {
     use microsandbox_network::dns::Nameserver;
     use microsandbox_network::policy::Action;
@@ -1702,8 +1713,15 @@ fn materialize_network_patch(
         }
         patch = patch.tls(value);
     }
-    if let Some(entries) = materialized_secrets {
-        patch = patch.secrets(SecretsConfigPatch::new().secrets(entries));
+    if materialized_secrets.is_some() || violation_action.is_some() {
+        let mut secrets = SecretsConfigPatch::new();
+        if let Some(entries) = materialized_secrets {
+            secrets = secrets.secrets(entries);
+        }
+        if let Some(action) = violation_action {
+            secrets = secrets.violation_action(action.clone());
+        }
+        patch = patch.secrets(secrets);
     }
     if let Some(enabled) = input.strict {
         patch = patch.strict(enabled);
@@ -1722,7 +1740,7 @@ fn materialize_secrets(
     input: &BTreeMap<String, SecretInput>,
 ) -> anyhow::Result<Vec<microsandbox_types::SecretEntry>> {
     use microsandbox::sandbox::SecretSource;
-    use microsandbox_types::{HostPattern, SecretInjection};
+    use microsandbox_types::{HostPattern, SecretSubstitution};
     use zeroize::Zeroizing;
 
     let mut entries = Vec::with_capacity(input.len());
@@ -1743,32 +1761,34 @@ fn materialize_secrets(
             .clone()
             .unwrap_or_default()
             .into_iter()
-            .map(|host| {
-                if host.starts_with("*.") {
-                    HostPattern::Wildcard(host)
-                } else {
-                    HostPattern::Exact(host)
-                }
-            })
+            .map(|host| HostPattern::parse(&host))
             .collect();
-        let injection_scopes = input
-            .inject
+        let passthrough_hosts = input
+            .passthrough
             .clone()
-            .unwrap_or_else(|| vec![SecretInjectionInput::Headers]);
-        let injection = SecretInjection {
-            headers: injection_scopes.contains(&SecretInjectionInput::Headers),
-            basic_auth: injection_scopes.contains(&SecretInjectionInput::BasicAuth),
-            query_params: injection_scopes.contains(&SecretInjectionInput::QueryParams),
-            body: false,
+            .unwrap_or_default()
+            .into_iter()
+            .map(|host| HostPattern::parse(&host))
+            .collect();
+        // Defaults are applied only after all sparse layers have been merged.
+        let substitution = input.substitution.clone().unwrap_or_default();
+        let substitution = SecretSubstitution {
+            headers: substitution.headers.unwrap_or(true),
+            query: substitution.query.unwrap_or(false),
+            body: substitution.body.unwrap_or(false),
         };
         entries.push(microsandbox_types::SecretEntry {
             env_var: name.clone(),
             value,
             source,
-            placeholder: microsandbox_utils::secret::default_placeholder(name),
+            placeholder: input
+                .placeholder
+                .clone()
+                .unwrap_or_else(|| microsandbox_utils::secret::default_placeholder(name)),
             allowed_hosts,
-            injection,
-            on_violation: None,
+            substitution,
+            passthrough_hosts,
+            violation_action: input.violation_action.clone(),
             require_tls_identity: input.require_tls_identity.unwrap_or(true),
         });
     }
@@ -1921,6 +1941,7 @@ registry: { username: higher, password_env: PATH }
             patches,
             network,
             secrets,
+            secret_violation_action,
             scripts,
             ports,
         } = resolved.input;
@@ -1973,6 +1994,7 @@ registry: { username: higher, password_env: PATH }
         ));
         assert!(network.is_none());
         assert!(secrets.is_none());
+        assert!(secret_violation_action.is_none());
         assert_eq!(scripts.unwrap()["inherited"], "echo lower");
         assert!(ports.is_none());
     }
@@ -2073,7 +2095,8 @@ secrets:
   TOKEN:
     value: lower
     allow: ["lower.example.com"]
-    inject: [headers]
+    substitution:
+      headers: false
     require_tls_identity: false
   KEEP:
     value: keep
@@ -2102,7 +2125,8 @@ max_connections: 20
             r#"
 TOKEN:
   value: "${PATH}"
-  inject: [query_params]
+  substitution:
+    query: true
 ADD:
   value: add
   allow: ["add.example.com"]
@@ -2145,10 +2169,9 @@ ADD:
             Some(SecretValueInput::Environment { ref env }) if env == "PATH"
         ));
         assert_eq!(token.allow.as_deref().unwrap(), ["lower.example.com"]);
-        assert_eq!(
-            token.inject.as_deref().unwrap(),
-            [SecretInjectionInput::QueryParams]
-        );
+        let substitution = token.substitution.as_ref().unwrap();
+        assert_eq!(substitution.headers, Some(false));
+        assert_eq!(substitution.query, Some(true));
         assert_eq!(token.require_tls_identity, Some(false));
         assert!(matches!(
             secrets["KEEP"].value,
@@ -2200,7 +2223,18 @@ allow: ["scoped.example.com"]
             .source(SandboxConfigKind::Runtime, runtime)
             .source(SandboxConfigKind::Network, network);
 
-        let resolved = resolve(&sources).unwrap();
+        let resolved = resolve(&sources);
+        // The same input must fail explicitly without networking, not drop its policy.
+        if !cfg!(feature = "net") {
+            assert!(
+                resolved
+                    .unwrap_err()
+                    .to_string()
+                    .contains("networking enabled")
+            );
+            return;
+        }
+        let resolved = resolved.unwrap();
         let env = resolved.input.env.unwrap();
         assert_eq!(env.get("KEEP").map(String::as_str), Some("root"));
         assert_eq!(env.get("CHANGE").map(String::as_str), Some("scoped"));
@@ -2544,7 +2578,17 @@ secrets:
 "#,
         );
         let sources = SandboxConfigSources::default().source(SandboxConfigKind::Root, root);
-        let resolved = resolve(&sources).unwrap();
+        let resolved = resolve(&sources);
+        if !cfg!(feature = "net") {
+            assert!(
+                resolved
+                    .unwrap_err()
+                    .to_string()
+                    .contains("networking enabled")
+            );
+            return;
+        }
+        let resolved = resolved.unwrap();
         let image = resolved.image(None, None).unwrap();
         let builder = resolved.apply(SandboxBuilder::new("config-test")).unwrap();
         let config = image.apply(builder).unwrap().build().await.unwrap();
@@ -2585,34 +2629,150 @@ secrets:
             r#"
 TOKEN:
   value: "${HOST_TOKEN}"
-  inject: [headers, basic_auth]
+  substitution:
+    headers: false
+    body: true
+  passthrough: [api.anthropic.com]
 "#,
         );
         let sources = SandboxConfigSources::default()
             .source(SandboxConfigKind::Root, root)
             .source(SandboxConfigKind::Secrets, scoped);
 
-        let resolved = resolve(&sources).unwrap();
+        let resolved = resolve(&sources);
+        if !cfg!(feature = "net") {
+            assert!(
+                resolved
+                    .unwrap_err()
+                    .to_string()
+                    .contains("networking enabled")
+            );
+            return;
+        }
+        let resolved = resolved.unwrap();
         let secret = &resolved.input.secrets.unwrap()["TOKEN"];
         assert_eq!(
             secret.allow.as_deref(),
             Some(["api.example.com".to_string()].as_slice())
         );
         assert_eq!(secret.require_tls_identity, Some(false));
+        let substitution = secret.substitution.as_ref().unwrap();
+        assert_eq!(substitution.headers, Some(false));
+        assert_eq!(substitution.body, Some(true));
         assert_eq!(
-            secret.inject.as_deref(),
-            Some(
-                [
-                    SecretInjectionInput::Headers,
-                    SecretInjectionInput::BasicAuth,
-                ]
-                .as_slice()
-            )
+            secret.passthrough.as_deref(),
+            Some(["api.anthropic.com".to_string()].as_slice())
         );
         assert!(matches!(
             secret.value,
             Some(SecretValueInput::Environment { ref env }) if env == "HOST_TOKEN"
         ));
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn partial_secret_layers_preserve_policy_until_materialization() {
+        use microsandbox_types::{SecretSource, SecretViolationAction};
+
+        let dir = tempfile::tempdir().unwrap();
+        let base = write_config(
+            dir.path(),
+            "base.yaml",
+            r#"
+secret_violation_action: block-and-terminate
+secrets:
+  TOKEN:
+    placeholder: custom-placeholder
+    allow: [a.example]
+    substitution: { headers: false, query: true }
+    passthrough: [b.example]
+    violation_action: block
+    require_tls_identity: false
+"#,
+        );
+        let higher = write_config(
+            dir.path(),
+            "higher.yaml",
+            r#"
+secret_violation_action: block-and-log
+secrets:
+  TOKEN:
+    value: { $msb_env: HOST_TOKEN }
+    substitution: { body: true }
+"#,
+        );
+        let resolved = resolve(
+            &SandboxConfigSources::default()
+                .source(SandboxConfigKind::Root, base)
+                .source(SandboxConfigKind::Root, higher),
+        )
+        .unwrap();
+        let mut spec = microsandbox_types::SandboxSpec::default();
+        resolved.config_patch.apply_to(&mut spec);
+        let secrets = spec.network.secrets.unwrap();
+        assert_eq!(secrets.violation_action, SecretViolationAction::BlockAndLog);
+        let secret = &secrets.secrets[0];
+        assert_eq!(secret.source, Some(SecretSource::env("HOST_TOKEN")));
+        assert!(secret.value.is_empty());
+        assert_eq!(secret.placeholder, "custom-placeholder");
+        assert_eq!(
+            secret.allowed_hosts,
+            vec![microsandbox_types::HostPattern::Exact("a.example".into())]
+        );
+        assert!(!secret.substitution.headers);
+        assert!(secret.substitution.query);
+        assert!(secret.substitution.body);
+        assert_eq!(
+            secret.passthrough_hosts,
+            vec![microsandbox_types::HostPattern::Exact("b.example".into())]
+        );
+        assert_eq!(secret.violation_action, Some(SecretViolationAction::Block));
+        assert!(!secret.require_tls_identity);
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn action_only_secret_patch_keeps_existing_entries() {
+        let patch = materialize_network_patch(
+            None,
+            None,
+            Some(&microsandbox_types::SecretViolationAction::BlockAndTerminate),
+        )
+        .unwrap();
+        let mut network = microsandbox_types::NetworkSpec {
+            secrets: Some(microsandbox_types::SecretsConfig {
+                secrets: vec![
+                    serde_json::from_value(serde_json::json!({
+                        "env_var": "TOKEN", "placeholder": "$TOKEN",
+                    }))
+                    .unwrap(),
+                ],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        patch.apply_to(&mut network);
+        let secrets = network.secrets.unwrap();
+        assert_eq!(secrets.secrets.len(), 1);
+        assert_eq!(
+            secrets.violation_action,
+            microsandbox_types::SecretViolationAction::BlockAndTerminate
+        );
+        assert!(network.tls.is_none());
+    }
+
+    #[cfg(not(feature = "net"))]
+    #[test]
+    fn action_only_config_requires_networking() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = write_config(
+            dir.path(),
+            "action.yaml",
+            "secret_violation_action: block-and-terminate\n",
+        );
+        let error = resolve(&SandboxConfigSources::default().source(SandboxConfigKind::Root, root))
+            .unwrap_err();
+        assert!(error.to_string().contains("networking enabled"));
     }
 
     #[test]

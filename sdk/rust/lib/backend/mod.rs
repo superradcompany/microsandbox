@@ -20,22 +20,30 @@
 //! full trait-surface spec, and `planning/microsandbox/design/api/ambient-backend.md`
 //! for the resolution ladder + process-level config story.
 
+#[cfg(feature = "cloud")]
 mod cloud;
 mod dispatch;
-mod local;
+#[cfg(feature = "local")]
+pub(crate) mod local;
+
+#[cfg(feature = "local")]
+pub(crate) use local::ControlSession;
 mod misconfigured;
 mod profile;
 pub(crate) mod sandbox;
 pub(crate) mod snapshot;
 pub(crate) mod volume;
 
+#[cfg(feature = "cloud")]
 pub use cloud::{CloudBackend, CloudBackendBuilder, DEFAULT_CLOUD_API_URL};
 pub use dispatch::Backend;
 #[cfg(feature = "fuzzing")]
 #[doc(hidden)]
 pub use local::fuzz_unpack_local_snapshot_archive;
+#[cfg(feature = "local")]
 #[doc(hidden)]
 pub use local::snapshot_downgrade as local_snapshot_downgrade;
+#[cfg(feature = "local")]
 pub use local::{LocalBackend, LocalBackendBuilder};
 pub use microsandbox_types::{
     CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudErrorBody, CloudErrorDetails,
@@ -44,13 +52,15 @@ pub use microsandbox_types::{
 pub use profile::{Profile, ProfileBackend, SdkConfig, load_sdk_config, resolve_default_backend};
 pub use sandbox::{
     SandboxBackend, SandboxCloudState, SandboxHandleCloudState, SandboxHandleInner,
-    SandboxHandleLocalState, SandboxIdentity, SandboxInner, SandboxLocalState,
+    SandboxIdentity, SandboxInner,
 };
+pub use sandbox::{SandboxHandleLocalState, SandboxLocalState};
 pub use snapshot::SnapshotBackend;
 pub use volume::{
     CloudVolumeKind, CloudVolumeStatus, VolumeBackend, VolumeCloudState, VolumeHandleCloudState,
-    VolumeHandleInner, VolumeHandleLocalState, VolumeInner, VolumeLocalState,
+    VolumeHandleInner, VolumeInner,
 };
+pub use volume::{VolumeHandleLocalState, VolumeLocalState};
 
 use std::sync::{Arc, OnceLock, RwLock};
 

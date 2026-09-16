@@ -4,9 +4,11 @@ use std::{sync::Arc, time::Duration};
 
 use futures::future::BoxFuture;
 
+#[cfg(feature = "local")]
+use super::LocalBackend;
 use super::{
-    BackendInfo, BackendKind, BackendSelectionSource, LocalBackend, SandboxBackend,
-    SnapshotBackend, VolumeBackend,
+    BackendInfo, BackendKind, BackendSelectionSource, SandboxBackend, SnapshotBackend,
+    VolumeBackend,
 };
 use crate::{
     MicrosandboxResult,
@@ -52,6 +54,7 @@ pub trait Backend: Send + Sync + 'static {
     /// Used by helpers that need access to local-only state (DB pool, config
     /// paths) without keeping a separate `Arc<LocalBackend>` alongside the
     /// `Arc<dyn Backend>`. Returns `None` for cloud backends.
+    #[cfg(feature = "local")]
     fn as_local(&self) -> Option<&LocalBackend> {
         None
     }

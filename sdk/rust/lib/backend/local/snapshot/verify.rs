@@ -1,21 +1,24 @@
-//! Local snapshot content verification.
+//! Snapshot content verification.
 
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::io::{Read, Seek, SeekFrom};
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use crate::snapshot::{SnapshotVerifyReport, UpperVerifyStatus};
-use crate::{MicrosandboxError, MicrosandboxResult, Operation, UnsupportedReason};
-use microsandbox_types::snapshot::{
-    FILE_MERKLE_BLAKE3_LEAF_SIZE, Manifest, SnapshotState, UpperIntegrity,
-};
+use microsandbox_image::checkpoint::{CheckpointClosure, ObjectId};
+use microsandbox_image::snapshot::{FILE_MERKLE_BLAKE3_LEAF_SIZE, SnapshotState, UpperIntegrity};
 use microsandbox_utils::extent::ExtentMap;
 use rayon::prelude::*;
 use sha2::{Digest as _, Sha256};
+
+use crate::snapshot::{CheckpointVerifyStatus, SnapshotVerifyReport, UpperVerifyStatus};
+
+use crate::{MicrosandboxError, MicrosandboxResult};
+
+use super::Snapshot;
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -25,6 +28,10 @@ const MERKLE_LEAF_DOMAIN: &[u8] = b"msb-file-merkle-blake3-v1\0leaf\0";
 const MERKLE_PARENT_DOMAIN: &[u8] = b"msb-file-merkle-blake3-v1\0parent\0";
 const MERKLE_ROOT_DOMAIN: &[u8] = b"msb-file-merkle-blake3-v1\0root\0";
 const MERKLE_READ_BATCH: usize = 8 * 1024 * 1024;
+
+//--------------------------------------------------------------------------------------------------
+// Types
+//--------------------------------------------------------------------------------------------------
 
 /// Streaming binary-tree accumulator. Zero gaps are inserted as complete
 /// subtrees, keeping all-hole work logarithmic in the logical file size.
@@ -85,29 +92,88 @@ impl MerkleAccumulator {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-pub(super) async fn verify_snapshot(
-    path: &Path,
-    digest: &str,
-    manifest: &Manifest,
-) -> MicrosandboxResult<SnapshotVerifyReport> {
-    let SnapshotState::File(file_state) = &manifest.state else {
-        return Err(MicrosandboxError::unsupported(
-            Operation::SnapshotOps,
-            UnsupportedReason::NotAvailable(
-                "checkpoint-state snapshot verification is not available".into(),
-            ),
-        ));
-    };
-    let Some(expected) = file_state.upper.integrity.as_ref() else {
+pub(super) async fn verify_snapshot(snap: &Snapshot) -> MicrosandboxResult<SnapshotVerifyReport> {
+    if matches!(snap.manifest().state, SnapshotState::File(_)) {
+        let owned = snap.manifest().owned_volumes()?;
+        microsandbox_image::snapshot::verify_owned_directory_payloads(snap.path(), &owned)?;
+        for volume in &owned {
+            if let microsandbox_image::snapshot::OwnedVolumeData::Disk { generation } = &volume.data
+            {
+                for layer in &generation.layers {
+                    let path = snap
+                        .path()
+                        .join("layers")
+                        .join(format!("{}.{}", layer.layer_id, layer.format));
+                    if std::fs::metadata(&path)?.len() != layer.file_size {
+                        return Err(MicrosandboxError::SnapshotIntegrity(
+                            "owned disk payload length differs".into(),
+                        ));
+                    }
+                    if let Some(expected) = &layer.integrity_root
+                        && microsandbox_image::checkpoint::sparse_file_integrity(&path)?.root
+                            != *expected
+                    {
+                        return Err(MicrosandboxError::SnapshotIntegrity(
+                            "owned disk payload integrity differs".into(),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    let SnapshotState::File(file_state) = &snap.manifest().state else {
+        let SnapshotState::Checkpoint(checkpoint_state) = &snap.manifest().state else {
+            unreachable!("snapshot state is a closed enum")
+        };
+        let checkpoint = verify_checkpoint_closure(
+            snap.path().join(super::create::CHECKPOINT_DIRECTORY),
+            checkpoint_state.checkpoint_root.clone(),
+            snap.manifest().clone(),
+        )
+        .await?;
         return Ok(SnapshotVerifyReport {
-            digest: digest.to_string(),
-            path: path.to_path_buf(),
+            digest: snap.digest().to_string(),
+            path: snap.path().to_path_buf(),
+            // Keep the released disk-snapshot projection stable. Checkpoint callers use the
+            // explicit checkpoint result below instead of overloading upper-layer terminology.
             upper: UpperVerifyStatus::NotRecorded,
+            checkpoint: Some(checkpoint),
         });
     };
+    let mut upper = UpperVerifyStatus::NotRecorded;
+    // Every recorded ancestor binding matters, not just the newest layer. Keep the released
+    // `upper` projection describing the head, while any ancestor mismatch fails the operation.
+    for layer in &file_state.layers {
+        let verified = verify_file_layer(snap, layer).await?;
+        if layer.layer_id == file_state.head {
+            upper = verified;
+        }
+    }
+    Ok(SnapshotVerifyReport {
+        digest: snap.digest().to_string(),
+        path: snap.path().to_path_buf(),
+        upper,
+        checkpoint: None,
+    })
+}
 
-    let upper_path = path.join(&file_state.upper.file);
-    let payload = open_verification_source(&upper_path)?;
+async fn verify_file_layer(
+    snap: &Snapshot,
+    layer: &microsandbox_image::snapshot::DiskLayer,
+) -> MicrosandboxResult<UpperVerifyStatus> {
+    verify_file_payload(&snap.layer_path(layer), layer.payload.integrity.as_ref()).await
+}
+
+/// Verify an owned imported layer with the same codecs used by explicit snapshot verification.
+pub(super) async fn verify_file_payload(
+    upper_path: &Path,
+    expected: Option<&UpperIntegrity>,
+) -> MicrosandboxResult<UpperVerifyStatus> {
+    let Some(expected) = expected else {
+        return Ok(UpperVerifyStatus::NotRecorded);
+    };
+
+    let payload = open_verification_source(upper_path)?;
     let before = verification_source_identity(&payload.metadata()?);
     let actual = match expected {
         UpperIntegrity::Sha256 { .. } => {
@@ -120,7 +186,7 @@ pub(super) async fn verify_snapshot(
             compute_merkle_integrity_from_file(payload.try_clone()?).await?
         }
     };
-    ensure_verification_source_unchanged(&payload, &upper_path, &before)?;
+    ensure_verification_source_unchanged(&payload, upper_path, &before)?;
 
     if actual != *expected {
         return Err(MicrosandboxError::SnapshotIntegrity(format!(
@@ -130,14 +196,32 @@ pub(super) async fn verify_snapshot(
         )));
     }
 
-    Ok(SnapshotVerifyReport {
-        digest: digest.to_string(),
-        path: path.to_path_buf(),
-        upper: UpperVerifyStatus::Verified {
-            algorithm: expected.algorithm().into(),
-            digest: actual.value().into(),
-        },
+    Ok(UpperVerifyStatus::Verified {
+        algorithm: expected.algorithm().into(),
+        digest: actual.value().into(),
     })
+}
+
+async fn verify_checkpoint_closure(
+    closure_path: PathBuf,
+    expected_root: String,
+    manifest: microsandbox_image::snapshot::Manifest,
+) -> MicrosandboxResult<CheckpointVerifyStatus> {
+    tokio::task::spawn_blocking(move || {
+        let expected = ObjectId::new(&expected_root)
+            .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+        let closure = CheckpointClosure::open_portable(closure_path, Some(&expected))
+            .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+        super::validate_checkpoint_owned_inventory(&manifest, closure.checkpoint())?;
+        closure
+            .verify_memory_objects()
+            .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+        Ok(CheckpointVerifyStatus {
+            root: closure.root_id().to_string(),
+        })
+    })
+    .await
+    .map_err(|error| MicrosandboxError::Custom(format!("checkpoint verify task: {error}")))?
 }
 
 pub(super) async fn compute_merkle_integrity(path: &Path) -> MicrosandboxResult<UpperIntegrity> {
@@ -241,13 +325,36 @@ fn merkle_integrity_blocking(path: &Path) -> io::Result<UpperIntegrity> {
 }
 
 fn merkle_integrity_from_file(mut file: File) -> io::Result<UpperIntegrity> {
+    merkle_integrity_with_prefix(&mut file, &[])
+}
+
+/// Hash the bytes emitted by direct qcow2 export without making an intermediate disk copy.
+pub(super) async fn compute_merkle_integrity_with_prefix(
+    path: &Path,
+    prefix: Vec<u8>,
+) -> MicrosandboxResult<UpperIntegrity> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        merkle_integrity_with_prefix(&mut File::open(path)?, &prefix)
+    })
+    .await
+    .map_err(|error| MicrosandboxError::Custom(format!("snapshot integrity task: {error}")))?
+    .map_err(Into::into)
+}
+
+fn merkle_integrity_with_prefix(file: &mut File, prefix: &[u8]) -> io::Result<UpperIntegrity> {
     let logical_size = file.metadata()?.len();
     let leaf_size = u64::from(FILE_MERKLE_BLAKE3_LEAF_SIZE);
     let logical_leaf_count = logical_size.div_ceil(leaf_size).max(1);
     let tree_leaf_count = logical_leaf_count.next_power_of_two();
     let tree_height = tree_leaf_count.trailing_zeros();
     let zero_roots = zero_subtree_roots(tree_height);
-    let allocation_map = ExtentMap::scan_file(&file)?;
+    let mut allocation_map = ExtentMap::scan_file(file)?;
+    if !prefix.is_empty()
+        && let Some(map) = &mut allocation_map
+    {
+        map.extents.insert(0, (0, prefix.len() as u64));
+    }
     let ranges = allocated_leaf_ranges(allocation_map.as_ref(), logical_size, logical_leaf_count);
 
     let mut accumulator = MerkleAccumulator::new(tree_height);
@@ -258,12 +365,13 @@ fn merkle_integrity_from_file(mut file: File) -> io::Result<UpperIntegrity> {
     for (start, end) in ranges {
         push_zero_range(&mut accumulator, &zero_roots, cursor, start);
         hash_leaf_range(
-            &mut file,
+            file,
             logical_size,
             start,
             end,
             &mut buffer,
             &mut accumulator,
+            prefix,
         )?;
         cursor = end;
     }
@@ -323,6 +431,7 @@ fn hash_leaf_range(
     end: u64,
     buffer: &mut Vec<u8>,
     accumulator: &mut MerkleAccumulator,
+    prefix: &[u8],
 ) -> io::Result<()> {
     let leaf_size = FILE_MERKLE_BLAKE3_LEAF_SIZE as usize;
     let leaves_per_batch = (MERKLE_READ_BATCH / leaf_size).max(1);
@@ -337,6 +446,10 @@ fn hash_leaf_range(
         buffer[..batch_bytes].fill(0);
         file.seek(SeekFrom::Start(offset))?;
         file.read_exact(&mut buffer[..readable])?;
+        if offset < prefix.len() as u64 {
+            let count = readable.min(prefix.len() - offset as usize);
+            buffer[..count].copy_from_slice(&prefix[offset as usize..offset as usize + count]);
+        }
 
         let hashes: Vec<[u8; 32]> = buffer[..batch_bytes]
             .par_chunks_exact(leaf_size)

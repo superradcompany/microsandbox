@@ -43,13 +43,13 @@ from microsandbox import (
     Sandbox,
     Secret,
     SecretChangeKind,
+    SecretEntry,
     SecurityProfile,
     Snapshot,
     SnapshotCopyBuilder,
     SnapshotHandle,
     Stdin,
     StdinMode,
-    ViolationPolicy,
     Volume,
     default_backend_kind,
     set_default_backend,
@@ -112,7 +112,12 @@ def test_native_methods_reject_raw_enum_strings() -> None:
         lambda: NetworkDestination(kind="any")._to_dict(),
         lambda: PortBinding(8000, 8000, protocol="tcp")._to_dict(),
         lambda: Rlimit(resource="cpu", soft=1, hard=1)._to_dict(),
-        lambda: ViolationPolicy(fallback="block")._to_dict(),
+        lambda: SecretEntry(
+            env_var="API_KEY",
+            value="secret",
+            allow=("example.com",),
+            violation_action="block",  # type: ignore[arg-type]
+        )._to_dict(),
     ],
 )
 def test_python_config_types_reject_raw_enum_strings(operation: Callable[[], object]) -> None:
@@ -165,7 +170,7 @@ def test_new_enum_domains_have_canonical_values() -> None:
                     {
                         "env_var": "API_KEY",
                         "value": "secret",
-                        "allow_hosts": ["example.com"],
+                        "allow": ["example.com"],
                     }
                 ]
             },
@@ -220,7 +225,7 @@ def test_native_config_boundaries_accept_concrete_types() -> None:
                 Secret.env(
                     "API_KEY",
                     value="secret",
-                    allow_hosts=("example.com",),
+                    allow=("example.com",),
                 )
             ],
         )
@@ -253,7 +258,7 @@ def test_sandbox_create_accepts_documented_container_protocols() -> None:
                 Secret.env(
                     "API_KEY",
                     value="secret",
-                    allow_hosts=("example.com",),
+                    allow=("example.com",),
                 ),
             ),
         )
@@ -296,25 +301,35 @@ def test_sandbox_create_treats_explicit_none_as_omitted() -> None:
 
     assert str(accepted.value) == str(baseline.value)
 
-    with pytest.raises(ValueError, match="image= or from_snapshot= is required"):
+    with pytest.raises(ValueError, match="image= is required"):
         Sandbox.create("explicit-none-image", image=None)
 
-    with pytest.raises(type(baseline.value)) as accepted_snapshot:
+    # Selector lookup is async; type/options validation still happens before making the future.
+    with pytest.raises(TypeError):
         Sandbox.create(
             "explicit-none-image-with-snapshot",
             image=None,
             from_snapshot="definitely-missing-snapshot",
         )
-    assert str(accepted_snapshot.value) == str(baseline.value)
 
 
 @pytest.mark.asyncio
-async def test_missing_local_snapshot_is_reported_when_create_is_awaited() -> None:
+async def test_missing_local_snapshot_is_reported_when_restore_is_awaited() -> None:
     with pytest.raises(FileNotFoundError, match="snapshot not found"):
-        await Sandbox.create(
-            "missing-local-snapshot",
-            from_snapshot="definitely-missing-snapshot",
-        )
+        await Sandbox.restore("definitely-missing-snapshot", name="missing-local-snapshot")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("selector", ["missing-group", "missing-group:missing-member"])
+async def test_missing_snapshot_selector_is_reported_when_awaited(selector: str) -> None:
+    with pytest.raises(FileNotFoundError):
+        await Sandbox.restore(selector, name="missing-snapshot-source")
+
+
+@pytest.mark.asyncio
+async def test_missing_snapshot_pathlike_is_reported_when_awaited(tmp_path) -> None:
+    with pytest.raises(FileNotFoundError):
+        await Sandbox.restore(tmp_path / "missing", name="missing-snapshot-path")
 
 
 def test_inactive_mount_enum_fields_are_still_validated() -> None:

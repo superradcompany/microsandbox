@@ -19,7 +19,9 @@
 #   - crates/agentd/Cargo.lock (the agentd sub-workspace ships its own
 #     lockfile that the root `cargo check` won't refresh — targeted sed
 #     against microsandbox-* entries)
+#   - packages/protocol-client/typescript/package.json
 #   - packages/agent-client/typescript/package.json
+#   - packages/control-client/typescript/package.json
 #   - packages/microsandbox-types/typescript/package.json
 #   - sdk/node-ts/package.json (top-level + optionalDependencies versions)
 #   - sdk/node-ts/npm/*/package.json (per-platform npm sub-packages)
@@ -27,8 +29,8 @@
 #     expected native package version for runtime mismatch checks)
 #   - examples/typescript/*/package.json (microsandbox dep pin in every
 #     TypeScript example)
-#   - sdk/go/setup.go (sdkVersion constant; consumed by EnsureInstalled to
-#     resolve the GitHub release artefact URL for libmicrosandbox_go_ffi)
+#   - sdk/go/setup.go (sdkVersion constant; consumed by FFI bootstrap to
+#     name the per-version cache directory for libmicrosandbox_go_ffi)
 #
 # Cargo.lock entries for workspace-versioned crates are bumped by sed,
 # but the script does not do a full cargo-driven regen — run `cargo
@@ -36,7 +38,7 @@
 # reflected.
 #
 # Does NOT text-bump package-lock.json files. release-bump.yml regenerates
-# packages/agent-client/typescript/package-lock.json and packages/microsandbox-types/typescript/package-lock.json during the release PR, and
+# packages/package-lock.json during the release PR, and
 # release.yml's `refresh-lockfile` job re-resolves sdk/node-ts/package-lock.json
 # against the just-published platform packages and opens a follow-up PR.
 # (Text-bumping lockfiles would make them "look consistent" but lie about
@@ -132,7 +134,9 @@ done
 # own `version` field is independent (0.1.0 for examples) and never
 # coincides with a microsandbox release version.
 for f in \
+  packages/protocol-client/typescript/package.json \
   packages/agent-client/typescript/package.json \
+  packages/control-client/typescript/package.json \
   packages/microsandbox-types/typescript/package.json \
   sdk/node-ts/package.json \
   sdk/node-ts/npm/*/package.json \
@@ -165,8 +169,7 @@ fi
 echo
 echo "next steps:"
 echo "  cargo check    # refresh Cargo.lock against the new manifests"
-echo "  (cd packages/agent-client/typescript && npm install --package-lock-only --ignore-scripts)"
-echo "  (cd packages/microsandbox-types/typescript && npm install --package-lock-only --ignore-scripts)"
+echo "  (cd packages && npm install --package-lock-only --ignore-scripts)"
 echo "  git diff       # review"
 echo
 echo "note: package-lock.json files are not text-bumped. Regenerate the"

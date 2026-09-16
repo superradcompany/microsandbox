@@ -5,6 +5,10 @@
   "main": "./dist/cloud.js",
   "types": "./dist/cloud.d.ts",
   "exports": {
+    "./size": {
+      "types": "./dist/size.d.ts",
+      "import": "./dist/size.js"
+    },
     ".": {
       "types": "./dist/cloud.d.ts",
       "import": "./dist/cloud.js"

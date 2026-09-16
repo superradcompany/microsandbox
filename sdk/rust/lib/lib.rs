@@ -6,6 +6,7 @@
 mod error;
 #[cfg(test)]
 mod test_support;
+#[cfg(any(feature = "local", feature = "cloud"))]
 mod timing;
 
 //--------------------------------------------------------------------------------------------------
@@ -14,13 +15,19 @@ mod timing;
 
 pub mod agent;
 pub mod backend;
+#[cfg(feature = "local")]
 pub mod config;
 #[allow(dead_code)]
 pub(crate) mod db;
+#[cfg(feature = "local")]
 pub mod image;
 pub mod logs;
+#[cfg(feature = "local")]
+pub mod progress;
+#[cfg(feature = "local")]
 pub mod runtime;
 pub mod sandbox;
+#[cfg(feature = "local")]
 pub mod setup;
 pub mod snapshot;
 pub mod volume;
@@ -30,26 +37,37 @@ pub use agent::{
     RawFrame, StreamHandle,
 };
 pub use backend::{
-    Backend, BackendInfo, BackendKind, BackendSelectionSource, CloudBackend, CloudBackendBuilder,
-    CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudErrorBody, CloudErrorDetails,
-    CloudMessageResponse, CloudPaginated, CloudSandboxStatus, CloudSandboxStatusReason,
-    CloudVolumeKind, CloudVolumeStatus, DEFAULT_CLOUD_API_URL, LocalBackend, LocalBackendBuilder,
-    Profile, ProfileBackend, SandboxBackend, SandboxCloudState, SandboxHandleCloudState,
-    SandboxHandleInner, SandboxHandleLocalState, SandboxInner, SandboxLocalState, SdkConfig,
-    VolumeBackend, VolumeCloudState, VolumeHandleCloudState, VolumeHandleInner,
-    VolumeHandleLocalState, VolumeInner, VolumeLocalState, default_backend, default_backend_info,
-    load_sdk_config, resolve_default_backend, set_default_backend, swap_default_backend,
-    with_backend,
+    Backend, BackendInfo, BackendKind, BackendSelectionSource, CloudCreateSandboxRequest,
+    CloudCreateSandboxResponse, CloudErrorBody, CloudErrorDetails, CloudMessageResponse,
+    CloudPaginated, CloudSandboxStatus, CloudSandboxStatusReason, CloudVolumeKind,
+    CloudVolumeStatus, Profile, ProfileBackend, SandboxBackend, SandboxCloudState,
+    SandboxHandleCloudState, SandboxHandleInner, SandboxInner, SdkConfig, VolumeBackend,
+    VolumeCloudState, VolumeHandleCloudState, VolumeHandleInner, VolumeInner, default_backend,
+    default_backend_info, load_sdk_config, resolve_default_backend, set_default_backend,
+    swap_default_backend, with_backend,
 };
+#[cfg(feature = "cloud")]
+pub use backend::{CloudBackend, CloudBackendBuilder, DEFAULT_CLOUD_API_URL};
+#[cfg(feature = "local")]
+pub use backend::{
+    LocalBackend, LocalBackendBuilder, SandboxHandleLocalState, SandboxLocalState,
+    VolumeHandleLocalState, VolumeLocalState,
+};
+#[cfg(feature = "local")]
 pub use config::set_sdk_libkrunfw_path as set_libkrunfw_path;
 pub use error::*;
+#[cfg(feature = "local")]
 pub use image::{
     Image, ImageConfigDetail, ImageDetail, ImageHandle, ImageLayerDetail, ImagePruneReport,
 };
-pub use microsandbox_image::{ImageArchiveFormat, RegistryAuth};
+#[cfg(feature = "local")]
+pub use microsandbox_image::ImageArchiveFormat;
 pub use microsandbox_protocol as protocol;
-pub use microsandbox_runtime::logging::LogLevel;
+pub use microsandbox_types::RegistryAuth;
+pub use microsandbox_types::SandboxLogLevel as LogLevel;
 pub use microsandbox_utils::size;
+#[cfg(feature = "local")]
+pub use progress::{CreationProgress, CreationProgressHandle, StartupPhase, StartupProgress};
 pub use sandbox::exec::{ExecControl, ExecEvent, ExecHandle};
 #[cfg(feature = "ssh")]
 pub use sandbox::ssh::{
@@ -57,28 +75,34 @@ pub use sandbox::ssh::{
     SshClient, SshClientOptionsBuilder, SshExecOptionsBuilder, SshOutput, SshServer,
     SshServerOptionsBuilder, SshStdioStream,
 };
+#[cfg(feature = "local")]
 pub use sandbox::{
-    ChangeKind, ConfigPlannedChange, ExecOutput, MAX_HOSTNAME_BYTES, MAX_SANDBOX_NAME_BYTES,
-    ModificationConflict, ModificationDisposition, ModificationPolicy, ModificationWarning,
-    NetworkSpecPatch, PlannedChange, ResourceConvergenceState, ResourceKind, ResourceResizeStatus,
-    Sandbox, SandboxConfig, SandboxConfigPatch, SandboxListBuilder, SandboxMetrics,
-    SandboxMetricsReport, SandboxMetricsState, SandboxModificationBuilder,
-    SandboxModificationPatch, SandboxModificationPlan, SandboxPage, SandboxPingResult,
-    SandboxPolicyPatch, SandboxResourcesPatch, SandboxRuntimeOptionsPatch, SandboxTouchResult,
-    SecretChangeKind, SecretModificationPatch, SecretPatchBuilder, SecretPlannedChange,
-    SecretSource, VsockSpecPatch, all_sandbox_metrics, all_sandbox_metrics_local,
-    all_sandbox_metrics_reports_local, sandbox_metrics_report_local, validate_sandbox_name,
+    ChangeKind, ConfigPlannedChange, ModificationConflict, ModificationDisposition,
+    ModificationPolicy, ModificationWarning, PlannedChange, ResourceConvergenceState, ResourceKind,
+    ResourceResizeStatus, SandboxMetricsReport, SandboxMetricsState, SandboxModificationBuilder,
+    SandboxModificationPatch, SandboxModificationPlan, SecretChangeKind, SecretModificationPatch,
+    SecretPatchBuilder, SecretPlannedChange, SecretSource, all_sandbox_metrics,
+    all_sandbox_metrics_local, all_sandbox_metrics_reports_local, sandbox_metrics_report_local,
 };
 #[cfg(feature = "net")]
 pub use sandbox::{
     DnsConfigPatch, HostPattern, InterfaceOverridesPatch, Nameserver, NetworkAction, NetworkPolicy,
     NetworkProfile, NetworkRateLimiterConfigPatch, NetworkRule, OutboundProxy, PublishedPort,
-    SecretInjection, SecretsConfigPatch, Socks5Credentials, TlsConfigPatch,
+    SecretSubstitution, SecretViolationAction, SecretsConfigPatch, Socks5Credentials,
+    TlsConfigPatch,
+};
+pub use sandbox::{
+    ExecOutput, ExternalMountRestorePolicy, ExternalMountWarning, MAX_HOSTNAME_BYTES,
+    MAX_SANDBOX_NAME_BYTES, NetworkSpecPatch, Sandbox, SandboxConfig, SandboxConfigPatch,
+    SandboxListBuilder, SandboxMetrics, SandboxPage, SandboxPingResult, SandboxPolicyPatch,
+    SandboxResourcesPatch, SandboxRuntimeOptionsPatch, SandboxTouchResult, VsockSpecPatch,
+    validate_sandbox_name,
 };
 pub use snapshot::{
-    CheckpointSnapshotState, FileSnapshotState, SaveOpts, Snapshot, SnapshotBuilder,
-    SnapshotConfig, SnapshotCopyBuilder, SnapshotDescriptor, SnapshotFormat, SnapshotHandle,
-    SnapshotReference, SnapshotScope, SnapshotSpec, SnapshotState, SnapshotVerifyReport,
-    UpperIntegrity, UpperVerifyStatus,
+    CheckpointSnapshotState, FileSnapshotState, HeadUpdate, HeadUpdateReason, LoadOpts, SaveOpts,
+    Snapshot, SnapshotArchive, SnapshotBuilder, SnapshotConfig, SnapshotCopyBuilder,
+    SnapshotDescriptor, SnapshotFormat, SnapshotHandle, SnapshotReference, SnapshotRootDisk,
+    SnapshotScope, SnapshotSpec, SnapshotState, SnapshotVerifyReport, UpperIntegrity,
+    UpperVerifyStatus,
 };
 pub use volume::{Volume, VolumeConfig, VolumeHandle, VolumeKind, VolumeSpec};

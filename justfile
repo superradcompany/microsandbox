@@ -189,14 +189,14 @@ build-libkrunfw:
 # Build the msb CLI binary.
 [linux]
 build-msb mode="debug": build-agentd
-    cargo build {{ if mode == "release" { "--release" } else { "" } }} --no-default-features --features net,ssh -p microsandbox-cli
+    cargo build {{ if mode == "release" { "--release" } else { "" } }} --no-default-features --features embed-binaries,net,ssh -p microsandbox-cli
     mkdir -p build
     cp target/{{ mode }}/msb build/msb
 
 # Build and sign the msb CLI binary.
 [macos]
 build-msb mode="debug": build-agentd
-    cargo build {{ if mode == "release" { "--release" } else { "" } }} --no-default-features --features net,ssh -p microsandbox-cli
+    cargo build {{ if mode == "release" { "--release" } else { "" } }} --no-default-features --features embed-binaries,net,ssh -p microsandbox-cli
     mkdir -p build
     cp target/{{ mode }}/msb build/msb
     codesign --entitlements msb-entitlements.plist --force -s - build/msb
@@ -217,6 +217,30 @@ build mode="debug": (build-msb mode) _ensure-libkrunfw
 # Build everything: agentd, libkrunfw, and msb.
 [windows]
 build mode="debug": (build-msb mode) _ensure-libkrunfw
+
+# Run snapshot/archive/group and checkpoint logic tests without starting VMs.
+test-snapshot:
+    cargo test -p microsandbox --lib snapshot::
+    cargo test -p microsandbox --test snapshot_artifact
+    cargo test -p microsandbox-runtime --lib checkpoint::
+    cargo test -p microsandbox-cli --lib commands::snapshot::tests
+    {{ if os_family() == "windows" { "python" } else { "python3" } }} -m unittest discover -s scripts/smoke/cli -p test_snapshot_branch.py
+
+# Run the compact live snapshot/branch smoke. Forward arguments without shell re-parsing.
+[unix]
+[script("python3")]
+[positional-arguments]
+test-snapshot-live *args:
+    import runpy
+    runpy.run_path("scripts/smoke/cli/snapshot-branch.py", run_name="__main__")
+
+# Run the same smoke with the native Windows Python launcher.
+[windows]
+[script("python")]
+[positional-arguments]
+test-snapshot-live *args:
+    import runpy
+    runpy.run_path("scripts/smoke/cli/snapshot-branch.py", run_name="__main__")
 
 # Install msb and libkrunfw to ~/.microsandbox/{bin,lib}/ and configure shell paths. Requires: just build.
 [linux]

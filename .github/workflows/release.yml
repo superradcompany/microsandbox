@@ -578,7 +578,7 @@ jobs:
       # -- msb --
       - name: Build msb
         run: |
-          cargo build --release --no-default-features --features net,ssh -p microsandbox-cli
+          cargo build --release --no-default-features --features embed-binaries,net,ssh -p microsandbox-cli
           mkdir -p build
           cp target/release/msb build/msb
 
@@ -794,7 +794,7 @@ jobs:
           $ErrorActionPreference = "Stop"
           . "$env:GITHUB_WORKSPACE\vendor\libkrunfw\scripts\msvc-env.ps1"
           Set-MsvcEnvironment -Architecture ${{ matrix.vs_arch }} -HostArchitecture ${{ matrix.vs_host_arch }}
-          cargo build --release --no-default-features --features net,ssh -p microsandbox-cli --target ${{ matrix.rust_target }}
+          cargo build --release --no-default-features --features embed-binaries,net,ssh -p microsandbox-cli --target ${{ matrix.rust_target }}
           New-Item -ItemType Directory -Force -Path build | Out-Null
           Copy-Item target\${{ matrix.rust_target }}\release\msb.exe build\msb.exe -Force
 
@@ -1006,12 +1006,15 @@ jobs:
           pack_dir="$RUNNER_TEMP/cloud-smoke-packs"
           consumer_dir="$RUNNER_TEMP/cloud-smoke-consumer"
           mkdir -p "$pack_dir" "$consumer_dir"
+          # Keep the smoke consumer entirely on candidate packages, including
+          # the SDK's runtime types dependency before this version is published.
+          types_tarball=$(cd packages/microsandbox-types/typescript && npm pack --silent --pack-destination "$pack_dir")
           main_tarball=$(cd sdk/node-ts && npm pack --silent --pack-destination "$pack_dir")
           platform_tarball=$(cd "$platform" && npm pack --silent --pack-destination "$pack_dir")
           cp sdk/node-ts/scripts/cloud-release-smoke.mts "$consumer_dir/"
           cd "$consumer_dir"
           npm init --yes >/dev/null
-          npm install --ignore-scripts --omit=optional "$pack_dir/$main_tarball" "$pack_dir/$platform_tarball"
+          npm install --ignore-scripts --omit=optional "$pack_dir/$types_tarball" "$pack_dir/$main_tarball" "$pack_dir/$platform_tarball"
           node --input-type=module -e 'await import("microsandbox")'
 
       - name: Smoke test candidate SDK against production
@@ -1278,29 +1281,45 @@ jobs:
           cp node-artifacts/node-sdk-darwin-arm64/native/index.cjs sdk/node-ts/native/index.cjs
           cp node-artifacts/node-sdk-darwin-arm64/native/index.d.ts sdk/node-ts/native/index.d.cts
 
+      - name: Build shared TypeScript packages in dependency order
+        working-directory: packages
+        run: |
+          npm ci
+          npm run build
+
       - name: Build TypeScript output (root package dist/)
         working-directory: sdk/node-ts
         run: |
           npm ci --omit=optional
           npm run build:ts
 
-      - name: Build and publish agent client package
+      - name: Publish shared types and protocol engine
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        working-directory: packages/agent-client/typescript
+        working-directory: packages
         run: |
-          npm ci
-          npm run build
-          npm publish --access public
+          npm publish --workspace @microsandbox/types --access public
+          npm publish --workspace @microsandbox/protocol-client --access public
 
-      - name: Build and publish microsandbox types package
+      - name: Wait for shared dependencies to be indexed
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          node scripts/ci/wait-for-npm-packages.mjs "$VERSION" \
+            @microsandbox/types @microsandbox/protocol-client
+
+      - name: Publish agent and control clients
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        working-directory: packages/microsandbox-types/typescript
+        working-directory: packages
         run: |
-          npm ci
-          npm run build
-          npm publish --access public
+          npm publish --workspace @microsandbox/agent-client --access public
+          npm publish --workspace @microsandbox/control-client --access public
+
+      - name: Wait for shared clients to be indexed
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          node scripts/ci/wait-for-npm-packages.mjs "$VERSION" \
+            @microsandbox/agent-client @microsandbox/control-client
 
       - name: Publish platform packages
         env:

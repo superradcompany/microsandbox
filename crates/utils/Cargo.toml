@@ -17,7 +17,6 @@ http-client = ["dep:ureq"]
 dirs.workspace = true
 libc.workspace = true
 reflink-copy.workspace = true
-scopeguard.workspace = true
 ureq = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]

@@ -4,15 +4,80 @@ description: Go SDK - Snapshot API reference
 keywords: ["Go SDK", "Go snapshots", "microsandbox snapshots"]
 ---
 
-Disk-only snapshots of a sandbox that is not running. Local snapshots are
-portable artifacts; cloud snapshots use managed storage or the organization's
-host volume. See [Snapshots](/sandboxes/snapshots) for concepts and walkthroughs.
+Create local disk snapshots of running, paused, stopped, or crashed sandboxes, or full checkpoints of running and paused sandboxes. Cloud disk snapshots use managed storage or the organization's host volume. See [Snapshots](/sandboxes/snapshots) for usage and lifecycle concepts.
 
 <Note>
-  Snapshots are **disk-only** and require a sandbox that is stopped or crashed.
-  `ListDir`, `Reindex`, `Save`/`SaveTo`, `CopyTo`, `Load`, and `Verify` retain the same
-  API on every backend, but currently return `ErrUnsupportedOperation` in cloud.
+Cloud supports disk snapshot create, get, list, open, remove, and dedicated restore for stopped or crashed sources. Live capture, full checkpoints, branching, groups, archive import/export/copy, verification, and disk maintenance remain local-only. Unsupported options return an explicit error before mutation. Pass snapshot objects or typed references instead of assuming that cloud storage is a path on the client host.
 </Note>
+
+## Restore a sandbox
+
+```go
+child, err := m.RestoreSandbox(ctx, "api:baseline", "api-restored", m.WithForked())
+```
+
+`RestoreSandbox` accepts an installed selector or archive and returns a detached sandbox. Disk snapshots cold-boot; full snapshots resume captured execution. Use `WithForked()` for CoW RAM, `WithSnapshotDiskOnly()` for disk-only restore, and `WithSnapshotBase(base)` for dependent archives. `RestoreSandboxWithProgress` provides progress events and a result channel.
+
+Use `WithRestoreConfig(RestoreConfig{...})` for explicit `Volumes`, `CapturedVolumes`, `Ports`, `Vsock`, `User`, and `LogLevel`. Image, replacement, and startup-command options are not accepted. Host resources remain unmapped unless explicitly supplied or `WithDangerouslyInheritResources()` is selected; `WithExternalMountPolicy` validates supplied filesystem mappings without granting access.
+
+Destination controls use `WithRestoreCPUs(uint8)`, `WithRestoreMemory(uint32)` in MiB, `WithRestoreNetworkPolicy(*NetworkConfig)`, `WithRestoreMaxConnections(uint)`, `WithRestoreDisableNetwork()`, `WithRestoreSecurityProfile(SecurityProfile)`, `WithRestoreMaxDuration(time.Duration)`, and `WithRestoreIdleTimeout(time.Duration)`. These options also work with `RestoreSandboxWithProgress`. Network policy accepts the existing `NetworkPolicy` factory results, or `NetworkConfig` with only `Rules`, `DefaultEgress`, and `DefaultIngress`; other network fields are rejected rather than silently changing DNS, TLS, or bootstrap. Lifetime limits round up to whole seconds; explicit zero requests immediate expiry. Omit lifetime options or leave their `RestoreConfig` pointers `nil` for no limit by default. In contrast, `WithRestoreMaxConnections(0)` means no connection cap. Optional pointers distinguish omitted controls from explicit zero values.
+
+Full execution restore requires CPU and memory overrides to match captured geometry exactly, and rejects removing a captured NIC. Host-side network policy, connection limits, and lifetime limits can change. An explicit security profile—including `SecurityProfileDefault`—requires a disk snapshot or `WithSnapshotDiskOnly()`; it cannot change already-captured execution.
+
+## Snapshot groups
+
+Installed snapshots belong to a group. A bare group selects its head; `group:member` selects a member by name or stable snapshot ID. Artifact paths remain valid selectors. Creation defaults to the source sandbox's group and generates a member name when empty; imports without a group create a new generated group. `DestDir` and `SnapshotLoadOptions.Dest` select the parent directory containing groups.
+
+```go
+snap, err := m.Snapshot.Create(ctx, m.SnapshotCreateOptions{
+    Name: "baseline", FromSandbox: "box", Group: "work",
+})
+loaded, err := m.Snapshot.LoadWithOptions(ctx, "changes.msb", m.SnapshotLoadOptions{
+    Base: "work:baseline", Group: "work",
+})
+head, err := m.Snapshot.GroupHead(ctx, "work")
+selected, err := m.Snapshot.GroupHead(ctx, "work:baseline")
+loaded, err = m.Snapshot.LoadWithOptions(ctx, "other.msb", m.SnapshotLoadOptions{
+    Group: "work", SetHead: true,
+})
+```
+
+`SnapshotLoadOptions` contains `Dest`, `Base`, `Group`, and `SetHead`. `Load` and `LoadWithBase` use generated groups. `GroupHead` returns `SnapshotHeadUpdate` with `Group`, `Previous`, `Head`, `Reason`, and `Changed`; `Previous` and `Head` are stable snapshot IDs. Automatic head updates initialize an empty group or advance to a proven descendant; divergent imports and imports with unknown ancestry retain the current head. Reasons are `initialized`, `fast_forwarded`, `selected`, `unchanged`, `diverged`, `unknown_ancestry`, and `ambiguous_candidates`. Direct archive capture creates no group and rejects a nonempty `Group`.
+
+## Load multiple archives
+
+```go
+handles, err := m.Snapshot.LoadMany(ctx,
+    []string{"changes.msb", "base.msb"},
+    m.SnapshotLoadOptions{Group: "received"},
+)
+if err != nil { return err }
+```
+
+`LoadMany(ctx, archives []string, opts SnapshotLoadOptions)` returns `([]*SnapshotHandle, error)`, with one handle per supplied archive in input order. Dependencies are resolved regardless of argument order from the batch and exact matching snapshots already installed in an explicitly named destination group. `Base` supplies an external snapshot or standalone archive when needed. Single-file `LoadWithOptions` also reuses dependencies from its named destination group. An empty `Group` creates one generated group for the batch.
+
+All batch members are validated before publication. `SetHead: true` requires a unique tip. With divergent tips and the default `false`, an existing head is retained (`ambiguous_candidates`); a new group has no head and imported handles return `nil` from `HeadUpdate()`. Select a member explicitly to give that group a head. The archive format is unchanged. The CLI equivalent is `msb snapshot load checkpoints/*.msb --group received`, with `--dest DIR` for another group-store root.
+
+## Disk maintenance and incremental export
+
+Exporting since a base omits reusable root/owned-disk layers and RAM objects. Every disk shared with the base must retain its exact physical prefix; compaction of any such disk requires a new standalone baseline. New owned disks are included completely. Owned directory namespaces stay complete while unchanged file payloads can come from the base. Full checkpoints keep the complete memory map and CPU/device state. The last-layers option selects only the newest root-disk layers, retaining complete owned disks and RAM payloads. Imports resolve dependencies from the batch or an explicitly named destination group. Use an external base for missing dependencies; direct restore still accepts an explicit base. Selective export cannot be combined with whole-group/with-parents export.
+
+```go
+worker, err := m.GetSandbox(ctx, "worker")
+if err != nil { return err }
+layers := uint32(3)
+result, err := worker.Compact(ctx, m.DiskCompactionOptions{Layers: &layers})
+if err != nil { return err }
+err = m.Snapshot.Save(ctx, "worker:checkpoint-b", "changes.msb", m.SnapshotSaveOptions{Since: "worker:checkpoint-a"})
+if err != nil { return err }
+snapshot, err := m.Snapshot.LoadWithBase(ctx, "changes.msb", "", "worker:checkpoint-a")
+```
+
+Compaction defaults to the managed or flat root and all sandbox-owned data disks, never named/external disks or directories. Set `Disk: "/data"` to select one owned disk, or `RootDiskOnly: true` for only the root; these selectors are mutually exclusive. `Disk: "/"` also selects the root. `Layers` limits each disk to up to N oldest sealed physical layers including the base, excluding the writable head; N must be at least two. A nil `Layers` selects all sealed layers. Chains with fewer than two sealed layers are unchanged. `DryRun: true` only resolves the plan. Results contain aggregate metrics and per-disk `Disks` entries keyed by `GuestPath`. With no eligible disks the default succeeds with an empty list and zero layer and byte counts. Compaction requires a running or fully stopped local sandbox; multi-disk commits can require [journal-based recovery](/sandboxes/snapshots#export-changes-and-compact-a-disk-chain).
+
+Per-disk `TotalUs` measures preparation/materialization only; aggregate `TotalUs` also includes journal adoption and backend switching, and `PauseUs` measures the shared VM pause. Timings are microseconds.
+
+`LastLayers` is an alternative to `Since` for export. For direct restore use `RestoreSandbox(ctx, "changes.msb", "child", WithSnapshotBase("worker:checkpoint-a"))`. See [disk-chain maintenance](/sandboxes/snapshots#export-changes-and-compact-a-disk-chain) for dependency and retention rules.
 
 `SnapshotArtifact.Path()` and `SnapshotHandle.Path()` remain available for local
 snapshots. These accessors are deprecated and panic if no local filesystem path
@@ -29,9 +94,7 @@ Package-level helpers for snapshot artifacts. Access them through the exported `
 func (snapshotFactory) Create(ctx context.Context, opts SnapshotCreateOptions) (*SnapshotArtifact, error)
 ```
 
-Create a snapshot from a stopped or crashed sandbox. With no `DestDir`, local
-uses its default snapshot directory and cloud uses managed storage. `DestDir`
-selects a local parent or cloud host-volume directory.
+Create a disk snapshot, or set `Full` to include memory and execution state. [`SnapshotCreateOptions.FromSandbox`](#snapshotcreateoptionsstruct) is required. An empty `Name` is generated; an empty `Group` uses the source sandbox's name.
 
 <p className="msb-label">Parameters</p>
 
@@ -70,6 +133,26 @@ snap, err := m.Snapshot.Create(ctx, m.SnapshotCreateOptions{
 
 ---
 
+#### <span className="msb-recv">Snapshot.</span><span className="msb-hn">CreateArchive()</span>
+
+```go
+func (snapshotFactory) CreateArchive(ctx context.Context, opts SnapshotArchiveOptions) (*SnapshotArchive, error)
+```
+
+Capture directly into an archive without installing a snapshot directory or index row.
+
+```go
+archive, err := m.Snapshot.CreateArchive(ctx, m.SnapshotArchiveOptions{
+    SnapshotCreateOptions: m.SnapshotCreateOptions{
+        Name:        "after-pip-install",
+        FromSandbox: "baseline",
+    },
+    ArchivePath: "/tmp/after-pip-install.msb",
+})
+```
+
+---
+
 #### <span className="msb-recv">Snapshot.</span><span className="msb-hn">Open()</span>
 
 ```go
@@ -79,13 +162,12 @@ func (snapshotFactory) Open(ctx context.Context, pathOrName string) (*SnapshotAr
 <Accordion title="Example">
 
 ```go
-snap, err := m.Snapshot.Open(ctx, "after-pip-install")
+snap, err := m.Snapshot.Open(ctx, "baseline:after-pip-install")
 ```
 
 </Accordion>
 
-Open an existing snapshot using a backend-relative string. Bare values identify
-managed snapshots in cloud; path-like values identify host-volume artifacts.
+Open an existing artifact by group head, `group:member`, or filesystem path. This validates metadata only; call [`s.Verify()`](#s-verify) for content checks.
 
 <p className="msb-label">Parameters</p>
 
@@ -96,7 +178,7 @@ managed snapshots in cloud; path-like values identify host-volume artifacts.
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>pathOrName</code><span className="msb-type">string</span></div>
-    <div className="msb-param-desc">Backend-relative snapshot name, ID, or path.</div>
+    <div className="msb-param-desc">Group head or <code>group:member</code> selector or artifact directory path.</div>
   </div>
 </div>
 
@@ -118,12 +200,12 @@ func (snapshotFactory) Get(ctx context.Context, nameOrDigest string) (*SnapshotH
 <Accordion title="Example">
 
 ```go
-h, err := m.Snapshot.Get(ctx, "after-pip-install")
+h, err := m.Snapshot.Get(ctx, "baseline:after-pip-install")
 ```
 
 </Accordion>
 
-Look up a lightweight handle through the active backend.
+Look up a lightweight handle by group head, `group:member`, stable snapshot ID, descriptor digest, or artifact path. Global IDs and digests must resolve unambiguously.
 
 <p className="msb-label">Parameters</p>
 
@@ -134,7 +216,7 @@ Look up a lightweight handle through the active backend.
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>nameOrDigest</code><span className="msb-type">string</span></div>
-    <div className="msb-param-desc">Public identifier understood by the active backend, such as a local name/digest or cloud snapshot ID.</div>
+    <div className="msb-param-desc">Group head, <code>group:member</code>, stable snapshot ID, digest, or artifact path.</div>
   </div>
 </div>
 
@@ -216,7 +298,7 @@ func (snapshotFactory) Remove(ctx context.Context, pathOrName string, force bool
 <Accordion title="Example">
 
 ```go
-err := m.Snapshot.Remove(ctx, "after-pip-install", false)
+err := m.Snapshot.Remove(ctx, "baseline:after-pip-install", false)
 ```
 
 </Accordion>
@@ -233,7 +315,7 @@ the index and refuses indexed children unless `force` is true.
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>pathOrName</code><span className="msb-type">string</span></div>
-    <div className="msb-param-desc">Bare name or artifact path.</div>
+    <div className="msb-param-desc">Group head, <code>group:member</code>, or artifact path.</div>
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>force</code><span className="msb-type">bool</span></div>
@@ -290,9 +372,7 @@ returns `ErrUnsupportedOperation`.
 func (snapshotFactory) Save(ctx context.Context, nameOrPath, outPath string, opts SnapshotSaveOptions) error
 ```
 
-Bundle a local snapshot into a `.tar.zst` archive at `outPath`. Set
-[`SnapshotSaveOptions.PlainTar`](#snapshotsaveoptionsstruct) to skip
-compression. Cloud returns `ErrUnsupportedOperation`.
+Bundle a snapshot into a `.msb` archive at `outPath`. Set [`SnapshotSaveOptions.PlainTar`](#snapshotsaveoptionsstruct) to skip compression.
 
 <p className="msb-label">Parameters</p>
 
@@ -303,7 +383,7 @@ compression. Cloud returns `ErrUnsupportedOperation`.
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>nameOrPath</code><span className="msb-type">string</span></div>
-    <div className="msb-param-desc">Bare name or artifact path to save.</div>
+    <div className="msb-param-desc">Group head, <code>group:member</code>, or artifact path to save.</div>
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>outPath</code><span className="msb-type">string</span></div>
@@ -318,7 +398,7 @@ compression. Cloud returns `ErrUnsupportedOperation`.
 <Accordion title="Example">
 
 ```go
-err := m.Snapshot.Save(ctx, "after-pip-install", "/tmp/snap.tar.zst",
+err := m.Snapshot.Save(ctx, "baseline:after-pip-install", "/tmp/snap.msb",
     m.SnapshotSaveOptions{WithParents: true},
 )
 ```
@@ -367,14 +447,14 @@ Unpack a snapshot archive into the local snapshots directory or an explicit
 <Accordion title="Example">
 
 ```go
-h, err := m.Snapshot.Load(ctx, "/tmp/snap.tar.zst", "")
+h, err := m.Snapshot.Load(ctx, "/tmp/snap.msb", "")
 ```
 
 </Accordion>
 
 ## SandboxHandle methods
 
-Snapshots are taken from a metadata handle, so stop the sandbox first and then call [`GetSandbox`](/sdk/go/sandbox#m-getsandbox).
+Snapshots are taken from a metadata handle returned by [`GetSandbox`](/sdk/go/sandbox#m-getsandbox). Disk capture also supports a running or paused sandbox.
 
 ```go
 _ = sb.Stop(ctx)
@@ -393,8 +473,7 @@ snap, err := h.Snapshot(ctx, "after-pip-install")
 func (h *SandboxHandle) Snapshot(ctx context.Context, name string) (*SnapshotArtifact, error)
 ```
 
-Snapshot this sandbox under a bare name. Local uses its default snapshot
-directory; cloud uses managed storage. The sandbox must be stopped or crashed.
+Snapshot this sandbox into its default group with the given member name. Live disk captures preserve the source's running or paused state. Use the returned artifact path or `sandbox:member` to open it later.
 
 <p className="msb-label">Parameters</p>
 
@@ -405,7 +484,7 @@ directory; cloud uses managed storage. The sandbox must be stopped or crashed.
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>name</code><span className="msb-type">string</span></div>
-    <div className="msb-param-desc">Bare name for the artifact.</div>
+    <div className="msb-param-desc">Member name within the source sandbox's group.</div>
   </div>
 </div>
 
@@ -466,13 +545,21 @@ err := snap.CopyTo("/tmp/snap-copy.tar.zst").
     Save(ctx)
 ```
 
+#### <span className="msb-recv">s.</span><span className="msb-hn">ID()</span>
+
+```go
+func (s *SnapshotArtifact) ID() string
+```
+
+Stable opaque `snap_...` identity.
+
 #### <span className="msb-recv">s.</span><span className="msb-hn">Verify()</span>
 
 ```go
 func (s *SnapshotArtifact) Verify(ctx context.Context) (*SnapshotVerifyReport, error)
 ```
 
-Recompute the upper layer's recorded content integrity and compare against the descriptor. Current BLAKE3 Merkle integrity skips known all-hole subtrees and hashes allocated leaves in batches; released SHA descriptors retain their exact, potentially O(logical size), verifier. The report's `Upper.Kind` is `"not_recorded"` when the artifact was created without [`RecordIntegrity`](#snapshotcreateoptionsstruct), and `"verified"` when the recorded value matched.
+Verify the snapshot's complete state closure. File state recomputes recorded upper-layer integrity. Checkpoint state validates the complete checkpoint closure and returns its root in `Checkpoint`.
 
 <p className="msb-label">Returns</p>
 
@@ -505,8 +592,7 @@ if report.Upper.Kind == "not_recorded" {
 func (s *SnapshotArtifact) Reference() string
 ```
 
-Stable backend-relative value. Prefer passing the `SnapshotArtifact` itself to
-`WithFromSnapshot` so its typed reference is preserved as well.
+Stable backend-relative value. Prefer passing the `SnapshotArtifact` itself to `RestoreSandbox` so its typed reference is preserved as well.
 
 #### <span className="msb-recv">s.</span><span className="msb-hn">ReferenceKind()</span>
 
@@ -566,7 +652,7 @@ Upper-layer disk format: `"raw"` or `"qcow2"`.
 func (s *SnapshotArtifact) Scope() string
 ```
 
-Snapshot scope: `SnapshotScopeDisk` (`"disk"`) or `SnapshotScopeResumable` (`"resumable"`). Always `SnapshotScopeDisk` today; `SnapshotScopeResumable` is reserved for resumable snapshots.
+Snapshot scope: `SnapshotScopeDisk` (`"disk"`) or `SnapshotScopeFull` (`"full"`).
 
 ---
 
@@ -655,7 +741,7 @@ err := h.Remove(ctx, false)
 
 </Accordion>
 
-Remove this snapshot using this handle's stable reference.
+Remove this installed snapshot copy by its stored artifact path. Other groups containing the same snapshot ID or digest remain unchanged.
 
 <p className="msb-label">Parameters</p>
 
@@ -698,7 +784,7 @@ Manifest digest.
 func (h *SnapshotHandle) Name() *string
 ```
 
-Bare-name alias, if the snapshot was indexed with one; otherwise `nil`. Returns a defensive copy.
+Member name within its group, or `nil` when no alias is recorded. Returns a defensive copy.
 
 #### <span className="msb-recv">h.</span><span className="msb-hn">ParentDigest()</span>
 
@@ -733,7 +819,7 @@ Upper-layer disk format: `"raw"` or `"qcow2"`.
 func (h *SnapshotHandle) Scope() string
 ```
 
-Snapshot scope: `SnapshotScopeDisk` (`"disk"`) or `SnapshotScopeResumable` (`"resumable"`). Always `SnapshotScopeDisk` today.
+Snapshot scope: `SnapshotScopeDisk` (`"disk"`) or `SnapshotScopeFull` (`"full"`).
 
 ---
 
@@ -761,6 +847,18 @@ func (h *SnapshotHandle) CreatedAt() time.Time
 
 Snapshot creation time, decoded from the index's Unix timestamp.
 
+## Constants
+
+<p className="msb-member-group">Snapshot scopes</p>
+
+<p className="msb-backref">Returned by <a href="#s-scope">s.Scope()</a> · <a href="#h-scope">h.Scope()</a></p>
+
+Scope of what a snapshot captures: disk-only or disk plus complete VM state.
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `SnapshotScopeDisk` | `"disk"` | Disk-only snapshot |
+| `SnapshotScopeFull` | `"full"` | Disk plus complete VM execution state |
 ## Types
 
 ### SnapshotArtifact<span className="msb-tag is-type" style={{marginLeft: "8px"}}>struct</span>
@@ -772,6 +870,8 @@ accessor methods below.
 
 | Method | Returns | Description |
 |--------|---------|-------------|
+| `ID()` | `string` | Stable opaque snapshot identity |
+| `Path()` | `string` | Local artifact directory; panics on cloud |
 | `Reference()` | `string` | Stable backend-relative restore reference |
 | `ReferenceKind()` | `string` | `id` or `path` |
 | [`Digest()`](#s-digest) | `string` | Canonical manifest digest (`sha256:...`) |
@@ -779,7 +879,7 @@ accessor methods below.
 | [`ImageRef()`](#s-imageref) | `string` | Image reference the snapshot was taken from |
 | [`ImageManifestDigest()`](#s-imagemanifestdigest) | `string` | Pinned OCI manifest digest |
 | [`Format()`](#s-format) | `string` | `"raw"` or `"qcow2"` |
-| [`Scope()`](#s-scope) | `string` | `SnapshotScopeDisk` or `SnapshotScopeResumable` |
+| [`Scope()`](#s-scope) | `string` | `SnapshotScopeDisk` or `SnapshotScopeFull` |
 | [`Fstype()`](#s-fstype) | `string` | Filesystem type inside the upper layer |
 | [`Parent()`](#s-parent) | `*string` | Parent digest, or nil |
 | [`CreatedAt()`](#s-createdat) | `string` | RFC 3339 timestamp |
@@ -809,12 +909,14 @@ read them through the accessor methods below.
 
 | Method | Returns | Description |
 |--------|---------|-------------|
+| `ID()` | `string` | Stable opaque snapshot identity |
+| `Path()` | `string` | Local artifact directory; panics on cloud |
 | [`Digest()`](#h-digest) | `string` | Manifest digest |
 | [`Name()`](#h-name) | `*string` | Bare-name alias, if indexed with one |
 | [`ParentDigest()`](#h-parentdigest) | `*string` | Parent digest, or nil |
 | [`ImageRef()`](#h-imageref) | `string` | Pinned image reference |
 | [`Format()`](#h-format) | `string` | `"raw"` or `"qcow2"` |
-| [`Scope()`](#h-scope) | `string` | `SnapshotScopeDisk` or `SnapshotScopeResumable` |
+| [`Scope()`](#h-scope) | `string` | `SnapshotScopeDisk` or `SnapshotScopeFull` |
 | [`SizeBytes()`](#h-sizebytes) | `*uint64` | Backend-reported stored payload size |
 | `Reference()` | `string` | Stable backend-relative restore reference |
 | `ReferenceKind()` | `string` | `id` or `path` |
@@ -827,17 +929,18 @@ read them through the accessor methods below.
 
 <p className="msb-backref">Accepted by <a href="#snapshot-create">Snapshot.Create()</a></p>
 
-Configures [`Snapshot.Create`](#snapshot-create). `Name` and `FromSandbox` are both required.
+Configures [`Snapshot.Create`](#snapshot-create). `FromSandbox` is required. An empty `Name` is generated; an empty `Group` uses the source sandbox's name.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| Name | `string` | Snapshot name; storage location is selected by the active backend |
-| FromSandbox | `string` | Name of the stopped or crashed sandbox to capture |
-| DestDir | `string` | Local parent or cloud host-volume directory; empty = backend-managed storage |
+| Name | `string` | Member name within its group; generated when empty |
+| Group | `string` | Destination snapshot group; defaults to the source sandbox's name |
+| FromSandbox | `string` | Name of the source sandbox; disk capture supports running, paused, stopped, and crashed sources |
+| DestDir | `string` | Parent directory containing snapshot groups; empty = the default snapshots directory |
 | Labels | `map[string]string` | Arbitrary user labels recorded in the manifest |
-| Force | `bool` | Overwrite an existing artifact with the same name |
+| Force | `bool` | Overwrite a direct archive output; rejected for installed group members |
 | RecordIntegrity | `bool` | Record content hashes so [`Verify`](#s-verify) can recompute them later |
-| Resumable | `bool` | Request a resumable snapshot; returns an unsupported-feature error today |
+| Full | `bool` | Include memory and execution state from a running or paused source; `false` captures disk state from running, paused, stopped, or crashed sources |
 
 ### SnapshotSaveOptions<span className="msb-tag is-type" style={{marginLeft: "8px"}}>struct</span>
 
@@ -847,9 +950,11 @@ Configures [`Snapshot.Save`](#snapshot-save) and instance `SaveTo()` methods.
 
 | Field | Type | Description |
 |-------|------|-------------|
+| Since | `string` | Omit disk layers and RAM objects supplied by an exact base; incompatible with `LastLayers` and `WithParents` |
+| LastLayers | `*uint32` | Include the newest N sealed root-disk layers; owned disks and full execution state remain complete |
 | WithParents | `bool` | Include the snapshot's parent chain in the archive |
 | WithImage | `bool` | Include the base OCI image in the archive |
-| PlainTar | `bool` | Write an uncompressed `.tar` instead of `.tar.zst` |
+| PlainTar | `bool` | Write an uncompressed `.tar` instead of `.msb` |
 
 ### SnapshotVerifyReport<span className="msb-tag is-type" style={{marginLeft: "8px"}}>struct</span>
 
@@ -862,6 +967,7 @@ Result of [`Verify`](#s-verify).
 | Digest | `string` | Recomputed manifest digest |
 | Path | `string` | Artifact directory that was verified |
 | Upper | [`SnapshotUpperVerifyStatus`](#snapshotupperverifystatusstruct) | Upper-layer integrity status |
+| Checkpoint | `*SnapshotCheckpointVerifyStatus` | Verified checkpoint root for full state; otherwise `nil` |
 
 ### SnapshotUpperVerifyStatus<span className="msb-tag is-type" style={{marginLeft: "8px"}}>struct</span>
 
@@ -874,14 +980,3 @@ Upper-layer integrity details inside a [`SnapshotVerifyReport`](#snapshotverifyr
 | Kind | `string` | Integrity record kind |
 | Algorithm | `string` | Hash algorithm used |
 | Digest | `string` | Recomputed upper-layer digest |
-
-### Snapshot scope constants
-
-<p className="msb-backref">Returned by <a href="#s-scope">s.Scope()</a> · <a href="#h-scope">h.Scope()</a></p>
-
-Scope of what a snapshot captures. Every snapshot today is disk-only; the resumable scope (disk plus VM state) is reserved for resumable snapshots.
-
-| Constant | Value | Description |
-|----------|-------|-------------|
-| `SnapshotScopeDisk` | `"disk"` | Disk-only snapshot |
-| `SnapshotScopeResumable` | `"resumable"` | Disk plus VM state (not yet supported) |

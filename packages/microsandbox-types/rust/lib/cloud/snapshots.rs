@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::CloudErrorDetails;
-use crate::snapshot::Manifest as SnapshotManifest;
+use crate::snapshot::cloud_manifest::Manifest as SnapshotManifest;
 
 //--------------------------------------------------------------------------------------------------
 // Types: Snapshots

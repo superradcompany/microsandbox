@@ -3,11 +3,8 @@
 //! The transport layer is intentionally CBOR-blind. It moves complete
 //! length-prefixed packets and leaves message-type validation to higher layers.
 
-use std::future::Future;
-use std::pin::Pin;
-
 use microsandbox_protocol::codec::{self, RawFrame};
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::error::{AgentClientError, AgentClientResult};
 
@@ -19,28 +16,13 @@ use crate::error::{AgentClientError, AgentClientResult};
 ///
 /// A packet contains the four-byte length prefix followed by one binary frame:
 /// `[len: u32 BE][id: u32 BE][flags: u8][body...]`.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct TransportPacket {
     bytes: Vec<u8>,
 }
 
-/// Bidirectional packet transport for the agent protocol.
-///
-/// Custom transports can implement this trait when they can preserve exact
-/// packet boundaries. Byte-stream transports may use
-/// [`read_packet_from_io`] and [`write_packet_to_io`].
-pub trait AgentTransport: Send + Unpin + 'static {
-    /// Read the next packet. Returns `None` when the transport reaches EOF.
-    fn read_packet(
-        &mut self,
-    ) -> Pin<Box<dyn Future<Output = AgentClientResult<Option<TransportPacket>>> + Send + '_>>;
-
-    /// Write one packet to the transport.
-    fn write_packet(
-        &mut self,
-        packet: TransportPacket,
-    ) -> Pin<Box<dyn Future<Output = AgentClientResult<()>> + Send + '_>>;
-}
+/// Owned byte transport accepted directly by `AgentClient::connect_stream`.
+pub use microsandbox_protocol_client::ByteTransport as AgentTransport;
 
 //--------------------------------------------------------------------------------------------------
 // Methods
@@ -55,15 +37,15 @@ impl TransportPacket {
     /// frame.
     pub fn from_bytes(bytes: impl Into<Vec<u8>>) -> AgentClientResult<Self> {
         let bytes = bytes.into();
-        let mut buf = bytes.clone();
-        let Some(_frame) = codec::try_decode_raw_from_buf(&mut buf)? else {
+        if bytes.len() < 9 {
             return Err(AgentClientError::InvalidPacket(
                 "packet does not contain a complete frame".to_string(),
             ));
-        };
-        if !buf.is_empty() {
+        }
+        let length = u32::from_be_bytes(bytes[..4].try_into().unwrap());
+        if !(5..=codec::MAX_FRAME_SIZE).contains(&length) || length as usize + 4 != bytes.len() {
             return Err(AgentClientError::InvalidPacket(
-                "packet contains trailing bytes".to_string(),
+                "packet must contain exactly one bounded frame".to_string(),
             ));
         }
         Ok(Self { bytes })
@@ -91,6 +73,18 @@ impl TransportPacket {
 }
 
 //--------------------------------------------------------------------------------------------------
+// Trait Implementations
+//--------------------------------------------------------------------------------------------------
+
+impl std::fmt::Debug for TransportPacket {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TransportPacket")
+            .field("bytes", &self.bytes.len())
+            .finish()
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
 
@@ -101,11 +95,22 @@ pub async fn read_packet_from_io<R>(reader: &mut R) -> AgentClientResult<Option<
 where
     R: AsyncRead + Unpin,
 {
-    match codec::read_raw_frame(reader).await {
-        Ok(frame) => TransportPacket::from_frame(&frame).map(Some),
-        Err(microsandbox_protocol::ProtocolError::UnexpectedEof) => Ok(None),
-        Err(error) => Err(error.into()),
+    let mut prefix = [0; 4];
+    if reader.read(&mut prefix[..1]).await? == 0 {
+        return Ok(None);
     }
+    // Only EOF before the first byte is clean; a partial prefix is truncation.
+    reader.read_exact(&mut prefix[1..]).await?;
+    let length = u32::from_be_bytes(prefix);
+    if !(5..=codec::MAX_FRAME_SIZE).contains(&length) {
+        return Err(AgentClientError::InvalidPacket(
+            "invalid frame length".into(),
+        ));
+    }
+    let mut bytes = vec![0; length as usize + 4];
+    bytes[..4].copy_from_slice(&prefix);
+    reader.read_exact(&mut bytes[4..]).await?;
+    Ok(Some(TransportPacket { bytes }))
 }
 
 /// Write one packet to a byte stream.
@@ -113,8 +118,6 @@ pub async fn write_packet_to_io<W>(writer: &mut W, packet: TransportPacket) -> A
 where
     W: AsyncWrite + Unpin,
 {
-    use tokio::io::AsyncWriteExt;
-
     writer.write_all(packet.as_bytes()).await?;
     writer.flush().await?;
     Ok(())

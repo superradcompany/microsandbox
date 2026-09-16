@@ -9,9 +9,9 @@
 
 use ts_rs::TS;
 
-use crate::snapshot::{
-    CheckpointSnapshotState, FileSnapshotState, ImageRef, SnapshotFormat, SnapshotScope,
-    SnapshotState, UpperIntegrity, UpperLayer,
+use crate::snapshot::cloud_manifest::{
+    CheckpointSnapshotState, FileSnapshotState, ImageRef, Manifest as SnapshotManifest,
+    SnapshotFormat, SnapshotScope, SnapshotState, UpperIntegrity, UpperLayer,
 };
 use crate::{
     Action, CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudCreateSnapshotRequest,
@@ -23,8 +23,8 @@ use crate::{
     CloudSnapshot, CloudSnapshotDetails, CloudSnapshotKind, CloudSnapshotLocation,
     CloudSnapshotOperation, CloudSnapshotOperationStatus, CloudSnapshotSpec, CloudViolationAction,
     CloudVolumeMount, Destination, DestinationGroup, Direction, EnvVar, HandoffInit,
-    HostPermissions, MountOptions, NetworkPolicy, PortRange, Protocol, Rule, SandboxLogLevel,
-    SandboxPolicy, SecretInjection, SecurityProfile, SnapshotManifest, StatVirtualization,
+    HostPermissions, MountOptions, NetworkPolicy, OwnedVolumeStorage, PortRange, Protocol, Rule,
+    SandboxLogLevel, SandboxPolicy, SecretSubstitution, SecurityProfile, StatVirtualization,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -45,13 +45,14 @@ const DOMAIN_TYPE_NAMES: &[&str] = &[
     "HandoffInit",
     "HostPermissions",
     "MountOptions",
+    "OwnedVolumeStorage",
     "NetworkPolicy",
     "PortRange",
     "Protocol",
     "Rule",
     "SandboxLogLevel",
     "SandboxPolicy",
-    "SecretInjection",
+    "SecretSubstitution",
     "SecurityProfile",
     "StatVirtualization",
 ];
@@ -147,9 +148,10 @@ pub fn domain_declarations() -> Vec<String> {
         SandboxPolicy::decl(&cfg),
         SandboxLogLevel::decl(&cfg),
         MountOptions::decl(&cfg),
+        OwnedVolumeStorage::decl(&cfg),
         StatVirtualization::decl(&cfg),
         HostPermissions::decl(&cfg),
-        SecretInjection::decl(&cfg),
+        SecretSubstitution::decl(&cfg),
         NetworkPolicy::decl(&cfg),
         Rule::decl(&cfg),
         Action::decl(&cfg),

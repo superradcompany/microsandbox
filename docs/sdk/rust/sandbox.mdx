@@ -26,6 +26,27 @@ Lifecycle methods on a `Sandbox` or `SandboxHandle` stay attached to its opaque 
 
 ## Sandbox
 
+### External mount restore
+
+Restore and branch leave host filesystems unmapped unless you supply bindings or explicitly request resource inheritance. `ExternalMountRestorePolicy::Strict` validates the authorized mappings by default; `.external_mount_policy(ExternalMountRestorePolicy::Relaxed)` accepts supported mismatches with warnings. Neither mode grants host access, and intentional omissions do not fail strict validation. `sandbox.restore_warnings().await?` reports unmapped filesystems and accepted mismatches through `guest_path`, `reason`, and `stale_inodes`. See [Snapshot external mounts](/sandboxes/snapshots#external-mounts).
+
+### Creation and restore progress
+
+Use `create_with_progress()` for fresh creation and `restore_with_progress()` for snapshots. Progress covers image preparation, snapshot RAM backing preparation, and activation. Await the task for the result; ignoring or dropping progress does not cancel the operation.
+
+```rust
+let (mut progress, task) = Sandbox::restore("saved")
+    .name("child")
+    .forked()
+    .restore_with_progress()?;
+while let Some(event) = progress.recv().await {
+    eprintln!("{event:?}");
+}
+let sandbox = task.await??;
+```
+
+Local startup events distinguish waiting for backing, preparing it, reusing it, syncing, and activating. Byte totals cover required data slices, not reserved RAM. Lock waits and syncing have no percentage. Preparation has no fixed deadline; the activation timeout begins afterward. Abort the creation task to cancel, or wrap the operation in your own overall deadline. `create_detached_with_progress()` provides the same events for detached creation. Existing pull-only APIs remain available.
+
 #### <span className="msb-recv">Sandbox::</span><span className="msb-hn">builder()</span>
 
 ```rust
@@ -693,7 +714,7 @@ sb.stop().await?;
 
 </Accordion>
 
-Gracefully shut down the sandbox and wait until stopped state is observed. Local waits up to ten seconds, then force-kills the sandbox if it is still running. Cloud waits up to six minutes because shutdown may include creating a durable disk checkpoint. If that deadline expires, this returns `MicrosandboxError::SandboxStopTimedOut` without cancelling the accepted server-side stop, which may still complete afterward.
+Request graceful shutdown and wait indefinitely for the targeted run to become terminal and release runtime ownership. Success allows immediate removal without racing teardown. Cancelling the wait does not kill the sandbox or undo a delivered request. Paused or unreachable sandboxes return an error; resume explicitly or choose `kill()` when force termination is intended.
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">stop_with_timeout()</span>
 
@@ -703,7 +724,7 @@ Gracefully shut down the sandbox and wait until stopped state is observed. Local
 async fn stop_with_timeout(&self, timeout: Duration) -> MicrosandboxResult<()>
 ```
 
-Gracefully shut down the sandbox with an explicit observation timeout. Local force-kills after the timeout. Cloud returns `MicrosandboxError::SandboxStopTimedOut` instead, while the accepted server-side stop may continue. `Duration::ZERO` requests immediate force termination and is therefore local-only.
+Apply one total budget to graceful dispatch and completion. Expiry returns `MicrosandboxError::StopTimeout` without killing; `Duration::ZERO` expires before dispatch. A shutdown request already sent may complete later. Only explicit `kill()` requests force termination.
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">stop_and_wait()</span>
 
@@ -722,7 +743,7 @@ println!("exited: {}", status.success());
 
 </Accordion>
 
-Stop the sandbox and wait for the exit status. This is a local-backend compatibility helper; prefer [`stop()`](#sb-stop) or [`stop_with_timeout()`](#sb-stop_with_timeout) when the caller only needs stopped-state observation.
+Stop the sandbox and wait for runtime completion. An owned child-process handle supplies its actual exit status. Detached or connected handles retain the existing synthetic success status; use [`stop()`](#sb-stop) or [`stop_with_timeout()`](#sb-stop_with_timeout) when you only need completion.
 
 <p className="msb-label">Returns</p>
 
@@ -846,12 +867,7 @@ Request a globally unique cloud slug. When omitted, microsandbox cloud assigns o
 async fn build(self) -> MicrosandboxResult<SandboxConfig>
 ```
 
-Materialize the [`SandboxConfig`](#sandboxconfig) without booting the sandbox.
-Local snapshot references are opened to pin their image and upper-layer source;
-cloud references remain typed and are resolved by the cloud backend. For
-booting, use [`create`](#sandbox-create) instead; call
-[`detached(true)`](#sandbox-detached) first for background mode. `create()` calls
-`build` internally.
+Materialize the [`SandboxConfig`](#sandboxconfig) without booting the sandbox. Validates fresh-boot configuration. Use `Sandbox::restore()` for snapshots. For booting, use [`create`](#sandbox-create) instead; call [`detached(true)`](#sandbox-detached) first for background mode. `create()` calls `build` internally.
 
 <p className="msb-label">Returns</p>
 
@@ -1598,7 +1614,7 @@ Add a secret with full configuration. See [Secrets](/sdk/rust/secrets) for the b
 fn secret_env(self, env_var: impl Into<String>, value: impl Into<String>, allowed_host: impl Into<String>) -> Self
 ```
 
-Shorthand for adding a header-injected secret. Equivalent to `.secret(|s| s.env(env_var).value(value).allow_host(allowed_host))`.
+Shorthand for adding a header-injected secret. Equivalent to `.secret(|s| s.env(env_var).value(value).allow(allowed_host))`.
 
 <Warning>
   **Plaintext at rest.** The value is persisted verbatim in the durable sandbox config until a later `modify` rotate migrates the entry to a source reference. Prefer `.secret(|s| s.source(..))` when the value can be referenced; use this path when you hold only a value. A future host-side secret store will switch this method to import-then-reference with no signature change.
@@ -2184,7 +2200,7 @@ let plan = sb.modify()
     .secret(|s| s
         .env("API_KEY")
         .source(SecretSource::Env { var: "API_KEY".into() })
-        .allow_host("api.example.com"))
+        .allow("api.example.com"))
     .apply()
     .await?;
 ```
@@ -2632,7 +2648,7 @@ Current status
 stop()
 ```
 
-Gracefully shut down and wait until stopped. Local waits up to ten seconds, then force-kills. Cloud waits up to six minutes and returns `SandboxStopTimedOut` on expiry without cancelling the accepted server-side stop.
+Wait indefinitely for graceful completion and release of the same runtime's ownership. No implicit kill; cancellation stops only the wait.
 
 <p className="msb-label">Returns</p>
 
@@ -2646,7 +2662,7 @@ Gracefully shut down and wait until stopped. Local waits up to ten seconds, then
 stop_with_timeout(timeout)
 ```
 
-Same as `stop()` with an explicit timeout. Local force-kills on expiry; Cloud returns `SandboxStopTimedOut` while the accepted stop may continue. `Duration::ZERO` requests immediate force termination and is local-only.
+Same completion contract as `stop()` under one total budget. Expiry returns `MicrosandboxError::StopTimeout` without killing; `Duration::ZERO` expires before dispatch.
 
 <p className="msb-label">Returns</p>
 
@@ -2764,10 +2780,10 @@ Set the guest-visible placeholder. Placeholder changes cannot reach already-runn
   </div>
 </div>
 
-#### <span className="msb-recv">secret.</span><span className="msb-hn" id="secretpatchbuilder-allow_host">allow_host()</span>
+#### <span className="msb-recv">secret.</span><span className="msb-hn" id="secretpatchbuilder-allow">allow()</span>
 
 ```rust
-fn allow_host(self, host: impl Into<String>) -> Self
+fn allow(self, host: impl Into<String>) -> Self
 ```
 
 Add an allowed host pattern, such as `api.example.com`, `*.example.org`, or `*`. A non-empty list replaces the secret's current allow-list; an empty list leaves it unchanged. A new secret needs at least one.
@@ -2780,6 +2796,38 @@ Add an allowed host pattern, such as `api.example.com`, `*.example.org`, or `*`.
     <div className="msb-param-desc">Allowed exact host, wildcard host pattern, or <code>*</code>.</div>
   </div>
 </div>
+
+#### <span className="msb-recv">secret.</span><span className="msb-hn" id="secretpatchbuilder-substitution">substitution()</span>
+
+```rust
+fn substitution(self, value: SecretSubstitution) -> Self
+```
+
+Replace the enabled request locations for this secret. Omit this method to leave existing settings unchanged. At least one location must remain enabled. See [SecretSubstitution](/sdk/rust/secrets#secretsubstitution) for defaults and protocol limits.
+
+#### <span className="msb-recv">secret.</span><span className="msb-hn" id="secretpatchbuilder-allow_passthrough_for">allow_passthrough_for()</span>
+
+```rust
+fn allow_passthrough_for(self, host: impl Into<String>) -> Self
+```
+
+Add a destination allowed to receive the unchanged placeholder. This does not grant access to the real secret.
+
+#### <span className="msb-recv">secret.</span><span className="msb-hn" id="secretpatchbuilder-violation_action">violation_action()</span>
+
+```rust
+fn violation_action(self, value: SecretViolationAction) -> Self
+```
+
+Set the per-secret blocking action. See [SecretViolationAction](/sdk/rust/secrets#secretviolationaction).
+
+#### <span className="msb-recv">secret.</span><span className="msb-hn" id="secretpatchbuilder-require_tls_identity">require_tls_identity()</span>
+
+```rust
+fn require_tls_identity(self, value: bool) -> Self
+```
+
+Set whether substitution requires a verified TLS identity. Omit this method to retain the existing setting.
 
 ## Types
 

@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures::future::BoxFuture;
+use microsandbox_types::snapshot::{cloud_manifest, legacy::project_cloud_descriptor};
 use microsandbox_types::{
     CloudCreateSnapshotRequest, CloudPaginated, CloudSnapshot, CloudSnapshotDetails,
     CloudSnapshotLocation, CloudSnapshotOperation, CloudSnapshotOperationStatus, CloudSnapshotSpec,
@@ -18,7 +19,7 @@ use crate::backend::{Backend, SnapshotBackend};
 use crate::sandbox::{FsEntryKind, SandboxConfig};
 use crate::snapshot::{
     DESCRIPTOR_FILENAME, Manifest, SaveOpts, Snapshot, SnapshotConfig, SnapshotHandle,
-    SnapshotReference, SnapshotScope, SnapshotState, SnapshotVerifyReport,
+    SnapshotReference, SnapshotState, SnapshotVerifyReport,
 };
 use crate::{MicrosandboxError, MicrosandboxResult, Operation, UnsupportedReason};
 
@@ -53,11 +54,17 @@ impl SnapshotBackend for CloudBackend {
         config: SnapshotConfig,
     ) -> BoxFuture<'a, MicrosandboxResult<Snapshot>> {
         Box::pin(async move {
-            if config.resumable {
+            if config.full {
                 return Err(MicrosandboxError::unsupported(
                     Operation::SnapshotOps,
-                    UnsupportedReason::NotAvailable("resumable snapshots are not supported".into()),
+                    UnsupportedReason::NotAvailable(
+                        "full snapshots are not supported by the cloud backend".into(),
+                    ),
                 ));
+            }
+
+            if config.group.is_some() {
+                return Err(MicrosandboxError::local_only(Operation::SnapshotOps));
             }
 
             let source = self.get_sandbox(&config.source_sandbox).await?;
@@ -65,7 +72,7 @@ impl SnapshotBackend for CloudBackend {
             let operation = self.create_snapshot(&request).await?;
             let snapshot = self.wait_for_snapshot(operation).await?;
 
-            Ok(snapshot_from_cloud(backend, snapshot))
+            snapshot_from_cloud(backend, snapshot)
         })
     }
 
@@ -84,7 +91,7 @@ impl SnapshotBackend for CloudBackend {
                 SnapshotReference::Auto(identifier) => self.find_snapshot(&identifier).await?,
             };
 
-            Ok(snapshot_from_cloud(backend, snapshot))
+            snapshot_from_cloud(backend, snapshot)
         })
     }
 
@@ -375,17 +382,18 @@ impl CloudBackend {
             .volumes()
             .fs_read_to_string("", &descriptor_path)
             .await?;
-        let manifest = Manifest::from_bytes(descriptor.as_bytes()).map_err(|error| {
-            MicrosandboxError::SnapshotIntegrity(format!(
-                "invalid host-volume snapshot descriptor at {path}: {error}"
-            ))
-        })?;
+        let manifest =
+            cloud_manifest::Manifest::from_bytes(descriptor.as_bytes()).map_err(|error| {
+                MicrosandboxError::SnapshotIntegrity(format!(
+                    "invalid host-volume snapshot descriptor at {path}: {error}"
+                ))
+            })?;
         let digest = manifest.digest().map_err(|error| {
             MicrosandboxError::SnapshotIntegrity(format!(
                 "could not identify host-volume snapshot at {path}: {error}"
             ))
         })?;
-        if let SnapshotState::File(state) = &manifest.state {
+        if let cloud_manifest::SnapshotState::File(state) = &manifest.state {
             let upper_path = format!(
                 "{}/{}",
                 path.trim_end_matches('/'),
@@ -412,8 +420,8 @@ impl CloudBackend {
             })?
             .with_timezone(&chrono::Utc);
         let size_bytes = match &manifest.state {
-            SnapshotState::File(state) => state.upper.size_bytes,
-            SnapshotState::Checkpoint(_) => 0,
+            cloud_manifest::SnapshotState::File(state) => state.upper.size_bytes,
+            cloud_manifest::SnapshotState::Checkpoint(_) => 0,
         };
         let name = Path::new(&path)
             .file_name()
@@ -433,10 +441,12 @@ impl CloudBackend {
         };
 
         match snapshot.manifest.scope {
-            SnapshotScope::Disk => Ok(CloudSnapshot::Disk { snapshot }),
-            SnapshotScope::Resumable => Err(MicrosandboxError::unsupported(
+            cloud_manifest::SnapshotScope::Disk => Ok(CloudSnapshot::Disk { snapshot }),
+            cloud_manifest::SnapshotScope::Resumable => Err(MicrosandboxError::unsupported(
                 Operation::SnapshotOps,
-                UnsupportedReason::NotAvailable("resumable snapshots are not supported".into()),
+                UnsupportedReason::NotAvailable(
+                    "full snapshots are not supported by the cloud backend".into(),
+                ),
             )),
         }
     }
@@ -480,15 +490,23 @@ pub(super) fn cloud_reference(
     }
 }
 
-fn snapshot_from_cloud(backend: Arc<dyn Backend>, snapshot: CloudSnapshot) -> Snapshot {
+fn snapshot_from_cloud(
+    backend: Arc<dyn Backend>,
+    snapshot: CloudSnapshot,
+) -> MicrosandboxResult<Snapshot> {
     let snapshot = snapshot.into_details();
-    Snapshot {
+    // Verify the wire descriptor with its own canonical codec before projecting it.
+    // The normalized view is never serialized back to a cloud endpoint.
+    let manifest = project_cloud_descriptor(&snapshot.manifest, &snapshot.digest)?;
+    Ok(Snapshot {
         backend,
         reference: reference_from_cloud_location(snapshot.location),
         digest: snapshot.digest,
-        manifest: snapshot.manifest,
+        manifest,
+        labels: snapshot.labels,
+        head_update: None,
         reported_size_bytes: Some(snapshot.size_bytes),
-    }
+    })
 }
 
 fn snapshot_handle_from_cloud(
@@ -496,11 +514,16 @@ fn snapshot_handle_from_cloud(
     snapshot: CloudSnapshot,
 ) -> MicrosandboxResult<SnapshotHandle> {
     let snapshot = snapshot.into_details();
-    let (format, fstype, checkpoint_manifest_digest) = match &snapshot.manifest.state {
-        SnapshotState::File(state) => (Some(state.format), Some(state.fstype.clone()), None),
-        SnapshotState::Checkpoint(state) => (None, None, Some(state.manifest.clone())),
+    let manifest = project_cloud_descriptor(&snapshot.manifest, &snapshot.digest)?;
+    let (format, fstype, checkpoint_manifest_digest) = match &manifest.state {
+        SnapshotState::File(state) => (
+            Some(state.disk_format),
+            Some(state.filesystem.clone()),
+            None,
+        ),
+        SnapshotState::Checkpoint(state) => (None, None, Some(state.checkpoint_root.clone())),
     };
-    let created_at = chrono::DateTime::parse_from_rfc3339(&snapshot.manifest.created_at)
+    let created_at = chrono::DateTime::parse_from_rfc3339(&manifest.capture.created_at)
         .map_err(|error| {
             MicrosandboxError::InvalidConfig(format!(
                 "cloud snapshot has invalid created_at: {error}"
@@ -512,12 +535,15 @@ fn snapshot_handle_from_cloud(
         backend,
         reference: reference_from_cloud_location(snapshot.location),
         local_path: None,
+        snapshot_id: manifest.snapshot_id.to_string(),
+        group: None,
+        head_update: None,
         digest: snapshot.digest,
         name: Some(snapshot.name),
-        parent_digest: snapshot.manifest.parent,
-        scope: snapshot.manifest.scope,
-        image_ref: snapshot.manifest.image.reference,
-        state_kind: snapshot.manifest.state.kind().to_string(),
+        parent_digest: manifest.parent.map(|id| id.to_string()),
+        scope: manifest.scope,
+        image_ref: manifest.image.reference,
+        state_kind: manifest.state.kind().to_string(),
         format,
         fstype,
         checkpoint_manifest_digest,
@@ -578,8 +604,91 @@ mod tests {
             labels: Vec::new(),
             force: false,
             record_integrity: false,
-            resumable: false,
+            full: false,
+            group: None,
         }
+    }
+
+    fn wire_manifest() -> cloud_manifest::Manifest {
+        cloud_manifest::Manifest::from_bytes(br#"{"schema":1,"artifact":"snapshot","scope":"disk","created_at":"2026-05-01T12:00:00Z","parent":null,"image":{"ref":"docker.io/library/python:3.12","manifest_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"source_sandbox":"build-1","state":{"kind":"file","format":"raw","fstype":"ext4","upper":{"file":"upper.ext4","size_bytes":4096,"integrity":null}},"labels":{"owner":"alice"},"extensions":{},"requires":[]}"#).unwrap()
+    }
+
+    #[test]
+    fn cloud_projection_retains_source_digest_and_actual_backend_reference() {
+        let cloud = CloudBackend::new("https://example.invalid", "test-key").unwrap();
+        let backend: Arc<dyn Backend> = Arc::new(cloud);
+        let wire = wire_manifest();
+        let source_bytes = wire.to_canonical_bytes().unwrap();
+        let digest = wire.digest().unwrap();
+        let projected = project_cloud_descriptor(&wire, &digest).unwrap();
+        for location in [
+            CloudSnapshotLocation::Managed {
+                id: "managed-resource-id".into(),
+            },
+            CloudSnapshotLocation::HostVolume {
+                path: "snapshots/base".into(),
+            },
+        ] {
+            let reference = reference_from_cloud_location(location.clone());
+            let details = CloudSnapshotDetails {
+                name: "base".into(),
+                location,
+                sandbox_id: None,
+                digest: digest.clone(),
+                size_bytes: 4096,
+                labels: wire.labels.clone(),
+                created_at: chrono::DateTime::parse_from_rfc3339(&wire.created_at)
+                    .unwrap()
+                    .with_timezone(&chrono::Utc),
+                manifest: wire.clone(),
+            };
+            let snapshot = snapshot_from_cloud(
+                backend.clone(),
+                CloudSnapshot::Disk {
+                    snapshot: details.clone(),
+                },
+            )
+            .unwrap();
+            assert_eq!(snapshot.reference(), reference);
+            assert_eq!(snapshot.digest(), digest);
+            assert_eq!(snapshot.manifest(), &projected);
+            assert_eq!(
+                snapshot.id(),
+                &microsandbox_types::snapshot::legacy::snapshot_id(&digest).unwrap()
+            );
+            assert_ne!(snapshot.manifest().digest().unwrap(), digest);
+            let handle = snapshot_handle_from_cloud(
+                backend.clone(),
+                CloudSnapshot::Disk {
+                    snapshot: details.clone(),
+                },
+            )
+            .unwrap();
+            assert_eq!(handle.reference(), reference);
+            assert_eq!(handle.id(), snapshot.id().as_str());
+            assert_eq!(handle.digest(), digest);
+            // A read-side SDK projection must never mutate the DTO used on the wire.
+            assert_eq!(details.manifest.to_canonical_bytes().unwrap(), source_bytes);
+            assert!(snapshot.path().is_err());
+        }
+    }
+
+    #[test]
+    fn cloud_projection_rejects_a_mismatched_wire_digest() {
+        let wire = wire_manifest();
+        assert!(project_cloud_descriptor(&wire, &format!("sha256:{}", "0".repeat(64))).is_err());
+    }
+
+    #[tokio::test]
+    async fn full_capture_and_local_group_requests_reject_before_network_access() {
+        let cloud = CloudBackend::new("https://example.invalid", "test-key").unwrap();
+        let backend: Arc<dyn Backend> = Arc::new(cloud.clone());
+        let mut full = snapshot_config();
+        full.full = true;
+        assert_unsupported(SnapshotBackend::create(&cloud, backend.clone(), full).await);
+        let mut grouped = snapshot_config();
+        grouped.group = Some("local-group".into());
+        assert_unsupported(SnapshotBackend::create(&cloud, backend, grouped).await);
     }
 
     #[test]

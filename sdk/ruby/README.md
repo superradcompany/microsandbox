@@ -194,10 +194,7 @@ Microsandbox::Snapshot.save(
 )
 ```
 
-Snapshot archive operations are currently local-only. With the cloud backend,
-`save`, `save_to`, direct directory enumeration, reindexing, archive loading,
-and payload verification raise an unsupported-operation error. Capture,
-lookup, listing, open, restore, and removal remain backend-neutral.
+Snapshot archive operations are currently local-only. With the cloud backend, `save`, `save_to`, direct directory enumeration, reindexing, archive loading, and payload verification raise an unsupported-operation error. Capture, lookup, listing, open, and removal remain backend-neutral. The Ruby SDK does not yet expose dedicated sandbox restoration; use another SDK or the CLI for that operation.
 
 ## Supported surface
 

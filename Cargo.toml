@@ -10,6 +10,8 @@ members = [
     "crates/metrics",
     "crates/metrics-collector",
     "packages/agent-client/rust",
+    "packages/control-client/rust",
+    "packages/protocol-client/rust",
     "packages/microsandbox-types/macros",
     "packages/microsandbox-types/rust",
     "sdk/rust",
@@ -79,6 +81,8 @@ strip = false
 # version. Caret would let an older release pull newer siblings and break.
 microsandbox = { version = "=0.6.18", path = "sdk/rust", default-features = false }
 microsandbox-agent-client = { version = "=0.6.18", path = "packages/agent-client/rust" }
+microsandbox-control-client = { version = "=0.6.18", path = "packages/control-client/rust" }
+microsandbox-protocol-client = { version = "=0.6.18", path = "packages/protocol-client/rust" }
 microsandbox-db = { version = "=0.6.18", path = "crates/db" }
 microsandbox-filesystem = { version = "=0.6.18", path = "crates/filesystem", default-features = false }
 microsandbox-image = { version = "=0.6.18", path = "crates/image" }
@@ -86,13 +90,14 @@ microsandbox-metrics = { version = "=0.6.18", path = "crates/metrics" }
 microsandbox-types-macros = { version = "=0.6.18", path = "packages/microsandbox-types/macros" }
 microsandbox-types = { version = "=0.6.18", path = "packages/microsandbox-types/rust" }
 microsandbox-migration = { version = "=0.6.18", path = "crates/migration" }
-microsandbox-network = { version = "=0.6.18", path = "crates/network" }
+microsandbox-network = { version = "=0.6.18", path = "crates/network", default-features = false }
 microsandbox-protocol = { version = "=0.6.18", path = "crates/protocol" }
 microsandbox-runtime = { version = "=0.6.18", path = "crates/runtime", default-features = false }
 microsandbox-utils = { version = "=0.6.18", path = "crates/utils" }
 microsandbox-vsock = { version = "=0.6.18", path = "crates/vsock" }
-msb_krun = "=0.1.32"
-msb_krun_utils = "=0.1.32"
+# Keep the inherited-baseline API and its runtime types on the same published release.
+msb_krun = "=0.1.39"
+msb_krun_utils = "=0.1.39"
 test-macros = { path = "crates/testing/macros" }
 test-utils = { path = "crates/testing/utils" }
 
@@ -107,6 +112,7 @@ cap-primitives = "4.0.2"
 cap-std = "4.0.2"
 chrono = { version = "0.4", features = ["serde"] }
 ciborium = "0.2"
+ciborium-ll = "0.2"
 clap = { version = "4.6", features = ["color", "derive"] }
 clap_complete = "4.6"
 console = "0.16"
@@ -121,9 +127,11 @@ hex = "0.4"
 hickory-net = "0.26.1"
 hickory-proto = "0.26.1"
 httlib-hpack = "0.1.3"
+imago = { package = "msb-imago", version = "0.1.7" }
 indicatif = "0.18"
 ipnetwork = { version = "0.21.0", features = ["serde"] }
 libc = "0.2"
+memmap2 = "0.9"
 nix = "0.31"
 notify = "8"
 oci-client = "0.17"
@@ -133,6 +141,8 @@ rayon = "1.11"
 reflink-copy = "0.1"
 reqwest = { version = "0.13", features = ["json", "stream"] }
 resolv-conf = "0.7"
+object = { version = "0.37.3", default-features = false, features = ["read", "std"] }
+semver = "1.0.27"
 scopeguard = "1.2"
 serde = { version = "1.0", features = ["derive"] }
 serde_bytes = "0.11"

@@ -1,5 +1,5 @@
 use super::*;
-use crate::agentd::AGENTD_BYTES;
+use crate::agentd::agentd_bytes;
 
 #[test]
 fn test_init_lookup_inode_2() {
@@ -17,7 +17,7 @@ fn test_init_getattr() {
     let (st, _timeout) = sb.fs.getattr(sb.ctx(), INIT_INODE, None).unwrap();
     assert_eq!(st.st_uid, 0);
     assert_eq!(st.st_gid, 0);
-    assert_eq!(st.st_size, AGENTD_BYTES.len() as i64);
+    assert_eq!(st.st_size, agentd_bytes().len() as i64);
     let mode = st.st_mode as u32;
     assert_eq!(mode & libc::S_IFMT as u32, libc::S_IFREG as u32);
     assert_eq!(mode & 0o777, 0o755);
@@ -38,10 +38,10 @@ fn test_init_open_handle_0() {
 fn test_init_read_full() {
     let sb = TestSandbox::new();
     let data = sb
-        .fuse_read(INIT_INODE, INIT_HANDLE, AGENTD_BYTES.len() as u32, 0)
+        .fuse_read(INIT_INODE, INIT_HANDLE, agentd_bytes().len() as u32, 0)
         .unwrap();
-    assert_eq!(data.len(), AGENTD_BYTES.len());
-    assert_eq!(&data[..], AGENTD_BYTES);
+    assert_eq!(data.len(), agentd_bytes().len());
+    assert_eq!(&data[..], agentd_bytes());
 }
 
 #[test]
@@ -50,7 +50,7 @@ fn test_init_read_partial_from_start() {
     let size = 64u32;
     let data = sb.fuse_read(INIT_INODE, INIT_HANDLE, size, 0).unwrap();
     assert_eq!(data.len(), size as usize);
-    assert_eq!(&data[..], &AGENTD_BYTES[..size as usize]);
+    assert_eq!(&data[..], &agentd_bytes()[..size as usize]);
 }
 
 #[test]
@@ -62,7 +62,7 @@ fn test_init_read_at_offset() {
     assert_eq!(data.len(), size as usize);
     assert_eq!(
         &data[..],
-        &AGENTD_BYTES[offset as usize..offset as usize + size as usize]
+        &agentd_bytes()[offset as usize..offset as usize + size as usize]
     );
 }
 
@@ -70,7 +70,7 @@ fn test_init_read_at_offset() {
 fn test_init_read_past_eof() {
     let sb = TestSandbox::new();
     let data = sb
-        .fuse_read(INIT_INODE, INIT_HANDLE, 1024, AGENTD_BYTES.len() as u64)
+        .fuse_read(INIT_INODE, INIT_HANDLE, 1024, agentd_bytes().len() as u64)
         .unwrap();
     assert_eq!(data.len(), 0);
 }
@@ -78,10 +78,10 @@ fn test_init_read_past_eof() {
 #[test]
 fn test_init_read_spanning_eof() {
     let sb = TestSandbox::new();
-    let offset = AGENTD_BYTES.len() as u64 - 10;
+    let offset = agentd_bytes().len() as u64 - 10;
     let data = sb.fuse_read(INIT_INODE, INIT_HANDLE, 1024, offset).unwrap();
     assert_eq!(data.len(), 10);
-    assert_eq!(&data[..], &AGENTD_BYTES[offset as usize..]);
+    assert_eq!(&data[..], &agentd_bytes()[offset as usize..]);
 }
 
 #[test]

@@ -311,14 +311,14 @@ func TestDNSConfigCreates(t *testing.T) {
 	}
 }
 
-// TestNetworkOnSecretViolationCreates verifies that the network-wide
-// on_secret_violation field is accepted. Triggering an actual violation
+// TestNetworkSecretViolationActionCreates verifies that the network-wide
+// secret_violation_action field is accepted. Triggering an actual violation
 // requires a TLS-intercepting outbound, which is brittle in CI.
-func TestNetworkOnSecretViolationCreates(t *testing.T) {
+func TestNetworkSecretViolationActionCreates(t *testing.T) {
 	ctx := integrationCtx(t)
 	name := "go-sdk-onviolation-" + t.Name()
 	network := microsandbox.NetworkPolicy.FromProfiles(microsandbox.NetworkProfilePublic)
-	network.OnSecretViolation = microsandbox.ViolationActionBlockAndLog
+	network.SecretViolationAction = microsandbox.ViolationActionBlockAndLog
 
 	sb, err := createSandbox(t, ctx, name,
 		microsandbox.WithImage(goIntegrationImage),
@@ -335,10 +335,8 @@ func TestNetworkOnSecretViolationCreates(t *testing.T) {
 	})
 }
 
-// TestSecretWithOnViolation exercises the per-secret OnViolation field.
-// Per the runtime, the value is applied network-wide (last-write-wins);
-// here we only verify the FFI accepts the field.
-func TestSecretWithOnViolation(t *testing.T) {
+// TestSecretWithViolationAction exercises the per-secret override.
+func TestSecretWithViolationAction(t *testing.T) {
 	ctx := integrationCtx(t)
 	name := "go-sdk-secretviol-" + t.Name()
 
@@ -348,8 +346,8 @@ func TestSecretWithOnViolation(t *testing.T) {
 			"VIOLATION_KEY",
 			"value-not-leaked-xyz",
 			microsandbox.SecretEnvOptions{
-				AllowHosts:  []string{"api.example.com"},
-				OnViolation: microsandbox.ViolationActionBlock,
+				Allow:           []string{"api.example.com"},
+				ViolationAction: microsandbox.ViolationActionBlock,
 			},
 		)),
 	)

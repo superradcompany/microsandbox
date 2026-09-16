@@ -7,6 +7,7 @@ mod command;
 mod domain;
 mod error;
 pub mod modify;
+mod registry;
 pub mod snapshot;
 mod validation;
 
@@ -38,16 +39,16 @@ pub use domain::{
     InterfaceOverridesPatch, LogSource, MAX_SECRET_PLACEHOLDER_BYTES, MemoryPlacement,
     MountOptions, NamedVolumeCreate, NamedVolumeMode, NetworkPolicy, NetworkRateLimitDirection,
     NetworkRateLimiterConfig, NetworkRateLimiterConfigPatch, NetworkSpec, NetworkSpecPatch,
-    NumaPlacement, OciRootfsSource, OutboundProxy, Patch, PlacementProfile, PortProtocol,
-    PortRange, Protocol, PublishedPortSpec, PullPolicy, RateLimitConfigError, RateLimiterConfig,
-    Rlimit, RlimitResource, RootDisk, RootfsSource, Rule, SandboxConfigPatch, SandboxLogLevel,
-    SandboxPolicy, SandboxPolicyPatch, SandboxResources, SandboxResourcesPatch,
+    NumaPlacement, OciRootfsSource, OutboundProxy, OwnedVolumeStorage, Patch, PlacementProfile,
+    PortProtocol, PortRange, Protocol, PublishedPortSpec, PullPolicy, RateLimitConfigError,
+    RateLimiterConfig, Rlimit, RlimitResource, RootDisk, RootfsSource, Rule, SandboxConfigPatch,
+    SandboxLogLevel, SandboxPolicy, SandboxPolicyPatch, SandboxResources, SandboxResourcesPatch,
     SandboxRuntimeOptions, SandboxRuntimeOptionsPatch, SandboxSpec, ScopedUpstreamCaCert,
-    ScopedVerifyUpstream, SecretConfigError, SecretEntry, SecretInjection, SecretsConfig,
-    SecretsConfigPatch, SecurityProfile, SnapshotSpec, Socks5Credentials, StatVirtualization,
-    TlsConfig, TlsConfigPatch, TokenBucketConfig, TransparentHugePagePolicy, ViolationAction,
-    VolumeKind, VolumeMount, VolumeSpec, VsockRouteSpec, VsockSocketType, VsockSpec,
-    VsockSpecPatch, canonicalize_volume_mounts,
+    ScopedVerifyUpstream, SecretConfigError, SecretEntry, SecretSubstitution,
+    SecretViolationAction, SecretsConfig, SecretsConfigPatch, SecurityProfile, SnapshotSpec,
+    Socks5Credentials, StatVirtualization, TlsConfig, TlsConfigPatch, TokenBucketConfig,
+    TransparentHugePagePolicy, VolumeKind, VolumeMount, VolumeSpec, VsockRouteSpec,
+    VsockSocketType, VsockSpec, VsockSpecPatch, canonicalize_volume_mounts, owned_volume_mount_id,
 };
 pub use error::{SnapshotManifestError, SnapshotManifestResult, TypesError, TypesResult};
 pub use modify::{
@@ -56,7 +57,12 @@ pub use modify::{
     ResourceResizeStatus, SandboxModificationPatch, SandboxModificationPlan, SecretChangeKind,
     SecretModificationPatch, SecretPlannedChange, SecretSource,
 };
-pub use snapshot::Manifest as SnapshotManifest;
+pub use registry::RegistryAuth;
+pub use snapshot::manifest::Manifest as SnapshotManifest;
+pub use snapshot::{
+    DiskCompactionDiskResult, DiskCompactionResult, DiskCompactionTarget,
+    ExternalMountRestorePolicy, ExternalMountWarning,
+};
 pub use validation::{
     MAX_HOSTNAME_BYTES, MAX_SANDBOX_NAME_BYTES, hostname_from_sandbox_name, validate_hostname,
     validate_sandbox_name,

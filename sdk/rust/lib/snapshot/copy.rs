@@ -34,19 +34,25 @@ impl SnapshotCopyBuilder {
         }
     }
 
-    /// Replace the copied snapshot's labels.
+    /// Replace the archive's labels, stored outside the immutable descriptor.
+    /// Defaults to an empty label map.
     pub fn labels(mut self, labels: BTreeMap<String, String>) -> Self {
         self.labels = labels;
         self
     }
 
     /// Choose whether to calculate and record disk integrity in the copy.
+    /// Disabled by default; existing descriptor integrity is omitted in that case.
     pub fn record_integrity(mut self, enabled: bool) -> Self {
         self.record_integrity = enabled;
         self
     }
 
-    /// Package the configured copy and return its manifest.
+    /// Package the configured disk copy and return its manifest.
+    ///
+    /// Identical descriptor bytes retain their portable identity. A changed integrity
+    /// policy creates a new snapshot identity while retaining source provenance.
+    /// Full-state snapshots use `Snapshot::save_to` instead.
     pub async fn save(self) -> MicrosandboxResult<Manifest> {
         self.snapshot
             .backend

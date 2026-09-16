@@ -10,11 +10,16 @@
 use std::{path::Path, sync::Arc};
 
 use bytes::Bytes;
+use microsandbox_agent_client::AgentFrame;
 use microsandbox_protocol::{
-    fs::{FsData, FsEntryInfo, FsResponse},
+    bulk::{
+        BulkAccepted, BulkCancel, BulkCancelReason, BulkCredit, BulkFinish, BulkFlow, BulkKind,
+        BulkOffer, BulkReceiveState, BulkRecord, BulkSendState,
+    },
+    fs::{FS_CHUNK_SIZE, FsData, FsEntryInfo, FsResponse},
     message::{Message, MessageType},
 };
-use tokio::sync::mpsc;
+use tokio::sync::{Mutex, mpsc};
 
 use crate::{
     MicrosandboxError, MicrosandboxResult,
@@ -22,6 +27,16 @@ use crate::{
     backend::Backend,
     error::{Operation, UnsupportedReason},
 };
+
+//--------------------------------------------------------------------------------------------------
+// Constants
+//--------------------------------------------------------------------------------------------------
+
+/// Largest known filesystem write that stays on the legacy inline exchange.
+///
+/// Raw bulk wins once payload work can amortize its offer, acceptance, credit, finish, and terminal
+/// lifecycle. Below this cutoff the already-supported inline exchange has lower fixed latency.
+const FS_INLINE_WRITE_MAX: u64 = 16 * 1024;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -120,20 +135,37 @@ pub struct FsMetadata {
 
 /// A streaming reader for file data from the sandbox.
 pub struct FsReadStream {
-    rx: mpsc::Receiver<Message>,
+    id: u32,
+    rx: mpsc::Receiver<AgentFrame>,
     // Holds the per-call agent client alive for the duration of the stream.
     // Without this the AgentClient's reader task would be dropped after
     // `fs_read_stream` returns and `rx` would receive nothing.
     client: Option<Arc<AgentClient>>,
     close_handle: Option<FsHandle>,
+    /// Set only after a terminal `FsResponse`; channel closure alone is an error.
+    finished: bool,
+    bulk: Option<BulkReceiveState>,
+    bulk_finish_seen: bool,
 }
 
 /// A streaming writer for file data to the sandbox.
 pub struct FsWriteSink {
     id: u32,
     client: Arc<AgentClient>,
-    rx: mpsc::Receiver<Message>,
+    protocol: Mutex<Option<FsWriteProtocol>>,
     close_handle: Option<FsHandle>,
+    finished: bool,
+    bulk_active: bool,
+}
+
+enum FsWriteProtocol {
+    Legacy {
+        rx: mpsc::Receiver<AgentFrame>,
+    },
+    Bulk {
+        rx: mpsc::Receiver<AgentFrame>,
+        sender: BulkSendState,
+    },
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -263,7 +295,7 @@ impl<'a> SandboxFsOps<'a> {
         len: Option<u64>,
     ) -> MicrosandboxResult<FsWriteSink> {
         let client = self.agent_client(Operation::SandboxFsWriteHandleStream)?;
-        agent::write_handle_stream(client, handle, offset, len, None).await
+        agent::write_handle_stream(client, handle, offset, len, None, false).await
     }
 
     //----------------------------------------------------------------------------------------------
@@ -480,6 +512,10 @@ impl<'a> SandboxFsOps<'a> {
     }
 
     /// Copy a file from the sandbox to the host.
+    ///
+    /// The destination is published with an atomic rename after the complete file has been
+    /// received. An interrupted copy leaves an existing destination unchanged. Publication uses
+    /// buffered host I/O and does not force file or directory metadata to stable storage.
     pub async fn copy_to_host(
         &self,
         guest_path: &str,
@@ -513,6 +549,7 @@ impl<'a> SandboxFsOps<'a> {
     /// connection: local callers should go through `Sandbox::fs` on a live
     /// sandbox; cloud backends do not expose them at all.
     fn unsupported_reason(&self) -> UnsupportedReason {
+        #[cfg(feature = "local")]
         if self.backend.as_local().is_some() {
             return UnsupportedReason::UseInstead(Operation::SandboxFs);
         }
@@ -527,14 +564,20 @@ impl<'a> SandboxFsOps<'a> {
 impl FsReadStream {
     /// Construct a read stream that closes an owned handle at EOF.
     pub(crate) fn with_client_and_close(
-        rx: mpsc::Receiver<Message>,
+        id: u32,
+        rx: mpsc::Receiver<AgentFrame>,
         client: Arc<AgentClient>,
         close_handle: Option<FsHandle>,
+        bulk: Option<BulkReceiveState>,
     ) -> Self {
         Self {
+            id,
             rx,
             client: Some(client),
             close_handle,
+            finished: false,
+            bulk,
+            bulk_finish_seen: false,
         }
     }
 
@@ -543,30 +586,100 @@ impl FsReadStream {
     /// Returns `None` when the stream is complete (after `FsResponse`).
     /// Returns an error if the guest reported a failure.
     pub async fn recv(&mut self) -> MicrosandboxResult<Option<Bytes>> {
-        while let Some(msg) = self.rx.recv().await {
-            match msg.t {
-                MessageType::FsData => {
-                    let chunk: FsData = msg.payload()?;
-                    if !chunk.data.is_empty() {
-                        return Ok(Some(Bytes::from(chunk.data)));
+        if self.finished {
+            return Ok(None);
+        }
+
+        while let Some(frame) = self.rx.recv().await {
+            match frame {
+                AgentFrame::Bulk(record) => {
+                    let Some(receiver) = self.bulk.as_mut() else {
+                        return self
+                            .fail("raw bulk data arrived without filesystem negotiation")
+                            .await;
+                    };
+                    let end = receiver.accept_record(&record).map_err(|error| {
+                        MicrosandboxError::SandboxFsOps(format!(
+                            "invalid filesystem bulk record: {error}"
+                        ))
+                    })?;
+                    let payload = record.payload;
+                    if let Some(credit) = receiver.consume(end).map_err(|error| {
+                        MicrosandboxError::SandboxFsOps(format!(
+                            "advance filesystem bulk credit: {error}"
+                        ))
+                    })? {
+                        let client = self.client.as_ref().ok_or_else(|| {
+                            MicrosandboxError::SandboxFsOps(
+                                "filesystem stream client closed".into(),
+                            )
+                        })?;
+                        client
+                            .send(self.id, MessageType::BulkCredit, &credit)
+                            .await?;
                     }
+                    return Ok(Some(payload));
                 }
-                MessageType::FsResponse => {
-                    let resp: FsResponse = msg.payload()?;
-                    let close_result = self.close_owned_handle().await;
-                    if !resp.ok {
-                        return Err(MicrosandboxError::SandboxFsOps(
-                            resp.error.unwrap_or_else(|| "unknown error".into()),
-                        ));
+                AgentFrame::Control(msg) => match msg.t {
+                    MessageType::FsData => {
+                        if self.bulk.is_some() {
+                            return self
+                                .fail("CBOR filesystem data arrived after raw bulk acceptance")
+                                .await;
+                        }
+                        let chunk: FsData = msg.payload()?;
+                        if !chunk.data.is_empty() {
+                            return Ok(Some(Bytes::from(chunk.data)));
+                        }
                     }
-                    close_result?;
-                    return Ok(None);
-                }
-                _ => {}
+                    MessageType::BulkFinish => {
+                        let finish: BulkFinish = msg.payload()?;
+                        let Some(receiver) = self.bulk.as_mut() else {
+                            return self.fail("bulk finish arrived without negotiation").await;
+                        };
+                        receiver.accept_finish(finish).map_err(|error| {
+                            MicrosandboxError::SandboxFsOps(format!(
+                                "invalid filesystem bulk finish: {error}"
+                            ))
+                        })?;
+                        self.bulk_finish_seen = true;
+                    }
+                    MessageType::BulkCancel => {
+                        let cancel: BulkCancel = msg.payload()?;
+                        return self
+                            .fail(&format!(
+                                "filesystem bulk transfer cancelled: {}",
+                                cancel.message
+                            ))
+                            .await;
+                    }
+                    MessageType::FsResponse | MessageType::CoreError => {
+                        let response = filesystem_response(msg);
+                        let close_result = self.close_owned_handle().await;
+                        self.finished = true;
+                        let resp = response?;
+                        if !resp.ok {
+                            return Err(MicrosandboxError::SandboxFsOps(
+                                resp.error.unwrap_or_else(|| "unknown error".into()),
+                            ));
+                        }
+                        if self.bulk.is_some() && !self.bulk_finish_seen {
+                            return Err(MicrosandboxError::SandboxFsOps(
+                                "filesystem bulk read completed without an exact finish marker"
+                                    .into(),
+                            ));
+                        }
+                        close_result?;
+                        return Ok(None);
+                    }
+                    _ => {}
+                },
             }
         }
         self.close_owned_handle().await?;
-        Ok(None)
+        Err(MicrosandboxError::SandboxFsOps(
+            "filesystem read stream closed before terminal response".into(),
+        ))
     }
 
     /// Collect all remaining data into bytes.
@@ -584,6 +697,12 @@ impl FsReadStream {
         }
         Ok(())
     }
+
+    async fn fail(&mut self, message: &str) -> MicrosandboxResult<Option<Bytes>> {
+        let _ = self.close_owned_handle().await;
+        self.finished = true;
+        Err(MicrosandboxError::SandboxFsOps(message.into()))
+    }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -595,26 +714,80 @@ impl FsWriteSink {
     pub(crate) fn new(
         id: u32,
         client: Arc<AgentClient>,
-        rx: mpsc::Receiver<Message>,
+        rx: mpsc::Receiver<AgentFrame>,
         close_handle: Option<FsHandle>,
+        bulk: Option<BulkSendState>,
     ) -> Self {
+        let bulk_active = bulk.is_some();
+        let protocol = match bulk {
+            Some(sender) => FsWriteProtocol::Bulk { rx, sender },
+            None => FsWriteProtocol::Legacy { rx },
+        };
         Self {
             id,
             client,
-            rx,
+            protocol: Mutex::new(Some(protocol)),
             close_handle,
+            finished: false,
+            bulk_active,
         }
     }
 
     /// Write a chunk of data.
     pub async fn write(&self, data: impl AsRef<[u8]>) -> MicrosandboxResult<()> {
-        let fs_data = FsData {
-            data: data.as_ref().to_vec(),
-        };
-        self.client
-            .send(self.id, MessageType::FsData, &fs_data)
-            .await
-            .map_err(Into::into)
+        self.write_owned(data.as_ref().to_vec()).await
+    }
+
+    /// Write an already-owned chunk without cloning it at the SDK stream boundary.
+    async fn write_owned(&self, data: Vec<u8>) -> MicrosandboxResult<()> {
+        let mut protocol = self.protocol.lock().await;
+        let protocol = protocol.as_mut().ok_or_else(|| {
+            MicrosandboxError::SandboxFsOps("filesystem write stream is already closed".into())
+        })?;
+        match protocol {
+            FsWriteProtocol::Legacy { .. } => {
+                // Keep generation-6 writes below the bounded CBOR frame limit even when a
+                // streaming caller supplies a much larger chunk.
+                for chunk in data.chunks(FS_CHUNK_SIZE) {
+                    let fs_data = FsData {
+                        data: chunk.to_vec(),
+                    };
+                    self.client
+                        .send(self.id, MessageType::FsData, &fs_data)
+                        .await?;
+                }
+                Ok(())
+            }
+            FsWriteProtocol::Bulk { rx, sender } => {
+                let mut remaining = Bytes::from(data);
+                while !remaining.is_empty() {
+                    while sender.available_credit() == 0 {
+                        apply_next_fs_write_credit(rx, sender).await?;
+                    }
+
+                    let chunk_len = remaining
+                        .len()
+                        .min(sender.max_record_payload() as usize)
+                        .min(sender.available_credit() as usize);
+                    let payload = remaining.split_to(chunk_len);
+                    let offset = sender.admit(chunk_len).map_err(|error| {
+                        MicrosandboxError::SandboxFsOps(format!(
+                            "admit filesystem bulk write: {error}"
+                        ))
+                    })?;
+                    self.client
+                        .send_bulk(BulkRecord {
+                            id: self.id,
+                            kind: BulkKind::Filesystem,
+                            flow: BulkFlow::HostToGuest,
+                            offset,
+                            payload,
+                        })
+                        .await?;
+                }
+                Ok(())
+            }
+        }
     }
 
     /// Close the write stream (sends EOF) and wait for confirmation.
@@ -622,24 +795,85 @@ impl FsWriteSink {
     /// This must be called to finalize the write operation. Returns an
     /// error if the guest reports a write failure.
     pub async fn close(mut self) -> MicrosandboxResult<()> {
-        let eof = FsData { data: Vec::new() };
-        self.client.send(self.id, MessageType::FsData, &eof).await?;
-
-        // Wait for the terminal FsResponse from the guest.
-        let result = wait_for_ok_response(&mut self.rx).await;
+        let protocol = self.protocol.get_mut().take().ok_or_else(|| {
+            MicrosandboxError::SandboxFsOps("filesystem write stream is already closed".into())
+        })?;
+        let result = match protocol {
+            FsWriteProtocol::Legacy { mut rx } => {
+                let eof = FsData { data: Vec::new() };
+                self.client.send(self.id, MessageType::FsData, &eof).await?;
+                wait_for_ok_frame_response(&mut rx).await
+            }
+            FsWriteProtocol::Bulk { mut rx, mut sender } => {
+                let finish = sender.finish().map_err(|error| {
+                    MicrosandboxError::SandboxFsOps(format!(
+                        "finish filesystem bulk write: {error}"
+                    ))
+                })?;
+                self.client
+                    .send(self.id, MessageType::BulkFinish, &finish)
+                    .await?;
+                wait_for_ok_frame_response(&mut rx).await
+            }
+        };
         let close_result = if let Some(handle) = self.close_handle.take() {
             agent::close_handle(&self.client, handle).await
         } else {
             Ok(())
         };
+        self.finished = true;
+        self.bulk_active = false;
         result?;
         close_result
     }
 }
 
 //--------------------------------------------------------------------------------------------------
+// Trait Implementations
+//--------------------------------------------------------------------------------------------------
+
+impl Drop for FsReadStream {
+    fn drop(&mut self) {
+        if self.finished || self.bulk.is_none() {
+            return;
+        }
+        let Some(client) = self.client.take() else {
+            return;
+        };
+        spawn_fs_bulk_cancel(self.id, client, self.close_handle.take());
+    }
+}
+
+impl Drop for FsWriteSink {
+    fn drop(&mut self) {
+        if self.finished || !self.bulk_active {
+            return;
+        }
+        spawn_fs_bulk_cancel(self.id, Arc::clone(&self.client), self.close_handle.take());
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
+
+/// Best-effort cancellation keeps a dropped SDK stream from draining or retaining guest work.
+fn spawn_fs_bulk_cancel(id: u32, client: Arc<AgentClient>, close_handle: Option<FsHandle>) {
+    let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+        return;
+    };
+    runtime.spawn(async move {
+        let cancel = BulkCancel {
+            kind: BulkKind::Filesystem,
+            reason: BulkCancelReason::CallerCancelled,
+            message: "host filesystem stream was dropped".into(),
+        };
+        let _ = client.cancel_bulk(id, &cancel).await;
+        if let Some(handle) = close_handle {
+            let _ = agent::close_handle(&client, handle).await;
+        }
+    });
+}
 
 /// Parse a kind string from the wire protocol into an `FsEntryKind`.
 fn parse_kind(s: &str) -> FsEntryKind {
@@ -685,9 +919,22 @@ fn entry_info_to_metadata(info: &FsEntryInfo) -> FsMetadata {
     }
 }
 
+/// Check the envelope before decoding: a paused runtime rejects new work with
+/// `core.error`, which has no filesystem `ok` field. Do not hide that diagnostic
+/// behind a CBOR decoding error (or silently discard it on a stream).
+fn filesystem_response(msg: Message) -> MicrosandboxResult<FsResponse> {
+    if msg.t != MessageType::FsResponse {
+        return Err(super::unexpected_agent_response(
+            "filesystem operation",
+            &msg,
+        ));
+    }
+    Ok(msg.payload()?)
+}
+
 /// Deserialize and check a simple ok/error `FsResponse`.
 fn check_response(msg: Message) -> MicrosandboxResult<()> {
-    let resp: FsResponse = msg.payload()?;
+    let resp = filesystem_response(msg)?;
     if resp.ok {
         Ok(())
     } else {
@@ -698,14 +945,121 @@ fn check_response(msg: Message) -> MicrosandboxResult<()> {
 }
 
 /// Wait for and check a terminal `FsResponse` from a subscription channel.
-async fn wait_for_ok_response(rx: &mut mpsc::Receiver<Message>) -> MicrosandboxResult<()> {
-    while let Some(msg) = rx.recv().await {
-        if msg.t == MessageType::FsResponse {
-            return check_response(msg);
+async fn wait_for_ok_frame_response(rx: &mut mpsc::Receiver<AgentFrame>) -> MicrosandboxResult<()> {
+    while let Some(frame) = rx.recv().await {
+        match frame {
+            AgentFrame::Control(message)
+                if matches!(message.t, MessageType::FsResponse | MessageType::CoreError) =>
+            {
+                return check_response(message);
+            }
+            AgentFrame::Control(message) if message.t == MessageType::BulkCancel => {
+                let cancel: BulkCancel = message.payload()?;
+                return Err(MicrosandboxError::SandboxFsOps(format!(
+                    "filesystem bulk transfer cancelled: {}",
+                    cancel.message
+                )));
+            }
+            AgentFrame::Control(_) => {}
+            AgentFrame::Bulk(_) => {
+                return Err(MicrosandboxError::SandboxFsOps(
+                    "unexpected raw bulk data on a filesystem write".into(),
+                ));
+            }
         }
     }
     Err(MicrosandboxError::SandboxFsOps(
         "channel closed before response".into(),
+    ))
+}
+
+async fn apply_next_fs_write_credit(
+    rx: &mut mpsc::Receiver<AgentFrame>,
+    sender: &mut BulkSendState,
+) -> MicrosandboxResult<()> {
+    while let Some(frame) = rx.recv().await {
+        match frame {
+            AgentFrame::Control(message) if message.t == MessageType::BulkCredit => {
+                let credit: BulkCredit = message.payload()?;
+                sender.apply_credit(credit).map_err(|error| {
+                    MicrosandboxError::SandboxFsOps(format!(
+                        "invalid filesystem bulk credit: {error}"
+                    ))
+                })?;
+                return Ok(());
+            }
+            AgentFrame::Control(message) if message.t == MessageType::BulkCancel => {
+                let cancel: BulkCancel = message.payload()?;
+                return Err(MicrosandboxError::SandboxFsOps(format!(
+                    "filesystem bulk transfer cancelled: {}",
+                    cancel.message
+                )));
+            }
+            AgentFrame::Control(message)
+                if matches!(message.t, MessageType::FsResponse | MessageType::CoreError) =>
+            {
+                check_response(message)?;
+                return Err(MicrosandboxError::SandboxFsOps(
+                    "filesystem write completed before its finish marker".into(),
+                ));
+            }
+            AgentFrame::Control(_) => {}
+            AgentFrame::Bulk(_) => {
+                return Err(MicrosandboxError::SandboxFsOps(
+                    "unexpected raw bulk data on a filesystem write".into(),
+                ));
+            }
+        }
+    }
+    Err(MicrosandboxError::SandboxFsOps(
+        "filesystem write closed while waiting for credit".into(),
+    ))
+}
+
+async fn receive_fs_bulk_acceptance(
+    rx: &mut mpsc::Receiver<AgentFrame>,
+    offer: BulkOffer,
+    flows: u8,
+) -> MicrosandboxResult<BulkAccepted> {
+    while let Some(frame) = rx.recv().await {
+        match frame {
+            AgentFrame::Control(message) if message.t == MessageType::BulkAccepted => {
+                let accepted: BulkAccepted = message.payload()?;
+                return accepted
+                    .validate_against(offer, BulkKind::Filesystem, flows)
+                    .map_err(|error| {
+                        MicrosandboxError::SandboxFsOps(format!(
+                            "invalid filesystem bulk acceptance: {error}"
+                        ))
+                    });
+            }
+            AgentFrame::Control(message)
+                if matches!(message.t, MessageType::FsResponse | MessageType::CoreError) =>
+            {
+                // Host-side pause rejection can arrive before the guest accepts bulk mode.
+                // Keep that terminal diagnostic instead of waiting for a closed correlation.
+                check_response(message)?;
+                return Err(MicrosandboxError::SandboxFsOps(
+                    "filesystem stream completed before bulk acceptance".into(),
+                ));
+            }
+            AgentFrame::Control(message) if message.t == MessageType::BulkCancel => {
+                let cancel: BulkCancel = message.payload()?;
+                return Err(MicrosandboxError::SandboxFsOps(format!(
+                    "filesystem bulk negotiation cancelled: {}",
+                    cancel.message
+                )));
+            }
+            AgentFrame::Control(_) => {}
+            AgentFrame::Bulk(_) => {
+                return Err(MicrosandboxError::SandboxFsOps(
+                    "filesystem bulk data arrived before acceptance".into(),
+                ));
+            }
+        }
+    }
+    Err(MicrosandboxError::SandboxFsOps(
+        "filesystem stream closed before bulk acceptance".into(),
     ))
 }
 
@@ -725,6 +1079,16 @@ fn write_open_options() -> FsOpenOptions {
     }
 }
 
+/// Keep raw bulk unless an exact owned payload is small enough that its lifecycle cannot amortize.
+fn should_offer_fs_write_bulk(
+    bulk_supported: bool,
+    exact_owned_payload: bool,
+    transfer_len_hint: Option<u64>,
+) -> bool {
+    bulk_supported
+        && (!exact_owned_payload || transfer_len_hint.is_none_or(|len| len > FS_INLINE_WRITE_MAX))
+}
+
 //--------------------------------------------------------------------------------------------------
 // Module: agent (backend-agnostic ops driven over an agent connection)
 //--------------------------------------------------------------------------------------------------
@@ -742,19 +1106,21 @@ pub(crate) mod agent {
 
     use bytes::Bytes;
     use microsandbox_protocol::{
-        fs::{
-            FS_CHUNK_SIZE, FsData, FsOp, FsOpenOptions, FsRequest, FsResponse, FsResponseData,
-            FsSetAttrs,
+        bulk::{
+            BULK_FLOW_MASK_GUEST_TO_HOST, BULK_FLOW_MASK_HOST_TO_GUEST, BulkFlow, BulkKind,
+            BulkOffer, BulkReceiveState, BulkSendState,
         },
+        fs::{FS_CHUNK_SIZE, FsOp, FsOpenOptions, FsRequest, FsResponseData, FsSetAttrs},
         message::MessageType,
     };
-    use tokio::io::AsyncReadExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use crate::{MicrosandboxError, MicrosandboxResult, agent::AgentClient, backend::Backend};
 
     use super::{
         FsEntry, FsHandle, FsMetadata, FsReadStream, FsWriteSink, check_response,
-        entry_info_to_fs_entry, entry_info_to_metadata, wait_for_ok_response,
+        entry_info_to_fs_entry, entry_info_to_metadata, filesystem_response,
+        receive_fs_bulk_acceptance, should_offer_fs_write_bulk,
     };
 
     /// Open a fresh agent connection for the named sandbox.
@@ -783,9 +1149,10 @@ pub(crate) mod agent {
                 path: path.to_string(),
                 options,
             },
+            bulk: None,
         };
         let resp_msg = client.request(MessageType::FsRequest, &req).await?;
-        let resp: FsResponse = resp_msg.payload()?;
+        let resp = filesystem_response(resp_msg)?;
         if !resp.ok {
             return Err(MicrosandboxError::SandboxFsOps(
                 resp.error.unwrap_or_else(|| "unknown error".into()),
@@ -804,9 +1171,10 @@ pub(crate) mod agent {
             op: FsOp::OpenDir {
                 path: path.to_string(),
             },
+            bulk: None,
         };
         let resp_msg = client.request(MessageType::FsRequest, &req).await?;
-        let resp: FsResponse = resp_msg.payload()?;
+        let resp = filesystem_response(resp_msg)?;
         if !resp.ok {
             return Err(MicrosandboxError::SandboxFsOps(
                 resp.error.unwrap_or_else(|| "unknown error".into()),
@@ -826,6 +1194,7 @@ pub(crate) mod agent {
     ) -> MicrosandboxResult<()> {
         let req = FsRequest {
             op: FsOp::CloseHandle { handle },
+            bulk: None,
         };
         let resp_msg = client.request(MessageType::FsRequest, &req).await?;
         check_response(resp_msg)
@@ -856,15 +1225,42 @@ pub(crate) mod agent {
                 offset,
                 len,
             },
+            bulk: client
+                .supports(MessageType::BulkAccepted)
+                .then(BulkOffer::filesystem_read),
         };
-        let (_id, rx) = client.stream(MessageType::FsRequest, &req).await?;
+        let (id, mut rx) = client.stream_frames(MessageType::FsRequest, &req).await?;
+        let bulk = match req.bulk {
+            Some(offer) => {
+                let accepted =
+                    receive_fs_bulk_acceptance(&mut rx, offer, BULK_FLOW_MASK_GUEST_TO_HOST)
+                        .await?;
+                Some(
+                    BulkReceiveState::new(
+                        BulkKind::Filesystem,
+                        BulkFlow::GuestToHost,
+                        accepted.max_record_payload,
+                        accepted.guest_to_host_credit_limit,
+                        offer.guest_to_host_credit_limit,
+                    )
+                    .map_err(|error| {
+                        MicrosandboxError::SandboxFsOps(format!(
+                            "create filesystem bulk read state: {error}"
+                        ))
+                    })?,
+                )
+            }
+            None => None,
+        };
 
         // The stream must retain the same relay client while the handle is in
         // use; agentd rejects handle operations from a different client range.
         Ok(FsReadStream::with_client_and_close(
+            id,
             rx,
             client,
             close_handle,
+            bulk,
         ))
     }
 
@@ -874,8 +1270,8 @@ pub(crate) mod agent {
         offset: u64,
         data: &[u8],
     ) -> MicrosandboxResult<()> {
-        let sink =
-            write_handle_stream(client, handle, offset, Some(data.len() as u64), None).await?;
+        let sink = write_handle_stream(client, handle, offset, Some(data.len() as u64), None, true)
+            .await?;
         for chunk in data.chunks(FS_CHUNK_SIZE) {
             sink.write(chunk).await?;
         }
@@ -888,6 +1284,7 @@ pub(crate) mod agent {
         offset: u64,
         len: Option<u64>,
         close_handle: Option<FsHandle>,
+        exact_owned_payload: bool,
     ) -> MicrosandboxResult<FsWriteSink> {
         let req = FsRequest {
             op: FsOp::Write {
@@ -895,9 +1292,36 @@ pub(crate) mod agent {
                 offset,
                 len,
             },
+            bulk: should_offer_fs_write_bulk(
+                client.supports(MessageType::BulkAccepted),
+                exact_owned_payload,
+                len,
+            )
+            .then(BulkOffer::filesystem_write),
         };
-        let (id, rx) = client.stream(MessageType::FsRequest, &req).await?;
-        Ok(FsWriteSink::new(id, client, rx, close_handle))
+        let (id, mut rx) = client.stream_frames(MessageType::FsRequest, &req).await?;
+        let bulk = match req.bulk {
+            Some(offer) => {
+                let accepted =
+                    receive_fs_bulk_acceptance(&mut rx, offer, BULK_FLOW_MASK_HOST_TO_GUEST)
+                        .await?;
+                Some(
+                    BulkSendState::new(
+                        BulkKind::Filesystem,
+                        BulkFlow::HostToGuest,
+                        accepted.max_record_payload,
+                        accepted.host_to_guest_credit_limit,
+                    )
+                    .map_err(|error| {
+                        MicrosandboxError::SandboxFsOps(format!(
+                            "create filesystem bulk write state: {error}"
+                        ))
+                    })?,
+                )
+            }
+            None => None,
+        };
+        Ok(FsWriteSink::new(id, client, rx, close_handle, bulk))
     }
 
     pub(crate) async fn read_dir_handle(
@@ -907,9 +1331,10 @@ pub(crate) mod agent {
     ) -> MicrosandboxResult<Vec<FsEntry>> {
         let req = FsRequest {
             op: FsOp::ReadDir { handle, limit },
+            bulk: None,
         };
         let resp_msg = client.request(MessageType::FsRequest, &req).await?;
-        let resp: FsResponse = resp_msg.payload()?;
+        let resp = filesystem_response(resp_msg)?;
 
         if !resp.ok {
             return Err(MicrosandboxError::SandboxFsOps(
@@ -931,9 +1356,10 @@ pub(crate) mod agent {
     ) -> MicrosandboxResult<FsMetadata> {
         let req = FsRequest {
             op: FsOp::FStat { handle },
+            bulk: None,
         };
         let resp_msg = client.request(MessageType::FsRequest, &req).await?;
-        let resp: FsResponse = resp_msg.payload()?;
+        let resp = filesystem_response(resp_msg)?;
 
         if !resp.ok {
             return Err(MicrosandboxError::SandboxFsOps(
@@ -956,6 +1382,7 @@ pub(crate) mod agent {
     ) -> MicrosandboxResult<()> {
         let req = FsRequest {
             op: FsOp::FSetStat { handle, attrs },
+            bulk: None,
         };
         let resp_msg = client.request(MessageType::FsRequest, &req).await?;
         check_response(resp_msg)
@@ -966,40 +1393,13 @@ pub(crate) mod agent {
         name: &str,
         path: &str,
     ) -> MicrosandboxResult<Bytes> {
-        let client = connect_agent(backend, name).await?;
+        let client = Arc::new(connect_agent(backend, name).await?);
         let handle = open_file(&client, path, super::read_only_open_options()).await?;
-
-        let req = FsRequest {
-            op: FsOp::Read {
-                handle,
-                offset: 0,
-                len: None,
-            },
-        };
-        let (_id, mut rx) = client.stream(MessageType::FsRequest, &req).await?;
-
+        let mut stream = read_handle_stream(client, handle, 0, None, Some(handle)).await?;
         let mut data = Vec::new();
-        while let Some(msg) = rx.recv().await {
-            match msg.t {
-                MessageType::FsData => {
-                    let chunk: FsData = msg.payload()?;
-                    data.extend_from_slice(&chunk.data);
-                }
-                MessageType::FsResponse => {
-                    let resp: FsResponse = msg.payload()?;
-                    if !resp.ok {
-                        return Err(MicrosandboxError::SandboxFsOps(
-                            resp.error.unwrap_or_else(|| "unknown error".into()),
-                        ));
-                    }
-                    break;
-                }
-                _ => {}
-            }
+        while let Some(chunk) = stream.recv().await? {
+            data.extend_from_slice(&chunk);
         }
-
-        let close_result = close_handle(&client, handle).await;
-        close_result?;
         Ok(Bytes::from(data))
     }
 
@@ -1011,22 +1411,7 @@ pub(crate) mod agent {
         let client = Arc::new(connect_agent(backend, name).await?);
         let handle = open_file(&client, path, super::read_only_open_options()).await?;
 
-        let req = FsRequest {
-            op: FsOp::Read {
-                handle,
-                offset: 0,
-                len: None,
-            },
-        };
-        let (_id, rx) = client.stream(MessageType::FsRequest, &req).await?;
-
-        // Pin the AgentClient alive inside the stream and close the
-        // auto-opened file handle once the guest sends the terminal response.
-        Ok(FsReadStream::with_client_and_close(
-            rx,
-            client,
-            Some(handle),
-        ))
+        read_handle_stream(client, handle, 0, None, Some(handle)).await
     }
 
     pub(crate) async fn write(
@@ -1035,31 +1420,21 @@ pub(crate) mod agent {
         path: &str,
         data: Vec<u8>,
     ) -> MicrosandboxResult<()> {
-        let client = connect_agent(backend, name).await?;
+        let client = Arc::new(connect_agent(backend, name).await?);
         let handle = open_file(&client, path, super::write_open_options()).await?;
-
-        let req = FsRequest {
-            op: FsOp::Write {
-                handle,
-                offset: 0,
-                len: Some(data.len() as u64),
-            },
-        };
-        let (id, mut rx) = client.stream(MessageType::FsRequest, &req).await?;
-
+        let sink = write_handle_stream(
+            client,
+            handle,
+            0,
+            Some(data.len() as u64),
+            Some(handle),
+            true,
+        )
+        .await?;
         for chunk in data.chunks(FS_CHUNK_SIZE) {
-            let fs_data = FsData {
-                data: chunk.to_vec(),
-            };
-            client.send(id, MessageType::FsData, &fs_data).await?;
+            sink.write(chunk).await?;
         }
-
-        let eof = FsData { data: Vec::new() };
-        client.send(id, MessageType::FsData, &eof).await?;
-
-        let result = wait_for_ok_response(&mut rx).await;
-        let _ = close_handle(&client, handle).await;
-        result
+        sink.close().await
     }
 
     pub(crate) async fn write_stream(
@@ -1070,16 +1445,7 @@ pub(crate) mod agent {
         let client = Arc::new(connect_agent(backend, name).await?);
         let handle = open_file(&client, path, super::write_open_options()).await?;
 
-        let req = FsRequest {
-            op: FsOp::Write {
-                handle,
-                offset: 0,
-                len: None,
-            },
-        };
-        let (id, rx) = client.stream(MessageType::FsRequest, &req).await?;
-
-        Ok(FsWriteSink::new(id, client, rx, Some(handle)))
+        write_handle_stream(client, handle, 0, None, Some(handle), false).await
     }
 
     pub(crate) async fn list(
@@ -1092,9 +1458,10 @@ pub(crate) mod agent {
             op: FsOp::List {
                 path: path.to_string(),
             },
+            bulk: None,
         };
         let resp_msg = client.request(MessageType::FsRequest, &req).await?;
-        let resp: FsResponse = resp_msg.payload()?;
+        let resp = filesystem_response(resp_msg)?;
 
         if !resp.ok {
             return Err(MicrosandboxError::SandboxFsOps(
@@ -1121,6 +1488,7 @@ pub(crate) mod agent {
                 path: path.to_string(),
                 mode: None,
             },
+            bulk: None,
         };
         let resp_msg = client.request(MessageType::FsRequest, &req).await?;
         check_response(resp_msg)
@@ -1141,6 +1509,7 @@ pub(crate) mod agent {
             op: FsOp::Remove {
                 path: path.to_string(),
             },
+            bulk: None,
         };
         let resp_msg = client.request(MessageType::FsRequest, &req).await?;
         check_response(resp_msg)
@@ -1158,6 +1527,7 @@ pub(crate) mod agent {
                 path: path.to_string(),
                 recursive,
             },
+            bulk: None,
         };
         let resp_msg = client.request(MessageType::FsRequest, &req).await?;
         check_response(resp_msg)
@@ -1175,6 +1545,7 @@ pub(crate) mod agent {
                 src: from.to_string(),
                 dst: to.to_string(),
             },
+            bulk: None,
         };
         let resp_msg = client.request(MessageType::FsRequest, &req).await?;
         check_response(resp_msg)
@@ -1192,6 +1563,7 @@ pub(crate) mod agent {
                 src: from.to_string(),
                 dst: to.to_string(),
             },
+            bulk: None,
         };
         let resp_msg = client.request(MessageType::FsRequest, &req).await?;
         check_response(resp_msg)
@@ -1217,9 +1589,10 @@ pub(crate) mod agent {
                 path: path.to_string(),
                 follow_symlink,
             },
+            bulk: None,
         };
         let resp_msg = client.request(MessageType::FsRequest, &req).await?;
-        let resp: FsResponse = resp_msg.payload()?;
+        let resp = filesystem_response(resp_msg)?;
 
         if !resp.ok {
             return Err(MicrosandboxError::SandboxFsOps(
@@ -1249,6 +1622,7 @@ pub(crate) mod agent {
                 follow_symlink,
                 attrs,
             },
+            bulk: None,
         };
         let resp_msg = client.request(MessageType::FsRequest, &req).await?;
         check_response(resp_msg)
@@ -1264,9 +1638,10 @@ pub(crate) mod agent {
             op: FsOp::ReadLink {
                 path: path.to_string(),
             },
+            bulk: None,
         };
         let resp_msg = client.request(MessageType::FsRequest, &req).await?;
-        let resp: FsResponse = resp_msg.payload()?;
+        let resp = filesystem_response(resp_msg)?;
 
         if !resp.ok {
             return Err(MicrosandboxError::SandboxFsOps(
@@ -1294,6 +1669,7 @@ pub(crate) mod agent {
                 target: target.to_string(),
                 link_path: link_path.to_string(),
             },
+            bulk: None,
         };
         let resp_msg = client.request(MessageType::FsRequest, &req).await?;
         check_response(resp_msg)
@@ -1309,9 +1685,10 @@ pub(crate) mod agent {
             op: FsOp::RealPath {
                 path: path.to_string(),
             },
+            bulk: None,
         };
         let resp_msg = client.request(MessageType::FsRequest, &req).await?;
-        let resp: FsResponse = resp_msg.payload()?;
+        let resp = filesystem_response(resp_msg)?;
 
         if !resp.ok {
             return Err(MicrosandboxError::SandboxFsOps(
@@ -1346,14 +1723,47 @@ pub(crate) mod agent {
         guest_path: &str,
     ) -> MicrosandboxResult<()> {
         let mut file = tokio::fs::File::open(host_path).await?;
+        let small_candidate = file.metadata().await?.len() <= super::FS_INLINE_WRITE_MAX;
+        let first = if small_candidate {
+            let mut first = Vec::with_capacity((super::FS_INLINE_WRITE_MAX + 1) as usize);
+            (&mut file)
+                .take(super::FS_INLINE_WRITE_MAX + 1)
+                .read_to_end(&mut first)
+                .await?;
+            if first.len() as u64 <= super::FS_INLINE_WRITE_MAX {
+                // Metadata is only a hint. EOF inside the bounded probe proves that the complete
+                // owned payload can use inline without risking an unbounded control-lane stream.
+                return write(backend, name, guest_path, first).await;
+            }
+
+            // The candidate grew across the cutoff. Refill the ordinary first record before raw
+            // bulk opens rather than penalizing the transfer with a tiny leading record.
+            while first.len() < FS_CHUNK_SIZE {
+                let start = first.len();
+                first.resize(FS_CHUNK_SIZE, 0);
+                let n = file.read(&mut first[start..]).await?;
+                first.truncate(start + n);
+                if n == 0 {
+                    break;
+                }
+            }
+            Some(first)
+        } else {
+            None
+        };
+
         let sink = write_stream(backend, name, guest_path).await?;
-        let mut buf = vec![0u8; FS_CHUNK_SIZE];
+        if let Some(first) = first {
+            sink.write_owned(first).await?;
+        }
         loop {
+            let mut buf = vec![0u8; FS_CHUNK_SIZE];
             let n = file.read(&mut buf).await?;
             if n == 0 {
                 break;
             }
-            sink.write(&buf[..n]).await?;
+            buf.truncate(n);
+            sink.write_owned(buf).await?;
         }
         sink.close().await
     }
@@ -1364,9 +1774,489 @@ pub(crate) mod agent {
         guest_path: &str,
         host_path: &Path,
     ) -> MicrosandboxResult<()> {
-        let data = read(backend, name, guest_path).await?;
-        tokio::fs::write(host_path, &data).await?;
+        let (std_file, temp_path) = prepare_host_copy_target(host_path).await?;
+        let mut file = tokio::fs::File::from_std(std_file);
+        let mut stream = read_stream(backend, name, guest_path).await?;
+        let mut received = 0u64;
+
+        while let Some(chunk) = stream.recv().await? {
+            file.write_all(&chunk).await?;
+            received = received.checked_add(chunk.len() as u64).ok_or_else(|| {
+                MicrosandboxError::SandboxFsOps(
+                    "copied file size exceeds the supported u64 range".into(),
+                )
+            })?;
+        }
+
+        file.flush().await?;
+        let written = file.metadata().await?.len();
+        if written != received {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("host copy byte-count mismatch: received {received}, wrote {written}"),
+            )
+            .into());
+        }
+        drop(file);
+
+        publish_host_copy_target(temp_path, host_path)?;
+        tracing::debug!(bytes = received, path = %host_path.display(), "copied guest file to host");
         Ok(())
+    }
+
+    async fn prepare_host_copy_target(
+        host_path: &Path,
+    ) -> MicrosandboxResult<(std::fs::File, tempfile::TempPath)> {
+        let host_path = host_path.to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            let existing_permissions = match std::fs::symlink_metadata(&host_path) {
+                Ok(metadata) if metadata.file_type().is_symlink() => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!(
+                            "refusing to replace symbolic-link destination {}",
+                            host_path.display()
+                        ),
+                    ));
+                }
+                Ok(metadata) if metadata.is_dir() => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::IsADirectory,
+                        format!("copy destination is a directory: {}", host_path.display()),
+                    ));
+                }
+                Ok(metadata) => Some(metadata.permissions()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => return Err(error),
+            };
+
+            let parent = host_path
+                .parent()
+                .filter(|path| !path.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."));
+            let file_name = host_path.file_name().ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("copy destination has no file name: {}", host_path.display()),
+                )
+            })?;
+            let prefix = format!(".{}.msb-copy-", file_name.to_string_lossy());
+            let named = tempfile::Builder::new()
+                .prefix(&prefix)
+                .tempfile_in(parent)?;
+            if let Some(permissions) = existing_permissions {
+                named.as_file().set_permissions(permissions)?;
+            } else {
+                // NamedTempFile is owner-only by default. Set the mode explicitly so this
+                // security property does not depend on a future tempfile implementation.
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+
+                    named
+                        .as_file()
+                        .set_permissions(std::fs::Permissions::from_mode(0o600))?;
+                }
+            }
+            let (file, path) = named.into_parts();
+            Ok((file, path))
+        })
+        .await
+        .map_err(|error| MicrosandboxError::Custom(format!("host copy worker failed: {error}")))?
+        .map_err(Into::into)
+    }
+
+    fn publish_host_copy_target(
+        temp_path: tempfile::TempPath,
+        host_path: &Path,
+    ) -> MicrosandboxResult<()> {
+        // Re-check immediately before rename. Atomic rename never follows a symlink, but
+        // rejecting it keeps the public behavior explicit even if the path changed mid-copy.
+        match std::fs::symlink_metadata(host_path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!(
+                        "refusing to replace symbolic-link destination {}",
+                        host_path.display()
+                    ),
+                )
+                .into());
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+
+        // Keep the final lstat+rename in one non-awaiting region. Once publication starts, task
+        // cancellation cannot report failure while a detached blocking worker commits later.
+        temp_path.persist(host_path).map_err(|error| error.error)?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        #[cfg(unix)]
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        use super::*;
+
+        #[tokio::test]
+        async fn host_copy_target_atomically_replaces_existing_file() {
+            let dir = tempfile::tempdir().unwrap();
+            let destination = dir.path().join("artifact.bin");
+            std::fs::write(&destination, b"old").unwrap();
+
+            let (file, temp_path) = prepare_host_copy_target(&destination).await.unwrap();
+            let mut file = tokio::fs::File::from_std(file);
+            file.write_all(b"complete replacement").await.unwrap();
+            file.sync_all().await.unwrap();
+            drop(file);
+            publish_host_copy_target(temp_path, &destination).unwrap();
+
+            assert_eq!(
+                std::fs::read(&destination).unwrap(),
+                b"complete replacement"
+            );
+        }
+
+        #[cfg(unix)]
+        #[tokio::test]
+        async fn host_copy_target_preserves_unix_mode() {
+            let dir = tempfile::tempdir().unwrap();
+            let destination = dir.path().join("artifact.bin");
+            std::fs::write(&destination, b"old").unwrap();
+            std::fs::set_permissions(&destination, std::fs::Permissions::from_mode(0o640)).unwrap();
+
+            let (file, temp_path) = prepare_host_copy_target(&destination).await.unwrap();
+            drop(file);
+            publish_host_copy_target(temp_path, &destination).unwrap();
+
+            assert_eq!(
+                std::fs::metadata(&destination)
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o640
+            );
+        }
+
+        #[tokio::test]
+        async fn cancelled_host_copy_removes_temp_and_keeps_destination() {
+            let dir = tempfile::tempdir().unwrap();
+            let destination = dir.path().join("artifact.bin");
+            std::fs::write(&destination, b"original").unwrap();
+
+            let (file, temp_path) = prepare_host_copy_target(&destination).await.unwrap();
+            let temp_name = temp_path.to_path_buf();
+            drop(file);
+            drop(temp_path);
+
+            assert!(!temp_name.exists());
+            assert_eq!(std::fs::read(&destination).unwrap(), b"original");
+        }
+
+        #[cfg(unix)]
+        #[tokio::test]
+        async fn new_host_copy_target_is_owner_only() {
+            let dir = tempfile::tempdir().unwrap();
+            let destination = dir.path().join("new.bin");
+            let (file, temp_path) = prepare_host_copy_target(&destination).await.unwrap();
+            drop(file);
+            publish_host_copy_target(temp_path, &destination).unwrap();
+
+            assert_eq!(
+                std::fs::metadata(&destination)
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+
+        #[cfg(unix)]
+        #[tokio::test]
+        async fn host_copy_rejects_symbolic_link_destination() {
+            let dir = tempfile::tempdir().unwrap();
+            let target = dir.path().join("target.bin");
+            let destination = dir.path().join("link.bin");
+            std::fs::write(&target, b"target").unwrap();
+            symlink(&target, &destination).unwrap();
+
+            let error = prepare_host_copy_target(&destination).await.unwrap_err();
+            assert!(matches!(
+                error,
+                MicrosandboxError::Io(ref error)
+                    if error.kind() == std::io::ErrorKind::InvalidInput
+            ));
+            assert_eq!(std::fs::read(&target).unwrap(), b"target");
+        }
+
+        #[cfg(unix)]
+        #[tokio::test]
+        async fn host_copy_rechecks_symbolic_link_before_publish() {
+            let dir = tempfile::tempdir().unwrap();
+            let target = dir.path().join("target.bin");
+            let destination = dir.path().join("link.bin");
+            std::fs::write(&target, b"target").unwrap();
+            let (file, temp_path) = prepare_host_copy_target(&destination).await.unwrap();
+            drop(file);
+            symlink(&target, &destination).unwrap();
+
+            let error = publish_host_copy_target(temp_path, &destination).unwrap_err();
+            assert!(matches!(
+                error,
+                MicrosandboxError::Io(ref error)
+                    if error.kind() == std::io::ErrorKind::InvalidInput
+            ));
+            assert!(
+                std::fs::symlink_metadata(&destination)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
+        }
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_exact_owned_small_filesystem_writes_stay_inline() {
+        assert!(!should_offer_fs_write_bulk(false, true, None));
+        assert!(!should_offer_fs_write_bulk(true, true, Some(0)));
+        assert!(!should_offer_fs_write_bulk(
+            true,
+            true,
+            Some(FS_INLINE_WRITE_MAX)
+        ));
+        assert!(should_offer_fs_write_bulk(
+            true,
+            true,
+            Some(FS_INLINE_WRITE_MAX + 1)
+        ));
+        assert!(should_offer_fs_write_bulk(true, true, None));
+        assert!(should_offer_fs_write_bulk(
+            true,
+            false,
+            Some(FS_INLINE_WRITE_MAX)
+        ));
+    }
+
+    #[tokio::test]
+    async fn read_stream_rejects_channel_close_without_terminal_response() {
+        let (tx, rx) = mpsc::channel(1);
+        drop(tx);
+        let mut stream = FsReadStream {
+            id: 1,
+            rx,
+            client: None,
+            close_handle: None,
+            finished: false,
+            bulk: None,
+            bulk_finish_seen: false,
+        };
+
+        let error = stream.recv().await.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("closed before terminal response")
+        );
+    }
+
+    #[tokio::test]
+    async fn read_stream_finishes_only_after_success_response() {
+        let (tx, rx) = mpsc::channel(1);
+        let response = FsResponse {
+            ok: true,
+            error: None,
+            data: None,
+        };
+        tx.send(AgentFrame::Control(
+            Message::with_payload(MessageType::FsResponse, 1, &response).unwrap(),
+        ))
+        .await
+        .unwrap();
+        drop(tx);
+        let mut stream = FsReadStream {
+            id: 1,
+            rx,
+            client: None,
+            close_handle: None,
+            finished: false,
+            bulk: None,
+            bulk_finish_seen: false,
+        };
+
+        assert!(stream.recv().await.unwrap().is_none());
+        assert!(stream.recv().await.unwrap().is_none());
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod pause_tests {
+    use microsandbox_protocol::core::{CoreError, CoreErrorKind};
+
+    use super::*;
+
+    fn paused_response() -> Message {
+        Message::with_payload(
+            MessageType::CoreError,
+            1,
+            &CoreError {
+                kind: CoreErrorKind::InvalidSession,
+                message: "sandbox is paused; resume it before starting guest work".into(),
+                offending_type: None,
+                workload_failure: None,
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn filesystem_error_preserves_paused_diagnostic() {
+        let error = filesystem_response(paused_response()).unwrap_err();
+        assert!(matches!(error, MicrosandboxError::Runtime(_)));
+        assert!(error.to_string().contains("sandbox is paused"));
+    }
+
+    #[test]
+    fn filesystem_response_rejects_unexpected_envelope() {
+        let mut message = paused_response();
+        message.t = MessageType::Pong;
+        let error = filesystem_response(message).unwrap_err();
+        assert!(error.to_string().contains("agent returned"));
+    }
+
+    #[test]
+    fn filesystem_response_retains_normal_success_and_failure() {
+        for ok in [true, false] {
+            let response = FsResponse {
+                ok,
+                error: (!ok).then(|| "permission denied".to_string()),
+                data: None,
+            };
+            let message = Message::with_payload(MessageType::FsResponse, 1, &response).unwrap();
+            let result = check_response(message);
+            if ok {
+                assert!(result.is_ok());
+            } else {
+                assert!(matches!(result, Err(MicrosandboxError::SandboxFsOps(_))));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn filesystem_read_stream_preserves_rejection_instead_of_eof() {
+        let (tx, rx) = mpsc::channel(1);
+        tx.send(AgentFrame::Control(paused_response()))
+            .await
+            .unwrap();
+        let mut stream = FsReadStream {
+            id: 1,
+            rx,
+            client: None,
+            close_handle: None,
+            finished: false,
+            bulk: None,
+            bulk_finish_seen: false,
+        };
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), stream.recv())
+            .await
+            .expect("a read rejection must not be discarded");
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("sandbox is paused")
+        );
+    }
+
+    #[tokio::test]
+    async fn filesystem_stream_rejection_does_not_wait_for_channel_close() {
+        let (tx, mut rx) = mpsc::channel(1);
+        tx.send(AgentFrame::Control(paused_response()))
+            .await
+            .unwrap();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            wait_for_ok_frame_response(&mut rx),
+        )
+        .await
+        .expect("core.error must terminate the stream even with its sender alive");
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("sandbox is paused")
+        );
+    }
+
+    #[tokio::test]
+    async fn filesystem_bulk_acceptance_preserves_paused_rejection() {
+        for (offer, flow) in [
+            (BulkOffer::filesystem_read(), BulkFlow::GuestToHost),
+            (BulkOffer::filesystem_write(), BulkFlow::HostToGuest),
+        ] {
+            let (tx, mut rx) = mpsc::channel(1);
+            tx.send(AgentFrame::Control(paused_response()))
+                .await
+                .unwrap();
+            // Keep the sender alive: the rejection, not a later channel close, is terminal.
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                receive_fs_bulk_acceptance(&mut rx, offer, flow.mask()),
+            )
+            .await
+            .expect("bulk negotiation must not discard core.error");
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("sandbox is paused")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn filesystem_bulk_credit_preserves_terminal_rejection() {
+        let offer = BulkOffer::filesystem_write();
+        let mut sender = BulkSendState::new(
+            BulkKind::Filesystem,
+            BulkFlow::HostToGuest,
+            offer.max_record_payload,
+            offer.max_record_payload as u64,
+        )
+        .unwrap();
+        let (tx, mut rx) = mpsc::channel(1);
+        tx.send(AgentFrame::Control(paused_response()))
+            .await
+            .unwrap();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            apply_next_fs_write_credit(&mut rx, &mut sender),
+        )
+        .await
+        .expect("a terminal rejection must interrupt a credit wait");
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("sandbox is paused")
+        );
     }
 }
 

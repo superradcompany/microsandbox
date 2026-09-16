@@ -3,6 +3,7 @@ import { mapNapiError, withMappedErrors } from "./internal/error-mapping.js";
 import {
   napi,
   type NapiSnapshot,
+  type NapiSnapshotArchive,
   type NapiSnapshotBuilderSetters,
   type NapiSnapshotCopyBuilder,
   type NapiSnapshotCopyBuilderSetters,
@@ -17,7 +18,7 @@ import {
 /**
  * Snapshot payload scope.
  */
-export type SnapshotScope = "disk" | "resumable";
+export type SnapshotScope = "disk" | "full";
 
 /** Canonical closed state family from schema-1 `snapshot.json`. */
 export type SnapshotState =
@@ -54,6 +55,10 @@ export type SnapshotState =
  * Bundle options for `Snapshot.save` and instance `saveTo` methods.
  */
 export interface SaveOpts {
+  /** Omit disk layers and RAM objects supplied by this base; mutually exclusive with lastLayers/withParents. */
+  since?: string;
+  /** Newest N sealed disk layers. Full snapshots still include all memory/device state. */
+  lastLayers?: number;
   /** Walk the parent chain and include each ancestor in the archive. */
   withParents?: boolean;
   /** Include the OCI image cache so the archive boots offline. */
@@ -62,12 +67,34 @@ export interface SaveOpts {
   plainTar?: boolean;
 }
 
+/** Options for importing one or more archives into a snapshot group. */
+export interface LoadOpts {
+  /** Parent directory containing snapshot groups. */
+  dest?: string;
+  /** External snapshot or standalone archive for dependencies absent from the batch/group. */
+  base?: string;
+  /** Destination group; generated when omitted. */
+  group?: string;
+  /** Select the unique imported tip even when it is not a fast-forward. */
+  setHead?: boolean;
+}
+
+/** Outcome of reading or selecting a snapshot group's head. */
+export interface HeadUpdate {
+  readonly group: string;
+  readonly previous: string | null;
+  readonly head: string;
+  readonly reason: string;
+  readonly changed: boolean;
+}
+
 /** Result of an explicit `Snapshot.verify()` call. */
 export type SnapshotVerifyReport =
   | {
       readonly digest: string;
       readonly path: string;
       readonly upper: { readonly kind: "notRecorded" };
+      readonly checkpoint?: { readonly kind: "verified"; readonly root: string };
     }
   | {
       readonly digest: string;
@@ -77,6 +104,7 @@ export type SnapshotVerifyReport =
         readonly algorithm: string;
         readonly digest: string;
       };
+      readonly checkpoint?: { readonly kind: "verified"; readonly root: string };
     };
 
 /**
@@ -88,6 +116,25 @@ export type SnapshotVerifyReport =
  */
 export interface SnapshotBuilder extends NapiSnapshotBuilderSetters {
   create(): Promise<Snapshot>;
+  createArchive(out: string, plainTar?: boolean): Promise<SnapshotArchive>;
+}
+
+/** Result of direct sandbox-to-archive capture. */
+export class SnapshotArchive {
+  /** @internal */
+  constructor(readonly inner: NapiSnapshotArchive) {}
+
+  get id(): string {
+    return this.inner.id;
+  }
+
+  get descriptorDigest(): string {
+    return this.inner.descriptorDigest;
+  }
+
+  get path(): string {
+    return this.inner.path;
+  }
 }
 
 /** Builder for copying a snapshot archive with replacement metadata. */
@@ -114,16 +161,15 @@ export class Snapshot {
   }
 
   /**
-   * Begin building a snapshot named `name` using the active backend.
+   * Begin building a snapshot using the active backend; local names may be generated.
    *
    * The source sandbox is required:
    * `Snapshot.builder("clean").fromSandbox("box").create()`.
    *
-   * Use `destDir(dir)` to create the artifact under a different parent
-   * directory instead; it lands at `destDir/<name>`, and the name stays
-   * the snapshot's identity either way.
+   * Use `group(name)` to select a group and `destDir(dir)` to select its
+   * parent directory. The default group is the source sandbox's name.
    */
-  static builder(name: string): SnapshotBuilder {
+  static builder(name = ""): SnapshotBuilder {
     return wrapBuilder(new napi.SnapshotBuilder(name));
   }
 
@@ -162,6 +208,56 @@ export class Snapshot {
     );
   }
 
+  /**
+   * Walk the snapshots directory (default: configured snapshots dir)
+   * and rebuild the local index. Returns the number of artifacts
+   * indexed.
+   */
+  static async reindex(dir?: string): Promise<number> {
+    return withMappedErrors(() => napi.Snapshot.reindex(dir));
+  }
+
+  /**
+   * Bundle a snapshot into a `.tar.zst` archive. The recorded
+   * manifest is archived as-is, so create the snapshot with
+   * `recordIntegrity()` if receivers must verify content.
+   */
+  static async save(
+    nameOrPath: string,
+    out: string,
+    opts?: SaveOpts,
+  ): Promise<void> {
+    await withMappedErrors(() => napi.Snapshot.save(nameOrPath, out, opts));
+  }
+
+  /**
+   * Unpack a snapshot archive (`.tar.zst` or `.tar`) into the
+   * snapshots directory. Recorded payload integrity is preserved for
+   * explicit verification. Compression is detected from magic bytes.
+   */
+  static async load(archive: string, dest?: string, base?: string): Promise<SnapshotHandle> {
+    const raw = await withMappedErrors(() => napi.Snapshot.load(archive, dest, base));
+    return new SnapshotHandle(raw);
+  }
+
+  /** Import into a selected or generated group, with optional head selection. */
+  static async loadWithOptions(archive: string, opts: LoadOpts = {}): Promise<SnapshotHandle> {
+    const raw = await withMappedErrors(() => napi.Snapshot.loadWithOptions(archive, opts));
+    return new SnapshotHandle(raw);
+  }
+
+  /** Import archives together into one group, resolving dependencies regardless of input order. */
+  static async loadMany(archives: string[], opts: LoadOpts = {}): Promise<SnapshotHandle[]> {
+    const raw = await withMappedErrors(() => napi.Snapshot.loadMany(archives, opts));
+    return raw.map((handle) => new SnapshotHandle(handle));
+  }
+
+  /** Read a group's head, or select `group:member` as its head. */
+  static async groupHead(selector: string): Promise<HeadUpdate> {
+    const update = await withMappedErrors(() => napi.Snapshot.groupHead(selector));
+    return { ...update, previous: update.previous ?? null };
+  }
+
   //--------------------------------------------------------------------------
   // Instance accessors
   //--------------------------------------------------------------------------
@@ -181,7 +277,7 @@ export class Snapshot {
     }
   }
 
-  /** Stable value accepted by `SandboxBuilder.fromSnapshot()`. */
+  /** Stable value accepted by `Sandbox.restore()`. */
   get reference(): string {
     return this.inner.reference;
   }
@@ -191,7 +287,18 @@ export class Snapshot {
     return this.inner.referenceKind;
   }
 
+  /** Outcome of the group head update performed by this capture. */
+  get headUpdate(): HeadUpdate | null {
+    const update = this.inner.headUpdate;
+    return update ? { ...update, previous: update.previous ?? null } : null;
+  }
+
   /** Canonical content digest (`sha256:hex`). The snapshot's identity. */
+  get id(): string {
+    return this.inner.id;
+  }
+
+  /** SHA-256 digest of the canonical descriptor. */
   get digest(): string {
     return this.inner.digest;
   }
@@ -340,39 +447,6 @@ export class Snapshot {
   }
 
   /**
-   * Rebuild the backend snapshot index from artifacts in `dir`.
-   * Throws `UnsupportedError` when the backend does not expose a rebuildable index.
-   */
-  static async reindex(dir?: string): Promise<number> {
-    return withMappedErrors(() => napi.Snapshot.reindex(dir));
-  }
-
-  /**
-   * Bundle a snapshot into a `.tar.zst` archive.
-   * Throws `UnsupportedError` when the backend does not expose artifact archives.
-   */
-  static async save(
-    nameOrPath: string,
-    out: string,
-    opts?: SaveOpts,
-  ): Promise<void> {
-    await withMappedErrors(() =>
-      napi.Snapshot.save(nameOrPath, out, opts),
-    );
-  }
-
-  /**
-   * Unpack a snapshot archive into the active backend's snapshot store.
-   * Throws `UnsupportedError` when the backend does not expose artifact archives.
-   */
-  static async load(archive: string, dest?: string): Promise<SnapshotHandle> {
-    const raw = await withMappedErrors(() =>
-      napi.Snapshot.load(archive, dest),
-    );
-    return new SnapshotHandle(raw);
-  }
-
-  /**
    * Bundle this snapshot into a `.tar.zst` archive.
    * Throws `UnsupportedError` when the backend does not expose artifact archives.
    */
@@ -402,9 +476,18 @@ export class Snapshot {
 /** @internal */
 function wrapBuilder(nb: InstanceType<typeof napi.SnapshotBuilder>): SnapshotBuilder {
   const origCreate = nb.create.bind(nb);
+  const origCreateArchive = nb.createArchive.bind(nb);
   (nb as unknown as { create: () => Promise<Snapshot> }).create = async () => {
     const inner = await withMappedErrors(() => origCreate());
     return new Snapshot(inner);
+  };
+  (
+    nb as unknown as {
+      createArchive: (out: string, plainTar?: boolean) => Promise<SnapshotArchive>;
+    }
+  ).createArchive = async (out: string, plainTar?: boolean) => {
+    const inner = await withMappedErrors(() => origCreateArchive(out, plainTar));
+    return new SnapshotArchive(inner);
   };
   return nb as unknown as SnapshotBuilder;
 }
@@ -418,11 +501,16 @@ function wrapCopyBuilder(builder: NapiSnapshotCopyBuilder): SnapshotCopyBuilder 
 
 /** @internal */
 function verifyReportToTs(r: NapiSnapshotVerifyReport): SnapshotVerifyReport {
+  const checkpoint =
+    typeof r.checkpointRoot === "string"
+      ? { kind: "verified" as const, root: r.checkpointRoot }
+      : undefined;
   if (r.upperKind === "notRecorded") {
     return {
       digest: r.digest,
       path: r.path,
       upper: { kind: "notRecorded" },
+      ...(checkpoint === undefined ? {} : { checkpoint }),
     };
   }
   if (r.upperKind === "verified") {
@@ -437,6 +525,7 @@ function verifyReportToTs(r: NapiSnapshotVerifyReport): SnapshotVerifyReport {
         ),
         digest: requiredProjectionString(r.upperDigest, "verify.upperDigest"),
       },
+      ...(checkpoint === undefined ? {} : { checkpoint }),
     };
   }
   throw invalidProjection(`unknown verification kind ${r.upperKind}`);

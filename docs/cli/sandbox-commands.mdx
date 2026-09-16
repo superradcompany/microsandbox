@@ -5,7 +5,13 @@ description: Create, run, and interact with sandboxes from the CLI
 icon: "cube"
 ---
 
-## msb run
+Sandbox operations belong to the canonical `msb sandbox` group, also available as `msb sbx`. Top-level verbs remain the recommended everyday form, so examples below use the shorter spelling. For example, `msb create`, `msb sandbox create`, and `msb sbx create` accept the same arguments and perform the same operation.
+
+The verb aliases `ls`, `ps`, `rm`, `cp`, and `mod` work at all three levels. SSH remains a separate top-level group, documented under [SSH commands](/cli/ssh-commands). Installation and self-management commands have their own sections at the end of this page.
+
+<a id="msb-run"></a>
+
+## msb sandbox run
 
 <Tooltip tip="The core run workflow works on microsandbox cloud, but replace-on-create, published ports, custom DNS and interfaces, local rootfs forms, snapshots, and several host-integrated options are unavailable."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
@@ -52,6 +58,7 @@ Common flags:
 | `--thp` | Guest transparent huge-page policy: `always`, `madvise` (default), or `never` |
 | `--root-disk` | OCI root storage, such as `8G`, `tmpfs:2G`, `flat:8G,clone=auto`, or `./rootfs.qcow2:format=qcow2,fstype=ext4` |
 | `-v`, `--volume` | Mount a host path or named volume, such as `./src:/app:ro` |
+| `--mount-owned` | Private storage removed with this sandbox: `/data` for a directory, or `/var/lib/docker:kind=disk,size=10G` for an ext4 disk. Local-only |
 | `--mount-dir`, `--mount-file`, `--mount-disk`, `--mount-named` | Mount a source with an explicit kind (`SOURCE:DEST[:OPTIONS]` or `NAME:DEST[:OPTIONS]`). Directory and file mounts accept `quota=...` and paired `uid=...,gid=...`; `--mount-named` creates missing named volumes idempotently and accepts `kind=dir\|disk`, `size=...`, and `quota=...` |
 | `-p`, `--port` | Publish a port, such as `8000:8000` for loopback-only or `0.0.0.0:8000:8000` for all host interfaces |
 | `--vsock` | Expose local host IPC at host CID 2 using `HOST_PATH:PORT[/stream\|/dgram]`; Unix sockets and local Windows named pipes are supported, the flag is repeatable, and stream is the default |
@@ -69,7 +76,8 @@ Common flags:
 | `--proxy` | Route eligible outbound traffic through a `socks4://IP:PORT` or `socks5://IP:PORT` proxy. Local-only. See [Proxies](#outbound-proxy) |
 | `--socks4-user-id` | Optional SOCKS4 user ID. Requires a `socks4://` proxy |
 | `--socks5-username`, `--socks5-password-env` | SOCKS5 username and the host environment variable containing its password. Both flags are required together |
-| `--secret` | Inject a host-held secret for an allowed destination |
+| `--secret` | Configure `NAME[:OPTIONS]@HOST[,HOST...]`; options control substitution and placeholder passthrough |
+| `--secret-violation-action` | Set `block`, `block-and-log`, or `block-and-terminate` for blocked placeholders |
 | `--tmpfs` | Mount an in-memory filesystem |
 | `--copy`, `--copy-file`, `--copy-dir`, `--mkdir`, `--rm` | Patch the rootfs before boot |
 | `--conf` | Load a sparse [sandbox configuration](/cli/configuration). Repeatable |
@@ -92,7 +100,7 @@ msb run --root-disk flat:8G,clone=auto python -- python -c "print('hello')"
 
 The pre-pull is optional: creating the first flat sandbox lazily materializes a missing flat artifact from the normal OCI layer cache. `clone=auto` prefers a native copy-on-write clone and falls back to a sparse copy, `clone=copy` forces an independent portable copy, and `clone=reflink` requires native clone support and fails clearly if the destination filesystem cannot provide it. Native cloning uses `FICLONE` on Linux, `clonefile` on macOS, and block cloning on Windows volumes that advertise block refcounting, including supported ReFS and Dev Drive configurations.
 
-Flat v1 uses ext4 and rejects rootfs patches and snapshots instead of silently changing their semantics. The normal layered root remains the built-in default, and `sandbox_defaults.oci.root_disk` can select flat for future sandboxes without repeating the flag.
+Flat roots support the same pre-boot patches and local snapshot commands as managed roots. Patches are applied while microsandbox builds the sandbox's private complete ext4 disk; the shared cached base is never modified. A snapshot preserves whether its payload is a managed upper or a complete flat root and restores with the same layout. The normal layered root remains the built-in default, and `sandbox_defaults.oci.root_disk` can select flat for future sandboxes without repeating the flag.
 
 ### Published ports
 
@@ -189,7 +197,9 @@ msb run alpine --no-net --net-rule "allow@api.internal.corp"
 msb run alpine --net public --net-rule "deny@dns"
 ```
 
-## msb create
+<a id="msb-create"></a>
+
+## msb sandbox create
 
 <Tooltip tip="The core create workflow works on microsandbox cloud, but replace-on-create, published ports, custom DNS and interfaces, local rootfs forms, snapshots, and several host-integrated options are unavailable."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
@@ -202,7 +212,47 @@ msb create --replace-with-timeout 30s python --name worker  # Give the old one 3
 msb create --replace-with-timeout 0 python --name worker    # SIGKILL immediately
 ```
 
-## msb start
+<a id="msb-restore"></a>
+
+## msb sandbox restore
+
+Restore a saved snapshot into a new sandbox. Use `msb restore`, `msb sandbox restore`, or `msb sbx restore`; all three accept the same flags. Local full snapshots resume captured processes; disk snapshots boot from the saved disk. Cloud supports disk restore but rejects full checkpoints and local-only resource/archive options. Run new commands separately with `msb exec`.
+
+```bash
+msb restore devbox:ready --name worker --forked
+msb exec worker -- echo hello
+msb sbx restore ./saved.msb --name disk-copy --disk-only
+```
+
+| Flag | Description |
+|------|-------------|
+| `--name` | Required destination sandbox name |
+| `--forked` | Restore full snapshots using private CoW memory |
+| `--disk-only` | Restore only the disk from a full snapshot; conflicts with `--forked` |
+| `--snapshot-base` | Exact base snapshot or archive for a dependent export |
+| `-u`, `--user` | Override the default user for new exec commands |
+| `-c`, `--cpus` | CPU count for disk boot; full restore requires the captured count |
+| `-m`, `--memory` | Memory for disk boot, e.g. `2G`; full restore requires the captured size |
+| `--security` | `default` or `restricted`, applied at disk boot; rejected for full execution restore |
+| `--no-net` | Deny traffic in both directions by default; keeps the captured device and accepts explicit allow rules |
+| `--net-default` | Set both traffic defaults to `allow` or `deny` |
+| `--net-rule` | Repeatable host-policy rule; requires `--net-default` or `--no-net` |
+| `--max-connections` | Concurrent TCP limit; zero explicitly means unlimited |
+| `--max-duration` | Destination sandbox lifetime bound, e.g. `10m` |
+| `--idle-timeout` | Destination inactivity bound, e.g. `2m` |
+| `-q`, `--quiet` | Hide progress, but not unavailable-resource warnings |
+
+Restore progress covers RAM-backing preparation, cache waits/reuse, syncing, and activation. Slow preparation does not consume the activation timeout. `create` and `run` no longer accept `--from-snapshot`.
+
+Disk restore applies destination controls before boot, then leaves the sandbox idle for `msb exec`. Full restore applies host-enforced network policy, connection limits, and lifetime/idle timers, but cannot change the captured guest interface or CPU/RAM geometry. An explicit security profile is rejected for full execution restore because boot-time guest confinement is not replayed; use `--disk-only` when a cold boot is intended. Backend capability checks still apply on cloud.
+
+Restore policy rules replace the complete destination policy only when you explicitly select `--net-default` or `--no-net`; rule-only requests fail instead of silently discarding configured policy. No policy flags retain the configured default. Restore never replaces an existing sandbox or accepts a new startup command: stop and remove an old destination explicitly, and run workloads with `msb exec` after successful restore.
+
+Restore and branch do not reuse host resources by default. Map directories with `-v /host/path:/guest/path`, select a private captured disk with `-v /guest/path`, and publish new listeners with `-p HOST:GUEST`. An unmapped filesystem or additional disk stays present during full restore but backend requests return I/O errors; data already cached in guest RAM may still be readable. Warnings are shown even with `--quiet`. Disk errors can make the guest filesystem abort its journal or become read-only. The root disk is always restored from the snapshot and cannot be omitted. Custom vsock routes are not inherited; use `--vsock HOST_PATH:PORT` to authorize a service for clients to reconnect to.
+
+<a id="msb-start"></a>
+
+## msb sandbox start
 
 Resume a stopped sandbox. Name one or more sandboxes, or select them by label.
 
@@ -216,31 +266,61 @@ msb start --label app=engine          # Start every sandbox labeled app=engine
 | `--label` | Start every sandbox carrying this label (`KEY=VALUE`). Repeatable; AND-matched. Unioned with any named sandboxes |
 | `-q`, `--quiet` | Suppress progress output |
 
-## msb stop
+<a id="msb-stop"></a>
 
-<Tooltip tip="Graceful stop works on microsandbox cloud; force mode and timeout escalation to force kill are unavailable."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+## msb sandbox stop
+
+<Tooltip tip="Graceful stop works on microsandbox cloud; explicit force mode is unavailable."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```bash
-msb stop devbox                # Graceful shutdown (10s grace)
+msb stop devbox                # Wait indefinitely for graceful completion
 msb stop --force devbox        # Force kill immediately
-msb stop -t 30 devbox          # 30s grace before force kill
+msb stop -t 30 devbox          # Fail after 30s without killing
 msb stop --label app=engine    # Stop every sandbox labeled app=engine
 ```
 
-Graceful shutdown gives the sandbox a chance to finish writing any pending data to disk before it exits, so files written inside the sandbox aren't lost across a later `msb start`. If the sandbox is still running after the timeout, it is force-killed.
+Graceful Stop waits until the targeted run is terminal and releases runtime ownership, so a successful Stop can be followed immediately by Remove. There is no default deadline. `--timeout` is one total graceful-completion budget; expiry returns a nonzero exit status without killing. Zero expires before dispatch. A request already sent can finish later. Paused or unreachable sandboxes return an error; resume or force termination explicitly.
 
-`--force` and a timeout that elapses both end in a force-kill. Pending writes that the workload hasn't `fsync`'d at that point may be lost, with the same durability semantics as a sudden power loss on a physical machine. For durable writes, workloads should `fsync` important data themselves.
+Only `--force` requests force termination. Pending writes that the workload has not synced may be lost, as with sudden power loss. For durable writes, workloads should sync important data themselves.
 
 | Flag | Description |
 |------|-------------|
 | `--label` | Stop every sandbox carrying this label (`KEY=VALUE`). Repeatable; AND-matched. Unioned with any named sandboxes |
 | `-f`, `--force` | Force terminate immediately. Pending writes may be lost |
-| `-t`, `--timeout` | Seconds to wait for graceful shutdown before force-killing. Defaults to 10 |
+| `-t`, `--timeout` | Total graceful-completion budget in seconds; expiry fails without killing. Omit to wait indefinitely |
 | `-q`, `--quiet` | Suppress progress output |
 
-## msb restart
+## msb sandbox pause / resume
 
-<Tooltip tip="Graceful restart works on microsandbox cloud; force mode and timeout escalation to force kill are unavailable."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+Suspend a resident sandbox without creating a snapshot, then resume it. These operations also accept the top-level `msb pause` and `msb resume` forms.
+
+```bash
+msb pause devbox
+msb resume devbox
+```
+
+## msb sandbox branch
+
+Branch running execution into a new local CoW child without creating a durable full snapshot. The top-level form is `msb branch`.
+
+```bash
+msb branch devbox --name experiment
+```
+
+Use `--names` to capture once and start several independent children from the same state:
+
+```bash
+msb branch devbox --names alice bob charlie
+msb branch devbox --names worker-{1..10} # Bash/Zsh expand the names
+```
+
+Names are checked before capture. Up to four children start concurrently; results are reported in input order. One child's startup failure does not remove successful children. The command reports failed names and exits unsuccessfully if any child fails. Separate `--name` calls still capture separate points in time.
+
+<a id="msb-restart"></a>
+
+## msb sandbox restart
+
+<Tooltip tip="Graceful restart works on microsandbox cloud; explicit force mode is unavailable."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 Stop and start one or more sandboxes. Running, draining, and paused sandboxes are stopped first, then started from their persisted configuration. Stopped, crashed, and created sandboxes skip the stop phase and are started directly.
 
@@ -252,16 +332,18 @@ msb restart --force devbox
 msb restart -t 30 devbox
 ```
 
-`msb restart` uses the same stop controls as `msb stop`: `--force` kills immediately, and `--timeout` controls how long graceful shutdown gets before force-kill escalation.
+`msb restart --force` kills immediately. Otherwise `--timeout` bounds graceful completion; expiry fails without killing or starting a replacement. Unlike standalone Stop, Restart retains its explicit default budget of ten seconds.
 
 | Flag | Description |
 |------|-------------|
 | `--label` | Restart every sandbox carrying this label (`KEY=VALUE`). Repeatable; AND-matched. Unioned with any named sandboxes |
 | `-f`, `--force` | Force terminate immediately before starting again. Pending writes may be lost |
-| `-t`, `--timeout` | Seconds to wait for graceful shutdown before force-killing. Defaults to 10 |
+| `-t`, `--timeout` | Total graceful-completion budget in seconds; expiry fails without killing. Defaults to 10 |
 | `-q`, `--quiet` | Suppress progress output |
 
-## msb ping
+<a id="msb-ping"></a>
+
+## msb sandbox ping
 
 <Tooltip tip="Not yet available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
@@ -282,7 +364,9 @@ Use `--touch` when a successful health check should also refresh the idle timer.
 | `--touch` | Refresh the sandbox idle timer after a successful ping |
 | `-q`, `--quiet` | Suppress progress output |
 
-## msb touch
+<a id="msb-touch"></a>
+
+## msb sandbox touch
 
 <Tooltip tip="Not yet available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
@@ -299,7 +383,9 @@ msb touch --label app=engine
 | `--label` | Touch every sandbox carrying this label (`KEY=VALUE`). Repeatable; AND-matched. Unioned with any named sandboxes |
 | `-q`, `--quiet` | Suppress progress output |
 
-## msb modify
+<a id="msb-modify"></a>
+
+## msb sandbox modify
 
 <Tooltip tip="Not yet available on microsandbox cloud; recreate the sandbox with the new configuration."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
@@ -320,7 +406,7 @@ Live resize is not necessarily instant. When an accepted resize has not fully se
 
 Env and workdir changes on a running sandbox apply to future execs only; running processes keep their current environment. The plan reports this as a warning.
 
-`--secret NAME@HOST[,HOST...]` adds or rotates a secret from the same-named host environment variable, recording a source reference; the value itself never rides in the command. The inline `NAME=VALUE@HOST` form is rejected, same as on `msb create`: shell history and process listings would leak the value, so providing a raw value is SDK-only.
+`--secret NAME[:OPTIONS]@HOST[,HOST...]` adds or rotates a secret from the same-named host environment variable, recording a source reference; the value itself never rides in the command. Options include `body`, `no-headers`, `no-query`, `no-body`, `passthrough=HOST`, and `passthrough=[HOST,...]`. Repeated passthrough options and repeated declarations for the same name are merged. The inline `NAME=VALUE@HOST` form is rejected, same as on `msb create`: shell history and process listings would leak the value, so providing a raw value is SDK-only.
 
 | Flag | Description |
 |------|-------------|
@@ -331,7 +417,8 @@ Env and workdir changes on a running sandbox apply to future execs only; running
 | `--env`, `--env-rm` | Set (`KEY=VALUE`) or remove an environment variable for future execs |
 | `--label`, `--label-rm` | Set (`KEY=VALUE`) or remove a label |
 | `--workdir` | Working directory for future execs |
-| `--secret`, `--secret-rm` | Add or rotate a secret from a host environment variable (`NAME@HOST[,HOST...]`), or remove one |
+| `--secret`, `--secret-rm` | Add or rotate a secret (`NAME[:OPTIONS]@HOST[,HOST...]`), or remove one |
+| `--secret-violation-action` | Set the sandbox-wide blocking action for placeholder violations |
 | `--dry-run` | Show the plan without applying anything |
 | `--next-start` | Save changes for the next start without mutating a running VM |
 | `--restart` | Restart if needed so restart-required changes become active now |
@@ -339,7 +426,11 @@ Env and workdir changes on a running sandbox apply to future execs only; running
 
 A live resize may not apply instantly; `--format json` reports a per-resource `resize_status`. See [Live Modify](/sandboxes/tuning) for the change model, or use `msb modify --help` for the full flag list.
 
-## msb exec
+For disk maintenance, use `msb modify api --compact` separately from configuration changes. This compacts the managed or flat root and all sandbox-owned data disks, never named/external disks or directories. Add `--layers N` to limit each disk to up to N oldest sealed physical layers including the base (minimum two, excluding the writable head); chains with fewer than two sealed layers are unchanged. `--disk /data` selects one owned disk and `--root-disk-only` selects just the root; these flags are mutually exclusive, and `--disk /` also selects the root. `--dry-run` reports the plan, including per-disk results, without writing. With no eligible disks the default is a no-op. Compaction requires a running or fully stopped local sandbox. See [disk-chain maintenance](/sandboxes/snapshots#export-changes-and-compact-a-disk-chain) for partial-commit recovery and retention rules.
+
+<a id="msb-exec"></a>
+
+## msb sandbox exec
 
 Execute a command inside a sandbox.
 
@@ -365,7 +456,9 @@ msb exec devbox -- ls -la /app
   The CLI auto-detects whether stdin is a terminal. When interactive, `msb exec` uses `attach` mode (TTY, line editing). When piped, it captures output. Use `--no-tty` to force captured, non-interactive execution even from a terminal.
 </Tip>
 
-## msb copy
+<a id="msb-copy"></a>
+
+## msb sandbox copy
 
 Copy files between the host and a sandbox.
 
@@ -384,7 +477,9 @@ Host-to-sandbox and sandbox-to-host forms follow `docker cp` syntax. Same-sandbo
 |------|-------------|
 | `-q`, `--quiet` | Suppress progress output |
 
-## msb logs
+<a id="msb-logs"></a>
+
+## msb sandbox logs
 
 <Tooltip tip="On microsandbox cloud, use msb logs -f for a live stream. Bounded and historical reads remain local-only."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
@@ -442,7 +537,9 @@ msb logs devbox --source all                # everything, chronologically merged
   If a sandbox failed to start, `msb logs` prepends a styled error block reconstructed from `boot-error.json`. The block tells you the failure stage, errno, and a hint, even though no user-program output was ever captured.
 </Tip>
 
-## msb ls
+<a id="msb-ls"></a>
+
+## msb sandbox list
 
 List all stored sandboxes.
 
@@ -463,7 +560,9 @@ msb ls -q                 # Names only
 | `--format` | Output format (`json`) |
 | `-q`, `--quiet` | Show only sandbox names |
 
-## msb status / ps
+<a id="msb-status--ps"></a>
+
+## msb sandbox status
 
 Show sandbox status with process details.
 
@@ -483,7 +582,9 @@ msb ps --format json      # JSON output
 
 The `CPUS` and `MEM` columns show the sandbox's allocation as `effective / max`, where max is the boot-time hotplug ceiling, the headroom available to a [live resize](/cli/sandbox-commands#msb-modify). Values come from the active config for running sandboxes (so an accepted `msb modify` shows immediately) and from the stored config for stopped ones. For *usage* rather than allocation, see [`msb metrics`](/cli/sandbox-commands#msb-metrics).
 
-## msb metrics
+<a id="msb-metrics"></a>
+
+## msb sandbox metrics
 
 <Tooltip tip="Not yet available on microsandbox cloud; instrument the workload with an external monitoring system."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
@@ -527,7 +628,9 @@ The `CPU` and `MEM` denominators come from the catalog's **active config**, so t
 
 `--format json` and `--follow` keep the raw cumulative counters (no rate conversion) and add `state` and `cpus` fields.
 
-## msb inspect
+<a id="msb-inspect"></a>
+
+## msb sandbox inspect
 
 <Tooltip tip="On microsandbox cloud, text output omits parsed configuration details; use --format json to view the raw cloud specification."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
@@ -542,7 +645,9 @@ msb inspect devbox --format json
 |------|-------------|
 | `--format` | Output format (`json`) |
 
-## msb rm
+<a id="msb-rm"></a>
+
+## msb sandbox remove
 
 Remove one or more sandboxes and their associated state.
 

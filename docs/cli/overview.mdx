@@ -40,6 +40,20 @@ Check your local setup with:
 msb doctor
 ```
 
+## Command forms
+
+Top-level verbs are the recommended everyday form. The canonical `sandbox` group organizes sandbox operations, and `sbx` is its visible alias. All three forms share flags, defaults, and behavior:
+
+```bash
+msb run alpine -- echo hello
+msb sandbox run alpine -- echo hello
+msb sbx run alpine -- echo hello
+```
+
+Existing verb aliases also work inside either group, such as `msb sbx ls`, `msb sandbox rm devbox`, and `msb sbx mod devbox --cpus 2`. This includes `restore`, `pause`, `resume`, and `branch`. The same command forms apply when a cloud backend is selected, subject to each operation's backend support. Cloud supports disk snapshot restore; full restore, pause, resume, and branch remain local-only.
+
+SSH remains a separate top-level command group: use `msb ssh`, `msb ssh serve`, and `msb ssh authorize`.
+
 ## Quick reference
 
 ```bash
@@ -155,7 +169,7 @@ msb completion powershell > (Join-Path $completions "msb.ps1")
 ```
 </CodeGroup>
 
-Then restart your shell.
+Then restart your shell. After upgrading, regenerate saved completion scripts to include `sandbox`, `sbx`, and their subcommands.
 
 ## Command tree
 
@@ -171,6 +185,8 @@ You can scope it to a specific subcommand:
 msb image --tree    # Show only image commands
 msb volume --tree   # Show only volume commands
 msb run --tree      # Show all flags for run
+msb sandbox --tree  # Show the canonical sandbox command group
+msb sbx run --tree  # Show run flags through the group alias
 ```
 
 For detailed command reference, see [Sandbox commands](/cli/sandbox-commands), [SSH commands](/cli/ssh-commands), [Volume commands](/cli/volume-commands), and [Image commands](/cli/image-commands). For the SSH model and usage patterns, see [SSH](/sandboxes/ssh).

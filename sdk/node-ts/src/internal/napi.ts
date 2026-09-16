@@ -3,17 +3,15 @@ import type { NetworkConfig } from "../network-config.js";
 import type { NetworkPolicy } from "../policy/types.js";
 import { msbPath } from "./resolve-binary.js";
 
-// Resolve the bundled runtime binary once and push it into the Rust
-// resolver's SDK tier. User-provided MSB_PATH still wins — Rust reads it
-// natively as its highest-precedence tier — so we don't duplicate the
-// env-var read here.
+// Register only the package fallback. Rust resolves explicit overrides and
+// the current runtime home before considering this executable.
 const resolvedMsbPath = msbPath();
 
 const require = createRequire(import.meta.url);
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const native = require("../../native/index.cjs") as NativeBindings;
 
-if (resolvedMsbPath) native.setRuntimeMsbPath?.(resolvedMsbPath);
+if (resolvedMsbPath) native.setPackagedMsbPath(resolvedMsbPath);
 
 export const napi = native;
 
@@ -23,6 +21,7 @@ export const napi = native;
 // dependency on the generated d.ts.
 
 export interface NativeBindings {
+  readonly setPackagedMsbPath: (path: string) => void;
   readonly setRuntimeMsbPath?: (path: string) => void;
   readonly setRuntimeLibkrunfwPath?: (path: string) => void;
   readonly setDefaultBackend?: (
@@ -42,6 +41,7 @@ export interface NativeBindings {
   readonly defaultBackendInfo?: () => NapiBackendInfo;
   readonly Sandbox: NapiSandboxStatic;
   readonly SandboxBuilder: NapiSandboxBuilderCtor;
+  readonly RestoreBuilder: new (snapshot: string, referenceKind?: "auto" | "id" | "path") => NapiRestoreBuilder;
   readonly Volume: NapiVolumeStatic;
   readonly VolumeBuilder: NapiVolumeBuilderCtor;
   readonly Snapshot: NapiSnapshotStatic;
@@ -52,7 +52,6 @@ export interface NativeBindings {
   readonly DnsBuilder: NapiBuilderCtor<NapiDnsBuilder>;
   readonly TlsBuilder: NapiBuilderCtor<NapiTlsBuilder>;
   readonly SecretBuilder: NapiBuilderCtor<NapiSecretBuilder>;
-  readonly ViolationActionBuilder: NapiBuilderCtor<NapiViolationActionBuilder>;
   readonly NetworkBuilder: NapiBuilderCtor<NapiNetworkBuilder>;
   readonly OutboundProxyBuilder: NapiBuilderCtor<NapiOutboundProxyBuilder>;
   readonly Socks4ProxyBuilder: { prototype: NapiSocks4ProxyBuilder };
@@ -70,7 +69,6 @@ export interface NativeBindings {
   readonly RegistryConfigBuilder: NapiBuilderCtor<NapiRegistryConfigBuilder>;
   readonly ImageBuilder: NapiBuilderCtor<NapiImageBuilder>;
   readonly RootDiskBuilder: NapiBuilderCtor<NapiRootDiskBuilder>;
-  readonly Setup: new () => NapiSetup;
   readonly imageGet: (reference: string) => Promise<NapiImageHandle>;
   readonly imageList: () => Promise<NapiImageInfo[]>;
   readonly imageInspect: (reference: string) => Promise<NapiImageDetail>;
@@ -85,8 +83,11 @@ export interface NativeBindings {
     outputPath: string,
     format?: string,
   ) => Promise<void>;
-  readonly install: () => Promise<void>;
-  readonly isInstalled: () => boolean;
+  readonly resolveRuntimeVersion: (executable: string) => Promise<string | null>;
+  readonly resolveRuntime: (configJson: string) => string;
+  readonly isRuntimeInstalled: (configJson: string) => boolean;
+  readonly installRuntime: (configJson: string, optionsJson: string) => Promise<string>;
+  readonly ensureRuntime: (configJson: string, optionsJson: string) => Promise<string>;
   readonly allSandboxMetrics: () => Promise<Record<string, NapiSandboxMetrics>>;
   readonly AgentClient: NapiAgentClientStatic;
 }
@@ -180,11 +181,6 @@ export type NapiSnapshotSeed =
  * not preserve `this` correctly. */
 export interface NapiSandboxBuilderSetters {
   image(s: string): this;
-  fromSnapshot(snapshot: string): this;
-  fromSnapshotRef(
-    reference: string,
-    referenceKind: "auto" | "id" | "path",
-  ): this;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   imageWith(configure: (b: any) => any): this;
   /** Managed root disk of the given size in MiB. Requires an OCI image. */
@@ -260,6 +256,45 @@ export interface NapiSandboxBuilder extends NapiSandboxBuilderSetters {
   create(): Promise<NapiSandbox>;
   connectOrCreate(): Promise<NapiSandbox>;
   createWithPullProgress(): Promise<NapiPullProgressCreate>;
+  createWithProgress(): Promise<NapiPullProgressCreate>;
+}
+
+/** Restore exposes destination controls, never image or startup-command selection. */
+export interface NapiRestoreBuilderSetters {
+  name(name: string): this;
+  /** Full execution restore requires captured CPU and memory geometry. */
+  cpus(count: number): this;
+  memory(mib: number): this;
+  /** Host policy only: does not configure DNS, TLS, or guest bootstrap. */
+  networkPolicy(policy: NetworkPolicy | NapiNetworkPolicyBuilder): this;
+  maxConnections(count: number): this;
+  /** Full execution restore rejects removing a captured NIC. */
+  disableNetwork(): this;
+  /** Requires disk scope or diskOnly(); full execution rejects even explicit default. */
+  security(profile: "default" | "restricted"): this;
+  maxDuration(secs: number): this;
+  idleTimeout(secs: number): this;
+  forked(): this;
+  diskOnly(): this;
+  snapshotBase(base: string): this;
+  logLevel(level: string): this;
+  user(user: string): this;
+  externalMountPolicy(policy: "strict" | "relaxed"): this;
+  dangerouslyInheritResources(): this;
+  volume(guest: string, configure: (mount: NapiMountBuilder) => NapiMountBuilder): this;
+  port(host: number, guest: number): this;
+  portBind(bind: string, host: number, guest: number): this;
+  portUdp(host: number, guest: number): this;
+  portUdpBind(bind: string, host: number, guest: number): this;
+  vsock(path: string, port: number): this;
+  vsockDgram(path: string, port: number): this;
+}
+
+export interface NapiRestoreBuilder extends NapiRestoreBuilderSetters {
+  networkPolicyJson(json: string): this;
+  networkPolicyFromBuilder(builder: NapiNetworkPolicyBuilder): this;
+  restore(): Promise<NapiSandbox>;
+  restoreWithProgress(): Promise<NapiPullProgressCreate>;
 }
 
 export interface NapiSandboxRestartOptions {
@@ -296,12 +331,18 @@ export interface NapiSandbox {
   ping(): Promise<NapiSandboxPingResult>;
   touch(): Promise<NapiSandboxTouchResult>;
   modify(opts?: NapiSandboxModifyOptions): Promise<string>;
+  compact(layers?: number, dryRun?: boolean, disk?: string, rootDiskOnly?: boolean): Promise<string>;
   attach(cmd: string, args?: string[]): Promise<number>;
   attachDefault(): Promise<number>;
   attachDefaultWithBuilder(builder: NapiAttachOptionsBuilder): Promise<number>;
   attachWithBuilder(cmd: string, builder: NapiAttachOptionsBuilder): Promise<number>;
   attachShell(): Promise<number>;
+  restoreWarnings(): Promise<Array<{ guestPath: string; reason: string; staleInodes: bigint[] }>>;
   stop(): Promise<void>;
+  branch(name: string, recordIntegrity?: boolean): Promise<NapiSandbox>;
+  branchMany(names: string[], recordIntegrity?: boolean): Promise<{name: string; sandbox?: NapiSandbox; error?: string}[]>;
+  pause(): Promise<void>;
+  resume(): Promise<void>;
   requestStop(): Promise<void>;
   stopWithTimeout(timeoutMs: number): Promise<void>;
   kill(): Promise<void>;
@@ -330,12 +371,17 @@ export interface NapiSandboxHandle {
   ping(): Promise<NapiSandboxPingResult>;
   touch(): Promise<NapiSandboxTouchResult>;
   modify(opts?: NapiSandboxModifyOptions): Promise<string>;
+  compact(layers?: number, dryRun?: boolean, disk?: string, rootDiskOnly?: boolean): Promise<string>;
   start(): Promise<NapiSandbox>;
   startDetached(): Promise<NapiSandbox>;
   connect(): Promise<NapiSandbox>;
   connectWithTimeout(timeoutMs: number): Promise<NapiSandbox>;
   connectOrStart(detached?: boolean): Promise<NapiSandbox>;
   stop(): Promise<void>;
+  branch(name: string, recordIntegrity?: boolean): Promise<NapiSandbox>;
+  branchMany(names: string[], recordIntegrity?: boolean): Promise<{name: string; sandbox?: NapiSandbox; error?: string}[]>;
+  pause(): Promise<void>;
+  resume(): Promise<void>;
   requestStop(): Promise<void>;
   stopWithTimeout(timeoutMs: number): Promise<void>;
   kill(): Promise<void>;
@@ -587,7 +633,25 @@ export interface NapiSnapshotStatic {
   remove(pathOrName: string, opts?: NapiSnapshotRemoveOptions): Promise<void>;
   reindex(dir?: string): Promise<number>;
   save(name: string, out: string, opts?: NapiSaveOpts): Promise<void>;
-  load(archive: string, dest?: string): Promise<NapiSnapshotHandle>;
+  load(archive: string, dest?: string, base?: string): Promise<NapiSnapshotHandle>;
+  loadWithOptions(archive: string, opts?: NapiLoadOpts): Promise<NapiSnapshotHandle>;
+  loadMany(archives: string[], opts?: NapiLoadOpts): Promise<NapiSnapshotHandle[]>;
+  groupHead(selector: string): Promise<NapiHeadUpdate>;
+}
+
+export interface NapiLoadOpts {
+  dest?: string;
+  base?: string;
+  group?: string;
+  setHead?: boolean;
+}
+
+export interface NapiHeadUpdate {
+  readonly group: string;
+  readonly previous: string | null | undefined;
+  readonly head: string;
+  readonly reason: string;
+  readonly changed: boolean;
 }
 
 export type NapiSnapshotBuilderCtor = new (name: string) => NapiSnapshotBuilder;
@@ -595,15 +659,23 @@ export type NapiSnapshotBuilderCtor = new (name: string) => NapiSnapshotBuilder;
 export interface NapiSnapshotBuilderSetters {
   fromSandbox(sourceSandbox: string): this;
   destDir(destDir: string): this;
+  group(group: string): this;
   label(key: string, value: string): this;
   force(): this;
   recordIntegrity(): this;
-  resumable(): this;
+  full(): this;
 }
 
 
 export interface NapiSnapshotBuilder extends NapiSnapshotBuilderSetters {
   create(): Promise<NapiSnapshot>;
+  createArchive(out: string, plainTar?: boolean): Promise<NapiSnapshotArchive>;
+}
+
+export interface NapiSnapshotArchive {
+  readonly id: string;
+  readonly descriptorDigest: string;
+  readonly path: string;
 }
 
 export interface NapiSnapshotCopyBuilderSetters {
@@ -617,7 +689,9 @@ export interface NapiSnapshotCopyBuilder
 }
 
 export interface NapiSnapshot {
+  readonly id: string;
   readonly path: string;
+  readonly headUpdate: NapiHeadUpdate | null | undefined;
   readonly reference: string;
   readonly referenceKind: "id" | "path";
   readonly digest: string;
@@ -635,7 +709,7 @@ export interface NapiSnapshot {
   readonly checkpointId: string | null | undefined;
   readonly checkpointManifestDigest: string | null | undefined;
   readonly parent: string | null | undefined;
-  readonly scope: string; // "disk" | "resumable"
+  readonly scope: string; // "disk" | "full"
   readonly createdAt: string; // RFC 3339 UTC
   readonly labels: Record<string, string>;
   readonly sourceSandbox: string | null | undefined;
@@ -646,10 +720,13 @@ export interface NapiSnapshot {
 
 export interface NapiSnapshotHandle {
   readonly path: string;
+  readonly id: string;
   readonly digest: string;
   readonly name: string | null | undefined;
+  readonly group: string | null | undefined;
+  readonly headUpdate: NapiHeadUpdate | null | undefined;
   readonly parentDigest: string | null | undefined;
-  readonly scope: string; // "disk" | "resumable"
+  readonly scope: string; // "disk" | "full"
   readonly imageRef: string;
   readonly stateKind: string;
   readonly format: string | null | undefined;
@@ -670,10 +747,13 @@ export interface NapiSnapshotHandle {
 
 export interface NapiSnapshotInfo {
   readonly path?: string | null;
+  readonly id: string;
   readonly digest: string;
   readonly name: string | null | undefined;
+  readonly group: string | null | undefined;
+  readonly headUpdate: NapiHeadUpdate | null | undefined;
   readonly parentDigest: string | null | undefined;
-  readonly scope: string; // "disk" | "resumable"
+  readonly scope: string; // "disk" | "full"
   readonly imageRef: string;
   readonly stateKind: string;
   readonly format: string | null | undefined;
@@ -690,6 +770,8 @@ export interface NapiSnapshotInfo {
 }
 
 export interface NapiSaveOpts {
+  since?: string;
+  lastLayers?: number;
   withParents?: boolean;
   withImage?: boolean;
   plainTar?: boolean;
@@ -705,6 +787,7 @@ export interface NapiSnapshotVerifyReport {
   readonly upperKind: string; // "notRecorded" | "verified"
   readonly upperAlgorithm: string | null | undefined;
   readonly upperDigest: string | null | undefined;
+  readonly checkpointRoot: string | null | undefined;
 }
 
 export interface NapiImageHandle {
@@ -761,14 +844,6 @@ export interface NapiImagePruneReport {
   readonly fsmetaRemoved: number;
   readonly vmdkRemoved: number;
   readonly bytesReclaimed: number | null | undefined;
-}
-
-export interface NapiSetup {
-  baseDir(path: string): NapiSetup;
-  version(version: string): NapiSetup;
-  skipVerify(enabled: boolean): NapiSetup;
-  force(enabled: boolean): NapiSetup;
-  install(): Promise<void>;
 }
 
 export interface NapiExecHandle extends AsyncIterable<NapiExecEvent> {
@@ -970,17 +1045,14 @@ export interface NapiSecretBuilder {
   env(varName: string): this;
   value(value: string): this;
   placeholder(placeholder: string): this;
-  allowHost(host: string): this;
-  allowHostPattern(pattern: string): this;
+  allow(host: string): this;
   allowAnyHostDangerous(iUnderstand: boolean): this;
+  allowPassthroughFor(host: string): this;
   requireTlsIdentity(enabled: boolean): this;
-  injectHeaders(enabled: boolean): this;
-  injectBasicAuth(enabled: boolean): this;
-  injectQuery(enabled: boolean): this;
-  injectBody(enabled: boolean): this;
-  onViolation(
-    configure: (b: NapiViolationActionBuilder) => NapiViolationActionBuilder,
-  ): this;
+  substituteInHeaders(enabled: boolean): this;
+  substituteInQuery(enabled: boolean): this;
+  substituteInBody(enabled: boolean): this;
+  violationAction(action: string): this;
   build(): NapiSecretEntry;
 }
 
@@ -991,14 +1063,14 @@ export interface NapiSecretEntry {
   readonly allowedHosts: string[];
   readonly allowedHostPatterns: string[];
   readonly allowAnyHost: boolean;
+  readonly passthroughHosts: string[];
   readonly requireTlsIdentity: boolean;
-  readonly injection: NapiSecretInjection;
+  readonly substitution: NapiSecretSubstitution;
 }
 
-export interface NapiSecretInjection {
+export interface NapiSecretSubstitution {
   readonly headers: boolean;
-  readonly basicAuth: boolean;
-  readonly queryParams: boolean;
+  readonly query: boolean;
   readonly body: boolean;
 }
 
@@ -1019,9 +1091,7 @@ export interface NapiNetworkBuilder {
   interface(
     configure: (b: NapiInterfaceOverridesBuilder) => NapiInterfaceOverridesBuilder,
   ): this;
-  onSecretViolation(
-    configure: (b: NapiViolationActionBuilder) => NapiViolationActionBuilder,
-  ): this;
+  secretViolationAction(action: string): this;
   maxConnections(max: number): this;
   strict(enabled: boolean): this;
   ipv4Pool(pool: string): this;
@@ -1069,17 +1139,10 @@ export interface NapiInterfaceOverridesBuilder {
   ipv6(address: string): this;
 }
 
-export interface NapiViolationActionBuilder {
-  block(): this;
-  blockAndLog(): this;
-  blockAndTerminate(): this;
-  passthroughHost(host: string): this;
-  passthroughHostPattern(pattern: string): this;
-  passthroughAllHosts(iUnderstand: boolean): this;
-}
-
 export interface NapiPullProgressEvent {
   readonly kind: string;
+  readonly phase?: string;
+  readonly completedBytes?: number;
   readonly reference?: string;
   readonly manifestDigest?: string;
   readonly layerCount?: number;
@@ -1097,6 +1160,7 @@ export interface NapiPullProgressStream extends AsyncIterable<NapiPullProgressEv
 }
 
 export interface NapiPullProgressCreate {
+  cancel(): void;
   readonly progress: NapiPullProgressStream;
   awaitSandbox(): Promise<NapiSandbox>;
 }
@@ -1183,9 +1247,18 @@ export interface NapiBuiltNetworkPolicyDestination {
   readonly group?: string;
 }
 
+/** Storage allocated for one sandbox and removed with it. */
+export interface NapiOwnedVolumeOptions {
+  kind?: "dir" | "disk";
+  sizeMib?: number;
+  quotaMib?: number;
+}
+
 export interface NapiMountBuilder {
+  captured(): this;
   bind(host: string): this;
   named(name: string): this;
+  owned(options?: NapiOwnedVolumeOptions): this;
   namedWith(
     name: string,
     mode?: "existing" | "create" | "ensure-exists",
@@ -1210,7 +1283,7 @@ export interface NapiMountBuilder {
 }
 
 export interface NapiVolumeMount {
-  readonly kind: "bind" | "named" | "tmpfs" | "disk";
+  readonly kind: "bind" | "named" | "owned" | "tmpfs" | "disk";
   readonly guest: string;
   readonly readonly: boolean;
   readonly noexec: boolean;
@@ -1220,6 +1293,7 @@ export interface NapiVolumeMount {
   readonly name?: string;
   readonly namedMode?: "existing" | "create" | "ensure-exists";
   readonly namedKind?: "dir" | "disk";
+  readonly ownedKind?: "dir" | "disk";
   readonly sizeMib?: number;
   readonly quotaMib?: number;
   readonly format?: string;

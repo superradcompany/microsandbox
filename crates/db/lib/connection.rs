@@ -71,6 +71,30 @@ impl DbReadConnection {
         Ok(Self(conn))
     }
 
+    /// Open an existing catalog without creating it or changing its journal mode.
+    ///
+    /// Intended for short control lookups after the caller coordinates with migrations.
+    /// This is a normal WAL-aware reader, never an immutable-file shortcut.
+    pub async fn open_read_only(
+        db_path: &Path,
+        connect_timeout: Duration,
+        busy_timeout: Duration,
+    ) -> Result<Self, sqlx::Error> {
+        let options = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(db_path)
+            .read_only(true)
+            .create_if_missing(false)
+            .busy_timeout(busy_timeout);
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(connect_timeout)
+            .connect_with(options)
+            .await?;
+        Ok(Self(sea_orm::SqlxSqliteConnector::from_sqlx_sqlite_pool(
+            pool,
+        )))
+    }
+
     /// Borrow the underlying sea-orm connection.
     pub fn inner(&self) -> &DatabaseConnection {
         &self.0
@@ -216,6 +240,55 @@ mod tests {
     use super::*;
 
     const TIMEOUT: Duration = Duration::from_secs(5);
+
+    #[tokio::test]
+    async fn strict_reader_sees_wal_commits_but_cannot_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.db");
+        let writer = DbWriteConnection::open(&path, TIMEOUT, TIMEOUT)
+            .await
+            .unwrap();
+        writer
+            .execute_unprepared("CREATE TABLE control_test (value INTEGER)")
+            .await
+            .unwrap();
+        let reader = DbReadConnection::open_read_only(&path, TIMEOUT, TIMEOUT)
+            .await
+            .unwrap();
+        // Keep the writer alive: control reads must see WAL commits, not an immutable
+        // view of only the main database file.
+        writer
+            .execute_unprepared("INSERT INTO control_test VALUES (42)")
+            .await
+            .unwrap();
+        let row = reader
+            .query_one_raw(Statement::from_string(
+                DbBackend::Sqlite,
+                "SELECT value FROM control_test",
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.try_get_by_index::<i64>(0).unwrap(), 42);
+        assert!(
+            reader
+                .execute_unprepared("INSERT INTO control_test VALUES (43)")
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn strict_reader_never_creates_a_catalog() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("missing.db");
+        assert!(
+            DbReadConnection::open_read_only(&path, TIMEOUT, TIMEOUT)
+                .await
+                .is_err()
+        );
+        assert!(!path.exists());
+    }
 
     #[tokio::test]
     async fn read_open_does_not_create_db() {

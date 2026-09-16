@@ -627,6 +627,37 @@ pub struct PullProgressDisplay {
 //--------------------------------------------------------------------------------------------------
 
 impl PullProgressDisplay {
+    /// Render creation telemetry using the existing stderr-only progress surface.
+    pub fn handle_creation_event(&mut self, event: microsandbox::CreationProgress) {
+        use microsandbox::{CreationProgress, StartupPhase};
+        match event {
+            CreationProgress::Pull(event) => self.handle_event(event),
+            CreationProgress::Startup(event) => {
+                let phase = match event.phase {
+                    StartupPhase::PreparingSnapshot => "Preparing sandbox",
+                    StartupPhase::WaitingForMemoryBacking => "Waiting for RAM backing",
+                    StartupPhase::PreparingMemoryBacking => "Preparing RAM backing",
+                    StartupPhase::ReusingMemoryBacking => "Reusing RAM backing",
+                    StartupPhase::SyncingMemoryBacking => "Syncing RAM backing",
+                    StartupPhase::Activating => "Activating sandbox",
+                };
+                // No invented percentage during a lock wait or fsync. Byte counts apply only
+                // to verified slices actually written, not the VM's hotplug ceiling.
+                let detail = event
+                    .total_bytes
+                    .map(|total| {
+                        format!(
+                            " — {} / {} MiB",
+                            event.completed_bytes / 1_048_576,
+                            total / 1_048_576
+                        )
+                    })
+                    .unwrap_or_default();
+                self.header.set_message(format!("{phase}{detail}"));
+            }
+        }
+    }
+
     /// Create a new pull progress display for the given image reference.
     pub fn new(reference: &str) -> Self {
         Self::new_inner(reference, false, "Pulling")

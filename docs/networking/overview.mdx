@@ -55,12 +55,9 @@ The TypeScript and Rust examples disable the network device. Python `Network.non
 
 `single-tenant` is the default and preserves the network configuration requested by the sandbox. `multi-tenant` adds a host-runtime isolation floor: traffic must pass both the platform public-network policy and the sandbox's policy, and DNS rebinding protection is forced on. Custom DNS servers and interface overrides are removed, host CA import and published ports are disabled. Sandbox policy can further restrict this floor but cannot broaden it.
 
-The per-sandbox `maxConnections` setting optionally limits concurrent TCP
-connections. When omitted, `single-tenant` has no connection-count cap and
-`multi-tenant` defaults to 1,024. An explicit positive value overrides either
-default; zero explicitly selects unlimited. These are runtime defaults, not
-operator-enforced ceilings. Services accepting tenant configuration must enforce
-their own policy on overrides.
+The per-sandbox `maxConnections` setting optionally limits concurrent TCP connections. When omitted, `single-tenant` has no connection-count cap and `multi-tenant` defaults to 1,024. An explicit positive value overrides either default; zero explicitly selects unlimited. These are runtime defaults, not operator-enforced ceilings. Services accepting tenant configuration must enforce their own policy on overrides.
+
+Legacy v0.6.x launch contracts keep their historical default of 256 connections when the limit is omitted. The current SDK rejects explicit unlimited connections, values above 4,096, or multi-tenant values above 256 when launching an older runtime because those peers cannot preserve the requested meaning. A current runtime also rejects legacy zero limits: old zero meant deny all connections, not unlimited. Current-contract defaults and explicit limits are unchanged.
 
 Each tracked TCP socket currently allocates 64 KiB for receiving and 64 KiB for
 sending. A ceiling of 1024 therefore requires up to 128 MiB of socket-buffer

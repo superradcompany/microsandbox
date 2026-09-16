@@ -9,6 +9,7 @@ use std::str::FromStr;
 use ipnetwork::{IpNetwork, Ipv4Network, Ipv6Network};
 use microsandbox_types_macros::ConfigPatch;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use typed_path::{Utf8Component, Utf8UnixComponent, Utf8UnixPath};
 use zeroize::Zeroizing;
 
@@ -364,12 +365,43 @@ pub struct NamedVolumeCreate {
     pub labels: Vec<(String, String)>,
 }
 
+/// Storage for a volume whose lifetime belongs exclusively to its sandbox.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub enum OwnedVolumeStorage {
+    /// A private directory exposed through virtiofs.
+    Directory {
+        /// Guest-write budget in MiB; `None` uses the directory-mount default.
+        quota_mib: Option<u32>,
+    },
+    /// A private ext4 disk exposed through virtio-blk.
+    Disk {
+        /// Required, positive capacity in MiB.
+        capacity_mib: u32,
+    },
+}
+
 /// A volume mount specification for a sandbox.
 #[derive(Clone)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "ts", ts(tag = "type"))]
 pub enum VolumeMount {
+    /// An unnamed private volume removed with its owning sandbox.
+    Owned {
+        /// Guest mount path, also the stable identity within the sandbox.
+        guest: String,
+        /// Directory or ext4 disk storage.
+        storage: OwnedVolumeStorage,
+        /// Guest mount behavior.
+        options: MountOptions,
+        /// Guest-visible stat virtualization policy for directory storage.
+        stat_virtualization: StatVirtualization,
+        /// Host permission propagation policy for directory storage.
+        host_permissions: HostPermissions,
+    },
     /// Bind mount a host directory into the guest.
     Bind {
         /// Host path to bind mount.
@@ -577,7 +609,7 @@ pub struct NetworkSpec {
     /// Require hostname-based policy allows to use inspectable application authority.
     pub strict: bool,
 
-    /// Secret injection subdocument.
+    /// Secret substitution subdocument.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[config_patch(nested)]
     pub secrets: Option<SecretsConfig>,
@@ -782,41 +814,39 @@ pub struct SandboxPolicy {
 
 /// Inputs to create a snapshot.
 ///
-/// The snapshot's name is its identity; the artifact directory is
-/// `dest_dir.join(name)`, with `dest_dir` defaulting to the snapshots
-/// store. Archive movement happens through save/load (the artifact
-/// directory is also self-contained and safe to move directly).
+/// Installed artifacts live at `dest_dir/<group>/<snapshot_id>`. A friendly name
+/// is scoped to the group; it does not change the portable snapshot identity.
+/// Save/load moves artifacts between stores without starting a VM.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct SnapshotSpec {
-    /// Snapshot name. Always the artifact directory's basename.
+    /// Friendly member name within a group; empty selects a generated name.
     pub name: String,
 
-    /// Parent directory to create the artifact in. `None` = the default
-    /// snapshots directory.
+    /// Local snapshot group; defaults to the source sandbox's name.
+    #[serde(default)]
+    pub group: Option<String>,
+
+    /// Group-store root. `None` selects the default snapshots directory.
     #[serde(default)]
     #[cfg_attr(feature = "ts", ts(type = "string | null"))]
     pub dest_dir: Option<PathBuf>,
 
-    /// Name of the source sandbox. Must be stopped.
+    /// Source sandbox. Disk capture accepts running, paused, or stopped sources.
     pub source_sandbox: String,
 
     /// User-supplied labels.
     pub labels: Vec<(String, String)>,
 
-    /// Overwrite an existing artifact at the destination.
+    /// Overwrite a direct archive destination; installed members remain immutable.
     pub force: bool,
 
     /// Compute and record upper-layer content integrity at creation time.
     pub record_integrity: bool,
 
-    /// Request a future resumable snapshot that includes memory/device state.
-    ///
-    /// This is part of the public contract now so callers can validate shape
-    /// early. The local runtime returns an unsupported-feature error until VM
-    /// pause/resume capture lands.
+    /// Capture disk, memory, execution, and device state from a running sandbox.
     #[serde(default)]
-    pub resumable: bool,
+    pub full: bool,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1156,6 +1186,28 @@ pub enum LogSource {
 // Methods
 //--------------------------------------------------------------------------------------------------
 
+impl SandboxResourcesPatch {
+    /// Whether this patch explicitly sets the initial vCPU count, even to its default value.
+    pub fn has_cpus(&self) -> bool {
+        self.cpus.is_some()
+    }
+
+    /// Whether this patch explicitly sets initial memory, even to its default value.
+    pub fn has_memory_mib(&self) -> bool {
+        self.memory_mib.is_some()
+    }
+
+    /// Whether this patch explicitly sets the maximum vCPU count.
+    pub fn has_max_cpus(&self) -> bool {
+        self.max_cpus.is_some()
+    }
+
+    /// Whether this patch explicitly sets maximum memory.
+    pub fn has_max_memory_mib(&self) -> bool {
+        self.max_memory_mib.is_some()
+    }
+}
+
 impl DiskImageFormat {
     /// Returns the format as a CLI-safe lowercase string.
     pub fn as_str(&self) -> &'static str {
@@ -1390,6 +1442,7 @@ impl VolumeMount {
     pub fn guest(&self) -> &str {
         match self {
             Self::Bind { guest, .. }
+            | Self::Owned { guest, .. }
             | Self::Named { guest, .. }
             | Self::Tmpfs { guest, .. }
             | Self::DiskImage { guest, .. } => guest,
@@ -1399,6 +1452,7 @@ impl VolumeMount {
     fn guest_mut(&mut self) -> &mut String {
         match self {
             Self::Bind { guest, .. }
+            | Self::Owned { guest, .. }
             | Self::Named { guest, .. }
             | Self::Tmpfs { guest, .. }
             | Self::DiskImage { guest, .. } => guest,
@@ -1417,6 +1471,33 @@ impl VolumeMount {
 //--------------------------------------------------------------------------------------------------
 // Functions: Volume Mounts
 //--------------------------------------------------------------------------------------------------
+
+/// Portable private-volume identity derived from an already canonical guest path.
+/// The ASCII hint is diagnostic; the suffix keeps distinct paths distinct.
+pub fn owned_volume_mount_id(guest: &str) -> String {
+    use std::fmt::Write as _;
+    let slug: String = guest
+        .trim_start_matches('/')
+        .chars()
+        .take(11)
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || character == '-' {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let mut id = if slug.is_empty() {
+        String::new()
+    } else {
+        format!("{slug}_")
+    };
+    for byte in Sha256::digest(guest.as_bytes()).iter().take(4) {
+        let _ = write!(id, "{byte:02x}");
+    }
+    id
+}
 
 /// Canonicalizes guest paths and orders mounts from parent to child.
 ///
@@ -1752,11 +1833,35 @@ impl FromStr for SandboxLogLevel {
     }
 }
 
+impl std::fmt::Display for SandboxLogLevel {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 impl Serialize for VolumeMount {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeMap;
 
         match self {
+            Self::Owned {
+                guest,
+                storage,
+                options,
+                stat_virtualization,
+                host_permissions,
+            } => {
+                // A distinct tag is intentional: older runtimes must reject ownership,
+                // not reinterpret a private mount as an external or named volume.
+                let mut map = serializer.serialize_map(Some(6))?;
+                map.serialize_entry("type", "Owned")?;
+                map.serialize_entry("guest", guest)?;
+                map.serialize_entry("storage", storage)?;
+                map.serialize_entry("options", options)?;
+                map.serialize_entry("stat_virtualization", stat_virtualization)?;
+                map.serialize_entry("host_permissions", host_permissions)?;
+                map.end()
+            }
             Self::Bind {
                 host,
                 guest,
@@ -1841,6 +1946,16 @@ impl<'de> Deserialize<'de> for VolumeMount {
         #[derive(Deserialize)]
         #[serde(tag = "type")]
         enum VolumeMountHelper {
+            Owned {
+                guest: String,
+                storage: OwnedVolumeStorage,
+                #[serde(default)]
+                options: MountOptions,
+                #[serde(default = "default_strict")]
+                stat_virtualization: StatVirtualization,
+                #[serde(default = "default_private")]
+                host_permissions: HostPermissions,
+            },
             Bind {
                 host: PathBuf,
                 guest: String,
@@ -1895,6 +2010,19 @@ impl<'de> Deserialize<'de> for VolumeMount {
 
         let helper = VolumeMountHelper::deserialize(deserializer)?;
         Ok(match helper {
+            VolumeMountHelper::Owned {
+                guest,
+                storage,
+                options,
+                stat_virtualization,
+                host_permissions,
+            } => Self::Owned {
+                guest,
+                storage,
+                options,
+                stat_virtualization,
+                host_permissions,
+            },
             VolumeMountHelper::Bind {
                 host,
                 guest,
@@ -1961,6 +2089,20 @@ impl<'de> Deserialize<'de> for VolumeMount {
 impl fmt::Debug for VolumeMount {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Owned {
+                guest,
+                storage,
+                options,
+                stat_virtualization,
+                host_permissions,
+            } => f
+                .debug_struct("Owned")
+                .field("guest", guest)
+                .field("storage", storage)
+                .field("options", options)
+                .field("stat_virtualization", stat_virtualization)
+                .field("host_permissions", host_permissions)
+                .finish(),
             Self::Bind {
                 host,
                 guest,
@@ -2105,11 +2247,11 @@ pub(crate) fn default_private() -> HostPermissions {
 /// Maximum supported secret placeholder length in bytes.
 pub const MAX_SECRET_PLACEHOLDER_BYTES: usize = 1024;
 
-/// Placeholder-based secret injection for a sandbox's TLS-intercepted egress.
+/// Placeholder-based secret substitution for a sandbox's TLS-intercepted egress.
 ///
 /// The sandbox only ever sees each secret's `placeholder`; the local network
 /// engine substitutes the real `value` into outbound requests bound for an
-/// allowed host (and blocks/forwards per [`ViolationAction`] otherwise). Carried
+/// allowed host (and blocks/forwards per [`SecretViolationAction`] otherwise). Carried
 /// in [`NetworkSpec::secrets`](NetworkSpec).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ConfigPatch)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
@@ -2122,7 +2264,7 @@ pub struct SecretsConfig {
 
     /// Default action when a placeholder leaks to a disallowed host.
     #[serde(default)]
-    pub on_violation: ViolationAction,
+    pub violation_action: SecretViolationAction,
 }
 
 /// A single secret entry.
@@ -2165,17 +2307,21 @@ pub struct SecretEntry {
     /// must not contain NUL, CR, or LF.
     pub placeholder: String,
 
-    /// Hosts allowed to receive this secret.
+    /// Hosts allowed to receive the substituted secret value.
     #[serde(default)]
     pub allowed_hosts: Vec<HostPattern>,
 
-    /// Where the secret can be injected.
+    /// Request locations where the placeholder can be substituted.
     #[serde(default)]
-    pub injection: SecretInjection,
+    pub substitution: SecretSubstitution,
+
+    /// Hosts allowed to receive the placeholder unchanged.
+    #[serde(default)]
+    pub passthrough_hosts: Vec<HostPattern>,
 
     /// Action on a violation for this secret (overrides the config default).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub on_violation: Option<ViolationAction>,
+    pub violation_action: Option<SecretViolationAction>,
 
     /// Require verified TLS identity before substituting (default: true).
     ///
@@ -2202,22 +2348,18 @@ pub enum HostPattern {
     Any,
 }
 
-/// Where in the HTTP request a secret can be injected.
+/// Request locations where a placeholder can be substituted with its secret.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
-pub struct SecretInjection {
+pub struct SecretSubstitution {
     /// Substitute in HTTP headers (default: true).
     #[serde(default = "default_true")]
     pub headers: bool,
 
-    /// Substitute in HTTP Basic Auth (default: true).
-    #[serde(default = "default_true")]
-    pub basic_auth: bool,
-
     /// Substitute in URL query parameters (default: false).
     #[serde(default)]
-    pub query_params: bool,
+    pub query: bool,
 
     /// Substitute in request body (default: false).
     ///
@@ -2230,12 +2372,12 @@ pub struct SecretInjection {
     pub body: bool,
 }
 
-/// Action when a secret placeholder is detected going to a disallowed host.
+/// Action when a secret placeholder is not allowed to leave the sandbox.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "kebab-case")]
-pub enum ViolationAction {
+pub enum SecretViolationAction {
     /// Block the request silently.
     #[serde(alias = "Block")]
     Block,
@@ -2246,9 +2388,6 @@ pub enum ViolationAction {
     /// Block and terminate the sandbox.
     #[serde(alias = "BlockAndTerminate", alias = "block_and_terminate")]
     BlockAndTerminate,
-    /// Forward the request with the placeholder unchanged for matching hosts.
-    #[serde(alias = "Passthrough")]
-    Passthrough(Vec<HostPattern>),
 }
 
 /// Invalid secret configuration.
@@ -2278,6 +2417,13 @@ pub enum SecretConfigError {
     /// No allowed hosts were configured for a secret.
     #[error("secret #{secret_index}: at least one allowed host is required")]
     MissingAllowedHosts {
+        /// Index of the invalid secret entry.
+        secret_index: usize,
+    },
+
+    /// No request locations were enabled for substitution.
+    #[error("secret #{secret_index}: at least one substitution location is required")]
+    MissingSubstitutionLocation {
         /// Index of the invalid secret entry.
         secret_index: usize,
     },
@@ -2336,6 +2482,10 @@ impl SecretEntry {
             return Err(SecretConfigError::MissingAllowedHosts { secret_index });
         }
 
+        if !self.substitution.headers && !self.substitution.query && !self.substitution.body {
+            return Err(SecretConfigError::MissingSubstitutionLocation { secret_index });
+        }
+
         validate_placeholder(&self.placeholder, secret_index)
     }
 }
@@ -2349,8 +2499,9 @@ impl fmt::Debug for SecretEntry {
             .field("source", &self.source)
             .field("placeholder", &self.placeholder)
             .field("allowed_hosts", &self.allowed_hosts)
-            .field("injection", &self.injection)
-            .field("on_violation", &self.on_violation)
+            .field("substitution", &self.substitution)
+            .field("passthrough_hosts", &self.passthrough_hosts)
+            .field("violation_action", &self.violation_action)
             .field("require_tls_identity", &self.require_tls_identity)
             .finish()
     }
@@ -2392,12 +2543,11 @@ impl HostPattern {
     }
 }
 
-impl Default for SecretInjection {
+impl Default for SecretSubstitution {
     fn default() -> Self {
         Self {
             headers: true,
-            basic_auth: true,
-            query_params: false,
+            query: false,
             body: false,
         }
     }

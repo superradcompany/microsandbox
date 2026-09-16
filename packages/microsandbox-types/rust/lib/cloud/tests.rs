@@ -3,9 +3,9 @@
 use super::*;
 use crate::domain::{
     DEFAULT_SANDBOX_CPUS, DEFAULT_SANDBOX_MEMORY_MIB, OciRootfsSource, RootDisk, RootfsSource,
-    SecretInjection, SecretsConfig,
+    SecretSubstitution, SecretsConfig,
 };
-use crate::snapshot::Manifest as SnapshotManifest;
+use crate::snapshot::cloud_manifest::Manifest as SnapshotManifest;
 
 fn spec(name: &str) -> CloudSandboxSpec {
     CloudSandboxSpec {
@@ -83,7 +83,7 @@ fn create_request_ignores_future_fields_at_nested_boundaries() {
         "network": {
             "enabled": false,
             "max_connections": 64,
-            "secrets": {"entries": [], "on_violation": {"type": "block"}}
+            "secrets": {"entries": [], "violation_action": {"type": "block"}}
         },
         "runtime": {"workdir": "/app"},
         "mounts": [{"type": "tmpfs", "guest": "/tmp", "options": {}}],
@@ -98,7 +98,7 @@ fn create_request_ignores_future_fields_at_nested_boundaries() {
         "/resources",
         "/network",
         "/network/secrets",
-        "/network/secrets/on_violation",
+        "/network/secrets/violation_action",
         "/runtime",
         "/mounts/0",
         "/mounts/0/options",
@@ -203,11 +203,8 @@ fn cloud_secret_twins_use_internal_tagging() {
         serde_json::json!({"type": "env", "var": "OPENAI"})
     );
     assert_eq!(
-        serde_json::to_value(CloudViolationAction::Passthrough {
-            hosts: vec![CloudHostPattern::Any],
-        })
-        .unwrap(),
-        serde_json::json!({"type": "passthrough", "hosts": [{"type": "any"}]})
+        serde_json::to_value(CloudViolationAction::BlockAndLog).unwrap(),
+        serde_json::json!({"type": "block_and_log"})
     );
 }
 
@@ -224,19 +221,23 @@ fn cloud_secrets_config_round_trips_through_domain() {
             allowed_hosts: vec![CloudHostPattern::Exact {
                 value: "api.openai.com".into(),
             }],
-            injection: SecretInjection::default(),
-            on_violation: Some(CloudViolationAction::BlockAndTerminate),
+            passthrough_hosts: vec![CloudHostPattern::Exact {
+                value: "api.anthropic.com".into(),
+            }],
+            substitution: SecretSubstitution::default(),
+            violation_action: Some(CloudViolationAction::BlockAndTerminate),
             require_tls_identity: true,
         }],
-        on_violation: CloudViolationAction::BlockAndLog,
+        violation_action: CloudViolationAction::BlockAndLog,
     };
 
     let back: CloudSecretsConfig = SecretsConfig::from(cloud.clone()).into();
     assert_eq!(back.entries.len(), 1);
     assert_eq!(back.entries[0].value, "sk-x");
     assert_eq!(back.entries[0].allowed_hosts.len(), 1);
+    assert_eq!(back.entries[0].passthrough_hosts.len(), 1);
     assert!(matches!(
-        back.entries[0].on_violation,
+        back.entries[0].violation_action,
         Some(CloudViolationAction::BlockAndTerminate)
     ));
 }
@@ -540,7 +541,7 @@ fn domain_spec_converts_to_oci_without_snapshot() {
 }
 
 fn sample_snapshot_manifest() -> SnapshotManifest {
-    use crate::snapshot::{
+    use crate::snapshot::cloud_manifest::{
         FileSnapshotState, ImageRef, SCHEMA_VERSION, SNAPSHOT_ARTIFACT_KIND, SnapshotFormat,
         SnapshotScope, SnapshotState, UpperIntegrity, UpperLayer,
     };

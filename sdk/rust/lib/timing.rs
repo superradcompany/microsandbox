@@ -1,6 +1,7 @@
 //! Operation timing for startup stages and cloud agent connections.
 //! Enable with `RUST_LOG=info,microsandbox::profiling=trace`.
 
+#[cfg(feature = "local")]
 use std::future::Future;
 use std::time::Instant;
 
@@ -15,6 +16,7 @@ pub(crate) const TARGET: &str = "microsandbox::profiling";
 // Types
 //--------------------------------------------------------------------------------------------------
 
+#[cfg(feature = "local")]
 struct StageTiming<'a> {
     sandbox_name: &'a str,
     stage: &'static str,
@@ -23,6 +25,7 @@ struct StageTiming<'a> {
 }
 
 /// Emits one terminal event when a polled connection attempt finishes or is dropped.
+#[cfg(feature = "cloud")]
 pub(crate) struct ConnectionTiming<'a> {
     name: &'a str,
     id: Option<String>,
@@ -35,6 +38,7 @@ pub(crate) struct ConnectionTiming<'a> {
 // Methods
 //--------------------------------------------------------------------------------------------------
 
+#[cfg(feature = "cloud")]
 impl<'a> ConnectionTiming<'a> {
     pub(crate) fn new(name: &'a str) -> Self {
         Self {
@@ -63,6 +67,7 @@ impl<'a> ConnectionTiming<'a> {
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
 
+#[cfg(feature = "local")]
 impl Drop for StageTiming<'_> {
     fn drop(&mut self) {
         tracing::trace!(target: TARGET,
@@ -75,6 +80,7 @@ impl Drop for StageTiming<'_> {
     }
 }
 
+#[cfg(feature = "cloud")]
 impl Drop for ConnectionTiming<'_> {
     fn drop(&mut self) {
         tracing::trace!(target: TARGET,
@@ -93,6 +99,7 @@ impl Drop for ConnectionTiming<'_> {
 //--------------------------------------------------------------------------------------------------
 
 /// Measure a fallible startup stage, including errors and future cancellation.
+#[cfg(feature = "local")]
 pub(crate) async fn measure<T, E>(
     sandbox_name: &str,
     stage: &'static str,

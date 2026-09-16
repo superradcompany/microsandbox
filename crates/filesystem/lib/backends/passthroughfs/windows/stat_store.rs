@@ -300,7 +300,7 @@ impl OverrideStat {
 //--------------------------------------------------------------------------------------------------
 
 /// Query the backing volume instead of creating a probe ADS on a read-only mount.
-fn volume_supports_named_streams(path: &Path) -> io::Result<bool> {
+pub(super) fn volume_supports_named_streams(path: &Path) -> io::Result<bool> {
     let path_wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
     let mut volume_path = [0u16; 32_768];
     let found = unsafe {

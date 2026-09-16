@@ -94,6 +94,13 @@ class MicrosandboxTest < Test::Unit::TestCase
     assert_respond_to Microsandbox::Sandbox, :with
   end
 
+  def test_explicit_stop_timeout_requires_one_argument_on_both_receivers
+    [Microsandbox::Sandbox, Microsandbox::SandboxHandle].each do |receiver|
+      assert_equal 1, receiver.instance_method(:stop_with_timeout).arity
+      assert_equal(-1, receiver.instance_method(:stop).arity)
+    end
+  end
+
   def test_connect_or_create_is_available
     assert_respond_to Microsandbox::Sandbox, :connect_or_create
     assert_respond_to Microsandbox::Sandbox.builder("ruby-test"), :connect_or_create

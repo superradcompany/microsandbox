@@ -4,7 +4,7 @@ import type {
   NapiSnapshotHandle,
   NapiSnapshotInfo,
 } from "./internal/napi.js";
-import { Snapshot, type SaveOpts, type SnapshotScope } from "./snapshot.js";
+import { Snapshot, type HeadUpdate, type SaveOpts, type SnapshotScope } from "./snapshot.js";
 
 const READ_ONLY_MSG =
   "SnapshotHandle is read-only — fetch a live handle via Snapshot.get(name) for lifecycle methods.";
@@ -18,10 +18,16 @@ const READ_ONLY_MSG =
  */
 export class SnapshotHandle {
   private readonly inner: NapiSnapshotHandle | NapiSnapshotInfo;
+  /** Stable opaque snapshot identity. */
+  readonly id: string;
   /** Manifest digest (`sha256:hex`) — canonical identity. */
   readonly digest: string;
   /** Convenience name. `null` for digest-only entries. */
   readonly name: string | null;
+  /** Local group containing this indexed snapshot. */
+  readonly group: string | null;
+  /** Outcome of the group head update performed by this import. */
+  readonly headUpdate: HeadUpdate | null;
   /** Manifest digest of the parent snapshot, or `null` for a root. */
   readonly parentDigest: string | null;
   /** Snapshot payload scope. */
@@ -48,7 +54,7 @@ export class SnapshotHandle {
   readonly migrationErrorCode: string | null;
   /** Snapshot creation time (from manifest). */
   readonly createdAt: Date;
-  /** Stable value accepted by `SandboxBuilder.fromSnapshot()`. */
+  /** Stable value accepted by `Sandbox.restore()`. */
   readonly reference: string;
   /** How the backend resolves `reference`. */
   readonly referenceKind: "id" | "path";
@@ -56,8 +62,13 @@ export class SnapshotHandle {
   /** @internal */
   constructor(inner: NapiSnapshotHandle | NapiSnapshotInfo) {
     this.inner = inner;
+    this.id = inner.id;
     this.digest = inner.digest;
     this.name = (inner.name ?? null) as string | null;
+    this.group = inner.group ?? null;
+    this.headUpdate = inner.headUpdate
+      ? { ...inner.headUpdate, previous: inner.headUpdate.previous ?? null }
+      : null;
     this.parentDigest = (inner.parentDigest ?? null) as string | null;
     this.scope = inner.scope as SnapshotScope;
     this.imageRef = inner.imageRef;
