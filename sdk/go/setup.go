@@ -14,7 +14,7 @@ import (
 // sdkVersion is the microsandbox release that this SDK binds to. The
 // embedded FFI library uses this version. Runtime downloads use the
 // version pinned in that native SDK. Both are updated by the release train.
-const sdkVersion = "0.7.0"
+const sdkVersion = "0.7.1"
 
 // init wires the FFI auto-loader so the first SDK call (e.g.
 // CreateSandbox) transparently extracts + dlopens the embedded
