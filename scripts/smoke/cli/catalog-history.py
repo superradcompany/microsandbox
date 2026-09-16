@@ -8,8 +8,10 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
+import traceback
 import urllib.request
 
 
@@ -51,12 +53,44 @@ def fixture_environment(root, artifacts):
     return env
 
 
-def cleanup(env, root, log):
+def cleanup(env, root, log, candidate):
+    """Attempt both readers, without letting recovery turn a regression green."""
+    try:
+        cleanup_catalog(env, root, log)
+    except Exception as error:
+        # A catalog-format regression can prevent the historical CLI from even
+        # listing VMs. The candidate can read that catalog; do not signal bare
+        # PIDs or touch any catalog outside this fixture's disposable home.
+        traceback.print_exc(file=log)
+        log.write("Retrying cleanup with the candidate CLI\n")
+        candidate_env = dict(env, MSB_PATH=str(candidate))
+        try:
+            cleanup_catalog(candidate_env, root, log)
+        except Exception as recovery_error:
+            traceback.print_exc(file=log)
+            error.add_note(f"Candidate cleanup also failed: {recovery_error}")
+        else:
+            error.add_note("Candidate cleanup recovered the disposable catalog.")
+        # Even successful recovery must not hide a historical-reader failure.
+        raise
+
+
+def cleanup_catalog(env, root, log):
     """Clean only this runner's disposable catalog, including partial creates."""
     def msb(*args):
-        result = subprocess.run([env["MSB_PATH"], *args], env=env, cwd=root,
-                                capture_output=True, text=True, timeout=30, check=True)
+        command = [env["MSB_PATH"], *args]
+        log.write(f"command={command!r}\n")
+        try:
+            result = subprocess.run(command, env=env, cwd=root,
+                                    capture_output=True, text=True, timeout=30, check=False)
+        except subprocess.TimeoutExpired as error:
+            # Timeout output may be bytes even when text=True.
+            for output in (error.stdout, error.stderr):
+                if output:
+                    log.write(output.decode(errors="replace") if isinstance(output, bytes) else output)
+            raise
         log.write(result.stdout + result.stderr)
+        result.check_returncode()
         return result.stdout
 
     errors = []
@@ -75,6 +109,7 @@ def cleanup(env, root, log):
 def execute(args):
     archive = args.archive.resolve(strict=True)
     workspace = args.workspace.resolve(strict=True)
+    candidate = args.cleanup_binary.resolve(strict=True)
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
     # Short paths are important for historical Unix socket layouts. Keep failed
@@ -89,6 +124,7 @@ def execute(args):
                 shutil.copyfileobj(source, target)
         unpack_verified_release(root / BUNDLE, (root / "checksums.sha256").read_text(), root)
     env = fixture_environment(root, root)
+    test_failure = None
     try:
         with (output / "test.log").open("w") as log:
             # GNU timeout also signals the nextest process group, not just its
@@ -98,14 +134,31 @@ def execute(args):
                 "--archive-file", str(archive), "--workspace-remap", str(workspace),
                 "--run-ignored=only", "-E", f"test(={TEST})", "--test-threads", "1",
             ], env=env, cwd=root, stdout=log, stderr=subprocess.STDOUT, check=True)
+    except BaseException as error:
+        # Preserve nextest's original exception (including an interrupt) when
+        # teardown fails too. Cleanup-only failures must still fail the job.
+        test_failure = error
+        raise
     finally:
-        with (output / "cleanup.log").open("w") as log:
-            cleanup(env, root, log)
+        try:
+            with (output / "cleanup.log").open("w") as log:
+                try:
+                    cleanup(env, root, log, candidate)
+                except Exception:
+                    traceback.print_exc(file=log)
+                    raise
+        except Exception as error:
+            if test_failure is None:
+                raise
+            detail = f"Cleanup also failed: {error}; see {output / 'cleanup.log'}"
+            test_failure.add_note(detail)
+            print(detail, file=sys.stderr)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--archive", type=Path, required=True)
     parser.add_argument("--workspace", type=Path, required=True)
+    parser.add_argument("--cleanup-binary", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     execute(parser.parse_args())

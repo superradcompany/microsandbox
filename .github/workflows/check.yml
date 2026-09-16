@@ -1601,6 +1601,7 @@ jobs:
           python3 scripts/smoke/cli/catalog-history.py \
             --archive build/rust-integration-tests.tar.zst \
             --workspace "${{ github.workspace }}" \
+            --cleanup-binary build/msb \
             --output build/catalog-history-results
 
       - name: Upload historical catalog results
