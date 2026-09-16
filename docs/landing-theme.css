@@ -403,3 +403,33 @@ html[data-msb-overlay-scrollbar]::-webkit-scrollbar { display: none !important; 
 }
 #content-area #content [data-as="p"]:first-child { margin-top: 0; }
 #content-area #content [data-as="p"]:last-child { margin-bottom: 0; }
+
+/* Portal menus do not inherit the sidebar's compact typography. */
+[role="menu"] {
+  width: max-content;
+  max-width: calc(100vw - 24px);
+  overflow-x: auto;
+}
+[role="menu"] [role^="menuitem"],
+[role="menu"] [role^="menuitem"] :is(span, a, button) {
+  font-size: 13px !important;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+/* Linked cards should visibly respond to pointer and keyboard navigation. */
+#content a.card[href] {
+  transition: background-color 150ms ease;
+}
+#content a.card[href]:is(:hover, :focus-visible) {
+  background-color: rgba(126, 34, 206, .08) !important;
+}
+.dark #content a.card[href]:is(:hover, :focus-visible) {
+  background-color: rgba(192, 132, 252, .14) !important;
+}
+#content a.card[href]:is(:hover, :focus-visible) :is(h2, h3) {
+  color: var(--msb-link-text) !important;
+}
+@media (prefers-reduced-motion: reduce) {
+  #content a.card[href] { transition: none; }
+}
