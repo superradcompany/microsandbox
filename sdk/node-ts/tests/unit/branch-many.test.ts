@@ -20,8 +20,8 @@ describe("capture-once branch wrappers", () => {
       };
       const source = kind === "sandbox"
         ? new Sandbox(native as never, "source") : new SandboxHandle(native as never);
-      const results = await source.branchMany(["alice", "bob"], { recordIntegrity: true });
-      expect(native.branchMany).toHaveBeenCalledExactlyOnceWith(["alice", "bob"], true);
+      const results = await source.branchMany(["alice", "bob"], { recordIntegrity: true, guestFlush: "required" });
+      expect(native.branchMany).toHaveBeenCalledExactlyOnceWith(["alice", "bob"], true, "required");
       expect(native.branch).not.toHaveBeenCalled();
       expect(results.map(r => r.name)).toEqual(["alice", "bob"]);
       expect(results[0]!.sandbox).toBeInstanceOf(Sandbox);

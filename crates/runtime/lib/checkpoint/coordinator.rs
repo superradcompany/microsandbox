@@ -135,6 +135,9 @@ struct PausedCaptureTimings {
 
 struct FrozenWorkload {
     external_mounts_synced: bool,
+    // An empty request also acknowledges success. Retain exactly what was requested
+    // so a later paused capture cannot mistake that acknowledgement for a root flush.
+    synced_mounts: BTreeSet<String>,
     gate: InputGate,
     attempt_id: String,
     protocol_generation: u8,
@@ -169,17 +172,32 @@ impl CheckpointCoordinator {
         &self,
         vm: &msb_krun::VmControl,
         attempt_id: &str,
+        guest_flush: Option<microsandbox_types::GuestFlush>,
     ) -> Result<UserPause, CheckpointFailure> {
         if !vm.clock_sync_supported() {
             return Err(CheckpointFailure::before_pause(
                 "guest kernel lacks clock-only resume support",
             ));
         }
-        let (workload, capture_unavailable) = match self.freeze_workload(vm, attempt_id) {
+        let required = guest_flush.is_some_and(|policy| policy.requires_writeback(false));
+        let (workload, capture_unavailable) = match self
+            .freeze_workload(vm, attempt_id, required, false)
+        {
             Ok(workload) => (Some(workload), None),
-            Err(error) if error.freezer_unavailable => (None, Some(error.to_string())),
+            Err(error) if error.freezer_unavailable && !required => (None, Some(error.to_string())),
             Err(error) => return Err(error),
         };
+        if required
+            && let Some(workload) = &workload
+            && !workload.covers(&self.flush_mounts(true, false))
+        {
+            return Err(recover_failed_freeze(
+                attempt_id,
+                "required guest filesystem flush failed; pause was not established".into(),
+                || self.thaw_workload(workload),
+                || vm.pause().map(|_| ()).map_err(|error| error.to_string()),
+            ));
+        }
         let input_gate = if workload.is_none() {
             Some(
                 self.gate_input(Instant::now() + WORKLOAD_CONTROL_TIMEOUT)?
@@ -475,6 +493,7 @@ impl CheckpointCoordinator {
         vm: &msb_krun::VmControl,
         checkpoint_id: &str,
         user_pause: Option<&UserPause>,
+        guest_flush: Option<microsandbox_types::GuestFlush>,
     ) -> Result<crate::control::DiskCheckpointControlState, super::disk::RootDiskRolloverError>
     {
         use super::disk::RootDiskRolloverError as Failure;
@@ -491,32 +510,36 @@ impl CheckpointCoordinator {
                 "complete pending root-disk growth before snapshotting",
             ));
         }
-        // Owned storage requires one guest-synced namespace cut, while legacy
-        // root-only capture keeps its existing crash-consistent behavior.
+        // Absent policy preserves old clients. New clients explicitly send Auto, whose
+        // disk-only default includes writeback even without an owned data volume.
+        let required = guest_flush.is_some_and(|policy| policy.requires_writeback(true));
+        let required_mounts = self.flush_mounts(required, true);
         let acquired_workload;
-        let workload = if self.owned_mounts.is_empty() {
+        let workload = if self.owned_mounts.is_empty() && !required {
             None
         } else if let Some(paused) = user_pause {
             Some(paused.workload.as_ref().ok_or_else(|| {
-                Failure::pre_rebind("owned storage capture requires a guest-synced pause")
+                Failure::pre_rebind("capture requires a guest-flushed pause; resume and pause with --guest-flush required, or explicitly skip optional flushing")
             })?)
         } else {
-            acquired_workload = self.freeze_workload(vm, checkpoint_id).map_err(|error| {
-                if error.keep_paused {
-                    Failure::post_journal(error)
-                } else {
-                    Failure::pre_rebind(error)
-                }
-            })?;
+            acquired_workload = self
+                .freeze_workload(vm, checkpoint_id, required, true)
+                .map_err(|error| {
+                    if error.keep_paused {
+                        Failure::post_journal(error)
+                    } else {
+                        Failure::pre_rebind(error)
+                    }
+                })?;
             Some(&acquired_workload)
         };
-        if workload.is_some_and(|workload| !workload.external_mounts_synced) {
+        if workload.is_some_and(|workload| !workload.covers(&required_mounts)) {
             if user_pause.is_none() {
                 self.thaw_workload(workload.expect("checked workload"))
                     .map_err(Failure::post_journal)?;
             }
             return Err(Failure::pre_rebind(
-                "owned storage capture requires an acknowledged root and volume writeback boundary",
+                "capture requires an acknowledged guest filesystem flush at this pause; resume and pause with --guest-flush required, or explicitly skip optional flushing",
             ));
         }
         let path = self.root.join(checkpoint_id);
@@ -637,6 +660,7 @@ impl CheckpointCoordinator {
         intent: CaptureIntent,
         user_pause: Option<&UserPause>,
         record_integrity: bool,
+        guest_flush: Option<microsandbox_types::GuestFlush>,
     ) -> Result<CheckpointResult, CheckpointFailure> {
         self.capture_to(
             vm,
@@ -646,6 +670,7 @@ impl CheckpointCoordinator {
             None,
             None,
             record_integrity,
+            guest_flush,
         )
     }
 
@@ -661,6 +686,7 @@ impl CheckpointCoordinator {
         user_pause: Option<&UserPause>,
         memory_backing: Option<&std::fs::File>,
         record_integrity: bool,
+        guest_flush: Option<microsandbox_types::GuestFlush>,
     ) -> Result<CheckpointResult, CheckpointFailure> {
         let cache = self.local_cache_root.as_ref().ok_or_else(|| {
             CheckpointFailure::before_pause("runtime has no backend-resolved memory cache")
@@ -717,6 +743,7 @@ impl CheckpointCoordinator {
             Some(&destination),
             memory_backing,
             record_integrity,
+            guest_flush,
         )
     }
 
@@ -731,6 +758,7 @@ impl CheckpointCoordinator {
         local_destination: Option<&Path>,
         _memory_backing: Option<&std::fs::File>,
         record_integrity: bool,
+        guest_flush: Option<microsandbox_types::GuestFlush>,
     ) -> Result<CheckpointResult, CheckpointFailure> {
         // All RAM captures pass through this executor-owned method. Consume the construction
         // handoff before either durable or local capture can publish a newer token. Dirty
@@ -852,13 +880,15 @@ impl CheckpointCoordinator {
         // run application code before VM Generation ID activation completes.
         // An already-paused source borrows its original latch and token: even a brief resume
         // here would invalidate the user's paused boundary and require another guest handshake.
+        let required = guest_flush.is_some_and(|policy| policy.requires_writeback(false));
+        let required_mounts = self.flush_mounts(required, false);
         let workload_unavailable_started = Instant::now();
         let freeze_started = Instant::now();
         let acquired_workload;
         let workload = match user_pause {
             Some(paused) => paused.workload.as_ref().expect("validated workload latch"),
             None => {
-                acquired_workload = match self.freeze_workload(vm, checkpoint_id) {
+                acquired_workload = match self.freeze_workload(vm, checkpoint_id, required, false) {
                     Ok(workload) => workload,
                     Err(error) => {
                         let _ = std::fs::remove_dir_all(&staging);
@@ -869,21 +899,14 @@ impl CheckpointCoordinator {
             }
         };
         let freeze_us = freeze_started.elapsed().as_micros();
-        if (!self.owned_mounts.is_empty()
-            || self.fs_resource_bindings.values().any(|binding| {
-                binding
-                    .get("role")
-                    .is_some_and(|role| role == "external_bind" || role == "owned_directory")
-            }))
-            && !workload.external_mounts_synced
-        {
+        if !workload.covers(&required_mounts) {
             let _ = std::fs::remove_dir_all(&staging);
             if user_pause.is_none() {
                 self.thaw_workload(workload)
                     .map_err(CheckpointFailure::paused)?;
             }
             return Err(CheckpointFailure::before_pause(
-                "external mount capture requires a clean guest writeback boundary; finish active filesystem uploads and retry with the matching guest agent",
+                "capture requires a clean guest writeback boundary at this pause; finish active filesystem uploads, or resume and pause with --guest-flush required",
             ));
         }
         admitted.resources.push(workload.resource_descriptor());
@@ -1096,10 +1119,70 @@ impl CheckpointCoordinator {
         Ok(captured.result)
     }
 
+    /// Build the exact filesystem coverage needed at this boundary. Required owned and
+    /// external writeback is deliberately independent of the optional root policy.
+    fn flush_mounts(&self, required: bool, disk_only: bool) -> BTreeSet<String> {
+        let mut mounts = self
+            .fs_resource_bindings
+            .values()
+            .filter(|binding| {
+                binding
+                    .get("role")
+                    .is_some_and(|role| role == "external_bind" || role == "owned_directory")
+            })
+            .filter_map(|binding| binding.get("guest_tag").cloned())
+            .collect::<BTreeSet<_>>();
+        if required || !self.owned_mounts.is_empty() {
+            mounts.insert("path:/".into());
+        }
+        mounts.extend(
+            self.owned_mounts
+                .values()
+                .filter(|mount| {
+                    matches!(
+                        mount.storage,
+                        microsandbox_types::OwnedVolumeStorage::Disk { .. }
+                    )
+                })
+                .map(|mount| format!("path:{}", mount.guest)),
+        );
+        if required && !disk_only {
+            // Full capture also includes independent managed named disks. Their filesystem
+            // cache must reach those disks when the caller requests a disk-usable full image.
+            mounts.extend(
+                self.additional_disks
+                    .values()
+                    .filter_map(|disk| disk.binding().get("guest_path"))
+                    .map(|guest| format!("path:{guest}")),
+            );
+        }
+        mounts
+    }
+
+    pub(crate) fn validate_paused_flush(
+        &self,
+        vm: &msb_krun::VmControl,
+        pause: &UserPause,
+        policy: microsandbox_types::GuestFlush,
+    ) -> Result<(), String> {
+        pause.validate(vm)?;
+        if policy.requires_writeback(false)
+            && !pause
+                .workload
+                .as_ref()
+                .is_some_and(|workload| workload.covers(&self.flush_mounts(true, false)))
+        {
+            return Err("existing pause has no required guest-flush boundary; explicitly resume before pausing with --guest-flush required".into());
+        }
+        Ok(())
+    }
+
     fn freeze_workload(
         &self,
         vm: &msb_krun::VmControl,
         attempt_id: &str,
+        required: bool,
+        disk_only: bool,
     ) -> Result<FrozenWorkload, CheckpointFailure> {
         // These are the bundled guest's capabilities, not a newly connected SDK client's
         // generation. Internal lifecycle work must not join the FIFO it is about to gate.
@@ -1114,30 +1197,8 @@ impl CheckpointCoordinator {
         }
         let gate_deadline = Instant::now() + WORKLOAD_CONTROL_TIMEOUT;
         let (gate, host_input) = self.gate_input(gate_deadline)?;
-        let mut external_mount_tags = self
-            .fs_resource_bindings
-            .values()
-            .filter(|binding| {
-                binding
-                    .get("role")
-                    .is_some_and(|role| role == "external_bind" || role == "owned_directory")
-            })
-            .filter_map(|binding| binding.get("guest_tag").cloned())
-            .collect::<Vec<_>>();
-        if !self.owned_mounts.is_empty() {
-            external_mount_tags.push("path:/".into());
-            external_mount_tags.extend(
-                self.owned_mounts
-                    .values()
-                    .filter(|mount| {
-                        matches!(
-                            mount.storage,
-                            microsandbox_types::OwnedVolumeStorage::Disk { .. }
-                        )
-                    })
-                    .map(|mount| format!("path:{}", mount.guest)),
-            );
-        }
+        let requested_mounts = self.flush_mounts(required, disk_only);
+        let external_mount_tags = requested_mounts.iter().cloned().collect::<Vec<_>>();
         // Gating keeps its original deadline. The external-only request budget begins
         // after gating and includes freezer work, the guest's 20s flush, and output cut.
         let deadline = freeze_request_deadline(
@@ -1147,6 +1208,7 @@ impl CheckpointCoordinator {
         );
         let mut workload = FrozenWorkload {
             external_mounts_synced: false,
+            synced_mounts: BTreeSet::new(),
             gate,
             attempt_id: attempt_id.to_string(),
             protocol_generation,
@@ -1220,6 +1282,9 @@ impl CheckpointCoordinator {
         })?;
         workload.input_credit = frozen.input_credit;
         workload.external_mounts_synced = frozen.external_mounts_synced;
+        if frozen.external_mounts_synced {
+            workload.synced_mounts = requested_mounts;
+        }
         workload.guest_bulk_bytes = frozen.guest_bulk_bytes_target;
         Ok(workload)
     }
@@ -1854,6 +1919,13 @@ impl CheckpointCoordinator {
     }
 }
 
+impl FrozenWorkload {
+    fn covers(&self, required: &BTreeSet<String>) -> bool {
+        required.is_empty()
+            || (self.external_mounts_synced && required.is_subset(&self.synced_mounts))
+    }
+}
+
 impl UserPause {
     fn validate(&self, vm: &msb_krun::VmControl) -> Result<(), String> {
         if vm.execution_state() != Some(msb_krun::VmExecutionState::Paused(self.generation)) {
@@ -2473,6 +2545,7 @@ mod tests {
         persist_device_states, publish_root_last, runtime_owned_fs_bindings,
         validate_vm_generation_state, validate_workload_reply,
     };
+    use std::collections::BTreeSet;
 
     use microsandbox_image::checkpoint::{
         CaptureObjectBatch, ContentRef, LocalObjectStore, MemoryExtent, MemoryExtentContent,
@@ -2505,6 +2578,41 @@ mod tests {
             super::WORKLOAD_CONTROL_TIMEOUT,
             std::time::Duration::from_secs(10)
         );
+    }
+
+    #[test]
+    fn flush_acknowledgement_proves_only_the_requested_filesystems() {
+        let control = WorkloadControl::new();
+        let mut workload = FrozenWorkload {
+            external_mounts_synced: true,
+            synced_mounts: BTreeSet::new(),
+            gate: control.gate(),
+            attempt_id: "flush-proof".into(),
+            protocol_generation: 9,
+            ready: Ready::default(),
+            host_input: WorkloadTransportPosition::default(),
+            input_credit: WorkloadTransportCredit::default(),
+            guest_bulk_bytes: 0,
+        };
+        let root = BTreeSet::from(["path:/".into()]);
+        let owned = BTreeSet::from(["path:/".into(), "path:/data".into()]);
+        assert!(workload.covers(&BTreeSet::new()));
+        assert!(
+            !workload.covers(&root),
+            "empty success must not masquerade as root writeback"
+        );
+        workload.synced_mounts = root.clone();
+        assert!(workload.covers(&root));
+        assert!(!workload.covers(&owned));
+        workload.synced_mounts = owned.clone();
+        assert!(workload.covers(&root));
+        assert!(workload.covers(&owned));
+        workload.external_mounts_synced = false;
+        assert!(
+            !workload.covers(&owned),
+            "requested coverage without success is not proof"
+        );
+        workload.gate.release();
     }
 
     #[test]
@@ -2828,6 +2936,7 @@ mod tests {
         let control = WorkloadControl::new();
         let workload = FrozenWorkload {
             external_mounts_synced: false,
+            synced_mounts: BTreeSet::new(),
             gate: control.gate(),
             attempt_id: "checkpoint-42".into(),
             protocol_generation: 9,

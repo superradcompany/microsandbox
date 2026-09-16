@@ -27,6 +27,7 @@ use super::{SandboxConfig, SandboxStatus, modify};
 
 /// Prepare a direct local branch with explicit child resource bindings.
 pub struct BranchBuilder {
+    guest_flush: microsandbox_types::GuestFlush,
     backend: Arc<dyn Backend>,
     source: String,
     identity: SandboxIdentity,
@@ -36,6 +37,7 @@ pub struct BranchBuilder {
 
 /// Capture once and create independently owned children concurrently, returning input-order results.
 pub struct BranchManyBuilder {
+    guest_flush: microsandbox_types::GuestFlush,
     backend: Arc<dyn Backend>,
     source: String,
     identity: SandboxIdentity,
@@ -100,6 +102,7 @@ impl SandboxHandle {
 impl BranchManyBuilder {
     fn new(inner: BranchBuilder, names: impl IntoIterator<Item = impl Into<String>>) -> Self {
         let BranchBuilder {
+            guest_flush,
             backend,
             source,
             identity,
@@ -107,6 +110,7 @@ impl BranchManyBuilder {
             record_integrity,
         } = inner;
         Self {
+            guest_flush,
             backend,
             source,
             identity,
@@ -114,6 +118,12 @@ impl BranchManyBuilder {
             record_integrity,
             names: names.into_iter().map(Into::into).collect(),
         }
+    }
+
+    /// Select optional guest writeback for the single shared capture.
+    pub fn guest_flush(mut self, policy: microsandbox_types::GuestFlush) -> Self {
+        self.guest_flush = policy;
+        self
     }
 
     /// Apply disk content integrity to the single shared capture.
@@ -136,6 +146,7 @@ impl BranchManyBuilder {
             self.inner.config,
             self.record_integrity,
             self.names,
+            self.guest_flush,
         )
         .await
     }
@@ -159,7 +170,14 @@ impl BranchBuilder {
             identity,
             inner,
             record_integrity: false,
+            guest_flush: microsandbox_types::GuestFlush::Auto,
         }
+    }
+
+    /// Require or skip optional guest writeback before this capture. Auto retains dirty RAM.
+    pub fn guest_flush(mut self, policy: microsandbox_types::GuestFlush) -> Self {
+        self.guest_flush = policy;
+        self
     }
 
     /// Record disk content integrity for the captured layers. Off by default; RAM is not hashed.
@@ -180,6 +198,7 @@ impl BranchBuilder {
             self.identity,
             self.inner.config,
             self.record_integrity,
+            self.guest_flush,
         )
         .await
     }
@@ -214,6 +233,7 @@ async fn branch(
     _identity: SandboxIdentity,
     _options: super::SandboxConfig,
     _record_integrity: bool,
+    _guest_flush: microsandbox_types::GuestFlush,
 ) -> MicrosandboxResult<Sandbox> {
     Err(MicrosandboxError::InvalidConfig(
         "direct branching requires a local backend".into(),
@@ -227,9 +247,17 @@ async fn branch(
     identity: SandboxIdentity,
     options: SandboxConfig,
     record_integrity: bool,
+    guest_flush: microsandbox_types::GuestFlush,
 ) -> MicrosandboxResult<Sandbox> {
-    let config =
-        prepare_branch(backend.clone(), source, identity, options, record_integrity).await?;
+    let config = prepare_branch(
+        backend.clone(),
+        source,
+        identity,
+        options,
+        record_integrity,
+        guest_flush,
+    )
+    .await?;
     backend
         .sandboxes()
         .create_detached(backend.clone(), config)
@@ -244,6 +272,7 @@ pub(super) async fn prepare_branch(
     identity: SandboxIdentity,
     options: SandboxConfig,
     record_integrity: bool,
+    guest_flush: microsandbox_types::GuestFlush,
 ) -> MicrosandboxResult<SandboxConfig> {
     let name = options.spec.name.clone();
     super::validate_sandbox_name(&name)?;
@@ -342,6 +371,7 @@ pub(super) async fn prepare_branch(
     config.replace_existing = false;
     config.spec.patches.clear();
     config.branch_source = Some(super::identity::BranchSource {
+        guest_flush: modify::capture_flush_policy(capabilities.capabilities, guest_flush, false)?,
         batch: None,
         record_integrity,
         name: source.into(),
@@ -389,6 +419,7 @@ pub(crate) async fn capture_child(
     tokio::fs::write(child.join(".branch-reservation"), &id).await?;
     #[cfg(not(target_os = "linux"))]
     let request = ControlRequest::BranchCreate {
+        guest_flush: source.guest_flush,
         record_integrity,
         branch_id: id.clone(),
         child_name: config.spec.name.clone(),
@@ -400,6 +431,7 @@ pub(crate) async fn capture_child(
     let memory: Option<std::fs::File> = None;
     #[cfg(target_os = "linux")]
     let request = ControlRequest::BranchCreateMemfd {
+        guest_flush: source.guest_flush,
         record_integrity,
         branch_id: id.clone(),
         child_name: config.spec.name.clone(),

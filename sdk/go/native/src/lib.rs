@@ -494,6 +494,8 @@ struct FfiError {
 struct BranchManyRequest {
     names: Vec<String>,
     source_identity: Option<String>,
+    #[serde(default)]
+    guest_flush: microsandbox::snapshot::GuestFlush,
 }
 
 impl FfiError {
@@ -1211,6 +1213,8 @@ struct SnapshotCreateOpts {
     record_integrity: bool,
     #[serde(default)]
     full: bool,
+    #[serde(default)]
+    guest_flush: microsandbox::snapshot::GuestFlush,
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -3432,6 +3436,45 @@ pub unsafe extern "C" fn msb_sandbox_pause(
     })
 }
 
+/// Pause with an explicit flush policy. Its presence also advertises policy-aware JSON APIs.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sandbox_pause_with_guest_flush(
+    cancel_id: u64,
+    handle: Handle,
+    source: *const c_char,
+    expected_id: *const c_char,
+    policy: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let source = unsafe { cstr(source) }?;
+        let expected_id = unsafe { cstr(expected_id) }?;
+        let policy = unsafe { cstr(policy) }?
+            .parse::<microsandbox::snapshot::GuestFlush>()
+            .map_err(FfiError::invalid_argument)?;
+        let live = if handle == 0 {
+            None
+        } else {
+            Some(get(handle)?)
+        };
+        Ok(Box::pin(async move {
+            if let Some(live) = live {
+                live.pause_with_guest_flush(policy)
+                    .await
+                    .map_err(FfiError::from)?;
+            } else {
+                identified_sandbox_handle(&source, &expected_id)
+                    .await?
+                    .pause_with_guest_flush(policy)
+                    .await
+                    .map_err(FfiError::from)?;
+            }
+            Ok("null".to_string())
+        }))
+    })
+}
+
 /// Branch by live handle, or by persisted name when handle is zero.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn msb_sandbox_branch(
@@ -3483,6 +3526,7 @@ pub unsafe extern "C" fn msb_sandbox_branch_many(
                 }
                 source.branch_many(request.names)
             };
+            builder = builder.guest_flush(request.guest_flush);
             if record_integrity {
                 builder = builder.record_integrity();
             }
@@ -6552,7 +6596,9 @@ fn snapshot_builder_from_opts(
     source_sandbox: String,
     opts: SnapshotCreateOpts,
 ) -> Result<microsandbox::SnapshotBuilder, FfiError> {
-    let mut builder = Snapshot::builder(opts.name.unwrap_or_default()).from_sandbox(source_sandbox);
+    let mut builder = Snapshot::builder(opts.name.unwrap_or_default())
+        .from_sandbox(source_sandbox)
+        .guest_flush(opts.guest_flush);
     if let Some(group) = opts.group {
         builder = builder.group(group);
     }

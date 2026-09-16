@@ -387,6 +387,16 @@ Choose evidence proportional to the boundary and failure risk:
 
 If an applicable direction cannot be tested locally, state exactly what remains unverified and which CI, platform, historical binary, or fixture is required.
 
+## Guest filesystem flush policy
+
+Capture requests carry an optional `guest_flush` field gated by `guest_flush_policy` capability. Missing fields retain historical behavior for old clients; explicit `auto` requires writeback for live disk-only capture. New full-capture clients may omit Auto for an older runtime because its behavior is unchanged, but cannot downgrade Required or Skip silently. Explicit-policy pause has a separate operation so an old runtime cannot acknowledge it as ordinary pause. Legacy `Pause` and resume remain unchanged.
+
+The existing guest freeze protocol carries `path:/` and captured storage selectors and acknowledges successful synchronization. The host retains the exact requested set only after that acknowledgement; a successful empty-set request never proves a root flush. Coverage is tied to the resident pause generation and is not serialized as a new portable snapshot format. Required writeback on a stopped guest or an unflushed paused guest fails before disk rollover; the runtime never resumes a paused guest implicitly.
+
+The Go native ABI adds an optional explicit-policy pause symbol, also used to detect support for policy fields on existing JSON capture/batch entry points. New Go clients refuse unavailable semantics rather than let an older library ignore those fields. Existing exported signatures remain unchanged. The Rust public capture configuration gains `guest_flush` with a serde default; Rust struct-literal callers must include the field. No agent protocol, archive schema, or database migration changes.
+
+The approved Go exception covers all disk-capture entry points, including the handle convenience method and stopped sources: they require a policy-aware native library. Full Auto capture and unrelated operations remain compatible with older native libraries. This is separate from the running VM's capability gate; updating only the Go package cannot teach an old native library to enforce Auto's live-disk guarantee.
+
 ## Capture-once branch batches
 
 `branch --names` and SDK batch methods reuse the existing local branch capture/restore envelope. The batch retains a process-local RAM pin and temporary owner-only links to immutable CPU/device/disk state; each child acquires its own links, RAM handle, writable disks, and VM generation identity. Nothing new is serialized into launch JSON, the database, or portable snapshots. Single-name branching still captures the current source state on each call. Batch names and known conflicts are checked before capture; per-child reservations remain authoritative against races. Validation/capture failures fail the call, while later startup failures return named outcomes without recapture or rollback of successful children. The Go FFI adds an optional batch symbol and refuses older native libraries without it rather than looping over single captures. Temporary batch staging is released on normal completion or cooperative cancellation; process-kill crash recovery is not a durable snapshot guarantee.

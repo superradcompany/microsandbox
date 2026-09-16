@@ -317,6 +317,14 @@ class SnapshotFormat(StrEnum):
     QCOW2 = "qcow2"
 
 
+class GuestFlush(StrEnum):
+    """Optional guest writeback; mandatory storage barriers always apply."""
+
+    AUTO = "auto"
+    REQUIRED = "required"
+    SKIP = "skip"
+
+
 class SnapshotScope(StrEnum):
     DISK = "disk"
     FULL = "full"

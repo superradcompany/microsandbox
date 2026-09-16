@@ -1136,6 +1136,7 @@ pub(crate) async fn control_checkpoint_create(
     name: &str,
     checkpoint_id: String,
     record_integrity: bool,
+    guest_flush: microsandbox_types::GuestFlush,
 ) -> MicrosandboxResult<CheckpointCaptureOutcome> {
     let capabilities =
         control_request_for(local, name, "{\"op\":\"capabilities\"}\n".into()).await?;
@@ -1151,6 +1152,7 @@ pub(crate) async fn control_checkpoint_create(
         ));
     }
     let request = microsandbox_runtime::control::ControlRequest::CheckpointCreate {
+        guest_flush: capture_flush_policy(capabilities.capabilities, guest_flush, false)?,
         record_integrity,
         checkpoint_id,
         intent: microsandbox_runtime::control::CheckpointCaptureIntent::FullSnapshot,
@@ -1199,6 +1201,7 @@ pub(crate) async fn control_disk_checkpoint_create(
     local: &crate::backend::LocalBackend,
     name: &str,
     checkpoint_id: String,
+    guest_flush: microsandbox_types::GuestFlush,
 ) -> MicrosandboxResult<microsandbox_runtime::control::DiskCheckpointControlState> {
     let capabilities =
         control_request_for(local, name, "{\"op\":\"capabilities\"}\n".into()).await?;
@@ -1209,14 +1212,33 @@ pub(crate) async fn control_disk_checkpoint_create(
         return Err(MicrosandboxError::unsupported(Operation::SnapshotOps,
             UnsupportedReason::NotAvailable("this runtime does not support live disk-only snapshots; recreate the sandbox with the updated runtime".into())));
     }
-    let request =
-        microsandbox_runtime::control::ControlRequest::DiskCheckpointCreate { checkpoint_id };
+    let request = microsandbox_runtime::control::ControlRequest::DiskCheckpointCreate {
+        checkpoint_id,
+        guest_flush: capture_flush_policy(capabilities.capabilities, guest_flush, true)?,
+    };
     let mut line = serde_json::to_string(&request)?;
     line.push('\n');
     let response = control_request_for(local, name, line).await?;
     response.disk_checkpoint.ok_or_else(|| {
         MicrosandboxError::Runtime("runtime omitted the disk-only capture result".into())
     })
+}
+
+/// Never let an older runtime silently discard an explicit policy. Full Auto is the
+/// released behavior and can retain the old request shape; disk Auto is a new guarantee.
+pub(crate) fn capture_flush_policy(
+    capabilities: Option<microsandbox_runtime::control::ControlCapabilities>,
+    policy: microsandbox_types::GuestFlush,
+    disk_only: bool,
+) -> MicrosandboxResult<Option<microsandbox_types::GuestFlush>> {
+    if capabilities.is_some_and(|capabilities| capabilities.guest_flush_policy) {
+        return Ok(Some(policy));
+    }
+    if !disk_only && policy == microsandbox_types::GuestFlush::Auto {
+        return Ok(None);
+    }
+    Err(MicrosandboxError::unsupported(Operation::SnapshotOps,
+        UnsupportedReason::NotAvailable("source runtime does not support guest-flush policy; restart the sandbox with an updated runtime".into())))
 }
 
 /// Send the value-bearing live secret batch to the sandbox process. The
@@ -2783,6 +2805,36 @@ mod tests {
     use crate::backend::LocalBackend;
     use crate::size::SizeExt;
 
+    #[test]
+    fn guest_flush_capability_never_silently_weakens_capture() {
+        use microsandbox_types::GuestFlush::{Auto, Required, Skip};
+        let old = microsandbox_runtime::control::ControlCapabilities::default();
+        let new = microsandbox_runtime::control::ControlCapabilities {
+            guest_flush_policy: true,
+            ..old
+        };
+        for capabilities in [None, Some(old)] {
+            assert_eq!(
+                capture_flush_policy(capabilities, Auto, false).unwrap(),
+                None
+            );
+            for policy in [Auto, Required, Skip] {
+                assert!(capture_flush_policy(capabilities, policy, true).is_err());
+                if policy != Auto {
+                    assert!(capture_flush_policy(capabilities, policy, false).is_err());
+                }
+            }
+        }
+        for disk in [true, false] {
+            for policy in [Auto, Required, Skip] {
+                assert_eq!(
+                    capture_flush_policy(Some(new), policy, disk).unwrap(),
+                    Some(policy)
+                );
+            }
+        }
+    }
+
     #[tokio::test]
     async fn restored_fixed_cpu_counts_do_not_require_a_hotplug_controller() {
         let home = tempfile::tempdir().unwrap();
@@ -3044,14 +3096,24 @@ mod tests {
                 }
             }));
         }
-        let first_capture =
-            control_checkpoint_create(&first, "worker", "first-checkpoint".into(), false)
-                .await
-                .unwrap();
-        let second_capture =
-            control_checkpoint_create(&second, "worker", "second-checkpoint".into(), true)
-                .await
-                .unwrap();
+        let first_capture = control_checkpoint_create(
+            &first,
+            "worker",
+            "first-checkpoint".into(),
+            false,
+            microsandbox_types::GuestFlush::Auto,
+        )
+        .await
+        .unwrap();
+        let second_capture = control_checkpoint_create(
+            &second,
+            "worker",
+            "second-checkpoint".into(),
+            true,
+            microsandbox_types::GuestFlush::Auto,
+        )
+        .await
+        .unwrap();
         assert_eq!(
             first_capture.checkpoint.path,
             std::path::Path::new("/capture/first")

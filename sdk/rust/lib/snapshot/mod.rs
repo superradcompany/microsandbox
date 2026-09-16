@@ -20,7 +20,7 @@ pub use microsandbox_types::snapshot::{
     SnapshotDescriptor, SnapshotFormat, SnapshotId, SnapshotRootDisk, SnapshotScope, SnapshotState,
     UpperIntegrity, UpperLayer,
 };
-pub use microsandbox_types::{SnapshotSpec, SnapshotSpec as SnapshotConfig};
+pub use microsandbox_types::{GuestFlush, SnapshotSpec, SnapshotSpec as SnapshotConfig};
 pub use types::{
     CheckpointVerifyStatus, HeadUpdate, HeadUpdateReason, LoadOpts, SaveOpts, SnapshotVerifyReport,
     UpperVerifyStatus,

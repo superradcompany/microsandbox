@@ -649,8 +649,9 @@ impl SandboxHandle {
 
     /// Snapshot this sandbox under a bare name using the handle's backend.
     ///
-    /// Captures disk only, including running and paused sources. A live cut is
-    /// crash-consistent and preserves the source's running/paused state.
+    /// Captures disk only with automatic guest writeback for live sources. A paused
+    /// source must already have a matching flushed boundary; it is never resumed
+    /// implicitly. Use `Snapshot::builder` to choose another guest-flush policy.
     /// Cloud uses managed storage and its own disk-capture admission rules.
     pub async fn snapshot(
         &self,

@@ -301,6 +301,8 @@ msb pause devbox
 msb resume devbox
 ```
 
+`pause --guest-flush required` flushes captured persistent filesystems before pausing, so a later disk snapshot can reuse that boundary without resuming. The default `auto` and explicit `skip` omit optional writeback; mandatory storage barriers remain. An already-paused VM without the required flush fails rather than resuming implicitly. `resume` has no flush option. See [guest filesystem flush](/sandboxes/snapshots#guest-filesystem-flush).
+
 ## msb sandbox branch
 
 Branch running execution into a new local CoW child without creating a durable full snapshot. The top-level form is `msb branch`.
@@ -317,6 +319,8 @@ msb branch devbox --names worker-{1..10} # Bash/Zsh expand the names
 ```
 
 Names are checked before capture. Up to four children start concurrently; results are reported in input order. One child's startup failure does not remove successful children. The command reports failed names and exits unsuccessfully if any child fails. Separate `--name` calls still capture separate points in time.
+
+Both branch forms accept `--guest-flush auto|required|skip`. Auto preserves dirty memory without an optional root flush; required adds writeback. Skip never disables mandatory owned/external-storage barriers.
 
 <a id="msb-restart"></a>
 

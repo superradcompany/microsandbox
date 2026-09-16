@@ -25,6 +25,8 @@ pub(crate) struct SandboxRunIdentity {
 #[derive(Clone, Debug)]
 #[cfg(feature = "local")]
 pub(crate) struct BranchSource {
+    /// Negotiated capture policy; None preserves an older runtime's full-capture default.
+    pub(crate) guest_flush: Option<microsandbox_types::GuestFlush>,
     /// Process-local shared capture. Never serialized or interpreted by older runtimes.
     pub(crate) batch:
         Option<std::sync::Arc<super::branch_batch::CaptureSlot<super::branch_batch::BatchCapture>>>,

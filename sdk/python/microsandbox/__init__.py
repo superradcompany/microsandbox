@@ -126,6 +126,7 @@ from microsandbox.types import (
     FlatClone,
     FsEntryKind,
     GiB,
+    GuestFlush,
     HostPermissions,
     ImageArchiveFormat,
     ImageSource,
@@ -290,6 +291,7 @@ __all__ = [
     "SnapshotStateKind",
     "SnapshotFormat",
     "SnapshotScope",
+    "GuestFlush",
     # Network
     "Network",
     "NetworkPolicy",

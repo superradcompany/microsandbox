@@ -37,11 +37,17 @@ pub const CONTROL_PROTOCOL_VERSION: u16 = 1;
 pub enum ControlRequest {
     /// Seal only the owned root disk; never capture guest RAM or execution state.
     DiskCheckpointCreate {
+        /// Optional writeback policy. Absent preserves released clients' behavior.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        guest_flush: Option<microsandbox_types::GuestFlush>,
         /// Caller-selected safe capture identity.
         checkpoint_id: String,
     },
     /// Capture directly into a reserved child-owned local handoff directory.
     BranchCreate {
+        /// Optional writeback policy; mandatory storage barriers cannot be disabled.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        guest_flush: Option<microsandbox_types::GuestFlush>,
         /// Opt into disk content hashes; RAM remains an unhashed local backing.
         #[serde(default)]
         record_integrity: bool,
@@ -55,6 +61,9 @@ pub enum ControlRequest {
     /// Linux branch capture with one empty memory descriptor attached to the request.
     /// The distinct operation prevents older runtimes from ignoring descriptor ownership.
     BranchCreateMemfd {
+        /// Optional writeback policy, independent of memory backing.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        guest_flush: Option<microsandbox_types::GuestFlush>,
         /// Opt into disk content hashes; independent of memory descriptor ownership.
         #[serde(default)]
         record_integrity: bool,
@@ -70,6 +79,12 @@ pub enum ControlRequest {
     },
     /// Retain a resident pause until an explicit resume or stop.
     Pause,
+    /// Pause with an explicit policy; older runtimes reject this operation rather than
+    /// ignoring a field on the released unit-shaped pause request.
+    PauseWithGuestFlush {
+        /// Writeback requirement to establish before pausing.
+        guest_flush: microsandbox_types::GuestFlush,
+    },
     /// Resume a user-owned resident pause.
     Resume,
     /// Inspect user pause and full-capture availability without entering the guest.
@@ -123,6 +138,9 @@ pub enum ControlRequest {
     /// Produce one same-epoch full checkpoint and return the source to its prior running
     /// state after root-last publication.
     CheckpointCreate {
+        /// Optional writeback policy. Absent retains released capture semantics.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        guest_flush: Option<microsandbox_types::GuestFlush>,
         /// Opt into disk content hashes; RAM objects remain content-addressed.
         #[serde(default)]
         record_integrity: bool,
@@ -285,6 +303,9 @@ pub struct RootDiskGrowthResult {
 /// resize-capable and secrets-incapable.
 #[derive(Debug, Default, Clone, Copy, Serialize, Deserialize)]
 pub struct ControlCapabilities {
+    /// Explicit guest writeback policy and same-pause filesystem coverage checks.
+    #[serde(default)]
+    pub guest_flush_policy: bool,
     /// Capture accepts an explicit disk-integrity policy and unhashed disk manifests.
     #[serde(default)]
     pub optional_disk_integrity: bool,
@@ -501,6 +522,7 @@ mod tests {
         let response = ControlResponse {
             ok: true,
             capabilities: Some(ControlCapabilities {
+                guest_flush_policy: true,
                 optional_disk_integrity: true,
                 root_disk_grow: true,
                 cpu_resize: true,

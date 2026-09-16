@@ -128,6 +128,7 @@ export type {
   HeadUpdate,
   SnapshotCopyBuilder,
   SnapshotScope,
+  GuestFlush,
   SnapshotState,
   SnapshotVerifyReport,
 } from "./snapshot.js";

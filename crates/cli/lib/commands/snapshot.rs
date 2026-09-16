@@ -92,6 +92,9 @@ pub struct SnapshotCreateArgs {
     /// Capture disk, memory, execution, and device state from a running sandbox.
     #[arg(long)]
     pub full: bool,
+    /// Guest writeback: auto (disk-only default), required, or skip. Mandatory barriers remain.
+    #[arg(long, default_value = "auto")]
+    pub guest_flush: microsandbox::snapshot::GuestFlush,
 
     /// Suppress output.
     #[arg(short, long)]
@@ -235,8 +238,9 @@ pub async fn run(args: SnapshotArgs) -> anyhow::Result<()> {
 }
 
 async fn create(args: SnapshotCreateArgs) -> anyhow::Result<()> {
-    let mut builder =
-        Snapshot::builder(args.name.unwrap_or_default()).from_sandbox(&args.from_sandbox);
+    let mut builder = Snapshot::builder(args.name.unwrap_or_default())
+        .from_sandbox(&args.from_sandbox)
+        .guest_flush(args.guest_flush);
     if let Some(group) = args.group {
         builder = builder.group(group);
     }

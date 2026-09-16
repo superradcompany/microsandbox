@@ -584,22 +584,22 @@ export class Sandbox implements AsyncDisposable {
   }
 
   /** Create an independent local CoW child without a durable full snapshot. */
-  async branch(name: string, options: { recordIntegrity?: boolean } = {}): Promise<Sandbox> {
-    const child = await withMappedErrors(() => this.inner.branch(name, options.recordIntegrity));
+  async branch(name: string, options: { recordIntegrity?: boolean; guestFlush?: import("./snapshot.js").GuestFlush } = {}): Promise<Sandbox> {
+    const child = await withMappedErrors(() => this.inner.branch(name, options.recordIntegrity, options.guestFlush));
     return new Sandbox(child, name, false);
   }
 
   /** Capture once; return each named child's startup outcome in input order. */
-  async branchMany(names: string[], options: { recordIntegrity?: boolean } = {}): Promise<BranchOutcome[]> {
-    const outcomes = await withMappedErrors(() => this.inner.branchMany(names, options.recordIntegrity));
+  async branchMany(names: string[], options: { recordIntegrity?: boolean; guestFlush?: import("./snapshot.js").GuestFlush } = {}): Promise<BranchOutcome[]> {
+    const outcomes = await withMappedErrors(() => this.inner.branchMany(names, options.recordIntegrity, options.guestFlush));
     return outcomes.map(o => o.sandbox
       ? { name: o.name, sandbox: new Sandbox(o.sandbox, o.name, false) }
       : { name: o.name, error: mapNapiError(new Error(o.error ?? "Child startup failed")) as Error });
   }
 
   /** Suspend this resident VM without creating a snapshot. */
-  async pause(): Promise<void> {
-    await withMappedErrors(() => this.inner.pause());
+  async pause(options: { guestFlush?: import("./snapshot.js").GuestFlush } = {}): Promise<void> {
+    await withMappedErrors(() => this.inner.pause(options.guestFlush));
   }
 
   /** Explicit resident resume; no snapshot is created. */

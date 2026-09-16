@@ -67,6 +67,10 @@ const snap = await h.snapshot("after-pip-install");
 
 ---
 
+## Guest writeback
+
+Use `.guestFlush("required")` on snapshot builders or `{ guestFlush: "required" }` in `source.branch`, `source.branchMany`, and `source.pause` options. The default `"auto"` flushes live disk-only captures, but adds no optional flush to full captures, branches, or pause. `"skip"` retains mandatory storage barriers. A paused disk capture needs a matching prior flush; cloud rejects non-Auto policies. See [policy semantics and examples](/sandboxes/snapshots#guest-filesystem-flush).
+
 ## Snapshot groups
 
 Installed snapshots belong to a group. A bare group selects its head; `group:member` selects a member by name or stable snapshot ID. Artifact paths remain valid selectors. Creation defaults to the source sandbox's group and generates a member name when omitted; imports without a group create a new generated group. `destDir` and `LoadOpts.dest` select the parent directory containing groups.

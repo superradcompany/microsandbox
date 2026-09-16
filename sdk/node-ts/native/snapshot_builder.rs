@@ -13,6 +13,7 @@ use crate::snapshot::{JsSnapshot, JsSnapshotArchive};
 #[derive(Clone)]
 #[napi(object, js_name = "SnapshotConfig")]
 pub struct JsSnapshotConfig {
+    pub guest_flush: String,
     pub name: String,
     pub group: Option<String>,
     pub source_sandbox: Option<String>,
@@ -36,6 +37,7 @@ pub struct JsSnapshotLabel {
 /// The source sandbox is set with `fromSandbox()` and is required.
 #[napi(js_name = "SnapshotBuilder")]
 pub struct JsSnapshotBuilder {
+    guest_flush: String,
     inner: Option<RustSnapshotBuilder>,
     name: String,
     group: Option<String>,
@@ -56,6 +58,7 @@ impl JsSnapshotBuilder {
     #[napi(constructor)]
     pub fn new(name: String) -> Self {
         Self {
+            guest_flush: "auto".into(),
             inner: Some(RustSnapshot::builder(&name)),
             name,
             group: None,
@@ -135,10 +138,21 @@ impl JsSnapshotBuilder {
         self
     }
 
+    /// Select optional writeback: auto, required, or skip. Required storage barriers remain.
+    #[napi]
+    pub fn guest_flush(&mut self, policy: String) -> Result<&Self> {
+        let parsed = guest_flush_policy(Some(policy.clone()))?;
+        let prev = self.take_inner();
+        self.inner = Some(prev.guest_flush(parsed));
+        self.guest_flush = policy;
+        Ok(self)
+    }
+
     /// Snapshot the accumulated configuration.
     #[napi]
     pub fn build(&self) -> JsSnapshotConfig {
         JsSnapshotConfig {
+            guest_flush: self.guest_flush.clone(),
             name: self.name.clone(),
             group: self.group.clone(),
             source_sandbox: self.source_sandbox.clone(),
@@ -199,4 +213,18 @@ impl JsSnapshotBuilder {
             .take()
             .expect("SnapshotBuilder used after consumption")
     }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Functions
+//--------------------------------------------------------------------------------------------------
+
+pub(crate) fn guest_flush_policy(
+    value: Option<String>,
+) -> Result<microsandbox::snapshot::GuestFlush> {
+    value
+        .as_deref()
+        .unwrap_or("auto")
+        .parse()
+        .map_err(napi::Error::from_reason)
 }

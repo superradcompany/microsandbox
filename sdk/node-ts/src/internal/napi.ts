@@ -344,9 +344,9 @@ export interface NapiSandbox {
   attachShell(): Promise<number>;
   restoreWarnings(): Promise<Array<{ guestPath: string; reason: string; staleInodes: bigint[] }>>;
   stop(): Promise<void>;
-  branch(name: string, recordIntegrity?: boolean): Promise<NapiSandbox>;
-  branchMany(names: string[], recordIntegrity?: boolean): Promise<{name: string; sandbox?: NapiSandbox; error?: string}[]>;
-  pause(): Promise<void>;
+  branch(name: string, recordIntegrity?: boolean, guestFlush?: string): Promise<NapiSandbox>;
+  branchMany(names: string[], recordIntegrity?: boolean, guestFlush?: string): Promise<{name: string; sandbox?: NapiSandbox; error?: string}[]>;
+  pause(guestFlush?: string): Promise<void>;
   resume(): Promise<void>;
   requestStop(): Promise<void>;
   stopWithTimeout(timeoutMs: number): Promise<void>;
@@ -383,9 +383,9 @@ export interface NapiSandboxHandle {
   connectWithTimeout(timeoutMs: number): Promise<NapiSandbox>;
   connectOrStart(detached?: boolean): Promise<NapiSandbox>;
   stop(): Promise<void>;
-  branch(name: string, recordIntegrity?: boolean): Promise<NapiSandbox>;
-  branchMany(names: string[], recordIntegrity?: boolean): Promise<{name: string; sandbox?: NapiSandbox; error?: string}[]>;
-  pause(): Promise<void>;
+  branch(name: string, recordIntegrity?: boolean, guestFlush?: string): Promise<NapiSandbox>;
+  branchMany(names: string[], recordIntegrity?: boolean, guestFlush?: string): Promise<{name: string; sandbox?: NapiSandbox; error?: string}[]>;
+  pause(guestFlush?: string): Promise<void>;
   resume(): Promise<void>;
   requestStop(): Promise<void>;
   stopWithTimeout(timeoutMs: number): Promise<void>;
@@ -662,6 +662,7 @@ export interface NapiHeadUpdate {
 export type NapiSnapshotBuilderCtor = new (name: string) => NapiSnapshotBuilder;
 
 export interface NapiSnapshotBuilderSetters {
+  guestFlush(policy: import("../snapshot.js").GuestFlush): this;
   fromSandbox(sourceSandbox: string): this;
   destDir(destDir: string): this;
   group(group: string): this;

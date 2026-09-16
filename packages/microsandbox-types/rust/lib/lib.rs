@@ -6,6 +6,7 @@ mod cloud;
 mod command;
 mod domain;
 mod error;
+mod guest_flush;
 pub mod modify;
 mod registry;
 pub mod snapshot;
@@ -51,6 +52,7 @@ pub use domain::{
     VsockSocketType, VsockSpec, VsockSpecPatch, canonicalize_volume_mounts, owned_volume_mount_id,
 };
 pub use error::{SnapshotManifestError, SnapshotManifestResult, TypesError, TypesResult};
+pub use guest_flush::GuestFlush;
 pub use modify::{
     ChangeKind, ConfigPlannedChange, ModificationConflict, ModificationDisposition,
     ModificationPolicy, ModificationWarning, PlannedChange, ResourceConvergenceState, ResourceKind,

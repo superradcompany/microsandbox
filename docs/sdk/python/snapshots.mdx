@@ -10,6 +10,10 @@ Create local disk snapshots of running, paused, stopped, or crashed sandboxes, o
 Cloud supports disk snapshot create, get, list, open, remove, and dedicated restore for stopped or crashed sources. Live capture, full checkpoints, branching, groups, archive import/export/copy, verification, and disk maintenance remain local-only. Unsupported options return an explicit error before mutation. Pass snapshot objects or typed references instead of assuming that cloud storage is a path on the client host.
 </Note>
 
+## Guest writeback
+
+Pass `guest_flush=GuestFlush.REQUIRED` to `Snapshot.create`, `Snapshot.create_archive`, `source.branch`, `source.branch_many`, or `source.pause`. Import `GuestFlush` from `microsandbox`. The default `AUTO` flushes live disk-only captures, but adds no optional flush to full captures, branches, or pause. `SKIP` retains mandatory storage barriers. A paused disk capture needs a matching prior flush; cloud rejects non-Auto policies. See [policy semantics and examples](/sandboxes/snapshots#guest-filesystem-flush).
+
 ## Snapshot groups
 
 Installed snapshots belong to a group. A bare group selects its head; `group:member` selects a member by name or stable snapshot ID. Artifact paths remain valid selectors. Creation defaults to the source sandbox's group and generates a member name when omitted; imports without `group=` create a new generated group. `dest_dir` and `dest` select the parent directory containing groups.

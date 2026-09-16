@@ -114,6 +114,60 @@ The snapshot belongs to the source's group, `baseline`, and lives at `~/.microsa
 
 Each capture is an immutable member of a snapshot group. The group defaults to the source sandbox's name; use `--group` to choose another. Member names are local aliases, while the descriptor carries a stable `snap_...` identity. Omitting the member name generates one. A destination directory selects another group-store root (`DIR/<group>/<snapshot_id>`).
 
+## Guest filesystem flush
+
+`--guest-flush auto|required|skip` controls guest writeback during snapshot creation, branching, and pause. It does not change host-side durability or mandatory owned/external-storage barriers.
+
+| Policy | Live disk-only snapshot | Full snapshot, branch, or pause |
+| --- | --- | --- |
+| `auto` (default) | Require guest writeback | Preserve dirty pages in RAM; no optional root flush |
+| `required` | Require guest writeback | Also flush captured persistent filesystems |
+| `skip` | Accept unflushed disk state | No optional guest writeback |
+
+Use `required` on a full snapshot when you also want to restore its disks without RAM. Flushing writes the guest filesystem cache—not application buffers or transactions—and does not make tmpfs persistent.
+
+```bash
+msb snapshot create disk --from-sandbox worker
+msb snapshot create full --from-sandbox worker --full --guest-flush required
+msb branch worker --name child --guest-flush skip
+
+# Prepare a flush boundary before pausing; capture keeps the source paused.
+msb pause worker --guest-flush required
+msb snapshot create paused --from-sandbox worker
+msb resume worker
+```
+
+A paused source must already have acknowledged the required flush at that pause. Otherwise capture fails without resuming it. For a stopped or crashed source, `auto` and `skip` capture existing disk state; `required` fails because no guest is running. Older runtimes that cannot enforce a requested policy reject it before capture; restart the source with the updated runtime.
+
+SDK equivalents use the same policy:
+
+```rust
+use microsandbox::{Snapshot, snapshot::GuestFlush};
+Snapshot::builder("full").from_sandbox("worker").full()
+    .guest_flush(GuestFlush::Required).create().await?;
+source.pause_with_guest_flush(GuestFlush::Required).await?;
+```
+
+```python
+from microsandbox import GuestFlush, Snapshot
+await Snapshot.create("full", from_sandbox="worker", full=True, guest_flush=GuestFlush.REQUIRED)
+await source.pause(guest_flush=GuestFlush.REQUIRED)
+```
+
+```typescript
+await Snapshot.builder("full").fromSandbox("worker").full().guestFlush("required").create();
+await source.pause({ guestFlush: "required" });
+await source.branchMany(["alice", "bob"], { guestFlush: "skip" });
+```
+
+```go
+snapshot, err := msb.Snapshot.Create(ctx, msb.SnapshotCreateOptions{
+    Name: "full", FromSandbox: "worker", Full: true, GuestFlush: msb.GuestFlushRequired,
+})
+err = source.PauseWithGuestFlush(ctx, msb.GuestFlushRequired)
+child, err := source.Branch(ctx, "child", msb.WithBranchGuestFlush(msb.GuestFlushSkip))
+```
+
 ## Groups and head selection
 
 Use a bare group to restore its selected head, or `group:member` for an exact checkpoint:
@@ -449,7 +503,7 @@ msb restore worker:worker-checkpoint --name worker --disk-only
 ```
 </CodeGroup>
 
-Disk-only restore copies only the checkpoint's disk chain, creates a fresh writable qcow2 head, and performs an ordinary boot. It does not require the destination to support the checkpoint's memory or execution codec. Like a live disk snapshot, this disk-only view is crash-consistent: recent writes still buffered in guest RAM may be absent, and filesystem journal recovery may run during boot. Full restore preserves those buffers in captured RAM. Pause and full capture do not automatically sync guest filesystems; host disk flushes and durable snapshot publication are still enforced.
+Disk-only restore copies only the checkpoint's disk chain, creates a fresh writable qcow2 head, and performs an ordinary boot. It does not require the destination to support the checkpoint's memory or execution codec. The disk projection of a full snapshot may omit writes buffered in guest RAM unless capture used `--guest-flush required`; filesystem journal recovery may still run. Full restore preserves those buffers in RAM. Host disk flushes and durable snapshot publication remain enforced regardless of guest-flush policy.
 
 ## List, inspect, and remove
 
