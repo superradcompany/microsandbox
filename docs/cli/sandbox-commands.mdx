@@ -320,7 +320,7 @@ msb branch devbox --names worker-{1..10} # Bash/Zsh expand the names
 
 Names are checked before capture. Up to four children start concurrently; results are reported in input order. One child's startup failure does not remove successful children. The command reports failed names and exits unsuccessfully if any child fails. Separate `--name` calls still capture separate points in time.
 
-Both branch forms accept `--guest-flush auto|required|skip`. Auto preserves dirty memory without an optional root flush; required adds writeback. Skip never disables mandatory owned/external-storage barriers.
+Both branch forms accept `--guest-flush auto|required|skip`. Auto and skip preserve dirty memory without flushing root or owned block filesystems; required adds writeback. Host-backed directory synchronization and host disk barriers remain in effect.
 
 <a id="msb-restart"></a>
 

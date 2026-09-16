@@ -116,15 +116,17 @@ Each capture is an immutable member of a snapshot group. The group defaults to t
 
 ## Guest filesystem flush
 
-`--guest-flush auto|required|skip` controls guest writeback during snapshot creation, branching, and pause. It does not change host-side durability or mandatory owned/external-storage barriers.
+`--guest-flush auto|required|skip` controls guest writeback for the root and captured block disks, including owned disks, during snapshot creation, branching, and pause. Host-backed directories (owned directories and external virtiofs mounts) retain their synchronization barriers. Host disk-I/O draining and snapshot durability are unchanged.
 
 | Policy | Live disk-only snapshot | Full snapshot, branch, or pause |
 | --- | --- | --- |
-| `auto` (default) | Require guest writeback | Preserve dirty pages in RAM; no optional root flush |
+| `auto` (default) | Require guest writeback | Preserve dirty pages in RAM; no block-filesystem flush |
 | `required` | Require guest writeback | Also flush captured persistent filesystems |
 | `skip` | Accept unflushed disk state | No optional guest writeback |
 
 Use `required` on a full snapshot when you also want to restore its disks without RAM. Flushing writes the guest filesystem cache—not application buffers or transactions—and does not make tmpfs persistent.
+
+`skip` on a disk-only snapshot accepts crash-consistent root and owned disks: recent buffered writes may be absent and filesystem recovery may be needed. Full snapshots and branches retain those dirty pages in captured RAM. An owned disk does not force guest writeback during plain pause. Earlier guest-flush builds flushed root and owned disks unconditionally when any owned mount existed; do not rely on that incidental behavior with `skip`.
 
 ```bash
 msb snapshot create disk --from-sandbox worker
