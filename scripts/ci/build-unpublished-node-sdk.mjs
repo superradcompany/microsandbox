@@ -14,7 +14,7 @@ export function buildUnpublishedSdk(directory, run = execFileSync) {
   const options = { cwd: directory, stdio: "inherit" };
   try {
     execFileSync(process.execPath, ["scripts/prune-platform-optional-deps.mjs"], options);
-    run("npm", ["ci", "--omit=optional"], options);
+    run("npm", ["ci"], options);
     run("npm", ["run", "build:ts"], options);
   } finally {
     paths.forEach((path, index) => writeFileSync(path, originals[index]));
