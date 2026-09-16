@@ -3,23 +3,9 @@
   "theme": "maple",
   "name": "microsandbox",
   "logo": {
-    "light": "/images/microsandbox-pixel-light.svg",
-    "dark": "/images/microsandbox-pixel-dark.svg",
+    "light": "/images/microsandbox-banner-light.svg",
+    "dark": "/images/microsandbox-banner-dark.svg",
     "href": "https://microsandbox.dev"
-  },
-  "fonts": {
-    "heading": {
-      "family": "MSB Pixel Circle",
-      "source": "/fonts/geist-pixel-circle.woff2",
-      "format": "woff2",
-      "weight": 500
-    },
-    "body": {
-      "family": "MSB Mono",
-      "source": "/fonts/jetbrains-mono-latin.woff2",
-      "format": "woff2",
-      "weight": 400
-    }
   },
   "favicon": "/logo/favicon.png",
   "colors": {
