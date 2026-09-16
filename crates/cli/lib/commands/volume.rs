@@ -42,7 +42,7 @@ pub struct VolumeCreateArgs {
     pub positional_name: Option<String>,
 
     /// Name for the new volume.
-    #[arg(long)]
+    #[arg(short, long)]
     pub name: Option<String>,
 
     /// Volume kind.

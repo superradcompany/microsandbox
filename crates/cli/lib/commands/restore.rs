@@ -20,7 +20,7 @@ pub struct RestoreArgs {
     /// Snapshot group/member, ID, or archive path.
     pub snapshot: String,
     /// Unique name of the destination sandbox.
-    #[arg(long)]
+    #[arg(short, long)]
     pub name: String,
     /// Restore captured RAM using private copy-on-write mappings.
     #[arg(long, conflicts_with = "disk_only")]

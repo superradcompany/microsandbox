@@ -25,7 +25,7 @@ use crate::ui;
 #[command(args_conflicts_with_subcommands = true)]
 pub struct SshArgs {
     /// Explicit sandbox name. Useful when the sandbox is named like a subcommand.
-    #[arg(long)]
+    #[arg(short, long)]
     pub name: Option<String>,
 
     /// Sandbox to connect to.
@@ -61,7 +61,7 @@ pub enum SshCommand {
 #[derive(Debug, Args)]
 pub struct SshConnectArgs {
     /// Explicit sandbox name. Useful when the sandbox is named like a subcommand.
-    #[arg(long)]
+    #[arg(short, long)]
     pub name: Option<String>,
 
     /// Sandbox to connect to.
@@ -87,7 +87,7 @@ pub struct SshServeArgs {
     pub host: Option<String>,
 
     /// Listener port.
-    #[arg(long, conflicts_with = "stdio")]
+    #[arg(short, long, conflicts_with = "stdio")]
     pub port: Option<u16>,
 
     /// Serve one SSH transport over stdin/stdout.

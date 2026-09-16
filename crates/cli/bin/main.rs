@@ -867,6 +867,135 @@ mod command_tests {
 mod sandbox_command_tests {
     use super::*;
 
+    #[test]
+    fn repeated_long_flags_have_consistent_short_forms() {
+        fn collect(
+            command: &clap::Command,
+            path: &str,
+            flags: &mut std::collections::BTreeMap<String, Vec<(String, Option<char>)>>,
+        ) {
+            for arg in command.get_arguments() {
+                let Some(long) = arg.get_long() else {
+                    continue;
+                };
+                // Interactive commands reserve -t for TTY allocation; do not
+                // change existing invocations to make timeout look uniform.
+                if long == "timeout"
+                    && command.get_arguments().any(|other| {
+                        other.get_long() == Some("tty") && other.get_short() == Some('t')
+                    })
+                {
+                    assert_eq!(arg.get_short(), None);
+                    continue;
+                }
+                if long == "name" {
+                    assert_eq!(arg.get_short(), Some('n'), "{path} --name");
+                }
+                flags
+                    .entry(long.to_owned())
+                    .or_default()
+                    .push((path.to_owned(), arg.get_short()));
+            }
+            for child in command.get_subcommands() {
+                collect(child, &format!("{path} {}", child.get_name()), flags);
+            }
+        }
+
+        let mut command = Cli::command();
+        command.build();
+        command.clone().debug_assert();
+        let mut flags = std::collections::BTreeMap::new();
+        collect(&command, "msb", &mut flags);
+        for (long, occurrences) in flags {
+            let expected = occurrences[0].1;
+            assert!(
+                occurrences.iter().all(|(_, short)| *short == expected),
+                "inconsistent --{long} short forms: {occurrences:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn short_flag_additions_parse_like_their_long_forms() {
+        let cases: &[&[&str]] = &[
+            &["restore", "saved"],
+            &["branch", "source"],
+            &["volume", "create"],
+            #[cfg(feature = "ssh")]
+            &["ssh"],
+            #[cfg(feature = "ssh")]
+            &["ssh", "connect"],
+        ];
+        for prefix in cases {
+            for flag in ["--name", "-n"] {
+                let mut matches = Cli::command()
+                    .try_get_matches_from(
+                        ["msb"]
+                            .into_iter()
+                            .chain(prefix.iter().copied())
+                            .chain([flag, "child"]),
+                    )
+                    .unwrap();
+                while let Some((_, child)) = matches.remove_subcommand() {
+                    matches = child;
+                }
+                assert_eq!(matches.get_one::<String>("name").unwrap(), "child");
+            }
+        }
+        #[cfg(feature = "ssh")]
+        for flag in ["--port", "-p"] {
+            let cli = Cli::try_parse_from(["msb", "ssh", "serve", "demo", flag, "2222"]).unwrap();
+            let Commands::Ssh(args) = cli.command else {
+                panic!("expected SSH")
+            };
+            let Some(microsandbox_cli::commands::ssh::SshCommand::Serve(args)) = args.subcommand
+            else {
+                panic!("expected SSH serve")
+            };
+            assert_eq!(args.port, Some(2222));
+            assert!(
+                Cli::try_parse_from(["msb", "ssh", "serve", "demo", flag, "2222", "--stdio"])
+                    .is_err()
+            );
+        }
+        for prefix in [&[][..], &["sandbox"][..], &["sbx"][..]] {
+            let short = parse_sandbox(
+                prefix,
+                &[
+                    "modify", "demo", "-c", "2", "-m", "1G", "-e", "A=B", "-w", "/work",
+                ],
+            );
+            let long = parse_sandbox(
+                prefix,
+                &[
+                    "modify",
+                    "demo",
+                    "--cpus",
+                    "2",
+                    "--memory",
+                    "1G",
+                    "--env",
+                    "A=B",
+                    "--workdir",
+                    "/work",
+                ],
+            );
+            assert_eq!(format!("{short:?}"), format!("{long:?}"));
+            for verb in ["restore", "branch"] {
+                assert_eq!(
+                    format!(
+                        "{:?}",
+                        parse_sandbox(prefix, &[verb, "source", "-n", "child"])
+                    ),
+                    format!(
+                        "{:?}",
+                        parse_sandbox(prefix, &[verb, "source", "--name", "child"])
+                    )
+                );
+            }
+        }
+    }
+
     fn parse_sandbox(prefix: &[&str], args: &[&str]) -> sandbox::SandboxCommands {
         let cli = Cli::try_parse_from(
             ["msb"]

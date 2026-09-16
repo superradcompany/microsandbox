@@ -226,7 +226,7 @@ msb sbx restore ./saved.msb --name disk-copy --disk-only
 
 | Flag | Description |
 |------|-------------|
-| `--name` | Required destination sandbox name |
+| `-n`, `--name` | Required destination sandbox name |
 | `--forked` | Restore full snapshots using private CoW memory |
 | `--disk-only` | Restore only the disk from a full snapshot; conflicts with `--forked` |
 | `--snapshot-base` | Exact base snapshot or archive for a dependent export |
@@ -312,7 +312,7 @@ msb resume devbox
 Branch running execution into a new local CoW child without creating a durable full snapshot. The top-level form is `msb branch`.
 
 ```bash
-msb branch devbox --name experiment
+msb branch devbox -n experiment
 ```
 
 Use `--names` to capture once and start several independent children from the same state:
@@ -402,11 +402,13 @@ msb touch --label app=engine
 Change a running sandbox's configuration. Every change is planned and applied all-or-nothing. CPU and memory resize live within the `max_cpus` / `max_memory` ceilings; other changes that can't apply live need `--restart` or `--next-start`.
 
 ```bash
-msb modify api --cpus 4                     # Live when 4 <= max_cpus
-msb modify api --env MODE=prod --restart    # Restart to apply now
+msb modify api -c 4                         # Live when 4 <= max_cpus
+msb modify api -e MODE=prod --restart       # Restart to apply now
 msb modify api --max-memory 16G --next-start # Raise the ceiling on next start
 msb modify api --cpus 8 --dry-run           # Show the plan, apply nothing
 ```
+
+Like create/run, modify accepts `-c`/`--cpus`, `-m`/`--memory`, `-e`/`--env`, and `-w`/`--workdir`.
 
 `max_cpus` and `max_memory` are boot-time reservations chosen at create time. They default to the effective `cpus`/`memory`, which leaves no headroom; live growth beyond them is impossible without a restart. Reserving capacity costs almost nothing (parked vCPUs and lazily-backed memory), so set them above the initial values at create time if the sandbox may need to grow.
 
