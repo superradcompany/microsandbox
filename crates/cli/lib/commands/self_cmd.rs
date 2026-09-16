@@ -956,7 +956,12 @@ async fn run_downgrade_local(args: SelfDowngradeArgs) -> anyhow::Result<()> {
 
     let base_dir = resolve_base_dir()?;
     let db_dir = base_dir.join(microsandbox_utils::DB_SUBDIR);
-    let db_path = db_dir.join(microsandbox_utils::DB_FILENAME);
+    // Serialize downgrade invocations, including preflight cancellation, but
+    // do not hold the catalog migration lock while downloading the release.
+    // Ordinary commands must remain available during that potentially slow I/O.
+    let operations_dir = db_dir.join("self-downgrade");
+    fs::create_dir_all(&operations_dir)?;
+    let _operation_lock = acquire_migration_lock(&operations_dir)?;
     let spinner = ui::Spinner::start("Staging", &format!("verified release {target_version}"));
     let (mut operation, target_baseline) =
         match prepare_downgrade_operation(&db_dir, current_version, target_version, args.force)
@@ -972,9 +977,38 @@ async fn run_downgrade_local(args: SelfDowngradeArgs) -> anyhow::Result<()> {
             }
         };
 
+    let result = execute_prepared_downgrade(
+        args,
+        &base_dir,
+        &mut operation,
+        &target_baseline,
+        target_version,
+    )
+    .await;
+    // Before ArtifactsReverting, failure or a declined confirmation has not
+    // changed installation data. Retire the journal instead of requiring a
+    // recovery operation that cannot pass the same preflight rejection.
+    if operation.phase() < DowngradePhase::ArtifactsReverting {
+        #[cfg(windows)]
+        cancel_windows_downgrade_recovery(&base_dir, &operation)?;
+        retire_unstarted_downgrade(&operation)?;
+    }
+    result
+}
+
+async fn execute_prepared_downgrade(
+    args: SelfDowngradeArgs,
+    base_dir: &Path,
+    operation: &mut DowngradeOperation,
+    target_baseline: &SchemaBaseline,
+    target_version: Version,
+) -> anyhow::Result<()> {
+    let current_version = Version::parse(CURRENT_VERSION)?;
+    let db_dir = base_dir.join(microsandbox_utils::DB_SUBDIR);
+    let db_path = db_dir.join(microsandbox_utils::DB_FILENAME);
     let db = open_downgrade_db(&db_path).await?;
     let applied_migrations = applied_migrations(db.inner()).await?;
-    let rollback_plan = build_rollback_plan(&target_baseline, &applied_migrations)?;
+    let rollback_plan = build_rollback_plan(target_baseline, &applied_migrations)?;
     refuse_irreversible_rollback(&rollback_plan)?;
     let user_data_warnings = if rollback_plan.affects_user_data {
         user_data_warnings(db.inner()).await?
@@ -1022,8 +1056,8 @@ async fn run_downgrade_local(args: SelfDowngradeArgs) -> anyhow::Result<()> {
     // untouched and a later crash can always resume activation.
     #[cfg(windows)]
     if let Err(error) = prepare_windows_downgrade_recovery(
-        &base_dir,
-        &operation,
+        base_dir,
+        operation,
         target_version,
         install_lease.as_ref(),
     ) {
@@ -1036,29 +1070,19 @@ async fn run_downgrade_local(args: SelfDowngradeArgs) -> anyhow::Result<()> {
 
     let result = run_downgrade_with_db(DowngradeRunContext {
         db: &db,
-        base_dir: &base_dir,
+        base_dir,
         db_path: &db_path,
         backup_path: backup_path.as_deref(),
         target_version,
-        target_baseline: &target_baseline,
+        target_baseline,
         planned_applied_migrations: &applied_migrations,
         rollback_plan: &rollback_plan,
         snapshots_dir: &snapshots_dir,
-        operation: &mut operation,
+        operation,
         install_lease: install_lease.as_mut(),
         args: &args,
     })
     .await;
-
-    #[cfg(windows)]
-    if result.is_err()
-        && operation.phase() < DowngradePhase::ArtifactsReverting
-        && let Err(error) = cancel_windows_downgrade_recovery(&base_dir, &operation)
-    {
-        ui::warn(&format!(
-            "failed to cancel unused Windows downgrade recovery task: {error:#}"
-        ));
-    }
 
     let clear_lease_in_parent = result
         .as_ref()
@@ -1082,7 +1106,6 @@ async fn run_downgrade_with_db(
         .db_path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("database path has no parent: {}", ctx.db_path.display()))?;
-
     {
         let _migration_lock = acquire_migration_lock(db_dir)?;
         let fresh_applied = applied_migrations(ctx.db.inner()).await?;
@@ -2985,6 +3008,21 @@ fn remove_completed_downgrade_operation(operation: &DowngradeOperation) -> anyho
     Ok(())
 }
 
+fn retire_unstarted_downgrade(operation: &DowngradeOperation) -> anyhow::Result<()> {
+    if operation.phase() >= DowngradePhase::ArtifactsReverting {
+        anyhow::bail!("cannot cancel a downgrade after artifact mutation may have started");
+    }
+    let parent = operation
+        .directory
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("downgrade operation has no parent"))?;
+    // Keep the staged bundle, backup and diagnostic journal recoverable. Hidden
+    // entries are deliberately excluded by both released recovery scanners.
+    let retired = parent.join(format!(".cancelled-{}", operation.journal.operation_id));
+    fs::rename(&operation.directory, retired)?;
+    sync_directory(parent)
+}
+
 fn sync_directory(path: &Path) -> anyhow::Result<()> {
     #[cfg(unix)]
     File::open(path)?.sync_all()?;
@@ -3500,6 +3538,63 @@ fn remove_marker_block(path: &Path) -> anyhow::Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cancellation_retires_only_unstarted_downgrade_journals() {
+        for phase in [
+            DowngradePhase::TargetStaged,
+            DowngradePhase::PreflightComplete,
+            DowngradePhase::BackupComplete,
+            DowngradePhase::ArtifactsReverting,
+            DowngradePhase::ArtifactsReverted,
+            DowngradePhase::DatabaseReverted,
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let directory = dir.path().join("operation");
+            fs::create_dir(&directory).unwrap();
+            let journal = DowngradeOperationJournal {
+                format_version: 1,
+                operation_id: "operation".into(),
+                source_version: "0.7.0".into(),
+                target_version: "0.6.18".into(),
+                phase,
+                target_dir: directory.join("target"),
+                recovery_dir: directory.join("recovery"),
+                backup_path: None,
+                updated_at: chrono::Utc::now().to_rfc3339(),
+            };
+            let bytes = serde_json::to_vec(&journal).unwrap();
+            let journal_path = directory.join("journal.json");
+            fs::write(&journal_path, &bytes).unwrap();
+            let operation = DowngradeOperation {
+                directory: directory.clone(),
+                journal_path,
+                journal,
+            };
+            let result = retire_unstarted_downgrade(&operation);
+            if phase < DowngradePhase::ArtifactsReverting {
+                result.unwrap();
+                assert!(!directory.exists());
+                assert_eq!(
+                    fs::read(dir.path().join(".cancelled-operation/journal.json")).unwrap(),
+                    bytes
+                );
+                assert!(
+                    find_active_downgrade_operation(dir.path())
+                        .unwrap()
+                        .is_none()
+                );
+            } else {
+                assert!(result.is_err());
+                assert_eq!(fs::read(directory.join("journal.json")).unwrap(), bytes);
+                assert!(
+                    find_active_downgrade_operation(dir.path())
+                        .unwrap()
+                        .is_some()
+                );
+            }
+        }
+    }
 
     #[test]
     fn info_fact_rank_keeps_support_header_first() {

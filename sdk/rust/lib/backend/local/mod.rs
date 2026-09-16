@@ -715,6 +715,9 @@ async fn connect_catalog(
     .await
     .map_err(|e| MicrosandboxError::Custom(format!("connect to {}: {e}", db_path.display())))?;
 
+    // Durable downgrade recovery takes precedence over dead-owner reclamation.
+    // The migration file lock above excludes another catalog opener doing this.
+    catalog::recover_abandoned_lease(&pools).await?;
     microsandbox_runtime::maintenance::refuse_if_install_exclusive_held(pools.write())
         .await
         .map_err(|err| MicrosandboxError::Runtime(err.to_string()))?;

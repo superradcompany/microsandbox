@@ -2,7 +2,9 @@
 
 use microsandbox_migration::{Migrator, MigratorTrait};
 use microsandbox_runtime::maintenance;
-use sea_orm::TransactionTrait;
+use sea_orm::{
+    ColumnTrait, ConnectionTrait, DatabaseTransaction, EntityTrait, QueryFilter, TransactionTrait,
+};
 
 use super::{LocalBackend, connect_catalog};
 use crate::{MicrosandboxError, MicrosandboxResult};
@@ -60,19 +62,10 @@ pub(super) async fn upgrade(pools: &microsandbox_db::pool::DbPools) -> Microsand
     let lease = maintenance::acquire_install_exclusive_lease(pools.write())
         .await
         .map_err(|error| MicrosandboxError::Runtime(error.to_string()))?;
-    let result = async {
-        let active = maintenance::active_sandboxes_for_schema_rollback(pools.write())
-            .await
-            .map_err(|error| MicrosandboxError::Runtime(error.to_string()))?;
-        if !active.is_empty() {
-            return Err(MicrosandboxError::Runtime(
-                "catalog upgrade requires stopped sandboxes; use `msb ps` to list them and `msb stop <name>...` to stop them, then retry"
-                    .into(),
-            ));
-        }
+    let result: MicrosandboxResult<()> = async {
+        let transaction = begin_quiescent_upgrade(pools).await?;
         // All pending SQL migrations and their history commit together. A failed
         // migration must not leave an unrecognized, partially upgraded catalog.
-        let transaction = pools.write().inner().begin().await?;
         Migrator::up(&transaction, None).await?;
         transaction.commit().await?;
         Ok(())
@@ -83,6 +76,82 @@ pub(super) async fn upgrade(pools: &microsandbox_db::pool::DbPools) -> Microsand
         .map_err(|error| MicrosandboxError::Runtime(error.to_string()));
     result?;
     cleared
+}
+
+/// Return the same write transaction that proved the catalog quiescent. The
+/// caller must retain it through migration commit, while holding the install
+/// lease and migration file lock.
+async fn begin_quiescent_upgrade(
+    pools: &microsandbox_db::pool::DbPools,
+) -> MicrosandboxResult<DatabaseTransaction> {
+    let transaction = pools.write().inner().begin().await?;
+    // Reserve SQLite's writer before observing lifecycle state. Historical
+    // SDKs can retain an open pool and ignore the install lease, but must
+    // write Starting before launching a VM. A real write (even a no-op)
+    // fences those callers through the migration commit without requiring
+    // a new protocol or cooperation from old binaries.
+    transaction
+        .execute_unprepared(
+            "UPDATE maintenance_lease SET holder_pid = holder_pid WHERE name = 'install_exclusive'",
+        )
+        .await?;
+    let active = maintenance::active_sandboxes_for_schema_rollback(&transaction)
+        .await
+        .map_err(|error| MicrosandboxError::Runtime(error.to_string()))?;
+    if !active.is_empty() {
+        return Err(MicrosandboxError::Runtime(
+            "catalog upgrade requires stopped sandboxes; use `msb ps` to list them and `msb stop <name>...` to stop them, then retry"
+                .into(),
+        ));
+    }
+    Ok(transaction)
+}
+
+/// Recover only an abandoned catalog-operation lease. The caller must hold
+/// the migration lock and reject incomplete downgrade journals first: a
+/// Windows handoff intentionally outlives the parent PID recorded in its lease.
+pub(super) async fn recover_abandoned_lease(
+    pools: &microsandbox_db::pool::DbPools,
+) -> MicrosandboxResult<()> {
+    use microsandbox_db::entity::maintenance_lease as lease;
+    use sea_orm::sea_query::Expr;
+
+    if !microsandbox_db::catalog::has_table(pools.read(), "maintenance_lease").await? {
+        return Ok(());
+    }
+    let Some(row) = lease::Entity::find_by_id(lease::INSTALL_EXCLUSIVE)
+        .one(pools.read())
+        .await?
+    else {
+        return Ok(());
+    };
+    let Some(pid) = row.holder_pid else {
+        return Ok(());
+    };
+    // Windows retains an exited process object while another process holds a
+    // handle: opening that PID does not prove the lease owner can still run.
+    // Keep Unix's conservative existence check because a zombie leader can
+    // still have threads tearing down shared resources. A reused live PID must
+    // remain protected on either platform.
+    #[cfg(windows)]
+    let owner_may_be_live = microsandbox_utils::process::pid_is_alive(pid);
+    #[cfg(not(windows))]
+    let owner_may_be_live = microsandbox_utils::process::pid_exists(pid);
+    if pid <= 0 || owner_may_be_live {
+        return Ok(());
+    }
+    lease::Entity::update_many()
+        .col_expr(lease::Column::HolderPid, Expr::value(None::<i32>))
+        .col_expr(
+            lease::Column::LeaseExpiresAt,
+            Expr::value(chrono::Utc::now().naive_utc()),
+        )
+        .filter(lease::Column::Name.eq(lease::INSTALL_EXCLUSIVE))
+        .filter(lease::Column::HolderPid.eq(pid))
+        .filter(lease::Column::LeaseExpiresAt.eq(row.lease_expires_at))
+        .exec(pools.write())
+        .await?;
+    Ok(())
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -97,6 +166,106 @@ mod tests {
     use sea_orm::ConnectionTrait;
 
     use super::*;
+
+    #[tokio::test]
+    async fn abandoned_lease_recovery_preserves_live_owner() {
+        let home = tempfile::tempdir().unwrap();
+        let pools = historical(home.path()).await;
+        let live = maintenance::acquire_install_exclusive_lease(pools.write())
+            .await
+            .unwrap();
+        recover_abandoned_lease(&pools).await.unwrap();
+        assert!(
+            maintenance::refuse_if_install_exclusive_held(pools.write())
+                .await
+                .is_err()
+        );
+        maintenance::clear_install_exclusive_lease(pools.write(), &live)
+            .await
+            .unwrap();
+    }
+
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn abandoned_lease_recovers_but_never_bypasses_downgrade_journal() {
+        let home = tempfile::tempdir().unwrap();
+        let pools = historical(home.path()).await;
+        #[cfg(unix)]
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        #[cfg(windows)]
+        let mut child = std::process::Command::new("cmd")
+            .args(["/D", "/C", "exit", "0"])
+            .spawn()
+            .unwrap();
+        let dead = child.id();
+        child.wait().unwrap();
+        #[cfg(unix)]
+        assert!(!microsandbox_utils::process::pid_exists(dead as i32));
+        // Keep Child (and its Windows process handle) alive throughout recovery.
+        // This reproduces the exited-but-openable PID from the crash harness.
+        #[cfg(windows)]
+        {
+            assert!(microsandbox_utils::process::pid_exists(dead as i32));
+            assert!(!microsandbox_utils::process::pid_is_alive(dead as i32));
+        }
+        let lease = maintenance::acquire_install_exclusive_lease(pools.write())
+            .await
+            .unwrap();
+        pools
+            .write()
+            .inner()
+            .execute_unprepared(&format!(
+                "UPDATE maintenance_lease SET holder_pid = {dead} WHERE name = 'install_exclusive'"
+            ))
+            .await
+            .unwrap();
+        let dir = home.path().join("db/self-downgrade/pending");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("journal.json"),
+            r#"{"phase":"artifacts_reverting"}"#,
+        )
+        .unwrap();
+        let error = LocalBackend::builder()
+            .home(home.path())
+            .build()
+            .await
+            .err()
+            .expect("pending handoff must remain blocked");
+        assert!(
+            error
+                .to_string()
+                .contains("self_downgrade_recovery_required")
+        );
+        assert!(
+            maintenance::refuse_if_install_exclusive_held(pools.write())
+                .await
+                .is_err()
+        );
+        // A cancelled preflight is hidden, whereas a mutating operation above
+        // must not be treated as abandoned merely because its parent exited.
+        std::fs::rename(&dir, dir.with_file_name(".cancelled-pending")).unwrap();
+        let local = LocalBackend::builder()
+            .home(home.path())
+            .build()
+            .await
+            .unwrap();
+        local.db().await.unwrap();
+        maintenance::refuse_if_install_exclusive_held(pools.write())
+            .await
+            .unwrap();
+        assert!(
+            !crate::db::admission::is_current(pools.read())
+                .await
+                .unwrap()
+        );
+        assert!(
+            maintenance::clear_install_exclusive_lease(pools.write(), &lease)
+                .await
+                .is_err()
+        );
+        drop(child);
+    }
 
     #[tokio::test]
     #[ignore = "requires isolated MSB_CATALOG_TEST_HOME plus actual historical MSB_PATH/MSB_LIBKRUNFW_PATH and host virtualization"]
@@ -315,6 +484,76 @@ mod tests {
                 .await
                 .unwrap()
         );
+    }
+
+    #[tokio::test]
+    async fn catalog_upgrade_fences_preopened_lifecycle_writers_until_commit_or_rollback() {
+        for commit in [false, true] {
+            let home = tempfile::tempdir().unwrap();
+            let pools = historical(home.path()).await;
+            pools.write().inner().execute_unprepared(
+                "INSERT INTO sandbox (name, config, status, ephemeral) VALUES ('stopped', '{}', 'Stopped', 0)",
+            ).await.unwrap();
+            // A separate, already-open pool models an old SDK that does not
+            // cooperate with either the install lease or migration file lock.
+            // Zero busy timeout makes contention deterministic, without sleeps.
+            let old_sdk = DbPools::open(
+                &home.path().join("db/msb.db"),
+                1,
+                Duration::from_secs(5),
+                Duration::ZERO,
+            )
+            .await
+            .unwrap();
+            let lease = maintenance::acquire_install_exclusive_lease(pools.write())
+                .await
+                .unwrap();
+            let transaction = begin_quiescent_upgrade(&pools).await.unwrap();
+            let lifecycle_writes = [
+                "INSERT INTO sandbox (name, config, status, ephemeral) VALUES ('new', '{}', 'Starting', 0)",
+                "UPDATE sandbox SET status = 'Starting' WHERE name = 'stopped'",
+            ];
+            for sql in lifecycle_writes {
+                let error = old_sdk
+                    .write()
+                    .inner()
+                    .execute_unprepared(sql)
+                    .await
+                    .unwrap_err();
+                assert!(error.to_string().contains("database is locked"), "{error}");
+            }
+            assert!(
+                maintenance::active_sandboxes_for_schema_rollback(&transaction)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            Migrator::up(&transaction, None).await.unwrap();
+            if commit {
+                transaction.commit().await.unwrap();
+            } else {
+                transaction.rollback().await.unwrap();
+            }
+            maintenance::clear_install_exclusive_lease(pools.write(), &lease)
+                .await
+                .unwrap();
+            assert_eq!(
+                crate::db::admission::is_current(old_sdk.read())
+                    .await
+                    .unwrap(),
+                commit
+            );
+            // Both outcomes release the writer. This checks ordering, not
+            // whether a historical runtime supports the newly committed schema.
+            for sql in lifecycle_writes {
+                old_sdk
+                    .write()
+                    .inner()
+                    .execute_unprepared(sql)
+                    .await
+                    .unwrap();
+            }
+        }
     }
 
     #[tokio::test]

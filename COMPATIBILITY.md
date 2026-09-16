@@ -200,7 +200,11 @@ Tests should open copies of real older databases, migrate them, exercise the aff
 
 Catalog upgrade authority belongs to the user-facing CLI, not to an SDK's private runtime child. Local CLI creation/start, snapshot, and volume operations prepare the current catalog under the migration lock and install lease; upgrades refuse active sandboxes and commit pending SQL migrations together. Stop and diagnostic operations remain available so the user can stop old runtimes before retrying. This also covers a CLI replaced by the standalone installer, without requiring an earlier `msb upgrade` invocation. Private `msb machine` launches do not perform this upgrade.
 
+The upgrade transaction reserves SQLite's writer before checking active sandboxes, so an already-open historical SDK cannot start a VM between that check and the migration commit. After an upgrader exits, the next catalog opener can reclaim its dead-owner lease under the migration lock; live owners and incomplete downgrade journals still block admission. A downgrade rejected before artifact mutation retires its journal into a hidden `.cancelled-<operation-id>` directory, preserving diagnostic files without blocking ordinary commands. Once artifact mutation may have started, explicit downgrade recovery remains required.
+
 SDK backends preserve recognized existing catalogs. A new SDK home uses the catalog supported by its selected historical runtime. Configuration writes use explicit released field/tag contracts, not example rows or array lengths: zero, one, and many supported mounts are all valid. Unrepresentable semantics fail rather than being dropped. Unknown migration identities fail even when their count matches a known schema. These catalog rules do not replace launcher, agent, or snapshot-format capability checks.
+
+Windows abandoned-lease recovery checks whether the process has exited, not merely whether its PID can be opened: another process may retain a handle to the terminated owner. Unix retains its conservative PID-existence check during resource teardown. Both paths preserve live owners, match the observed lease before clearing it, and refuse admission while an incomplete downgrade journal exists.
 
 ## 7. Home and Runtime Path Layout
 
