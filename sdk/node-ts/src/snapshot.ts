@@ -20,6 +20,9 @@ import {
  */
 export type SnapshotScope = "disk" | "full";
 
+/** Optional guest writeback. Required owned/external-storage barriers are always retained. */
+export type GuestFlush = "auto" | "required" | "skip";
+
 /** Canonical closed state family from schema-1 `snapshot.json`. */
 export type SnapshotState =
   | {
@@ -115,6 +118,7 @@ export type SnapshotVerifyReport =
  * (so we can keep type-level distinction from the raw napi class).
  */
 export interface SnapshotBuilder extends NapiSnapshotBuilderSetters {
+  guestFlush(policy: GuestFlush): this;
   create(): Promise<Snapshot>;
   createArchive(out: string, plainTar?: boolean): Promise<SnapshotArchive>;
 }

@@ -14,6 +14,24 @@ use super::{Sandbox, SandboxHandle, SandboxPauseState, modify};
 //--------------------------------------------------------------------------------------------------
 
 impl Sandbox {
+    /// Pause with acknowledged guest writeback when required. Existing pauses are checked,
+    /// never resumed implicitly. Mandatory storage barriers are not disabled by Skip.
+    pub async fn pause_with_guest_flush(
+        &self,
+        policy: microsandbox_types::GuestFlush,
+    ) -> MicrosandboxResult<()> {
+        lifecycle(
+            self.name(),
+            self.identity(),
+            self.backend().as_ref(),
+            ControlRequest::PauseWithGuestFlush {
+                guest_flush: policy,
+            },
+        )
+        .await
+        .map(|_| ())
+    }
+
     /// Internal CLI lookup for an immediately following authoritative control mutation.
     ///
     /// Keep database/runtime reconciliation, but skip the pause observation used by ordinary
@@ -68,6 +86,23 @@ impl Sandbox {
 }
 
 impl SandboxHandle {
+    /// Pause with an explicit guest writeback policy without connecting to the guest.
+    pub async fn pause_with_guest_flush(
+        &self,
+        policy: microsandbox_types::GuestFlush,
+    ) -> MicrosandboxResult<()> {
+        lifecycle(
+            self.name(),
+            self.identity(),
+            self.backend.as_ref(),
+            ControlRequest::PauseWithGuestFlush {
+                guest_flush: policy,
+            },
+        )
+        .await
+        .map(|_| ())
+    }
+
     /// Suspend an existing resident sandbox without connecting to its guest.
     pub async fn pause(&self) -> MicrosandboxResult<()> {
         lifecycle(
@@ -153,6 +188,19 @@ async fn lifecycle(
     let _transition =
         LocalBackend::acquire_sandbox_transition_guard(&local.config().run_dir(), name).await?;
     let run = local.control_run_identity(name, expected_id).await?;
+    if matches!(request, ControlRequest::PauseWithGuestFlush { .. }) {
+        let capabilities =
+            modify::control_request_for_run(local, name, run, "{\"op\":\"capabilities\"}\n".into())
+                .await?;
+        // Even Auto is explicit on this new entry point; unknown runtimes must refuse.
+        if !capabilities
+            .capabilities
+            .is_some_and(|caps| caps.guest_flush_policy)
+        {
+            return Err(MicrosandboxError::unsupported(operation,
+                crate::UnsupportedReason::NotAvailable("source runtime does not support guest-flush pause; restart with an updated runtime".into())));
+        }
+    }
     // The mutation itself is authoritative. Unknown operations fail on older runtimes, and
     // successful replies must carry pause state; neither case can silently become a no-op.
     let line = format!("{}\n", serde_json::to_string(&request)?);
@@ -163,7 +211,7 @@ async fn lifecycle(
     // An acknowledgement must confirm the requested transition, not just contain some
     // observation. State inspection itself must still be able to report recovery required.
     let expected = match request {
-        ControlRequest::Pause => Some(true),
+        ControlRequest::Pause | ControlRequest::PauseWithGuestFlush { .. } => Some(true),
         ControlRequest::Resume => Some(false),
         _ => None,
     };

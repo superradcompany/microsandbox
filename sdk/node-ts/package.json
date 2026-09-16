@@ -1,5 +1,10 @@
 {
   "name": "microsandbox",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/superradcompany/microsandbox.git",
+    "directory": "sdk/node-ts"
+  },
   "version": "0.7.0",
   "type": "module",
   "main": "./dist/index.js",

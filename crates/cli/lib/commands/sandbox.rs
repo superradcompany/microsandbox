@@ -50,7 +50,7 @@ pub enum SandboxCommands {
     Branch(branch::BranchArgs),
 
     /// Resume a user-paused resident sandbox.
-    Resume(pause::PauseArgs),
+    Resume(pause::ResumeArgs),
 
     /// Restart one or more sandboxes.
     Restart(restart::RestartArgs),
@@ -116,7 +116,17 @@ pub async fn run(command: SandboxCommands, log_level: Option<LogLevel>) -> anyho
         SandboxCommands::Stop(args) => stop::run(args).await,
         SandboxCommands::Pause(args) => pause::run(args, false).await,
         SandboxCommands::Branch(args) => branch::run(args).await,
-        SandboxCommands::Resume(args) => pause::run(args, true).await,
+        SandboxCommands::Resume(args) => {
+            pause::run(
+                pause::PauseArgs {
+                    name: args.name,
+                    quiet: args.quiet,
+                    guest_flush: None,
+                },
+                true,
+            )
+            .await
+        }
         SandboxCommands::Restart(args) => restart::run(args).await,
         SandboxCommands::Ping(args) => ping::run(args).await,
         SandboxCommands::Touch(args) => touch::run(args).await,

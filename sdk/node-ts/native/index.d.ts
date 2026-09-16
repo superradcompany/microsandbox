@@ -1095,11 +1095,11 @@ export declare class Sandbox {
   /** Warnings for unmapped external filesystems and accepted restore mismatches. */
   restoreWarnings(): Promise<Array<ExternalMountWarning>>
   /** Create an independent local CoW child without a durable full snapshot. */
-  branch(name: string, recordIntegrity?: boolean | undefined | null): Promise<Sandbox>
+  branch(name: string, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null): Promise<Sandbox>
   /** Capture once and return individual child startup outcomes. */
-  branchMany(names: Array<string>, recordIntegrity?: boolean | undefined | null): Promise<Array<JsBranchOutcome>>
+  branchMany(names: Array<string>, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null): Promise<Array<JsBranchOutcome>>
   /** Explicit resident pause through host control. */
-  pause(): Promise<void>
+  pause(guestFlush?: string | undefined | null): Promise<void>
   /** Explicit resident resume through host control. */
   resume(): Promise<void>
   /** Stop and wait for exit, returning the exit status. */
@@ -1496,11 +1496,11 @@ export declare class SandboxHandle {
    */
   stop(): Promise<void>
   /** Create an independent local CoW child without a durable full snapshot. */
-  branch(name: string, recordIntegrity?: boolean | undefined | null): Promise<Sandbox>
+  branch(name: string, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null): Promise<Sandbox>
   /** Capture once and return individual child startup outcomes. */
-  branchMany(names: Array<string>, recordIntegrity?: boolean | undefined | null): Promise<Array<JsBranchOutcome>>
+  branchMany(names: Array<string>, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null): Promise<Array<JsBranchOutcome>>
   /** Explicit resident pause through host control. */
-  pause(): Promise<void>
+  pause(guestFlush?: string | undefined | null): Promise<void>
   /** Explicit resident resume through host control. */
   resume(): Promise<void>
   /** Request graceful shutdown without waiting. */
@@ -1702,6 +1702,8 @@ export declare class SnapshotBuilder {
   recordIntegrity(): this
   /** Capture disk, memory, execution, and device state from a running sandbox. */
   full(): this
+  /** Select optional writeback: auto, required, or skip. Required storage barriers remain. */
+  guestFlush(policy: string): this
   /** Snapshot the accumulated configuration. */
   build(): SnapshotConfig
   /**
@@ -2586,6 +2588,7 @@ export declare function setRuntimeMsbPath(path: string): void
 
 /** Built snapshot configuration produced by `SnapshotBuilder.build()`. */
 export interface SnapshotConfig {
+  guestFlush: string
   name: string
   group?: string
   sourceSandbox?: string

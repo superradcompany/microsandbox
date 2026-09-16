@@ -51,6 +51,7 @@ pub enum SnapshotReference {
 /// construction; the source sandbox is set with
 /// [`from_sandbox`](Self::from_sandbox) and is required.
 pub struct SnapshotBuilder {
+    guest_flush: super::GuestFlush,
     name: String,
     group: Option<String>,
     source_sandbox: Option<String>,
@@ -117,6 +118,7 @@ impl Snapshot {
     /// parent directory or a directory on the cloud host volume.
     pub fn builder(name: impl Into<String>) -> SnapshotBuilder {
         SnapshotBuilder {
+            guest_flush: super::GuestFlush::Auto,
             name: name.into(),
             group: None,
             source_sandbox: None,
@@ -529,6 +531,13 @@ impl SnapshotBuilder {
         self
     }
 
+    /// Select optional guest writeback before capture. Mandatory storage barriers remain.
+    /// Auto requires flushing for live disk-only capture, but not full execution capture.
+    pub fn guest_flush(mut self, policy: super::GuestFlush) -> Self {
+        self.guest_flush = policy;
+        self
+    }
+
     /// Build the [`SnapshotConfig`].
     pub fn build(self) -> MicrosandboxResult<SnapshotConfig> {
         let source_sandbox = self.source_sandbox.ok_or_else(|| {
@@ -537,6 +546,7 @@ impl SnapshotBuilder {
             )
         })?;
         Ok(SnapshotConfig {
+            guest_flush: self.guest_flush,
             name: self.name,
             group: self.group,
             dest_dir: self.dest_dir,

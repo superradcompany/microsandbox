@@ -94,6 +94,7 @@ pub(super) async fn branch_many(
     _options: SandboxConfig,
     _record_integrity: bool,
     _names: Vec<String>,
+    _guest_flush: microsandbox_types::GuestFlush,
 ) -> MicrosandboxResult<Vec<BranchOutcome>> {
     Err(MicrosandboxError::InvalidConfig(
         "direct branching requires a local backend".into(),
@@ -108,6 +109,7 @@ pub(super) async fn branch_many(
     mut options: SandboxConfig,
     record_integrity: bool,
     names: Vec<String>,
+    guest_flush: microsandbox_types::GuestFlush,
 ) -> MicrosandboxResult<Vec<BranchOutcome>> {
     validate_names(source, &names)?;
     let local = backend.as_local().ok_or_else(|| {
@@ -129,9 +131,15 @@ pub(super) async fn branch_many(
         }
     }
     options.spec.name = names[0].clone();
-    let mut template =
-        super::branch::prepare_branch(backend.clone(), source, identity, options, record_integrity)
-            .await?;
+    let mut template = super::branch::prepare_branch(
+        backend.clone(),
+        source,
+        identity,
+        options,
+        record_integrity,
+        guest_flush,
+    )
+    .await?;
     let capture = Arc::new(CaptureSlot::new());
     template
         .branch_source

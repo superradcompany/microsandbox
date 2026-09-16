@@ -982,8 +982,8 @@ jobs:
       - name: Build and check TypeScript smoke test
         working-directory: sdk/node-ts
         run: |
-          npm ci --omit=optional
-          npm run build:ts
+          node --test ../../scripts/ci/test-npm-release.mjs
+          node ../../scripts/ci/build-unpublished-node-sdk.mjs
           npx --no-install tsc --noEmit --strict --skipLibCheck --target ES2023 --module nodenext --allowImportingTsExtensions scripts/cloud-release-smoke.mts scripts/cloud-release-smoke.test.mts
           node --experimental-strip-types --test scripts/cloud-release-smoke.test.mts
 
@@ -1246,6 +1246,13 @@ jobs:
     needs: release-ready
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      # Every publish in this job uses the existing token plus GitHub OIDC
+      # provenance. MCP is published separately from its submodule repository.
+      NPM_CONFIG_PROVENANCE: "true"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -1286,12 +1293,6 @@ jobs:
         run: |
           npm ci
           npm run build
-
-      - name: Build TypeScript output (root package dist/)
-        working-directory: sdk/node-ts
-        run: |
-          npm ci --omit=optional
-          npm run build:ts
 
       - name: Publish shared types and protocol engine
         env:
@@ -1341,6 +1342,15 @@ jobs:
             @superradcompany/microsandbox-linux-x64-gnu \
             @superradcompany/microsandbox-win32-arm64-msvc \
             @superradcompany/microsandbox-win32-x64-msvc
+
+      - name: Build TypeScript output with published platform dependencies
+        working-directory: sdk/node-ts
+        run: |
+          # A version bump can precede registry entries for its native packages.
+          # Only resolve them after publication, then validate with a clean install.
+          npm install --package-lock-only --ignore-scripts
+          npm ci --omit=optional
+          npm run build:ts
 
       - name: Verify root package platform dependencies
         working-directory: sdk/node-ts

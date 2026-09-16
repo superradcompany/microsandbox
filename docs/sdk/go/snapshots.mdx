@@ -24,6 +24,12 @@ Destination controls use `WithRestoreCPUs(uint8)`, `WithRestoreMemory(uint32)` i
 
 Full execution restore requires CPU and memory overrides to match captured geometry exactly, and rejects removing a captured NIC. Host-side network policy, connection limits, and lifetime limits can change. An explicit security profile—including `SecurityProfileDefault`—requires a disk snapshot or `WithSnapshotDiskOnly()`; it cannot change already-captured execution.
 
+## Guest writeback
+
+Set `SnapshotCreateOptions.GuestFlush` to `msb.GuestFlushRequired`, pass `msb.WithBranchGuestFlush(msb.GuestFlushRequired)` to `Branch`/`BranchMany`, or call `source.PauseWithGuestFlush(ctx, msb.GuestFlushRequired)`. The default `GuestFlushAuto` flushes live disk-only captures, but adds no optional flush to full captures, branches, or pause. `GuestFlushSkip` retains mandatory storage barriers. A paused disk capture needs a matching prior flush; cloud rejects non-Auto policies. See [policy semantics and examples](/sandboxes/snapshots#guest-filesystem-flush).
+
+Disk capture, including `SandboxHandle.Snapshot`, requires a native library that supports guest-flush policies. Older libraries return an upgrade-required error, including for stopped disk captures. Full Auto capture and unrelated operations retain their compatibility.
+
 ## Snapshot groups
 
 Installed snapshots belong to a group. A bare group selects its head; `group:member` selects a member by name or stable snapshot ID. Artifact paths remain valid selectors. Creation defaults to the source sandbox's group and generates a member name when empty; imports without a group create a new generated group. `DestDir` and `SnapshotLoadOptions.Dest` select the parent directory containing groups.

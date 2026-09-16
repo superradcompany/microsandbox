@@ -126,6 +126,7 @@ typedef char *(*msb_sandbox_stop_gracefully_fn)(uint64_t cancel_id, uint64_t han
 typedef char *(*msb_sandbox_request_stop_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_restore_warnings_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_pause_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_sandbox_pause_with_guest_flush_fn)(uint64_t cancel_id, uint64_t handle, const char *source, const char *expected_id, const char *policy, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_branch_fn)(uint64_t cancel_id, uint64_t handle, const char *source, const char *child, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_branch_with_options_fn)(uint64_t cancel_id, uint64_t handle, const char *source, const char *child, bool record_integrity, uint8_t *buf, size_t buf_len);
 typedef msb_sandbox_branch_with_options_fn msb_sandbox_branch_many_fn;
@@ -301,6 +302,7 @@ static msb_sandbox_stop_gracefully_fn ptr_msb_sandbox_stop_gracefully = NULL;
 static msb_sandbox_request_stop_fn ptr_msb_sandbox_request_stop = NULL;
 static msb_sandbox_restore_warnings_fn ptr_msb_sandbox_restore_warnings = NULL;
 static msb_sandbox_pause_fn ptr_msb_sandbox_pause = NULL;
+static msb_sandbox_pause_with_guest_flush_fn ptr_msb_sandbox_pause_with_guest_flush = NULL;
 static msb_sandbox_branch_fn ptr_msb_sandbox_branch = NULL;
 static msb_sandbox_branch_with_options_fn ptr_msb_sandbox_branch_with_options = NULL;
 static msb_sandbox_branch_with_options_fn ptr_msb_sandbox_branch_many = NULL;
@@ -498,6 +500,7 @@ const char *load_microsandbox(const char *path) {
 	RESOLVE(msb_sandbox_request_stop);
 	RESOLVE_OPTIONAL(msb_sandbox_restore_warnings);
 	RESOLVE(msb_sandbox_pause);
+	RESOLVE_OPTIONAL(msb_sandbox_pause_with_guest_flush);
 	RESOLVE(msb_sandbox_branch);
 	RESOLVE_OPTIONAL(msb_sandbox_branch_with_options);
 	RESOLVE_OPTIONAL(msb_sandbox_branch_many);
@@ -736,6 +739,10 @@ char *call_msb_sandbox_branch(uint64_t cancel_id, uint64_t handle, const char *s
 	return ptr_msb_sandbox_branch ? ptr_msb_sandbox_branch(cancel_id, handle, source, child, buf, buf_len) : NULL;
 }
 bool has_branch_integrity(void) { return ptr_msb_sandbox_branch_with_options != NULL; }
+bool has_guest_flush(void) { return ptr_msb_sandbox_pause_with_guest_flush != NULL; }
+char *call_msb_sandbox_pause_with_guest_flush(uint64_t cancel_id, uint64_t handle, const char *source, const char *expected_id, const char *policy, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_sandbox_pause_with_guest_flush ? ptr_msb_sandbox_pause_with_guest_flush(cancel_id, handle, source, expected_id, policy, buf, buf_len) : NULL;
+}
 bool has_branch_many(void) { return ptr_msb_sandbox_branch_many != NULL; }
 char *call_msb_sandbox_branch_many(uint64_t cancel_id, uint64_t handle, const char *source, const char *names, bool record_integrity, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_sandbox_branch_many ? ptr_msb_sandbox_branch_many(cancel_id, handle, source, names, record_integrity, buf, buf_len) : NULL;
@@ -2749,31 +2756,39 @@ type BranchOutcome struct {
 	Error   error
 }
 
-func (s *Sandbox) BranchMany(ctx context.Context, names []string, integrity bool) ([]BranchOutcome, error) {
+func (s *Sandbox) BranchMany(ctx context.Context, names []string, integrity bool, policy ...string) ([]BranchOutcome, error) {
 	// Zero selects name lookup in the shared native entry point. A closed live handle
 	// must not take that path, including when Close races with this call.
 	handle := s.handle.Load()
 	if handle == 0 {
 		return nil, &Error{Kind: KindInvalidHandle, Message: "sandbox handle already closed"}
 	}
-	return BranchManyByName(ctx, handle, s.name, "", names, integrity)
+	return BranchManyByName(ctx, handle, s.name, "", names, integrity, policy...)
 }
 
 // BranchManyByName uses one native operation, never a loop of branch captures.
-func BranchManyByName(ctx context.Context, handle uint64, source, identity string, names []string, integrity bool) ([]BranchOutcome, error) {
+func BranchManyByName(ctx context.Context, handle uint64, source, identity string, names []string, integrity bool, policy ...string) ([]BranchOutcome, error) {
 	if err := ensureLoaded(); err != nil {
 		return nil, err
 	}
 	if !bool(C.has_branch_many()) {
 		return nil, &Error{Kind: KindUnsupportedOperation, Message: "native SDK does not support batch branching; update the native SDK"}
 	}
+	flush := ""
+	if len(policy) > 0 {
+		flush = policy[0]
+	}
+	if err := checkGuestFlush(flush, false); err != nil {
+		return nil, err
+	}
 	if names == nil {
 		names = []string{}
 	}
 	encoded, err := json.Marshal(struct {
-		Names    []string `json:"names"`
-		Identity string   `json:"source_identity"`
-	}{names, identity})
+		Names      []string `json:"names"`
+		Identity   string   `json:"source_identity"`
+		GuestFlush string   `json:"guest_flush,omitempty"`
+	}{names, identity, flush})
 	if err != nil {
 		return nil, err
 	}
@@ -2814,12 +2829,20 @@ func BranchManyByName(ctx context.Context, handle uint64, source, identity strin
 }
 
 // Branch creates an independent local child through the host runtime.
-func (s *Sandbox) Branch(ctx context.Context, name string, recordIntegrity bool) (*Sandbox, error) {
+func (s *Sandbox) Branch(ctx context.Context, name string, recordIntegrity bool, policy ...string) (*Sandbox, error) {
+	if len(policy) > 0 && policy[0] != "" {
+		rows, err := s.BranchMany(ctx, []string{name}, recordIntegrity, policy...)
+		return oneBranchOutcome(rows, err)
+	}
 	return branchSandbox(ctx, uint64(s.h()), s.name, name, recordIntegrity)
 }
 
 // BranchSandboxByName branches execution without an agent connection to the source.
-func BranchSandboxByName(ctx context.Context, source, name string, recordIntegrity bool) (*Sandbox, error) {
+func BranchSandboxByName(ctx context.Context, source, name string, recordIntegrity bool, policy ...string) (*Sandbox, error) {
+	if len(policy) > 0 && policy[0] != "" {
+		rows, err := BranchManyByName(ctx, 0, source, "", []string{name}, recordIntegrity, policy...)
+		return oneBranchOutcome(rows, err)
+	}
 	return branchSandbox(ctx, 0, source, name, recordIntegrity)
 }
 
@@ -2857,6 +2880,63 @@ func branchSandbox(ctx context.Context, handle uint64, source, name string, reco
 	s := &Sandbox{name: name, backendKind: resp.BackendKind}
 	s.handle.Store(resp.Handle)
 	return s, nil
+}
+
+// checkGuestFlush prevents older native libraries from silently ignoring JSON fields.
+// Auto full capture is unchanged; auto disk capture now requires guest writeback.
+func checkGuestFlush(policy string, diskOnly bool) error {
+	return validateGuestFlushSupport(policy, diskOnly, bool(C.has_guest_flush()))
+}
+
+func validateGuestFlushSupport(policy string, diskOnly, supported bool) error {
+	switch policy {
+	case "", "auto", "required", "skip":
+	default:
+		return &Error{Kind: KindInvalidArgument, Message: "guest flush must be auto, required, or skip"}
+	}
+	if (diskOnly || (policy != "" && policy != "auto")) && !supported {
+		return &Error{Kind: KindUnsupportedOperation, Message: "native SDK does not support guest flush policies; update the native SDK"}
+	}
+	return nil
+}
+
+func oneBranchOutcome(rows []BranchOutcome, err error) (*Sandbox, error) {
+	if err != nil {
+		return nil, err
+	}
+	if len(rows) != 1 {
+		return nil, fmt.Errorf("branch returned %d outcomes, expected one", len(rows))
+	}
+	return rows[0].Sandbox, rows[0].Error
+}
+
+// PauseWithGuestFlush uses the explicit-policy ABI; old libraries fail before pausing.
+func PauseWithGuestFlush(ctx context.Context, handle uint64, name, identity, policy string) error {
+	if err := ensureLoaded(); err != nil {
+		return err
+	}
+	if err := checkGuestFlush(policy, true); err != nil {
+		return err
+	}
+	if policy == "" {
+		policy = "auto"
+	}
+	cName, cIdentity, cPolicy := C.CString(name), C.CString(identity), C.CString(policy)
+	defer C.free(unsafe.Pointer(cName))
+	defer C.free(unsafe.Pointer(cIdentity))
+	defer C.free(unsafe.Pointer(cPolicy))
+	_, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, size C.size_t) *C.char {
+		return C.call_msb_sandbox_pause_with_guest_flush(cancelID, C.uint64_t(handle), cName, cIdentity, cPolicy, buf, size)
+	})
+	return err
+}
+
+func (s *Sandbox) PauseWithGuestFlush(ctx context.Context, policy string) error {
+	handle := s.handle.Load()
+	if handle == 0 {
+		return &Error{Kind: KindInvalidHandle, Message: "sandbox handle already closed"}
+	}
+	return PauseWithGuestFlush(ctx, handle, s.name, s.id, policy)
 }
 
 // Pause controls resident execution through the host runtime.
@@ -5302,6 +5382,7 @@ type SnapshotCreateOptions struct {
 	Force           bool              `json:"force,omitempty"`
 	RecordIntegrity bool              `json:"record_integrity,omitempty"`
 	Full            bool              `json:"full,omitempty"`
+	GuestFlush      string            `json:"guest_flush,omitempty"`
 }
 
 type SnapshotSaveOptions struct {
@@ -5336,6 +5417,11 @@ func SandboxHandleSnapshot(ctx context.Context, sandboxName, snapshotName string
 	if err := ensureLoaded(); err != nil {
 		return nil, err
 	}
+	// The convenience API uses disk Auto too; an old native library would silently
+	// retain unflushed live capture semantics. Require the same capability as Create.
+	if err := checkGuestFlush("", true); err != nil {
+		return nil, err
+	}
 	cSandbox := C.CString(sandboxName)
 	defer C.free(unsafe.Pointer(cSandbox))
 	cSnapshot := C.CString(snapshotName)
@@ -5355,6 +5441,9 @@ func SandboxHandleSnapshot(ctx context.Context, sandboxName, snapshotName string
 
 func SnapshotCreate(ctx context.Context, sourceSandbox string, opts SnapshotCreateOptions) (*SnapshotInfo, error) {
 	if err := ensureLoaded(); err != nil {
+		return nil, err
+	}
+	if err := checkGuestFlush(opts.GuestFlush, !opts.Full); err != nil {
 		return nil, err
 	}
 	payload, err := json.Marshal(opts)
@@ -5380,6 +5469,9 @@ func SnapshotCreate(ctx context.Context, sourceSandbox string, opts SnapshotCrea
 
 func SnapshotCreateArchive(ctx context.Context, sourceSandbox, archivePath string, opts SnapshotCreateOptions, plainTar bool) (*SnapshotArchiveInfo, error) {
 	if err := ensureLoaded(); err != nil {
+		return nil, err
+	}
+	if err := checkGuestFlush(opts.GuestFlush, !opts.Full); err != nil {
 		return nil, err
 	}
 	payload, err := json.Marshal(opts)

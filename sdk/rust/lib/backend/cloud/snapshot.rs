@@ -54,6 +54,9 @@ impl SnapshotBackend for CloudBackend {
         config: SnapshotConfig,
     ) -> BoxFuture<'a, MicrosandboxResult<Snapshot>> {
         Box::pin(async move {
+            if config.guest_flush != microsandbox_types::GuestFlush::Auto {
+                return Err(MicrosandboxError::local_only(Operation::SnapshotOps));
+            }
             if config.full {
                 return Err(MicrosandboxError::unsupported(
                     Operation::SnapshotOps,
@@ -598,6 +601,7 @@ mod tests {
 
     fn snapshot_config() -> SnapshotConfig {
         SnapshotConfig {
+            guest_flush: microsandbox_types::GuestFlush::Auto,
             name: "checkpoint".into(),
             dest_dir: None,
             source_sandbox: "source".into(),
@@ -683,6 +687,14 @@ mod tests {
     async fn full_capture_and_local_group_requests_reject_before_network_access() {
         let cloud = CloudBackend::new("https://example.invalid", "test-key").unwrap();
         let backend: Arc<dyn Backend> = Arc::new(cloud.clone());
+        for policy in [
+            microsandbox_types::GuestFlush::Required,
+            microsandbox_types::GuestFlush::Skip,
+        ] {
+            let mut config = snapshot_config();
+            config.guest_flush = policy;
+            assert_unsupported(SnapshotBackend::create(&cloud, backend.clone(), config).await);
+        }
         let mut full = snapshot_config();
         full.full = true;
         assert_unsupported(SnapshotBackend::create(&cloud, backend.clone(), full).await);
