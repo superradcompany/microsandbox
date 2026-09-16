@@ -1,0 +1,5 @@
+<svg viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- Official geometry from https://github.com/sst/opencode/blob/dev/packages/identity/mark.svg -->
+  <path d="M320 224V352H192V224H320Z" fill="#BF84FE" opacity="0.45"/>
+  <path fill-rule="evenodd" clip-rule="evenodd" d="M384 416H128V96H384V416ZM320 160H192V352H320V160Z" fill="#BF84FE"/>
+</svg>

@@ -15,18 +15,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .shell("echo 'shipped via snapshot' > /root/marker.txt && sync")
         .await?;
 
-    // Snapshots are stopped-only.
+    // Capture this example after stopping the source.
     baseline.stop().await?;
 
     let h = Sandbox::get("snapshot-baseline").await?;
     let snap = h.snapshot("snapshot-baseline-state").await?;
     println!("created snapshot: {}", snap.digest());
-    println!("                  {}", snap.path().display());
+    println!("        reference: {}", snap.reference().value());
 
-    let fork = Sandbox::builder("snapshot-fork")
-        .from_snapshot("snapshot-baseline-state")
-        .replace()
-        .create()
+    let fork = Sandbox::restore_ref(snap.reference())
+        .name("snapshot-fork")
+        .restore()
         .await?;
     let output = fork.shell("cat /root/marker.txt").await?;
     println!("fork sees: {}", output.stdout()?.trim());
@@ -35,7 +34,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     Sandbox::remove("snapshot-baseline").await?;
     Sandbox::remove("snapshot-fork").await?;
-    microsandbox::Snapshot::remove("snapshot-baseline-state", false).await?;
+    microsandbox::Snapshot::remove_ref(snap.reference(), false).await?;
 
     Ok(())
 }

@@ -1,13 +1,29 @@
 ---
 title: Volumes
 description: Rust SDK - Volume API reference
+keywords: ["Rust SDK", "Rust volumes", "microsandbox volumes"]
 ---
 
 Create, manage, and mount named volumes. See [Volumes](/sandboxes/volumes) for usage examples.
 
+## Sandbox-owned mounts
+
+Local storage can belong directly to a sandbox, with no volume name or separate cleanup:
+
+```rust
+let sb = Sandbox::builder("worker").image("alpine")
+    .volume("/cache", |v| v.owned())
+    .volume("/data", |v| v.owned_with(|d| d.disk().size(1024_u32)))
+    .create().await?;
+```
+
+`.owned()` creates an empty directory. `.owned_with(...)` accepts `.directory().quota(...)` or `.disk().size(...)`; disks are raw ext4 and require a positive size. Common mount flags stay on `MountBuilder`. The backing survives stop/start, is captured by snapshots and branches, and is removed with the sandbox. Restore makes private copies automatically. Cloud rejects owned mounts.
+
 ## Volume
 
 #### <span className="msb-recv">Volume::</span><span className="msb-hn">get_default()</span>
+
+<Tooltip tip="Available only on microsandbox cloud; the local backend has no default volume."><span className="msb-badge-cloud">Cloud-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```rust
 async fn get_default() -> MicrosandboxResult<VolumeHandle>
@@ -35,7 +51,7 @@ let vol = Volume::builder("pip-cache").create().await?;
 
 </Accordion>
 
-Create a builder for configuring a new named volume. Directory-backed volumes are the default; call [`.disk()`](#disk) then [`.size()`](#size) for a raw ext4 disk-image volume. Volume names must start with an alphanumeric character and contain only alphanumeric characters, dots, hyphens, and underscores. See [`VolumeBuilder`](#volumebuilder-2) for all options.
+Create a builder for configuring a new named volume. Directory-backed volumes are the default; call [`.disk()`](#volume_builder-disk) then [`.size()`](#volume_builder-size) for a raw ext4 disk-image volume. Volume names must start with an alphanumeric character and contain only alphanumeric characters, dots, hyphens, and underscores. See [`VolumeBuilder`](#volumebuilder-2) for all options.
 
 <p className="msb-label">Parameters</p>
 
@@ -56,6 +72,8 @@ Create a builder for configuring a new named volume. Directory-backed volumes ar
 </div>
 
 #### <span className="msb-recv">Volume::</span><span className="msb-hn">create()</span>
+
+<Tooltip tip="Microsandbox cloud creates directory volumes only; capacity is unavailable and quota must be a nonzero whole number of GiB."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```rust
 async fn create(config: VolumeConfig) -> MicrosandboxResult<Volume>
@@ -225,8 +243,6 @@ The storage kind: [`Directory`](#volumekind) or [`Disk`](#volumekind).
 
 #### <span className="msb-recv">vol.</span><span className="msb-hn">fs()</span>
 
-<Tooltip tip="Unmounted-volume filesystem access is not available on microsandbox cloud; mount the volume into a sandbox and use the sandbox filesystem."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
-
 ```rust
 fn fs(&self) -> VolumeFs<'_>
 ```
@@ -252,6 +268,8 @@ Get a filesystem handle for reading and writing the volume's files directly, wit
 
 #### <span className="msb-recv">vol.</span><span className="msb-hn">path()</span>
 
+<Tooltip tip="Only local volumes expose a path on the computer running the SDK."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```rust
 fn path(&self) -> MicrosandboxResult<&Path>
 ```
@@ -264,7 +282,7 @@ println!("{}", vol.path()?.display());
 
 </Accordion>
 
-The host-side directory where this volume's data is stored (local backend only). Errors with `Unsupported` for cloud volumes, whose bytes live in the org's object storage rather than on the caller's host.
+The host-side directory where this volume's data is stored.
 
 <p className="msb-label">Returns</p>
 
@@ -362,11 +380,13 @@ Which backend variant this volume is bound to: `Local` or `Cloud`.
 
 #### <span className="msb-recv">vol.</span><span className="msb-hn">local()</span>
 
+<Tooltip tip="Returns state only for local-backed volumes; None on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```rust
 fn local(&self) -> Option<&VolumeLocalState>
 ```
 
-Local-only volume state. Returns `Some` for local-backed volumes, `None` for cloud-backed ones.
+Returns `Some` for local-backed volumes and `None` otherwise.
 
 <p className="msb-label">Returns</p>
 
@@ -385,7 +405,7 @@ Local-only volume state. Returns `Some` for local-backed volumes, `None` for clo
 fn cloud(&self) -> Option<&VolumeCloudState>
 ```
 
-Cloud-only volume state. Returns `Some` for cloud-backed volumes, `None` for local-backed ones.
+Returns `Some` for cloud-backed volumes and `None` otherwise.
 
 <p className="msb-label">Returns</p>
 
@@ -438,8 +458,6 @@ The storage kind: [`Directory`](#volumekind) or [`Disk`](#volumekind).
 
 #### <span className="msb-recv">h.</span><span className="msb-hn">fs()</span>
 
-<Tooltip tip="Unmounted-volume filesystem access is not available on microsandbox cloud; mount the volume into a sandbox and use the sandbox filesystem."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
-
 ```rust
 fn fs(&self) -> VolumeFs<'_>
 ```
@@ -486,7 +504,7 @@ Delete this volume and its contents. Locally the database record is removed firs
 fn used_bytes(&self) -> u64
 ```
 
-Disk usage snapshot from when this handle was created. Not live, call [`Volume::get()`](#volumeget) again for a fresh reading.
+Disk usage snapshot from when this handle was created. Not live; call [`Volume::get()`](#volumeget) again for a fresh reading.
 
 <p className="msb-label">Returns</p>
 
@@ -635,11 +653,13 @@ Which backend variant this handle is bound to: `Local` or `Cloud`.
 
 #### <span className="msb-recv">h.</span><span className="msb-hn">local()</span>
 
+<Tooltip tip="Returns state only for local-backed volume handles; None on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```rust
 fn local(&self) -> Option<&VolumeHandleLocalState>
 ```
 
-Local-only handle state. Returns `Some` for local-backed handles, `None` for cloud-backed ones.
+Returns `Some` for local-backed handles and `None` otherwise.
 
 <p className="msb-label">Returns</p>
 
@@ -658,7 +678,7 @@ Local-only handle state. Returns `Some` for local-backed handles, `None` for clo
 fn cloud(&self) -> Option<&VolumeHandleCloudState>
 ```
 
-Cloud-only handle state. Returns `Some` for cloud-backed handles, `None` for local-backed ones.
+Returns `Some` for cloud-backed handles and `None` otherwise.
 
 <p className="msb-label">Returns</p>
 
@@ -676,8 +696,6 @@ Cloud-only handle state. Returns `Some` for cloud-backed handles, `None` for loc
 Host-side filesystem operations for a named volume.
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">read()</span>
-
-<Tooltip tip="Unmounted-volume filesystem access is not available on microsandbox cloud; mount the volume into a sandbox and use the sandbox filesystem."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```rust
 async fn read(&self, path: &str) -> MicrosandboxResult<Bytes>
@@ -713,8 +731,6 @@ Read an entire file into memory as raw bytes.
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">read_to_string()</span>
 
-<Tooltip tip="Unmounted-volume filesystem access is not available on microsandbox cloud; mount the volume into a sandbox and use the sandbox filesystem."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
-
 ```rust
 async fn read_to_string(&self, path: &str) -> MicrosandboxResult<String>
 ```
@@ -748,8 +764,6 @@ Read an entire file into memory as a UTF-8 string.
 </div>
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">read_stream()</span>
-
-<Tooltip tip="Unmounted-volume filesystem access is not available on microsandbox cloud; mount the volume into a sandbox and use the sandbox filesystem."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```rust
 async fn read_stream(&self, path: &str) -> MicrosandboxResult<VolumeFsReadStream>
@@ -788,8 +802,6 @@ Open a file for streaming reads. Returns a [`VolumeFsReadStream`](#volumefsreads
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">write()</span>
 
-<Tooltip tip="Unmounted-volume filesystem access is not available on microsandbox cloud; mount the volume into a sandbox and use the sandbox filesystem."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
-
 ```rust
 async fn write(&self, path: &str, data: impl AsRef<[u8]>) -> MicrosandboxResult<()>
 ```
@@ -818,8 +830,6 @@ Write data to a file, creating parent directories as needed. Overwrites if the f
 </div>
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">write_stream()</span>
-
-<Tooltip tip="Unmounted-volume filesystem access is not available on microsandbox cloud; mount the volume into a sandbox and use the sandbox filesystem."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```rust
 async fn write_stream(&self, path: &str) -> MicrosandboxResult<VolumeFsWriteSink>
@@ -1117,7 +1127,7 @@ Create a directory-backed named volume (mounted through virtiofs). This is the d
 fn disk(self) -> Self
 ```
 
-Create a raw ext4 disk-image named volume (mounted through virtio-blk). Requires [`.size()`](#size).
+Create a raw ext4 disk-image named volume (mounted through virtio-blk). Requires [`.size()`](#volume_builder-size).
 
 #### <span className="msb-recv">volume_builder.</span><span className="msb-hn">size()</span>
 
@@ -1154,13 +1164,13 @@ Set the disk volume's capacity. Required for disk volumes; rejected for director
 
 #### <span className="msb-recv">volume_builder.</span><span className="msb-hn">quota()</span>
 
-<Tooltip tip="On microsandbox cloud, quota sets a storage cap and must be a whole number of GiB."><span className="msb-badge-note">On cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On microsandbox cloud, quota must be a nonzero whole number of GiB."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```rust
 fn quota(self, size: impl Into<Mebibytes>) -> Self
 ```
 
-Limit a directory volume's storage. Accepts a bare `u32` (MiB) or a `SizeExt` helper such as `1.gib()`. Omit for unlimited growth (the default). Rejected for disk volumes, which size up front via [`.size()`](#size).
+Limit a directory volume's storage. Accepts a bare `u32` (MiB) or a `SizeExt` helper such as `1.gib()`. Omit for unlimited growth (the default). Rejected for disk volumes, which size up front via [`.size()`](#volume_builder-size).
 
 <p className="msb-label">Parameters</p>
 
@@ -1244,11 +1254,13 @@ Create the volume on the active backend. Equivalent to `Volume::create(self.buil
 
 ## MountBuilder
 
-<p className="msb-backref">Used by <a href="/sdk/rust/sandbox#volume">SandboxBuilder::volume()</a></p>
+<p className="msb-backref">Used by <a href="/sdk/rust/sandbox#sandbox-volume">SandboxBuilder::volume()</a></p>
 
 Builder for configuring a sandbox volume mount.
 
 #### <span className="msb-recv">mount.</span><span className="msb-hn">bind()</span>
+
+<Tooltip tip="On microsandbox cloud, the host path resolves against your organization's host volume, not the computer running the SDK."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```rust
 fn bind(self, host: impl Into<PathBuf>) -> Self
@@ -1271,7 +1283,7 @@ Bind mount a host directory into the guest. Changes in the guest are reflected o
 fn named(self, name: impl Into<String>) -> Self
 ```
 
-Mount a named volume created via [`Volume::create()`](#volumecreate). The volume must already exist. Persists across sandbox restarts and can be shared between sandboxes. For sandbox-time provisioning, use [`.named_with()`](#named_with).
+Mount a named volume created via [`Volume::create()`](#volumecreate). The volume must already exist. Persists across sandbox restarts and can be shared between sandboxes. For sandbox-time provisioning, use [`.named_with()`](#mount-named_with).
 
 <p className="msb-label">Parameters</p>
 
@@ -1311,7 +1323,7 @@ let sb = Sandbox::builder("worker")
 
 </Accordion>
 
-Mount a named volume with explicit sandbox-time existence behavior, configured via a [`NamedVolumeBuilder`](#namedvolumebuilder-2) closure. `existing` (the default) behaves like [`.named()`](#named); `create` provisions the volume and fails if it already exists; `ensure_exists` provisions it if missing or reuses a compatible existing volume. The ensure-exists mode validates existing metadata and errors when the kind, quota, capacity, or explicitly requested labels differ; it does not mutate existing metadata.
+Mount a named volume with explicit sandbox-time existence behavior, configured via a [`NamedVolumeBuilder`](#namedvolumebuilder) closure. `existing` (the default) behaves like [`.named()`](#mount-named); `create` provisions the volume and fails if it already exists; `ensure_exists` provisions it if missing or reuses a compatible existing volume. The ensure-exists mode validates existing metadata and errors when the kind, quota, capacity, or explicitly requested labels differ; it does not mutate existing metadata.
 
 <p className="msb-label">Parameters</p>
 
@@ -1321,7 +1333,7 @@ Mount a named volume with explicit sandbox-time existence behavior, configured v
     <div className="msb-param-desc">Volume name.</div>
   </div>
   <div className="msb-param">
-    <div className="msb-param-key"><code>f</code><a className="msb-type" href="#namedvolumebuilder-2">FnOnce(NamedVolumeBuilder)</a></div>
+    <div className="msb-param-key"><code>f</code><a className="msb-type" href="#namedvolumebuilder">FnOnce(NamedVolumeBuilder)</a></div>
     <div className="msb-param-desc">Configure existence behavior and creation metadata.</div>
   </div>
 </div>
@@ -1336,7 +1348,7 @@ Use an in-memory filesystem. Contents are discarded when the sandbox stops. Good
 
 #### <span className="msb-recv">mount.</span><span className="msb-hn">disk()</span>
 
-<Tooltip tip="On microsandbox cloud, the disk-image path resolves against your organization's host volume, not the computer running the SDK or CLI."><span className="msb-badge-note">On cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On microsandbox cloud, the disk-image path resolves against your organization's host volume, not the computer running the SDK or CLI."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 <a id="mb-disk"></a>
 
@@ -1344,7 +1356,7 @@ Use an in-memory filesystem. Contents are discarded when the sandbox stops. Good
 fn disk(self, host: impl Into<PathBuf>) -> Self
 ```
 
-Mount a host disk-image file as a virtio-blk device at the guest path. The format defaults from the file extension (`.qcow2`, `.vmdk`; anything else is `Raw`). Override with [`.format()`](#format).
+Mount a host disk-image file as a virtio-blk device at the guest path. The format defaults from the file extension (`.qcow2`, `.vmdk`; anything else is `Raw`). Override with [`.format()`](#mount-format).
 
 <p className="msb-label">Parameters</p>
 
@@ -1455,6 +1467,22 @@ Set the host permission propagation policy for a virtiofs-backed mount. Default:
   </div>
 </div>
 
+#### <span className="msb-recv">mount.</span><span className="msb-hn">owner()</span>
+
+```rust
+fn owner(self, uid: u32, gid: u32) -> Self
+```
+
+Present host files without a per-file stat override as the specified guest owner. Existing per-file overrides still take precedence, and the host inode is not changed. Valid only for bind and directory-backed named-volume mounts with stat virtualization enabled; tmpfs, disk images, disk-backed named volumes, and `StatVirtualization::Off` are rejected.
+
+```rust
+let sb = Sandbox::builder("worker")
+    .image("python")
+    .volume("/workspace", |mount| mount.bind("./workspace").owner(1000, 1000))
+    .create()
+    .await?;
+```
+
 #### <span className="msb-recv">mount.</span><span className="msb-hn">size()</span>
 
 <a id="mb-size"></a>
@@ -1463,7 +1491,7 @@ Set the host permission propagation policy for a virtiofs-backed mount. Default:
 fn size(self, size: impl Into<Mebibytes>) -> Self
 ```
 
-Set the size limit for a [`.tmpfs()`](#tmpfs) mount. Accepts a bare `u32` (MiB) or a `SizeExt` helper such as `1.gib()`. Valid only for tmpfs mounts.
+Set the size limit for a [`.tmpfs()`](#mount-tmpfs) mount. Accepts a bare `u32` (MiB) or a `SizeExt` helper such as `1.gib()`. Valid only for tmpfs mounts.
 
 <p className="msb-label">Parameters</p>
 
@@ -1482,7 +1510,7 @@ Set the size limit for a [`.tmpfs()`](#tmpfs) mount. Accepts a bare `u32` (MiB) 
 fn build(self) -> MicrosandboxResult<VolumeMount>
 ```
 
-Validate and materialize the mount. Usually called internally by `SandboxBuilder::volume`; call it directly only when assembling a [`VolumeMount`](#mountbuilder-2) by hand. Errors when no mount kind is set, the guest path is not absolute or is `/`, or a kind-specific option was set on the wrong mount kind.
+Validate and materialize the mount. Usually called internally by `SandboxBuilder::volume`; call it directly only when assembling a [`VolumeMount`](#mountbuilder) by hand. Errors when no mount kind is set, the guest path is not absolute or is `/`, or a kind-specific option was set on the wrong mount kind.
 
 <p className="msb-label">Returns</p>
 
@@ -1495,12 +1523,9 @@ Validate and materialize the mount. Usually called internally by `SandboxBuilder
 
 ## NamedVolumeBuilder
 
-Sub-builder for [`MountBuilder::named_with()`](#named_with). Selects sandbox-time existence behavior and creation metadata.
+<p className="msb-backref">Used by <a href="#mount-named_with">MountBuilder::named_with()</a></p>
 
-<p className="msb-backref">Used by <a href="#named_with">MountBuilder::named_with()</a></p>
-
-
-Sub-builder for [`MountBuilder::named_with()`](#named_with). Selects the sandbox-time existence behavior and, for `create` / `ensure_exists`, the creation metadata. Defaults to `existing` and directory-backed.
+Sub-builder for [`MountBuilder::named_with()`](#mount-named_with). Selects the sandbox-time existence behavior and, for `create` / `ensure_exists`, the creation metadata. Defaults to `existing` and directory-backed.
 
 #### <span className="msb-recv">named.</span><span className="msb-hn">existing()</span>
 
@@ -1540,7 +1565,7 @@ Create the named volume if it is missing, or reuse a compatible existing volume.
 fn name(self, name: impl Into<String>) -> Self
 ```
 
-Override the volume name passed to [`named_with()`](#named_with).
+Override the volume name passed to [`named_with()`](#mount-named_with).
 
 <p className="msb-label">Parameters</p>
 
@@ -1596,7 +1621,7 @@ Set disk capacity for a created disk volume. Accepts a bare `u32` (MiB) or a `Si
 
 #### <span className="msb-recv">named.</span><span className="msb-hn">quota()</span>
 
-<Tooltip tip="On microsandbox cloud, quota sets a storage cap and must be a whole number of GiB."><span className="msb-badge-note">On cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On microsandbox cloud, quota must be a nonzero whole number of GiB."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 <a id="nv-quota"></a>
 
@@ -1640,11 +1665,9 @@ Attach a label to a newly-created volume. For `ensure_exists`, requested labels 
 
 ## VolumeFsReadStream
 
-
-A streaming reader for file data from a local volume directory. Returned by [`VolumeFs::read_stream()`](#fs-read_stream).
-
 <p className="msb-backref">Returned by <a href="#fs-read_stream">VolumeFs::read_stream()</a></p>
 
+A streaming reader for file data from a local volume directory.
 
 #### <span className="msb-recv">stream.</span><span className="msb-hn">recv()</span>
 
@@ -1672,11 +1695,9 @@ Read the rest into one buffer
 
 ## VolumeFsWriteSink
 
-
-A streaming writer for file data to a local volume directory. Returned by [`VolumeFs::write_stream()`](#fs-write_stream).
-
 <p className="msb-backref">Returned by <a href="#fs-write_stream">VolumeFs::write_stream()</a></p>
 
+A streaming writer for file data to a local volume directory.
 
 #### <span className="msb-recv">sink.</span><span className="msb-hn">write()</span>
 
@@ -1723,7 +1744,7 @@ Configuration for creating a named volume. Re-exported as both `VolumeSpec` and 
 
 ### MountOptions
 
-Guest mount behavior shared by every mount kind. Set via the [`MountBuilder`](#mountbuilder-2) toggles; all fields default to `false`.
+Guest mount behavior shared by every mount kind. Set via the [`MountBuilder`](#mountbuilder) toggles; all fields default to `false`.
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -1731,10 +1752,12 @@ Guest mount behavior shared by every mount kind. Set via the [`MountBuilder`](#m
 | `noexec` | `bool` | Direct execution from the mount is disabled |
 | `nosuid` | `bool` | setuid/setgid elevation from files on the mount is ignored |
 | `nodev` | `bool` | Device files on the mount are ignored |
+| `override_uid` | `Option<u32>` | Guest uid fallback for host files without a per-file override; set together with `override_gid` via [`MountBuilder::owner()`](#mount-owner) |
+| `override_gid` | `Option<u32>` | Guest gid fallback for host files without a per-file override; set together with `override_uid` via [`MountBuilder::owner()`](#mount-owner) |
 
 ### StatVirtualization
 
-Stat virtualization policy for a virtiofs-backed mount. Default: `Strict`. Set via [`MountBuilder::stat_virtualization()`](#stat_virtualization).
+Stat virtualization policy for a virtiofs-backed mount. Default: `Strict`. Set via [`MountBuilder::stat_virtualization()`](#mount-stat_virtualization).
 
 | Variant | Description |
 |---------|-------------|
@@ -1744,7 +1767,7 @@ Stat virtualization policy for a virtiofs-backed mount. Default: `Strict`. Set v
 
 ### HostPermissions
 
-Host permission propagation policy for a virtiofs-backed mount. Default: `Private`. Set via [`MountBuilder::host_permissions()`](#host_permissions).
+Host permission propagation policy for a virtiofs-backed mount. Default: `Private`. Set via [`MountBuilder::host_permissions()`](#mount-host_permissions).
 
 | Variant | Description |
 |---------|-------------|
@@ -1753,7 +1776,7 @@ Host permission propagation policy for a virtiofs-backed mount. Default: `Privat
 
 ### DiskImageFormat
 
-Disk image format for virtio-blk root filesystems and volume mounts. Used by [`MountBuilder::format()`](#format).
+Disk image format for virtio-blk root filesystems and volume mounts. Used by [`MountBuilder::format()`](#mount-format).
 
 | Variant | Description |
 |---------|-------------|
@@ -1763,7 +1786,7 @@ Disk image format for virtio-blk root filesystems and volume mounts. Used by [`M
 
 ### NamedVolumeMode
 
-Sandbox-time behavior for a named volume mount, chosen via [`NamedVolumeBuilder`](#namedvolumebuilder-2).
+Sandbox-time behavior for a named volume mount, chosen via [`NamedVolumeBuilder`](#namedvolumebuilder).
 
 | Variant | Description |
 |---------|-------------|

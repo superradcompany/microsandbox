@@ -1,0 +1,127 @@
+{
+  "db_path": "/compat-home/db/msb.db",
+  "db_connect_timeout_secs": 30,
+  "log_dir": "/compat-home/sandboxes/legacy-offline/logs",
+  "runtime_dir": "/compat-home/sandboxes/legacy-offline/runtime",
+  "sandboxes_dir": "/compat-home/sandboxes",
+  "run_dir": "/compat-home/run",
+  "cpu_lease_dir": "/compat-home/run/cpu-leases",
+  "writeback_lease_dir": "/compat-home/run/writeback-leases",
+  "cpu_placement": "inherit",
+  "agent_sock": "/compat-home/run/sandboxes/b3e0339bac0097912fb15a0e/agent.sock",
+  "libkrunfw_path": "/compat-runtime/libkrunfw.5.dylib",
+  "thp": "madvise",
+  "startup": null,
+  "lifecycle": {
+    "max_duration_secs": null,
+    "idle_timeout_secs": null
+  },
+  "metrics": {
+    "sample_interval_ms": 1000,
+    "disabled": false,
+    "slot": null
+  },
+  "rootfs": {
+    "path": null,
+    "follow_root_symlinks": false,
+    "disk": "/compat-home/cache/vmdk/sha256_e7a1a92a5bfeee40966aea60f0796b0e7917cc35591542701834f03a68fa3d18.vmdk",
+    "disk_format": "vmdk",
+    "disk_readonly": false,
+    "upper": "/compat-home/sandboxes/legacy-offline/upper.ext4"
+  },
+  "mounts": [],
+  "file_mounts": [],
+  "disks": [],
+  "init_path": null,
+  "bootstrap": {
+    "block_root": {
+      "kind": "oci-erofs",
+      "lower": "/dev/vda",
+      "upper": {
+        "kind": "device",
+        "device": "/dev/vdb",
+        "fstype": "ext4"
+      }
+    },
+    "tmpfs_mounts": [
+      {
+        "path": "/tmp",
+        "size_mib": 64,
+        "flags": {
+          "readonly": false,
+          "noexec": false,
+          "nosuid": false,
+          "nodev": false
+        }
+      }
+    ],
+    "hostname": "legacy-offline",
+    "default_cwd": "/",
+    "default_env": [
+      {
+        "key": "PATH",
+        "value": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+      }
+    ],
+    "security_profile": "default"
+  },
+  "exec_path": null,
+  "exec_args": [],
+  "network": {
+    "config": {
+      "enabled": true,
+      "interface": {
+        "mac": null,
+        "mtu": null,
+        "ipv4_address": null,
+        "ipv4_pool": null,
+        "ipv6_address": null,
+        "ipv6_pool": null
+      },
+      "ports": [],
+      "policy": {
+        "default_egress": "deny",
+        "default_ingress": "deny",
+        "rules": []
+      },
+      "dns": {
+        "rebind_protection": true,
+        "nameservers": [],
+        "query_timeout_ms": 5000
+      },
+      "tls": {
+        "enabled": false,
+        "intercepted_ports": [
+          443
+        ],
+        "bypass": [],
+        "verify_upstream": true,
+        "block_quic_on_intercept": true,
+        "upstream_ca_cert": [],
+        "scoped_upstream_ca_cert": [],
+        "scoped_verify_upstream": [],
+        "intercept_ca": {
+          "cert_path": null,
+          "key_path": null
+        },
+        "cache": {
+          "capacity": 1000,
+          "validity_hours": 24
+        }
+      },
+      "strict": false,
+      "secrets": {
+        "secrets": [],
+        "on_violation": "block-and-log"
+      },
+      "max_connections": null,
+      "rate_limiter": null,
+      "trust_host_cas": false,
+      "outbound_proxy": null
+    },
+    "outbound_proxy": null
+  },
+  "deployment_profile": "single_tenant",
+  "sandbox_slot": 1,
+  "vsock": []
+}

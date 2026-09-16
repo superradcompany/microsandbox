@@ -6,17 +6,17 @@ use std::path::{Path, PathBuf};
 
 use base64::Engine;
 use microsandbox::sandbox::{
-    DiskImageFormat, FilesystemConfigPatch, HostPermissions, InitConfigPatch, MountBuilder, Patch,
-    PullPolicy, ResourceConfigPatch, Rlimit, RlimitResource, RuntimeConfigPatch, SandboxBuilder,
-    SandboxConfigPatch, SandboxImagePatch, ScriptConfigPatch, SecurityProfile, StatVirtualization,
-    VolumeMount,
+    DiskImageFormat, EnvVar, HandoffInit, HostPermissions, MountBuilder, Patch, PullPolicy, Rlimit,
+    RlimitResource, SandboxBuilder, SandboxConfigPatch, SandboxPolicyPatch, SandboxResourcesPatch,
+    SandboxRuntimeOptionsPatch, SecurityProfile, StatVirtualization, VolumeMount,
 };
 #[cfg(feature = "net")]
 use microsandbox::sandbox::{
-    DnsConfigPatch, NetworkConfigPatch, NetworkPolicyConfigPatch, SecretConfigPatch,
-    SecretEntryConfigPatch, TlsConfigPatch,
+    DnsConfigPatch, NetworkPolicy, NetworkProfile, NetworkSpecPatch, SecretsConfigPatch,
+    TlsConfigPatch,
 };
 use microsandbox_image::RegistryAuth;
+use microsandbox_types_macros::ConfigPatch;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -26,7 +26,8 @@ use serde_saphyr::{DuplicateKeyPolicy, MergeKeyPolicy, Options};
 #[cfg(test)]
 use crate::commands::common::SandboxOpts;
 use crate::commands::common::{
-    SandboxConfigKind, SandboxConfigSources, parse_duration_secs, validate_shell,
+    SandboxConfigKind, SandboxConfigSources, materialize_bind_mount, parse_duration_secs,
+    validate_shell,
 };
 use crate::ui;
 
@@ -43,8 +44,9 @@ const MAX_CONFIG_BYTES: usize = 16 * 1024 * 1024;
 /// A merged sparse single-sandbox configuration ready to lower into the SDK builder.
 pub struct ResolvedSandboxConfig {
     #[cfg(test)]
-    patch: SandboxPatch,
-    sdk_patch: SandboxConfigPatch,
+    input: SandboxConfigInput,
+    config_patch: SandboxConfigPatch,
+    config_scripts: BTreeMap<String, String>,
     image: Option<ResolvedImage>,
     registry_auth: Option<RegistryAuth>,
     loaded: bool,
@@ -93,9 +95,9 @@ pub enum ResolvedImage {
 // Types: Sparse Schema
 //--------------------------------------------------------------------------------------------------
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, ConfigPatch)]
 #[serde(default, deny_unknown_fields)]
-struct SandboxPatch {
+struct SandboxConfigInput {
     image: Option<ImageInput>,
     pull_policy: Option<PullPolicyInput>,
     registry: Option<RegistryInput>,
@@ -111,21 +113,28 @@ struct SandboxPatch {
     security: Option<SecurityInput>,
     entrypoint: Option<Vec<String>>,
     cmd: Option<Vec<String>>,
+    #[config_patch(merge)]
     env: Option<BTreeMap<String, String>>,
+    #[config_patch(merge)]
     labels: Option<BTreeMap<String, String>>,
+    #[config_patch(nested)]
     init: Option<InitInput>,
     mounts: Option<Vec<MountInput>>,
     patch_files: Option<Vec<PathBuf>>,
     patches: Option<Vec<PatchInput>>,
+    #[config_patch(merge_with = merge_network)]
     network: Option<NetworkInput>,
+    #[config_patch(merge_with = merge_secrets)]
     secrets: Option<BTreeMap<String, SecretInput>>,
+    secret_violation_action: Option<microsandbox_types::SecretViolationAction>,
+    #[config_patch(merge)]
     scripts: Option<BTreeMap<String, String>>,
     ports: Option<Vec<String>>,
 }
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-struct ResourcePatch {
+struct ResourceConfigInput {
     cpus: Option<u8>,
     memory: Option<String>,
     max_duration: Option<String>,
@@ -135,7 +144,7 @@ struct ResourcePatch {
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-struct RuntimePatch {
+struct RuntimeConfigInput {
     workdir: Option<String>,
     shell: Option<String>,
     user: Option<String>,
@@ -150,7 +159,7 @@ struct RuntimePatch {
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-struct FilesystemPatch {
+struct FilesystemConfigInput {
     mounts: Option<Vec<MountInput>>,
     patch_files: Option<Vec<PathBuf>>,
     patches: Option<Vec<PatchInput>>,
@@ -205,11 +214,12 @@ struct RlimitInput {
     hard: Option<u64>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, ConfigPatch)]
 #[serde(default, deny_unknown_fields)]
 struct InitInput {
     cmd: Option<String>,
     args: Option<Vec<String>>,
+    #[config_patch(merge)]
     env: Option<BTreeMap<String, String>>,
 }
 
@@ -237,6 +247,8 @@ struct MountObject {
     nodev: Option<bool>,
     stat_virtualization: Option<StatVirtualizationInput>,
     host_permissions: Option<HostPermissionsInput>,
+    uid: Option<u32>,
+    gid: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -361,7 +373,7 @@ struct AppendPatchInput {
 #[serde(untagged)]
 enum NetworkInput {
     Preset(NetworkPreset),
-    Object(NetworkPatch),
+    Object(NetworkConfigInput),
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -372,20 +384,25 @@ enum NetworkPreset {
     Open,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, ConfigPatch)]
 #[serde(default, deny_unknown_fields)]
-struct NetworkPatch {
+struct NetworkConfigInput {
     policy: Option<NetworkPreset>,
     allow: Option<Vec<String>>,
     deny: Option<Vec<String>>,
     ports: Option<Vec<String>>,
+    #[config_patch(nested)]
     dns: Option<DnsInput>,
+    #[config_patch(nested)]
     tls: Option<TlsInput>,
+    strict: Option<bool>,
     trust_host_cas: Option<bool>,
-    max_connections: Option<usize>,
+    #[serde(alias = "max_connections")]
+    max_tcp_connections: Option<usize>,
+    max_udp_connections: Option<usize>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, ConfigPatch)]
 #[serde(default, deny_unknown_fields)]
 struct DnsInput {
     rebind_protection: Option<bool>,
@@ -393,7 +410,7 @@ struct DnsInput {
     query_timeout: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, ConfigPatch)]
 #[serde(default, deny_unknown_fields)]
 struct TlsInput {
     enabled: Option<bool>,
@@ -402,12 +419,16 @@ struct TlsInput {
     block_quic: Option<bool>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, ConfigPatch)]
 #[serde(default, deny_unknown_fields)]
 struct SecretInput {
     value: Option<SecretValueInput>,
+    placeholder: Option<String>,
     allow: Option<Vec<String>>,
-    inject: Option<Vec<SecretInjectionInput>>,
+    #[config_patch(nested)]
+    substitution: Option<SecretSubstitutionInput>,
+    passthrough: Option<Vec<String>>,
+    violation_action: Option<microsandbox_types::SecretViolationAction>,
     require_tls_identity: Option<bool>,
 }
 
@@ -422,12 +443,12 @@ enum SecretValueInput {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum SecretInjectionInput {
-    Headers,
-    BasicAuth,
-    QueryParams,
+#[derive(Debug, Clone, Default, Deserialize, ConfigPatch)]
+#[serde(default, deny_unknown_fields)]
+struct SecretSubstitutionInput {
+    headers: Option<bool>,
+    query: Option<bool>,
+    body: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -437,43 +458,15 @@ struct PatchFileInput {
 }
 
 //--------------------------------------------------------------------------------------------------
-// Methods: Sparse Merging
+// Methods: Normalization
 //--------------------------------------------------------------------------------------------------
 
-impl SandboxPatch {
-    fn merge(&mut self, higher: Self) {
-        replace(&mut self.image, higher.image);
-        replace(&mut self.pull_policy, higher.pull_policy);
-        replace(&mut self.registry, higher.registry);
-        replace(&mut self.cpus, higher.cpus);
-        replace(&mut self.memory, higher.memory);
-        replace(&mut self.max_duration, higher.max_duration);
-        replace(&mut self.idle_timeout, higher.idle_timeout);
-        replace(&mut self.rlimits, higher.rlimits);
-        replace(&mut self.workdir, higher.workdir);
-        replace(&mut self.shell, higher.shell);
-        replace(&mut self.user, higher.user);
-        replace(&mut self.hostname, higher.hostname);
-        replace(&mut self.security, higher.security);
-        replace(&mut self.entrypoint, higher.entrypoint);
-        replace(&mut self.cmd, higher.cmd);
-        merge_map(&mut self.env, higher.env);
-        merge_map(&mut self.labels, higher.labels);
-        merge_init(&mut self.init, higher.init);
-        replace(&mut self.mounts, higher.mounts);
-        replace(&mut self.patch_files, higher.patch_files);
-        replace(&mut self.patches, higher.patches);
-        merge_network(&mut self.network, higher.network);
-        merge_secrets(&mut self.secrets, higher.secrets);
-        merge_map(&mut self.scripts, higher.scripts);
-        replace(&mut self.ports, higher.ports);
-    }
-
+impl SandboxConfigInput {
     fn normalize(&mut self) {
         if let Some(ports) = self.ports.take() {
             let network = self
                 .network
-                .get_or_insert_with(|| NetworkInput::Object(NetworkPatch::default()));
+                .get_or_insert_with(|| NetworkInput::Object(NetworkConfigInput::default()));
             network.object_mut().ports = Some(match network.object_mut().ports.take() {
                 Some(mut nested) => {
                     nested.extend(ports);
@@ -486,27 +479,27 @@ impl SandboxPatch {
 }
 
 impl NetworkInput {
-    fn into_object(self) -> NetworkPatch {
+    fn into_object(self) -> NetworkConfigInput {
         match self {
-            Self::Preset(policy) => NetworkPatch {
+            Self::Preset(policy) => NetworkConfigInput {
                 policy: Some(policy),
-                ..NetworkPatch::default()
+                ..NetworkConfigInput::default()
             },
-            Self::Object(patch) => patch,
+            Self::Object(input) => input,
         }
     }
 
-    fn object_mut(&mut self) -> &mut NetworkPatch {
+    fn object_mut(&mut self) -> &mut NetworkConfigInput {
         if let Self::Preset(policy) = self {
-            *self = Self::Object(NetworkPatch {
+            *self = Self::Object(NetworkConfigInput {
                 policy: Some(*policy),
-                ..NetworkPatch::default()
+                ..NetworkConfigInput::default()
             });
         }
-        let Self::Object(patch) = self else {
+        let Self::Object(input) = self else {
             unreachable!("preset was normalized to an object")
         };
-        patch
+        input
     }
 }
 
@@ -547,7 +540,17 @@ impl ResolvedSandboxConfig {
 
     /// Apply the typed sparse patch to an SDK builder.
     pub fn apply(&self, builder: SandboxBuilder) -> anyhow::Result<SandboxBuilder> {
-        Ok(builder.configure(self.sdk_patch.clone()))
+        let builder = match &self.image {
+            Some(image) => image.apply(builder)?,
+            None => builder,
+        };
+        let mut builder = builder
+            .overlay(self.config_patch.clone())
+            .config_scripts(self.config_scripts.clone());
+        if let Some(auth) = self.registry_auth.clone() {
+            builder = builder.registry(|registry| registry.auth(auth));
+        }
+        Ok(builder)
     }
 }
 
@@ -636,8 +639,7 @@ impl From<HostPermissionsInput> for HostPermissions {
 
 /// Load and merge the root and scoped sparse configuration inputs.
 pub fn resolve(sources: &SandboxConfigSources) -> anyhow::Result<ResolvedSandboxConfig> {
-    let mut patch = SandboxPatch::default();
-    let mut sdk_patch = SandboxConfigPatch::new();
+    let mut input = SandboxConfigInput::default();
     let mut image = None;
     let mut registry_auth = None;
     for source in sources.iter() {
@@ -662,35 +664,30 @@ pub fn resolve(sources: &SandboxConfigSources) -> anyhow::Result<ResolvedSandbox
                 if contribution_registry_auth.is_some() {
                     registry_auth = contribution_registry_auth.clone();
                 }
-                sdk_patch = sdk_patch.overlay(materialize_sandbox_patch(
-                    &contribution,
-                    contribution_image.as_ref(),
-                    contribution_registry_auth,
-                )?);
                 contribution
             }
             SandboxConfigKind::Network => {
                 reject_scoped_wrapper(&source.path, "network", "--net-conf")?;
-                let network = load_typed::<NetworkPatch>(&source.path, "network config")?;
-                SandboxPatch {
+                let network = load_typed::<NetworkConfigInput>(&source.path, "network config")?;
+                SandboxConfigInput {
                     network: Some(NetworkInput::Object(network)),
-                    ..SandboxPatch::default()
+                    ..SandboxConfigInput::default()
                 }
             }
             SandboxConfigKind::Resources => {
-                let scoped = load_typed::<ResourcePatch>(&source.path, "resource config")?;
-                SandboxPatch {
+                let scoped = load_typed::<ResourceConfigInput>(&source.path, "resource config")?;
+                SandboxConfigInput {
                     cpus: scoped.cpus,
                     memory: scoped.memory,
                     max_duration: scoped.max_duration,
                     idle_timeout: scoped.idle_timeout,
                     rlimits: scoped.rlimits,
-                    ..SandboxPatch::default()
+                    ..SandboxConfigInput::default()
                 }
             }
             SandboxConfigKind::Runtime => {
-                let scoped = load_typed::<RuntimePatch>(&source.path, "runtime config")?;
-                SandboxPatch {
+                let scoped = load_typed::<RuntimeConfigInput>(&source.path, "runtime config")?;
+                SandboxConfigInput {
                     workdir: scoped.workdir,
                     shell: scoped.shell,
                     user: scoped.user,
@@ -701,17 +698,18 @@ pub fn resolve(sources: &SandboxConfigSources) -> anyhow::Result<ResolvedSandbox
                     env: scoped.env,
                     labels: scoped.labels,
                     init: scoped.init,
-                    ..SandboxPatch::default()
+                    ..SandboxConfigInput::default()
                 }
             }
             SandboxConfigKind::Filesystem => {
-                let mut scoped = load_typed::<FilesystemPatch>(&source.path, "filesystem config")?;
-                absolutize_filesystem_patch(&mut scoped, config_base(&source.path)?);
-                SandboxPatch {
+                let mut scoped =
+                    load_typed::<FilesystemConfigInput>(&source.path, "filesystem config")?;
+                absolutize_filesystem_input(&mut scoped, config_base(&source.path)?);
+                SandboxConfigInput {
                     mounts: scoped.mounts,
                     patch_files: scoped.patch_files,
                     patches: scoped.patches,
-                    ..SandboxPatch::default()
+                    ..SandboxConfigInput::default()
                 }
             }
             SandboxConfigKind::Secrets => {
@@ -721,55 +719,73 @@ pub fn resolve(sources: &SandboxConfigSources) -> anyhow::Result<ResolvedSandbox
                     "secret config",
                     vec!["secrets".to_string()],
                 )?;
-                SandboxPatch {
+                SandboxConfigInput {
                     secrets: Some(secrets),
-                    ..SandboxPatch::default()
+                    ..SandboxConfigInput::default()
                 }
             }
             SandboxConfigKind::Scripts => {
                 reject_scoped_wrapper(&source.path, "scripts", "--script-conf")?;
                 let scripts =
                     load_typed::<BTreeMap<String, String>>(&source.path, "script config")?;
-                SandboxPatch {
+                SandboxConfigInput {
                     scripts: Some(scripts),
-                    ..SandboxPatch::default()
+                    ..SandboxConfigInput::default()
                 }
             }
         };
 
-        // Root sources are materialized above so their resolved image and registry credentials are
-        // captured with the contribution that declared them. Scoped sources need no such context.
-        if source.kind != SandboxConfigKind::Root {
-            sdk_patch = sdk_patch.overlay(materialize_sandbox_patch(&contribution, None, None)?);
-        }
-        patch.merge(contribution);
+        SandboxConfigInputPatch::from_present_fields(contribution).apply_to(&mut input);
     }
 
-    patch.normalize();
+    input.normalize();
+
+    let config_scripts = input.scripts.clone().unwrap_or_default();
+    for name in config_scripts.keys() {
+        validate_script_name(name)?;
+    }
+
+    let config_patch = materialize_config_patch(&input)?;
+    #[cfg(feature = "net")]
+    let config_patch = {
+        let network = materialize_network_patch(
+            input.network.as_ref(),
+            input.secrets.as_ref(),
+            input.secret_violation_action.as_ref(),
+        )?;
+        config_patch.network(network)
+    };
+    #[cfg(not(feature = "net"))]
+    if input.network.is_some() || input.secrets.is_some() || input.secret_violation_action.is_some()
+    {
+        anyhow::bail!("network and secret config require an msb build with networking enabled");
+    }
+
     Ok(ResolvedSandboxConfig {
         #[cfg(test)]
-        patch,
-        sdk_patch,
+        input,
+        config_patch,
+        config_scripts,
         image,
         registry_auth,
         loaded: sources.any(),
     })
 }
 
-fn load_root(path: &Path) -> anyhow::Result<SandboxPatch> {
+fn load_root(path: &Path) -> anyhow::Result<SandboxConfigInput> {
     let mut value = parse_yaml_value(path, "sandbox configuration")?;
     reject_project_only_fields(&value, path)?;
     interpolate_value(&mut value, &mut Vec::new()).map_err(|err| {
         anyhow::anyhow!("invalid sandbox configuration {}: {err}", path.display())
     })?;
-    let mut patch: SandboxPatch = serde_json::from_value(value).map_err(|err| {
+    let mut input: SandboxConfigInput = serde_json::from_value(value).map_err(|err| {
         anyhow::anyhow!("invalid sandbox configuration {}: {err}", path.display())
     })?;
-    absolutize_patch(&mut patch, config_base(path)?);
+    absolutize_input(&mut input, config_base(path)?);
     // Top-level `ports` is syntax sugar within this source. Normalize it before higher-precedence
     // scoped sources merge so a later network list can replace the root list as documented.
-    patch.normalize();
-    Ok(patch)
+    input.normalize();
+    Ok(input)
 }
 
 fn load_typed<T: DeserializeOwned>(path: &Path, kind: &str) -> anyhow::Result<T> {
@@ -972,48 +988,10 @@ fn config_base(path: &Path) -> anyhow::Result<PathBuf> {
         .to_path_buf())
 }
 
-fn replace<T>(base: &mut Option<T>, higher: Option<T>) {
-    if higher.is_some() {
-        *base = higher;
-    }
-}
-
-fn merge_map<K: Ord, V>(base: &mut Option<BTreeMap<K, V>>, higher: Option<BTreeMap<K, V>>) {
-    let Some(higher) = higher else {
-        return;
-    };
-    base.get_or_insert_with(BTreeMap::new).extend(higher);
-}
-
-fn merge_init(base: &mut Option<InitInput>, higher: Option<InitInput>) {
-    let Some(higher) = higher else {
-        return;
-    };
-    let base = base.get_or_insert_with(InitInput::default);
-    replace(&mut base.cmd, higher.cmd);
-    replace(&mut base.args, higher.args);
-    merge_map(&mut base.env, higher.env);
-}
-
-fn merge_secrets(
-    base: &mut Option<BTreeMap<String, SecretInput>>,
-    higher: Option<BTreeMap<String, SecretInput>>,
-) {
-    let Some(higher) = higher else {
-        return;
-    };
-    let base = base.get_or_insert_with(BTreeMap::new);
+fn merge_secrets(base: &mut BTreeMap<String, SecretInput>, higher: BTreeMap<String, SecretInput>) {
     for (name, higher) in higher {
         match base.get_mut(&name) {
-            Some(current) => {
-                replace(&mut current.value, higher.value);
-                replace(&mut current.allow, higher.allow);
-                replace(&mut current.inject, higher.inject);
-                replace(
-                    &mut current.require_tls_identity,
-                    higher.require_tls_identity,
-                );
-            }
+            Some(current) => SecretInputPatch::from_present_fields(higher).apply_to(current),
             None => {
                 base.insert(name, higher);
             }
@@ -1021,76 +999,51 @@ fn merge_secrets(
     }
 }
 
-fn merge_network(base: &mut Option<NetworkInput>, higher: Option<NetworkInput>) {
-    let Some(higher) = higher else {
-        return;
-    };
+fn merge_network(base: &mut NetworkInput, higher: NetworkInput) {
     let higher = higher.into_object();
-    let base = base
-        .get_or_insert_with(|| NetworkInput::Object(NetworkPatch::default()))
-        .object_mut();
-    replace(&mut base.policy, higher.policy);
-    replace(&mut base.allow, higher.allow);
-    replace(&mut base.deny, higher.deny);
-    replace(&mut base.ports, higher.ports);
-    merge_dns(&mut base.dns, higher.dns);
-    merge_tls(&mut base.tls, higher.tls);
-    replace(&mut base.trust_host_cas, higher.trust_host_cas);
-    replace(&mut base.max_connections, higher.max_connections);
-}
-
-fn merge_dns(base: &mut Option<DnsInput>, higher: Option<DnsInput>) {
-    let Some(higher) = higher else {
-        return;
-    };
-    let base = base.get_or_insert_with(DnsInput::default);
-    replace(&mut base.rebind_protection, higher.rebind_protection);
-    replace(&mut base.nameservers, higher.nameservers);
-    replace(&mut base.query_timeout, higher.query_timeout);
-}
-
-fn merge_tls(base: &mut Option<TlsInput>, higher: Option<TlsInput>) {
-    let Some(higher) = higher else {
-        return;
-    };
-    let base = base.get_or_insert_with(TlsInput::default);
-    replace(&mut base.enabled, higher.enabled);
-    replace(&mut base.bypass, higher.bypass);
-    replace(&mut base.verify_upstream, higher.verify_upstream);
-    replace(&mut base.block_quic, higher.block_quic);
+    let replaces_policy =
+        higher.policy.is_some() || higher.allow.is_some() || higher.deny.is_some();
+    let base = base.object_mut();
+    if replaces_policy {
+        // A source that supplies policy input replaces the complete lower-layer policy.
+        base.policy = None;
+        base.allow = None;
+        base.deny = None;
+    }
+    NetworkConfigInputPatch::from_present_fields(higher).apply_to(base);
 }
 
 //--------------------------------------------------------------------------------------------------
 // Functions: Path Resolution
 //--------------------------------------------------------------------------------------------------
 
-fn absolutize_patch(patch: &mut SandboxPatch, base: PathBuf) {
-    if let Some(image) = &mut patch.image {
+fn absolutize_input(input: &mut SandboxConfigInput, base: PathBuf) {
+    if let Some(image) = &mut input.image {
         absolutize_image(image, &base);
     }
-    if let Some(mounts) = &mut patch.mounts {
+    if let Some(mounts) = &mut input.mounts {
         absolutize_mounts(mounts, &base);
     }
-    if let Some(paths) = &mut patch.patch_files {
+    if let Some(paths) = &mut input.patch_files {
         for path in paths {
             absolutize(path, &base);
         }
     }
-    if let Some(patches) = &mut patch.patches {
+    if let Some(patches) = &mut input.patches {
         absolutize_patch_inputs(patches, &base);
     }
 }
 
-fn absolutize_filesystem_patch(patch: &mut FilesystemPatch, base: PathBuf) {
-    if let Some(mounts) = &mut patch.mounts {
+fn absolutize_filesystem_input(input: &mut FilesystemConfigInput, base: PathBuf) {
+    if let Some(mounts) = &mut input.mounts {
         absolutize_mounts(mounts, &base);
     }
-    if let Some(paths) = &mut patch.patch_files {
+    if let Some(paths) = &mut input.patch_files {
         for path in paths {
             absolutize(path, &base);
         }
     }
-    if let Some(patches) = &mut patch.patches {
+    if let Some(patches) = &mut input.patches {
         absolutize_patch_inputs(patches, &base);
     }
 }
@@ -1126,6 +1079,8 @@ fn absolutize_mounts(mounts: &mut [MountInput], base: &Path) {
         match mount {
             MountInput::String(spec) => {
                 if let Some(index) = bind_mount_separator(spec) {
+                    // YAML string mounts have always been config-relative bind
+                    // paths, including bare sources such as `src`.
                     let source = absolute_path(Path::new(&spec[..index]), base);
                     *spec = format!("{}{}", source.display(), &spec[index..]);
                 }
@@ -1191,40 +1146,36 @@ fn bind_mount_separator(spec: &str) -> Option<usize> {
 // Functions: Image and Runtime
 //--------------------------------------------------------------------------------------------------
 
-fn materialize_sandbox_patch(
-    patch: &SandboxPatch,
-    image: Option<&ResolvedImage>,
-    registry_auth: Option<RegistryAuth>,
-) -> anyhow::Result<SandboxConfigPatch> {
-    let mut result = SandboxConfigPatch::new();
-    if let Some(image) = image {
-        result = result.image(materialize_image_patch(image)?);
-    }
-    if let Some(policy) = patch.pull_policy {
-        result = result.pull_policy(match policy {
+fn materialize_config_patch(input: &SandboxConfigInput) -> anyhow::Result<SandboxConfigPatch> {
+    let mut config_patch = SandboxConfigPatch::new();
+    if let Some(policy) = input.pull_policy {
+        config_patch = config_patch.pull_policy(match policy {
             PullPolicyInput::Missing => PullPolicy::IfMissing,
             PullPolicyInput::Always => PullPolicy::Always,
             PullPolicyInput::Never => PullPolicy::Never,
         });
     }
-    if let Some(auth) = registry_auth {
-        result = result.registry_auth(auth);
-    }
 
-    let mut resources = ResourceConfigPatch::new();
-    if let Some(cpus) = patch.cpus {
-        resources = resources.cpus(cpus);
+    let mut resources = SandboxResourcesPatch::new();
+    if let Some(cpus) = input.cpus {
+        resources = resources.cpus(cpus).max_cpus(cpus);
     }
-    if let Some(memory) = &patch.memory {
-        resources = resources.memory_mib(parse_size("memory", memory)?);
+    if let Some(memory) = &input.memory {
+        let memory = parse_size("memory", memory)?;
+        resources = resources.memory_mib(memory).max_memory_mib(memory);
     }
-    if let Some(duration) = &patch.max_duration {
-        resources = resources.max_duration_secs(parse_duration_secs(duration)?);
+    config_patch = config_patch.resources(resources);
+
+    let mut lifecycle = SandboxPolicyPatch::new();
+    if let Some(duration) = &input.max_duration {
+        lifecycle = lifecycle.max_duration_secs(parse_duration_secs(duration)?);
     }
-    if let Some(duration) = &patch.idle_timeout {
-        resources = resources.idle_timeout_secs(parse_duration_secs(duration)?);
+    if let Some(duration) = &input.idle_timeout {
+        lifecycle = lifecycle.idle_timeout_secs(parse_duration_secs(duration)?);
     }
-    if let Some(rlimits) = &patch.rlimits {
+    config_patch = config_patch.lifecycle(lifecycle);
+
+    if let Some(rlimits) = &input.rlimits {
         let values = rlimits
             .iter()
             .map(|input| {
@@ -1237,130 +1188,90 @@ fn materialize_sandbox_patch(
                 })
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
-        resources = resources.rlimits(values);
+        config_patch = config_patch.rlimits(values);
     }
-    result = result.resources(resources);
 
-    let mut runtime = RuntimeConfigPatch::new();
-    if let Some(value) = &patch.workdir {
-        runtime = runtime.workdir(value);
+    let mut runtime = SandboxRuntimeOptionsPatch::new();
+    if let Some(value) = &input.workdir {
+        runtime = runtime.workdir(value.clone());
     }
-    if let Some(value) = &patch.shell {
+    if let Some(value) = &input.shell {
         validate_shell(value)?;
-        runtime = runtime.shell(value);
+        runtime = runtime.shell(value.clone());
     }
-    if let Some(value) = &patch.user {
-        runtime = runtime.user(value);
+    if let Some(value) = &input.user {
+        runtime = runtime.user(value.clone());
     }
-    if let Some(value) = &patch.hostname {
-        runtime = runtime.hostname(value);
+    if let Some(value) = &input.hostname {
+        runtime = runtime.hostname(value.clone());
     }
-    if let Some(value) = patch.security {
-        runtime = runtime.security(match value {
+    if let Some(value) = input.security {
+        config_patch = config_patch.security_profile(match value {
             SecurityInput::Default => SecurityProfile::Default,
             SecurityInput::Restricted => SecurityProfile::Restricted,
         });
     }
-    if let Some(value) = &patch.entrypoint {
+    if let Some(value) = &input.entrypoint {
         runtime = runtime.entrypoint(value.clone());
     }
-    if let Some(value) = &patch.cmd {
+    if let Some(value) = &input.cmd {
         runtime = runtime.cmd(value.clone());
     }
-    if let Some(value) = &patch.env {
-        runtime = runtime.env(value.clone());
+    if let Some(value) = &input.env {
+        config_patch = config_patch.env(
+            value
+                .iter()
+                .map(|(key, value)| EnvVar::new(key, value))
+                .collect(),
+        );
     }
-    if let Some(value) = &patch.labels {
-        runtime = runtime.labels(value.clone());
+    if let Some(value) = &input.labels {
+        config_patch = config_patch.labels(value.clone());
     }
-    if let Some(value) = &patch.init {
-        runtime = runtime.init(materialize_init_patch(value)?);
+    if let Some(value) = &input.init {
+        config_patch = config_patch.init(materialize_init(value)?);
     }
-    result = result.runtime(runtime);
+    config_patch = config_patch.runtime(runtime);
 
-    let mut filesystem = FilesystemConfigPatch::new();
-    if let Some(mounts) = &patch.mounts {
-        filesystem = filesystem.mounts(
+    if let Some(mounts) = &input.mounts {
+        config_patch = config_patch.mounts(
             mounts
                 .iter()
                 .map(materialize_mount)
                 .collect::<anyhow::Result<Vec<_>>>()?,
         );
     }
-    if let Some(paths) = &patch.patch_files {
-        filesystem = filesystem.patch_file_operations(materialize_patch_files(paths)?);
-    }
-    if let Some(patches) = &patch.patches {
-        filesystem = filesystem.patches(
-            patches
-                .iter()
-                .map(materialize_patch)
-                .collect::<anyhow::Result<Vec<_>>>()?,
-        );
-    }
-    result = result.filesystem(filesystem);
-
-    if let Some(scripts) = &patch.scripts {
-        for name in scripts.keys() {
-            validate_script_name(name)?;
+    if input.patch_files.is_some() || input.patches.is_some() {
+        let mut patches = match &input.patch_files {
+            Some(paths) => materialize_patch_files(paths)?,
+            None => Vec::new(),
+        };
+        if let Some(inline) = &input.patches {
+            patches.extend(
+                inline
+                    .iter()
+                    .map(materialize_patch)
+                    .collect::<anyhow::Result<Vec<_>>>()?,
+            );
         }
-        result = result.scripts(ScriptConfigPatch::new().scripts(scripts.clone()));
+        config_patch = config_patch.patches(patches);
     }
 
-    #[cfg(feature = "net")]
-    {
-        if let Some(network) = &patch.network {
-            result = result.network(materialize_network_patch(network)?);
-        }
-        if let Some(secrets) = &patch.secrets {
-            result = result.secrets(materialize_secret_patch(secrets)?);
-        }
-    }
-    #[cfg(not(feature = "net"))]
-    if patch.network.is_some() || patch.secrets.is_some() {
-        anyhow::bail!("network and secret config require an msb build with networking enabled");
-    }
-
-    Ok(result)
+    Ok(config_patch)
 }
 
-fn materialize_image_patch(image: &ResolvedImage) -> anyhow::Result<SandboxImagePatch> {
-    Ok(match image {
-        ResolvedImage::Image(value) => SandboxImagePatch::Image(value.clone()),
-        ResolvedImage::Oci {
-            reference,
-            upper_size,
-        } => SandboxImagePatch::Oci {
-            reference: reference.clone(),
-            root_disk_mib: upper_size
-                .as_deref()
-                .map(|value| parse_size("image.upper_size", value))
-                .transpose()?,
-        },
-        ResolvedImage::Disk { path, fstype } => SandboxImagePatch::Disk {
-            path: path.clone(),
-            fstype: fstype.clone(),
-        },
-        ResolvedImage::Bind(path) => SandboxImagePatch::Bind(path.clone()),
-        ResolvedImage::Snapshot(value) => SandboxImagePatch::Snapshot(value.clone()),
+fn materialize_init(init: &InitInput) -> anyhow::Result<HandoffInit> {
+    let Some(cmd) = init.cmd.clone() else {
+        anyhow::bail!("init.cmd is required when init configuration is present");
+    };
+    if cmd != microsandbox_protocol::HANDOFF_INIT_AUTO && !cmd.starts_with('/') {
+        anyhow::bail!("init.cmd must be an absolute guest path or `auto`, got {cmd:?}");
+    }
+    Ok(HandoffInit {
+        cmd,
+        args: init.args.clone().unwrap_or_default(),
+        env: init.env.clone().unwrap_or_default().into_iter().collect(),
     })
-}
-
-fn materialize_init_patch(init: &InitInput) -> anyhow::Result<InitConfigPatch> {
-    let mut patch = InitConfigPatch::new();
-    if let Some(cmd) = init.cmd.as_deref() {
-        if cmd != microsandbox_protocol::HANDOFF_INIT_AUTO && !cmd.starts_with('/') {
-            anyhow::bail!("init.cmd must be an absolute guest path or `auto`, got {cmd:?}");
-        }
-        patch = patch.cmd(cmd);
-    }
-    if let Some(args) = &init.args {
-        patch = patch.args(args.clone());
-    }
-    if let Some(env) = &init.env {
-        patch = patch.env(env.clone());
-    }
-    Ok(patch)
 }
 
 fn resolve_image_input(input: &ImageInput) -> anyhow::Result<ResolvedImage> {
@@ -1452,32 +1363,9 @@ fn resolve_registry_auth(registry: &RegistryInput) -> anyhow::Result<Option<Regi
 
 fn materialize_mount(input: &MountInput) -> anyhow::Result<VolumeMount> {
     match input {
-        MountInput::String(spec) => materialize_bind_mount_string(spec),
+        MountInput::String(spec) => materialize_bind_mount(spec),
         MountInput::Object(object) => materialize_mount_object(object),
     }
-}
-
-fn materialize_bind_mount_string(spec: &str) -> anyhow::Result<VolumeMount> {
-    let index = bind_mount_separator(spec)
-        .ok_or_else(|| anyhow::anyhow!("bind mount {spec:?} must use SOURCE:TARGET[:ro]"))?;
-    let source = &spec[..index];
-    let rest = &spec[index + 1..];
-    if !source.starts_with('.') && !source.starts_with('/') && !Path::new(source).is_absolute() {
-        anyhow::bail!("bind mount source must start with `.` or `/`, got {source:?}");
-    }
-    let (target, readonly) = match rest.strip_suffix(":ro") {
-        Some(target) => (target, true),
-        None => (rest, false),
-    };
-    if target.is_empty() || !target.starts_with('/') {
-        anyhow::bail!("bind mount target must be an absolute guest path, got {target:?}");
-    }
-    let source = PathBuf::from(source);
-    let mut mount = MountBuilder::new(target).bind(source);
-    if readonly {
-        mount = mount.readonly();
-    }
-    mount.build().map_err(Into::into)
 }
 
 fn materialize_mount_object(object: &MountObject) -> anyhow::Result<VolumeMount> {
@@ -1510,6 +1398,12 @@ fn materialize_mount_object(object: &MountObject) -> anyhow::Result<VolumeMount>
         anyhow::bail!(
             "mount.stat_virtualization and mount.host_permissions are only valid for bind or named mounts"
         );
+    }
+    if object.uid.is_some() != object.gid.is_some() {
+        anyhow::bail!("mount.uid and mount.gid must be specified together");
+    }
+    if object.uid.is_some() && object.bind.is_none() && object.named.is_none() {
+        anyhow::bail!("mount.uid and mount.gid are only valid for bind or named mounts");
     }
 
     let tmpfs_size = object
@@ -1560,6 +1454,9 @@ fn materialize_mount_object(object: &MountObject) -> anyhow::Result<VolumeMount>
     }
     if let Some(policy) = object.host_permissions {
         mount = mount.host_permissions(policy.into());
+    }
+    if let (Some(uid), Some(gid)) = (object.uid, object.gid) {
+        mount = mount.owner(uid, gid);
     }
     mount.build().map_err(Into::into)
 }
@@ -1686,50 +1583,80 @@ fn validate_script_name(name: &str) -> anyhow::Result<()> {
 //--------------------------------------------------------------------------------------------------
 
 #[cfg(feature = "net")]
-fn materialize_network_patch(input: &NetworkInput) -> anyhow::Result<NetworkConfigPatch> {
-    use microsandbox_network::config::{PortProtocol, PublishedPort};
+fn materialize_network_patch(
+    input: Option<&NetworkInput>,
+    secrets: Option<&BTreeMap<String, SecretInput>>,
+    violation_action: Option<&microsandbox_types::SecretViolationAction>,
+) -> anyhow::Result<NetworkSpecPatch> {
     use microsandbox_network::dns::Nameserver;
-    use microsandbox_network::policy::{NetworkPolicy, NetworkProfile};
+    use microsandbox_network::policy::Action;
+    use microsandbox_types::{PortProtocol, PublishedPortSpec};
 
     use crate::commands::common::parse_port_mapping;
     use crate::net_rule::parse_rule_token;
 
-    let input = input.clone().into_object();
-    let mut policy = NetworkPolicyConfigPatch::new();
-    if let Some(base) = input.policy {
-        policy = policy.base(match base {
-            NetworkPreset::None => NetworkPolicy::none(),
-            NetworkPreset::Public => NetworkPolicy::from_profiles([NetworkProfile::Public]),
-            NetworkPreset::Open => NetworkPolicy::allow_all(),
-        });
-    }
-    if let Some(deny) = input.deny {
-        policy = policy.deny_rules(
-            deny.into_iter()
+    let input = input
+        .cloned()
+        .map(NetworkInput::into_object)
+        .unwrap_or_default();
+    let tls_present = input.tls.is_some();
+    let mut patch = NetworkSpecPatch::new();
+    let base_policy = input.policy.map(|base| match base {
+        NetworkPreset::None => NetworkPolicy::none(),
+        NetworkPreset::Public => NetworkPolicy::from_profiles([NetworkProfile::Public]),
+        NetworkPreset::Open => NetworkPolicy::allow_all(),
+    });
+    let deny_rules = input
+        .deny
+        .map(|values| {
+            values
+                .into_iter()
                 .map(|destination| {
                     parse_rule_token(&format!("deny@{destination}")).map_err(anyhow::Error::from)
                 })
-                .collect::<anyhow::Result<Vec<_>>>()?,
-        );
-    }
-    if let Some(allow) = input.allow {
-        policy = policy.allow_rules(
-            allow
+                .collect::<anyhow::Result<Vec<_>>>()
+        })
+        .transpose()?;
+    let allow_rules = input
+        .allow
+        .map(|values| {
+            values
                 .into_iter()
                 .map(|destination| {
                     parse_rule_token(&format!("allow@{destination}")).map_err(anyhow::Error::from)
                 })
-                .collect::<anyhow::Result<Vec<_>>>()?,
-        );
+                .collect::<anyhow::Result<Vec<_>>>()
+        })
+        .transpose()?;
+
+    if base_policy.is_some() || deny_rules.is_some() || allow_rules.is_some() {
+        let base = base_policy.unwrap_or_default();
+        let allowlist = allow_rules.as_ref().is_some_and(|rules| !rules.is_empty());
+        let mut rules = deny_rules.unwrap_or_default();
+        rules.extend(allow_rules.unwrap_or_default());
+        if !allowlist {
+            rules.extend(base.rules);
+        }
+        let policy = NetworkPolicy {
+            default_egress: if allowlist {
+                Action::Deny
+            } else {
+                base.default_egress
+            },
+            default_ingress: base.default_ingress,
+            rules,
+        };
+        let policy: microsandbox_types::NetworkPolicy =
+            serde_json::from_value(serde_json::to_value(policy)?)?;
+        patch = patch.policy(policy);
     }
-    let mut patch = NetworkConfigPatch::new().policy(policy);
 
     if let Some(ports) = input.ports {
         let ports = ports
             .iter()
             .map(|value| {
                 let (host_bind, host_port, guest_port, udp) = parse_port_mapping(value)?;
-                Ok(PublishedPort {
+                Ok(PublishedPortSpec {
                     host_port,
                     guest_port,
                     protocol: if udp {
@@ -1737,7 +1664,7 @@ fn materialize_network_patch(input: &NetworkInput) -> anyhow::Result<NetworkConf
                     } else {
                         PortProtocol::Tcp
                     },
-                    host_bind,
+                    host_bind: host_bind.to_string(),
                 })
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
@@ -1749,20 +1676,25 @@ fn materialize_network_patch(input: &NetworkInput) -> anyhow::Result<NetworkConf
             value = value.rebind_protection(enabled);
         }
         if let Some(nameservers) = dns.nameservers {
-            value = value.nameservers(
-                nameservers
-                    .iter()
-                    .map(|item| item.parse::<Nameserver>().map_err(anyhow::Error::from))
-                    .collect::<anyhow::Result<Vec<_>>>()?,
-            );
+            for item in &nameservers {
+                item.parse::<Nameserver>().map_err(anyhow::Error::from)?;
+            }
+            value = value.nameservers(nameservers);
         }
         if let Some(timeout) = dns.query_timeout {
             value = value.query_timeout_ms(parse_duration_millis(&timeout)?);
         }
         patch = patch.dns(value);
     }
-    if let Some(tls) = input.tls {
+
+    let materialized_secrets = secrets.map(materialize_secrets).transpose()?;
+    if tls_present
+        || materialized_secrets
+            .as_ref()
+            .is_some_and(|entries| !entries.is_empty())
+    {
         let mut value = TlsConfigPatch::new();
+        let tls = input.tls.unwrap_or_default();
         if let Some(enabled) = tls.enabled {
             value = value.enabled(enabled);
         }
@@ -1773,71 +1705,99 @@ fn materialize_network_patch(input: &NetworkInput) -> anyhow::Result<NetworkConf
             value = value.verify_upstream(verify);
         }
         if let Some(block) = tls.block_quic {
-            value = value.block_quic(block);
+            value = value.block_quic_on_intercept(block);
+        }
+        if materialized_secrets
+            .as_ref()
+            .is_some_and(|entries| !entries.is_empty())
+        {
+            value = value.enabled(true);
         }
         patch = patch.tls(value);
+    }
+    if materialized_secrets.is_some() || violation_action.is_some() {
+        let mut secrets = SecretsConfigPatch::new();
+        if let Some(entries) = materialized_secrets {
+            secrets = secrets.secrets(entries);
+        }
+        if let Some(action) = violation_action {
+            secrets = secrets.violation_action(action.clone());
+        }
+        patch = patch.secrets(secrets);
+    }
+    if let Some(enabled) = input.strict {
+        patch = patch.strict(enabled);
     }
     if let Some(enabled) = input.trust_host_cas {
         patch = patch.trust_host_cas(enabled);
     }
-    if let Some(max) = input.max_connections {
-        patch = patch.max_connections(max);
+    if let Some(max) = input.max_tcp_connections {
+        patch = patch.max_tcp_connections(max);
+    }
+    if let Some(max) = input.max_udp_connections {
+        patch = patch.max_udp_connections(max);
     }
     Ok(patch)
 }
 
 #[cfg(feature = "net")]
-fn materialize_secret_patch(
+fn materialize_secrets(
     input: &BTreeMap<String, SecretInput>,
-) -> anyhow::Result<SecretConfigPatch> {
+) -> anyhow::Result<Vec<microsandbox_types::SecretEntry>> {
     use microsandbox::sandbox::SecretSource;
-    use microsandbox_types::{HostPattern, SecretInjection};
+    use microsandbox_types::{HostPattern, SecretSubstitution};
+    use zeroize::Zeroizing;
 
-    let mut patch = SecretConfigPatch::new();
+    let mut entries = Vec::with_capacity(input.len());
     for (name, input) in input {
-        let mut entry = SecretEntryConfigPatch::new();
-        match &input.value {
-            Some(SecretValueInput::Literal(value)) => {
-                entry = entry.literal(value);
-            }
-            Some(SecretValueInput::Environment { env }) => {
-                entry = entry.source(SecretSource::Env { var: env.clone() });
-            }
-            None => {
-                entry = entry.source(SecretSource::Env { var: name.clone() });
-            }
-        }
-        entry = entry.allowed_hosts(
-            input
-                .allow
-                .clone()
-                .unwrap_or_default()
-                .into_iter()
-                .map(|host| {
-                    if host.starts_with("*.") {
-                        HostPattern::Wildcard(host)
-                    } else {
-                        HostPattern::Exact(host)
-                    }
-                })
-                .collect(),
-        );
-        let injection = input
-            .inject
+        let (value, source) = match &input.value {
+            Some(SecretValueInput::Literal(value)) => (Zeroizing::new(value.clone()), None),
+            Some(SecretValueInput::Environment { env }) => (
+                Zeroizing::new(String::new()),
+                Some(SecretSource::Env { var: env.clone() }),
+            ),
+            None => (
+                Zeroizing::new(String::new()),
+                Some(SecretSource::Env { var: name.clone() }),
+            ),
+        };
+        let allowed_hosts = input
+            .allow
             .clone()
-            .unwrap_or_else(|| vec![SecretInjectionInput::Headers]);
-        entry = entry.injection(SecretInjection {
-            headers: injection.contains(&SecretInjectionInput::Headers),
-            basic_auth: injection.contains(&SecretInjectionInput::BasicAuth),
-            query_params: injection.contains(&SecretInjectionInput::QueryParams),
-            body: false,
+            .unwrap_or_default()
+            .into_iter()
+            .map(|host| HostPattern::parse(&host))
+            .collect();
+        let passthrough_hosts = input
+            .passthrough
+            .clone()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|host| HostPattern::parse(&host))
+            .collect();
+        // Defaults are applied only after all sparse layers have been merged.
+        let substitution = input.substitution.clone().unwrap_or_default();
+        let substitution = SecretSubstitution {
+            headers: substitution.headers.unwrap_or(true),
+            query: substitution.query.unwrap_or(false),
+            body: substitution.body.unwrap_or(false),
+        };
+        entries.push(microsandbox_types::SecretEntry {
+            env_var: name.clone(),
+            value,
+            source,
+            placeholder: input
+                .placeholder
+                .clone()
+                .unwrap_or_else(|| microsandbox_utils::secret::default_placeholder(name)),
+            allowed_hosts,
+            substitution,
+            passthrough_hosts,
+            violation_action: input.violation_action.clone(),
+            require_tls_identity: input.require_tls_identity.unwrap_or(true),
         });
-        if let Some(required) = input.require_tls_identity {
-            entry = entry.require_tls_identity(required);
-        }
-        patch = patch.secret(name, entry);
     }
-    Ok(patch)
+    Ok(entries)
 }
 
 #[cfg(feature = "net")]
@@ -1855,6 +1815,24 @@ fn parse_duration_millis(value: &str) -> anyhow::Result<u64> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn network_config_tcp_aliases_reject_duplicate_names() {
+        for key in ["max_connections", "max_tcp_connections"] {
+            let config: NetworkConfigInput = serde_json::from_value(serde_json::json!({
+                key: 0, "max_udp_connections": 7
+            }))
+            .unwrap();
+            assert_eq!(config.max_tcp_connections, Some(0));
+            assert_eq!(config.max_udp_connections, Some(7));
+        }
+        assert!(
+            serde_json::from_value::<NetworkConfigInput>(serde_json::json!({
+                "max_connections": 0, "max_tcp_connections": 64
+            }))
+            .is_err()
+        );
+    }
+
     fn write_config(dir: &Path, name: &str, contents: &str) -> PathBuf {
         let path = dir.join(name);
         fs::write(&path, contents).unwrap();
@@ -1862,7 +1840,374 @@ mod tests {
     }
 
     #[test]
-    fn scoped_files_merge_maps_and_replace_lists() {
+    fn layered_cli_sources_cover_every_atomic_input_field() {
+        let dir = tempfile::tempdir().unwrap();
+        write_config(dir.path(), "lower-patches.yaml", "patches: []\n");
+        write_config(dir.path(), "higher-patches.yaml", "patches: []\n");
+        let base = write_config(
+            dir.path(),
+            "base.yaml",
+            r#"
+image: "alpine"
+pull_policy: missing
+registry: { username: lower, password_env: PATH }
+cpus: 1
+memory: "1G"
+max_duration: "1m"
+idle_timeout: "2m"
+rlimits: [{ resource: nofile, soft: 1, hard: 2 }]
+workdir: "/lower"
+shell: "/bin/sh"
+user: "lower"
+hostname: "lower"
+security: default
+entrypoint: ["lower-entrypoint"]
+cmd: ["lower-command"]
+env: { INHERITED: lower }
+labels: { inherited: lower }
+init:
+  cmd: auto
+  args: [lower]
+  env: { INHERITED: lower }
+mounts: ["./lower:/lower"]
+patch_files: ["./lower-patches.yaml"]
+patches:
+  - text: { path: "/lower", content: lower }
+scripts: { inherited: "echo lower" }
+"#,
+        );
+        let resources = write_config(
+            dir.path(),
+            "resources.yaml",
+            r#"
+cpus: 2
+memory: "2G"
+max_duration: "3m"
+idle_timeout: "4m"
+rlimits: [{ resource: nproc, soft: 3, hard: 4 }]
+"#,
+        );
+        let runtime = write_config(
+            dir.path(),
+            "runtime.yaml",
+            r#"
+workdir: "/higher"
+shell: "/bin/bash"
+user: "higher"
+hostname: "higher"
+security: restricted
+entrypoint: ["higher-entrypoint"]
+cmd: ["higher-command"]
+"#,
+        );
+        let filesystem = write_config(
+            dir.path(),
+            "filesystem.yaml",
+            r#"
+mounts: ["./higher:/higher"]
+patch_files: ["./higher-patches.yaml"]
+patches:
+  - text: { path: "/higher", content: higher }
+"#,
+        );
+        let identity = write_config(
+            dir.path(),
+            "identity.yaml",
+            r#"
+image: "python:3.12"
+pull_policy: always
+registry: { username: higher, password_env: PATH }
+"#,
+        );
+
+        let resolved = resolve(
+            &SandboxConfigSources::default()
+                .source(SandboxConfigKind::Root, base)
+                .source(SandboxConfigKind::Resources, resources)
+                .source(SandboxConfigKind::Runtime, runtime)
+                .source(SandboxConfigKind::Filesystem, filesystem)
+                .source(SandboxConfigKind::Root, identity),
+        )
+        .unwrap();
+        assert!(matches!(
+            resolved.image(None, None).unwrap(),
+            ResolvedImage::Image(ref value) if value == "python:3.12"
+        ));
+        assert!(matches!(
+            resolved.registry_auth().unwrap(),
+            Some(RegistryAuth::Basic { ref username, .. }) if username == "higher"
+        ));
+
+        // Keep this destructuring exhaustive so adding a CLI input field requires assigning it a
+        // precedence test instead of silently accepting the macro's default strategy.
+        let SandboxConfigInput {
+            image,
+            pull_policy,
+            registry,
+            cpus,
+            memory,
+            max_duration,
+            idle_timeout,
+            rlimits,
+            workdir,
+            shell,
+            user,
+            hostname,
+            security,
+            entrypoint,
+            cmd,
+            env,
+            labels,
+            init,
+            mounts,
+            patch_files,
+            patches,
+            network,
+            secrets,
+            secret_violation_action,
+            scripts,
+            ports,
+        } = resolved.input;
+
+        assert!(matches!(image, Some(ImageInput::String(value)) if value == "python:3.12"));
+        assert!(matches!(pull_policy, Some(PullPolicyInput::Always)));
+        let registry = registry.unwrap();
+        assert_eq!(registry.username.as_deref(), Some("higher"));
+        assert_eq!(registry.password_env.as_deref(), Some("PATH"));
+        assert_eq!(cpus, Some(2));
+        assert_eq!(memory.as_deref(), Some("2G"));
+        assert_eq!(max_duration.as_deref(), Some("3m"));
+        assert_eq!(idle_timeout.as_deref(), Some("4m"));
+        let rlimits = rlimits.unwrap();
+        assert_eq!(rlimits.len(), 1);
+        assert_eq!(rlimits[0].resource, "nproc");
+        assert_eq!(rlimits[0].soft, 3);
+        assert_eq!(rlimits[0].hard, Some(4));
+        assert_eq!(workdir.as_deref(), Some("/higher"));
+        assert_eq!(shell.as_deref(), Some("/bin/bash"));
+        assert_eq!(user.as_deref(), Some("higher"));
+        assert_eq!(hostname.as_deref(), Some("higher"));
+        assert!(matches!(security, Some(SecurityInput::Restricted)));
+        assert_eq!(entrypoint.as_deref().unwrap(), ["higher-entrypoint"]);
+        assert_eq!(cmd.as_deref().unwrap(), ["higher-command"]);
+        assert_eq!(env.unwrap()["INHERITED"], "lower");
+        assert_eq!(labels.unwrap()["inherited"], "lower");
+        let init = init.unwrap();
+        assert_eq!(init.cmd.as_deref(), Some("auto"));
+        assert_eq!(init.args.as_deref().unwrap(), ["lower"]);
+        assert_eq!(init.env.unwrap()["INHERITED"], "lower");
+
+        let canonical_dir = fs::canonicalize(dir.path()).unwrap();
+        let mounts = mounts.unwrap();
+        assert_eq!(mounts.len(), 1);
+        assert!(matches!(
+            &mounts[0],
+            MountInput::String(value)
+                if value == &format!("{}:/higher", canonical_dir.join("./higher").display())
+        ));
+        assert_eq!(
+            patch_files.unwrap(),
+            [canonical_dir.join("./higher-patches.yaml")]
+        );
+        let patches = patches.unwrap();
+        assert_eq!(patches.len(), 1);
+        assert!(matches!(
+            &patches[0],
+            PatchInput::Text(value) if value.path == "/higher" && value.content == "higher"
+        ));
+        assert!(network.is_none());
+        assert!(secrets.is_none());
+        assert!(secret_violation_action.is_none());
+        assert_eq!(scripts.unwrap()["inherited"], "echo lower");
+        assert!(ports.is_none());
+    }
+
+    #[test]
+    fn layered_cli_sources_merge_every_annotated_input_field() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = write_config(
+            dir.path(),
+            "base.yaml",
+            r#"
+image: alpine
+env: { KEEP: lower, CHANGE: lower }
+labels: { keep: lower, change: lower }
+init:
+  cmd: auto
+  args: [lower]
+  env: { KEEP: lower, CHANGE: lower }
+scripts: { keep: "echo lower", change: "echo lower" }
+"#,
+        );
+        let runtime = write_config(
+            dir.path(),
+            "runtime.yaml",
+            r#"
+env: { CHANGE: higher, ADD: higher }
+labels: { change: higher, add: higher }
+init:
+  args: [higher]
+  env: { CHANGE: higher, ADD: higher }
+"#,
+        );
+        let scripts = write_config(
+            dir.path(),
+            "scripts.yaml",
+            r#"
+change: "echo higher"
+add: "echo higher"
+"#,
+        );
+
+        let resolved = resolve(
+            &SandboxConfigSources::default()
+                .source(SandboxConfigKind::Root, base)
+                .source(SandboxConfigKind::Runtime, runtime)
+                .source(SandboxConfigKind::Scripts, scripts),
+        )
+        .unwrap();
+        let input = resolved.input;
+
+        let env = input.env.unwrap();
+        assert_eq!(env["KEEP"], "lower");
+        assert_eq!(env["CHANGE"], "higher");
+        assert_eq!(env["ADD"], "higher");
+        let labels = input.labels.unwrap();
+        assert_eq!(labels["keep"], "lower");
+        assert_eq!(labels["change"], "higher");
+        assert_eq!(labels["add"], "higher");
+        let init = input.init.unwrap();
+        assert_eq!(init.cmd.as_deref(), Some("auto"));
+        assert_eq!(init.args.as_deref().unwrap(), ["higher"]);
+        let init_env = init.env.unwrap();
+        assert_eq!(init_env["KEEP"], "lower");
+        assert_eq!(init_env["CHANGE"], "higher");
+        assert_eq!(init_env["ADD"], "higher");
+        let scripts = input.scripts.unwrap();
+        assert_eq!(scripts["keep"], "echo lower");
+        assert_eq!(scripts["change"], "echo higher");
+        assert_eq!(scripts["add"], "echo higher");
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn layered_cli_sources_cover_custom_network_and_secret_merge_rules() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = write_config(
+            dir.path(),
+            "base.yaml",
+            r#"
+image: alpine
+network:
+  policy: open
+  allow: ["lower.example.com"]
+  deny: ["192.0.2.1"]
+  ports: ["7000:7000"]
+  dns:
+    rebind_protection: false
+    nameservers: ["8.8.8.8"]
+    query_timeout: "5s"
+  tls:
+    enabled: true
+    bypass: ["lower.example.com"]
+    verify_upstream: false
+    block_quic: true
+  trust_host_cas: true
+  max_tcp_connections: 10
+secrets:
+  TOKEN:
+    value: lower
+    allow: ["lower.example.com"]
+    substitution:
+      headers: false
+    require_tls_identity: false
+  KEEP:
+    value: keep
+    allow: ["keep.example.com"]
+"#,
+        );
+        let network = write_config(
+            dir.path(),
+            "network.yaml",
+            r#"
+allow: ["higher.example.com"]
+ports: ["8000:8000"]
+dns:
+  nameservers: ["1.1.1.1"]
+tls:
+  bypass: ["higher.example.com"]
+strict: true
+trust_host_cas: false
+max_tcp_connections: 20
+"#,
+        );
+        let ports = write_config(dir.path(), "ports.yaml", "ports: [\"9000:9000\"]\n");
+        let secrets = write_config(
+            dir.path(),
+            "secrets.yaml",
+            r#"
+TOKEN:
+  value: "${PATH}"
+  substitution:
+    query: true
+ADD:
+  value: add
+  allow: ["add.example.com"]
+"#,
+        );
+
+        let resolved = resolve(
+            &SandboxConfigSources::default()
+                .source(SandboxConfigKind::Root, base)
+                .source(SandboxConfigKind::Network, network)
+                .source(SandboxConfigKind::Root, ports)
+                .source(SandboxConfigKind::Secrets, secrets),
+        )
+        .unwrap();
+        let input = resolved.input;
+
+        assert!(input.ports.is_none());
+        let network = input.network.unwrap().into_object();
+        assert!(network.policy.is_none());
+        assert_eq!(network.allow.as_deref().unwrap(), ["higher.example.com"]);
+        assert!(network.deny.is_none());
+        assert_eq!(network.ports.as_deref().unwrap(), ["9000:9000"]);
+        let dns = network.dns.unwrap();
+        assert_eq!(dns.rebind_protection, Some(false));
+        assert_eq!(dns.nameservers.as_deref().unwrap(), ["1.1.1.1"]);
+        assert_eq!(dns.query_timeout.as_deref(), Some("5s"));
+        let tls = network.tls.unwrap();
+        assert_eq!(tls.enabled, Some(true));
+        assert_eq!(tls.bypass.as_deref().unwrap(), ["higher.example.com"]);
+        assert_eq!(tls.verify_upstream, Some(false));
+        assert_eq!(tls.block_quic, Some(true));
+        assert_eq!(network.strict, Some(true));
+        assert_eq!(network.trust_host_cas, Some(false));
+        assert_eq!(network.max_tcp_connections, Some(20));
+
+        let secrets = input.secrets.unwrap();
+        let token = &secrets["TOKEN"];
+        assert!(matches!(
+            token.value,
+            Some(SecretValueInput::Environment { ref env }) if env == "PATH"
+        ));
+        assert_eq!(token.allow.as_deref().unwrap(), ["lower.example.com"]);
+        let substitution = token.substitution.as_ref().unwrap();
+        assert_eq!(substitution.headers, Some(false));
+        assert_eq!(substitution.query, Some(true));
+        assert_eq!(token.require_tls_identity, Some(false));
+        assert!(matches!(
+            secrets["KEEP"].value,
+            Some(SecretValueInput::Literal(ref value)) if value == "keep"
+        ));
+        assert!(matches!(
+            secrets["ADD"].value,
+            Some(SecretValueInput::Literal(ref value)) if value == "add"
+        ));
+    }
+
+    #[test]
+    fn scoped_files_replace_network_policy_and_merge_sibling_fields() {
         let dir = tempfile::tempdir().unwrap();
         let root = write_config(
             dir.path(),
@@ -1876,6 +2221,8 @@ env:
 network:
   allow: ["root.example.com"]
   deny: ["192.0.2.1"]
+  dns:
+    rebind_protection: true
 "#,
         );
         let runtime = write_config(
@@ -1899,20 +2246,32 @@ allow: ["scoped.example.com"]
             .source(SandboxConfigKind::Runtime, runtime)
             .source(SandboxConfigKind::Network, network);
 
-        let resolved = resolve(&sources).unwrap();
-        let env = resolved.patch.env.unwrap();
+        let resolved = resolve(&sources);
+        // The same input must fail explicitly without networking, not drop its policy.
+        if !cfg!(feature = "net") {
+            assert!(
+                resolved
+                    .unwrap_err()
+                    .to_string()
+                    .contains("networking enabled")
+            );
+            return;
+        }
+        let resolved = resolved.unwrap();
+        let env = resolved.input.env.unwrap();
         assert_eq!(env.get("KEEP").map(String::as_str), Some("root"));
         assert_eq!(env.get("CHANGE").map(String::as_str), Some("scoped"));
         assert_eq!(env.get("ADD").map(String::as_str), Some("scoped"));
 
-        let network = resolved.patch.network.unwrap().into_object();
+        let network = resolved.input.network.unwrap().into_object();
         assert_eq!(
             network.allow.as_deref(),
             Some(["scoped.example.com".to_string()].as_slice())
         );
+        assert!(network.deny.is_none());
         assert_eq!(
-            network.deny.as_deref(),
-            Some(["192.0.2.1".to_string()].as_slice())
+            network.dns.as_ref().and_then(|dns| dns.rebind_protection),
+            Some(true)
         );
     }
 
@@ -1932,7 +2291,7 @@ allow: ["scoped.example.com"]
                 .source(SandboxConfigKind::Resources, large.clone()),
         )
         .unwrap();
-        assert_eq!(resolved.patch.memory.as_deref(), Some("4G"));
+        assert_eq!(resolved.input.memory.as_deref(), Some("4G"));
         assert!(matches!(
             resolved.image(None, None).unwrap(),
             ResolvedImage::Image(ref value) if value == "alpine"
@@ -1946,7 +2305,7 @@ allow: ["scoped.example.com"]
                 .source(SandboxConfigKind::Root, project),
         )
         .unwrap();
-        assert_eq!(reordered.patch.memory.as_deref(), Some("3G"));
+        assert_eq!(reordered.input.memory.as_deref(), Some("3G"));
     }
 
     #[tokio::test]
@@ -1976,23 +2335,15 @@ allow: ["scoped.example.com"]
         assert_eq!(init.args, ["--unit=test.target"]);
     }
 
-    #[tokio::test]
-    async fn unresolved_nested_required_fields_fail_at_final_build() {
+    #[test]
+    fn unresolved_nested_required_fields_fail_during_resolution() {
         let dir = tempfile::tempdir().unwrap();
         let root = write_config(
             dir.path(),
             "base.yaml",
             "image: alpine\ninit:\n  args: [--unit=test.target]\n",
         );
-        let resolved =
-            resolve(&SandboxConfigSources::default().source(SandboxConfigKind::Root, root))
-                .unwrap();
-
-        let error = resolved
-            .apply(SandboxBuilder::new("missing-init"))
-            .unwrap()
-            .build()
-            .await
+        let error = resolve(&SandboxConfigSources::default().source(SandboxConfigKind::Root, root))
             .unwrap_err();
         assert!(error.to_string().contains("init.cmd is required"));
     }
@@ -2010,7 +2361,7 @@ allow: ["scoped.example.com"]
             r#"
 image: { bind: "./rootfs" }
 mounts:
-  - "./src:/app"
+  - "src:/app"
 patch_files: ["./patch.yaml"]
 patches:
   - copy_file: { src: "./app.toml", dst: "/etc/app.toml" }
@@ -2020,25 +2371,120 @@ patches:
         let sources = SandboxConfigSources::default().source(SandboxConfigKind::Root, root);
 
         let resolved = resolve(&sources).unwrap();
-        let ImageInput::Object(image) = resolved.patch.image.unwrap() else {
+        let ImageInput::Object(image) = resolved.input.image.unwrap() else {
             panic!("expected object image")
         };
         assert_eq!(image.bind.unwrap(), config_base.join("./rootfs"));
         assert_eq!(
-            resolved.patch.patch_files.unwrap(),
+            resolved.input.patch_files.unwrap(),
             vec![config_base.join("./patch.yaml")]
         );
-        let MountInput::String(mount) = &resolved.patch.mounts.unwrap()[0] else {
+        let MountInput::String(mount) = &resolved.input.mounts.unwrap()[0] else {
             panic!("expected string mount")
         };
         assert_eq!(
             mount,
-            &format!("{}:/app", config_base.join("./src").display())
+            &format!("{}:/app", config_base.join("src").display())
         );
-        let PatchInput::CopyFile(copy) = &resolved.patch.patches.unwrap()[0] else {
+        let PatchInput::CopyFile(copy) = &resolved.input.patches.unwrap()[0] else {
             panic!("expected copy-file patch")
         };
         assert_eq!(copy.src, config_base.join("./app.toml"));
+    }
+
+    #[test]
+    fn yaml_string_mounts_share_the_full_bind_option_grammar() {
+        let bind = materialize_mount(&MountInput::String(
+            "/host:/workspace:ro,noexec,nosuid,nodev,stat-virt=relaxed,host-perms=mirror,quota=64M,uid=1000,gid=1001"
+                .to_string(),
+        ))
+        .unwrap();
+
+        match bind {
+            VolumeMount::Bind {
+                host,
+                guest,
+                options,
+                stat_virtualization,
+                host_permissions,
+                quota_mib,
+                ..
+            } => {
+                assert_eq!(host, PathBuf::from("/host"));
+                assert_eq!(guest, "/workspace");
+                assert!(options.readonly);
+                assert!(options.noexec);
+                assert!(options.nosuid);
+                assert!(options.nodev);
+                assert_eq!(options.override_uid, Some(1000));
+                assert_eq!(options.override_gid, Some(1001));
+                assert_eq!(stat_virtualization, StatVirtualization::Relaxed);
+                assert_eq!(host_permissions, HostPermissions::Mirror);
+                assert_eq!(quota_mib, Some(64));
+            }
+            other => panic!("expected bind mount, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn yaml_object_mounts_accept_paired_owner_and_reject_invalid_uses() {
+        let dir = tempfile::tempdir().unwrap();
+        let valid = write_config(
+            dir.path(),
+            "valid-owner.yaml",
+            r#"
+image: alpine
+mounts:
+  - bind: "./workspace"
+    target: "/workspace"
+    uid: 1000
+    gid: 1001
+  - named: cache
+    target: "/cache"
+    uid: 2000
+    gid: 2001
+"#,
+        );
+        let patch = load_root(&valid).unwrap();
+        let mounts = patch.mounts.unwrap();
+        let mount = materialize_mount(&mounts[0]).unwrap();
+        match mount {
+            VolumeMount::Bind { options, .. } => {
+                assert_eq!(options.override_uid, Some(1000));
+                assert_eq!(options.override_gid, Some(1001));
+            }
+            other => panic!("expected bind mount, got {other:?}"),
+        }
+        let mount = materialize_mount(&mounts[1]).unwrap();
+        match mount {
+            VolumeMount::Named { options, .. } => {
+                assert_eq!(options.override_uid, Some(2000));
+                assert_eq!(options.override_gid, Some(2001));
+            }
+            other => panic!("expected named mount, got {other:?}"),
+        }
+
+        let partial = write_config(
+            dir.path(),
+            "partial-owner.yaml",
+            "image: alpine\nmounts:\n  - bind: ./workspace\n    target: /workspace\n    uid: 1000\n",
+        );
+        let error =
+            resolve(&SandboxConfigSources::default().source(SandboxConfigKind::Root, partial))
+                .unwrap_err()
+                .to_string();
+        assert!(error.contains("mount.uid and mount.gid must be specified together"));
+
+        let tmpfs = write_config(
+            dir.path(),
+            "tmpfs-owner.yaml",
+            "image: alpine\nmounts:\n  - tmpfs: {}\n    target: /tmp\n    uid: 1000\n    gid: 1000\n",
+        );
+        let error =
+            resolve(&SandboxConfigSources::default().source(SandboxConfigKind::Root, tmpfs))
+                .unwrap_err()
+                .to_string();
+        assert!(error.contains("only valid for bind or named mounts"));
     }
 
     #[test]
@@ -2146,7 +2592,8 @@ scripts:
 network:
   policy: public
   allow: ["api.openai.com"]
-  max_connections: 64
+  strict: true
+  max_tcp_connections: 64
 secrets:
   TOKEN:
     value: "literal-test-value"
@@ -2154,7 +2601,17 @@ secrets:
 "#,
         );
         let sources = SandboxConfigSources::default().source(SandboxConfigKind::Root, root);
-        let resolved = resolve(&sources).unwrap();
+        let resolved = resolve(&sources);
+        if !cfg!(feature = "net") {
+            assert!(
+                resolved
+                    .unwrap_err()
+                    .to_string()
+                    .contains("networking enabled")
+            );
+            return;
+        }
+        let resolved = resolved.unwrap();
         let image = resolved.image(None, None).unwrap();
         let builder = resolved.apply(SandboxBuilder::new("config-test")).unwrap();
         let config = image.apply(builder).unwrap().build().await.unwrap();
@@ -2168,10 +2625,11 @@ secrets:
             config.spec.runtime.scripts.get("start").unwrap(),
             "#!/bin/bash\npython app.py\n"
         );
-        assert_eq!(config.spec.network.max_connections, Some(64));
+        assert_eq!(config.spec.network.max_tcp_connections, Some(64));
+        assert!(config.spec.network.strict);
         assert_eq!(config.spec.network.ports.len(), 0);
         assert!(config.spec.network.tls.as_ref().unwrap().enabled);
-        assert!(config.spec.network.dns.as_ref().unwrap().rebind_protection);
+        assert!(config.spec.network.dns.is_none());
     }
 
     #[test]
@@ -2194,34 +2652,150 @@ secrets:
             r#"
 TOKEN:
   value: "${HOST_TOKEN}"
-  inject: [headers, basic_auth]
+  substitution:
+    headers: false
+    body: true
+  passthrough: [api.anthropic.com]
 "#,
         );
         let sources = SandboxConfigSources::default()
             .source(SandboxConfigKind::Root, root)
             .source(SandboxConfigKind::Secrets, scoped);
 
-        let resolved = resolve(&sources).unwrap();
-        let secret = &resolved.patch.secrets.unwrap()["TOKEN"];
+        let resolved = resolve(&sources);
+        if !cfg!(feature = "net") {
+            assert!(
+                resolved
+                    .unwrap_err()
+                    .to_string()
+                    .contains("networking enabled")
+            );
+            return;
+        }
+        let resolved = resolved.unwrap();
+        let secret = &resolved.input.secrets.unwrap()["TOKEN"];
         assert_eq!(
             secret.allow.as_deref(),
             Some(["api.example.com".to_string()].as_slice())
         );
         assert_eq!(secret.require_tls_identity, Some(false));
+        let substitution = secret.substitution.as_ref().unwrap();
+        assert_eq!(substitution.headers, Some(false));
+        assert_eq!(substitution.body, Some(true));
         assert_eq!(
-            secret.inject.as_deref(),
-            Some(
-                [
-                    SecretInjectionInput::Headers,
-                    SecretInjectionInput::BasicAuth,
-                ]
-                .as_slice()
-            )
+            secret.passthrough.as_deref(),
+            Some(["api.anthropic.com".to_string()].as_slice())
         );
         assert!(matches!(
             secret.value,
             Some(SecretValueInput::Environment { ref env }) if env == "HOST_TOKEN"
         ));
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn partial_secret_layers_preserve_policy_until_materialization() {
+        use microsandbox_types::{SecretSource, SecretViolationAction};
+
+        let dir = tempfile::tempdir().unwrap();
+        let base = write_config(
+            dir.path(),
+            "base.yaml",
+            r#"
+secret_violation_action: block-and-terminate
+secrets:
+  TOKEN:
+    placeholder: custom-placeholder
+    allow: [a.example]
+    substitution: { headers: false, query: true }
+    passthrough: [b.example]
+    violation_action: block
+    require_tls_identity: false
+"#,
+        );
+        let higher = write_config(
+            dir.path(),
+            "higher.yaml",
+            r#"
+secret_violation_action: block-and-log
+secrets:
+  TOKEN:
+    value: { $msb_env: HOST_TOKEN }
+    substitution: { body: true }
+"#,
+        );
+        let resolved = resolve(
+            &SandboxConfigSources::default()
+                .source(SandboxConfigKind::Root, base)
+                .source(SandboxConfigKind::Root, higher),
+        )
+        .unwrap();
+        let mut spec = microsandbox_types::SandboxSpec::default();
+        resolved.config_patch.apply_to(&mut spec);
+        let secrets = spec.network.secrets.unwrap();
+        assert_eq!(secrets.violation_action, SecretViolationAction::BlockAndLog);
+        let secret = &secrets.secrets[0];
+        assert_eq!(secret.source, Some(SecretSource::env("HOST_TOKEN")));
+        assert!(secret.value.is_empty());
+        assert_eq!(secret.placeholder, "custom-placeholder");
+        assert_eq!(
+            secret.allowed_hosts,
+            vec![microsandbox_types::HostPattern::Exact("a.example".into())]
+        );
+        assert!(!secret.substitution.headers);
+        assert!(secret.substitution.query);
+        assert!(secret.substitution.body);
+        assert_eq!(
+            secret.passthrough_hosts,
+            vec![microsandbox_types::HostPattern::Exact("b.example".into())]
+        );
+        assert_eq!(secret.violation_action, Some(SecretViolationAction::Block));
+        assert!(!secret.require_tls_identity);
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn action_only_secret_patch_keeps_existing_entries() {
+        let patch = materialize_network_patch(
+            None,
+            None,
+            Some(&microsandbox_types::SecretViolationAction::BlockAndTerminate),
+        )
+        .unwrap();
+        let mut network = microsandbox_types::NetworkSpec {
+            secrets: Some(microsandbox_types::SecretsConfig {
+                secrets: vec![
+                    serde_json::from_value(serde_json::json!({
+                        "env_var": "TOKEN", "placeholder": "$TOKEN",
+                    }))
+                    .unwrap(),
+                ],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        patch.apply_to(&mut network);
+        let secrets = network.secrets.unwrap();
+        assert_eq!(secrets.secrets.len(), 1);
+        assert_eq!(
+            secrets.violation_action,
+            microsandbox_types::SecretViolationAction::BlockAndTerminate
+        );
+        assert!(network.tls.is_none());
+    }
+
+    #[cfg(not(feature = "net"))]
+    #[test]
+    fn action_only_config_requires_networking() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = write_config(
+            dir.path(),
+            "action.yaml",
+            "secret_violation_action: block-and-terminate\n",
+        );
+        let error = resolve(&SandboxConfigSources::default().source(SandboxConfigKind::Root, root))
+            .unwrap_err();
+        assert!(error.to_string().contains("networking enabled"));
     }
 
     #[test]
@@ -2287,12 +2861,22 @@ scripts: { start: "python app.py" }
 
     #[cfg(feature = "net")]
     #[tokio::test]
-    async fn cli_network_defaults_replace_file_presets() {
+    async fn cli_network_defaults_replace_the_complete_file_policy() {
         let dir = tempfile::tempdir().unwrap();
         let root = write_config(
             dir.path(),
             "agent.yaml",
-            "image: \"python\"\nnetwork: public\n",
+            r#"
+image: "python"
+network:
+  policy: open
+  deny: ["169.254.169.254"]
+  allow: ["api.openai.com"]
+secrets:
+  TOKEN:
+    value: "test-secret"
+    allow: ["api.openai.com"]
+"#,
         );
         let sources = SandboxConfigSources::default().source(SandboxConfigKind::Root, root);
         let resolved = resolve(&sources).unwrap();
@@ -2316,16 +2900,23 @@ scripts: { start: "python app.py" }
         assert_eq!(policy["default_egress"], "deny");
         assert_eq!(policy["default_ingress"], "deny");
         assert_eq!(policy["rules"], serde_json::json!([]));
+        assert!(config.spec.network.secrets.is_some());
     }
 
     #[cfg(feature = "net")]
     #[tokio::test]
-    async fn cli_network_profiles_replace_file_presets() {
+    async fn cli_network_profiles_replace_the_complete_file_policy() {
         let dir = tempfile::tempdir().unwrap();
         let root = write_config(
             dir.path(),
             "agent.yaml",
-            "image: \"python\"\nnetwork: open\n",
+            r#"
+image: "python"
+network:
+  policy: open
+  deny: ["169.254.169.254"]
+  allow: ["api.openai.com"]
+"#,
         );
         let sources = SandboxConfigSources::default().source(SandboxConfigKind::Root, root);
         let resolved = resolve(&sources).unwrap();

@@ -1,0 +1,1048 @@
+//! Handler for the `msb machine` subcommand.
+//!
+//! Parses CLI arguments, builds a [`microsandbox_runtime::vm::Config`], and delegates to
+//! [`microsandbox_runtime::vm::enter()`]. This command **never returns**
+//! — the VMM calls `_exit()` on guest shutdown.
+
+#[cfg(unix)]
+use std::fs::File;
+#[cfg(unix)]
+use std::io::Read;
+#[cfg(unix)]
+use std::mem::MaybeUninit;
+use std::path::PathBuf;
+#[cfg(unix)]
+use std::{os::fd::FromRawFd, os::fd::OwnedFd};
+
+use clap::Args;
+use microsandbox_runtime::{
+    launch::LaunchConfig,
+    logging::LogLevel,
+    vm::{
+        AgentTransportProfile, Config, DiskMountSpec, UpperLayerSpec, UpperSpec, VmConfig,
+        validate_disk_format,
+    },
+};
+
+//--------------------------------------------------------------------------------------------------
+// Types
+//--------------------------------------------------------------------------------------------------
+
+/// Arguments for the `msb machine` subcommand.
+///
+/// Only the operator-readable labels and the real inherited fds live on argv.
+/// The bulk of the configuration — paths, env (incl. secrets), mounts, network
+/// config — arrives as a JSON [`LaunchConfig`] over `--config-fd` (or
+/// `--config-file` for manual invocation). See issue #997.
+#[derive(Debug, Args)]
+pub struct MachineArgs {
+    /// Set by legacy command routing, never inferred from a missing execution field.
+    #[arg(skip)]
+    pub legacy_launch: bool,
+    /// Require captured execution; runtimes without this protocol reject the invocation.
+    #[arg(long, hide = true)]
+    pub restore: bool,
+    /// Override automatic internal host/guest agent transport selection.
+    #[arg(
+        long = "agent-transport",
+        hide = true,
+        default_value = "auto",
+        value_parser = parse_agent_transport_profile
+    )]
+    pub(crate) agent_transport: AgentTransportProfile,
+
+    /// Name of the sandbox.
+    #[arg(long = "name")]
+    pub sandbox_name: String,
+
+    /// Database ID of the sandbox.
+    #[arg(long = "sandbox-id")]
+    pub sandbox_id: i32,
+
+    /// Log verbosity for the sandbox runtime (error, warn, info, debug, trace).
+    #[arg(long = "log-level", value_name = "LOG_LEVEL", value_parser = parse_log_level)]
+    pub log_level: Option<LogLevel>,
+
+    /// Read end of the attached-parent watchdog pipe.
+    #[cfg(unix)]
+    #[arg(long = "parent-watch-fd", hide = true)]
+    pub parent_watch_fd: Option<i32>,
+
+    /// Write end of the startup JSON pipe.
+    #[cfg(unix)]
+    #[arg(long = "startup-fd", hide = true)]
+    pub startup_fd: Option<i32>,
+
+    /// Inherited descriptor owning this sandbox's lifecycle lock.
+    #[cfg(unix)]
+    #[arg(long = "lifecycle-lock-fd", hide = true)]
+    pub lifecycle_lock_fd: Option<i32>,
+
+    /// Windows named pipe used to write startup JSON.
+    #[cfg(windows)]
+    #[arg(long = "startup-pipe", hide = true)]
+    pub startup_pipe: Option<String>,
+
+    /// Adopt launcher-transferred disk locks from stdin before opening guest disks.
+    #[cfg(windows)]
+    #[arg(long = "disk-locks-stdin", hide = true)]
+    pub disk_locks_stdin: bool,
+
+    /// Forward VM console output to stdout.
+    #[arg(long = "forward")]
+    pub forward_output: bool,
+
+    /// Number of virtual CPUs.
+    #[arg(long, default_value_t = 1)]
+    pub vcpus: u8,
+
+    /// Memory in MiB.
+    #[arg(long, default_value_t = 512)]
+    pub memory_mib: u32,
+
+    /// Maximum possible virtual CPUs (defaults to `--vcpus`).
+    #[arg(long = "max-vcpus")]
+    pub max_vcpus: Option<u8>,
+
+    /// Maximum hotpluggable memory in MiB (defaults to `--memory-mib`).
+    #[arg(long = "max-memory-mib")]
+    pub max_memory_mib: Option<u32>,
+
+    /// Inherited fd carrying the JSON [`LaunchConfig`] (set by the SDK).
+    #[cfg(unix)]
+    #[arg(long = "config-fd", hide = true)]
+    pub config_fd: Option<i32>,
+
+    /// Path to a JSON [`LaunchConfig`] file (manual invocation / debugging).
+    #[arg(long = "config-file", hide = true)]
+    pub config_file: Option<PathBuf>,
+}
+
+//--------------------------------------------------------------------------------------------------
+// Functions
+//--------------------------------------------------------------------------------------------------
+
+/// Parse a sandbox runtime log level.
+fn parse_log_level(s: &str) -> Result<LogLevel, String> {
+    match s {
+        "error" => Ok(LogLevel::Error),
+        "warn" => Ok(LogLevel::Warn),
+        "info" => Ok(LogLevel::Info),
+        "debug" => Ok(LogLevel::Debug),
+        "trace" => Ok(LogLevel::Trace),
+        _ => Err(format!(
+            "invalid log level: {s} (expected: error, warn, info, debug, trace)"
+        )),
+    }
+}
+
+/// Parse the hidden internal agent transport policy override.
+fn parse_agent_transport_profile(s: &str) -> Result<AgentTransportProfile, String> {
+    match s {
+        "auto" => Ok(AgentTransportProfile::Auto),
+        "combined" => Ok(AgentTransportProfile::Combined),
+        "dual-port-v1" => Ok(AgentTransportProfile::DualPortV1),
+        _ => Err(format!(
+            "invalid agent transport: {s} (expected: auto, combined, dual-port-v1)"
+        )),
+    }
+}
+
+/// Run the sandbox process. This function **never returns**.
+pub fn run(args: MachineArgs) -> ! {
+    // Keep these sidecar handles on this never-returning stack until process teardown. They
+    // are non-inheritable, so unrelated descendants cannot extend the sandbox's ownership.
+    #[cfg(windows)]
+    let _disk_locks = if args.disk_locks_stdin {
+        // SAFETY: the private startup pipe carries handles duplicated exclusively into this
+        // process by the launcher. No other runtime code has adopted them.
+        unsafe { microsandbox_runtime::disk_lock_handoff::receive(std::io::stdin().lock()) }
+            .unwrap_or_else(|error| {
+                eprintln!("failed to receive disk ownership: {error}");
+                std::process::exit(2);
+            })
+    } else {
+        Vec::new()
+    };
+    let launch = match load_launch_config(&args) {
+        Ok(launch) => launch,
+        Err(err) => {
+            eprintln!("{err}");
+            std::process::exit(2);
+        }
+    };
+    #[cfg(unix)]
+    let parent_watchdog = match args
+        .parent_watch_fd
+        .map(parent_watchdog_from_fd)
+        .transpose()
+    {
+        Ok(fd) => fd,
+        Err(err) => {
+            eprintln!("{err}");
+            std::process::exit(2);
+        }
+    };
+    #[cfg(unix)]
+    let startup_fd = match args.startup_fd.map(startup_from_fd).transpose() {
+        Ok(fd) => fd,
+        Err(err) => {
+            eprintln!("{err}");
+            std::process::exit(2);
+        }
+    };
+    let run_dir = launch_run_dir(&launch);
+    #[cfg(unix)]
+    let lifecycle_guard = match args.lifecycle_lock_fd {
+        Some(fd) => match lifecycle_guard_from_fd(fd) {
+            Ok(guard) => guard,
+            Err(err) => {
+                eprintln!("{err}");
+                std::process::exit(2);
+            }
+        },
+        None => {
+            match microsandbox_runtime::ipc::acquire_lifecycle_guard(&run_dir, &args.sandbox_name) {
+                Ok(guard) => guard,
+                Err(err) => {
+                    eprintln!("failed to acquire sandbox lifecycle ownership: {err}");
+                    std::process::exit(2);
+                }
+            }
+        }
+    };
+    #[cfg(not(unix))]
+    let lifecycle_guard =
+        microsandbox_runtime::ipc::acquire_lifecycle_guard(&run_dir, &args.sandbox_name)
+            .unwrap_or_else(|err| {
+                eprintln!("failed to acquire sandbox lifecycle ownership: {err}");
+                std::process::exit(2);
+            });
+    let is_vmdk = launch.rootfs.disk_format.as_deref() == Some("vmdk");
+    let disks = match parse_disk_args(&launch.disks) {
+        Ok(disks) => disks,
+        Err(err) => {
+            eprintln!("{err}");
+            std::process::exit(2);
+        }
+    };
+    // Restored managed chains and user-supplied disk-image roots ride the typed UpperSpec. The
+    // ordinary managed ext4 fast path stays on rootfs_upper. Exactly one representation is used.
+    let rootfs_upper_spec = if !launch.rootfs.upper_layers.is_empty() {
+        if launch.rootfs.upper.is_some() || launch.rootfs.upper_format.is_some() {
+            eprintln!("upper_layers cannot be combined with upper or upper_format");
+            std::process::exit(2);
+        }
+        let layers = launch
+            .rootfs
+            .upper_layers
+            .iter()
+            .map(|layer| {
+                let format = validate_disk_format(Some(&layer.format)).unwrap_or_else(|err| {
+                    eprintln!("upper layer format: {err}");
+                    std::process::exit(2);
+                });
+                UpperLayerSpec {
+                    path: layer.path.clone(),
+                    format,
+                }
+            })
+            .collect();
+        Some(UpperSpec {
+            layers,
+            read_only: false,
+        })
+    } else {
+        match (&launch.rootfs.upper, &launch.rootfs.upper_format) {
+            (Some(upper), Some(format)) => {
+                let format = match validate_disk_format(Some(format)) {
+                    Ok(format) => format,
+                    Err(err) => {
+                        eprintln!("upper disk format: {err}");
+                        std::process::exit(2);
+                    }
+                };
+                Some(UpperSpec {
+                    layers: vec![UpperLayerSpec {
+                        path: upper.clone(),
+                        format,
+                    }],
+                    read_only: false,
+                })
+            }
+            _ => None,
+        }
+    };
+    let rootfs_upper =
+        if launch.rootfs.upper_format.is_none() && launch.rootfs.upper_layers.is_empty() {
+            launch.rootfs.upper
+        } else {
+            None
+        };
+    let rootfs_disk_spec = if launch.rootfs.disk_layers.is_empty() {
+        None
+    } else {
+        if launch.rootfs.disk.is_some() {
+            eprintln!("disk_layers cannot be combined with disk");
+            std::process::exit(2);
+        }
+        let layers = launch
+            .rootfs
+            .disk_layers
+            .iter()
+            .map(|layer| {
+                let format = validate_disk_format(Some(&layer.format)).unwrap_or_else(|err| {
+                    eprintln!("root disk layer format: {err}");
+                    std::process::exit(2);
+                });
+                UpperLayerSpec {
+                    path: layer.path.clone(),
+                    format,
+                }
+            })
+            .collect();
+        Some(UpperSpec {
+            layers,
+            read_only: false,
+        })
+    };
+    if let Some(profile_name) = &launch.placement_profile_name
+        && launch.placement_profile.is_none()
+    {
+        eprintln!(
+            "placement profile `{profile_name}` is not defined in runtime.placement_profiles"
+        );
+        std::process::exit(2);
+    }
+    let vm_config = VmConfig {
+        libkrunfw_path: launch.libkrunfw_path,
+        thp: launch.thp,
+        memory_cache_dir: launch.memory_cache_dir,
+        vcpus: args.vcpus,
+        memory_mib: args.memory_mib,
+        max_cpus: args.max_vcpus.unwrap_or(args.vcpus).max(args.vcpus),
+        max_memory_mib: args
+            .max_memory_mib
+            .unwrap_or(args.memory_mib)
+            .max(args.memory_mib),
+        cpu_placement: launch.cpu_placement,
+        placement_profile_name: launch.placement_profile_name,
+        placement_profile: launch.placement_profile,
+        block_writeback_limit_bytes: launch.block_writeback_limit_bytes,
+        rootfs_path: launch.rootfs.path,
+        rootfs_follow_root_symlinks: launch.rootfs.follow_root_symlinks,
+        rootfs_vmdk: if is_vmdk {
+            launch.rootfs.disk.clone()
+        } else {
+            None
+        },
+        rootfs_upper,
+        rootfs_upper_spec,
+        rootfs_disk: if is_vmdk { None } else { launch.rootfs.disk },
+        rootfs_disk_format: if is_vmdk {
+            None
+        } else {
+            launch.rootfs.disk_format
+        },
+        rootfs_disk_readonly: launch.rootfs.disk_readonly,
+        rootfs_disk_spec,
+        rootfs_disk_runtime_owned: launch.rootfs.disk_runtime_owned,
+        mounts: launch.mounts,
+        owned_volumes: launch.owned_volumes,
+        file_mounts: launch.file_mounts,
+        disks,
+        vsock: launch.vsock,
+        #[cfg(unix)]
+        backends: vec![],
+        init_path: launch.init_path,
+        bootstrap: launch.bootstrap,
+        exec_path: launch.exec_path,
+        exec_args: launch.exec_args,
+        #[cfg(feature = "net")]
+        network: launch.network.unwrap_or_default(),
+        #[cfg(feature = "net")]
+        deployment_profile: launch.deployment_profile,
+        #[cfg(feature = "net")]
+        sandbox_slot: launch.sandbox_slot,
+        checkpoint_restore: launch.checkpoint_restore,
+    };
+
+    let config = Config {
+        agent_transport: args.agent_transport,
+        sandbox_name: args.sandbox_name,
+        sandbox_id: args.sandbox_id,
+        log_level: args.log_level,
+        sandbox_db_path: launch.db_path,
+        sandbox_db_connect_timeout_secs: launch.db_connect_timeout_secs,
+        log_dir: launch.log_dir,
+        runtime_dir: launch.runtime_dir,
+        sandboxes_dir: launch.sandboxes_dir,
+        run_dir,
+        lifecycle_guard,
+        cpu_lease_dir: launch.cpu_lease_dir,
+        writeback_lease_dir: launch.writeback_lease_dir,
+        block_writeback_pool_bytes: launch.block_writeback_pool_bytes,
+        agent_sock_path: launch.agent_sock,
+        startup_command: launch.startup,
+        #[cfg(unix)]
+        startup_fd,
+        #[cfg(windows)]
+        startup_pipe: args.startup_pipe,
+        #[cfg(unix)]
+        parent_watchdog,
+        forward_output: args.forward_output,
+        idle_timeout_secs: launch.lifecycle.idle_timeout_secs,
+        max_duration_secs: launch.lifecycle.max_duration_secs,
+        metrics_sample_interval_ms: if launch.metrics.disabled {
+            None
+        } else {
+            std::num::NonZero::new(launch.metrics.sample_interval_ms)
+        },
+        metrics_slot: launch.metrics.slot,
+        vm: vm_config,
+    };
+
+    microsandbox_runtime::vm::enter(config)
+}
+
+/// Resolve the runtime artifact root across launch-config generations.
+fn launch_run_dir(launch: &LaunchConfig) -> PathBuf {
+    if !launch.run_dir.as_os_str().is_empty() {
+        return launch.run_dir.clone();
+    }
+
+    // Older launchers bind `<run>/agent/<hash>.sock` and do not serialize a
+    // run root. Recover it from that stable legacy endpoint when possible.
+    if let Some(agent_dir) = launch.agent_sock.parent()
+        && agent_dir.file_name().is_some_and(|name| name == "agent")
+        && let Some(run_dir) = agent_dir.parent()
+    {
+        return run_dir.to_path_buf();
+    }
+
+    // The pre-hash deep-path fallback lives below the sandbox root, so it
+    // carries no run-root information. Existing homes colocate `run` beside
+    // `sandboxes`; this inference is only used for old launch payloads.
+    launch
+        .sandboxes_dir
+        .parent()
+        .map(|home| home.join(microsandbox_utils::RUN_SUBDIR))
+        .unwrap_or_default()
+}
+
+/// Load the JSON [`LaunchConfig`] for this sandbox from the inherited config
+/// fd, or from `--config-file <path>` for manual invocation.
+///
+/// The launcher keeps only operator-readable labels on the real argv and
+/// serializes the rest — network config, env (including secrets), mounts, and
+/// paths — to an inherited fd, so they no longer appear in `ps` or
+/// `/proc/<pid>/cmdline`. See issue #997.
+fn load_launch_config(args: &MachineArgs) -> Result<LaunchConfig, String> {
+    #[cfg(unix)]
+    let bytes = match (args.config_fd, &args.config_file) {
+        (Some(fd), _) => read_config_fd(fd)?,
+        (None, Some(path)) => std::fs::read(path)
+            .map_err(|e| format!("failed to read --config-file {}: {e}", path.display()))?,
+        (None, None) => {
+            return Err("missing --config-fd or --config-file for `msb machine`".to_string());
+        }
+    };
+    #[cfg(windows)]
+    let bytes = match &args.config_file {
+        Some(path) => std::fs::read(path)
+            .map_err(|e| format!("failed to read --config-file {}: {e}", path.display()))?,
+        None => return Err("missing --config-file for `msb machine`".to_string()),
+    };
+    let config = if args.legacy_launch {
+        microsandbox_runtime::launch_protocol::decode_legacy(&bytes)?
+    } else {
+        LaunchConfig::decode(&bytes)?
+    };
+    if args.restore != (config.execution == microsandbox_runtime::launch::ExecutionIntent::Restore)
+    {
+        return Err("--restore and launch execution intent disagree".into());
+    }
+    Ok(config)
+}
+
+/// Read the full contents of the inherited config fd, taking ownership so it
+/// is closed once consumed.
+#[cfg(unix)]
+fn read_config_fd(fd: i32) -> Result<Vec<u8>, String> {
+    if fd < 0 {
+        return Err(format!(
+            "invalid --config-fd: must be non-negative, got {fd}"
+        ));
+    }
+    let mut file = unsafe { File::from_raw_fd(fd) };
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .map_err(|e| format!("failed to read --config-fd {fd}: {e}"))?;
+    Ok(bytes)
+}
+
+#[cfg(unix)]
+fn parent_watchdog_from_fd(fd: i32) -> Result<OwnedFd, String> {
+    validate_pipe_fd(
+        fd,
+        microsandbox_runtime::vm::PARENT_WATCH_FD,
+        "parent-watch-fd",
+    )?;
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
+#[cfg(unix)]
+fn startup_from_fd(fd: i32) -> Result<OwnedFd, String> {
+    validate_pipe_fd(fd, microsandbox_runtime::vm::STARTUP_FD, "startup-fd")?;
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
+#[cfg(unix)]
+fn lifecycle_guard_from_fd(
+    fd: i32,
+) -> Result<microsandbox_runtime::ipc::SandboxLifecycleGuard, String> {
+    validate_open_fd(
+        fd,
+        microsandbox_runtime::vm::LIFECYCLE_LOCK_FD,
+        "lifecycle-lock-fd",
+    )?;
+    let file = unsafe { File::from_raw_fd(fd) };
+    Ok(microsandbox_runtime::ipc::SandboxLifecycleGuard::from_inherited_file(file))
+}
+
+#[cfg(unix)]
+fn validate_pipe_fd(fd: i32, expected_fd: i32, arg_name: &str) -> Result<(), String> {
+    validate_open_fd(fd, expected_fd, arg_name)?;
+
+    let mut stat = MaybeUninit::<libc::stat>::uninit();
+    if unsafe { libc::fstat(fd, stat.as_mut_ptr()) } != 0 {
+        return Err(format!(
+            "invalid --{arg_name} {fd}: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let stat = unsafe { stat.assume_init() };
+    let file_type = stat.st_mode & libc::S_IFMT as libc::mode_t;
+    if file_type != libc::S_IFIFO as libc::mode_t {
+        return Err(format!("invalid --{arg_name} {fd}: fd is not a pipe"));
+    }
+
+    Ok(())
+}
+
+#[cfg(unix)]
+fn validate_open_fd(fd: i32, expected_fd: i32, arg_name: &str) -> Result<(), String> {
+    if fd < 0 {
+        return Err(format!(
+            "invalid --{arg_name}: fd must be non-negative, got {fd}"
+        ));
+    }
+    if fd != expected_fd {
+        return Err(format!(
+            "invalid --{arg_name}: expected {expected_fd}, got {fd}",
+        ));
+    }
+
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    if flags < 0 {
+        return Err(format!(
+            "invalid --{arg_name} {fd}: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+
+    Ok(())
+}
+
+/// Parse `--disk id:host_path:format[:ro][:snapshot-owned]` entries into typed specs.
+///
+/// `guest` and `fstype` are not in this arg. They travel in the typed guest
+/// bootstrap consumed by agentd, so the runtime only needs what `DiskBuilder`
+/// will set.
+///
+/// Malformed entries are hard errors so bootstrap cannot mention a disk that
+/// the runtime silently failed to attach.
+fn parse_disk_args(entries: &[String]) -> Result<Vec<DiskMountSpec>, String> {
+    entries
+        .iter()
+        .map(|entry| parse_one_disk_arg(entry))
+        .collect()
+}
+
+fn parse_one_disk_arg(entry: &str) -> Result<DiskMountSpec, String> {
+    let (id, rest) = entry.split_once(':').ok_or_else(|| {
+        format!("invalid --disk entry, expected id:host:format[:ro], got: {entry:?}")
+    })?;
+    if id.is_empty() {
+        return Err(format!("invalid --disk entry with empty id: {entry:?}"));
+    }
+
+    // This must-understand suffix is emitted only by the trusted launcher after ownership
+    // resolution. Older runtimes reject it as an unknown format instead of assuming ownership.
+    let (rest, lifecycle_owned) = match rest.strip_suffix(":lifecycle-owned") {
+        Some(rest) => (rest, true),
+        None => (rest, false),
+    };
+    let (rest, snapshot_owned) = match rest.strip_suffix(":snapshot-owned") {
+        Some(rest) => (rest, true),
+        None => (rest, false),
+    };
+    if lifecycle_owned && !snapshot_owned {
+        return Err("lifecycle-owned disks must also be snapshot-owned".into());
+    }
+    let (rest, readonly) = match rest.strip_suffix(":ro") {
+        Some(rest) => (rest, true),
+        None => (rest, false),
+    };
+    let (host, fmt_str) = rest.rsplit_once(':').ok_or_else(|| {
+        format!("invalid --disk entry, expected id:host:format[:ro], got: {entry:?}")
+    })?;
+    if host.is_empty() {
+        return Err(format!(
+            "invalid --disk entry with empty host path: {entry:?}"
+        ));
+    }
+    let format = match microsandbox_runtime::vm::validate_disk_format(Some(fmt_str)) {
+        Ok(f) => f,
+        Err(_) => {
+            return Err(format!(
+                "invalid --disk entry with unknown format {fmt_str:?}: {entry:?}"
+            ));
+        }
+    };
+
+    Ok(DiskMountSpec {
+        id: id.to_string(),
+        host: PathBuf::from(host),
+        layers: Vec::new(),
+        guest: String::new(), // consumed only by agentd via env
+        format,
+        fstype: None, // ditto
+        readonly,
+        snapshot_owned,
+        lifecycle_owned,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(unix)]
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+
+    use super::*;
+
+    #[test]
+    fn snapshot_disk_ownership_requires_the_explicit_suffix() {
+        for (value, owned, readonly) in [
+            ("disk:/host:raw", false, false),
+            ("disk:/host:raw:ro", false, true),
+            ("disk:/host:raw:snapshot-owned", true, false),
+            ("disk:/host:qcow2:ro:snapshot-owned", true, true),
+        ] {
+            let parsed = parse_one_disk_arg(value).unwrap();
+            assert_eq!(parsed.snapshot_owned, owned);
+            assert_eq!(parsed.readonly, readonly);
+            assert!(parsed.layers.is_empty());
+        }
+        assert!(parse_one_disk_arg("disk:/host:raw:snapshot-owned:ro").is_err());
+        assert!(parse_one_disk_arg("disk:/host:raw:snapshot-owned:snapshot-owned").is_err());
+    }
+
+    fn fmt(s: &str) -> String {
+        format!(
+            "{:?}",
+            microsandbox_runtime::vm::validate_disk_format(Some(s)).unwrap()
+        )
+    }
+
+    #[test]
+    fn test_parse_one_disk_arg_happy() {
+        let spec = parse_one_disk_arg("data_abc:/host/data.qcow2:qcow2").unwrap();
+        assert_eq!(spec.id, "data_abc");
+        assert_eq!(spec.host, PathBuf::from("/host/data.qcow2"));
+        assert_eq!(format!("{:?}", spec.format), fmt("qcow2"));
+        assert!(!spec.readonly);
+    }
+
+    #[test]
+    fn test_parse_one_disk_arg_with_ro() {
+        let spec = parse_one_disk_arg("seed:/host/seed.raw:raw:ro").unwrap();
+        assert!(spec.readonly);
+        assert_eq!(format!("{:?}", spec.format), fmt("raw"));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_parse_one_disk_arg_with_windows_drive_path() {
+        let spec = parse_one_disk_arg(r"seed:C:\Users\Stephen\seed.raw:raw:ro").unwrap();
+        assert_eq!(spec.host, PathBuf::from(r"C:\Users\Stephen\seed.raw"));
+        assert!(spec.readonly);
+        assert_eq!(format!("{:?}", spec.format), fmt("raw"));
+    }
+
+    #[test]
+    fn test_parse_one_disk_arg_missing_format_field() {
+        // Two-field entries are rejected (no format token).
+        assert!(parse_one_disk_arg("id:/host").is_err());
+    }
+
+    #[test]
+    fn test_parse_one_disk_arg_too_many_fields() {
+        assert!(parse_one_disk_arg("id:/host:raw:ro:extra").is_err());
+    }
+
+    #[test]
+    fn test_parse_one_disk_arg_empty_id() {
+        assert!(parse_one_disk_arg(":/host:raw").is_err());
+    }
+
+    #[test]
+    fn test_parse_one_disk_arg_empty_host() {
+        assert!(parse_one_disk_arg("id::raw").is_err());
+    }
+
+    #[test]
+    fn test_parse_one_disk_arg_unknown_format() {
+        assert!(parse_one_disk_arg("id:/host:bogus").is_err());
+    }
+
+    #[test]
+    fn test_parse_one_disk_arg_unknown_flag() {
+        // "rw" / typos are rejected explicitly so they don't silently coerce
+        // to readonly=false.
+        assert!(parse_one_disk_arg("id:/host:raw:rw").is_err());
+        assert!(parse_one_disk_arg("id:/host:raw:RO").is_err());
+    }
+
+    #[test]
+    fn test_parse_disk_args_rejects_bad_entries() {
+        let entries = vec![
+            "good:/host/g.raw:raw".to_string(),
+            "bad".to_string(),
+            "another:/host/a.qcow2:qcow2:ro".to_string(),
+        ];
+        let err = parse_disk_args(&entries).unwrap_err();
+        assert!(err.contains("invalid --disk entry"));
+    }
+
+    #[test]
+    fn test_parse_disk_args_keeps_good_entries() {
+        let entries = vec![
+            "good:/host/g.raw:raw".to_string(),
+            "another:/host/a.qcow2:qcow2:ro".to_string(),
+        ];
+        let specs = parse_disk_args(&entries).unwrap();
+        assert_eq!(specs.len(), 2);
+        assert_eq!(specs[0].id, "good");
+        assert_eq!(specs[1].id, "another");
+        assert!(specs[1].readonly);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_validate_parent_watchdog_fd_rejects_negative_fd() {
+        let err = validate_pipe_fd(
+            -1,
+            microsandbox_runtime::vm::PARENT_WATCH_FD,
+            "parent-watch-fd",
+        )
+        .unwrap_err();
+
+        assert!(err.contains("non-negative"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_validate_parent_watchdog_fd_rejects_wrong_fd_number() {
+        let err = validate_pipe_fd(
+            0,
+            microsandbox_runtime::vm::PARENT_WATCH_FD,
+            "parent-watch-fd",
+        )
+        .unwrap_err();
+
+        assert!(err.contains("expected 97"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_validate_parent_watchdog_fd_rejects_regular_file() {
+        let file = tempfile::tempfile().unwrap();
+        let fd = file.as_raw_fd();
+
+        let err = validate_pipe_fd(fd, fd, "parent-watch-fd").unwrap_err();
+
+        assert!(err.contains("not a pipe"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_validate_parent_watchdog_fd_accepts_pipe() {
+        let mut fds = [0; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        let read_fd = unsafe { OwnedFd::from_raw_fd(fds[0]) };
+        let _write_fd = unsafe { OwnedFd::from_raw_fd(fds[1]) };
+
+        validate_pipe_fd(read_fd.as_raw_fd(), read_fd.as_raw_fd(), "parent-watch-fd").unwrap();
+    }
+
+    /// Build a `MachineArgs` carrying only a config source; the rest is unused
+    /// by `load_launch_config`.
+    fn args_with(config_fd: Option<i32>, config_file: Option<PathBuf>) -> MachineArgs {
+        #[cfg(not(unix))]
+        let _ = config_fd;
+
+        MachineArgs {
+            legacy_launch: false,
+            restore: false,
+            agent_transport: AgentTransportProfile::Auto,
+            sandbox_name: "test".to_string(),
+            sandbox_id: 1,
+            log_level: None,
+            #[cfg(unix)]
+            parent_watch_fd: None,
+            #[cfg(unix)]
+            startup_fd: None,
+            #[cfg(unix)]
+            lifecycle_lock_fd: None,
+            #[cfg(windows)]
+            startup_pipe: None,
+            #[cfg(windows)]
+            disk_locks_stdin: false,
+            forward_output: false,
+            vcpus: 1,
+            memory_mib: 512,
+            max_vcpus: None,
+            max_memory_mib: None,
+            #[cfg(unix)]
+            config_fd,
+            config_file,
+        }
+    }
+
+    #[test]
+    fn test_parse_hidden_agent_transport_profiles() {
+        assert_eq!(
+            parse_agent_transport_profile("auto").unwrap(),
+            AgentTransportProfile::Auto
+        );
+        assert_eq!(
+            parse_agent_transport_profile("combined").unwrap(),
+            AgentTransportProfile::Combined
+        );
+        assert_eq!(
+            parse_agent_transport_profile("dual-port-v1").unwrap(),
+            AgentTransportProfile::DualPortV1
+        );
+        assert!(parse_agent_transport_profile("dual-port-v2").is_err());
+    }
+
+    #[test]
+    fn test_hidden_agent_transport_defaults_to_auto_without_help_surface() {
+        use clap::{CommandFactory, Parser};
+
+        #[derive(Debug, Parser)]
+        struct TestCli {
+            #[command(flatten)]
+            sandbox: MachineArgs,
+        }
+
+        let parsed =
+            TestCli::try_parse_from(["msb", "--name", "box", "--sandbox-id", "1"]).unwrap();
+        assert_eq!(parsed.sandbox.agent_transport, AgentTransportProfile::Auto);
+
+        let help = TestCli::command().render_long_help().to_string();
+        assert!(!help.contains("--agent-transport"));
+        assert!(!help.contains("dual-port-v1"));
+
+        let combined = TestCli::try_parse_from([
+            "msb",
+            "--name",
+            "box",
+            "--sandbox-id",
+            "1",
+            "--agent-transport",
+            "combined",
+        ])
+        .unwrap();
+        assert_eq!(
+            combined.sandbox.agent_transport,
+            AgentTransportProfile::Combined
+        );
+
+        let retired = TestCli::try_parse_from([
+            "msb",
+            "--name",
+            "box",
+            "--sandbox-id",
+            "1",
+            "--unstable-agent-transport",
+            "combined",
+        ]);
+        assert!(retired.is_err());
+    }
+
+    #[test]
+    fn test_load_launch_config_from_file() {
+        use microsandbox_protocol::bootstrap::{BootstrapEnvVar, GuestBootstrap};
+        use std::io::Write;
+
+        let launch = LaunchConfig {
+            db_path: PathBuf::from("/tmp/x.db"),
+            bootstrap: GuestBootstrap {
+                default_env: vec![BootstrapEnvVar {
+                    key: "TOKEN".to_string(),
+                    value: "secret".to_string(),
+                }],
+                ..GuestBootstrap::default()
+            },
+            block_writeback_limit_bytes: Some(512 * 1024 * 1024),
+            block_writeback_pool_bytes: Some(4 * 1024 * 1024 * 1024),
+            writeback_lease_dir: PathBuf::from("/tmp/writeback-leases"),
+            ..Default::default()
+        };
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(&serde_json::to_vec(&launch).unwrap())
+            .unwrap();
+
+        let args = args_with(None, Some(file.path().to_path_buf()));
+        let loaded = load_launch_config(&args).unwrap();
+
+        assert_eq!(loaded.db_path, PathBuf::from("/tmp/x.db"));
+        assert_eq!(
+            loaded.bootstrap.default_env,
+            vec![BootstrapEnvVar {
+                key: "TOKEN".to_string(),
+                value: "secret".to_string(),
+            }]
+        );
+        assert_eq!(loaded.block_writeback_limit_bytes, Some(512 * 1024 * 1024));
+        assert_eq!(
+            loaded.block_writeback_pool_bytes,
+            Some(4 * 1024 * 1024 * 1024)
+        );
+        assert_eq!(
+            loaded.writeback_lease_dir,
+            PathBuf::from("/tmp/writeback-leases")
+        );
+    }
+
+    #[test]
+    fn legacy_launch_decoding_is_explicit_and_cannot_restore() {
+        use microsandbox_runtime::launch_protocol::LaunchProtocol;
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let bytes = LaunchProtocol::Legacy {
+            file_mounts: true,
+            resolved_network: true,
+        }
+        .encode(&LaunchConfig::default())
+        .unwrap();
+        std::fs::write(file.path(), bytes).unwrap();
+        let mut args = args_with(None, Some(file.path().to_path_buf()));
+        assert!(load_launch_config(&args).is_err());
+        args.legacy_launch = true;
+        assert!(load_launch_config(&args).is_ok());
+        args.restore = true;
+        assert!(
+            load_launch_config(&args)
+                .unwrap_err()
+                .contains("intent disagree")
+        );
+    }
+
+    #[test]
+    fn restore_argument_cannot_select_a_fresh_boot() {
+        use std::io::Write;
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(&serde_json::to_vec(&LaunchConfig::default()).unwrap())
+            .unwrap();
+        let mut args = args_with(None, Some(file.path().to_path_buf()));
+        args.restore = true;
+        assert!(
+            load_launch_config(&args)
+                .unwrap_err()
+                .contains("intent disagree")
+        );
+    }
+
+    #[test]
+    fn test_old_launch_config_without_run_dir_remains_readable() {
+        use std::io::Write;
+
+        let launch = LaunchConfig {
+            sandboxes_dir: PathBuf::from("/tmp/msb/sandboxes"),
+            agent_sock: PathBuf::from("/tmp/msb/run/agent/legacy.sock"),
+            ..Default::default()
+        };
+        let mut value = serde_json::to_value(&launch).unwrap();
+        value.as_object_mut().unwrap().remove("run_dir");
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(&serde_json::to_vec(&value).unwrap())
+            .unwrap();
+
+        let args = args_with(None, Some(file.path().to_path_buf()));
+        let loaded = load_launch_config(&args).unwrap();
+
+        assert!(loaded.run_dir.as_os_str().is_empty());
+        assert_eq!(launch_run_dir(&loaded), PathBuf::from("/tmp/msb/run"));
+    }
+
+    #[test]
+    fn test_old_fallback_launch_config_infers_run_dir_from_sandbox_root() {
+        let launch = LaunchConfig {
+            sandboxes_dir: PathBuf::from("/tmp/msb/sandboxes"),
+            agent_sock: PathBuf::from("/tmp/msb/sandboxes/demo/runtime/agent.sock"),
+            ..Default::default()
+        };
+
+        assert_eq!(launch_run_dir(&launch), PathBuf::from("/tmp/msb/run"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_load_launch_config_from_fd() {
+        use std::io::{Seek, SeekFrom, Write};
+        use std::os::fd::IntoRawFd;
+
+        let launch = LaunchConfig {
+            bootstrap: microsandbox_protocol::bootstrap::GuestBootstrap {
+                default_cwd: Some("/srv".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(&serde_json::to_vec(&launch).unwrap())
+            .unwrap();
+        file.seek(SeekFrom::Start(0)).unwrap();
+        let fd = file.into_raw_fd();
+
+        let args = args_with(Some(fd), None);
+        let loaded = load_launch_config(&args).unwrap();
+
+        assert_eq!(loaded.bootstrap.default_cwd.as_deref(), Some("/srv"));
+    }
+
+    #[test]
+    fn test_load_launch_config_missing_source() {
+        let err = load_launch_config(&args_with(None, None)).unwrap_err();
+        assert!(err.contains("missing"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_load_launch_config_rejects_negative_fd() {
+        let err = load_launch_config(&args_with(Some(-1), None)).unwrap_err();
+        assert!(err.contains("config-fd"));
+    }
+
+    #[test]
+    fn test_load_launch_config_rejects_garbage() {
+        use std::io::Write;
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(b"not json").unwrap();
+        let err =
+            load_launch_config(&args_with(None, Some(file.path().to_path_buf()))).unwrap_err();
+        assert!(err.contains("invalid launch config"));
+    }
+}

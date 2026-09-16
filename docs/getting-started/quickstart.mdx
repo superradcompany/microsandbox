@@ -4,29 +4,56 @@ description: Get a sandbox running in under 5 minutes
 icon: "bolt"
 ---
 
-<Note>
-  Running locally requires **glibc-based Linux with KVM**, **macOS with Apple Silicon** (M-series chip), or **Windows 11 with Windows Hypervisor Platform** enabled. All local backends use hardware virtualization. [microsandbox cloud](/cloud/overview) has no hardware requirements.
-</Note>
+## Run your first sandbox
+
+<CodeGroup>
+```bash npx
+npx microsandbox run debian
+```
+
+```bash macOS & Linux
+curl -fsSL https://install.microsandbox.dev | sh
+msb run debian
+```
+
+```powershell Windows
+irm https://install.microsandbox.dev/windows | iex
+msb run debian
+```
+</CodeGroup>
 
 <Tip>
-  Boot a microVM in one command.
-
-  ```bash
-  npx microsandbox run debian
-  ```
+  Prefer short commands such as `msb run debian` for everyday use. `msb sandbox run debian` and `msb sbx run debian` do the same thing, with the same flags. Explore the full group with `msb sandbox --help`.
 </Tip>
+
+Having trouble with a local installation? Choose your platform for setup checks and fixes.
+
+<div className="msb-platform-strip msb-platform-strip-three" role="list" aria-label="Installation troubleshooting">
+  <a className="msb-platform-item msb-platform-link" role="listitem" href="/troubleshooting/linux">
+    <span className="msb-platform-icon"><Icon icon="linux" size={18} /></span>
+    <span className="msb-platform-copy"><strong>Linux</strong><span>glibc 2.28+ and KVM</span></span>
+  </a>
+  <a className="msb-platform-item msb-platform-link" role="listitem" href="/troubleshooting/macos">
+    <span className="msb-platform-icon"><Icon icon="apple" size={18} /></span>
+    <span className="msb-platform-copy"><strong>macOS</strong><span>Apple Silicon</span></span>
+  </a>
+  <a className="msb-platform-item msb-platform-link" role="listitem" href="/troubleshooting/windows">
+    <span className="msb-platform-icon"><Icon icon="windows" size={18} /></span>
+    <span className="msb-platform-copy"><strong>Windows</strong><span>10+ · WHP</span></span>
+  </a>
+</div>
 
 <Steps>
   <Step title="Install microsandbox">
-    Install the SDK for the language you are using, and install the `msb` CLI for terminal workflows such as managing images, volumes, and sandboxes. Both run microsandbox locally by default; there is no separate server or daemon to set up. The same install also drives [microsandbox cloud](/cloud/overview) when an API key is set.
+    For application code, install the SDK for your language. For terminal workflows, use one of the CLI options above. Both run microsandbox locally by default; there is no separate server or daemon to set up. The same installation also drives [microsandbox cloud](/cloud/overview) when an API key is set.
 
     <CodeGroup>
-    ```bash Rust
-    cargo add microsandbox
-    ```
-
     ```bash TypeScript
     npm install microsandbox
+    ```
+
+    ```bash Rust
+    cargo add microsandbox
     ```
 
     ```bash Python
@@ -37,21 +64,15 @@ icon: "bolt"
     go get github.com/superradcompany/microsandbox/sdk/go
     ```
 
-    ```bash CLI (Linux & macOS)
-    curl -fsSL https://install.microsandbox.dev | sh
-    ```
-
-    ```bash Homebrew (macOS)
-    brew install superradcompany/tap/microsandbox
-    ```
-
-    ```powershell CLI (Windows)
-    irm https://install.microsandbox.dev/windows | iex
+    ```bash Ruby
+    gem install microsandbox
     ```
 
     </CodeGroup>
 
-    microsandbox uses hardware virtualization: Linux needs KVM, macOS needs Apple Silicon, and Windows needs Windows Hypervisor Platform. Check your local setup with:
+    You can also provision the runtime with the CLI installer above or explicit SDK setup helpers. See [Runtime setup](/sdk/setup#bring-your-own-runtime) for Node's bundled binaries and Rust's opt-out options.
+
+    Check local virtualization support with:
 
     ```bash
     msb doctor
@@ -64,6 +85,18 @@ icon: "bolt"
     Create a sandbox, execute code inside it, and get the result back.
 
     <CodeGroup>
+    ```typescript TypeScript
+    import { Sandbox } from "microsandbox";
+
+    await using sb = await Sandbox.builder("hello")
+        .image("python")
+        .memory(512)
+        .create();
+
+    const output = await sb.exec("python", ["-c", "print('Hello from a microVM!')"]);
+    console.log(output.stdout()); // Hello from a microVM!
+    ```
+
     ```rust Rust
     use microsandbox::Sandbox;
 
@@ -81,18 +114,6 @@ icon: "bolt"
         sb.stop().await?;
         Ok(())
     }
-    ```
-
-    ```typescript TypeScript
-    import { Sandbox } from "microsandbox";
-
-    await using sb = await Sandbox.builder("hello")
-        .image("python")
-        .memory(512)
-        .create();
-
-    const output = await sb.exec("python", ["-c", "print('Hello from a microVM!')"]);
-    console.log(output.stdout()); // Hello from a microVM!
     ```
 
     ```python Python
@@ -131,6 +152,17 @@ icon: "bolt"
     fmt.Println(output.Stdout()) // Hello from a microVM!
     ```
 
+    ```ruby Ruby
+    require "microsandbox"
+
+    Microsandbox.install unless Microsandbox.installed?
+
+    Microsandbox::Sandbox.with("hello", image: "python", memory: 512) do |sandbox|
+      output = sandbox.exec("python", ["-c", "print('Hello from a microVM!')"])
+      puts output.stdout
+    end
+    ```
+
     ```bash CLI
     msb run python -- python3 -c "print('Hello from a microVM!')"
     ```
@@ -151,20 +183,17 @@ Here's what happened behind that `Sandbox.builder(...).create()` call:
 The `exec` call uses the host-guest command channel, not SSH and not the sandbox network.
 
 <Tip>
-  Because exec doesn't go through the network, it works even when a sandbox has networking disabled via `.disable_network()` and no network interfaces at all.
-</Tip>
-
-<Tip>
   Want the same sandbox on hosted infrastructure? Set `MSB_BACKEND=cloud` and export `MSB_API_KEY`; the code above then runs on [microsandbox cloud](/cloud/overview) unchanged.
 </Tip>
 
 ## Next steps
 
+- [Explore practical examples](/examples/overview): tested workflows for agents, CI/CD, Docker, automation, and more
 - [Run on microsandbox cloud](/cloud/overview): the same code on hosted infrastructure
-- [Tune sandbox settings](/sandboxes/tuning): resize headroom, labels, secrets, and storage
+- [Modify live sandbox settings](/sandboxes/tuning): resize headroom, labels, secrets, and storage
 - [Troubleshoot Linux setup](/troubleshooting/linux): KVM, `/dev/kvm`, and permissions
 - [Troubleshoot macOS setup](/troubleshooting/macos): Apple Silicon and local runtime checks
-- [Troubleshoot Windows setup](/troubleshooting/windows): WHP, `msb doctor`, and Windows 11 notes
+- [Troubleshoot Windows setup](/troubleshooting/windows): WHP, `msb doctor`, and runtime setup
 - [Run commands and stream output](/sandboxes/commands): `exec`, `shell`, `attach`, and streaming
 - [Control network access](/networking/overview): policies, DNS interception, and secret protection
 - [Manage sandboxes with the CLI](/cli/overview): create, inspect, and manage sandboxes from the terminal

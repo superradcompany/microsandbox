@@ -26,7 +26,7 @@ msb run python --root-disk tmpfs:2G
 msb run python --root-disk ./scratch.qcow2:format=qcow2,fstype=ext4
 ```
 
-`msb modify --root-disk` keeps grow-only semantics for managed disks, allows any direction for tmpfs, and rejects sizing on user disk images. All four SDKs expose the new surface with builders and deprecated aliases mapping to the managed kind. See the [tuning guide](/sandboxes/tuning).
+`msb modify --root-disk` keeps grow-only semantics for managed disks, allows any direction for tmpfs, and rejects sizing on user disk images. All four SDKs expose the new surface with builders and deprecated aliases mapping to the managed kind. See the [Live Modify guide](/sandboxes/tuning).
 
 **Default symlink protection on mount roots**
 

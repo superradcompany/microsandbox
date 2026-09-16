@@ -1,0 +1,174 @@
+---
+title: Crawl a site with Scrapy
+sidebarTitle: Scrapy
+description: Run a bounded crawler with a single-site network allowlist
+icon: "spider"
+---
+
+<Tooltip tip="This workflow uses local snapshot verification and explicit destination security/network controls."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+Run a Scrapy spider in a disposable microVM and export only its JSON result. This example targets [Books to Scrape](https://books.toscrape.com/), a public practice site.
+
+Use [Playwright](/examples/browser-automation/playwright) instead when content appears only after JavaScript runs.
+
+## Crawl a site
+
+<Steps>
+
+<Step title="Create the spider">
+
+```python books_spider.py
+import scrapy
+
+
+class BooksSpider(scrapy.Spider):
+    name = "books"
+    start_urls = ["https://books.toscrape.com/"]
+    allowed_domains = ["books.toscrape.com"]
+    custom_settings = {
+        "ROBOTSTXT_OBEY": True,
+        "CONCURRENT_REQUESTS_PER_DOMAIN": 2,
+        "DOWNLOAD_DELAY": 0.25,
+        "CLOSESPIDER_PAGECOUNT": 10,
+    }
+
+    def parse(self, response):
+        for book in response.css("article.product_pod"):
+            yield {
+                "title": book.css("h3 a::attr(title)").get(),
+                "price": book.css(".price_color::text").get(),
+            }
+
+        next_page = response.css("li.next a::attr(href)").get()
+        if next_page:
+            yield response.follow(next_page, self.parse)
+```
+
+</Step>
+
+<Step title="Prepare Scrapy">
+
+<CodeGroup>
+```sh macOS & Linux
+msb run --name scrapy-base --replace \
+  --memory 1G --root-disk 3G --max-duration 5m \
+  python:3.13.14-alpine3.23 -- sh -lc \
+    'mkdir -p /work && pip install --no-cache-dir scrapy==2.17.0'
+```
+
+```powershell Windows
+msb run --name scrapy-base --replace `
+  --memory 1G --root-disk 3G --max-duration 5m `
+  python:3.13.14-alpine3.23 -- sh -lc `
+    'mkdir -p /work && pip install --no-cache-dir scrapy==2.17.0'
+```
+</CodeGroup>
+
+Capture the prepared environment:
+
+<CodeGroup>
+```sh macOS & Linux
+msb snapshot create scrapy-runtime \
+  --from-sandbox scrapy-base --integrity
+```
+
+```powershell Windows
+msb snapshot create scrapy-runtime `
+  --from-sandbox scrapy-base --integrity
+```
+</CodeGroup>
+
+Verify the snapshot before using it:
+
+```sh
+msb snapshot verify scrapy-base:scrapy-runtime
+```
+
+The snapshot avoids reinstalling Scrapy for every crawl.
+
+</Step>
+
+<Step title="Crawl the site">
+
+The destination name must be unused. Restore installs the deny-by-default allowlist, connection cap, restricted guest profile, and lifetime bound before boot. Copy the spider into the root-owned `/work` directory and make it read-only before running it as the unprivileged user; no host directory is exposed.
+
+<CodeGroup>
+```sh macOS & Linux
+msb restore scrapy-base:scrapy-runtime --name scrapy-books \
+  --user 65534:65534 --memory 1G --max-duration 2m \
+  --net-default deny \
+  --net-rule 'allow@books.toscrape.com:tcp:443' \
+  --max-connections 8 --security restricted
+msb cp ./books_spider.py scrapy-books:/work/books_spider.py
+msb exec --user root scrapy-books -- chmod 0444 /work/books_spider.py
+msb exec --workdir /work --user 65534:65534 --env HOME=/tmp \
+  --timeout 2m --rlimit fsize=8388608 \
+  scrapy-books -- scrapy runspider books_spider.py \
+    --loglevel WARNING -O /var/tmp/books.json
+msb stop scrapy-books
+```
+
+```powershell Windows
+msb restore scrapy-base:scrapy-runtime --name scrapy-books `
+  --user 65534:65534 --memory 1G --max-duration 2m `
+  --net-default deny `
+  --net-rule 'allow@books.toscrape.com:tcp:443' `
+  --max-connections 8 --security restricted
+msb cp ./books_spider.py scrapy-books:/work/books_spider.py
+msb exec --user root scrapy-books -- chmod 0444 /work/books_spider.py
+msb exec --workdir /work --user 65534:65534 --env HOME=/tmp `
+  --timeout 2m --rlimit fsize=8388608 `
+  scrapy-books -- scrapy runspider books_spider.py `
+    --loglevel WARNING -O /var/tmp/books.json
+msb stop scrapy-books
+```
+</CodeGroup>
+
+The crawler and the microVM policy both constrain navigation to the target host. Change the spider, start URL, and network rule together when adapting the example, and respect the site's terms and robots policy.
+
+</Step>
+
+<Step title="Copy out the result">
+
+<CodeGroup>
+```sh macOS & Linux
+mkdir -p .artifacts
+msb cp scrapy-books:/var/tmp/books.json .artifacts/books.json
+```
+
+```powershell Windows
+New-Item -ItemType Directory -Force .artifacts | Out-Null
+msb cp scrapy-books:/var/tmp/books.json .artifacts/books.json
+```
+</CodeGroup>
+
+Inspect the number of collected records:
+
+```sh
+jq 'length' .artifacts/books.json
+```
+
+Treat scraped values as untrusted data when rendering HTML, building shell commands, or exporting spreadsheets.
+
+</Step>
+
+<Step title="Clean up">
+
+```sh
+msb rm -f scrapy-base scrapy-books
+```
+
+Remove the reusable snapshot:
+
+```sh
+msb snapshot remove scrapy-base:scrapy-runtime
+```
+
+</Step>
+
+</Steps>
+
+## Reference
+
+- [Scrapy spiders](https://docs.scrapy.org/en/latest/topics/spiders.html)
+- [Feed exports](https://docs.scrapy.org/en/latest/topics/feed-exports.html)

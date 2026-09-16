@@ -1,0 +1,112 @@
+---
+title: Run Docker Compose integration tests
+sidebarTitle: Compose tests
+description: Run a Compose stack without exposing the host Docker socket
+icon: "boxes-stacked"
+---
+
+Run Docker Compose inside a microVM when a test needs several containers. The inner daemon uses the sandbox's flat root disk and never receives the host's `/var/run/docker.sock`.
+
+This example assumes `./my-project` contains `compose.yaml` and a test service named `test`.
+
+## Run the integration tests
+
+<Steps>
+<Step title="Start Docker">
+
+<Tooltip tip="Flat root disks are not yet available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+<CodeGroup>
+```sh macOS & Linux
+msb run -d --name compose-ci --replace \
+  --memory 2G --root-disk flat:10G --max-duration 10m \
+  docker:27.5.1-dind
+```
+
+```powershell Windows
+msb run -d --name compose-ci --replace `
+  --memory 2G --root-disk flat:10G --max-duration 10m `
+  docker:27.5.1-dind
+```
+</CodeGroup>
+
+The flat root gives Docker a direct ext4 filesystem for its own overlay storage, avoiding an overlay-on-overlay stack. Its 10 GiB capacity covers the image, project, build cache, and containers.
+
+Copy the project into the running sandbox. This happens after creation because flat roots do not currently accept create-time rootfs patches such as `--copy-dir`:
+
+```sh
+msb cp ./my-project/. compose-ci:/workspace
+```
+
+The official `dind` image starts `dockerd`. Wait for it before sending Compose commands:
+
+<CodeGroup>
+```sh macOS & Linux
+for attempt in $(seq 1 60); do
+  msb exec compose-ci -- docker info >/dev/null 2>&1 && break
+  sleep 1
+done
+msb exec compose-ci -- docker info >/dev/null
+```
+
+```powershell Windows
+for ($attempt = 1; $attempt -le 60; $attempt++) {
+  msb exec compose-ci -- docker info *> $null
+  if ($LASTEXITCODE -eq 0) { break }
+  Start-Sleep -Seconds 1
+}
+msb exec compose-ci -- docker info *> $null
+if ($LASTEXITCODE -ne 0) { throw 'Docker did not become ready' }
+```
+</CodeGroup>
+
+</Step>
+
+<Step title="Run the tests">
+
+<CodeGroup>
+```sh macOS & Linux
+msb exec --timeout 5m --workdir /workspace compose-ci -- \
+  docker compose up --build \
+    --abort-on-container-exit \
+    --exit-code-from test
+```
+
+```powershell Windows
+msb exec --timeout 5m --workdir /workspace compose-ci -- `
+  docker compose up --build `
+    --abort-on-container-exit `
+    --exit-code-from test
+```
+</CodeGroup>
+
+Replace `test` with the service whose exit code should decide the CI result. `msb exec` returns that code to the host.
+
+<Note>
+  `msb cp` makes a guest copy. Use a clean project directory, and do not copy credentials or unrelated files into the sandbox.
+</Note>
+
+</Step>
+
+<Step title="Clean up">
+
+Stop the Compose stack inside the sandbox:
+
+```sh
+msb exec --workdir /workspace compose-ci -- docker compose down --volumes
+```
+
+Remove the sandbox:
+
+```sh
+msb rm -f compose-ci
+```
+
+Removing the sandbox also removes Docker's image and build cache. Keep the sandbox between trusted runs if you want to reuse that cache; do not carry a writable cache across repositories or trust boundaries.
+
+</Step>
+</Steps>
+
+<Warning>
+  Never mount the host Docker socket into the sandbox. Control of that socket is normally control of the host Docker daemon and defeats the microVM boundary.
+</Warning>

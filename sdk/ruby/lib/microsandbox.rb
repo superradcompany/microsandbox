@@ -1,13 +1,28 @@
 # frozen_string_literal: true
 
-require "microsandbox/microsandbox"
+require_relative "microsandbox/version"
+
+# Platform gems stage the binary under lib/microsandbox/<major.minor>/ (one per
+# Ruby ABI); source builds produce the flat path. Try the ABI dir first. When
+# both misses are plain "no such file", either message will do; but a binary
+# that exists and fails to load (e.g. missing libcap-ng.so.0) must win over a
+# file miss on the other path, whichever order the two failures arrive in.
+begin
+  require "microsandbox/#{RUBY_VERSION[/\d+\.\d+/]}/microsandbox"
+rescue LoadError => abi_error
+  begin
+    require "microsandbox/microsandbox"
+  rescue LoadError => flat_error
+    raise flat_error.message.start_with?("cannot load such file") ? abi_error : flat_error
+  end
+end
 
 module Microsandbox
   class SandboxBuilder
     %i[
       image cpus max_cpus memory max_memory workdir shell hostname user
       detached ephemeral max_duration idle_timeout replace root_disk
-      disable_network quiet_logs entrypoint init vsock vsock_dgram
+      disable_network quiet_logs entrypoint init proxy vsock vsock_dgram
     ].each do |name|
       define_method(name) do |*args|
         public_send(:"#{name}!", *args)
@@ -27,6 +42,18 @@ module Microsandbox
 
     def replace_with_timeout(seconds)
       replace_with_timeout!(seconds)
+      self
+    end
+  end
+
+  class OutboundProxy
+    def user_id(value)
+      user_id!(value)
+      self
+    end
+
+    def credentials(username, password)
+      credentials!(username, password)
       self
     end
   end

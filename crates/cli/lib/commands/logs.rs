@@ -1,12 +1,8 @@
 //! `msb logs` command — read the captured output of a sandbox.
 //!
-//! Backed by `microsandbox::logs::read_logs` for the historical
-//! snapshot and `microsandbox::logs::log_stream` for `--follow`. Both
-//! read `<sandbox-dir>/logs/exec.log` (the JSON Lines file produced by
-//! the runtime's relay tap, see `crates/runtime/lib/exec_log.rs`),
-//! plus `runtime.log` and `kernel.log` when `--source system` is in
-//! scope. This command decodes each entry and renders it to the
-//! terminal per `design/runtime/sandbox-logs.md` D5.
+//! Log retrieval is delegated to the selected SDK backend. This command
+//! translates CLI filters into SDK options, then renders the returned entries
+//! per `design/runtime/sandbox-logs.md` D5.
 //!
 //! Supports filtering by source (stdout/stderr/system), time window,
 //! tail count, regex search, follow mode (filesystem-watch driven),
@@ -15,7 +11,6 @@
 //! `ls`/`grep` convention).
 
 use std::io::{IsTerminal, Write};
-use std::path::Path;
 use std::pin::pin;
 use std::time::Duration;
 
@@ -26,10 +21,7 @@ use clap::{Args, ValueEnum};
 use console::style;
 use futures::StreamExt;
 use microsandbox::MicrosandboxError;
-use microsandbox::logs::{
-    self, LogEntry as EngineLogEntry, LogOptions, LogSource, LogStreamOptions, LogStreamStart,
-};
-use microsandbox_runtime::boot_error::BootError;
+use microsandbox::logs::{self, BootError, LogEntry as EngineLogEntry, LogOptions, LogSource};
 use microsandbox_utils::log_text::{base64_decode, strip_ansi};
 use regex::Regex;
 use serde::Deserialize;
@@ -173,12 +165,8 @@ struct LogEntry {
 
 /// Execute the `msb logs` command.
 pub async fn run(args: LogsArgs) -> anyhow::Result<()> {
-    let log_dir = logs::log_dir_for(&args.name);
-    if !log_dir.exists() {
-        return Err(anyhow!(
-            "no logs directory for sandbox {:?} (sandbox not found?)",
-            args.name
-        ));
+    if let Some(boot_error) = logs::boot_error(&args.name).await? {
+        render_boot_error(&boot_error, &args.name, args.json)?;
     }
 
     let mask = resolve_sources(&args.source);
@@ -196,47 +184,25 @@ pub async fn run(args: LogsArgs) -> anyhow::Result<()> {
         args.color
     };
 
-    // Render the boot-error block first if present (Phase B's
-    // boot-error.json sits next to exec.log in the same log_dir).
-    render_boot_error_if_present(&log_dir, &args.name, args.json)?;
-
-    // Snapshot: drain the chronologically-sorted history. `read_logs`
-    // applies tail / since / until / source filtering; --grep is
-    // applied locally so it can match against the decoded body string.
-    let snapshot_opts = LogOptions {
+    let opts = LogOptions {
         tail: args.tail,
         since,
         until,
-        sources: engine_sources.clone(),
+        sources: engine_sources,
     };
-    let snapshot = logs::read_logs_snapshot(&args.name, &snapshot_opts)
-        .await
-        .context("reading logs")?;
-    for entry in &snapshot.entries {
-        let cli_entry = engine_entry_to_cli(entry);
-        if grep_matches(grep_re.as_ref(), &cli_entry.d) {
-            render_entry(&cli_entry, &args, color_policy)?;
-        }
-    }
 
     if !args.follow {
+        let entries = logs::read_logs(&args.name, &opts).await?;
+        for entry in &entries {
+            let cli_entry = engine_entry_to_cli(entry);
+            if grep_matches(grep_re.as_ref(), &cli_entry.d) {
+                render_entry(&cli_entry, &args, color_policy)?;
+            }
+        }
         return Ok(());
     }
 
-    // Follow: resume from the exact snapshot end cursor so entries
-    // written between the snapshot drain and stream startup are not
-    // skipped.
-    let stream_opts = LogStreamOptions {
-        sources: engine_sources,
-        start: LogStreamStart::From(snapshot.cursor),
-        until,
-        follow: true,
-    };
-    let mut stream = pin!(
-        logs::log_stream(&args.name, &stream_opts)
-            .await
-            .context("starting log stream")?
-    );
+    let mut stream = pin!(logs::follow_logs(&args.name, &opts).await?);
     while let Some(item) = stream.next().await {
         match item {
             Ok(entry) => {
@@ -327,18 +293,12 @@ impl SourceMask {
 // Functions: Helpers — boot-error block
 //--------------------------------------------------------------------------------------------------
 
-fn render_boot_error_if_present(log_dir: &Path, name: &str, json_mode: bool) -> anyhow::Result<()> {
-    let boot_err = match BootError::read(log_dir) {
-        Ok(Some(b)) => b,
-        Ok(None) => return Ok(()),
-        Err(_) => return Ok(()),
-    };
-
+fn render_boot_error(boot_err: &BootError, name: &str, json_mode: bool) -> anyhow::Result<()> {
     if json_mode {
         // Emit as a synthetic JSON Lines entry tagged s: "boot-error".
         // `d` is a string per the documented schema; consumers that
         // need the structured fields can `JSON.parse(d)`.
-        let payload = serde_json::to_string(&boot_err).unwrap_or_default();
+        let payload = serde_json::to_string(boot_err).unwrap_or_default();
         let line = serde_json::json!({
             "t": boot_err.t,
             "s": "boot-error",
@@ -348,7 +308,7 @@ fn render_boot_error_if_present(log_dir: &Path, name: &str, json_mode: bool) -> 
         return Ok(());
     }
 
-    crate::boot_error_render::render(name, &boot_err);
+    crate::boot_error_render::render(name, boot_err);
     eprintln!();
     Ok(())
 }

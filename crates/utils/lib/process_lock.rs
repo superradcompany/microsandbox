@@ -43,6 +43,38 @@ pub fn lock_exclusive(file: &File) -> io::Result<()> {
     lock_exclusive_inner(file, false).map(|_| ())
 }
 
+/// Pins immutable data against cooperative exclusive eviction until the file closes.
+pub fn lock_shared(file: &File) -> io::Result<()> {
+    #[cfg(unix)]
+    loop {
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH) } == 0 {
+            return Ok(());
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
+    #[cfg(windows)]
+    {
+        let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+        let result = unsafe {
+            LockFileEx(
+                file.as_raw_handle() as HANDLE,
+                0,
+                0,
+                u32::MAX,
+                u32::MAX,
+                &mut overlapped,
+            )
+        };
+        if result == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+}
+
 /// Attempts to acquire an exclusive process-held lock without blocking.
 ///
 /// Returns `Ok(false)` only when another process currently owns the lock.

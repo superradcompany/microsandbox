@@ -93,9 +93,8 @@ impl InitOptionsBuilder {
 // Functions: Validation
 //--------------------------------------------------------------------------------------------------
 
-/// Validate a populated [`HandoffInit`] before it's persisted into
-/// [`super::SandboxConfig`] or serialised onto MSB_HANDOFF_INIT* env
-/// vars.
+/// Validate a populated [`HandoffInit`] before it is persisted into
+/// [`super::SandboxConfig`] or serialized into the typed guest bootstrap.
 ///
 /// Constraints (each violation produces an `InvalidConfig` error):
 /// - `cmd` must be either an absolute path or the literal sentinel

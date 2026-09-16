@@ -1,0 +1,31 @@
+[package]
+name = "microsandbox-control-client"
+description = "Framed host-control client with explicit legacy JSON compatibility."
+version.workspace = true
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+edition.workspace = true
+
+[lib]
+path = "lib/lib.rs"
+
+[features]
+default = []
+uds = ["microsandbox-protocol-client/uds"]
+named-pipe = ["microsandbox-protocol-client/named-pipe"]
+
+[dependencies]
+microsandbox-protocol.workspace = true
+microsandbox-protocol-client.workspace = true
+microsandbox-utils.workspace = true
+serde.workspace = true
+serde_json = { workspace = true, features = ["raw_value"] }
+thiserror.workspace = true
+tokio = { workspace = true, features = ["io-util", "time"] }
+tokio-util = { workspace = true, features = ["rt"] }
+zeroize.workspace = true
+
+[dev-dependencies]
+ciborium.workspace = true
+tokio = { workspace = true, features = ["io-util", "macros", "rt-multi-thread", "time", "test-util"] }

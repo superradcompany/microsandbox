@@ -1,0 +1,159 @@
+---
+title: Hermes Agent
+description: Set up Hermes Agent from its official image and persist its state
+icon: "/images/recipes/agents/hermes-agent.svg"
+---
+
+Hermes Agent's source installer brings in a large Python, Node.js, browser, and media toolchain. Use the official image instead: it contains the complete application and stores mutable state under `/opt/data`.
+
+<Note>
+  The official image uses s6-overlay. `--init auto` is required so its `/init` entrypoint becomes guest PID 1 rather than running as an ordinary child process. The image is approximately 900 MB compressed and can require several gigabytes of temporary free space during its first pull.
+</Note>
+
+## Set up Hermes Agent
+
+<Steps>
+<Step title="Run setup">
+
+<Tooltip tip="On microsandbox cloud, create the named volume first and omit replace-on-create from this command."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+<CodeGroup>
+```sh macOS & Linux
+msb run -t --name hermes-setup --replace \
+  --cpus 2 --memory 4G --root-disk 2G \
+  --mount-named hermes-data:/opt/data \
+  --init auto \
+  nousresearch/hermes-agent:v2026.7.20 -- setup
+```
+
+```powershell Windows
+msb run -t --name hermes-setup --replace `
+  --cpus 2 --memory 4G --root-disk 2G `
+  --mount-named hermes-data:/opt/data `
+  --init auto `
+  nousresearch/hermes-agent:v2026.7.20 -- setup
+```
+</CodeGroup>
+
+Follow the setup wizard to configure a model provider and any messaging integrations. Everything written to `/opt/data` survives sandbox replacement in the `hermes-data` volume.
+
+</Step>
+
+<Step title="Verify the installation">
+
+<Tooltip tip="This check works on microsandbox cloud after omitting replace-on-create from the command."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+After setup exits, inspect the pinned image directly:
+
+<CodeGroup>
+```sh macOS & Linux
+msb run --name hermes-version --replace \
+  --entrypoint hermes \
+  nousresearch/hermes-agent:v2026.7.20 -- --version
+```
+
+```powershell Windows
+msb run --name hermes-version --replace `
+  --entrypoint hermes `
+  nousresearch/hermes-agent:v2026.7.20 -- --version
+```
+</CodeGroup>
+
+The tested image reports Hermes Agent `v0.19.0 (2026.7.20)`.
+
+</Step>
+
+<Step title="Run the gateway API">
+
+<Tooltip tip="Publishing the gateway API to a port on the computer running the client is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+Generate an API key in the host shell:
+
+<CodeGroup>
+```sh macOS & Linux
+export HERMES_API_KEY="$(openssl rand -hex 32)"
+```
+
+```powershell Windows
+$bytes = New-Object byte[] 32
+$rng = [Security.Cryptography.RandomNumberGenerator]::Create()
+$rng.GetBytes($bytes)
+$rng.Dispose()
+$env:HERMES_API_KEY = -join ($bytes | ForEach-Object { $_.ToString('x2') })
+```
+</CodeGroup>
+
+Recreate Hermes as a detached, supervised gateway:
+
+<CodeGroup>
+```sh macOS & Linux
+msb run -d --name hermes-gateway --replace \
+  --cpus 2 --memory 4G --root-disk 2G \
+  -p 127.0.0.1:8642:8642 \
+  -e API_SERVER_ENABLED=true \
+  -e API_SERVER_HOST=0.0.0.0 \
+  -e API_SERVER_KEY="$HERMES_API_KEY" \
+  --mount-named hermes-data:/opt/data \
+  --init auto \
+  nousresearch/hermes-agent:v2026.7.20 -- gateway run
+```
+
+```powershell Windows
+msb run -d --name hermes-gateway --replace `
+  --cpus 2 --memory 4G --root-disk 2G `
+  -p 127.0.0.1:8642:8642 `
+  -e API_SERVER_ENABLED=true `
+  -e API_SERVER_HOST=0.0.0.0 `
+  -e "API_SERVER_KEY=$env:HERMES_API_KEY" `
+  --mount-named hermes-data:/opt/data `
+  --init auto `
+  nousresearch/hermes-agent:v2026.7.20 -- gateway run
+```
+</CodeGroup>
+
+Port 8642 is published only on host loopback. Watch the supervised gateway start with:
+
+```sh
+msb logs -f hermes-gateway
+```
+
+<Warning>
+  Do not expose the API or dashboard on a public interface without a supported authentication provider and TLS. Hermes refuses several unsafe configurations, but host-level port exposure is still your responsibility.
+</Warning>
+
+</Step>
+
+<Step title="Clean up">
+
+Remove the setup, version-check, and gateway sandboxes:
+
+```sh
+msb rm -f hermes-setup hermes-version hermes-gateway
+```
+
+Remove persisted Hermes state only when you no longer need it:
+
+```sh
+msb volume rm hermes-data
+```
+
+Clear the API key from the host shell:
+
+<CodeGroup>
+```sh macOS & Linux
+unset HERMES_API_KEY
+```
+
+```powershell Windows
+Remove-Item Env:HERMES_API_KEY
+```
+</CodeGroup>
+
+Keep `hermes-data` to preserve configuration, sessions, memories, skills, and credentials.
+
+</Step>
+</Steps>
+
+## Reference
+
+- [Hermes Agent Docker image guide](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/docker.md)

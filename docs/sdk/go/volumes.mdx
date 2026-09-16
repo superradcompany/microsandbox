@@ -1,13 +1,34 @@
 ---
 title: Volumes
 description: Go SDK - Volume API reference
+keywords: ["Go SDK", "Go volumes", "microsandbox volumes"]
 ---
 
 Create, manage, and mount named volumes. See [Volumes](/sandboxes/volumes) for usage examples.
 
+## Sandbox-owned mounts
+
+Use `Mount.Owned(OwnedVolumeOptions)` for local storage allocated for one sandbox. It starts empty, survives stop/start and reboot, and is deleted with the sandbox. Owned mounts do not appear in `ListVolumes()` and cannot be shared or removed independently. Cloud rejects owned mounts.
+
+```go
+sb, err := m.CreateSandbox(ctx, "worker",
+    m.WithImage("python"),
+    m.WithMounts(map[string]m.MountConfig{
+        "/cache": m.Mount.Owned(m.OwnedVolumeOptions{QuotaMiB: 2048}),
+        "/data": m.Mount.Owned(m.OwnedVolumeOptions{
+            Kind: m.VolumeKindDisk, SizeMiB: 10240,
+        }),
+    }),
+)
+```
+
+`OwnedVolumeOptions.Kind` defaults to `VolumeKindDir`; `QuotaMiB` applies only to directories. `VolumeKindDisk` creates raw ext4 and requires positive `SizeMiB`. Common flags are `Readonly`, `Noexec`, `Nosuid`, and `Nodev`. `StatVirtualization`, `HostPermissions`, and `Owner` apply only to directories. No host path or volume name is accepted. Mounting over an existing image directory hides its contents without copying them.
+
 ## Functions
 
 #### <span className="msb-recv"></span><span className="msb-hn">GetDefaultVolume()</span>
+
+<Tooltip tip="Available only on microsandbox cloud; the local backend has no default volume."><span className="msb-badge-cloud">Cloud-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 func GetDefaultVolume(ctx context.Context) (*VolumeHandle, error)
@@ -22,6 +43,8 @@ contents, err := volume.FS().ReadString(ctx, "customers/acme.json")
 ```
 
 #### <span className="msb-recv"></span><span className="msb-hn">CreateVolume()</span>
+
+<Tooltip tip="Microsandbox cloud creates directory volumes only; size is unavailable and quota must be a nonzero whole number of GiB."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 func CreateVolume(ctx context.Context, name string, opts ...VolumeOption) (*Volume, error)
@@ -187,6 +210,8 @@ Return the volume's name.
 
 #### <span className="msb-recv">v.</span><span className="msb-hn">Path()</span>
 
+<Tooltip tip="Only local volumes expose a path on the computer running the SDK."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```go
 func (v *Volume) Path() string
 ```
@@ -194,8 +219,6 @@ func (v *Volume) Path() string
 Return the host filesystem path of the volume's data directory.
 
 #### <span className="msb-recv">v.</span><span className="msb-hn">FS()</span>
-
-<Tooltip tip="Unmounted-volume filesystem access is not available on microsandbox cloud; mount the volume into a sandbox and use the sandbox filesystem."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 func (v *Volume) FS() *VolumeFs
@@ -255,6 +278,8 @@ func (h *VolumeHandle) Name() string
 Return the volume name.
 
 #### <span className="msb-recv">h.</span><span className="msb-hn">Path()</span>
+
+<Tooltip tip="Only local volume handles expose a path on the computer running the SDK."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 func (h *VolumeHandle) Path() string
@@ -337,8 +362,6 @@ Return the creation timestamp, or the zero `time.Time` value if unknown.
 
 #### <span className="msb-recv">h.</span><span className="msb-hn">FS()</span>
 
-<Tooltip tip="Unmounted-volume filesystem access is not available on microsandbox cloud; mount the volume into a sandbox and use the sandbox filesystem."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
-
 ```go
 func (h *VolumeHandle) FS() *VolumeFs
 ```
@@ -378,8 +401,6 @@ Return the absolute host path of the volume's data directory.
 
 #### <span className="msb-recv">vfs.</span><span className="msb-hn">Read()</span>
 
-<Tooltip tip="Unmounted-volume filesystem access is not available on microsandbox cloud; mount the volume into a sandbox and use the sandbox filesystem."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
-
 ```go
 func (fs *VolumeFs) Read(ctx context.Context, relPath string) ([]byte, error)
 ```
@@ -406,8 +427,6 @@ Read the contents of a file relative to the volume root.
 
 #### <span className="msb-recv">vfs.</span><span className="msb-hn">ReadString()</span>
 
-<Tooltip tip="Unmounted-volume filesystem access is not available on microsandbox cloud; mount the volume into a sandbox and use the sandbox filesystem."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
-
 ```go
 func (fs *VolumeFs) ReadString(ctx context.Context, relPath string) (string, error)
 ```
@@ -415,8 +434,6 @@ func (fs *VolumeFs) ReadString(ctx context.Context, relPath string) (string, err
 Read a file and return its contents as a UTF-8 string.
 
 #### <span className="msb-recv">vfs.</span><span className="msb-hn">Write()</span>
-
-<Tooltip tip="Unmounted-volume filesystem access is not available on microsandbox cloud; mount the volume into a sandbox and use the sandbox filesystem."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 func (fs *VolumeFs) Write(ctx context.Context, relPath string, data []byte) error
@@ -438,8 +455,6 @@ Write data to a file, creating or truncating it. Created files use mode `0o644`.
 </div>
 
 #### <span className="msb-recv">vfs.</span><span className="msb-hn">WriteString()</span>
-
-<Tooltip tip="Unmounted-volume filesystem access is not available on microsandbox cloud; mount the volume into a sandbox and use the sandbox filesystem."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 func (fs *VolumeFs) WriteString(ctx context.Context, relPath, content string) error
@@ -532,6 +547,8 @@ Set disk volume capacity in MiB. Required when the kind is [`VolumeKindDisk`](#v
 
 #### <span className="msb-recv"></span><span className="msb-hn">WithVolumeQuota()</span>
 
+<Tooltip tip="On microsandbox cloud, quota must be a nonzero whole number of GiB."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```go
 func WithVolumeQuota(mebibytes uint32) VolumeOption
 ```
@@ -567,6 +584,8 @@ Attach key-value labels to the volume. When called repeatedly, the maps merge; l
 ## Mount
 
 #### <span className="msb-recv">Mount.</span><span className="msb-hn">Bind()</span>
+
+<Tooltip tip="On microsandbox cloud, the host path resolves against your organization's host volume, not the computer running the SDK."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 func (mountFactory) Bind(hostPath string, opts MountOptions) MountConfig
@@ -628,6 +647,8 @@ Mount an existing named persistent volume. The volume must already exist (create
 </div>
 
 #### <span className="msb-recv">Mount.</span><span className="msb-hn">NamedWith()</span>
+
+<Tooltip tip="On microsandbox cloud, create the named volume before mounting; create-on-mount, disk-kind, and size are unavailable."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 func (mountFactory) NamedWith(name string, opts MountOptions, namedOpts NamedVolumeOptions) MountConfig
@@ -699,7 +720,7 @@ Mount an ephemeral in-memory filesystem. Contents are discarded when the sandbox
 
 #### <span className="msb-recv">Mount.</span><span className="msb-hn">Disk()</span>
 
-<Tooltip tip="On microsandbox cloud, the disk-image path resolves against your organization's host volume, not the computer running the SDK or CLI."><span className="msb-badge-note">On cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On microsandbox cloud, the disk-image path resolves against your organization's host volume, not the computer running the SDK or CLI."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 func (mountFactory) Disk(hostPath string, opts DiskOptions) MountConfig
@@ -834,6 +855,12 @@ Per-mount stat-virtualization policy (bind / named only)
 
 Per-mount host-permission propagation policy (bind / named only)
 
+#### <span className="msb-recv">mount.</span><span className="msb-hn">Owner</span>
+
+`*MountOwner`
+
+Guest owner fallback for host files without a per-file stat override (bind / directory-backed named only)
+
 
 #### <span className="msb-recv">mount.</span><span className="msb-hn">Kind()</span>
 
@@ -922,7 +949,7 @@ Discriminates between the four mount flavours. Inspect via `mount.Kind()`.
 
 ### MountOptions
 
-Tuning struct for [`Mount.Bind`](#mount-bind), [`Mount.Named`](#mount-named), and [`Mount.NamedWith`](#mount-namedwith). `StatVirtualization` and `HostPermissions` are virtiofs-only and rejected at build time if combined with a tmpfs or disk-image mount; their zero values preserve the conservative defaults (strict, private).
+Tuning struct for [`Mount.Bind`](#mount-bind), [`Mount.Named`](#mount-named), and [`Mount.NamedWith`](#mount-namedwith). `StatVirtualization`, `HostPermissions`, and `Owner` are virtiofs-only; owner is rejected for disk-backed named volumes and when stat virtualization is off. Zero policy values preserve the conservative defaults (strict, private), while a nil owner keeps the runtime fallback identity.
 
 <p className="msb-backref">Used by <a href="#mount-bind">Mount.Bind()</a> · <a href="#mount-named">Mount.Named()</a> · <a href="#mount-namedwith">Mount.NamedWith()</a></p>
 
@@ -935,6 +962,20 @@ Tuning struct for [`Mount.Bind`](#mount-bind), [`Mount.Named`](#mount-named), an
 | `QuotaMiB` | `uint32` | Guest-write quota in MiB, bounding growth beyond the host directory's existing contents; zero keeps the protective default (bind mounts only; named volumes use [`NamedVolumeOptions.QuotaMiB`](#namedvolumeoptions)) |
 | `StatVirtualization` | `StatVirtualization` | Per-mount stat-virtualization policy (virtiofs only) |
 | `HostPermissions` | `HostPermissions` | Per-mount host-permission propagation policy (virtiofs only) |
+| `Owner` | `*MountOwner` | Paired guest uid/gid fallback for host files without a per-file override; nil keeps the runtime fallback |
+
+### MountOwner
+
+An inseparable guest ownership pair used by [`MountOptions.Owner`](#mountoptions). UID and GID may include zero; using a pointer to `MountOwner` keeps an unset owner distinct from root.
+
+```go
+Owner: &m.MountOwner{UID: 1000, GID: 1000}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `UID` | `uint32` | Guest user ID |
+| `GID` | `uint32` | Guest group ID |
 
 ### NamedVolumeOptions
 

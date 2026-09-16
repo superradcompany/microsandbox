@@ -8,6 +8,12 @@ use std::{fs::File, sync::RwLock};
 
 /// Data associated with an open file handle.
 pub(crate) struct HandleData {
+    /// Guest-visible inode that owns this handle.
+    pub inode: u64,
+
+    /// Guest open flags used to recreate the destination-local descriptor.
+    pub flags: u32,
+
     /// The real host file descriptor.
     ///
     /// Wrapped in `RwLock` because `preadv64`/`pwritev64` only need a shared

@@ -1,0 +1,138 @@
+---
+title: Playwright
+description: Capture pages or expose a remote browser server without a GPU
+icon: "globe"
+---
+
+Headless Chromium does not require GPU acceleration. This example uses Microsoft's Playwright image to capture a screenshot and optionally run a persistent browser server for a host-side test runner or agent.
+
+<Note>
+  The Playwright image is large. Its first pull can take several minutes, while cached browser launches are much faster. Consider turning a prepared browser sandbox into a [snapshot](/examples/sandboxing/warm-workers) for repeated jobs.
+</Note>
+
+## Use Playwright
+
+<Steps>
+
+<Step title="Capture a screenshot">
+
+<Tooltip tip="Headless capture works on microsandbox cloud after omitting replace-on-create from this command."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+<CodeGroup>
+```sh macOS & Linux
+msb run --name playwright-shot --replace \
+  --cpus 2 --memory 2G --root-disk 4G \
+  mcr.microsoft.com/playwright:v1.61.0-noble -- sh -lc '
+    npx -y playwright@1.61.0 screenshot \
+      --browser chromium \
+      https://example.com \
+      /root/example.png &&
+    stat -c "%s bytes" /root/example.png
+  '
+```
+
+```powershell Windows
+msb run --name playwright-shot --replace `
+  --cpus 2 --memory 2G --root-disk 4G `
+  mcr.microsoft.com/playwright:v1.61.0-noble -- sh -lc '
+    npx -y playwright@1.61.0 screenshot \
+      --browser chromium \
+      https://example.com \
+      /root/example.png &&
+    stat -c "%s bytes" /root/example.png
+  '
+```
+</CodeGroup>
+
+Copy the artifact out of the stopped sandbox:
+
+```sh
+msb cp playwright-shot:/root/example.png ./example.png
+```
+
+The smoke test used for this example produced a valid 15,909-byte PNG. Rendering can vary slightly between releases and hosts, so verify the file rather than asserting an exact byte count.
+
+</Step>
+
+<Step title="Optional: run a remote server">
+
+<Tooltip tip="Publishing the browser server to a port on the computer running the client is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+<CodeGroup>
+```sh macOS & Linux
+msb run -d --name playwright-server --replace \
+  --cpus 2 --memory 2G --root-disk 4G \
+  -p 127.0.0.1:3000:3000 \
+  mcr.microsoft.com/playwright:v1.61.0-noble -- sh -lc '
+    exec npx -y playwright@1.61.0 run-server \
+      --host 0.0.0.0 \
+      --port 3000
+  '
+```
+
+```powershell Windows
+msb run -d --name playwright-server --replace `
+  --cpus 2 --memory 2G --root-disk 4G `
+  -p 127.0.0.1:3000:3000 `
+  mcr.microsoft.com/playwright:v1.61.0-noble -- sh -lc '
+    exec npx -y playwright@1.61.0 run-server \
+      --host 0.0.0.0 \
+      --port 3000
+  '
+```
+</CodeGroup>
+
+Verify the forwarding path:
+
+<CodeGroup>
+```sh macOS & Linux
+curl http://127.0.0.1:3000/
+```
+
+```powershell Windows
+curl.exe http://127.0.0.1:3000/
+```
+</CodeGroup>
+
+The server returns `Running` and logs its WebSocket endpoint:
+
+```sh
+msb logs playwright-server
+```
+
+Connect a matching Playwright client to `ws://127.0.0.1:3000/`. Keep the client and server versions aligned.
+
+<Warning>
+  The remote server has no application-level authentication. This example binds the host side to loopback intentionally. Do not publish it on `0.0.0.0` or an internet-facing interface without an authenticated proxy.
+</Warning>
+
+</Step>
+
+<Step title="Clean up">
+
+Remove the sandboxes:
+
+```sh
+msb rm -f playwright-shot playwright-server
+```
+
+Delete the copied screenshot only if you no longer need it:
+
+<CodeGroup>
+```sh macOS & Linux
+rm ./example.png
+```
+
+```powershell Windows
+Remove-Item ./example.png
+```
+</CodeGroup>
+
+</Step>
+
+</Steps>
+
+## Reference
+
+- [Playwright Docker images](https://playwright.dev/docs/docker)
+- [Playwright remote connections](https://playwright.dev/docs/api/class-browsertype#browser-type-connect)

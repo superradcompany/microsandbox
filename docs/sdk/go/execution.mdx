@@ -1,13 +1,14 @@
 ---
 title: Execution
 description: Go SDK - Command execution API reference
+keywords: ["Go SDK", "Go execution", "microsandbox execution"]
 ---
 
 Run commands inside a running sandbox. Non-zero exit codes are returned in [`ExecOutput`](#execoutput), not as Go errors. See [Commands](/sandboxes/commands) for usage examples.
 
 ## Sandbox
 
-The exec entry points live on [`*Sandbox`](/sdk/go/sandbox#instance-methods).
+The exec entry points live on [`*Sandbox`](/sdk/go/sandbox#sandbox).
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">Exec()</span>
 

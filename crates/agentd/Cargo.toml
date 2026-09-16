@@ -16,6 +16,7 @@ path = "lib/lib.rs"
 
 [dependencies]
 base64.workspace = true
+bytes.workspace = true
 chrono.workspace = true
 ciborium.workspace = true
 libc.workspace = true
@@ -42,3 +43,4 @@ tokio = { workspace = true, features = [
     "sync",
     "time",
 ] }
+typed-path.workspace = true

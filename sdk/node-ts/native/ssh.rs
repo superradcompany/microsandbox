@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
@@ -253,6 +254,9 @@ pub fn apply_client_options(
     if let Some(sftp) = options.sftp {
         builder = builder.sftp(sftp);
     }
+    if let Some(timeout_secs) = options.inactivity_timeout_secs {
+        builder = builder.inactivity_timeout(Duration::from_secs(u64::from(timeout_secs)));
+    }
     builder
 }
 
@@ -275,6 +279,9 @@ pub fn apply_server_options(
     }
     if let Some(sftp) = options.sftp {
         builder = builder.sftp(sftp);
+    }
+    if let Some(timeout_secs) = options.inactivity_timeout_secs {
+        builder = builder.inactivity_timeout(Duration::from_secs(u64::from(timeout_secs)));
     }
     builder
 }

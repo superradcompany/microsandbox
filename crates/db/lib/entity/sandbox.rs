@@ -12,15 +12,15 @@ use sea_orm::entity::prelude::*;
 pub enum SandboxStatus {
     /// The sandbox has been created but not yet started.
     ///
-    /// Cloud-only today: msb-cloud's create-without-start state. Local
-    /// sandboxes transition straight to `Running` after create.
+    /// Cloud-only today: msb-cloud's create-without-start state. Local create
+    /// requests begin in `Starting` because they boot immediately.
     #[sea_orm(string_value = "Created")]
     Created,
 
     /// A start request has been submitted but the sandbox is not yet running.
     ///
-    /// Cloud-only today: covers the gap between accepting a start request
-    /// and the runtime reporting the VM as live.
+    /// Covers the gap between accepting a create/start request and the runtime
+    /// reporting the VM and guest agent as ready.
     #[sea_orm(string_value = "Starting")]
     Starting,
 
@@ -45,6 +45,20 @@ pub enum SandboxStatus {
     Crashed,
 }
 
+//--------------------------------------------------------------------------------------------------
+// Methods
+//--------------------------------------------------------------------------------------------------
+
+impl SandboxStatus {
+    /// Whether this status represents a live runtime or an in-flight runtime transition.
+    pub fn has_active_runtime_state(self) -> bool {
+        match self {
+            Self::Starting | Self::Running | Self::Draining | Self::Paused => true,
+            Self::Created | Self::Stopped | Self::Crashed => false,
+        }
+    }
+}
+
 /// The sandbox entity model.
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
 #[sea_orm(table_name = "sandbox")]
@@ -58,6 +72,10 @@ pub struct Model {
     /// Configuration actually used by the currently running VM, when active.
     pub active_config: Option<String>,
     pub status: SandboxStatus,
+    /// Network address-pool slot leased to this sandbox's current run (#1390).
+    /// Inactive rows should not retain a slot; maintenance repairs stale leases.
+    pub network_slot: Option<u16>,
+
     /// Denormalized copy of `config.policy.ephemeral`.
     ///
     /// Indexed alongside `status` so host-runtime lifecycle maintenance can

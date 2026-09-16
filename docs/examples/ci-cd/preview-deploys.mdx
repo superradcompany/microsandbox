@@ -1,0 +1,87 @@
+---
+title: Create an ephemeral preview deploy
+sidebarTitle: Preview deploys
+description: Serve a built site from a time-limited microVM
+icon: "window-maximize"
+---
+
+<Tooltip tip="This workflow depends on publishing a guest service to a port on the computer running the CLI, which is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+Copy a static build into a microVM, expose it on host loopback, and let the sandbox expire automatically. The preview cannot modify the host build or make outbound network requests.
+
+## Run the preview
+
+<Steps>
+<Step title="Start the preview">
+
+Run this after producing `dist`:
+
+<CodeGroup>
+```sh macOS & Linux
+msb run -d --name preview --replace \
+  --memory 256M --max-duration 30m --copy-dir ./dist:/site \
+  -p 127.0.0.1:4173:8080 \
+  --net-default-egress deny --net-default-ingress allow \
+  --security restricted --user 65534:65534 \
+  python:3.13.14-alpine3.23 -- python -m http.server 8080 \
+    --bind 0.0.0.0 --directory /site
+```
+
+```powershell Windows
+msb run -d --name preview --replace `
+  --memory 256M --max-duration 30m --copy-dir ./dist:/site `
+  -p 127.0.0.1:4173:8080 `
+  --net-default-egress deny --net-default-ingress allow `
+  --security restricted --user 65534:65534 `
+  python:3.13.14-alpine3.23 -- python -m http.server 8080 `
+    --bind 0.0.0.0 --directory /site
+```
+</CodeGroup>
+
+Detached runs return before the server is ready. Wait for it, then open the preview:
+
+<CodeGroup>
+```sh macOS & Linux
+until curl -fsS http://127.0.0.1:4173/ >/dev/null 2>&1; do sleep 1; done
+```
+
+```powershell Windows
+do {
+  curl.exe -fsS http://127.0.0.1:4173/ *> $null
+  if ($LASTEXITCODE -ne 0) { Start-Sleep -Seconds 1 }
+} until ($LASTEXITCODE -eq 0)
+```
+</CodeGroup>
+
+Open the preview after the readiness check succeeds:
+
+<CodeGroup>
+```sh macOS & Linux
+open http://127.0.0.1:4173
+```
+
+```powershell Windows
+Start-Process http://127.0.0.1:4173
+```
+</CodeGroup>
+
+On Linux, replace `open` with `xdg-open`, or visit the URL manually.
+
+`--copy-dir` gives the guest its own copy of `dist`. Use a unique sandbox name and host port for each concurrent pull request.
+
+<Warning>
+  Loopback is not authentication: other processes on the host can reach the preview. Browser JavaScript is also outside the guest network policy, so review untrusted builds with a disposable browser profile.
+</Warning>
+
+</Step>
+
+<Step title="Clean up">
+
+```sh
+msb rm -f preview
+```
+
+`--max-duration 30m` still removes an abandoned preview when explicit cleanup does not run.
+
+</Step>
+</Steps>

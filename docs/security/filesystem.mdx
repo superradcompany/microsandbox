@@ -29,6 +29,12 @@ Writes never modify the cached image and are never visible to another sandbox. T
   <img className="hidden dark:block" src="/images/security/rootfs-layers-dark.svg" alt="Each sandbox has its own private writable layer stacked over a shared, read-only image cache." />
 </Frame>
 
+### Bind rootfs patches
+
+A bind rootfs is different from an OCI root: it is a host directory that microsandbox modifies in place when applying pre-boot patches. Patch destinations must be absolute, canonical guest paths without explicit `..` components and are resolved through a directory capability pinned to the selected root. Existing absolute symlinks use guest semantics and restart at the guest root, parent traversal inside symlink targets clamps there, and no-replace creation and mode application avoid pathname races. Requested modes are applied through pinned handles before file content is written.
+
+The boundary is the filesystem objects selected by that directory, not a promise that every inode has only one host pathname. A nested filesystem mounted beneath the bind root is intentionally part of the selected tree, and a pre-existing hard link aliases the same inode wherever its other names live. Do not place host-sensitive nested mounts or externally linked files inside a bind root that receives patches. Use an OCI rootfs when the source tree itself is untrusted.
+
 ## Bind mounts and volumes
 
 When you *do* share a host directory, it's exposed through virtio-fs, a filesystem passthrough, not by handing the guest your host's raw disk. The broker that serves it runs on the trusted host side and enforces containment:

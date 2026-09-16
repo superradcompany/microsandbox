@@ -1,0 +1,119 @@
+---
+title: OpenCode
+description: Run the OpenCode terminal agent against a project on your host
+icon: "/images/recipes/agents/opencode.svg"
+---
+
+This example installs OpenCode in a microVM and opens its terminal UI in a project mounted from your host. OpenCode edits the source checkout directly while its tools and dependencies stay inside the sandbox.
+
+## Run OpenCode
+
+<Steps>
+<Step title="Start OpenCode">
+
+<Tooltip tip="Writable host-directory mounts are local-only. On microsandbox cloud, use the isolated-copy alternative and omit replace-on-create."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+Replace `./my-project` with the project directory you want OpenCode to work on:
+
+<CodeGroup>
+```sh macOS & Linux
+msb run -t --name opencode-demo --replace \
+  --cpus 2 --memory 2G --root-disk 4G \
+  --mount-dir ./my-project:/workspace:rw \
+  --workdir /workspace \
+  node:24-bookworm-slim -- sh -lc '
+    apt-get update &&
+    apt-get install -y --no-install-recommends ca-certificates git &&
+    npm install -g opencode-ai@1.18.4 &&
+    exec opencode
+  '
+```
+
+```powershell Windows
+msb run -t --name opencode-demo --replace `
+  --cpus 2 --memory 2G --root-disk 4G `
+  --mount-dir ./my-project:/workspace:rw `
+  --workdir /workspace `
+  node:24-bookworm-slim -- sh -lc '
+    apt-get update &&
+    apt-get install -y --no-install-recommends ca-certificates git &&
+    npm install -g opencode-ai@1.18.4 &&
+    exec opencode
+  '
+```
+</CodeGroup>
+
+The first run downloads the package and may take a couple of minutes. OpenCode should render its prompt and offer `/connect` for provider setup. Its XDG configuration, provider connections, and session data live on the sandbox's 4 GiB root disk and remain available when the sandbox stops and starts.
+
+<Tip>
+  For an isolated workspace, or when using microsandbox cloud, replace `--mount-dir ./my-project:/workspace:rw` with `--copy-dir ./my-project:/workspace`. To try the TUI without a project, use `--mkdir /workspace` instead.
+</Tip>
+
+</Step>
+
+<Step title="Start another session">
+
+After leaving OpenCode, return to the same sandbox and workspace with:
+
+```sh
+msb exec -t opencode-demo -- opencode
+```
+
+</Step>
+
+<Step title="Verify the installation">
+
+Exit the TUI, then run:
+
+```sh
+msb exec opencode-demo -- opencode --version
+```
+
+The pinned example prints `1.18.4`.
+
+</Step>
+
+<Step title="Review or export changes">
+
+With the default writable mount, changes are already in the host checkout. Review the diff from either side of the mount:
+
+```sh
+msb exec opencode-demo -- sh -lc 'cd /workspace && git status --short && git diff --stat && git diff'
+```
+
+If you chose the isolated `--copy-dir` alternative, export a patch from the sandbox:
+
+```sh
+msb exec opencode-demo -- sh -lc 'cd /workspace && git add -N . && git diff --binary > /tmp/opencode.patch'
+```
+
+Copy the patch to the host:
+
+```sh
+msb cp opencode-demo:/tmp/opencode.patch ./opencode.patch
+```
+
+Check that it applies cleanly before applying it:
+
+```sh
+git apply --check ./opencode.patch
+```
+
+</Step>
+
+<Step title="Clean up">
+
+Remove the sandbox:
+
+```sh
+msb rm -f opencode-demo
+```
+
+Removing the sandbox also removes its provider connections, sessions, and OpenCode configuration. Changes made through the default workspace mount remain in the host checkout. Never copy an agent's entire home directory back to the host.
+
+</Step>
+</Steps>
+
+## Reference
+
+- [OpenCode installation](https://opencode.ai/docs/)

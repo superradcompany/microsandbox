@@ -31,7 +31,7 @@ async def test_network_policy_and_port_config_create(sandbox_factory):
                 rules=(Rule.deny(protocol=Protocol.TCP, port=9, destination="public"),),
             ),
             ports=(PortBinding.tcp(host_port, 7777),),
-            max_connections=128,
+            max_tcp_connections=128,
         ),
     )
 

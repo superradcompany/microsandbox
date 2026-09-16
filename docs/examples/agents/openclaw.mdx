@@ -1,0 +1,152 @@
+---
+title: OpenClaw
+description: Onboard OpenClaw and run its persistent gateway inside a microVM
+icon: "/images/recipes/agents/openclaw.svg"
+---
+
+OpenClaw combines an interactive agent with a long-running gateway. This example persists its state in a named volume and maps the gateway only to host loopback.
+
+## Set up OpenClaw
+
+<Steps>
+<Step title="Run onboarding">
+
+<Tooltip tip="On microsandbox cloud, create the named volume first and omit replace-on-create from this command."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+<CodeGroup>
+```sh macOS & Linux
+msb run -t --name openclaw-setup --replace \
+  --cpus 2 --memory 2G --root-disk 4G \
+  --mount-named openclaw-data:/root/.openclaw \
+  node:24-bookworm-slim -- sh -lc '
+    apt-get update &&
+    apt-get install -y --no-install-recommends ca-certificates git &&
+    npm install -g openclaw@2026.7.1-2 &&
+    exec openclaw onboard --mode local
+  '
+```
+
+```powershell Windows
+msb run -t --name openclaw-setup --replace `
+  --cpus 2 --memory 2G --root-disk 4G `
+  --mount-named openclaw-data:/root/.openclaw `
+  node:24-bookworm-slim -- sh -lc '
+    apt-get update &&
+    apt-get install -y --no-install-recommends ca-certificates git &&
+    npm install -g openclaw@2026.7.1-2 &&
+    exec openclaw onboard --mode local
+  '
+```
+</CodeGroup>
+
+Complete the provider and channel prompts. The `openclaw-data` volume retains the workspace, configuration, credentials, sessions, and gateway state after the setup sandbox is removed.
+
+Verify the installed version before removing the setup sandbox:
+
+```sh
+msb exec openclaw-setup -- openclaw --version
+```
+
+The pinned package reports `OpenClaw 2026.7.1-2`.
+
+</Step>
+
+<Step title="Run the gateway">
+
+<Tooltip tip="Publishing the gateway to a port on the computer running the client is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+Generate a token in the host shell:
+
+<CodeGroup>
+```sh macOS & Linux
+export OPENCLAW_GATEWAY_TOKEN="$(openssl rand -hex 32)"
+```
+
+```powershell Windows
+$bytes = New-Object byte[] 32
+$rng = [Security.Cryptography.RandomNumberGenerator]::Create()
+$rng.GetBytes($bytes)
+$rng.Dispose()
+$env:OPENCLAW_GATEWAY_TOKEN = -join ($bytes | ForEach-Object { $_.ToString('x2') })
+```
+</CodeGroup>
+
+Start a fresh gateway sandbox using the persisted state:
+
+<CodeGroup>
+```sh macOS & Linux
+msb run -d --name openclaw-gateway --replace \
+  --cpus 2 --memory 2G --root-disk 4G \
+  -p 127.0.0.1:18789:18789 \
+  -e OPENCLAW_GATEWAY_TOKEN="$OPENCLAW_GATEWAY_TOKEN" \
+  --mount-named openclaw-data:/root/.openclaw \
+  node:24-bookworm-slim -- sh -lc '
+    apt-get update &&
+    apt-get install -y --no-install-recommends ca-certificates git &&
+    npm install -g openclaw@2026.7.1-2 &&
+    exec openclaw gateway run --bind lan --port 18789 --auth token
+  '
+```
+
+```powershell Windows
+msb run -d --name openclaw-gateway --replace `
+  --cpus 2 --memory 2G --root-disk 4G `
+  -p 127.0.0.1:18789:18789 `
+  -e "OPENCLAW_GATEWAY_TOKEN=$env:OPENCLAW_GATEWAY_TOKEN" `
+  --mount-named openclaw-data:/root/.openclaw `
+  node:24-bookworm-slim -- sh -lc '
+    apt-get update &&
+    apt-get install -y --no-install-recommends ca-certificates git &&
+    npm install -g openclaw@2026.7.1-2 &&
+    exec openclaw gateway run --bind lan --port 18789 --auth token
+  '
+```
+</CodeGroup>
+
+The gateway listens inside the guest on port 18789, while microsandbox exposes it only at `127.0.0.1:18789` on the host. Follow its output with:
+
+```sh
+msb logs -f openclaw-gateway
+```
+
+<Warning>
+  `OPENCLAW_GATEWAY_TOKEN` is visible to the guest and to processes that can inspect the host command environment. Use the microsandbox [secrets workflow](/sandboxes/secrets) for production credentials. Do not change the host bind address to `0.0.0.0` without adding transport security and understanding the exposure.
+</Warning>
+
+</Step>
+
+<Step title="Clean up">
+
+Remove the setup and gateway sandboxes:
+
+```sh
+msb rm -f openclaw-setup openclaw-gateway
+```
+
+Remove persisted OpenClaw state only when you no longer need it:
+
+```sh
+msb volume rm openclaw-data
+```
+
+Clear the token from the host shell:
+
+<CodeGroup>
+```sh macOS & Linux
+unset OPENCLAW_GATEWAY_TOKEN
+```
+
+```powershell Windows
+Remove-Item Env:OPENCLAW_GATEWAY_TOKEN
+```
+</CodeGroup>
+
+Keep `openclaw-data` if you want the configured agent to survive sandbox replacement.
+
+</Step>
+</Steps>
+
+## Reference
+
+- [OpenClaw getting started](https://docs.openclaw.ai/getting-started)
+- [OpenClaw gateway CLI](https://docs.openclaw.ai/cli/gateway)

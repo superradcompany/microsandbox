@@ -3,17 +3,23 @@ export type MicrosandboxErrorCode =
   | "http"
   | "cloudHttp"
   | "libkrunfwNotFound"
+  | "runtimeNotInstalled"
+  | "runtimeIncomplete"
   | "database"
   | "invalidConfig"
   | "noDefaultCommand"
   | "sandboxNotFound"
   | "sandboxAlreadyExists"
+  | "sandboxReplaced"
   | "sandboxStillRunning"
+  | "sandboxNotRunning"
+  | "sandboxStopTimedOut"
   | "runtime"
   | "json"
   | "protocol"
   | "nix"
   | "execTimeout"
+  | "stopTimeout"
   | "terminal"
   | "sandboxFsOps"
   | "imageNotFound"
@@ -22,6 +28,7 @@ export type MicrosandboxErrorCode =
   | "volumeAlreadyExists"
   | "image"
   | "patchFailed"
+  | "snapshotSourceRecovery"
   | "metricsDisabled"
   | "metricsUnavailable"
   | "unsupportedOperation"
@@ -62,6 +69,18 @@ export class LibkrunfwNotFoundError extends MicrosandboxError {
   }
 }
 
+export class RuntimeNotInstalledError extends MicrosandboxError {
+  constructor(message: string, options?: ErrorOptions) {
+    super("runtimeNotInstalled", message, options);
+  }
+}
+
+export class RuntimeIncompleteError extends MicrosandboxError {
+  constructor(message: string, options?: ErrorOptions) {
+    super("runtimeIncomplete", message, options);
+  }
+}
+
 export class DatabaseError extends MicrosandboxError {
   constructor(message: string, options?: ErrorOptions) {
     super("database", message, options);
@@ -92,9 +111,27 @@ export class SandboxAlreadyExistsError extends MicrosandboxError {
   }
 }
 
+export class SandboxReplacedError extends MicrosandboxError {
+  constructor(message: string, options?: ErrorOptions) {
+    super("sandboxReplaced", message, options);
+  }
+}
+
 export class SandboxStillRunningError extends MicrosandboxError {
   constructor(message: string, options?: ErrorOptions) {
     super("sandboxStillRunning", message, options);
+  }
+}
+
+export class SandboxNotRunningError extends MicrosandboxError {
+  constructor(message: string, options?: ErrorOptions) {
+    super("sandboxNotRunning", message, options);
+  }
+}
+
+export class SandboxStopTimedOutError extends MicrosandboxError {
+  constructor(message: string, options?: ErrorOptions) {
+    super("sandboxStopTimedOut", message, options);
   }
 }
 
@@ -128,6 +165,13 @@ export class ExecTimeoutError extends MicrosandboxError {
   constructor(message: string, timeoutMs: number | null = null, options?: ErrorOptions) {
     super("execTimeout", message, options);
     this.timeoutMs = timeoutMs;
+  }
+}
+
+/** Graceful shutdown exceeded its budget; the sandbox was not implicitly killed. */
+export class StopTimeoutError extends MicrosandboxError {
+  constructor(message: string, options?: ErrorOptions) {
+    super("stopTimeout", message, options);
   }
 }
 
@@ -182,6 +226,36 @@ export class PatchFailedError extends MicrosandboxError {
 export class MetricsDisabledError extends MicrosandboxError {
   constructor(message: string, options?: ErrorOptions) {
     super("metricsDisabled", message, options);
+  }
+}
+
+/** An artifact successfully published despite failure to recover the source. */
+export interface PublishedSnapshotArtifact {
+  readonly kind: "installed" | "archive";
+  readonly path: string;
+  readonly snapshotId: string;
+  readonly digest: string;
+}
+
+/** Recovery locators do not imply that the source is running or safe to resume. */
+export interface SnapshotSourceRecoveryDetails {
+  readonly sourceSandbox: string;
+  readonly checkpointId: string;
+  readonly checkpointRoot: string;
+  readonly checkpointPath: string;
+  readonly artifact: PublishedSnapshotArtifact | null;
+  readonly detail: string;
+  readonly publicationError: string | null;
+}
+
+/** Capture succeeded, but the source did not recover its prior execution state. */
+export class SnapshotSourceRecoveryError extends MicrosandboxError {
+  constructor(
+    message: string,
+    readonly recovery: SnapshotSourceRecoveryDetails,
+    options?: ErrorOptions,
+  ) {
+    super("snapshotSourceRecovery", message, options);
   }
 }
 

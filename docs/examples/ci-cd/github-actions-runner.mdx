@@ -1,0 +1,136 @@
+---
+title: Run GitHub Actions in a microVM
+sidebarTitle: GitHub runner
+description: Give one self-hosted job a disposable runner
+icon: "github"
+---
+
+Start GitHub's official Actions runner image in a microsandbox, let it accept one job, then remove the VM. The runner is ephemeral, so GitHub deregisters it after that job.
+
+## Before you start
+
+Authenticate the [GitHub CLI](https://cli.github.com/) for the target repository. The token needs **Administration: write** to create the temporary runner and **Actions: write** to start the workflow.
+
+Set the repository once for the commands below:
+
+<CodeGroup>
+```sh macOS & Linux
+repo=OWNER/REPOSITORY
+```
+
+```powershell Windows
+$repo = 'OWNER/REPOSITORY'
+```
+</CodeGroup>
+
+## Add the workflow
+
+Add this file to the repository's default branch. Replace the final step with the commands you want the runner to execute.
+
+```yaml .github/workflows/microsandbox-runner.yml
+name: Microsandbox runner
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: [self-hosted, msb-ephemeral]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: test -f README.md && uname -a
+```
+
+## Run one job
+
+<Steps>
+  <Step title="Queue the workflow">
+    The job waits until the temporary runner connects.
+
+    ```sh
+    gh workflow run microsandbox-runner.yml --repo "$repo"
+    ```
+  </Step>
+
+  <Step title="Create the runner VM">
+    Give this runner a unique name so multiple jobs can run independently.
+
+    <CodeGroup>
+    ```sh macOS & Linux
+    runner="msb-gh-$(date +%s)"
+    msb create ghcr.io/actions/actions-runner:2.336.0 \
+      --name "$runner" --cpus 2 --memory 4G --max-duration 1h
+    ```
+
+    ```powershell Windows
+    $runner = "msb-gh-$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())"
+    msb create ghcr.io/actions/actions-runner:2.336.0 `
+      --name $runner --cpus 2 --memory 4G --max-duration 1h
+    ```
+    </CodeGroup>
+  </Step>
+
+  <Step title="Register and start the runner">
+    First, ask GitHub to register this VM as a runner for one job. GitHub returns a single-use configuration containing the repository address, runner identity, labels, and temporary credentials.
+
+    <CodeGroup>
+    ```sh macOS & Linux
+    runner_config=$(gh api --method POST --hostname github.com "repos/$repo/actions/runners/generate-jitconfig" \
+      -f name="$runner" -F runner_group_id=1 -f 'labels[]=self-hosted' \
+      -f 'labels[]=msb-ephemeral' -f work_folder=_work --jq .encoded_jit_config)
+    ```
+
+    ```powershell Windows
+    $runnerConfig = gh api --method POST --hostname github.com "repos/$repo/actions/runners/generate-jitconfig" `
+      -f "name=$runner" -F runner_group_id=1 -f 'labels[]=self-hosted' `
+      -f 'labels[]=msb-ephemeral' -f work_folder=_work --jq .encoded_jit_config
+    ```
+    </CodeGroup>
+
+    Next, pass that configuration through standard input to GitHub's runner process inside the microVM:
+
+    <CodeGroup>
+    ```sh macOS & Linux
+    printf '%s\n' "$runner_config" | msb exec --stream --user runner \
+      --workdir /home/runner "$runner" -- \
+      bash -lc 'read -r config; exec ./run.sh --jitconfig "$config"'
+    unset runner_config
+    ```
+
+    ```powershell Windows
+    $runnerConfig | msb exec --stream --user runner `
+      --workdir /home/runner $runner -- `
+      bash -lc 'read -r config; exec ./run.sh --jitconfig "$config"'
+    Remove-Variable runnerConfig
+    ```
+    </CodeGroup>
+
+    The runner now opens an outbound HTTPS long poll to GitHub and waits. No inbound port or public IP is required. GitHub returns the queued job through that request, and the command exits when the job finishes.
+  </Step>
+
+  <Step title="Remove the VM">
+    After the job completes, stop and delete the sandbox.
+
+    <CodeGroup>
+    ```sh macOS & Linux
+    msb stop "$runner"
+    msb rm "$runner"
+    ```
+
+    ```powershell Windows
+    msb stop $runner
+    msb rm $runner
+    ```
+    </CodeGroup>
+  </Step>
+</Steps>
+
+The GitHub credential used by `gh` stays on the host. Only the single-use JIT configuration enters the VM, and the workflow receives only the permissions declared in its YAML. No host directory or Docker socket is mounted into the runner.
+
+To keep accepting jobs, run the same four steps from a long-lived machine or service whenever a matching workflow job is queued. For a larger runner fleet, see GitHub's [self-hosted runner autoscaling guidance](https://docs.github.com/en/actions/reference/runners/self-hosted-runners#autoscaling).

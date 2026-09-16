@@ -4,6 +4,7 @@ use std::{
     future::Future,
     mem::ManuallyDrop,
     panic::{AssertUnwindSafe, catch_unwind},
+    path::PathBuf,
     sync::{
         Arc, Condvar, Mutex,
         atomic::{AtomicPtr, AtomicU32, Ordering},
@@ -23,12 +24,13 @@ use microsandbox_core::{
     image::{Image, ImageHandle},
     logs::{LogEntry, LogOptions, LogSource},
     sandbox::{
-        ExecOptionsBuilder, ExecOutput, FsEntry, FsEntryKind, FsMetadata, NetworkPolicy,
-        PullPolicy, RlimitResource, Sandbox as CoreSandbox, SandboxBuilder, SandboxFsOps,
-        SandboxHandle as CoreSandboxHandle, SandboxMetrics, SandboxPage, SandboxPingResult,
-        SandboxStatus, SandboxStopResult, SandboxTouchResult,
+        DestroyOptions, ExecOptionsBuilder, ExecOutput, FsEntry, FsEntryKind, FsMetadata,
+        NetworkPolicy, PullPolicy, RestartOptions, RlimitResource, Sandbox as CoreSandbox,
+        SandboxBuilder, SandboxFsOps, SandboxHandle as CoreSandboxHandle, SandboxMetrics,
+        SandboxPage, SandboxPingResult, SandboxStatus, SandboxStopResult, SandboxTouchResult,
+        SecretSource,
     },
-    snapshot::{Snapshot, SnapshotHandle},
+    snapshot::{SaveOpts, Snapshot, SnapshotHandle},
     volume::{Volume, VolumeHandle, VolumeKind},
 };
 
@@ -430,6 +432,39 @@ fn apply_secret_options(
     Ok(builder)
 }
 
+#[derive(Clone)]
+enum RubyOutboundProxyConfig {
+    Socks4 {
+        address: String,
+        user_id: Option<String>,
+    },
+    Socks5 {
+        address: String,
+        credentials: Option<(String, SecretSource)>,
+    },
+}
+
+fn apply_outbound_proxy(builder: SandboxBuilder, proxy: &RubyOutboundProxy) -> SandboxBuilder {
+    match proxy.inner.borrow().clone() {
+        RubyOutboundProxyConfig::Socks4 {
+            address,
+            user_id: Some(user_id),
+        } => builder.proxy(|proxy| proxy.socks4(address).user_id(user_id)),
+        RubyOutboundProxyConfig::Socks4 {
+            address,
+            user_id: None,
+        } => builder.proxy(|proxy| proxy.socks4(address)),
+        RubyOutboundProxyConfig::Socks5 {
+            address,
+            credentials: Some((username, password)),
+        } => builder.proxy(|proxy| proxy.socks5(address).credentials(username, password)),
+        RubyOutboundProxyConfig::Socks5 {
+            address,
+            credentials: None,
+        } => builder.proxy(|proxy| proxy.socks5(address)),
+    }
+}
+
 // -------------------------------------------------------------------------------------------------
 // Duration / timeout
 // -------------------------------------------------------------------------------------------------
@@ -463,6 +498,49 @@ fn parse_timeout(
         .or(kw)
         .map(|s| duration(ruby, s, "timeout"))
         .transpose()
+}
+
+fn parse_status(ruby: &Ruby, status: &str) -> Result<SandboxStatus, Error> {
+    match status {
+        "created" => Ok(SandboxStatus::Created),
+        "starting" => Ok(SandboxStatus::Starting),
+        "running" => Ok(SandboxStatus::Running),
+        "draining" => Ok(SandboxStatus::Draining),
+        "paused" => Ok(SandboxStatus::Paused),
+        "stopped" => Ok(SandboxStatus::Stopped),
+        "crashed" => Ok(SandboxStatus::Crashed),
+        other => Err(argument_error(
+            ruby,
+            format!("invalid sandbox status {other:?}"),
+        )),
+    }
+}
+
+fn restart_options(ruby: &Ruby, args: &[Value]) -> Result<RestartOptions, Error> {
+    let parsed = scan_args::<(), (), (), (), RHash, ()>(args)?;
+    reject_unknown_keywords(ruby, parsed.keywords, &["force", "timeout", "detached"])?;
+    let mut options = RestartOptions {
+        force: keyword::<bool>(parsed.keywords, "force")?.unwrap_or(false),
+        detached: keyword::<bool>(parsed.keywords, "detached")?.unwrap_or(false),
+        ..Default::default()
+    };
+    if let Some(timeout) = keyword::<f64>(parsed.keywords, "timeout")? {
+        options.timeout = duration(ruby, timeout, "timeout")?;
+    }
+    Ok(options)
+}
+
+fn destroy_options(ruby: &Ruby, args: &[Value]) -> Result<DestroyOptions, Error> {
+    let parsed = scan_args::<(), (), (), (), RHash, ()>(args)?;
+    reject_unknown_keywords(ruby, parsed.keywords, &["force", "timeout"])?;
+    let mut options = DestroyOptions {
+        force: keyword::<bool>(parsed.keywords, "force")?.unwrap_or(false),
+        ..Default::default()
+    };
+    if let Some(timeout) = keyword::<f64>(parsed.keywords, "timeout")? {
+        options.timeout = duration(ruby, timeout, "timeout")?;
+    }
+    Ok(options)
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -524,6 +602,7 @@ fn apply_builder_options(
         "root_disk",
         "disable_network",
         "network",
+        "proxy",
         "secrets",
         "quiet_logs",
         "entrypoint",
@@ -601,6 +680,9 @@ fn apply_builder_options(
             let policy = restricted_network_policy(ruby, net)?;
             builder = builder.network(|n| n.policy(policy));
         }
+    }
+    if let Some(proxy) = keyword::<typed_data::Obj<RubyOutboundProxy>>(kwargs, "proxy")? {
+        builder = apply_outbound_proxy(builder, &proxy);
     }
     if let Some(v) = kwargs.get(symbol("secrets")) {
         builder = apply_secret_options(ruby, builder, v)?;
@@ -734,6 +816,16 @@ struct RubySandboxBuilder {
     inner: std::cell::RefCell<Option<SandboxBuilder>>,
 }
 
+#[magnus::wrap(class = "Microsandbox::OutboundProxy", free_immediately, size)]
+struct RubyOutboundProxy {
+    inner: std::cell::RefCell<RubyOutboundProxyConfig>,
+}
+
+#[magnus::wrap(class = "Microsandbox::SecretSource", free_immediately, size)]
+struct RubySecretSource {
+    inner: SecretSource,
+}
+
 #[magnus::wrap(class = "Microsandbox::ExecOutput", free_immediately, size)]
 struct RubyExecOutput {
     inner: ExecOutput,
@@ -762,6 +854,11 @@ struct RubyVolumeHandle {
 #[magnus::wrap(class = "Microsandbox::SnapshotHandle", free_immediately, size)]
 struct RubySnapshotHandle {
     inner: SnapshotHandle,
+}
+
+#[magnus::wrap(class = "Microsandbox::Snapshot", free_immediately, size)]
+struct RubySnapshot {
+    inner: Snapshot,
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -864,6 +961,12 @@ impl RubySandboxBuilder {
     fn init(this: typed_data::Obj<Self>, v: String) -> Result<(), Error> {
         put_builder(&this, |b| b.init(v))
     }
+    fn proxy(
+        this: typed_data::Obj<Self>,
+        proxy: typed_data::Obj<RubyOutboundProxy>,
+    ) -> Result<(), Error> {
+        put_builder(&this, |builder| apply_outbound_proxy(builder, &proxy))
+    }
     fn vsock(this: typed_data::Obj<Self>, host_path: String, port: u32) -> Result<(), Error> {
         put_builder(&this, |b| b.vsock(host_path, port))
     }
@@ -875,6 +978,14 @@ impl RubySandboxBuilder {
         let sb = run(ruby, b.create())?;
         Ok(RubySandbox {
             inner: std::cell::RefCell::new(Some(sb)),
+        })
+    }
+
+    fn connect_or_create(ruby: &Ruby, this: typed_data::Obj<Self>) -> Result<RubySandbox, Error> {
+        let builder = take_builder(&this)?;
+        let sandbox = run(ruby, builder.connect_or_create())?;
+        Ok(RubySandbox {
+            inner: std::cell::RefCell::new(Some(sandbox)),
         })
     }
 }
@@ -895,6 +1006,9 @@ impl RubySandbox {
 
     fn name(&self) -> Result<String, Error> {
         Ok(self.inner_clone()?.name().to_owned())
+    }
+    fn id(&self) -> Result<String, Error> {
+        Ok(self.inner_clone()?.id().to_string())
     }
     fn owns_lifecycle(&self) -> Result<bool, Error> {
         Ok(self.inner_clone()?.owns_lifecycle())
@@ -963,6 +1077,17 @@ impl RubySandbox {
         })
     }
 
+    fn stop_with_timeout(
+        ruby: &Ruby,
+        this: typed_data::Obj<Self>,
+        seconds: f64,
+    ) -> Result<(), Error> {
+        // A required scalar cannot turn an explicit bounded call into an unbounded stop.
+        let timeout = duration(ruby, seconds, "timeout")?;
+        let sb = this.inner_clone()?;
+        run(ruby, async move { sb.stop_with_timeout(timeout).await })
+    }
+
     fn kill(ruby: &Ruby, this: typed_data::Obj<Self>, args: &[Value]) -> Result<(), Error> {
         let parsed = scan_args::<(), (Option<f64>,), (), (), RHash, ()>(args)?;
         let timeout = parse_timeout(ruby, parsed.optional.0, parsed.keywords, "kill")?;
@@ -988,6 +1113,38 @@ impl RubySandbox {
     fn wait_until_stopped(ruby: &Ruby, this: typed_data::Obj<Self>) -> Result<RHash, Error> {
         let sb = this.inner_clone()?;
         stop_result_hash(run(ruby, async move { sb.wait_until_stopped().await })?)
+    }
+
+    fn wait_for_status(
+        ruby: &Ruby,
+        this: typed_data::Obj<Self>,
+        status: String,
+    ) -> Result<RubySandboxHandle, Error> {
+        let sandbox = this.inner_clone()?;
+        let status = parse_status(ruby, &status)?;
+        let handle = run(ruby, async move { sandbox.wait_for_status(status).await })?;
+        Ok(RubySandboxHandle {
+            inner: Arc::new(handle),
+        })
+    }
+
+    fn restart(
+        ruby: &Ruby,
+        this: typed_data::Obj<Self>,
+        args: &[Value],
+    ) -> Result<RubySandbox, Error> {
+        let options = restart_options(ruby, args)?;
+        let sandbox = this.inner_clone()?;
+        let restarted = run(ruby, async move { sandbox.restart_with(options).await })?;
+        Ok(RubySandbox {
+            inner: std::cell::RefCell::new(Some(restarted)),
+        })
+    }
+
+    fn destroy(ruby: &Ruby, this: typed_data::Obj<Self>, args: &[Value]) -> Result<(), Error> {
+        let options = destroy_options(ruby, args)?;
+        let sandbox = this.inner_clone()?;
+        run(ruby, async move { sandbox.destroy_with(options).await })
     }
 
     fn ping(ruby: &Ruby, this: typed_data::Obj<Self>) -> Result<RHash, Error> {
@@ -1031,10 +1188,22 @@ impl RubySandbox {
         }
         Ok(array)
     }
-    fn ssh_exec(ruby: &Ruby, this: typed_data::Obj<Self>, command: String) -> Result<RHash, Error> {
+    fn ssh_exec(ruby: &Ruby, this: typed_data::Obj<Self>, args: &[Value]) -> Result<RHash, Error> {
+        let parsed = scan_args::<(String,), (), (), (), RHash, ()>(args)?;
+        reject_unknown_keywords(ruby, parsed.keywords, &["inactivity_timeout"])?;
+        let inactivity_timeout = keyword::<f64>(parsed.keywords, "inactivity_timeout")?
+            .map(|seconds| duration(ruby, seconds, "inactivity_timeout"))
+            .transpose()?;
+        let command = parsed.required.0;
         let sb = this.inner_clone()?;
         let output = run(ruby, async move {
-            let client = sb.ssh().connect().await?;
+            let client = sb
+                .ssh()
+                .connect_with(|builder| match inactivity_timeout {
+                    Some(timeout) => builder.inactivity_timeout(timeout),
+                    None => builder,
+                })
+                .await?;
             client.exec(command).await
         })?;
         let hash = current_ruby().hash_new();
@@ -1228,6 +1397,9 @@ impl RubySandboxHandle {
     fn name(&self) -> String {
         self.inner.name().to_owned()
     }
+    fn id(&self) -> String {
+        self.inner.id().to_string()
+    }
     fn status(&self) -> String {
         status_name(self.inner.status_snapshot()).to_owned()
     }
@@ -1254,6 +1426,27 @@ impl RubySandboxHandle {
         let inner = run(ruby, async move { handle.connect().await })?;
         Ok(RubySandbox {
             inner: std::cell::RefCell::new(Some(inner)),
+        })
+    }
+
+    fn connect_or_start(
+        ruby: &Ruby,
+        this: typed_data::Obj<Self>,
+        args: &[Value],
+    ) -> Result<RubySandbox, Error> {
+        let parsed = scan_args::<(), (), (), (), RHash, ()>(args)?;
+        reject_unknown_keywords(ruby, parsed.keywords, &["detached"])?;
+        let detached = keyword::<bool>(parsed.keywords, "detached")?.unwrap_or(false);
+        let handle = Arc::clone(&this.inner);
+        let sandbox = run(ruby, async move {
+            if detached {
+                handle.connect_or_start_detached().await
+            } else {
+                handle.connect_or_start().await
+            }
+        })?;
+        Ok(RubySandbox {
+            inner: std::cell::RefCell::new(Some(sandbox)),
         })
     }
 
@@ -1290,6 +1483,16 @@ impl RubySandboxHandle {
         })
     }
 
+    fn stop_with_timeout(
+        ruby: &Ruby,
+        this: typed_data::Obj<Self>,
+        seconds: f64,
+    ) -> Result<(), Error> {
+        let timeout = duration(ruby, seconds, "timeout")?;
+        let handle = Arc::clone(&this.inner);
+        run(ruby, async move { handle.stop_with_timeout(timeout).await })
+    }
+
     fn kill(ruby: &Ruby, this: typed_data::Obj<Self>, args: &[Value]) -> Result<(), Error> {
         let parsed = scan_args::<(), (Option<f64>,), (), (), RHash, ()>(args)?;
         let timeout = parse_timeout(ruby, parsed.optional.0, parsed.keywords, "kill")?;
@@ -1310,6 +1513,38 @@ impl RubySandboxHandle {
     fn wait_until_stopped(ruby: &Ruby, this: typed_data::Obj<Self>) -> Result<RHash, Error> {
         let handle = Arc::clone(&this.inner);
         stop_result_hash(run(ruby, async move { handle.wait_until_stopped().await })?)
+    }
+
+    fn wait_for_status(
+        ruby: &Ruby,
+        this: typed_data::Obj<Self>,
+        status: String,
+    ) -> Result<RubySandboxHandle, Error> {
+        let status = parse_status(ruby, &status)?;
+        let handle = Arc::clone(&this.inner);
+        let current = run(ruby, async move { handle.wait_for_status(status).await })?;
+        Ok(RubySandboxHandle {
+            inner: Arc::new(current),
+        })
+    }
+
+    fn restart(
+        ruby: &Ruby,
+        this: typed_data::Obj<Self>,
+        args: &[Value],
+    ) -> Result<RubySandbox, Error> {
+        let options = restart_options(ruby, args)?;
+        let handle = Arc::clone(&this.inner);
+        let sandbox = run(ruby, async move { handle.restart_with(options).await })?;
+        Ok(RubySandbox {
+            inner: std::cell::RefCell::new(Some(sandbox)),
+        })
+    }
+
+    fn destroy(ruby: &Ruby, this: typed_data::Obj<Self>, args: &[Value]) -> Result<(), Error> {
+        let options = destroy_options(ruby, args)?;
+        let handle = Arc::clone(&this.inner);
+        run(ruby, async move { handle.destroy_with(options).await })
     }
 
     fn snapshot(ruby: &Ruby, this: typed_data::Obj<Self>, name: String) -> Result<RHash, Error> {
@@ -1477,8 +1712,28 @@ impl RubyVolumeHandle {
 }
 
 // -------------------------------------------------------------------------------------------------
-// SnapshotHandle methods
+// Snapshot methods
 // -------------------------------------------------------------------------------------------------
+
+impl RubySnapshot {
+    fn digest(&self) -> String {
+        self.inner.digest().to_owned()
+    }
+    fn size_bytes(&self) -> Option<u64> {
+        self.inner.size_bytes()
+    }
+    fn reference(&self) -> String {
+        self.inner.reference().value().to_owned()
+    }
+    fn reference_kind(&self) -> &'static str {
+        self.inner.reference().kind()
+    }
+    fn save_to(ruby: &Ruby, this: typed_data::Obj<Self>, args: &[Value]) -> Result<(), Error> {
+        let (out, opts) = parse_snapshot_save_args(ruby, args)?;
+        let snapshot = this.inner.clone();
+        run(ruby, async move { snapshot.save_to(&out, opts).await })
+    }
+}
 
 impl RubySnapshotHandle {
     fn digest(&self) -> String {
@@ -1496,12 +1751,25 @@ impl RubySnapshotHandle {
     fn state_kind(&self) -> String {
         self.inner.state_kind().to_owned()
     }
-    fn path(&self) -> String {
-        self.inner.path().to_string_lossy().into_owned()
+    fn reference(&self) -> String {
+        self.inner.reference().value().to_owned()
+    }
+    fn reference_kind(&self) -> &'static str {
+        self.inner.reference().kind()
     }
     fn remove(ruby: &Ruby, this: typed_data::Obj<Self>, force: bool) -> Result<(), Error> {
         let handle = this.inner.clone();
         run(ruby, async move { handle.remove(force).await })
+    }
+    fn open(ruby: &Ruby, this: typed_data::Obj<Self>) -> Result<RubySnapshot, Error> {
+        let handle = this.inner.clone();
+        let inner = run(ruby, async move { handle.open().await })?;
+        Ok(RubySnapshot { inner })
+    }
+    fn save_to(ruby: &Ruby, this: typed_data::Obj<Self>, args: &[Value]) -> Result<(), Error> {
+        let (out, opts) = parse_snapshot_save_args(ruby, args)?;
+        let handle = this.inner.clone();
+        run(ruby, async move { handle.save_to(&out, opts).await })
     }
 }
 
@@ -1514,11 +1782,20 @@ fn version() -> &'static str {
 }
 
 fn installed() -> bool {
-    microsandbox_core::setup::is_installed()
+    microsandbox_core::setup::is_runtime_installed(
+        &microsandbox_core::config::GlobalConfig::default(),
+    )
 }
 
 fn install(ruby: &Ruby) -> Result<(), Error> {
-    run(ruby, microsandbox_core::setup::install())
+    run(ruby, async {
+        microsandbox_core::setup::install_runtime(
+            &microsandbox_core::config::GlobalConfig::default(),
+            Default::default(),
+        )
+        .await
+        .map(|_| ())
+    })
 }
 
 fn set_runtime_msb_path(path: String) {
@@ -1579,6 +1856,72 @@ fn sandbox_builder(name: String) -> RubySandboxBuilder {
     }
 }
 
+fn outbound_proxy_socks4(address: String) -> RubyOutboundProxy {
+    RubyOutboundProxy {
+        inner: std::cell::RefCell::new(RubyOutboundProxyConfig::Socks4 {
+            address,
+            user_id: None,
+        }),
+    }
+}
+
+fn outbound_proxy_socks5(address: String) -> RubyOutboundProxy {
+    RubyOutboundProxy {
+        inner: std::cell::RefCell::new(RubyOutboundProxyConfig::Socks5 {
+            address,
+            credentials: None,
+        }),
+    }
+}
+
+fn secret_source_env(ruby: &Ruby, variable: String) -> Result<RubySecretSource, Error> {
+    if variable.is_empty() {
+        return Err(argument_error(
+            ruby,
+            "secret source environment variable must not be empty",
+        ));
+    }
+    Ok(RubySecretSource {
+        inner: SecretSource::env(variable),
+    })
+}
+
+impl RubyOutboundProxy {
+    fn user_id(ruby: &Ruby, this: typed_data::Obj<Self>, user_id: String) -> Result<(), Error> {
+        match &mut *this.inner.borrow_mut() {
+            RubyOutboundProxyConfig::Socks4 {
+                user_id: configured,
+                ..
+            } => {
+                *configured = Some(user_id);
+                Ok(())
+            }
+            RubyOutboundProxyConfig::Socks5 { .. } => Err(argument_error(
+                ruby,
+                "user_id is only supported for SOCKS4 proxies",
+            )),
+        }
+    }
+
+    fn credentials(
+        ruby: &Ruby,
+        this: typed_data::Obj<Self>,
+        username: String,
+        password: typed_data::Obj<RubySecretSource>,
+    ) -> Result<(), Error> {
+        match &mut *this.inner.borrow_mut() {
+            RubyOutboundProxyConfig::Socks4 { .. } => Err(argument_error(
+                ruby,
+                "credentials are only supported for SOCKS5 proxies",
+            )),
+            RubyOutboundProxyConfig::Socks5 { credentials, .. } => {
+                *credentials = Some((username, password.inner.clone()));
+                Ok(())
+            }
+        }
+    }
+}
+
 fn sandbox_create(ruby: &Ruby, args: &[Value]) -> Result<RubySandbox, Error> {
     let parsed = scan_args::<(String,), (), (), (), RHash, ()>(args)?;
     let builder = apply_builder_options(
@@ -1587,6 +1930,19 @@ fn sandbox_create(ruby: &Ruby, args: &[Value]) -> Result<RubySandbox, Error> {
         parsed.keywords,
     )?;
     let inner = run(ruby, builder.create())?;
+    Ok(RubySandbox {
+        inner: std::cell::RefCell::new(Some(inner)),
+    })
+}
+
+fn sandbox_connect_or_create(ruby: &Ruby, args: &[Value]) -> Result<RubySandbox, Error> {
+    let parsed = scan_args::<(String,), (), (), (), RHash, ()>(args)?;
+    let builder = apply_builder_options(
+        ruby,
+        SandboxBuilder::new(parsed.required.0),
+        parsed.keywords,
+    )?;
+    let inner = run(ruby, builder.connect_or_create())?;
     Ok(RubySandbox {
         inner: std::cell::RefCell::new(Some(inner)),
     })
@@ -1700,6 +2056,16 @@ fn volume_builder(name: String) -> RubyVolumeBuilder {
 
 // -- Snapshot statics --------------------------------------------------------
 
+fn snapshot_open(ruby: &Ruby, args: &[Value]) -> Result<RubySnapshot, Error> {
+    let parsed = scan_args::<(String,), (), (), (), RHash, ()>(args)?;
+    if !parsed.keywords.is_empty() {
+        return Err(argument_error(ruby, "open does not accept keywords"));
+    }
+    let reference = parsed.required.0;
+    let inner = run(ruby, async move { Snapshot::open(&reference).await })?;
+    Ok(RubySnapshot { inner })
+}
+
 fn snapshot_get(ruby: &Ruby, args: &[Value]) -> Result<RubySnapshotHandle, Error> {
     let parsed = scan_args::<(String,), (), (), (), RHash, ()>(args)?;
     if !parsed.keywords.is_empty() {
@@ -1731,6 +2097,28 @@ fn snapshot_remove(ruby: &Ruby, args: &[Value]) -> Result<(), Error> {
     let name = parsed.required.0;
     let force = parsed.optional.0.unwrap_or(false);
     run(ruby, async move { Snapshot::remove(&name, force).await })
+}
+
+fn snapshot_save(ruby: &Ruby, args: &[Value]) -> Result<(), Error> {
+    let parsed = scan_args::<(String, String), (), (), (), RHash, ()>(args)?;
+    reject_unknown_keywords(
+        ruby,
+        parsed.keywords,
+        &[
+            "with_parents",
+            "with_image",
+            "plain_tar",
+            "since",
+            "last_layers",
+        ],
+    )?;
+    let reference = parsed.required.0;
+    let out = PathBuf::from(parsed.required.1);
+    let opts = snapshot_save_opts(parsed.keywords)?;
+    run(
+        ruby,
+        async move { Snapshot::save(&reference, &out, opts).await },
+    )
 }
 
 // -- Image statics -----------------------------------------------------------
@@ -1980,9 +2368,33 @@ fn fs_metadata_hash(md: FsMetadata) -> Result<RHash, Error> {
 fn snapshot_hash(snapshot: Snapshot) -> Result<RHash, Error> {
     let hash = current_ruby().hash_new();
     hash.aset("digest", snapshot.digest())?;
-    hash.aset("path", snapshot.path().to_string_lossy().into_owned())?;
+    hash.aset("reference", snapshot.reference().value())?;
+    hash.aset("reference_kind", snapshot.reference().kind())?;
     hash.aset("size_bytes", snapshot.size_bytes())?;
     Ok(hash)
+}
+
+fn parse_snapshot_save_args(ruby: &Ruby, args: &[Value]) -> Result<(PathBuf, SaveOpts), Error> {
+    let parsed = scan_args::<(String,), (), (), (), RHash, ()>(args)?;
+    reject_unknown_keywords(
+        ruby,
+        parsed.keywords,
+        &["with_parents", "with_image", "plain_tar"],
+    )?;
+    Ok((
+        PathBuf::from(parsed.required.0),
+        snapshot_save_opts(parsed.keywords)?,
+    ))
+}
+
+fn snapshot_save_opts(keywords: RHash) -> Result<SaveOpts, Error> {
+    Ok(SaveOpts {
+        with_parents: keyword::<bool>(keywords, "with_parents")?.unwrap_or(false),
+        with_image: keyword::<bool>(keywords, "with_image")?.unwrap_or(false),
+        plain_tar: keyword::<bool>(keywords, "plain_tar")?.unwrap_or(false),
+        since: keyword::<String>(keywords, "since")?,
+        last_layers: keyword::<usize>(keywords, "last_layers")?,
+    })
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -2018,15 +2430,30 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
         function!(set_default_backend_profile, 1),
     )?;
 
+    // -- Proxy ---------------------------------------------------------------
+    let secret_source = module.define_class("SecretSource", ruby.class_object())?;
+    secret_source.define_singleton_method("env", function!(secret_source_env, 1))?;
+
+    let outbound_proxy = module.define_class("OutboundProxy", ruby.class_object())?;
+    outbound_proxy.define_singleton_method("socks4", function!(outbound_proxy_socks4, 1))?;
+    outbound_proxy.define_singleton_method("socks5", function!(outbound_proxy_socks5, 1))?;
+    outbound_proxy.define_method("user_id!", method!(RubyOutboundProxy::user_id, 1))?;
+    outbound_proxy.define_method("credentials!", method!(RubyOutboundProxy::credentials, 2))?;
+
     // -- Sandbox -------------------------------------------------------------
     let sandbox = module.define_class("Sandbox", ruby.class_object())?;
     sandbox.define_singleton_method("builder", function!(sandbox_builder, 1))?;
     sandbox.define_singleton_method("create", function!(sandbox_create, -1))?;
+    sandbox.define_singleton_method(
+        "connect_or_create",
+        function!(sandbox_connect_or_create, -1),
+    )?;
     sandbox.define_singleton_method("start", function!(sandbox_start, -1))?;
     sandbox.define_singleton_method("get", function!(sandbox_get, -1))?;
     sandbox.define_singleton_method("list", function!(sandbox_list, -1))?;
     sandbox.define_singleton_method("remove", function!(sandbox_remove, -1))?;
     sandbox.define_method("name", method!(RubySandbox::name, 0))?;
+    sandbox.define_method("id", method!(RubySandbox::id, 0))?;
     sandbox.define_method("owns_lifecycle?", method!(RubySandbox::owns_lifecycle, 0))?;
     sandbox.define_method("backend", method!(RubySandbox::backend, 0))?;
     sandbox.define_method("status", method!(RubySandbox::status, 0))?;
@@ -2037,6 +2464,10 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     sandbox.define_method("exec", method!(RubySandbox::exec, -1))?;
     sandbox.define_method("shell", method!(RubySandbox::shell, -1))?;
     sandbox.define_method("stop", method!(RubySandbox::stop, -1))?;
+    sandbox.define_method(
+        "stop_with_timeout",
+        method!(RubySandbox::stop_with_timeout, 1),
+    )?;
     sandbox.define_method("kill", method!(RubySandbox::kill, -1))?;
     sandbox.define_method("request_stop", method!(RubySandbox::request_stop, 0))?;
     sandbox.define_method("request_kill", method!(RubySandbox::request_kill, 0))?;
@@ -2044,12 +2475,15 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
         "wait_until_stopped",
         method!(RubySandbox::wait_until_stopped, 0),
     )?;
+    sandbox.define_method("wait_for_status", method!(RubySandbox::wait_for_status, 1))?;
+    sandbox.define_method("restart", method!(RubySandbox::restart, -1))?;
+    sandbox.define_method("destroy", method!(RubySandbox::destroy, -1))?;
     sandbox.define_method("detach", method!(RubySandbox::detach, 0))?;
     sandbox.define_method("ping", method!(RubySandbox::ping, 0))?;
     sandbox.define_method("touch", method!(RubySandbox::touch, 0))?;
     sandbox.define_method("metrics", method!(RubySandbox::metrics, 0))?;
     sandbox.define_method("logs", method!(RubySandbox::logs, -1))?;
-    sandbox.define_method("ssh_exec", method!(RubySandbox::ssh_exec, 1))?;
+    sandbox.define_method("ssh_exec", method!(RubySandbox::ssh_exec, -1))?;
     // filesystem
     sandbox.define_method("fs_read", method!(RubySandbox::fs_read, 1))?;
     sandbox.define_method("fs_write", method!(RubySandbox::fs_write, 2))?;
@@ -2070,6 +2504,7 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     // -- SandboxHandle -------------------------------------------------------
     let handle = module.define_class("SandboxHandle", ruby.class_object())?;
     handle.define_method("name", method!(RubySandboxHandle::name, 0))?;
+    handle.define_method("id", method!(RubySandboxHandle::id, 0))?;
     handle.define_method("status", method!(RubySandboxHandle::status, 0))?;
     handle.define_method("config_json", method!(RubySandboxHandle::config_json, 0))?;
     handle.define_method(
@@ -2082,14 +2517,28 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     )?;
     handle.define_method("refresh", method!(RubySandboxHandle::refresh, 0))?;
     handle.define_method("connect", method!(RubySandboxHandle::connect, 0))?;
+    handle.define_method(
+        "connect_or_start",
+        method!(RubySandboxHandle::connect_or_start, -1),
+    )?;
     handle.define_method("start", method!(RubySandboxHandle::start, -1))?;
     handle.define_method("stop", method!(RubySandboxHandle::stop, -1))?;
+    handle.define_method(
+        "stop_with_timeout",
+        method!(RubySandboxHandle::stop_with_timeout, 1),
+    )?;
     handle.define_method("kill", method!(RubySandboxHandle::kill, -1))?;
     handle.define_method("remove", method!(RubySandboxHandle::remove, 0))?;
     handle.define_method(
         "wait_until_stopped",
         method!(RubySandboxHandle::wait_until_stopped, 0),
     )?;
+    handle.define_method(
+        "wait_for_status",
+        method!(RubySandboxHandle::wait_for_status, 1),
+    )?;
+    handle.define_method("restart", method!(RubySandboxHandle::restart, -1))?;
+    handle.define_method("destroy", method!(RubySandboxHandle::destroy, -1))?;
     handle.define_method("snapshot", method!(RubySandboxHandle::snapshot, 1))?;
     handle.define_method("metrics", method!(RubySandboxHandle::metrics, 0))?;
     handle.define_method("ping", method!(RubySandboxHandle::ping, 0))?;
@@ -2131,9 +2580,14 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     builder.define_method("quiet_logs!", method!(RubySandboxBuilder::quiet_logs, 0))?;
     builder.define_method("entrypoint!", method!(RubySandboxBuilder::entrypoint, 1))?;
     builder.define_method("init!", method!(RubySandboxBuilder::init, 1))?;
+    builder.define_method("proxy!", method!(RubySandboxBuilder::proxy, 1))?;
     builder.define_method("vsock!", method!(RubySandboxBuilder::vsock, 2))?;
     builder.define_method("vsock_dgram!", method!(RubySandboxBuilder::vsock_dgram, 2))?;
     builder.define_method("create", method!(RubySandboxBuilder::create, 0))?;
+    builder.define_method(
+        "connect_or_create",
+        method!(RubySandboxBuilder::connect_or_create, 0),
+    )?;
 
     // -- ExecOutput ----------------------------------------------------------
     let output = module.define_class("ExecOutput", ruby.class_object())?;
@@ -2205,9 +2659,16 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
 
     // -- Snapshot ------------------------------------------------------------
     let snapshot = module.define_class("Snapshot", ruby.class_object())?;
+    snapshot.define_singleton_method("open", function!(snapshot_open, -1))?;
     snapshot.define_singleton_method("get", function!(snapshot_get, -1))?;
     snapshot.define_singleton_method("list", function!(snapshot_list, -1))?;
     snapshot.define_singleton_method("remove", function!(snapshot_remove, -1))?;
+    snapshot.define_singleton_method("save", function!(snapshot_save, -1))?;
+    snapshot.define_method("digest", method!(RubySnapshot::digest, 0))?;
+    snapshot.define_method("size_bytes", method!(RubySnapshot::size_bytes, 0))?;
+    snapshot.define_method("reference", method!(RubySnapshot::reference, 0))?;
+    snapshot.define_method("reference_kind", method!(RubySnapshot::reference_kind, 0))?;
+    snapshot.define_method("save_to", method!(RubySnapshot::save_to, -1))?;
 
     let snap_handle = module.define_class("SnapshotHandle", ruby.class_object())?;
     snap_handle.define_method("digest", method!(RubySnapshotHandle::digest, 0))?;
@@ -2215,8 +2676,14 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     snap_handle.define_method("size_bytes", method!(RubySnapshotHandle::size_bytes, 0))?;
     snap_handle.define_method("image_ref", method!(RubySnapshotHandle::image_ref, 0))?;
     snap_handle.define_method("state_kind", method!(RubySnapshotHandle::state_kind, 0))?;
-    snap_handle.define_method("path", method!(RubySnapshotHandle::path, 0))?;
+    snap_handle.define_method("reference", method!(RubySnapshotHandle::reference, 0))?;
+    snap_handle.define_method(
+        "reference_kind",
+        method!(RubySnapshotHandle::reference_kind, 0),
+    )?;
     snap_handle.define_method("remove", method!(RubySnapshotHandle::remove, 1))?;
+    snap_handle.define_method("open", method!(RubySnapshotHandle::open, 0))?;
+    snap_handle.define_method("save_to", method!(RubySnapshotHandle::save_to, -1))?;
 
     Ok(())
 }

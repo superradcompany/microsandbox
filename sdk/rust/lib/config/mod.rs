@@ -1,6 +1,6 @@
 //! Configuration schema for the microsandbox library.
 //!
-//! [`LocalConfig`] is the persisted schema for `~/.microsandbox/config.json`.
+//! [`GlobalConfig`] is the persisted schema for `~/.microsandbox/config.json`.
 //! It is owned by [`LocalBackend`](crate::backend::LocalBackend); accessors
 //! live on explicit backend instances, with [`config`] providing an ambient
 //! helper for the active local backend. See D6.7 Layer 2a in
@@ -29,6 +29,8 @@ use serde::{Deserialize, Serialize};
 use crate::error::Operation;
 use crate::{MicrosandboxError, MicrosandboxResult};
 
+mod runtime_paths;
+
 //--------------------------------------------------------------------------------------------------
 // Constants
 //--------------------------------------------------------------------------------------------------
@@ -47,6 +49,9 @@ pub(crate) const DEFAULT_CONNECT_TIMEOUT_SECS: u64 = 30;
 
 /// Default sandbox metrics sampling interval in milliseconds.
 pub const DEFAULT_METRICS_SAMPLE_INTERVAL_MS: u64 = 1000;
+
+/// Default SSH session inactivity timeout in seconds.
+pub const DEFAULT_SSH_INACTIVITY_TIMEOUT_SECS: u64 = 600;
 
 /// Default value for `metrics_sample_interval_ms` fields.
 pub fn default_metrics_sample_interval() -> Option<NonZero<u64>> {
@@ -112,15 +117,11 @@ const REGISTRY_KEYRING_SERVICE: &str = "dev.microsandbox.registry";
 // Statics: Layer 1 (process-level)
 //--------------------------------------------------------------------------------------------------
 
-/// SDK-provided path to the bundled `msb` binary. Set via [`set_sdk_msb_path`]
-/// by FFI bindings that ship a binary inside their language package and need
-/// an in-process channel that doesn't fight user env. Tier 2 of the
-/// resolution ladder (below `MSB_PATH` env, above config + filesystem
-/// fallbacks).
+/// Explicit process-level executable override, below `MSB_PATH` and above
+/// configuration and filesystem candidates. Package discovery uses its own fallback.
 static SDK_MSB_PATH: OnceLock<PathBuf> = OnceLock::new();
 
-/// SDK-provided path to the bundled `libkrunfw` dylib. Set via
-/// [`set_sdk_libkrunfw_path`]. Tier 2 of the libkrunfw resolution ladder.
+/// Explicit process-level firmware override set via [`set_sdk_libkrunfw_path`].
 static SDK_LIBKRUNFW_PATH: OnceLock<PathBuf> = OnceLock::new();
 
 //--------------------------------------------------------------------------------------------------
@@ -135,7 +136,7 @@ static SDK_LIBKRUNFW_PATH: OnceLock<PathBuf> = OnceLock::new();
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 #[derive(Default)]
-pub struct LocalConfig {
+pub struct GlobalConfig {
     /// Root directory for all microsandbox data.
     pub home: Option<PathBuf>,
 
@@ -172,8 +173,25 @@ pub struct LocalConfig {
     /// Registry authentication configuration.
     pub registries: RegistriesConfig,
 
+    /// SSH session defaults.
+    pub ssh: SshConfig,
+
     /// Live metrics registry configuration.
     pub metrics: MetricsConfig,
+}
+
+/// Compatibility alias for the backend-owned global configuration.
+#[deprecated(since = "0.6.15", note = "renamed to GlobalConfig")]
+pub type LocalConfig = GlobalConfig;
+
+/// Default settings for host-side SSH sessions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SshConfig {
+    /// Disconnect an SSH session after this many seconds without SSH traffic.
+    ///
+    /// A value of `0` disables the inactivity timeout.
+    pub inactivity_timeout_secs: u64,
 }
 
 /// Live metrics registry configuration.
@@ -192,7 +210,7 @@ pub struct LocalConfig {
 pub struct MetricsConfig {
     /// Number of slots reserved in the metrics shared-memory segment.
     /// A value of `0` (the default) falls back to the built-in default at
-    /// read time via [`LocalConfig::metrics_registry_capacity`]. The
+    /// read time via [`GlobalConfig::metrics_registry_capacity`]. The
     /// derived `Default` therefore avoids pinning serialized configs to a
     /// particular release's default capacity.
     pub capacity: u32,
@@ -221,13 +239,16 @@ pub struct DatabaseConfig {
 #[serde(default)]
 pub struct PathsConfig {
     /// Path to `msb` binary.
-    ///
-    /// Resolution: `MSB_PATH` env → SDK runtime path → this →
-    /// workspace-local (debug only) → `~/.microsandbox/bin/msb` → PATH lookup.
     pub msb: Option<PathBuf>,
 
     /// Path to `libkrunfw.{so,dylib}`.
     pub libkrunfw: Option<PathBuf>,
+
+    /// Path to the Linux guest Agentd executable.
+    ///
+    /// `MSB_AGENTD_PATH` takes precedence. When neither is set, the runtime
+    /// uses the Agentd payload embedded in `msb`.
+    pub agentd: Option<PathBuf>,
 
     /// Cache directory.
     pub cache: Option<PathBuf>,
@@ -416,7 +437,17 @@ struct KeyringRegistryCredential {
 // Methods
 //--------------------------------------------------------------------------------------------------
 
-impl LocalConfig {
+impl GlobalConfig {
+    /// Resolve the executable from the same complete pair used for sandbox launches.
+    pub fn resolve_msb_path(&self) -> MicrosandboxResult<PathBuf> {
+        crate::setup::resolve_runtime(self).map(|runtime| runtime.msb_path)
+    }
+
+    /// Resolve the firmware from the same complete pair used for sandbox launches.
+    pub fn resolve_libkrunfw_path(&self) -> MicrosandboxResult<PathBuf> {
+        crate::setup::resolve_runtime(self).map(|runtime| runtime.libkrunfw_path)
+    }
+
     /// Validate defaults that affect sandbox construction.
     pub(crate) fn validate_sandbox_defaults(&self) -> MicrosandboxResult<()> {
         let oci = &self.sandbox_defaults.oci;
@@ -548,32 +579,6 @@ impl LocalConfig {
         } else {
             self.metrics.capacity
         }
-    }
-
-    /// Resolve the path to the `msb` binary for this local config.
-    ///
-    /// Resolution order:
-    /// 1. `MSB_PATH` environment variable
-    /// 2. SDK-provided runtime path
-    /// 3. `self.paths.msb`
-    /// 4. workspace-local `build/msb` or `target/debug/msb` (debug builds only)
-    /// 5. `~/.microsandbox/bin/msb`
-    /// 6. `which::which("msb")`
-    pub fn resolve_msb_path(&self) -> MicrosandboxResult<PathBuf> {
-        resolve_msb_path_for_config(self)
-    }
-
-    /// Resolve the path to `libkrunfw` for this local config.
-    ///
-    /// Resolution order (highest first):
-    /// 1. `MSB_LIBKRUNFW_PATH` environment variable
-    /// 2. SDK-provided runtime path set via [`set_sdk_libkrunfw_path`]
-    /// 3. `self.paths.libkrunfw`
-    /// 4. A sibling of the resolved `msb` binary (for `build/msb`)
-    /// 5. `../lib/` next to the resolved `msb` binary (for installed layouts)
-    /// 6. `{home}/lib/libkrunfw.{so,dylib}`
-    pub fn resolve_libkrunfw_path(&self) -> MicrosandboxResult<PathBuf> {
-        resolve_libkrunfw_path_for_config(self)
     }
 
     /// Resolve registry transport for a given hostname from this config.
@@ -724,6 +729,14 @@ impl Default for DatabaseConfig {
     }
 }
 
+impl Default for SshConfig {
+    fn default() -> Self {
+        Self {
+            inactivity_timeout_secs: DEFAULT_SSH_INACTIVITY_TIMEOUT_SECS,
+        }
+    }
+}
+
 impl Default for SandboxDefaults {
     fn default() -> Self {
         Self {
@@ -823,7 +836,7 @@ fn docker_credential_servers(hostname: &str) -> Vec<String> {
 /// This is the ambient convenience path for callers that do not explicitly
 /// construct a [`LocalBackend`](crate::backend::LocalBackend). It returns
 /// [`MicrosandboxError::Unsupported`] when the active backend is cloud.
-pub fn config() -> MicrosandboxResult<Arc<LocalConfig>> {
+pub fn config() -> MicrosandboxResult<Arc<GlobalConfig>> {
     let backend = crate::backend::default_backend();
     let local = backend
         .as_local()
@@ -834,7 +847,7 @@ pub fn config() -> MicrosandboxResult<Arc<LocalConfig>> {
 /// Resolve the path to the persisted local config file.
 pub fn config_path() -> PathBuf {
     // Honour MSB_CONFIG_PATH if set — same env var the SDK config loader
-    // checks. The LocalConfig and the SdkConfig live in the same JSON
+    // checks. The GlobalConfig and the SdkConfig live in the same JSON
     // document, so both layers must agree on the path.
     if let Ok(p) = std::env::var("MSB_CONFIG_PATH") {
         return PathBuf::from(p);
@@ -843,17 +856,17 @@ pub fn config_path() -> PathBuf {
 }
 
 /// Load the persisted config file or return the default config if it does not exist.
-pub fn load_persisted_config_or_default() -> MicrosandboxResult<LocalConfig> {
+pub fn load_persisted_config_or_default() -> MicrosandboxResult<GlobalConfig> {
     let path = config_path();
     if !path.exists() {
-        return Ok(LocalConfig::default());
+        return Ok(GlobalConfig::default());
     }
 
     read_config_from(&path)
 }
 
 /// Persist the provided local config to disk as pretty JSON.
-pub fn save_persisted_config(config: &LocalConfig) -> MicrosandboxResult<()> {
+pub fn save_persisted_config(config: &GlobalConfig) -> MicrosandboxResult<()> {
     let path = config_path();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| {
@@ -892,7 +905,9 @@ pub fn delete_registry_keyring_auth(hostname: &str) -> MicrosandboxResult<()> {
     remove_registry_keyring_auth(hostname).map_err(MicrosandboxError::Custom)
 }
 
-/// Set the `msb` binary path resolved by an SDK package.
+/// Set an explicit process-level `msb` path.
+///
+/// Automatic package discovery should use [`set_sdk_packaged_msb_path`] instead.
 ///
 /// This is an internal SDK bridge for runtimes where mutating `process.env`
 /// does not update the native process environment. User-provided `MSB_PATH`
@@ -901,254 +916,33 @@ pub fn set_sdk_msb_path(path: impl Into<PathBuf>) {
     let _ = SDK_MSB_PATH.set(path.into());
 }
 
-/// Resolve the path to the `msb` binary for the ambient local config.
+pub(crate) fn sdk_msb_path() -> Option<PathBuf> {
+    SDK_MSB_PATH.get().cloned()
+}
+
+/// Resolve the ambient runtime executable as part of a complete runtime pair.
 pub fn resolve_msb_path() -> MicrosandboxResult<PathBuf> {
     config()?.resolve_msb_path()
-}
-
-/// Resolve the path to the `msb` binary against the supplied [`LocalConfig`].
-///
-/// Resolution order:
-/// 1. `MSB_PATH` environment variable
-/// 2. SDK-provided runtime path
-/// 3. `config.paths.msb`
-/// 4. workspace-local `build/msb` or `target/debug/msb` (debug builds only)
-/// 5. `~/.microsandbox/bin/msb`
-/// 6. `which::which("msb")`
-fn resolve_msb_path_for_config(config: &LocalConfig) -> MicrosandboxResult<PathBuf> {
-    let env_msb = std::env::var("MSB_PATH").ok();
-    let sdk_msb = SDK_MSB_PATH.get().cloned();
-    let config_msb = config.paths.msb.clone();
-
-    let debug_probe = || -> Option<PathBuf> {
-        // Only probe workspace-local dev builds in debug builds to prevent
-        // binary hijacking from untrusted parent directories in production.
-        #[cfg(debug_assertions)]
-        {
-            let mut local_candidates = Vec::new();
-            if let Ok(current_dir) = std::env::current_dir() {
-                local_candidates.extend(dev_msb_candidates_from(&current_dir));
-            }
-            if let Ok(current_exe) = std::env::current_exe()
-                && let Some(exe_dir) = current_exe.parent()
-            {
-                local_candidates.extend(dev_msb_candidates_from(exe_dir));
-            }
-            dedupe_paths(&mut local_candidates);
-            local_candidates.into_iter().find(|path| path.is_file())
-        }
-        #[cfg(not(debug_assertions))]
-        {
-            None
-        }
-    };
-
-    let home_probe = || -> Option<PathBuf> {
-        let home_bin = config.home().join(microsandbox_utils::BIN_SUBDIR).join(
-            microsandbox_utils::msb_binary_filename(std::env::consts::OS),
-        );
-        home_bin.is_file().then_some(home_bin)
-    };
-
-    let which_probe = || -> Option<PathBuf> { which::which(microsandbox_utils::MSB_BINARY).ok() };
-
-    resolve_msb_path_from(
-        env_msb.as_deref(),
-        sdk_msb.as_deref(),
-        config_msb.as_deref(),
-        &debug_probe,
-        &home_probe,
-        &which_probe,
-    )
-}
-
-/// Pure precedence ladder for `resolve_msb_path`. Probe closures encapsulate
-/// the filesystem-touching tiers so unit tests can supply fakes.
-fn resolve_msb_path_from(
-    env_msb: Option<&str>,
-    sdk_msb: Option<&Path>,
-    config_msb: Option<&Path>,
-    debug_probe: &dyn Fn() -> Option<PathBuf>,
-    home_probe: &dyn Fn() -> Option<PathBuf>,
-    which_probe: &dyn Fn() -> Option<PathBuf>,
-) -> MicrosandboxResult<PathBuf> {
-    if let Some(path) = env_msb {
-        tracing::debug!(path = %path, source = "MSB_PATH env", "resolved msb binary");
-        return Ok(PathBuf::from(path));
-    }
-    if let Some(path) = sdk_msb {
-        tracing::debug!(path = %path.display(), source = "SDK runtime path", "resolved msb binary");
-        return Ok(path.to_path_buf());
-    }
-    if let Some(path) = config_msb {
-        tracing::debug!(path = %path.display(), source = "config.paths.msb", "resolved msb binary");
-        return Ok(path.to_path_buf());
-    }
-    if let Some(path) = debug_probe() {
-        tracing::debug!(path = %path.display(), source = "workspace-local msb", "resolved msb binary");
-        return Ok(path);
-    }
-    if let Some(path) = home_probe() {
-        tracing::debug!(path = %path.display(), source = "~/.microsandbox/bin/msb", "resolved msb binary");
-        return Ok(path);
-    }
-    if let Some(path) = which_probe() {
-        tracing::debug!(path = %path.display(), source = "PATH lookup", "resolved msb binary");
-        return Ok(path);
-    }
-    Err(MicrosandboxError::Custom(
-        "msb binary not found. Run `cargo clean -p microsandbox && cargo build` to reinstall, \
-         or set MSB_PATH to the binary location"
-            .into(),
-    ))
 }
 
 /// Set the `libkrunfw` path resolved by an SDK package (e.g. one that ships a
 /// bundled libkrunfw dylib inside its language-package wheel/npm-package).
 ///
-/// Set-once: subsequent calls are ignored. Sits at tier 2 of
-/// [`resolve_libkrunfw_path`] — below user env (`MSB_LIBKRUNFW_PATH`) so a user
-/// override always wins, above the config + filesystem fallbacks.
+/// Set-once: subsequent calls are ignored. The user-facing
+/// `MSB_LIBKRUNFW_PATH` environment override still wins.
 ///
 /// Mirrors [`set_sdk_msb_path`]; both share the same precedence shape.
 pub fn set_sdk_libkrunfw_path(path: impl Into<PathBuf>) {
     let _ = SDK_LIBKRUNFW_PATH.set(path.into());
 }
 
-/// Resolve the path to `libkrunfw` for the ambient local config.
+pub(crate) fn sdk_libkrunfw_path() -> Option<PathBuf> {
+    SDK_LIBKRUNFW_PATH.get().cloned()
+}
+
+/// Resolve the ambient firmware library as part of a complete runtime pair.
 pub fn resolve_libkrunfw_path() -> MicrosandboxResult<PathBuf> {
     config()?.resolve_libkrunfw_path()
-}
-
-/// Resolve the path to `libkrunfw` against the supplied [`LocalConfig`].
-///
-/// Resolution order (highest first):
-/// 1. `MSB_LIBKRUNFW_PATH` environment variable (user-facing override).
-/// 2. SDK-provided runtime path (set via [`set_sdk_libkrunfw_path`], used by
-///    FFI bindings that ship a bundled dylib).
-/// 3. `config.paths.libkrunfw`.
-/// 4. A sibling of the resolved `msb` binary (for `build/msb`).
-/// 5. `../lib/` next to the resolved `msb` binary (for installed layouts).
-/// 6. `{home}/lib/libkrunfw.{so,dylib}`.
-fn resolve_libkrunfw_path_for_config(config: &LocalConfig) -> MicrosandboxResult<PathBuf> {
-    if let Ok(env_path) = std::env::var("MSB_LIBKRUNFW_PATH") {
-        let path = PathBuf::from(env_path);
-        if path.is_file() {
-            tracing::debug!(path = %path.display(), source = "MSB_LIBKRUNFW_PATH env", "resolved libkrunfw");
-            return Ok(path);
-        }
-        return Err(MicrosandboxError::LibkrunfwNotFound(format!(
-            "MSB_LIBKRUNFW_PATH points to non-file: {}",
-            path.display()
-        )));
-    }
-    if let Some(sdk_path) = SDK_LIBKRUNFW_PATH.get() {
-        if sdk_path.is_file() {
-            tracing::debug!(path = %sdk_path.display(), source = "SDK runtime path", "resolved libkrunfw");
-            return Ok(sdk_path.clone());
-        }
-        // SDK path set but missing — fall through to config + fallbacks rather than error.
-        tracing::warn!(path = %sdk_path.display(), "SDK_LIBKRUNFW_PATH points to non-file; falling through to config + filesystem fallbacks");
-    }
-    if let Some(path) = &config.paths.libkrunfw {
-        if path.is_file() {
-            return Ok(path.clone());
-        }
-        return Err(MicrosandboxError::LibkrunfwNotFound(format!(
-            "configured path does not exist: {}",
-            path.display()
-        )));
-    }
-
-    let filename = microsandbox_utils::libkrunfw_filename(libkrunfw_target_os());
-    let home_fallback = config
-        .home()
-        .join(microsandbox_utils::LIB_SUBDIR)
-        .join(&filename);
-
-    let mut candidates = Vec::new();
-    if let Ok(msb_path) = config.resolve_msb_path() {
-        candidates.extend(libkrunfw_candidates_from_msb(&msb_path, &filename));
-    }
-    candidates.push(home_fallback);
-
-    if let Some(path) = candidates.iter().find(|path| path.is_file()) {
-        tracing::debug!(path = %path.display(), "resolved libkrunfw path");
-        return Ok(path.clone());
-    }
-
-    let searched = candidates
-        .iter()
-        .map(|path| path.display().to_string())
-        .collect::<Vec<_>>()
-        .join(", ");
-    Err(MicrosandboxError::LibkrunfwNotFound(format!(
-        "searched: {searched}"
-    )))
-}
-
-fn libkrunfw_candidates_from_msb(msb_path: &Path, filename: &str) -> Vec<PathBuf> {
-    let mut candidates = Vec::new();
-
-    if let Some(msb_dir) = msb_path.parent() {
-        candidates.push(msb_dir.join(filename));
-
-        if let Some(parent) = msb_dir.parent() {
-            candidates.push(parent.join(microsandbox_utils::LIB_SUBDIR).join(filename));
-        }
-    }
-
-    let mut deduped = Vec::new();
-    for path in candidates {
-        if !deduped.iter().any(|existing| existing == &path) {
-            deduped.push(path);
-        }
-    }
-
-    deduped
-}
-
-fn libkrunfw_target_os() -> &'static str {
-    if cfg!(target_os = "macos") {
-        "macos"
-    } else if cfg!(target_os = "windows") {
-        "windows"
-    } else {
-        "linux"
-    }
-}
-
-#[cfg(debug_assertions)]
-fn dev_msb_candidates_from(start: &Path) -> Vec<PathBuf> {
-    let mut candidates = Vec::new();
-
-    for ancestor in start.ancestors() {
-        if !ancestor.join("Cargo.toml").is_file() {
-            continue;
-        }
-
-        candidates.push(
-            ancestor
-                .join("build")
-                .join(microsandbox_utils::msb_binary_filename(
-                    std::env::consts::OS,
-                )),
-        );
-    }
-
-    dedupe_paths(&mut candidates);
-    candidates
-}
-
-#[cfg(debug_assertions)]
-fn dedupe_paths(paths: &mut Vec<PathBuf>) {
-    let mut deduped = Vec::new();
-    for path in paths.drain(..) {
-        if !deduped.iter().any(|existing| existing == &path) {
-            deduped.push(path);
-        }
-    }
-    *paths = deduped;
 }
 
 fn dedupe_strings(values: &mut Vec<String>) {
@@ -1161,7 +955,7 @@ fn dedupe_strings(values: &mut Vec<String>) {
     *values = deduped;
 }
 
-fn read_config_from(path: &Path) -> MicrosandboxResult<LocalConfig> {
+fn read_config_from(path: &Path) -> MicrosandboxResult<GlobalConfig> {
     let content = std::fs::read_to_string(path).map_err(|e| {
         MicrosandboxError::Custom(format!("failed to read config `{}`: {e}", path.display()))
     })?;
@@ -1174,7 +968,7 @@ fn read_config_from(path: &Path) -> MicrosandboxResult<LocalConfig> {
     })
 }
 
-/// Resolve the default home directory (`~/.microsandbox`, or `$MSB_HOME` if set).
+/// Resolve the default home directory (`~/.microsandbox`, or non-empty `$MSB_HOME`).
 fn resolve_default_home() -> PathBuf {
     microsandbox_utils::resolve_home()
 }
@@ -1304,7 +1098,7 @@ mod tests {
 
     #[test]
     fn test_default_config() {
-        let cfg = LocalConfig::default();
+        let cfg = GlobalConfig::default();
         assert_eq!(cfg.sandbox_defaults.cpus, 1);
         assert_eq!(cfg.sandbox_defaults.memory_mib, 512);
         assert_eq!(cfg.sandbox_defaults.cpu_placement, CpuPlacement::Inherit);
@@ -1322,6 +1116,7 @@ mod tests {
         assert_eq!(cfg.database.max_connections, 5);
         assert_eq!(cfg.database.connect_timeout_secs, 30);
         assert_eq!(cfg.database.busy_timeout_secs, 5);
+        assert_eq!(cfg.ssh.inactivity_timeout_secs, 600);
         assert_eq!(
             cfg.runtime.block_writeback,
             BlockWritebackConfig::Auto { pool_mib: None }
@@ -1335,7 +1130,7 @@ mod tests {
 
     #[test]
     fn test_deserialize_empty_json() {
-        let cfg: LocalConfig = serde_json::from_str("{}").unwrap();
+        let cfg: GlobalConfig = serde_json::from_str("{}").unwrap();
         assert_eq!(cfg.sandbox_defaults.cpus, 1);
         assert!(cfg.home.is_none());
         assert_eq!(
@@ -1347,14 +1142,14 @@ mod tests {
     #[test]
     fn test_deserialize_partial_json() {
         let json = r#"{"sandbox_defaults": {"cpus": 4}}"#;
-        let cfg: LocalConfig = serde_json::from_str(json).unwrap();
+        let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
         assert_eq!(cfg.sandbox_defaults.cpus, 4);
         assert_eq!(cfg.sandbox_defaults.memory_mib, 512);
     }
 
     #[test]
     fn test_deployment_profile_uses_human_facing_config_values() {
-        let cfg: LocalConfig =
+        let cfg: GlobalConfig =
             serde_json::from_str(r#"{"deployment_profile":"multi-tenant"}"#).unwrap();
         assert_eq!(cfg.deployment_profile, Some(DeploymentProfile::MultiTenant));
 
@@ -1364,7 +1159,7 @@ mod tests {
 
     #[test]
     fn test_deployment_profile_accepts_snake_case_wire_values() {
-        let cfg: LocalConfig =
+        let cfg: GlobalConfig =
             serde_json::from_str(r#"{"deployment_profile":"single_tenant"}"#).unwrap();
         assert_eq!(
             cfg.deployment_profile,
@@ -1375,7 +1170,7 @@ mod tests {
     #[test]
     fn test_deployment_profile_rejects_unknown_values() {
         let error =
-            serde_json::from_str::<LocalConfig>(r#"{"deployment_profile":"shared"}"#).unwrap_err();
+            serde_json::from_str::<GlobalConfig>(r#"{"deployment_profile":"shared"}"#).unwrap_err();
         assert!(error.to_string().contains("unknown deployment profile"));
     }
 
@@ -1396,7 +1191,7 @@ mod tests {
             "runtime": { "block_writeback": { "mode": "off" } }
         }"#;
 
-        let cfg: LocalConfig = serde_json::from_str(json).unwrap();
+        let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
         assert_eq!(cfg.sandbox_defaults.cpu_placement, CpuPlacement::Spread);
         assert_eq!(cfg.sandbox_defaults.thp, TransparentHugePagePolicy::Always);
         assert_eq!(
@@ -1426,7 +1221,7 @@ mod tests {
                 }
             }
         }"#;
-        let cfg: LocalConfig = serde_json::from_str(json).unwrap();
+        let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
 
         cfg.validate_sandbox_defaults().unwrap();
         assert_eq!(
@@ -1443,7 +1238,7 @@ mod tests {
             microsandbox_types::MemoryPlacement::FollowCpu
         );
 
-        let round: LocalConfig =
+        let round: GlobalConfig =
             serde_json::from_value(serde_json::to_value(cfg).unwrap()).unwrap();
         assert_eq!(
             round.sandbox_defaults.placement_profile.as_deref(),
@@ -1453,7 +1248,7 @@ mod tests {
 
     #[test]
     fn test_validate_rejects_unknown_default_placement_profile() {
-        let cfg: LocalConfig =
+        let cfg: GlobalConfig =
             serde_json::from_str(r#"{"sandbox_defaults":{"placement_profile":"missing"}}"#)
                 .unwrap();
 
@@ -1476,7 +1271,7 @@ mod tests {
                 }
             }
         }"#;
-        let cfg: LocalConfig = serde_json::from_str(json).unwrap();
+        let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
 
         assert_eq!(
             cfg.runtime.block_writeback,
@@ -1516,8 +1311,8 @@ mod tests {
             }
         }"#;
 
-        assert!(serde_json::from_str::<LocalConfig>(auto_with_fixed_limit).is_err());
-        assert!(serde_json::from_str::<LocalConfig>(off_with_pool).is_err());
+        assert!(serde_json::from_str::<GlobalConfig>(auto_with_fixed_limit).is_err());
+        assert!(serde_json::from_str::<GlobalConfig>(off_with_pool).is_err());
     }
 
     #[test]
@@ -1530,7 +1325,7 @@ mod tests {
                 }
             }
         }"#;
-        let cfg: LocalConfig = serde_json::from_str(json).unwrap();
+        let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
 
         let error = cfg.validate_sandbox_defaults().unwrap_err();
         assert!(error.to_string().contains("mutually exclusive"));
@@ -1539,7 +1334,7 @@ mod tests {
     #[test]
     fn test_deserialize_metrics_interval_missing_uses_default() {
         let json = r#"{"sandbox_defaults": {}}"#;
-        let cfg: LocalConfig = serde_json::from_str(json).unwrap();
+        let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
         assert_eq!(
             cfg.sandbox_defaults.metrics_sample_interval_ms,
             NonZero::new(DEFAULT_METRICS_SAMPLE_INTERVAL_MS)
@@ -1549,14 +1344,14 @@ mod tests {
     #[test]
     fn test_deserialize_metrics_interval_zero_disables() {
         let json = r#"{"sandbox_defaults": {"metrics_sample_interval_ms": 0}}"#;
-        let cfg: LocalConfig = serde_json::from_str(json).unwrap();
+        let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
         assert!(cfg.sandbox_defaults.metrics_sample_interval_ms.is_none());
     }
 
     #[test]
     fn test_deserialize_metrics_interval_positive() {
         let json = r#"{"sandbox_defaults": {"metrics_sample_interval_ms": 2500}}"#;
-        let cfg: LocalConfig = serde_json::from_str(json).unwrap();
+        let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
         assert_eq!(
             cfg.sandbox_defaults.metrics_sample_interval_ms,
             NonZero::new(2500)
@@ -1565,20 +1360,20 @@ mod tests {
 
     #[test]
     fn test_serialize_metrics_interval_disabled_round_trips() {
-        let mut cfg = LocalConfig::default();
+        let mut cfg = GlobalConfig::default();
         cfg.sandbox_defaults.metrics_sample_interval_ms = None;
         let json = serde_json::to_string(&cfg).unwrap();
         assert!(
             json.contains("\"metrics_sample_interval_ms\":0"),
             "expected `0` serialization, got: {json}"
         );
-        let round: LocalConfig = serde_json::from_str(&json).unwrap();
+        let round: GlobalConfig = serde_json::from_str(&json).unwrap();
         assert!(round.sandbox_defaults.metrics_sample_interval_ms.is_none());
     }
 
     #[test]
     fn test_metrics_capacity_default_uses_crate_default() {
-        let cfg = LocalConfig::default();
+        let cfg = GlobalConfig::default();
         assert_eq!(
             cfg.metrics_registry_capacity(),
             microsandbox_metrics::default_capacity()
@@ -1588,7 +1383,7 @@ mod tests {
     #[test]
     fn test_metrics_capacity_zero_falls_back_to_default() {
         let json = r#"{"metrics": {"capacity": 0}}"#;
-        let cfg: LocalConfig = serde_json::from_str(json).unwrap();
+        let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
         assert_eq!(cfg.metrics.capacity, 0);
         assert_eq!(
             cfg.metrics_registry_capacity(),
@@ -1599,28 +1394,28 @@ mod tests {
     #[test]
     fn test_metrics_capacity_explicit_value_overrides_default() {
         let json = r#"{"metrics": {"capacity": 2048}}"#;
-        let cfg: LocalConfig = serde_json::from_str(json).unwrap();
+        let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
         assert_eq!(cfg.metrics.capacity, 2048);
         assert_eq!(cfg.metrics_registry_capacity(), 2048);
     }
 
     #[test]
     fn test_deserialize_disable_metrics_sample_default_false() {
-        let cfg: LocalConfig = serde_json::from_str("{}").unwrap();
+        let cfg: GlobalConfig = serde_json::from_str("{}").unwrap();
         assert!(!cfg.sandbox_defaults.disable_metrics_sample);
     }
 
     #[test]
     fn test_deserialize_disable_metrics_sample_true() {
         let json = r#"{"sandbox_defaults": {"disable_metrics_sample": true}}"#;
-        let cfg: LocalConfig = serde_json::from_str(json).unwrap();
+        let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
         assert!(cfg.sandbox_defaults.disable_metrics_sample);
     }
 
     #[test]
     fn test_deserialize_log_level() {
         let json = r#"{"log_level":"debug"}"#;
-        let cfg: LocalConfig = serde_json::from_str(json).unwrap();
+        let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
         assert_eq!(cfg.log_level, Some(LogLevel::Debug));
     }
 
@@ -1633,15 +1428,29 @@ mod tests {
                 "busy_timeout_secs": 12
             }
         }"#;
-        let cfg: LocalConfig = serde_json::from_str(json).unwrap();
+        let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
         assert_eq!(cfg.database.max_connections, 9);
         assert_eq!(cfg.database.connect_timeout_secs, 7);
         assert_eq!(cfg.database.busy_timeout_secs, 12);
     }
 
     #[test]
+    fn test_deserialize_ssh_config() {
+        let json = r#"{"ssh": {"inactivity_timeout_secs": 1800}}"#;
+        let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.ssh.inactivity_timeout_secs, 1800);
+    }
+
+    #[test]
+    fn test_deserialize_ssh_timeout_disabled() {
+        let json = r#"{"ssh": {"inactivity_timeout_secs": 0}}"#;
+        let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.ssh.inactivity_timeout_secs, 0);
+    }
+
+    #[test]
     fn test_home_resolution() {
-        let cfg = LocalConfig {
+        let cfg = GlobalConfig {
             home: Some(PathBuf::from("/custom/home")),
             ..Default::default()
         };
@@ -1650,7 +1459,7 @@ mod tests {
 
     #[test]
     fn test_sandboxes_dir_override() {
-        let cfg = LocalConfig {
+        let cfg = GlobalConfig {
             paths: PathsConfig {
                 sandboxes: Some(PathBuf::from("/custom/sandboxes")),
                 ..Default::default()
@@ -1658,6 +1467,17 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(cfg.sandboxes_dir(), PathBuf::from("/custom/sandboxes"));
+    }
+
+    #[test]
+    fn test_deserialize_agentd_path() {
+        let json = r#"{"paths": {"agentd": "/opt/microsandbox/agentd"}}"#;
+        let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
+
+        assert_eq!(
+            cfg.paths.agentd,
+            Some(PathBuf::from("/opt/microsandbox/agentd"))
+        );
     }
 
     #[test]
@@ -1692,7 +1512,7 @@ mod tests {
             }
         }"#;
 
-        let cfg: LocalConfig = serde_json::from_str(json).unwrap();
+        let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
         let entry = cfg
             .registries
             .hosts
@@ -1712,7 +1532,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("config.json");
 
-        let cfg = LocalConfig {
+        let cfg = GlobalConfig {
             registries: registries(vec![(
                 "ghcr.io",
                 RegistryEntry {
@@ -1745,66 +1565,13 @@ mod tests {
     }
 
     #[test]
-    fn test_libkrunfw_candidates_for_build_msb() {
-        let msb = PathBuf::from("/repo/build/msb");
-        let paths = libkrunfw_candidates_from_msb(&msb, "libkrunfw.5.dylib");
-        assert_eq!(paths[0], PathBuf::from("/repo/build/libkrunfw.5.dylib"));
-        assert_eq!(paths[1], PathBuf::from("/repo/lib/libkrunfw.5.dylib"));
-    }
-
-    #[test]
-    fn test_libkrunfw_candidates_for_target_msb() {
-        let msb = PathBuf::from("/repo/target/debug/msb");
-        let paths = libkrunfw_candidates_from_msb(&msb, "libkrunfw.5.dylib");
-        assert_eq!(
-            paths[0],
-            PathBuf::from("/repo/target/debug/libkrunfw.5.dylib")
-        );
-        assert_eq!(
-            paths[1],
-            PathBuf::from("/repo/target/lib/libkrunfw.5.dylib")
-        );
-        assert_eq!(paths.len(), 2);
-    }
-
-    #[test]
-    fn test_libkrunfw_target_os_uses_windows_dll_name() {
-        let filename = microsandbox_utils::libkrunfw_filename(libkrunfw_target_os());
-
-        if cfg!(target_os = "windows") {
-            assert_eq!(filename, "libkrunfw.dll");
-        } else if cfg!(target_os = "macos") {
-            assert!(filename.ends_with(".dylib"));
-        } else {
-            assert!(filename.ends_with(".so.5.6.1"));
-        }
-    }
-
-    #[test]
-    fn test_dev_msb_candidates_from_workspace_root() {
-        let temp = tempfile::tempdir().unwrap();
-        std::fs::write(temp.path().join("Cargo.toml"), "[workspace]\n").unwrap();
-
-        let paths = dev_msb_candidates_from(temp.path());
-        assert_eq!(paths.len(), 1);
-        assert_eq!(
-            paths[0],
-            temp.path()
-                .join("build")
-                .join(microsandbox_utils::msb_binary_filename(
-                    std::env::consts::OS
-                ))
-        );
-    }
-
-    #[test]
     fn test_resolve_configured_registry_auth_reads_secret_file() {
         let temp = tempfile::tempdir().unwrap();
         let secret_dir = temp.path().join("registries");
         std::fs::create_dir_all(&secret_dir).unwrap();
         std::fs::write(secret_dir.join("ghcr-token"), "secret-token\n").unwrap();
 
-        let cfg = LocalConfig {
+        let cfg = GlobalConfig {
             home: Some(temp.path().to_path_buf()),
             paths: PathsConfig {
                 secrets: Some(temp.path().to_path_buf()),
@@ -1837,7 +1604,7 @@ mod tests {
 
     #[test]
     fn test_resolve_configured_registry_auth_rejects_multiple_sources() {
-        let cfg = LocalConfig {
+        let cfg = GlobalConfig {
             registries: registries(vec![(
                 "ghcr.io",
                 RegistryEntry {
@@ -1867,7 +1634,7 @@ mod tests {
     )))]
     #[test]
     fn test_resolve_configured_registry_auth_reports_disabled_keyring() {
-        let cfg = LocalConfig {
+        let cfg = GlobalConfig {
             registries: registries(vec![(
                 "ghcr.io",
                 RegistryEntry {
@@ -1970,7 +1737,7 @@ mod tests {
             }
         }"#;
 
-        let cfg: LocalConfig = serde_json::from_str(json).unwrap();
+        let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
         let entry = cfg.registries.hosts.get("localhost:5050").unwrap();
         assert!(entry.insecure);
         assert!(entry.auth.is_none());
@@ -1984,7 +1751,7 @@ mod tests {
             }
         }"#;
 
-        let cfg: LocalConfig = serde_json::from_str(json).unwrap();
+        let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
         assert_eq!(
             cfg.registries.ca_certs,
             Some(PathBuf::from("/path/to/ca.pem"))
@@ -2008,7 +1775,7 @@ mod tests {
             }
         }"#;
 
-        let cfg: LocalConfig = serde_json::from_str(json).unwrap();
+        let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
         assert_eq!(
             cfg.registries.ca_certs,
             Some(PathBuf::from("/path/to/ca.pem"))
@@ -2023,7 +1790,7 @@ mod tests {
     #[test]
     fn test_deserialize_empty_registries() {
         let json = r#"{"registries": {}}"#;
-        let cfg: LocalConfig = serde_json::from_str(json).unwrap();
+        let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
         assert!(cfg.registries.hosts.is_empty());
         assert!(cfg.registries.ca_certs.is_none());
     }
@@ -2035,7 +1802,7 @@ mod tests {
         let pem_data = b"-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----\n";
         std::fs::write(&pem_path, pem_data).unwrap();
 
-        let cfg = LocalConfig {
+        let cfg = GlobalConfig {
             registries: RegistriesConfig {
                 ca_certs: Some(pem_path),
                 ..Default::default()
@@ -2050,7 +1817,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_resolve_ca_certs_missing_file_errors() {
-        let cfg = LocalConfig {
+        let cfg = GlobalConfig {
             registries: RegistriesConfig {
                 ca_certs: Some(PathBuf::from("/nonexistent/ca.pem")),
                 ..Default::default()
@@ -2064,14 +1831,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_resolve_ca_certs_none_returns_empty() {
-        let cfg = LocalConfig::default();
+        let cfg = GlobalConfig::default();
         let certs = cfg.resolve_ca_certs().await.unwrap();
         assert!(certs.is_empty());
     }
 
     #[test]
     fn test_insecure_registries() {
-        let cfg = LocalConfig {
+        let cfg = GlobalConfig {
             registries: registries(vec![
                 (
                     "localhost:5050",
@@ -2093,96 +1860,11 @@ mod tests {
         let insecure = cfg.insecure_registries();
         assert_eq!(insecure, vec!["localhost:5050"]);
     }
-
-    //----------------------------------------------------------------------------------------------
-    // resolve_msb_path precedence
-    //----------------------------------------------------------------------------------------------
-
-    fn pb(s: &str) -> PathBuf {
-        PathBuf::from(s)
-    }
-
-    fn none() -> Option<PathBuf> {
-        None
-    }
-
-    #[test]
-    fn resolve_msb_path_env_wins_over_everything() {
-        let got = resolve_msb_path_from(
-            Some("/from/env"),
-            Some(Path::new("/from/sdk")),
-            Some(Path::new("/from/config")),
-            &|| Some(pb("/from/debug")),
-            &|| Some(pb("/from/home")),
-            &|| Some(pb("/from/which")),
-        )
-        .unwrap();
-        assert_eq!(got, pb("/from/env"));
-    }
-
-    #[test]
-    fn resolve_msb_path_sdk_wins_when_env_missing() {
-        let got = resolve_msb_path_from(
-            None,
-            Some(Path::new("/from/sdk")),
-            Some(Path::new("/from/config")),
-            &|| Some(pb("/from/debug")),
-            &|| Some(pb("/from/home")),
-            &|| Some(pb("/from/which")),
-        )
-        .unwrap();
-        assert_eq!(got, pb("/from/sdk"));
-    }
-
-    #[test]
-    fn resolve_msb_path_config_wins_over_filesystem_tiers() {
-        let got = resolve_msb_path_from(
-            None,
-            None,
-            Some(Path::new("/from/config")),
-            &|| Some(pb("/from/debug")),
-            &|| Some(pb("/from/home")),
-            &|| Some(pb("/from/which")),
-        )
-        .unwrap();
-        assert_eq!(got, pb("/from/config"));
-    }
-
-    #[test]
-    fn resolve_msb_path_debug_probe_wins_over_home_and_which() {
-        let got = resolve_msb_path_from(
-            None,
-            None,
-            None,
-            &|| Some(pb("/from/debug")),
-            &|| Some(pb("/from/home")),
-            &|| Some(pb("/from/which")),
-        )
-        .unwrap();
-        assert_eq!(got, pb("/from/debug"));
-    }
-
-    #[test]
-    fn resolve_msb_path_home_wins_over_which() {
-        let got =
-            resolve_msb_path_from(None, None, None, &none, &|| Some(pb("/from/home")), &|| {
-                Some(pb("/from/which"))
-            })
-            .unwrap();
-        assert_eq!(got, pb("/from/home"));
-    }
-
-    #[test]
-    fn resolve_msb_path_which_is_last_resort() {
-        let got =
-            resolve_msb_path_from(None, None, None, &none, &none, &|| Some(pb("/from/which")))
-                .unwrap();
-        assert_eq!(got, pb("/from/which"));
-    }
-
-    #[test]
-    fn resolve_msb_path_errors_when_all_tiers_empty() {
-        let result = resolve_msb_path_from(None, None, None, &none, &none, &none);
-        assert!(matches!(result, Err(MicrosandboxError::Custom(_))));
-    }
 }
+
+//--------------------------------------------------------------------------------------------------
+// Re-Exports
+//--------------------------------------------------------------------------------------------------
+
+pub(crate) use runtime_paths::sdk_packaged_msb_path;
+pub use runtime_paths::set_sdk_packaged_msb_path;

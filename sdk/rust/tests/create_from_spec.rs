@@ -10,6 +10,7 @@ use microsandbox::{Sandbox, sandbox::SandboxBuilder};
 use test_utils::msb_test;
 
 const IMAGE: &str = "mirror.gcr.io/library/alpine";
+const FROM_SPEC_VALUE: &str = "{\"message\":\"hello\",\"nested\":{\"quote\":\"a=b\"}}";
 
 async fn cleanup(name: &str) {
     if let Ok(h) = Sandbox::get(name).await {
@@ -32,15 +33,14 @@ async fn assert_shell_ok(sandbox: &Sandbox, command: &str, expected: &str) {
 /// A full `SandboxSpec` — image, resources, a guest hostname, and an env var.
 /// Everything else falls back to the spec defaults.
 fn spec_json(name: &str) -> String {
-    format!(
-        r#"{{
-            "name": "{name}",
-            "image": {{ "Oci": {{ "reference": "{IMAGE}" }} }},
-            "resources": {{ "cpus": 1, "memory_mib": 256 }},
-            "runtime": {{ "hostname": "spec-host" }},
-            "env": [{{ "key": "FROM_SPEC", "value": "applied" }}]
-        }}"#
-    )
+    serde_json::json!({
+        "name": name,
+        "image": { "Oci": { "reference": IMAGE } },
+        "resources": { "cpus": 1, "memory_mib": 256 },
+        "runtime": { "hostname": "spec-host" },
+        "env": [{ "key": "FROM_SPEC", "value": FROM_SPEC_VALUE }]
+    })
+    .to_string()
 }
 
 /// A full spec JSON boots and its fields take effect in the guest — the whole
@@ -57,8 +57,16 @@ async fn from_spec_json_boots_and_applies_spec_fields() {
         .await
         .expect("create from spec");
 
-    assert_shell_ok(&sandbox, r#"printf %s "$FROM_SPEC""#, "applied").await;
+    assert_shell_ok(&sandbox, r#"printf %s "$FROM_SPEC""#, FROM_SPEC_VALUE).await;
     assert_shell_ok(&sandbox, "hostname", "spec-host").await;
+    let cmdline = sandbox
+        .shell("cat /proc/cmdline")
+        .await
+        .expect("read kernel command line")
+        .stdout()
+        .unwrap_or_default();
+    assert!(!cmdline.contains("FROM_SPEC"));
+    assert!(!cmdline.contains(FROM_SPEC_VALUE));
 
     let _ = sandbox.stop().await;
     cleanup(name).await;
@@ -80,7 +88,7 @@ async fn from_spec_json_options_override_spec() {
         .expect("create from spec with override");
 
     assert_shell_ok(&sandbox, "hostname", "override-host").await;
-    assert_shell_ok(&sandbox, r#"printf %s "$FROM_SPEC""#, "applied").await;
+    assert_shell_ok(&sandbox, r#"printf %s "$FROM_SPEC""#, FROM_SPEC_VALUE).await;
 
     let _ = sandbox.stop().await;
     cleanup(name).await;

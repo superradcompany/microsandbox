@@ -9,6 +9,29 @@ import (
 	"time"
 )
 
+func TestLifecycleConvergenceOptions(t *testing.T) {
+	connect := connectOrStartOptions{}
+	WithConnectOrStartDetached()(&connect)
+	if !connect.detached {
+		t.Fatal("WithConnectOrStartDetached did not enable detached mode")
+	}
+
+	restart := restartOptions{}
+	WithRestartForce()(&restart)
+	WithRestartTimeout(3 * time.Second)(&restart)
+	WithRestartDetached()(&restart)
+	if !restart.force || restart.timeout != 3*time.Second || !restart.detached {
+		t.Fatalf("restart options = %#v", restart)
+	}
+
+	destroy := destroyOptions{}
+	WithDestroyForce()(&destroy)
+	WithDestroyTimeout(4 * time.Second)(&destroy)
+	if !destroy.force || destroy.timeout != 4*time.Second {
+		t.Fatalf("destroy options = %#v", destroy)
+	}
+}
+
 func marshalCreateOptions(t *testing.T, opts ...SandboxOption) map[string]any {
 	t.Helper()
 	cfg := SandboxConfig{}
@@ -33,6 +56,45 @@ func mustField(t *testing.T, m map[string]any, key string) any {
 		t.Fatalf("expected JSON field %q in payload; got %v", key, m)
 	}
 	return v
+}
+
+func marshalRestoreOptions[T SnapshotSeed](t *testing.T, snapshot T) map[string]any {
+	t.Helper()
+	raw, err := json.Marshal(buildFFIRestoreOptions(snapshot, RestoreConfig{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatal(err)
+	}
+	return payload
+}
+
+func TestRestorePreservesTypedReference(t *testing.T) {
+	snapshot := &SnapshotArtifact{
+		reference:     "baseline",
+		referenceKind: "path",
+	}
+	payload := marshalRestoreOptions(t, snapshot)
+
+	if got := mustField(t, payload, "snapshot"); got != "baseline" {
+		t.Fatalf("snapshot = %v, want baseline", got)
+	}
+	if got := mustField(t, payload, "snapshot_reference_kind"); got != "path" {
+		t.Fatalf("snapshot_reference_kind = %v, want path", got)
+	}
+}
+
+func TestRestoreStringRemainsUnresolved(t *testing.T) {
+	payload := marshalRestoreOptions(t, "baseline")
+
+	if got := mustField(t, payload, "snapshot"); got != "baseline" {
+		t.Fatalf("snapshot = %v, want baseline", got)
+	}
+	if _, ok := payload["snapshot_reference_kind"]; ok {
+		t.Fatalf("snapshot_reference_kind should be omitted for string references: %v", payload)
+	}
 }
 
 func TestSandboxConfigUnmarshalPersistedRootfsSource(t *testing.T) {
@@ -310,13 +372,25 @@ func TestFFIWireShape_LegacyConfigFieldMapsToRootDisk(t *testing.T) {
 	}
 }
 
-func TestFFIWireShape_WithFromSnapshot(t *testing.T) {
-	got := marshalCreateOptions(t, WithFromSnapshot("after-pip-install"))
+func TestFFIWireShape_Restore(t *testing.T) {
+	config := RestoreConfig{}
+	WithSnapshotDiskOnly()(&config)
+	raw, err := json.Marshal(buildFFIRestoreOptions("after-pip-install", config))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
 	if v := mustField(t, got, "snapshot"); v != "after-pip-install" {
 		t.Fatalf("snapshot = %v, want %q", v, "after-pip-install")
 	}
 	if _, present := got["image"]; present {
 		t.Fatal("image must not appear in payload when only snapshot is set")
+	}
+	if v := mustField(t, got, "disk_only"); v != true {
+		t.Fatalf("snapshot_disk_only = %v, want true", v)
 	}
 }
 
@@ -624,6 +698,31 @@ func TestFFIWireShape_Volumes(t *testing.T) {
 	}
 }
 
+func TestFFIWireShape_MountOwner(t *testing.T) {
+	got := marshalCreateOptions(t,
+		WithImage("alpine"),
+		WithMounts(map[string]MountConfig{
+			"/owned":   Mount.Bind("/host/owned", MountOptions{Owner: &MountOwner{UID: 1000, GID: 1000}}),
+			"/root":    Mount.Bind("/host/root", MountOptions{Owner: &MountOwner{UID: 0, GID: 0}}),
+			"/default": Mount.Bind("/host/default", MountOptions{}),
+		}),
+	)
+	volumes := mustField(t, got, "volumes").(map[string]any)
+
+	// An explicit owner rides the wire as override_uid/override_gid.
+	if v := volumes["/owned"].(map[string]any); v["override_uid"] != float64(1000) || v["override_gid"] != float64(1000) {
+		t.Fatalf("/owned = %v", v)
+	}
+	// uid 0 (root) is a real value and must be present, not omitted.
+	if v := volumes["/root"].(map[string]any); v["override_uid"] != float64(0) || v["override_gid"] != float64(0) {
+		t.Fatalf("/root = %v", v)
+	}
+	// No owner → the keys are omitted entirely (unset, not 0).
+	if v := volumes["/default"].(map[string]any); v["override_uid"] != nil || v["override_gid"] != nil {
+		t.Fatalf("/default should omit override_uid/override_gid, got %v", v)
+	}
+}
+
 func TestFFIWireShape_SecurityProfile(t *testing.T) {
 	got := marshalCreateOptions(t,
 		WithImage("alpine"),
@@ -648,9 +747,9 @@ func TestFFIWireShape_Secrets(t *testing.T) {
 	got := marshalCreateOptions(t,
 		WithImage("alpine"),
 		WithSecrets(Secret.Env("OPENAI_API_KEY", "sk-xxx", SecretEnvOptions{
-			AllowHosts:        []string{"api.openai.com"},
-			AllowHostPatterns: []string{"*.openai.com"},
-			OnViolation:       ViolationActionBlockAndTerminate,
+			Allow:           []string{"api.openai.com", "*.openai.com"},
+			Passthrough:     []string{"api.anthropic.com"},
+			ViolationAction: ViolationActionBlockAndTerminate,
 		})),
 	)
 	secs := mustField(t, got, "secrets").([]any)
@@ -661,12 +760,12 @@ func TestFFIWireShape_Secrets(t *testing.T) {
 	if s["env_var"] != "OPENAI_API_KEY" || s["value"] != "sk-xxx" {
 		t.Fatalf("secret = %v", s)
 	}
-	if s["on_violation"] != "block-and-terminate" {
-		t.Fatalf("on_violation = %v", s["on_violation"])
+	if s["violation_action"] != "block-and-terminate" {
+		t.Fatalf("violation_action = %v", s["violation_action"])
 	}
-	hosts := s["allow_hosts"].([]any)
-	if len(hosts) != 1 || hosts[0] != "api.openai.com" {
-		t.Fatalf("allow_hosts = %v", hosts)
+	hosts := s["allow"].([]any)
+	if len(hosts) != 2 || hosts[0] != "api.openai.com" || hosts[1] != "*.openai.com" {
+		t.Fatalf("allow = %v", hosts)
 	}
 }
 
@@ -702,9 +801,11 @@ func TestFFIWireShape_NetworkCustomRules(t *testing.T) {
 			DNS: &DNSConfig{
 				Nameservers: []string{"1.1.1.1:53"},
 			},
+			Strict:   true,
 			IPv4Pool: "172.31.240.0/24",
 			IPv6Pool: "fd7a:115c:a1e0:100::/56",
 		}),
+		WithProxy(SOCKS5Proxy("127.0.0.1:1080")),
 	)
 	net := mustField(t, got, "network").(map[string]any)
 
@@ -726,6 +827,9 @@ func TestFFIWireShape_NetworkCustomRules(t *testing.T) {
 	if len(deny) != 1 || deny[0] != "blocked.example.com" {
 		t.Fatalf("deny_domains = %v", deny)
 	}
+	if net["strict"] != true {
+		t.Fatalf("strict = %v", net["strict"])
+	}
 	if net["ipv4_pool"] != "172.31.240.0/24" {
 		t.Fatalf("ipv4_pool = %v", net["ipv4_pool"])
 	}
@@ -736,6 +840,48 @@ func TestFFIWireShape_NetworkCustomRules(t *testing.T) {
 	ns := dns["nameservers"].([]any)
 	if len(ns) != 1 || ns[0] != "1.1.1.1:53" {
 		t.Fatalf("dns.nameservers = %v", ns)
+	}
+	proxy := mustField(t, got, "proxy").(map[string]any)
+	if proxy["protocol"] != "socks5" || proxy["address"] != "127.0.0.1:1080" {
+		t.Fatalf("proxy = %#v", proxy)
+	}
+}
+
+func TestFFIWireShape_SOCKS4Proxy(t *testing.T) {
+	got := marshalCreateOptions(t,
+		WithImage("alpine"),
+		WithProxy(SOCKS4Proxy("127.0.0.1:1080", SOCKS4ProxyOptions{UserID: "sandbox"})),
+	)
+	proxy := mustField(t, got, "proxy").(map[string]any)
+	if proxy["protocol"] != "socks4" || proxy["address"] != "127.0.0.1:1080" || proxy["user_id"] != "sandbox" {
+		t.Fatalf("proxy = %#v", proxy)
+	}
+}
+
+func TestFFIWireShape_NetworkConnectionLimits(t *testing.T) {
+	zero, finite := uint(0), uint(7)
+	for _, test := range []struct {
+		name    string
+		network *NetworkConfig
+		want    map[string]any
+	}{
+		{"omitted", &NetworkConfig{}, map[string]any{}},
+		{"canonical", &NetworkConfig{MaxTCPConnections: &zero, MaxUDPConnections: &finite, SecretViolationAction: ViolationActionBlockAndLog}, map[string]any{"max_tcp_connections": float64(0), "max_udp_connections": float64(7)}},
+		{"legacy", &NetworkConfig{MaxConnections: &finite, MaxUDPConnections: &zero}, map[string]any{"max_connections": float64(7), "max_udp_connections": float64(0)}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got := marshalCreateOptions(t, WithNetwork(test.network))["network"].(map[string]any)
+			if action := test.network.SecretViolationAction; action != "" && got["secret_violation_action"] != string(action) {
+				t.Fatalf("connection limits discarded the secret violation action: %#v", got)
+			}
+			for _, field := range []string{"max_connections", "max_tcp_connections", "max_udp_connections"} {
+				actual, present := got[field]
+				want, expected := test.want[field]
+				if present != expected || actual != want {
+					t.Errorf("%s = %#v (present %v), want %#v (present %v)", field, actual, present, want, expected)
+				}
+			}
+		})
 	}
 }
 
@@ -855,6 +1001,18 @@ func TestFFIWireShape_NetworkRateLimiters(t *testing.T) {
 	}
 }
 
+func TestFFIWireShape_SOCKS5Credentials(t *testing.T) {
+	got := marshalCreateOptions(t,
+		WithImage("alpine"),
+		WithProxy(SOCKS5Proxy("127.0.0.1:1080").Credentials("sandbox", SecretSourceEnv("SOCKS5_PASSWORD"))),
+	)
+	proxy := mustField(t, got, "proxy").(map[string]any)
+	passwordSource, ok := proxy["password_source"].(map[string]any)
+	if proxy["username"] != "sandbox" || !ok || passwordSource["kind"] != "env" || passwordSource["var"] != "SOCKS5_PASSWORD" {
+		t.Fatalf("proxy credentials = %#v", proxy)
+	}
+}
+
 // The Rust side relies on serde(default), so zero-valued Go scalar fields must
 // not reach the wire. Explicit optional values use pointers when zero is valid
 // on the wire for validation.
@@ -866,7 +1024,7 @@ func TestFFIWireShape_EmptyConfigOmitsOptionalFields(t *testing.T) {
 		"thp",
 		"hostname", "user", "replace", "detached", "env", "scripts",
 		"ports", "ports_udp", "vsock", "network", "secrets", "patches", "volumes",
-		"init", "registry_auth", "registry_insecure", "registry_ca_certs", "root_disk",
+		"proxy", "init", "registry_auth", "registry_insecure", "registry_ca_certs", "root_disk",
 	} {
 		if _, present := got[key]; present {
 			body, _ := json.Marshal(got)
@@ -899,7 +1057,7 @@ func TestFFIWireShape_KitchenSinkDoesNotPanic(t *testing.T) {
 			TLS: &TLSConfig{Bypass: []string{"*.googleapis.com"}},
 		}),
 		WithSecrets(Secret.Env("K", "v", SecretEnvOptions{
-			AllowHosts: []string{"h"},
+			Allow: []string{"h"},
 		})),
 		WithPatches(Patch.Mkdir("/app", PatchOptions{})),
 		WithPorts(map[uint16]uint16{8080: 80}),

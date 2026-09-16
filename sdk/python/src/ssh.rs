@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 use tokio::io::AsyncWriteExt;
@@ -64,14 +66,17 @@ impl PySandboxSshOps {
 #[pymethods]
 impl PySandboxSshOps {
     /// Connect a native in-process SSH client to this sandbox.
-    #[pyo3(signature = (*, user = "root".to_string(), term = None, sftp = true))]
+    #[pyo3(signature = (*, user = "root".to_string(), term = None, sftp = true, inactivity_timeout = None))]
     fn open_client<'py>(
         &self,
         py: Python<'py>,
         user: String,
         term: Option<String>,
         sftp: bool,
+        inactivity_timeout: Option<f64>,
     ) -> PyResult<Bound<'py, PyAny>> {
+        let inactivity_timeout =
+            parse_inactivity_timeout(inactivity_timeout).map_err(PyValueError::new_err)?;
         let ssh = Self {
             inner: self.inner.clone(),
         };
@@ -83,6 +88,9 @@ impl PySandboxSshOps {
                     let mut builder = builder.user(user).sftp(sftp);
                     if let Some(term) = term {
                         builder = builder.term(term);
+                    }
+                    if let Some(timeout) = inactivity_timeout {
+                        builder = builder.inactivity_timeout(timeout);
                     }
                     builder
                 })
@@ -99,6 +107,7 @@ impl PySandboxSshOps {
         authorized_keys_path = None,
         user = None,
         sftp = true,
+        inactivity_timeout = None,
     ))]
     fn prepare_server<'py>(
         &self,
@@ -107,7 +116,10 @@ impl PySandboxSshOps {
         authorized_keys_path: Option<PathBuf>,
         user: Option<String>,
         sftp: bool,
+        inactivity_timeout: Option<f64>,
     ) -> PyResult<Bound<'py, PyAny>> {
+        let inactivity_timeout =
+            parse_inactivity_timeout(inactivity_timeout).map_err(PyValueError::new_err)?;
         let ssh = Self {
             inner: self.inner.clone(),
         };
@@ -125,6 +137,9 @@ impl PySandboxSshOps {
                     }
                     if let Some(user) = user {
                         builder = builder.user(user);
+                    }
+                    if let Some(timeout) = inactivity_timeout {
+                        builder = builder.inactivity_timeout(timeout);
                     }
                     builder
                 })
@@ -430,6 +445,15 @@ impl PySshServer {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
+fn parse_inactivity_timeout(timeout: Option<f64>) -> Result<Option<Duration>, &'static str> {
+    match timeout {
+        Some(timeout) => Duration::try_from_secs_f64(timeout)
+            .map(Some)
+            .map_err(|_| "inactivity_timeout must be a non-negative finite duration"),
+        None => Ok(None),
+    }
+}
+
 fn sftp_py_err(error: impl std::fmt::Display) -> PyErr {
     pyo3::exceptions::PyRuntimeError::new_err(format!("SFTP error: {error}"))
 }
@@ -460,5 +484,35 @@ impl PySshServer {
             .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("SSH server is busy"))?;
         guard.take().ok_or_else(crate::error::consumed)?;
         Ok(())
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inactivity_timeout_parsing_supports_inherit_set_and_disable() {
+        assert_eq!(parse_inactivity_timeout(None).unwrap(), None);
+        assert_eq!(
+            parse_inactivity_timeout(Some(30.5)).unwrap(),
+            Some(Duration::from_secs_f64(30.5))
+        );
+        assert_eq!(
+            parse_inactivity_timeout(Some(0.0)).unwrap(),
+            Some(Duration::ZERO)
+        );
+    }
+
+    #[test]
+    fn inactivity_timeout_rejects_invalid_values() {
+        assert!(parse_inactivity_timeout(Some(-1.0)).is_err());
+        assert!(parse_inactivity_timeout(Some(f64::INFINITY)).is_err());
+        assert!(parse_inactivity_timeout(Some(f64::NAN)).is_err());
+        assert!(parse_inactivity_timeout(Some(f64::MAX)).is_err());
     }
 }

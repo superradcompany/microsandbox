@@ -209,8 +209,8 @@ pub(crate) fn do_fsyncdir(
 
 /// lseek on the virtual init binary.
 fn lseek_init(offset: u64, whence: u32) -> io::Result<u64> {
-    use crate::agentd::AGENTD_BYTES;
-    let file_size = AGENTD_BYTES.len() as u64;
+    use crate::agentd::agentd_bytes;
+    let file_size = agentd_bytes().len() as u64;
 
     match whence {
         w if w == libc::SEEK_SET as u32 => Ok(offset),

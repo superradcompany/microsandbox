@@ -1,0 +1,126 @@
+---
+title: Fan out isolated batch jobs
+sidebarTitle: Parallel jobs
+description: Run independent inputs in parallel microVMs and collect their output
+icon: "layer-group"
+---
+
+Use one sandbox per independent input when a parser, converter, or other worker should not share a filesystem with its siblings. The host only needs a small loop; the workload stays inside each microVM.
+
+## Run a batch
+
+<Steps>
+<Step title="Create a few inputs">
+
+<CodeGroup>
+```sh macOS & Linux
+mkdir -p jobs results
+printf '%s\n' '{"id":"alpha","values":[10,20,30]}' > jobs/alpha.json
+printf '%s\n' '{"id":"beta","values":[7,8,9]}' > jobs/beta.json
+printf '%s\n' '{"id":"gamma","values":[100,200]}' > jobs/gamma.json
+```
+
+```powershell Windows
+New-Item -ItemType Directory -Force jobs, results | Out-Null
+[IO.File]::WriteAllText((Join-Path $PWD 'jobs/alpha.json'), '{"id":"alpha","values":[10,20,30]}')
+[IO.File]::WriteAllText((Join-Path $PWD 'jobs/beta.json'), '{"id":"beta","values":[7,8,9]}')
+[IO.File]::WriteAllText((Join-Path $PWD 'jobs/gamma.json'), '{"id":"gamma","values":[100,200]}')
+```
+</CodeGroup>
+
+</Step>
+
+<Step title="Run them in parallel">
+
+<Tooltip tip="These jobs work on microsandbox cloud after omitting replace-on-create from the command."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+<CodeGroup>
+```bash macOS & Linux
+pids=()
+batch_status=0
+
+for input in jobs/*.json; do
+  job="$(basename "$input" .json)"
+  msb run --quiet --name "batch-$job" --replace \
+    --cpus 1 --memory 256M --max-duration 30s \
+    --copy-file "$input:/job/input.json" --workdir /job \
+    --no-net --security restricted \
+    python:3.13.14-alpine3.23 -- python -c \
+      'import json; p=json.load(open("input.json")); print(json.dumps({"id":p["id"],"total":sum(p["values"])}))' \
+    > "results/$job.json" &
+  pids+=("$!")
+done
+
+for pid in "${pids[@]}"; do
+  wait "$pid" || batch_status=1
+done
+
+test "$batch_status" -eq 0
+```
+
+```powershell Windows
+$workers = Get-ChildItem jobs/*.json | ForEach-Object {
+  $inputPath = $_.FullName
+  $jobName = $_.BaseName
+  $resultPath = Join-Path $PWD "results/$jobName.json"
+
+  Start-Job -ArgumentList $inputPath, $jobName, $resultPath -ScriptBlock {
+    param($inputPath, $jobName, $resultPath)
+
+    $result = & msb run --quiet --name "batch-$jobName" --replace `
+      --cpus 1 --memory 256M --max-duration 30s `
+      --copy-file "${inputPath}:/job/input.json" --workdir /job `
+      --no-net --security restricted `
+      python:3.13.14-alpine3.23 -- python -c `
+        'import json; p=json.load(open("input.json")); print(json.dumps({"id":p["id"],"total":sum(p["values"])}))'
+
+    $status = $LASTEXITCODE
+    [IO.File]::WriteAllText($resultPath, ($result -join [Environment]::NewLine))
+    if ($status -ne 0) { throw "batch-$jobName failed" }
+  }
+}
+
+$workers | Wait-Job | Receive-Job
+if ($workers.State -contains 'Failed') { throw 'one or more batch jobs failed' }
+$workers | Remove-Job
+```
+</CodeGroup>
+
+`&` provides the concurrency and `wait` carries worker failures back to the host. CPU, memory, network, and lifetime are bounded independently for every input.
+
+Inspect the results:
+
+<CodeGroup>
+```sh macOS & Linux
+jq . results/*.json
+```
+
+```powershell Windows
+Get-ChildItem results/*.json | ForEach-Object { jq . $_.FullName }
+```
+</CodeGroup>
+
+Replace the short Python expression with your worker command. For larger outputs, write to `/var/tmp` in the guest and use `msb cp` after the sandbox stops instead of capturing stdout.
+
+</Step>
+
+<Step title="Clean up">
+
+<CodeGroup>
+```sh macOS & Linux
+for input in jobs/*.json; do
+  msb rm -f "batch-$(basename "$input" .json)"
+done
+```
+
+```powershell Windows
+Get-ChildItem jobs/*.json | ForEach-Object {
+  msb rm -f "batch-$($_.BaseName)"
+}
+```
+</CodeGroup>
+
+This loop limits one batch only. Put a queue or global concurrency limit in front of it when several batches can run on the same host.
+
+</Step>
+</Steps>

@@ -111,6 +111,17 @@ class MicrosandboxIntegrationTest < Test::Unit::TestCase
     sandbox&.stop
   end
 
+  def test_ssh_exec_accepts_inactivity_timeout
+    sandbox = create_sandbox("ssh-timeout")
+
+    output = sandbox.ssh_exec("printf ruby-ssh", inactivity_timeout: 0)
+
+    assert_equal "ruby-ssh", output.fetch("stdout")
+    assert_true output.fetch("success")
+  ensure
+    sandbox&.stop
+  end
+
   def test_assert_eventually_enforces_timeout
     started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
 
@@ -120,6 +131,27 @@ class MicrosandboxIntegrationTest < Test::Unit::TestCase
 
     elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started_at
     assert_operator elapsed, :<, 1
+  end
+
+  def test_explicit_stop_timeout_preserves_running_sandbox
+    sandbox = create_sandbox("stop-timeout")
+    handle = Microsandbox::Sandbox.get(sandbox.name)
+
+    [sandbox, handle].each do |receiver|
+      [-1, Float::INFINITY, Float::NAN].each do |timeout|
+        assert_raise(ArgumentError) { receiver.stop_with_timeout(timeout) }
+      end
+      assert_raise(TypeError) { receiver.stop_with_timeout(nil) }
+      error = assert_raise(Microsandbox::Error) { receiver.stop_with_timeout(0) }
+      assert_match(/timed out/, error.message)
+      assert_equal "running", Microsandbox::Sandbox.get(sandbox.name).refresh.status
+    end
+
+    # Omitted timeout uses the unbounded Rust stop, not a hidden default deadline.
+    sandbox.stop
+    assert_equal "stopped", Microsandbox::Sandbox.get(sandbox.name).refresh.status
+  ensure
+    sandbox&.kill
   end
 
   private

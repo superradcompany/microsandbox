@@ -64,6 +64,14 @@ Inside the guest the default is permissive, and that is intentional, because the
 For defense-in-depth *inside* the guest, opt into the **restricted security profile**. It sets `no_new_privs`, drops the mount-admin capability from user commands, and forces `nosuid,nodev` on user mounts. It is incompatible with workloads that need those, such as `sudo` or Docker-in-Docker.
 
 <CodeGroup>
+```typescript TypeScript
+await using sb = await Sandbox.builder("worker")
+    .image("python")
+    .user("app")
+    .security("restricted")
+    .create();
+```
+
 ```rust Rust
 use microsandbox::{Sandbox, SecurityProfile};
 
@@ -73,14 +81,6 @@ let sb = Sandbox::builder("worker")
     .security(SecurityProfile::Restricted)
     .create()
     .await?;
-```
-
-```typescript TypeScript
-await using sb = await Sandbox.builder("worker")
-    .image("python")
-    .user("app")
-    .security("restricted")
-    .create();
 ```
 
 ```python Python

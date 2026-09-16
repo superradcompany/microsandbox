@@ -16,9 +16,19 @@ name = "microsandbox_cli"
 path = "lib/lib.rs"
 
 [features]
-default = ["net", "prebuilt", "keyring", "ssh"]
+default = ["net", "download-binaries", "embed-binaries", "keyring", "ssh"]
 keyring = ["microsandbox/keyring"]
-prebuilt = ["microsandbox-runtime/prebuilt", "microsandbox/prebuilt"]
+download-binaries = [
+    "microsandbox/download-binaries",
+    "microsandbox-filesystem/download-binaries",
+    "microsandbox-runtime/download-binaries",
+]
+embed-binaries = [
+    # The CLI is itself `msb`, so embedding the SDK host-runtime archive would create a build cycle.
+    # This feature embeds the guest Agentd payload needed by the standalone CLI.
+    "microsandbox-filesystem/embed-binaries",
+    "microsandbox-runtime/embed-binaries",
+]
 ssh = ["microsandbox/ssh", "dep:russh"]
 net = [
     "dep:microsandbox-network",
@@ -26,6 +36,7 @@ net = [
     "microsandbox/net",
     "dep:ipnetwork",
     "dep:thiserror",
+    "dep:zeroize",
 ]
 
 [dependencies]
@@ -41,14 +52,16 @@ futures.workspace = true
 indicatif.workspace = true
 ipnetwork = { workspace = true, optional = true }
 libc.workspace = true
-microsandbox.workspace = true
+microsandbox = { workspace = true, features = ["local"] }
 microsandbox-db.workspace = true
+microsandbox-filesystem.workspace = true
 microsandbox-image.workspace = true
 microsandbox-migration.workspace = true
-microsandbox-network = { workspace = true, optional = true }
+microsandbox-network = { workspace = true, features = ["engine"], optional = true }
 microsandbox-protocol.workspace = true
-microsandbox-runtime.workspace = true
+microsandbox-runtime = { workspace = true, features = ["runner"] }
 microsandbox-types.workspace = true
+microsandbox-types-macros.workspace = true
 microsandbox-utils.workspace = true
 rand.workspace = true
 regex = "1"
@@ -63,6 +76,7 @@ tempfile.workspace = true
 thiserror = { workspace = true, optional = true }
 tokio.workspace = true
 tracing.workspace = true
+zeroize = { workspace = true, optional = true }
 tracing-subscriber.workspace = true
 
 [target.'cfg(windows)'.dependencies]

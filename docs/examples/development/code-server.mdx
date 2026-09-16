@@ -1,0 +1,100 @@
+---
+title: code-server
+description: Open an isolated VS Code workspace in the browser
+icon: "code"
+---
+
+Run VS Code in a disposable microVM when you want an editable Linux workspace without installing its tools or extensions on the host. The project is copied into the sandbox, so edits stay isolated until you explicitly copy them back.
+
+<Tooltip tip="This example publishes code-server to a port on the computer running the CLI, which is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+## Use the editor
+
+<Steps>
+<Step title="Start the editor">
+
+<CodeGroup>
+```sh macOS & Linux
+msb run -d --name code-server-demo --replace \
+  --cpus 2 --memory 2G --root-disk 4G \
+  -p 127.0.0.1:8080:8080 \
+  --entrypoint code-server \
+  codercom/code-server:4.130.0 -- \
+    --bind-addr 0.0.0.0:8080 \
+    --auth none \
+    /home/coder/project
+```
+
+```powershell Windows
+msb run -d --name code-server-demo --replace `
+  --cpus 2 --memory 2G --root-disk 4G `
+  -p 127.0.0.1:8080:8080 `
+  --entrypoint code-server `
+  codercom/code-server:4.130.0 -- `
+    --bind-addr 0.0.0.0:8080 `
+    --auth none `
+    /home/coder/project
+```
+</CodeGroup>
+
+The host port is bound to `127.0.0.1`, so the unauthenticated editor is reachable only from the local machine.
+
+</Step>
+
+<Step title="Add a project">
+
+Replace `./my-project` with the directory you want to edit:
+
+```sh
+msb cp ./my-project/. code-server-demo:/home/coder/project
+msb exec -u root code-server-demo -- chown -R coder:coder /home/coder/project
+```
+
+Open [http://127.0.0.1:8080](http://127.0.0.1:8080). The editor, terminal, extensions, and project commands all run inside the microVM.
+
+<Warning>
+  Keep the host bind on `127.0.0.1`. Do not expose an editor with `--auth none` to a LAN or public interface.
+</Warning>
+
+</Step>
+
+<Step title="Check the service">
+
+<CodeGroup>
+```sh macOS & Linux
+curl -fsSI http://127.0.0.1:8080/ | head -n 1
+```
+
+```powershell Windows
+curl.exe -fsSI http://127.0.0.1:8080/ | Select-Object -First 1
+```
+</CodeGroup>
+
+A healthy server responds with an HTTP status line, usually a redirect into the workspace.
+
+</Step>
+
+<Step title="Copy changes back">
+
+Export the edited project into a new host directory:
+
+```sh
+msb cp code-server-demo:/home/coder/project ./code-server-output
+```
+
+Review `code-server-output` before merging its changes into the original checkout.
+
+</Step>
+
+<Step title="Clean up">
+
+```sh
+msb rm -f code-server-demo
+```
+
+</Step>
+</Steps>
+
+## Reference
+
+- [code-server documentation](https://coder.com/docs/code-server)

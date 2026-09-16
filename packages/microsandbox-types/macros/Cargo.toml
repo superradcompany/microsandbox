@@ -1,0 +1,17 @@
+[package]
+name = "microsandbox-types-macros"
+description = "Derive macros for microsandbox shared contract types."
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+edition.workspace = true
+
+[lib]
+path = "lib/lib.rs"
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "3", features = ["full"] }

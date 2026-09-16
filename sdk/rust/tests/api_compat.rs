@@ -1,4 +1,5 @@
 #[test]
+#[cfg(feature = "local")]
 fn rust_root_compat_exports_stay_available() {
     // Compile-time tripwire for public root exports restored after the
     // backend-routing refactor. The function items are not invoked.
@@ -14,20 +15,42 @@ fn rust_root_compat_exports_stay_available() {
 }
 
 #[test]
-fn rust_config_compat_surface_stays_available() {
-    // Ambient local config access and method-style path resolution are the
-    // public shape; explicit free functions taking `&LocalConfig` are not.
+#[cfg(feature = "local")]
+fn rust_config_and_runtime_setup_surface_stays_available() {
+    let _ = microsandbox::setup::resolve_runtime;
+    let _ = microsandbox::setup::install_runtime;
+    let _ = microsandbox::setup::ensure_runtime;
+    let _: Option<microsandbox::setup::ResolvedRuntime> = None;
+    let _: Option<microsandbox::setup::InstallOptions> = None;
     let _ = microsandbox::config::config;
     let _ = microsandbox::config::resolve_msb_path;
     let _ = microsandbox::config::resolve_libkrunfw_path;
-    let _ = microsandbox::config::LocalConfig::resolve_msb_path;
-    let _ = microsandbox::config::LocalConfig::resolve_libkrunfw_path;
+    let _ = microsandbox::config::GlobalConfig::resolve_msb_path;
+    let _ = microsandbox::config::GlobalConfig::resolve_libkrunfw_path;
+
+    #[allow(deprecated)]
+    let _: Option<microsandbox::config::LocalConfig> = None;
 }
 
 #[cfg(feature = "ssh")]
 #[test]
 fn rust_ssh_compat_export_stays_available() {
     let _: Option<microsandbox::SandboxSshOps> = None;
+}
+
+#[test]
+fn rust_identity_and_generated_patch_surface_is_backend_neutral() {
+    use microsandbox::sandbox::{DestroyOptions, RestartOptions, SandboxHandle, SandboxId};
+
+    let _: Option<SandboxId> = None;
+    let _ = SandboxHandle::id;
+    let _ = SandboxHandle::connect_or_start;
+    let _ = SandboxHandle::wait_for_status;
+    let _ = SandboxHandle::restart;
+    let _ = SandboxHandle::destroy;
+    let _ = (RestartOptions::default(), DestroyOptions::default());
+    let _ = microsandbox::SandboxConfigPatch::new()
+        .resources(microsandbox::SandboxResourcesPatch::new().cpus(2));
 }
 
 #[allow(dead_code)]

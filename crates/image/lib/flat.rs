@@ -61,20 +61,11 @@ pub(crate) fn materialize_flat_rootfs(
         let _ = std::fs::remove_dir_all(&work_dir);
     });
     let spool_path = work_dir.join("merged.spool");
-    let mut spool = DataSpool::new(&spool_path).map_err(ImageError::Io)?;
-    let mut layers = Vec::with_capacity(layer_diff_ids.len());
-    for diff_id in layer_diff_ids {
-        let layer_path = cache.layer_erofs_path(diff_id);
-        layers.push(read_erofs_layer(&layer_path, &mut spool).map_err(|source| {
-            ImageError::Materialize {
-                digest: diff_id.to_string(),
-                message: "failed to reconstruct cached EROFS layer for flat materialization"
-                    .to_string(),
-                source: Some(Box::new(source)),
-            }
-        })?);
-    }
-    let (tree, _) = merge_layers_with_provenance(layers);
+    let layer_paths = layer_diff_ids
+        .iter()
+        .map(|diff_id| cache.layer_erofs_path(diff_id))
+        .collect::<Vec<_>>();
+    let tree = merge_erofs_layers(&layer_paths, &spool_path)?;
 
     let candidate = work_dir.join("rootfs.raw.part");
     let artifact = materialize_ext4_rootfs(
@@ -108,6 +99,30 @@ pub(crate) fn materialize_flat_rootfs(
     };
     cache.write_flat_ref(manifest_digest, &reference)?;
     Ok(reference)
+}
+
+/// Reconstruct and merge cached EROFS layers into one complete filesystem tree.
+///
+/// Large regular files remain backed by `spool_path`, so callers can modify metadata and selected
+/// files without loading the whole image into memory before materializing a private root disk.
+pub fn merge_erofs_layers(
+    layer_paths: &[impl AsRef<Path>],
+    spool_path: &Path,
+) -> ImageResult<FileTree> {
+    let mut spool = DataSpool::new(spool_path).map_err(ImageError::Io)?;
+    let mut layers = Vec::with_capacity(layer_paths.len());
+    for layer_path in layer_paths {
+        let layer_path = layer_path.as_ref();
+        layers.push(read_erofs_layer(layer_path, &mut spool).map_err(|source| {
+            ImageError::Materialize {
+                digest: layer_path.display().to_string(),
+                message: "failed to reconstruct cached EROFS layer for flat materialization"
+                    .to_string(),
+                source: Some(Box::new(source)),
+            }
+        })?);
+    }
+    Ok(merge_layers_with_provenance(layers).0)
 }
 
 /// Read the flat reference only when it matches the current materializer inputs.

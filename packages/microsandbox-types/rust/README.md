@@ -13,10 +13,10 @@ The crate models durable user and wire intent: what the user wants to exist, not
 - **Sandbox spec** (`domain` module): `SandboxSpec`, `SandboxResources`, `SandboxRuntimeOptions`, `EnvVar`, `SandboxPolicy`.
 - **Rootfs sources**: `RootfsSource` (bind, OCI, disk image), `OciRootfsSource`, `DiskImageFormat`, `PullPolicy`.
 - **Mounts and patches**: `VolumeMount`, `MountOptions`, `StatVirtualization`, `HostPermissions`, `Patch`, `SecurityProfile`.
-- **Volumes and snapshots**: `VolumeSpec`, `VolumeKind`, `NamedVolumeCreate`, `NamedVolumeMode`, `SnapshotSpec`, `SnapshotDestination`.
+- **Volumes and snapshots**: `VolumeSpec`, `VolumeKind`, `NamedVolumeCreate`, `NamedVolumeMode`, `SnapshotSpec`, and the canonical `SnapshotManifest` schema.
 - **Networking**: `NetworkSpec`, `PublishedPortSpec`, `PortProtocol`.
 - **Exec and logs**: `Rlimit`, `RlimitResource`, `SandboxLogLevel`, `LogSource`, `HandoffInit`.
-- **Cloud wire contracts** (`cloud` module): `CloudCreateSandboxRequest`, `CloudSandbox`, `CloudSandboxStatus`, `CloudPaginated`, `CloudMessageResponse`, `CloudErrorBody`, `CloudErrorDetails`.
+- **Cloud wire contracts** (`cloud` module): sandbox, snapshot, pagination, message, and error request/response types.
 - **Validation** (`validation` module): `validate_sandbox_name`, `validate_hostname`, `hostname_from_sandbox_name`, and the `MAX_SANDBOX_NAME_BYTES` / `MAX_HOSTNAME_BYTES` limits.
 
 Backend-private materialized state stays out: registry credentials, local CA paths, replace flags, pull-discovered manifest digests, snapshot upper paths, process handles, and DB rows belong to the SDK and backends, not the contract.
@@ -50,7 +50,7 @@ The Rust SDK re-exports the contract types it accepts, so most SDK users get the
 
 ## TypeScript Generation
 
-The `ts` feature derives `ts_rs::TS` on every exported type and builds the `microsandbox-types-generate` binary, which writes `../typescript/src/index.ts`.
+The `ts` feature derives `ts_rs::TS` on exported wire types and builds the `microsandbox-types-generate` binary, which writes `domain.ts`, `snapshot.ts`, and `cloud.ts` beneath `../typescript/src`.
 
 ```bash
 # Regenerate the checked-in bindings.
@@ -60,7 +60,7 @@ cargo run -p microsandbox-types --features ts --bin microsandbox-types-generate
 cargo run -p microsandbox-types --features ts --bin microsandbox-types-generate -- --check
 ```
 
-A unit test (`checked_in_bindings_match_generated_output`) also fails when `typescript/src/index.ts` drifts from the generator output, so `cargo test --features ts` catches stale bindings too.
+A unit test (`checked_in_bindings_match_generated_output`) also fails when any generated TypeScript file drifts, so `cargo test --features ts` catches stale bindings too.
 
 ## Testing
 

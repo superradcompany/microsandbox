@@ -33,14 +33,6 @@ pub fn run(args: ContextArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Format the concise stderr notice used before mutating and interactive commands.
-pub fn notice_text(info: &BackendInfo) -> String {
-    match info.api_url.as_deref() {
-        Some(api_url) => format!("{} · {api_url}", info.kind.as_str()),
-        None => info.kind.as_str().to_string(),
-    }
-}
-
 fn render_human(info: &BackendInfo) -> ui::Table {
     let mut table = ui::Table::new(&["FIELD", "VALUE"]);
     table.add_row(vec!["Backend".into(), info.kind.as_str().into()]);
@@ -91,13 +83,5 @@ mod tests {
             r#"{"kind":"cloud","api_url":"https://api.microsandbox.dev","source":"MSB_API_KEY"}"#
         );
         assert!(!rendered.contains("msb_ak_"));
-    }
-
-    #[test]
-    fn notice_is_concise() {
-        assert_eq!(
-            notice_text(&cloud_info()),
-            "cloud · https://api.microsandbox.dev"
-        );
     }
 }

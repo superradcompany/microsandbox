@@ -34,12 +34,15 @@ ts = [
 [dependencies]
 chrono.workspace = true
 dprint-plugin-typescript = { version = "=0.95", optional = true }
+hex.workspace = true
 ipnetwork.workspace = true
+microsandbox-types-macros.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 ts-rs = { workspace = true, optional = true }
+typed-path.workspace = true
 utoipa = { version = "5", optional = true, features = ["chrono"] }
 zeroize.workspace = true
 

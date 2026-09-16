@@ -1,0 +1,34 @@
+---
+title: "Week of September 11, 2026"
+sidebarTitle: "Week of the 11th"
+description: "Strict hostname policy mode for network allowlists, standard stream devices in the guest, and forward-compatible cloud request handling."
+icon: "bolt"
+---
+
+<Tip>
+  **Released this week:** [v0.6.18](https://github.com/superradcompany/microsandbox/releases/tag/v0.6.18)
+</Tip>
+
+## New features
+
+**Strict hostname policy mode**
+
+Network policies can now fail closed when a hostname allow rule fires but microsandbox cannot inspect the request authority. In strict mode, hostname-based allows still work for plaintext HTTP and TLS-intercepted HTTPS. Non-intercepted HTTPS is denied when only a hostname rule would have allowed it. IP, CIDR, group, and default allows are unaffected. Strict mode is opt-in and enforced before the outbound TCP connection is dialed.
+
+```bash
+msb create alpine --name restricted-worker \
+  --net-default-egress deny \
+  --net-rule "allow@example.com:tcp:443" \
+  --net-strict
+```
+
+See [Hostname rules and HTTPS](/networking/overview#hostname-rules-and-https) and [`--net-strict`](/cli/sandbox-commands).
+
+**Other features**
+
+- **Forward-compatible cloud requests.** The cloud API now ignores unknown fields in network and runtime settings from newer SDKs while preserving defaults, required-field checks, and validation of recognized values. SDKs and the cloud service can ship on independent release cadences without breaking existing clients.
+
+## Bug fixes
+
+- HTTP host policy checks now match the hostname that the policy allowed, closing a gap where a mismatched `Host` header could bypass a hostname-based allow rule.
+- `/dev/stdin`, `/dev/stdout`, and `/dev/stderr` are now created during guest initialization alongside `/dev/fd`. Commands such as `printf 'echo hello\n' | bash /dev/stdin` work inside sandboxes, and existing entries are preserved when initialization runs again.

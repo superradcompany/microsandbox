@@ -14,7 +14,7 @@ use microsandbox::sandbox::{PullProgress as RustPullProgress, PullProgressHandle
 ///
 /// `kind` discriminates the event; the per-variant fields below are
 /// `null` when not applicable to that kind.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 #[napi(object, js_name = "PullProgressEvent")]
 pub struct PullProgressEvent {
     /// Event kind: one of
@@ -23,8 +23,10 @@ pub struct PullProgressEvent {
     ///  "layerMaterializeStarted" | "layerMaterializeProgress" |
     ///  "layerMaterializeWriting" | "layerMaterializeComplete" |
     ///  "stitchMergingTrees" | "stitchWritingFsmeta" |
-    ///  "stitchWritingVmdk" | "stitchComplete" | "complete"`.
+    ///  "stitchWritingVmdk" | "stitchComplete" | "complete" | "startup"`.
     pub kind: String,
+    pub phase: Option<String>,
+    pub completed_bytes: Option<f64>,
     pub reference: Option<String>,
     pub manifest_digest: Option<String>,
     pub layer_count: Option<u32>,
@@ -52,7 +54,12 @@ pub struct PullProgressEvent {
 #[derive(Clone)]
 #[napi(async_iterator, js_name = "PullProgressStream")]
 pub struct JsPullProgressStream {
-    inner: Arc<Mutex<Option<PullProgressHandle>>>,
+    inner: Arc<Mutex<Option<ProgressHandle>>>,
+}
+
+enum ProgressHandle {
+    Pull(PullProgressHandle),
+    Creation(microsandbox::CreationProgressHandle),
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -69,7 +76,7 @@ impl JsPullProgressStream {
         let Some(handle) = guard.as_mut() else {
             return Ok(None);
         };
-        Ok(handle.recv().await.map(progress_to_js))
+        Ok(handle.recv().await)
     }
 }
 
@@ -89,7 +96,7 @@ impl AsyncGenerator for JsPullProgressStream {
             let Some(handle) = guard.as_mut() else {
                 return Ok(None);
             };
-            Ok(handle.recv().await.map(progress_to_js))
+            Ok(handle.recv().await)
         }
     }
 }
@@ -97,7 +104,31 @@ impl AsyncGenerator for JsPullProgressStream {
 impl JsPullProgressStream {
     pub fn from_handle(handle: PullProgressHandle) -> Self {
         Self {
-            inner: Arc::new(Mutex::new(Some(handle))),
+            inner: Arc::new(Mutex::new(Some(ProgressHandle::Pull(handle)))),
+        }
+    }
+
+    pub fn from_creation(handle: microsandbox::CreationProgressHandle) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(Some(ProgressHandle::Creation(handle)))),
+        }
+    }
+}
+
+impl ProgressHandle {
+    async fn recv(&mut self) -> Option<PullProgressEvent> {
+        match self {
+            Self::Pull(handle) => handle.recv().await.map(progress_to_js),
+            Self::Creation(handle) => handle.recv().await.map(|event| match event {
+                microsandbox::CreationProgress::Pull(event) => progress_to_js(event),
+                microsandbox::CreationProgress::Startup(event) => PullProgressEvent {
+                    kind: "startup".into(),
+                    phase: Some(event.phase.as_str().into()),
+                    completed_bytes: Some(event.completed_bytes as f64),
+                    total_bytes: event.total_bytes.map(|bytes| bytes as f64),
+                    ..Default::default()
+                },
+            }),
         }
     }
 }
@@ -109,6 +140,8 @@ impl JsPullProgressStream {
 fn progress_to_js(ev: RustPullProgress) -> PullProgressEvent {
     let blank = || PullProgressEvent {
         kind: String::new(),
+        phase: None,
+        completed_bytes: None,
         reference: None,
         manifest_digest: None,
         layer_count: None,

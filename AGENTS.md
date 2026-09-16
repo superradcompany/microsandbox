@@ -31,6 +31,7 @@ Repository layout:
 |-- AGENTS.md
 |-- Cargo.lock
 |-- Cargo.toml
+|-- COMPATIBILITY.md
 |-- DEVELOPMENT.md
 |-- Dockerfile.agentd
 |-- justfile
@@ -92,11 +93,61 @@ Repository layout:
 
 ## Design Principles
 
-- Before making or continuing a change that may introduce a regression or breaking change, stop and alert the human with the likely impact and affected workflows.
+- Before making or continuing a change that may introduce a regression, breaking change, or backward-compatibility risk identified below, stop and alert the human with the likely impact and affected workflows.
 - Keep changes narrowly scoped to the requested behavior. Avoid drive-by refactors, unrelated formatting, or dependency churn.
 - Treat sandbox isolation, host filesystem access, networking, and secret handling as security-sensitive. Validate inputs at boundaries and avoid exposing host paths, credentials, or ambient privileges.
 - For public APIs, keep the Rust SDK, CLI, Python SDK, Node SDK, Go SDK, docs, and examples consistent when they describe the same capability.
 - Prefer explicit errors with useful context over silent fallbacks.
+
+## Backward Compatibility Review
+
+Backward-compatibility detection is a required part of working on this project. Surface potential compatibility breaks before making or continuing the affected change.
+
+The review's immediate goal is proactive detection and reporting, not automatically implementing compatibility fixes. Do not silently add compatibility layers, migrations, legacy codecs, fallback paths, or downgrade behavior. When a material risk is found, explain the affected releases, components, persisted artifacts, users or workflows, the likely failure mode, and the available options; then wait for human direction as required by the Design Principles above.
+
+SDK-to-`msb` compatibility is required in both directions for future changes:
+
+- Newer SDKs must continue to work with older `msb` binaries for existing supported workflows.
+- Newer `msb` binaries must continue to work with older SDKs for existing supported workflows.
+- Apply this requirement to every language SDK and the complete SDK/runtime interaction, including binary resolution, launch arguments and JSON, inherited descriptors, startup responses, control and agent protocols, and shared persisted state. Compatibility with an already-running agent alone does not establish launch compatibility.
+- A new feature unavailable in an older peer must be detected and produce a clear unsupported-feature or upgrade-required error, or use an explicitly approved fallback. It must not silently lose requested behavior or break unrelated existing functionality.
+- Do not assume matching package versions or bundled binaries satisfy this requirement. Review independently installed runtimes, including those resolved from `MSB_HOME`, and use cross-version tests or historical fixtures for affected boundaries; same-version tests alone are insufficient evidence.
+
+If a proposed change may violate either direction, flag it before implementation and wait for human direction; this requirement does not authorize silently building adapters or choosing a breaking change. Any exception or change to the supported compatibility horizon requires explicit human direction. The known v0.6.9 ↔ v0.6.10 launch incompatibility is an accepted historical exception and must not be repaired as part of unrelated work. It does not exempt future changes from this review or requirement.
+
+By explicit user direction on 2026-09-13, the historical SDK/runtime compatibility target for this work is v0.6.x, with v0.6.0 as the floor, against the current implementation candidate in both directions. Releases older than v0.6.0, including all v0.4.x and v0.5.x releases, are excluded from required compatibility. Preserve their historical results as diagnostic evidence. This supersedes the earlier exact-v0.5.0 exclusion. Existing codecs and capability gates are not removed or changed by this scope decision. The known v0.6.9 ↔ v0.6.10 exception remains unchanged; other v0.6.x failures are not waived.
+
+Before changing an existing cross-version boundary, determine:
+
+- What older component, binary, sandbox, or persisted state may interact with the change.
+- Which side is the old producer or consumer.
+- Whether failure would be a clean refusal, loss of functionality, stranded state, silent misinterpretation, data loss, or possible corruption.
+- Whether the repository has a fixture or test using an actual older artifact or binary, rather than only same-version round trips.
+
+Always perform this review when a change affects any of these areas:
+
+- Host-to-guest framing, message names, flags, IDs, payload fields, version negotiation, bootstrap, or lifecycle handshakes.
+- Unix sockets, Windows named pipes, path hashing, relay routing, control messages, inherited file descriptors, signals, or process-launch JSON.
+- SQLite schemas, migration history, persisted configuration, downgrade behavior, journals, leases, or runtime recovery state.
+- ext4, EROFS, VMDK, OCI layers, filesystem metadata, device IDs, mount tags, block paths, or other on-disk formats.
+- Snapshots, archives, manifests, canonical serialization, digests, parent identities, filenames, or atomic publication order.
+- Cache keys, materializer ABIs, layer ordering, whiteouts, hardlinks, xattrs, or content-addressed storage.
+- The runtime, agentd, libkrun, firmware, kernel patches, virtio devices, shared-memory layouts, or package-version coupling.
+- Network address derivation, MACs, interface names, DNS aliases, published ports, TCP/UDP behavior, vsock, SSH, or SFTP behavior.
+- Heartbeats, boot errors, metrics, logs, lock files, runtime directories, or other files consumed across process or release boundaries.
+
+Check each applicable compatibility direction:
+
+1. A new host interacting with an old running sandbox and old agentd.
+2. A new release opening an existing `MSB_HOME` and its database.
+3. A new release reading old disks, snapshots, archives, caches, and filesystem metadata.
+4. An older release encountering state written by the new release, including downgrade refusal behavior.
+5. Exported artifacts moving between releases, platforms, or architectures.
+6. Independently running components from different releases communicating during an upgrade.
+7. A newer SDK launching and operating an older `msb` binary.
+8. An older SDK launching and operating a newer `msb` binary.
+
+Treat stable strings, numeric constants, paths, hashes, serialized field details, ordering guarantees, timing, and error interpretations as compatibility-sensitive even when they are not part of the public API. Consult [COMPATIBILITY.md](COMPATIBILITY.md) for the detailed map, source-of-truth files, evolution rules, and expected tests.
 
 ## Rust Layout And Style
 

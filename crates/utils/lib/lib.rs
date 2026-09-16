@@ -156,15 +156,18 @@ pub fn metrics_registry_shm_name(home: &std::path::Path, registry_abi_version: u
 /// Resolve the microsandbox home directory.
 ///
 /// Order of resolution:
-/// 1. `MSB_HOME` env var (used as-is, no `.microsandbox` suffix appended)
+/// 1. Non-empty `MSB_HOME` env var (used as-is, no `.microsandbox` suffix appended)
 /// 2. `~/.microsandbox/` (i.e. `dirs::home_dir().join(BASE_DIR_NAME)`)
 /// 3. `./.microsandbox/` if no home is available
+///
+/// An empty `MSB_HOME` is treated as unset, matching common shell and SDK
+/// configuration conventions and avoiding an accidental current-directory root.
 ///
 /// `MSB_HOME` lets CI and integration tests isolate microsandbox state
 /// (db, sandboxes, cache, logs) per process without disturbing other
 /// `$HOME`-rooted tooling.
 pub fn resolve_home() -> std::path::PathBuf {
-    if let Some(path) = std::env::var_os("MSB_HOME") {
+    if let Some(path) = std::env::var_os("MSB_HOME").filter(|path| !path.is_empty()) {
         return std::path::PathBuf::from(path);
     }
     dirs::home_dir()
@@ -288,22 +291,31 @@ pub fn is_windows_drive_separator_at(s: &str, index: usize) -> bool {
 mod tests {
     use super::*;
 
-    /// `MSB_HOME` is honoured verbatim (no `.microsandbox` suffix appended)
-    /// so callers can isolate state per process without disturbing tooling
-    /// that reads `$HOME` (npm cache, ssh keys, etc.).
-    ///
-    /// Uses a unique env var per test process to avoid clashing with other
-    /// parallel tests that read `MSB_HOME`.
+    /// Non-empty `MSB_HOME` is honoured verbatim (no `.microsandbox` suffix
+    /// appended), while an empty value falls back to the default home.
     #[test]
-    fn test_resolve_home_respects_env_override() {
+    fn test_resolve_home_env_contract() {
         // SAFETY: This test sets a process-global env var. Vitest-style
         // single-test isolation isn't available; rely on the test being
         // the sole reader of `MSB_HOME` in this binary.
+        let original = std::env::var_os("MSB_HOME");
         let custom = std::path::PathBuf::from("/tmp/msb-home-resolve-test-12345");
         unsafe { std::env::set_var("MSB_HOME", &custom) };
-        let resolved = resolve_home();
+        let overridden = resolve_home();
+
+        unsafe { std::env::set_var("MSB_HOME", "") };
+        let empty = resolve_home();
+
         unsafe { std::env::remove_var("MSB_HOME") };
-        assert_eq!(resolved, custom);
+        let unset = resolve_home();
+
+        match original {
+            Some(value) => unsafe { std::env::set_var("MSB_HOME", value) },
+            None => unsafe { std::env::remove_var("MSB_HOME") },
+        }
+
+        assert_eq!(overridden, custom);
+        assert_eq!(empty, unset);
     }
 
     #[test]

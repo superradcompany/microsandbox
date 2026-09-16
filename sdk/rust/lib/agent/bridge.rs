@@ -21,7 +21,9 @@ use tokio::sync::Mutex;
 use tokio::sync::Notify;
 use tokio::sync::mpsc::Receiver;
 
-use super::{AgentClient, connect_sandbox, connect_sandbox_with_timeout};
+use super::AgentClient;
+#[cfg(feature = "local")]
+use super::{connect_sandbox, connect_sandbox_with_timeout};
 use microsandbox_agent_client::{AgentClientError, AgentClientResult};
 
 //--------------------------------------------------------------------------------------------------
@@ -69,6 +71,7 @@ impl AgentBridge {
     /// Connect to a sandbox by name (resolves the socket path from SDK config).
     ///
     /// Sandbox names are limited to 128 UTF-8 bytes.
+    #[cfg(feature = "local")]
     pub async fn connect_sandbox(name: &str) -> AgentClientResult<Self> {
         let client = connect_sandbox(name).await?;
         Ok(Self::from_client(client))
@@ -77,6 +80,7 @@ impl AgentBridge {
     /// Connect to a sandbox by name with an explicit handshake timeout.
     ///
     /// Sandbox names are limited to 128 UTF-8 bytes.
+    #[cfg(feature = "local")]
     pub async fn connect_sandbox_with_timeout(
         name: &str,
         timeout: Duration,

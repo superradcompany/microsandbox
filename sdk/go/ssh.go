@@ -2,6 +2,8 @@ package microsandbox
 
 import (
 	"context"
+	"fmt"
+	"time"
 
 	"github.com/superradcompany/microsandbox/sdk/go/internal/ffi"
 )
@@ -20,9 +22,10 @@ func (s *Sandbox) SSH() *SandboxSSHOps {
 type SSHClientOption func(*sshClientConfig)
 
 type sshClientConfig struct {
-	user string
-	term string
-	sftp *bool
+	user              string
+	term              string
+	sftp              *bool
+	inactivityTimeout *time.Duration
 }
 
 // WithSSHUser sets the SSH login user.
@@ -40,6 +43,12 @@ func WithSSHClientSFTP(enabled bool) SSHClientOption {
 	return func(o *sshClientConfig) { o.sftp = &enabled }
 }
 
+// WithSSHClientInactivityTimeout sets the internal SSH server inactivity timeout.
+// A zero duration disables the timeout.
+func WithSSHClientInactivityTimeout(timeout time.Duration) SSHClientOption {
+	return func(o *sshClientConfig) { o.inactivityTimeout = &timeout }
+}
+
 // SSHClient is a native in-process SSH client session.
 type SSHClient struct {
 	inner *ffi.SSHClient
@@ -51,11 +60,16 @@ func (ssh *SandboxSSHOps) OpenClient(ctx context.Context, opts ...SSHClientOptio
 	for _, opt := range opts {
 		opt(&cfg)
 	}
+	inactivityTimeoutSecs, err := sshInactivityTimeoutSeconds(cfg.inactivityTimeout)
+	if err != nil {
+		return nil, err
+	}
 
 	inner, err := ssh.sandbox.inner.SSHConnect(ctx, ffi.SSHClientOptions{
-		User: cfg.user,
-		Term: cfg.term,
-		SFTP: cfg.sftp,
+		User:                  cfg.user,
+		Term:                  cfg.term,
+		SFTP:                  cfg.sftp,
+		InactivityTimeoutSecs: inactivityTimeoutSecs,
 	})
 	if err != nil {
 		return nil, wrapFFI(err)
@@ -217,6 +231,7 @@ type sshServerConfig struct {
 	authorizedKeysPath string
 	user               string
 	sftp               *bool
+	inactivityTimeout  *time.Duration
 }
 
 // WithSSHHostKeyPath overrides the host private key path.
@@ -239,6 +254,12 @@ func WithSSHServerSFTP(enabled bool) SSHServerOption {
 	return func(o *sshServerConfig) { o.sftp = &enabled }
 }
 
+// WithSSHServerInactivityTimeout sets the SSH session inactivity timeout.
+// A zero duration disables the timeout.
+func WithSSHServerInactivityTimeout(timeout time.Duration) SSHServerOption {
+	return func(o *sshServerConfig) { o.inactivityTimeout = &timeout }
+}
+
 // SSHServer is a prepared SSH server endpoint for a sandbox.
 type SSHServer struct {
 	inner *ffi.SSHServer
@@ -250,12 +271,17 @@ func (ssh *SandboxSSHOps) PrepareServer(ctx context.Context, opts ...SSHServerOp
 	for _, opt := range opts {
 		opt(&cfg)
 	}
+	inactivityTimeoutSecs, err := sshInactivityTimeoutSeconds(cfg.inactivityTimeout)
+	if err != nil {
+		return nil, err
+	}
 
 	inner, err := ssh.sandbox.inner.SSHServer(ctx, ffi.SSHServerOptions{
-		HostKeyPath:        cfg.hostKeyPath,
-		AuthorizedKeysPath: cfg.authorizedKeysPath,
-		User:               cfg.user,
-		SFTP:               cfg.sftp,
+		HostKeyPath:           cfg.hostKeyPath,
+		AuthorizedKeysPath:    cfg.authorizedKeysPath,
+		User:                  cfg.user,
+		SFTP:                  cfg.sftp,
+		InactivityTimeoutSecs: inactivityTimeoutSecs,
 	})
 	if err != nil {
 		return nil, wrapFFI(err)
@@ -271,4 +297,15 @@ func (srv *SSHServer) Close(ctx context.Context) error {
 // ServeConnection serves one SSH transport over this process's stdin/stdout.
 func (srv *SSHServer) ServeConnection(ctx context.Context) error {
 	return wrapFFI(srv.inner.ServeConnection(ctx))
+}
+
+func sshInactivityTimeoutSeconds(timeout *time.Duration) (*uint64, error) {
+	if timeout == nil {
+		return nil, nil
+	}
+	if *timeout < 0 {
+		return nil, fmt.Errorf("SSH inactivity timeout must be non-negative")
+	}
+	value := durationSecsCeil(*timeout)
+	return &value, nil
 }

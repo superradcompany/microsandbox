@@ -4,7 +4,6 @@
 //! kernel and e2fsprogs. It owns the primary reserved-GDT blocks and their sparse-super backup
 //! copies; these blocks are filesystem metadata even though ext4 accounts for them through inode 7.
 
-use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 
 use super::format::{
@@ -68,7 +67,7 @@ pub(super) fn write_resize_inode(
 
 /// Validate inode 7 and every reserved-GDT pointer against the current filesystem geometry.
 pub(super) fn validate_resize_inode(
-    file: &mut File,
+    file: &mut (impl Read + Seek),
     geometry: &GroupGeometry,
     inode_table_block: u64,
     csum_seed: u32,

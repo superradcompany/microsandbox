@@ -8,11 +8,11 @@
 //!    on APFS, btrfs, XFS (with `reflink=1`), and bcachefs. Returns
 //!    `EOPNOTSUPP` (or similar) on ext4 and other non-COW filesystems.
 //!
-//! 2. **Sparse-aware copy**. POSIX `SEEK_DATA` / `SEEK_HOLE` walk of
-//!    the source's allocation map, with `copy_file_range(2)` on Linux
-//!    for in-kernel zero-copy of data extents. The destination is
-//!    `ftruncate`d to the source size up front so unallocated regions
-//!    stay holes.
+//! 2. **Sparse-aware copy**. Walks the source's allocation map with
+//!    POSIX `SEEK_DATA` / `SEEK_HOLE` or Windows
+//!    `FSCTL_QUERY_ALLOCATED_RANGES`, then copies only allocated
+//!    extents. The destination is extended to the source size up
+//!    front so unallocated regions stay holes.
 //!
 //! Never falls back to a naive byte-for-byte copy — that would
 //! densify a 4 GiB sparse file with a few MB of data into 4 GiB on
@@ -35,7 +35,7 @@ use std::path::Path;
 use std::ptr;
 
 #[cfg(windows)]
-use crate::extent::mark_sparse;
+use crate::extent::{ExtentMap, mark_sparse};
 #[cfg(windows)]
 use windows_sys::Win32::Foundation::HANDLE;
 #[cfg(windows)]
@@ -77,6 +77,16 @@ pub enum FastCopyStrategy {
     SparseCopy,
 }
 
+/// Windows strategy used to materialize the sparse destination's data.
+#[cfg(windows)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WindowsSparseCopyStrategy {
+    /// Copy the filesystem-allocated ranges reported by `FSCTL_QUERY_ALLOCATED_RANGES`.
+    AllocatedRanges,
+    /// Preserve holes by finding non-zero byte runs when allocation metadata is unavailable.
+    NonzeroRuns,
+}
+
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
@@ -96,6 +106,24 @@ pub fn fast_copy(src: &Path, dst: &Path) -> io::Result<u64> {
 
 /// Copy using the fastest safe strategy and report which strategy resolved.
 pub fn fast_copy_with_strategy(src: &Path, dst: &Path) -> io::Result<(u64, FastCopyStrategy)> {
+    fast_copy_impl(src, dst, true)
+}
+
+/// Copy an ephemeral backing without flushing the destination to stable storage.
+///
+/// Completed writes are visible to other processes, but are not crash-durable. Use only
+/// for reconstructible/local handoffs whose contract does not require persistence across
+/// host failure. This retains sparse-copy and reflink behavior and independent contents.
+/// Existing snapshot callers must continue using [`fast_copy_with_strategy`].
+pub fn fast_copy_without_sync(src: &Path, dst: &Path) -> io::Result<(u64, FastCopyStrategy)> {
+    fast_copy_impl(src, dst, false)
+}
+
+fn fast_copy_impl(
+    src: &Path,
+    dst: &Path,
+    sync_destination: bool,
+) -> io::Result<(u64, FastCopyStrategy)> {
     // Stat the source up front. This makes the missing-source error
     // kind platform-consistent (`NotFound` everywhere); without it,
     // reflink-copy on Linux surfaces `InvalidInput` with no errno
@@ -114,7 +142,7 @@ pub fn fast_copy_with_strategy(src: &Path, dst: &Path) -> io::Result<(u64, FastC
         Err(e) => return Err(e),
     }
 
-    sparse_copy(src, dst).map(|len| (len, FastCopyStrategy::SparseCopy))
+    sparse_copy_impl(src, dst, sync_destination).map(|len| (len, FastCopyStrategy::SparseCopy))
 }
 
 /// Require a filesystem copy-on-write clone with no fallback.
@@ -124,19 +152,18 @@ pub fn reflink(src: &Path, dst: &Path) -> io::Result<u64> {
     Ok(src_len)
 }
 
-/// Sparse-aware copy via `SEEK_DATA`/`SEEK_HOLE` and per-extent copy.
+/// Sparse-aware copy via platform allocation metadata and per-extent copy.
 ///
 /// Public for callers that want to skip the reflink attempt — e.g.
 /// when they already know the destination filesystem doesn't support
 /// reflinks, or for tests that want to exercise the fallback path.
 pub fn sparse_copy(src: &Path, dst: &Path) -> io::Result<u64> {
-    sparse_copy_impl(src, dst)
+    sparse_copy_impl(src, dst, true)
 }
 
 #[cfg(unix)]
-fn sparse_copy_impl(src: &Path, dst: &Path) -> io::Result<u64> {
+fn sparse_copy_impl(src: &Path, dst: &Path, sync_destination: bool) -> io::Result<u64> {
     let src_file = File::open(src)?;
-    let len = src_file.metadata()?.len();
 
     let dst_file = OpenOptions::new()
         .read(true)
@@ -144,6 +171,26 @@ fn sparse_copy_impl(src: &Path, dst: &Path) -> io::Result<u64> {
         .create(true)
         .truncate(true)
         .open(dst)?;
+    sparse_copy_files(&src_file, &dst_file, sync_destination)
+}
+
+/// Copy an ephemeral Linux memory generation between already-owned files, preserving holes.
+/// The destination must be a distinct writable object. No durability flush is performed.
+#[cfg(target_os = "linux")]
+pub fn sparse_copy_file_without_sync(src: &File, dst: &File) -> io::Result<u64> {
+    use std::os::unix::fs::MetadataExt;
+    let source = src.metadata()?;
+    let target = dst.metadata()?;
+    if source.dev() == target.dev() && source.ino() == target.ino() {
+        return Err(io::Error::other("cannot copy memory backing onto itself"));
+    }
+    dst.set_len(0)?;
+    sparse_copy_files(src, dst, false)
+}
+
+#[cfg(unix)]
+fn sparse_copy_files(src_file: &File, dst_file: &File, sync_destination: bool) -> io::Result<u64> {
+    let len = src_file.metadata()?.len();
     // Establish destination as a fully-sparse hole of `len` bytes;
     // only data extents will materialize into allocated blocks below.
     dst_file.set_len(len)?;
@@ -174,11 +221,23 @@ fn sparse_copy_impl(src: &Path, dst: &Path) -> io::Result<u64> {
             break;
         }
 
+        #[cfg(target_os = "linux")]
+        if !sync_destination {
+            // Local handoffs require independent contents, not physically independent blocks.
+            // Keep the explicit/durable copy backend unchanged, but avoid a userspace bounce
+            // buffer when the kernel can transfer an ephemeral generation directly.
+            copy_local_extent(src_fd, dst_fd, data_start, data_end - data_start)?;
+        } else {
+            copy_extent(src_fd, dst_fd, data_start, data_end - data_start)?;
+        }
+        #[cfg(not(target_os = "linux"))]
         copy_extent(src_fd, dst_fd, data_start, data_end - data_start)?;
         off = data_end as i64;
     }
 
-    dst_file.sync_all()?;
+    if sync_destination {
+        dst_file.sync_all()?;
+    }
     Ok(len)
 }
 
@@ -216,7 +275,7 @@ fn reflink_impl(_src: &Path, _dst: &Path) -> io::Result<()> {
 }
 
 #[cfg(windows)]
-fn sparse_copy_impl(src: &Path, dst: &Path) -> io::Result<u64> {
+fn sparse_copy_impl(src: &Path, dst: &Path, sync_destination: bool) -> io::Result<u64> {
     const BUF_SIZE: usize = 1024 * 1024;
 
     let mut src_file = File::open(src)?;
@@ -231,19 +290,11 @@ fn sparse_copy_impl(src: &Path, dst: &Path) -> io::Result<u64> {
     dst_file.set_len(len)?;
     mark_sparse(&dst_file)?;
 
-    let mut offset = 0u64;
-    let mut buf = vec![0u8; BUF_SIZE];
-    loop {
-        let n = src_file.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
+    copy_windows_sparse_data(&mut src_file, &mut dst_file, BUF_SIZE)?;
 
-        write_nonzero_runs(&mut dst_file, offset, &buf[..n])?;
-        offset += n as u64;
+    if sync_destination {
+        dst_file.sync_all()?;
     }
-
-    dst_file.sync_all()?;
     Ok(len)
 }
 
@@ -417,6 +468,68 @@ fn copy_windows_tail(src: &mut File, dst: &mut File, offset: u64, len: u64) -> i
     Ok(())
 }
 
+#[cfg(windows)]
+fn copy_windows_range(
+    src: &mut File,
+    dst: &mut File,
+    offset: u64,
+    len: u64,
+    buf: &mut [u8],
+) -> io::Result<()> {
+    src.seek(SeekFrom::Start(offset))?;
+    dst.seek(SeekFrom::Start(offset))?;
+
+    let mut remaining = len;
+    while remaining != 0 {
+        let chunk_len = remaining.min(buf.len() as u64) as usize;
+        src.read_exact(&mut buf[..chunk_len])?;
+        dst.write_all(&buf[..chunk_len])?;
+        remaining -= chunk_len as u64;
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn copy_windows_sparse_data(
+    src: &mut File,
+    dst: &mut File,
+    buf_size: usize,
+) -> io::Result<WindowsSparseCopyStrategy> {
+    if let Some(map) = ExtentMap::scan_file(src)? {
+        // NTFS can enumerate the ranges that actually occupy filesystem blocks. Copy those ranges
+        // wholesale: inspecting zero/non-zero byte runs inside an allocated extent turns raw disk
+        // images into millions of tiny seeks and writes.
+        let mut buf = vec![0u8; buf_size];
+        for (offset, extent_len) in map.extents {
+            copy_windows_range(src, dst, offset, extent_len, &mut buf)?;
+        }
+        Ok(WindowsSparseCopyStrategy::AllocatedRanges)
+    } else {
+        // Filesystems without FSCTL_QUERY_ALLOCATED_RANGES cannot expose their allocation map.
+        // Preserve sparseness there with the slower byte-run fallback instead of densifying the
+        // destination with a naive full-file copy.
+        copy_windows_nonzero_runs(src, dst, buf_size)?;
+        Ok(WindowsSparseCopyStrategy::NonzeroRuns)
+    }
+}
+
+#[cfg(windows)]
+fn copy_windows_nonzero_runs(src: &mut File, dst: &mut File, buf_size: usize) -> io::Result<()> {
+    src.seek(SeekFrom::Start(0))?;
+    let mut offset = 0u64;
+    let mut buf = vec![0u8; buf_size];
+    loop {
+        let n = src.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+
+        write_nonzero_runs(dst, offset, &buf[..n])?;
+        offset += n as u64;
+    }
+    Ok(())
+}
+
 /// Reflink can fail with several different errnos depending on the
 /// filesystem and platform. Treat them all as "fall through to Tier 2"
 /// rather than propagating to the caller.
@@ -460,6 +573,52 @@ fn is_reflink_unsupported(e: &io::Error) -> bool {
 fn copy_extent(src_fd: RawFd, dst_fd: RawFd, off: u64, len: u64) -> io::Result<()> {
     // Explicit copy must never ask the filesystem to satisfy the transfer with shared COW extents.
     read_write_extent(src_fd, dst_fd, off, len)
+}
+
+/// Preserve holes by transferring only the caller's allocated extent. A kernel copy may
+/// internally clone blocks; that is safe for immutable local generations and private children.
+#[cfg(target_os = "linux")]
+fn copy_local_extent(src_fd: RawFd, dst_fd: RawFd, off: u64, len: u64) -> io::Result<()> {
+    let mut copied = 0u64;
+    while copied < len {
+        let mut source_offset = (off + copied) as libc::loff_t;
+        let mut destination_offset = source_offset;
+        let count = (len - copied).min(32 * 1024 * 1024) as usize;
+        let result = unsafe {
+            libc::copy_file_range(
+                src_fd,
+                &mut source_offset,
+                dst_fd,
+                &mut destination_offset,
+                count,
+                0,
+            )
+        };
+        if result > 0 {
+            copied += result as u64;
+            continue;
+        }
+        if result == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "kernel copy reached EOF mid-extent",
+            ));
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() == io::ErrorKind::Interrupted {
+            continue;
+        }
+        if matches!(
+            error.raw_os_error(),
+            Some(libc::EXDEV | libc::ENOSYS | libc::EOPNOTSUPP | libc::EINVAL)
+        ) {
+            // A transfer can succeed partially before discovering an unsupported extent.
+            // Continue at the exact next byte, never restart or densify the whole file.
+            return read_write_extent(src_fd, dst_fd, off + copied, len - copied);
+        }
+        return Err(error);
+    }
+    Ok(())
 }
 
 /// Copy `len` bytes from `src_fd` at `off` to `dst_fd` at `off` with
@@ -566,6 +725,8 @@ mod tests {
             .create(true)
             .truncate(true)
             .open(path)?;
+        #[cfg(windows)]
+        mark_sparse(&f)?;
         f.set_len(len)?;
         for &off in data_offsets {
             let buf = vec![0xAB_u8; 64 * 1024];
@@ -651,6 +812,127 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn unsynced_sparse_copy_is_complete_and_independent() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("source");
+        let dst = dir.path().join("local-backing");
+        let length = 8 * 1024 * 1024;
+        make_sparse(&src, length, &[0, 4 * 1024 * 1024]).unwrap();
+
+        // Force the fallback even on a reflink-capable test host. Omitting a flush
+        // must not omit bytes, fill holes, or alias writable contents with the source.
+        assert_eq!(sparse_copy_impl(&src, &dst, false).unwrap(), length);
+        assert_eq!(std::fs::read(&src).unwrap(), std::fs::read(&dst).unwrap());
+        #[cfg(unix)]
+        {
+            let source = std::fs::metadata(&src).unwrap();
+            let copied = std::fs::metadata(&dst).unwrap();
+            if source.blocks() * 512 < length / 2 {
+                assert!(copied.blocks() * 512 < length / 2);
+            }
+        }
+        let mut copied = OpenOptions::new().write(true).open(&dst).unwrap();
+        copied.write_all(b"child").unwrap();
+        let original = std::fs::read(&src).unwrap();
+        assert_eq!(&original[..5], &[0xAB; 5]);
+        std::fs::remove_file(&src).unwrap();
+        assert_eq!(&std::fs::read(&dst).unwrap()[..5], b"child");
+    }
+
+    #[test]
+    fn unsynced_fast_copy_preserves_contents() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("source");
+        let dst = dir.path().join("local-backing");
+        std::fs::write(&src, b"local generation").unwrap();
+        let (length, _) = fast_copy_without_sync(&src, &dst).unwrap();
+        assert_eq!(length, 16);
+        assert_eq!(std::fs::read(&dst).unwrap(), b"local generation");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn descriptor_copy_rejects_alias_before_truncating() {
+        let mut source = tempfile::tempfile().unwrap();
+        source.write_all(b"keep this generation").unwrap();
+        let alias = source.try_clone().unwrap();
+        assert!(sparse_copy_file_without_sync(&source, &alias).is_err());
+        assert_eq!(source.metadata().unwrap().len(), 20);
+        source.rewind().unwrap();
+        let mut bytes = Vec::new();
+        source.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"keep this generation");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn descriptor_copy_clears_old_contents_and_preserves_holes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("source");
+        let length = 8 * 1024 * 1024;
+        make_sparse(&path, length, &[0, 4 * 1024 * 1024]).unwrap();
+        let source = File::open(&path).unwrap();
+        let mut target = tempfile::tempfile().unwrap();
+        target
+            .write_all(&vec![0xEE; length as usize + 4096])
+            .unwrap();
+        assert_eq!(
+            sparse_copy_file_without_sync(&source, &target).unwrap(),
+            length
+        );
+        target.rewind().unwrap();
+        let mut bytes = Vec::new();
+        target.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, std::fs::read(path).unwrap());
+        if source.metadata().unwrap().blocks() * 512 < length / 2 {
+            assert!(target.metadata().unwrap().blocks() * 512 < length / 2);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn local_kernel_copy_reports_truncated_extent() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("source");
+        let dst = dir.path().join("destination");
+        std::fs::write(&src, b"short").unwrap();
+        let source = File::open(src).unwrap();
+        let destination = File::create(dst).unwrap();
+        let error =
+            copy_local_extent(source.as_raw_fd(), destination.as_raw_fd(), 0, 4096).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_sparse_copy_uses_allocated_ranges_when_available() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src.bin");
+        let dst = dir.path().join("dst.bin");
+        let len = 8 * 1024 * 1024;
+
+        make_sparse(&src, len, &[0, 4 * 1024 * 1024]).unwrap();
+        let mut src_file = File::open(&src).unwrap();
+        if ExtentMap::scan_file(&src_file).unwrap().is_none() {
+            eprintln!("filesystem cannot enumerate allocated ranges; strategy not exercised");
+            return;
+        }
+
+        let mut dst_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&dst)
+            .unwrap();
+        dst_file.set_len(len).unwrap();
+        mark_sparse(&dst_file).unwrap();
+
+        let strategy = copy_windows_sparse_data(&mut src_file, &mut dst_file, 1024 * 1024).unwrap();
+        assert_eq!(strategy, WindowsSparseCopyStrategy::AllocatedRanges);
     }
 
     #[test]

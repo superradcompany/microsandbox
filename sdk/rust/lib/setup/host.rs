@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use microsandbox_utils::copy::{FastCopyStrategy, fast_copy_with_strategy};
 
-use crate::config::{self, LocalConfig};
+use crate::config::{self, GlobalConfig};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -237,7 +237,7 @@ pub fn diagnose() -> Diagnosis {
 fn runtime_section() -> (Section, Vec<Problem>) {
     let (config, config_error) = match config::load_persisted_config_or_default() {
         Ok(config) => (config, None),
-        Err(error) => (LocalConfig::default(), Some(error.to_string())),
+        Err(error) => (GlobalConfig::default(), Some(error.to_string())),
     };
     let base = config.home();
     let msb = resolve_msb_runtime_file(&config);
@@ -366,10 +366,10 @@ fn concise_io_error(error: &io::Error) -> &'static str {
     }
 }
 
-fn resolve_msb_runtime_file(config: &LocalConfig) -> Result<PathBuf, String> {
-    let path = config
-        .resolve_msb_path()
-        .map_err(|error| error.to_string())?;
+fn resolve_msb_runtime_file(config: &GlobalConfig) -> Result<PathBuf, String> {
+    let path = super::resolve_runtime(config)
+        .map_err(|error| error.to_string())?
+        .msb_path;
     if path.is_file() {
         Ok(path)
     } else {
@@ -377,9 +377,9 @@ fn resolve_msb_runtime_file(config: &LocalConfig) -> Result<PathBuf, String> {
     }
 }
 
-fn resolve_libkrunfw_runtime_file(config: &LocalConfig) -> Result<PathBuf, String> {
-    config
-        .resolve_libkrunfw_path()
+fn resolve_libkrunfw_runtime_file(config: &GlobalConfig) -> Result<PathBuf, String> {
+    super::resolve_runtime(config)
+        .map(|runtime| runtime.libkrunfw_path)
         .map_err(|error| error.to_string())
 }
 

@@ -1,0 +1,5 @@
+<svg viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <!-- Terminal mark used for the Codex CLI example. -->
+  <path d="M80 104 272 256 80 408v-88l80-64-80-64z" fill="#BF84FE"/>
+  <path d="M248 352h184v64H248z" fill="#BF84FE"/>
+</svg>
