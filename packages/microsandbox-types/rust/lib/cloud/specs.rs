@@ -655,9 +655,15 @@ pub struct CloudNetworkSpec {
     /// Require hostname-based policy allows to use inspectable application authority.
     pub strict: bool,
 
-    /// Max concurrent guest connections.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_connections: Option<usize>,
+    /// Max concurrent TCP connections.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    // Keep outbound requests compatible with existing cloud servers.
+    #[serde(rename = "max_connections", alias = "max_tcp_connections")]
+    pub max_tcp_connections: Option<usize>,
+
+    /// Max concurrent UDP relay sessions. Omitted is unlimited for single-tenant and 1024 for multi-tenant; zero means unlimited.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_udp_connections: Option<usize>,
 }
 
 impl Default for CloudNetworkSpec {
@@ -667,7 +673,8 @@ impl Default for CloudNetworkSpec {
             policy: None,
             secrets: None,
             strict: false,
-            max_connections: None,
+            max_tcp_connections: None,
+            max_udp_connections: None,
         }
     }
 }

@@ -34,8 +34,11 @@ use crate::tls::state::{TlsState, TlsStateError};
 // Constants
 //--------------------------------------------------------------------------------------------------
 
-/// Default connection cap for multi-tenant deployments; explicit settings override it.
-const DEFAULT_MULTI_TENANT_MAX_CONNECTIONS: NonZeroUsize = NonZeroUsize::new(1024).unwrap();
+/// Default TCP cap for multi-tenant deployments; explicit settings override it.
+const DEFAULT_MULTI_TENANT_MAX_TCP_CONNECTIONS: NonZeroUsize = NonZeroUsize::new(1024).unwrap();
+
+/// Default UDP cap for multi-tenant deployments; explicit settings override it.
+const DEFAULT_MULTI_TENANT_MAX_UDP_CONNECTIONS: NonZeroUsize = NonZeroUsize::new(1024).unwrap();
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -83,15 +86,6 @@ struct HostRoutes {
 /// Errors that prevent the smoltcp network from being created safely.
 #[derive(Debug, thiserror::Error)]
 pub enum NetworkInitError {
-    /// The configured connection cap is above the hard safety limit.
-    #[error("max_connections {configured} exceeds hard limit {limit}")]
-    MaxConnectionsExceeded {
-        /// Requested connection limit.
-        configured: usize,
-        /// Hard cap enforced by the network stack.
-        limit: usize,
-    },
-
     /// The configured IPv4 pool cannot provide a `/30` for this slot.
     #[error("IPv4 pool {pool} cannot assign network slot {slot}")]
     Ipv4PoolCapacity {
@@ -316,7 +310,8 @@ impl SmoltcpNetwork {
         let tls_state = self.tls_state.clone();
         let published_ports = config.ports.clone();
         let strict = config.strict;
-        let max_connections = config.max_connections.and_then(ConnectionLimit::cap);
+        let max_tcp_connections = config.max_tcp_connections.and_then(ConnectionLimit::cap);
+        let max_udp_connections = config.max_udp_connections;
         let secrets = self.secrets.clone();
         let outbound_proxy = self.config.outbound_proxy().cloned().map(Arc::new);
 
@@ -333,7 +328,8 @@ impl SmoltcpNetwork {
                         tls_state,
                         published_ports,
                         strict,
-                        max_connections,
+                        max_tcp_connections,
+                        max_udp_connections,
                         tokio_handle,
                         secrets,
                         outbound_proxy,
@@ -522,9 +518,14 @@ fn enforce_deployment_profile(config: &mut ResolvedNetworkConfig, profile: Deplo
 
     let config = config.config_mut();
     config
-        .max_connections
+        .max_tcp_connections
         .get_or_insert(ConnectionLimit::Limited(
-            DEFAULT_MULTI_TENANT_MAX_CONNECTIONS,
+            DEFAULT_MULTI_TENANT_MAX_TCP_CONNECTIONS,
+        ));
+    config
+        .max_udp_connections
+        .get_or_insert(ConnectionLimit::Limited(
+            DEFAULT_MULTI_TENANT_MAX_UDP_CONNECTIONS,
         ));
     let interface_overridden = config.interface.mac.is_some()
         || config.interface.mtu.is_some()
@@ -712,7 +713,7 @@ mod tests {
             address: "127.0.0.1:1080".parse().unwrap(),
             credentials: None,
         });
-        config.max_connections = Some(ConnectionLimit::from(257));
+        config.max_tcp_connections = Some(ConnectionLimit::from(257));
         config.policy = NetworkPolicy::allow_all();
         let mut resolved = resolved(config);
 
@@ -726,7 +727,7 @@ mod tests {
         assert!(config.dns.rebind_protection);
         assert!(!config.trust_host_cas);
         assert!(config.outbound_proxy.is_none());
-        assert_eq!(config.max_connections, Some(ConnectionLimit::from(257)));
+        assert_eq!(config.max_tcp_connections, Some(ConnectionLimit::from(257)));
         assert!(resolved.config().outbound_proxy.is_none());
         assert!(resolved.outbound_proxy().is_none());
         // Tenant policy stays intact and is intersected with the platform
@@ -742,7 +743,7 @@ mod tests {
         ] {
             for requested in [None, Some(0), Some(64), Some(4096)] {
                 let config: NetworkConfig =
-                    serde_json::from_value(serde_json::json!({"max_connections": requested}))
+                    serde_json::from_value(serde_json::json!({"max_tcp_connections": requested}))
                         .unwrap();
                 let mut config = resolved(config);
                 // Exercise the serialized runtime launch boundary as well.
@@ -757,7 +758,7 @@ mod tests {
                 assert_eq!(
                     config
                         .config()
-                        .max_connections
+                        .max_tcp_connections
                         .and_then(ConnectionLimit::cap),
                     expected
                 );
@@ -766,10 +767,36 @@ mod tests {
                 assert_eq!(
                     config
                         .config()
-                        .max_connections
+                        .max_tcp_connections
                         .and_then(ConnectionLimit::cap),
                     expected
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn deployment_profiles_resolve_udp_defaults_and_preserve_overrides() {
+        for profile in [
+            DeploymentProfile::SingleTenant,
+            DeploymentProfile::MultiTenant,
+        ] {
+            for requested in [None, Some(0), Some(7), Some(4096)] {
+                let config: NetworkConfig = serde_json::from_value(serde_json::json!({
+                    "max_udp_connections": requested
+                }))
+                .unwrap();
+                let mut config = resolved(config);
+                let expected = requested
+                    .or(match profile {
+                        DeploymentProfile::SingleTenant => None,
+                        DeploymentProfile::MultiTenant => Some(1024),
+                    })
+                    .map(ConnectionLimit::from);
+                enforce_deployment_profile(&mut config, profile);
+                assert_eq!(config.config().max_udp_connections, expected);
+                enforce_deployment_profile(&mut config, profile);
+                assert_eq!(config.config().max_udp_connections, expected);
             }
         }
     }
@@ -1046,7 +1073,7 @@ mod tests {
         for limit in [10000, usize::MAX] {
             let mut config = NetworkConfig::default();
             config.tls.enabled = false;
-            config.max_connections = Some(ConnectionLimit::from(limit));
+            config.max_tcp_connections = Some(ConnectionLimit::from(limit));
             let net = SmoltcpNetwork::build(
                 resolved(config),
                 0,

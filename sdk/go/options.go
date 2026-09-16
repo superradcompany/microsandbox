@@ -1175,8 +1175,13 @@ type NetworkConfig struct {
 	// Defaults to "fd42:6d73:62::/48".
 	IPv6Pool string
 
-	// MaxConnections caps concurrent network connections from the sandbox.
+	// MaxConnections caps TCP connections.
+	// Deprecated: use MaxTCPConnections instead; specifying both is an error.
 	MaxConnections *uint
+	// MaxTCPConnections caps TCP connections; zero means unlimited.
+	MaxTCPConnections *uint
+	// MaxUDPConnections caps UDP relay sessions. Defaults to unlimited for single-tenant and 1024 for multi-tenant; zero means unlimited.
+	MaxUDPConnections *uint
 
 	// RateLimiter configures local egress and ingress traffic limits. Nil means
 	// unlimited in both directions.

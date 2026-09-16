@@ -1022,7 +1022,10 @@ export interface NapiNetworkBuilder {
   onSecretViolation(
     configure: (b: NapiViolationActionBuilder) => NapiViolationActionBuilder,
   ): this;
+  /** @deprecated Use maxTcpConnections instead. */
   maxConnections(max: number): this;
+  maxTcpConnections(max: number): this;
+  maxUdpConnections(max: number): this;
   strict(enabled: boolean): this;
   ipv4Pool(pool: string): this;
   ipv6Pool(pool: string): this;

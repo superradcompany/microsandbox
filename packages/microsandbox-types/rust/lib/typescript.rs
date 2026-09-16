@@ -297,6 +297,17 @@ mod tests {
     }
 
     #[test]
+    fn cloud_network_limits_are_optional_in_typescript_and_on_the_wire() {
+        let network: crate::cloud::CloudNetworkSpec = serde_json::from_str("{}").unwrap();
+        let wire = serde_json::to_value(network).unwrap();
+        let declaration = crate::cloud::CloudNetworkSpec::decl(&ts_rs::Config::new());
+        for field in ["max_connections", "max_udp_connections"] {
+            assert!(wire.get(field).is_none());
+            assert!(declaration.contains(&format!("{field}?:")));
+        }
+    }
+
+    #[test]
     fn cloud_bindings_import_domain_and_stay_scoped() {
         assert_eq!(domain_declarations().len(), 17);
         assert_eq!(snapshot_declarations().len(), 9);

@@ -2504,13 +2504,29 @@ mod tests {
     async fn test_builder_network_preserves_explicit_unlimited() {
         let config = SandboxBuilder::new("test")
             .image("alpine")
-            .network(|n| n.max_connections(0))
+            .network(|n| n.max_tcp_connections(0))
             .build()
             .await
             .unwrap();
-        assert_eq!(config.spec.network.max_connections, Some(0));
+        assert_eq!(config.spec.network.max_tcp_connections, Some(0));
         assert_eq!(
-            config.local_network_config().unwrap().max_connections,
+            config.local_network_config().unwrap().max_tcp_connections,
+            Some(ConnectionLimit::Unlimited)
+        );
+    }
+
+    #[cfg(feature = "net")]
+    #[tokio::test]
+    async fn test_builder_network_preserves_explicit_unlimited_udp() {
+        let config = SandboxBuilder::new("test")
+            .image("alpine")
+            .network(|n| n.max_udp_connections(0))
+            .build()
+            .await
+            .unwrap();
+        assert_eq!(config.spec.network.max_udp_connections, Some(0));
+        assert_eq!(
+            config.local_network_config().unwrap().max_udp_connections,
             Some(ConnectionLimit::Unlimited)
         );
     }
@@ -2522,7 +2538,7 @@ mod tests {
             .image("alpine")
             .port(8080, 80)
             .secret_env("OPENAI_API_KEY", "secret", "api.openai.com")
-            .network(|n| n.max_connections(128).strict(true))
+            .network(|n| n.max_tcp_connections(128).strict(true))
             .build()
             .await
             .unwrap();
@@ -2533,7 +2549,10 @@ mod tests {
         assert_eq!(config.spec.network.ports[0].protocol, PortProtocol::Tcp);
         let network = config.local_network_config().unwrap();
         assert_eq!(network.secrets.secrets.len(), 1);
-        assert_eq!(network.max_connections, Some(ConnectionLimit::from(128)));
+        assert_eq!(
+            network.max_tcp_connections,
+            Some(ConnectionLimit::from(128))
+        );
         assert!(network.strict);
     }
 

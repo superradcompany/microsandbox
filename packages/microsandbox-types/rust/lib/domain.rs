@@ -582,8 +582,14 @@ pub struct NetworkSpec {
     #[config_patch(nested)]
     pub secrets: Option<SecretsConfig>,
 
-    /// Max concurrent guest connections.
-    pub max_connections: Option<usize>,
+    /// TCP connection cap. `max_connections` is a deprecated configuration alias.
+    // Keep saved configurations readable by releases that predate the TCP-specific name.
+    #[serde(rename = "max_connections", alias = "max_tcp_connections")]
+    pub max_tcp_connections: Option<usize>,
+
+    /// Max concurrent UDP relay sessions. Omitted is unlimited for single-tenant and 1024 for multi-tenant; zero means unlimited.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_udp_connections: Option<usize>,
 
     /// Local network rate limits. Missing means unlimited in both directions.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1706,7 +1712,8 @@ impl Default for NetworkSpec {
             tls: None,
             strict: false,
             secrets: None,
-            max_connections: None,
+            max_tcp_connections: None,
+            max_udp_connections: None,
             rate_limiter: None,
             trust_host_cas: false,
             outbound_proxy: None,

@@ -220,7 +220,14 @@ wrapMethodWithErrorMap(napi.VolumeBuilder, "create");
       } catch (e) {
         throw mapNapiError(e);
       }
-      return remapKeys(JSON.parse(json));
+      const config = remapKeys(JSON.parse(json));
+      // Preserve the deprecated read accessor on built configurations.
+      config.network.maxTcpConnections = config.network.maxConnections;
+      Object.defineProperty(config.network, "maxConnections", {
+        get: () => config.network.maxTcpConnections,
+        enumerable: false,
+      });
+      return config;
     };
     Object.defineProperty(proto, "__buildWrapped", {
       value: true,
@@ -278,7 +285,14 @@ hideMethod(napi.SandboxBuilder, "attachWithBuilder");
       } catch (e) {
         throw mapNapiError(e);
       }
-      return remapKeys(JSON.parse(json));
+      const config = remapKeys(JSON.parse(json));
+      // Preserve the deprecated read accessor on built configurations.
+      config.maxTcpConnections = config.maxConnections;
+      Object.defineProperty(config, "maxConnections", {
+        get: () => config.maxTcpConnections,
+        enumerable: false,
+      });
+      return config;
     };
     Object.defineProperty(proto, "__buildWrapped", {
       value: true,

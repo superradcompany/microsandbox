@@ -925,7 +925,9 @@ struct NetworkOpts {
     ipv4_pool: Option<String>,
     /// IPv6 pool used to derive per-sandbox /64 guest prefixes.
     ipv6_pool: Option<String>,
-    max_connections: Option<usize>,
+    #[serde(alias = "max_connections")]
+    max_tcp_connections: Option<usize>,
+    max_udp_connections: Option<usize>,
     /// Local egress and ingress rate limiters.
     rate_limiter: Option<NetworkRateLimiterOpts>,
     /// Sandbox-wide secret violation action: "block", "block-and-log",
@@ -1423,8 +1425,11 @@ fn apply_network(
     }
 
     // Connection ceiling.
-    if let Some(max) = net.max_connections {
-        builder = builder.network(move |n| n.max_connections(max));
+    if let Some(max) = net.max_tcp_connections {
+        builder = builder.network(move |n| n.max_tcp_connections(max));
+    }
+    if let Some(max) = net.max_udp_connections {
+        builder = builder.network(move |n| n.max_udp_connections(max));
     }
 
     // Strict hostname policy.
@@ -7108,6 +7113,24 @@ fn agent_error(err: microsandbox::AgentClientError) -> FfiError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn tcp_network_aliases_are_exclusive() {
+        for name in ["max_connections", "max_tcp_connections"] {
+            let config: super::NetworkOpts = serde_json::from_value(serde_json::json!({
+                name: 0, "max_udp_connections": 7
+            }))
+            .unwrap();
+            assert_eq!(config.max_tcp_connections, Some(0));
+            assert_eq!(config.max_udp_connections, Some(7));
+        }
+        assert!(
+            serde_json::from_value::<super::NetworkOpts>(serde_json::json!({
+                "max_connections": 0, "max_tcp_connections": 64
+            }))
+            .is_err()
+        );
+    }
+
     use super::*;
 
     #[test]

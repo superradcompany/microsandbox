@@ -7,6 +7,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::num::NonZeroUsize;
 use std::ops::Range;
 #[cfg(target_os = "linux")]
 use std::os::fd::AsRawFd;
@@ -38,9 +39,6 @@ const SESSION_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Channel capacity for outbound datagrams to the relay task.
 const OUTBOUND_CHANNEL_CAPACITY: usize = 64;
-
-/// Default max concurrent UDP relay sessions per sandbox.
-const MAX_UDP_SESSIONS: usize = 256;
 
 /// Maximum queued bytes for one UDP relay session.
 const MAX_QUEUED_BYTES_PER_SESSION: usize = 512 * 1024;
@@ -96,6 +94,7 @@ static NEXT_IPV6_RESPONSE_IDENT: AtomicU32 = AtomicU32::new(1);
 pub struct UdpRelay {
     shared: Arc<SharedState>,
     sessions: HashMap<(SocketAddr, SocketAddr), UdpSession>,
+    max_sessions: Option<NonZeroUsize>,
     gateway_mac: EthernetAddress,
     guest_mac: EthernetAddress,
     mtu: usize,
@@ -162,12 +161,23 @@ impl UdpRelay {
         Self {
             shared,
             sessions: HashMap::new(),
+            max_sessions: None,
             gateway_mac: EthernetAddress(gateway_mac),
             guest_mac: EthernetAddress(guest_mac),
             mtu,
             tokio_handle,
             outbound_proxy,
             dns_forwarder: None,
+        }
+    }
+
+    /// Configure the session cap. `None` selects unlimited.
+    pub fn set_max_sessions(&mut self, limit: Option<NonZeroUsize>) {
+        self.max_sessions = limit;
+        if let Some(limit) = limit {
+            while self.sessions.len() > limit.get() {
+                self.evict_oldest();
+            }
         }
     }
 
@@ -278,7 +288,10 @@ impl UdpRelay {
         }
 
         self.sessions.remove(&key);
-        if self.sessions.len() >= MAX_UDP_SESSIONS {
+        if self
+            .max_sessions
+            .is_some_and(|limit| self.sessions.len() >= limit.get())
+        {
             self.evict_oldest();
         }
 
@@ -1531,6 +1544,37 @@ fn cmsg_align(len: usize) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn configured_session_limit_evicts_oldest_and_can_be_unlimited() {
+        let mut relay = UdpRelay::new(
+            Arc::new(SharedState::new(16)),
+            [2, 0, 0, 0, 0, 1],
+            [2, 0, 0, 0, 0, 2],
+            1500,
+            tokio::runtime::Handle::current(),
+            None,
+        );
+        relay.set_max_sessions(NonZeroUsize::new(2));
+        let dst: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+        let sources: Vec<SocketAddr> = (10000..10004)
+            .map(|port| SocketAddr::from(([127, 0, 0, 1], port)))
+            .collect();
+        for src in &sources[..2] {
+            assert!(relay.ensure_session((*src, dst), *src, dst, dst));
+        }
+        relay
+            .sessions
+            .get_mut(&(sources[0], dst))
+            .unwrap()
+            .last_active = Instant::now() - Duration::from_secs(1);
+        assert!(relay.ensure_session((sources[2], dst), sources[2], dst, dst));
+        assert_eq!(relay.sessions.len(), 2);
+        assert!(!relay.sessions.contains_key(&(sources[0], dst)));
+        relay.set_max_sessions(None);
+        assert!(relay.ensure_session((sources[3], dst), sources[3], dst, dst));
+        assert_eq!(relay.sessions.len(), 3);
+    }
 
     #[test]
     fn construct_v4_response_has_correct_structure() {

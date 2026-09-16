@@ -504,8 +504,12 @@ export declare class NetworkBuilder {
   interface(configure: (arg: InterfaceOverridesBuilder) => InterfaceOverridesBuilder): this
   /** Configure the violation action for secrets. */
   onSecretViolation(configure: (arg: JsViolationActionBuilder) => JsViolationActionBuilder): this
-  /** Set the maximum number of concurrent connections. */
+  /** @deprecated Use maxTcpConnections instead. */
   maxConnections(max: number): this
+  /** Set the TCP connection cap; zero selects unlimited. */
+  maxTcpConnections(max: number): this
+  /** Set the UDP session cap; zero selects unlimited. Defaults to unlimited for single-tenant and 1024 for multi-tenant. */
+  maxUdpConnections(max: number): this
   /** Require hostname-based policy allows to use inspectable application authority. */
   strict(enabled: boolean): this
   /** Set the IPv4 pool used for per-sandbox /30 guest subnets. */

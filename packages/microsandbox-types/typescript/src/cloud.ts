@@ -625,9 +625,13 @@ export type CloudNetworkSpec = {
    */
   strict: boolean;
   /**
-   * Max concurrent guest connections.
+   * Max concurrent TCP connections.
    */
-  max_connections: number | null;
+  max_connections?: number | null;
+  /**
+   * Max concurrent UDP relay sessions. Omitted is unlimited for single-tenant and 1024 for multi-tenant; zero means unlimited.
+   */
+  max_udp_connections?: number | null;
 };
 
 export type CloudSecretsConfig = {

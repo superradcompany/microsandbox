@@ -592,10 +592,16 @@ Require hostname-based policy allows to use an inspectable request authority. De
   </div>
 </div>
 
-#### <span className="msb-recv">network.</span><span className="msb-hn">maxConnections()</span>
+#### maxUdpConnections()
+
+`network.maxUdpConnections(512)` sets the runtime UDP relay session limit. Omission is unlimited in single-tenant mode and defaults to 1,024 in multi-tenant mode; zero explicitly selects unlimited. At a finite limit, a new session evicts the least recently active session. Sessions expire after 60 seconds of inactivity.
+
+#### <span className="msb-recv">network.</span><span className="msb-hn">maxTcpConnections()</span>
+
+`maxConnections` remains a deprecated alias for this builder method. The last call sets the TCP limit. Either method can be combined with the UDP limit.
 
 ```typescript
-maxConnections(max: number): this
+maxTcpConnections(max: number): this
 ```
 
 Limit the maximum number of concurrent network connections from the sandbox.
@@ -1935,7 +1941,8 @@ Built network configuration produced by `NetworkBuilder.build()`. Keys are camel
 | tls | [`TlsConfig`](#tlsconfig) ` \| null` | TLS interception |
 | secrets | `readonly SecretEntry[]` | Secret entries |
 | secretViolation | [`ViolationAction`](/sdk/typescript/secrets#violationaction) ` \| null` | Action on disallowed secret use |
-| maxConnections | `number \| null` | Maximum concurrent connections |
+| maxTcpConnections | `number \| null` | Maximum concurrent TCP connections |
+| maxUdpConnections | `number \| null` (optional) | Maximum concurrent UDP relay sessions |
 | strict | `boolean` | Strict hostname policy mode |
 | rateLimiter | [`NetworkRateLimiterConfig`](#networkratelimiterconfig) ` \| null` | Local rate limits grouped by direction |
 | interface | `{ ipv4Pool?, ipv6Pool?, ipv4Address?, ipv6Address?, mac?, mtu? }` | Optional interface overrides |

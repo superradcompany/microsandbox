@@ -119,7 +119,10 @@ export interface NetworkConfig {
   readonly tls: TlsConfig | null;
   readonly secrets: readonly SecretEntry[];
   readonly secretViolation: ViolationAction | null;
+  /** @deprecated Use maxTcpConnections instead. */
   readonly maxConnections: number | null;
+  readonly maxTcpConnections: number | null;
+  readonly maxUdpConnections?: number | null;
   readonly strict: boolean;
   readonly rateLimiter: NetworkRateLimiterConfig | null;
   readonly interface?: {

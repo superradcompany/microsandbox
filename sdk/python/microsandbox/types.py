@@ -5,6 +5,7 @@ from __future__ import annotations
 import enum
 import os
 import sys
+import warnings
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Literal, TypeAlias, TypedDict
@@ -1730,6 +1731,11 @@ class Network:
     """IPv6 pool used to derive per-sandbox /64 guest prefixes. Defaults
     to ``fd42:6d73:62::/48``."""
     max_connections: int | None = None
+    """Deprecated: use ``max_tcp_connections`` instead."""
+    max_tcp_connections: int | None = field(default=None, kw_only=True)
+    max_udp_connections: int | None = field(default=None, kw_only=True)
+    """UDP session limit. Defaults to unlimited for single-tenant and 1024 for
+    multi-tenant; zero means unlimited."""
     rate_limiter: NetworkRateLimiter | None = None
     """Local egress and ingress rate limits. ``None`` means unlimited."""
     on_secret_violation: ViolationAction | ViolationPolicy = ViolationAction.BLOCK_AND_LOG
@@ -1785,8 +1791,19 @@ class Network:
             d["ipv4_pool"] = self.ipv4_pool
         if self.ipv6_pool is not None:
             d["ipv6_pool"] = self.ipv6_pool
+        if self.max_connections is not None and self.max_tcp_connections is not None:
+            raise ValueError("max_connections and max_tcp_connections are mutually exclusive")
         if self.max_connections is not None:
-            d["max_connections"] = self.max_connections
+            warnings.warn(
+                "max_connections is deprecated; use max_tcp_connections",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            d["max_tcp_connections"] = self.max_connections
+        elif self.max_tcp_connections is not None:
+            d["max_tcp_connections"] = self.max_tcp_connections
+        if self.max_udp_connections is not None:
+            d["max_udp_connections"] = self.max_udp_connections
         if self.rate_limiter is not None:
             if not isinstance(self.rate_limiter, NetworkRateLimiter):
                 raise TypeError("Network.rate_limiter must be NetworkRateLimiter or None")

@@ -71,15 +71,19 @@ pub struct ProxyConnectState {
 /// - **Lifecycle detection** — identifies newly-established connections for
 ///   proxy spawning.
 /// - **Cleanup** — removes closed sockets from the socket set.
-pub struct ConnectionTracker {
+pub struct TcpConnectionTracker {
     /// Active connections keyed by smoltcp socket handle.
     connections: HashMap<SocketHandle, Connection>,
     /// Secondary index for O(1) duplicate-SYN detection by (src, dst) 4-tuple.
     connection_keys: HashSet<(SocketAddr, SocketAddr)>,
     /// Max concurrent connections (from NetworkConfig).
-    max_connections: Option<NonZeroUsize>,
+    max_tcp_connections: Option<NonZeroUsize>,
     rejected_connections: u64,
 }
+
+/// Deprecated name for [`TcpConnectionTracker`].
+#[deprecated(note = "use TcpConnectionTracker instead")]
+pub type ConnectionTracker = TcpConnectionTracker;
 
 /// Maximum number of poll iterations to attempt flushing remaining data
 /// after the proxy task has exited before force-aborting the socket.
@@ -101,7 +105,7 @@ struct Connection {
     /// Receives data from proxy task to write to smoltcp socket (server → guest).
     from_proxy: mpsc::Receiver<Bytes>,
     /// Proxy-side channel ends, held until the connection is ESTABLISHED.
-    /// Taken by [`ConnectionTracker::take_new_connections()`].
+    /// Taken by [`TcpConnectionTracker::take_new_connections()`].
     proxy_channels: Option<ProxyChannels>,
     /// Whether a proxy task has been spawned for this connection.
     proxy_spawned: bool,
@@ -127,7 +131,7 @@ struct ProxyChannels {
 
 /// Information for spawning a proxy task for a newly established connection.
 ///
-/// Returned by [`ConnectionTracker::take_new_connections()`]. The poll loop
+/// Returned by [`TcpConnectionTracker::take_new_connections()`]. The poll loop
 /// passes this to the proxy task spawner.
 pub struct NewConnection {
     /// Original destination the guest was connecting to.
@@ -198,13 +202,13 @@ impl Default for ProxyConnectState {
     }
 }
 
-impl ConnectionTracker {
+impl TcpConnectionTracker {
     /// Create a new tracker with the given connection limit.
-    pub fn new(max_connections: Option<NonZeroUsize>) -> Self {
+    pub fn new(max_tcp_connections: Option<NonZeroUsize>) -> Self {
         Self {
             connections: HashMap::new(),
             connection_keys: HashSet::new(),
-            max_connections,
+            max_tcp_connections,
             rejected_connections: 0,
         }
     }
@@ -223,7 +227,7 @@ impl ConnectionTracker {
     /// prevents socket dispatch ambiguity when multiple connections target
     /// different IPs on the same port.
     ///
-    /// Returns `false` if at `max_connections` limit.
+    /// Returns `false` if at `max_tcp_connections` limit.
     pub fn create_tcp_socket(
         &mut self,
         src: SocketAddr,
@@ -231,7 +235,7 @@ impl ConnectionTracker {
         sockets: &mut SocketSet<'_>,
     ) -> bool {
         if self
-            .max_connections
+            .max_tcp_connections
             .is_some_and(|max| self.connections.len() >= max.get())
         {
             // Reclaim completed flows before rejecting a burst. Existing
@@ -239,7 +243,7 @@ impl ConnectionTracker {
             // an idle listener here is an invalid or reset handshake.
             self.cleanup_closed(sockets);
             if self
-                .max_connections
+                .max_tcp_connections
                 .is_some_and(|max| self.connections.len() >= max.get())
             {
                 self.rejected_connections = self.rejected_connections.saturating_add(1);
@@ -454,7 +458,7 @@ impl ConnectionTracker {
             .count();
         tracing::trace!(
             target: PROFILING_TARGET,
-            limit = ?self.max_connections,
+            limit = ?self.max_tcp_connections,
             tracked = self.connections.len(),
             closing,
             rejected_total = self.rejected_connections,
@@ -542,7 +546,7 @@ mod tests {
 
     #[test]
     fn omitted_limit_tracks_more_than_the_previous_default() {
-        let mut tracker = ConnectionTracker::new(None);
+        let mut tracker = TcpConnectionTracker::new(None);
         let mut sockets = SocketSet::new(Vec::new());
         let dst = "198.51.100.1:443".parse().unwrap();
         for port in 10000..10300 {

@@ -55,6 +55,7 @@ fn cloud_network_ignores_unsupported_options() {
     let network: CloudNetworkSpec = serde_json::from_value(serde_json::json!({
         "enabled": false,
         "max_connections": 64,
+        "max_udp_connections": 32,
         "rate_limiter": {
             "egress": {
                 "bandwidth": {"size": 1024, "refill_time_ms": 1000}
@@ -64,7 +65,8 @@ fn cloud_network_ignores_unsupported_options() {
     .unwrap();
 
     assert!(!network.enabled);
-    assert_eq!(network.max_connections, Some(64));
+    assert_eq!(network.max_tcp_connections, Some(64));
+    assert_eq!(network.max_udp_connections, Some(32));
     assert!(
         serde_json::to_value(network)
             .unwrap()
@@ -138,7 +140,7 @@ fn create_request_defaults_fields_missing_from_older_clients() {
 
     assert!(request.sandbox_spec().network.enabled);
     assert!(!request.sandbox_spec().network.strict);
-    assert_eq!(request.sandbox_spec().network.max_connections, None);
+    assert_eq!(request.sandbox_spec().network.max_tcp_connections, None);
     assert_eq!(request.sandbox_spec().runtime.workdir, None);
 }
 
@@ -814,4 +816,24 @@ fn create_snapshot_request_requires_sandbox_and_name_and_defaults_the_rest() {
         "name": "post-setup",
     }));
     assert!(legacy_source.is_err());
+}
+
+#[test]
+fn tcp_aliases_preserve_the_existing_cloud_wire_key() {
+    for name in ["max_connections", "max_tcp_connections"] {
+        let network: CloudNetworkSpec = serde_json::from_value(serde_json::json!({
+            name: 64, "max_udp_connections": 8
+        }))
+        .unwrap();
+        let wire = serde_json::to_value(network).unwrap();
+        assert_eq!(wire["max_connections"], 64);
+        assert_eq!(wire["max_udp_connections"], 8);
+        assert!(wire.get("max_tcp_connections").is_none());
+    }
+    assert!(
+        serde_json::from_value::<CloudNetworkSpec>(serde_json::json!({
+            "max_connections": 64, "max_tcp_connections": 64
+        }))
+        .is_err()
+    );
 }

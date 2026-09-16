@@ -1282,8 +1282,18 @@ fn apply_network(
     }
 
     // Max connections.
-    if let Some(max) = extract_opt::<usize>(net, "max_connections")? {
-        builder = builder.network(|n| n.max_connections(max));
+    let legacy = extract_opt::<usize>(net, "max_connections")?;
+    let tcp = extract_opt::<usize>(net, "max_tcp_connections")?;
+    if legacy.is_some() && tcp.is_some() {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "max_connections and max_tcp_connections are mutually exclusive",
+        ));
+    }
+    if let Some(max) = tcp.or(legacy) {
+        builder = builder.network(|n| n.max_tcp_connections(max));
+    }
+    if let Some(max) = extract_opt::<usize>(net, "max_udp_connections")? {
+        builder = builder.network(|n| n.max_udp_connections(max));
     }
 
     // Strict hostname policy.

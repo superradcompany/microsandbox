@@ -93,15 +93,6 @@ pub enum BuildError {
         reason: String,
     },
 
-    /// The configured connection limit is above the network stack's hard cap.
-    #[error("max_connections {configured} exceeds hard limit {limit}")]
-    MaxConnectionsExceeded {
-        /// Requested connection limit.
-        configured: usize,
-        /// Hard cap enforced by the network stack.
-        limit: usize,
-    },
-
     /// Exactly one TLS intercept CA path was configured.
     #[error("intercept CA config is incomplete; set both cert_path and key_path")]
     IncompleteInterceptCaConfig,

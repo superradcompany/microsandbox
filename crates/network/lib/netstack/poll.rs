@@ -22,7 +22,7 @@ use smoltcp::wire::{
     Ipv6Repr, TcpPacket, UdpPacket,
 };
 
-use crate::config::{DnsConfig, PublishedPort};
+use crate::config::{ConnectionLimit, DnsConfig, PublishedPort};
 use crate::dns::common::ports::DnsPortType;
 use crate::dns::{
     interceptor::DnsInterceptor,
@@ -33,7 +33,7 @@ use crate::policy::{EgressEvaluation, HostnameSource, NetworkPolicy, Protocol};
 use crate::ports::PortPublisher;
 use crate::proxy::ResolvedOutboundProxy;
 use crate::secrets::handle::SecretsHandle;
-use crate::tcp::{connection::ConnectionTracker, proxy::TcpProxy, upstream::UpstreamTcpTarget};
+use crate::tcp::{connection::TcpConnectionTracker, proxy::TcpProxy, upstream::UpstreamTcpTarget};
 use crate::tls::{proxy::TlsProxy, state::TlsState};
 use crate::udp::fragments::{
     Ipv4UdpFragmentReassembler, Ipv6UdpFragmentReassembler, ReassembledUdpDatagram,
@@ -220,8 +220,8 @@ pub fn create_interface(device: &mut SmoltcpDevice, config: &PollLoopConfig) -> 
 ///   when present.
 /// * `published_ports` - Host → guest port publishes; the publisher accepts inbound
 ///   connections on the host-bind address and forwards into the guest.
-/// * `max_connections` - Optional cap on concurrent guest connections tracked by
-///   [`ConnectionTracker`]; `None` uses the default.
+/// * `max_tcp_connections` - Optional cap on concurrent guest connections tracked by
+///   [`TcpConnectionTracker`]; `None` uses the default.
 /// * `tokio_handle` - Runtime handle used for proxy tasks, DNS forwarding, port publishing,
 ///   and ICMP relays.
 #[allow(clippy::too_many_arguments)]
@@ -234,7 +234,8 @@ pub fn smoltcp_poll_loop(
     tls_state: Option<Arc<TlsState>>,
     published_ports: Vec<PublishedPort>,
     strict: bool,
-    max_connections: Option<NonZeroUsize>,
+    max_tcp_connections: Option<NonZeroUsize>,
+    max_udp_connections: Option<ConnectionLimit>,
     tokio_handle: tokio::runtime::Handle,
     secrets: SecretsHandle,
     outbound_proxy: Option<Arc<ResolvedOutboundProxy>>,
@@ -242,7 +243,7 @@ pub fn smoltcp_poll_loop(
     let mut device = SmoltcpDevice::new(shared.clone(), config.mtu);
     let mut iface = create_interface(&mut device, &config);
     let mut sockets = SocketSet::new(vec![]);
-    let mut conn_tracker = ConnectionTracker::new(max_connections);
+    let mut conn_tracker = TcpConnectionTracker::new(max_tcp_connections);
 
     // The DNS forwarder needs to know which IPs count as "the gateway"
     // (so it routes guest queries to those addresses through the
@@ -296,6 +297,7 @@ pub fn smoltcp_poll_loop(
         tokio_handle.clone(),
         outbound_proxy.clone(),
     );
+    udp_relay.set_max_sessions(max_udp_connections.and_then(ConnectionLimit::cap));
     udp_relay.attach_dns_forwarder(dns_forwarder_handle.clone());
     let mut udp_fragments = Ipv4UdpFragmentReassembler::new();
     let mut ipv6_udp_fragments = Ipv6UdpFragmentReassembler::new();
@@ -1790,7 +1792,7 @@ mod tests {
     // ─────────────────────────────────────────────────────────────────────
     // Guest-initiated TCP teardown.
     //
-    // These tests drive the real `ConnectionTracker` + smoltcp interface
+    // These tests drive the real `TcpConnectionTracker` + smoltcp interface
     // through a full TCP handshake and then a guest-initiated teardown,
     // asserting the observable the proxy task sees on its channel:
     //   - guest FIN => half-close propagated (channel EOF), server → guest
@@ -1947,7 +1949,7 @@ mod tests {
     /// Drive guest→server handshake to ESTABLISHED, returning (server_isn,
     /// guest_seq_after_handshake).
     fn handshake(
-        tracker: &mut ConnectionTracker,
+        tracker: &mut TcpConnectionTracker,
         device: &mut SmoltcpDevice,
         iface: &mut Interface,
         sockets: &mut SocketSet<'_>,
@@ -2018,7 +2020,7 @@ mod tests {
 
     /// Complete a guest→server handshake and hand the connection to a proxy.
     fn establish(
-        tracker: &mut ConnectionTracker,
+        tracker: &mut TcpConnectionTracker,
         device: &mut SmoltcpDevice,
         iface: &mut Interface,
         sockets: &mut SocketSet<'_>,
@@ -2047,7 +2049,7 @@ mod tests {
         let mut device = SmoltcpDevice::new(shared.clone(), poll_config.mtu);
         let mut iface = create_interface(&mut device, &poll_config);
         let mut sockets = SocketSet::new(vec![]);
-        let mut tracker = ConnectionTracker::new(None);
+        let mut tracker = TcpConnectionTracker::new(None);
         let now = smoltcp_now();
 
         let (server_isn, guest_seq, mut new_conns) = establish(
@@ -2145,7 +2147,7 @@ mod tests {
         let mut device = SmoltcpDevice::new(shared.clone(), poll_config.mtu);
         let mut iface = create_interface(&mut device, &poll_config);
         let mut sockets = SocketSet::new(vec![]);
-        let mut tracker = ConnectionTracker::new(None);
+        let mut tracker = TcpConnectionTracker::new(None);
         let now = smoltcp_now();
 
         let (server_isn, guest_seq, mut new_conns) = establish(
@@ -2240,7 +2242,7 @@ mod tests {
         let mut device = SmoltcpDevice::new(shared.clone(), poll_config.mtu);
         let mut iface = create_interface(&mut device, &poll_config);
         let mut sockets = SocketSet::new(vec![]);
-        let mut tracker = ConnectionTracker::new(None);
+        let mut tracker = TcpConnectionTracker::new(None);
         let now = smoltcp_now();
 
         let (server_isn, guest_seq, mut new_conns) = establish(
@@ -2305,7 +2307,7 @@ mod tests {
         let mut device = SmoltcpDevice::new(shared.clone(), config.mtu);
         let mut iface = create_interface(&mut device, &config);
         let mut sockets = SocketSet::new(vec![]);
-        let mut tracker = ConnectionTracker::new(NonZeroUsize::new(1));
+        let mut tracker = TcpConnectionTracker::new(NonZeroUsize::new(1));
         let now = smoltcp_now();
         handshake(
             &mut tracker,
@@ -2355,7 +2357,7 @@ mod tests {
         let mut device = SmoltcpDevice::new(shared.clone(), config.mtu);
         let mut iface = create_interface(&mut device, &config);
         let mut sockets = SocketSet::new(vec![]);
-        let mut tracker = ConnectionTracker::new(NonZeroUsize::new(1));
+        let mut tracker = TcpConnectionTracker::new(NonZeroUsize::new(1));
         let now = smoltcp_now();
         ingress(
             build_arp_request_frame(GUEST_MAC, GUEST_IP, GATEWAY_IP),
@@ -2400,7 +2402,7 @@ mod tests {
         let mut device = SmoltcpDevice::new(shared.clone(), config.mtu);
         let mut iface = create_interface(&mut device, &config);
         let mut sockets = SocketSet::new(vec![]);
-        let mut tracker = ConnectionTracker::new(NonZeroUsize::new(1));
+        let mut tracker = TcpConnectionTracker::new(NonZeroUsize::new(1));
         let now = smoltcp_now();
         let (_, guest_seq) = handshake(
             &mut tracker,
@@ -2466,7 +2468,7 @@ mod tests {
         // Once the table is full, new guest connections are refused. Uses a
         // small max to avoid 256 full handshakes; the gating logic is
         // identical to the 256 default.
-        let mut tracker = ConnectionTracker::new(NonZeroUsize::new(4));
+        let mut tracker = TcpConnectionTracker::new(NonZeroUsize::new(4));
         let mut sockets = SocketSet::new(vec![]);
         let shared = Arc::new(SharedState::new(64));
         let config = leak_poll_config();
@@ -2503,7 +2505,7 @@ mod tests {
         let mut device = SmoltcpDevice::new(shared.clone(), poll_config.mtu);
         let mut iface = create_interface(&mut device, &poll_config);
         let mut sockets = SocketSet::new(vec![]);
-        let mut tracker = ConnectionTracker::new(None);
+        let mut tracker = TcpConnectionTracker::new(None);
         let now = smoltcp_now();
         let guest_port = 54323;
         let (server_isn, guest_seq) = handshake(

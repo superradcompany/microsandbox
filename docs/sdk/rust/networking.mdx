@@ -853,10 +853,16 @@ fn strict(self, enabled: bool) -> Self
 
 Require hostname-based policy allows to use an inspectable request authority. Default: `false`. Plain HTTP exposes that authority in `Host`; HTTPS only exposes it when TLS interception is enabled and not bypassed. Without that visibility, strict mode denies HTTPS that would otherwise be allowed only by a hostname rule.
 
-#### <span className="msb-recv">network.</span><span className="msb-hn">max_connections()</span>
+#### max_udp_connections()
+
+`network.max_udp_connections(512)` sets the runtime UDP relay session limit. Omission is unlimited in single-tenant mode and defaults to 1,024 in multi-tenant mode; zero explicitly selects unlimited. At a finite limit, a new session evicts the least recently active session. Sessions expire after 60 seconds of inactivity.
+
+#### <span className="msb-recv">network.</span><span className="msb-hn">max_tcp_connections()</span>
+
+`max_connections` remains a deprecated alias for this builder method. The last call sets the TCP limit. Either method can be combined with the UDP limit.
 
 ```rust
-fn max_connections(self, max: usize) -> Self
+fn max_tcp_connections(self, max: usize) -> Self
 ```
 
 Limit the maximum number of concurrent network connections from the sandbox. When omitted, single-tenant mode is unlimited and multi-tenant mode defaults to 1,024. A positive value overrides the default; passing zero explicitly selects unlimited in either mode. Hosting services are responsible for restricting tenant overrides.

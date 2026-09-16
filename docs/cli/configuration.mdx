@@ -66,7 +66,7 @@ Scoped flags accept the contents of one field or field group without its root wr
 | Flag | Accepted fields |
 | --- | --- |
 | `--conf PATH` | Any sandbox configuration field |
-| `--net-conf PATH` | `policy`, `allow`, `deny`, `ports`, `dns`, `tls`, `strict`, `trust_host_cas`, `max_connections` |
+| `--net-conf PATH` | `policy`, `allow`, `deny`, `ports`, `dns`, `tls`, `strict`, `trust_host_cas`, `max_tcp_connections`, `max_udp_connections` |
 | `--resource-conf PATH` | `cpus`, `memory`, `max_duration`, `idle_timeout`, `rlimits` |
 | `--runtime-conf PATH` | `workdir`, `shell`, `user`, `hostname`, `security`, `entrypoint`, `cmd`, `env`, `labels`, `init` |
 | `--fs-conf PATH` | `mounts`, `patch_files`, `patches` |
@@ -260,7 +260,7 @@ network:
     block_quic: true
   strict: false
   trust_host_cas: false
-  max_connections: 256
+  max_tcp_connections: 256
 ```
 
 A non-empty `allow` list implies deny-by-default egress. `strict: true` requires hostname-based allow rules to use an inspectable request authority. Plain HTTP exposes that authority in `Host`; HTTPS only exposes it when TLS interception is enabled and not bypassed. Without that visibility, strict mode denies HTTPS that would otherwise be allowed only by a hostname rule. Top-level `ports` is shorthand for `network.ports`; when both are present, the lists are combined and duplicate host ports are rejected.
@@ -306,3 +306,9 @@ Sandbox configuration is data, not a templating language. The loader rejects unk
 Only `${NAME}` environment substitution is supported. Substituted variables must exist when the config is loaded; an exact secret `value: "${NAME}"` is the exception because it records a host-side source that is resolved when the sandbox starts. Shell-style operators such as `${NAME:-fallback}`, includes, templates, loops, and expressions are not supported.
 
 Project envelope fields such as `sandboxes`, `volumes`, and `layers`, plus per-project fields such as `depends_on`, are rejected in single-sandbox configuration.
+
+### UDP session limit
+
+Set `max_udp_connections` in the network configuration, or pass `--max-udp-connections 512`. The default is unlimited in single-tenant mode and 1,024 relay sessions in multi-tenant mode; zero explicitly selects unlimited. At capacity, new sessions evict the least recently active session.
+
+`max_connections` and `--max-connections` remain deprecated TCP-only aliases for `max_tcp_connections` and `--max-tcp-connections`. Specifying both TCP names in one configuration or command is an error. The UDP limit is independent.

@@ -396,14 +396,14 @@ func TestTLSConfigUpstreamCACertsCreates(t *testing.T) {
 	})
 }
 
-// TestNetworkMaxConnectionsCreates exercises the connection-cap option.
-func TestNetworkMaxConnectionsCreates(t *testing.T) {
+// TestNetworkMaxTCPConnectionsCreates exercises the connection-cap option.
+func TestNetworkMaxTCPConnectionsCreates(t *testing.T) {
 	ctx := integrationCtx(t)
 	name := "go-sdk-maxconn-" + t.Name()
 
 	max := uint(64)
 	network := microsandbox.NetworkPolicy.AllowAll()
-	network.MaxConnections = &max
+	network.MaxTCPConnections = &max
 	sb, err := createSandbox(t, ctx, name,
 		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithNetwork(network),
