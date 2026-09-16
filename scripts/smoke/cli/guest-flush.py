@@ -123,7 +123,7 @@ def main():
                             names.append(child)
                             run("measure-" + label, "branch", source, "--name", child, *flags)
                         else:
-                            archive = home / (label + ".msnap")
+                            archive = home / (label + ".msb")
                             scope = ["--full"] if operation == "full" else []
                             run("measure-" + label, "snapshot", "create", label,
                                 "--from-sandbox", source, "-o", str(archive), *scope, *flags)
@@ -183,7 +183,7 @@ def main():
                                 run("measure-" + label, "branch", source, "--name", child,
                                     *flags, executable=executable)
                             else:
-                                archive = home / (label + ".msnap")
+                                archive = home / (label + ".msb")
                                 scope = ["--full"] if operation == "full" else []
                                 run("measure-" + label, "snapshot", "create", label,
                                     "--from-sandbox", source, "-o", str(archive),
@@ -219,7 +219,7 @@ def main():
                     shell(source, "dd if=/dev/urandom of=/flush-data bs=1M count=8 2>/dev/null; "
                           "echo captured > /flush-marker")
                     checksum = shell(source, "sha256sum /flush-data").stdout.split()[0]
-                    archive = home / (label + ".msnap")
+                    archive = home / (label + ".msb")
                     command = ["snapshot", "create", label, "--from-sandbox", source,
                                "-o", str(archive)]
                     if full:
@@ -258,7 +258,7 @@ def main():
                 # external-mount request received a successful acknowledgement.
                 run("pause-auto-" + layout, "pause", source)
                 assert state(source) == "paused"
-                failed = home / (layout + "-must-not-publish.msnap")
+                failed = home / (layout + "-must-not-publish.msb")
                 refused("paused-auto-disk-refused-" + layout, "snapshot", "create",
                         "unflushed", "--from-sandbox", source, "-o", str(failed))
                 refused("paused-required-full-refused-" + layout, "snapshot", "create",
@@ -323,7 +323,7 @@ def main():
                     shell(source, "dd if=/dev/urandom of=/data/data bs=1M count=8 2>/dev/null; "
                           "cp /data/data /files/data; cp /data/data /flush-data")
                     checksum = shell(source, "sha256sum /data/data").stdout.split()[0]
-                    archive = home / (label + ".msnap")
+                    archive = home / (label + ".msb")
                     command = ["snapshot", "create", label, "--from-sandbox", source,
                                "--guest-flush", policy, "-o", str(archive)]
                     if full:
@@ -362,7 +362,7 @@ def main():
                     executable=args.legacy_msb.resolve(strict=True))
                 shell(source, "echo retained-ram > /dev/shm/flush-marker")
                 for policy in ("auto", "required", "skip"):
-                    archive = home / ("legacy-disk-" + policy + ".msnap")
+                    archive = home / ("legacy-disk-" + policy + ".msb")
                     refused("legacy-disk-refuses-" + policy, "snapshot", "create", "old-disk",
                             "--from-sandbox", source, "--guest-flush", policy, "-o", str(archive))
                     assert not archive.exists()

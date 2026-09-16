@@ -2968,7 +2968,7 @@ mod tests {
     #[tokio::test]
     async fn checkpoint_archive_build_retains_patch_resource_intent() {
         let directory = tempfile::tempdir().unwrap();
-        let archive = directory.path().join("saved.msnap");
+        let archive = directory.path().join("saved.msb");
         std::fs::write(&archive, b"archive validation is deferred to the backend").unwrap();
         let config = SandboxBuilder::new("restore")
             .with_snapshot_reference(SnapshotReference::path(archive.to_string_lossy()))

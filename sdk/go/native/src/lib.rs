@@ -7887,7 +7887,7 @@ mod tests {
                 checkpoint_path: "/runtime/checkpoint".into(),
                 artifact: Some(microsandbox::PublishedSnapshotArtifact {
                     kind: microsandbox::SnapshotArtifactKind::Archive,
-                    path: "/saved.msnap".into(),
+                    path: "/saved.msb".into(),
                     snapshot_id: "snap_1".into(),
                     digest: "sha256:descriptor".into(),
                 }),
@@ -7902,7 +7902,7 @@ mod tests {
         assert_eq!(payload["message"], message);
         assert_eq!(payload["recovery"]["checkpoint_id"], "checkpoint-1");
         assert_eq!(payload["recovery"]["artifact"]["kind"], "archive");
-        assert_eq!(payload["recovery"]["artifact"]["path"], "/saved.msnap");
+        assert_eq!(payload["recovery"]["artifact"]["path"], "/saved.msb");
         assert!(payload["recovery"]["publication_error"].is_null());
     }
 
