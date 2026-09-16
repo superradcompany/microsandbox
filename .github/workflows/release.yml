@@ -20,6 +20,7 @@ on:
       - scripts/ci/validate_linux_glibc.py
       - scripts/ci/test_validate_linux_glibc.py
       - scripts/ci/wait-for-npm-packages.mjs
+      - scripts/ci/publish-npm-package.mjs
   # Manual runs exercise the full release build and validation graph. Every
   # irreversible job below is independently guarded to tag pushes only.
   workflow_dispatch:
@@ -1298,8 +1299,8 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         working-directory: packages
         run: |
-          npm publish --workspace @microsandbox/types --access public
-          npm publish --workspace @microsandbox/protocol-client --access public
+          node ../scripts/ci/publish-npm-package.mjs microsandbox-types/typescript
+          node ../scripts/ci/publish-npm-package.mjs protocol-client/typescript
 
       - name: Wait for shared dependencies to be indexed
         run: |
@@ -1312,8 +1313,8 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         working-directory: packages
         run: |
-          npm publish --workspace @microsandbox/agent-client --access public
-          npm publish --workspace @microsandbox/control-client --access public
+          node ../scripts/ci/publish-npm-package.mjs agent-client/typescript
+          node ../scripts/ci/publish-npm-package.mjs control-client/typescript
 
       - name: Wait for shared clients to be indexed
         run: |
@@ -1328,7 +1329,7 @@ jobs:
           for dir in darwin-arm64 linux-x64-gnu linux-arm64-gnu win32-x64-msvc win32-arm64-msvc; do
             echo "Publishing @superradcompany/microsandbox-$dir..."
             cd sdk/node-ts/npm/$dir
-            npm publish --access public
+            node ../../../../scripts/ci/publish-npm-package.mjs .
             cd ../../../..
           done
 
@@ -1370,7 +1371,7 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         working-directory: sdk/node-ts
-        run: npm publish --access public
+        run: node ../../scripts/ci/publish-npm-package.mjs .
 
   # ---------------------------------------------------------------------------
   # Refresh sdk/node-ts/package-lock.json against the just-published platform
@@ -1450,7 +1451,7 @@ jobs:
           rm -f package-lock.json
           npm install
           npm run build
-          npm publish --access public
+          node ../scripts/ci/publish-npm-package.mjs .
 
   # ---------------------------------------------------------------------------
   # Publish Rust crates to crates.io
