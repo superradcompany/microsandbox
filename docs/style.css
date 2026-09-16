@@ -498,11 +498,11 @@ html.dark body .code-block-background[data-component-part="code-block-root"] {
   color: var(--msb-code-header-text) !important;
 }
 
-#pagination {
+nav#pagination {
   background-color: var(--msb-code-surface-strong) !important;
 }
 
-#pagination a:hover > div:first-child {
+nav#pagination a:hover > div:first-child {
   box-shadow: 0 0 0 1px var(--msb-interactive-accent) !important;
 }
 

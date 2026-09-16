@@ -3,8 +3,8 @@
   "theme": "maple",
   "name": "microsandbox",
   "logo": {
-    "light": "/images/microsandbox-banner-light.svg",
-    "dark": "/images/microsandbox-banner-dark.svg",
+    "light": "/images/microsandbox-pixel-light.svg",
+    "dark": "/images/microsandbox-pixel-dark.svg",
     "href": "https://microsandbox.dev"
   },
   "favicon": "/logo/favicon.png",
