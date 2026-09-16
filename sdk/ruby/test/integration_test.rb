@@ -122,6 +122,47 @@ class MicrosandboxIntegrationTest < Test::Unit::TestCase
     sandbox&.stop
   end
 
+  def test_exec_timeout_raises_typed_error
+    sandbox = create_sandbox("exec-timeout")
+
+    error = assert_raise(Microsandbox::ExecTimeoutError) { sandbox.exec("sleep", ["30"], timeout: 0.5) }
+
+    assert_true Microsandbox::Error === error
+    assert_equal "exec-timeout", error.code
+  ensure
+    sandbox&.stop
+  end
+
+  def test_missing_guest_path_raises_filesystem_error
+    sandbox = create_sandbox("fs-missing")
+
+    error = assert_raise(Microsandbox::FilesystemError) { sandbox.fs.read("/does-not-exist-#{SecureRandom.hex(4)}") }
+
+    assert_true Microsandbox::Error === error
+    assert_equal "filesystem-error", error.code
+  ensure
+    sandbox&.stop
+  end
+
+  def test_missing_volume_raises_volume_not_found_error
+    error = assert_raise(Microsandbox::VolumeNotFoundError) { Microsandbox::Volume.get(unique_name("missing-volume")) }
+
+    assert_true Microsandbox::Error === error
+    assert_equal "volume-not-found", error.code
+  end
+
+  def test_removing_running_sandbox_raises_sandbox_still_running_error
+    sandbox = create_sandbox("remove-running")
+    handle = Microsandbox::Sandbox.get(@names.last)
+
+    error = assert_raise(Microsandbox::SandboxStillRunningError) { handle.remove }
+
+    assert_true Microsandbox::Error === error
+    assert_equal "sandbox-still-running", error.code
+  ensure
+    sandbox&.stop
+  end
+
   def test_assert_eventually_enforces_timeout
     started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
 

@@ -17,6 +17,9 @@ rescue LoadError => abi_error
   end
 end
 
+# The base Error is defined natively; the typed subclasses reopen it.
+require_relative "microsandbox/errors"
+
 module Microsandbox
   class SandboxBuilder
     %i[
