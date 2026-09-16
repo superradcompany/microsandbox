@@ -1,21 +1,23 @@
-/* Documentation theme shared with the microsandbox landing page. */
+/* Documentation theme shared with the microsandbox landing page.
+   Fonts are preloaded in docs.json. If they arrive late, keep readable fallback
+   text for this page load instead of blocking text or swapping it mid-read. */
 @font-face {
   font-family: "MSB Pixel Circle";
   src: url("/fonts/geist-pixel-circle.woff2") format("woff2");
   font-weight: 500;
-  font-display: block;
+  font-display: optional;
 }
 @font-face {
   font-family: "MSB Pixel Square";
   src: url("/fonts/geist-pixel-square.woff2") format("woff2");
   font-weight: 500;
-  font-display: block;
+  font-display: optional;
 }
 @font-face {
   font-family: "MSB Mono";
   src: url("/fonts/jetbrains-mono-latin.woff2") format("woff2");
   font-weight: 100 800;
-  font-display: block;
+  font-display: optional;
 }
 :root {
   --font-family-body: "MSB Mono", monospace;
