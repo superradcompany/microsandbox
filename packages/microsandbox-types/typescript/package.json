@@ -1,5 +1,10 @@
 {
   "name": "@microsandbox/types",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/superradcompany/microsandbox.git",
+    "directory": "packages/microsandbox-types/typescript"
+  },
   "version": "0.7.0",
   "type": "module",
   "main": "./dist/cloud.js",

@@ -1,5 +1,10 @@
 {
   "name": "@superradcompany/microsandbox-linux-x64-gnu",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/superradcompany/microsandbox.git",
+    "directory": "sdk/node-ts/npm/linux-x64-gnu"
+  },
   "version": "0.7.0",
   "description": "Bundled msb + libkrunfw + napi binding for microsandbox on Linux x86_64 (glibc).",
   "os": ["linux"],

@@ -306,6 +306,14 @@ The release workflow (`.github/workflows/release.yml`) will:
 10. Update the Homebrew tap and winget manifests
 11. Sync docs to Mintlify and refresh the npm lockfile on `main`
 
+### npm publishing and provenance
+
+The Node SDK, shared packages, and native platform packages publish with npm provenance from the GitHub-hosted `npm-publish` job. The job retains `NPM_TOKEN` authentication and requests `id-token: write` only for signing the provenance statement. Each package's repository metadata points to this public repository. MCP remains a separate token-based publication because its source lives in the `microsandbox-mcp` submodule repository.
+
+Pre-publication validation temporarily removes only the SDK's native platform dependencies while installing locked build tools, then restores the original manifest and lockfile before packing. Publication waits for the platform versions to be indexed before refreshing the SDK lockfile, running `npm ci`, and building the SDK. The existing post-release lockfile PR persists registry integrity entries on `main`. Already-published versions are skipped on retries; provenance is not retroactively added to those versions.
+
+Trusted publishing can replace `NPM_TOKEN` later: configure `superradcompany/microsandbox` and workflow filename `release.yml` in each package's npm trusted-publisher settings, and use npm 11.5.1+ with Node 22.14.0+. That switch requires npm-side configuration; this workflow change does not enable it. See [npm provenance](https://docs.npmjs.com/generating-provenance-statements/) and [trusted publishing](https://docs.npmjs.com/trusted-publishers/).
+
 ### Production SDK smoke gate
 
 Add the repository Actions secret `MSB_API_KEY` in
