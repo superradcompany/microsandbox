@@ -3,19 +3,19 @@
   font-family: "MSB Pixel Circle";
   src: url("/fonts/geist-pixel-circle.woff2") format("woff2");
   font-weight: 500;
-  font-display: swap;
+  font-display: block;
 }
 @font-face {
   font-family: "MSB Pixel Square";
   src: url("/fonts/geist-pixel-square.woff2") format("woff2");
   font-weight: 500;
-  font-display: swap;
+  font-display: block;
 }
 @font-face {
   font-family: "MSB Mono";
   src: url("/fonts/jetbrains-mono-latin.woff2") format("woff2");
   font-weight: 100 800;
-  font-display: swap;
+  font-display: block;
 }
 :root {
   --font-family-body: "MSB Mono", monospace;
