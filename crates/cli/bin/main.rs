@@ -285,7 +285,8 @@ fn main() {
             println!(
                 "{}",
                 serde_json::to_string(&microsandbox_runtime::launch_protocol::LaunchCapabilities {
-                    protocols: vec![2, 1]
+                    protocols: vec![2, 1],
+                    required_restore_backing: true,
                 })
                 .expect("serialize capabilities")
             );

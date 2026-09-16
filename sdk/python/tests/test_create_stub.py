@@ -160,7 +160,8 @@ def test_lifecycle_convergence_methods_are_typed() -> None:
 def test_restore_has_only_destination_options() -> None:
     restore = _method("restore")
     names = {arg.arg for arg in restore.args.kwonlyargs}
-    assert {"name", "forked", "disk_only", "snapshot_base", "volumes", "ports", "vsock"} <= names
+    assert {"name", "forked", "disk_only", "snapshot_base", "volumes", "ports", "vsock",
+            "allow_missing_resources"} <= names
     assert not names & {"image", "cmd", "replace", "detached", "from_snapshot", "network"}
     assert {"cpus", "memory", "network_policy", "max_connections", "disable_network",
             "security", "max_duration", "idle_timeout"} <= names

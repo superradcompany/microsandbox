@@ -100,7 +100,7 @@ impl RegistryConfigBuilder {
 impl SandboxBuilder {
     /// Select validation of authorized external filesystem mappings and captured handles.
     /// Strict is the default; relaxed accepts supported mismatches with warnings.
-    /// Neither policy grants host access. Unmapped filesystems remain unavailable in both modes.
+    /// Neither policy grants host access or waives full restore's required-resource checks.
     pub(crate) fn external_mount_policy(
         mut self,
         policy: super::ExternalMountRestorePolicy,

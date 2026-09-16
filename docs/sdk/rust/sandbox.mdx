@@ -28,7 +28,7 @@ Lifecycle methods on a `Sandbox` or `SandboxHandle` stay attached to its opaque 
 
 ### External mount restore
 
-Restore and branch leave host filesystems unmapped unless you supply bindings or explicitly request resource inheritance. `ExternalMountRestorePolicy::Strict` validates the authorized mappings by default; `.external_mount_policy(ExternalMountRestorePolicy::Relaxed)` accepts supported mismatches with warnings. Neither mode grants host access, and intentional omissions do not fail strict validation. `sandbox.restore_warnings().await?` reports unmapped filesystems and accepted mismatches through `guest_path`, `reason`, and `stale_inodes`. See [Snapshot external mounts](/sandboxes/snapshots#external-mounts).
+Full restore requires captured external filesystems and additional disks by default. Supply bindings or explicitly request validated source-local inheritance; `.allow_missing_resources()` instead accepts unavailable resources with warnings. `ExternalMountRestorePolicy::Strict` validates supplied objects; `.external_mount_policy(ExternalMountRestorePolicy::Relaxed)` accepts supported object mismatches without waiving required bindings. Direct branches retain their existing omission behavior. `sandbox.restore_warnings().await?` reports unavailable filesystems and accepted mismatches through `guest_path`, `reason`, and `stale_inodes`. See [Snapshot external mounts](/sandboxes/snapshots#external-mounts).
 
 ### Creation and restore progress
 

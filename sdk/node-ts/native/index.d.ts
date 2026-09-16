@@ -759,6 +759,8 @@ export declare class RestoreBuilder {
   idleTimeout(secs: number): this
   /** Explicitly reuse locally validated source resource bindings. */
   dangerouslyInheritResources(): this
+  /** Accept missing restore resources without inheriting host resources. */
+  allowMissingResources(): this
   /** Supply the base for omitted disk layers and RAM objects in a snapshot archive. */
   snapshotBase(base: string): this
   /** Cold-boot only the disk state carried by a full snapshot. */

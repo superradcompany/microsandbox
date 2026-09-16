@@ -2140,7 +2140,7 @@ fn build_vm(
             match SingleFileFs::new(host_path.clone(), file_mount.filename.clone(), cfg) {
                 Err(error)
                     if relaxed
-                        && restore_binding.is_some()
+                        && restore_binding.is_some_and(|binding| !binding.require_backing)
                         && matches!(
                             error.kind(),
                             std::io::ErrorKind::NotFound
@@ -2306,7 +2306,7 @@ fn build_vm(
             ..Default::default()
         };
         let backend = match PassthroughFs::new(cfg) {
-            Err(error) if owned_mount.is_none() && relaxed && restore_binding.is_some()
+            Err(error) if owned_mount.is_none() && relaxed && restore_binding.is_some_and(|binding| !binding.require_backing)
                 && matches!(error.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::NotADirectory) => {
                 external_mount_reports.last_mut().expect("restore report").unavailable = Some(format!("external export cannot be opened: {error}; filesystem operations return EIO"));
                 builder = builder.fs(move |fs| fs.tag(&tag).custom(Box::new(microsandbox_filesystem::UnavailableFs::default())));

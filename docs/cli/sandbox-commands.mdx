@@ -230,6 +230,7 @@ msb sbx restore ./saved.msb --name disk-copy --disk-only
 | `--forked` | Restore full snapshots using private CoW memory |
 | `--disk-only` | Restore only the disk from a full snapshot; conflicts with `--forked` |
 | `--snapshot-base` | Exact base snapshot or archive for a dependent export |
+| `--allow-missing-resources` | Resume with missing external filesystems or additional disks unavailable, with warnings; full restore otherwise requires their bindings |
 | `-u`, `--user` | Override the default user for new exec commands |
 | `-c`, `--cpus` | CPU count for disk boot; full restore requires the captured count |
 | `-m`, `--memory` | Memory for disk boot, e.g. `2G`; full restore requires the captured size |
@@ -250,7 +251,12 @@ Disk restore applies destination controls before boot, then leaves the sandbox i
 
 Restore policy rules replace the complete destination policy only when you explicitly select `--net-default` or `--no-net`; rule-only requests fail instead of silently discarding configured policy. No policy flags retain the configured default. Restore never replaces an existing sandbox or accepts a new startup command: stop and remove an old destination explicitly, and run workloads with `msb exec` after successful restore.
 
-Restore and branch do not reuse host resources by default. Map directories with `-v /host/path:/guest/path`, select a private captured disk with `-v /guest/path`, and publish new listeners with `-p HOST:GUEST`. An unmapped filesystem or additional disk stays present during full restore but backend requests return I/O errors; data already cached in guest RAM may still be readable. Warnings are shown even with `--quiet`. Disk errors can make the guest filesystem abort its journal or become read-only. The root disk is always restored from the snapshot and cannot be omitted. Custom vsock routes are not inherited; use `--vsock HOST_PATH:PORT` to authorize a service for clients to reconnect to.
+Restore and branch do not reuse host resources by default. Map directories with `-v /host/path:/guest/path`, select a private captured disk with `-v /guest/path`, and publish new listeners with `-p HOST:GUEST`. Full restore refuses missing external filesystems and additional disks unless `--allow-missing-resources` is explicit. Opting out leaves those devices unavailable: backend I/O returns errors, although data cached in guest RAM may remain readable. Disk errors can abort a guest filesystem journal or make it read-only. Warnings remain visible with `--quiet`. `--external-mount-policy relaxed` permits supported stale-object mismatches; it does not waive missing backing. `--dangerously-inherit-resources` authorizes validated source-local bindings, not missing ones. Direct branching retains its existing unavailable-resource behavior. Root and owned storage are always reconstructed; the opt-out cannot waive corrupt or missing snapshot data. Custom vsock routes are not inherited; use `--vsock HOST_PATH:PORT` to authorize a service for clients to reconnect to.
+
+```bash
+msb restore saved.msb --name worker -v /srv/project:/work -v /data
+msb restore saved.msb --name inspection --allow-missing-resources
+```
 
 <a id="msb-start"></a>
 

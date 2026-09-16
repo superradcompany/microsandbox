@@ -122,6 +122,7 @@ class Sandbox:
         vsock: Mapping[str, int] | Sequence[VsockRoute] | None = None,
         external_mount_policy: Literal["strict", "relaxed"] = "strict",
         dangerously_inherit_resources: bool = False,
+        allow_missing_resources: bool = False,
     ) -> Sandbox: ...
     @staticmethod
     def restore_with_progress(
@@ -149,6 +150,7 @@ class Sandbox:
         vsock: Mapping[str, int] | Sequence[VsockRoute] | None = None,
         external_mount_policy: Literal["strict", "relaxed"] = "strict",
         dangerously_inherit_resources: bool = False,
+        allow_missing_resources: bool = False,
     ) -> PullSession: ...
     @staticmethod
     async def create(

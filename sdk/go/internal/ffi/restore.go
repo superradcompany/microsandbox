@@ -24,6 +24,7 @@ type RestoreOptions struct {
 	LogLevel                    string               `json:"log_level,omitempty"`
 	ExternalMountPolicy         string               `json:"external_mount_policy,omitempty"`
 	DangerouslyInheritResources bool                 `json:"dangerously_inherit_resources,omitempty"`
+	AllowMissingResources       bool                 `json:"allow_missing_resources,omitempty"`
 	Volumes                     map[string]MountSpec `json:"volumes,omitempty"`
 	CapturedVolumes             []string             `json:"captured_volumes,omitempty"`
 	Ports                       []PortBindingOptions `json:"ports,omitempty"`

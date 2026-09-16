@@ -161,6 +161,13 @@ impl JsRestoreBuilder {
         Ok(self)
     }
 
+    /// Accept missing restore resources without inheriting host resources.
+    #[napi]
+    pub fn allow_missing_resources(&mut self) -> Result<&Self> {
+        self.inner = Some(self.take_inner()?.allow_missing_resources());
+        Ok(self)
+    }
+
     /// Explicitly reuse locally validated source resource bindings.
     #[napi]
     pub fn dangerously_inherit_resources(&mut self) -> Result<&Self> {
