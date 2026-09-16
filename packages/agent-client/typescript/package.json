@@ -1,6 +1,11 @@
 {
   "name": "@microsandbox/agent-client",
-  "version": "0.6.18",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/superradcompany/microsandbox.git",
+    "directory": "packages/agent-client/typescript"
+  },
+  "version": "0.7.0",
   "type": "module",
   "license": "Apache-2.0",
   "engines": {
@@ -55,6 +60,7 @@
     "vitest": "^5.0"
   },
   "dependencies": {
+    "@microsandbox/protocol-client": "0.7.0",
     "cbor-x": "^1.6.0"
   }
 }

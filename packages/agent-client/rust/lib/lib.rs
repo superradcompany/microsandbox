@@ -10,30 +10,39 @@
 //! caller-owned, pre-authenticated transport adapted to bytes).
 
 #![warn(missing_docs)]
+#![doc = include_str!("../README.md")]
 
 pub mod client;
 pub mod error;
+/// Internal Unix-local shared-memory transport used by the UDS adapter and runtime relay.
+///
+/// The SDK connects through [`OptimizedAgentClient`] for automatic arena negotiation.
+#[cfg(all(feature = "uds", unix))]
+#[doc(hidden)]
+pub mod local_shm;
 pub mod message;
+#[doc(hidden)]
+pub mod optimized;
+pub mod protocol;
 pub mod stream;
 pub mod transport;
 
 /// Transport adapters that can be enabled with crate features.
-pub mod transports {
-    /// Windows named-pipe transport support.
-    #[cfg(all(feature = "named-pipe", windows))]
-    pub mod named_pipe;
-
-    /// Unix domain socket transport support.
-    #[cfg(all(feature = "uds", unix))]
-    pub mod uds;
-}
+pub mod transports;
 
 //--------------------------------------------------------------------------------------------------
 // Re-Exports
 //--------------------------------------------------------------------------------------------------
 
-pub use client::{AgentClient, AgentProtocol};
+pub use client::AgentClient;
 pub use error::{AgentClientError, AgentClientResult};
 pub use message::{EncodedMessage, IntoOutboundMessage, OutboundMessage, TypedMessage};
-pub use stream::AgentStream;
+pub use microsandbox_protocol_client::{
+    Client, ClientError, ClientResult, ConnectOptions, Connector, Delivery, ErrorKind, Request,
+    RequestOptions,
+};
+#[doc(hidden)]
+pub use optimized::{AgentClient as OptimizedAgentClient, AgentFrame};
+pub use protocol::{AgentProtocol, AgentReady, AgentWireFormat};
+pub use stream::{AgentStream, RawAgentStream};
 pub use transport::{AgentTransport, TransportPacket};

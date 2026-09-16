@@ -1,13 +1,13 @@
 """microsandbox — Python SDK for secure, fast microVM-based sandboxing."""
 
-import os as _os
-
 from microsandbox._microsandbox import (
     BackendInfo,
+    BranchOutcome,
     ExecEvent,
     ExecHandle,
     ExecOutput,
     ExecSink,
+    ExternalMountWarning,
     FsEntry,
     FsMetadata,
     FsReadStream,
@@ -34,6 +34,8 @@ from microsandbox._microsandbox import (
     SandboxTouchResult,
     SftpClient,
     Snapshot,
+    SnapshotArchive,
+    SnapshotCopyBuilder,
     SnapshotHandle,
     SshClient,
     SshOutput,
@@ -44,16 +46,14 @@ from microsandbox._microsandbox import (
     backend_scope,
     default_backend_info,
     default_backend_kind,
-    install,
-    is_installed,
     set_default_backend,
     version,
 )
 from microsandbox._microsandbox import (
-    set_runtime_libkrunfw_path as set_libkrunfw_path,
+    set_packaged_msb_path as _set_packaged_msb_path,
 )
 from microsandbox._microsandbox import (
-    set_runtime_msb_path as _set_runtime_msb_path,
+    set_runtime_libkrunfw_path as set_libkrunfw_path,
 )
 from microsandbox._runtime import msb_path as _msb_path
 from microsandbox.agent import (
@@ -79,17 +79,33 @@ from microsandbox.errors import (
     NetworkPolicyError,
     NoDefaultCommandError,
     PathNotFoundError,
+    PublishedSnapshotArtifact,
+    RuntimeIncompleteError,
+    RuntimeNotInstalledError,
     SandboxAlreadyExistsError,
     SandboxNotFoundError,
     SandboxNotRunningError,
     SandboxReplacedError,
     SandboxStillRunningError,
+    SandboxStopTimedOutError,
     SecretViolationError,
     SnapshotMigrationError,
+    SnapshotSourceRecoveryError,
+    StopTimeoutError,
     TlsError,
     UnsupportedError,
     UnsupportedOperationError,
     VolumeNotFoundError,
+)
+from microsandbox.setup import (
+    InstallOptions,
+    ResolvedRuntime,
+    RuntimeConfig,
+    RuntimeOrigin,
+    ensure_runtime,
+    install_runtime,
+    is_runtime_installed,
+    resolve_runtime,
 )
 from microsandbox.types import (
     Action,
@@ -101,6 +117,8 @@ from microsandbox.types import (
     DestGroup,
     Destination,
     Direction,
+    DiskCompactionDiskResult,
+    DiskCompactionResult,
     DiskImageFormat,
     ExecEventType,
     ExecOptions,
@@ -108,6 +126,7 @@ from microsandbox.types import (
     FlatClone,
     FsEntryKind,
     GiB,
+    GuestFlush,
     HostPermissions,
     ImageArchiveFormat,
     ImageSource,
@@ -160,10 +179,10 @@ from microsandbox.types import (
     Secret,
     SecretChangeKind,
     SecretEntry,
-    SecretInjection,
     SecretModifySpec,
     SecretPlannedChange,
     SecretSource,
+    SecretSubstitution,
     SecurityProfile,
     Size,
     SnapshotFormat,
@@ -175,18 +194,16 @@ from microsandbox.types import (
     TlsConfig,
     TokenBucket,
     ViolationAction,
-    ViolationPolicy,
     VolumeKind,
     VsockRoute,
     VsockSocketType,
 )
 
-# Pass the bundled msb path to Rust explicitly. `MSB_PATH` remains a user
-# override and is still honored first by the native resolver.
-if "MSB_PATH" not in _os.environ:
-    _bundled_msb = _msb_path()
-    if _bundled_msb.exists():
-        _set_runtime_msb_path(str(_bundled_msb))
+# Register package discovery separately from explicit user overrides. Rust checks
+# the resolved runtime home before this candidate on each resolution.
+_bundled_msb = _msb_path()
+if _bundled_msb.is_file():
+    _set_packaged_msb_path(str(_bundled_msb))
 
 __all__ = [
     # Backend selection
@@ -199,10 +216,14 @@ __all__ = [
     "SandboxStopResult",
     "SandboxPingResult",
     "SandboxTouchResult",
+    "ExternalMountWarning",
+    "BranchOutcome",
     "PullSession",
     "SandboxStatus",
     "ModificationPolicy",
     "SandboxModificationPlan",
+    "DiskCompactionDiskResult",
+    "DiskCompactionResult",
     "ConfigPlannedChange",
     "SecretPlannedChange",
     "PlannedChange",
@@ -264,10 +285,13 @@ __all__ = [
     "NamedVolumeMode",
     # Snapshots
     "Snapshot",
+    "SnapshotArchive",
+    "SnapshotCopyBuilder",
     "SnapshotHandle",
     "SnapshotStateKind",
     "SnapshotFormat",
     "SnapshotScope",
+    "GuestFlush",
     # Network
     "Network",
     "NetworkPolicy",
@@ -292,12 +316,11 @@ __all__ = [
     # Secrets & TLS
     "Secret",
     "SecretEntry",
-    "SecretInjection",
+    "SecretSubstitution",
     "ScopedUpstreamCACert",
     "ScopedVerifyUpstream",
     "TlsConfig",
     "ViolationAction",
-    "ViolationPolicy",
     # Images / rootfs
     "Image",
     "ImageHandle",
@@ -339,13 +362,17 @@ __all__ = [
     "MicrosandboxError",
     "InvalidConfigError",
     "NoDefaultCommandError",
+    "RuntimeNotInstalledError",
+    "RuntimeIncompleteError",
     "CloudHttpError",
     "SandboxNotFoundError",
     "SandboxReplacedError",
     "SandboxNotRunningError",
     "SandboxAlreadyExistsError",
     "SandboxStillRunningError",
+    "SandboxStopTimedOutError",
     "ExecTimeoutError",
+    "StopTimeoutError",
     "ExecFailedError",
     "FilesystemError",
     "PathNotFoundError",
@@ -356,6 +383,8 @@ __all__ = [
     "NetworkPolicyError",
     "SecretViolationError",
     "SnapshotMigrationError",
+    "SnapshotSourceRecoveryError",
+    "PublishedSnapshotArtifact",
     "TlsError",
     "IoError",
     "MetricsDisabledError",
@@ -363,8 +392,14 @@ __all__ = [
     "UnsupportedOperationError",
     "UnsupportedError",
     # Setup
-    "install",
-    "is_installed",
+    "resolve_runtime",
+    "is_runtime_installed",
+    "install_runtime",
+    "ensure_runtime",
+    "RuntimeConfig",
+    "InstallOptions",
+    "ResolvedRuntime",
+    "RuntimeOrigin",
     "set_libkrunfw_path",
     "set_default_backend",
     "backend_scope",

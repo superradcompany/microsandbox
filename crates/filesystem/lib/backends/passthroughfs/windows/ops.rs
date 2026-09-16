@@ -1,5 +1,6 @@
 //! DynFileSystem callback table for the Windows passthrough backend.
 
+use super::dir_ops::snapshot_dir_entry;
 use super::*;
 
 //--------------------------------------------------------------------------------------------------
@@ -7,6 +8,27 @@ use super::*;
 //--------------------------------------------------------------------------------------------------
 
 impl DynFileSystem for PassthroughFs {
+    fn request_error(&self, inode: u64) -> Option<i32> {
+        // FUSE speaks Linux errno values even when the host is Windows.
+        self.invalid_inodes
+            .read()
+            .unwrap()
+            .contains(&inode)
+            .then_some(116)
+    }
+
+    fn capture_state(&self) -> io::Result<Vec<u8>> {
+        mobility::capture(self)
+    }
+
+    fn validate_state(&self, state: &[u8]) -> io::Result<()> {
+        mobility::prepare(self, state).map(drop)
+    }
+
+    fn restore_state(&self, state: &[u8]) -> io::Result<()> {
+        mobility::restore(self, state)
+    }
+
     fn init(&self, _capable: FsOptions) -> io::Result<FsOptions> {
         self.insert_root()?;
         Ok(FsOptions::empty())
@@ -17,10 +39,22 @@ impl DynFileSystem for PassthroughFs {
         self.dir_handles.write().unwrap().clear();
         self.inodes.write().unwrap().by_inode.clear();
         self.inodes.write().unwrap().by_path.clear();
+        self.inodes.write().unwrap().by_identity.clear();
     }
 
     fn lookup(&self, _ctx: Context, parent: u64, name: &CStr) -> io::Result<Entry> {
         self.do_lookup(parent, name)
+            .map(|entry| self.record_owned_entry(entry))
+    }
+
+    fn forget(&self, _ctx: Context, inode: u64, count: u64) {
+        self.forget_owned(inode, count);
+    }
+
+    fn batch_forget(&self, _ctx: Context, requests: Vec<(u64, u64)>) {
+        for (inode, count) in requests {
+            self.forget_owned(inode, count);
+        }
     }
 
     fn getattr(
@@ -56,6 +90,7 @@ impl DynFileSystem for PassthroughFs {
         _extensions: Extensions,
     ) -> io::Result<Entry> {
         self.do_symlink(ctx, linkname, parent, name)
+            .map(|entry| self.record_owned_entry(entry))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -70,6 +105,7 @@ impl DynFileSystem for PassthroughFs {
         _extensions: Extensions,
     ) -> io::Result<Entry> {
         self.do_mknod(ctx, parent, name, mode, rdev, umask)
+            .map(|entry| self.record_owned_entry(entry))
     }
 
     fn mkdir(
@@ -99,11 +135,12 @@ impl DynFileSystem for PassthroughFs {
             S_IFDIR | (mode & !umask & 0o7777),
             0,
         ) {
-            let _ = std::fs::remove_dir(&data.path);
-            self.remove_inode_path(&data.path);
+            let _ = std::fs::remove_dir(data.path());
+            self.remove_inode_path(&data.path());
             return Err(error);
         }
-        self.entry_for_path(data.path.clone())
+        self.entry_for_path(data.path())
+            .map(|entry| self.record_owned_entry(entry))
     }
 
     fn unlink(&self, _ctx: Context, parent: u64, name: &CStr) -> io::Result<()> {
@@ -114,11 +151,13 @@ impl DynFileSystem for PassthroughFs {
             return Err(linux_error(LINUX_EISDIR));
         }
 
+        let retained = self.prepare_owned_unlink(&path)?;
         std::fs::remove_file(&path).map_err(host_error)?;
+        self.retain_owned_unlink(retained);
+        self.remove_inode_path(&path);
         if let Some(store) = &self.stat_store {
             store.remove(&path)?;
         }
-        self.remove_inode_path(&path);
         Ok(())
     }
 
@@ -165,9 +204,21 @@ impl DynFileSystem for PassthroughFs {
         }
         if new_path.exists() {
             self.safe_metadata(&new_path)?;
+            if self.cfg.owned_checkpoint.is_some()
+                && self.owned_identity(&old_path)? == self.owned_identity(&new_path)?
+            {
+                // POSIX rename of two aliases of one inode is a namespace no-op.
+                return Ok(());
+            }
         }
 
+        let retained = if old_path != new_path && new_path.exists() {
+            self.prepare_owned_unlink(&new_path)?
+        } else {
+            None
+        };
         std::fs::rename(&old_path, &new_path).map_err(host_error)?;
+        self.retain_owned_unlink(retained);
         if let Some(store) = &self.stat_store {
             store.rename(&old_path, &new_path)?;
         }
@@ -177,6 +228,7 @@ impl DynFileSystem for PassthroughFs {
 
     fn link(&self, _ctx: Context, inode: u64, newparent: u64, newname: &CStr) -> io::Result<Entry> {
         self.do_link(inode, newparent, newname)
+            .map(|entry| self.record_owned_entry(entry))
     }
 
     fn open(
@@ -201,6 +253,7 @@ impl DynFileSystem for PassthroughFs {
         _extensions: Extensions,
     ) -> io::Result<(Entry, Option<u64>, OpenOptions)> {
         self.do_create(ctx, parent, name, mode, flags, umask)
+            .map(|(entry, handle, options)| (self.record_owned_entry(entry), handle, options))
     }
 
     fn read(
@@ -253,7 +306,7 @@ impl DynFileSystem for PassthroughFs {
         }
 
         let data = self.inode(inode)?;
-        let old_len = self.safe_metadata(&data.path)?.len();
+        let old_len = self.inode_metadata(&data)?.len();
         let file = handle.file.lock().unwrap();
         let offset = if handle.flags & LINUX_O_APPEND as u32 != 0 {
             file.metadata().map_err(host_error)?.len()
@@ -316,14 +369,19 @@ impl DynFileSystem for PassthroughFs {
         }
 
         let mut handles = self.handles.write().unwrap();
-        match handles.remove(&handle) {
+        let result = match handles.remove(&handle) {
             Some(data) if data.inode == inode => Ok(()),
             Some(data) => {
                 handles.insert(handle, data);
                 Err(linux_error(LINUX_EBADF))
             }
             None => Err(linux_error(LINUX_EBADF)),
+        };
+        drop(handles);
+        if result.is_ok() {
+            self.reap_owned_inode(inode);
         }
+        result
     }
 
     fn statfs(&self, _ctx: Context, _inode: u64) -> io::Result<statvfs64> {
@@ -394,16 +452,20 @@ impl DynFileSystem for PassthroughFs {
         }
 
         let data = self.inode(inode)?;
-        let metadata = self.safe_metadata(&data.path)?;
+        let metadata = self.safe_metadata(&data.path())?;
         if !metadata.file_type().is_dir() {
             return Err(linux_error(LINUX_ENOTDIR));
         }
 
         let handle = self.next_handle.fetch_add(1, Ordering::Relaxed);
-        self.dir_handles
-            .write()
-            .unwrap()
-            .insert(handle, Arc::new(DirHandle { inode }));
+        self.dir_handles.write().unwrap().insert(
+            handle,
+            Arc::new(DirHandle {
+                inode,
+                flags,
+                snapshot: Mutex::new(None),
+            }),
+        );
         Ok((Some(handle), OpenOptions::empty()))
     }
 
@@ -415,21 +477,11 @@ impl DynFileSystem for PassthroughFs {
         _size: u32,
         offset: u64,
     ) -> io::Result<Vec<DirEntry<'static>>> {
-        let dir_handle = self
-            .dir_handles
-            .read()
-            .unwrap()
-            .get(&handle)
-            .filter(|data| data.inode == inode)
-            .cloned()
-            .ok_or_else(|| linux_error(LINUX_EBADF))?;
-        let _ = dir_handle;
-
         Ok(self
-            .dir_entries(inode)?
+            .dir_snapshot(inode, handle)?
             .into_iter()
-            .map(|(dir_entry, _)| dir_entry)
-            .skip(offset as usize)
+            .filter(|entry| entry.offset > offset)
+            .map(snapshot_dir_entry)
             .collect())
     }
 
@@ -442,17 +494,12 @@ impl DynFileSystem for PassthroughFs {
         offset: u64,
         add_entry: &mut AddDirEntry<'_>,
     ) -> io::Result<()> {
-        let dir_handle = self
-            .dir_handles
-            .read()
-            .unwrap()
-            .get(&handle)
-            .filter(|data| data.inode == inode)
-            .cloned()
-            .ok_or_else(|| linux_error(LINUX_EBADF))?;
-        let _ = dir_handle;
-
-        self.dir_entries_for_each(inode, offset, &mut |dir_entry, _entry| add_entry(dir_entry))
+        for entry in self.dir_snapshot(inode, handle)? {
+            if entry.offset > offset && add_entry(snapshot_dir_entry(entry))? == 0 {
+                break;
+            }
+        }
+        Ok(())
     }
 
     fn readdirplus(
@@ -463,21 +510,19 @@ impl DynFileSystem for PassthroughFs {
         _size: u32,
         offset: u64,
     ) -> io::Result<Vec<(DirEntry<'static>, Entry)>> {
-        let dir_handle = self
-            .dir_handles
-            .read()
-            .unwrap()
-            .get(&handle)
-            .filter(|data| data.inode == inode)
-            .cloned()
-            .ok_or_else(|| linux_error(LINUX_EBADF))?;
-        let _ = dir_handle;
-
-        Ok(self
-            .dir_entries(inode)?
+        let entries = self
+            .dir_snapshot(inode, handle)?
             .into_iter()
-            .skip(offset as usize)
-            .collect())
+            .filter(|entry| entry.offset > offset)
+            .map(|entry| {
+                let full = self.snapshot_entry_attributes(&entry)?;
+                Ok((snapshot_dir_entry(entry), full))
+            })
+            .collect::<io::Result<Vec<_>>>()?;
+        for (_, entry) in &entries {
+            self.record_owned_lookup(entry.inode);
+        }
+        Ok(entries)
     }
 
     fn readdirplus_for_each(
@@ -489,17 +534,18 @@ impl DynFileSystem for PassthroughFs {
         offset: u64,
         add_entry: &mut AddDirEntryPlus<'_>,
     ) -> io::Result<()> {
-        let dir_handle = self
-            .dir_handles
-            .read()
-            .unwrap()
-            .get(&handle)
-            .filter(|data| data.inode == inode)
-            .cloned()
-            .ok_or_else(|| linux_error(LINUX_EBADF))?;
-        let _ = dir_handle;
-
-        self.dir_entries_for_each(inode, offset, add_entry)
+        for entry in self.dir_snapshot(inode, handle)? {
+            if entry.offset <= offset {
+                continue;
+            }
+            let full = self.snapshot_entry_attributes(&entry)?;
+            let id = full.inode;
+            if add_entry(snapshot_dir_entry(entry), full)? == 0 {
+                break;
+            }
+            self.record_owned_lookup(id);
+        }
+        Ok(())
     }
 
     fn fsyncdir(&self, _ctx: Context, inode: u64, _datasync: bool, handle: u64) -> io::Result<()> {
@@ -514,14 +560,29 @@ impl DynFileSystem for PassthroughFs {
 
     fn releasedir(&self, _ctx: Context, inode: u64, _flags: u32, handle: u64) -> io::Result<()> {
         let mut handles = self.dir_handles.write().unwrap();
-        match handles.remove(&handle) {
+        let result = match handles.remove(&handle) {
             Some(data) if data.inode == inode => Ok(()),
             Some(data) => {
                 handles.insert(handle, data);
                 Err(linux_error(LINUX_EBADF))
             }
             None => Err(linux_error(LINUX_EBADF)),
+        };
+        drop(handles);
+        if result.is_ok() && self.cfg.owned_checkpoint.is_some() {
+            let ids = self
+                .inodes
+                .read()
+                .unwrap()
+                .by_inode
+                .keys()
+                .copied()
+                .collect::<Vec<_>>();
+            for id in ids {
+                self.reap_owned_inode(id);
+            }
         }
+        result
     }
 
     fn access(&self, _ctx: Context, inode: u64, mask: u32) -> io::Result<()> {
@@ -533,7 +594,7 @@ impl DynFileSystem for PassthroughFs {
         }
 
         let data = self.inode(inode)?;
-        let metadata = self.safe_metadata(&data.path)?;
+        let metadata = self.safe_metadata(&data.path())?;
         let st = self.stat_from_metadata(&metadata, data.as_ref())?;
         check_access(_ctx, &st, mask)
     }

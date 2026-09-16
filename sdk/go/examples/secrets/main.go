@@ -29,8 +29,8 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 
-	if err := microsandbox.EnsureInstalled(ctx); err != nil {
-		log.Fatalf("EnsureInstalled: %v", err)
+	if _, err := microsandbox.EnsureRuntime(ctx, microsandbox.RuntimeConfig{}, microsandbox.InstallOptions{}); err != nil {
+		log.Fatalf("EnsureRuntime: %v", err)
 	}
 
 	name := fmt.Sprintf("go-sdk-secrets-%d", time.Now().Unix())
@@ -42,7 +42,7 @@ func main() {
 			envVarInGuest,
 			secretValue,
 			microsandbox.SecretEnvOptions{
-				AllowHosts:  []string{allowedHost},
+				Allow:       []string{allowedHost},
 				Placeholder: placeholder,
 			},
 		)),

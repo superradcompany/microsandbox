@@ -4,9 +4,12 @@ package integration
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
+	"io"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -31,11 +34,41 @@ const (
 func TestMain(m *testing.M) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
-	if err := microsandbox.EnsureInstalled(ctx); err != nil {
-		fmt.Fprintf(os.Stderr, "microsandbox: EnsureInstalled: %v\n", err)
+	if _, err := microsandbox.EnsureRuntime(ctx, microsandbox.RuntimeConfig{}, microsandbox.InstallOptions{}); err != nil {
+		fmt.Fprintf(os.Stderr, "microsandbox: EnsureRuntime: %v\n", err)
 		os.Exit(1)
 	}
-	os.Exit(m.Run())
+	code := m.Run()
+	if code != 0 {
+		logIntegrationRuntimeFailures()
+	}
+	os.Exit(code)
+}
+
+// Include successfully booted VMs too: a listener can fail after core.ready.
+// CI supplies an isolated MSB_HOME; never fall back to the user's default home.
+func logIntegrationRuntimeFailures() {
+	home := os.Getenv("MSB_HOME")
+	if home == "" {
+		return
+	}
+	paths, _ := filepath.Glob(filepath.Join(home, "sandboxes", "*", "logs", "runtime.log"))
+	for _, path := range paths {
+		file, err := os.Open(path)
+		if err != nil {
+			continue
+		}
+		info, err := file.Stat()
+		if err == nil {
+			const tailBytes = 16 * 1024
+			if info.Size() > tailBytes {
+				_, _ = file.Seek(-tailBytes, io.SeekEnd)
+			}
+			fmt.Fprintf(os.Stderr, "\n--- integration runtime log: %s ---\n", path)
+			_, _ = io.CopyN(os.Stderr, file, tailBytes)
+		}
+		_ = file.Close()
+	}
 }
 
 // integrationCtx returns a context with a generous timeout for VM boot.
@@ -506,10 +539,26 @@ func TestDetachedSandboxOutlivesHandle(t *testing.T) {
 func TestPortPublishing(t *testing.T) {
 	ctx := integrationCtx(t)
 	name := "go-sdk-ports-" + t.Name()
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("select host port: %v", err)
+	}
+	hostPort := uint16(listener.Addr().(*net.TCPAddr).Port)
+	// This discovers a free port, not a reservation across runtime startup.
+	// Avoid sharing fixed port 17777 between independent CI jobs on one host.
+	if err := listener.Close(); err != nil {
+		t.Fatalf("release candidate host port: %v", err)
+	}
+	var nonce [16]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		t.Fatalf("generate response identity: %v", err)
+	}
+	want := fmt.Sprintf("hello-port-%x", nonce)
+	t.Logf("publishing 127.0.0.1:%d -> guest:7777, response %q", hostPort, want)
 
 	sb, err := createSandbox(t, ctx, name,
 		microsandbox.WithImage(goIntegrationImage),
-		microsandbox.WithPorts(map[uint16]uint16{17777: 7777}),
+		microsandbox.WithPorts(map[uint16]uint16{hostPort: 7777}),
 	)
 	if err != nil {
 		t.Fatalf("CreateSandbox with ports: %v", err)
@@ -523,7 +572,7 @@ func TestPortPublishing(t *testing.T) {
 
 	// Start a background listener on guest port 7777 and immediately send a
 	// response, then connect from the host side to verify end-to-end.
-	handle, err := sb.ShellStream(ctx, "echo hello-port | nc -l -p 7777")
+	handle, err := sb.ShellStream(ctx, "printf '"+want+"' | nc -l -p 7777")
 	if err != nil {
 		t.Fatalf("ShellStream: %v", err)
 	}
@@ -532,17 +581,19 @@ func TestPortPublishing(t *testing.T) {
 	// Give netcat time to bind.
 	time.Sleep(500 * time.Millisecond)
 
-	conn, err := dialWithRetry("localhost:17777", 5, 200*time.Millisecond)
+	conn, err := dialWithRetry(fmt.Sprintf("127.0.0.1:%d", hostPort), 5, 200*time.Millisecond)
 	if err != nil {
 		t.Fatalf("connect to published port: %v", err)
 	}
 	defer conn.Close()
 
-	buf := make([]byte, 64)
+	buf := make([]byte, len(want))
 	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	n, _ := conn.Read(buf)
-	if !strings.Contains(string(buf[:n]), "hello-port") {
-		t.Errorf("got %q from published port, want 'hello-port'", string(buf[:n]))
+	if _, err := io.ReadFull(conn, buf); err != nil {
+		t.Fatalf("read published-port response: %v", err)
+	}
+	if string(buf) != want {
+		t.Errorf("got %q from published port, want %q", string(buf), want)
 	}
 }
 
@@ -1035,7 +1086,7 @@ func TestSecretPlaceholderSubstitution(t *testing.T) {
 			"MY_API_KEY",
 			"super-secret-value-xyz",
 			microsandbox.SecretEnvOptions{
-				AllowHosts:  []string{"api.example.com"},
+				Allow:       []string{"api.example.com"},
 				Placeholder: "$MY_API_KEY_PLACEHOLDER",
 			},
 		)),

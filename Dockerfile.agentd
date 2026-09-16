@@ -28,8 +28,10 @@ edition = "2024"
 
 [workspace.dependencies]
 base64 = "0.22"
+bytes = "1.9"
 chrono = { version = "0.4", features = ["serde"] }
 ciborium = "0.2"
+hex = "0.4"
 ipnetwork = { version = "0.21.0", features = ["serde"] }
 libc = "0.2"
 microsandbox-protocol = { path = "crates/protocol" }

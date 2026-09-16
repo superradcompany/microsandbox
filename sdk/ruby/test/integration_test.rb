@@ -133,6 +133,27 @@ class MicrosandboxIntegrationTest < Test::Unit::TestCase
     assert_operator elapsed, :<, 1
   end
 
+  def test_explicit_stop_timeout_preserves_running_sandbox
+    sandbox = create_sandbox("stop-timeout")
+    handle = Microsandbox::Sandbox.get(sandbox.name)
+
+    [sandbox, handle].each do |receiver|
+      [-1, Float::INFINITY, Float::NAN].each do |timeout|
+        assert_raise(ArgumentError) { receiver.stop_with_timeout(timeout) }
+      end
+      assert_raise(TypeError) { receiver.stop_with_timeout(nil) }
+      error = assert_raise(Microsandbox::Error) { receiver.stop_with_timeout(0) }
+      assert_match(/timed out/, error.message)
+      assert_equal "running", Microsandbox::Sandbox.get(sandbox.name).refresh.status
+    end
+
+    # Omitted timeout uses the unbounded Rust stop, not a hidden default deadline.
+    sandbox.stop
+    assert_equal "stopped", Microsandbox::Sandbox.get(sandbox.name).refresh.status
+  ensure
+    sandbox&.kill
+  end
+
   private
 
   def create_sandbox(label, **options)

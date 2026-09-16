@@ -4,13 +4,15 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use clap::{Arg, ArgAction, ArgMatches, Args, Command, FromArgMatches};
+#[cfg(feature = "net")]
+use microsandbox::OutboundProxy;
+use microsandbox::VolumeKind;
 use microsandbox::backend::{Backend, LocalBackend};
 use microsandbox::sandbox::{
     CpuPlacement, DeploymentProfile, DiskImageFormat, FlatClone, MountBuilder, Patch,
     RootDiskBuilder, Sandbox, SandboxBuilder, SandboxHandle, SecurityProfile,
     TransparentHugePagePolicy, VolumeMount, VsockSocketType,
 };
-use microsandbox::{OutboundProxy, VolumeKind};
 #[cfg(feature = "net")]
 use microsandbox_network::{OutboundProxyBuilder, OutboundProxyConfig};
 #[cfg(feature = "net")]
@@ -38,6 +40,26 @@ pub fn resolve_local_backend() -> anyhow::Result<Arc<dyn Backend>> {
         );
     }
     Ok(backend)
+}
+
+/// Display relaxed-restore diagnostics even when ordinary progress is quiet.
+pub(crate) async fn display_restore_warnings(sandbox: &Sandbox) {
+    if !sandbox.config().resumed_from_full_snapshot() {
+        return;
+    }
+    match sandbox.restore_warnings().await {
+        Ok(warnings) => {
+            for warning in warnings {
+                ui::warn(&format!(
+                    "external mount {}: {} (stale inodes: {:?})",
+                    warning.guest_path, warning.reason, warning.stale_inodes,
+                ));
+            }
+        }
+        // Creation already succeeded. Reporting a diagnostic-read failure must not imply
+        // rollback or discard the live handle and accidentally trigger its drop policy.
+        Err(error) => ui::warn(&format!("could not read restore warnings: {error}")),
+    }
 }
 
 /// Borrow the `LocalBackend` inside the resolved default backend, or error.
@@ -152,6 +174,11 @@ pub struct SandboxOpts {
     /// OPTIONS may include paired `uid=<N>,gid=<N>` when the volume is a directory.
     #[arg(long = "mount-named", value_name = "NAME:DEST[:OPTIONS]")]
     pub mount_named: Vec<String>,
+
+    /// Create a private volume removed with this sandbox (`DEST[:OPTIONS]`).
+    /// Defaults to a directory; use `kind=disk,size=10G` for an ext4 disk.
+    #[arg(long = "mount-owned", value_name = "DEST[:OPTIONS]")]
+    pub mount_owned: Vec<String>,
 
     /// Set the default working directory for commands.
     #[arg(short, long)]
@@ -485,10 +512,20 @@ pub struct SandboxOpts {
     #[arg(long = "net-ingress-ops-burst", value_name = "COUNT")]
     pub net_ingress_ops_burst: Option<u64>,
 
-    /// Limit the number of concurrent network connections.
+    /// Deprecated alias for --max-tcp-connections.
+    #[cfg(feature = "net")]
+    #[arg(long, conflicts_with = "max_tcp_connections")]
+    pub max_connections: Option<usize>,
+
+    /// Limit TCP connections; zero means unlimited.
     #[cfg(feature = "net")]
     #[arg(long)]
-    pub max_connections: Option<usize>,
+    pub max_tcp_connections: Option<usize>,
+
+    /// Limit UDP relay sessions (default: unlimited single-tenant, 1024 multi-tenant; zero means unlimited).
+    #[cfg(feature = "net")]
+    #[arg(long)]
+    pub max_udp_connections: Option<usize>,
 
     /// Require hostname-based network allows to use inspectable request authority.
     #[cfg(feature = "net")]
@@ -582,19 +619,32 @@ pub struct SandboxOpts {
     pub tls_no_verify_upstream_for: Vec<String>,
 
     // --- Secrets ---
-    /// Inject a secret that is only sent to allowed hosts (ENV@HOST[,HOST...]).
+    /// Configure a protected secret (`ENV[:OPTIONS]@HOST[,HOST...]`).
     /// The value is read from the host environment variable ENV at start time
     /// and stored only as a source reference, never inlined in the sandbox
     /// config. Inline `ENV=VALUE@HOST` is rejected; export the value and use
-    /// `ENV@HOST[,HOST...]`.
+    /// `ENV[:OPTIONS]@HOST[,HOST...]`.
     #[cfg(feature = "net")]
     #[arg(long)]
     pub secret: Vec<String>,
 
-    /// Action when a secret is sent to a disallowed host (block, block-and-log, block-and-terminate, passthrough).
+    /// Action when a secret placeholder is blocked (block, block-and-log, block-and-terminate).
     #[cfg(feature = "net")]
     #[arg(long)]
-    pub on_secret_violation: Option<String>,
+    pub secret_violation_action: Option<String>,
+}
+
+/// Parsed `--secret` policy for one environment variable.
+///
+/// Shared with live modification parsing, which uses only wire-model types.
+#[derive(Debug, Clone)]
+pub(crate) struct ParsedSecret {
+    pub(crate) env_var: String,
+    pub(crate) allowed_hosts: Vec<String>,
+    pub(crate) passthrough_hosts: Vec<String>,
+    pub(crate) substitute_headers: bool,
+    pub(crate) substitute_query: bool,
+    pub(crate) substitute_body: bool,
 }
 
 /// Parsed public CLI mount options.
@@ -775,6 +825,8 @@ impl SandboxOpts {
             || self.net_ingress_ops.is_some()
             || self.net_ingress_ops_burst.is_some()
             || self.max_connections.is_some()
+            || self.max_tcp_connections.is_some()
+            || self.max_udp_connections.is_some()
             || self.trust_host_cas
             || self.tls_intercept
             || !self.tls_intercept_port.is_empty()
@@ -785,7 +837,7 @@ impl SandboxOpts {
             || !self.tls_upstream_ca_cert.is_empty()
             || !self.tls_upstream_ca_cert_for.is_empty()
             || !self.tls_no_verify_upstream_for.is_empty()
-            || self.on_secret_violation.is_some()
+            || self.secret_violation_action.is_some()
     }
 
     /// Builds one direction of the network rate limiter from its related flags.
@@ -845,7 +897,7 @@ impl SandboxOpts {
 
     /// Builds the network policy selected by the related CLI flags.
     #[cfg(feature = "net")]
-    fn build_network_policy(
+    pub(super) fn build_network_policy(
         &self,
     ) -> anyhow::Result<Option<microsandbox_network::policy::NetworkPolicy>> {
         use microsandbox_network::policy::{Action, NetworkPolicy, NetworkProfile};
@@ -974,6 +1026,7 @@ impl SandboxOpts {
             || !self.mount_file.is_empty()
             || !self.mount_disk.is_empty()
             || !self.mount_named.is_empty()
+            || !self.mount_owned.is_empty()
             || self.workdir.is_some()
             || self.shell.is_some()
             || !self.env.is_empty()
@@ -1021,6 +1074,8 @@ impl SandboxOpts {
             || self.net_ingress_ops.is_some()
             || self.net_ingress_ops_burst.is_some()
             || self.max_connections.is_some()
+            || self.max_tcp_connections.is_some()
+            || self.max_udp_connections.is_some()
             || self.net_strict
             || self.trust_host_cas
             || self.proxy.is_some()
@@ -1037,7 +1092,7 @@ impl SandboxOpts {
             || !self.tls_upstream_ca_cert_for.is_empty()
             || !self.tls_no_verify_upstream_for.is_empty()
             || !self.secret.is_empty()
-            || self.on_secret_violation.is_some();
+            || self.secret_violation_action.is_some();
 
         #[cfg(not(feature = "net"))]
         let net = false;
@@ -1287,6 +1342,9 @@ fn apply_sandbox_opts_inner(
     for mount_str in &opts.mount_named {
         builder = apply_explicit_named_mount(builder, mount_str)?;
     }
+    for mount_str in &opts.mount_owned {
+        builder = apply_owned_mount(builder, mount_str)?;
+    }
 
     // --- Tmpfs ---
     for tmpfs_str in &opts.tmpfs {
@@ -1401,7 +1459,7 @@ fn apply_sandbox_opts_inner(
 
 /// Parse `HOST_PATH:PORT[/stream|/dgram]` without treating colons in the
 /// host path as separators. Stream is intentionally the compact default.
-fn parse_vsock_route(spec: &str) -> anyhow::Result<(PathBuf, u32, VsockSocketType)> {
+pub(crate) fn parse_vsock_route(spec: &str) -> anyhow::Result<(PathBuf, u32, VsockSocketType)> {
     let (host_socket, endpoint) = spec.rsplit_once(':').ok_or_else(|| {
         anyhow::anyhow!("--vsock must use HOST_PATH:PORT[/stream|/dgram], got {spec:?}")
     })?;
@@ -1772,6 +1830,23 @@ pub fn apply_volume(builder: SandboxBuilder, spec: &str) -> anyhow::Result<Sandb
     }))
 }
 
+/// Restore-only guest-path shorthand; explicit mappings retain the existing path grammar.
+pub(crate) fn parse_restore_volume(spec: &str) -> anyhow::Result<(String, MountBuilder)> {
+    if spec.starts_with('/') && !spec.contains(':') {
+        return Ok((spec.into(), MountBuilder::new(spec).captured()));
+    }
+    let parsed = parse_volume_mount_spec(spec)?;
+    let guest = parsed.guest.to_string();
+    let is_path = microsandbox_utils::looks_like_local_path_text(parsed.source);
+    let mount = configure_volume_mount(
+        MountBuilder::new(&guest),
+        parsed.source,
+        is_path,
+        parsed.options,
+    );
+    Ok((guest, mount))
+}
+
 /// Parse and materialize a bind mount with the shared `-v/--volume` options.
 ///
 /// YAML strings historically treat every source as a config-relative bind path,
@@ -2008,6 +2083,61 @@ pub fn apply_explicit_named_mount(
         common_options.quota_mib = None;
         apply_common_mount_options(mount, common_options)
     }))
+}
+
+/// Apply an unnamed private directory or disk mount.
+pub fn apply_owned_mount(builder: SandboxBuilder, spec: &str) -> anyhow::Result<SandboxBuilder> {
+    let (guest, mount) = owned_mount_from_spec(spec)?;
+    Ok(builder.volume(guest, move |_| mount))
+}
+
+/// Validate ownership options before `install` persists a runnable alias.
+pub fn validate_mount_owned_spec(spec: &str) -> anyhow::Result<()> {
+    let (_, builder) = owned_mount_from_spec(spec)?;
+    let mut mount = builder.build()?;
+    microsandbox_types::canonicalize_volume_mounts(std::slice::from_mut(&mut mount))?;
+    Ok(())
+}
+
+fn owned_mount_from_spec(spec: &str) -> anyhow::Result<(String, MountBuilder)> {
+    let (guest, text) = match spec.split_once(':') {
+        Some((guest, options)) => (guest, Some(options)),
+        None => (spec, None),
+    };
+    if !guest.starts_with('/') || guest.contains(',') {
+        anyhow::bail!("mount-owned must be an absolute guest path with optional :options");
+    }
+    let options = parse_cli_mount_options(
+        text,
+        CliMountOptionSupport {
+            policies: true,
+            size: true,
+            quota: true,
+            named_kind: true,
+            owner: true,
+            ..Default::default()
+        },
+    )?;
+    if options.follow_root_symlinks {
+        anyhow::bail!("mount-owned does not accept follow-root-symlinks");
+    }
+    // Keep storage options in the owned sub-builder; applying .size() to the
+    // outer mount builder would accidentally select tmpfs-only semantics.
+    let mount = MountBuilder::new(guest).owned_with(|mut volume| {
+        if options.named_kind == Some(VolumeKind::Disk) {
+            volume = volume.disk();
+        }
+        if let Some(size) = options.size_mib {
+            volume = volume.size(size);
+        }
+        if let Some(quota) = options.quota_mib {
+            volume = volume.quota(quota);
+        }
+        volume
+    });
+    let mut common = options;
+    common.quota_mib = None;
+    Ok((guest.to_owned(), apply_common_mount_options(mount, common)))
 }
 
 /// Apply common read/mount behavior options to a mount builder.
@@ -2355,25 +2485,40 @@ fn apply_network_opts(
     // Secrets. `create` persists a host-side source reference, not the raw
     // value: the plaintext is read from the host environment at spawn time so
     // the durable config never stores secret material at rest.
-    let mut secret_specs: Vec<(String, Vec<String>)> = Vec::new();
+    let mut secret_specs: Vec<ParsedSecret> = Vec::new();
     for secret_str in &opts.secret {
-        let (env_var, hosts) = parse_secret(secret_str, "create")?;
+        let parsed = parse_secret(secret_str, "create")?;
         match secret_specs
             .iter_mut()
-            .find(|(existing, _)| *existing == env_var)
+            .find(|existing| existing.env_var == parsed.env_var)
         {
-            Some((_, existing_hosts)) => existing_hosts.extend(hosts),
-            None => secret_specs.push((env_var, hosts)),
+            Some(existing) => {
+                extend_unique(&mut existing.allowed_hosts, parsed.allowed_hosts);
+                extend_unique(&mut existing.passthrough_hosts, parsed.passthrough_hosts);
+                existing.substitute_headers &= parsed.substitute_headers;
+                existing.substitute_query |= parsed.substitute_query;
+                existing.substitute_body |= parsed.substitute_body;
+            }
+            None => secret_specs.push(parsed),
         }
     }
-    for (env_var, hosts) in secret_specs {
+    for secret in secret_specs {
+        let env_var = secret.env_var;
         let source = microsandbox::sandbox::SecretSource::Env {
             var: env_var.clone(),
         };
         builder = builder.secret(|mut s| {
-            s = s.env(&env_var).source(source);
-            for host in hosts {
+            s = s
+                .env(&env_var)
+                .source(source)
+                .substitute_in_headers(secret.substitute_headers)
+                .substitute_in_query(secret.substitute_query)
+                .substitute_in_body(secret.substitute_body);
+            for host in secret.allowed_hosts {
                 s = allow_secret_host(s, &host);
+            }
+            for host in secret.passthrough_hosts {
+                s = s.allow_passthrough_for(host);
             }
             s
         });
@@ -2407,7 +2552,8 @@ fn apply_network_opts(
             }
             builder = builder.prepend_network_policy_rules(rules);
         }
-        let max_conn = opts.max_connections;
+        let max_conn = opts.max_tcp_connections.or(opts.max_connections);
+        let max_udp_conn = opts.max_udp_connections;
         let ipv4_pool = opts
             .net_ipv4_pool
             .as_deref()
@@ -2439,7 +2585,7 @@ fn apply_network_opts(
             .map(|spec| parse_scoped_upstream_ca_cert(spec))
             .collect::<anyhow::Result<Vec<_>>>()?;
         let no_verify_upstream_for = opts.tls_no_verify_upstream_for.clone();
-        let violation_action = parse_violation_action(&opts.on_secret_violation)?;
+        let violation_action = parse_violation_action(&opts.secret_violation_action)?;
         let egress_rate_limiter = opts.build_rate_limiter(NetworkRateLimitDirection::Egress)?;
         let ingress_rate_limiter = opts.build_rate_limiter(NetworkRateLimitDirection::Ingress)?;
 
@@ -2459,7 +2605,10 @@ fn apply_network_opts(
                 });
             }
             if let Some(max) = max_conn {
-                n = n.max_connections(max);
+                n = n.max_tcp_connections(max);
+            }
+            if let Some(max) = max_udp_conn {
+                n = n.max_udp_connections(max);
             }
             if let Some(pool) = ipv4_pool {
                 n = n.ipv4_pool(pool);
@@ -2485,9 +2634,7 @@ fn apply_network_opts(
                 });
             }
             if let Some(action) = violation_action {
-                n = n.on_secret_violation(|_| {
-                    microsandbox_network::builder::ViolationActionBuilder::from_action(action)
-                });
+                n = n.secret_violation_action(action);
             }
 
             // TLS configuration.
@@ -2700,8 +2847,7 @@ pub(crate) fn parse_port_mapping(spec: &str) -> anyhow::Result<(std::net::IpAddr
     Ok((bind, host, guest, udp))
 }
 
-/// Parse a `--secret ENV@HOST[,HOST...]` spec into `(env_var, hosts)` for
-/// `command` (`create` or `modify`).
+/// Parse `--secret ENV[:OPTIONS]@HOST[,HOST...]` for `command`.
 ///
 /// The value is NOT read here: the CLI records a host-side source reference
 /// (`{kind: env, var: ENV}`) that is resolved from the host environment when
@@ -2711,33 +2857,111 @@ pub(crate) fn parse_port_mapping(spec: &str) -> anyhow::Result<(std::net::IpAddr
 /// The inline `ENV=VALUE@HOST` form is rejected loudly: the shell would leak
 /// the value regardless, so the value path is SDK-only. Users are pointed at
 /// the `ENV@HOST[,HOST...]` env-var form instead.
-pub(crate) fn parse_secret(spec: &str, command: &str) -> anyhow::Result<(String, Vec<String>)> {
-    if let Some(eq_pos) = spec.find('=') {
-        let env_var = &spec[..eq_pos];
+pub(crate) fn parse_secret(spec: &str, command: &str) -> anyhow::Result<ParsedSecret> {
+    let at_pos = spec
+        .rfind('@')
+        .ok_or_else(|| anyhow::anyhow!("secret must be in format ENV[:OPTIONS]@HOST[,HOST...]"))?;
+    let policy = &spec[..at_pos];
+    let (env_var, options) = policy
+        .split_once(':')
+        .map_or((policy, None), |(env, options)| (env, Some(options)));
+
+    if let Some((name, _)) = env_var.split_once('=') {
         anyhow::bail!(
-            "inline secret values (`{env_var}=VALUE@HOST`) are not supported by `{command}`: \
+            "inline secret values (`{name}=VALUE@HOST`) are not supported by `{command}`: \
              the value would be stored in the sandbox config at rest. Export the value as a \
-             host environment variable and reference it with `{env_var}@HOST` instead, which \
+             host environment variable and reference it with `{name}@HOST` instead, which \
              is resolved from the environment at start time."
         );
     }
 
-    let at_pos = spec
-        .rfind('@')
-        .ok_or_else(|| anyhow::anyhow!("secret must be in format ENV@HOST[,HOST...]"))?;
-    let env_var = spec[..at_pos].to_string();
-    let hosts: Vec<String> = spec[at_pos + 1..]
+    let allowed_hosts: Vec<String> = spec[at_pos + 1..]
         .split(',')
         .map(str::trim)
         .filter(|host| !host.is_empty())
         .map(ToString::to_string)
         .collect();
 
-    if env_var.is_empty() || hosts.is_empty() {
-        anyhow::bail!("secret must be in format ENV@HOST[,HOST...] (all parts required)");
+    if env_var.is_empty() || allowed_hosts.is_empty() {
+        anyhow::bail!("secret must be in format ENV[:OPTIONS]@HOST[,HOST...] (all parts required)");
     }
 
-    Ok((env_var, hosts))
+    let mut parsed = ParsedSecret {
+        env_var: env_var.to_string(),
+        allowed_hosts,
+        passthrough_hosts: Vec::new(),
+        substitute_headers: true,
+        substitute_query: false,
+        substitute_body: false,
+    };
+    if let Some(options) = options {
+        for option in split_secret_options(options)? {
+            match option.as_str() {
+                "no-headers" => parsed.substitute_headers = false,
+                "query" => parsed.substitute_query = true,
+                "body" => parsed.substitute_body = true,
+                value if value.starts_with("passthrough=") => {
+                    let hosts = value.trim_start_matches("passthrough=");
+                    let hosts = hosts
+                        .strip_prefix('[')
+                        .and_then(|value| value.strip_suffix(']'))
+                        .unwrap_or(hosts);
+                    let parsed_hosts = hosts
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|host| !host.is_empty())
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>();
+                    if parsed_hosts.is_empty() {
+                        anyhow::bail!("secret passthrough requires at least one host");
+                    }
+                    extend_unique(&mut parsed.passthrough_hosts, parsed_hosts);
+                }
+                other => anyhow::bail!(
+                    "invalid secret option: {other} (expected: no-headers, query, body, passthrough=HOST, or passthrough=[HOST,...])"
+                ),
+            }
+        }
+    }
+    if !parsed.substitute_headers && !parsed.substitute_query && !parsed.substitute_body {
+        anyhow::bail!("secret must enable at least one substitution location");
+    }
+
+    Ok(parsed)
+}
+
+/// Split comma-separated secret options while retaining bracketed host lists.
+fn split_secret_options(options: &str) -> anyhow::Result<Vec<String>> {
+    let mut result = Vec::new();
+    let mut start = 0;
+    let mut bracketed = false;
+    for (index, ch) in options.char_indices() {
+        match ch {
+            '[' if !bracketed => bracketed = true,
+            ']' if bracketed => bracketed = false,
+            ',' if !bracketed => {
+                result.push(options[start..index].trim().to_string());
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    if bracketed {
+        anyhow::bail!("secret passthrough host list is missing a closing `]`");
+    }
+    result.push(options[start..].trim().to_string());
+    if result.iter().any(String::is_empty) {
+        anyhow::bail!("secret options must not be empty");
+    }
+    Ok(result)
+}
+
+fn extend_unique(target: &mut Vec<String>, values: impl IntoIterator<Item = String>) {
+    for value in values {
+        if !target.contains(&value) {
+            target.push(value);
+        }
+    }
 }
 
 #[cfg(feature = "net")]
@@ -2746,10 +2970,8 @@ fn allow_secret_host(
     host: &str,
 ) -> microsandbox::sandbox::SecretBuilder {
     match microsandbox_network::secrets::config::HostPattern::parse(host) {
-        microsandbox_network::secrets::config::HostPattern::Exact(host) => builder.allow_host(host),
-        microsandbox_network::secrets::config::HostPattern::Wildcard(host) => {
-            builder.allow_host_pattern(host)
-        }
+        microsandbox_network::secrets::config::HostPattern::Exact(host)
+        | microsandbox_network::secrets::config::HostPattern::Wildcard(host) => builder.allow(host),
         microsandbox_network::secrets::config::HostPattern::Any => {
             builder.allow_any_host_dangerous(true)
         }
@@ -2771,16 +2993,15 @@ pub(crate) fn parse_scoped_upstream_ca_cert(spec: &str) -> anyhow::Result<(Strin
 #[cfg(feature = "net")]
 pub(crate) fn parse_violation_action(
     s: &Option<String>,
-) -> anyhow::Result<Option<microsandbox_network::secrets::config::ViolationAction>> {
-    use microsandbox_network::secrets::config::{HostPattern, ViolationAction};
+) -> anyhow::Result<Option<microsandbox_network::secrets::config::SecretViolationAction>> {
+    use microsandbox_network::secrets::config::SecretViolationAction;
     match s.as_deref() {
         None => Ok(None),
-        Some("block") => Ok(Some(ViolationAction::Block)),
-        Some("block-and-log") => Ok(Some(ViolationAction::BlockAndLog)),
-        Some("block-and-terminate") => Ok(Some(ViolationAction::BlockAndTerminate)),
-        Some("passthrough") => Ok(Some(ViolationAction::Passthrough(vec![HostPattern::Any]))),
+        Some("block") => Ok(Some(SecretViolationAction::Block)),
+        Some("block-and-log") => Ok(Some(SecretViolationAction::BlockAndLog)),
+        Some("block-and-terminate") => Ok(Some(SecretViolationAction::BlockAndTerminate)),
         Some(other) => anyhow::bail!(
-            "invalid violation action: {other} (expected: block, block-and-log, block-and-terminate, passthrough)"
+            "invalid violation action: {other} (expected: block, block-and-log, block-and-terminate)"
         ),
     }
 }
@@ -3152,6 +3373,29 @@ mod tests {
 
     #[cfg(feature = "net")]
     #[test]
+    fn tcp_limit_flags_are_aliases_but_mutually_exclusive() {
+        for flag in ["--max-connections", "--max-tcp-connections"] {
+            let matches = SandboxOpts::augment_args(Command::new("test"))
+                .try_get_matches_from(["test", flag, "0", "--max-udp-connections", "7"])
+                .unwrap();
+            let opts = SandboxOpts::from_arg_matches(&matches).unwrap();
+            assert_eq!(opts.max_tcp_connections.or(opts.max_connections), Some(0));
+            assert_eq!(opts.max_udp_connections, Some(7));
+        }
+        let err = SandboxOpts::augment_args(Command::new("test"))
+            .try_get_matches_from([
+                "test",
+                "--max-connections",
+                "0",
+                "--max-tcp-connections",
+                "64",
+            ])
+            .unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
     fn parse_rate_splits_value_and_duration() {
         let bytes = |s: &str| ui::parse_size_bytes(s).map_err(anyhow::Error::msg);
 
@@ -3259,23 +3503,43 @@ mod tests {
     fn parse_secret_returns_env_and_host_reference() {
         // The value is NOT read here: `create` persists a source reference and
         // the spawn resolver reads the host env at start time.
-        let (env_var, hosts) =
-            parse_secret("MSB_PARSE_SECRET_TOKEN@api.example.com", "create").unwrap();
+        let secret = parse_secret("MSB_PARSE_SECRET_TOKEN@api.example.com", "create").unwrap();
 
-        assert_eq!(env_var, "MSB_PARSE_SECRET_TOKEN");
-        assert_eq!(hosts, vec!["api.example.com"]);
+        assert_eq!(secret.env_var, "MSB_PARSE_SECRET_TOKEN");
+        assert_eq!(secret.allowed_hosts, vec!["api.example.com"]);
     }
 
     #[test]
     fn parse_secret_accepts_multiple_hosts() {
-        let (env_var, hosts) = parse_secret(
+        let secret = parse_secret(
             "MSB_PARSE_SECRET_TOKEN@api.example.com, *.example.org, *",
             "create",
         )
         .unwrap();
 
-        assert_eq!(env_var, "MSB_PARSE_SECRET_TOKEN");
-        assert_eq!(hosts, vec!["api.example.com", "*.example.org", "*"]);
+        assert_eq!(secret.env_var, "MSB_PARSE_SECRET_TOKEN");
+        assert_eq!(
+            secret.allowed_hosts,
+            vec!["api.example.com", "*.example.org", "*"]
+        );
+    }
+
+    #[test]
+    fn parse_secret_supports_substitution_and_passthrough_options() {
+        let secret = parse_secret(
+            "GH_TOKEN:no-headers,query,body,passthrough=api.anthropic.com,passthrough=[example.com,*.example.org]@github.com,api.github.com",
+            "create",
+        )
+        .unwrap();
+
+        assert!(!secret.substitute_headers);
+        assert!(secret.substitute_query);
+        assert!(secret.substitute_body);
+        assert_eq!(
+            secret.passthrough_hosts,
+            vec!["api.anthropic.com", "example.com", "*.example.org"]
+        );
+        assert_eq!(secret.allowed_hosts, vec!["github.com", "api.github.com"]);
     }
 
     #[test]
@@ -3450,15 +3714,8 @@ mod tests {
 
     #[cfg(feature = "net")]
     #[test]
-    fn parse_violation_action_accepts_passthrough() {
-        let action = parse_violation_action(&Some("passthrough".to_string()))
-            .expect("passthrough should parse")
-            .expect("action should be present");
-
-        assert!(matches!(
-            action,
-            microsandbox_network::secrets::config::ViolationAction::Passthrough(_)
-        ));
+    fn parse_violation_action_rejects_passthrough() {
+        assert!(parse_violation_action(&Some("passthrough".to_string())).is_err());
     }
 
     #[test]
@@ -4106,6 +4363,90 @@ mod tests {
                 assert_eq!(create.capacity_mib(), Some(2048));
             }
             other => panic!("expected Named, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn owned_mount_cli_supports_directory_and_disk_without_a_name() {
+        for (spec, disk) in [
+            ("/data:quota=512M,noexec", false),
+            ("/data:kind=disk,size=1G,ro", true),
+        ] {
+            let mount = build_explicit(spec, apply_owned_mount).await;
+            let VolumeMount::Owned {
+                guest,
+                storage,
+                options,
+                ..
+            } = mount
+            else {
+                panic!("expected owned mount")
+            };
+            assert_eq!(guest, "/data");
+            if disk {
+                assert_eq!(
+                    storage,
+                    microsandbox::sandbox::OwnedVolumeStorage::Disk { capacity_mib: 1024 }
+                );
+                assert!(options.readonly);
+            } else {
+                assert_eq!(
+                    storage,
+                    microsandbox::sandbox::OwnedVolumeStorage::Directory {
+                        quota_mib: Some(512)
+                    }
+                );
+                assert!(options.noexec);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn owned_mount_cli_rejects_name_and_inapplicable_options() {
+        for spec in [
+            "named:/data",
+            "/data:kind=disk",
+            "/data:kind=disk,size=0",
+            "/data:size=1G",
+            "/data:kind=disk,size=1G,quota=1G",
+            "/data:fstype=xfs",
+            "/data:format=qcow2",
+            "/data:follow-root-symlinks",
+        ] {
+            let result =
+                apply_owned_mount(SandboxBuilder::new("invalid-owned").image("alpine"), spec);
+            if let Ok(builder) = result {
+                assert!(
+                    builder.build().await.is_err(),
+                    "{spec} unexpectedly accepted"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn owned_install_validation_checks_storage_and_guest_path_synchronously() {
+        for spec in [
+            "/data",
+            "/data:quota=1G,nodev",
+            "/data:kind=disk,size=1G,ro",
+        ] {
+            validate_mount_owned_spec(spec).unwrap();
+        }
+        for spec in [
+            "/",
+            "/data/..",
+            "/data\0bad",
+            "/data:kind=disk",
+            "/data:kind=disk,size=0",
+            "/data:size=1G",
+            "/data:kind=disk,size=1G,stat-virt=strict",
+            "/data:kind=disk,size=1G,quota=0",
+        ] {
+            assert!(
+                validate_mount_owned_spec(spec).is_err(),
+                "accepted {spec:?}"
+            );
         }
     }
 

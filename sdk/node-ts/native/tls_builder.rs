@@ -20,7 +20,10 @@ pub struct JsTlsConfig {
     pub intercepted_ports: Vec<u32>,
     pub block_quic: bool,
     pub upstream_ca_cert_paths: Vec<String>,
+    // Keep public names stable when napi-rs renders these renamed nested objects.
+    #[napi(ts_type = "Array<ScopedUpstreamCaCert>")]
     pub scoped_upstream_ca_certs: Vec<JsScopedUpstreamCaCert>,
+    #[napi(ts_type = "Array<ScopedVerifyUpstream>")]
     pub scoped_verify_upstream: Vec<JsScopedVerifyUpstream>,
     pub intercept_ca_cert_path: Option<String>,
     pub intercept_ca_key_path: Option<String>,

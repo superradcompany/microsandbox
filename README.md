@@ -29,7 +29,8 @@
 
 ##
 
-- <img height="14" src="https://octicons-col.vercel.app/shield-lock/A770EF"> **Hardware Isolation**: Hardware-level isolation with microVM technology.
+- <img height="14" src="https://octicons-col.vercel.app/shield-lock/A770EF"> **Hardware Isolation**: Hardware-level isolation with tiny virtual machines.
+- <img height="14" src="https://octicons-col.vercel.app/repo-forked/A770EF"> **Branch & Snapshot**: Fork live sandboxes. Save running sandbox state and restore later.
 - <img height="14" src="https://octicons-col.vercel.app/globe/A770EF"> **Cross Platform**: Runs on Linux, macOS, and Windows.
 - <img height="14" src="https://octicons-col.vercel.app/package/A770EF"> **OCI Compatible**: Runs standard container images from Docker Hub, GHCR, or any OCI registry.
 - <img height="14" src="https://octicons-col.vercel.app/container/A770EF"> **Docker-Like Workflows**: Familiar image, command, shell, and volume workflows.
@@ -43,34 +44,7 @@
 
 ## <a href="./#gh-dark-mode-only" target="_blank"><img height="13" src="https://octicons-col.vercel.app/rocket/ffffff" alt="rocket-dark"></a><a href="./#gh-light-mode-only" target="_blank"><img height="13" src="https://octicons-col.vercel.app/rocket/000000" alt="rocket"></a>&nbsp;&nbsp;Getting Started
 
-#### <img height="14" src="https://octicons-col.vercel.app/move-to-bottom/A770EF">&nbsp;&nbsp;Install the SDK
-> ```sh
-> npm i microsandbox                                       # 🟦 TypeScript
-> ```
->
-> ```sh
-> cargo add microsandbox                                   # 🦀 Rust
-> ```
->
-> ```sh
-> uv add microsandbox                                      # 🐍 Python
-> ```
->
-> ```sh
-> go get github.com/superradcompany/microsandbox/sdk/go    # 🐹 Go
-> ```
 #### <img height="14" src="https://octicons-col.vercel.app/download/A770EF">&nbsp;&nbsp;Install the CLI
-
-> Boot a microVM in a single command:
->
-> ```sh
-> npx microsandbox run debian
-> ```
->
-> ##
->
-> Or install the `msb` command globally:
->
 > ```sh
 > curl -fsSL https://install.microsandbox.dev | sh        # 🍎 macOS / 🐧 Linux
 > ```
@@ -104,11 +78,29 @@
 >
 > ##
 >
-> Then you can run `msb` directly:
+> Start creating sandboxes once installed:
 >
 > ```sh
-> msb run debian
+> msb run ubuntu
 > ```
+
+#### <img height="14" src="https://octicons-col.vercel.app/move-to-bottom/A770EF">&nbsp;&nbsp;Install the SDK
+> ```sh
+> npm i microsandbox                                       # 🟦 TypeScript
+> ```
+>
+> ```sh
+> cargo add microsandbox                                   # 🦀 Rust
+> ```
+>
+> ```sh
+> uv add microsandbox                                      # 🐍 Python
+> ```
+>
+> ```sh
+> go get github.com/superradcompany/microsandbox/sdk/go    # 🐹 Go
+> ```
+
 
 ##
 
@@ -119,6 +111,113 @@
 > - <img height="14" src="https://api.iconify.design/simple-icons:windows.svg?color=%23A770EF" alt="Windows"> **Windows**: WHP enabled.
 >
 > **Warning**: Microsandbox is still **beta software**. Expect breaking changes, missing features, and rough edges.
+
+<br />
+
+## <a href="./#gh-dark-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/terminal/ffffff" alt="cli-dark"></a><a href="./#gh-light-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/terminal/000000" alt="cli"></a>&nbsp;&nbsp;CLI
+
+The `msb` CLI provides a complete interface for managing sandboxes, snapshots, images, and volumes.
+
+#### <img height="14" src="https://octicons-col.vercel.app/play/A770EF">&nbsp;&nbsp;Run a Command
+
+> ```sh
+> msb run python -- python3 -c "print('Hello from a microVM!')"
+> ```
+
+#### <img height="14" src="https://octicons-col.vercel.app/stopwatch/A770EF">&nbsp;&nbsp;Named Sandboxes
+
+> ```sh
+> # Create and start a named sandbox
+> msb create --name app python
+> ```
+>
+> ```sh
+> # Execute commands
+> msb exec app -- python -c "import this"
+> msb exec app -- curl https://example.com
+> ```
+>
+> ```sh
+> # Fork a running sandbox.
+> msb branch app --name experiment
+> msb exec experiment -- python -c "print('An independent copy!')"
+> ```
+>
+> ```sh
+> # Save now, resume later
+> msb snapshot create --from-sandbox app --full -o saved.msb
+> msb restore saved.msb --name restored
+> ```
+>
+> ```sh
+> # Lifecycle
+> msb stop app
+> msb start app
+> msb rm app
+> ```
+
+#### <img height="14" src="https://octicons-col.vercel.app/cache/A770EF">&nbsp;&nbsp;Image Management
+
+> ```sh
+> msb pull python           # Pull an image
+> msb image ls              # List cached images
+> msb image rm python       # Remove an image
+> ```
+
+#### <img height="14" src="https://octicons-col.vercel.app/file-code/A770EF">&nbsp;&nbsp;Configuration File
+
+> ```sh
+> msb run --conf sandbox.yaml -- octocat
+> ```
+>
+> ```yaml
+> # sandbox.yaml
+> image: python:3.12
+> memory: 64M
+> network:
+>   allow:
+>     - api.github.com
+> scripts:
+>   octocat: |
+>     python - <<'PY'
+>     import urllib.request
+>
+>     request = urllib.request.Request(
+>         "https://api.github.com/octocat",
+>         headers={"User-Agent": "microsandbox-example"},
+>     )
+>     with urllib.request.urlopen(request) as response:
+>         print(response.read().decode())
+>     PY
+> ```
+
+#### <img height="14" src="https://octicons-col.vercel.app/download/A770EF">&nbsp;&nbsp;Install & Uninstall Sandboxes
+
+> ```sh
+> msb install ubuntu               # Install ubuntu sandbox as 'ubuntu' command
+> ubuntu                           # Opens Ubuntu in a microVM
+> msb uninstall ubuntu             # Uninstall the ubuntu sandbox
+> ```
+
+#### <img height="14" src="https://octicons-col.vercel.app/list-unordered/A770EF">&nbsp;&nbsp;Status & Inspection
+
+> ```sh
+> msb ls                         # List all sandboxes
+> msb ps app                     # Show sandbox status
+> msb inspect app                # Detailed sandbox info
+> msb metrics app                # Live CPU/memory/network stats
+> ```
+
+> [!TIP]
+>
+> Run:<br />
+> · `msb --help` for quick help menu. <br />
+> · `msb --tree` for complete command hierarchy and descriptions. <br />
+> · `msb <command> --tree` for a specific command tree.
+
+<br />
+
+<a href="https://docs.microsandbox.dev/cli/overview"><img src="https://img.shields.io/badge/CLI_Docs-%E2%86%92-A770EF?style=flat-square&labelColor=2b2b2b" alt="CLI Docs"></a>
 
 <br />
 
@@ -249,7 +348,7 @@ The SDK lets you create and control sandboxes directly from your application. `S
 >     ctx := context.Background()
 >
 >     // Downloads the microsandbox runtime to ~/.microsandbox/ on first run.
->     if err := microsandbox.EnsureInstalled(ctx); err != nil {
+>     if _, err := microsandbox.EnsureRuntime(ctx, microsandbox.RuntimeConfig{}, microsandbox.InstallOptions{}); err != nil {
 >         log.Fatal(err)
 >     }
 >
@@ -282,106 +381,13 @@ The SDK lets you create and control sandboxes directly from your application. `S
 
 <br />
 
-## <a href="./#gh-dark-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/terminal/ffffff" alt="cli-dark"></a><a href="./#gh-light-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/terminal/000000" alt="cli"></a>&nbsp;&nbsp;CLI
-
-The `msb` CLI provides a complete interface for managing sandboxes, images, and volumes.
-
-#### <img height="14" src="https://octicons-col.vercel.app/play/A770EF">&nbsp;&nbsp;Run a Command
-
-> ```sh
-> msb run python -- python3 -c "print('Hello from a microVM!')"
-> ```
-
-#### <img height="14" src="https://octicons-col.vercel.app/stopwatch/A770EF">&nbsp;&nbsp;Named Sandboxes
-
-> ```sh
-> # Create and start a named sandbox
-> msb create --name app python
-> ```
->
-> ```sh
-> # Execute commands
-> msb exec app -- python -c "import this"
-> msb exec app -- curl https://example.com
-> ```
->
-> ```sh
-> # Lifecycle
-> msb stop app
-> msb start app
-> msb rm app
-> ```
-
-#### <img height="14" src="https://octicons-col.vercel.app/cache/A770EF">&nbsp;&nbsp;Image Management
-
-> ```sh
-> msb pull python           # Pull an image
-> msb image ls              # List cached images
-> msb image rm python       # Remove an image
-> ```
-
-#### <img height="14" src="https://octicons-col.vercel.app/file-code/A770EF">&nbsp;&nbsp;Configuration File
-
-> ```sh
-> msb run --conf sandbox.yaml -- octocat
-> ```
->
-> ```yaml
-> # sandbox.yaml
-> image: python:3.12
-> network:
->   allow:
->     - api.github.com
-> scripts:
->   octocat: |
->     python - <<'PY'
->     import urllib.request
->
->     request = urllib.request.Request(
->         "https://api.github.com/octocat",
->         headers={"User-Agent": "microsandbox-example"},
->     )
->     with urllib.request.urlopen(request) as response:
->         print(response.read().decode())
->     PY
-> ```
-
-#### <img height="14" src="https://octicons-col.vercel.app/download/A770EF">&nbsp;&nbsp;Install & Uninstall Sandboxes
-
-> ```sh
-> msb install ubuntu               # Install ubuntu sandbox as 'ubuntu' command
-> ubuntu                           # Opens Ubuntu in a microVM
-> msb uninstall ubuntu             # Uninstall the ubuntu sandbox
-> ```
-
-#### <img height="14" src="https://octicons-col.vercel.app/list-unordered/A770EF">&nbsp;&nbsp;Status & Inspection
-
-> ```sh
-> msb ls                         # List all sandboxes
-> msb ps app                     # Show sandbox status
-> msb inspect app                # Detailed sandbox info
-> msb metrics app                # Live CPU/memory/network stats
-> ```
-
-> [!TIP]
->
-> Run:<br />
-> · `msb --help` for quick help menu. <br />
-> · `msb --tree` for complete command hierarchy and descriptions. <br />
-> · `msb <command> --tree` for a specific command tree.
-
-<br />
-
-<a href="https://docs.microsandbox.dev/cli/overview"><img src="https://img.shields.io/badge/CLI_Docs-%E2%86%92-A770EF?style=flat-square&labelColor=2b2b2b" alt="CLI Docs"></a>
-
-<br />
-
 ## <a href="./#gh-dark-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/beaker/ffffff" alt="beaker-dark"></a><a href="./#gh-light-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/beaker/000000" alt="beaker"></a>&nbsp;&nbsp;Examples
 
 Practical ways to put microsandbox to work:
 
 > • <img height="14" src="https://octicons-col.vercel.app/container/A770EF"> **[Docker in a Sandbox](https://docs.microsandbox.dev/examples/docker/docker-in-sandbox)**: Run Docker without touching the host daemon.<br />
 > • <img height="14" src="https://octicons-col.vercel.app/code/A770EF"> **[OpenCode](https://docs.microsandbox.dev/examples/agents/opencode)**: Give a coding agent an isolated project workspace.<br />
+> • <img height="14" src="https://octicons-col.vercel.app/globe/A770EF"> **[Browser Use](https://docs.microsandbox.dev/examples/browser-automation/browser-use)**: Run an AI browser agent inside a microVM.<br />
 > • <img height="14" src="https://octicons-col.vercel.app/globe/A770EF"> **[Playwright](https://docs.microsandbox.dev/examples/browser-automation/playwright)**: Run headless browser jobs inside a microVM.<br />
 > • <img height="14" src="https://octicons-col.vercel.app/cache/A770EF"> **[Warm Workers](https://docs.microsandbox.dev/examples/sandboxing/warm-workers)**: Snapshot a toolchain and launch clean workers.<br />
 > • <img height="14" src="https://octicons-col.vercel.app/database/A770EF"> **[Migration Rehearsal](https://docs.microsandbox.dev/examples/data/migration-rehearsal)**: Test a database migration, then restore the baseline.<br />
@@ -403,6 +409,7 @@ Practical ways to put microsandbox to work:
 > • <img height="14" src="https://octicons-col.vercel.app/package/A770EF"> **[Condukt](https://github.com/tuist/condukt) and [Once](https://github.com/tuist/once) by Tuist**: Elixir agentic engine, and cacheable actions that run in fresh sandboxes.<br />
 > • <img height="14" src="https://octicons-col.vercel.app/link/A770EF"> **[langchain-microsandbox](https://github.com/kenwoodjw/langchain-microsandbox) by kenwoodjw**: Microsandbox integration for LangChain Deep Agents.<br />
 > • <img height="14" src="https://octicons-col.vercel.app/history/A770EF"> **[Smithers](https://github.com/smithersai/smithers) by Smithers**: Agent workflows with full observability, rewind, fork, and replay.<br />
+> • <img height="14" src="https://octicons-col.vercel.app/organization/A770EF"> **[AgentConnect](https://github.com/agentconnect-md/agentconnect)**: Bring multiple AI agents into your team's chats, issues, and pull requests.<br />
 > • <img height="14" src="https://octicons-col.vercel.app/terminal/A770EF"> **[wrap](https://github.com/tobi/wrap) by Tobi Lütke**: Run coding agents and project commands in isolated Arch Linux microVMs.<br />
 > • <img height="14" src="https://octicons-col.vercel.app/shield-lock/A770EF"> **[Agent VM](https://github.com/wirenboard/agent-vm) by Wiren Board**: Run AI agents in safe VMs scoped to a local folder.
 

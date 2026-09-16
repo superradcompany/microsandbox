@@ -136,7 +136,7 @@ def verify_migration_set(
     candidate_baseline: dict[str, Any],
     database_path: Path,
 ) -> None:
-    """Verify released identifiers survive and the candidate fully migrates."""
+    """Verify released identifiers survive and opening preserves the released catalog."""
     old_migrations = old_baseline["migrations"]
     candidate_migrations = candidate_baseline["migrations"]
     if len(old_migrations) != len(set(old_migrations)):
@@ -154,10 +154,12 @@ def verify_migration_set(
         applied = {
             row[0] for row in database.execute("SELECT version FROM seaql_migrations")
         }
-    expected = set(candidate_migrations)
+    # Historical catalogs remain readable by released CLIs and SDKs. Opening them
+    # must not apply the candidate-only migrations. Fresh catalogs are checked separately.
+    expected = set(old_migrations)
     if applied != expected:
         raise SmokeError(
-            "candidate database migration set does not match its schema baseline; "
+            "historical database migration set changed after candidate access; "
             f"missing={sorted(expected - applied)}, "
             f"unexpected={sorted(applied - expected)}"
         )
@@ -180,7 +182,12 @@ def verify_upgrade(
     old_baseline = schema_baseline(old_msb)
     run_msb(old_msb, "list", home=old_home)
 
-    # Opening twice verifies both the upgrade and its steady-state/idempotent path.
+    with sqlite3.connect(old_home / "db" / "msb.db") as database:
+        original_schema = database.execute(
+            "SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name"
+        ).fetchall()
+
+    # Opening twice verifies compatibility and its steady-state/idempotent path.
     run_msb(candidate, "list", home=old_home)
     run_msb(candidate, "list", home=old_home)
     verify_migration_set(
@@ -189,7 +196,14 @@ def verify_upgrade(
         candidate_baseline,
         old_home / "db" / "msb.db",
     )
-    print(f"upgrade smoke passed: {version} -> candidate")
+    with sqlite3.connect(old_home / "db" / "msb.db") as database:
+        current_schema = database.execute(
+            "SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name"
+        ).fetchall()
+    if current_schema != original_schema:
+        raise SmokeError(f"candidate changed the schema of the {version} catalog")
+    run_msb(old_msb, "list", home=old_home)
+    print(f"compatibility smoke passed: {version} -> candidate -> {version}")
 
 
 def main() -> int:
@@ -206,6 +220,11 @@ def main() -> int:
     candidate_baseline = schema_baseline(candidate)
     with tempfile.TemporaryDirectory(prefix="msb-upgrade-smoke-") as temp_dir:
         smoke_root = Path(temp_dir)
+        fresh_home = smoke_root / "candidate-fresh"
+        run_msb(candidate, "list", home=fresh_home)
+        verify_migration_set(
+            "candidate", candidate_baseline, candidate_baseline, fresh_home / "db" / "msb.db"
+        )
         for version in versions:
             verify_upgrade(
                 repository,

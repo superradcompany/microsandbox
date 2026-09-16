@@ -1,0 +1,130 @@
+---
+title: Browser Use
+description: Run an AI browser agent with isolated Chromium inside a microVM
+icon: "globe"
+---
+
+[Browser Use](https://github.com/browser-use/browser-use) turns a task into browser actions. This example runs both the agent and Chromium inside one isolated microsandbox.
+
+<Note>
+  The browser image is large. Its first pull and Python package install can take a few minutes. Use a [snapshot](/examples/sandboxing/warm-workers) to avoid repeating that setup.
+</Note>
+
+## Run Browser Use
+
+<Steps>
+
+<Step title="Create the agent">
+
+Save this as `browser-use-task.py`:
+
+```python
+import asyncio
+import os
+
+from browser_use import Agent, BrowserProfile, BrowserSession, ChatBrowserUse
+
+
+async def main() -> None:
+    browser = BrowserSession(
+        browser_profile=BrowserProfile(
+            headless=True,
+            executable_path=os.environ["CHROME_PATH"],
+            args=["--no-sandbox", "--disable-dev-shm-usage"],
+            enable_default_extensions=False,
+            user_data_dir=None,
+        )
+    )
+    agent = Agent(
+        task="Return the title of https://example.com",
+        llm=ChatBrowserUse(model="bu-2-0"),
+        browser_session=browser,
+    )
+    history = await agent.run(max_steps=3)
+    print(history.final_result())
+    await browser.kill()
+
+
+asyncio.run(main())
+```
+
+</Step>
+
+<Step title="Start the sandbox">
+
+Export a [Browser Use API key](https://cloud.browser-use.com/new-api-key), then run the task. The secret stays on the host and can only be substituted into requests to Browser Use's model endpoint.
+
+<CodeGroup>
+```sh macOS & Linux
+export BROWSER_USE_API_KEY="your-key"
+
+msb run --name browser-use-task --replace \
+  --cpus 2 --memory 4G --root-disk 10G \
+  --secret "BROWSER_USE_API_KEY@llm.api.browser-use.com" \
+  --copy-file ./browser-use-task.py:/root/browser-use-task.py \
+  mcr.microsoft.com/playwright/python:v1.61.0-noble -- sh -lc '
+    apt-get update -qq && apt-get install -y -qq libnss3-tools &&
+    mkdir -p "$HOME/.pki/nssdb" &&
+    certutil -d sql:"$HOME/.pki/nssdb" -N --empty-password &&
+    certutil -d sql:"$HOME/.pki/nssdb" -A -n microsandbox-egress -t "C,," -i /.msb/tls/ca.pem &&
+    pip install --disable-pip-version-check browser-use==0.13.10 &&
+    CHROME_PATH="$(find /ms-playwright -path "*/chrome-linux/chrome" -type f | head -n 1)" \
+      python /root/browser-use-task.py
+  '
+```
+
+```powershell Windows
+$env:BROWSER_USE_API_KEY = "your-key"
+
+msb run --name browser-use-task --replace `
+  --cpus 2 --memory 4G --root-disk 10G `
+  --secret "BROWSER_USE_API_KEY@llm.api.browser-use.com" `
+  --copy-file ./browser-use-task.py:/root/browser-use-task.py `
+  mcr.microsoft.com/playwright/python:v1.61.0-noble -- sh -lc '
+    apt-get update -qq && apt-get install -y -qq libnss3-tools &&
+    mkdir -p "$HOME/.pki/nssdb" &&
+    certutil -d sql:"$HOME/.pki/nssdb" -N --empty-password &&
+    certutil -d sql:"$HOME/.pki/nssdb" -A -n microsandbox-egress -t "C,," -i /.msb/tls/ca.pem &&
+    pip install --disable-pip-version-check browser-use==0.13.10 &&
+    CHROME_PATH="$(find /ms-playwright -path "*/chrome-linux/chrome" -type f | head -n 1)" \
+      python /root/browser-use-task.py
+  '
+```
+</CodeGroup>
+
+The agent prints its final result and exits. The Browser Use browser session uses the Chromium already included in the image, so it does not download a second browser.
+
+<Warning>
+  `--secret` routes egress through microsandbox's TLS-terminating proxy. Chromium reads its own NSS
+  store, not `SSL_CERT_FILE` or `NODE_EXTRA_CA_CERTS`, so without the `certutil` step above every
+  page load fails with `net::ERR_CERT_AUTHORITY_INVALID` and the agent burns steps clicking through
+  the interstitial. Importing `/.msb/tls/ca.pem` into `$HOME/.pki/nssdb` is what makes navigation clean.
+</Warning>
+
+</Step>
+
+<Step title="Clean up">
+
+Remove the stopped sandbox and unset the API key:
+
+<CodeGroup>
+```sh macOS & Linux
+msb rm -f browser-use-task
+unset BROWSER_USE_API_KEY
+```
+
+```powershell Windows
+msb rm -f browser-use-task
+Remove-Item Env:BROWSER_USE_API_KEY
+```
+</CodeGroup>
+
+</Step>
+
+</Steps>
+
+## Reference
+
+- [Browser Use Python quickstart](https://docs.browser-use.com/open-source/introduction)
+- [Microsandbox secrets](/sandboxes/secrets)
+- [Microsandbox snapshots](/examples/sandboxing/warm-workers)

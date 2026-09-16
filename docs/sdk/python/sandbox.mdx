@@ -141,7 +141,7 @@ async with session:
 
 </Accordion>
 
-Same parameters as [`create()`](#sandbox-create) but returns a [`PullSession`](#pullsession) that lets you track image pull progress before the sandbox is ready. This method is synchronous (not awaitable); the async work happens through the `PullSession`.
+Same parameters as [`create()`](#sandbox-create) but returns a [`PullSession`](#pullsession) that reports image preparation and local startup. This factory is synchronous; the async work happens through the session. Startup events have `event_type == PullEventType.STARTUP`, with `phase`, `completed_bytes`, and optional `total_bytes`. They distinguish backing preparation, cache waits/reuse, syncing, and activation. Preparation does not consume the activation timeout. Ignoring progress does not cancel creation; await `session.result()` for the outcome.
 
 <p className="msb-label">Parameters</p>
 
@@ -596,8 +596,8 @@ for change in plan["changes"]:
 # Make an env change active now by restarting
 await sb.modify(env={"MODE": "prod"}, policy=ModificationPolicy.RESTART)
 
-# Grow the managed OCI root disk offline and restart
-await sb.modify(root_disk_size=8192, policy=ModificationPolicy.RESTART)
+# Grow the owned OCI root disk while it is running
+await sb.modify(root_disk_size=8192)
 
 # Add or rotate a host-environment secret; restart if it is newly added
 await sb.modify(
@@ -616,9 +616,9 @@ await sb.modify(secrets_rm=["OLD_API_KEY"])
 
 </Accordion>
 
-Plan or apply a configuration change. The returned plan uses [`ModificationDisposition`](#modificationdisposition) to classify when each change takes effect, and apply is all-or-nothing.
+Plan or apply a configuration change. The returned plan uses [`ModificationDisposition`](#modificationdisposition) to classify when each change takes effect.
 
-`cpus` and `memory` resize live within the `max_cpus` / `max_memory` ceilings; raising a ceiling requires a restart. `root_disk_size` changes are offline: managed and flat OCI root disks grow only, tmpfs root disks can change in either direction on the next boot, and user-supplied disk images are rejected. Env and workdir changes affect future execs only. On a stopped sandbox, changes are saved for the next boot.
+`cpus` and `memory` resize live within the `max_cpus` / `max_memory` ceilings; raising a ceiling requires a restart. `root_disk_size` grows owned managed and flat ext4 roots live, including checkpoint-backed roots, tmpfs root disks can change in either direction on the next boot, and user-supplied disk images are rejected. Env and workdir changes affect future execs only. Stopped roots grow before the new size is saved. Explicit restart and next-start policies remain available.
 
 Secret specs are keyed by stable secret name. Each `SecretModifySpec` selects at most one source (`env`, `value`, or `store`) and may also set `placeholder` and `allowed_hosts`; omitting a source updates only the other supplied fields. Plans expose only safe references and metadata; raw secret values never appear in a plan. Removal is explicit through `secrets_rm`.
 
@@ -913,7 +913,7 @@ Stream captured log entries as a [`LogStream`](#logstream). With `follow=True` t
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">stop()</span>
 
-<Tooltip tip="Graceful stop works on microsandbox cloud; timeout expiry cannot escalate to force kill."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On Cloud, the timeout only limits how long the SDK waits; the accepted stop may continue server-side."><span className="msb-badge-limited">Different on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```python
 async def stop(self, timeout: float | None = None) -> None
@@ -927,16 +927,24 @@ await sb.stop()
 
 </Accordion>
 
-Gracefully shut down the sandbox and wait until stopped state is observed. Lets the sandbox finish writing any pending data to disk before it exits, so files written inside the sandbox aren't lost across a later restart. Waits up to ten seconds by default; pass `timeout` to override the graceful shutdown window before force-kill escalation.
+Wait indefinitely for graceful shutdown and release of the targeted runtime's ownership. Success allows immediate removal. Cancelling the await does not kill the sandbox or undo a delivered shutdown request. Paused or unreachable sandboxes return errors; resume or kill explicitly. The optional `timeout` retains its call syntax and uses the same total budget as `stop_with_timeout()`.
 
 <p className="msb-label">Parameters</p>
 
 <div className="msb-params">
   <div className="msb-param">
     <div className="msb-param-key"><code>timeout</code><span className="msb-type">float | None</span></div>
-    <div className="msb-param-desc">Seconds to wait for graceful exit before force-kill. <code>None</code> uses the ten-second default.</div>
+    <div className="msb-param-desc">Total graceful-completion budget in seconds. <code>None</code> waits indefinitely; expiry raises <code>StopTimeoutError</code> without killing.</div>
   </div>
 </div>
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">stop_with_timeout()</span>
+
+```python
+async def stop_with_timeout(self, timeout: float) -> None
+```
+
+Use `await sb.stop_with_timeout(seconds)` for an explicit total graceful-completion budget. Expiry raises `StopTimeoutError`; zero expires before dispatch. A delivered request may finish later, but the timeout never requests force termination.
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">request_stop()</span>
 
@@ -1491,13 +1499,13 @@ Start in attached or detached mode
 
 #### <span className="msb-recv">handle.</span><span className="msb-hn">stop()</span>
 
-<Tooltip tip="Graceful stop works on microsandbox cloud; timeout expiry cannot escalate to force kill."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On Cloud, the timeout only limits how long the SDK waits; the accepted stop may continue server-side."><span className="msb-badge-limited">Different on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```python
 stop(timeout=None)
 ```
 
-Gracefully shut down and wait until stopped state is observed
+Wait indefinitely for graceful completion and runtime ownership release. `await handle.stop_with_timeout(seconds)` supplies one total budget; expiry raises `StopTimeoutError` without killing, and zero expires before dispatch. The optional `stop(timeout=...)` argument uses the same behavior.
 
 <p className="msb-label">Returns</p>
 
@@ -1623,7 +1631,7 @@ Stream captured log entries (works without starting)
 
 #### <span className="msb-recv">handle.</span><span className="msb-hn">snapshot()</span>
 
-<Tooltip tip="Snapshots use local disk artifacts and are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Cloud disk snapshots require a stopped or crashed source. Local snapshots also support running or paused sources."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```python
 snapshot(name)
@@ -1793,8 +1801,7 @@ The keyword arguments accepted by [`create()`](#sandbox-create) and [`create_wit
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| image | `str \| os.PathLike[str] \| `[`ImageSource`](/sdk/python/images) | - | OCI image, local path, or disk image. Required unless `from_snapshot=` is passed. Use `Image.oci("python:3.12", root_disk=RootDisk.managed(8192))` to set a managed OCI root-disk size |
-| from_snapshot | `str \| os.PathLike[str]` | - | Snapshot artifact to boot from instead of `image=`. Mutually exclusive with `image=` |
+| image | `str \| os.PathLike[str] \| `[`ImageSource`](/sdk/python/images) | - | OCI image, local path, or disk image. Required; use `Sandbox.restore()` for snapshots. Use `Image.oci("python:3.12", root_disk=RootDisk.managed(8192))` to set a managed OCI root-disk size |
 | cpus | `int` | `1` | Virtual CPUs. This is a limit, not a reservation |
 | max_cpus | `int` | same as `cpus` | Boot-time maximum possible virtual CPUs |
 | memory | `int` | `512` | Guest memory in MiB. This is a limit, not a reservation |
@@ -1827,7 +1834,7 @@ The keyword arguments accepted by [`create()`](#sandbox-create) and [`create_wit
 | network | [`Network`](/sdk/python/networking#network) | public profile | Network policy and configuration |
 | proxy | [`OutboundProxy`](/sdk/python/proxies#outboundproxy)` \| None` | `None` | Single proxy used for outbound connections. See [Proxies](/sdk/python/proxies) |
 | secrets | `Sequence[`[`SecretEntry`](/sdk/python/secrets#secretentry)`]` | `[]` | Secret injection |
-| on_secret_violation | [`ViolationAction`](/sdk/python/secrets#violationaction)` \| `[`ViolationPolicy`](/sdk/python/secrets#violationpolicy) | `BLOCK_AND_LOG` | Sandbox-wide default action when a secret placeholder would leak to a non-eligible destination. Shorthand for `Network.on_secret_violation`; if both are provided, this top-level value takes precedence. See [Violation policy](/sdk/python/secrets#violationpolicy) |
+| secret_violation_action | [`ViolationAction`](/sdk/python/secrets#violationaction) | `BLOCK_AND_LOG` | Sandbox-wide default action when a secret placeholder would leak to a non-eligible destination. Shorthand for `Network.secret_violation_action`; if both are provided, this top-level value takes precedence. |
 | detached | `bool` | `False` | If `True`, spawn the sandbox in detached mode; call [`detach()`](#sb-detach) before dropping the returned handle when it should keep running |
 
 ### InitConfig

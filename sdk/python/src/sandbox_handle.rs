@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyDict, PyList};
-use tokio::sync::Mutex;
 
 use crate::error::to_py_err;
 use crate::helpers::{extract_str_enum, str_enum_member};
@@ -19,7 +18,7 @@ use crate::sandbox::{
 #[pyclass(name = "SandboxHandle")]
 #[derive(Clone)]
 pub struct PySandboxHandle {
-    inner: Arc<Mutex<microsandbox::sandbox::SandboxHandle>>,
+    inner: Arc<microsandbox::sandbox::SandboxHandle>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -29,7 +28,7 @@ pub struct PySandboxHandle {
 impl PySandboxHandle {
     pub fn from_rust(inner: microsandbox::sandbox::SandboxHandle) -> Self {
         Self {
-            inner: Arc::new(Mutex::new(inner)),
+            inner: Arc::new(inner),
         }
     }
 }
@@ -39,30 +38,21 @@ impl PySandboxHandle {
     /// Sandbox name. Names are limited to 128 UTF-8 bytes.
     #[getter]
     fn name(&self) -> PyResult<String> {
-        let guard = self
-            .inner
-            .try_lock()
-            .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("handle is busy"))?;
+        let guard = &self.inner;
         Ok(guard.name().to_string())
     }
 
     /// Stable identity that changes when this name is removed and recreated.
     #[getter]
     fn id(&self) -> PyResult<String> {
-        let guard = self
-            .inner
-            .try_lock()
-            .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("handle is busy"))?;
+        let guard = &self.inner;
         Ok(guard.id().to_string())
     }
 
     /// Current sandbox lifecycle status.
     #[getter]
     fn status(&self, py: Python<'_>) -> PyResult<PyObject> {
-        let guard = self
-            .inner
-            .try_lock()
-            .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("handle is busy"))?;
+        let guard = &self.inner;
         str_enum_member(
             py,
             "SandboxStatus",
@@ -73,29 +63,20 @@ impl PySandboxHandle {
     /// Backend retained by this handle (`"local"` or `"cloud"`).
     #[getter]
     fn backend_kind(&self) -> PyResult<String> {
-        let guard = self
-            .inner
-            .try_lock()
-            .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("handle is busy"))?;
+        let guard = &self.inner;
         Ok(guard.backend_kind().as_str().to_string())
     }
 
     /// Raw config JSON string.
     #[getter]
     fn config_json(&self) -> PyResult<String> {
-        let guard = self
-            .inner
-            .try_lock()
-            .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("handle is busy"))?;
+        let guard = &self.inner;
         Ok(guard.config_json().to_string())
     }
 
     /// Parsed sandbox configuration.
     fn config(&self, py: Python<'_>) -> PyResult<PyObject> {
-        let guard = self
-            .inner
-            .try_lock()
-            .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("handle is busy"))?;
+        let guard = &self.inner;
         let value: serde_json::Value =
             serde_json::from_str(guard.config_json()).map_err(|e| to_py_err(e.into()))?;
         json_value_to_py(py, value)
@@ -105,7 +86,7 @@ impl PySandboxHandle {
     fn refresh<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let guard = inner.lock().await;
+            let guard = inner.clone();
             let refreshed = guard.refresh().await.map_err(to_py_err)?;
             Ok(PySandboxHandle::from_rust(refreshed))
         })
@@ -114,20 +95,14 @@ impl PySandboxHandle {
     /// Creation timestamp as ms since epoch.
     #[getter]
     fn created_at(&self) -> PyResult<Option<f64>> {
-        let guard = self
-            .inner
-            .try_lock()
-            .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("handle is busy"))?;
+        let guard = &self.inner;
         Ok(guard.created_at().map(|dt| dt.timestamp_millis() as f64))
     }
 
     /// Last update timestamp as ms since epoch.
     #[getter]
     fn updated_at(&self) -> PyResult<Option<f64>> {
-        let guard = self
-            .inner
-            .try_lock()
-            .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("handle is busy"))?;
+        let guard = &self.inner;
         Ok(guard.updated_at().map(|dt| dt.timestamp_millis() as f64))
     }
 
@@ -135,7 +110,7 @@ impl PySandboxHandle {
     fn metrics<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let guard = inner.lock().await;
+            let guard = inner.clone();
             let m = guard.metrics().await.map_err(to_py_err)?;
             Ok(convert_metrics(&m))
         })
@@ -148,7 +123,7 @@ impl PySandboxHandle {
     fn ping<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let guard = inner.lock().await;
+            let guard = inner.clone();
             let result = guard.ping().await.map_err(to_py_err)?;
             Ok(PySandboxPingResult::from_rust(result))
         })
@@ -161,9 +136,26 @@ impl PySandboxHandle {
     fn touch<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let guard = inner.lock().await;
+            let guard = inner.clone();
             let result = guard.touch().await.map_err(to_py_err)?;
             Ok(PySandboxTouchResult::from_rust(result))
+        })
+    }
+
+    /// Compact root and owned-data disks, running or stopped.
+    #[pyo3(signature = (*, layers = None, dry_run = false, disk = None, root_disk_only = false))]
+    fn compact<'py>(
+        &self,
+        py: Python<'py>,
+        layers: Option<usize>,
+        dry_run: bool,
+        disk: Option<String>,
+        root_disk_only: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let builder = inner.clone().compact();
+            crate::sandbox::run_compact(builder, layers, dry_run, disk, root_disk_only).await
         })
     }
 
@@ -236,7 +228,7 @@ impl PySandboxHandle {
             .transpose()?;
         let policy = crate::sandbox::parse_modify_policy(policy.as_deref())?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let guard = inner.lock().await;
+            let guard = inner.clone();
             let builder =
                 crate::sandbox::apply_modify_policy(guard.modify().with_patch(patch), policy);
             drop(guard);
@@ -260,7 +252,7 @@ impl PySandboxHandle {
         let inner = self.inner.clone();
         let opts = crate::logs::parse_log_options(py, tail, since_ms, until_ms, sources)?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let guard = inner.lock().await;
+            let guard = inner.clone();
             let entries = guard.logs(&opts).await.map_err(to_py_err)?;
             Ok(entries
                 .into_iter()
@@ -301,7 +293,7 @@ impl PySandboxHandle {
             follow,
         )?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let guard = inner.lock().await;
+            let guard = inner.clone();
             let stream = guard.log_stream(&opts).await.map_err(to_py_err)?;
             Ok(crate::logs::PyLogStream::new(stream))
         })
@@ -312,7 +304,7 @@ impl PySandboxHandle {
     fn start<'py>(&self, py: Python<'py>, detached: bool) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let guard = inner.lock().await;
+            let guard = inner.clone();
             let sb = if detached {
                 guard.start_detached().await.map_err(to_py_err)?
             } else {
@@ -328,7 +320,7 @@ impl PySandboxHandle {
         let inner = self.inner.clone();
         let timeout = optional_duration(timeout)?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let guard = inner.lock().await;
+            let guard = inner.clone();
             let sb = match timeout {
                 Some(timeout) => guard
                     .connect_with_timeout(timeout)
@@ -353,7 +345,7 @@ impl PySandboxHandle {
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let guard = inner.lock().await;
+            let guard = inner.clone();
             let sandbox = if detached {
                 guard.connect_or_start_detached().await
             } else {
@@ -364,17 +356,102 @@ impl PySandboxHandle {
         })
     }
 
-    /// Stop the sandbox gracefully and wait until stopped.
+    /// Wait indefinitely for graceful completion and runtime ownership release.
     #[pyo3(signature = (timeout = None))]
     fn stop<'py>(&self, py: Python<'py>, timeout: Option<f64>) -> PyResult<Bound<'py, PyAny>> {
-        let inner = self.inner.clone();
         let timeout = optional_duration(timeout)?;
+        let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let guard = inner.lock().await;
+            // Immutable native handles are shared without a wrapper mutex, so explicit
+            // Kill and other observers remain callable during an indefinite Stop.
+            let handle = inner.clone();
             match timeout {
-                Some(timeout) => guard.stop_with_timeout(timeout).await.map_err(to_py_err)?,
-                None => guard.stop().await.map_err(to_py_err)?,
+                Some(timeout) => handle.stop_with_timeout(timeout).await,
+                None => handle.stop().await,
             }
+            .map_err(to_py_err)?;
+            Ok(())
+        })
+    }
+
+    /// Wait for graceful completion within one seconds budget; expiry never kills.
+    fn stop_with_timeout<'py>(&self, py: Python<'py>, timeout: f64) -> PyResult<Bound<'py, PyAny>> {
+        self.stop(py, Some(timeout))
+    }
+
+    /// Create an independent local CoW child without a durable full snapshot.
+    #[pyo3(signature = (name, *, record_integrity = false, guest_flush = None))]
+    fn branch<'py>(
+        &self,
+        py: Python<'py>,
+        name: String,
+        record_integrity: bool,
+        guest_flush: Option<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let guard = inner.clone();
+            let mut builder = guard
+                .branch(name)
+                .guest_flush(crate::snapshot::guest_flush_policy(guest_flush)?);
+            if record_integrity {
+                builder = builder.record_integrity();
+            }
+            Ok(PySandbox::from_rust(
+                builder.branch().await.map_err(to_py_err)?,
+            ))
+        })
+    }
+
+    /// Capture once for all names; return individual child outcomes in input order.
+    #[pyo3(signature = (names, *, record_integrity = false, guest_flush = None))]
+    fn branch_many<'py>(
+        &self,
+        py: Python<'py>,
+        names: Vec<String>,
+        record_integrity: bool,
+        guest_flush: Option<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let mut builder = inner
+                .branch_many(names)
+                .guest_flush(crate::snapshot::guest_flush_policy(guest_flush)?);
+            if record_integrity {
+                builder = builder.record_integrity();
+            }
+            crate::sandbox::branch_outcomes(builder.branch().await.map_err(to_py_err)?)
+        })
+    }
+
+    /// Suspend this resident VM without releasing RAM.
+    #[pyo3(signature = (*, guest_flush = None))]
+    fn pause<'py>(
+        &self,
+        py: Python<'py>,
+        guest_flush: Option<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let guard = inner.clone();
+            if let Some(policy) = guest_flush {
+                guard
+                    .pause_with_guest_flush(crate::snapshot::guest_flush_policy(Some(policy))?)
+                    .await
+                    .map_err(to_py_err)?;
+            } else {
+                guard.pause().await.map_err(to_py_err)?;
+            }
+            Ok(())
+        })
+    }
+
+    /// Resume the same resident VM and its workloads.
+    fn resume<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let guard = inner.clone();
+            guard.resume().await.map_err(to_py_err)?;
             Ok(())
         })
     }
@@ -383,7 +460,7 @@ impl PySandboxHandle {
     fn request_stop<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let guard = inner.lock().await;
+            let guard = inner.clone();
             guard.request_stop().await.map_err(to_py_err)?;
             Ok(())
         })
@@ -395,7 +472,7 @@ impl PySandboxHandle {
         let inner = self.inner.clone();
         let timeout = optional_duration(timeout)?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let guard = inner.lock().await;
+            let guard = inner.clone();
             match timeout {
                 Some(timeout) => guard.kill_with_timeout(timeout).await.map_err(to_py_err)?,
                 None => guard.kill().await.map_err(to_py_err)?,
@@ -408,7 +485,7 @@ impl PySandboxHandle {
     fn request_kill<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let guard = inner.lock().await;
+            let guard = inner.clone();
             guard.request_kill().await.map_err(to_py_err)?;
             Ok(())
         })
@@ -418,7 +495,7 @@ impl PySandboxHandle {
     fn request_drain<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let guard = inner.lock().await;
+            let guard = inner.clone();
             guard.request_drain().await.map_err(to_py_err)?;
             Ok(())
         })
@@ -432,7 +509,7 @@ impl PySandboxHandle {
         let inner = self.inner.clone();
         let status = parse_sandbox_status(&status)?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let guard = inner.lock().await;
+            let guard = inner.clone();
             let handle = guard.wait_for_status(status).await.map_err(to_py_err)?;
             Ok(PySandboxHandle::from_rust(handle))
         })
@@ -459,7 +536,7 @@ impl PySandboxHandle {
             options.timeout = timeout;
         }
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let guard = inner.lock().await;
+            let guard = inner.clone();
             let sandbox = guard.restart_with(options).await.map_err(to_py_err)?;
             Ok(PySandbox::from_rust(sandbox))
         })
@@ -484,7 +561,7 @@ impl PySandboxHandle {
             options.timeout = timeout;
         }
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let guard = inner.lock().await;
+            let guard = inner.clone();
             guard.destroy_with(options).await.map_err(to_py_err)?;
             Ok(())
         })
@@ -494,7 +571,7 @@ impl PySandboxHandle {
     fn wait_until_stopped<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let guard = inner.lock().await;
+            let guard = inner.clone();
             let result = guard.wait_until_stopped().await.map_err(to_py_err)?;
             Ok(PySandboxStopResult::from_rust(result))
         })
@@ -504,19 +581,19 @@ impl PySandboxHandle {
     fn remove<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let guard = inner.lock().await;
+            let guard = inner.clone();
             guard.remove().await.map_err(to_py_err)?;
             Ok(())
         })
     }
 
-    /// Snapshot this (stopped) sandbox under a bare name. Resolves
+    /// Snapshot this sandbox's disk under a bare name, preserving its running/paused state. Resolves
     /// under `~/.microsandbox/snapshots/<name>/`. Move artifacts with
     /// `Snapshot.save`/`Snapshot.load`.
     fn snapshot<'py>(&self, py: Python<'py>, name: String) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let guard = inner.lock().await;
+            let guard = inner.clone();
             let snap = guard.snapshot(&name).await.map_err(to_py_err)?;
             Ok(crate::snapshot::PySnapshot::from_rust(snap))
         })

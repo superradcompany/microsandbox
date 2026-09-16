@@ -1,0 +1,99 @@
+{
+  "kind": "historical-source-records",
+  "source_path": "crates/runtime/lib/control.rs",
+  "records_file": "control_records.rs",
+  "extraction": "control request through CPU state records, plus SecretValue Debug implementation; identical across all listed tags",
+  "binary_tested": false,
+  "versions": [
+    {
+      "version": "v0.6.4",
+      "commit": "91e4d369bfc9431b4f8e01d869113f1df9e728f6",
+      "control_blob": "a996403c553639cd57c3e04d90298195ab24d9e4",
+      "records_sha256": "23bcab768dc935d91f55bdd25b4483f3a88e69845953a3d9f1ec197427eef0b0"
+    },
+    {
+      "version": "v0.6.5",
+      "commit": "057816ab187e19722eed73bd514a336b0ecec7a0",
+      "control_blob": "7f72d7e13d1f774719591fd3b9263fe053fc60fd",
+      "records_sha256": "23bcab768dc935d91f55bdd25b4483f3a88e69845953a3d9f1ec197427eef0b0"
+    },
+    {
+      "version": "v0.6.6",
+      "commit": "2367d506103f87fe733d7252c3202b278eadef88",
+      "control_blob": "7f72d7e13d1f774719591fd3b9263fe053fc60fd",
+      "records_sha256": "23bcab768dc935d91f55bdd25b4483f3a88e69845953a3d9f1ec197427eef0b0"
+    },
+    {
+      "version": "v0.6.7",
+      "commit": "0c54fd12acf7740f68d5bcd38e58a9fe82d51a45",
+      "control_blob": "7f72d7e13d1f774719591fd3b9263fe053fc60fd",
+      "records_sha256": "23bcab768dc935d91f55bdd25b4483f3a88e69845953a3d9f1ec197427eef0b0"
+    },
+    {
+      "version": "v0.6.8",
+      "commit": "7958cddeff2fce10dbcfd0c0d6a32dec93a9d5ea",
+      "control_blob": "7f72d7e13d1f774719591fd3b9263fe053fc60fd",
+      "records_sha256": "23bcab768dc935d91f55bdd25b4483f3a88e69845953a3d9f1ec197427eef0b0"
+    },
+    {
+      "version": "v0.6.9",
+      "commit": "664552c033a5976c5c318eb1cef94867fce619ee",
+      "control_blob": "13c220c5016c6d15d566f3540ed9c5d63e0c1094",
+      "records_sha256": "23bcab768dc935d91f55bdd25b4483f3a88e69845953a3d9f1ec197427eef0b0"
+    },
+    {
+      "version": "v0.6.10",
+      "commit": "aae05d825bb5891a9ca9b0ace3fb3acf3bad1897",
+      "control_blob": "13c220c5016c6d15d566f3540ed9c5d63e0c1094",
+      "records_sha256": "23bcab768dc935d91f55bdd25b4483f3a88e69845953a3d9f1ec197427eef0b0"
+    },
+    {
+      "version": "v0.6.11",
+      "commit": "6d0e0d1bc8ee1f70d6053a79b583e1f0c9afe0db",
+      "control_blob": "13c220c5016c6d15d566f3540ed9c5d63e0c1094",
+      "records_sha256": "23bcab768dc935d91f55bdd25b4483f3a88e69845953a3d9f1ec197427eef0b0"
+    },
+    {
+      "version": "v0.6.12",
+      "commit": "5941c1a29529620e4abf1baa7fa4916d1a76ab04",
+      "control_blob": "13c220c5016c6d15d566f3540ed9c5d63e0c1094",
+      "records_sha256": "23bcab768dc935d91f55bdd25b4483f3a88e69845953a3d9f1ec197427eef0b0"
+    },
+    {
+      "version": "v0.6.13",
+      "commit": "6362f131982b3ef10197836786341d5c99ea97cb",
+      "control_blob": "13c220c5016c6d15d566f3540ed9c5d63e0c1094",
+      "records_sha256": "23bcab768dc935d91f55bdd25b4483f3a88e69845953a3d9f1ec197427eef0b0"
+    },
+    {
+      "version": "v0.6.14",
+      "commit": "b30fd164ad8640cbc34f6aa9645f9c265c3490b8",
+      "control_blob": "13c220c5016c6d15d566f3540ed9c5d63e0c1094",
+      "records_sha256": "23bcab768dc935d91f55bdd25b4483f3a88e69845953a3d9f1ec197427eef0b0"
+    },
+    {
+      "version": "v0.6.15",
+      "commit": "bb03217deddb4b862a5735048031111198a0a935",
+      "control_blob": "13c220c5016c6d15d566f3540ed9c5d63e0c1094",
+      "records_sha256": "23bcab768dc935d91f55bdd25b4483f3a88e69845953a3d9f1ec197427eef0b0"
+    },
+    {
+      "version": "v0.6.16",
+      "commit": "93c14431b387d4666c7c9ca6599bb2fafdc01782",
+      "control_blob": "13c220c5016c6d15d566f3540ed9c5d63e0c1094",
+      "records_sha256": "23bcab768dc935d91f55bdd25b4483f3a88e69845953a3d9f1ec197427eef0b0"
+    },
+    {
+      "version": "v0.6.17",
+      "commit": "5dd55ebb920f2690204390f86698d20f570d4dfa",
+      "control_blob": "13c220c5016c6d15d566f3540ed9c5d63e0c1094",
+      "records_sha256": "23bcab768dc935d91f55bdd25b4483f3a88e69845953a3d9f1ec197427eef0b0"
+    },
+    {
+      "version": "v0.6.18",
+      "commit": "fa3e43902e9bc49e1d85cc0a7298e13fe2374026",
+      "control_blob": "13c220c5016c6d15d566f3540ed9c5d63e0c1094",
+      "records_sha256": "23bcab768dc935d91f55bdd25b4483f3a88e69845953a3d9f1ec197427eef0b0"
+    }
+  ]
+}

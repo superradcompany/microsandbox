@@ -12,6 +12,30 @@
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct SandboxId(pub(crate) String);
 
+/// One local runtime generation selected before opening a name-addressed control endpoint.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(feature = "local")]
+pub(crate) struct SandboxRunIdentity {
+    pub(crate) sandbox_id: i32,
+    pub(crate) run_id: i32,
+    pub(crate) pid: i32,
+}
+
+/// Exact source selected for a direct branch before reserving its child.
+#[derive(Clone, Debug)]
+#[cfg(feature = "local")]
+pub(crate) struct BranchSource {
+    /// Negotiated capture policy; None preserves an older runtime's full-capture default.
+    pub(crate) guest_flush: Option<microsandbox_types::GuestFlush>,
+    /// Process-local shared capture. Never serialized or interpreted by older runtimes.
+    pub(crate) batch:
+        Option<std::sync::Arc<super::branch_batch::CaptureSlot<super::branch_batch::BatchCapture>>>,
+    /// Explicit disk integrity policy for this one capture, never inherited by descendants.
+    pub(crate) record_integrity: bool,
+    pub(crate) name: String,
+    pub(crate) run: SandboxRunIdentity,
+}
+
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------

@@ -1,0 +1,40 @@
+{
+  "commit": "21705b7d50877628c2c5837b97e7ce7e570e4912",
+  "sourcePath": "packages/agent-client/typescript/src/message.ts",
+  "blob": "9bf589b2c08e6892d83649bd4386d1318d063e93",
+  "sourceSha256": "08639bb31286f71ee73ec7aa079ecfa707fdf85e4168a1c7a6bee0d06651ee24",
+  "encoderVersion": "1.6.4",
+  "binaryTested": false,
+  "cases": [
+    {
+      "name": "native_exec",
+      "type": "core.exec.request",
+      "flags": 2,
+      "envelopeHex": "b90003617605617471636f72652e657865632e72657175657374617051b9000263636d6463636174646172677380"
+    },
+    {
+      "name": "native_stdin_bytes",
+      "type": "core.exec.stdin",
+      "flags": 0,
+      "envelopeHex": "b9000361760561746f636f72652e657865632e737464696e61704db900016464617461d840426869"
+    },
+    {
+      "name": "encoded_opaque",
+      "type": "core.exec.stdin",
+      "flags": 0,
+      "envelopeHex": "b9000361760561746f636f72652e657865632e737464696e6170d84044ff001820"
+    },
+    {
+      "name": "encoded_fs",
+      "type": "core.fs.request",
+      "flags": 2,
+      "envelopeHex": "b9000361760561746f636f72652e66732e726571756573746170d8404ba1626f70a16470696e67f5"
+    },
+    {
+      "name": "native_shutdown",
+      "type": "core.shutdown",
+      "flags": 4,
+      "envelopeHex": "b9000361760561746d636f72652e73687574646f776e617043b90000"
+    }
+  ]
+}

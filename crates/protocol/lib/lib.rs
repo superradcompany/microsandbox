@@ -17,24 +17,20 @@ const HANDOFF_POWEROFF_TIMEOUT_SECS: u64 = 5;
 const SHUTDOWN_FLUSH_MARGIN_SECS: u64 = 3;
 const NORMAL_SHUTDOWN_FLUSH_TIMEOUT_SECS: u64 = 2;
 
-/// Maximum time agentd spends in its handoff-mode poweroff sequence.
+/// Base grace used by explicit host lifetime policies for handoff-init sandboxes.
 ///
-/// In init-handoff sandboxes (systemd, openrc, …) agentd's shutdown
-/// handler signals the new PID 1 with `SIGRTMIN+4`, sleeps for this
-/// duration to give the init a chance to act, then falls back to
-/// `SIGTERM`. The host's handoff shutdown fallback must exceed this
-/// so it doesn't cut the sequence short.
+/// This is not a graceful Stop deadline. Agentd signals foreign PID 1 once and
+/// leaves its shutdown schedule intact; normal Stop never escalates on a timer.
 pub const HANDOFF_POWEROFF_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(HANDOFF_POWEROFF_TIMEOUT_SECS);
 
-/// Additional host-side margin after agentd's handoff poweroff grace.
+/// Additional host-side margin for an explicitly selected lifetime policy.
 ///
-/// This gives the guest init time to react to agentd's fallback signal before
-/// the host gives up and tears down the VMM process.
+/// Ordinary graceful Stop does not use this fallback margin.
 pub const SHUTDOWN_FLUSH_MARGIN: std::time::Duration =
     std::time::Duration::from_secs(SHUTDOWN_FLUSH_MARGIN_SECS);
 
-/// Host fallback window for normal sandboxes where agentd remains PID 1.
+/// Explicit lifetime-policy fallback window when agentd remains PID 1.
 ///
 /// agentd can synchronously `sync()`, remount the root read-only, and request
 /// kernel poweroff directly in this mode, so normal development sandboxes
@@ -42,13 +38,11 @@ pub const SHUTDOWN_FLUSH_MARGIN: std::time::Duration =
 pub const NORMAL_SHUTDOWN_FLUSH_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(NORMAL_SHUTDOWN_FLUSH_TIMEOUT_SECS);
 
-/// Host fallback window for sandboxes that hand PID 1 to another init.
+/// Explicit lifetime-policy fallback window for a foreign guest PID 1.
 ///
-/// agentd uses this window to `sync()` block-backed root filesystems
-/// and power off the kernel cleanly (or run its handoff sequence —
-/// see [`HANDOFF_POWEROFF_TIMEOUT`]). On a healthy guest the VMM
-/// exits well inside the window and the host fallback is a no-op;
-/// the fallback only fires when the guest is wedged.
+/// Idle, startup-command completion and parent-death policies may bound guest
+/// shutdown before host teardown. Public Stop and its timeout variant do not
+/// install this timer, and agentd no longer sends a fallback SIGTERM.
 ///
 /// Equals [`HANDOFF_POWEROFF_TIMEOUT`] plus [`SHUTDOWN_FLUSH_MARGIN`] for the
 /// init's own signal handling — enforced at compile time below.
@@ -62,10 +56,7 @@ pub const HANDOFF_SHUTDOWN_FLUSH_TIMEOUT: std::time::Duration =
 /// handoff init.
 pub const SHUTDOWN_FLUSH_TIMEOUT: std::time::Duration = HANDOFF_SHUTDOWN_FLUSH_TIMEOUT;
 
-// Compile-time invariant: the host must wait at least as long as
-// agentd's longest internal grace, otherwise the host fallback will
-// cut agentd's handoff sequence short and we'll silently strand
-// init-handoff sandboxes.
+// Keep a positive host margin in the explicit lifetime-policy window.
 const _: () = assert!(
     HANDOFF_SHUTDOWN_FLUSH_TIMEOUT.as_secs() > HANDOFF_POWEROFF_TIMEOUT.as_secs(),
     "HANDOFF_SHUTDOWN_FLUSH_TIMEOUT must exceed HANDOFF_POWEROFF_TIMEOUT",
@@ -77,6 +68,14 @@ const _: () = assert!(
 
 /// Virtio-console port name for the agent channel.
 pub const AGENT_PORT_NAME: &str = "agent";
+
+/// Virtio-console port name for the optional generation-8 bulk lane.
+#[doc(hidden)]
+pub const AGENT_BULK_PORT_NAME: &str = "agent-bulk";
+
+/// Internal kernel command-line selector for the first dual-port transport profile.
+#[doc(hidden)]
+pub const AGENT_TRANSPORT_DUAL_PORT_CMDLINE: &str = "microsandbox.agent_transport=dual-port-v1";
 
 /// Virtiofs tag for the runtime filesystem (scripts, heartbeat).
 pub const RUNTIME_FS_TAG: &str = "msb_runtime";
@@ -431,12 +430,17 @@ pub const GUEST_TLS_HOST_CAS_PATH: &str = "/.msb/tls/host-cas.pem";
 //--------------------------------------------------------------------------------------------------
 
 pub mod bootstrap;
+pub mod bulk;
 pub mod codec;
+pub mod control;
 pub mod core;
 pub mod exec;
 pub mod fs;
 pub mod heartbeat;
 pub mod message;
 pub mod tcp;
+#[doc(hidden)]
+pub mod transport;
+pub mod wire;
 
 pub use error::*;

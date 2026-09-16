@@ -6,10 +6,23 @@ documented keyword arguments (for direct Python construction).
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from typing import Literal
+
 
 class MicrosandboxError(Exception):
     """Base exception for all microsandbox errors."""
     code: str = "microsandbox-error"
+
+
+class RuntimeNotInstalledError(MicrosandboxError):
+    """No complete host runtime pair could be found."""
+    code = "runtime-not-installed"
+
+
+class RuntimeIncompleteError(MicrosandboxError):
+    """The selected host runtime is partial or an explicit binary path is invalid."""
+    code = "runtime-incomplete"
 
 
 class InvalidConfigError(MicrosandboxError):
@@ -52,9 +65,19 @@ class SandboxStillRunningError(MicrosandboxError):
     code = "sandbox-still-running"
 
 
+class SandboxStopTimedOutError(MicrosandboxError):
+    """Sandbox stop was not observed before its deadline and may still complete."""
+    code = "sandbox-stop-timed-out"
+
+
 class ExecTimeoutError(MicrosandboxError):
     """Command execution timed out."""
     code = "exec-timeout"
+
+
+class StopTimeoutError(MicrosandboxError, TimeoutError):
+    """Graceful shutdown did not complete within its budget; no kill was requested."""
+    code = "stop-timeout"
 
 
 class ExecFailedError(MicrosandboxError):
@@ -135,3 +158,45 @@ class UnsupportedError(MicrosandboxError):
 class SnapshotMigrationError(MicrosandboxError):
     """A snapshot could not complete its adjacent-release migration."""
     code = "snapshot-migration"
+
+
+@dataclass(frozen=True)
+class PublishedSnapshotArtifact:
+    """A completed snapshot retained after source recovery failed."""
+
+    kind: Literal["installed", "archive"]
+    path: str
+    snapshot_id: str
+    digest: str
+
+
+class SnapshotSourceRecoveryError(MicrosandboxError):
+    """Capture completed, but the source requires recovery before further use.
+
+    ``artifact`` is set only when the requested snapshot was published. Otherwise,
+    ``checkpoint_path`` identifies the retained runtime-local checkpoint; removing
+    the source may remove it. This error does not imply that ordinary resume is safe.
+    """
+
+    code = "snapshot-source-recovery"
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        source_sandbox: str,
+        checkpoint_id: str,
+        checkpoint_root: str,
+        checkpoint_path: str,
+        artifact: dict | None,
+        detail: str,
+        publication_error: str | None,
+    ) -> None:
+        super().__init__(message)
+        self.source_sandbox = source_sandbox
+        self.checkpoint_id = checkpoint_id
+        self.checkpoint_root = checkpoint_root
+        self.checkpoint_path = checkpoint_path
+        self.artifact = PublishedSnapshotArtifact(**artifact) if artifact is not None else None
+        self.detail = detail
+        self.publication_error = publication_error
