@@ -1,5 +1,7 @@
 // The main scrollbar is a fixed overlay, so showing it never changes layout.
 (() => {
+  // Keep the native scrollbar in viewers that cannot maintain the overlay.
+  if (typeof ResizeObserver !== "function") return;
   const root = document.documentElement;
   if (document.getElementById("msb-page-scrollbar")) return;
   const track = document.createElement("div");
@@ -13,7 +15,6 @@
   thumb.className = "msb-page-scrollbar-thumb";
   track.append(thumb);
   document.body.append(track);
-  root.setAttribute("data-msb-overlay-scrollbar", "");
   let timer, frame, dragOffset = null;
   let nearEdge = false;
 
@@ -82,4 +83,6 @@
   });
   window.addEventListener("blur", () => { dragOffset = null; nearEdge = false; reveal(); });
   update();
+  // Hide the native scrollbar only after the overlay is ready.
+  root.setAttribute("data-msb-overlay-scrollbar", "");
 })();
