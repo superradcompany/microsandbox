@@ -36,6 +36,38 @@ task :version_check do
   abort "Ruby/Cargo package version mismatch" unless package_version == version
   abort "Ruby/published Rust SDK must use an exact version pin" unless core_requirement&.start_with?("=")
   abort "Ruby/published Rust SDK version mismatch" unless core_requirement.delete_prefix("=") == version
+
+  # The committed lockfile ships in the source gem, so it must resolve the same
+  # published crate the manifest pins; nothing else checks that, because every
+  # CI build of the extension swaps this lock for the workspace one and patches
+  # `microsandbox` to the in-tree SDK (scripts/ci/ruby-sdk-checkout.sh). That
+  # swapped-in lock, like the one cargo:patch_workspace re-resolves, records
+  # `microsandbox` as a path dependency with no `source` line, and a patched
+  # workspace may have no lock at all before its first build: neither says
+  # anything about the crates.io pin, so both are skipped rather than failed.
+  # A lock with no `microsandbox` entry at all is neither: it was not
+  # generated from this manifest, so it is rejected. Parsed with regexes on
+  # purpose: this must not need a cargo invocation.
+  pin = core_requirement.delete_prefix("=")
+  lock_path = "ext/microsandbox/Cargo.lock"
+  if File.file?(lock_path)
+    refresh = "run `cargo update -p microsandbox --precise #{pin}` in ext/microsandbox " \
+              "(with no [patch.crates-io] active) and commit the lock"
+    packages = File.read(lock_path).split(/^\[\[package\]\]$/)
+                   .select { |package| package.match?(/^name = "microsandbox"$/) }
+    if packages.empty?
+      abort "Ruby/standalone Cargo.lock has no [[package]] entry named microsandbox, so it " \
+            "was not resolved from ext/microsandbox/Cargo.toml; #{refresh}"
+    end
+
+    packages.select { |package| package.match?(/^source = "registry\+/) }.each do |package|
+      locked = package[/^version = "([^"]+)"$/, 1]
+      next if locked == pin
+
+      abort "Ruby/standalone Cargo.lock resolves crates.io microsandbox #{locked} but " \
+            "Cargo.toml pins #{pin}; #{refresh}"
+    end
+  end
 end
 
 Rake::TestTask.new do |test|
