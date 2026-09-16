@@ -206,6 +206,8 @@ SDK backends preserve recognized existing catalogs. A new SDK home uses the cata
 
 Windows abandoned-lease recovery checks whether the process has exited, not merely whether its PID can be opened: another process may retain a handle to the terminated owner. Unix retains its conservative PID-existence check during resource teardown. Both paths preserve live owners, match the observed lease before clearing it, and refuse admission while an incomplete downgrade journal exists.
 
+Downgrade operation ownership uses the existing `db/self-downgrade/msb.db.migration.lock` path and OS lock protocol, but competing commands fail immediately instead of waiting through another command's download or confirmation prompt. Ownership lasts through staging, execution and journal retirement, separately from the catalog migration lock. Exiting releases ownership without deleting the lock file or bypassing an incomplete recovery journal; an older command's lock still excludes a newer contender.
+
 ## 7. Home and Runtime Path Layout
 
 Directory names under `MSB_HOME` and the runtime directory are durable locators used by binaries from different releases. This includes the database, cache, sandboxes, volumes, snapshots, logs, secrets, TLS material, SSH state, sockets, locks, journals, and configuration files.

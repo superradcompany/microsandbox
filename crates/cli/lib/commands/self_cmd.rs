@@ -956,12 +956,11 @@ async fn run_downgrade_local(args: SelfDowngradeArgs) -> anyhow::Result<()> {
 
     let base_dir = resolve_base_dir()?;
     let db_dir = base_dir.join(microsandbox_utils::DB_SUBDIR);
-    // Serialize downgrade invocations, including preflight cancellation, but
-    // do not hold the catalog migration lock while downloading the release.
-    // Ordinary commands must remain available during that potentially slow I/O.
-    let operations_dir = db_dir.join("self-downgrade");
-    fs::create_dir_all(&operations_dir)?;
-    let _operation_lock = acquire_migration_lock(&operations_dir)?;
+    // This is operation ownership, not a catalog critical section. Retain it
+    // across staging, confirmation and journal retirement so two commands
+    // cannot resume or cancel the same operation. Contenders fail immediately;
+    // they must not block an async worker behind a download or unattended prompt.
+    let _operation_lock = acquire_downgrade_operation_lock(&db_dir)?;
     let spinner = ui::Spinner::start("Staging", &format!("verified release {target_version}"));
     let (mut operation, target_baseline) =
         match prepare_downgrade_operation(&db_dir, current_version, target_version, args.force)
@@ -3185,6 +3184,31 @@ fn acquire_migration_lock(db_dir: &Path) -> anyhow::Result<MigrationLock> {
     )))
 }
 
+fn acquire_downgrade_operation_lock(db_dir: &Path) -> anyhow::Result<MigrationLock> {
+    let operations_dir = db_dir.join("self-downgrade");
+    fs::create_dir_all(&operations_dir)?;
+    // Keep the existing filename and OS lock protocol so a holder using the
+    // previous implementation is still excluded. File existence is not ownership.
+    let path = operations_dir.join(format!(
+        "{}.migration.lock",
+        microsandbox_utils::DB_FILENAME
+    ));
+    let file = microsandbox_utils::process_lock::open_lock_file(&path)?;
+    let acquired =
+        microsandbox_utils::process_lock::try_lock_exclusive(&file).map_err(|error| {
+            anyhow::anyhow!(
+                "failed to lock downgrade operation {}: {error}",
+                path.display()
+            )
+        })?;
+    if !acquired {
+        anyhow::bail!(
+            "another downgrade is in progress for this installation; wait for it to finish or cancel that command before retrying"
+        );
+    }
+    Ok(MigrationLock { file })
+}
+
 fn next_backup_path(
     db_dir: &Path,
     current_version: Version,
@@ -3538,6 +3562,133 @@ fn remove_marker_block(path: &Path) -> anyhow::Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn downgrade_operation_lock_child() {
+        let Some(home) = std::env::var_os("MSB_TEST_DOWNGRADE_LOCK_HOME") else {
+            return;
+        };
+        let db_dir = PathBuf::from(home);
+        match std::env::var("MSB_TEST_DOWNGRADE_LOCK_MODE")
+            .unwrap()
+            .as_str()
+        {
+            "owner" => {
+                // Model an already-running command using the previous lock
+                // acquisition path, not just two copies of the new helper.
+                let _guard = acquire_migration_lock(&db_dir.join("self-downgrade")).unwrap();
+                println!("DOWNGRADE_LOCK_READY");
+                std::io::stdout().flush().unwrap();
+                std::io::stdin().read_line(&mut String::new()).unwrap();
+            }
+            "contender" => {
+                let error = acquire_downgrade_operation_lock(&db_dir)
+                    .err()
+                    .expect("a live owner must exclude a competing downgrade");
+                assert!(
+                    error
+                        .to_string()
+                        .contains("another downgrade is in progress"),
+                    "{error}"
+                );
+            }
+            "catalog" => {
+                // Ordinary catalog admission uses a different lock namespace.
+                drop(acquire_migration_lock(&db_dir).unwrap());
+            }
+            mode => panic!("unknown lock test mode: {mode}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn downgrade_operation_lock_fails_promptly_and_recovers_after_owner_exit() {
+        use std::process::Stdio;
+
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        for kill_owner in [false, true] {
+            let home = tempfile::tempdir().unwrap();
+            let child_command = |mode| {
+                let mut command = TokioCommand::new(std::env::current_exe().unwrap());
+                command
+                    .args([
+                        "--exact",
+                        "commands::self_cmd::tests::downgrade_operation_lock_child",
+                        "--nocapture",
+                        "--test-threads=1",
+                    ])
+                    .env("MSB_TEST_DOWNGRADE_LOCK_HOME", home.path())
+                    .env("MSB_TEST_DOWNGRADE_LOCK_MODE", mode)
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::inherit())
+                    .kill_on_drop(true);
+                command
+            };
+            let mut owner = child_command("owner").spawn().unwrap();
+            let mut output = BufReader::new(owner.stdout.take().unwrap()).lines();
+            tokio::time::timeout(Duration::from_secs(15), async {
+                loop {
+                    let line = output
+                        .next_line()
+                        .await
+                        .unwrap()
+                        .expect("owner exited before locking");
+                    if line.ends_with("DOWNGRADE_LOCK_READY") {
+                        break;
+                    }
+                }
+            })
+            .await
+            .expect("owner must acquire the operation lock");
+
+            // Rejection must neither wait for nor unlock the first command.
+            // Repeating also catches an erroneous unlock by a failed contender.
+            // Bound the separate catalog-lock probe too: a future path mix-up
+            // must fail the test rather than hang its async runtime.
+            for mode in ["contender", "contender", "catalog"] {
+                let mut contender = child_command(mode).spawn().unwrap();
+                let status = tokio::time::timeout(Duration::from_secs(5), contender.wait())
+                    .await
+                    .expect("competing downgrade must not wait for the owner")
+                    .unwrap();
+                assert!(status.success());
+            }
+            if kill_owner {
+                owner.start_kill().unwrap();
+            } else {
+                owner.stdin.take().unwrap().write_all(b"\n").await.unwrap();
+            }
+            let status = tokio::time::timeout(Duration::from_secs(5), owner.wait())
+                .await
+                .expect("owner must exit")
+                .unwrap();
+            if !kill_owner {
+                assert!(status.success());
+            }
+            drop(acquire_downgrade_operation_lock(home.path()).unwrap());
+            // Leaving the lock file behind must not turn it into a stale lease.
+            assert!(
+                home.path()
+                    .join("self-downgrade/msb.db.migration.lock")
+                    .exists()
+            );
+            drop(acquire_downgrade_operation_lock(home.path()).unwrap());
+        }
+    }
+
+    #[test]
+    fn downgrade_operation_lock_preserves_filesystem_errors() {
+        let home = tempfile::tempdir().unwrap();
+        fs::write(home.path().join("self-downgrade"), "not a directory").unwrap();
+        let error = acquire_downgrade_operation_lock(home.path()).err().unwrap();
+        assert!(
+            !error
+                .to_string()
+                .contains("another downgrade is in progress")
+        );
+        assert!(error.downcast_ref::<std::io::Error>().is_some());
+    }
 
     #[test]
     fn cancellation_retires_only_unstarted_downgrade_journals() {
