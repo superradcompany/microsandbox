@@ -10,7 +10,7 @@
 pub(crate) mod admission;
 pub(crate) mod config;
 #[cfg(feature = "local")]
-pub(crate) mod encoding;
+mod historical;
 mod json;
 #[cfg(feature = "local")]
 pub(crate) mod writing;

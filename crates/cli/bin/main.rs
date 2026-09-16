@@ -651,6 +651,11 @@ fn run_async_command_anyhow(
             // the SDK's ambient convenience fallback, the CLI must not run a
             // sandbox operation locally after an invalid explicit cloud selection.
             let backend = microsandbox::resolve_default_backend()?;
+            if requires_current_catalog(&command)
+                && let Some(local) = backend.as_local()
+            {
+                local.prepare_cli_catalog().await?;
+            }
             microsandbox::set_default_backend(backend);
         }
 
@@ -705,6 +710,25 @@ fn run_async_command_anyhow(
     })
 }
 
+// Control and diagnostic operations must remain available so users can stop
+// older runtimes before a catalog upgrade. Internal `machine` dispatch never
+// enters this path: a newer SDK must not migrate an older CLI's catalog.
+fn requires_current_catalog(command: &Commands) -> bool {
+    match command {
+        Commands::Sandbox(args) => matches!(
+            args.command,
+            sandbox::SandboxCommands::Run(_)
+                | sandbox::SandboxCommands::Create(_)
+                | sandbox::SandboxCommands::Restore(_)
+                | sandbox::SandboxCommands::Start(_)
+                | sandbox::SandboxCommands::Restart(_)
+                | sandbox::SandboxCommands::Branch(_)
+        ),
+        Commands::Snapshot(_) | Commands::Snapshots(_) | Commands::Volume(_) => true,
+        _ => false,
+    }
+}
+
 /// Return whether a command manages the CLI installation rather than a backend.
 ///
 /// These commands are deliberately available even when backend configuration is
@@ -726,6 +750,26 @@ fn is_backend_independent_maintenance_command(command: &Commands) -> bool {
 #[cfg(test)]
 mod command_tests {
     use super::*;
+
+    #[test]
+    fn catalog_upgrade_leaves_stop_and_diagnostics_available() {
+        for (arguments, expected) in [
+            (vec!["msb", "sandbox", "create", "alpine"], true),
+            (vec!["msb", "sandbox", "start", "example"], true),
+            (vec!["msb", "snapshot", "ls"], true),
+            (vec!["msb", "sandbox", "stop", "example"], false),
+            (vec!["msb", "sandbox", "ls"], false),
+            (
+                vec!["msb", "sandbox", "exec", "example", "--", "true"],
+                false,
+            ),
+            (vec!["msb", "doctor"], false),
+            (vec!["msb", "context"], false),
+        ] {
+            let cli = Cli::try_parse_from(arguments).unwrap();
+            assert_eq!(requires_current_catalog(&cli.command), expected);
+        }
+    }
 
     #[test]
     fn partial_capture_failure_keeps_artifact_locator_and_nonzero_exit() {

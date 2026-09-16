@@ -588,7 +588,7 @@ mod unix {
             serde_json::from_str(before.as_deref().unwrap()).unwrap();
         active.spec.resources.cpus = 2;
         let accepted = session
-            .persist_active_config(pools.write(), before.as_deref(), &active)
+            .persist_active_config(pools.write(), before.as_deref(), &active, None)
             .await
             .unwrap();
 
@@ -596,7 +596,7 @@ mod unix {
         // change while recording its independent memory change.
         active.spec.resources.memory_mib += 256;
         let error = session
-            .persist_active_config(pools.write(), before.as_deref(), &active)
+            .persist_active_config(pools.write(), before.as_deref(), &active, None)
             .await
             .unwrap_err();
         assert!(matches!(
@@ -616,7 +616,7 @@ mod unix {
         .await
         .unwrap();
         let error = session
-            .persist_active_config(pools.write(), Some(&accepted), &active)
+            .persist_active_config(pools.write(), Some(&accepted), &active, None)
             .await
             .unwrap_err();
         assert!(matches!(

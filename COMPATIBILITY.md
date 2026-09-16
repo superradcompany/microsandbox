@@ -198,6 +198,10 @@ Local startup serializes database opening, migration, and snapshot reconciliatio
 
 Tests should open copies of real older databases, migrate them, exercise the affected behavior, and test every supported reverse migration or refusal path.
 
+Catalog upgrade authority belongs to the user-facing CLI, not to an SDK's private runtime child. Local CLI creation/start, snapshot, and volume operations prepare the current catalog under the migration lock and install lease; upgrades refuse active sandboxes and commit pending SQL migrations together. Stop and diagnostic operations remain available so the user can stop old runtimes before retrying. This also covers a CLI replaced by the standalone installer, without requiring an earlier `msb upgrade` invocation. Private `msb machine` launches do not perform this upgrade.
+
+SDK backends preserve recognized existing catalogs. A new SDK home uses the catalog supported by its selected historical runtime. Configuration writes use explicit released field/tag contracts, not example rows or array lengths: zero, one, and many supported mounts are all valid. Unrepresentable semantics fail rather than being dropped. Unknown migration identities fail even when their count matches a known schema. These catalog rules do not replace launcher, agent, or snapshot-format capability checks.
+
 ## 7. Home and Runtime Path Layout
 
 Directory names under `MSB_HOME` and the runtime directory are durable locators used by binaries from different releases. This includes the database, cache, sandboxes, volumes, snapshots, logs, secrets, TLS material, SSH state, sockets, locks, journals, and configuration files.
