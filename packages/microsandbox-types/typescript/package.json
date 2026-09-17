@@ -5,7 +5,7 @@
     "url": "git+https://github.com/superradcompany/microsandbox.git",
     "directory": "packages/microsandbox-types/typescript"
   },
-  "version": "0.7.1",
+  "version": "0.7.2",
   "type": "module",
   "main": "./dist/cloud.js",
   "types": "./dist/cloud.d.ts",

@@ -5,7 +5,7 @@
     "url": "git+https://github.com/superradcompany/microsandbox.git",
     "directory": "sdk/node-ts/npm/linux-arm64-gnu"
   },
-  "version": "0.7.1",
+  "version": "0.7.2",
   "description": "Bundled msb + libkrunfw + napi binding for microsandbox on Linux arm64 (glibc).",
   "os": ["linux"],
   "cpu": ["arm64"],
