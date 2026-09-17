@@ -10,6 +10,19 @@ use crate::{MicrosandboxError, MicrosandboxResult, SandboxConfig};
 // Functions
 //--------------------------------------------------------------------------------------------------
 
+/// Validate historical runtime semantics before create can replace a sandbox.
+/// The catalog can be current while the selected executable is still old;
+/// checking its representation here does not store that representation.
+pub(crate) async fn validate_runtime_config(
+    config: &SandboxConfig,
+    runtime: &crate::config::GlobalConfig,
+) -> MicrosandboxResult<()> {
+    if let Some(patch) = crate::runtime::launch_contract::catalog_patch(runtime).await? {
+        HistoricalFormat::for_patch(patch).encode(config)?;
+    }
+    Ok(())
+}
+
 pub(crate) async fn encode_new<C: ConnectionTrait>(
     db: &C,
     config: &SandboxConfig,

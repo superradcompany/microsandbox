@@ -174,17 +174,10 @@ impl LocalBackend {
         // Initialize the database before any expensive image pull so we can
         // fail fast on conflicting persisted sandbox state.
         let db = self.db().await?;
-        if !crate::db::admission::is_current(db.read()).await? {
-            // Reject unsupported historical semantics before provisioning disks
-            // or replacing an existing sandbox. The insert still validates the
-            // final configuration after image defaults and restore resolution.
-            crate::db::writing::encode_new(
-                db.read(),
-                &config.clone_for_persistence(),
-                Some(self.config()),
-            )
+        // Runtime compatibility is independent of the upgraded catalog. Keep
+        // unsupported requests from deleting a replace target before launch.
+        crate::db::writing::validate_runtime_config(&config.clone_for_persistence(), self.config())
             .await?;
-        }
         let sandbox_dir = self.sandboxes_dir().join(&config.spec.name);
         // Transition ownership is deliberately separate from the runtime lifecycle lock: this
         // guard serializes database/storage mutation and launcher-to-runtime handoff, while the

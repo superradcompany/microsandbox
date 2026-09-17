@@ -176,14 +176,9 @@ impl LocalBackend {
         self.db
             .get_or_try_init(|| async {
                 let db_dir = self.config.home().join(microsandbox_utils::DB_SUBDIR);
-                let pools = connect_catalog(
-                    &db_dir,
-                    &self.config.database,
-                    &self.config.snapshots_dir(),
-                    false,
-                    Some(&self.config),
-                )
-                .await?;
+                let pools =
+                    connect_catalog(&db_dir, &self.config.database, &self.config.snapshots_dir())
+                        .await?;
                 self.control_sessions
                     .bind_database(&db_dir.join(microsandbox_utils::DB_FILENAME))
                     .map_err(MicrosandboxError::ControlClient)?;
@@ -691,15 +686,13 @@ async fn connect_and_migrate(
     database: &DatabaseConfig,
     snapshots_dir: &Path,
 ) -> MicrosandboxResult<DbPools> {
-    connect_catalog(db_dir, database, snapshots_dir, false, None).await
+    connect_catalog(db_dir, database, snapshots_dir).await
 }
 
 async fn connect_catalog(
     db_dir: &Path,
     database: &DatabaseConfig,
     snapshots_dir: &Path,
-    upgrade: bool,
-    runtime: Option<&GlobalConfig>,
 ) -> MicrosandboxResult<DbPools> {
     tokio::fs::create_dir_all(db_dir).await?;
     let _migration_lock = acquire_migration_lock(db_dir).await?;
@@ -724,40 +717,13 @@ async fn connect_catalog(
     let initialize = crate::db::admission::requires_initialization(pools.write()).await?;
     if !initialize {
         if !crate::db::admission::is_current(pools.write()).await? {
-            if !upgrade {
-                return Ok(pools);
-            }
             catalog::upgrade(&pools).await?;
         }
     } else {
-        // A fresh SDK home must not start with a schema newer than its selected
-        // older runtime. CLI-owned initialization always uses this release.
-        let historical = if let Some(runtime) = runtime {
-            crate::runtime::launch_contract::catalog_patch(runtime).await?
-        } else {
-            None
-        };
-        let target = historical
-            .map(crate::db::admission::historical_migration_count)
-            .transpose()?;
-        let steps = if let Some(target) = target {
-            // `up(Some(n))` means n pending steps, not a target schema number.
-            // Account for a interrupted initialization before the supported floor.
-            let applied = Migrator::get_applied_migrations(pools.write().inner())
-                .await?
-                .len() as u32;
-            Some(target.checked_sub(applied).ok_or_else(|| {
-                MicrosandboxError::Runtime(
-                    "catalog initialization is ahead of the selected runtime".into(),
-                )
-            })?)
-        } else {
-            None
-        };
-        Migrator::up(pools.write().inner(), steps).await?;
-        if historical.is_some() {
-            return Ok(pools);
-        }
+        // The SDK/CLI owns the catalog format, independently of the selected
+        // VM executable. Historical runtime processes open pools without
+        // migrating; their launch protocol is adapted separately.
+        Migrator::up(pools.write().inner(), None).await?;
     }
 
     // Descriptor translation mutates the same installation state as schema
@@ -1284,7 +1250,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_connect_preserves_v0_6_15_catalog_for_its_cli() {
+    async fn test_connect_upgrades_v0_6_15_catalog_in_release_order() {
         let tmp = tempfile::tempdir().unwrap();
         let db_dir = tmp.path().join("db");
         let db_path = db_dir.join(microsandbox_utils::DB_FILENAME);
@@ -1346,8 +1312,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(network_slot_migration.is_none());
-        assert!(network_slot_column.is_none());
+        assert!(network_slot_migration.is_some());
+        assert!(network_slot_column.is_some());
     }
 
     #[tokio::test]

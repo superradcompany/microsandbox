@@ -101,7 +101,7 @@ class CatalogHistoryTests(unittest.TestCase):
                 HARNESS.cleanup_catalog(HARNESS.fixture_environment(self.root, self.destination), self.root, io.StringIO())
         self.assertIn(["rm", "b"], [call.args[0][1:] for call in run.call_args_list])
 
-    def test_unreadable_historical_catalog_recovers_with_candidate_but_still_fails(self):
+    def test_failed_candidate_cleanup_recovers_with_historical_but_still_fails(self):
         env = HARNESS.fixture_environment(self.root, self.destination)
         candidate = self.root / "candidate-msb"
         inventory = [{"name": "orphan", "status": "Running"}]
@@ -116,17 +116,17 @@ class CatalogHistoryTests(unittest.TestCase):
                 HARNESS.cleanup(env, self.root, log, candidate)
         self.assertIn("recovered", raised.exception.__notes__[0])
         self.assertIn("catalog too new", log.getvalue())
-        self.assertEqual(run.call_args_list[0].args[0][0], env["MSB_PATH"])
+        self.assertEqual(run.call_args_list[0].args[0][0], str(candidate))
         self.assertEqual([call.args[0][1:] for call in run.call_args_list[1:]], [
             ["list", "--format", "json"], ["stop", "orphan"], ["rm", "orphan"], ["list", "--format", "json"],
         ])
         for call in run.call_args_list[1:]:
-            self.assertEqual(call.args[0][0], str(candidate))
-            self.assertEqual(call.kwargs["env"], dict(env, MSB_PATH=str(candidate)))
+            self.assertEqual(call.args[0][0], env["MSB_PATH"])
+            self.assertEqual(call.kwargs["env"], env)
             self.assertEqual(call.kwargs["cwd"], self.root)
         self.assertEqual(env["MSB_PATH"], str(self.destination / "msb"))
 
-    def test_malformed_historical_inventory_still_attempts_candidate_cleanup(self):
+    def test_malformed_candidate_inventory_still_attempts_historical_cleanup(self):
         log = io.StringIO()
         replies = [subprocess.CompletedProcess([], 0, "not JSON", ""),
                    subprocess.CompletedProcess([], 0, "[]", ""),
@@ -138,7 +138,7 @@ class CatalogHistoryTests(unittest.TestCase):
         self.assertEqual(run.call_count, 3)
         self.assertIn("Retrying cleanup", log.getvalue())
 
-    def test_failed_candidate_cleanup_preserves_historical_error_and_logs_both(self):
+    def test_failed_fallback_preserves_original_cleanup_error_and_logs_both(self):
         historical_error = subprocess.CalledProcessError(1, ["old-msb", "list"])
         candidate_error = RuntimeError("candidate cannot read catalog either")
         log = io.StringIO()
@@ -161,12 +161,12 @@ class CatalogHistoryTests(unittest.TestCase):
         self.assertIn("partial stdout", log.getvalue())
         self.assertIn("partial stderr", log.getvalue())
 
-    def test_successful_historical_cleanup_does_not_use_candidate(self):
+    def test_successful_candidate_cleanup_does_not_use_historical_reader(self):
         with unittest.mock.patch.object(HARNESS, "cleanup_catalog") as cleanup:
             env = HARNESS.fixture_environment(self.root, self.destination)
             log = io.StringIO()
             HARNESS.cleanup(env, self.root, log, self.root / "candidate-msb")
-        cleanup.assert_called_once_with(env, self.root, log)
+        cleanup.assert_called_once_with(dict(env, MSB_PATH=str(self.root / "candidate-msb")), self.root, log)
 
     def execute_with_failures(self, test_failure, cleanup_failure):
         checksums = self.bundle()

@@ -18,7 +18,7 @@ import urllib.request
 VERSION = "0.6.18"
 BUNDLE = "microsandbox-linux-x86_64.tar.gz"
 FIRMWARE = "libkrunfw.so.5.6.1"
-TEST = "backend::local::catalog::tests::live_sdk_preserves_historical_catalog_and_old_cli_reads_new_records"
+TEST = "backend::local::catalog::tests::live_sdk_upgrades_catalog_with_historical_runtime"
 RELEASE = f"https://github.com/superradcompany/microsandbox/releases/download/v{VERSION}"
 
 
@@ -54,24 +54,22 @@ def fixture_environment(root, artifacts):
 
 
 def cleanup(env, root, log, candidate):
-    """Attempt both readers, without letting recovery turn a regression green."""
+    """Use the candidate for upgraded catalogs; retain pre-upgrade recovery."""
     try:
-        cleanup_catalog(env, root, log)
+        cleanup_catalog(dict(env, MSB_PATH=str(candidate)), root, log)
     except Exception as error:
-        # A catalog-format regression can prevent the historical CLI from even
-        # listing VMs. The candidate can read that catalog; do not signal bare
-        # PIDs or touch any catalog outside this fixture's disposable home.
+        # If setup failed before upgrading, the old reader may still help.
+        # Recovery must not hide a failure of the candidate's cleanup path.
         traceback.print_exc(file=log)
-        log.write("Retrying cleanup with the candidate CLI\n")
-        candidate_env = dict(env, MSB_PATH=str(candidate))
+        log.write("Retrying cleanup with the historical CLI\n")
         try:
-            cleanup_catalog(candidate_env, root, log)
+            cleanup_catalog(env, root, log)
         except Exception as recovery_error:
             traceback.print_exc(file=log)
-            error.add_note(f"Candidate cleanup also failed: {recovery_error}")
+            error.add_note(f"Historical cleanup also failed: {recovery_error}")
         else:
-            error.add_note("Candidate cleanup recovered the disposable catalog.")
-        # Even successful recovery must not hide a historical-reader failure.
+            error.add_note("Historical cleanup recovered the disposable catalog.")
+        # Even successful recovery must not hide a candidate-reader failure.
         raise
 
 

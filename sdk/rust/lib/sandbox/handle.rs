@@ -571,7 +571,9 @@ impl SandboxHandle {
                 // handshake so concurrent name reuse cannot silently rebind
                 // this receiver to the replacement.
                 self.refresh().await?;
-                let config: SandboxConfig = serde_json::from_str(&local.config_json)?;
+                // A current SQL schema can still contain historical JSON.
+                // Use the same lossless decoder as config inspection/start.
+                let config = crate::db::config::decode(&local.config_json)?;
 
                 Ok(Sandbox::from_local(
                     self.backend.clone(),
