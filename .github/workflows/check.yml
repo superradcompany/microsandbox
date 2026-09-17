@@ -1427,6 +1427,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           chmod +x build/msb
+          python3 -m unittest discover -s scripts/smoke/cli -p test_previous_release_upgrade.py -v
           python3 scripts/smoke/cli/previous_release_upgrade.py
 
   # ---------------------------------------------------------------------------
