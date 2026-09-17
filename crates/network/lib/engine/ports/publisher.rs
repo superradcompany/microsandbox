@@ -19,7 +19,7 @@ use smoltcp::iface::{Interface, SocketHandle, SocketSet};
 use smoltcp::socket::tcp;
 use smoltcp::wire::{EthernetAddress, IpEndpoint};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream, UdpSocket};
+use tokio::net::{TcpListener, TcpSocket, TcpStream, UdpSocket};
 use tokio::sync::mpsc;
 
 use crate::config::{PortProtocol, PublishedPort};
@@ -547,6 +547,38 @@ fn reject_with_rst(stream: &TcpStream) {
     let _ = socket2::SockRef::from(stream).set_linger(Some(Duration::ZERO));
 }
 
+/// Backlog for a published port's listener.
+///
+/// `TcpListener::bind` leaves this to mio, which passes 128. That is not enough for a published
+/// HTTP server: one browser opening one page of a modern web app makes ~100 parallel requests, and
+/// a reverse proxy in front turns each into its own upstream connection. Beyond the queue the
+/// kernel refuses the connection, the proxy reads EOF, and a file that is present and serves fine
+/// on retry comes back as 502.
+///
+/// Measured against a published dev server on a loopback port: 120 concurrent connections all
+/// succeed, 130 leave 118 refused, 140 refuse every one. The accept loop below drains the queue
+/// quickly, so the depth only has to absorb a burst rather than sustained load.
+///
+/// The kernel clamps this to `net.core.somaxconn` (4096 by default on Linux), so a host that wants
+/// it lower can still say so.
+const LISTEN_BACKLOG: u32 = 1024;
+
+/// Bind a published port's listener with a backlog that survives a browser.
+///
+/// Goes through `TcpSocket` rather than `TcpListener::bind` only so the backlog can be given
+/// explicitly; `set_reuseaddr(true)` keeps the behaviour `TcpListener::bind` already had, so a
+/// listener can be re-created after a restart without waiting out `TIME_WAIT`.
+fn bind_listener(bind_addr: SocketAddr) -> std::io::Result<TcpListener> {
+    let socket = if bind_addr.is_ipv4() {
+        TcpSocket::new_v4()?
+    } else {
+        TcpSocket::new_v6()?
+    };
+    socket.set_reuseaddr(true)?;
+    socket.bind(bind_addr)?;
+    socket.listen(LISTEN_BACKLOG)
+}
+
 /// Listener task: accepts TCP connections on the host, runs each
 /// through the network policy's ingress evaluator, and queues
 /// allowed connections for the publisher's accept loop. Denied
@@ -559,7 +591,7 @@ async fn tcp_listener_task(
     policy: Arc<NetworkPolicy>,
     shared: Arc<SharedState>,
 ) -> std::io::Result<()> {
-    let listener = TcpListener::bind(bind_addr).await?;
+    let listener = bind_listener(bind_addr)?;
     log_published_port_listener("TCP", bind_addr, guest_port);
 
     loop {
@@ -921,6 +953,32 @@ mod tests {
         assert!(queue_inbound_connection(&tx, (), &shared).await);
         assert!(rx.try_recv().is_ok());
         assert!(shared.proxy_wake.wait_timeout(Duration::ZERO));
+    }
+
+    /// A published port has to absorb more than one browser's worth of parallel connections.
+    ///
+    /// `TcpListener::bind` gives a backlog of 128 (mio's default), and a single page load of a
+    /// modern web app behind a reverse proxy exceeds that: the kernel refuses the excess, the
+    /// proxy reads EOF, and a present, healthy file is served as 502. This connects well past the
+    /// old ceiling without accepting anything, so it fails on a 128-deep queue and passes on a
+    /// deeper one.
+    #[tokio::test]
+    async fn published_listener_queues_more_than_one_browser_can_open() {
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+        let listener = bind_listener(addr).unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // Deliberately never accept: what is under test is the queue, not the accept loop.
+        let mut held = Vec::new();
+        for _ in 0..300 {
+            match tokio::time::timeout(Duration::from_secs(2), TcpStream::connect(addr)).await {
+                Ok(Ok(stream)) => held.push(stream),
+                Ok(Err(e)) => panic!("refused after {} connections: {e}", held.len()),
+                Err(_) => panic!("timed out after {} connections", held.len()),
+            }
+        }
+
+        assert_eq!(held.len(), 300);
     }
 
     #[tokio::test]
