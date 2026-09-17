@@ -559,8 +559,10 @@ fn reject_with_rst(stream: &TcpStream) {
 /// succeed, 130 leave 118 refused, 140 refuse every one. The accept loop below drains the queue
 /// quickly, so the depth only has to absorb a burst rather than sustained load.
 ///
-/// The kernel clamps this to `net.core.somaxconn` (4096 by default on Linux), so a host that wants
-/// it lower can still say so.
+/// The kernel clamps this to the host's own ceiling, so asking for more than it allows is not an
+/// error and a host that wants a shallower queue can still say so: `net.core.somaxconn` is 4096
+/// by default on Linux, while `kern.ipc.somaxconn` on macOS is 128 -- there, raising the sysctl
+/// is what makes this take effect.
 const LISTEN_BACKLOG: u32 = 1024;
 
 /// Bind a published port's listener with a backlog that survives a browser.
@@ -962,6 +964,13 @@ mod tests {
     /// proxy reads EOF, and a present, healthy file is served as 502. This connects well past the
     /// old ceiling without accepting anything, so it fails on a 128-deep queue and passes on a
     /// deeper one.
+    ///
+    /// Linux only, because the assertion is about what `listen()` was asked for and every other
+    /// platform answers a different question. macOS clamps the backlog to `kern.ipc.somaxconn`,
+    /// which is 128 by default, so this would fail there against a correct implementation and be
+    /// testing the sysctl rather than this change. Linux clamps to `net.core.somaxconn`, 4096 by
+    /// default, which leaves room for the 300 below.
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn published_listener_queues_more_than_one_browser_can_open() {
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
