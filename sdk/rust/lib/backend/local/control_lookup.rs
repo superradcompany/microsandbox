@@ -252,6 +252,7 @@ mod tests {
             &backend,
             &mut child,
             &crate::sandbox::identity::BranchSource {
+                guest_flush: None,
                 batch: None,
                 record_integrity: false,
                 name: "source".into(),

@@ -20,6 +20,8 @@ A complete home installation wins over Python wheel and Node platform-package bi
 
 A partial home installation fails with an incomplete-runtime error; it is not silently bypassed by package binaries or repaired by setup. An invalid explicit path also fails instead of falling through. Keep the executable and firmware library from the same runtime bundle, and use compatible SDK/runtime releases.
 
+Updating an SDK does not upgrade an existing runtime's catalog. Supported operations keep using its format; features it cannot represent require a runtime upgrade. After updating `msb`, local creation/start, snapshot, and volume commands prepare the current catalog automatically. If an upgrade requires stopping active sandboxes, list them with `msb ps`, stop them with `msb stop <name>...`, and retry the command.
+
 Host runtime resolution never downloads or extracts `msb` or `libkrunfw`. Rust's embedded archive is an explicit installation source: call `ensure_runtime` with `InstallSource::EmbeddedArchive` to install it only if no runtime resolves. An existing resolved pair wins even when that installation source is requested.
 
 ## Bring your own runtime

@@ -88,6 +88,8 @@ msb self uninstall --yes      # Skip confirmation
 
 `msb self update` always targets the latest release; it does not accept a version argument. Use `msb self downgrade <version>` to move to a supported older release.
 
+Only one downgrade can run per installation. A second command fails immediately; wait for the first to finish or cancel it before retrying.
+
 Downgrade checks compatibility and requires affected sandboxes to be stopped. Releases below 0.6.0 and irreversible state changes are rejected. Database rollback creates a retained backup unless `--no-backup` is set; affected image caches are cleared unless `--keep-cache` is set.
 
 | Flag | Subcommand | Description |

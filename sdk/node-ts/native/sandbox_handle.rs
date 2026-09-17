@@ -212,8 +212,12 @@ impl JsSandboxHandle {
         &self,
         name: String,
         record_integrity: Option<bool>,
+        guest_flush: Option<String>,
     ) -> Result<crate::sandbox::Sandbox> {
-        let mut builder = self.inner.branch(name);
+        let mut builder = self
+            .inner
+            .branch(name)
+            .guest_flush(crate::snapshot_builder::guest_flush_policy(guest_flush)?);
         if record_integrity.unwrap_or(false) {
             builder = builder.record_integrity();
         }
@@ -228,8 +232,12 @@ impl JsSandboxHandle {
         &self,
         names: Vec<String>,
         record_integrity: Option<bool>,
+        guest_flush: Option<String>,
     ) -> Result<Vec<crate::sandbox::JsBranchOutcome>> {
-        let mut builder = self.inner.branch_many(names);
+        let mut builder = self
+            .inner
+            .branch_many(names)
+            .guest_flush(crate::snapshot_builder::guest_flush_policy(guest_flush)?);
         if record_integrity.unwrap_or(false) {
             builder = builder.record_integrity();
         }
@@ -240,7 +248,14 @@ impl JsSandboxHandle {
 
     /// Explicit resident pause through host control.
     #[napi]
-    pub async fn pause(&self) -> Result<()> {
+    pub async fn pause(&self, guest_flush: Option<String>) -> Result<()> {
+        if guest_flush.is_some() {
+            return self
+                .inner
+                .pause_with_guest_flush(crate::snapshot_builder::guest_flush_policy(guest_flush)?)
+                .await
+                .map_err(to_napi_error);
+        }
         self.inner.pause().await.map_err(to_napi_error)
     }
 

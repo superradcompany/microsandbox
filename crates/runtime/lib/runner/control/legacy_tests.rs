@@ -51,17 +51,23 @@ fn secrets_update_round_trips_through_json() {
 #[test]
 fn checkpoint_request_round_trips_through_json() {
     let request = ControlRequest::CheckpointCreate {
+        guest_flush: None,
         record_integrity: false,
         checkpoint_id: "checkpoint_0123456789abcdef".into(),
         intent: CheckpointCaptureIntent::FullSnapshot,
     };
 
     let json = serde_json::to_string(&request).unwrap();
+    assert!(
+        !json.contains("guest_flush"),
+        "legacy clients retain their request shape"
+    );
     let parsed: ControlRequest = serde_json::from_str(&json).unwrap();
 
     assert!(matches!(
         parsed,
         ControlRequest::CheckpointCreate {
+            guest_flush: None,
             record_integrity: false,
             checkpoint_id,
             intent: CheckpointCaptureIntent::FullSnapshot,
@@ -72,6 +78,7 @@ fn checkpoint_request_round_trips_through_json() {
 #[test]
 fn disk_only_capture_has_a_distinct_wire_operation() {
     let request = ControlRequest::DiskCheckpointCreate {
+        guest_flush: None,
         checkpoint_id: "disk_test".into(),
     };
     let json = serde_json::to_string(&request).unwrap();
@@ -80,11 +87,41 @@ fn disk_only_capture_has_a_distinct_wire_operation() {
         "disk_checkpoint_create"
     );
     assert!(
-        matches!(serde_json::from_str::<ControlRequest>(&json).unwrap(), ControlRequest::DiskCheckpointCreate { checkpoint_id } if checkpoint_id == "disk_test")
+        matches!(serde_json::from_str::<ControlRequest>(&json).unwrap(), ControlRequest::DiskCheckpointCreate { checkpoint_id, guest_flush: None } if checkpoint_id == "disk_test")
     );
     // An older runtime's capability response cannot accidentally opt into this operation.
     let old: ControlCapabilities = serde_json::from_str(r#"{"cpu_resize":false,"memory_resize":false,"secrets_update":false,"checkpoint_create":true}"#).unwrap();
     assert!(!old.disk_checkpoint_create);
+    assert!(!old.guest_flush_policy);
+}
+
+#[test]
+fn explicit_flush_uses_validated_values_and_a_distinct_pause_operation() {
+    let old: ControlRequest =
+        serde_json::from_str(r#"{"op":"disk_checkpoint_create","checkpoint_id":"old"}"#).unwrap();
+    assert!(matches!(
+        old,
+        ControlRequest::DiskCheckpointCreate {
+            guest_flush: None,
+            ..
+        }
+    ));
+    for policy in ["auto", "required", "skip"] {
+        let request: ControlRequest = serde_json::from_value(serde_json::json!({
+            "op":"pause_with_guest_flush", "guest_flush":policy,
+        }))
+        .unwrap();
+        assert!(matches!(
+            request,
+            ControlRequest::PauseWithGuestFlush { .. }
+        ));
+    }
+    assert!(
+        serde_json::from_str::<ControlRequest>(
+            r#"{"op":"pause_with_guest_flush","guest_flush":"best-effort"}"#
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -92,6 +129,7 @@ fn capabilities_response_serializes_flags() {
     let response = ControlResponse {
         ok: true,
         capabilities: Some(ControlCapabilities {
+            guest_flush_policy: true,
             optional_disk_integrity: true,
             branch_memfd: false,
             disk_compact_owned: true,

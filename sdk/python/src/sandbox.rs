@@ -1083,17 +1083,20 @@ impl PySandbox {
     }
 
     /// Create an independent local CoW child without a durable full snapshot.
-    #[pyo3(signature = (name, *, record_integrity = false))]
+    #[pyo3(signature = (name, *, record_integrity = false, guest_flush = None))]
     fn branch<'py>(
         &self,
         py: Python<'py>,
         name: String,
         record_integrity: bool,
+        guest_flush: Option<String>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let sandbox = Self::clone_sandbox(&inner).await?;
-            let mut builder = sandbox.branch(name);
+            let mut builder = sandbox
+                .branch(name)
+                .guest_flush(crate::snapshot::guest_flush_policy(guest_flush)?);
             if record_integrity {
                 builder = builder.record_integrity();
             }
@@ -1104,17 +1107,20 @@ impl PySandbox {
     }
 
     /// Capture once for all names; return an outcome for each child in input order.
-    #[pyo3(signature = (names, *, record_integrity = false))]
+    #[pyo3(signature = (names, *, record_integrity = false, guest_flush = None))]
     fn branch_many<'py>(
         &self,
         py: Python<'py>,
         names: Vec<String>,
         record_integrity: bool,
+        guest_flush: Option<String>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let sandbox = Self::clone_sandbox(&inner).await?;
-            let mut builder = sandbox.branch_many(names);
+            let mut builder = sandbox
+                .branch_many(names)
+                .guest_flush(crate::snapshot::guest_flush_policy(guest_flush)?);
             if record_integrity {
                 builder = builder.record_integrity();
             }
@@ -1123,11 +1129,23 @@ impl PySandbox {
     }
 
     /// Suspend this resident VM without releasing RAM.
-    fn pause<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    #[pyo3(signature = (*, guest_flush = None))]
+    fn pause<'py>(
+        &self,
+        py: Python<'py>,
+        guest_flush: Option<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let sandbox = Self::clone_sandbox(&inner).await?;
-            sandbox.pause().await.map_err(to_py_err)?;
+            if let Some(policy) = guest_flush {
+                sandbox
+                    .pause_with_guest_flush(crate::snapshot::guest_flush_policy(Some(policy))?)
+                    .await
+                    .map_err(to_py_err)?;
+            } else {
+                sandbox.pause().await.map_err(to_py_err)?;
+            }
             Ok(())
         })
     }

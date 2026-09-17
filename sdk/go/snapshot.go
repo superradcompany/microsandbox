@@ -28,6 +28,8 @@ type SnapshotCreateOptions struct {
 	// Full includes memory and execution state from a running or paused source.
 	// False captures disk state from running, paused, stopped, or crashed sources.
 	Full bool
+	// GuestFlush defaults to Auto: flush live disk captures, not full captures.
+	GuestFlush GuestFlush
 }
 
 // SnapshotSaveOptions configures Snapshot.Save and instance SaveTo methods.
@@ -406,6 +408,7 @@ func (snapshotFactory) Create(ctx context.Context, opts SnapshotCreateOptions) (
 		Force:           opts.Force,
 		RecordIntegrity: opts.RecordIntegrity,
 		Full:            opts.Full,
+		GuestFlush:      string(opts.GuestFlush),
 	})
 	if err != nil {
 		return nil, wrapFFI(err)
@@ -429,6 +432,7 @@ func (snapshotFactory) CreateArchive(ctx context.Context, opts SnapshotArchiveOp
 		Force:           opts.Force,
 		RecordIntegrity: opts.RecordIntegrity,
 		Full:            opts.Full,
+		GuestFlush:      string(opts.GuestFlush),
 	}, opts.PlainTar)
 	if err != nil {
 		return nil, wrapFFI(err)

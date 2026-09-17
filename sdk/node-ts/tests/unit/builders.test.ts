@@ -385,6 +385,13 @@ describe("PatchBuilder", () => {
 });
 
 describe("SandboxBuilder.build", () => {
+  it("opts into missing restore resources independently of object validation", () => {
+    const builder = Sandbox.restore("saved").name("missing-resources");
+    expect(builder.allowMissingResources()).toBe(builder);
+    expect(builder.externalMountPolicy("strict")).toBe(builder);
+    expect(Sandbox.builder("fresh")).not.toHaveProperty("allowMissingResources");
+  });
+
   it.each(["strict", "relaxed"] as const)("accepts restore mount policy %s", (policy) => {
     const builder = Sandbox.restore("saved").name("external-policy");
     expect(builder.externalMountPolicy(policy)).toBe(builder);

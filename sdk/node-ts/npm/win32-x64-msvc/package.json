@@ -1,6 +1,11 @@
 {
   "name": "@superradcompany/microsandbox-win32-x64-msvc",
-  "version": "0.7.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/superradcompany/microsandbox.git",
+    "directory": "sdk/node-ts/npm/win32-x64-msvc"
+  },
+  "version": "0.7.1",
   "description": "Bundled msb + libkrunfw + napi binding for microsandbox on Windows x64.",
   "os": ["win32"],
   "cpu": ["x64"],

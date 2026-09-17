@@ -24,9 +24,22 @@ type Sandbox struct {
 	inner *ffi.Sandbox
 }
 
-// BranchOptions controls optional content integrity for one local branch.
+// GuestFlush controls optional guest filesystem writeback during capture or pause.
+type GuestFlush string
+
+const (
+	// GuestFlushAuto flushes live disk-only captures, but not full captures or branches.
+	GuestFlushAuto GuestFlush = "auto"
+	// GuestFlushRequired requires successful writeback of captured persistent filesystems.
+	GuestFlushRequired GuestFlush = "required"
+	// GuestFlushSkip skips optional writeback, never mandatory storage barriers.
+	GuestFlushSkip GuestFlush = "skip"
+)
+
+// BranchOptions controls optional integrity and guest writeback for a local branch.
 type BranchOptions struct {
 	RecordIntegrity bool
+	GuestFlush      GuestFlush
 }
 
 // BranchOutcome contains either a running child or its startup error.
@@ -42,6 +55,11 @@ type BranchOption func(*BranchOptions)
 // WithBranchIntegrity records disk content hashes; RAM backing remains unhashed.
 func WithBranchIntegrity() BranchOption {
 	return func(options *BranchOptions) { options.RecordIntegrity = true }
+}
+
+// WithBranchGuestFlush selects guest writeback before capturing a branch generation.
+func WithBranchGuestFlush(policy GuestFlush) BranchOption {
+	return func(options *BranchOptions) { options.GuestFlush = policy }
 }
 
 // BackendKind returns the backend retained by this sandbox.
@@ -973,7 +991,7 @@ func (h *SandboxHandle) BranchMany(ctx context.Context, names []string, opts ...
 	for _, opt := range opts {
 		opt(&options)
 	}
-	rows, err := ffi.BranchManyByName(ctx, 0, h.name, h.id, names, options.RecordIntegrity)
+	rows, err := ffi.BranchManyByName(ctx, 0, h.name, h.id, names, options.RecordIntegrity, string(options.GuestFlush))
 	return wrapBranchOutcomes(rows, err)
 }
 
@@ -983,7 +1001,7 @@ func (h *SandboxHandle) Branch(ctx context.Context, name string, opts ...BranchO
 	for _, opt := range opts {
 		opt(&options)
 	}
-	inner, err := ffi.BranchSandboxByName(ctx, h.name, name, options.RecordIntegrity)
+	inner, err := ffi.BranchSandboxByName(ctx, h.name, name, options.RecordIntegrity, string(options.GuestFlush))
 	if err != nil {
 		return nil, wrapFFI(err)
 	}
@@ -993,6 +1011,11 @@ func (h *SandboxHandle) Branch(ctx context.Context, name string, opts ...BranchO
 // Pause controls resident execution without creating a snapshot.
 func (h *SandboxHandle) Pause(ctx context.Context) error {
 	return wrapFFI(ffi.PauseSandboxByName(ctx, h.name))
+}
+
+// PauseWithGuestFlush pauses without resuming implicitly to satisfy missing flush coverage.
+func (h *SandboxHandle) PauseWithGuestFlush(ctx context.Context, policy GuestFlush) error {
+	return wrapFFI(ffi.PauseWithGuestFlush(ctx, 0, h.name, h.id, string(policy)))
 }
 
 // Resume controls resident execution without creating a snapshot.
@@ -1138,13 +1161,18 @@ func (s *Sandbox) Pause(ctx context.Context) error {
 	return wrapFFI(s.inner.Pause(ctx))
 }
 
+// PauseWithGuestFlush optionally prepares flushed disks for capture while paused.
+func (s *Sandbox) PauseWithGuestFlush(ctx context.Context, policy GuestFlush) error {
+	return wrapFFI(s.inner.PauseWithGuestFlush(ctx, string(policy)))
+}
+
 // Branch creates an independent local CoW child without publishing a durable full snapshot.
 func (s *Sandbox) Branch(ctx context.Context, name string, opts ...BranchOption) (*Sandbox, error) {
 	options := BranchOptions{}
 	for _, opt := range opts {
 		opt(&options)
 	}
-	inner, err := s.inner.Branch(ctx, name, options.RecordIntegrity)
+	inner, err := s.inner.Branch(ctx, name, options.RecordIntegrity, string(options.GuestFlush))
 	if err != nil {
 		return nil, wrapFFI(err)
 	}
@@ -1163,7 +1191,7 @@ func (s *Sandbox) BranchMany(ctx context.Context, names []string, opts ...Branch
 	for _, opt := range opts {
 		opt(&options)
 	}
-	rows, err := s.inner.BranchMany(ctx, names, options.RecordIntegrity)
+	rows, err := s.inner.BranchMany(ctx, names, options.RecordIntegrity, string(options.GuestFlush))
 	return wrapBranchOutcomes(rows, err)
 }
 

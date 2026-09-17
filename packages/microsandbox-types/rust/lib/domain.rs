@@ -826,6 +826,9 @@ pub struct SandboxPolicy {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct SnapshotSpec {
+    /// Optional guest writeback policy. Auto flushes live disk-only captures, not full RAM.
+    #[serde(default)]
+    pub guest_flush: crate::GuestFlush,
     /// Friendly member name within a group; empty selects a generated name.
     pub name: String,
 

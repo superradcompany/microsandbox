@@ -10,6 +10,10 @@ Create and manage snapshots. See the [snapshot guide](/sandboxes/snapshots) for 
 
 Use snapshot objects or references on cloud. Local operations also accept a group head, `group:member`, or artifact path.
 
+## Guest writeback
+
+Use `.guestFlush("required")` on snapshot builders or `{ guestFlush: "required" }` in `source.branch`, `source.branchMany`, and `source.pause` options. The default `"auto"` flushes live disk-only captures, but adds no optional flush to full captures, branches, or pause. `"skip"` retains mandatory storage barriers. A paused disk capture needs a matching prior flush; cloud rejects non-Auto policies. See [policy semantics and examples](/sandboxes/snapshots#guest-filesystem-flush).
+
 ## Snapshot
 
 A snapshot retains the backend that created or opened it.
@@ -854,6 +858,16 @@ Capture disk, memory, and execution state. The source must be running or paused 
 
 ---
 
+#### <span className="msb-recv">.</span><span className="msb-hn">guestFlush()</span>
+
+```typescript
+guestFlush(policy: GuestFlush): this
+```
+
+Select guest writeback before capture. `GuestFlush` is `"auto" | "required" | "skip"`; defaults to `"auto"`. See [guest writeback](#guest-writeback).
+
+---
+
 #### <span className="msb-recv">.</span><span className="msb-hn">create()</span>
 
 ```typescript
@@ -918,6 +932,8 @@ const child = await Sandbox.restore("api:baseline")
 
 Image, replacement, and startup-command options are not accepted. Full restore requires matching CPU and memory settings, keeps captured network devices, and cannot apply a new guest security profile. Use disk-only restore to change these.
 
+Full restore rejects missing external filesystems and additional disks by default. Use `allowMissingResources()` to resume with unavailable devices and warnings. This is separate from strict/relaxed validation of supplied mappings; inheritance does not waive missing backing. Root and owned storage remain required.
+
 <Accordion title="Destination options">
 
 | Option | Purpose |
@@ -933,6 +949,7 @@ Image, replacement, and startup-command options are not accepted. Full restore r
 | `vsock(), vsockDgram()` | Bind destination vsock endpoints. |
 | `user(), logLevel()` | Default user for new execs and host runtime log level. |
 | `dangerouslyInheritResources()` | Explicitly inherit host resources. Disabled by default. |
+| `allowMissingResources()` | Allow unavailable external filesystems or additional disks, with warnings. Full restore otherwise requires their bindings. |
 | `externalMountPolicy()` | Validate supplied filesystem mappings: strict (default) or relaxed. Does not grant access. |
 
 Omitted controls retain destination defaults. Durations are non-negative finite seconds, rounded up. Network policy accepts `NetworkPolicy` or `NetworkPolicyBuilder`. Use `v => v.captured()` for a private captured volume.

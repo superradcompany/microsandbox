@@ -24,6 +24,22 @@ async def test_restore_missing_artifact_does_not_boot(tmp_path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("method", ["restore", "restore_with_progress"])
+async def test_missing_resource_opt_out_is_restore_only(tmp_path, method):
+    with pytest.raises(FileNotFoundError):
+        result = getattr(Sandbox, method)(
+            tmp_path / "missing", name="restore-opt-out",
+            allow_missing_resources=True, external_mount_policy="strict",
+        )
+        if method == "restore":
+            await result
+        else:
+            await result.result()
+    with pytest.raises(TypeError):
+        Sandbox.create("fresh", image="alpine", allow_missing_resources=True)
+
+
+@pytest.mark.asyncio
 async def test_restore_accepts_explicit_destination_controls(tmp_path):
     with pytest.raises(FileNotFoundError):
         await Sandbox.restore(

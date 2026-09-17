@@ -10,6 +10,10 @@ Create and manage snapshots. See the [snapshot guide](/sandboxes/snapshots) for 
 
 Use snapshot objects or references on cloud. Local operations also accept a group head, `group:member`, or artifact path.
 
+## Guest writeback
+
+Pass `guest_flush=GuestFlush.REQUIRED` to `Snapshot.create`, `Snapshot.create_archive`, `source.branch`, `source.branch_many`, or `source.pause`. Import `GuestFlush` from `microsandbox`. The default `AUTO` flushes live disk-only captures, but adds no optional flush to full captures, branches, or pause. `SKIP` retains mandatory storage barriers. A paused disk capture needs a matching prior flush; cloud rejects non-Auto policies. See [policy semantics and examples](/sandboxes/snapshots#guest-filesystem-flush).
+
 ## Snapshot
 
 <div className="msb-tags"><span className="msb-tag is-type">class</span></div>
@@ -32,6 +36,7 @@ async def create(
     force: bool = False,
     record_integrity: bool = False,
     full: bool = False,
+    guest_flush: GuestFlush | None = None,
 ) -> Snapshot
 ```
 
@@ -67,6 +72,10 @@ Create a disk snapshot, or set `full=True` to include memory and execution state
   <div className="msb-param">
     <div className="msb-param-key"><code>full</code><span className="msb-type">bool</span></div>
     <div className="msb-param-desc">Capture disk, memory, execution, and device state from a running or paused sandbox. Default <code>False</code> captures disk state from running, paused, stopped, or crashed sources.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>guest_flush</code><span className="msb-type">GuestFlush | None</span></div>
+    <div className="msb-param-desc">Guest writeback policy. Omitted selects <code>AUTO</code>; see <a href="#guest-writeback">guest writeback</a>.</div>
   </div>
 </div>
 
@@ -109,6 +118,7 @@ async def create_archive(
     record_integrity: bool = False,
     full: bool = False,
     plain_tar: bool = False,
+    guest_flush: GuestFlush | None = None,
 ) -> SnapshotArchive
 ```
 
@@ -718,6 +728,8 @@ child = await Sandbox.restore("api:baseline", name="api-restored", forked=True)
 
 Image, replacement, and startup-command options are not accepted. Full restore requires matching CPU and memory settings, keeps captured network devices, and cannot apply a new guest security profile. Use disk-only restore to change these.
 
+Full restore rejects missing external filesystems and additional disks by default. Use `allow_missing_resources=True` to resume with unavailable devices and warnings. This is separate from strict/relaxed validation of supplied mappings; inheritance does not waive missing backing. Root and owned storage remain required.
+
 <Accordion title="Destination options">
 
 | Option | Purpose |
@@ -733,6 +745,7 @@ Image, replacement, and startup-command options are not accepted. Full restore r
 | `vsock` | Bind destination vsock endpoints. |
 | `user, log_level` | Default user for new execs and host runtime log level. |
 | `dangerously_inherit_resources` | Explicitly inherit host resources. Disabled by default. |
+| `allow_missing_resources=True` | Allow unavailable external filesystems or additional disks, with warnings. Full restore otherwise requires their bindings. |
 | `external_mount_policy` | Validate supplied filesystem mappings: strict (default) or relaxed. Does not grant access. |
 
 Omitted controls retain destination defaults. Durations are non-negative finite seconds, rounded up. Network policy accepts `NetworkPolicy`, not `Network`. `captured_volumes` contains guest paths.

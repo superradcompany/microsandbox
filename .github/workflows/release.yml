@@ -20,6 +20,7 @@ on:
       - scripts/ci/validate_linux_glibc.py
       - scripts/ci/test_validate_linux_glibc.py
       - scripts/ci/wait-for-npm-packages.mjs
+      - scripts/ci/publish-npm-package.mjs
   # Manual runs exercise the full release build and validation graph. Every
   # irreversible job below is independently guarded to tag pushes only.
   workflow_dispatch:
@@ -981,8 +982,8 @@ jobs:
       - name: Build and check TypeScript smoke test
         working-directory: sdk/node-ts
         run: |
-          npm ci --omit=optional
-          npm run build:ts
+          node --test ../../scripts/ci/test-npm-release.mjs
+          node ../../scripts/ci/build-unpublished-node-sdk.mjs
           npx --no-install tsc --noEmit --strict --skipLibCheck --target ES2023 --module nodenext --allowImportingTsExtensions scripts/cloud-release-smoke.mts scripts/cloud-release-smoke.test.mts
           node --experimental-strip-types --test scripts/cloud-release-smoke.test.mts
 
@@ -1245,6 +1246,13 @@ jobs:
     needs: release-ready
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      # Every publish in this job uses the existing token plus GitHub OIDC
+      # provenance. MCP is published separately from its submodule repository.
+      NPM_CONFIG_PROVENANCE: "true"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -1276,10 +1284,9 @@ jobs:
 
           # Copy napi-generated bindings into the root package's native/ dir
           # (use darwin-arm64; all platforms emit identical JS and types).
-          # napi build emits index.d.ts; rename to index.d.cts so nodenext
-          # resolution finds it next to the .cjs binding.
+          # Keep the declaration path aligned with package.json exports/files.
           cp node-artifacts/node-sdk-darwin-arm64/native/index.cjs sdk/node-ts/native/index.cjs
-          cp node-artifacts/node-sdk-darwin-arm64/native/index.d.ts sdk/node-ts/native/index.d.cts
+          cp node-artifacts/node-sdk-darwin-arm64/native/index.d.ts sdk/node-ts/native/index.d.ts
 
       - name: Build shared TypeScript packages in dependency order
         working-directory: packages
@@ -1287,19 +1294,13 @@ jobs:
           npm ci
           npm run build
 
-      - name: Build TypeScript output (root package dist/)
-        working-directory: sdk/node-ts
-        run: |
-          npm ci --omit=optional
-          npm run build:ts
-
       - name: Publish shared types and protocol engine
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         working-directory: packages
         run: |
-          npm publish --workspace @microsandbox/types --access public
-          npm publish --workspace @microsandbox/protocol-client --access public
+          node ../scripts/ci/publish-npm-package.mjs microsandbox-types/typescript
+          node ../scripts/ci/publish-npm-package.mjs protocol-client/typescript
 
       - name: Wait for shared dependencies to be indexed
         run: |
@@ -1312,8 +1313,8 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         working-directory: packages
         run: |
-          npm publish --workspace @microsandbox/agent-client --access public
-          npm publish --workspace @microsandbox/control-client --access public
+          node ../scripts/ci/publish-npm-package.mjs agent-client/typescript
+          node ../scripts/ci/publish-npm-package.mjs control-client/typescript
 
       - name: Wait for shared clients to be indexed
         run: |
@@ -1328,7 +1329,7 @@ jobs:
           for dir in darwin-arm64 linux-x64-gnu linux-arm64-gnu win32-x64-msvc win32-arm64-msvc; do
             echo "Publishing @superradcompany/microsandbox-$dir..."
             cd sdk/node-ts/npm/$dir
-            npm publish --access public
+            node ../../../../scripts/ci/publish-npm-package.mjs .
             cd ../../../..
           done
 
@@ -1341,6 +1342,15 @@ jobs:
             @superradcompany/microsandbox-linux-x64-gnu \
             @superradcompany/microsandbox-win32-arm64-msvc \
             @superradcompany/microsandbox-win32-x64-msvc
+
+      - name: Build TypeScript output with published platform dependencies
+        working-directory: sdk/node-ts
+        run: |
+          # A version bump can precede registry entries for its native packages.
+          # Only resolve them after publication, then validate with a clean install.
+          npm install --package-lock-only --ignore-scripts
+          npm ci --omit=optional
+          npm run build:ts
 
       - name: Verify root package platform dependencies
         working-directory: sdk/node-ts
@@ -1370,7 +1380,7 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         working-directory: sdk/node-ts
-        run: npm publish --access public
+        run: node ../../scripts/ci/publish-npm-package.mjs .
 
   # ---------------------------------------------------------------------------
   # Refresh sdk/node-ts/package-lock.json against the just-published platform
@@ -1442,15 +1452,23 @@ jobs:
           VERSION="${GITHUB_REF_NAME#v}"
           node scripts/ci/wait-for-npm-packages.mjs "$VERSION" microsandbox
 
-      - name: Build and publish MCP server
+      - name: Build MCP server
+        working-directory: mcp
+        run: |
+          # The pinned MCP source has no lockfile. Disable dependency lifecycle
+          # scripts during resolution and keep publishing credentials out of build.
+          if [ -f package-lock.json ]; then
+            npm ci --ignore-scripts
+          else
+            npm install --ignore-scripts
+          fi
+          npm run build
+
+      - name: Publish MCP server
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         working-directory: mcp
-        run: |
-          rm -f package-lock.json
-          npm install
-          npm run build
-          npm publish --access public
+        run: node ../scripts/ci/publish-npm-package.mjs .
 
   # ---------------------------------------------------------------------------
   # Publish Rust crates to crates.io

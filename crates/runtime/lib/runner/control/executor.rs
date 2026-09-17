@@ -226,9 +226,13 @@ impl RuntimeControlExecutor {
         };
         // Gate the authoritative operation, including idempotent Resume on a running VM.
         // Clients need no separate capability exchange, and refusal never changes ownership.
-        if matches!(request, ControlRequest::Pause | ControlRequest::Resume)
-            && let Some(response) =
-                unsupported_lifecycle_request(&request, self.vm.clock_sync_supported())
+        if matches!(
+            request,
+            ControlRequest::Pause
+                | ControlRequest::PauseWithGuestFlush { .. }
+                | ControlRequest::Resume
+        ) && let Some(response) =
+            unsupported_lifecycle_request(&request, self.vm.clock_sync_supported())
         {
             return response;
         }
@@ -244,12 +248,14 @@ impl RuntimeControlExecutor {
                 | ControlRequest::BranchCreateMemfd { .. }
                 | ControlRequest::DiskCompact { dry_run: false, .. }
                 | ControlRequest::Pause
+                | ControlRequest::PauseWithGuestFlush { .. }
                 | ControlRequest::Resume
         );
         let resident_operation = state.user_pause.is_some()
             && matches!(
                 request,
                 ControlRequest::Pause
+                    | ControlRequest::PauseWithGuestFlush { .. }
                     | ControlRequest::Resume
                     | ControlRequest::CheckpointCreate { .. }
                     | ControlRequest::DiskCheckpointCreate { .. }
@@ -263,13 +269,21 @@ impl RuntimeControlExecutor {
             );
         }
 
+        let pause_policy = match &request {
+            ControlRequest::PauseWithGuestFlush { guest_flush } => Some(*guest_flush),
+            _ => None,
+        };
         let response = match request {
-            ControlRequest::DiskCheckpointCreate { checkpoint_id } => {
+            ControlRequest::DiskCheckpointCreate {
+                checkpoint_id,
+                guest_flush,
+            } => {
                 state.lifecycle = RuntimeLifecycle::Quiescing;
                 match state.checkpoint.capture_disk(
                     &self.vm,
                     &checkpoint_id,
                     state.user_pause.as_ref(),
+                    guest_flush,
                 ) {
                     Ok(result) => {
                         state.lifecycle = if state.user_pause.is_some() {
@@ -296,13 +310,23 @@ impl RuntimeControlExecutor {
                     }
                 }
             }
-            ControlRequest::Pause => {
+            ControlRequest::Pause | ControlRequest::PauseWithGuestFlush { .. } => {
+                if let (Some(paused), Some(policy)) = (state.user_pause.as_ref(), pause_policy)
+                    && let Err(error) = state
+                        .checkpoint
+                        .validate_paused_flush(&self.vm, paused, policy)
+                {
+                    return control_error("guest_flush_required", error);
+                }
                 if state.user_pause.is_none() {
                     self.resident_paused
                         .store(true, std::sync::atomic::Ordering::Release);
                     let attempt = format!("pause-{}-{}", state.runtime_boot_id, state.revision);
                     state.lifecycle = RuntimeLifecycle::Quiescing;
-                    match state.checkpoint.pause_user(&self.vm, &attempt) {
+                    match state
+                        .checkpoint
+                        .pause_user(&self.vm, &attempt, pause_policy)
+                    {
                         Ok(paused) => {
                             state.user_pause = Some(paused);
                             state.lifecycle = RuntimeLifecycle::Quiesced;
@@ -375,12 +399,14 @@ impl RuntimeControlExecutor {
                 }
             },
             ControlRequest::BranchCreate {
+                guest_flush,
                 record_integrity,
                 branch_id,
                 child_name,
                 memory_cache_dir,
             }
             | ControlRequest::BranchCreateMemfd {
+                guest_flush,
                 record_integrity,
                 branch_id,
                 child_name,
@@ -396,6 +422,7 @@ impl RuntimeControlExecutor {
                     state.user_pause.as_ref(),
                     memory_backing.as_deref(),
                     record_integrity,
+                    guest_flush,
                 ) {
                     Ok(result) => {
                         state.lifecycle = if state.user_pause.is_some() {
@@ -423,6 +450,7 @@ impl RuntimeControlExecutor {
                 }
             }
             ControlRequest::CheckpointCreate {
+                guest_flush,
                 checkpoint_id,
                 intent,
                 record_integrity,
@@ -444,6 +472,7 @@ impl RuntimeControlExecutor {
                     },
                     state.user_pause.as_ref(),
                     record_integrity,
+                    guest_flush,
                 ) {
                     Ok(result) => {
                         state.lifecycle = if state.user_pause.is_some() {
@@ -548,6 +577,7 @@ impl RuntimeControlExecutor {
                     disk_checkpoint_create: true,
                     branch_create: cfg!(any(unix, windows)),
                     optional_disk_integrity: true,
+                    guest_flush_policy: true,
                     branch_memfd: cfg!(target_os = "linux"),
                     disk_compact: true,
                     disk_compact_owned: true,
@@ -576,6 +606,7 @@ impl RuntimeControlExecutor {
             | ControlRequest::BranchCreate { .. }
             | ControlRequest::BranchCreateMemfd { .. }
             | ControlRequest::Pause
+            | ControlRequest::PauseWithGuestFlush { .. }
             | ControlRequest::Resume
             | ControlRequest::PauseState
             | ControlRequest::DiskCompact { .. }
@@ -639,7 +670,7 @@ fn unsupported_lifecycle_request(
     request: &ControlRequest,
     clock_sync: bool,
 ) -> Option<ControlResponse> {
-    (!clock_sync && matches!(request, ControlRequest::Pause | ControlRequest::Resume)).then(|| {
+    (!clock_sync && matches!(request, ControlRequest::Pause | ControlRequest::PauseWithGuestFlush { .. } | ControlRequest::Resume)).then(|| {
         control_error(
             "pause_resume_unavailable",
             "resident pause/resume requires a runtime and guest kernel with clock-only resume support",

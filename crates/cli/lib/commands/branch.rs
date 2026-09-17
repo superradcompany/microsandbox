@@ -12,10 +12,18 @@ use crate::ui;
 /// Create an independent child from a running or user-paused local sandbox.
 #[derive(Debug, Args)]
 pub struct BranchArgs {
+    /// Optional guest writeback: auto, required, or skip. Auto preserves dirty RAM.
+    #[arg(long, default_value = "auto")]
+    pub guest_flush: microsandbox::snapshot::GuestFlush,
     /// Source sandbox name.
     pub source: String,
     /// Name of the new child sandbox.
-    #[arg(long, required_unless_present = "names", conflicts_with = "names")]
+    #[arg(
+        short,
+        long,
+        required_unless_present = "names",
+        conflicts_with = "names"
+    )]
     pub name: Option<String>,
     /// Capture once for these independent children, in input order.
     #[arg(long, num_args = 1.., conflicts_with = "name")]
@@ -41,7 +49,7 @@ pub async fn run(args: BranchArgs) -> anyhow::Result<()> {
     if !args.names.is_empty() {
         let mut builder = args
             .resources
-            .apply_branch_many(source.branch_many(args.names))?;
+            .apply_branch_many(source.branch_many(args.names).guest_flush(args.guest_flush))?;
         if args.integrity {
             builder = builder.record_integrity();
         }
@@ -68,9 +76,11 @@ pub async fn run(args: BranchArgs) -> anyhow::Result<()> {
         );
         return Ok(());
     }
-    let mut builder = args
-        .resources
-        .apply_branch(source.branch(args.name.expect("clap requires a child name")))?;
+    let mut builder = args.resources.apply_branch(
+        source
+            .branch(args.name.expect("clap requires a child name"))
+            .guest_flush(args.guest_flush),
+    )?;
     if args.integrity {
         builder = builder.record_integrity();
     }
@@ -121,6 +131,7 @@ mod tests {
             vec!["msb", "source"],
             vec!["msb", "source", "--names"],
             vec!["msb", "source", "--name", "a", "--names", "b"],
+            vec!["msb", "source", "-n", "a", "--names", "b"],
         ] {
             assert!(Command::try_parse_from(args).is_err());
         }

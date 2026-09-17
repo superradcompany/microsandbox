@@ -5,7 +5,7 @@
 //! [`crate::sandbox::SandboxConfig`].
 
 pub(crate) mod handle;
-mod launch_contract;
+pub(crate) mod launch_contract;
 mod launch_input;
 #[cfg(feature = "net")]
 mod network_slot;

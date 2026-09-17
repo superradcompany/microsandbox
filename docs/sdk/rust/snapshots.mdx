@@ -10,6 +10,10 @@ Create and manage snapshots. See the [snapshot guide](/sandboxes/snapshots) for 
 
 Use snapshot objects or references on cloud. Local operations also accept a group head, `group:member`, or artifact path.
 
+## Guest writeback
+
+Use `.guest_flush(GuestFlush::Required)` on snapshot, branch, or branch-many builders, or `source.pause_with_guest_flush(GuestFlush::Required)`. Import `GuestFlush` from `microsandbox::snapshot`. The default `Auto` flushes live disk-only captures, but adds no optional flush to full captures, branches, or pause. `Skip` retains mandatory storage barriers. A paused disk capture needs a matching prior flush; cloud rejects non-Auto policies. See [policy semantics and examples](/sandboxes/snapshots#guest-filesystem-flush).
+
 ## Static methods
 
 #### <span className="msb-recv">Snapshot::</span><span className="msb-hn">builder()</span>
@@ -938,6 +942,14 @@ fn full(self) -> Self
 
 Capture disk, memory, and execution state. The source must be running or paused and returns to that state after capture.
 
+#### <span className="msb-recv">.</span><span className="msb-hn">guest_flush()</span>
+
+```rust
+fn guest_flush(self, policy: GuestFlush) -> Self
+```
+
+Select guest writeback before capture. Defaults to `GuestFlush::Auto`; see [guest writeback](#guest-writeback).
+
 #### <span className="msb-recv">.</span><span className="msb-hn">build()</span>
 
 ```rust
@@ -1009,6 +1021,8 @@ let child = Sandbox::restore("api:baseline")
 
 Image, replacement, and startup-command options are not accepted. Full restore requires matching CPU and memory settings, keeps captured network devices, and cannot apply a new guest security profile. Use disk-only restore to change these.
 
+Full restore rejects missing external filesystems and additional disks by default. Use `allow_missing_resources()` to resume with unavailable devices and warnings. This is separate from strict/relaxed validation of supplied mappings; inheritance does not waive missing backing. Root and owned storage remain required.
+
 <Accordion title="Destination options">
 
 | Option | Purpose |
@@ -1024,6 +1038,7 @@ Image, replacement, and startup-command options are not accepted. Full restore r
 | `vsock(), vsock_dgram()` | Bind destination vsock endpoints. |
 | `user(), log_level()` | Default user for new execs and host runtime log level. |
 | `dangerously_inherit_resources()` | Explicitly inherit host resources. Disabled by default. |
+| `allow_missing_resources()` | Allow unavailable external filesystems or additional disks, with warnings. Full restore otherwise requires their bindings. |
 | `external_mount_policy()` | Validate supplied filesystem mappings: strict (default) or relaxed. Does not grant access. |
 
 Omitted controls retain destination defaults. Durations are whole seconds. Network policy accepts `NetworkPolicy`. Use `|v| v.captured()` for a private captured volume.
@@ -1175,6 +1190,7 @@ Inputs to create a snapshot. A type alias for `SnapshotSpec`. Usually built via 
 | force | `bool` | Overwrite a direct archive output; rejected for installed group members |
 | record_integrity | `bool` | Compute and record upper-layer integrity at creation |
 | full | `bool` | Include memory and execution state from a running or paused source; `false` captures disk state from running, paused, stopped, or crashed sources |
+| guest_flush | `GuestFlush` | Guest writeback policy; defaults to `GuestFlush::Auto`. See [guest writeback](#guest-writeback) |
 
 ### SnapshotFormat
 

@@ -85,7 +85,16 @@ impl RestoreBuilder {
         inner.config.spec.network.ports.clear();
         inner.config.spec.vsock = Default::default();
         inner.config.spec.runtime.user = None;
+        inner.config.restore_resources.require_complete = true;
         Self { inner }
+    }
+
+    /// Resume even when captured external resources have no destination backing.
+    /// Does not inherit host resources or relax validation of supplied objects.
+    pub fn allow_missing_resources(mut self) -> Self {
+        self.inner.config.restore_resources.require_complete = false;
+        self.inner.config.restore_resources.allow_missing = true;
+        self
     }
 
     /// Set the unique destination sandbox name.
@@ -282,7 +291,7 @@ macro_rules! resource_methods {
             }
 
             /// Choose strict or relaxed compatibility validation for authorized filesystem mappings.
-            /// Unmapped filesystems remain unavailable in either mode; this does not inherit resources.
+            /// This does not authorize inheritance or waive restore's required-resource checks.
             pub fn external_mount_policy(mut self, policy: ExternalMountRestorePolicy) -> Self {
                 self.inner = self.inner.external_mount_policy(policy);
                 self
@@ -330,6 +339,24 @@ resource_methods!(super::branch::BranchManyBuilder);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn restore_requires_resources_independently_of_inheritance_and_object_policy() {
+        let restore = Sandbox::restore("saved")
+            .name("child")
+            .dangerously_inherit_resources()
+            .external_mount_policy(ExternalMountRestorePolicy::Relaxed);
+        assert!(restore.inner.config.restore_resources.require_complete);
+        assert!(!restore.inner.config.restore_resources.allow_missing);
+        let restore = restore.allow_missing_resources();
+        assert!(!restore.inner.config.restore_resources.require_complete);
+        assert!(restore.inner.config.restore_resources.allow_missing);
+        assert!(restore.inner.config.restore_resources.inherit);
+        assert_eq!(
+            restore.inner.config.external_mount_policy,
+            ExternalMountRestorePolicy::Relaxed
+        );
+    }
 
     #[test]
     fn only_explicit_guest_security_changes_are_refused_for_full_execution() {

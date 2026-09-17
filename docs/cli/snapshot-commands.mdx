@@ -27,13 +27,14 @@ msb snapshot create ready --from-sandbox worker
 | `--dest-dir DIR` | Parent directory for local groups |
 | `-o`, `--output PATH` | Capture directly to an archive; conflicts with `--dest-dir` and does not accept `--group` |
 | `--full` | Capture disk, memory, and execution state from a running or paused source |
+| `--guest-flush` | Guest writeback policy: `auto` (default), `required`, or `skip`; see [flush behavior](/sandboxes/snapshots#guest-filesystem-flush) |
 | `--integrity` | Record content hashes for later verification |
 | `--label KEY=VALUE` | Attach a label; repeatable |
 | `--plain-tar` | Write uncompressed tar; requires `--output` |
 | `-f`, `--force` | Overwrite an archive output; not allowed for installed members |
 | `-q`, `--quiet` | Suppress output |
 
-Local disk capture accepts running, paused, stopped, or crashed sources. Stop first to include buffered writes. Cloud requires a stopped or crashed source.
+Local disk capture accepts running, paused, stopped, or crashed sources. Running disk captures flush guest filesystem writes by default; paused captures need a prior `pause --guest-flush required`. Use `skip` to accept unflushed disk state. Cloud requires a stopped or crashed source and accepts only `auto`.
 
 <Accordion title="Examples">
 

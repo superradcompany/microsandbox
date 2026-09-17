@@ -192,6 +192,17 @@ char *msb_sandbox_stop_gracefully(uint64_t cancel_id,
 char *msb_sandbox_pause(uint64_t cancel_id, Handle handle, unsigned char *buf, uintptr_t buf_len);
 
 /**
+ * Pause with an explicit flush policy. Its presence also advertises policy-aware JSON APIs.
+ */
+char *msb_sandbox_pause_with_guest_flush(uint64_t cancel_id,
+                                         Handle handle,
+                                         const char *source,
+                                         const char *expected_id,
+                                         const char *policy,
+                                         unsigned char *buf,
+                                         uintptr_t buf_len);
+
+/**
  * Branch by live handle, or by persisted name when handle is zero.
  */
 char *msb_sandbox_branch(uint64_t cancel_id,

@@ -1721,7 +1721,8 @@ pub(super) async fn remove_local_persisted_sandbox(
     // newer sandbox that reused the same deterministic name, and an active identity must not be
     // reaped merely because a caller held an older terminal snapshot.
     let pools = local_backend.db().await?;
-    let mut current = sandbox_entity::Entity::find()
+    let mut current = microsandbox_db::catalog::sandbox_query(pools.read())
+        .await?
         .filter(sandbox_entity::Column::Name.eq(name))
         .one(pools.read())
         .await?
@@ -1764,7 +1765,8 @@ pub(super) async fn remove_local_persisted_sandbox(
 
     // Runtime ownership may have taken time to become available. Recheck the exact identity and
     // terminal state before deleting any deterministic storage.
-    current = sandbox_entity::Entity::find()
+    current = microsandbox_db::catalog::sandbox_query(pools.read())
+        .await?
         .filter(sandbox_entity::Column::Name.eq(name))
         .one(pools.read())
         .await?

@@ -141,6 +141,41 @@ impl FileIdentity {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
+/// Identify the selected installation for catalog initialization/serialization.
+/// Absence is not an installation request. Existing malformed overrides fail
+/// closed, and the version probe has the same bounds as launch discovery.
+pub(crate) async fn catalog_patch(
+    config: &crate::config::GlobalConfig,
+) -> MicrosandboxResult<Option<u64>> {
+    let runtime = match crate::setup::resolve_runtime(config) {
+        Ok(runtime) => runtime,
+        Err(MicrosandboxError::RuntimeNotInstalled(_)) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let path = runtime.msb_path;
+    let mut magic = [0; 2];
+    let wrapper = File::open(&path)?.read(&mut magic)? == 2 && magic == *b"#!";
+    let embedded = if wrapper {
+        None
+    } else {
+        crate::setup::resolve_runtime_version(&path)?
+    };
+    let version = match embedded {
+        Some(version) => version,
+        None => probe(&path).await?,
+    };
+    if version.major == 0 && version.minor == 6 && version.patch <= 18 && version.pre.is_empty() {
+        Ok(Some(version.patch))
+    } else if version == Version::parse(env!("CARGO_PKG_VERSION")).expect("Cargo version is semver")
+    {
+        Ok(None)
+    } else {
+        Err(MicrosandboxError::Runtime(format!(
+            "no tested catalog contract for runtime {version}"
+        )))
+    }
+}
+
 pub(super) async fn resolve(path: &Path) -> MicrosandboxResult<LaunchContract> {
     let path = std::fs::canonicalize(path)?;
     // Serialize cold discovery so concurrent starts share one probe. No failed
@@ -211,9 +246,33 @@ pub(super) async fn resolve(path: &Path) -> MicrosandboxResult<LaunchContract> {
     Ok(contract)
 }
 
+/// Probe only the new combination. Ordinary starts/restores keep their cached,
+/// process-free discovery path, and old runtimes still accept their existing wire.
+pub(super) async fn require_restore_backing(path: &Path) -> MicrosandboxResult<()> {
+    let output = bounded_probe(path, "__launch-protocol").await?;
+    let supported = serde_json::from_slice::<
+        microsandbox_runtime::launch_protocol::LaunchCapabilities,
+    >(&output)
+    .is_ok_and(|capabilities| {
+        capabilities.protocols.contains(&2) && capabilities.required_restore_backing
+    });
+    if !supported {
+        return Err(MicrosandboxError::Runtime(
+            microsandbox_runtime::launch_protocol::upgrade_required(
+                "relaxed external-object validation with required resource backing",
+            ),
+        ));
+    }
+    Ok(())
+}
+
 async fn probe(path: &Path) -> MicrosandboxResult<Version> {
+    parse_version(&bounded_probe(path, "--version").await?)
+}
+
+async fn bounded_probe(path: &Path, argument: &str) -> MicrosandboxResult<Vec<u8>> {
     let mut child = Command::new(path)
-        .arg("--version")
+        .arg(argument)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -254,7 +313,7 @@ async fn probe(path: &Path) -> MicrosandboxResult<Version> {
             "runtime version probe exited unsuccessfully".into(),
         ));
     }
-    parse_version(&bytes)
+    Ok(bytes)
 }
 
 fn parse_version(bytes: &[u8]) -> MicrosandboxResult<Version> {
@@ -272,6 +331,32 @@ fn parse_version(bytes: &[u8]) -> MicrosandboxResult<Version> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn required_backing_probe_distinguishes_old_and_capable_runtimes() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = script(
+            dir.path(),
+            "old-capabilities",
+            "printf '%s' '{\"protocols\":[2,1]}'",
+        );
+        let error = require_restore_backing(&old).await.unwrap_err().to_string();
+        assert!(error.contains("upgrade msb"));
+        assert!(error.contains("required resource backing"));
+        let new = script(
+            dir.path(),
+            "new-capabilities",
+            "printf '%s' '{\"protocols\":[2,1],\"required_restore_backing\":true}'",
+        );
+        require_restore_backing(&new).await.unwrap();
+        let malformed = script(
+            dir.path(),
+            "malformed-capabilities",
+            "printf '%s' '{\"protocols\":[2],\"required_restore_backing\":\"true\"}'",
+        );
+        assert!(require_restore_backing(&malformed).await.is_err());
+    }
 
     #[cfg(unix)]
     fn script(dir: &Path, name: &str, body: &str) -> PathBuf {

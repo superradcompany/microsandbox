@@ -255,6 +255,7 @@ async fn capture_installed(
     let total_started = Instant::now();
     let SnapshotConfig {
         name,
+        guest_flush,
         group: _,
         dest_dir,
         source_sandbox,
@@ -300,6 +301,7 @@ async fn capture_installed(
             labels,
             model,
             record_integrity,
+            guest_flush,
         )
         .await;
     }
@@ -372,6 +374,7 @@ async fn capture_installed(
         &root_disk,
         &sandbox_config.spec.mounts,
         _lifecycle_guard.clone(),
+        guest_flush,
     )
     .await?;
 
@@ -445,6 +448,7 @@ async fn create_full_snapshot(
     labels: Vec<(String, String)>,
     model: sandbox_entity::Model,
     record_integrity: bool,
+    guest_flush: microsandbox_types::GuestFlush,
 ) -> MicrosandboxResult<StagedSnapshot> {
     let dest_dir = destination.path;
     let total_started = Instant::now();
@@ -462,8 +466,15 @@ async fn create_full_snapshot(
     // The runtime owns capture and recovery even if this client disappears. Do not allocate an
     // artifact staging directory while waiting for it: there is nothing to stage until capture
     // succeeds. The guard also removes partial materialization on ordinary errors/cancellation.
-    let captured =
-        capture_full_snapshot(local, source_sandbox, labels, model, record_integrity).await?;
+    let captured = capture_full_snapshot(
+        local,
+        source_sandbox,
+        labels,
+        model,
+        record_integrity,
+        guest_flush,
+    )
+    .await?;
     let capture_us = capture_started.elapsed().as_micros();
     stage_full_snapshot(
         destination,
@@ -576,6 +587,7 @@ pub(super) async fn create_snapshot_archive(
     let total_started = Instant::now();
     let SnapshotConfig {
         mut name,
+        guest_flush,
         group,
         dest_dir,
         source_sandbox,
@@ -607,8 +619,15 @@ pub(super) async fn create_snapshot_archive(
     }
     if full {
         let capture_started = Instant::now();
-        let mut captured =
-            capture_full_snapshot(local, &source_sandbox, labels, model, record_integrity).await?;
+        let mut captured = capture_full_snapshot(
+            local,
+            &source_sandbox,
+            labels,
+            model,
+            record_integrity,
+            guest_flush,
+        )
+        .await?;
         lineage
             .validate_source(local, &source_sandbox)
             .await
@@ -685,6 +704,7 @@ pub(super) async fn create_snapshot_archive(
         &root_disk,
         &sandbox_config.spec.mounts,
         _lifecycle_guard.clone(),
+        guest_flush,
     )
     .await?;
     lineage.validate_source(local, &source_sandbox).await?;
@@ -854,6 +874,7 @@ async fn capture_full_snapshot(
     labels: Vec<(String, String)>,
     model: sandbox_entity::Model,
     record_integrity: bool,
+    guest_flush: microsandbox_types::GuestFlush,
 ) -> MicrosandboxResult<CapturedFullSnapshot> {
     if model.status != SandboxStatus::Running {
         return Err(MicrosandboxError::unsupported(
@@ -877,6 +898,7 @@ async fn capture_full_snapshot(
         source_sandbox,
         checkpoint_id.clone(),
         record_integrity,
+        guest_flush,
     )
     .await?;
     let checkpoint = outcome.checkpoint;
@@ -1323,8 +1345,14 @@ async fn capture_disk_source(
     root_disk: &SnapshotRootDisk,
     mounts: &[microsandbox_types::VolumeMount],
     lifecycle_guard: Option<Arc<microsandbox_runtime::ipc::SandboxLifecycleGuard>>,
+    guest_flush: microsandbox_types::GuestFlush,
 ) -> MicrosandboxResult<SnapshotDiskClosure> {
     if !matches!(status, SandboxStatus::Running | SandboxStatus::Paused) {
+        if guest_flush == microsandbox_types::GuestFlush::Required {
+            return Err(MicrosandboxError::InvalidConfig(
+                "required guest flush is unavailable for a stopped or crashed source; use auto or skip to capture its existing disk state".into(),
+            ));
+        }
         let lifecycle_guard = lifecycle_guard.ok_or_else(|| {
             MicrosandboxError::Runtime("stopped disk capture requires lifecycle ownership".into())
         })?;
@@ -1358,7 +1386,8 @@ async fn capture_disk_source(
     }
     let id = format!("disk_{:032x}", rand::random::<u128>());
     let captured =
-        crate::sandbox::control_disk_checkpoint_create(local, source, id.clone()).await?;
+        crate::sandbox::control_disk_checkpoint_create(local, source, id.clone(), guest_flush)
+            .await?;
     let expected_path = sandbox_dir.join("runtime").join("checkpoints").join(&id);
     let expected_device = match root_disk {
         SnapshotRootDisk::Flat => "vda",
@@ -2736,6 +2765,7 @@ mod tests {
                 &SnapshotRootDisk::Managed,
                 &mounts,
                 Some(Arc::clone(&guard)),
+                microsandbox_types::GuestFlush::Auto,
             )
             .await
             .unwrap();
@@ -2824,6 +2854,7 @@ mod tests {
                     &SnapshotRootDisk::Managed,
                     &mounts,
                     Some(Arc::clone(&guard)),
+                    microsandbox_types::GuestFlush::Auto,
                 ));
                 assert!(futures::poll!(capture.as_mut()).is_pending());
                 drop(capture);

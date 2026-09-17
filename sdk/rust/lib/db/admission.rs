@@ -24,12 +24,79 @@ static RELEASED: LazyLock<Vec<ReleasedCatalog>> = LazyLock::new(|| {
 
 #[derive(Deserialize)]
 struct ReleasedCatalog {
+    versions: Vec<String>,
     migrations: BTreeSet<String>,
 }
 
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
+
+/// Compare identities, not counts: an unknown migration must never admit a current writer.
+pub(crate) async fn is_current<C: ConnectionTrait>(db: &C) -> MicrosandboxResult<bool> {
+    let rows = db
+        .query_all_raw(Statement::from_string(
+            DbBackend::Sqlite,
+            "SELECT version FROM seaql_migrations",
+        ))
+        .await?;
+    let applied = rows
+        .into_iter()
+        .map(|row| row.try_get_by_index::<String>(0))
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    Ok(applied
+        == schema_metadata::migration_ids()
+            .map(str::to_owned)
+            .collect())
+}
+
+/// Earliest released writer for an exact historical migration set.
+pub(super) async fn historical_patch<C: ConnectionTrait>(db: &C) -> MicrosandboxResult<u64> {
+    let rows = db
+        .query_all_raw(Statement::from_string(
+            DbBackend::Sqlite,
+            "SELECT version FROM seaql_migrations",
+        ))
+        .await?;
+    let applied = rows
+        .into_iter()
+        .map(|row| row.try_get_by_index::<String>(0))
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    RELEASED
+        .iter()
+        .find(|profile| profile.migrations == applied)
+        .and_then(|profile| {
+            profile
+                .versions
+                .iter()
+                .filter_map(|version| version.rsplit('.').next()?.parse().ok())
+                .min()
+        })
+        .ok_or_else(|| {
+            MicrosandboxError::InvalidConfig(
+                "unrecognized catalog migration history; refusing configuration write".into(),
+            )
+        })
+}
+
+pub(crate) fn historical_migration_count(patch: u64) -> MicrosandboxResult<u32> {
+    let version = format!("v0.6.{patch}");
+    RELEASED
+        .iter()
+        .find(|profile| profile.versions.contains(&version))
+        .map(|profile| profile.migrations.len() as u32)
+        .ok_or_else(|| {
+            MicrosandboxError::Runtime(format!("unrecognized catalog release {version}"))
+        })
+}
+
+pub(super) fn same_historical_schema(left: u64, right: u64) -> bool {
+    let left = format!("v0.6.{left}");
+    let right = format!("v0.6.{right}");
+    RELEASED
+        .iter()
+        .any(|profile| profile.versions.contains(&left) && profile.versions.contains(&right))
+}
 
 /// Returns true only for a new catalog or interrupted pre-floor initialization.
 /// Complete supported catalogs remain in their existing schema and retain their
@@ -124,5 +191,29 @@ mod tests {
         .await
         .unwrap();
         assert!(requires_initialization(&db).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn equal_migration_counts_do_not_admit_an_unknown_writer() {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        db.execute_unprepared(
+            "CREATE TABLE seaql_migrations (version TEXT PRIMARY KEY, applied_at BIGINT NOT NULL)",
+        )
+        .await
+        .unwrap();
+        for version in schema_metadata::migration_ids() {
+            db.execute_raw(Statement::from_sql_and_values(
+                DbBackend::Sqlite,
+                "INSERT INTO seaql_migrations VALUES (?, 1)",
+                [version.into()],
+            ))
+            .await
+            .unwrap();
+        }
+        assert!(is_current(&db).await.unwrap());
+        db.execute_unprepared("UPDATE seaql_migrations SET version = 'unknown_replacement' WHERE version = (SELECT version FROM seaql_migrations ORDER BY version LIMIT 1)").await.unwrap();
+        assert!(!is_current(&db).await.unwrap());
+        assert!(requires_initialization(&db).await.is_err());
+        assert!(historical_patch(&db).await.is_err());
     }
 }

@@ -71,6 +71,7 @@ impl PySnapshot {
         force = false,
         record_integrity = false,
         full = false,
+        guest_flush = None,
     ))]
     fn create<'py>(
         py: Python<'py>,
@@ -82,9 +83,12 @@ impl PySnapshot {
         force: bool,
         record_integrity: bool,
         full: bool,
+        guest_flush: Option<String>,
     ) -> PyResult<Bound<'py, PyAny>> {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut builder = RustSnapshot::builder(name).from_sandbox(&from_sandbox);
+            let mut builder = RustSnapshot::builder(name)
+                .from_sandbox(&from_sandbox)
+                .guest_flush(guest_flush_policy(guest_flush)?);
             if let Some(group) = group {
                 builder = builder.group(group);
             }
@@ -124,6 +128,7 @@ impl PySnapshot {
         record_integrity = false,
         full = false,
         plain_tar = false,
+        guest_flush = None,
     ))]
     fn create_archive<'py>(
         py: Python<'py>,
@@ -136,9 +141,12 @@ impl PySnapshot {
         record_integrity: bool,
         full: bool,
         plain_tar: bool,
+        guest_flush: Option<String>,
     ) -> PyResult<Bound<'py, PyAny>> {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut builder = RustSnapshot::builder(name).from_sandbox(from_sandbox);
+            let mut builder = RustSnapshot::builder(name)
+                .from_sandbox(from_sandbox)
+                .guest_flush(guest_flush_policy(guest_flush)?);
             if let Some(group) = group {
                 builder = builder.group(group);
             }
@@ -896,6 +904,16 @@ fn format_str(f: RustSnapshotFormat) -> &'static str {
         RustSnapshotFormat::Raw => "raw",
         RustSnapshotFormat::Qcow2 => "qcow2",
     }
+}
+
+pub(crate) fn guest_flush_policy(
+    value: Option<String>,
+) -> PyResult<microsandbox::snapshot::GuestFlush> {
+    value
+        .as_deref()
+        .unwrap_or("auto")
+        .parse()
+        .map_err(pyo3::exceptions::PyValueError::new_err)
 }
 
 fn format_scope(scope: RustSnapshotScope) -> &'static str {

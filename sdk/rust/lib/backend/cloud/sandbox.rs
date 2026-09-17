@@ -615,6 +615,9 @@ fn reject_dropped_cloud_create_fields(config: &SandboxConfig) -> MicrosandboxRes
     if config.restore_resources.inherit {
         return Err(unsupported("inherit_resources"));
     }
+    if config.restore_resources.allow_missing {
+        return Err(unsupported("allow_missing_resources"));
+    }
     if !config.restore_resources.captured.is_empty() {
         return Err(unsupported("captured resources"));
     }
@@ -1318,6 +1321,13 @@ mod tests {
             config.spec.mounts.push(mount);
             assert_unsupported_config_field(config, "sandbox-owned volumes");
         }
+    }
+
+    #[test]
+    fn cloud_restore_does_not_silently_drop_missing_resource_opt_out() {
+        let mut config = base_cloud_config();
+        config.restore_resources.allow_missing = true;
+        assert_unsupported_config_field(config, "allow_missing_resources");
     }
 
     #[test]

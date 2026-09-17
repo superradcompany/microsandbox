@@ -237,10 +237,11 @@ msb sbx restore ./saved.msb --name disk-copy --disk-only
 
 | Flag | Description |
 |------|-------------|
-| `--name` | Required destination sandbox name |
+| `-n`, `--name` | Required destination sandbox name |
 | `--forked` | Restore full snapshots using private CoW memory |
 | `--disk-only` | Restore only the disk from a full snapshot; conflicts with `--forked` |
 | `--snapshot-base` | Exact base snapshot or archive for a dependent export |
+| `--allow-missing-resources` | Resume with missing external filesystems or additional disks unavailable, with warnings; full restore otherwise requires their bindings |
 | `-v`, `--volume` | Bind `SOURCE:GUEST[:OPTIONS]`, or select a private captured disk with `GUEST` alone |
 | `-p`, `--port` | Publish `[BIND:]HOST:GUEST[/tcp\|udp]` |
 | `--vsock` | Bind `HOST_PATH:PORT[/stream\|/dgram]` |
@@ -266,7 +267,12 @@ Full restore must keep captured CPU and memory settings and cannot apply a guest
 
 Network flags replace the destination policy. `--net-rule` requires `--net-default` or `--no-net`; omitting all policy flags keeps configured defaults. Restore requires a new name and does not accept a startup command.
 
-Host resources are not inherited by default. Explicitly map volumes, ports, and vsock endpoints. Unmapped filesystems can return I/O errors, while cached bytes may remain readable; warnings appear even with `--quiet`. The root disk is always restored. See [mount behavior](/sandboxes/snapshots#mount-behavior).
+Restore and branch do not reuse host resources by default. Map directories with `-v /host/path:/guest/path`, select a private captured disk with `-v /guest/path`, and publish new listeners with `-p HOST:GUEST`. Full restore refuses missing external filesystems and additional disks unless `--allow-missing-resources` is explicit. Opting out leaves those devices unavailable: backend I/O returns errors, although data cached in guest RAM may remain readable. Disk errors can abort a guest filesystem journal or make it read-only. Warnings remain visible with `--quiet`. `--external-mount-policy relaxed` permits supported stale-object mismatches; it does not waive missing backing. `--dangerously-inherit-resources` authorizes validated source-local bindings, not missing ones. Direct branching retains its existing unavailable-resource behavior. Root and owned storage are always reconstructed; the opt-out cannot waive corrupt or missing snapshot data. Custom vsock routes are not inherited; use `--vsock HOST_PATH:PORT` to authorize a service for clients to reconnect to.
+
+```bash
+msb restore saved.msb --name worker -v /srv/project:/work -v /data
+msb restore saved.msb --name inspection --allow-missing-resources
+```
 
 <span id="msb-sandbox-start" />
 
@@ -319,6 +325,8 @@ msb pause devbox
 msb resume devbox
 ```
 
+`pause --guest-flush required` flushes captured persistent filesystems before pausing, so a later disk snapshot can reuse that boundary without resuming. The default `auto` and explicit `skip` omit optional writeback; mandatory storage barriers remain. An already-paused VM without the required flush fails rather than resuming implicitly. `resume` has no flush option. See [guest filesystem flush](/sandboxes/snapshots#guest-filesystem-flush).
+
 <span id="msb-sandbox-branch" />
 
 ## msb branch
@@ -328,7 +336,7 @@ msb resume devbox
 Create a local child from running or paused execution without saving a snapshot. Memory is shared through copy-on-write; each child’s writes stay private.
 
 ```bash
-msb branch devbox --name experiment
+msb branch devbox -n experiment
 ```
 
 Use `--names` to capture once and start several independent children from the same state:
@@ -340,10 +348,13 @@ msb branch devbox --names worker-{1..10} # Bash/Zsh expand the names
 
 | Flag | Description |
 | --- | --- |
-| `--name NAME` | One child name; conflicts with `--names` |
+| `-n`, `--name NAME` | One child name; conflicts with `--names` |
 | `--names NAME...` | Several child names from one capture |
+| `--guest-flush` | Guest writeback policy: `auto` (default), `required`, or `skip` |
 | `--integrity` | Record disk content hashes |
 | `-q`, `--quiet` | Suppress progress |
+
+Both branch forms accept `--guest-flush auto|required|skip`. Auto and skip preserve dirty memory without flushing root or owned block filesystems; required adds writeback. Host-backed directory synchronization and host disk barriers remain in effect.
 
 Volume, port, user, vsock, inheritance, and mount-policy flags match [`restore`](#msb-restore).
 
@@ -426,11 +437,13 @@ msb touch --label app=engine
 Change a running sandbox's configuration. Every change is planned and applied all-or-nothing. CPU and memory resize live within the `max_cpus` / `max_memory` ceilings; other changes that can't apply live need `--restart` or `--next-start`.
 
 ```bash
-msb modify api --cpus 4                     # Live when 4 <= max_cpus
-msb modify api --env MODE=prod --restart    # Restart to apply now
+msb modify api -c 4                         # Live when 4 <= max_cpus
+msb modify api -e MODE=prod --restart       # Restart to apply now
 msb modify api --max-memory 16G --next-start # Raise the ceiling on next start
 msb modify api --cpus 8 --dry-run           # Show the plan, apply nothing
 ```
+
+Like create/run, modify accepts `-c`/`--cpus`, `-m`/`--memory`, `-e`/`--env`, and `-w`/`--workdir`.
 
 Set `--max-cpus` and `--max-memory` at creation to leave room for live growth. They default to the initial CPU and memory allocation; increasing the ceilings requires a restart.
 

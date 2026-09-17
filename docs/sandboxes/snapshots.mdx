@@ -19,7 +19,7 @@ Disk is the default. Full adds memory and execution state; there is no memory-on
 
 ## Disk snapshots
 
-Use disk snapshots for installed dependencies, prepared workspaces, and saved files. Stop the source first to include writes buffered in memory. Local live capture is also supported but is crash-consistent; cloud requires a stopped or crashed source.
+Use disk snapshots for installed dependencies, prepared workspaces, and saved files. Local live captures flush guest filesystem writes by default; application buffers and transactions still need application-level coordination. Cloud requires a stopped or crashed source. See [guest filesystem flush](#guest-filesystem-flush) for paused sources and the unflushed `skip` policy.
 
 <Steps>
 <Step title="Prepare">
@@ -370,7 +370,65 @@ msb restore worker:snap --name rebooted --disk-only
 ```
 </CodeGroup>
 
-Buffered guest writes may be missing, and filesystem recovery may run. Full capture does not automatically sync guest filesystems. A tmpfs-root snapshot cannot restore disk-only.
+Disk-only restore copies only the checkpoint's disk chain, creates a fresh writable qcow2 head, and performs an ordinary boot. It does not require the destination to support the checkpoint's memory or execution codec. The disk projection of a full snapshot may omit writes buffered in guest RAM unless capture used `--guest-flush required`; filesystem journal recovery may still run. Full restore preserves those buffers in RAM. Host disk flushes and durable snapshot publication remain enforced regardless of guest-flush policy. A tmpfs-root snapshot cannot restore disk-only.
+
+## Guest filesystem flush
+
+`--guest-flush auto|required|skip` controls guest writeback for the root and captured block disks, including owned disks, during snapshot creation, branching, and pause. Host-backed directories (owned directories and external virtiofs mounts) retain their synchronization barriers. Host disk-I/O draining and snapshot durability are unchanged.
+
+| Policy | Live disk-only snapshot | Full snapshot, branch, or pause |
+| --- | --- | --- |
+| `auto` (default) | Require guest writeback | Preserve dirty pages in RAM; no block-filesystem flush |
+| `required` | Require guest writeback | Also flush captured persistent filesystems |
+| `skip` | Accept unflushed disk state | No optional guest writeback |
+
+Use `required` on a full snapshot when you also want to restore its disks without RAM. Flushing writes the guest filesystem cache—not application buffers or transactions—and does not make tmpfs persistent.
+
+`skip` on a disk-only snapshot accepts crash-consistent root and owned disks: recent buffered writes may be absent and filesystem recovery may be needed. Full snapshots and branches retain those dirty pages in captured RAM. An owned disk does not force guest writeback during plain pause. Earlier guest-flush builds flushed root and owned disks unconditionally when any owned mount existed; do not rely on that incidental behavior with `skip`.
+
+```bash
+msb snapshot create disk --from-sandbox worker
+msb snapshot create full --from-sandbox worker --full --guest-flush required
+msb branch worker --name child --guest-flush skip
+
+# Prepare a flush boundary before pausing; capture keeps the source paused.
+msb pause worker --guest-flush required
+msb snapshot create paused --from-sandbox worker
+msb resume worker
+```
+
+A paused source must already have acknowledged the required flush at that pause. Otherwise capture fails without resuming it. For a stopped or crashed source, `auto` and `skip` capture existing disk state; `required` fails because no guest is running. Older runtimes that cannot enforce a requested policy reject it before capture; restart the source with the updated runtime.
+
+SDK equivalents use the same policy:
+
+<CodeGroup>
+```typescript TypeScript
+await Snapshot.builder("full").fromSandbox("worker").full().guestFlush("required").create();
+await source.pause({ guestFlush: "required" });
+await source.branchMany(["alice", "bob"], { guestFlush: "skip" });
+```
+
+```rust Rust
+use microsandbox::{Snapshot, snapshot::GuestFlush};
+Snapshot::builder("full").from_sandbox("worker").full()
+    .guest_flush(GuestFlush::Required).create().await?;
+source.pause_with_guest_flush(GuestFlush::Required).await?;
+```
+
+```python Python
+from microsandbox import GuestFlush, Snapshot
+await Snapshot.create("full", from_sandbox="worker", full=True, guest_flush=GuestFlush.REQUIRED)
+await source.pause(guest_flush=GuestFlush.REQUIRED)
+```
+
+```go Go
+snapshot, err := msb.Snapshot.Create(ctx, msb.SnapshotCreateOptions{
+    Name: "full", FromSandbox: "worker", Full: true, GuestFlush: msb.GuestFlushRequired,
+})
+err = source.PauseWithGuestFlush(ctx, msb.GuestFlushRequired)
+child, err := source.Branch(ctx, "child", msb.WithBranchGuestFlush(msb.GuestFlushSkip))
+```
+</CodeGroup>
 
 ## Branching
 
@@ -464,7 +522,11 @@ Owned directory snapshots cannot move between Unix and Windows. Owned disks do n
 
 ### External mounts
 
-Supply a host binding explicitly. These local restore options work for disk and full snapshots:
+Full restore requires bindings for captured external filesystems and additional disks. Supply `-v /host/data:/data`, select a private captured disk with `-v /data`, or explicitly authorize validated source-local bindings with `--dangerously-inherit-resources`. Inheritance is not permission to ignore a missing dependency. Owned volumes are reconstructed automatically.
+
+Use `--allow-missing-resources` to resume with unavailable resources and warnings; their backend operations return `EIO`. This does not inherit resources or accept changed objects in a supplied mapping. SDK equivalents are Rust `.allow_missing_resources()`, Python `allow_missing_resources=True`, TypeScript `.allowMissingResources()`, and Go `WithAllowMissingResources()`. Direct branches retain their existing omission behavior. Disk-only restore is a cold boot, not restoration of captured external filesystem handles.
+
+These explicit bindings work for disk and full snapshots:
 
 <CodeGroup>
 ```typescript TypeScript
@@ -561,7 +623,7 @@ msb restore worker:snap --name child \
 ```
 </CodeGroup>
 
-Relaxed mode does not grant host access, recreate missing files, or bypass integrity checks. Unmapped host filesystems remain inaccessible; omitting them does not fail strict validation.
+Relaxed mode validates supplied filesystem objects; it does not grant host access, waive missing-resource checks, recreate missing files, or bypass integrity checks. Full restore requires `--allow-missing-resources` to leave an external filesystem or additional disk unavailable. Root and owned storage must still be complete. Direct branching retains its existing unavailable-resource behavior. Backend I/O returns errors for unavailable devices, which can abort filesystem journals or make them read-only; warnings remain visible with `--quiet`.
 
 <Accordion title="Open files and cached data">
 

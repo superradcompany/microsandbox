@@ -52,7 +52,7 @@ members = [
 [workspace.package]
 authors = ["Super Rad Company <development@superrad.company>"]
 repository = "https://github.com/superradcompany/microsandbox"
-version = "0.7.0"
+version = "0.7.1"
 license = "Apache-2.0"
 edition = "2024"
 
@@ -79,22 +79,22 @@ strip = false
 # Exact (`=`) pins: these crates share private, unstable APIs across patch
 # releases, so every published version must resolve its siblings to the same
 # version. Caret would let an older release pull newer siblings and break.
-microsandbox = { version = "=0.7.0", path = "sdk/rust", default-features = false }
-microsandbox-agent-client = { version = "=0.7.0", path = "packages/agent-client/rust" }
-microsandbox-control-client = { version = "=0.7.0", path = "packages/control-client/rust" }
-microsandbox-protocol-client = { version = "=0.7.0", path = "packages/protocol-client/rust" }
-microsandbox-db = { version = "=0.7.0", path = "crates/db" }
-microsandbox-filesystem = { version = "=0.7.0", path = "crates/filesystem", default-features = false }
-microsandbox-image = { version = "=0.7.0", path = "crates/image" }
-microsandbox-metrics = { version = "=0.7.0", path = "crates/metrics" }
-microsandbox-types-macros = { version = "=0.7.0", path = "packages/microsandbox-types/macros" }
-microsandbox-types = { version = "=0.7.0", path = "packages/microsandbox-types/rust" }
-microsandbox-migration = { version = "=0.7.0", path = "crates/migration" }
-microsandbox-network = { version = "=0.7.0", path = "crates/network", default-features = false }
-microsandbox-protocol = { version = "=0.7.0", path = "crates/protocol" }
-microsandbox-runtime = { version = "=0.7.0", path = "crates/runtime", default-features = false }
-microsandbox-utils = { version = "=0.7.0", path = "crates/utils" }
-microsandbox-vsock = { version = "=0.7.0", path = "crates/vsock" }
+microsandbox = { version = "=0.7.1", path = "sdk/rust", default-features = false }
+microsandbox-agent-client = { version = "=0.7.1", path = "packages/agent-client/rust" }
+microsandbox-control-client = { version = "=0.7.1", path = "packages/control-client/rust" }
+microsandbox-protocol-client = { version = "=0.7.1", path = "packages/protocol-client/rust" }
+microsandbox-db = { version = "=0.7.1", path = "crates/db" }
+microsandbox-filesystem = { version = "=0.7.1", path = "crates/filesystem", default-features = false }
+microsandbox-image = { version = "=0.7.1", path = "crates/image" }
+microsandbox-metrics = { version = "=0.7.1", path = "crates/metrics" }
+microsandbox-types-macros = { version = "=0.7.1", path = "packages/microsandbox-types/macros" }
+microsandbox-types = { version = "=0.7.1", path = "packages/microsandbox-types/rust" }
+microsandbox-migration = { version = "=0.7.1", path = "crates/migration" }
+microsandbox-network = { version = "=0.7.1", path = "crates/network", default-features = false }
+microsandbox-protocol = { version = "=0.7.1", path = "crates/protocol" }
+microsandbox-runtime = { version = "=0.7.1", path = "crates/runtime", default-features = false }
+microsandbox-utils = { version = "=0.7.1", path = "crates/utils" }
+microsandbox-vsock = { version = "=0.7.1", path = "crates/vsock" }
 # Keep the inherited-baseline API and its runtime types on the same published release.
 msb_krun = "=0.1.39"
 msb_krun_utils = "=0.1.39"
