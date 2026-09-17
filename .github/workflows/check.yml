@@ -683,8 +683,9 @@ jobs:
           New-Item -ItemType Directory -Force -Path build | Out-Null
           Copy-Item vendor\libkrunfw\libkrunfw.dll build\libkrunfw.dll -Force
 
+      # Go's Rust binding enables download-binaries. Build and stage the same-source
+      # runtime in both lanes so an unreleased version never needs release assets.
       - name: Build msb
-        if: matrix.component == 'CLI'
         shell: pwsh
         env:
           RUSTFLAGS: -C target-feature=+crt-static
@@ -693,12 +694,15 @@ jobs:
           . "$env:GITHUB_WORKSPACE\vendor\libkrunfw\scripts\msvc-env.ps1"
           Set-MsvcEnvironment -Architecture ${{ matrix.vs_arch }} -HostArchitecture ${{ matrix.vs_host_arch }}
           cargo +stable build --profile ci --no-default-features --features embed-binaries,net,ssh -p microsandbox-cli --target ${{ matrix.rust_target }}
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item "target\${{ matrix.rust_target }}\ci\msb.exe" build\msb.exe -Force
 
       - name: Build Go FFI cdylib
         if: matrix.component == 'Go'
         shell: pwsh
         env:
           RUSTFLAGS: -C target-feature=+crt-static
+          MSB_EMBED_ARTIFACTS_DIR: ${{ github.workspace }}/build
         run: |
           $ErrorActionPreference = "Stop"
           . "$env:GITHUB_WORKSPACE\vendor\libkrunfw\scripts\msvc-env.ps1"
