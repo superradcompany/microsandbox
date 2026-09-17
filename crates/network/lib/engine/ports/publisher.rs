@@ -54,6 +54,24 @@ const UDP_EPHEMERAL_PORT_START: u16 = 49152;
 const UDP_EPHEMERAL_PORT_COUNT: usize =
     (u16::MAX as usize) - (UDP_EPHEMERAL_PORT_START as usize) + 1;
 
+/// Backlog for a published port's listener.
+///
+/// `TcpListener::bind` leaves this to mio, which passes 128. That is not enough for a published
+/// HTTP server: one browser opening one page of a modern web app makes ~100 parallel requests, and
+/// a reverse proxy in front turns each into its own upstream connection. Beyond the queue the
+/// kernel refuses the connection, the proxy reads EOF, and a file that is present and serves fine
+/// on retry comes back as 502.
+///
+/// Measured against a published dev server on a loopback port: 120 concurrent connections all
+/// succeed, 130 leave 118 refused, 140 refuse every one. The accept loop below drains the queue
+/// quickly, so the depth only has to absorb a burst rather than sustained load.
+///
+/// The kernel clamps this to the host's own ceiling, so asking for more than it allows is not an
+/// error and a host that wants a shallower queue can still say so: `net.core.somaxconn` is 4096
+/// by default on Linux, while `kern.ipc.somaxconn` on macOS is 128 -- there, raising the sysctl
+/// is what makes this take effect.
+const LISTEN_BACKLOG: u32 = 1024;
+
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
@@ -546,24 +564,6 @@ impl PortPublisher {
 fn reject_with_rst(stream: &TcpStream) {
     let _ = socket2::SockRef::from(stream).set_linger(Some(Duration::ZERO));
 }
-
-/// Backlog for a published port's listener.
-///
-/// `TcpListener::bind` leaves this to mio, which passes 128. That is not enough for a published
-/// HTTP server: one browser opening one page of a modern web app makes ~100 parallel requests, and
-/// a reverse proxy in front turns each into its own upstream connection. Beyond the queue the
-/// kernel refuses the connection, the proxy reads EOF, and a file that is present and serves fine
-/// on retry comes back as 502.
-///
-/// Measured against a published dev server on a loopback port: 120 concurrent connections all
-/// succeed, 130 leave 118 refused, 140 refuse every one. The accept loop below drains the queue
-/// quickly, so the depth only has to absorb a burst rather than sustained load.
-///
-/// The kernel clamps this to the host's own ceiling, so asking for more than it allows is not an
-/// error and a host that wants a shallower queue can still say so: `net.core.somaxconn` is 4096
-/// by default on Linux, while `kern.ipc.somaxconn` on macOS is 128 -- there, raising the sysctl
-/// is what makes this take effect.
-const LISTEN_BACKLOG: u32 = 1024;
 
 /// Bind a published port's listener with a backlog that survives a browser.
 ///
