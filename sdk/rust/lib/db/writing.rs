@@ -40,11 +40,9 @@ pub(crate) async fn encode_new<C: ConnectionTrait>(
     config: &SandboxConfig,
     runtime: Option<&crate::config::GlobalConfig>,
 ) -> MicrosandboxResult<String> {
-    // Recheck the final effective config even on a current catalog: image defaults
-    // and restore preparation may have enriched it since initial admission.
-    if let Some(runtime) = runtime {
-        validate_runtime_config(config, runtime).await?;
-    }
+    // Persistence is not launch admission. A current catalog can store desired
+    // configuration even when no complete runtime is installed. Create/start
+    // validate execution requirements separately, before launching a VM.
     if admission::is_current(db).await? {
         return Ok(serde_json::to_string(config)?);
     }

@@ -268,7 +268,7 @@ fn archive_relocation_moves_only_child_owned_paths() {
 }
 
 #[tokio::test]
-async fn current_catalog_still_validates_final_runtime_config() {
+async fn current_catalog_persistence_is_separate_from_create_admission() {
     let root = tempfile::tempdir_in("/tmp").unwrap();
     let backend = backend(root.path(), 8).await;
     let pools = backend.db().await.unwrap();
@@ -280,10 +280,61 @@ async fn current_catalog_still_validates_final_runtime_config() {
     let mut config = SandboxConfig::default();
     config.spec.image = RootfsSource::oci("alpine:3.21");
     crate::sandbox::apply_snapshot_root_layout(&mut config, &SnapshotRootDisk::Flat).unwrap();
-    let error = crate::db::writing::encode_new(pools.read(), &config, Some(backend.config()))
+    // Desired state can be saved, but cannot become a Starting sandbox through
+    // a historical executable that does not understand the requested layout.
+    let encoded = crate::db::writing::encode_new(pools.read(), &config, Some(backend.config()))
         .await
-        .unwrap_err();
+        .unwrap();
+    assert!(encoded.contains("flat"));
+    let error = LocalBackend::insert_starting_sandbox_record(
+        pools.write(),
+        &config,
+        Some(backend.config()),
+    )
+    .await
+    .unwrap_err();
     assert!(error.to_string().contains("root_disk.flat"), "{error}");
+    assert!(
+        sandbox_entity::Entity::find()
+            .all(pools.read())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn current_catalog_configuration_writes_need_no_runtime_installation() {
+    let root = tempfile::tempdir_in("/tmp").unwrap();
+    let mut backend = LocalBackend::builder()
+        .home(root.path().join("home"))
+        .build_lazy();
+    let global = Arc::make_mut(&mut backend.config);
+    global.paths.msb = Some(root.path().join("missing-msb"));
+    global.paths.libkrunfw = Some(root.path().join("missing-firmware"));
+    let pools = backend.db().await.unwrap();
+    let mut config = SandboxConfig::default();
+    config.spec.name = "offline-edit".into();
+    let original = crate::db::writing::encode_new(pools.read(), &config, Some(backend.config()))
+        .await
+        .unwrap();
+    config.spec.labels.insert("edited".into(), "yes".into());
+    let updated = crate::db::writing::encode_existing(
+        pools.read(),
+        &config,
+        &original,
+        Some(backend.config()),
+    )
+    .await
+    .unwrap();
+    assert_ne!(original, updated);
+    assert_eq!(
+        serde_json::from_str::<SandboxConfig>(&updated)
+            .unwrap()
+            .spec
+            .labels["edited"],
+        "yes"
+    );
 }
 
 #[tokio::test]

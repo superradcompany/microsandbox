@@ -1861,6 +1861,12 @@ impl LocalBackend {
         config: &SandboxConfig,
         runtime: Option<&crate::config::GlobalConfig>,
     ) -> MicrosandboxResult<i32> {
+        // Image defaults and restore preparation can enrich the initial request.
+        // Recheck at create admission, not in shared configuration persistence:
+        // editing a stopped sandbox must not require an installed runtime.
+        if let Some(runtime) = runtime {
+            crate::db::writing::validate_runtime_config(config, runtime).await?;
+        }
         Self::insert_sandbox_record_with_status(db, config, SandboxStatus::Starting, runtime).await
     }
 
