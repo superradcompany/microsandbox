@@ -253,7 +253,9 @@ When the root-disk default is flat, plain `msb pull IMAGE` also prepares the reu
 
 ### `runtime.placement_profiles`
 
-Placement profiles let an operator define safe host topology policy once while callers select it by name. `numa.mode` is `prefer_single`, `strict_single`, or `inherit`; `memory.mode` is `follow_cpu` or `inherit`. Multi-node guest placement is not enabled in this release: `prefer_single` falls back to inherited host NUMA behavior when one node cannot fit, while `strict_single` fails clearly because it is an explicit guarantee.
+Placement profiles let an operator define safe host topology policy once while callers select it by name. `numa.mode` is `prefer_single`, `strict_single`, or `inherit`; `memory.mode` is `follow_cpu` or `inherit`.
+
+This release does not enable multi-node guest placement. `prefer_single` falls back to inherited host NUMA behavior when one node cannot fit. `strict_single` fails clearly because it is an explicit guarantee.
 
 `follow_cpu` requires managed CPU placement (`auto`, `spread`, or `compact`). Linux prefers the selected node for ordinary profiles and allows memory to spill elsewhere under pressure; `strict_single` uses a required binding instead. If CPUs span nodes, capacity is already insufficient, or the kernel rejects a best-effort affinity or memory-policy syscall, an ordinary profile starts with inherited memory placement. Windows keeps ordinary memory inherited because its preferred-node allocation cannot be undone if a later vCPU affinity attempt falls back; `strict_single` can still request required preferred-node allocation. Windows checks current boot-time availability, but does not expose equivalent per-node total capacity for a hard future-growth promise. macOS inherits ordinary CPU and memory scheduling for non-strict profiles because it has no equivalent hard-affinity API.
 
@@ -279,7 +281,9 @@ Use a fixed policy only when representative measurements justify a different per
 }
 ```
 
-`pool_mib` is a live pressure budget, not eagerly allocated RAM. Every eligible writable disk in the same `MSB_HOME` receives a weighted max-min fair share: disks with a smaller configured maximum keep that smaller value, and the remaining pool is divided equally across the rest. Creating another sandbox never fails merely because this pool is full. Existing VMMs observe membership changes within 250 ms; if a disk already owns more dirty data than its new share, libkrun retires accounted ranges and pauses later writes until it converges below the target. A guest write already reserved before the target changed is allowed to complete safely. `fixed` and an explicitly pooled `auto` policy are unsupported on other hosts.
+`pool_mib` is a live pressure budget, not eagerly allocated RAM. Every eligible writable disk in the same `MSB_HOME` receives a weighted max-min fair share. Disks with a smaller configured maximum keep that smaller value, and the remaining pool is divided equally across the rest. Creating another sandbox never fails merely because this pool is full.
+
+Existing VMMs observe membership changes within 250 ms. If a disk already owns more dirty data than its new share, libkrun retires accounted ranges and pauses later writes until it converges below the target. A guest write already reserved before the target changed completes safely. `fixed` and an explicitly pooled `auto` policy are unsupported on other hosts.
 
 See the [performance guide](/sandboxes/optimization) for choosing and measuring runtime settings.
 
