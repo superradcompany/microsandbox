@@ -18,7 +18,12 @@ pub struct BranchArgs {
     /// Source sandbox name.
     pub source: String,
     /// Name of the new child sandbox.
-    #[arg(long, required_unless_present = "names", conflicts_with = "names")]
+    #[arg(
+        short,
+        long,
+        required_unless_present = "names",
+        conflicts_with = "names"
+    )]
     pub name: Option<String>,
     /// Capture once for these independent children, in input order.
     #[arg(long, num_args = 1.., conflicts_with = "name")]
@@ -126,6 +131,7 @@ mod tests {
             vec!["msb", "source"],
             vec!["msb", "source", "--names"],
             vec!["msb", "source", "--name", "a", "--names", "b"],
+            vec!["msb", "source", "-n", "a", "--names", "b"],
         ] {
             assert!(Command::try_parse_from(args).is_err());
         }

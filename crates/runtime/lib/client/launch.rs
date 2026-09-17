@@ -246,6 +246,10 @@ pub struct CheckpointRestoreConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExternalMountRestoreBinding {
+    /// Require backing even when captured-object validation is relaxed.
+    /// Omitted for legacy semantics; older runtimes reject this explicit requirement.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub require_backing: bool,
     /// Exact captured virtio transport identity.
     pub device_id: String,
     /// Captured guest namespace and mount flags.
@@ -413,6 +417,28 @@ impl LaunchConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn required_backing_is_explicit_and_absent_from_legacy_mount_bindings() {
+        let legacy = serde_json::json!({
+            "device_id": "virtio_fs2", "mount": {"tag": "data", "guest_path": "/data", "flags": {}},
+            "filename": null, "remapped": false, "unavailable": false
+        });
+        let mut binding: super::ExternalMountRestoreBinding =
+            serde_json::from_value(legacy).unwrap();
+        assert!(!binding.require_backing);
+        assert!(
+            serde_json::to_value(&binding)
+                .unwrap()
+                .get("require_backing")
+                .is_none()
+        );
+        binding.require_backing = true;
+        assert_eq!(
+            serde_json::to_value(binding).unwrap()["require_backing"],
+            true
+        );
+    }
 
     #[test]
     fn memory_descriptor_cannot_be_used_as_a_durable_or_cold_restore() {

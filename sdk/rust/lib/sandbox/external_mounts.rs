@@ -37,6 +37,7 @@ pub(crate) async fn resolve_external_mounts(
             .resources
     };
     let mut bindings = Vec::new();
+    let mut missing = BTreeSet::new();
     let mut unavailable_disks = std::collections::BTreeMap::new();
     let mut disk_ids = BTreeSet::new();
     let mut paths = BTreeSet::new();
@@ -71,36 +72,54 @@ pub(crate) async fn resolve_external_mounts(
         {
             return Err(integrity("invalid additional disk binding"));
         }
-        if let Some(selected) = config
+        let selected = config
             .spec
             .mounts
             .iter()
             .find(|mount| mount.guest() == guest)
-        {
+            .cloned();
+        let available = if let Some(selected) = &selected {
             match selected {
-                VolumeMount::DiskImage { .. }
-                | VolumeMount::Owned {
+                VolumeMount::DiskImage { host, .. } => backing_exists(host).await?,
+                VolumeMount::Owned {
                     storage: microsandbox_types::OwnedVolumeStorage::Disk { .. },
                     ..
-                } => {}
+                } => true,
                 VolumeMount::Named { name, .. } => {
                     let db = local.db().await?;
                     let model = volume::Entity::find()
                         .filter(volume::Column::Name.eq(name.as_str()))
                         .one(db.read())
-                        .await?
-                        .ok_or_else(|| integrity("explicit disk volume does not exist"))?;
-                    if model.kind != "disk" {
-                        return Err(integrity("captured block device requires a disk mapping"));
+                        .await?;
+                    if let Some(model) = model {
+                        if model.kind != "disk" {
+                            return Err(integrity("captured block device requires a disk mapping"));
+                        }
+                        backing_exists(&local.volume_path(name).join("disk.raw")).await?
+                    } else {
+                        false
                     }
                 }
                 _ => return Err(integrity("captured block device requires a disk mapping")),
             }
-        } else if unavailable_disks
-            .insert(id.clone(), guest.clone())
-            .is_some()
-        {
-            return Err(integrity("duplicate additional disk binding"));
+        } else {
+            false
+        };
+        if !available {
+            if selected.is_some()
+                && !config.restore_resources.require_complete
+                && !config.restore_resources.allow_missing
+            {
+                return Err(integrity("explicit disk volume does not exist"));
+            }
+            config.spec.mounts.retain(|mount| mount.guest() != guest);
+            missing.insert(format!("disk {guest}"));
+            if unavailable_disks
+                .insert(id.clone(), guest.clone())
+                .is_some()
+            {
+                return Err(integrity("duplicate additional disk binding"));
+            }
         }
     }
     let mut tags = BTreeSet::new();
@@ -160,8 +179,34 @@ pub(crate) async fn resolve_external_mounts(
             ),
             None => (None, false),
         };
-        let selected = admit_existing_named_mount(local, selected).await?;
+        let mut selected = admit_existing_named_mount(local, selected).await?;
+        // Missing backing is not a stale-object mismatch. Resolve it before launch so
+        // opting out grants an unavailable device, never a newly created empty export.
+        if (config.restore_resources.require_complete || config.restore_resources.allow_missing)
+            && let Some(mount) = &selected
+        {
+            let path = match mount {
+                VolumeMount::Bind { host, .. } => Some(host.clone()),
+                VolumeMount::Named { name, .. } => Some(local.volume_path(name)),
+                _ => None,
+            };
+            if let Some(path) = path {
+                match tokio::fs::metadata(&path).await {
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => selected = None,
+                    Err(error) => {
+                        return Err(MicrosandboxError::InvalidConfig(format!(
+                            "cannot access restore filesystem {}: {error}",
+                            mount.guest()
+                        )));
+                    }
+                    Ok(_) => {}
+                }
+            }
+        }
         let unavailable = selected.is_none();
+        if unavailable {
+            missing.insert(format!("filesystem {}", mount.guest_path));
+        }
         if let Some(selected) = selected {
             let options = match &selected {
                 VolumeMount::Bind { options, .. }
@@ -201,6 +246,8 @@ pub(crate) async fn resolve_external_mounts(
                 config.spec.mounts.push(selected);
             }
         } else if explicitly_mapped
+            && !config.restore_resources.require_complete
+            && !config.restore_resources.allow_missing
             && config.external_mount_policy == ExternalMountRestorePolicy::Strict
         {
             return Err(MicrosandboxError::InvalidConfig(format!(
@@ -214,12 +261,18 @@ pub(crate) async fn resolve_external_mounts(
                 .retain(|existing| existing.guest() != mount.guest_path);
         }
         bindings.push(ExternalMountRestoreBinding {
+            require_backing: !owned
+                && config.restore_resources.require_complete
+                && config.external_mount_policy == ExternalMountRestorePolicy::Relaxed,
             device_id,
             mount,
             filename: resource.binding.get("filename").cloned(),
             remapped,
             unavailable,
         });
+    }
+    if config.restore_resources.require_complete && !missing.is_empty() {
+        return Err(missing_resources(missing));
     }
     // The source's complete writeback evidence belongs to this captured boundary, not a
     // caller option. Relaxed mode does not waive it or repair old dirty memory images.
@@ -330,6 +383,22 @@ fn integrity(error: impl std::fmt::Display) -> MicrosandboxError {
     MicrosandboxError::SnapshotIntegrity(error.to_string())
 }
 
+/// Keep the entire missing set actionable without disclosing source host paths.
+fn missing_resources(missing: BTreeSet<String>) -> MicrosandboxError {
+    MicrosandboxError::InvalidConfig(format!(
+        "restore requires destination bindings for: {}; provide --volume mappings, select captured disks with --volume GUEST, or explicitly use --allow-missing-resources",
+        missing.into_iter().collect::<Vec<_>>().join(", ")
+    ))
+}
+
+async fn backing_exists(path: &std::path::Path) -> MicrosandboxResult<bool> {
+    match tokio::fs::metadata(path).await {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
 //--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
@@ -340,6 +409,18 @@ mod tests {
 
     use super::*;
     use crate::Sandbox;
+
+    #[test]
+    fn missing_resource_diagnostic_lists_dependencies_and_explicit_opt_out() {
+        let error = missing_resources(BTreeSet::from([
+            "filesystem /work".into(),
+            "disk /data".into(),
+        ]))
+        .to_string();
+        assert!(error.contains("disk /data, filesystem /work"));
+        assert!(error.contains("--allow-missing-resources"));
+        assert!(!error.contains("select relaxed"));
+    }
 
     async fn requested_mount() -> VolumeMount {
         Sandbox::builder("mount-admission")

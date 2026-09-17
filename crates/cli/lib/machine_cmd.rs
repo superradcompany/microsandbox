@@ -52,7 +52,7 @@ pub struct MachineArgs {
     pub(crate) agent_transport: AgentTransportProfile,
 
     /// Name of the sandbox.
-    #[arg(long = "name")]
+    #[arg(short = 'n', long = "name")]
     pub sandbox_name: String,
 
     /// Database ID of the sandbox.

@@ -15,6 +15,7 @@
 //! the bulk of the old global config singleton plus the SQLite pool, so multiple
 //! backends can hold different configurations for tests / migrations.
 
+mod catalog;
 mod control;
 mod control_lookup;
 mod sandbox;
@@ -175,10 +176,12 @@ impl LocalBackend {
         self.db
             .get_or_try_init(|| async {
                 let db_dir = self.config.home().join(microsandbox_utils::DB_SUBDIR);
-                let pools = connect_and_migrate(
+                let pools = connect_catalog(
                     &db_dir,
                     &self.config.database,
                     &self.config.snapshots_dir(),
+                    false,
+                    Some(&self.config),
                 )
                 .await?;
                 self.control_sessions
@@ -682,10 +685,21 @@ impl Drop for MigrationLock {
 ///
 /// The write pool connects first so WAL mode (persisted in the database
 /// header) is set before the read pool opens.
+#[cfg(test)]
 async fn connect_and_migrate(
     db_dir: &Path,
     database: &DatabaseConfig,
     snapshots_dir: &Path,
+) -> MicrosandboxResult<DbPools> {
+    connect_catalog(db_dir, database, snapshots_dir, false, None).await
+}
+
+async fn connect_catalog(
+    db_dir: &Path,
+    database: &DatabaseConfig,
+    snapshots_dir: &Path,
+    upgrade: bool,
+    runtime: Option<&GlobalConfig>,
 ) -> MicrosandboxResult<DbPools> {
     tokio::fs::create_dir_all(db_dir).await?;
     let _migration_lock = acquire_migration_lock(db_dir).await?;
@@ -701,25 +715,49 @@ async fn connect_and_migrate(
     .await
     .map_err(|e| MicrosandboxError::Custom(format!("connect to {}: {e}", db_path.display())))?;
 
+    // Durable downgrade recovery takes precedence over dead-owner reclamation.
+    // The migration file lock above excludes another catalog opener doing this.
+    catalog::recover_abandoned_lease(&pools).await?;
     microsandbox_runtime::maintenance::refuse_if_install_exclusive_held(pools.write())
         .await
         .map_err(|err| MicrosandboxError::Runtime(err.to_string()))?;
     let initialize = crate::db::admission::requires_initialization(pools.write()).await?;
     if !initialize {
-        let count = pools
-            .read()
-            .query_one_raw(Statement::from_string(
-                DatabaseBackend::Sqlite,
-                "SELECT COUNT(*) FROM seaql_migrations",
-            ))
-            .await?
-            .expect("COUNT returns one row")
-            .try_get_by_index::<i64>(0)?;
-        if count != schema_metadata::migration_ids().count() as i64 {
-            return Ok(pools);
+        if !crate::db::admission::is_current(pools.write()).await? {
+            if !upgrade {
+                return Ok(pools);
+            }
+            catalog::upgrade(&pools).await?;
         }
     } else {
-        Migrator::up(pools.write().inner(), None).await?;
+        // A fresh SDK home must not start with a schema newer than its selected
+        // older runtime. CLI-owned initialization always uses this release.
+        let historical = if let Some(runtime) = runtime {
+            crate::runtime::launch_contract::catalog_patch(runtime).await?
+        } else {
+            None
+        };
+        let target = historical
+            .map(crate::db::admission::historical_migration_count)
+            .transpose()?;
+        let steps = if let Some(target) = target {
+            // `up(Some(n))` means n pending steps, not a target schema number.
+            // Account for a interrupted initialization before the supported floor.
+            let applied = Migrator::get_applied_migrations(pools.write().inner())
+                .await?
+                .len() as u32;
+            Some(target.checked_sub(applied).ok_or_else(|| {
+                MicrosandboxError::Runtime(
+                    "catalog initialization is ahead of the selected runtime".into(),
+                )
+            })?)
+        } else {
+            None
+        };
+        Migrator::up(pools.write().inner(), steps).await?;
+        if historical.is_some() {
+            return Ok(pools);
+        }
     }
 
     // Descriptor translation mutates the same installation state as schema

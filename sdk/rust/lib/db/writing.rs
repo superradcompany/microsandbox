@@ -1,8 +1,9 @@
-//! Select a persisted format without upgrading the shared catalog.
+//! Select a released format without copying another sandbox's values or list shapes.
 
-use microsandbox_db::catalog::{has_column, has_table};
 use sea_orm::{ConnectionTrait, DbBackend, Statement};
+use serde_json::Value;
 
+use super::{admission, config::decode, historical::HistoricalFormat};
 use crate::{MicrosandboxError, MicrosandboxResult, SandboxConfig};
 
 //--------------------------------------------------------------------------------------------------
@@ -12,56 +13,60 @@ use crate::{MicrosandboxError, MicrosandboxResult, SandboxConfig};
 pub(crate) async fn encode_new<C: ConnectionTrait>(
     db: &C,
     config: &SandboxConfig,
+    runtime: Option<&crate::config::GlobalConfig>,
 ) -> MicrosandboxResult<String> {
-    let current_migrations =
-        microsandbox_migration::schema_metadata::migration_ids().count() as i64;
-    let count = db
-        .query_one_raw(Statement::from_string(
-            DbBackend::Sqlite,
-            "SELECT COUNT(*) FROM seaql_migrations",
-        ))
-        .await?
-        .expect("COUNT returns one row")
-        .try_get_by_index::<i64>(0)?;
-    if count == current_migrations {
+    if admission::is_current(db).await? {
         return Ok(serde_json::to_string(config)?);
     }
-    // Pre-placement catalogs belong to several incompatible serializers. An
-    // existing row supplies the owning representation; schema 14 by itself
-    // cannot distinguish v0.6.4's format from v0.6.5's.
-    let rows = db
-        .query_all_raw(Statement::from_string(
-            DbBackend::Sqlite,
-            "SELECT config FROM sandbox ORDER BY id",
-        ))
-        .await?;
-    let mut encoded = None;
-    for row in rows {
-        let original = row.try_get_by_index::<String>(0)?;
-        let candidate = super::encoding::encode_like(config, &original)?;
-        let value: serde_json::Value = serde_json::from_str(&candidate)?;
-        if let Some((_, previous)) = &encoded {
-            if previous != &value {
+    let mut format = HistoricalFormat::for_patch(admission::historical_patch(db).await?);
+    let selected = if let Some(runtime) = runtime {
+        crate::runtime::launch_contract::catalog_patch(runtime).await?
+    } else {
+        None
+    };
+    let selected = selected.filter(|patch| admission::same_historical_schema(format.patch, *patch));
+    if let Some(patch) = selected {
+        format = HistoricalFormat::for_patch(patch);
+    }
+    // v0.6.4 and v0.6.5 share a SQL schema but differ in enum spelling. Observe
+    // only that discriminator; names, mounts, policies and their lengths do not
+    // define the storage contract of another sandbox.
+    if format.patch == 4 && selected.is_none() {
+        let rows = db
+            .query_all_raw(Statement::from_string(
+                DbBackend::Sqlite,
+                "SELECT config FROM sandbox",
+            ))
+            .await?;
+        let mut snake = None;
+        for row in rows {
+            let raw = row.try_get_by_index::<String>(0)?;
+            decode(&raw)?;
+            let raw: Value = serde_json::from_str(&raw)?;
+            let candidate = raw["resources"].get("vcpus").is_some();
+            if snake.is_some_and(|previous| previous != candidate) {
                 return Err(ambiguous());
             }
-        } else {
-            encoded = Some((candidate, value));
+            snake = Some(candidate);
         }
+        format.snake = snake.ok_or_else(ambiguous)?;
     }
-    if let Some((encoded, _)) = encoded {
-        return Ok(encoded);
+    format.encode(config)
+}
+
+pub(crate) async fn encode_existing<C: ConnectionTrait>(
+    db: &C,
+    config: &SandboxConfig,
+    original: &str,
+    runtime: Option<&crate::config::GlobalConfig>,
+) -> MicrosandboxResult<String> {
+    // Preserve exact bytes for a semantic no-op, including historical aliases.
+    if serde_json::to_value(decode(original)?)? == serde_json::to_value(config)? {
+        return Ok(original.to_owned());
     }
-    if has_table(db, "cpu_allocation").await? {
-        return super::encoding::encode_like(config, include_str!("fixtures/config-0.6.9.json"));
-    }
-    if !has_column(db, "sandbox", "active_config").await? {
-        return super::encoding::encode_like(config, include_str!("fixtures/config-0.6.0.json"));
-    }
-    Err(ambiguous())
+    encode_new(db, config, runtime).await
 }
 
 fn ambiguous() -> MicrosandboxError {
-    MicrosandboxError::InvalidConfig(
-        "cannot identify one compatible configuration format for this historical catalog; create the initial sandbox with its owning older CLI before adding sandboxes with this SDK".into(),
-    )
+    MicrosandboxError::InvalidConfig("cannot identify the enum spelling of this historical catalog; initialize it with its owning CLI before writing with this SDK".into())
 }

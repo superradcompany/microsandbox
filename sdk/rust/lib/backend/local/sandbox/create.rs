@@ -174,6 +174,17 @@ impl LocalBackend {
         // Initialize the database before any expensive image pull so we can
         // fail fast on conflicting persisted sandbox state.
         let db = self.db().await?;
+        if !crate::db::admission::is_current(db.read()).await? {
+            // Reject unsupported historical semantics before provisioning disks
+            // or replacing an existing sandbox. The insert still validates the
+            // final configuration after image defaults and restore resolution.
+            crate::db::writing::encode_new(
+                db.read(),
+                &config.clone_for_persistence(),
+                Some(self.config()),
+            )
+            .await?;
+        }
         let sandbox_dir = self.sandboxes_dir().join(&config.spec.name);
         // Transition ownership is deliberately separate from the runtime lifecycle lock: this
         // guard serializes database/storage mutation and launcher-to-runtime handoff, while the
@@ -730,7 +741,7 @@ impl LocalBackend {
         let sandbox_id = match timing::measure(
             &timing_name,
             "persist_start",
-            Self::insert_starting_sandbox_record(write_db, &persisted_config),
+            Self::insert_starting_sandbox_record(write_db, &persisted_config, Some(self.config())),
         )
         .await
         {
@@ -805,6 +816,7 @@ impl LocalBackend {
             write_db,
             sandbox_id,
             &sandbox.config().clone_for_persistence(),
+            Some(self.config()),
         )
         .await
         {
@@ -1831,15 +1843,16 @@ impl LocalBackend {
         db: &DbWriteConnection,
         config: &SandboxConfig,
     ) -> MicrosandboxResult<i32> {
-        Self::insert_sandbox_record_with_status(db, config, SandboxStatus::Running).await
+        Self::insert_sandbox_record_with_status(db, config, SandboxStatus::Running, None).await
     }
 
     /// Insert a provisional local create record that remains non-connectable until ready.
     async fn insert_starting_sandbox_record(
         db: &DbWriteConnection,
         config: &SandboxConfig,
+        runtime: Option<&crate::config::GlobalConfig>,
     ) -> MicrosandboxResult<i32> {
-        Self::insert_sandbox_record_with_status(db, config, SandboxStatus::Starting).await
+        Self::insert_sandbox_record_with_status(db, config, SandboxStatus::Starting, runtime).await
     }
 
     /// Insert the sandbox record with an explicit initial lifecycle status.
@@ -1847,8 +1860,9 @@ impl LocalBackend {
         db: &DbWriteConnection,
         config: &SandboxConfig,
         status: SandboxStatus,
+        runtime: Option<&crate::config::GlobalConfig>,
     ) -> MicrosandboxResult<i32> {
-        let config_json = crate::db::writing::encode_new(db, config).await?;
+        let config_json = crate::db::writing::encode_new(db, config, runtime).await?;
         let labels = config.spec.labels.clone();
 
         db.transaction(|txn| {
@@ -2277,7 +2291,7 @@ mod tests {
         .unwrap()
         .unwrap();
         let created = ensure_named_volumes(&local, &config).await.unwrap();
-        let sandbox_id = LocalBackend::insert_starting_sandbox_record(write_db, &config)
+        let sandbox_id = LocalBackend::insert_starting_sandbox_record(write_db, &config, None)
             .await
             .unwrap();
         LocalBackend::update_sandbox_status(write_db, sandbox_id, status)
@@ -2558,6 +2572,7 @@ mod tests {
             pools.write(),
             &config,
             SandboxStatus::Stopped,
+            None,
         )
         .await
         .unwrap();
@@ -2958,7 +2973,7 @@ mod tests {
         let pools = open_test_pools(&temp.path().join("test.db")).await;
         let config = test_config("booting");
 
-        let sandbox_id = LocalBackend::insert_starting_sandbox_record(pools.write(), &config)
+        let sandbox_id = LocalBackend::insert_starting_sandbox_record(pools.write(), &config, None)
             .await
             .unwrap();
         let row = sandbox_entity::Entity::find_by_id(sandbox_id)
@@ -3008,7 +3023,7 @@ mod tests {
         let sandbox_id = LocalBackend::insert_sandbox_record(pools.write(), &config)
             .await
             .unwrap();
-        LocalBackend::update_sandbox_active_config(pools.write(), sandbox_id, &config)
+        LocalBackend::update_sandbox_active_config(pools.write(), sandbox_id, &config, None)
             .await
             .unwrap();
 

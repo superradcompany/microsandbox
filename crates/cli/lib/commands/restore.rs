@@ -20,7 +20,7 @@ pub struct RestoreArgs {
     /// Snapshot group/member, ID, or archive path.
     pub snapshot: String,
     /// Unique name of the destination sandbox.
-    #[arg(long)]
+    #[arg(short, long)]
     pub name: String,
     /// Restore captured RAM using private copy-on-write mappings.
     #[arg(long, conflicts_with = "disk_only")]
@@ -31,6 +31,9 @@ pub struct RestoreArgs {
     /// Exact base snapshot or archive for a dependent export.
     #[arg(long)]
     pub snapshot_base: Option<String>,
+    /// Allow missing full-restore resources with warnings instead of refusing activation.
+    #[arg(long)]
+    pub allow_missing_resources: bool,
     /// Destination resource bindings.
     #[command(flatten)]
     pub resources: RestoreResourceArgs,
@@ -193,6 +196,9 @@ pub async fn run(
     if args.disk_only {
         builder = builder.disk_only();
     }
+    if args.allow_missing_resources {
+        builder = builder.allow_missing_resources();
+    }
     if let Some(base) = args.snapshot_base {
         builder = builder.snapshot_base(base);
     }
@@ -284,6 +290,29 @@ mod tests {
     struct TestCli {
         #[command(flatten)]
         args: RestoreArgs,
+    }
+
+    #[test]
+    fn missing_resource_opt_out_is_independent_of_mapping_policy_and_inheritance() {
+        let defaults = TestCli::try_parse_from(["restore", "saved", "--name", "child"]).unwrap();
+        assert!(!defaults.args.allow_missing_resources);
+        let explicit = TestCli::try_parse_from([
+            "restore",
+            "saved",
+            "--name",
+            "child",
+            "--allow-missing-resources",
+            "--external-mount-policy",
+            "strict",
+            "--dangerously-inherit-resources",
+        ])
+        .unwrap();
+        assert!(explicit.args.allow_missing_resources);
+        assert!(explicit.args.resources.dangerously_inherit_resources);
+        assert_eq!(
+            explicit.args.resources.external_mount_policy.as_deref(),
+            Some("strict")
+        );
     }
 
     #[test]

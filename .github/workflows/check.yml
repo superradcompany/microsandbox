@@ -1470,6 +1470,7 @@ jobs:
           python3 -m unittest discover -s scripts/ci -p test_runner_storage.py
           python3 -m unittest discover -s scripts/smoke/cli -p test_snapshot_branch.py
           python3 -m unittest discover -s scripts/smoke/cli -p test_restore_resource_intent.py
+          python3 -m unittest discover -s scripts/smoke/cli -p test_catalog_history.py
 
       - name: Snapshot and branch live smoke
         # The short operation deadline excludes image setup and bounded cleanup.
@@ -1581,15 +1582,35 @@ jobs:
           integration_config="$RUNNER_TEMP/msb-integration-config.json"
           printf '%s\n' '{"runtime":{"block_writeback":{"mode":"auto","pool_mib":4096}}}' > "$integration_config"
           export MSB_CONFIG_PATH="$integration_config"
-          # Control compatibility and binary-replacement fixtures require caller-selected
-          # historical binaries, existing VMs, and dummy secrets. Keep these manual native
-          # qualification cases out of the batch of self-provisioning integration tests.
+          # Catalog/control compatibility and binary-replacement fixtures require caller-selected
+          # historical binaries, existing VMs, and dummy secrets. Keep them out of this
+          # self-provisioning batch; the catalog fixture is provisioned separately below.
           cargo-nextest nextest run \
             --archive-file build/rust-integration-tests.tar.zst \
             --workspace-remap "${{ github.workspace }}" \
             --run-ignored=only \
-            -E 'not (binary(=creation_progress_live) or binary(=eager_lifecycle_live) or test(/^backend::local::control::.*::live_/) or test(/^runtime::launch_contract::tests::released_/))' \
+            -E 'not (binary(=creation_progress_live) or binary(=eager_lifecycle_live) or test(/^backend::local::control::.*::live_/) or test(/^runtime::launch_contract::tests::released_/) or test(/^backend::local::catalog::tests::live_sdk_preserves_historical_catalog_and_old_cli_reads_new_records$/))' \
             --test-threads 2
+
+      # This fixture needs a released runtime, not the candidate installed above.
+      # Keep its signal even when an unrelated test in the generic batch fails.
+      - name: Historical catalog compatibility (v0.6.18)
+        if: ${{ !cancelled() }}
+        timeout-minutes: 10
+        run: |
+          python3 scripts/smoke/cli/catalog-history.py \
+            --archive build/rust-integration-tests.tar.zst \
+            --workspace "${{ github.workspace }}" \
+            --cleanup-binary build/msb \
+            --output build/catalog-history-results
+
+      - name: Upload historical catalog results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: catalog-history-results
+          path: build/catalog-history-results/*.log
+          if-no-files-found: ignore
 
       # These tests require a captured guest and scoped fault injection; run every case
       # explicitly, including all three eager modes, even if the general batch failed.

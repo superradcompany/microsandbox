@@ -226,10 +226,11 @@ msb sbx restore ./saved.msb --name disk-copy --disk-only
 
 | Flag | Description |
 |------|-------------|
-| `--name` | Required destination sandbox name |
+| `-n`, `--name` | Required destination sandbox name |
 | `--forked` | Restore full snapshots using private CoW memory |
 | `--disk-only` | Restore only the disk from a full snapshot; conflicts with `--forked` |
 | `--snapshot-base` | Exact base snapshot or archive for a dependent export |
+| `--allow-missing-resources` | Resume with missing external filesystems or additional disks unavailable, with warnings; full restore otherwise requires their bindings |
 | `-u`, `--user` | Override the default user for new exec commands |
 | `-c`, `--cpus` | CPU count for disk boot; full restore requires the captured count |
 | `-m`, `--memory` | Memory for disk boot, e.g. `2G`; full restore requires the captured size |
@@ -250,7 +251,12 @@ Disk restore applies destination controls before boot, then leaves the sandbox i
 
 Restore policy rules replace the complete destination policy only when you explicitly select `--net-default` or `--no-net`; rule-only requests fail instead of silently discarding configured policy. No policy flags retain the configured default. Restore never replaces an existing sandbox or accepts a new startup command: stop and remove an old destination explicitly, and run workloads with `msb exec` after successful restore.
 
-Restore and branch do not reuse host resources by default. Map directories with `-v /host/path:/guest/path`, select a private captured disk with `-v /guest/path`, and publish new listeners with `-p HOST:GUEST`. An unmapped filesystem or additional disk stays present during full restore but backend requests return I/O errors; data already cached in guest RAM may still be readable. Warnings are shown even with `--quiet`. Disk errors can make the guest filesystem abort its journal or become read-only. The root disk is always restored from the snapshot and cannot be omitted. Custom vsock routes are not inherited; use `--vsock HOST_PATH:PORT` to authorize a service for clients to reconnect to.
+Restore and branch do not reuse host resources by default. Map directories with `-v /host/path:/guest/path`, select a private captured disk with `-v /guest/path`, and publish new listeners with `-p HOST:GUEST`. Full restore refuses missing external filesystems and additional disks unless `--allow-missing-resources` is explicit. Opting out leaves those devices unavailable: backend I/O returns errors, although data cached in guest RAM may remain readable. Disk errors can abort a guest filesystem journal or make it read-only. Warnings remain visible with `--quiet`. `--external-mount-policy relaxed` permits supported stale-object mismatches; it does not waive missing backing. `--dangerously-inherit-resources` authorizes validated source-local bindings, not missing ones. Direct branching retains its existing unavailable-resource behavior. Root and owned storage are always reconstructed; the opt-out cannot waive corrupt or missing snapshot data. Custom vsock routes are not inherited; use `--vsock HOST_PATH:PORT` to authorize a service for clients to reconnect to.
+
+```bash
+msb restore saved.msb --name worker -v /srv/project:/work -v /data
+msb restore saved.msb --name inspection --allow-missing-resources
+```
 
 <a id="msb-start"></a>
 
@@ -308,7 +314,7 @@ msb resume devbox
 Branch running execution into a new local CoW child without creating a durable full snapshot. The top-level form is `msb branch`.
 
 ```bash
-msb branch devbox --name experiment
+msb branch devbox -n experiment
 ```
 
 Use `--names` to capture once and start several independent children from the same state:
@@ -400,11 +406,13 @@ msb touch --label app=engine
 Change a running sandbox's configuration. Every change is planned and applied all-or-nothing. CPU and memory resize live within the `max_cpus` / `max_memory` ceilings; other changes that can't apply live need `--restart` or `--next-start`.
 
 ```bash
-msb modify api --cpus 4                     # Live when 4 <= max_cpus
-msb modify api --env MODE=prod --restart    # Restart to apply now
+msb modify api -c 4                         # Live when 4 <= max_cpus
+msb modify api -e MODE=prod --restart       # Restart to apply now
 msb modify api --max-memory 16G --next-start # Raise the ceiling on next start
 msb modify api --cpus 8 --dry-run           # Show the plan, apply nothing
 ```
+
+Like create/run, modify accepts `-c`/`--cpus`, `-m`/`--memory`, `-e`/`--env`, and `-w`/`--workdir`.
 
 `max_cpus` and `max_memory` are boot-time reservations chosen at create time. They default to the effective `cpus`/`memory`, which leaves no headroom; live growth beyond them is impossible without a restart. Reserving capacity costs almost nothing (parked vCPUs and lazily-backed memory), so set them above the initial values at create time if the sandbox may need to grow.
 
@@ -734,6 +742,8 @@ msb self uninstall --yes      # Skip confirmation
 | `uninstall` | Remove msb, libkrunfw, and command links |
 
 `msb self update` always targets the latest release; it does not accept a version argument. Use `msb self downgrade <version>` to move to a supported older release.
+
+Only one downgrade can run per installation. A second command fails immediately; wait for the first to finish or cancel it before retrying.
 
 Before a downgrade changes local state, `msb` runs several safety checks. It verifies the target release and confirms it can read the current local database. It refuses targets below 0.6.0, refuses irreversible state changes, and blocks the operation while matching running sandboxes are active. When a database rollback is needed, `msb` creates a retained SQLite backup under `~/.microsandbox/db/` unless you pass `--no-backup`. If rollback metadata marks the image cache affected, `msb` purges the cache after the database rollback unless you pass `--keep-cache`. `msb` always installs the target binary fresh and checks it with `msb --version` before refreshing command links.
 

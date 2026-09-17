@@ -27,7 +27,7 @@ Destination controls include `.cpus(count)`, `.memory(mib)`, `.networkPolicy(pol
 
 Full execution restore requires CPU and memory overrides to match captured geometry exactly, and rejects removing a captured NIC. Host-side network policy, connection limits, and lifetime limits can change. An explicit guest security profile—even `"default"`—requires a disk snapshot or `.diskOnly()`; it cannot change already-captured execution.
 
-Destination bindings use `.volume(guest, v => ...)`, `.port(...)`, `.portBind(...)`, `.portUdp(...)`, `.portUdpBind(...)`, `.vsock(...)`, and `.vsockDgram(...)`. Use `v => v.captured()` for a captured private volume. `.user(...)` sets the default user for new execs; `.logLevel(...)` configures host runtime logging. Host resources are not inherited unless `.dangerouslyInheritResources()` is selected. `.externalMountPolicy("strict" | "relaxed")` validates supplied filesystem mappings; it does not grant access.
+Destination bindings use `.volume(guest, v => ...)`, `.port(...)`, `.portBind(...)`, `.portUdp(...)`, `.portUdpBind(...)`, `.vsock(...)`, and `.vsockDgram(...)`. Use `v => v.captured()` for a captured private volume. `.user(...)` sets the default user for new execs; `.logLevel(...)` configures host runtime logging. Host resources are not inherited unless `.dangerouslyInheritResources()` is selected. Full restore rejects missing external filesystems and additional disks by default; `.allowMissingResources()` opts into unavailable devices with warnings. `.externalMountPolicy("strict" | "relaxed")` validates supplied filesystem objects, independently of missing-resource permission. Root and owned storage remain required.
 
 #### <span className="msb-recv">handle.</span><span className="msb-hn">snapshot()</span>
 

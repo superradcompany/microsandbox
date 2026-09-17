@@ -296,8 +296,8 @@ pub async fn run_sandbox_lifecycle_maintenance(
 /// intentionally status-based rather than "PID is live" based: a non-terminal
 /// row with no PID is still state owned by a runtime transition and should not
 /// be mutated out from under it.
-pub async fn active_sandboxes_for_schema_rollback(
-    db: &DbWriteConnection,
+pub async fn active_sandboxes_for_schema_rollback<C: ConnectionTrait>(
+    db: &C,
 ) -> RuntimeResult<Vec<ActiveSandbox>> {
     let sandboxes = lifecycle_sandboxes()
         .filter(sandbox_entity::Column::Status.is_in([

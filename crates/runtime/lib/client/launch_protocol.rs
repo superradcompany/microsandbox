@@ -14,6 +14,10 @@ use super::launch::{ExecutionIntent, LaunchConfig};
 pub struct LaunchCapabilities {
     /// Supported wire generations: 1 is the v0.6.17 boot contract; 2 adds explicit intent.
     pub protocols: Vec<u32>,
+    /// Relaxed captured-object checks can independently require destination backing.
+    /// Older probes omit this feature; ordinary protocol-2 launches are unchanged.
+    #[serde(default)]
+    pub required_restore_backing: bool,
 }
 
 /// Selected launch format. Releases predating the probe need two legacy feature boundaries.

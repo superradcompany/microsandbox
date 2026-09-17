@@ -45,6 +45,8 @@ struct RestoreOptions {
     #[serde(default)]
     dangerously_inherit_resources: bool,
     #[serde(default)]
+    allow_missing_resources: bool,
+    #[serde(default)]
     volumes: HashMap<String, MountSpec>,
     #[serde(default)]
     captured_volumes: Vec<String>,
@@ -139,6 +141,9 @@ fn builder(name: String, opts: &RestoreOptions) -> Result<RestoreBuilder, FfiErr
     }
     if opts.dangerously_inherit_resources {
         builder = builder.dangerously_inherit_resources();
+    }
+    if opts.allow_missing_resources {
+        builder = builder.allow_missing_resources();
     }
     for (guest, spec) in &opts.volumes {
         let mount = volume_mount(guest, spec)?;

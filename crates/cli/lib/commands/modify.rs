@@ -44,7 +44,7 @@ pub struct ModifyArgs {
     pub root_disk_only: bool,
 
     /// Desired effective vCPU count.
-    #[arg(long)]
+    #[arg(short = 'c', long)]
     pub cpus: Option<u8>,
 
     /// Desired boot-time maximum possible vCPU count.
@@ -52,7 +52,7 @@ pub struct ModifyArgs {
     pub max_cpus: Option<u8>,
 
     /// Desired effective guest memory size, such as `512M` or `4G`.
-    #[arg(long)]
+    #[arg(short, long)]
     pub memory: Option<String>,
 
     /// Desired boot-time maximum hotpluggable memory, such as `4G` or `16G`.
@@ -74,7 +74,7 @@ pub struct ModifyArgs {
     pub oci_upper_size: Option<String>,
 
     /// Set an environment variable for future execs (`KEY=VALUE`).
-    #[arg(long = "env", value_name = "KEY=VALUE")]
+    #[arg(short, long = "env", value_name = "KEY=VALUE")]
     pub env: Vec<String>,
 
     /// Remove an environment variable by key.
@@ -90,7 +90,7 @@ pub struct ModifyArgs {
     pub label_remove: Vec<String>,
 
     /// Working directory for future execs.
-    #[arg(long, value_name = "PATH")]
+    #[arg(short, long, value_name = "PATH")]
     pub workdir: Option<String>,
 
     /// Add or rotate a secret from a host environment variable
