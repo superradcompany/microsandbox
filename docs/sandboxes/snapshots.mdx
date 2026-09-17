@@ -382,7 +382,7 @@ Disk-only restore copies only the checkpoint's disk chain, creates a fresh writa
 | `required` | Require guest writeback | Also flush captured persistent filesystems |
 | `skip` | Accept unflushed disk state | No optional guest writeback |
 
-Use `required` on a full snapshot when you also want to restore its disks without RAM. Flushing writes the guest filesystem cache—not application buffers or transactions—and does not make tmpfs persistent.
+Use `required` on a full snapshot when you also want to restore its disks without RAM. Flushing writes the guest filesystem cache, not application buffers or transactions. It also does not make tmpfs persistent.
 
 `skip` on a disk-only snapshot accepts crash-consistent root and owned disks: recent buffered writes may be absent and filesystem recovery may be needed. Full snapshots and branches retain those dirty pages in captured RAM. An owned disk does not force guest writeback during plain pause. Earlier guest-flush builds flushed root and owned disks unconditionally when any owned mount existed; do not rely on that incidental behavior with `skip`.
 
