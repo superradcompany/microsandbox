@@ -1426,7 +1426,7 @@ fn recv_one_pmtu_error(fd: libc::c_int) -> io::Result<Option<u32>> {
     msg.msg_iov = &mut iov;
     msg.msg_iovlen = 1;
     msg.msg_control = control.as_mut_ptr().cast();
-    msg.msg_controllen = control.len();
+    msg.msg_controllen = control.len() as _;
 
     // SAFETY: `msg` contains valid iovec/control buffers and `fd` is a UDP socket.
     let rc = unsafe { libc::recvmsg(fd, &mut msg, libc::MSG_ERRQUEUE | libc::MSG_DONTWAIT) };
@@ -1434,7 +1434,7 @@ fn recv_one_pmtu_error(fd: libc::c_int) -> io::Result<Option<u32>> {
         return Err(io::Error::last_os_error());
     }
 
-    let control_len = msg.msg_controllen.min(control.len());
+    let control_len = (msg.msg_controllen as usize).min(control.len());
     Ok(parse_pmtu_from_control_messages(&control[..control_len]))
 }
 
