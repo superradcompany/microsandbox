@@ -459,7 +459,7 @@ pub(super) async fn save_snapshot(
 /// The payload is read from the sandbox's pinned upper file and is never copied
 /// into an installed snapshot directory or added to `snapshot_index`.
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn save_direct_file_snapshot(
+pub(in crate::backend::local) async fn save_direct_file_snapshot(
     manifest: &microsandbox_image::snapshot::Manifest,
     labels: &BTreeMap<String, String>,
     suggested_name: &str,

@@ -101,7 +101,7 @@ class CatalogHistoryTests(unittest.TestCase):
                 HARNESS.cleanup_catalog(HARNESS.fixture_environment(self.root, self.destination), self.root, io.StringIO())
         self.assertIn(["rm", "b"], [call.args[0][1:] for call in run.call_args_list])
 
-    def test_unreadable_historical_catalog_recovers_with_candidate_but_still_fails(self):
+    def test_failed_candidate_cleanup_retries_candidate_but_still_fails(self):
         env = HARNESS.fixture_environment(self.root, self.destination)
         candidate = self.root / "candidate-msb"
         inventory = [{"name": "orphan", "status": "Running"}]
@@ -116,7 +116,7 @@ class CatalogHistoryTests(unittest.TestCase):
                 HARNESS.cleanup(env, self.root, log, candidate)
         self.assertIn("recovered", raised.exception.__notes__[0])
         self.assertIn("catalog too new", log.getvalue())
-        self.assertEqual(run.call_args_list[0].args[0][0], env["MSB_PATH"])
+        self.assertEqual(run.call_args_list[0].args[0][0], str(candidate))
         self.assertEqual([call.args[0][1:] for call in run.call_args_list[1:]], [
             ["list", "--format", "json"], ["stop", "orphan"], ["rm", "orphan"], ["list", "--format", "json"],
         ])
@@ -126,7 +126,7 @@ class CatalogHistoryTests(unittest.TestCase):
             self.assertEqual(call.kwargs["cwd"], self.root)
         self.assertEqual(env["MSB_PATH"], str(self.destination / "msb"))
 
-    def test_malformed_historical_inventory_still_attempts_candidate_cleanup(self):
+    def test_malformed_candidate_inventory_retries_candidate_cleanup(self):
         log = io.StringIO()
         replies = [subprocess.CompletedProcess([], 0, "not JSON", ""),
                    subprocess.CompletedProcess([], 0, "[]", ""),
@@ -138,18 +138,51 @@ class CatalogHistoryTests(unittest.TestCase):
         self.assertEqual(run.call_count, 3)
         self.assertIn("Retrying cleanup", log.getvalue())
 
-    def test_failed_candidate_cleanup_preserves_historical_error_and_logs_both(self):
-        historical_error = subprocess.CalledProcessError(1, ["old-msb", "list"])
-        candidate_error = RuntimeError("candidate cannot read catalog either")
+    def test_failed_fallback_preserves_original_cleanup_error_and_logs_both(self):
+        candidate_error = subprocess.CalledProcessError(1, ["candidate-msb", "list"])
+        retry_error = RuntimeError("candidate cannot read catalog either")
+        historical_error = RuntimeError("old reader rejects upgraded catalog")
         log = io.StringIO()
-        with unittest.mock.patch.object(HARNESS, "cleanup_catalog", side_effect=[historical_error, candidate_error]):
+        with unittest.mock.patch.object(HARNESS, "cleanup_catalog", side_effect=[candidate_error, retry_error, historical_error]):
             with self.assertRaises(subprocess.CalledProcessError) as raised:
                 HARNESS.cleanup(HARNESS.fixture_environment(self.root, self.destination),
                                 self.root, log, self.root / "candidate-msb")
-        self.assertIs(raised.exception, historical_error)
+        self.assertIs(raised.exception, candidate_error)
         self.assertIn("candidate cannot read", raised.exception.__notes__[0])
-        self.assertIn("old-msb", log.getvalue())
+        self.assertIn("old reader rejects", log.getvalue())
         self.assertIn("candidate cannot read", log.getvalue())
+
+    def test_partial_cleanup_retries_fresh_inventory_with_current_reader(self):
+        candidate = self.root / "candidate-msb"
+        env = HARNESS.fixture_environment(self.root, self.destination)
+        inventory = [{"name": "removed", "status": "Stopped"},
+                     {"name": "remaining", "status": "Running"}]
+        remaining = inventory[1:]
+        replies = [json.dumps(inventory), "", None, json.dumps(remaining),
+                   json.dumps(remaining), "", "", "[]"]
+        results = [subprocess.CompletedProcess([], 0, reply, "") if reply is not None
+                   else subprocess.CalledProcessError(1, ["stop", "remaining"])
+                   for reply in replies]
+        with unittest.mock.patch.object(HARNESS.subprocess, "run", side_effect=results) as run:
+            with self.assertRaisesRegex(RuntimeError, "cleanup failed"):
+                HARNESS.cleanup(env, self.root, io.StringIO(), candidate)
+        self.assertEqual([call.args[0][1:] for call in run.call_args_list], [
+            ["list", "--format", "json"], ["rm", "removed"], ["stop", "remaining"],
+            ["list", "--format", "json"], ["list", "--format", "json"],
+            ["stop", "remaining"], ["rm", "remaining"], ["list", "--format", "json"],
+        ])
+        self.assertTrue(all(call.args[0][0] == str(candidate) for call in run.call_args_list))
+
+    def test_pre_upgrade_fallback_runs_only_after_candidate_retry_fails(self):
+        original = RuntimeError("candidate unavailable")
+        env = HARNESS.fixture_environment(self.root, self.destination)
+        candidate = self.root / "candidate-msb"
+        with unittest.mock.patch.object(HARNESS, "cleanup_catalog", side_effect=[original, OSError("retry unavailable"), None]) as cleanup:
+            with self.assertRaises(RuntimeError) as raised:
+                HARNESS.cleanup(env, self.root, io.StringIO(), candidate)
+        self.assertIs(raised.exception, original)
+        self.assertEqual([call.args[0]["MSB_PATH"] for call in cleanup.call_args_list],
+                         [str(candidate), str(candidate), env["MSB_PATH"]])
 
     def test_cleanup_timeout_retains_partial_diagnostics(self):
         error = subprocess.TimeoutExpired(["old-msb", "list"], 30,
@@ -161,12 +194,12 @@ class CatalogHistoryTests(unittest.TestCase):
         self.assertIn("partial stdout", log.getvalue())
         self.assertIn("partial stderr", log.getvalue())
 
-    def test_successful_historical_cleanup_does_not_use_candidate(self):
+    def test_successful_candidate_cleanup_does_not_use_historical_reader(self):
         with unittest.mock.patch.object(HARNESS, "cleanup_catalog") as cleanup:
             env = HARNESS.fixture_environment(self.root, self.destination)
             log = io.StringIO()
             HARNESS.cleanup(env, self.root, log, self.root / "candidate-msb")
-        cleanup.assert_called_once_with(env, self.root, log)
+        cleanup.assert_called_once_with(dict(env, MSB_PATH=str(self.root / "candidate-msb")), self.root, log)
 
     def execute_with_failures(self, test_failure, cleanup_failure):
         checksums = self.bundle()
