@@ -1,4 +1,4 @@
-//! Admission for an existing catalog without changing its owning CLI's schema.
+//! Recognize catalog histories before SDK/CLI initialization or upgrade.
 
 use std::{collections::BTreeSet, sync::LazyLock};
 

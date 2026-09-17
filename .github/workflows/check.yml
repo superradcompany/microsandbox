@@ -1427,6 +1427,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           chmod +x build/msb
+          python3 -m unittest discover -s scripts/smoke/cli -p test_previous_release_upgrade.py -v
           python3 scripts/smoke/cli/previous_release_upgrade.py
 
   # ---------------------------------------------------------------------------
@@ -1593,7 +1594,7 @@ jobs:
             --archive-file build/rust-integration-tests.tar.zst \
             --workspace-remap "${{ github.workspace }}" \
             --run-ignored=only \
-            -E 'not (binary(=creation_progress_live) or binary(=eager_lifecycle_live) or test(/^backend::local::control::.*::live_/) or test(/^runtime::launch_contract::tests::released_/) or test(/^backend::local::catalog::tests::live_sdk_preserves_historical_catalog_and_old_cli_reads_new_records$/))' \
+            -E 'not (binary(=creation_progress_live) or binary(=eager_lifecycle_live) or test(/^backend::local::control::.*::live_/) or test(/^runtime::launch_contract::tests::released_/) or test(/^backend::local::catalog::tests::live_sdk_upgrades_catalog_with_historical_runtime$/))' \
             --test-threads 2
 
       # This fixture needs a released runtime, not the candidate installed above.
