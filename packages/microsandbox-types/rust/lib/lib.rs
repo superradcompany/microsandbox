@@ -6,6 +6,9 @@ mod cloud;
 mod command;
 mod domain;
 mod error;
+
+#[doc(hidden)]
+pub mod helpers;
 pub mod modify;
 mod validation;
 
@@ -15,6 +18,8 @@ pub mod typescript;
 //--------------------------------------------------------------------------------------------------
 // Exports
 //--------------------------------------------------------------------------------------------------
+
+pub use microsandbox_types_macros::ConfigPatch;
 
 pub use cloud::{
     CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudDiskImageFormat, CloudErrorBody,
@@ -36,9 +41,9 @@ pub use domain::{
     NetworkRateLimiterConfig, NetworkRateLimiterConfigPatch, NetworkSpec, NetworkSpecPatch,
     NumaPlacement, OciRootfsSource, OutboundProxy, Patch, PlacementProfile, PortProtocol,
     PortRange, Protocol, PublishedPortSpec, PullPolicy, RateLimitConfigError, RateLimiterConfig,
-    Rlimit, RlimitResource, RootDisk, RootfsSource, Rule, SandboxConfigPatch, SandboxLogLevel,
-    SandboxPolicy, SandboxPolicyPatch, SandboxResources, SandboxResourcesPatch,
-    SandboxRuntimeOptions, SandboxRuntimeOptionsPatch, SandboxSpec, ScopedUpstreamCaCert,
+    Rlimit, RlimitResource, RootDisk, RootfsSource, Rule, SandboxLogLevel, SandboxPolicy,
+    SandboxPolicyPatch, SandboxResources, SandboxResourcesPatch, SandboxRuntimeOptions,
+    SandboxRuntimeOptionsPatch, SandboxSpec, SandboxSpecPatch, ScopedUpstreamCaCert,
     ScopedVerifyUpstream, SecretConfigError, SecretEntry, SecretInjection, SecretsConfig,
     SecretsConfigPatch, SecurityProfile, SnapshotSpec, Socks5Credentials, StatVirtualization,
     TlsConfig, TlsConfigPatch, TokenBucketConfig, TransparentHugePagePolicy, ViolationAction,

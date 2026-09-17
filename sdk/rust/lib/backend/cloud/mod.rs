@@ -36,6 +36,7 @@ use self::http::urlencoding;
 use super::{
     Backend, BackendInfo, BackendKind, BackendSelectionSource, SandboxBackend, VolumeBackend,
 };
+use crate::config::layers::BackendConfig;
 use crate::{MicrosandboxError, MicrosandboxResult};
 
 //--------------------------------------------------------------------------------------------------
@@ -65,7 +66,8 @@ fn default_user_agent() -> String {
 
 /// Cloud-runtime backend: talks to an msb-cloud control plane over HTTP.
 ///
-/// Holds the deployment URL and API key. The `(url, api_key)` pair determines
+/// Holds the deployment URL, API key, and captured user and managed settings.
+/// The `(url, api_key)` pair determines
 /// which org's view the backend sees: msb-cloud derives the org from the API
 /// key, so there is no per-call org argument.
 ///
@@ -82,6 +84,7 @@ pub struct CloudBackend {
     url: String,
     api_key: String,
     http: reqwest::Client,
+    config: Arc<BackendConfig>,
     selection_source: BackendSelectionSource,
     profile: Option<String>,
 }
@@ -100,6 +103,7 @@ pub struct CloudBackendBuilder {
     request_timeout: Duration,
     user_agent: Option<String>,
     custom_client: Option<reqwest::Client>,
+    config: Option<Arc<BackendConfig>>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -126,23 +130,9 @@ impl CloudBackend {
     /// Returns `InvalidConfig` if `MSB_API_KEY` is missing or empty. A missing
     /// or empty `MSB_API_URL` uses [`DEFAULT_CLOUD_API_URL`].
     pub fn from_env() -> MicrosandboxResult<Self> {
-        let api_key = std::env::var("MSB_API_KEY").map_err(|_| {
-            MicrosandboxError::InvalidConfig(
-                "MSB_API_KEY not set — required for cloud backend".into(),
-            )
-        })?;
-
-        let mut builder = Self::builder().api_key(api_key.trim());
-        if let Some(url) = std::env::var("MSB_API_URL")
-            .ok()
-            .map(|url| url.trim().to_string())
-            .filter(|url| !url.is_empty())
-        {
-            builder = builder.url(url);
-        }
-        Ok(builder
+        Ok(CloudBackendBuilder::from_env()?
             .build()?
-            .with_selection(BackendSelectionSource::MsbApiKey, None))
+            .with_selection_metadata(BackendSelectionSource::MsbApiKey, None))
     }
 
     /// Construct from a named SDK profile in `~/.microsandbox/config.json`.
@@ -163,14 +153,19 @@ impl CloudBackend {
         &self.url
     }
 
-    /// Attach resolver provenance without changing cloud credentials.
-    pub(crate) fn with_selection(
+    /// Settings captured when this backend was constructed.
+    pub(crate) fn config_sources(&self) -> &BackendConfig {
+        &self.config
+    }
+
+    /// Record the selection source and optional profile name for diagnostics.
+    pub(crate) fn with_selection_metadata(
         mut self,
         selection_source: BackendSelectionSource,
-        profile: Option<String>,
+        profile_name: Option<String>,
     ) -> Self {
         self.selection_source = selection_source;
-        self.profile = profile;
+        self.profile = profile_name;
         self
     }
 }
@@ -238,6 +233,31 @@ impl CloudBackend {
 //--------------------------------------------------------------------------------------------------
 
 impl CloudBackendBuilder {
+    /// Read cloud connection settings without loading device configuration twice.
+    pub(crate) fn from_env() -> MicrosandboxResult<Self> {
+        let api_key = std::env::var("MSB_API_KEY").map_err(|_| {
+            MicrosandboxError::InvalidConfig(
+                "MSB_API_KEY not set — required for cloud backend".into(),
+            )
+        })?;
+
+        let mut builder = Self::default().api_key(api_key.trim());
+        if let Some(url) = std::env::var("MSB_API_URL")
+            .ok()
+            .map(|url| url.trim().to_string())
+            .filter(|url| !url.is_empty())
+        {
+            builder = builder.url(url);
+        }
+        Ok(builder)
+    }
+
+    /// Reuse sources already read by backend selection, or explicit sources in tests.
+    pub(crate) fn config_sources(mut self, config: BackendConfig) -> Self {
+        self.config = Some(Arc::new(config));
+        self
+    }
+
     /// Set the msb-cloud endpoint URL.
     pub fn url(mut self, url: impl Into<String>) -> Self {
         self.url = Some(url.into());
@@ -272,7 +292,8 @@ impl CloudBackendBuilder {
 
     /// Build the `CloudBackend`. Uses [`DEFAULT_CLOUD_API_URL`] when `.url(...)`
     /// was not called. Errors when the API key is missing or invalid, an
-    /// explicitly supplied URL is empty, or the HTTP client fails to construct.
+    /// explicitly supplied URL is empty, the HTTP client fails to construct,
+    /// or user or managed configuration cannot be loaded.
     pub fn build(self) -> MicrosandboxResult<CloudBackend> {
         let url = self.url.as_deref().unwrap_or(DEFAULT_CLOUD_API_URL);
         let url = url.trim();
@@ -323,10 +344,16 @@ impl CloudBackendBuilder {
                 })?
         };
 
+        let config = match self.config {
+            Some(config) => config,
+            None => Arc::new(BackendConfig::load()?),
+        };
+
         Ok(CloudBackend {
             url,
             api_key,
             http,
+            config,
             selection_source: BackendSelectionSource::Programmatic,
             profile: None,
         })
@@ -349,6 +376,10 @@ impl Backend for CloudBackend {
             source: self.selection_source,
             profile: self.profile.clone(),
         }
+    }
+
+    fn as_cloud(&self) -> Option<&CloudBackend> {
+        Some(self)
     }
 
     fn sandboxes(&self) -> &dyn SandboxBackend {
@@ -425,6 +456,7 @@ impl Default for CloudBackendBuilder {
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
             user_agent: None,
             custom_client: None,
+            config: None,
         }
     }
 }
@@ -456,6 +488,40 @@ mod tests {
     use tokio_rustls::TlsAcceptor;
 
     use super::*;
+
+    #[test]
+    fn cloud_backend_keeps_captured_settings_until_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = dir.path().join("config.json");
+        let managed = dir.path().join("managed.json");
+        std::fs::write(&user, r#"{"sandbox_defaults":{"cpus":4}}"#).unwrap();
+        std::fs::write(&managed, r#"{"overrides":{"sandbox_defaults":{"cpus":2}}}"#).unwrap();
+        let sources = BackendConfig::load_from(&user, Some(&managed)).unwrap();
+        let cloud = CloudBackend::builder()
+            .api_key("test-key")
+            .config_sources(sources)
+            .build()
+            .unwrap();
+        std::fs::write(&managed, "invalid").unwrap();
+        assert_eq!(
+            cloud
+                .config_sources()
+                .resolved_config()
+                .sandbox_defaults
+                .cpus,
+            2
+        );
+        assert_eq!(
+            cloud
+                .clone()
+                .config_sources()
+                .resolved_config()
+                .sandbox_defaults
+                .cpus,
+            2
+        );
+        assert!(BackendConfig::load_from(&user, Some(&managed)).is_err());
+    }
 
     #[cfg(unix)]
     const TLS_TEST_CHILD_URL: &str = "MSB_TEST_CLOUD_AGENT_TLS_CHILD_URL";
@@ -575,8 +641,9 @@ mod tests {
     }
 
     #[test]
-    fn new_succeeds_with_url_and_key() {
-        let b = CloudBackend::new("https://msb.example.com", "msb_test_abc").unwrap();
+    fn builder_succeeds_with_url_and_key() {
+        let b =
+            crate::test_support::cloud_backend("https://msb.example.com", "msb_test_abc").unwrap();
         assert_eq!(b.kind(), BackendKind::Cloud);
         assert_eq!(b.url(), "https://msb.example.com");
         assert_eq!(b.info().source, BackendSelectionSource::Programmatic);
@@ -584,7 +651,9 @@ mod tests {
 
     #[test]
     fn backend_info_never_serializes_api_key() {
-        let b = CloudBackend::new("https://msb.example.com", "msb_test_super_secret").unwrap();
+        let b =
+            crate::test_support::cloud_backend("https://msb.example.com", "msb_test_super_secret")
+                .unwrap();
         let json = serde_json::to_string(&b.info()).unwrap();
 
         assert!(json.contains("https://msb.example.com"));
@@ -593,20 +662,88 @@ mod tests {
     }
 
     #[test]
-    fn new_strips_trailing_slash() {
-        let b = CloudBackend::new("https://msb.example.com/", "msb_test_abc").unwrap();
+    fn builder_strips_trailing_slash() {
+        let b =
+            crate::test_support::cloud_backend("https://msb.example.com/", "msb_test_abc").unwrap();
         assert_eq!(b.url(), "https://msb.example.com");
     }
 
     #[test]
-    fn with_api_key_uses_default_cloud_url() {
-        let b = CloudBackend::with_api_key("msb_test_abc").unwrap();
-        assert_eq!(b.url(), DEFAULT_CLOUD_API_URL);
+    fn from_env_builder_uses_configured_or_default_url() {
+        let _env_guard = crate::test_support::lock_env();
+        let previous = ["MSB_API_KEY", "MSB_API_URL"].map(|name| (name, std::env::var_os(name)));
+        // SAFETY: every environment-mutating SDK unit test holds the shared lock.
+        unsafe { std::env::set_var("MSB_API_KEY", " msb_test_abc ") };
+        let clouds = [
+            (None, DEFAULT_CLOUD_API_URL),
+            (Some("   "), DEFAULT_CLOUD_API_URL),
+            (
+                Some(" https://msb.example.com/ "),
+                "https://msb.example.com",
+            ),
+        ]
+        .map(|(url, expected)| {
+            unsafe {
+                match url {
+                    Some(url) => std::env::set_var("MSB_API_URL", url),
+                    None => std::env::remove_var("MSB_API_URL"),
+                }
+            }
+            (
+                CloudBackendBuilder::from_env().and_then(|builder| {
+                    builder
+                        .config_sources(BackendConfig::new(Default::default(), Default::default()))
+                        .build()
+                }),
+                expected,
+            )
+        });
+        for (name, value) in previous {
+            unsafe {
+                match value {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
+        }
+        for (cloud, expected) in clouds {
+            let cloud = cloud.unwrap();
+            assert_eq!(cloud.url(), expected);
+            assert_eq!(cloud.info().source, BackendSelectionSource::Programmatic);
+        }
+    }
+
+    #[test]
+    fn from_env_rejects_missing_or_blank_key_with_url() {
+        let _env_guard = crate::test_support::lock_env();
+        let previous = ["MSB_API_KEY", "MSB_API_URL"].map(|name| (name, std::env::var_os(name)));
+        // SAFETY: every environment-mutating SDK unit test holds the shared lock.
+        unsafe {
+            std::env::set_var("MSB_API_URL", "https://msb.example.com");
+            std::env::remove_var("MSB_API_KEY");
+        }
+        let missing = CloudBackend::from_env();
+        unsafe { std::env::set_var("MSB_API_KEY", "   ") };
+        let blank = CloudBackend::from_env();
+        for (name, value) in previous {
+            unsafe {
+                match value {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
+        }
+        assert!(matches!(missing, Err(MicrosandboxError::InvalidConfig(_))));
+        assert!(matches!(blank, Err(MicrosandboxError::InvalidConfig(_))));
     }
 
     #[test]
     fn builder_uses_default_cloud_url() {
-        let b = CloudBackendBuilder::default().api_key("k").build().unwrap();
+        let b = CloudBackendBuilder::default()
+            .config_sources(BackendConfig::new(Default::default(), Default::default()))
+            .api_key("k")
+            .build()
+            .unwrap();
         assert_eq!(b.url(), DEFAULT_CLOUD_API_URL);
     }
 
@@ -622,33 +759,35 @@ mod tests {
 
     #[test]
     fn builder_rejects_empty_url() {
-        assert!(CloudBackend::new("", "k").is_err());
+        assert!(crate::test_support::cloud_backend("", "k").is_err());
     }
 
     #[test]
     fn builder_rejects_whitespace_url() {
-        assert!(CloudBackend::new("   ", "k").is_err());
+        assert!(crate::test_support::cloud_backend("   ", "k").is_err());
     }
 
     #[test]
     fn builder_rejects_empty_key() {
-        assert!(CloudBackend::new("https://x", "").is_err());
+        assert!(crate::test_support::cloud_backend("https://x", "").is_err());
     }
 
     #[test]
     fn builder_rejects_whitespace_key() {
-        assert!(CloudBackend::new("https://x", "   ").is_err());
+        assert!(crate::test_support::cloud_backend("https://x", "   ").is_err());
     }
 
     #[test]
     fn agent_ws_url_maps_http_schemes() {
-        let plain = CloudBackend::new("http://127.0.0.1:8080", "msb_test_abc").unwrap();
+        let plain =
+            crate::test_support::cloud_backend("http://127.0.0.1:8080", "msb_test_abc").unwrap();
         assert_eq!(
             plain.agent_ws_url("sandbox id").unwrap(),
             "ws://127.0.0.1:8080/v1/sandboxes/sandbox%20id/agent"
         );
 
-        let tls = CloudBackend::new("https://cloud.example.com", "msb_test_abc").unwrap();
+        let tls = crate::test_support::cloud_backend("https://cloud.example.com", "msb_test_abc")
+            .unwrap();
         assert_eq!(
             tls.agent_ws_url("abc").unwrap(),
             "wss://cloud.example.com/v1/sandboxes/abc/agent"
@@ -657,7 +796,8 @@ mod tests {
 
     #[test]
     fn agent_ws_url_rejects_non_http_url() {
-        let backend = CloudBackend::new("file:///tmp/api", "msb_test_abc").unwrap();
+        let backend =
+            crate::test_support::cloud_backend("file:///tmp/api", "msb_test_abc").unwrap();
         let err = backend.agent_ws_url("abc").unwrap_err();
 
         assert!(matches!(err, MicrosandboxError::InvalidConfig(_)));

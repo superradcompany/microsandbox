@@ -933,8 +933,7 @@ mod tests {
     use sea_orm::{ActiveModelTrait, Set};
 
     use crate::backend::{
-        Backend, CloudBackend, CloudVolumeKind, CloudVolumeStatus, LocalBackend,
-        VolumeHandleCloudState,
+        Backend, CloudVolumeKind, CloudVolumeStatus, LocalBackend, VolumeHandleCloudState,
     };
     use crate::sandbox::{HostPermissions, MountOptions, SandboxStatus, StatVirtualization};
 
@@ -942,8 +941,9 @@ mod tests {
 
     #[test]
     fn cloud_managed_volume_reports_directory_storage_kind() {
-        let backend: Arc<dyn Backend> =
-            Arc::new(CloudBackend::new("https://msb.example.com", "msb_test_abc").unwrap());
+        let backend: Arc<dyn Backend> = Arc::new(
+            crate::test_support::cloud_backend("https://msb.example.com", "msb_test_abc").unwrap(),
+        );
         let now = chrono::Utc::now();
         let handle = VolumeHandle::from_cloud(
             backend,
@@ -967,8 +967,9 @@ mod tests {
 
     #[tokio::test]
     async fn cloud_default_volume_is_identified_and_cannot_be_removed() {
-        let backend: Arc<dyn Backend> =
-            Arc::new(CloudBackend::new("https://msb.example.com", "msb_test_abc").unwrap());
+        let backend: Arc<dyn Backend> = Arc::new(
+            crate::test_support::cloud_backend("https://msb.example.com", "msb_test_abc").unwrap(),
+        );
         let now = chrono::Utc::now();
         let handle = VolumeHandle::from_cloud(
             backend,
@@ -998,6 +999,8 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let local = Arc::new(
             LocalBackend::builder()
+                .config_path(temp.path().join("home").join("config.json"))
+                .managed_config_path(temp.path().join("home").join("managed.json"))
                 .home(temp.path().join("home"))
                 .build()
                 .await

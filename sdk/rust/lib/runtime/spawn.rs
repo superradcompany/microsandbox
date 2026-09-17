@@ -289,8 +289,8 @@ pub async fn spawn_sandbox(
         .map_err(|error| MicrosandboxError::InvalidConfig(error.to_string()))?;
 
     // libkrunfw is process-level (one dylib per process address space). The
-    // resolver consults MSB_LIBKRUNFW_PATH env, then SDK_LIBKRUNFW_PATH static,
-    // then config.paths.libkrunfw, then filesystem fallbacks.
+    // backend has already layered user, environment/SDK, and managed paths.
+    // Resolution uses those effective paths, then filesystem fallbacks.
     let global = local.config();
     let msb_path = global.resolve_msb_path()?;
     let libkrunfw_path = global.resolve_libkrunfw_path()?;
@@ -2842,6 +2842,9 @@ mod tests {
         auto_block_writeback_pool_bytes, resolve_linux_block_writeback_policy,
     };
     use super::{block_writeback_policy, sandbox_cli_args};
+    use crate::SandboxConfigPatch;
+    use crate::backend::BackendSelectionSource;
+    use crate::config::layers::BackendConfig;
     use crate::{
         LogLevel,
         backend::LocalBackend,
@@ -2913,11 +2916,16 @@ mod tests {
     // Functions: Helpers
     //----------------------------------------------------------------------------------------------
 
-    /// Build a `LocalBackend` for tests. Uses `lazy()` since these tests only
-    /// exercise the pure-rendering `sandbox_cli_args` path — no DB / FS
-    /// touches.
+    /// Use isolated configuration for pure `sandbox_cli_args` rendering tests.
+    /// The database remains unopened.
     fn test_local_backend() -> LocalBackend {
-        LocalBackend::lazy()
+        LocalBackend::from_backend_config(
+            BackendConfig::new(Default::default(), Default::default())
+                .prepare_for_local_backend(Default::default())
+                .unwrap(),
+            BackendSelectionSource::Programmatic,
+            None,
+        )
     }
 
     #[cfg(feature = "net")]
@@ -3475,7 +3483,9 @@ mod tests {
             .await
             .unwrap();
         config.spec.runtime.cmd = Some(vec!["bash".to_string()]);
-        config.set_background_command(Vec::new());
+        let mut patch = SandboxConfigPatch::new();
+        patch.set_background_command(Vec::new());
+        patch.apply_to(&mut config);
 
         let rendered = render_args(&config);
 
@@ -3560,7 +3570,13 @@ mod tests {
     async fn test_agent_socket_candidates_follow_explicit_local_backend_paths() {
         let temp = tempdir().unwrap();
         let home = temp.path().join("msb-home");
-        let backend = LocalBackend::builder().home(&home).build().await.unwrap();
+        let backend = LocalBackend::builder()
+            .config_path(home.join("config.json"))
+            .managed_config_path(home.join("managed.json"))
+            .home(&home)
+            .build()
+            .await
+            .unwrap();
 
         let candidates =
             super::sandbox_agent_socket_path_candidates_for(&backend, "sdk-socket-test");
@@ -3608,7 +3624,13 @@ mod tests {
         #[cfg(not(unix))]
         let temp = tempfile::Builder::new().prefix("msb").tempdir().unwrap();
         let home = temp.path().join("msb-home");
-        let backend = LocalBackend::builder().home(&home).build().await.unwrap();
+        let backend = LocalBackend::builder()
+            .config_path(home.join("config.json"))
+            .managed_config_path(home.join("managed.json"))
+            .home(&home)
+            .build()
+            .await
+            .unwrap();
 
         let resolved =
             super::resolve_sandbox_agent_socket_path_for(&backend, "sdk-socket-test").unwrap();
@@ -4448,6 +4470,8 @@ mod tests {
         std::fs::create_dir_all(&volumes_dir).unwrap();
         std::fs::write(volumes_dir.join("broken"), b"not a directory").unwrap();
         let local = LocalBackend::builder()
+            .config_path(home.join("config.json"))
+            .managed_config_path(home.join("managed.json"))
             .home(&home)
             .volumes_dir(&volumes_dir)
             .build()
@@ -4483,6 +4507,8 @@ mod tests {
         let home = temp.path().join("home");
         let volumes_dir = temp.path().join("volumes");
         let local = LocalBackend::builder()
+            .config_path(home.join("config.json"))
+            .managed_config_path(home.join("managed.json"))
             .home(&home)
             .volumes_dir(&volumes_dir)
             .build()
@@ -4525,6 +4551,8 @@ mod tests {
     async fn test_resolve_named_volumes_recovers_disk_metadata_from_store() {
         let temp = tempdir().unwrap();
         let local = LocalBackend::builder()
+            .config_path(temp.path().join("config.json"))
+            .managed_config_path(temp.path().join("managed.json"))
             .home(temp.path())
             .build()
             .await
@@ -4584,6 +4612,8 @@ mod tests {
     async fn test_existing_named_volume_mode_does_not_validate_default_metadata() {
         let temp = tempdir().unwrap();
         let local = LocalBackend::builder()
+            .config_path(temp.path().join("config.json"))
+            .managed_config_path(temp.path().join("managed.json"))
             .home(temp.path())
             .build()
             .await

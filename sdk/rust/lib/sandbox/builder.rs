@@ -6,7 +6,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use microsandbox_image::{PullProgressHandle, RegistryAuth};
+use microsandbox_image::{ImageConfig, PullProgressHandle, PullProgressSender, RegistryAuth};
 #[cfg(feature = "net")]
 use microsandbox_network::builder::{NetworkBuilder, SecretBuilder};
 #[cfg(feature = "net")]
@@ -14,14 +14,15 @@ use microsandbox_network::policy::Rule;
 #[cfg(feature = "net")]
 use microsandbox_network::{OutboundProxyBuilder, OutboundProxyConfig};
 use microsandbox_types::{
-    CpuPlacement, EnvVar, PullPolicy, SandboxConfigPatch, VsockRouteSpec, VsockSocketType,
+    CpuPlacement, EnvVar, PullPolicy, SandboxSpecPatch, VsockRouteSpec, VsockSocketType,
 };
 #[cfg(feature = "net")]
 use microsandbox_types::{PortProtocol, PublishedPortSpec};
 
+use super::Sandbox;
 use super::{
     SandboxSpec,
-    config::{SandboxConfig, sandbox_log_level_from_runtime},
+    config::{SandboxConfig, SandboxConfigPatch, sandbox_log_level_from_runtime},
     exec::{Rlimit, RlimitResource},
     init::{HandoffInit, InitOptionsBuilder},
     types::{
@@ -29,6 +30,9 @@ use super::{
         RootDiskBuilder, RootfsSource, SecurityProfile, VolumeMount,
     },
 };
+use crate::backend::default_backend;
+use crate::config::layers::BackendConfig;
+use crate::runtime::SpawnMode;
 use crate::{
     LogLevel, MicrosandboxError, MicrosandboxResult, Operation, UnsupportedReason, size::Mebibytes,
 };
@@ -39,11 +43,10 @@ use crate::{
 
 /// Builder for constructing a [`SandboxConfig`] with a fluent API.
 pub struct SandboxBuilder {
-    config: SandboxConfig,
+    /// Per-sandbox configuration assembled by file, CLI, and SDK inputs.
+    config: SandboxConfigPatch,
     detached: bool,
     build_error: Option<crate::MicrosandboxError>,
-    max_cpus_explicit: bool,
-    max_memory_explicit: bool,
     /// Raw script snippets supplied through construction patches. They are materialized only when
     /// building so later shell overrides determine their shebang.
     config_scripts: BTreeMap<String, String>,
@@ -92,61 +95,28 @@ impl SandboxBuilder {
     ///
     /// The name must be unique among existing sandboxes (unless
     /// [`replace`](Self::replace) is set) and no longer than 128 UTF-8 bytes.
-    /// Built-in defaults are applied first, followed by the active global `config.json`.
+    /// Defaults and managed overrides come from the backend active when [`build`](Self::build) runs.
     pub fn new(name: impl Into<String>) -> Self {
-        // Start with the hardcoded sandbox defaults.
-        let mut config = SandboxConfig::default();
-        config.spec.name = name.into();
+        // Builder calls accumulate one patch for final configuration resolution.
+        // SDK env() appends preserve order and duplicates; sparse overlays still merge by key.
+        let patch = SandboxSpecPatch::new()
+            .name(name.into())
+            .replace_env(Vec::new());
+        let config = SandboxConfigPatch::new().spec(patch);
 
-        let builder = Self {
+        Self {
             config,
             detached: false,
             build_error: None,
-            max_cpus_explicit: false,
-            max_memory_explicit: false,
             config_scripts: BTreeMap::new(),
             pending_snapshot: None,
             pending_snapshot_from_config: false,
-        };
-
-        // Overlay the global `config.json` defaults on the hardcoded defaults.
-        builder.apply_global_config()
+        }
     }
 
     /// Overlay sparse sandbox configuration on the hardcoded and global defaults.
     pub fn overlay(mut self, patch: SandboxConfigPatch) -> Self {
-        // Overlay caller-provided sandbox fields on the hardcoded and global defaults.
-        patch.apply_to(&mut self.config.spec);
-        self
-    }
-
-    /// Load and apply defaults from the active global `config.json`.
-    fn apply_global_config(mut self) -> Self {
-        let backend = crate::backend::default_backend();
-        let Some(local) = backend.as_local() else {
-            return self;
-        };
-        let config = local.config();
-        if let Err(error) = config.validate_sandbox_defaults() {
-            self.build_error = Some(error);
-            return self;
-        }
-
-        let defaults = &config.sandbox_defaults;
-        self.config.spec.resources.cpus = defaults.cpus;
-        self.config.spec.resources.max_cpus = defaults.cpus;
-        self.config.spec.resources.memory_mib = defaults.memory_mib;
-        self.config.spec.resources.max_memory_mib = defaults.memory_mib;
-        self.config.spec.resources.cpu_placement = defaults.cpu_placement;
-        self.config.spec.resources.placement_profile = defaults.placement_profile.clone();
-        self.config.spec.resources.thp = defaults.thp;
-        self.config.spec.runtime.shell = Some(defaults.shell.clone());
-        self.config.spec.runtime.workdir = defaults.workdir.clone();
-        self.config.spec.runtime.metrics_sample_interval_ms = defaults
-            .metrics_sample_interval_ms
-            .map(std::num::NonZero::get);
-        self.config.spec.runtime.disable_metrics_sample = defaults.disable_metrics_sample;
-        self.config.spec.runtime.log_level = config.log_level.map(sandbox_log_level_from_runtime);
+        self.config.overlay_mut(patch);
         self
     }
 
@@ -181,7 +151,9 @@ impl SandboxBuilder {
             self.pending_snapshot_from_config = false;
         }
         match image.into_rootfs_source() {
-            Ok(rootfs) => self.config.spec.image = rootfs,
+            Ok(rootfs) => {
+                self.config.spec.image = Some(rootfs);
+            }
             Err(e) => {
                 if self.build_error.is_none() {
                     self.build_error = Some(e);
@@ -203,7 +175,9 @@ impl SandboxBuilder {
             self.pending_snapshot_from_config = false;
         }
         match f(ImageBuilder::new()).build() {
-            Ok(rootfs) => self.config.spec.image = rootfs,
+            Ok(rootfs) => {
+                self.config.spec.image = Some(rootfs);
+            }
             Err(e) => {
                 if self.build_error.is_none() {
                     self.build_error = Some(e);
@@ -235,7 +209,7 @@ impl SandboxBuilder {
     /// Apply a CLI-selected snapshot after discarding a lower-precedence configured image.
     #[doc(hidden)]
     pub fn override_snapshot(mut self, snapshot: impl Into<String>) -> Self {
-        self.config.spec.image = RootfsSource::oci("");
+        self.config.spec.image = Some(RootfsSource::oci(""));
         self.pending_snapshot = Some(snapshot.into());
         self.pending_snapshot_from_config = false;
         self
@@ -274,9 +248,11 @@ impl SandboxBuilder {
                 return self;
             }
         };
-        match &mut self.config.spec.image {
+        let mut image = self.config.spec.image.clone().unwrap_or_default();
+        match &mut image {
             RootfsSource::Oci(oci) if !oci.reference.is_empty() => {
                 oci.root_disk = Some(root_disk);
+                self.config.spec.image = Some(image);
             }
             RootfsSource::Oci(_) => {
                 if self.build_error.is_none() {
@@ -304,10 +280,11 @@ impl SandboxBuilder {
 
     /// Allocate virtual CPUs for this sandbox (default: 1).
     pub fn cpus(mut self, count: u8) -> Self {
-        self.config.spec.resources.cpus = count;
-        if !self.max_cpus_explicit || self.config.spec.resources.max_cpus < count {
-            self.config.spec.resources.max_cpus = count;
+        let resources = &mut self.config.spec.resources;
+        if resources.max_cpus.is_some_and(|max| max < count) {
+            resources.max_cpus = Some(count);
         }
+        resources.cpus = Some(count);
         self
     }
 
@@ -317,20 +294,19 @@ impl SandboxBuilder {
     /// resize support lands. It does not increase the effective vCPU count by
     /// itself; use [`cpus`](Self::cpus) for the initial effective count.
     pub fn max_cpus(mut self, count: u8) -> Self {
-        self.config.spec.resources.max_cpus = count;
-        self.max_cpus_explicit = true;
+        self.config.spec.resources.max_cpus = Some(count);
         self
     }
 
     /// Select how vCPU threads are placed on host processors.
     pub fn cpu_placement(mut self, policy: CpuPlacement) -> Self {
-        self.config.spec.resources.cpu_placement = policy;
+        self.config.spec.resources.cpu_placement = Some(policy);
         self
     }
 
     /// Select a host-defined placement profile by name.
     pub fn placement_profile(mut self, profile: impl Into<String>) -> Self {
-        self.config.spec.resources.placement_profile = Some(profile.into());
+        self.config.spec.resources.placement_profile = Some(Some(profile.into()));
         self
     }
 
@@ -344,10 +320,11 @@ impl SandboxBuilder {
     /// ```
     pub fn memory(mut self, size: impl Into<Mebibytes>) -> Self {
         let memory_mib = size.into().as_u32();
-        self.config.spec.resources.memory_mib = memory_mib;
-        if !self.max_memory_explicit || self.config.spec.resources.max_memory_mib < memory_mib {
-            self.config.spec.resources.max_memory_mib = memory_mib;
+        let resources = &mut self.config.spec.resources;
+        if resources.max_memory_mib.is_some_and(|max| max < memory_mib) {
+            resources.max_memory_mib = Some(memory_mib);
         }
+        resources.memory_mib = Some(memory_mib);
         self
     }
 
@@ -357,8 +334,7 @@ impl SandboxBuilder {
     /// It does not increase the effective guest memory by itself; use
     /// [`memory`](Self::memory) for the initial effective memory.
     pub fn max_memory(mut self, size: impl Into<Mebibytes>) -> Self {
-        self.config.spec.resources.max_memory_mib = size.into().as_u32();
-        self.max_memory_explicit = true;
+        self.config.spec.resources.max_memory_mib = Some(size.into().as_u32());
         self
     }
 
@@ -368,7 +344,7 @@ impl SandboxBuilder {
     /// request them. `Always` can improve large anonymous-memory workloads at
     /// the cost of coarser memory allocation, while `Never` disables THP.
     pub fn thp(mut self, policy: super::TransparentHugePagePolicy) -> Self {
-        self.config.spec.resources.thp = policy;
+        self.config.spec.resources.thp = Some(policy);
         self
     }
 
@@ -376,13 +352,13 @@ impl SandboxBuilder {
     ///
     /// This controls the verbosity of the `msb sandbox` process.
     pub fn log_level(mut self, level: LogLevel) -> Self {
-        self.config.spec.runtime.log_level = Some(sandbox_log_level_from_runtime(level));
+        self.config.spec.runtime.log_level = Some(Some(sandbox_log_level_from_runtime(level)));
         self
     }
 
     /// Disable runtime logs for this sandbox, even if a global default exists.
     pub fn quiet_logs(mut self) -> Self {
-        self.config.spec.runtime.log_level = None;
+        self.config.spec.runtime.log_level = Some(None);
         self
     }
 
@@ -396,7 +372,7 @@ impl SandboxBuilder {
 
     /// Force-disable metrics sampling regardless of `metrics_sample_interval`.
     pub fn disable_metrics_sample(mut self) -> Self {
-        self.config.spec.runtime.disable_metrics_sample = true;
+        self.config.spec.runtime.disable_metrics_sample = Some(true);
         self
     }
 
@@ -412,7 +388,7 @@ impl SandboxBuilder {
             return self;
         }
         self.config.spec.runtime.metrics_sample_interval_ms =
-            std::num::NonZero::new(ms as u64).map(std::num::NonZero::get);
+            Some(std::num::NonZero::new(ms as u64).map(std::num::NonZero::get));
         self
     }
 
@@ -421,14 +397,14 @@ impl SandboxBuilder {
     /// [`shell`](super::Sandbox::shell), and [`attach`](super::Sandbox::attach)
     /// unless overridden per-command.
     pub fn workdir(mut self, path: impl Into<String>) -> Self {
-        self.config.spec.runtime.workdir = Some(path.into());
+        self.config.spec.runtime.workdir = Some(Some(path.into()));
         self
     }
 
     /// Shell used by [`shell()`](super::Sandbox::shell) to interpret
     /// commands (default: `/bin/sh`).
     pub fn shell(mut self, shell: impl Into<String>) -> Self {
-        self.config.spec.runtime.shell = Some(shell.into());
+        self.config.spec.runtime.shell = Some(Some(shell.into()));
         self
     }
 
@@ -456,10 +432,10 @@ impl SandboxBuilder {
     ) -> Self {
         let builder = f(RegistryConfigBuilder::default());
         if let Some(auth) = builder.auth {
-            self.config.registry_auth = Some(auth);
+            self.config.registry_auth = Some(Some(auth));
         }
-        self.config.insecure = builder.insecure;
-        self.config.ca_certs = builder.ca_certs;
+        self.config.insecure = Some(builder.insecure);
+        self.config.ca_certs = Some(builder.ca_certs);
         self
     }
 
@@ -469,7 +445,7 @@ impl SandboxBuilder {
     /// assigns one; create fails when the slug is already taken. The local
     /// backend has no slugs and ignores this with a warning.
     pub fn slug(mut self, slug: impl Into<String>) -> Self {
-        self.config.slug = Some(slug.into());
+        self.config.slug = Some(Some(slug.into()));
         self
     }
 
@@ -486,7 +462,7 @@ impl SandboxBuilder {
     ///
     /// [`replace_with_timeout`]: Self::replace_with_timeout
     pub fn replace(mut self) -> Self {
-        self.config.replace_existing = true;
+        self.config.replace_existing = Some(true);
         self
     }
 
@@ -501,8 +477,8 @@ impl SandboxBuilder {
     /// seconds. An expired timeout does not surface an error — the
     /// existing sandbox is force-killed and `create()` proceeds.
     pub fn replace_with_timeout(mut self, timeout: std::time::Duration) -> Self {
-        self.config.replace_existing = true;
-        self.config.replace_with_timeout = timeout;
+        self.config.replace_existing = Some(true);
+        self.config.replace_with_timeout = Some(timeout);
         self
     }
 
@@ -617,7 +593,7 @@ impl SandboxBuilder {
 
     /// Set the pull policy for OCI images.
     pub fn pull_policy(mut self, policy: PullPolicy) -> Self {
-        self.config.spec.pull_policy = policy;
+        self.config.spec.pull_policy = Some(policy);
         self
     }
 
@@ -632,11 +608,11 @@ impl SandboxBuilder {
     /// ```
     #[cfg(feature = "net")]
     pub fn disable_network(mut self) -> Self {
-        match self.config.local_network_config() {
+        match self.local_network_config() {
             Ok(mut network) => {
                 network.enabled = false;
                 network.policy = microsandbox_network::policy::NetworkPolicy::none();
-                if let Err(err) = self.config.set_local_network_config(network)
+                if let Err(err) = self.set_local_network_config(network)
                     && self.build_error.is_none()
                 {
                     self.build_error = Some(err);
@@ -662,7 +638,7 @@ impl SandboxBuilder {
     /// ```
     #[cfg(feature = "net")]
     pub fn network(mut self, f: impl FnOnce(NetworkBuilder) -> NetworkBuilder) -> Self {
-        let network = match self.config.local_network_config() {
+        let network = match self.local_network_config() {
             Ok(network) => network,
             Err(err) => {
                 if self.build_error.is_none() {
@@ -673,7 +649,7 @@ impl SandboxBuilder {
         };
         match f(NetworkBuilder::from_config(network)).build() {
             Ok(net) => {
-                if let Err(err) = self.config.set_local_network_config(net)
+                if let Err(err) = self.set_local_network_config(net)
                     && self.build_error.is_none()
                 {
                     self.build_error = Some(err);
@@ -711,10 +687,10 @@ impl SandboxBuilder {
             }
         };
 
-        match self.config.local_network_config() {
+        match self.local_network_config() {
             Ok(mut network) => {
                 network.outbound_proxy = Some(proxy);
-                if let Err(err) = self.config.set_local_network_config(network)
+                if let Err(err) = self.set_local_network_config(network)
                     && self.build_error.is_none()
                 {
                     self.build_error = Some(err);
@@ -733,11 +709,11 @@ impl SandboxBuilder {
     #[cfg(feature = "net")]
     #[doc(hidden)]
     pub fn prepend_network_policy_rules(mut self, mut rules: Vec<Rule>) -> Self {
-        match self.config.local_network_config() {
+        match self.local_network_config() {
             Ok(mut network) => {
                 rules.append(&mut network.policy.rules);
                 network.policy.rules = rules;
-                if let Err(error) = self.config.set_local_network_config(network)
+                if let Err(error) = self.set_local_network_config(network)
                     && self.build_error.is_none()
                 {
                     self.build_error = Some(error);
@@ -787,12 +763,17 @@ impl SandboxBuilder {
         guest_port: u16,
         protocol: PortProtocol,
     ) {
-        self.config.spec.network.ports.push(PublishedPortSpec {
-            host_port,
-            guest_port,
-            protocol,
-            host_bind: host_bind.to_string(),
-        });
+        self.config
+            .spec
+            .network
+            .ports
+            .get_or_insert_default()
+            .push(PublishedPortSpec {
+                host_port,
+                guest_port,
+                protocol,
+                host_bind: host_bind.to_string(),
+            });
     }
 
     /// Publish a UDP port directly on the sandbox builder.
@@ -826,11 +807,16 @@ impl SandboxBuilder {
     /// Guest applications connect directly to host CID 2 and `port`. No
     /// in-guest proxy or agentd integration is required.
     pub fn vsock(mut self, host_path: impl AsRef<Path>, port: u32) -> Self {
-        self.config.spec.vsock.routes.push(VsockRouteSpec {
-            host_socket: host_path.as_ref().to_path_buf(),
-            port,
-            socket_type: VsockSocketType::Stream,
-        });
+        self.config
+            .spec
+            .vsock
+            .routes
+            .get_or_insert_default()
+            .push(VsockRouteSpec {
+                host_socket: host_path.as_ref().to_path_buf(),
+                port,
+                socket_type: VsockSocketType::Stream,
+            });
         self
     }
 
@@ -840,17 +826,27 @@ impl SandboxBuilder {
     /// best-effort, matching Unix and vsock datagram semantics. Windows does
     /// not support datagram routes.
     pub fn vsock_dgram(mut self, host_path: impl AsRef<Path>, port: u32) -> Self {
-        self.config.spec.vsock.routes.push(VsockRouteSpec {
-            host_socket: host_path.as_ref().to_path_buf(),
-            port,
-            socket_type: VsockSocketType::Dgram,
-        });
+        self.config
+            .spec
+            .vsock
+            .routes
+            .get_or_insert_default()
+            .push(VsockRouteSpec {
+                host_socket: host_path.as_ref().to_path_buf(),
+                port,
+                socket_type: VsockSocketType::Dgram,
+            });
         self
     }
 
     /// Add a fully specified guest-to-host vsock route.
     pub fn vsock_route(mut self, route: VsockRouteSpec) -> Self {
-        self.config.spec.vsock.routes.push(route);
+        self.config
+            .spec
+            .vsock
+            .routes
+            .get_or_insert_default()
+            .push(route);
         self
     }
 
@@ -879,13 +875,13 @@ impl SandboxBuilder {
         mut self,
         entry: microsandbox_network::secrets::config::SecretEntry,
     ) -> Self {
-        match self.config.local_network_config() {
+        match self.local_network_config() {
             Ok(mut network) => {
                 network.secrets.secrets.push(entry);
                 if !network.tls.enabled {
                     network.tls.enabled = true;
                 }
-                if let Err(err) = self.config.set_local_network_config(network)
+                if let Err(err) = self.set_local_network_config(network)
                     && self.build_error.is_none()
                 {
                     self.build_error = Some(err);
@@ -945,7 +941,7 @@ impl SandboxBuilder {
             }
             return self;
         }
-        self.config.spec.env.push(EnvVar::new(key, value));
+        self.config.spec.get_env_mut().push(EnvVar::new(key, value));
         self
     }
 
@@ -962,7 +958,10 @@ impl SandboxBuilder {
 
     /// Attach a label (`key`/`value`) to the sandbox for attribution.
     pub fn label(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
-        self.config.spec.labels.insert(key.into(), value.into());
+        self.config
+            .spec
+            .get_labels_mut()
+            .insert(key.into(), value.into());
         self
     }
 
@@ -972,7 +971,7 @@ impl SandboxBuilder {
         labels: impl IntoIterator<Item = (impl Into<String>, impl Into<String>)>,
     ) -> Self {
         for (k, v) in labels {
-            self.config.spec.labels.insert(k.into(), v.into());
+            self = self.label(k, v);
         }
         self
     }
@@ -983,21 +982,29 @@ impl SandboxBuilder {
     /// long-lived daemons inherit the raised baseline without needing explicit
     /// per-exec rlimits.
     pub fn rlimit(mut self, resource: RlimitResource, limit: u64) -> Self {
-        self.config.spec.rlimits.push(Rlimit {
-            resource,
-            soft: limit,
-            hard: limit,
-        });
+        self.config
+            .spec
+            .rlimits
+            .get_or_insert_default()
+            .push(Rlimit {
+                resource,
+                soft: limit,
+                hard: limit,
+            });
         self
     }
 
     /// Set a sandbox-wide resource limit with different soft/hard values.
     pub fn rlimit_range(mut self, resource: RlimitResource, soft: u64, hard: u64) -> Self {
-        self.config.spec.rlimits.push(Rlimit {
-            resource,
-            soft,
-            hard,
-        });
+        self.config
+            .spec
+            .rlimits
+            .get_or_insert_default()
+            .push(Rlimit {
+                resource,
+                soft,
+                hard,
+            });
         self
     }
 
@@ -1010,7 +1017,7 @@ impl SandboxBuilder {
         self.config
             .spec
             .runtime
-            .scripts
+            .get_scripts_mut()
             .insert(name, content.into());
         self
     }
@@ -1026,7 +1033,7 @@ impl SandboxBuilder {
             self.config
                 .spec
                 .runtime
-                .scripts
+                .get_scripts_mut()
                 .insert(name, content.into());
         }
         self
@@ -1044,7 +1051,7 @@ impl SandboxBuilder {
     /// Note: removing an ephemeral sandbox also drops its logs and captured
     /// output, since those live under the sandbox directory.
     pub fn ephemeral(mut self, ephemeral: bool) -> Self {
-        self.config.spec.lifecycle.ephemeral = ephemeral;
+        self.config.spec.lifecycle.ephemeral = Some(ephemeral);
         self
     }
 
@@ -1063,7 +1070,7 @@ impl SandboxBuilder {
 
     /// Set the in-guest security profile.
     pub fn security(mut self, profile: SecurityProfile) -> Self {
-        self.config.spec.security_profile = profile;
+        self.config.spec.security_profile = Some(profile);
         self
     }
 
@@ -1072,7 +1079,7 @@ impl SandboxBuilder {
     /// Managed backends may replace this request with a platform-owned profile
     /// before launch. The cloud create wire does not transmit this value.
     pub fn deployment_profile(mut self, profile: DeploymentProfile) -> Self {
-        self.config.spec.deployment_profile = profile;
+        self.config.spec.deployment_profile = Some(profile);
         self
     }
 
@@ -1090,7 +1097,9 @@ impl SandboxBuilder {
         f: impl FnOnce(MountBuilder) -> MountBuilder,
     ) -> Self {
         match f(MountBuilder::new(guest_path)).build() {
-            Ok(mount) => self.config.spec.mounts.push(mount),
+            Ok(mount) => {
+                self.config.spec.mounts.get_or_insert_default().push(mount);
+            }
             Err(e) => {
                 if self.build_error.is_none() {
                     self.build_error = Some(e);
@@ -1117,20 +1126,21 @@ impl SandboxBuilder {
         self.config
             .spec
             .patches
+            .get_or_insert_default()
             .extend(f(PatchBuilder::new()).build());
         self
     }
 
     /// Add a single patch directly.
     pub fn add_patch(mut self, patch: Patch) -> Self {
-        self.config.spec.patches.push(patch);
+        self.config.spec.patches.get_or_insert_default().push(patch);
         self
     }
 
     /// Add one already-materialized volume mount.
     #[doc(hidden)]
     pub fn add_volume_mount(mut self, mount: VolumeMount) -> Self {
-        self.config.spec.mounts.push(mount);
+        self.config.spec.mounts.get_or_insert_default().push(mount);
         self
     }
 
@@ -1163,8 +1173,8 @@ impl SandboxBuilder {
         image_manifest_digest: impl Into<String>,
         upper_source: impl Into<std::path::PathBuf>,
     ) -> Self {
-        self.config.manifest_digest = Some(image_manifest_digest.into());
-        self.config.snapshot_upper_source = Some(upper_source.into());
+        self.config.manifest_digest = Some(Some(image_manifest_digest.into()));
+        self.config.snapshot_upper_source = Some(Some(upper_source.into()));
         self
     }
 
@@ -1173,12 +1183,54 @@ impl SandboxBuilder {
     /// If [`from_snapshot`](Self::from_snapshot) was called, the snapshot
     /// manifest is opened here and its pinned image reference, manifest
     /// digest, and upper-layer source path are populated onto the config.
-    /// Backend-owned defaults were seeded before explicit builder methods were applied.
+    /// Using the active backend's cached configuration, global defaults, accumulated
+    /// CLI/SDK patches, and managed overrides are overlaid in that order, then validated.
+    /// A concrete config cannot retain the distinction between an omitted and cleared workdir:
+    /// on local creation, `None` inherits global or image defaults. Use [`create`](Self::create)
+    /// directly to preserve explicit workdir clears through image resolution.
     pub async fn build(mut self) -> MicrosandboxResult<SandboxConfig> {
-        self.materialize_config_scripts();
-        self.resolve_pending().await?;
-        self.validate()?;
-        Ok(self.config)
+        let backend = default_backend();
+        if let Some(cloud) = backend.as_cloud() {
+            return cloud.build_sandbox_config(self).await;
+        }
+        self.prepare().await?;
+        self.finish(BackendConfig::for_backend(backend.as_ref()), None)
+    }
+
+    pub(crate) fn finish(
+        mut self,
+        backend_config: Option<&BackendConfig>,
+        image_metadata: Option<&ImageConfig>,
+    ) -> MicrosandboxResult<SandboxConfig> {
+        let mut sandbox = SandboxConfig::default();
+        sandbox.apply_layers(
+            backend_config,
+            std::mem::take(&mut self.config),
+            image_metadata,
+        );
+
+        self.materialize_config_scripts(&mut sandbox);
+        self.validate(&mut sandbox)?;
+        Ok(sandbox)
+    }
+
+    #[cfg(feature = "net")]
+    fn local_network_config(
+        &self,
+    ) -> MicrosandboxResult<microsandbox_network::config::NetworkConfig> {
+        let mut network = super::NetworkSpec::default();
+        self.config.spec.network.clone().apply_to(&mut network);
+        super::config::network_config_from_spec(&network)
+    }
+
+    #[cfg(feature = "net")]
+    fn set_local_network_config(
+        &mut self,
+        network: microsandbox_network::config::NetworkConfig,
+    ) -> MicrosandboxResult<()> {
+        let network = super::config::network_spec_from_config(&network)?;
+        self.config.spec.network = network.into();
+        Ok(())
     }
 
     /// Apply raw scripts loaded from configuration after the final shell is known.
@@ -1188,8 +1240,8 @@ impl SandboxBuilder {
         self
     }
 
-    fn materialize_config_scripts(&mut self) {
-        let shell = self.config.spec.runtime.shell.as_deref();
+    fn materialize_config_scripts(&mut self, sandbox: &mut SandboxConfig) {
+        let shell = sandbox.spec.runtime.shell.as_deref();
         for (name, body) in std::mem::take(&mut self.config_scripts) {
             if let Err(message) = validate_config_script_name(&name) {
                 if self.build_error.is_none() {
@@ -1197,7 +1249,7 @@ impl SandboxBuilder {
                 }
                 continue;
             }
-            self.config
+            sandbox
                 .spec
                 .runtime
                 .scripts
@@ -1205,9 +1257,22 @@ impl SandboxBuilder {
         }
     }
 
+    /// Resolve deferred builder inputs without materializing sandbox configuration.
+    /// The backend borrows only the pending fields needed before image resolution.
+    pub(crate) async fn prepare(&mut self) -> MicrosandboxResult<&mut SandboxConfigPatch> {
+        if let Some(error) = self.build_error.take() {
+            return Err(error);
+        }
+        for name in self.config_scripts.keys() {
+            validate_config_script_name(name).map_err(MicrosandboxError::InvalidConfig)?;
+        }
+        self.resolve_pending().await?;
+        Ok(&mut self.config)
+    }
+
     /// Open the deferred snapshot artifact and copy its pinned image
     /// reference, manifest digest, and upper-layer source path into the
-    /// config. Internal — driven by [`build`](Self::build).
+    /// config. Driven by build and create preparation.
     async fn resolve_pending(&mut self) -> MicrosandboxResult<()> {
         let Some(snapshot_ref) = self.pending_snapshot.take() else {
             return Ok(());
@@ -1262,27 +1327,27 @@ impl SandboxBuilder {
         }
         let snap_ref = snap.manifest().image.reference.clone();
 
-        self.config.spec.image = RootfsSource::oci(snap_ref);
-        self.config.manifest_digest = Some(snap.manifest().image.manifest_digest.clone());
-        self.config.snapshot_upper_source = Some(snap.path().join(&file_state.upper.file));
+        self.config.spec.image = Some(RootfsSource::oci(snap_ref));
+        self.config.manifest_digest = Some(Some(snap.manifest().image.manifest_digest.clone()));
+        self.config.snapshot_upper_source = Some(Some(snap.path().join(&file_state.upper.file)));
         Ok(())
     }
 
     fn has_explicit_rootfs_source(&self) -> bool {
-        match &self.config.spec.image {
-            RootfsSource::Oci(oci) => !oci.reference.is_empty() || oci.root_disk.is_some(),
-            RootfsSource::Bind { path, .. } => !path.as_os_str().is_empty(),
-            RootfsSource::DiskImage { .. } => true,
+        match self.config.spec.image.as_ref() {
+            Some(RootfsSource::Oci(oci)) => !oci.reference.is_empty() || oci.root_disk.is_some(),
+            Some(RootfsSource::Bind { path, .. }) => !path.as_os_str().is_empty(),
+            Some(RootfsSource::DiskImage { .. }) => true,
+            None => false,
         }
     }
 
     /// Create the sandbox. Boots the VM with agentd ready.
-    pub async fn create(self) -> MicrosandboxResult<super::Sandbox> {
+    pub async fn create(self) -> MicrosandboxResult<Sandbox> {
         if self.detached {
             return self.create_detached().await;
         }
-        let config = self.build().await?;
-        super::Sandbox::create(config).await
+        self.create_with_mode(SpawnMode::Attached, None).await
     }
 
     /// Connect to the persisted sandbox with this name, or create it.
@@ -1291,16 +1356,16 @@ impl SandboxBuilder {
     /// are connected and stopped ones are started. Builder configuration is
     /// used only when this call creates the sandbox. A concurrent creator is
     /// handled by connecting to and converging on the winner.
-    pub async fn connect_or_create(self) -> MicrosandboxResult<super::Sandbox> {
-        if self.config.replace_existing {
+    pub async fn connect_or_create(self) -> MicrosandboxResult<Sandbox> {
+        if self.config.replace_existing.unwrap_or(false) {
             return Err(MicrosandboxError::InvalidConfig(
                 "connect_or_create cannot be combined with replace_existing".to_string(),
             ));
         }
 
-        let name = self.config.spec.name.clone();
+        let name = self.config.spec.name.clone().unwrap_or_default();
         let detached = self.detached;
-        match super::Sandbox::get(&name).await {
+        match Sandbox::get(&name).await {
             Ok(handle) => return handle.connect_or_start_with_mode(detached).await,
             Err(MicrosandboxError::SandboxNotFound(_)) => {}
             Err(error) => return Err(error),
@@ -1309,7 +1374,7 @@ impl SandboxBuilder {
         match self.create().await {
             Ok(sandbox) => Ok(sandbox),
             Err(MicrosandboxError::SandboxAlreadyExists(_)) => {
-                super::Sandbox::get(&name)
+                Sandbox::get(&name)
                     .await?
                     .connect_or_start_with_mode(detached)
                     .await
@@ -1319,9 +1384,8 @@ impl SandboxBuilder {
     }
 
     /// Create the sandbox for detached/background use.
-    pub async fn create_detached(self) -> MicrosandboxResult<super::Sandbox> {
-        let config = self.build().await?;
-        super::Sandbox::create_detached(config).await
+    pub async fn create_detached(self) -> MicrosandboxResult<Sandbox> {
+        self.create_with_mode(SpawnMode::Detached, None).await
     }
 
     /// Create the sandbox with pull progress reporting.
@@ -1336,47 +1400,18 @@ impl SandboxBuilder {
     /// synchronous.
     pub fn create_with_pull_progress(
         self,
-    ) -> crate::MicrosandboxResult<(
+    ) -> MicrosandboxResult<(
         PullProgressHandle,
-        tokio::task::JoinHandle<crate::MicrosandboxResult<super::Sandbox>>,
+        tokio::task::JoinHandle<crate::MicrosandboxResult<Sandbox>>,
     )> {
         let (handle, sender) = microsandbox_image::progress_channel();
         let task = tokio::spawn(async move {
-            let detached = self.detached;
-            let config = self.build().await?;
-            let backend = crate::backend::default_backend();
-            match backend.kind() {
-                crate::backend::BackendKind::Local => {
-                    let mode = if detached {
-                        crate::runtime::SpawnMode::Detached
-                    } else {
-                        crate::runtime::SpawnMode::Attached
-                    };
-                    // Pull progress is a local-only extension that is not part of
-                    // SandboxBackend::create, so dispatch to the local backend's
-                    // canonical create entry point explicitly.
-                    let local = backend
-                        .as_local()
-                        .ok_or_else(|| MicrosandboxError::local_only(Operation::SandboxCreate))?;
-                    local
-                        .create_sandbox(backend.clone(), config, mode, Some(sender))
-                        .await
-                }
-                crate::backend::BackendKind::Cloud => {
-                    drop(sender);
-                    if detached {
-                        backend
-                            .sandboxes()
-                            .create_detached(backend.clone(), config)
-                            .await
-                    } else {
-                        backend
-                            .sandboxes()
-                            .create(backend.clone(), config, true)
-                            .await
-                    }
-                }
-            }
+            let mode = if self.detached {
+                SpawnMode::Detached
+            } else {
+                SpawnMode::Attached
+            };
+            self.create_with_mode(mode, Some(sender)).await
         });
         Ok((handle, task))
     }
@@ -1385,99 +1420,104 @@ impl SandboxBuilder {
     /// mode so the sandbox survives after the creating process exits.
     pub fn create_detached_with_pull_progress(
         self,
-    ) -> crate::MicrosandboxResult<(
+    ) -> MicrosandboxResult<(
         PullProgressHandle,
-        tokio::task::JoinHandle<crate::MicrosandboxResult<super::Sandbox>>,
+        tokio::task::JoinHandle<crate::MicrosandboxResult<Sandbox>>,
     )> {
         let (handle, sender) = microsandbox_image::progress_channel();
         let task = tokio::spawn(async move {
-            let config = self.build().await?;
-            let backend = crate::backend::default_backend();
-            match backend.kind() {
-                crate::backend::BackendKind::Local => {
-                    let local = backend
-                        .as_local()
-                        .ok_or_else(|| MicrosandboxError::local_only(Operation::SandboxCreate))?;
-                    local
-                        .create_sandbox(
-                            backend.clone(),
-                            config,
-                            crate::runtime::SpawnMode::Detached,
-                            Some(sender),
-                        )
-                        .await
-                }
-                crate::backend::BackendKind::Cloud => {
-                    drop(sender);
-                    backend
-                        .sandboxes()
-                        .create_detached(backend.clone(), config)
-                        .await
-                }
-            }
+            self.create_with_mode(SpawnMode::Detached, Some(sender))
+                .await
         });
         Ok((handle, task))
     }
-}
 
+    async fn create_with_mode(
+        mut self,
+        mode: SpawnMode,
+        progress: Option<PullProgressSender>,
+    ) -> MicrosandboxResult<Sandbox> {
+        let backend = default_backend();
+        if let Some(local) = backend.as_local() {
+            return local
+                .create_sandbox(backend.clone(), self, mode, progress)
+                .await;
+        }
+
+        // Cloud doesn't transmit progress information yet.
+        drop(progress);
+        if let Some(cloud) = backend.as_cloud() {
+            return cloud.create_from_builder(backend.clone(), self, true).await;
+        }
+        self.prepare().await?;
+
+        // Custom backends receive a concrete request and own their configuration behavior.
+        let sandboxes = backend.sandboxes();
+        let config = self.finish(None, None)?;
+        match mode {
+            SpawnMode::Attached => sandboxes.create(backend.clone(), config, true).await,
+            SpawnMode::Detached => sandboxes.create_detached(backend.clone(), config).await,
+        }
+    }
+}
 impl SandboxBuilder {
     /// Validate the configuration before building.
-    fn validate(&mut self) -> MicrosandboxResult<()> {
+    fn validate(&mut self, sandbox: &mut SandboxConfig) -> MicrosandboxResult<()> {
         if let Some(err) = self.build_error.take() {
             return Err(err);
         }
 
-        if self.config.spec.name.is_empty() {
+        if sandbox.spec.name.is_empty() {
             return Err(crate::MicrosandboxError::InvalidConfig(
                 "sandbox name is required".into(),
             ));
         }
-        super::validate_sandbox_name(&self.config.spec.name)?;
-        super::validate_hostname(self.config.spec.runtime.hostname.as_deref())?;
-        if self.config.spec.resources.cpus == 0 {
+        super::validate_sandbox_name(&sandbox.spec.name)?;
+        super::validate_hostname(sandbox.spec.runtime.hostname.as_deref())?;
+        if sandbox.spec.resources.cpus == 0 {
             return Err(crate::MicrosandboxError::InvalidConfig(
                 "cpus must be greater than 0".into(),
             ));
         }
-        if self.config.spec.resources.memory_mib == 0 {
+        if sandbox.spec.resources.memory_mib == 0 {
             return Err(crate::MicrosandboxError::InvalidConfig(
                 "memory must be greater than 0".into(),
             ));
         }
-        if self.config.spec.resources.max_cpus == 0 {
+        if sandbox.spec.resources.max_cpus == 0 {
             return Err(crate::MicrosandboxError::InvalidConfig(
                 "max_cpus must be greater than 0".into(),
             ));
         }
-        if self.config.spec.resources.max_memory_mib == 0 {
+        if sandbox.spec.resources.max_memory_mib == 0 {
             return Err(crate::MicrosandboxError::InvalidConfig(
                 "max_memory must be greater than 0".into(),
             ));
         }
-        if self.config.spec.resources.max_cpus < self.config.spec.resources.cpus {
+        if sandbox.spec.resources.max_cpus < sandbox.spec.resources.cpus {
             return Err(crate::MicrosandboxError::InvalidConfig(format!(
                 "max_cpus {} must be greater than or equal to cpus {}",
-                self.config.spec.resources.max_cpus, self.config.spec.resources.cpus
+                sandbox.spec.resources.max_cpus, sandbox.spec.resources.cpus
             )));
         }
-        if self.config.spec.resources.max_memory_mib < self.config.spec.resources.memory_mib {
+        if sandbox.spec.resources.max_memory_mib < sandbox.spec.resources.memory_mib {
             return Err(crate::MicrosandboxError::InvalidConfig(format!(
                 "max_memory {} MiB must be greater than or equal to memory {} MiB",
-                self.config.spec.resources.max_memory_mib, self.config.spec.resources.memory_mib
+                sandbox.spec.resources.max_memory_mib, sandbox.spec.resources.memory_mib
             )));
         }
 
         // Check that image is set (non-empty OCI string or Bind path).
-        match &self.config.spec.image {
+        match &sandbox.spec.image {
             RootfsSource::Oci(oci) if oci.reference.is_empty() => {
                 return Err(crate::MicrosandboxError::InvalidConfig(
                     "image source is required".into(),
                 ));
             }
             RootfsSource::Oci(oci) => {
-                self.validate_root_disk(oci.root_disk.as_ref())?;
+                Self::validate_root_disk(sandbox, oci.root_disk.as_ref())?;
             }
-            RootfsSource::DiskImage { .. } if !self.config.spec.patches.is_empty() => {
+            RootfsSource::DiskImage { .. } if !sandbox.spec.patches.is_empty() => {
                 return Err(crate::MicrosandboxError::InvalidConfig(
                     "patches are not compatible with disk image rootfs".into(),
                 ));
@@ -1485,7 +1525,7 @@ impl SandboxBuilder {
             _ => {}
         }
 
-        for rlimit in &self.config.spec.rlimits {
+        for rlimit in &sandbox.spec.rlimits {
             if rlimit.soft > rlimit.hard {
                 return Err(crate::MicrosandboxError::InvalidConfig(format!(
                     "rlimit {}: soft ({}) must not exceed hard ({})",
@@ -1496,14 +1536,14 @@ impl SandboxBuilder {
             }
         }
 
-        super::types::validate_volume_mounts(&mut self.config.spec.mounts)?;
-        super::validate_env(&self.config.spec.env)?;
-        super::validate_labels(&self.config.spec.labels)?;
-        self.validate_vsock_routes()?;
+        super::types::validate_volume_mounts(&mut sandbox.spec.mounts)?;
+        super::validate_env(&sandbox.spec.env)?;
+        super::validate_labels(&sandbox.spec.labels)?;
+        Self::validate_vsock_routes(sandbox)?;
 
         if let Err(error) = microsandbox_types::resolve_default_command(
-            self.config.spec.runtime.entrypoint.as_deref(),
-            self.config.spec.runtime.cmd.as_deref(),
+            sandbox.spec.runtime.entrypoint.as_deref(),
+            sandbox.spec.runtime.cmd.as_deref(),
             None,
         ) && !matches!(
             error,
@@ -1512,12 +1552,12 @@ impl SandboxBuilder {
             return Err(error.into());
         }
 
-        if let Some(spec) = &self.config.spec.init {
+        if let Some(spec) = &sandbox.spec.init {
             super::init::validate(spec)?;
         }
 
         #[cfg(feature = "net")]
-        self.config
+        sandbox
             .local_network_config()?
             .secrets
             .validate()
@@ -1534,7 +1574,7 @@ impl SandboxBuilder {
         // canonical path so symlinks and `./` prefixes don't bypass the
         // check.
         let mut seen: Vec<PathBuf> = Vec::new();
-        for mount in &self.config.spec.mounts {
+        for mount in &sandbox.spec.mounts {
             if let VolumeMount::DiskImage { host, .. } = mount {
                 let canonical = std::fs::canonicalize(host).map_err(|e| {
                     crate::MicrosandboxError::InvalidConfig(format!(
@@ -1556,9 +1596,9 @@ impl SandboxBuilder {
     }
 
     /// Validate the stable route key and the host resources it references.
-    fn validate_vsock_routes(&self) -> MicrosandboxResult<()> {
-        if self.config.spec.deployment_profile == DeploymentProfile::MultiTenant
-            && !self.config.spec.vsock.is_empty()
+    fn validate_vsock_routes(sandbox: &SandboxConfig) -> MicrosandboxResult<()> {
+        if sandbox.spec.deployment_profile == DeploymentProfile::MultiTenant
+            && !sandbox.spec.vsock.is_empty()
         {
             return Err(MicrosandboxError::InvalidConfig(
                 "host vsock routes are disabled for multi-tenant deployments".into(),
@@ -1567,7 +1607,7 @@ impl SandboxBuilder {
 
         let mut routes = HashSet::new();
 
-        for route in &self.config.spec.vsock.routes {
+        for route in &sandbox.spec.vsock.routes {
             #[cfg(unix)]
             if !route.host_socket.is_absolute() {
                 return Err(crate::MicrosandboxError::InvalidConfig(format!(
@@ -1628,7 +1668,7 @@ impl SandboxBuilder {
 
     /// Kind-specific root disk guards for an OCI rootfs.
     fn validate_root_disk(
-        &self,
+        sandbox: &SandboxConfig,
         root_disk: Option<&super::types::RootDisk>,
     ) -> MicrosandboxResult<()> {
         use super::types::RootDisk;
@@ -1650,19 +1690,19 @@ impl SandboxBuilder {
                 // tmpfs pages come from guest RAM and the guest has no swap:
                 // writes past memory are an OOM kill, not ENOSPC.
                 if let Some(size) = size_mib
-                    && *size > self.config.spec.resources.memory_mib
+                    && *size > sandbox.spec.resources.memory_mib
                 {
                     return Err(crate::MicrosandboxError::InvalidConfig(format!(
                         "tmpfs root disk size ({size} MiB) must not exceed sandbox memory ({} MiB)",
-                        self.config.spec.resources.memory_mib
+                        sandbox.spec.resources.memory_mib
                     )));
                 }
-                if !self.config.spec.patches.is_empty() {
+                if !sandbox.spec.patches.is_empty() {
                     return Err(crate::MicrosandboxError::InvalidConfig(
                         "patches require a managed root disk (they are baked into the upper at create time)".into(),
                     ));
                 }
-                if self.config.snapshot_upper_source.is_some() {
+                if sandbox.snapshot_upper_source.is_some() {
                     return Err(crate::MicrosandboxError::InvalidConfig(
                         "from_snapshot requires a managed root disk".into(),
                     ));
@@ -1675,12 +1715,12 @@ impl SandboxBuilder {
                         "disk-image root disk path must not be empty".into(),
                     ));
                 }
-                if !self.config.spec.patches.is_empty() {
+                if !sandbox.spec.patches.is_empty() {
                     return Err(crate::MicrosandboxError::InvalidConfig(
                         "patches require a managed root disk (they are baked into the upper at create time)".into(),
                     ));
                 }
-                if self.config.snapshot_upper_source.is_some() {
+                if sandbox.snapshot_upper_source.is_some() {
                     return Err(crate::MicrosandboxError::InvalidConfig(
                         "from_snapshot requires a managed root disk".into(),
                     ));
@@ -1700,12 +1740,12 @@ impl SandboxBuilder {
                         "flat root disks currently support only fstype=ext4".into(),
                     ));
                 }
-                if !self.config.spec.patches.is_empty() {
+                if !sandbox.spec.patches.is_empty() {
                     return Err(crate::MicrosandboxError::InvalidConfig(
                         "patches are not yet compatible with flat OCI rootfs".into(),
                     ));
                 }
-                if self.config.snapshot_upper_source.is_some() {
+                if sandbox.snapshot_upper_source.is_some() {
                     return Err(crate::MicrosandboxError::InvalidConfig(
                         "from_snapshot is not yet compatible with flat OCI rootfs".into(),
                     ));
@@ -1756,13 +1796,22 @@ fn wrap_config_script(shell: Option<&str>, body: &str) -> String {
 //--------------------------------------------------------------------------------------------------
 
 impl From<SandboxConfig> for SandboxBuilder {
-    fn from(config: SandboxConfig) -> Self {
+    fn from(mut config: SandboxConfig) -> Self {
+        let env = std::mem::take(&mut config.spec.env);
+        let shell = config.spec.runtime.shell.take();
+        let log_level = config.spec.runtime.log_level.take();
+        let metrics_sample_interval_ms = config.spec.runtime.metrics_sample_interval_ms.take();
+
+        let mut patch = SandboxConfigPatch::from_present_fields(config);
+        patch.spec.replace_env_mut(env);
+        patch.spec.runtime.shell = Some(shell);
+        patch.spec.runtime.log_level = Some(log_level);
+        patch.spec.runtime.metrics_sample_interval_ms = Some(metrics_sample_interval_ms);
+
         Self {
-            config,
+            config: patch,
             detached: false,
             build_error: None,
-            max_cpus_explicit: true,
-            max_memory_explicit: true,
             config_scripts: BTreeMap::new(),
             pending_snapshot: None,
             pending_snapshot_from_config: false,
@@ -1776,8 +1825,9 @@ impl From<SandboxConfig> for SandboxBuilder {
 
 #[cfg(test)]
 mod tests {
-    use super::SandboxBuilder;
+    use super::{BackendConfig, SandboxBuilder, SandboxConfigPatch};
     use crate::LogLevel;
+    use crate::config::GlobalConfigPatch;
     use crate::sandbox::{MAX_HOSTNAME_BYTES, MAX_SANDBOX_NAME_BYTES, RlimitResource};
     #[cfg(feature = "net")]
     use microsandbox_network::secrets::config::{HostPattern, SecretEntry, SecretInjection};
@@ -1790,13 +1840,804 @@ mod tests {
     #[cfg(feature = "net")]
     use std::net::{IpAddr, Ipv4Addr};
 
+    #[tokio::test]
+    async fn sandbox_build_uses_the_selected_backends_captured_sources() {
+        let local_config = BackendConfig::new(Default::default(), Default::default())
+            .prepare_for_local_backend(Default::default())
+            .unwrap();
+        let local = SandboxBuilder::new("local-defaults")
+            .image("alpine")
+            .finish(Some(&local_config), None)
+            .unwrap();
+        assert_eq!(local.spec.runtime.shell.as_deref(), Some("/bin/sh"));
+
+        let managed =
+            serde_json::from_str(r#"{"sandbox_defaults":{"cpus":2,"shell":"/bin/admin"}}"#)
+                .unwrap();
+        let local_backend = crate::LocalBackend::from_backend_config(
+            BackendConfig::new(Default::default(), managed)
+                .prepare_for_local_backend(Default::default())
+                .unwrap(),
+            crate::BackendSelectionSource::Programmatic,
+            None,
+        );
+        crate::backend::with_backend(local_backend, async {
+            let local = SandboxBuilder::new("local-policy")
+                .image("alpine")
+                .cpus(4)
+                .build()
+                .await
+                .unwrap();
+            assert_eq!(local.spec.resources.cpus, 2);
+            let cloud_policy = serde_json::from_str(
+                r#"{"sandbox_defaults":{"cpus":3,"shell":"/bin/cloud-policy"}}"#,
+            )
+            .unwrap();
+            let cloud_backend = crate::CloudBackend::builder()
+                .url("https://cloud.example")
+                .api_key("test-token")
+                .config_sources(BackendConfig::new(Default::default(), cloud_policy))
+                .build()
+                .unwrap();
+            let cloud = crate::backend::with_backend(cloud_backend, async {
+                SandboxBuilder::new("cloud-defaults")
+                    .image("alpine")
+                    .cpus(4)
+                    .build()
+                    .await
+                    .unwrap()
+            })
+            .await;
+            assert_eq!(cloud.spec.resources.cpus, 3);
+            assert_eq!(
+                cloud.spec.runtime.shell.as_deref(),
+                Some("/bin/cloud-policy")
+            );
+        })
+        .await;
+    }
+
+    #[test]
+    fn final_layers_preserve_workdir_presence() {
+        use serde_json::json;
+        let image = microsandbox_image::ImageConfig {
+            working_dir: Some("/image".into()),
+            ..Default::default()
+        };
+        for (global, workdir, managed, expected) in [
+            (json!({}), None, json!({}), Some("/image")),
+            (
+                json!({"workdir": "/global"}),
+                None,
+                json!({}),
+                Some("/global"),
+            ),
+            (json!({"workdir": null}), None, json!({}), None),
+            (
+                json!({"workdir": null}),
+                Some(Some("/sdk")),
+                json!({}),
+                Some("/sdk"),
+            ),
+            (json!({"workdir": "/global"}), Some(None), json!({}), None),
+            (
+                json!({}),
+                Some(None),
+                json!({"workdir": "/managed"}),
+                Some("/managed"),
+            ),
+            (
+                json!({}),
+                Some(Some("/sdk")),
+                json!({"workdir": null}),
+                None,
+            ),
+        ] {
+            let layers = BackendConfig::new(
+                serde_json::from_value(json!({"sandbox_defaults": global})).unwrap(),
+                serde_json::from_value(json!({"sandbox_defaults": managed})).unwrap(),
+            );
+            let mut patch = SandboxConfigPatch::new();
+            patch.spec.runtime.workdir = workdir.map(|value| value.map(String::from));
+            let config = SandboxBuilder::new("presence")
+                .image("alpine")
+                .overlay(patch)
+                .finish(Some(&layers), Some(&image))
+                .unwrap();
+            assert_eq!(config.spec.runtime.workdir.as_deref(), expected);
+        }
+    }
+
+    #[test]
+    fn final_image_layers_keep_env_order_and_resolve_init_with_effective_env() {
+        use microsandbox_types::EnvVar;
+        let image = microsandbox_image::ImageConfig {
+            env: vec!["IMAGE_ONLY=image".into(), "SHARED=image".into()],
+            labels: std::collections::HashMap::from([
+                ("source".into(), "image".into()),
+                ("image-only".into(), "yes".into()),
+                ("microsandbox.reserved".into(), "skip".into()),
+            ]),
+            entrypoint: Some(vec!["/init".into(), "/app/start".into()]),
+            cmd: Some(vec!["--serve".into()]),
+            ..Default::default()
+        };
+        let config = SandboxBuilder::new("image-layers")
+            .image("alpine")
+            .init("auto")
+            .env("REMOVED", "earlier")
+            .overlay(
+                SandboxConfigPatch::new().spec(
+                    microsandbox_types::SandboxSpecPatch::new()
+                        .replace_env(vec![EnvVar::new("SHARED", "file")]),
+                ),
+            )
+            .env("SHARED", "sdk")
+            .label("source", "sdk")
+            .finish(
+                Some(&BackendConfig::new(Default::default(), Default::default())),
+                Some(&image),
+            )
+            .unwrap();
+        assert_eq!(
+            config.spec.env,
+            vec![
+                EnvVar::new("IMAGE_ONLY", "image"),
+                EnvVar::new("SHARED", "file"),
+                EnvVar::new("SHARED", "sdk"),
+            ]
+        );
+        assert_eq!(config.spec.labels["source"], "sdk");
+        assert_eq!(config.spec.labels["image-only"], "yes");
+        assert!(!config.spec.labels.contains_key("microsandbox.reserved"));
+        let init = config.spec.init.as_ref().unwrap();
+        assert_eq!(init.cmd, "/init");
+        assert_eq!(
+            init.env,
+            vec![
+                ("IMAGE_ONLY".into(), "image".into()),
+                ("SHARED".into(), "file".into()),
+                ("SHARED".into(), "sdk".into()),
+            ]
+        );
+        assert_eq!(
+            config.spec.runtime.entrypoint,
+            Some(vec!["/app/start".into()])
+        );
+        assert_eq!(config.spec.runtime.cmd, Some(vec!["--serve".into()]));
+        assert!(!config.init_owns_boot_workload());
+    }
+
+    #[test]
+    fn final_image_resolution_preserves_concrete_launch_behavior() {
+        use crate::sandbox::config::LaunchIntent;
+        use microsandbox_types::{EnvVar, HandoffInit};
+        let image = microsandbox_image::ImageConfig {
+            env: vec!["IMAGE_ONLY=image".into(), "SHARED=image".into()],
+            entrypoint: Some(vec!["/init".into(), "/app/start".into()]),
+            cmd: Some(vec!["--serve".into()]),
+            working_dir: Some("/image".into()),
+            user: Some("1000:1000".into()),
+            ..Default::default()
+        };
+        for launch_intent in [
+            LaunchIntent::None,
+            LaunchIntent::Foreground {
+                command: Some(vec!["echo".into(), "hello".into()]),
+            },
+            LaunchIntent::Background,
+        ] {
+            for entrypoint in [None, Some(vec!["/user-entrypoint".into()])] {
+                let mut original = crate::SandboxConfig::default();
+                original.spec.name = "existing-config".into();
+                original.spec.image = super::RootfsSource::oci("alpine");
+                original.spec.env = vec![EnvVar::new("SHARED", "user")];
+                original.spec.init = Some(HandoffInit {
+                    cmd: "auto".into(),
+                    args: vec![],
+                    env: vec![],
+                });
+                original.spec.runtime.entrypoint = entrypoint;
+                original.spec.runtime.metrics_sample_interval_ms = None;
+                original.launch_intent = launch_intent.clone();
+                let mut expected = original.clone();
+                expected.merge_image_defaults(&image);
+                let actual = SandboxBuilder::from(original)
+                    .finish(
+                        Some(&BackendConfig::new(Default::default(), Default::default())),
+                        Some(&image),
+                    )
+                    .unwrap();
+                assert_eq!(
+                    serde_json::to_value(&actual).unwrap(),
+                    serde_json::to_value(&expected).unwrap()
+                );
+                assert_eq!(
+                    actual.init_owns_boot_workload(),
+                    expected.init_owns_boot_workload()
+                );
+                assert_eq!(
+                    actual.init_workload_arg_count,
+                    expected.init_workload_arg_count
+                );
+                assert_eq!(actual.launch_intent, expected.launch_intent);
+            }
+        }
+    }
+
+    #[test]
+    fn concrete_optional_network_and_placement_values_inherit_or_clear() {
+        let user: GlobalConfigPatch = serde_json::from_str(r#"{"sandbox_defaults":{
+            "placement_profile":"ordinary", "outbound_proxy":{"protocol":"socks5","address":"127.0.0.1:1080"}
+        }}"#).unwrap();
+        let layers = BackendConfig::new(user.clone(), Default::default());
+        let concrete = SandboxBuilder::new("optional-values")
+            .image("alpine")
+            .finish(
+                Some(&BackendConfig::new(Default::default(), Default::default())),
+                None,
+            )
+            .unwrap();
+        let inherited = SandboxBuilder::from(concrete.clone())
+            .finish(Some(&layers), None)
+            .unwrap();
+        assert_eq!(
+            inherited.spec.resources.placement_profile.as_deref(),
+            Some("ordinary")
+        );
+        assert!(inherited.spec.network.outbound_proxy.is_some());
+        let mut clear = SandboxConfigPatch::new();
+        clear.spec.resources.placement_profile = Some(None);
+        clear.spec.network.outbound_proxy = Some(None);
+        let cleared = SandboxBuilder::from(concrete.clone())
+            .overlay(clear)
+            .finish(Some(&layers), None)
+            .unwrap();
+        assert_eq!(cleared.spec.resources.placement_profile, None);
+        assert_eq!(cleared.spec.network.outbound_proxy, None);
+        let managed = serde_json::from_str(
+            r#"{"sandbox_defaults":{"placement_profile":"managed","outbound_proxy":null}}"#,
+        )
+        .unwrap();
+        let enforced = SandboxBuilder::from(concrete)
+            .finish(Some(&BackendConfig::new(user, managed)), None)
+            .unwrap();
+        assert_eq!(
+            enforced.spec.resources.placement_profile.as_deref(),
+            Some("managed")
+        );
+        assert_eq!(enforced.spec.network.outbound_proxy, None);
+    }
+
+    #[test]
+    fn concrete_workdir_uses_normal_precedence() {
+        let image = microsandbox_image::ImageConfig {
+            working_dir: Some("/image".into()),
+            ..Default::default()
+        };
+        let mut patch = SandboxConfigPatch::new();
+        patch.spec.runtime.workdir = Some(None);
+        let built = SandboxBuilder::new("concrete-config")
+            .image("alpine")
+            .overlay(patch)
+            .finish(
+                Some(&BackendConfig::new(Default::default(), Default::default())),
+                None,
+            )
+            .unwrap();
+        assert_eq!(built.spec.runtime.workdir, None);
+
+        for (global, image, expected) in [
+            ("{}", Some(&image), Some("/image")),
+            (
+                r#"{"sandbox_defaults":{"workdir":"/global"}}"#,
+                Some(&image),
+                Some("/global"),
+            ),
+            (
+                r#"{"sandbox_defaults":{"workdir":"/global"}}"#,
+                None,
+                Some("/global"),
+            ),
+            (
+                r#"{"sandbox_defaults":{"workdir":null}}"#,
+                Some(&image),
+                None,
+            ),
+        ] {
+            let layers =
+                BackendConfig::new(serde_json::from_str(global).unwrap(), Default::default());
+            let inherited = SandboxBuilder::from(built.clone())
+                .finish(Some(&layers), image)
+                .unwrap();
+            assert_eq!(inherited.spec.runtime.workdir.as_deref(), expected);
+        }
+
+        let layers = BackendConfig::new(
+            serde_json::from_str(r#"{"sandbox_defaults":{"workdir":"/global"}}"#).unwrap(),
+            Default::default(),
+        );
+        let mut supplied = built.clone();
+        supplied.spec.runtime.workdir = Some("/request".into());
+        let explicit = SandboxBuilder::from(supplied)
+            .finish(Some(&layers), Some(&image))
+            .unwrap();
+        assert_eq!(explicit.spec.runtime.workdir.as_deref(), Some("/request"));
+
+        let mut clear = SandboxConfigPatch::new();
+        clear.spec.runtime.workdir = Some(None);
+        let explicitly_cleared = SandboxBuilder::from(built.clone())
+            .overlay(clear)
+            .finish(Some(&layers), Some(&image))
+            .unwrap();
+        assert_eq!(explicitly_cleared.spec.runtime.workdir, None);
+        let enforced = SandboxBuilder::from(built)
+            .finish(
+                Some(&BackendConfig::new(
+                    serde_json::from_str(r#"{"sandbox_defaults":{"workdir":"/global"}}"#).unwrap(),
+                    serde_json::from_str(r#"{"sandbox_defaults":{"workdir":null}}"#).unwrap(),
+                )),
+                Some(&image),
+            )
+            .unwrap();
+        assert_eq!(enforced.spec.runtime.workdir, None);
+    }
+
+    #[test]
+    fn full_config_patch_overlays_create_inputs_and_preserves_builder_precedence() {
+        let auth = || microsandbox_image::RegistryAuth::Basic {
+            username: "builder".into(),
+            password: "test-token".into(),
+        };
+        let lower = SandboxConfigPatch::new()
+            .registry_auth(auth())
+            .slug("lower".into())
+            .replace_existing(true)
+            .replace_with_timeout(std::time::Duration::from_secs(30))
+            .insecure(true)
+            .ca_certs(vec![b"certificate".to_vec()]);
+        let higher = SandboxConfigPatch::new()
+            .set_registry_auth(None)
+            .set_slug(None)
+            .replace_existing(false)
+            .spec(
+                microsandbox_types::SandboxSpecPatch::new()
+                    .resources(microsandbox_types::SandboxResourcesPatch::new().cpus(4)),
+            );
+        let build = || {
+            SandboxBuilder::new("full-patch")
+                .image("alpine")
+                .overlay(lower.clone())
+                .overlay(higher.clone())
+        };
+        let config = build()
+            .finish(
+                Some(&BackendConfig::new(Default::default(), Default::default())),
+                None,
+            )
+            .unwrap();
+        assert_eq!(config.spec.resources.cpus, 4);
+        assert!(config.registry_auth.is_none());
+        assert!(config.slug.is_none());
+        assert!(!config.replace_existing);
+        assert_eq!(
+            config.replace_with_timeout,
+            std::time::Duration::from_secs(30)
+        );
+        assert!(config.insecure);
+        assert_eq!(config.ca_certs, [b"certificate".to_vec()]);
+
+        let config = build()
+            .registry(|registry| registry.auth(auth()))
+            .slug("final")
+            .replace()
+            .finish(
+                Some(&BackendConfig::new(Default::default(), Default::default())),
+                None,
+            )
+            .unwrap();
+        assert!(
+            matches!(config.registry_auth, Some(microsandbox_image::RegistryAuth::Basic { ref username, .. }) if username == "builder")
+        );
+        assert_eq!(config.slug.as_deref(), Some("final"));
+        assert!(config.replace_existing);
+        assert!(!config.insecure);
+        assert!(config.ca_certs.is_empty());
+        let serialized = serde_json::to_value(&config).unwrap();
+        assert!(serialized.get("spec").is_none());
+        assert_eq!(serialized["name"], "full-patch");
+        for field in [
+            "registry_auth",
+            "slug",
+            "replace_existing",
+            "replace_with_timeout",
+            "insecure",
+            "ca_certs",
+        ] {
+            assert!(
+                serialized.get(field).is_none(),
+                "{field} must remain transient"
+            );
+        }
+    }
+
+    #[test]
+    fn rebuilding_config_preserves_snapshot_and_launch_metadata() {
+        let mut config = SandboxBuilder::new("snapshot-metadata")
+            .image("alpine")
+            .snapshot_resolved("sha256:resolved", "/snapshot/upper.ext4")
+            .foreground_command(["echo", "ready"])
+            .finish(
+                Some(&BackendConfig::new(Default::default(), Default::default())),
+                None,
+            )
+            .unwrap();
+        config.init_owns_workload = true;
+        config.init_workload_arg_count = 2;
+        let rebuilt = SandboxBuilder::from(config.clone())
+            .finish(
+                Some(&BackendConfig::new(Default::default(), Default::default())),
+                None,
+            )
+            .unwrap();
+        assert_eq!(rebuilt.manifest_digest, config.manifest_digest);
+        assert_eq!(rebuilt.snapshot_upper_source, config.snapshot_upper_source);
+        assert_eq!(rebuilt.launch_intent, config.launch_intent);
+        assert_eq!(rebuilt.init_owns_workload, config.init_owns_workload);
+        assert_eq!(
+            rebuilt.init_workload_arg_count,
+            config.init_workload_arg_count
+        );
+        assert_eq!(
+            serde_json::to_value(rebuilt).unwrap(),
+            serde_json::to_value(config).unwrap()
+        );
+    }
+
+    #[test]
+    fn managed_layer_wins_over_builder_and_sdk_patches_before_validation() {
+        use std::collections::BTreeMap;
+
+        use microsandbox_types::SandboxResourcesPatch;
+
+        let managed: GlobalConfigPatch = serde_json::from_str(
+            r#"{"sandbox_defaults":{"cpus":2,"workdir":null,"shell":"/bin/bash"}}"#,
+        )
+        .unwrap();
+        let build = || {
+            SandboxBuilder::new("managed")
+                .image("alpine:latest")
+                .cpus(8)
+                .workdir("/user")
+                .config_scripts(BTreeMap::from([("hello".into(), "echo hello".into())]))
+        };
+        let config = build()
+            .finish(
+                Some(&BackendConfig::new(Default::default(), managed.clone())),
+                None,
+            )
+            .unwrap();
+        assert_eq!(config.spec.resources.cpus, 2);
+        assert_eq!(config.spec.resources.max_cpus, 2);
+        assert_eq!(config.spec.runtime.workdir, None);
+        assert_eq!(config.spec.runtime.shell.as_deref(), Some("/bin/bash"));
+        assert!(config.spec.runtime.scripts["hello"].starts_with("#!/bin/bash"));
+        let config = build()
+            .overlay(
+                SandboxConfigPatch::new().spec(
+                    microsandbox_types::SandboxSpecPatch::new()
+                        .resources(SandboxResourcesPatch::new().cpus(7).max_cpus(10)),
+                ),
+            )
+            .finish(
+                Some(&BackendConfig::new(Default::default(), managed.clone())),
+                None,
+            )
+            .unwrap();
+        assert_eq!(config.spec.resources.cpus, 2);
+        assert_eq!(config.spec.resources.max_cpus, 10);
+        assert!(
+            build()
+                .max_cpus(1)
+                .finish(
+                    Some(&BackendConfig::new(Default::default(), managed.clone())),
+                    None
+                )
+                .is_err()
+        );
+        // A maximum supplied by a patch has the same precedence as the SDK maximum setter.
+        let later_setter = build()
+            .overlay(
+                SandboxConfigPatch::new().spec(
+                    microsandbox_types::SandboxSpecPatch::new()
+                        .resources(SandboxResourcesPatch::new().max_cpus(10)),
+                ),
+            )
+            .cpus(4);
+        assert_eq!(
+            later_setter
+                .finish(
+                    Some(&BackendConfig::new(Default::default(), Default::default())),
+                    None
+                )
+                .unwrap()
+                .spec
+                .resources
+                .max_cpus,
+            10
+        );
+    }
+
+    #[test]
+    fn global_sparse_and_managed_inputs_share_patch_precedence() {
+        use microsandbox_types::EnvVar;
+
+        let builder = SandboxBuilder::new("layers").image("alpine");
+        let global = serde_json::from_str(
+            r#"{
+            "sandbox_defaults": {"cpus": 3, "memory_mib": 768,
+                "shell": "/bin/sh", "workdir": "/global"}
+        }"#,
+        )
+        .unwrap();
+        let mut sparse = SandboxConfigPatch::new().spec(
+            microsandbox_types::SandboxSpecPatch::new()
+                .env(vec![EnvVar::new("SOURCE", "file")])
+                .labels(std::collections::BTreeMap::from([
+                    ("file".into(), "yes".into()),
+                    ("source".into(), "file".into()),
+                ])),
+        );
+        sparse.spec.resources.cpus = Some(4);
+        sparse.spec.resources.max_memory_mib = Some(2048);
+        sparse.spec.runtime.workdir = Some(None);
+        let managed: GlobalConfigPatch = serde_json::from_str(
+            r#"{
+            "sandbox_defaults": {"cpus": 2, "shell": "/bin/bash"}
+        }"#,
+        )
+        .unwrap();
+        let config = builder
+            .overlay(sparse)
+            .cpus(6)
+            .memory(1024_u32)
+            .env("SDK", "yes")
+            .label("source", "sdk")
+            .quiet_logs()
+            .metrics_sample_interval(std::time::Duration::ZERO)
+            .overlay(
+                SandboxConfigPatch::new().spec(
+                    microsandbox_types::SandboxSpecPatch::new()
+                        .env(vec![EnvVar::new("SOURCE", "last")]),
+                ),
+            )
+            .finish(Some(&BackendConfig::new(global, managed)), None)
+            .unwrap();
+        assert_eq!(config.spec.resources.cpus, 2);
+        assert_eq!(config.spec.resources.max_cpus, 2);
+        assert_eq!(config.spec.resources.memory_mib, 1024);
+        assert_eq!(config.spec.resources.max_memory_mib, 2048);
+        assert_eq!(config.spec.runtime.workdir, None);
+        assert_eq!(config.spec.runtime.shell.as_deref(), Some("/bin/bash"));
+        assert_eq!(config.spec.runtime.log_level, None);
+        assert_eq!(config.spec.runtime.metrics_sample_interval_ms, None);
+        assert_eq!(
+            config.spec.env,
+            vec![EnvVar::new("SOURCE", "last"), EnvVar::new("SDK", "yes")]
+        );
+        assert_eq!(config.spec.labels["file"], "yes");
+        assert_eq!(config.spec.labels["source"], "sdk");
+    }
+
+    #[test]
+    fn complete_config_survives_patch_normalization() {
+        let config = SandboxBuilder::new("complete")
+            .image("alpine")
+            .max_cpus(8)
+            .cpus(2)
+            .env("FIRST", "one")
+            .env("SECOND", "two")
+            .quiet_logs()
+            .metrics_sample_interval(std::time::Duration::ZERO)
+            .entrypoint(Vec::<String>::new())
+            .cmd(["echo", "hello"])
+            .label("owner", "test")
+            .finish(
+                Some(&BackendConfig::new(Default::default(), Default::default())),
+                None,
+            )
+            .unwrap();
+        let expected = serde_json::to_value(&config.spec).unwrap();
+        let rebuilt = SandboxBuilder::from(config)
+            .finish(
+                Some(&BackendConfig::new(Default::default(), Default::default())),
+                None,
+            )
+            .unwrap();
+        assert_eq!(serde_json::to_value(rebuilt.spec).unwrap(), expected);
+    }
+
+    #[test]
+    fn env_appends_preserve_duplicates_and_sparse_overlays_merge_by_key() {
+        use microsandbox_types::EnvVar;
+
+        let config = SandboxBuilder::new("env-appends")
+            .image("alpine")
+            .env("KEY", "first")
+            .env("KEY", "second")
+            .finish(
+                Some(&BackendConfig::new(Default::default(), Default::default())),
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            config.spec.env,
+            vec![EnvVar::new("KEY", "first"), EnvVar::new("KEY", "second")]
+        );
+
+        let config = SandboxBuilder::new("env-overlay")
+            .image("alpine")
+            .env("KEY", "first")
+            .overlay(
+                SandboxConfigPatch::new().spec(
+                    microsandbox_types::SandboxSpecPatch::new()
+                        .env(vec![EnvVar::new("KEY", "overlay")]),
+                ),
+            )
+            .env("KEY", "last")
+            .finish(
+                Some(&BackendConfig::new(Default::default(), Default::default())),
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            config.spec.env,
+            vec![EnvVar::new("KEY", "overlay"), EnvVar::new("KEY", "last")]
+        );
+    }
+
+    #[test]
+    fn mount_replacement_discards_earlier_appends() {
+        let config = SandboxBuilder::new("mount-layers")
+            .image("alpine")
+            .volume("/first", |mount| mount.tmpfs())
+            .overlay(
+                SandboxConfigPatch::new()
+                    .spec(microsandbox_types::SandboxSpecPatch::new().mounts(Vec::new())),
+            )
+            .volume("/second", |mount| mount.tmpfs())
+            .volume("/third", |mount| mount.tmpfs())
+            .finish(
+                Some(&BackendConfig::new(Default::default(), Default::default())),
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            config
+                .spec
+                .mounts
+                .iter()
+                .map(VolumeMount::guest)
+                .collect::<Vec<_>>(),
+            vec!["/second", "/third"]
+        );
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn network_callbacks_replace_tls_and_preserve_ports() {
+        let config = SandboxBuilder::new("network-layers")
+            .image("alpine")
+            .port(8080, 80)
+            .network(|network| {
+                network.tls(|tls| {
+                    tls.intercept_ca_cert("/test/ca.pem")
+                        .intercept_ca_key("/test/ca.key")
+                })
+            })
+            .network(|network| network.tls(|tls| tls.enabled(false)))
+            .port(8443, 443)
+            .finish(
+                Some(&BackendConfig::new(Default::default(), Default::default())),
+                None,
+            )
+            .unwrap();
+        let network = config.local_network_config().unwrap();
+        assert!(!network.tls.enabled);
+        assert!(network.tls.intercept_ca.cert_path.is_none());
+        assert!(network.tls.intercept_ca.key_path.is_none());
+        assert_eq!(config.spec.network.ports.len(), 2);
+    }
+
+    #[test]
+    fn managed_root_disk_sizes_are_resolved_after_final_resources() {
+        let managed: GlobalConfigPatch = serde_json::from_str(
+            r#"{"sandbox_defaults":{"memory_mib":1024,"oci":{"root_disk":{"kind":"tmpfs"}}}}"#,
+        )
+        .unwrap();
+        let mut config = SandboxBuilder::new("root-size")
+            .image("alpine")
+            .memory(2048_u32)
+            .root_disk(4096_u32)
+            .finish(
+                Some(&BackendConfig::new(Default::default(), managed)),
+                Some(&Default::default()),
+            )
+            .unwrap();
+        config.apply_rootfs_defaults(&Default::default()).unwrap();
+        let super::RootfsSource::Oci(image) = config.spec.image else {
+            panic!("expected OCI image");
+        };
+        assert_eq!(
+            image.root_disk,
+            Some(microsandbox_types::RootDisk::Tmpfs {
+                size_mib: Some(512)
+            })
+        );
+    }
+
+    #[test]
+    fn managed_root_disk_preserves_the_selected_image() {
+        let managed: GlobalConfigPatch = serde_json::from_str(
+            r#"{
+            "sandbox_defaults": {"oci": {"root_disk": {"kind": "managed", "size_mib": 2048}}}
+        }"#,
+        )
+        .unwrap();
+        let layers = BackendConfig::new(Default::default(), managed);
+        let builder = SandboxBuilder::new("root-disk")
+            .image("alpine:latest")
+            .root_disk(4096_u32);
+        let super::RootfsSource::Oci(image_for_pull) = builder.config.resolve_image(&layers) else {
+            panic!("expected OCI image");
+        };
+        let config = builder.finish(Some(&layers), None).unwrap();
+        let super::RootfsSource::Oci(image) = config.spec.image else {
+            panic!("expected OCI image");
+        };
+        assert_eq!(image.reference, "alpine:latest");
+        assert_eq!(image_for_pull.reference, image.reference);
+        assert_eq!(image_for_pull.root_disk, image.root_disk);
+        assert_eq!(
+            image.root_disk,
+            Some(microsandbox_types::RootDisk::Managed {
+                size_mib: Some(2048)
+            })
+        );
+    }
+
+    #[test]
+    fn managed_root_disk_can_replace_the_deprecated_upper_size() {
+        let managed: GlobalConfigPatch = serde_json::from_str(
+            r#"{"sandbox_defaults":{"oci":{"upper_size_mib":null,"root_disk":{"kind":"tmpfs","size_mib":128}}}}"#,
+        )
+        .unwrap();
+        let config = SandboxBuilder::new("root-disk-alias")
+            .image("alpine")
+            .root_disk(4096_u32)
+            .finish(
+                Some(&BackendConfig::new(Default::default(), managed.clone())),
+                None,
+            )
+            .unwrap();
+        let super::RootfsSource::Oci(image) = config.spec.image else {
+            panic!("expected OCI image");
+        };
+        assert_eq!(
+            image.root_disk,
+            Some(microsandbox_types::RootDisk::Tmpfs {
+                size_mib: Some(128)
+            })
+        );
+    }
+
     #[test]
     fn deployment_profile_sets_sandbox_spec() {
         let builder =
             SandboxBuilder::new("profile-test").deployment_profile(DeploymentProfile::MultiTenant);
 
         assert_eq!(
-            builder.config.spec.deployment_profile,
+            builder.config.spec.deployment_profile.unwrap(),
             DeploymentProfile::MultiTenant
         );
     }
@@ -2486,6 +3327,171 @@ mod tests {
         assert_eq!(network.secrets.secrets.len(), 1);
         assert_eq!(network.max_connections, Some(128));
         assert!(network.strict);
+    }
+
+    #[cfg(feature = "net")]
+    #[tokio::test]
+    async fn global_outbound_proxy_survives_network_options_and_accepts_sdk_override() {
+        let global = serde_json::from_str(
+            r#"{"sandbox_defaults":{"outbound_proxy":{"protocol":"socks5","address":"127.0.0.1:1080"}}}"#,
+        )
+        .unwrap();
+        let backend = crate::LocalBackend::from_backend_config(
+            BackendConfig::new(global, Default::default())
+                .prepare_for_local_backend(Default::default())
+                .unwrap(),
+            crate::BackendSelectionSource::Programmatic,
+            None,
+        );
+        crate::backend::with_backend(backend, async {
+            let inherited = SandboxBuilder::new("inherited-proxy")
+                .image("alpine")
+                .network(|n| n.port(8080, 80))
+                .build()
+                .await
+                .unwrap();
+            assert!(matches!(
+                inherited.spec.network.outbound_proxy,
+                Some(microsandbox_types::OutboundProxy::Socks5 { ref address, .. })
+                    if address == "127.0.0.1:1080"
+            ));
+            assert_eq!(inherited.spec.network.ports.len(), 1);
+
+            let overridden = SandboxBuilder::new("override-proxy")
+                .image("alpine")
+                .proxy(|p| p.socks4("127.0.0.1:2080"))
+                .build()
+                .await
+                .unwrap();
+            assert!(matches!(
+                overridden.spec.network.outbound_proxy,
+                Some(microsandbox_types::OutboundProxy::Socks4 { ref address, .. })
+                    if address == "127.0.0.1:2080"
+            ));
+        })
+        .await;
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn invalid_proxy_defaults_can_be_overridden_before_network_validation() {
+        use microsandbox_network::config::EnvNetworkSecretResolver;
+
+        for proxy in [
+            serde_json::json!({"protocol": "socks5", "address": "not-an-address"}),
+            serde_json::json!({"protocol": "socks4", "address": "127.0.0.1:1080", "user_id": ""}),
+            serde_json::json!({"protocol": "socks5", "address": "127.0.0.1:1080", "credentials": {
+                "username": "", "password": {"kind": "env", "var": "PROXY_PASSWORD"}
+            }}),
+            serde_json::json!({"protocol": "socks5", "address": "127.0.0.1:1080", "credentials": {
+                "username": "employee", "password": {"kind": "env", "var": ""}
+            }}),
+        ] {
+            let global = serde_json::from_value(serde_json::json!({
+                "sandbox_defaults": {"outbound_proxy": proxy}
+            }))
+            .unwrap();
+            let backend = crate::LocalBackend::from_backend_config(
+                BackendConfig::new(global, Default::default())
+                    .prepare_for_local_backend(Default::default())
+                    .unwrap(),
+                crate::BackendSelectionSource::Programmatic,
+                None,
+            );
+            let config = SandboxBuilder::new("override-invalid-proxy")
+                .image("alpine")
+                .proxy(|p| p.socks5("127.0.0.1:2080"))
+                .finish(Some(backend.config_sources()), None)
+                .unwrap();
+            config
+                .local_network_config()
+                .unwrap()
+                .resolve(&EnvNetworkSecretResolver)
+                .unwrap();
+        }
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn invalid_managed_proxy_fails_network_resolution() {
+        use microsandbox_network::config::EnvNetworkSecretResolver;
+
+        let managed = serde_json::from_str(
+            r#"{"sandbox_defaults":{"outbound_proxy":{"protocol":"socks4","address":"127.0.0.1:1080","user_id":""}}}"#,
+        )
+        .unwrap();
+        let layers = BackendConfig::new(Default::default(), managed)
+            .prepare_for_local_backend(Default::default())
+            .unwrap();
+        let config = SandboxBuilder::new("invalid-managed-proxy")
+            .image("alpine")
+            .proxy(|p| p.socks5("127.0.0.1:2080"))
+            .finish(Some(&layers), None)
+            .unwrap();
+        let error = config
+            .local_network_config()
+            .unwrap()
+            .resolve(&EnvNetworkSecretResolver)
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            microsandbox_network::config::NetworkConfigResolveError::OutboundProxy(
+                microsandbox_network::OutboundProxyBuildError::InvalidSocks4UserId { .. }
+            )
+        ));
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn managed_outbound_proxy_overrides_sparse_and_sdk_options_and_can_clear() {
+        use microsandbox_types::{NetworkSpecPatch, OutboundProxy};
+
+        let build = || {
+            SandboxBuilder::new("managed-proxy")
+                .image("alpine")
+                .overlay(SandboxConfigPatch::new().spec(
+                    microsandbox_types::SandboxSpecPatch::new().network(
+                        NetworkSpecPatch::new().outbound_proxy(OutboundProxy::Socks4 {
+                            address: "127.0.0.1:1080".into(),
+                            user_id: Some("sparse-user".into()),
+                        }),
+                    ),
+                ))
+                .proxy(|p| {
+                    p.socks5("127.0.0.1:2080")
+                        .credentials("sdk-user", SecretSource::env("UNUSED_PROXY_PASSWORD"))
+                })
+                .network(|n| n.port(8080, 80))
+        };
+        let managed = serde_json::from_str(
+            r#"{"sandbox_defaults":{"outbound_proxy":{"protocol":"socks5","address":"127.0.0.1:3080"}}}"#,
+        )
+        .unwrap();
+        let layers = BackendConfig::new(Default::default(), managed);
+        let expected = Some(OutboundProxy::Socks5 {
+            address: "127.0.0.1:3080".into(),
+            credentials: None,
+        });
+        let config = build().finish(Some(&layers), None).unwrap();
+        assert_eq!(config.spec.network.outbound_proxy, expected);
+        assert_eq!(config.spec.network.ports.len(), 1);
+        assert!(config.spec.network.enabled);
+
+        let disabled = build()
+            .disable_network()
+            .finish(Some(&layers), None)
+            .unwrap();
+        assert_eq!(disabled.spec.network.outbound_proxy, expected);
+        assert!(!disabled.spec.network.enabled);
+
+        let clear =
+            serde_json::from_str(r#"{"sandbox_defaults":{"outbound_proxy":null}}"#).unwrap();
+        let layers = BackendConfig::new(Default::default(), clear);
+        let config = build()
+            .finish(Some(&layers), Some(&Default::default()))
+            .unwrap();
+        assert_eq!(config.spec.network.outbound_proxy, None);
+        assert_eq!(config.spec.network.ports.len(), 1);
     }
 
     #[cfg(feature = "net")]

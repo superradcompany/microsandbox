@@ -34,7 +34,7 @@ pub use microsandbox_types::{
     CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudErrorBody, CloudErrorDetails,
     CloudMessageResponse, CloudPaginated, CloudSandboxStatus, CloudSandboxStatusReason,
 };
-pub use profile::{Profile, ProfileBackend, SdkConfig, load_sdk_config, resolve_default_backend};
+pub use profile::{Profile, ProfileBackend, resolve_default_backend};
 pub use sandbox::{
     SandboxBackend, SandboxCloudState, SandboxHandleCloudState, SandboxHandleInner,
     SandboxHandleLocalState, SandboxIdentity, SandboxInner, SandboxLocalState,
@@ -177,6 +177,11 @@ pub trait Backend: Send + Sync + 'static {
     /// paths) without keeping a separate `Arc<LocalBackend>` alongside the
     /// `Arc<dyn Backend>`. Returns `None` for cloud backends.
     fn as_local(&self) -> Option<&LocalBackend> {
+        None
+    }
+
+    /// Try downcast to a concrete cloud backend, including its captured device settings.
+    fn as_cloud(&self) -> Option<&CloudBackend> {
         None
     }
 

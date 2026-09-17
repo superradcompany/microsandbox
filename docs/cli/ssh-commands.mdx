@@ -99,7 +99,7 @@ msb ssh connect devbox -- uname -a
 | `--no-inactivity-timeout` | Disable the SSH inactivity timeout |
 | `-- COMMAND...` | Remote command to run through the sandbox shell |
 
-All SSH commands inherit `ssh.inactivity_timeout_secs` from the global configuration when neither timeout flag is present. The built-in default is 10 minutes.
+All SSH commands inherit `ssh.inactivity_timeout_secs` from user configuration when neither timeout flag is present. The built-in default is 10 minutes. A [managed timeout](/configuration#ssh) takes precedence over both flags, including `--no-inactivity-timeout`, for local and cloud sessions.
 
 ## SSH state
 

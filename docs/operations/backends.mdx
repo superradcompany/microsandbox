@@ -16,7 +16,7 @@ Use the simplest selector that matches who owns the decision:
 
 ## Environment
 
-The `MSB_BACKEND` environment variable forces a backend for a single command or shell:
+The `MSB_BACKEND` environment variable selects a backend for a single command or shell, unless an administrator has set a managed active profile:
 
 ```bash
 MSB_BACKEND=local msb run python -- python -V
@@ -49,7 +49,7 @@ set_default_backend(CloudBackend::from_env()?);
 set_default_backend(CloudBackend::with_api_key(api_key)?);
 
 // Or force the local runtime.
-set_default_backend(LocalBackend::lazy());
+set_default_backend(LocalBackend::lazy()?);
 ```
 
 ```python Python
@@ -71,6 +71,10 @@ Microsandbox.use_cloud_backend!(ENV.fetch("MSB_API_KEY"))
 Microsandbox.use_local_backend!
 ```
 </CodeGroup>
+
+In Rust, `LocalBackend::builder().config_path(path).build_lazy()?` reads a specific user config file without changing `MSB_CONFIG_PATH`. Managed settings still apply. The builder's `home(...)` controls data storage, not which config file is read.
+
+Local and cloud backends read user and managed configuration during construction. Invalid files cause an error even when cloud credentials are supplied explicitly. Existing backends retain their settings; construct a new backend to load file changes. The synchronous Rust constructors and backend-selection helpers remain synchronous.
 
 ## Profiles
 
@@ -104,10 +108,13 @@ Cloud profiles require `api_key_ref`. The optional `url` field defaults to `http
 Backend resolution uses this order:
 
 1. Programmatic backend set by the SDK
-2. `MSB_BACKEND=local|cloud`
-3. `MSB_PROFILE=<name>`
-4. `active_profile`
-5. Local runtime
+2. Managed `active_profile`, if supplied
+3. `MSB_BACKEND=local|cloud`
+4. `MSB_PROFILE=<name>`
+5. User `active_profile`
+6. Local runtime
+
+A managed `active_profile` set to `null` or an empty string clears saved and environment-selected profiles while preserving `MSB_BACKEND`. With no explicit backend, it uses the local fallback. To enforce local execution over `MSB_BACKEND`, select a named managed profile with `backend: local`. Managed profile entries replace same-named user entries. See [Managed deployment](/enterprise/managed-configuration) for deployment and file format. An explicitly constructed SDK backend keeps its identity. Both local and cloud backends apply managed sandbox settings and host-side SSH policy.
 
 Selecting a cloud profile with `MSB_PROFILE` or `active_profile` is explicit cloud intent when that profile has `"backend": "cloud"`. `MSB_BACKEND=cloud` without a usable API key or cloud profile returns a configuration error; it never falls back to local execution.
 

@@ -93,13 +93,14 @@ Configuration resolves from lower to higher precedence:
 1. Built-in and global `config.json` defaults
 2. Every `--conf` and scoped config occurrence, from left to right on the command line
 3. Explicit non-config CLI flags and positional arguments
+4. [Managed overrides](/enterprise/managed-configuration) for fields supported by global configuration
 
 Higher-precedence scalars replace lower values. Maps merge by key, including nested `init`, `network.dns`, `network.tls`, and secret definitions. A list supplied by a higher-precedence config file replaces the lower list. Network policy is atomic: when a higher config source supplies any of `policy`, `allow`, or `deny`, those values replace the complete lower-layer policy while sibling network fields continue to merge. Repeating the same config flag works exactly like interleaving different config flags: each file overlays everything to its left.
 
 `--net-conf` cannot be combined with `--net`, `--no-net`, `--net-rule`, or `--net-default*`. When network policy is loaded through a root `--conf` file instead, a policy CLI flag replaces it, while `--net-rule` remains additive and is evaluated before rules loaded from the file.
 
 ```bash
-# Files overlay left to right; the explicit CLI value wins over every file.
+# Files overlay left to right; --memory wins unless managed policy overrides it.
 msb run python \
   --conf base.yaml \
   --resource-conf standard.yaml \

@@ -164,7 +164,7 @@ microsandbox adds these certificates to the default system roots, so public regi
 }
 ```
 
-You can also set these per-sandbox via the SDK, overriding global config:
+Per-sandbox SDK options override user registry settings. [Managed registry settings](/configuration#auth-resolution-order) take precedence over both. Managed `insecure: false` requires TLS without changing credentials; managed `auth: null` forces anonymous access, and managed CA settings replace per-call custom certificates.
 
 <CodeGroup>
 ```typescript TypeScript

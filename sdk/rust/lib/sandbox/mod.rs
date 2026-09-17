@@ -101,7 +101,7 @@ pub use crate::db::entity::sandbox::SandboxStatus;
 pub use crate::logs::{LogEntry, LogOptions, LogSource, LogStreamOptions};
 pub use attach::AttachOptionsBuilder;
 pub use builder::{RegistryConfigBuilder, SandboxBuilder};
-pub use config::SandboxConfig;
+pub use config::{SandboxConfig, SandboxConfigPatch};
 pub use exec::{ExecOptionsBuilder, ExecOutput, Rlimit, RlimitResource};
 pub use fs::{
     FsEntry, FsEntryKind, FsHandle, FsMetadata, FsOpenOptions, FsReadStream, FsSetAttrs,
@@ -138,9 +138,9 @@ pub use microsandbox_types::{
 };
 pub use microsandbox_types::{
     EnvVar, MAX_HOSTNAME_BYTES, MAX_SANDBOX_NAME_BYTES, NetworkSpec, NetworkSpecPatch,
-    PortProtocol, PublishedPortSpec, SandboxConfigPatch, SandboxLogLevel, SandboxPolicyPatch,
-    SandboxResources, SandboxResourcesPatch, SandboxRuntimeOptions, SandboxRuntimeOptionsPatch,
-    SandboxSpec, TransparentHugePagePolicy, VsockRouteSpec, VsockSocketType, VsockSpec,
+    PortProtocol, PublishedPortSpec, SandboxLogLevel, SandboxPolicyPatch, SandboxResources,
+    SandboxResourcesPatch, SandboxRuntimeOptions, SandboxRuntimeOptionsPatch, SandboxSpec,
+    SandboxSpecPatch, TransparentHugePagePolicy, VsockRouteSpec, VsockSocketType, VsockSpec,
     VsockSpecPatch,
 };
 pub use modify::{
@@ -1942,6 +1942,8 @@ mod tests {
     async fn persisted_removal_rejects_a_stale_sandbox_identity() {
         let temp = tempdir().unwrap();
         let backend = LocalBackend::builder()
+            .config_path(temp.path().join("home").join("config.json"))
+            .managed_config_path(temp.path().join("home").join("managed.json"))
             .home(temp.path().join("home"))
             .build()
             .await
@@ -1979,6 +1981,8 @@ mod tests {
 
         let temp = tempdir().unwrap();
         let backend = LocalBackend::builder()
+            .config_path(temp.path().join("home").join("config.json"))
+            .managed_config_path(temp.path().join("home").join("managed.json"))
             .home(temp.path().join("home"))
             .build()
             .await

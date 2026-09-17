@@ -34,11 +34,10 @@ pub use backend::{
     CloudMessageResponse, CloudPaginated, CloudSandboxStatus, CloudSandboxStatusReason,
     CloudVolumeKind, CloudVolumeStatus, DEFAULT_CLOUD_API_URL, LocalBackend, LocalBackendBuilder,
     Profile, ProfileBackend, SandboxBackend, SandboxCloudState, SandboxHandleCloudState,
-    SandboxHandleInner, SandboxHandleLocalState, SandboxInner, SandboxLocalState, SdkConfig,
-    VolumeBackend, VolumeCloudState, VolumeHandleCloudState, VolumeHandleInner,
-    VolumeHandleLocalState, VolumeInner, VolumeLocalState, default_backend, default_backend_info,
-    load_sdk_config, resolve_default_backend, set_default_backend, swap_default_backend,
-    with_backend,
+    SandboxHandleInner, SandboxHandleLocalState, SandboxInner, SandboxLocalState, VolumeBackend,
+    VolumeCloudState, VolumeHandleCloudState, VolumeHandleInner, VolumeHandleLocalState,
+    VolumeInner, VolumeLocalState, default_backend, default_backend_info, resolve_default_backend,
+    set_default_backend, swap_default_backend, with_backend,
 };
 pub use config::set_sdk_libkrunfw_path as set_libkrunfw_path;
 pub use error::*;
@@ -63,10 +62,11 @@ pub use sandbox::{
     Sandbox, SandboxConfig, SandboxConfigPatch, SandboxListBuilder, SandboxMetrics,
     SandboxMetricsReport, SandboxMetricsState, SandboxModificationBuilder,
     SandboxModificationPatch, SandboxModificationPlan, SandboxPage, SandboxPingResult,
-    SandboxPolicyPatch, SandboxResourcesPatch, SandboxRuntimeOptionsPatch, SandboxTouchResult,
-    SecretChangeKind, SecretModificationPatch, SecretPatchBuilder, SecretPlannedChange,
-    SecretSource, VsockSpecPatch, all_sandbox_metrics, all_sandbox_metrics_local,
-    all_sandbox_metrics_reports_local, sandbox_metrics_report_local, validate_sandbox_name,
+    SandboxPolicyPatch, SandboxResourcesPatch, SandboxRuntimeOptionsPatch, SandboxSpecPatch,
+    SandboxTouchResult, SecretChangeKind, SecretModificationPatch, SecretPatchBuilder,
+    SecretPlannedChange, SecretSource, VsockSpecPatch, all_sandbox_metrics,
+    all_sandbox_metrics_local, all_sandbox_metrics_reports_local, sandbox_metrics_report_local,
+    validate_sandbox_name,
 };
 #[cfg(feature = "net")]
 pub use sandbox::{

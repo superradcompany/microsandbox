@@ -5,8 +5,8 @@
 //! config + DB pool statics that lived in `crate::config` / `crate::db`. Two
 //! construction paths:
 //!
-//! - [`LocalBackend::lazy`] — sync ambient default. Initialises its DB pool +
-//!   config lazily on first access. Used by the ambient `default_backend()`
+//! - [`LocalBackend::lazy`] — resolves and validates configuration synchronously,
+//!   deferring its DB pool until first access. Used by the ambient `default_backend()`
 //!   when no explicit backend is installed.
 //! - [`LocalBackend::builder`] — programmatic config. `.build().await`
 //!   constructs eagerly with all DB pools + config resolved up front.
@@ -39,11 +39,11 @@ use tokio::sync::OnceCell;
 use super::{
     Backend, BackendInfo, BackendKind, BackendSelectionSource, SandboxBackend, VolumeBackend,
 };
-use crate::{MicrosandboxError, MicrosandboxResult};
-use crate::{
-    SandboxConfig,
-    config::{DatabaseConfig, GlobalConfig, RegistryEntry, load_persisted_config_or_default},
+use crate::config::{
+    DatabaseConfig, GlobalConfig, GlobalConfigPatch, RegistryConfig, RegistryEntry,
+    RegistryOptions, RegistrySettingsPatch, layers::BackendConfig,
 };
+use crate::{MicrosandboxError, MicrosandboxResult};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -51,12 +51,12 @@ use crate::{
 
 /// Local-runtime backend: spawns microVMs via libkrun on the calling host.
 ///
-/// Owns the persisted [`GlobalConfig`] (paths, sandbox defaults, registry
-/// settings, database tuning) and the SQLite [`DbPools`] for this instance.
+/// Owns the captured settings and their resolved [`GlobalConfig`] (paths,
+/// sandbox defaults, registry settings, database tuning), plus the SQLite [`DbPools`].
 /// Built via either [`LocalBackend::lazy`] (no-explicit-setup ambient
 /// default, lazily initialised) or [`LocalBackend::builder`] (programmatic).
 pub struct LocalBackend {
-    config: Arc<GlobalConfig>,
+    config: BackendConfig,
     db: OnceCell<DbPools>,
     selection_source: BackendSelectionSource,
     profile: Option<String>,
@@ -69,32 +69,14 @@ pub struct LocalBackend {
 ///
 /// `build` overlays the builder's overrides on top of the persisted
 /// `~/.microsandbox/config.json` (honouring `MSB_CONFIG_PATH`). Persisted
-/// values fill in everything the builder didn't set; builder overrides win.
-/// Override the `home()` setter to point the merge at a different config
-/// file (the underlying loader still respects `MSB_CONFIG_PATH`).
+/// values fill in everything the builder didn't set. Managed configuration is applied last.
+/// Use [`config_path`](Self::config_path) to read a different user config file.
+/// [`home`](Self::home) changes the data directory, not the config file location.
 #[derive(Default)]
 pub struct LocalBackendBuilder {
-    home: Option<PathBuf>,
-    sandboxes_dir: Option<PathBuf>,
-    volumes_dir: Option<PathBuf>,
-    snapshots_dir: Option<PathBuf>,
-    cache_dir: Option<PathBuf>,
-    logs_dir: Option<PathBuf>,
-    secrets_dir: Option<PathBuf>,
-    max_connections: Option<u32>,
-    connect_timeout_secs: Option<u64>,
-    busy_timeout_secs: Option<u64>,
-    default_cpus: Option<u8>,
-    default_memory_mib: Option<u32>,
-    shell: Option<String>,
-    workdir: Option<String>,
-    metrics_sample_interval_ms: Option<Option<NonZero<u64>>>,
-    disable_metrics_sample: Option<bool>,
-    ca_certs: Option<Option<PathBuf>>,
-    registry_hosts: Option<HashMap<String, RegistryEntry>>,
-    ssh_inactivity_timeout_secs: Option<u64>,
-    log_level: Option<microsandbox_runtime::logging::LogLevel>,
-    deployment_profile: Option<DeploymentProfile>,
+    config: GlobalConfigPatch,
+    config_path: Option<PathBuf>,
+    managed_config_path: Option<PathBuf>,
 }
 
 struct MigrationLock {
@@ -111,26 +93,26 @@ impl LocalBackend {
     ///
     /// The config is read from `~/.microsandbox/config.json` (honouring
     /// `MSB_CONFIG_PATH`) at construction; a missing file resolves to the
-    /// hard-coded defaults. The DB pool is created (and migrations applied)
-    /// on first call to [`Self::db`].
+    /// hard-coded defaults. Invalid configuration fails construction. The DB pool is
+    /// created (and migrations applied) on first call to [`Self::db`].
     ///
     /// Process-wide singleton access goes through
     /// [`default_backend()`](super::default_backend) +
     /// [`Backend::as_local`]; the process default lazy-initialises a single
     /// `LocalBackend` instance, so callers never end up with two backends
     /// racing on the same SQLite file.
-    pub fn lazy() -> Self {
-        Self::lazy_with_selection(BackendSelectionSource::Programmatic, None)
+    pub fn lazy() -> MicrosandboxResult<Self> {
+        Self::builder().build_lazy()
     }
 
-    /// Construct a lazy local backend with resolver provenance attached.
-    pub(crate) fn lazy_with_selection(
+    /// Store backend settings finalized by [`BackendConfig::prepare_for_local_backend`].
+    pub(crate) fn from_backend_config(
+        config: BackendConfig,
         selection_source: BackendSelectionSource,
         profile: Option<String>,
     ) -> Self {
-        let config = load_persisted_config_or_default().unwrap_or_default();
         Self {
-            config: Arc::new(config),
+            config,
             db: OnceCell::new(),
             selection_source,
             profile,
@@ -140,7 +122,7 @@ impl LocalBackend {
     /// Eagerly construct a `LocalBackend` from `~/.microsandbox/config.json`,
     /// opening (and migrating) the DB pool up front.
     pub async fn new() -> MicrosandboxResult<Self> {
-        let backend = Self::lazy();
+        let backend = Self::lazy()?;
         let _ = backend.db().await?;
         Ok(backend)
     }
@@ -155,22 +137,42 @@ impl LocalBackend {
     pub async fn db(&self) -> MicrosandboxResult<&DbPools> {
         self.db
             .get_or_try_init(|| async {
-                let db_dir = self.config.home().join(microsandbox_utils::DB_SUBDIR);
-                connect_and_migrate(&db_dir, &self.config.database, &self.config.snapshots_dir())
-                    .await
+                let config = self.config();
+                let db_dir = config.home().join(microsandbox_utils::DB_SUBDIR);
+                connect_and_migrate(&db_dir, &config.database, &config.snapshots_dir()).await
             })
             .await
     }
 
-    /// Borrow this backend's [`GlobalConfig`].
+    /// Return the resolved backend configuration, including managed overrides.
     pub fn config(&self) -> &GlobalConfig {
+        self.config.resolved_config()
+    }
+
+    /// Borrow the captured settings to obtain operation layers with managed policy included.
+    pub(crate) fn config_sources(&self) -> &BackendConfig {
         &self.config
+    }
+
+    /// Resolve per-pull options through this backend's complete configuration layers.
+    pub async fn registry_config(
+        &self,
+        hostname: &str,
+        options: RegistryOptions,
+    ) -> MicrosandboxResult<RegistryConfig> {
+        self.config
+            .registry_layers(hostname)
+            .options(RegistrySettingsPatch::from_options(options))
+            .build()
+            .into_config()
+            .resolve(hostname, self.config())
+            .await
     }
 
     /// Clone the backend-owned config handle for APIs that need to return the
     /// ambient local config without borrowing through a temporary backend `Arc`.
     pub(crate) fn config_handle(&self) -> Arc<GlobalConfig> {
-        self.config.clone()
+        self.config.resolved_config().clone()
     }
 
     /// Host-side directory rooted at `volumes_dir/<name>` for a named volume.
@@ -179,67 +181,70 @@ impl LocalBackend {
     /// streaming methods and FFI shims that need a path before any backend
     /// trait call.
     pub fn volume_path(&self, name: &str) -> PathBuf {
-        self.config.volumes_dir().join(name)
+        self.config().volumes_dir().join(name)
     }
 
     /// Resolved sandboxes directory.
     pub fn sandboxes_dir(&self) -> PathBuf {
-        self.config.sandboxes_dir()
+        self.config().sandboxes_dir()
     }
 
     /// Resolved volumes directory.
     pub fn volumes_dir(&self) -> PathBuf {
-        self.config.volumes_dir()
+        self.config().volumes_dir()
     }
 
     /// Resolved snapshots directory.
     pub fn snapshots_dir(&self) -> PathBuf {
-        self.config.snapshots_dir()
+        self.config().snapshots_dir()
     }
 
     /// Resolved cache directory.
     pub fn cache_dir(&self) -> PathBuf {
-        self.config.cache_dir()
+        self.config().cache_dir()
     }
 
     /// Resolved logs directory.
     pub fn logs_dir(&self) -> PathBuf {
-        self.config.logs_dir()
+        self.config().logs_dir()
     }
 
     /// Resolved secrets directory.
     pub fn secrets_dir(&self) -> PathBuf {
-        self.config.secrets_dir()
+        self.config().secrets_dir()
     }
 
     /// Warn about create-time options only a cloud backend can honor.
     /// These are inert locally, so the create proceeds without them.
-    pub(super) fn warn_cloud_only(&self, config: &SandboxConfig) {
-        if config.slug.is_some() {
+    pub(super) fn warn_cloud_only(&self, name: &str, slug: Option<&str>) {
+        if slug.is_some() {
             tracing::warn!(
-                sandbox = %config.spec.name,
+                sandbox = %name,
                 "SandboxBuilder::slug is only honored by cloud backends; ignoring"
             );
         }
     }
 
-    /// Apply the operator-selected deployment profile before persistence and launch.
+    /// Resolve the operator-selected deployment profile before persistence and launch.
     ///
     /// The optional backend value is authoritative. Keeping this decision on
     /// the backend means an embedding host can enforce its isolation model even
     /// when the incoming sandbox specification requests a weaker profile.
-    pub(crate) fn apply_deployment_profile(&self, config: &mut SandboxConfig) {
-        let Some(profile) = self.config.deployment_profile else {
-            return;
+    pub(crate) fn resolve_deployment_profile(
+        &self,
+        name: &str,
+        requested: DeploymentProfile,
+    ) -> DeploymentProfile {
+        let Some(profile) = self.config().deployment_profile else {
+            return requested;
         };
 
-        if config.spec.deployment_profile != profile {
-            let requested = config.spec.deployment_profile;
+        if requested != profile {
             if requested == DeploymentProfile::MultiTenant
                 && profile == DeploymentProfile::SingleTenant
             {
                 tracing::warn!(
-                    sandbox = %config.spec.name,
+                    sandbox = %name,
                     ?requested,
                     enforced = ?profile,
                     "host policy is weakening the requested deployment profile"
@@ -249,120 +254,138 @@ impl LocalBackend {
                 // therefore decode to SingleTenant. Enforcing MultiTenant is
                 // the normal managed path, not a tenant override attempt.
                 tracing::debug!(
-                    sandbox = %config.spec.name,
+                    sandbox = %name,
                     ?requested,
                     enforced = ?profile,
                     "host policy strengthened the deployment profile"
                 );
             }
         }
-        config.spec.deployment_profile = profile;
+        profile
     }
 }
 
 impl LocalBackendBuilder {
+    /// Inject a managed-file fixture without exposing a policy bypass to SDK callers.
+    #[cfg(test)]
+    pub(crate) fn managed_config_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.managed_config_path = Some(path.into());
+        self
+    }
+
+    /// Read user settings from this file instead of `MSB_CONFIG_PATH` or the default path.
+    /// A missing file supplies no user settings. Machine-wide managed policy still applies.
+    pub fn config_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.config_path = Some(path.into());
+        self
+    }
+
     /// Override the home directory (default: `~/.microsandbox`).
     pub fn home(mut self, path: impl Into<PathBuf>) -> Self {
-        self.home = Some(path.into());
+        self.config.home_mut(path.into());
         self
     }
 
     /// Override the sandboxes directory.
     pub fn sandboxes_dir(mut self, path: impl Into<PathBuf>) -> Self {
-        self.sandboxes_dir = Some(path.into());
+        self.config.paths.sandboxes_mut(path.into());
         self
     }
 
     /// Override the volumes directory.
     pub fn volumes_dir(mut self, path: impl Into<PathBuf>) -> Self {
-        self.volumes_dir = Some(path.into());
+        self.config.paths.volumes_mut(path.into());
         self
     }
 
     /// Override the snapshots directory.
     pub fn snapshots_dir(mut self, path: impl Into<PathBuf>) -> Self {
-        self.snapshots_dir = Some(path.into());
+        self.config.paths.snapshots_mut(path.into());
         self
     }
 
     /// Override the cache directory.
     pub fn cache_dir(mut self, path: impl Into<PathBuf>) -> Self {
-        self.cache_dir = Some(path.into());
+        self.config.paths.cache_mut(path.into());
         self
     }
 
     /// Override the logs directory.
     pub fn logs_dir(mut self, path: impl Into<PathBuf>) -> Self {
-        self.logs_dir = Some(path.into());
+        self.config.paths.logs_mut(path.into());
         self
     }
 
     /// Override the secrets directory.
     pub fn secrets_dir(mut self, path: impl Into<PathBuf>) -> Self {
-        self.secrets_dir = Some(path.into());
+        self.config.paths.secrets_mut(path.into());
         self
     }
 
     /// Override the DB max connections (default: 5).
     pub fn max_connections(mut self, n: u32) -> Self {
-        self.max_connections = Some(n);
+        self.config.database.max_connections_mut(n);
         self
     }
 
     /// Override the DB connect timeout in seconds.
     pub fn connect_timeout_secs(mut self, secs: u64) -> Self {
-        self.connect_timeout_secs = Some(secs);
+        self.config.database.connect_timeout_secs_mut(secs);
         self
     }
 
     /// Override SQLite's `busy_timeout` in seconds.
     pub fn busy_timeout_secs(mut self, secs: u64) -> Self {
-        self.busy_timeout_secs = Some(secs);
+        self.config.database.busy_timeout_secs_mut(secs);
         self
     }
 
     /// Override the default sandbox vCPU count.
     pub fn default_cpus(mut self, cpus: u8) -> Self {
-        self.default_cpus = Some(cpus);
+        self.config.sandbox_defaults.cpus_mut(cpus);
         self
     }
 
     /// Override the default sandbox guest memory (MiB).
     pub fn default_memory_mib(mut self, mib: u32) -> Self {
-        self.default_memory_mib = Some(mib);
+        self.config.sandbox_defaults.memory_mib_mut(mib);
         self
     }
 
     /// Override the default shell used for interactive sessions and scripts.
     pub fn shell(mut self, shell: impl Into<String>) -> Self {
-        self.shell = Some(shell.into());
+        self.config.sandbox_defaults.shell_mut(shell.into());
         self
     }
 
     /// Override the default working directory inside sandboxes.
     pub fn workdir(mut self, workdir: impl Into<String>) -> Self {
-        self.workdir = Some(workdir.into());
+        self.config.sandbox_defaults.workdir_mut(workdir.into());
         self
     }
 
     /// Override the sandbox metrics sampling interval. Pass `0` to disable
     /// sampling globally.
     pub fn metrics_sample_interval_ms(mut self, ms: u64) -> Self {
-        self.metrics_sample_interval_ms = Some(NonZero::new(ms));
+        self.config
+            .sandbox_defaults
+            .set_metrics_sample_interval_ms_mut(NonZero::new(ms));
         self
     }
 
     /// Force-disable sandbox metrics sampling regardless of the configured
     /// interval.
     pub fn disable_metrics_sample(mut self, disable: bool) -> Self {
-        self.disable_metrics_sample = Some(disable);
+        self.config
+            .sandbox_defaults
+            .disable_metrics_sample_mut(disable);
         self
     }
 
     /// Override the path to additional CA root certificates trusted by
     /// registry connections. Pass `None` to clear a persisted value.
     pub fn ca_certs(mut self, path: Option<PathBuf>) -> Self {
-        self.ca_certs = Some(path);
+        self.config.registries.set_ca_certs_mut(path);
         self
     }
 
@@ -370,7 +393,12 @@ impl LocalBackendBuilder {
     /// any persisted `registries.hosts` — additive merging isn't supported
     /// by the builder (use a persisted config file for incremental edits).
     pub fn registry_hosts(mut self, hosts: HashMap<String, RegistryEntry>) -> Self {
-        self.registry_hosts = Some(hosts);
+        self.config.registries.replace_hosts_mut(
+            hosts
+                .into_iter()
+                .map(|(name, entry)| (name, entry.into()))
+                .collect(),
+        );
         self
     }
 
@@ -378,13 +406,13 @@ impl LocalBackendBuilder {
     ///
     /// Pass `0` to disable the timeout.
     pub fn ssh_inactivity_timeout_secs(mut self, secs: u64) -> Self {
-        self.ssh_inactivity_timeout_secs = Some(secs);
+        self.config.ssh.inactivity_timeout_secs_mut(secs);
         self
     }
 
     /// Override the runtime log level applied to SDK-spawned sandboxes.
     pub fn log_level(mut self, level: microsandbox_runtime::logging::LogLevel) -> Self {
-        self.log_level = Some(level);
+        self.config.log_level_mut(level);
         self
     }
 
@@ -393,150 +421,37 @@ impl LocalBackendBuilder {
     /// This operator setting takes precedence over the profile requested on a
     /// sandbox builder and is applied on both create and restart.
     pub fn deployment_profile(mut self, profile: DeploymentProfile) -> Self {
-        self.deployment_profile = Some(profile);
+        self.config.deployment_profile_mut(profile);
         self
     }
 
     /// Build the `LocalBackend`. Opens the DB pool and applies migrations.
     ///
-    /// Reads `~/.microsandbox/config.json` (or `MSB_CONFIG_PATH`) and
-    /// overlays the builder's overrides on top. Builder values win;
+    /// Reads [`config_path`](Self::config_path), or `MSB_CONFIG_PATH` / `~/.microsandbox/config.json`, and
+    /// overlays the builder's overrides, then the managed configuration;
     /// anything the builder didn't set falls through to the persisted
     /// config (or the hard-coded defaults if no config file exists).
     pub async fn build(self) -> MicrosandboxResult<LocalBackend> {
-        let backend = self.build_lazy();
+        let backend = self.build_lazy()?;
         let _ = backend.db().await?;
         Ok(backend)
     }
 
     /// Build a `LocalBackend` whose database initializes on first use.
     ///
-    /// This retains the programmatic overrides from the builder while avoiding
-    /// filesystem or migration work during construction. It is useful for
-    /// embedding runtimes that must finish a protocol handshake before touching
-    /// sandbox state. Persisted-config read or parse errors fall back to hard-coded
-    /// defaults; use [`try_build_lazy`](Self::try_build_lazy) to propagate them.
-    pub fn build_lazy(self) -> LocalBackend {
-        let persisted = load_persisted_config_or_default().unwrap_or_default();
-        self.build_lazy_from(persisted)
-    }
+    /// Resolves and validates configuration before returning the backend. Configuration
+    /// errors are returned immediately; sandbox filesystem setup and database migrations
+    /// remain deferred until the first database operation.
+    pub fn build_lazy(self) -> MicrosandboxResult<LocalBackend> {
+        let path = self.config_path.unwrap_or_else(crate::config::config_path);
+        let config = BackendConfig::load_from(&path, self.managed_config_path.as_deref())?
+            .prepare_for_local_backend(self.config)?;
 
-    /// Build a lazy `LocalBackend`, returning persisted-config read or parse errors.
-    ///
-    /// Unlike [`build_lazy`](Self::build_lazy), this constructor does not fall
-    /// back to hard-coded defaults when the configured file is unreadable or
-    /// invalid. The database still initializes only on first use.
-    pub fn try_build_lazy(self) -> MicrosandboxResult<LocalBackend> {
-        Ok(self.build_lazy_from(load_persisted_config_or_default()?))
-    }
-
-    /// Finish lazy construction from an already resolved persisted config.
-    fn build_lazy_from(self, persisted: GlobalConfig) -> LocalBackend {
-        let config = self.merge_into(persisted);
-        LocalBackend {
-            config: Arc::new(config),
-            db: OnceCell::new(),
-            selection_source: BackendSelectionSource::Programmatic,
-            profile: None,
-        }
-    }
-
-    /// Overlay the builder's overrides on top of `base`. Builder values win;
-    /// `None` builder fields fall through to `base`.
-    fn merge_into(self, mut base: GlobalConfig) -> GlobalConfig {
-        let LocalBackendBuilder {
-            home,
-            sandboxes_dir,
-            volumes_dir,
-            snapshots_dir,
-            cache_dir,
-            logs_dir,
-            secrets_dir,
-            max_connections,
-            connect_timeout_secs,
-            busy_timeout_secs,
-            default_cpus,
-            default_memory_mib,
-            shell,
-            workdir,
-            metrics_sample_interval_ms,
-            disable_metrics_sample,
-            ca_certs,
-            registry_hosts,
-            ssh_inactivity_timeout_secs,
-            log_level,
-            deployment_profile,
-        } = self;
-
-        if let Some(home) = home {
-            base.home = Some(home);
-        }
-        if let Some(level) = log_level {
-            base.log_level = Some(level);
-        }
-        if let Some(profile) = deployment_profile {
-            base.deployment_profile = Some(profile);
-        }
-
-        if let Some(v) = max_connections {
-            base.database.max_connections = v;
-        }
-        if let Some(v) = connect_timeout_secs {
-            base.database.connect_timeout_secs = v;
-        }
-        if let Some(v) = busy_timeout_secs {
-            base.database.busy_timeout_secs = v;
-        }
-
-        if let Some(p) = cache_dir {
-            base.paths.cache = Some(p);
-        }
-        if let Some(p) = sandboxes_dir {
-            base.paths.sandboxes = Some(p);
-        }
-        if let Some(p) = volumes_dir {
-            base.paths.volumes = Some(p);
-        }
-        if let Some(p) = snapshots_dir {
-            base.paths.snapshots = Some(p);
-        }
-        if let Some(p) = logs_dir {
-            base.paths.logs = Some(p);
-        }
-        if let Some(p) = secrets_dir {
-            base.paths.secrets = Some(p);
-        }
-
-        if let Some(v) = default_cpus {
-            base.sandbox_defaults.cpus = v;
-        }
-        if let Some(v) = default_memory_mib {
-            base.sandbox_defaults.memory_mib = v;
-        }
-        if let Some(v) = shell {
-            base.sandbox_defaults.shell = v;
-        }
-        if let Some(v) = workdir {
-            base.sandbox_defaults.workdir = Some(v);
-        }
-        if let Some(v) = metrics_sample_interval_ms {
-            base.sandbox_defaults.metrics_sample_interval_ms = v;
-        }
-        if let Some(v) = disable_metrics_sample {
-            base.sandbox_defaults.disable_metrics_sample = v;
-        }
-
-        if let Some(v) = ca_certs {
-            base.registries.ca_certs = v;
-        }
-        if let Some(v) = registry_hosts {
-            base.registries.hosts = v;
-        }
-        if let Some(secs) = ssh_inactivity_timeout_secs {
-            base.ssh.inactivity_timeout_secs = secs;
-        }
-
-        base
+        Ok(LocalBackend::from_backend_config(
+            config,
+            BackendSelectionSource::Programmatic,
+            None,
+        ))
     }
 }
 
@@ -637,12 +552,6 @@ fn agent_endpoint_may_exist(path: &std::path::Path) -> bool {
 #[cfg(windows)]
 fn agent_endpoint_may_exist(_path: &std::path::Path) -> bool {
     true
-}
-
-impl Default for LocalBackend {
-    fn default() -> Self {
-        Self::lazy()
-    }
 }
 
 impl From<LocalBackend> for Arc<dyn Backend> {
@@ -822,10 +731,21 @@ mod tests {
     use sha2::{Digest as _, Sha256};
 
     use super::*;
-    use crate::SandboxConfigPatch;
     use crate::backend::with_backend;
     use crate::sandbox::SandboxBuilder;
     use crate::volume::VolumeConfig;
+    use crate::{SandboxConfig, SandboxConfigPatch};
+
+    fn backend_with_config(config: GlobalConfig) -> LocalBackend {
+        let backend_config = BackendConfig::new(config.into(), Default::default());
+        LocalBackend::from_backend_config(
+            backend_config
+                .prepare_for_local_backend(Default::default())
+                .unwrap(),
+            BackendSelectionSource::Programmatic,
+            None,
+        )
+    }
 
     #[tokio::test]
     async fn sandbox_config_patch_overlays_global_config_by_field_presence() {
@@ -849,19 +769,15 @@ mod tests {
             },
         );
 
-        let backend = LocalBackend {
-            config: Arc::new(config),
-            db: OnceCell::new(),
-            selection_source: BackendSelectionSource::Programmatic,
-            profile: None,
-        };
+        let backend = backend_with_config(config);
 
         let (inherited, overridden) = with_backend(backend, async {
             let patch = SandboxResourcesPatch::new()
                 .cpus(2)
                 .max_cpus(2)
                 .memory_mib(512);
-            let supplied = SandboxConfigPatch::new().resources(patch);
+            let supplied = SandboxConfigPatch::new()
+                .spec(microsandbox_types::SandboxSpecPatch::new().resources(patch));
             let inherited = SandboxBuilder::new("test")
                 .overlay(supplied.clone())
                 .image("alpine")
@@ -872,7 +788,10 @@ mod tests {
             let patch = SandboxResourcesPatch::new()
                 .cpu_placement(CpuPlacement::Spread)
                 .thp(microsandbox_types::TransparentHugePagePolicy::Never);
-            let supplied = supplied.overlay(SandboxConfigPatch::new().resources(patch));
+            let supplied = supplied.overlay(
+                SandboxConfigPatch::new()
+                    .spec(microsandbox_types::SandboxSpecPatch::new().resources(patch)),
+            );
             let overridden = SandboxBuilder::new("test")
                 .overlay(supplied)
                 .image("alpine")
@@ -907,22 +826,79 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn sandbox_builder_uses_backend_layers_at_build_time() {
+        let initial_backend = backend_with_config(GlobalConfig {
+            sandbox_defaults: crate::config::SandboxDefaults {
+                cpus: 2,
+                memory_mib: 768,
+                workdir: Some("/initial".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        let (inherited, overridden, cloud) = with_backend(initial_backend, async {
+            (
+                SandboxBuilder::new("inherited").image("alpine"),
+                SandboxBuilder::new("overridden")
+                    .image("alpine")
+                    .cpus(3)
+                    .workdir("/explicit"),
+                SandboxBuilder::new("cloud").image("alpine"),
+            )
+        })
+        .await;
+
+        let build_backend = backend_with_config(GlobalConfig {
+            sandbox_defaults: crate::config::SandboxDefaults {
+                cpus: 4,
+                memory_mib: 2048,
+                workdir: Some("/build".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        let (inherited, overridden) = with_backend(build_backend, async {
+            (
+                inherited.build().await.unwrap(),
+                overridden.build().await.unwrap(),
+            )
+        })
+        .await;
+        assert_eq!(inherited.spec.resources.cpus, 4);
+        assert_eq!(inherited.spec.resources.memory_mib, 2048);
+        assert_eq!(inherited.spec.runtime.workdir.as_deref(), Some("/build"));
+        assert_eq!(overridden.spec.resources.cpus, 3);
+        assert_eq!(overridden.spec.resources.memory_mib, 2048);
+        assert_eq!(
+            overridden.spec.runtime.workdir.as_deref(),
+            Some("/explicit")
+        );
+
+        let backend =
+            crate::test_support::cloud_backend(crate::DEFAULT_CLOUD_API_URL, "test-key").unwrap();
+        let cloud = with_backend(backend, cloud.build()).await.unwrap();
+        let defaults = SandboxConfig::default();
+        assert_eq!(cloud.spec.resources.cpus, defaults.spec.resources.cpus);
+        assert_eq!(
+            cloud.spec.resources.memory_mib,
+            defaults.spec.resources.memory_mib
+        );
+        assert_eq!(cloud.spec.runtime.workdir, defaults.spec.runtime.workdir);
+    }
+
     #[test]
     fn operator_deployment_profile_overrides_sandbox_request() {
-        let backend = LocalBackend {
-            config: Arc::new(GlobalConfig {
-                deployment_profile: Some(DeploymentProfile::MultiTenant),
-                ..Default::default()
-            }),
-            db: OnceCell::new(),
-            selection_source: BackendSelectionSource::Programmatic,
-            profile: None,
-        };
+        let backend = backend_with_config(GlobalConfig {
+            deployment_profile: Some(DeploymentProfile::MultiTenant),
+            ..Default::default()
+        });
         let mut config = SandboxConfig::default();
         config.spec.name = "profile-test".into();
         config.spec.deployment_profile = DeploymentProfile::SingleTenant;
 
-        backend.apply_deployment_profile(&mut config);
+        config.spec.deployment_profile =
+            backend.resolve_deployment_profile(&config.spec.name, config.spec.deployment_profile);
 
         assert_eq!(
             config.spec.deployment_profile,
@@ -932,16 +908,12 @@ mod tests {
 
     #[test]
     fn sandbox_deployment_profile_is_preserved_without_operator_override() {
-        let backend = LocalBackend {
-            config: Arc::new(GlobalConfig::default()),
-            db: OnceCell::new(),
-            selection_source: BackendSelectionSource::Programmatic,
-            profile: None,
-        };
+        let backend = backend_with_config(GlobalConfig::default());
         let mut config = SandboxConfig::default();
         config.spec.deployment_profile = DeploymentProfile::MultiTenant;
 
-        backend.apply_deployment_profile(&mut config);
+        config.spec.deployment_profile =
+            backend.resolve_deployment_profile(&config.spec.name, config.spec.deployment_profile);
 
         assert_eq!(
             config.spec.deployment_profile,
@@ -1338,6 +1310,8 @@ mod tests {
 
         let backend_a: Arc<dyn Backend> = Arc::new(
             LocalBackend::builder()
+                .config_path(home_a.path().join("config.json"))
+                .managed_config_path(home_a.path().join("managed.json"))
                 .home(home_a.path())
                 .build()
                 .await
@@ -1345,6 +1319,8 @@ mod tests {
         );
         let backend_b: Arc<dyn Backend> = Arc::new(
             LocalBackend::builder()
+                .config_path(home_b.path().join("config.json"))
+                .managed_config_path(home_b.path().join("managed.json"))
                 .home(home_b.path())
                 .build()
                 .await
@@ -1405,22 +1381,79 @@ mod tests {
     }
 
     #[test]
-    fn try_build_lazy_rejects_invalid_persisted_config() {
+    fn managed_file_enforces_policy_and_errors_reach_backend_construction() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = dir.path().join("config.json");
+        let managed = dir.path().join("managed.json");
+        std::fs::write(&user, r#"{"sandbox_defaults":{"cpus":3}}"#).unwrap();
+        let build = || {
+            LocalBackend::builder()
+                .config_path(&user)
+                .managed_config_path(&managed)
+                .default_cpus(4)
+                .build_lazy()
+        };
+
+        // A missing policy is unmanaged. Reading the same file later must enforce it.
+        assert_eq!(build().unwrap().config().sandbox_defaults.cpus, 4);
+        std::fs::write(&managed, r#"{"overrides":{"sandbox_defaults":{"cpus":2}}}"#).unwrap();
+        assert_eq!(build().unwrap().config().sandbox_defaults.cpus, 2);
+
+        for raw in [
+            "not json",
+            r#"{"version":2}"#,
+            r#"{"overrides":{"sandbox_defaults":{"placement_profile":"missing"}}}"#,
+        ] {
+            std::fs::write(&managed, raw).unwrap();
+            assert!(build().is_err(), "accepted {raw}");
+        }
+        std::fs::remove_file(&managed).unwrap();
+        std::fs::create_dir(&managed).unwrap();
+        assert!(
+            build().is_err(),
+            "an unreadable policy must fail construction"
+        );
+    }
+
+    #[test]
+    fn explicit_config_path_ignores_invalid_environment_config() {
         let _env_guard = crate::test_support::lock_env();
+        let temp = tempfile::tempdir().unwrap();
+        let invalid = temp.path().join("invalid.json");
+        let configured = temp.path().join("config.json");
+        std::fs::write(&invalid, "not json").unwrap();
+        std::fs::write(&configured, r#"{"sandbox_defaults":{"cpus":3}}"#).unwrap();
+        let previous = std::env::var_os("MSB_CONFIG_PATH");
+        let _restore = scopeguard::guard(previous, |previous| {
+            // SAFETY: the shared environment lock remains held during restoration.
+            unsafe {
+                match previous {
+                    Some(value) => std::env::set_var("MSB_CONFIG_PATH", value),
+                    None => std::env::remove_var("MSB_CONFIG_PATH"),
+                }
+            }
+        });
+        // SAFETY: environment-dependent SDK tests hold the shared lock.
+        unsafe { std::env::set_var("MSB_CONFIG_PATH", &invalid) };
+        assert!(LocalBackend::lazy().is_err());
+        let backend = LocalBackend::builder()
+            .config_path(&configured)
+            .managed_config_path(configured.with_file_name("managed.json"))
+            .build_lazy()
+            .unwrap();
+        assert_eq!(backend.config().sandbox_defaults.cpus, 3);
+        assert!(backend.db.get().is_none());
+    }
+
+    #[test]
+    fn build_lazy_rejects_invalid_persisted_config() {
         let temp = tempfile::tempdir().unwrap();
         let config_path = temp.path().join("config.json");
         std::fs::write(&config_path, "not json").unwrap();
-        let previous = std::env::var_os("MSB_CONFIG_PATH");
-
-        // SAFETY: every environment-mutating SDK unit test holds the shared lock.
-        unsafe { std::env::set_var("MSB_CONFIG_PATH", &config_path) };
-        let result = LocalBackend::builder().try_build_lazy();
-        unsafe {
-            match previous {
-                Some(value) => std::env::set_var("MSB_CONFIG_PATH", value),
-                None => std::env::remove_var("MSB_CONFIG_PATH"),
-            }
-        }
+        let result = LocalBackend::builder()
+            .config_path(&config_path)
+            .managed_config_path(config_path.with_file_name("managed.json"))
+            .build_lazy();
 
         let error = match result {
             Ok(_) => panic!("invalid persisted config must fail lazy construction"),
@@ -1429,14 +1462,51 @@ mod tests {
         assert!(matches!(error, MicrosandboxError::InvalidConfig(_)));
     }
 
-    /// `LocalBackendBuilder::build()` overlays builder overrides on top of
-    /// the persisted config — values the builder didn't set must be
-    /// preserved from the base. This test runs `merge_into` directly so it
-    /// doesn't have to mutate `MSB_CONFIG_PATH` (which races other tests).
+    #[test]
+    fn constructing_a_replacement_reads_new_config_and_keeps_database_lazy() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let home = dir.path().join("not-created");
+        let write_config = |cpus| {
+            std::fs::write(
+                &path,
+                serde_json::to_vec(&serde_json::json!({
+                    "home": home, "sandbox_defaults": {"cpus": cpus}
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        };
+        write_config(2);
+        let original = LocalBackend::builder()
+            .config_path(&path)
+            .managed_config_path(path.with_file_name("managed.json"))
+            .build_lazy();
+        write_config(4);
+        let replacement = LocalBackend::builder()
+            .config_path(&path)
+            .managed_config_path(path.with_file_name("managed.json"))
+            .build_lazy();
+        std::fs::write(&path, "invalid").unwrap();
+        let invalid_replacement = LocalBackend::builder()
+            .config_path(&path)
+            .managed_config_path(path.with_file_name("managed.json"))
+            .build_lazy();
+        let original = original.unwrap();
+        let replacement = replacement.unwrap();
+        assert_eq!(original.config().sandbox_defaults.cpus, 2);
+        assert_eq!(replacement.config().sandbox_defaults.cpus, 4);
+        assert!(invalid_replacement.is_err());
+        assert!(original.db.get().is_none());
+        assert!(replacement.db.get().is_none());
+        assert!(!home.exists());
+    }
+
+    /// The public builder preserves persisted fields that it does not override.
     #[test]
     fn builder_merge_preserves_persisted_fields_when_not_overridden() {
-        // Persisted base: a fully-populated config the user supposedly
-        // wrote to ~/.microsandbox/config.json.
+        let temp = tempfile::tempdir().unwrap();
+        let config_path = temp.path().join("config.json");
         let base = GlobalConfig {
             log_level: Some(microsandbox_runtime::logging::LogLevel::Debug),
             deployment_profile: Some(DeploymentProfile::MultiTenant),
@@ -1455,14 +1525,21 @@ mod tests {
                 oci: crate::config::OciSandboxDefaults::default(),
                 shell: "/bin/zsh".into(),
                 workdir: Some("/work".into()),
+                outbound_proxy: None,
                 metrics_sample_interval_ms: NonZero::new(750),
                 disable_metrics_sample: true,
             },
             ..Default::default()
         };
 
-        // Builder overrides only one knob — vCPU count.
-        let merged = LocalBackend::builder().default_cpus(2).merge_into(base);
+        std::fs::write(&config_path, serde_json::to_vec(&base).unwrap()).unwrap();
+        let result = LocalBackend::builder()
+            .config_path(&config_path)
+            .managed_config_path(config_path.with_file_name("managed.json"))
+            .default_cpus(2)
+            .build_lazy();
+        let backend = result.unwrap();
+        let merged = backend.config();
 
         // The overridden field reflects the builder.
         assert_eq!(merged.sandbox_defaults.cpus, 2);
@@ -1493,14 +1570,21 @@ mod tests {
 
     #[test]
     fn builder_deployment_profile_overrides_persisted_policy() {
+        let temp = tempfile::tempdir().unwrap();
+        let config_path = temp.path().join("config.json");
         let base = GlobalConfig {
             deployment_profile: Some(DeploymentProfile::SingleTenant),
             ..Default::default()
         };
 
-        let merged = LocalBackend::builder()
+        std::fs::write(&config_path, serde_json::to_vec(&base).unwrap()).unwrap();
+        let result = LocalBackend::builder()
+            .config_path(&config_path)
+            .managed_config_path(config_path.with_file_name("managed.json"))
             .deployment_profile(DeploymentProfile::MultiTenant)
-            .merge_into(base);
+            .build_lazy();
+        let backend = result.unwrap();
+        let merged = backend.config();
 
         assert_eq!(
             merged.deployment_profile,
@@ -1510,6 +1594,8 @@ mod tests {
 
     #[test]
     fn builder_ssh_inactivity_timeout_overrides_persisted_default() {
+        let temp = tempfile::tempdir().unwrap();
+        let config_path = temp.path().join("config.json");
         let base = GlobalConfig {
             ssh: crate::config::SshConfig {
                 inactivity_timeout_secs: 1800,
@@ -1517,9 +1603,14 @@ mod tests {
             ..Default::default()
         };
 
-        let merged = LocalBackend::builder()
+        std::fs::write(&config_path, serde_json::to_vec(&base).unwrap()).unwrap();
+        let result = LocalBackend::builder()
+            .config_path(&config_path)
+            .managed_config_path(config_path.with_file_name("managed.json"))
             .ssh_inactivity_timeout_secs(0)
-            .merge_into(base);
+            .build_lazy();
+        let backend = result.unwrap();
+        let merged = backend.config();
 
         assert_eq!(merged.ssh.inactivity_timeout_secs, 0);
     }

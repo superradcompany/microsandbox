@@ -13,7 +13,7 @@ use microsandbox_db::DbWriteConnection;
 use microsandbox_db::pool::DbPools;
 use microsandbox_image::{
     CachedImageMetadata, Digest, GlobalCache, PullOptions, PullProgress, PullProgressSender,
-    PullResult, Reference, Registry, ext4, tree,
+    PullResult, Reference, Registry, RootfsMaterialization, ext4, tree,
 };
 use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, Set, sea_query::Expr};
 use sha2::{Digest as _, Sha256};
@@ -23,6 +23,7 @@ use super::LocalBackend;
 use crate::MicrosandboxResult;
 use crate::agent::AgentClient;
 use crate::backend::Backend;
+use crate::config::RegistryOptions;
 use crate::db::entity::{
     run as run_entity, sandbox as sandbox_entity, sandbox_label as sandbox_label_entity,
     sandbox_rootfs as sandbox_rootfs_entity,
@@ -31,9 +32,9 @@ use crate::runtime::{
     ProcessHandle, SpawnMode, ensure_named_volumes, rollback_created_named_volumes, spawn_sandbox,
 };
 use crate::sandbox::{
-    FsEntryKind, PullPolicy, RootDisk, RootfsSource, Sandbox, SandboxConfig, SandboxStatus,
-    apply_patches, build_upper_tree, remove_dir_if_exists, validate_env, validate_hostname,
-    validate_labels, validate_sandbox_name, validate_volume_mounts,
+    FsEntryKind, PullPolicy, RootDisk, RootfsSource, Sandbox, SandboxBuilder, SandboxConfig,
+    SandboxStatus, apply_patches, build_upper_tree, remove_dir_if_exists, validate_sandbox_name,
+    validate_volume_mounts,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -46,13 +47,6 @@ const AGENT_RELAY_READY_TIMEOUT: std::time::Duration = std::time::Duration::from
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
-
-/// Transient registry overrides from the SDK, merged with global config at pull time.
-struct RegistryOverrides {
-    auth: Option<microsandbox_image::RegistryAuth>,
-    insecure: bool,
-    ca_certs: Vec<Vec<u8>>,
-}
 
 /// OCI materialization selected for a create request.
 ///
@@ -88,10 +82,108 @@ impl LocalBackend {
     pub(crate) async fn create_sandbox(
         &self,
         backend: Arc<dyn Backend>,
-        mut config: SandboxConfig,
+        input: impl Into<SandboxBuilder>,
         mode: SpawnMode,
         progress: Option<PullProgressSender>,
     ) -> MicrosandboxResult<Sandbox> {
+        let mut builder = input.into();
+        let options = builder.prepare().await?;
+        self.warn_cloud_only(
+            options.spec.name.as_deref().unwrap_or_default(),
+            options.slug.as_ref().and_then(Option::as_deref),
+        );
+        validate_sandbox_name(options.spec.name.as_deref().unwrap_or_default())?;
+
+        let image = options.resolve_image(&self.config);
+        if matches!(image, RootfsSource::Oci(_)) {
+            Self::validate_rootfs_source(&image)?;
+        }
+
+        let expected_snapshot_manifest_digest = options
+            .snapshot_upper_source
+            .as_ref()
+            .and_then(Option::as_ref)
+            .and(options.manifest_digest.as_ref().and_then(Option::as_ref))
+            .cloned();
+
+        // Advisory preflight before an expensive OCI pull. The guarded check below
+        // remains authoritative, and replacement still waits for final validation.
+        if matches!(image, RootfsSource::Oci(_)) && !options.replace_existing.unwrap_or_default() {
+            let name = options.spec.name.as_deref().unwrap_or_default();
+            Self::check_create_target(self.db().await?, name, &self.sandboxes_dir().join(name))
+                .await?;
+        }
+
+        let resolved_image = if let RootfsSource::Oci(oci) = &image {
+            let image_materialization = if matches!(oci.root_disk, Some(RootDisk::Flat { .. })) {
+                RootfsMaterialization::Flat
+            } else {
+                RootfsMaterialization::Layered
+            };
+            let overrides = RegistryOptions {
+                auth: options
+                    .registry_auth
+                    .as_ref()
+                    .and_then(Option::as_ref)
+                    .cloned(),
+                insecure: options.insecure.unwrap_or_default(),
+                ca_certs: options.ca_certs.clone().unwrap_or_default(),
+                ..Default::default()
+            };
+            let resolved = self
+                .resolve_oci_image_for_create(
+                    &oci.reference,
+                    options.spec.pull_policy.unwrap_or_default(),
+                    overrides,
+                    expected_snapshot_manifest_digest.as_deref(),
+                    image_materialization,
+                    progress,
+                )
+                .await?;
+            if let Some(expected) = expected_snapshot_manifest_digest.as_deref()
+                && resolved.pull_result.manifest_digest.to_string() != expected
+            {
+                return Err(crate::MicrosandboxError::SnapshotIntegrity(format!(
+                    "snapshot image digest mismatch: manifest pinned {}, resolved {}",
+                    expected, resolved.pull_result.manifest_digest
+                )));
+            }
+            Some(resolved)
+        } else {
+            None
+        };
+
+        // Host deployment policy applies to local creation even when configured
+        // as an ordinary backend setting. Managed overrides remain the last layer.
+        let profile = self.resolve_deployment_profile(
+            options.spec.name.as_deref().unwrap_or_default(),
+            options.spec.deployment_profile.unwrap_or_default(),
+        );
+        builder = builder.deployment_profile(profile);
+        let mut config = builder.finish(
+            Some(&self.config),
+            resolved_image
+                .as_ref()
+                .map(|image| &image.pull_result.config),
+        )?;
+
+        self.validate_sandbox_name_for_runtime(&config.spec.name)?;
+        Self::validate_rootfs_source(&config.spec.image)?;
+        config.apply_rootfs_defaults(&self.config().sandbox_defaults.oci)?;
+        config.apply_runtime_defaults();
+
+        // Runtime-provided mounts also need validation before any sandbox mutation.
+        validate_volume_mounts(&mut config.spec.mounts)?;
+        let db = self.db().await?;
+        let sandbox_dir = self.sandboxes_dir().join(&config.spec.name);
+
+        // Acquire transition ownership before inspecting or replacing sandbox
+        // state. Image resolution above uses only the independently locked cache.
+        let _guard =
+            Self::acquire_sandbox_transition_guard(&self.config().run_dir(), &config.spec.name)
+                .await?;
+        Self::prepare_create_target(db, &config, &sandbox_dir, &self.config().run_dir()).await?;
+
         tracing::debug!(
             sandbox = %config.spec.name,
             image = ?config.spec.image,
@@ -100,88 +192,27 @@ impl LocalBackend {
             memory_mib = config.spec.resources.memory_mib,
             "create_local: starting"
         );
-
-        self.apply_deployment_profile(&mut config);
-        config.apply_rootfs_defaults(&self.config().sandbox_defaults.oci)?;
-
         let mut pinned_manifest_digest: Option<String> = None;
         let mut pinned_reference: Option<String> = None;
 
-        config.apply_runtime_defaults();
-        validate_hostname(config.spec.runtime.hostname.as_deref())?;
-        self.validate_sandbox_name_for_runtime(&config.spec.name)?;
-        Self::validate_rootfs_source(&config.spec.image)?;
-        validate_env(&config.spec.env)?;
-        validate_labels(&config.spec.labels)?;
-        validate_volume_mounts(&mut config.spec.mounts)?;
-        if let Some(init) = &config.spec.init {
-            crate::sandbox::init::validate(init)?;
-        }
-
-        // Initialize the database before any expensive image pull so we can
-        // fail fast on conflicting persisted sandbox state.
-        let db = self.db().await?;
-        let sandbox_dir = self.sandboxes_dir().join(&config.spec.name);
-        // Transition ownership is deliberately separate from the runtime lifecycle lock: this
-        // guard serializes database/storage mutation and launcher-to-runtime handoff, while the
-        // lifecycle lock remains owned by the VM for its entire runtime generation.
-        let _transition_guard =
-            Self::acquire_sandbox_transition_guard(&self.config().run_dir(), &config.spec.name)
-                .await?;
-        Self::prepare_create_target(db, &config, &sandbox_dir, &self.config().run_dir()).await?;
-
-        // Resolve OCI images before spawning the sandbox process.
-        if let RootfsSource::Oci(oci) = config.spec.image.clone() {
-            let reference = oci.reference;
-            let expected_snapshot_manifest_digest = config
-                .snapshot_upper_source
-                .as_ref()
-                .and(config.manifest_digest.clone());
+        if let Some(ResolvedOciImage {
+            pull_result,
+            metadata_reference,
+            cached_metadata,
+        }) = resolved_image
+        {
+            let RootfsSource::Oci(oci) = &config.spec.image else {
+                unreachable!("image metadata was resolved for an OCI image");
+            };
             let root_disk = oci
                 .root_disk
+                .clone()
                 .unwrap_or(RootDisk::Managed { size_mib: None });
-            let image_materialization = if matches!(&root_disk, RootDisk::Flat { .. }) {
-                microsandbox_image::RootfsMaterialization::Flat
+            let image_materialization = if matches!(root_disk, RootDisk::Flat { .. }) {
+                RootfsMaterialization::Flat
             } else {
-                microsandbox_image::RootfsMaterialization::Layered
+                RootfsMaterialization::Layered
             };
-            let overrides = RegistryOverrides {
-                auth: config.registry_auth.clone(),
-                insecure: config.insecure,
-                ca_certs: config.ca_certs.clone(),
-            };
-            let ResolvedOciImage {
-                pull_result,
-                metadata_reference,
-                cached_metadata,
-            } = self
-                .resolve_oci_image_for_create(
-                    &reference,
-                    config.spec.pull_policy,
-                    overrides,
-                    expected_snapshot_manifest_digest.as_deref(),
-                    image_materialization,
-                    progress,
-                )
-                .await?;
-
-            // Snapshot overlays are meaningful only against the exact base
-            // image digest captured in their descriptor.
-            if let Some(expected) = expected_snapshot_manifest_digest.as_deref()
-                && pull_result.manifest_digest.to_string() != expected
-            {
-                return Err(crate::MicrosandboxError::SnapshotIntegrity(format!(
-                    "snapshot image digest mismatch: manifest pinned {}, resolved {}",
-                    expected, pull_result.manifest_digest
-                )));
-            }
-
-            // Merge image config defaults under user-provided config.
-            config.merge_image_defaults(&pull_result.config);
-            if let Some(init) = &config.spec.init {
-                crate::sandbox::init::validate(init)?;
-            }
-
             pinned_manifest_digest = Some(pull_result.manifest_digest.to_string());
             pinned_reference = Some(metadata_reference.clone());
 
@@ -689,9 +720,9 @@ impl LocalBackend {
         &self,
         reference: &str,
         pull_policy: PullPolicy,
-        registry_overrides: RegistryOverrides,
+        registry_overrides: RegistryOptions,
         expected_snapshot_manifest_digest: Option<&str>,
-        materialization: microsandbox_image::RootfsMaterialization,
+        materialization: RootfsMaterialization,
         progress: Option<PullProgressSender>,
     ) -> MicrosandboxResult<ResolvedOciImage> {
         let Some(pinned_digest) = expected_snapshot_manifest_digest else {
@@ -727,7 +758,7 @@ impl LocalBackend {
         reference: &str,
         pinned_digest: &str,
         pull_policy: PullPolicy,
-        registry_overrides: RegistryOverrides,
+        registry_overrides: RegistryOptions,
         progress: Option<PullProgressSender>,
     ) -> MicrosandboxResult<ResolvedOciImage> {
         let manifest_digest: Digest = pinned_digest.parse().map_err(|e| {
@@ -763,7 +794,7 @@ impl LocalBackend {
                 &pinned_reference,
                 pull_policy,
                 registry_overrides,
-                microsandbox_image::RootfsMaterialization::Layered,
+                RootfsMaterialization::Layered,
                 progress,
             )
             .await
@@ -844,11 +875,10 @@ impl LocalBackend {
         &self,
         reference: &str,
         pull_policy: PullPolicy,
-        registry_overrides: RegistryOverrides,
-        materialization: microsandbox_image::RootfsMaterialization,
+        registry_overrides: RegistryOptions,
+        materialization: RootfsMaterialization,
         progress: Option<PullProgressSender>,
     ) -> MicrosandboxResult<PullResult> {
-        let global = self.config();
         let cache = GlobalCache::new(&self.cache_dir())?;
         let platform = microsandbox_image::Platform::host_linux();
         let image_ref: Reference = reference.parse().map_err(|e| {
@@ -868,24 +898,13 @@ impl LocalBackend {
             return Ok(result);
         }
 
-        let auth = match registry_overrides.auth {
-            Some(auth) => auth,
-            None => global.resolve_registry_auth(image_ref.registry())?,
-        };
-
-        // Merge global config with SDK overrides.
-        let mut ca_certs = global.resolve_ca_certs().await?;
-        ca_certs.extend(registry_overrides.ca_certs);
-
-        let mut insecure_registries = global.insecure_registries();
-        if registry_overrides.insecure {
-            insecure_registries.push(image_ref.registry().to_string());
-        }
-
+        let config = self
+            .registry_config(image_ref.registry(), registry_overrides)
+            .await?;
         let registry = Registry::builder(platform, cache)
-            .auth(auth)
-            .extra_ca_certs(ca_certs)
-            .add_insecure_registries(insecure_registries)
+            .auth(config.auth)
+            .extra_ca_certs(config.ca_certs)
+            .add_insecure_registries(config.insecure_registries)
             .build()?;
 
         if let Some(sender) = progress {
@@ -954,6 +973,24 @@ impl LocalBackend {
         Ok(())
     }
 
+    /// Check availability without stopping or removing any existing sandbox.
+    async fn check_create_target(
+        pools: &DbPools,
+        name: &str,
+        sandbox_dir: &Path,
+    ) -> MicrosandboxResult<()> {
+        let existing = sandbox_entity::Entity::find()
+            .filter(sandbox_entity::Column::Name.eq(name))
+            .one(pools.read())
+            .await?;
+        if existing.is_some() || sandbox_dir.exists() {
+            return Err(crate::MicrosandboxError::SandboxAlreadyExists(format!(
+                "sandbox '{name}' already exists; remove it, start the stopped sandbox, or recreate with .replace()"
+            )));
+        }
+        Ok(())
+    }
+
     /// Clear the way for a create: reject conflicting persisted state, or
     /// (with `.replace()`) stop and remove the prior sandbox.
     async fn prepare_create_target(
@@ -962,22 +999,13 @@ impl LocalBackend {
         sandbox_dir: &Path,
         run_dir: &Path,
     ) -> MicrosandboxResult<()> {
+        if !config.replace_existing {
+            return Self::check_create_target(pools, &config.spec.name, sandbox_dir).await;
+        }
         let existing = sandbox_entity::Entity::find()
             .filter(sandbox_entity::Column::Name.eq(&config.spec.name))
             .one(pools.read())
             .await?;
-
-        let dir_exists = sandbox_dir.exists();
-
-        if !config.replace_existing {
-            if existing.is_some() || dir_exists {
-                return Err(crate::MicrosandboxError::SandboxAlreadyExists(format!(
-                    "sandbox '{}' already exists; remove it, start the stopped sandbox, or recreate with .replace()",
-                    config.spec.name
-                )));
-            }
-            return Ok(());
-        }
 
         if let Some(model) = existing {
             let sandboxes_dir = sandbox_dir.parent().ok_or_else(|| {
@@ -1471,9 +1499,158 @@ mod tests {
         pools
     }
 
+    #[tokio::test]
+    async fn existing_name_fails_before_image_pull() {
+        use crate::config::{GlobalConfigPatch, layers::BackendConfig};
+        let temp = tempfile::Builder::new()
+            .prefix("msb-preflight")
+            .tempdir_in("/tmp")
+            .unwrap();
+        for persisted in [false, true] {
+            let home = temp
+                .path()
+                .join(if persisted { "database" } else { "directory" });
+            let layers = BackendConfig::new(
+                GlobalConfigPatch::new().home(home.clone()),
+                Default::default(),
+            );
+            let backend = Arc::new(LocalBackend::from_backend_config(
+                layers
+                    .prepare_for_local_backend(Default::default())
+                    .unwrap(),
+                crate::backend::BackendSelectionSource::Programmatic,
+                None,
+            ));
+            if persisted {
+                let pools = backend.db().await.unwrap();
+                LocalBackend::insert_sandbox_record(pools.write(), &test_config("existing"))
+                    .await
+                    .unwrap();
+            } else {
+                fs::create_dir_all(home.join("sandboxes/existing")).unwrap();
+            }
+            // This uncached image would fail under PullPolicy::Never if pulling were reached.
+            let input = crate::sandbox::SandboxBuilder::new("existing")
+                .image("registry.invalid/review-never-pulled:missing")
+                .pull_policy(crate::sandbox::PullPolicy::Never);
+            let error = backend
+                .create_sandbox(backend.clone(), input, SpawnMode::Attached, None)
+                .await
+                .err()
+                .unwrap();
+            assert!(
+                matches!(error, crate::MicrosandboxError::SandboxAlreadyExists(_)),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn cleared_host_deployment_policy_preserves_create_and_restart_selection() {
+        use crate::config::{GlobalConfigPatch, layers::BackendConfig};
+        use microsandbox_types::DeploymentProfile;
+        let user = GlobalConfigPatch::new().deployment_profile(DeploymentProfile::SingleTenant);
+        let managed = serde_json::from_str(r#"{"deployment_profile":null}"#).unwrap();
+        let layers = BackendConfig::new(user, managed);
+        let backend = LocalBackend::from_backend_config(
+            layers
+                .prepare_for_local_backend(Default::default())
+                .unwrap(),
+            crate::backend::BackendSelectionSource::Programmatic,
+            None,
+        );
+        let requested = DeploymentProfile::MultiTenant;
+        let restart = backend.resolve_deployment_profile("policy-clear", requested);
+        let created = crate::sandbox::SandboxBuilder::new("policy-clear")
+            .image("alpine")
+            .deployment_profile(restart)
+            .finish(Some(backend.config_sources()), None)
+            .unwrap();
+        assert_eq!(restart, requested);
+        assert_eq!(created.spec.deployment_profile, requested);
+    }
+
+    #[tokio::test]
+    async fn create_layers_managed_resources_before_final_validation() {
+        use crate::config::{GlobalConfigPatch, layers::BackendConfig};
+        let temp = tempfile::Builder::new()
+            .prefix("msb-layers")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let layers = BackendConfig::new(
+            GlobalConfigPatch::new().home(temp.path().join("home")),
+            serde_json::from_str(r#"{"sandbox_defaults":{"cpus":2}}"#).unwrap(),
+        );
+        let backend = Arc::new(LocalBackend::from_backend_config(
+            layers
+                .prepare_for_local_backend(Default::default())
+                .unwrap(),
+            crate::backend::BackendSelectionSource::Programmatic,
+            None,
+        ));
+        let builder = crate::sandbox::SandboxBuilder::new("late-resources")
+            .image(temp.path().join("missing-rootfs"))
+            .cpus(8)
+            .max_cpus(3);
+        let error = backend
+            .create_sandbox(backend.clone(), builder, SpawnMode::Attached, None)
+            .await
+            .err()
+            .expect("missing rootfs must fail without starting a VM");
+        // cpus=8/max_cpus=3 is invalid before layering. Managed cpus=2 repairs
+        // that input, so the final config reaches the subsequent rootfs check.
+        assert!(
+            error
+                .to_string()
+                .contains("rootfs bind path does not exist"),
+            "{error}"
+        );
+        assert!(backend.db.get().is_none());
+    }
+
+    #[tokio::test]
+    async fn invalid_final_config_does_not_replace_existing_state() {
+        use crate::config::{GlobalConfigPatch, layers::BackendConfig};
+        let temp = tempfile::Builder::new()
+            .prefix("msb-layers")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let home = temp.path().join("home");
+        let sandbox_dir = home.join("sandboxes").join("retained");
+        fs::create_dir_all(&sandbox_dir).unwrap();
+        let marker = sandbox_dir.join("keep");
+        fs::write(&marker, "existing state").unwrap();
+        let layers = BackendConfig::new(
+            GlobalConfigPatch::new().home(home),
+            serde_json::from_str(r#"{"sandbox_defaults":{"cpus":0}}"#).unwrap(),
+        );
+        let backend = Arc::new(LocalBackend::from_backend_config(
+            layers
+                .prepare_for_local_backend(Default::default())
+                .unwrap(),
+            crate::backend::BackendSelectionSource::Programmatic,
+            None,
+        ));
+        let builder = crate::sandbox::SandboxBuilder::new("retained")
+            .image(temp.path().to_path_buf())
+            .cpus(2)
+            .replace();
+        let error = backend
+            .create_sandbox(backend.clone(), builder, SpawnMode::Attached, None)
+            .await
+            .err()
+            .expect("invalid managed CPU count must fail");
+        assert!(
+            error.to_string().contains("cpus must be greater than 0"),
+            "{error}"
+        );
+        assert_eq!(fs::read_to_string(marker).unwrap(), "existing state");
+        assert!(backend.db.get().is_none());
+    }
+
     #[test]
     #[cfg(unix)]
-    fn untracked_runtime_probe_distinguishes_live_and_stale_endpoints() {
+    fn untracked_runtime_probe_detects_listener_removal() {
         let temp = tempfile::Builder::new()
             .prefix("msb-untracked")
             .tempdir_in("/tmp")
@@ -1486,6 +1663,8 @@ mod tests {
 
         assert!(sandbox_runtime_endpoint_is_live(&run_dir, &sandbox_dir, "worker").unwrap());
         drop(listener);
+        // Remove the endpoint before probing: macOS may defer listener teardown.
+        std::fs::remove_file(&paths.legacy_agent).unwrap();
         assert!(!sandbox_runtime_endpoint_is_live(&run_dir, &sandbox_dir, "worker").unwrap());
     }
 
@@ -1540,7 +1719,13 @@ mod tests {
             .tempdir_in("/tmp")
             .unwrap();
         let home = temp.path().join("msb-home");
-        let backend = LocalBackend::builder().home(&home).build().await.unwrap();
+        let backend = LocalBackend::builder()
+            .config_path(home.join("config.json"))
+            .managed_config_path(home.join("managed.json"))
+            .home(&home)
+            .build()
+            .await
+            .unwrap();
 
         backend
             .validate_sandbox_name_for_runtime("sdk-socket-test")
@@ -1557,6 +1742,8 @@ mod tests {
         std::fs::create_dir_all(&rootfs).unwrap();
         let backend = Arc::new(
             LocalBackend::builder()
+                .config_path(temp.path().join("home").join("config.json"))
+                .managed_config_path(temp.path().join("home").join("managed.json"))
                 .home(temp.path().join("home"))
                 .build()
                 .await
@@ -1596,6 +1783,8 @@ mod tests {
         let temp = tempdir().unwrap();
         let backend = Arc::new(
             LocalBackend::builder()
+                .config_path(temp.path().join("config.json"))
+                .managed_config_path(temp.path().join("managed.json"))
                 .home(temp.path())
                 .build()
                 .await
