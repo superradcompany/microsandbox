@@ -55,20 +55,32 @@ def fixture_environment(root, artifacts):
 
 def cleanup(env, root, log, candidate):
     """Use the candidate for upgraded catalogs; retain pre-upgrade recovery."""
+    candidate_env = dict(env, MSB_PATH=str(candidate))
     try:
-        cleanup_catalog(dict(env, MSB_PATH=str(candidate)), root, log)
+        cleanup_catalog(candidate_env, root, log)
     except Exception as error:
-        # If setup failed before upgrading, the old reader may still help.
-        # Recovery must not hide a failure of the candidate's cleanup path.
+        # A partial cleanup can leave a VM exiting or a transient lock held.
+        # The historical reader cannot reopen an upgraded catalog; retry with
+        # the candidate and a fresh inventory before any pre-upgrade fallback.
         traceback.print_exc(file=log)
-        log.write("Retrying cleanup with the historical CLI\n")
+        log.write("Retrying cleanup with the candidate CLI\n")
         try:
-            cleanup_catalog(env, root, log)
+            cleanup_catalog(candidate_env, root, log)
         except Exception as recovery_error:
             traceback.print_exc(file=log)
-            error.add_note(f"Historical cleanup also failed: {recovery_error}")
+            error.add_note(f"Candidate cleanup retry also failed: {recovery_error}")
+            # Only a failure before catalog upgrade can benefit from this last
+            # attempt. Never treat it as the teardown path for upgraded state.
+            log.write("Attempting historical CLI for pre-upgrade recovery\n")
+            try:
+                cleanup_catalog(env, root, log)
+            except Exception as historical_error:
+                traceback.print_exc(file=log)
+                error.add_note(f"Historical cleanup also failed: {historical_error}")
+            else:
+                error.add_note("Historical cleanup recovered the disposable catalog.")
         else:
-            error.add_note("Historical cleanup recovered the disposable catalog.")
+            error.add_note("Candidate cleanup retry recovered the disposable catalog.")
         # Even successful recovery must not hide a candidate-reader failure.
         raise
 

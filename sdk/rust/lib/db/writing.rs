@@ -18,7 +18,19 @@ pub(crate) async fn validate_runtime_config(
     runtime: &crate::config::GlobalConfig,
 ) -> MicrosandboxResult<()> {
     if let Some(patch) = crate::runtime::launch_contract::catalog_patch(runtime).await? {
-        HistoricalFormat::for_patch(patch).encode(config)?;
+        HistoricalFormat::for_patch(patch).encode(&config.clone_for_persistence())?;
+        // These transient fields are intentionally absent from persisted cold-start
+        // configuration, but still require the newer process-launch contract.
+        if config.checkpoint_restore.is_some()
+            || config.branch_source.is_some()
+            || !config.snapshot_upper_layers.is_empty()
+            || !config.snapshot_root_layer_sources.is_empty()
+        {
+            return Err(MicrosandboxError::Runtime(
+                "checkpoint restore, branch, or disk chains require a newer runtime launch contract"
+                    .into(),
+            ));
+        }
     }
     Ok(())
 }
@@ -28,6 +40,11 @@ pub(crate) async fn encode_new<C: ConnectionTrait>(
     config: &SandboxConfig,
     runtime: Option<&crate::config::GlobalConfig>,
 ) -> MicrosandboxResult<String> {
+    // Recheck the final effective config even on a current catalog: image defaults
+    // and restore preparation may have enriched it since initial admission.
+    if let Some(runtime) = runtime {
+        validate_runtime_config(config, runtime).await?;
+    }
     if admission::is_current(db).await? {
         return Ok(serde_json::to_string(config)?);
     }
