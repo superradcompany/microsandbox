@@ -269,14 +269,12 @@ mod tests {
         let ambient_home = tempfile::tempdir_in("/tmp").unwrap();
         let bound_home = tempfile::tempdir_in("/tmp").unwrap();
         let ambient: Arc<dyn Backend> = Arc::new(
-            LocalBackend::builder()
-                .home(ambient_home.path())
+            crate::test_support::local_backend_builder(ambient_home.path())
                 .build()
                 .await
                 .unwrap(),
         );
-        let bound = LocalBackend::builder()
-            .home(bound_home.path())
+        let bound = crate::test_support::local_backend_builder(bound_home.path())
             .build()
             .await
             .unwrap();
@@ -365,8 +363,7 @@ mod tests {
             ),
         ] {
             let home = tempfile::tempdir_in("/tmp").unwrap();
-            let backend = LocalBackend::builder()
-                .home(home.path())
+            let backend = crate::test_support::local_backend_builder(home.path())
                 .build()
                 .await
                 .unwrap();
@@ -410,8 +407,7 @@ mod tests {
         use crate::db::entity::sandbox;
         let home = tempfile::tempdir_in("/tmp").unwrap();
         let backend = Arc::new(
-            LocalBackend::builder()
-                .home(home.path())
+            crate::test_support::local_backend_builder(home.path())
                 .build()
                 .await
                 .unwrap(),
@@ -501,8 +497,7 @@ mod tests {
     #[tokio::test]
     async fn control_peer_mismatch_sends_no_mutation() {
         let home = tempfile::tempdir_in("/tmp").unwrap();
-        let backend = LocalBackend::builder()
-            .home(home.path())
+        let backend = crate::test_support::local_backend_builder(home.path())
             .build()
             .await
             .unwrap();

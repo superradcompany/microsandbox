@@ -5815,8 +5815,7 @@ mod tests {
         use microsandbox_utils::process_lock::try_lock_exclusive;
 
         let directory = tempfile::tempdir().unwrap();
-        let local = LocalBackend::builder()
-            .home(directory.path().join("home"))
+        let local = crate::test_support::local_backend_builder(directory.path().join("home"))
             .build()
             .await
             .unwrap();

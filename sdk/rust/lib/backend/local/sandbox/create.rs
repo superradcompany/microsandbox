@@ -2520,8 +2520,7 @@ mod tests {
         let directory = tempdir().unwrap();
         let rootfs = directory.path().join("rootfs");
         fs::create_dir_all(&rootfs).unwrap();
-        let local = LocalBackend::builder()
-            .home(directory.path().join("home"))
+        let local = crate::test_support::local_backend_builder(directory.path().join("home"))
             .build()
             .await
             .unwrap();
@@ -2825,8 +2824,7 @@ mod tests {
     async fn test_create_local_missing_snapshot_descriptor_preserves_replace_target() {
         let temp = tempdir().unwrap();
         let backend = Arc::new(
-            LocalBackend::builder()
-                .home(temp.path().join("home"))
+            crate::test_support::local_backend_builder(temp.path().join("home"))
                 .build()
                 .await
                 .unwrap(),
@@ -2888,8 +2886,7 @@ mod tests {
     async fn test_create_local_stored_snapshot_reference_error_is_not_ignored() {
         let temp = tempdir().unwrap();
         let backend = Arc::new(
-            LocalBackend::builder()
-                .home(temp.path().join("home"))
+            crate::test_support::local_backend_builder(temp.path().join("home"))
                 .build()
                 .await
                 .unwrap(),

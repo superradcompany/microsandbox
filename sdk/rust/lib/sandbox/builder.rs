@@ -1459,14 +1459,14 @@ impl SandboxBuilder {
 
     /// Create the sandbox. Boots the VM with agentd ready.
     pub async fn create(self) -> MicrosandboxResult<Sandbox> {
-        if self.detached {
-            return self.create_detached().await;
-        }
-        self.create_with_mode(
-            false,
+        let detached = self.detached;
+        // Keep configuration and restore state off callers' stacks when they
+        // compose multiple creates in a single async task.
+        Box::pin(self.create_with_mode(
+            detached,
             #[cfg(feature = "local")]
             None,
-        )
+        ))
         .await
     }
 
@@ -1505,11 +1505,11 @@ impl SandboxBuilder {
 
     /// Create the sandbox for detached/background use.
     pub async fn create_detached(self) -> MicrosandboxResult<Sandbox> {
-        self.create_with_mode(
+        Box::pin(self.create_with_mode(
             true,
             #[cfg(feature = "local")]
             None,
-        )
+        ))
         .await
     }
 

@@ -198,6 +198,26 @@ async fn archive_metadata_is_admitted_before_replacement() {
 }
 
 #[tokio::test]
+async fn managed_root_layout_conflict_preserves_replacement_target() {
+    use crate::config::{GlobalConfigPatch, layers::BackendConfig};
+
+    for flat in [false, true] {
+        let root = tempfile::tempdir_in("/tmp").unwrap();
+        let archive = archive(root.path(), flat, false).await;
+        let mut backend = backend(root.path(), 18).await;
+        let user = GlobalConfigPatch::from_present_fields(backend.config().clone());
+        let managed = serde_json::from_value(serde_json::json!({
+            "sandbox_defaults": {"oci": {"root_disk": {
+                "kind": if flat { "managed" } else { "flat" }
+            }}}
+        }))
+        .unwrap();
+        Arc::get_mut(&mut backend).unwrap().config = BackendConfig::new(user, managed);
+        assert_rejection_preserves_target(backend, &archive, "captured root disk layout").await;
+    }
+}
+
+#[tokio::test]
 async fn corrupt_archive_does_not_replace_target() {
     let root = tempfile::tempdir_in("/tmp").unwrap();
     let archive = root.path().join("broken.msnap");

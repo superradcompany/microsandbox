@@ -800,7 +800,7 @@ mod tests {
 
     #[test]
     fn cloud_default_stop_timeout_covers_checkpoint_convergence() {
-        let backend = CloudBackend::new("http://127.0.0.1:1", "test-key").unwrap();
+        let backend = crate::test_support::cloud_backend("http://127.0.0.1:1", "test-key").unwrap();
 
         assert_eq!(backend.default_stop_timeout(), Duration::from_secs(360));
         assert!(!backend.should_force_kill_after_stop_timeout());
@@ -809,7 +809,7 @@ mod tests {
     type ConfigMutation = fn(&mut SandboxConfig);
 
     #[tokio::test]
-    async fn every_cloud_create_entry_point_sends_managed_values() {
+    async fn every_cloud_create_entry_point_sends_captured_file_policy() {
         use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
         for entry in 0..6 {
@@ -847,17 +847,30 @@ mod tests {
                     .unwrap();
                 serde_json::from_slice::<serde_json::Value>(&body).unwrap()
             });
-            let user = serde_json::from_str(
+            let directory = tempfile::tempdir().unwrap();
+            let user = directory.path().join("config.json");
+            let managed = directory.path().join("managed.json");
+            std::fs::write(
+                &user,
                 r#"{"sandbox_defaults":{"cpus":6,"memory_mib":4096,"workdir":"/user"}}"#,
             )
             .unwrap();
-            let managed = serde_json::from_str(r#"{"sandbox_defaults":{"cpus":2,"memory_mib":1024,"workdir":"/managed","shell":"/bin/admin"}}"#).unwrap();
+            std::fs::write(&managed, r#"{"version":1,"overrides":{"sandbox_defaults":{"cpus":2,"memory_mib":1024,"workdir":"/managed","shell":"/bin/admin"}}}"#).unwrap();
             let backend = CloudBackend::builder()
                 .url(url)
                 .api_key("test-token")
-                .config_sources(crate::config::layers::BackendConfig::new(user, managed))
+                .config_sources(
+                    crate::config::layers::BackendConfig::load_from(&user, Some(&managed)).unwrap(),
+                )
                 .build()
                 .unwrap();
+            // Existing backends keep captured policy. A new backend must fail on
+            // these invalid files, but no create entry point should reload them.
+            std::fs::write(&user, "invalid").unwrap();
+            std::fs::write(&managed, "invalid").unwrap();
+            assert!(
+                crate::config::layers::BackendConfig::load_from(&user, Some(&managed)).is_err()
+            );
             let backend: Arc<dyn Backend> = Arc::new(backend);
             let request = || {
                 SandboxBuilder::new("policy-request")

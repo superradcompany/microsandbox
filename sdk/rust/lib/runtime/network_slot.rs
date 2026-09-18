@@ -203,8 +203,7 @@ mod tests {
     #[tokio::test]
     async fn historical_and_current_runs_share_the_slot_namespace() {
         let temp = tempdir().unwrap();
-        let backend = LocalBackend::builder()
-            .home(temp.path().join("msb-home"))
+        let backend = crate::test_support::local_backend_builder(temp.path().join("msb-home"))
             .build()
             .await
             .unwrap();

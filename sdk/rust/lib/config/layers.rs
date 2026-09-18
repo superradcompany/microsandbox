@@ -356,6 +356,7 @@ mod tests {
         assert!(Arc::ptr_eq(&cached, layers.resolved_config()));
     }
 
+    #[cfg(feature = "local")]
     #[test]
     fn runtime_paths_are_captured_once_below_managed_overrides() {
         let _guard = crate::test_support::lock_env();

@@ -246,6 +246,17 @@ mod tests {
         let local = Arc::new(crate::test_support::local_backend(
             crate::config::GlobalConfig {
                 home: Some(std::path::PathBuf::from(&home)),
+                // This isolated backend does not read environment paths. Supply the
+                // released runtime pair selected by the historical fixture explicitly.
+                paths: crate::config::PathsConfig {
+                    msb: Some(std::env::var_os("MSB_PATH").expect("historical msb").into()),
+                    libkrunfw: Some(
+                        std::env::var_os("MSB_LIBKRUNFW_PATH")
+                            .expect("historical firmware")
+                            .into(),
+                    ),
+                    ..Default::default()
+                },
                 ..Default::default()
             },
         ));

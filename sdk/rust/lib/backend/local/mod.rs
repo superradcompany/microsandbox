@@ -810,12 +810,10 @@ mod tests {
     async fn concurrent_local_backends_migrate_the_same_home() {
         let tmp = tempfile::tempdir().unwrap();
         let snapshots = tmp.path().join("snapshots");
-        let first = LocalBackend::builder()
-            .home(tmp.path())
+        let first = crate::test_support::local_backend_builder(tmp.path())
             .snapshots_dir(&snapshots)
             .build();
-        let second = LocalBackend::builder()
-            .home(tmp.path())
+        let second = crate::test_support::local_backend_builder(tmp.path())
             .snapshots_dir(&snapshots)
             .build();
         let (first, second) = tokio::time::timeout(Duration::from_secs(30), async {
@@ -1531,6 +1529,138 @@ mod tests {
             build().is_err(),
             "an unreadable policy must fail construction"
         );
+    }
+
+    #[test_utils::msb_test]
+    async fn live_managed_files_control_creation_and_preserve_existing_sandboxes() {
+        use futures::FutureExt;
+
+        let binary =
+            PathBuf::from(std::env::var_os("MSB_PATH").expect("explicit candidate runtime"));
+        let firmware = std::env::var_os("MSB_LIBKRUNFW_PATH").map(PathBuf::from);
+        // Retain the directory if cleanup fails, rather than deleting a live VM's disks.
+        let temporary = if cfg!(windows) {
+            std::env::temp_dir()
+        } else {
+            PathBuf::from("/tmp")
+        };
+        let root = tempfile::Builder::new()
+            .prefix("msb-policy-")
+            .tempdir_in(temporary)
+            .unwrap()
+            .keep();
+        let user = root.join("config.json");
+        let managed = root.join("managed.json");
+        std::fs::write(
+            &user,
+            serde_json::to_vec(&serde_json::json!({
+                "paths": {"msb": binary, "libkrunfw": firmware},
+                "runtime": {"block_writeback": {"mode": "off"}},
+                "sandbox_defaults": {"cpus": 3, "memory_mib": 512, "workdir": "/"}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let policy = |cpus, memory| {
+            std::fs::write(
+                &managed,
+                serde_json::to_vec(&serde_json::json!({
+                    "version": 1,
+                    "overrides": {"sandbox_defaults": {
+                        "cpus": cpus, "memory_mib": memory, "workdir": "/tmp"
+                    }}
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        };
+        let build = || -> Arc<dyn Backend> {
+            Arc::new(
+                LocalBackend::builder()
+                    .config_path(&user)
+                    .managed_config_path(&managed)
+                    .home(root.join("home"))
+                    .default_cpus(4)
+                    .build_lazy()
+                    .unwrap(),
+            )
+        };
+        let request = |name| {
+            crate::Sandbox::builder(name)
+                .image("alpine:3.21")
+                .cpus(8)
+                .memory(768u32)
+                .workdir("/")
+                .max_duration(120)
+        };
+        policy(1, 256);
+        let captured = build();
+        let result = std::panic::AssertUnwindSafe(async {
+            let first =
+                crate::backend::with_backend(captured.clone(), request("policy-first").create())
+                    .await
+                    .unwrap();
+            assert_eq!(first.config().spec.resources.cpus, 1);
+            assert_eq!(first.config().spec.resources.memory_mib, 256);
+            let output = first.exec("sh", ["-c", "nproc; pwd"]).await.unwrap();
+            assert!(output.status().success);
+            assert_eq!(output.stdout().unwrap().trim(), "1\n/tmp");
+            first.stop().await.unwrap();
+
+            policy(2, 384);
+            let retained =
+                crate::backend::with_backend(captured.clone(), request("policy-retained").create())
+                    .await
+                    .unwrap();
+            assert_eq!(retained.config().spec.resources.cpus, 1);
+            retained.stop().await.unwrap();
+
+            let updated = build();
+            let fresh =
+                crate::backend::with_backend(updated.clone(), request("policy-fresh").create())
+                    .await
+                    .unwrap();
+            assert_eq!(fresh.config().spec.resources.cpus, 2);
+            assert_eq!(fresh.config().spec.resources.memory_mib, 384);
+            fresh.stop().await.unwrap();
+
+            // New policy governs new creates. Restart keeps the existing
+            // sandbox's persisted resources, as documented before this change.
+            let handle = crate::backend::with_backend(updated, crate::Sandbox::get("policy-first"))
+                .await
+                .unwrap();
+            assert_eq!(handle.config().unwrap().spec.resources.cpus, 1);
+            let restarted = handle.start().await.unwrap();
+            let output = restarted
+                .exec("nproc", std::iter::empty::<&str>())
+                .await
+                .unwrap();
+            assert!(output.status().success);
+            assert_eq!(output.stdout().unwrap().trim(), "1");
+            restarted.stop().await.unwrap();
+        })
+        .catch_unwind()
+        .await;
+        crate::backend::with_backend(captured, async {
+            for name in ["policy-first", "policy-retained", "policy-fresh"] {
+                match crate::Sandbox::get(name).await {
+                    Ok(handle) => {
+                        let _ = handle.stop().await;
+                        handle.remove().await.unwrap();
+                    }
+                    Err(crate::MicrosandboxError::SandboxNotFound(_)) => {}
+                    Err(error) => panic!(
+                        "policy fixture cleanup failed at {}: {error}",
+                        root.display()
+                    ),
+                }
+            }
+        })
+        .await;
+        std::fs::remove_dir_all(&root).unwrap();
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
     }
 
     #[test]

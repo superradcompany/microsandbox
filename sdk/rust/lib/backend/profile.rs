@@ -457,7 +457,7 @@ mod tests {
         assert_eq!(sources.resolved_config().sandbox_defaults.cpus, 2);
     }
 
-    #[cfg(feature = "cloud")]
+    #[cfg(all(feature = "local", feature = "cloud"))]
     #[test]
     fn resolved_profiles_preserve_metadata_and_validate_only_local_defaults() {
         let _env_guard = crate::test_support::lock_env();
@@ -552,7 +552,7 @@ mod tests {
         assert!(p.cloud_builder("local").is_err());
     }
 
-    #[cfg(feature = "cloud")]
+    #[cfg(all(feature = "local", feature = "cloud"))]
     #[test]
     fn resolve_default_backend_honors_explicit_backend_over_cloud_env() {
         let temp = tempfile::tempdir().unwrap();
@@ -618,7 +618,12 @@ mod tests {
             url: None,
             api_key_ref: Some("inline:msb_live_abc".into()),
         };
-        let cloud = p.cloud_builder("prod").unwrap().build().unwrap();
+        let cloud = p
+            .cloud_builder("prod")
+            .unwrap()
+            .config_sources(BackendConfig::new(Default::default(), Default::default()))
+            .build()
+            .unwrap();
         assert_eq!(cloud.url(), super::super::DEFAULT_CLOUD_API_URL);
     }
 

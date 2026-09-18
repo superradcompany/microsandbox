@@ -577,6 +577,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "local")]
     #[test]
     fn sparse_user_file_allows_image_defaults_and_explicit_clear() {
         let dir = tempfile::tempdir().unwrap();

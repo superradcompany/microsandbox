@@ -1253,6 +1253,7 @@ mod tests {
         assert!(round.sandbox_defaults.metrics_sample_interval_ms.is_none());
     }
 
+    #[cfg(feature = "local")]
     #[test]
     fn test_metrics_capacity_default_uses_crate_default() {
         let cfg = GlobalConfig::default();
@@ -1262,6 +1263,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "local")]
     #[test]
     fn test_metrics_capacity_zero_falls_back_to_default() {
         let json = r#"{"metrics": {"capacity": 0}}"#;
@@ -1273,6 +1275,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "local")]
     #[test]
     fn test_metrics_capacity_explicit_value_overrides_default() {
         let json = r#"{"metrics": {"capacity": 2048}}"#;

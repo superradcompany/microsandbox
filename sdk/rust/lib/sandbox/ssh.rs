@@ -3321,21 +3321,21 @@ mod tests {
         .inactivity
     }
 
+    #[cfg(feature = "cloud")]
     #[tokio::test]
     async fn cloud_ssh_uses_its_captured_policy_above_session_options() {
-        let local_policy =
+        let ambient_policy =
             serde_json::from_str(r#"{"ssh":{"inactivity_timeout_secs":99}}"#).unwrap();
-        let local = crate::LocalBackend::from_backend_config(
-            BackendConfig::new(Default::default(), local_policy)
-                .prepare_for_local_backend(Default::default())
-                .unwrap(),
-            crate::BackendSelectionSource::Programmatic,
-            None,
-        );
+        let ambient = crate::CloudBackend::builder()
+            .url("https://other-cloud.example")
+            .api_key("test-token")
+            .config_sources(BackendConfig::new(Default::default(), ambient_policy))
+            .build()
+            .unwrap();
         let key =
             PrivateKey::random(&mut russh::keys::key::safe_rng(), Algorithm::Ed25519).unwrap();
         let public_key = key.public_key().public_key_base64();
-        crate::backend::with_backend(local, async {
+        crate::backend::with_backend(ambient, async {
             for managed in [None, Some(0), Some(10)] {
                 let saved =
                     serde_json::from_str(r#"{"ssh":{"inactivity_timeout_secs":30}}"#).unwrap();

@@ -2165,8 +2165,7 @@ mod tests {
     async fn persisted_removal_waits_for_snapshot_lineage_owner() {
         let temp = tempdir().unwrap();
         let backend = std::sync::Arc::new(
-            LocalBackend::builder()
-                .home(temp.path().join("home"))
+            crate::test_support::local_backend_builder(temp.path().join("home"))
                 .build()
                 .await
                 .unwrap(),

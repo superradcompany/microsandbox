@@ -46,3 +46,16 @@ pub(crate) fn local_backend(config: crate::config::GlobalConfig) -> crate::Local
         None,
     )
 }
+
+/// Build against user and managed config files inside a test's temporary home.
+/// Runtime environment paths are still honored for live runtime fixtures.
+#[cfg(feature = "local")]
+pub(crate) fn local_backend_builder(
+    home: impl AsRef<std::path::Path>,
+) -> crate::backend::local::LocalBackendBuilder {
+    let home = home.as_ref();
+    crate::LocalBackend::builder()
+        .config_path(home.join("config.json"))
+        .managed_config_path(home.join("managed.json"))
+        .home(home)
+}

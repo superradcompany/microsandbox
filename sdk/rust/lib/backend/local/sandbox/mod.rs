@@ -1637,8 +1637,7 @@ mod tests {
 
         let home = tempfile::tempdir_in("/tmp").unwrap();
         let backend = Arc::new(
-            LocalBackend::builder()
-                .home(home.path())
+            crate::test_support::local_backend_builder(home.path())
                 .build()
                 .await
                 .unwrap(),
@@ -1947,8 +1946,7 @@ mod tests {
         let home = tempfile::tempdir_in("/tmp").unwrap();
         #[cfg(not(unix))]
         let home = tempdir().unwrap();
-        let backend = LocalBackend::builder()
-            .home(home.path())
+        let backend = crate::test_support::local_backend_builder(home.path())
             .build()
             .await
             .unwrap();
@@ -2003,8 +2001,7 @@ mod tests {
     async fn kill_waits_for_start_publication_and_terminates_the_created_run() {
         let home = tempfile::tempdir_in("/tmp").unwrap();
         let backend = Arc::new(
-            LocalBackend::builder()
-                .home(home.path())
+            crate::test_support::local_backend_builder(home.path())
                 .build()
                 .await
                 .unwrap(),
@@ -2317,8 +2314,7 @@ mod tests {
     #[tokio::test]
     async fn flat_restart_does_not_require_layered_image_artifacts() {
         let temp = tempdir().unwrap();
-        let backend = LocalBackend::builder()
-            .home(temp.path())
+        let backend = crate::test_support::local_backend_builder(temp.path())
             .build()
             .await
             .unwrap();

@@ -372,8 +372,7 @@ mod tests {
     async fn resolved_builder_reference_is_consumed_once_and_preserves_layer_sources() {
         let temp = tempfile::tempdir().unwrap();
         let local = Arc::new(
-            LocalBackend::builder()
-                .home(temp.path().join("home"))
+            crate::test_support::local_backend_builder(temp.path().join("home"))
                 .build()
                 .await
                 .unwrap(),

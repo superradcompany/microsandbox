@@ -210,8 +210,7 @@ mod tests {
             let rootfs = directory.path().join("rootfs");
             std::fs::create_dir(&rootfs).unwrap();
             let backend = Arc::new(
-                LocalBackend::builder()
-                    .home(directory.path().join("home"))
+                crate::test_support::local_backend_builder(directory.path().join("home"))
                     .build()
                     .await
                     .unwrap(),
@@ -665,8 +664,7 @@ mod tests {
         let rootfs = directory.path().join("rootfs");
         std::fs::create_dir_all(&rootfs).unwrap();
         let backend = Arc::new(
-            LocalBackend::builder()
-                .home(directory.path().join("home"))
+            crate::test_support::local_backend_builder(directory.path().join("home"))
                 .build()
                 .await
                 .unwrap(),
