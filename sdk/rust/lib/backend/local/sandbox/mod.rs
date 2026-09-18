@@ -263,6 +263,7 @@ impl LocalBackend {
                     write_db,
                     model.id,
                     &sandbox.config().clone_for_persistence(),
+                    Some(self.config()),
                 )
                 .await
                 {
@@ -1057,6 +1058,7 @@ impl LocalBackend {
         db: &DbWriteConnection,
         sandbox_id: i32,
         config: &SandboxConfig,
+        runtime: Option<&crate::config::GlobalConfig>,
     ) -> MicrosandboxResult<()> {
         if !microsandbox_db::catalog::has_column(db, "sandbox", "active_config").await? {
             return Ok(());
@@ -1071,7 +1073,8 @@ impl LocalBackend {
                     "sandbox disappeared before recording its active configuration".into(),
                 )
             })?;
-        let config_json = crate::db::encoding::encode_like(config, &original.config)?;
+        let config_json =
+            crate::db::writing::encode_existing(db, config, &original.config, runtime).await?;
         sandbox_entity::Entity::update_many()
             .col_expr(
                 sandbox_entity::Column::ActiveConfig,

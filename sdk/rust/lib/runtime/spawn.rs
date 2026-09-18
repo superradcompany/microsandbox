@@ -327,6 +327,18 @@ pub async fn spawn_sandbox(
     let resolved_runtime = crate::setup::resolve_runtime(global)?;
     ensure_sigchld_handler_uses_alt_stack_before_spawn().await?;
     let launch_contract = super::launch_contract::resolve(&resolved_runtime.msb_path).await?;
+    // A stopped sandbox may have been edited without a runtime installed, or
+    // the selected executable may have changed since creation. Validate its
+    // effective configuration here for both initial launch and later starts.
+    crate::db::writing::validate_runtime_config(config, global).await?;
+    if config.checkpoint_restore.as_ref().is_some_and(|restore| {
+        restore
+            .external_mounts
+            .iter()
+            .any(|binding| binding.require_backing)
+    }) {
+        super::launch_contract::require_restore_backing(&resolved_runtime.msb_path).await?;
+    }
     launch_contract.validate_capacity(
         config.spec.resources.cpus,
         config.spec.resources.max_cpus,

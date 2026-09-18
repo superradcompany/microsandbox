@@ -104,7 +104,7 @@ Destination options include `cpus`, `memory` (MiB), `network_policy`, `max_conne
 
 Full execution restore requires CPU and memory overrides to match captured geometry exactly, and rejects removing a captured NIC. Host-side network policy, connection limits, and lifetime limits can change. An explicit `SecurityProfile`—including `SecurityProfile.DEFAULT`—requires a disk snapshot or `disk_only=True`; it cannot change already-captured execution.
 
-Supply destination bindings with `volumes`, `ports`, and `vsock`, using the same typed values as creation. `captured_volumes=["/data"]` selects private captured disks. `user` changes the default for new execs, and `log_level` configures host logging. Resources are not inherited unless `dangerously_inherit_resources=True` is explicit. `external_mount_policy="strict"` (default) or `"relaxed"` validates supplied filesystem mappings, not permission to inherit them.
+Supply destination bindings with `volumes`, `ports`, and `vsock`, using the same typed values as creation. `captured_volumes=["/data"]` selects private captured disks. `user` changes the default for new execs, and `log_level` configures host logging. Resources are not inherited unless `dangerously_inherit_resources=True` is explicit. Full restore rejects missing external filesystems and additional disks by default; `allow_missing_resources=True` opts into unavailable devices with warnings. `external_mount_policy="strict"` (default) or `"relaxed"` validates supplied filesystem objects, independently of missing-resource permission. Root and owned storage remain required.
 
 ## Disk maintenance and incremental export
 

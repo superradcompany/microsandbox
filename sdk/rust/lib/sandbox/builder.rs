@@ -100,7 +100,7 @@ impl RegistryConfigBuilder {
 impl SandboxBuilder {
     /// Select validation of authorized external filesystem mappings and captured handles.
     /// Strict is the default; relaxed accepts supported mismatches with warnings.
-    /// Neither policy grants host access. Unmapped filesystems remain unavailable in both modes.
+    /// Neither policy grants host access or waives full restore's required-resource checks.
     pub(crate) fn external_mount_policy(
         mut self,
         policy: super::ExternalMountRestorePolicy,
@@ -2968,7 +2968,7 @@ mod tests {
     #[tokio::test]
     async fn checkpoint_archive_build_retains_patch_resource_intent() {
         let directory = tempfile::tempdir().unwrap();
-        let archive = directory.path().join("saved.msnap");
+        let archive = directory.path().join("saved.msb");
         std::fs::write(&archive, b"archive validation is deferred to the backend").unwrap();
         let config = SandboxBuilder::new("restore")
             .with_snapshot_reference(SnapshotReference::path(archive.to_string_lossy()))

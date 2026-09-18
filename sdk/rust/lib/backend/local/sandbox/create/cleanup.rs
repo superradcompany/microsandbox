@@ -394,9 +394,10 @@ mod tests {
             );
             let mut cleanup = fixture.arm().await;
             let pools = fixture.backend.db().await.unwrap();
-            let id = LocalBackend::insert_starting_sandbox_record(pools.write(), &fixture.config)
-                .await
-                .unwrap();
+            let id =
+                LocalBackend::insert_starting_sandbox_record(pools.write(), &fixture.config, None)
+                    .await
+                    .unwrap();
             if direct_rollback {
                 fixture
                     .backend
@@ -446,9 +447,10 @@ mod tests {
             }
             let mut cleanup = fixture.arm().await;
             let pools = fixture.backend.db().await.unwrap();
-            let id = LocalBackend::insert_starting_sandbox_record(pools.write(), &fixture.config)
-                .await
-                .unwrap();
+            let id =
+                LocalBackend::insert_starting_sandbox_record(pools.write(), &fixture.config, None)
+                    .await
+                    .unwrap();
             if refuse_delete {
                 pools.write().execute_unprepared(
                     "CREATE TRIGGER retain_sandbox BEFORE DELETE ON sandbox BEGIN SELECT RAISE(ABORT, 'retained'); END;",
@@ -586,7 +588,7 @@ mod tests {
                 let pools = backend.db().await.unwrap();
                 if committed {
                     let result =
-                        LocalBackend::insert_starting_sandbox_record(pools.write(), &config)
+                        LocalBackend::insert_starting_sandbox_record(pools.write(), &config, None)
                             .await
                             .unwrap();
                     ready.send(()).unwrap();
@@ -596,7 +598,7 @@ mod tests {
                     result
                 } else {
                     ready.send(()).unwrap();
-                    LocalBackend::insert_starting_sandbox_record(pools.write(), &config)
+                    LocalBackend::insert_starting_sandbox_record(pools.write(), &config, None)
                         .await
                         .unwrap()
                 }
@@ -700,7 +702,7 @@ mod tests {
             false,
             None,
         );
-        let id = LocalBackend::insert_starting_sandbox_record(pools.write(), &config)
+        let id = LocalBackend::insert_starting_sandbox_record(pools.write(), &config, None)
             .await
             .unwrap();
         LocalBackend::update_sandbox_status(pools.write(), id, SandboxStatus::Running)

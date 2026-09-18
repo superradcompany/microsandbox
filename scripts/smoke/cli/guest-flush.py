@@ -23,6 +23,8 @@ def main():
     parser.add_argument("--legacy-msb", type=Path, help="Released runtime for capability refusal tests")
     parser.add_argument("--benchmark-repetitions", type=int, default=0,
                         help="Measure fresh sources, alternating policies and an optional released baseline")
+    parser.add_argument("--owned-disk-mib", type=int, default=0,
+                        help="Exercise dirty root + owned block disks with this many MiB on each; --baseline records old policy behavior")
     args = parser.parse_args()
     home = args.home.resolve()
     if home.exists():
@@ -84,6 +86,72 @@ def main():
 
     try:
         run("version", "--version")
+        if args.owned_disk_mib:
+            assert 0 < args.owned_disk_mib <= 512
+            # Enough RAM and long writeback intervals keep both files dirty until capture.
+            # Use a fresh source per case; a preceding Required capture must not clean Skip's input.
+            for layout, root in [("managed", "2G"), ("flat", "flat:2G")]:
+                for operation in ("pause", "disk", "full", "branch"):
+                    for policy in ("auto", "required", "skip"):
+                        label = f"owned-{layout}-{operation}-{policy}"
+                        source, child = "b-" + label, "c-" + label
+                        names.append(source)
+                        run("create-" + label, "create", "alpine", "--name", source,
+                            "--root-disk", root, "--memory", "4G", "--max-duration", "30m",
+                            "--mount-owned", "/data:kind=disk,size=2G")
+                        shell(source, "set -e; echo 99 > /proc/sys/vm/dirty_background_ratio; "
+                              "echo 99 > /proc/sys/vm/dirty_ratio; "
+                              "echo 60000 > /proc/sys/vm/dirty_writeback_centisecs; "
+                              "echo 60000 > /proc/sys/vm/dirty_expire_centisecs; "
+                              f"dd if=/dev/urandom of=/flush-data bs=1M count={args.owned_disk_mib} 2>/dev/null; "
+                              "cp /flush-data /data/data; echo retained-ram > /dev/shm/flush-marker")
+                        checksum = shell(source, "sha256sum /flush-data").stdout.split()[0]
+                        dirty_cmd = "awk '/^Dirty:/ {print $2}' /proc/meminfo"
+                        dirty_before = int(shell(source, dirty_cmd).stdout.strip())
+                        assert dirty_before >= args.owned_disk_mib * 1024 * 1.5, (label, dirty_before)
+                        # Plain pause is important: it must not flush solely because a disk is owned.
+                        flags = [] if operation == "pause" and policy == "auto" else ["--guest-flush", policy]
+                        if operation == "pause":
+                            run("measure-" + label, "pause", source, *flags)
+                            assert state(source) == "paused"
+                            if not args.baseline and policy != "required":
+                                refused("unflushed-paused-" + label, "snapshot", "create", "must-refuse",
+                                        "--from-sandbox", source, "--guest-flush", "required")
+                                assert state(source) == "paused"
+                            run("resume-" + label, "resume", source)
+                        elif operation == "branch":
+                            names.append(child)
+                            run("measure-" + label, "branch", source, "--name", child, *flags)
+                        else:
+                            archive = home / (label + ".msb")
+                            scope = ["--full"] if operation == "full" else []
+                            run("measure-" + label, "snapshot", "create", label,
+                                "--from-sandbox", source, "-o", str(archive), *scope, *flags)
+                        dirty_after = int(shell(source, dirty_cmd).stdout.strip())
+                        rows.append({"case": "dirty-" + label, "before_kib": dirty_before, "after_kib": dirty_after})
+                        save()
+                        flush_expected = policy == "required" or (operation == "disk" and policy == "auto")
+                        if not args.baseline:
+                            if flush_expected:
+                                assert dirty_after < dirty_before / 4, (label, dirty_before, dirty_after)
+                            else:
+                                assert dirty_after > dirty_before / 2, (label, dirty_before, dirty_after)
+                        if operation in ("disk", "full"):
+                            names.append(child)
+                            run("restore-" + label, "restore", str(archive), "--name", child)
+                        if operation != "pause":
+                            if operation != "disk" or flush_expected:
+                                for path in ("/flush-data", "/data/data"):
+                                    assert shell(child, "sha256sum " + path).stdout.split()[0] == checksum
+                            if operation != "disk":
+                                assert shell(child, "cat /dev/shm/flush-marker").stdout.strip() == "retained-ram"
+                            shell(child, "echo private > /flush-data; echo private > /data/data")
+                            for path in ("/flush-data", "/data/data"):
+                                assert shell(source, "sha256sum " + path).stdout.split()[0] == checksum
+                            stop(child)
+                        stop(source)
+            completed = True
+            return
         if args.benchmark_repetitions:
             assert args.benchmark_repetitions > 0
             variants = [("auto", binary), ("required", binary), ("skip", binary)]
@@ -115,7 +183,7 @@ def main():
                                 run("measure-" + label, "branch", source, "--name", child,
                                     *flags, executable=executable)
                             else:
-                                archive = home / (label + ".msnap")
+                                archive = home / (label + ".msb")
                                 scope = ["--full"] if operation == "full" else []
                                 run("measure-" + label, "snapshot", "create", label,
                                     "--from-sandbox", source, "-o", str(archive),
@@ -151,7 +219,7 @@ def main():
                     shell(source, "dd if=/dev/urandom of=/flush-data bs=1M count=8 2>/dev/null; "
                           "echo captured > /flush-marker")
                     checksum = shell(source, "sha256sum /flush-data").stdout.split()[0]
-                    archive = home / (label + ".msnap")
+                    archive = home / (label + ".msb")
                     command = ["snapshot", "create", label, "--from-sandbox", source,
                                "-o", str(archive)]
                     if full:
@@ -190,7 +258,7 @@ def main():
                 # external-mount request received a successful acknowledgement.
                 run("pause-auto-" + layout, "pause", source)
                 assert state(source) == "paused"
-                failed = home / (layout + "-must-not-publish.msnap")
+                failed = home / (layout + "-must-not-publish.msb")
                 refused("paused-auto-disk-refused-" + layout, "snapshot", "create",
                         "unflushed", "--from-sandbox", source, "-o", str(failed))
                 refused("paused-required-full-refused-" + layout, "snapshot", "create",
@@ -255,7 +323,7 @@ def main():
                     shell(source, "dd if=/dev/urandom of=/data/data bs=1M count=8 2>/dev/null; "
                           "cp /data/data /files/data; cp /data/data /flush-data")
                     checksum = shell(source, "sha256sum /data/data").stdout.split()[0]
-                    archive = home / (label + ".msnap")
+                    archive = home / (label + ".msb")
                     command = ["snapshot", "create", label, "--from-sandbox", source,
                                "--guest-flush", policy, "-o", str(archive)]
                     if full:
@@ -265,13 +333,21 @@ def main():
                     names.append(child)
                     run("restore-" + label, "restore", str(archive), "--name", child)
                     for path in ("/data/data", "/files/data", "/flush-data"):
-                        assert shell(child, "sha256sum " + path).stdout.split()[0] == checksum
+                        # Directory writeback is mandatory, but does not certify the
+                        # independent root or owned block filesystems under disk Skip.
+                        if full or policy != "skip" or path == "/files/data":
+                            assert shell(child, "sha256sum " + path).stdout.split()[0] == checksum
                     shell(child, "echo private > /data/data; echo private > /files/data")
                     assert shell(source, "sha256sum /data/data").stdout.split()[0] == checksum
                     assert shell(source, "sha256sum /files/data").stdout.split()[0] == checksum
                     stop(child)
-            # Owned-storage synchronization already proves root + owned coverage.
+            # Directory synchronization alone must not certify root/owned block flush.
             run("pause-owned-auto", "pause", source)
+            refused("capture-owned-paused-unflushed", "snapshot", "create", "owned-unflushed",
+                    "--from-sandbox", source, "--guest-flush", "required")
+            assert state(source) == "paused"
+            run("resume-owned-unflushed", "resume", source)
+            run("pause-owned-required", "pause", source, "--guest-flush", "required")
             run("capture-owned-paused", "snapshot", "create", "owned-paused",
                 "--from-sandbox", source, "--guest-flush", "required")
             assert state(source) == "paused"
@@ -286,7 +362,7 @@ def main():
                     executable=args.legacy_msb.resolve(strict=True))
                 shell(source, "echo retained-ram > /dev/shm/flush-marker")
                 for policy in ("auto", "required", "skip"):
-                    archive = home / ("legacy-disk-" + policy + ".msnap")
+                    archive = home / ("legacy-disk-" + policy + ".msb")
                     refused("legacy-disk-refuses-" + policy, "snapshot", "create", "old-disk",
                             "--from-sandbox", source, "--guest-flush", policy, "-o", str(archive))
                     assert not archive.exists()

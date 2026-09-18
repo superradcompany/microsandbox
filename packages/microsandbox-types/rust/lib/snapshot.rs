@@ -63,8 +63,9 @@ pub struct DiskCompactionResult {
 
 /// How full restore validates authorized external filesystem mappings and captured objects.
 ///
-/// This policy does not authorize or inherit host resources. Intentionally unmapped
-/// filesystems remain unavailable under either policy; backend operations return EIO.
+/// This policy does not authorize or inherit host resources, or waive required backing.
+/// When the restore operation explicitly allows an unmapped filesystem, it remains
+/// unavailable under either policy; backend operations return EIO.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ExternalMountRestorePolicy {

@@ -11,7 +11,7 @@ use super::{ExternalMountWarning, Sandbox};
 //--------------------------------------------------------------------------------------------------
 
 impl Sandbox {
-    /// Read structured storage-health warnings from an explicitly relaxed full restore.
+    /// Read storage-health warnings for allowed missing resources or relaxed object validation.
     /// An empty list means no external resource was degraded by that restore.
     pub async fn restore_warnings(&self) -> MicrosandboxResult<Vec<ExternalMountWarning>> {
         #[cfg(feature = "local")]

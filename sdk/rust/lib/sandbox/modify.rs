@@ -309,7 +309,17 @@ impl SandboxModificationBuilder {
             let mut prospective = config.clone();
             apply_patch_to_config(&mut prospective, &self.patch);
             apply_secret_patch_to_config(&mut prospective, &self.patch)?;
-            crate::db::encoding::encode_like(&prospective, &local.config_json)?;
+            let backend = self
+                .backend
+                .as_local()
+                .ok_or_else(|| crate::MicrosandboxError::local_only(Operation::SandboxModify))?;
+            crate::db::writing::encode_existing(
+                backend.db().await?.read(),
+                &prospective,
+                &local.config_json,
+                Some(backend.config()),
+            )
+            .await?;
         }
         let restart_required = plan_requires_restart(&plan) && running_status(status);
         if restart_required {
@@ -1680,9 +1690,15 @@ async fn persist_config(
         .as_local()
         .ok_or_else(|| crate::MicrosandboxError::local_only(Operation::SandboxModify))?;
 
-    let config_json = crate::db::encoding::encode_like(config, &local.config_json)?;
     let labels = config.spec.labels.clone();
     let write_db = local_backend.db().await?.write();
+    let config_json = crate::db::writing::encode_existing(
+        write_db,
+        config,
+        &local.config_json,
+        Some(local_backend.config()),
+    )
+    .await?;
 
     write_db
         .transaction(|txn| {
@@ -1735,6 +1751,7 @@ async fn persist_active_config(
             local_backend.db().await?.write(),
             expected.as_deref(),
             active,
+            Some(local_backend.config()),
         )
         .await?;
     *expected = Some(json);

@@ -8,7 +8,8 @@ use serde::{Deserialize, Serialize};
 
 /// Guest filesystem writeback requested before capture or resident pause.
 ///
-/// This policy never disables mandatory owned/external-storage synchronization or host
+/// This policy controls root and captured block-filesystem writeback, including owned disks.
+/// It never disables host-backed directory synchronization, host I/O draining, or snapshot
 /// durability. Filesystem writeback does not flush application-owned buffers or commit
 /// application transactions.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

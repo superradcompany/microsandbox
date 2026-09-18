@@ -39,6 +39,7 @@ type RestoreConfig struct {
 	LogLevel                    LogLevel
 	ExternalMountPolicy         ExternalMountRestorePolicy
 	DangerouslyInheritResources bool
+	AllowMissingResources       bool
 	Volumes                     map[string]MountConfig
 	CapturedVolumes             []string
 	Ports                       []PortBinding
@@ -148,6 +149,11 @@ func WithDangerouslyInheritResources() RestoreOption {
 	return func(o *RestoreConfig) { o.DangerouslyInheritResources = true }
 }
 
+// WithAllowMissingResources accepts unavailable restore resources without inheriting them.
+func WithAllowMissingResources() RestoreOption {
+	return func(o *RestoreConfig) { o.AllowMissingResources = true }
+}
+
 func buildFFIRestoreOptions[T SnapshotSeed](snapshot T, config RestoreConfig) ffi.RestoreOptions {
 	// Reuse mount/route serialization only. Never pass a creation config to the
 	// native restore operation or copy global creation defaults into it.
@@ -191,6 +197,7 @@ func buildFFIRestoreOptions[T SnapshotSeed](snapshot T, config RestoreConfig) ff
 		SnapshotBase: config.SnapshotBase, User: config.User, LogLevel: string(config.LogLevel),
 		ExternalMountPolicy:         string(config.ExternalMountPolicy),
 		DangerouslyInheritResources: config.DangerouslyInheritResources,
+		AllowMissingResources:       config.AllowMissingResources,
 		Volumes:                     resources.Volumes, CapturedVolumes: config.CapturedVolumes,
 		Ports: buildFFIPortBindings(config.Ports), Vsock: buildFFIVsockRoutes(config.Vsock),
 	}

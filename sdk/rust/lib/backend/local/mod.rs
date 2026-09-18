@@ -15,6 +15,7 @@
 //! the bulk of the old global config singleton plus the SQLite pool, so multiple
 //! backends can hold different configurations for tests / migrations.
 
+mod catalog;
 mod control;
 mod control_lookup;
 mod sandbox;
@@ -175,12 +176,9 @@ impl LocalBackend {
         self.db
             .get_or_try_init(|| async {
                 let db_dir = self.config.home().join(microsandbox_utils::DB_SUBDIR);
-                let pools = connect_and_migrate(
-                    &db_dir,
-                    &self.config.database,
-                    &self.config.snapshots_dir(),
-                )
-                .await?;
+                let pools =
+                    connect_catalog(&db_dir, &self.config.database, &self.config.snapshots_dir())
+                        .await?;
                 self.control_sessions
                     .bind_database(&db_dir.join(microsandbox_utils::DB_FILENAME))
                     .map_err(MicrosandboxError::ControlClient)?;
@@ -682,7 +680,16 @@ impl Drop for MigrationLock {
 ///
 /// The write pool connects first so WAL mode (persisted in the database
 /// header) is set before the read pool opens.
+#[cfg(test)]
 async fn connect_and_migrate(
+    db_dir: &Path,
+    database: &DatabaseConfig,
+    snapshots_dir: &Path,
+) -> MicrosandboxResult<DbPools> {
+    connect_catalog(db_dir, database, snapshots_dir).await
+}
+
+async fn connect_catalog(
     db_dir: &Path,
     database: &DatabaseConfig,
     snapshots_dir: &Path,
@@ -701,24 +708,21 @@ async fn connect_and_migrate(
     .await
     .map_err(|e| MicrosandboxError::Custom(format!("connect to {}: {e}", db_path.display())))?;
 
+    // Durable downgrade recovery takes precedence over dead-owner reclamation.
+    // The migration file lock above excludes another catalog opener doing this.
+    catalog::recover_abandoned_lease(&pools).await?;
     microsandbox_runtime::maintenance::refuse_if_install_exclusive_held(pools.write())
         .await
         .map_err(|err| MicrosandboxError::Runtime(err.to_string()))?;
     let initialize = crate::db::admission::requires_initialization(pools.write()).await?;
     if !initialize {
-        let count = pools
-            .read()
-            .query_one_raw(Statement::from_string(
-                DatabaseBackend::Sqlite,
-                "SELECT COUNT(*) FROM seaql_migrations",
-            ))
-            .await?
-            .expect("COUNT returns one row")
-            .try_get_by_index::<i64>(0)?;
-        if count != schema_metadata::migration_ids().count() as i64 {
-            return Ok(pools);
+        if !crate::db::admission::is_current(pools.write()).await? {
+            catalog::upgrade(&pools).await?;
         }
     } else {
+        // The SDK/CLI owns the catalog format, independently of the selected
+        // VM executable. Historical runtime processes open pools without
+        // migrating; their launch protocol is adapted separately.
         Migrator::up(pools.write().inner(), None).await?;
     }
 
@@ -1246,7 +1250,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_connect_preserves_v0_6_15_catalog_for_its_cli() {
+    async fn test_connect_upgrades_v0_6_15_catalog_in_release_order() {
         let tmp = tempfile::tempdir().unwrap();
         let db_dir = tmp.path().join("db");
         let db_path = db_dir.join(microsandbox_utils::DB_FILENAME);
@@ -1308,8 +1312,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(network_slot_migration.is_none());
-        assert!(network_slot_column.is_none());
+        assert!(network_slot_migration.is_some());
+        assert!(network_slot_column.is_some());
     }
 
     #[tokio::test]

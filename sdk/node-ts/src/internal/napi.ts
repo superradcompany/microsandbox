@@ -286,6 +286,7 @@ export interface NapiRestoreBuilderSetters {
   user(user: string): this;
   externalMountPolicy(policy: "strict" | "relaxed"): this;
   dangerouslyInheritResources(): this;
+  allowMissingResources(): this;
   volume(guest: string, configure: (mount: NapiMountBuilder) => NapiMountBuilder): this;
   port(host: number, guest: number): this;
   portBind(bind: string, host: number, guest: number): this;

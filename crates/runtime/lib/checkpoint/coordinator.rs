@@ -510,8 +510,8 @@ impl CheckpointCoordinator {
                 "complete pending root-disk growth before snapshotting",
             ));
         }
-        // Absent policy preserves old clients. New clients explicitly send Auto, whose
-        // disk-only default includes writeback even without an owned data volume.
+        // Absent policy preserves old clients' crash-consistent disk cut. New clients
+        // explicitly send Auto, which requires root and owned-block guest writeback.
         let required = guest_flush.is_some_and(|policy| policy.requires_writeback(true));
         let required_mounts = self.flush_mounts(required, true);
         let acquired_workload;
@@ -1119,8 +1119,8 @@ impl CheckpointCoordinator {
         Ok(captured.result)
     }
 
-    /// Build the exact filesystem coverage needed at this boundary. Required owned and
-    /// external writeback is deliberately independent of the optional root policy.
+    /// Build the exact filesystem coverage needed at this boundary. Host-backed directory
+    /// synchronization remains mandatory; block-filesystem writeback follows the policy.
     fn flush_mounts(&self, required: bool, disk_only: bool) -> BTreeSet<String> {
         let mut mounts = self
             .fs_resource_bindings
@@ -1132,30 +1132,25 @@ impl CheckpointCoordinator {
             })
             .filter_map(|binding| binding.get("guest_tag").cloned())
             .collect::<BTreeSet<_>>();
-        if required || !self.owned_mounts.is_empty() {
-            mounts.insert("path:/".into());
-        }
-        mounts.extend(
-            self.owned_mounts
-                .values()
-                .filter(|mount| {
-                    matches!(
-                        mount.storage,
-                        microsandbox_types::OwnedVolumeStorage::Disk { .. }
-                    )
-                })
-                .map(|mount| format!("path:{}", mount.guest)),
-        );
-        if required && !disk_only {
-            // Full capture also includes independent managed named disks. Their filesystem
-            // cache must reach those disks when the caller requests a disk-usable full image.
-            mounts.extend(
-                self.additional_disks
-                    .values()
-                    .filter_map(|disk| disk.binding().get("guest_path"))
-                    .map(|guest| format!("path:{guest}")),
-            );
-        }
+        let owned_disks = self
+            .owned_mounts
+            .values()
+            .filter(|mount| {
+                matches!(
+                    mount.storage,
+                    microsandbox_types::OwnedVolumeStorage::Disk { .. }
+                )
+            })
+            .map(|mount| mount.guest.as_str());
+        // Disk-only capture does not include independent named disks. Full Required
+        // capture must flush them too, but merely owning a disk must not force a flush.
+        let additional_disks = self
+            .additional_disks
+            .values()
+            .filter(|_| !disk_only)
+            .filter_map(|disk| disk.binding().get("guest_path"))
+            .map(String::as_str);
+        extend_block_flush_mounts(&mut mounts, required, owned_disks.chain(additional_disks));
         mounts
     }
 
@@ -2322,6 +2317,20 @@ fn overlay_extents(
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
 
+/// Guest writeback is separate from draining/sealing the host block backends. A full
+/// capture retains dirty pages in RAM; a disk-only Skip accepts a crash-consistent cut.
+/// Neither an owned disk nor a virtiofs mount should implicitly add a root flush.
+fn extend_block_flush_mounts<'a>(
+    mounts: &mut BTreeSet<String>,
+    required: bool,
+    disks: impl Iterator<Item = &'a str>,
+) {
+    if required {
+        mounts.insert("path:/".into());
+        mounts.extend(disks.map(|guest| format!("path:{guest}")));
+    }
+}
+
 fn slice_extent(extent: &MemoryExtent, start: u64, length: u64) -> MemoryExtent {
     let delta = start - extent.start;
     let content = match &extent.content {
@@ -2558,6 +2567,36 @@ mod tests {
     use microsandbox_protocol::message::{Message, MessageType};
     use msb_krun::{GuestMemoryRange, MemoryCaptureSink};
     use std::sync::Arc;
+
+    #[test]
+    fn block_writeback_follows_policy_without_weakening_directory_barriers() {
+        use microsandbox_types::GuestFlush::{Auto, Required, Skip};
+        for (policy, disk_only, flush_blocks) in [
+            (Auto, true, true),
+            (Required, true, true),
+            (Skip, true, false),
+            (Auto, false, false),
+            (Required, false, true),
+            (Skip, false, false),
+        ] {
+            for directories in [
+                BTreeSet::new(),
+                BTreeSet::from(["owned_files".into(), "external_data".into()]),
+            ] {
+                let mut mounts = directories.clone();
+                super::extend_block_flush_mounts(
+                    &mut mounts,
+                    policy.requires_writeback(disk_only),
+                    ["/data"].into_iter(),
+                );
+                let mut expected = directories;
+                if flush_blocks {
+                    expected.extend(["path:/".into(), "path:/data".into()]);
+                }
+                assert_eq!(mounts, expected, "{policy:?}, disk_only={disk_only}");
+            }
+        }
+    }
 
     #[test]
     fn external_flush_budget_starts_after_gate_without_extending_ordinary_control() {

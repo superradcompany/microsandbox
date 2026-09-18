@@ -111,7 +111,9 @@ async fn check_secret_output(json: bool) {
         .await
         .expect("apply real database migrations");
 
-    // A stopped, non-ephemeral row needs no image, runtime, or agent. Seed
+    // A stopped, non-ephemeral row needs no image, runtime, or agent. Keep this
+    // fixture runtime-free: it also guards against launch admission leaking
+    // into ordinary configuration writes (including the apply path). Seed
     // actual inline material so dumping the loaded config would fail the test.
     let mut config = SandboxConfig::default();
     config.spec.name = SANDBOX.to_string();

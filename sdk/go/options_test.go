@@ -30,8 +30,9 @@ func TestDedicatedRestoreOptions(t *testing.T) {
 	var config RestoreConfig
 	WithForked()(&config)
 	WithExternalMountPolicy(ExternalMountRelaxed)(&config)
+	WithAllowMissingResources()(&config)
 	wire := buildFFIRestoreOptions("saved", config)
-	if !wire.Forked || wire.ExternalMountPolicy != "relaxed" || wire.Snapshot != "saved" {
+	if !wire.Forked || !wire.AllowMissingResources || wire.ExternalMountPolicy != "relaxed" || wire.Snapshot != "saved" {
 		t.Fatal("restore options were lost")
 	}
 	typ := reflect.TypeOf(SandboxConfig{})

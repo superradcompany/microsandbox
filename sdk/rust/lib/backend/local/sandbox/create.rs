@@ -5,6 +5,8 @@
 //! impl's `create`/`create_detached` and the pull-progress shims on
 //! [`Sandbox`] and `SandboxBuilder` all dispatch here.
 
+#[cfg(all(test, unix))]
+mod archive_tests;
 mod cleanup;
 
 use std::fs::File;
@@ -174,30 +176,10 @@ impl LocalBackend {
         // Initialize the database before any expensive image pull so we can
         // fail fast on conflicting persisted sandbox state.
         let db = self.db().await?;
+        // Runtime compatibility is independent of the upgraded catalog. Keep
+        // unsupported requests from deleting a replace target before launch.
+        crate::db::writing::validate_runtime_config(&config, self.config()).await?;
         let sandbox_dir = self.sandboxes_dir().join(&config.spec.name);
-        // Transition ownership is deliberately separate from the runtime lifecycle lock: this
-        // guard serializes database/storage mutation and launcher-to-runtime handoff, while the
-        // lifecycle lock remains owned by the VM for its entire runtime generation.
-        let _transition_guard = timing::measure(
-            &timing_name,
-            "transition_lock",
-            Self::acquire_sandbox_transition_guard(&self.config().run_dir(), &config.spec.name),
-        )
-        .await?;
-        Self::prepare_create_target(db, &config, &sandbox_dir, &self.config().run_dir()).await?;
-        // Hold the existing lifecycle lock across reservation, capture and spawn. Recheck
-        // under the lock so two creates cannot both own the same child staging directory.
-        let lifecycle_guard = crate::runtime::acquire_sandbox_lifecycle_guard(
-            &self.config().run_dir(),
-            &config.spec.name,
-            std::time::Duration::from_secs(5),
-        )
-        .await?;
-        let mut reserved_config = config.clone();
-        reserved_config.replace_existing = false;
-        Self::prepare_create_target(db, &reserved_config, &sandbox_dir, &self.config().run_dir())
-            .await?;
-        let mut child_stage_guard = None;
         // Preserve only the installed-snapshot source that existed on entry. Direct archive
         // materialization below installs its checkpoint closure directly into child staging, so
         // feeding that result through the installed-snapshot copier would copy the closure onto
@@ -205,29 +187,23 @@ impl LocalBackend {
         let installed_checkpoint_restore = config.checkpoint_restore.take();
         let installed_file_sources = std::mem::take(&mut config.snapshot_root_layer_sources);
         let installed_file_virtual_size = config.snapshot_root_virtual_size.take();
-        let _branch_pin = if let Some(source) = config.branch_source.take() {
-            tokio::fs::create_dir(&sandbox_dir).await?;
-            child_stage_guard = Some(ChildStageGuard::new(sandbox_dir.clone()));
-            Some(
-                crate::sandbox::branch::capture_child(self, &mut config, &source, &sandbox_dir)
-                    .await?,
-            )
-        } else {
-            None
-        };
-
-        // A direct archive restore streams its layer into the ordinary child
-        // staging location before image resolution. The archive supplies the
-        // pinned image identity; no installed snapshot artifact is created.
+        // Decode once into a unique sibling before touching the replacement target.
+        // Archive metadata supplies effective runtime requirements; validating the
+        // builder alone misses those. Publication below is a rename, not another copy.
+        let mut archive_stage = None;
         if let Some(archive) = config.snapshot_archive_source.take() {
-            child_stage_guard = Some(ChildStageGuard::new(sandbox_dir.clone()));
+            tokio::fs::create_dir_all(self.sandboxes_dir()).await?;
+            let stage = tempfile::Builder::new()
+                .prefix(".archive-restore-")
+                .tempdir_in(self.sandboxes_dir())?;
+            let stage_path = stage.path();
             let disk_only = config.snapshot_restore_mode == SnapshotRestoreMode::DiskOnly;
             // Archive decoding has a large async state machine. Keep it off the containing
             // create future so native SDK debug builds fit ordinary Tokio worker stacks.
             let materialized = Box::pin(crate::snapshot::materialize_archive_for_child(
                 self,
                 &archive,
-                &sandbox_dir,
+                stage_path,
                 disk_only,
                 config.snapshot_base.as_deref(),
                 &config.restore_resources,
@@ -282,7 +258,7 @@ impl LocalBackend {
                 crate::snapshot::SnapshotState::File(_)
             ) {
                 config.snapshot_upper_source =
-                    Some(sandbox_dir.join(match &materialized.manifest.root_disk {
+                    Some(stage_path.join(match &materialized.manifest.root_disk {
                         SnapshotRootDisk::Managed => "upper.ext4",
                         SnapshotRootDisk::Flat => crate::sandbox::flat_rootfs::FLAT_ROOTFS_FILENAME,
                         SnapshotRootDisk::Tmpfs { .. } => {
@@ -290,7 +266,51 @@ impl LocalBackend {
                         }
                     }));
             }
+            // Keep launch-time restore intent in this check, not just cold-start state.
+            crate::db::writing::validate_runtime_config(&config, self.config()).await?;
+            archive_stage = Some(stage);
         }
+
+        // Transition ownership is deliberately separate from the runtime lifecycle lock: this
+        // guard serializes database/storage mutation and launcher-to-runtime handoff, while the
+        // lifecycle lock remains owned by the VM for its entire runtime generation.
+        let _transition_guard = timing::measure(
+            &timing_name,
+            "transition_lock",
+            Self::acquire_sandbox_transition_guard(&self.config().run_dir(), &config.spec.name),
+        )
+        .await?;
+        Self::prepare_create_target(db, &config, &sandbox_dir, &self.config().run_dir()).await?;
+        // Hold the existing lifecycle lock across reservation, capture and spawn. Recheck
+        // under the lock so two creates cannot both own the same child staging directory.
+        let lifecycle_guard = crate::runtime::acquire_sandbox_lifecycle_guard(
+            &self.config().run_dir(),
+            &config.spec.name,
+            std::time::Duration::from_secs(5),
+        )
+        .await?;
+        let mut reserved_config = config.clone();
+        reserved_config.replace_existing = false;
+        Self::prepare_create_target(db, &reserved_config, &sandbox_dir, &self.config().run_dir())
+            .await?;
+        let mut child_stage_guard = None;
+        if let Some(stage) = archive_stage {
+            relocate_archive_config(&mut config, stage.path(), &sandbox_dir);
+            // Keep rename and guard installation in one poll: cancellation must never
+            // leave published child storage without an owner.
+            std::fs::rename(stage.path(), &sandbox_dir)?;
+            child_stage_guard = Some(ChildStageGuard::new(sandbox_dir.clone()));
+        }
+        let _branch_pin = if let Some(source) = config.branch_source.take() {
+            tokio::fs::create_dir(&sandbox_dir).await?;
+            child_stage_guard = Some(ChildStageGuard::new(sandbox_dir.clone()));
+            Some(
+                crate::sandbox::branch::capture_child(self, &mut config, &source, &sandbox_dir)
+                    .await?,
+            )
+        } else {
+            None
+        };
 
         // Installed full snapshots likewise become child-owned before image resolution. The
         // closure is retained only through eager construction; the disk layers and fresh writable
@@ -730,7 +750,7 @@ impl LocalBackend {
         let sandbox_id = match timing::measure(
             &timing_name,
             "persist_start",
-            Self::insert_starting_sandbox_record(write_db, &persisted_config),
+            Self::insert_starting_sandbox_record(write_db, &persisted_config, Some(self.config())),
         )
         .await
         {
@@ -805,6 +825,7 @@ impl LocalBackend {
             write_db,
             sandbox_id,
             &sandbox.config().clone_for_persistence(),
+            Some(self.config()),
         )
         .await
         {
@@ -1831,15 +1852,22 @@ impl LocalBackend {
         db: &DbWriteConnection,
         config: &SandboxConfig,
     ) -> MicrosandboxResult<i32> {
-        Self::insert_sandbox_record_with_status(db, config, SandboxStatus::Running).await
+        Self::insert_sandbox_record_with_status(db, config, SandboxStatus::Running, None).await
     }
 
     /// Insert a provisional local create record that remains non-connectable until ready.
     async fn insert_starting_sandbox_record(
         db: &DbWriteConnection,
         config: &SandboxConfig,
+        runtime: Option<&crate::config::GlobalConfig>,
     ) -> MicrosandboxResult<i32> {
-        Self::insert_sandbox_record_with_status(db, config, SandboxStatus::Starting).await
+        // Image defaults and restore preparation can enrich the initial request.
+        // Recheck at create admission, not in shared configuration persistence:
+        // editing a stopped sandbox must not require an installed runtime.
+        if let Some(runtime) = runtime {
+            crate::db::writing::validate_runtime_config(config, runtime).await?;
+        }
+        Self::insert_sandbox_record_with_status(db, config, SandboxStatus::Starting, runtime).await
     }
 
     /// Insert the sandbox record with an explicit initial lifecycle status.
@@ -1847,8 +1875,9 @@ impl LocalBackend {
         db: &DbWriteConnection,
         config: &SandboxConfig,
         status: SandboxStatus,
+        runtime: Option<&crate::config::GlobalConfig>,
     ) -> MicrosandboxResult<i32> {
-        let config_json = crate::db::writing::encode_new(db, config).await?;
+        let config_json = crate::db::writing::encode_new(db, config, runtime).await?;
         let labels = config.spec.labels.clone();
 
         db.transaction(|txn| {
@@ -1998,6 +2027,31 @@ impl LocalBackend {
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
+
+/// Repoint only extracted child-owned paths after same-filesystem publication.
+/// Disk headers use relative basenames, so moving the whole directory preserves
+/// root and owned-volume chains without rewriting or copying their contents.
+fn relocate_archive_config(config: &mut SandboxConfig, stage: &Path, child: &Path) {
+    let relocate = |path: &mut PathBuf| {
+        if let Ok(relative) = path.strip_prefix(stage) {
+            *path = child.join(relative);
+        }
+    };
+    if let Some(restore) = config.checkpoint_restore.as_mut() {
+        relocate(&mut restore.closure);
+    }
+    if let Some(source) = config.snapshot_upper_source.as_mut() {
+        relocate(source);
+    }
+    for layer in &mut config.snapshot_upper_layers {
+        relocate(&mut layer.path);
+    }
+    for mount in &mut config.spec.mounts {
+        if let microsandbox_types::VolumeMount::DiskImage { host, .. } = mount {
+            relocate(host);
+        }
+    }
+}
 
 fn snapshot_root_layout_from_config(
     config: &SandboxConfig,
@@ -2277,7 +2331,7 @@ mod tests {
         .unwrap()
         .unwrap();
         let created = ensure_named_volumes(&local, &config).await.unwrap();
-        let sandbox_id = LocalBackend::insert_starting_sandbox_record(write_db, &config)
+        let sandbox_id = LocalBackend::insert_starting_sandbox_record(write_db, &config, None)
             .await
             .unwrap();
         LocalBackend::update_sandbox_status(write_db, sandbox_id, status)
@@ -2558,6 +2612,7 @@ mod tests {
             pools.write(),
             &config,
             SandboxStatus::Stopped,
+            None,
         )
         .await
         .unwrap();
@@ -2958,7 +3013,7 @@ mod tests {
         let pools = open_test_pools(&temp.path().join("test.db")).await;
         let config = test_config("booting");
 
-        let sandbox_id = LocalBackend::insert_starting_sandbox_record(pools.write(), &config)
+        let sandbox_id = LocalBackend::insert_starting_sandbox_record(pools.write(), &config, None)
             .await
             .unwrap();
         let row = sandbox_entity::Entity::find_by_id(sandbox_id)
@@ -3008,7 +3063,7 @@ mod tests {
         let sandbox_id = LocalBackend::insert_sandbox_record(pools.write(), &config)
             .await
             .unwrap();
-        LocalBackend::update_sandbox_active_config(pools.write(), sandbox_id, &config)
+        LocalBackend::update_sandbox_active_config(pools.write(), sandbox_id, &config, None)
             .await
             .unwrap();
 

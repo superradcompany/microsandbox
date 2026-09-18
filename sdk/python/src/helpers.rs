@@ -219,6 +219,7 @@ pub(crate) fn restore_builder_from_args(
             "vsock",
             "external_mount_policy",
             "dangerously_inherit_resources",
+            "allow_missing_resources",
         ]
         .contains(&key.as_str())
         {
@@ -297,6 +298,9 @@ pub(crate) fn restore_builder_from_args(
     }
     if extract_opt::<bool>(kwargs, "dangerously_inherit_resources")?.unwrap_or(false) {
         builder = builder.dangerously_inherit_resources();
+    }
+    if extract_opt::<bool>(kwargs, "allow_missing_resources")?.unwrap_or(false) {
+        builder = builder.allow_missing_resources();
     }
     if let Some(base) = extract_opt::<String>(kwargs, "snapshot_base")? {
         builder = builder.snapshot_base(base);
