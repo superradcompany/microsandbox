@@ -1,8 +1,11 @@
 ---
-title: Global config
+title: Global config reference
 description: Reference for the global config.json shared by the CLI and SDKs
 icon: "gear"
 ---
+
+For guidance on choosing between global configuration, sandbox YAML, CLI
+arguments, and SDK inputs, start with [Configuration](/operations/configuration).
 
 microsandbox reads user configuration from `~/.microsandbox/config.json`, or `MSB_CONFIG_PATH` when set. All fields are optional. A missing file or empty JSON object adds no user overrides; defaults and managed settings still apply.
 
@@ -33,6 +36,7 @@ See [Managed deployment](/enterprise/managed-configuration) for deployment, prec
   "paths": {
     "msb": "/usr/local/bin/msb",
     "libkrunfw": "/usr/local/lib/libkrunfw.so",
+    "agentd": "/usr/local/libexec/microsandbox/agentd",
     "cache": "/mnt/fast/msb-cache",
     "sandboxes": null,
     "volumes": null,
@@ -159,14 +163,15 @@ The parser also accepts the internal wire spellings `single_tenant` and `multi_t
 
 <Tooltip tip="Configures files used by the local runtime; these paths do not apply to microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
-All path fields are optional. When `null`, they resolve relative to `home`.
+All path fields are optional. Runtime pairs resolve from environment overrides, SDK-provided paths, explicit configuration, then the install under `home`. Other unset paths resolve relative to `home`; runtime resolution does not search `PATH` or debug build directories.
 
 On Windows, the default `home` is `%USERPROFILE%\.microsandbox`. JSON strings can use escaped backslashes such as `"C:\\Users\\you\\.microsandbox\\lib\\libkrunfw.dll"` or forward slashes such as `"C:/Users/you/.microsandbox/lib/libkrunfw.dll"`.
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `msb` | `{home}/bin/msb` | `msb` binary. Resolved via: `MSB_PATH` env, SDK-provided runtime path, this field, debug workspace build paths, default install path, then `PATH` |
-| `libkrunfw` | `{home}/lib/libkrunfw` | Path to the libkrunfw shared library (`.so` on Linux, `.dylib` on macOS, `.dll` on Windows). Resolved via: `MSB_LIBKRUNFW_PATH` env, SDK-provided runtime path, this field, paths next to the resolved `msb` binary, then default install path |
+| `msb` | `{home}/bin/msb` | `msb` binary. Configure a matching `libkrunfw` path; when omitted, resolution can use a library adjacent to this executable. An incomplete pair fails closed. |
+| `libkrunfw` | `{home}/lib/libkrunfw` | Matching libkrunfw shared library (`.so` on Linux, `.dylib` on macOS, `.dll` on Windows). Set this together with `msb`. |
+| `agentd` | embedded when enabled | Linux guest Agentd executable. Normal release builds embed it in `msb`; custom builds without `embed-binaries` must provide this field or `MSB_AGENTD_PATH`. The environment variable takes precedence, and an explicitly configured missing or invalid file fails closed. |
 | `cache` | `{home}/cache` | Image layer cache |
 | `sandboxes` | `{home}/sandboxes` | Per-sandbox state |
 | `volumes` | `{home}/volumes` | Named volumes |
@@ -182,8 +187,9 @@ Rust callers can inspect the active config and resolve runtime paths with the sa
 
 ```rust
 let cfg = microsandbox::config::config()?;
-let msb = cfg.resolve_msb_path()?;
-let libkrunfw = cfg.resolve_libkrunfw_path()?;
+let runtime = microsandbox::setup::resolve_runtime(&cfg)?;
+let msb = &runtime.msb_path;
+let libkrunfw = &runtime.libkrunfw_path;
 ```
 
 When your code owns an explicit local backend, prefer the backend-owned config:
@@ -197,7 +203,7 @@ let backend = LocalBackend::builder()
     .await?;
 
 let cfg = backend.config();
-let msb = cfg.resolve_msb_path()?;
+let runtime = microsandbox::setup::resolve_runtime(&cfg)?;
 ```
 
 `LocalBackend` has two plain constructors alongside the builder. `LocalBackend::lazy()?` is synchronous and defers opening (and migrating) the local sandbox database until the first operation; it is what backend resolution uses when no backend is set explicitly. `LocalBackend::new().await?` opens the database up front, so startup fails fast if the database is unusable. All constructors read, layer, and validate global configuration before returning a backend; only database setup is lazy. Proxy settings are validated after sandbox options and managed overrides are composed, before network use.
@@ -228,7 +234,7 @@ Rust applications can use [`SandboxBuilder::overlay`](/sdk/rust/sandbox#sandbox-
 
 For local `workdir`, omission inherits the lower layer and explicit `null` clears it, including an image working directory. A concrete Rust `SandboxConfig` with `workdir: None` is treated as omitted. Local CPU and memory maxima remain explicit when supplied; otherwise they follow the final size. Cloud supports no separate hotplug maximum: a supplied maximum equal to the requested size follows the final size. A maximum that differs from the final size is rejected.
 
-For workload effects, host requirements, filesystem expectations, and verification steps for these settings, see [Optimization](/sandboxes/optimization).
+For workload effects, host requirements, filesystem expectations, and verification steps for these settings, see [Performance](/sandboxes/optimization).
 
 | Field | Default | Description |
 |-------|---------|-------------|
@@ -300,7 +306,7 @@ Use a fixed policy only when representative measurements justify a different per
 
 `pool_mib` is a live pressure budget, not eagerly allocated RAM. Every eligible writable disk in the same `MSB_HOME` receives a weighted max-min fair share: disks with a smaller configured maximum keep that smaller value, and the remaining pool is divided equally across the rest. Creating another sandbox never fails merely because this pool is full. Existing VMMs observe membership changes within 250 ms; if a disk already owns more dirty data than its new share, libkrun retires accounted ranges and pauses later writes until it converges below the target. A guest write already reserved before the target changed is allowed to complete safely. `fixed` and an explicitly pooled `auto` policy are unsupported on other hosts.
 
-Hardware CRC32C, the guest kernel preemption model, x2APIC, APICv/AVIC capability, vCPU affinity mechanics, and the pure-Rust ext4 writer are implementation or capability details rather than user policy, so they intentionally have no global config keys. The [optimization guide](/sandboxes/optimization#optimizations-that-are-not-knobs) explains how those automatic layers interact with the configurable policy.
+See the [performance guide](/sandboxes/optimization) for choosing and measuring runtime settings.
 
 ## `registries`
 
@@ -379,7 +385,7 @@ For local pulls without managed `auth`, microsandbox resolves credentials in thi
 
 ## `profiles`
 
-Named backend profiles keyed by profile name; `active_profile` selects the default. How profiles participate in backend selection, including the full resolution order, is documented in [Backends](/operations/backends).
+Named backend profiles keyed by profile name; `active_profile` selects the default. How profiles participate in local or cloud selection, including the full precedence order, is documented in [Local or cloud](/operations/backends).
 
 | Field | Default | Description |
 |-------|---------|-------------|

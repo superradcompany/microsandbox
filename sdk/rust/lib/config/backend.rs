@@ -5,7 +5,9 @@ use std::{collections::HashMap, path::Path};
 use microsandbox_types::ConfigPatch;
 
 use super::{GlobalConfigPatch, layers::BackendConfig, persistence::ManagedConfig};
-use crate::backend::{BackendSelectionSource, CloudBackendBuilder, Profile, ProfileBackend};
+#[cfg(feature = "cloud")]
+use crate::backend::CloudBackendBuilder;
+use crate::backend::{BackendSelectionSource, Profile, ProfileBackend};
 use crate::{MicrosandboxError, MicrosandboxResult};
 
 //--------------------------------------------------------------------------------------------------
@@ -20,6 +22,7 @@ pub(crate) enum BackendSelection {
     /// Local settings come from the resolved layers; retain the profile name for diagnostics.
     Local { profile: Option<String> },
     /// Resolved connection settings and a profile name, or environment settings without a profile.
+    #[cfg(feature = "cloud")]
     Cloud {
         profile: Option<(String, CloudBackendBuilder)>,
     },
@@ -149,7 +152,10 @@ impl BackendSelection {
 
         let has_api_key = api_key.is_some_and(|key| !key.trim().is_empty());
         if backend_kind == Some(ProfileBackend::Cloud) && has_api_key {
+            #[cfg(feature = "cloud")]
             return Ok(Self::Cloud { profile: None });
+            #[cfg(not(feature = "cloud"))]
+            return Err(feature_disabled("cloud"));
         }
 
         let profile_name = profile.map(str::trim).filter(|name| !name.is_empty());
@@ -170,9 +176,16 @@ impl BackendSelection {
                 ProfileBackend::Local => Self::Local {
                     profile: Some(name.to_string()),
                 },
-                ProfileBackend::Cloud => Self::Cloud {
-                    profile: Some((name.to_string(), profile.cloud_builder(name)?)),
-                },
+                ProfileBackend::Cloud => {
+                    #[cfg(feature = "cloud")]
+                    {
+                        Self::Cloud {
+                            profile: Some((name.to_string(), profile.cloud_builder(name)?)),
+                        }
+                    }
+                    #[cfg(not(feature = "cloud"))]
+                    return Err(feature_disabled("cloud"));
+                }
             });
         }
 
@@ -185,6 +198,14 @@ impl BackendSelection {
         // A bare API key is credential material, not backend intent.
         Ok(Self::Local { profile: None })
     }
+}
+
+/// Report a backend selected at runtime but omitted from this SDK build.
+#[cfg(not(all(feature = "local", feature = "cloud")))]
+pub(crate) fn feature_disabled(feature: &str) -> MicrosandboxError {
+    MicrosandboxError::InvalidConfig(format!(
+        "the {feature} backend is not available; rebuild microsandbox with the {feature:?} feature"
+    ))
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -306,6 +327,7 @@ mod tests {
         assert_eq!(global.resolved_config().profiles["work"].api_key_ref, None);
     }
 
+    #[cfg(feature = "cloud")]
     #[test]
     fn managed_clear_preserves_explicit_backend_selection() {
         for value in [serde_json::Value::Null, serde_json::json!("")] {
@@ -364,6 +386,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "local")]
     #[test]
     fn local_construction_uses_the_configuration_loaded_during_selection() {
         let home = tempfile::tempdir().unwrap();
@@ -394,6 +417,7 @@ mod tests {
         assert_eq!(backend.config().home(), home.path());
     }
 
+    #[cfg(feature = "cloud")]
     #[test]
     fn ordinary_explicit_routing_and_profile_sources_are_preserved() {
         for (kind, key) in [("local", None), ("cloud", Some("key"))] {
@@ -473,6 +497,7 @@ mod tests {
         ));
     }
 
+    #[cfg(feature = "cloud")]
     #[test]
     fn explicit_cloud_uses_environment_credentials() {
         for profile in [None, Some("missing")] {
@@ -505,6 +530,7 @@ mod tests {
         ));
     }
 
+    #[cfg(feature = "cloud")]
     #[test]
     fn profile_selection_is_explicit_backend_intent() {
         for (env_profile, expected, url) in [
@@ -526,6 +552,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "cloud")]
     #[test]
     fn explicit_cloud_requires_selected_profile_to_be_cloud() {
         assert!(matches!(
@@ -558,6 +585,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "cloud")]
     #[test]
     fn cloud_profile_settings_are_resolved_after_managed_overrides() {
         let _env_guard = crate::test_support::lock_env();
@@ -601,6 +629,7 @@ mod tests {
         assert_eq!(cloud.unwrap().url(), crate::backend::DEFAULT_CLOUD_API_URL);
     }
 
+    #[cfg(feature = "cloud")]
     #[test]
     fn invalid_cloud_profile_credentials_fail_during_selection() {
         for key_ref in [None, Some("inline:   ")] {

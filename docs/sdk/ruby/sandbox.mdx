@@ -55,6 +55,31 @@ Builder terminal with the same reuse, creation-option, concurrency, and replace-
 
 A live sandbox connection returned by `create`, `connect_or_create`, `start`, `connect_or_start`, or `restart`.
 
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">stop()</span>
+
+```ruby
+sandbox.stop # => nil
+sandbox.stop(timeout: 30) # Existing optional bounded form
+```
+
+Request graceful shutdown and wait for this exact sandbox run to finish, including local runtime ownership release. There is no built-in deadline or automatic force-kill. A supplied `timeout:` bounds the wait without changing graceful shutdown into forced termination. These semantics require the matching updated native extension and runtime.
+
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">stop_with_timeout()</span>
+
+```ruby
+sandbox.stop_with_timeout(30) # Seconds; => nil after shutdown
+```
+
+Bound graceful shutdown with an explicit finite, non-negative timeout. The deadline covers local transition ownership, request dispatch, and termination observation. Expiry raises `Microsandbox::Error` without force-killing; zero expires before sending a request. Call `kill` separately when forced termination is intended.
+
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">request_stop()</span>
+
+```ruby
+sandbox.request_stop # => nil
+```
+
+Send the graceful shutdown request without waiting for termination or scheduling a force-kill. Pair with `wait_until_stopped` to observe completion.
+
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">id</span>
 
 ```ruby
@@ -105,6 +130,16 @@ handle.id # => String
 
 Opaque stable identity captured by this handle. Receiver lifecycle calls remain bound to this value.
 
+#### <span className="msb-recv">handle.</span><span className="msb-hn">stop()</span>
+
+```ruby
+handle.stop # No built-in deadline
+handle.stop(timeout: 30) # Existing optional bounded form
+handle.stop_with_timeout(30) # Explicit bounded form
+```
+
+Request graceful shutdown for this exact sandbox run and wait for termination and local runtime ownership release. `stop` has no built-in timeout. Both bounded forms raise `Microsandbox::Error` on expiry without force-killing; zero expires before sending a request. A stale identity is refused rather than stopping a replacement.
+
 #### <span className="msb-recv">handle.</span><span className="msb-hn">connect_or_start()</span>
 
 ```ruby
@@ -120,6 +155,16 @@ handle.wait_for_status(status) # => SandboxHandle
 ```
 
 Wait until this exact sandbox reaches `status`, returning a refreshed handle. The method does not have a built-in timeout.
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">stop()</span>
+
+<Tooltip tip="On Cloud, the timeout only limits how long the SDK waits; the accepted stop may continue server-side."><span className="msb-badge-limited">Different on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+```ruby
+handle.stop(timeout: nil) # => nil
+```
+
+Gracefully shut down with the same Local and Cloud timeout behavior as `Sandbox#stop`.
 
 #### <span className="msb-recv">handle.</span><span className="msb-hn">restart()</span>
 

@@ -27,8 +27,8 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 
-	if err := microsandbox.EnsureInstalled(ctx); err != nil {
-		log.Fatalf("EnsureInstalled: %v", err)
+	if _, err := microsandbox.EnsureRuntime(ctx, microsandbox.RuntimeConfig{}, microsandbox.InstallOptions{}); err != nil {
+		log.Fatalf("EnsureRuntime: %v", err)
 	}
 
 	// 1. ErrSandboxNotFound — looking up a sandbox that doesn't exist.

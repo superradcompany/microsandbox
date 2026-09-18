@@ -3,6 +3,7 @@
 use std::fmt;
 use std::net::{AddrParseError, SocketAddr};
 use std::str::FromStr;
+#[cfg(feature = "engine")]
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -149,6 +150,7 @@ pub trait OutboundProxyConfig {
 // Methods
 //--------------------------------------------------------------------------------------------------
 
+#[cfg(feature = "engine")]
 impl ResolvedOutboundProxy {
     /// Selects the configured proxy unless the host-side destination was
     /// rewritten for a host-local connection.

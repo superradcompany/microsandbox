@@ -596,7 +596,10 @@ mod tests {
             );
             let config = crate::sandbox::SandboxBuilder::new("from-file")
                 .image("alpine")
-                .finish(Some(&layers), Some(&image))
+                .finish(
+                    Some(&layers),
+                    Some(crate::SandboxConfigPatch::from_image(&image)),
+                )
                 .unwrap();
             assert_eq!(config.spec.resources.cpus, 2);
             assert_eq!(config.spec.runtime.workdir.as_deref(), expected);

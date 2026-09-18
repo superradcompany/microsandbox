@@ -9,7 +9,7 @@
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
-use crate::domain::EnvVar;
+use crate::domain::{EnvVar, SecretSubstitution, SecretViolationAction};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -132,6 +132,22 @@ pub struct SecretModificationPatch {
     /// existing secret; a new secret needs at least one.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_hosts: Vec<String>,
+
+    /// Desired substitution locations. `None` leaves an existing policy unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub substitution: Option<SecretSubstitution>,
+
+    /// Desired hosts allowed to receive the placeholder unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub passthrough_hosts: Vec<String>,
+
+    /// Per-secret blocking action. `None` leaves an existing policy unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub violation_action: Option<SecretViolationAction>,
+
+    /// Whether substitution requires verified TLS identity.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub require_tls_identity: Option<bool>,
 }
 
 /// Host-side source for secret material.

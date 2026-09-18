@@ -29,6 +29,12 @@ pub struct JsBackendInfo {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
+/// Register the platform package executable as a fallback after the runtime home.
+#[napi(js_name = "setPackagedMsbPath")]
+pub fn set_packaged_msb_path(path: String) {
+    microsandbox::config::set_sdk_packaged_msb_path(path);
+}
+
 /// Set the `msb` binary path resolved by the JS SDK.
 ///
 /// This avoids using `process.env` as an internal JS-to-native config channel.

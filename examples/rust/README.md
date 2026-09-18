@@ -3,7 +3,7 @@
 ## Prerequisites
 
 - [Rust](https://rustup.rs/) (2024 edition)
-- `msb` + `libkrunfw` installed (via `cargo build` with the `prebuilt` feature, or manually)
+- `msb` + `libkrunfw` installed (via `cargo build` with the `download-binaries` feature, or manually)
 - For `root-bind` and `root-block`: `git submodule update --init --recursive`
 
 ## Running

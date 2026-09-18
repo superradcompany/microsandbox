@@ -5,9 +5,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[cfg(feature = "local")]
 use docker_credential::{CredentialRetrievalError, DockerCredential};
-use microsandbox_image::RegistryAuth;
 use microsandbox_types::ConfigPatch;
+use microsandbox_types::RegistryAuth;
 use serde::{Deserialize, Serialize};
 
 #[cfg(test)]
@@ -202,6 +203,7 @@ impl GlobalConfig {
             return Ok(auth);
         }
 
+        #[cfg(feature = "local")]
         if let Some(auth) =
             resolve_registry_auth_with_lookup(hostname, docker_credential::get_credential)
         {
@@ -516,6 +518,7 @@ pub fn delete_registry_keyring_auth(hostname: &str) -> MicrosandboxResult<()> {
     KeyringRegistryCredential::delete(hostname).map_err(MicrosandboxError::Custom)
 }
 
+#[cfg(feature = "local")]
 fn resolve_registry_auth_with_lookup<F>(hostname: &str, mut lookup: F) -> Option<RegistryAuth>
 where
     F: FnMut(&str) -> Result<DockerCredential, CredentialRetrievalError>,
@@ -541,6 +544,7 @@ where
     None
 }
 
+#[cfg(feature = "local")]
 fn docker_credential_servers(hostname: &str) -> Vec<String> {
     let mut servers = vec![hostname.to_string(), format!("https://{hostname}")];
 
@@ -561,6 +565,7 @@ fn docker_credential_servers(hostname: &str) -> Vec<String> {
     servers
 }
 
+#[cfg(feature = "local")]
 fn dedupe_strings(values: &mut Vec<String>) {
     let mut deduped = Vec::new();
     for value in values.drain(..) {
@@ -575,7 +580,7 @@ fn dedupe_strings(values: &mut Vec<String>) {
 // Tests
 //--------------------------------------------------------------------------------------------------
 
-#[cfg(test)]
+#[cfg(all(test, feature = "local"))]
 mod tests {
     use std::collections::VecDeque;
 

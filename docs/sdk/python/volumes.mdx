@@ -8,6 +8,23 @@ Create, manage, and mount named volumes. See [Volumes](/sandboxes/volumes) for u
 
 ## Volume
 
+Use `Volume.owned()` to configure local storage allocated for one sandbox. It starts empty, survives stop/start and reboot, and is deleted with the sandbox. Owned mounts do not appear in `Volume.list()` and cannot be shared or removed independently. Cloud rejects owned mounts.
+
+```python
+from microsandbox import Sandbox, Volume, VolumeKind
+
+sb = await Sandbox.create(
+    "worker",
+    image="python",
+    volumes={
+        "/cache": Volume.owned(quota_mib=2048),
+        "/data": Volume.owned(kind=VolumeKind.DISK, size_mib=10240),
+    },
+)
+```
+
+`Volume.owned()` returns a `MountConfig`. `kind` defaults to `VolumeKind.DIRECTORY`; `quota_mib` applies only to directories. `VolumeKind.DISK` creates raw ext4 and requires positive `size_mib`. Common flags are `readonly`, `noexec`, `nosuid`, and `nodev`. `stat_virtualization`, `host_permissions`, and paired `uid`/`gid` apply only to directories. No host path or volume name is accepted. Mounting over an existing image directory hides its contents without copying them.
+
 <p className="msb-member-group" id="instance-properties">Instance properties</p>
 
 #### <span className="msb-recv">volume.</span><span className="msb-hn">name</span>

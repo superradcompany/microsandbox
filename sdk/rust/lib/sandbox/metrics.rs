@@ -1,24 +1,36 @@
 //! Sandbox metrics APIs backed by the shared-memory live registry.
 
+#[cfg(feature = "local")]
 use std::collections::{HashMap, HashSet};
+#[cfg(feature = "local")]
 use std::num::NonZero;
+#[cfg(feature = "local")]
 use std::sync::Arc;
 use std::time::Duration;
 
+#[cfg(feature = "local")]
 use chrono::Utc;
+#[cfg(feature = "local")]
 use futures::stream;
+#[cfg(feature = "local")]
 use microsandbox_db::DbReadConnection;
+#[cfg(feature = "local")]
 use microsandbox_metrics::{LiveMetric, LiveMetricState, MetricsRegistry};
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+#[cfg(feature = "local")]
+use sea_orm::{ColumnTrait, QueryFilter};
 
+use crate::MicrosandboxResult;
+#[cfg(feature = "local")]
 use crate::{
-    MicrosandboxError, MicrosandboxResult,
+    MicrosandboxError,
     backend::{Backend, LocalBackend, sandbox::MetricsStream},
     db::entity::sandbox as sandbox_entity,
     error::Operation,
 };
 
-use super::{Sandbox, SandboxConfig};
+use super::Sandbox;
+#[cfg(feature = "local")]
+use super::SandboxConfig;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -61,6 +73,7 @@ pub struct SandboxMetrics {
 
 /// Presentation-level state of a sandbox metrics row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(feature = "local")]
 pub enum SandboxMetricsState {
     /// The runtime owns its slot, is alive, and its sample is fresh.
     Running,
@@ -79,6 +92,7 @@ pub enum SandboxMetricsState {
 /// config, so live resizes are reflected without re-stamping the
 /// shared-memory slot.
 #[derive(Clone, Debug)]
+#[cfg(feature = "local")]
 pub struct SandboxMetricsReport {
     /// Sandbox name.
     pub name: String,
@@ -134,6 +148,7 @@ impl Sandbox {
 /// Local-backend metrics fetch keyed by sandbox name. Called from the
 /// [`SandboxBackend::metrics`](crate::backend::SandboxBackend::metrics) impl on
 /// [`LocalBackend`](crate::backend::LocalBackend).
+#[cfg(feature = "local")]
 pub(crate) async fn local_metrics(
     local: &LocalBackend,
     name: &str,
@@ -143,7 +158,8 @@ pub(crate) async fn local_metrics(
         return Err(MicrosandboxError::MetricsDisabled(name.to_string()));
     }
     let pools = local.db().await?;
-    let model = sandbox_entity::Entity::find()
+    let model = microsandbox_db::catalog::sandbox_query(pools.read())
+        .await?
         .filter(sandbox_entity::Column::Name.eq(name))
         .one(pools.read())
         .await?
@@ -157,6 +173,7 @@ pub(crate) async fn local_metrics(
 /// Local-backend streaming metrics. Called from the
 /// [`SandboxBackend::metrics_stream`](crate::backend::SandboxBackend::metrics_stream)
 /// impl on [`LocalBackend`](crate::backend::LocalBackend).
+#[cfg(feature = "local")]
 pub(crate) fn local_metrics_stream(
     backend: Arc<dyn Backend>,
     name: String,
@@ -181,10 +198,14 @@ pub(crate) fn local_metrics_stream(
             ticker.tick().await;
             let item = match backend.as_local() {
                 Some(local) => match local.db().await {
-                    Ok(pools) => match sandbox_entity::Entity::find()
-                        .filter(sandbox_entity::Column::Name.eq(&name))
-                        .one(pools.read())
-                        .await
+                    Ok(pools) => match async {
+                        microsandbox_db::catalog::sandbox_query(pools.read())
+                            .await?
+                            .filter(sandbox_entity::Column::Name.eq(&name))
+                            .one(pools.read())
+                            .await
+                    }
+                    .await
                     {
                         Ok(Some(model)) => {
                             let effective =
@@ -210,6 +231,7 @@ pub(crate) fn local_metrics_stream(
 //--------------------------------------------------------------------------------------------------
 
 /// Get the latest metrics snapshot for every running sandbox from the active local backend.
+#[cfg(feature = "local")]
 pub async fn all_sandbox_metrics() -> MicrosandboxResult<HashMap<String, SandboxMetrics>> {
     let backend = crate::backend::default_backend();
     let local = backend
@@ -219,6 +241,7 @@ pub async fn all_sandbox_metrics() -> MicrosandboxResult<HashMap<String, Sandbox
 }
 
 /// Get the latest metrics snapshot for every running sandbox from an explicit local backend.
+#[cfg(feature = "local")]
 pub async fn all_sandbox_metrics_local(
     local: &LocalBackend,
 ) -> MicrosandboxResult<HashMap<String, SandboxMetrics>> {
@@ -242,6 +265,7 @@ pub async fn all_sandbox_metrics_local(
 /// `include_exited` keeps rows whose slot is stale — exited sandboxes whose
 /// terminal sample is preserved until the slot is reused. Rows for sandboxes
 /// that were removed from the catalog are always dropped.
+#[cfg(feature = "local")]
 pub async fn all_sandbox_metrics_reports_local(
     local: &LocalBackend,
     include_exited: bool,
@@ -279,7 +303,8 @@ pub async fn all_sandbox_metrics_reports_local(
         return Ok(Vec::new());
     }
     let pools = local.db().await?;
-    let models = sandbox_entity::Entity::find()
+    let models = microsandbox_db::catalog::sandbox_query(pools.read())
+        .await?
         .filter(sandbox_entity::Column::Id.is_in(ids))
         .all(pools.read())
         .await?;
@@ -312,12 +337,14 @@ pub async fn all_sandbox_metrics_reports_local(
 /// Unlike [`Sandbox::metrics`], this answers for exited sandboxes too (the
 /// report's state says so). Returns `Ok(None)` when the sandbox exists but
 /// has no slot in the registry — never sampled, or the slot was reused.
+#[cfg(feature = "local")]
 pub async fn sandbox_metrics_report_local(
     local: &LocalBackend,
     name: &str,
 ) -> MicrosandboxResult<Option<SandboxMetricsReport>> {
     let pools = local.db().await?;
-    let model = sandbox_entity::Entity::find()
+    let model = microsandbox_db::catalog::sandbox_query(pools.read())
+        .await?
         .filter(sandbox_entity::Column::Name.eq(name))
         .one(pools.read())
         .await?
@@ -338,6 +365,7 @@ pub async fn sandbox_metrics_report_local(
     Ok(Some(report_from_live(live, config.as_ref())))
 }
 
+#[cfg(feature = "local")]
 pub(super) async fn metrics_for_sandbox(
     db: &DbReadConnection,
     local: &LocalBackend,
@@ -367,6 +395,7 @@ pub(super) async fn metrics_for_sandbox(
     Ok(to_sandbox_metrics(&live, Some(config)))
 }
 
+#[cfg(feature = "local")]
 fn open_registry(local: &LocalBackend) -> MicrosandboxResult<Option<MetricsRegistry>> {
     let name = local.config().metrics_registry_shm_name();
     match MetricsRegistry::open(&name) {
@@ -378,10 +407,12 @@ fn open_registry(local: &LocalBackend) -> MicrosandboxResult<Option<MetricsRegis
     }
 }
 
+#[cfg(feature = "local")]
 fn is_missing_registry_io_error(err: &std::io::Error) -> bool {
     err.kind() == std::io::ErrorKind::NotFound || err.raw_os_error() == Some(libc::ENOENT)
 }
 
+#[cfg(feature = "local")]
 fn to_sandbox_metrics(live: &LiveMetric, config: Option<&SandboxConfig>) -> SandboxMetrics {
     SandboxMetrics {
         cpu_percent: live.cpu_percent,
@@ -407,24 +438,28 @@ fn to_sandbox_metrics(live: &LiveMetric, config: Option<&SandboxConfig>) -> Sand
     }
 }
 
+#[cfg(feature = "local")]
 fn metrics_error(err: microsandbox_metrics::MetricsError) -> MicrosandboxError {
     MicrosandboxError::Custom(format!("metrics registry: {err}"))
 }
 
+#[cfg(feature = "local")]
 fn memory_limit_bytes(config: &SandboxConfig) -> u64 {
     u64::from(config.spec.resources.memory_mib) * 1024 * 1024
 }
 
 /// Parse the config that best describes the sandbox's current allocation:
 /// the active-config snapshot when one is recorded, else the desired config.
+#[cfg(feature = "local")]
 fn model_effective_config(model: &sandbox_entity::Model) -> Option<SandboxConfig> {
     model
         .active_config
         .as_deref()
         .and_then(|json| serde_json::from_str(json).ok())
-        .or_else(|| serde_json::from_str(&model.config).ok())
+        .or_else(|| crate::db::config::decode(&model.config).ok())
 }
 
+#[cfg(feature = "local")]
 fn slot_rank(live: &LiveMetric) -> u8 {
     match live.state {
         LiveMetricState::Active => 1,
@@ -432,6 +467,7 @@ fn slot_rank(live: &LiveMetric) -> u8 {
     }
 }
 
+#[cfg(feature = "local")]
 fn report_from_live(live: LiveMetric, config: Option<&SandboxConfig>) -> SandboxMetricsReport {
     let state = classify_state(&live, config);
     let cpus = config.map(|config| u32::from(config.spec.resources.cpus));
@@ -449,6 +485,7 @@ fn report_from_live(live: LiveMetric, config: Option<&SandboxConfig>) -> Sandbox
 /// Derive the row state. Stale slots are exited by definition; active slots
 /// are stalled when no sample landed within three sampling intervals
 /// (minimum 3s), mirroring the sampler's own guest-freshness policy.
+#[cfg(feature = "local")]
 fn classify_state(live: &LiveMetric, config: Option<&SandboxConfig>) -> SandboxMetricsState {
     match live.state {
         LiveMetricState::Stale => SandboxMetricsState::Exited,
@@ -470,7 +507,7 @@ fn classify_state(live: &LiveMetric, config: Option<&SandboxConfig>) -> SandboxM
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "local"))]
 mod tests {
     use super::is_missing_registry_io_error;
 

@@ -20,7 +20,7 @@ msb ssh --name serve -- uptime
 | Argument | Description |
 |----------|-------------|
 | `sandbox` | Sandbox name, up to 128 UTF-8 bytes |
-| `--name NAME` | Explicit sandbox name, up to 128 UTF-8 bytes; useful when the name collides with `serve`, `authorize`, or `help` |
+| `-n`, `--name NAME` | Explicit sandbox name, up to 128 UTF-8 bytes; useful when the name collides with `serve`, `authorize`, or `help` |
 | `--inactivity-timeout DURATION` | Disconnect after this much SSH inactivity; accepts values such as `30s`, `10m`, or `1h`. Use `0` to disable |
 | `--no-inactivity-timeout` | Disable the SSH inactivity timeout |
 | `-- COMMAND...` | Remote command to run through the sandbox shell |
@@ -58,7 +58,7 @@ msb ssh serve devbox --stdio
 | Flag | Description |
 |------|-------------|
 | `--host HOST` | Listener host. Defaults to `127.0.0.1` |
-| `--port PORT` | Listener port. Defaults to `2222` |
+| `-p`, `--port PORT` | Listener port. Defaults to `2222` |
 | `--stdio` | Serve one SSH transport over stdin/stdout for OpenSSH `ProxyCommand` |
 | `--inactivity-timeout DURATION` | Disconnect each connection after this much SSH inactivity. Use `0` to disable |
 | `--no-inactivity-timeout` | Disable the SSH inactivity timeout |
@@ -94,7 +94,7 @@ msb ssh connect devbox -- uname -a
 | Argument | Description |
 |----------|-------------|
 | `sandbox` | Sandbox name, up to 128 UTF-8 bytes |
-| `--name NAME` | Explicit sandbox name, up to 128 UTF-8 bytes |
+| `-n`, `--name NAME` | Explicit sandbox name, up to 128 UTF-8 bytes |
 | `--inactivity-timeout DURATION` | Disconnect after this much SSH inactivity. Use `0` to disable |
 | `--no-inactivity-timeout` | Disable the SSH inactivity timeout |
 | `-- COMMAND...` | Remote command to run through the sandbox shell |

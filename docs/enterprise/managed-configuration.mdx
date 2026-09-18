@@ -116,7 +116,7 @@ This example enforces **two vCPUs and 1 GiB of memory** for new local and cloud 
   | Other maps | Merge by key; replace each supplied entry |
   | Array or tagged value | Replace the whole value |
 
-  Tagged values need their discriminator, such as `kind`, `mode`, or `protocol`. See [registry rules](/configuration#auth-resolution-order) and [backend selection](/operations/backends#resolution-order) for their specific behavior. Sandbox settings are applied before cloud create requests are sent. Unsupported sandbox options cause an error. Registry settings govern local pulls; cloud pulls use explicit or cloud-stored credentials. Host runtime and data-path settings remain local; this file does not reconfigure the cloud service or its hosted SSH gateway.
+  Tagged values need their discriminator, such as `kind`, `mode`, or `protocol`. See [registry rules](/configuration#auth-resolution-order) and [backend selection](/operations/backends#resolution-order) for their specific behavior. Sandbox settings are applied before cloud create requests are sent. Unsupported sandbox options cause an error. Snapshot restores reject managed settings that conflict with the captured root-disk layout or full-checkpoint CPU and memory geometry. Registry settings govern local pulls; cloud pulls use explicit or cloud-stored credentials. Host runtime and data-path settings remain local; this file does not reconfigure the cloud service or its hosted SSH gateway.
 </Accordion>
 
 ## Deploy to employee devices

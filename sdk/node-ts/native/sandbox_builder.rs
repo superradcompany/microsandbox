@@ -27,7 +27,7 @@ use crate::patch_builder::JsPatchBuilder;
 use crate::pull_progress::JsPullProgressStream;
 use crate::registry_builder::JsRegistryConfigBuilder;
 use crate::root_disk_builder::JsRootDiskBuilder;
-use crate::sandbox::Sandbox as JsSandbox;
+use crate::sandbox::Sandbox;
 use crate::secret_builder::JsSecretBuilder;
 use crate::tls_builder::JsTlsBuilder;
 
@@ -138,21 +138,6 @@ impl JsSandboxBuilder {
             }
         }
         Ok(self)
-    }
-
-    /// Boot a fresh sandbox from a snapshot artifact (path or name).
-    /// Mutually exclusive with `image()` / `imageWith()` — the
-    /// snapshot already pins the image reference and digest.
-    #[napi(js_name = "fromSnapshot")]
-    // Naming mirrors the Rust SDK (`SandboxBuilder::from_snapshot`),
-    // not Rust's `from_*` constructor convention. Clippy's
-    // wrong_self_convention lint trips on the `from_` prefix here;
-    // the alternative name would diverge from the rest of the SDK.
-    #[allow(clippy::wrong_self_convention)]
-    pub fn from_snapshot(&mut self, path_or_name: String) -> &Self {
-        let prev = self.take_inner();
-        self.inner = Some(prev.from_snapshot(path_or_name));
-        self
     }
 
     /// Number of virtual CPUs.
@@ -789,13 +774,13 @@ impl JsSandboxBuilder {
     /// synchronously before awaiting; napi-rs requires the `unsafe` tag
     /// regardless. JS callers see `create(): Promise<Sandbox>`.
     #[napi]
-    pub async unsafe fn create(&mut self) -> Result<JsSandbox> {
+    pub async unsafe fn create(&mut self) -> Result<Sandbox> {
         let b = self
             .inner
             .take()
             .ok_or_else(|| napi::Error::from_reason("SandboxBuilder already consumed"))?;
         let inner: RustSandbox = b.create().await.map_err(to_napi_error)?;
-        Ok(JsSandbox::from_rust(inner))
+        Ok(Sandbox::from_rust(inner))
     }
 
     /// Connect to the persisted sandbox with this name, or create it.
@@ -803,13 +788,13 @@ impl JsSandboxBuilder {
     /// # Safety
     /// Same justification as `create`.
     #[napi(js_name = "connectOrCreate")]
-    pub async unsafe fn connect_or_create(&mut self) -> Result<JsSandbox> {
+    pub async unsafe fn connect_or_create(&mut self) -> Result<Sandbox> {
         let builder = self
             .inner
             .take()
             .ok_or_else(|| napi::Error::from_reason("SandboxBuilder already consumed"))?;
         let inner = builder.connect_or_create().await.map_err(to_napi_error)?;
-        Ok(JsSandbox::from_rust(inner))
+        Ok(Sandbox::from_rust(inner))
     }
 
     /// Create the sandbox with image-pull progress reporting. Returns
@@ -829,12 +814,31 @@ impl JsSandboxBuilder {
         let (handle, task) = b.create_with_pull_progress().map_err(to_napi_error)?;
         Ok(JsPullProgressCreate {
             stream: JsPullProgressStream::from_handle(handle),
+            abort: task.abort_handle(),
+            task: std::sync::Arc::new(tokio::sync::Mutex::new(Some(task))),
+        })
+    }
+
+    /// Create with image, snapshot preparation and activation progress.
+    ///
+    /// # Safety
+    /// Same consumed-builder ownership requirement as `create`.
+    #[napi(js_name = "createWithProgress")]
+    pub async unsafe fn create_with_progress(&mut self) -> Result<JsPullProgressCreate> {
+        let builder = self
+            .inner
+            .take()
+            .ok_or_else(|| napi::Error::from_reason("SandboxBuilder already consumed"))?;
+        let (handle, task) = builder.create_with_progress().map_err(to_napi_error)?;
+        Ok(JsPullProgressCreate {
+            stream: JsPullProgressStream::from_creation(handle),
+            abort: task.abort_handle(),
             task: std::sync::Arc::new(tokio::sync::Mutex::new(Some(task))),
         })
     }
 }
 
-fn parse_bind_addr(bind: &str) -> Result<IpAddr> {
+pub(crate) fn parse_bind_addr(bind: &str) -> Result<IpAddr> {
     bind.parse::<IpAddr>()
         .map_err(|_| napi::Error::from_reason(format!("invalid bind address: {bind}")))
 }
@@ -843,8 +847,9 @@ fn parse_bind_addr(bind: &str) -> Result<IpAddr> {
 /// plus a method to await the final `Sandbox`.
 #[napi(js_name = "PullProgressCreate")]
 pub struct JsPullProgressCreate {
-    stream: JsPullProgressStream,
-    task: std::sync::Arc<
+    pub(crate) abort: tokio::task::AbortHandle,
+    pub(crate) stream: JsPullProgressStream,
+    pub(crate) task: std::sync::Arc<
         tokio::sync::Mutex<
             Option<tokio::task::JoinHandle<microsandbox::MicrosandboxResult<RustSandbox>>>,
         >,
@@ -853,6 +858,12 @@ pub struct JsPullProgressCreate {
 
 #[napi]
 impl JsPullProgressCreate {
+    /// Cancel creation, independently of whether awaitSandbox is already waiting.
+    #[napi]
+    pub fn cancel(&self) {
+        self.abort.abort();
+    }
+
     /// The progress event stream. Iterate with `for await...of` or
     /// poll with `.recv()`. The stream closes once the pull completes.
     #[napi(getter)]
@@ -863,7 +874,7 @@ impl JsPullProgressCreate {
     /// Await the sandbox. Resolves once the pull + boot finishes.
     /// Calling more than once errors.
     #[napi(js_name = "awaitSandbox")]
-    pub async fn await_sandbox(&self) -> Result<JsSandbox> {
+    pub async fn await_sandbox(&self) -> Result<Sandbox> {
         let mut guard = self.task.lock().await;
         let task = guard
             .take()
@@ -872,7 +883,7 @@ impl JsPullProgressCreate {
             .await
             .map_err(|e| napi::Error::from_reason(format!("create task panicked: {e}")))?
             .map_err(to_napi_error)?;
-        Ok(JsSandbox::from_rust(inner))
+        Ok(Sandbox::from_rust(inner))
     }
 }
 

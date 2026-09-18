@@ -1,13 +1,18 @@
 //! SOCKS outbound proxy builders, credentials, and transport implementations.
 
 use std::fmt;
+#[cfg(feature = "engine")]
 use std::io;
+#[cfg(feature = "engine")]
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use microsandbox_types::SecretSource;
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "engine")]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+#[cfg(feature = "engine")]
 use tokio::net::TcpStream;
+#[cfg(feature = "engine")]
 use tokio_socks::tcp::Socks4Stream;
 use zeroize::Zeroizing;
 
@@ -15,7 +20,8 @@ use super::types::{
     OutboundProxy, OutboundProxyBuildError, OutboundProxyBuilder, OutboundProxyConfig,
     OutboundProxyProtocol, ResolvedOutboundProxy,
 };
-use crate::dns::forwarder::{DnsForwarder, DnsForwarderHandle};
+#[cfg(feature = "engine")]
+use crate::engine::dns::forwarder::{DnsForwarder, DnsForwarderHandle};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -51,6 +57,7 @@ pub struct Socks5ProxyBuilder {
 }
 
 /// Active SOCKS5 UDP association.
+#[cfg(feature = "engine")]
 pub(crate) struct Socks5UdpAssociation {
     _control: TcpStream,
     socket: tokio::net::UdpSocket,
@@ -58,9 +65,11 @@ pub(crate) struct Socks5UdpAssociation {
 }
 
 /// SOCKS5 wire protocol operations shared by TCP and UDP proxying.
+#[cfg(feature = "engine")]
 struct Socks5Protocol;
 
 /// Address returned by a SOCKS5 command reply.
+#[cfg(feature = "engine")]
 enum Socks5ReplyAddress {
     Socket(SocketAddr),
     Domain { name: String, port: u16 },
@@ -134,6 +143,7 @@ impl ResolvedOutboundProxy {
     }
 
     /// Connects to `destination` through this outbound proxy.
+    #[cfg(feature = "engine")]
     pub(crate) async fn connect(&self, destination: SocketAddr) -> io::Result<TcpStream> {
         match self {
             Self::Socks4 { address, user_id } => match user_id {
@@ -159,6 +169,7 @@ impl ResolvedOutboundProxy {
     }
 
     /// Opens a SOCKS5 UDP association for relaying datagrams.
+    #[cfg(feature = "engine")]
     pub(crate) async fn associate_udp(
         &self,
         dns_forwarder: Option<DnsForwarderHandle>,
@@ -285,6 +296,7 @@ impl Socks5Credentials {
     }
 }
 
+#[cfg(feature = "engine")]
 impl Socks5UdpAssociation {
     /// Connects a UDP socket to the first usable relay address.
     async fn connect(
@@ -466,6 +478,7 @@ impl OutboundProxyConfig for OutboundProxy {
     }
 }
 
+#[cfg(feature = "engine")]
 impl Socks5Protocol {
     /// Resolves a domain-form SOCKS5 endpoint through the internal DNS path.
     async fn resolve_domain(
@@ -729,7 +742,7 @@ impl Socks5Protocol {
 // Tests
 //--------------------------------------------------------------------------------------------------
 
-#[cfg(test)]
+#[cfg(all(test, feature = "engine"))]
 mod tests {
     use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
     use std::sync::Arc;
@@ -747,7 +760,7 @@ mod tests {
         OutboundProxy, OutboundProxyBuildError, OutboundProxyBuilder, OutboundProxyConfig,
         OutboundProxyProtocol, ResolvedOutboundProxy, ResolvedSocks5Credentials,
     };
-    use crate::dns::forwarder::DnsForwarder;
+    use crate::engine::dns::forwarder::DnsForwarder;
     use crate::netstack::poll::GatewayIps;
     use crate::netstack::shared::SharedState;
 

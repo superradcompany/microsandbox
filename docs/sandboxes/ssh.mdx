@@ -243,6 +243,8 @@ rsync -av ./src/ devbox.msb:/app/
 
 Editors that build on OpenSSH, such as VS Code Remote-SSH, connect to the `devbox.msb` host the same way.
 
+For a walkthrough using a TCP listener, see [Using with VS Code](/examples/development/vscode), including key authorization and troubleshooting.
+
 ## Inactivity timeout
 
 SSH sessions disconnect after 10 minutes without SSH traffic by default. Any SSH input or output resets the timer. This transport timeout is independent of the sandbox lifecycle idle timeout: an SSH disconnect does not stop the sandbox.

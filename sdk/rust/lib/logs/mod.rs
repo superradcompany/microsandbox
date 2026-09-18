@@ -56,6 +56,7 @@
 //! of the last entry successfully consumed.
 
 mod cursor;
+#[cfg(feature = "local")]
 mod logger;
 mod parser;
 mod stream;
@@ -63,21 +64,31 @@ mod types;
 mod watch;
 
 pub use cursor::{LogCursor, LogCursorParseError};
+#[cfg(feature = "local")]
 pub use logger::{RegisteredSandboxLogger, SandboxLogger};
+#[cfg(feature = "local")]
 pub use microsandbox_runtime::boot_error::{BootError, BootErrorStage};
 pub use stream::{LogStreamOptions, LogStreamStart};
+#[cfg(not(feature = "local"))]
+pub use types::{BootError, BootErrorStage};
 pub use types::{LogEntry, LogOptions, LogSource};
 pub use watch::{LogRegistration, LogRegistry, RegistryStatsSnapshot};
 
+#[cfg(feature = "local")]
 use std::path::PathBuf;
 
+#[cfg(feature = "local")]
 use futures::Stream;
 
+#[cfg(feature = "local")]
 use stream::{LogEngine, LogFileConfig, LogFileFormat};
 
+#[cfg(feature = "local")]
+use crate::MicrosandboxError;
+use crate::MicrosandboxResult;
+#[cfg(feature = "local")]
 use crate::backend::LocalBackend;
 use crate::backend::sandbox::LogStream;
-use crate::{MicrosandboxError, MicrosandboxResult};
 
 //--------------------------------------------------------------------------------------------------
 // LOG_FILES
@@ -87,6 +98,7 @@ use crate::{MicrosandboxError, MicrosandboxResult};
 /// type by adding an entry here — the [`LogEngine`] opens a
 /// reader for any entry whose `produces` list intersects the
 /// caller's requested sources.
+#[cfg(feature = "local")]
 const LOG_FILES: &[LogFileConfig] = &[
     LogFileConfig {
         filename: "exec.log",
@@ -131,6 +143,7 @@ pub struct LogSnapshot {
 }
 
 /// Compute the on-disk log directory for a sandbox name.
+#[cfg(feature = "local")]
 pub fn log_dir_for(name: &str) -> PathBuf {
     crate::backend::default_backend()
         .as_local()
@@ -144,6 +157,7 @@ pub fn log_dir_for(name: &str) -> PathBuf {
 }
 
 /// Compute the on-disk log directory for an explicit local backend.
+#[cfg(feature = "local")]
 pub(crate) fn log_dir_for_local(local: &LocalBackend, name: &str) -> PathBuf {
     local.config().sandboxes_dir().join(name).join("logs")
 }
@@ -191,6 +205,7 @@ pub async fn boot_error(name: &str) -> MicrosandboxResult<Option<BootError>> {
 }
 
 /// Read all matching log entries through an explicit local backend.
+#[cfg(feature = "local")]
 pub(crate) async fn read_logs_local(
     local: &LocalBackend,
     name: &str,
@@ -200,6 +215,7 @@ pub(crate) async fn read_logs_local(
 }
 
 /// Read a filtered snapshot and cursor through an explicit local backend.
+#[cfg(feature = "local")]
 pub(crate) async fn read_logs_snapshot_local(
     local: &LocalBackend,
     name: &str,
@@ -213,10 +229,12 @@ pub(crate) async fn read_logs_snapshot_local(
 /// This is useful when handing a bounded historical read to
 /// [`log_stream`] with [`LogStreamStart::From`] without losing log
 /// lines written between the snapshot drain and follow startup.
+#[cfg(feature = "local")]
 pub async fn read_logs_snapshot(name: &str, opts: &LogOptions) -> MicrosandboxResult<LogSnapshot> {
     read_logs_snapshot_from_dir(name, log_dir_for(name), opts).await
 }
 
+#[cfg(feature = "local")]
 async fn read_logs_snapshot_from_dir(
     name: &str,
     log_dir: PathBuf,
@@ -256,6 +274,7 @@ async fn read_logs_snapshot_from_dir(
 /// Returns [`MicrosandboxError::SandboxNotFound`] if the sandbox's
 /// log directory doesn't exist. Within each source, entries are
 /// chronological; across sources, ordering is "as parsed."
+#[cfg(feature = "local")]
 pub async fn log_stream(
     name: &str,
     opts: &LogStreamOptions,
@@ -264,6 +283,7 @@ pub async fn log_stream(
 }
 
 /// Stream log entries through an explicit local backend.
+#[cfg(feature = "local")]
 pub(crate) async fn log_stream_local(
     local: &LocalBackend,
     name: &str,
@@ -272,6 +292,7 @@ pub(crate) async fn log_stream_local(
     log_stream_from_dir(name, log_dir_for_local(local, name), opts).await
 }
 
+#[cfg(feature = "local")]
 async fn log_stream_from_dir(
     name: &str,
     log_dir: PathBuf,
@@ -298,6 +319,7 @@ async fn log_stream_from_dir(
 /// [`LogRegistry`](watch::LogRegistry) subscription rather than
 /// a private watcher. Always follows — a non-follow read has no wake
 /// source and takes [`log_stream_from_dir`] / the snapshot path.
+#[cfg(feature = "local")]
 pub(crate) async fn log_stream_from_dir_registry(
     name: &str,
     log_dir: PathBuf,

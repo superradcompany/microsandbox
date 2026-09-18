@@ -62,7 +62,7 @@ jobs:
 
       - name: Build local runtime placeholders for cargo check
         run: |
-          cargo build --no-default-features --features net,ssh -p microsandbox-cli
+          cargo build --no-default-features --features embed-binaries,net,ssh -p microsandbox-cli
           mkdir -p build
           cp target/debug/msb build/msb
           touch "build/libkrunfw.so.${LIBKRUNFW_VERSION}"
@@ -76,12 +76,8 @@ jobs:
         working-directory: sdk/node-ts
         run: npm install --package-lock-only --ignore-scripts
 
-      - name: Refresh agent client npm lockfile
-        working-directory: packages/agent-client/typescript
-        run: npm install --package-lock-only --ignore-scripts
-
-      - name: Refresh microsandbox types npm lockfile
-        working-directory: packages/microsandbox-types/typescript
+      - name: Refresh shared-package npm lockfile
+        working-directory: packages
         run: npm install --package-lock-only --ignore-scripts
 
       - name: Open release PR
@@ -93,15 +89,16 @@ jobs:
 
             bumped by `scripts/bump-version.sh`:
             - `Cargo.toml` workspace + path-dep versions
+            - `packages/protocol-client/typescript/package.json`
             - `packages/agent-client/typescript/package.json`
+            - `packages/control-client/typescript/package.json`
             - `packages/microsandbox-types/typescript/package.json`
             - `sdk/node-ts/package.json` and per-platform sub-packages
             - `sdk/go/setup.go` `sdkVersion` (if present)
 
             regenerated:
             - `Cargo.lock`
-            - `packages/agent-client/typescript/package-lock.json`
-            - `packages/microsandbox-types/typescript/package-lock.json`
+            - `packages/package-lock.json`
             - `sdk/node-ts/package-lock.json`
 
             after this PR merges:

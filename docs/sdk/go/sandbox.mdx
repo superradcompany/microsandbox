@@ -25,6 +25,26 @@ Lifecycle methods on a `Sandbox` or `SandboxHandle` stay attached to its opaque 
 
 ## Functions
 
+### External mount restore
+
+Full restores use strict external-filesystem admission by default. Pass `WithExternalMountPolicy(ExternalMountRelaxed)` to accept supported mismatches, then inspect `sandbox.RestoreWarnings(ctx)`. Each `ExternalMountWarning` has `GuestPath`, `Reason`, and `StaleInodes []uint64`. `ExternalMountStrict` explicitly selects the default. Existing mount options select the destination paths. See [Snapshot external mounts](/sandboxes/snapshots#external-mounts).
+
+### Creation and restore progress
+
+`CreateSandboxWithProgress` and `RestoreSandboxWithProgress` return a bounded event channel and a single-result channel. Ignoring events does not delay the operation. Always receive the result and close the handle when finished; restored sandboxes are detached, so use `Stop` or `Destroy` to stop them. Cancel `ctx` to cancel the operation.
+
+```go
+events, result := m.RestoreSandboxWithProgress(ctx, "saved", "child", m.WithForked())
+for event := range events {
+    fmt.Println(event.Kind, event.Progress.Phase, event.Progress.CompletedBytes)
+}
+created := <-result
+if created.Err != nil { return created.Err }
+defer created.Sandbox.Close()
+```
+
+`Kind` is `"pull"` or `"startup"`. Startup phases distinguish backing preparation, waits, reuse, syncing, and activation. `TotalBytes == nil` means indeterminate work. Preparation has no fixed deadline and does not consume the activation timeout; an optional context deadline still bounds the entire operation.
+
 #### <span className="msb-recv">m.</span><span className="msb-hn">CreateSandbox()</span>
 
 ```go
@@ -604,10 +624,9 @@ _, err = sb.Modify(ctx, m.ModifyOptions{
     Env:    map[string]string{"MODE": "prod"},
     Policy: m.ModificationPolicyRestart,
 })
-// Grow the managed OCI root disk offline and restart
+// Grow the owned OCI root disk while it is running
 _, err = sb.Modify(ctx, m.ModifyOptions{
     RootDiskSizeMiB: 8192,
-    Policy:          m.ModificationPolicyRestart,
 })
 
 // Add or rotate a host-environment secret; restart if it is newly added
@@ -629,9 +648,9 @@ _, err = sb.Modify(ctx, m.ModifyOptions{
 
 </Accordion>
 
-Plan or apply a configuration change. The returned plan labels each change `"live"`, `"next start"`, `"requires restart"`, or `"unsupported"`, and apply is all-or-nothing.
+Plan or apply a configuration change. The returned plan labels each change `"live"`, `"next start"`, `"requires restart"`, or `"unsupported"`.
 
-`CPUs` and `MemoryMiB` resize live within the [`WithMaxCPUs`](#withmaxcpus) / [`WithMaxMemory`](#withmaxmemory) ceilings; raising a ceiling requires a restart. `RootDiskSizeMiB` changes are offline: managed and flat OCI root disks grow only, tmpfs root disks can change in either direction on the next boot, and user-supplied disk images are rejected. Env and workdir changes affect future execs only. On a stopped sandbox, changes are saved for the next boot.
+`CPUs` and `MemoryMiB` resize live within the [`WithMaxCPUs`](#withmaxcpus) / [`WithMaxMemory`](#withmaxmemory) ceilings; raising a ceiling requires a restart. `RootDiskSizeMiB` grows owned managed and flat ext4 roots live, including checkpoint-backed roots, tmpfs root disks can change in either direction on the next boot, and user-supplied disk images are rejected. Env and workdir changes affect future execs only. Stopped roots grow before the new size is saved. Explicit restart and next-start policies remain available.
 
 Secret specs are keyed by stable secret name. Each `SecretModifySpec` selects at most one source (`Env`, `Value`, or `Store`) and may also set `Placeholder` and `AllowedHosts`; omitting a source updates only the other supplied fields. Plans expose only safe references and metadata; raw secret values never appear in a plan. Removal is explicit through `SecretsRemove`.
 
@@ -827,7 +846,7 @@ Attach to the sandbox's default shell (configured via [`WithShell`](#withshell),
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">Stop()</span>
 
-<Tooltip tip="Graceful stop works on microsandbox cloud; timeout expiry cannot escalate to force kill."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On Cloud, the timeout only limits how long the SDK waits; the accepted stop may continue server-side."><span className="msb-badge-limited">Different on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 func (s *Sandbox) Stop(ctx context.Context, opts ...StopOption) error
@@ -836,21 +855,33 @@ func (s *Sandbox) Stop(ctx context.Context, opts ...StopOption) error
 <Accordion title="Example">
 
 ```go
-err := sb.Stop(ctx, m.WithStopTimeout(30*time.Second))
+err := sb.Stop(ctx)
 ```
 
 </Accordion>
 
-Gracefully shut down the sandbox and wait until stopped state is observed. Lets the workload finish writing any pending data to disk before it exits. Defaults to a ten-second graceful window before force-kill; pass [`WithStopTimeout`](#withstoptimeout) to change it.
+Request graceful shutdown and wait for the same sandbox run to finish, including local runtime ownership release. There is no built-in deadline and no automatic force-kill. Cancelling `ctx` ends the wait without force-killing. Use [`StopWithTimeout`](#sb-stopwithtimeout) or [`WithStopTimeout`](#withstoptimeout) for a bounded wait. These semantics require the matching updated native SDK and runtime; an older native library returns an unsupported-operation error.
 
 <p className="msb-label">Parameters</p>
 
 <div className="msb-params">
   <div className="msb-param">
     <div className="msb-param-key"><code>opts</code><a className="msb-type" href="#withstoptimeout">...StopOption</a></div>
-    <div className="msb-param-desc">Graceful shutdown window, e.g. <code>WithStopTimeout(30 * time.Second)</code>.</div>
+    <div className="msb-param-desc">Optional wait deadline, e.g. <code>WithStopTimeout(30 * time.Second)</code>; expiry never force-kills.</div>
   </div>
 </div>
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">StopWithTimeout()</span>
+
+```go
+func (s *Sandbox) StopWithTimeout(ctx context.Context, timeout time.Duration) error
+```
+
+Bound graceful shutdown with an explicit deadline. The deadline includes local transition ownership, request dispatch, and termination observation. Expiry returns `ErrStopTimeout` without force-killing; zero or a negative duration expires before sending a request. Use [`Kill`](#sb-kill) separately when forced termination is intended.
+
+```go
+err := sb.StopWithTimeout(ctx, 30*time.Second)
+```
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">RequestStop()</span>
 
@@ -858,7 +889,7 @@ Gracefully shut down the sandbox and wait until stopped state is observed. Lets 
 func (s *Sandbox) RequestStop(ctx context.Context) error
 ```
 
-Request graceful shutdown and return once the request is sent, without waiting for the sandbox to reach stopped state. Pair with [`WaitUntilStopped`](#sb-waituntilstopped) to await termination.
+Request graceful shutdown and return once the request is sent, without waiting for the sandbox to reach stopped state or scheduling a force-kill. Pair with [`WaitUntilStopped`](#sb-waituntilstopped) to await termination. A paused sandbox is not force-killed merely because its agent cannot process shutdown.
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">Kill()</span>
 
@@ -1088,7 +1119,7 @@ Require every supplied label. Repeated selectors are AND-matched.
 func WithImage(image string) SandboxOption
 ```
 
-Set the root filesystem source: an OCI image name, local directory path, or disk image path (e.g. `"python:3.12"`, `"docker.io/library/alpine"`). Required unless [`WithFromSnapshot`](#withfromsnapshot) is used. Use [`WithImageDisk`](#withimagedisk) when a disk-image root needs an explicit filesystem type.
+Set the root filesystem source: an OCI image name, local directory path, or disk image path (e.g. `"python:3.12"`, `"docker.io/library/alpine"`). Required for creation; use `RestoreSandbox` for snapshots. Use [`WithImageDisk`](#withimagedisk) when a disk-image root needs an explicit filesystem type.
 
 <p className="msb-label">Parameters</p>
 
@@ -1169,25 +1200,6 @@ Use a disk image as the root filesystem and optionally provide the inner filesys
 
 ---
 
-#### <span className="msb-recv"></span><span className="msb-hn">WithFromSnapshot()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">option</span></div>
-
-<Tooltip tip="Snapshots use local disk artifacts and are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
-
-```go
-func WithFromSnapshot(pathOrName string) SandboxOption
-```
-
-Boot from a snapshot artifact by bare name or filesystem path. Mutually exclusive with [`WithImage`](#withimage). See [Snapshots](/sdk/go/snapshots).
-
-<p className="msb-label">Parameters</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><code>pathOrName</code><span className="msb-type">string</span></div>
-    <div className="msb-param-desc">Snapshot artifact path or bare name.</div>
-  </div>
-</div>
 
 #### <span className="msb-recv"></span><span className="msb-hn">WithMemory()</span>
 
@@ -1879,14 +1891,14 @@ Add volume mount configurations keyed by guest path. Build values via the [`Moun
 func WithStopTimeout(timeout time.Duration) StopOption
 ```
 
-Set how long [`Stop`](#sb-stop) waits for graceful shutdown before force-killing. The default is ten seconds. This is a `StopOption`, not a `SandboxOption`. Pass it to [`Stop`](#sb-stop).
+Set a deadline for [`Stop`](#sb-stop), which otherwise waits without a built-in timeout. Expiry returns `ErrStopTimeout` without force-killing. Zero or a negative duration expires before sending a shutdown request. This is a `StopOption`, not a `SandboxOption`; pass it to [`Stop`](#sb-stop), or use [`StopWithTimeout`](#sb-stopwithtimeout).
 
 <p className="msb-label">Parameters</p>
 
 <div className="msb-params">
   <div className="msb-param">
     <div className="msb-param-key"><code>timeout</code><span className="msb-type">time.Duration</span></div>
-    <div className="msb-param-desc">Graceful shutdown window.</div>
+    <div className="msb-param-desc">Stopped-state observation deadline.</div>
   </div>
 </div>
 
@@ -1955,9 +1967,7 @@ Set how long [`Kill`](#sb-kill) waits for stopped-state observation. The default
   </div>
 </div>
 
-<span id="withskipdownload"></span>
-
-The setup-only `WithSkipDownload()` option is documented under [Runtime setup](/sdk/setup#customize-installation).
+Use `ResolveRuntime(RuntimeConfig{})` to require a pre-provisioned runtime without downloading. See [Runtime setup](/sdk/setup#customize-installation).
 
 <p className="msb-member-group">Attach options</p>
 
@@ -2518,17 +2528,25 @@ Stop and remove this exact sandbox. A stale handle returns `ErrSandboxReplaced` 
 
 #### <span className="msb-recv">h.</span><span className="msb-hn">Stop()</span>
 
-<Tooltip tip="Graceful stop works on microsandbox cloud; timeout expiry cannot escalate to force kill."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On Cloud, the timeout only limits how long the SDK waits; the accepted stop may continue server-side."><span className="msb-badge-limited">Different on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 Stop(ctx, opts...)
 ```
 
-Graceful shutdown; accepts [`StopOption`](#withstoptimeout)
+Request graceful shutdown and wait for this exact sandbox run and local runtime ownership release, without a built-in deadline or force-kill. Accepts [`StopOption`](#withstoptimeout); context cancellation ends only the wait.
 
 <p className="msb-label">Returns</p>
 
 `error`
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">StopWithTimeout()</span>
+
+```go
+StopWithTimeout(ctx, timeout)
+```
+
+Bound graceful shutdown for this exact sandbox run. Expiry returns `ErrStopTimeout` without force-killing; zero or a negative duration expires before sending a request.
 
 #### <span className="msb-recv">h.</span><span className="msb-hn">RequestStop()</span>
 
@@ -2536,7 +2554,7 @@ Graceful shutdown; accepts [`StopOption`](#withstoptimeout)
 RequestStop(ctx)
 ```
 
-Async stop request
+Send a graceful shutdown request without waiting for completion or scheduling forced termination.
 
 <p className="msb-label">Returns</p>
 
@@ -2610,13 +2628,13 @@ Delete sandbox and persisted state
 
 #### <span className="msb-recv">h.</span><span className="msb-hn">Snapshot()</span>
 
-<Tooltip tip="Snapshots use local disk artifacts and are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Cloud disk snapshots require a stopped or crashed source. Local snapshots also support running or paused sources."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 Snapshot(ctx, name)
 ```
 
-Snapshot a stopped sandbox under a bare name
+Capture a disk snapshot. Locally, the name selects a member within the sandbox's snapshot group. See [Snapshots](/sdk/go/snapshots).
 
 <p className="msb-label">Returns</p>
 
@@ -2864,7 +2882,6 @@ The full configuration of a sandbox. Most callers build a sandbox via `CreateSan
 | ImageFstype | `string` | Optional inner filesystem type for disk-image roots |
 | RootDisk | [`*RootDiskConfig`](#rootdiskconfig) | Root storage for an OCI image |
 | OCIUpperSizeMiB | `uint32` | Deprecated managed-root-disk size alias; ignored when `RootDisk` is set |
-| Snapshot | `string` | Snapshot artifact path or bare name; mutually exclusive with `Image` |
 | MemoryMiB | `uint32` | Guest memory in MiB |
 | CPUs | `uint8` | Virtual CPUs |
 | MaxMemoryMiB | `uint32` | Boot-time maximum hotpluggable memory in MiB |
@@ -3232,6 +3249,6 @@ Discriminator for [`PatchConfig`](#patchconfig). Prefer the [`Patch`](#patch) fa
 | `PatchKindCopyFile` | `"copy_file"` |
 | `PatchKindCopyDir` | `"copy_dir"` |
 
-### SetupOption
+### InstallOptions
 
-The setup-only `SetupOption` type is documented under [Runtime setup](/sdk/setup#customize-installation).
+The setup-only `InstallOptions` type is documented under [Runtime setup](/sdk/setup#customize-installation).

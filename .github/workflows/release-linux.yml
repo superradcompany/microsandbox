@@ -118,7 +118,7 @@ jobs:
 
       - name: Build msb
         run: |
-          cargo build --release --no-default-features --features net,ssh -p microsandbox-cli
+          cargo build --release --no-default-features --features embed-binaries,net,ssh -p microsandbox-cli
           cp target/release/msb build/msb
 
       - name: Verify runtime and glibc baseline
@@ -265,11 +265,15 @@ jobs:
             native/${{ inputs.node_file }} npm/${{ inputs.npm_dir }}
 
           # Install exactly the tarballs that will be published, without relying
-          # on a source-tree override or an already-published optional package.
+          # on a source-tree override or already-published dependency versions.
           pack_dir="${RUNNER_TEMP}/microsandbox-packs"
           consumer_dir="${RUNNER_TEMP}/microsandbox-consumer"
           mkdir -p "$pack_dir" "$consumer_dir"
           main_tarball=$(npm pack --silent --pack-destination "$pack_dir")
+          types_tarball=$(
+            cd ../../packages/microsandbox-types/typescript
+            npm pack --silent --pack-destination "$pack_dir"
+          )
           platform_tarball=$(
             cd npm/${{ inputs.npm_dir }}
             npm pack --silent --pack-destination "$pack_dir"
@@ -277,7 +281,8 @@ jobs:
           cd "$consumer_dir"
           npm init --yes >/dev/null
           npm install --ignore-scripts --omit=optional \
-            "$pack_dir/$main_tarball" "$pack_dir/$platform_tarball"
+            "$pack_dir/$main_tarball" "$pack_dir/$platform_tarball" \
+            "$pack_dir/$types_tarball"
           node --input-type=module -e 'await import("microsandbox")'
 
       - name: Upload Node SDK artifacts

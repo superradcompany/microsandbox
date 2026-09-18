@@ -1,11 +1,62 @@
 //! Error types for microsandbox.
 
+use std::path::PathBuf;
+
+use serde::Serialize;
+
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
 
 /// The result type for microsandbox operations.
 pub type MicrosandboxResult<T> = Result<T, MicrosandboxError>;
+
+/// Representation of a successfully published snapshot artifact.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SnapshotArtifactKind {
+    /// An installed snapshot directory.
+    Installed,
+    /// A portable snapshot archive.
+    Archive,
+}
+
+/// A completed artifact retained even though the source failed to recover after capture.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct PublishedSnapshotArtifact {
+    /// Whether `path` names an installed directory or archive.
+    pub kind: SnapshotArtifactKind,
+    /// Final published path, never an operation's staging directory.
+    pub path: PathBuf,
+    /// Identity stored in the snapshot descriptor.
+    pub snapshot_id: String,
+    /// Digest of the canonical snapshot descriptor.
+    pub digest: String,
+}
+
+/// Capture completed, but restoring the source's prior execution state failed.
+///
+/// The runtime checkpoint remains available at its runtime-local locator. `artifact` is present
+/// only after the requested installed snapshot or archive was also published successfully. Do not
+/// infer that the source is running, safely paused, or eligible for ordinary resume from this
+/// error: a thaw acknowledgement or fail-closed re-pause may itself have failed.
+#[derive(Clone, Debug, Serialize)]
+pub struct SnapshotSourceRecoveryError {
+    /// Sandbox whose post-capture recovery failed.
+    pub source_sandbox: String,
+    /// Verified runtime checkpoint identity.
+    pub checkpoint_id: String,
+    /// Content-addressed root of the verified runtime checkpoint.
+    pub checkpoint_root: String,
+    /// Runtime-local checkpoint path; removing the source may remove this recovery locator.
+    pub checkpoint_path: PathBuf,
+    /// Requested artifact, when its publication completed.
+    pub artifact: Option<PublishedSnapshotArtifact>,
+    /// Original runtime recovery diagnostic, including uncertainty about thaw or re-pause.
+    pub detail: String,
+    /// Additional failure while materializing or publishing the requested artifact.
+    pub publication_error: Option<String>,
+}
 
 /// Errors that can occur in microsandbox operations.
 #[derive(Debug, thiserror::Error)]
@@ -15,6 +66,7 @@ pub enum MicrosandboxError {
     Io(#[from] std::io::Error),
 
     /// An HTTP request error occurred.
+    #[cfg(any(feature = "cloud", feature = "local"))]
     #[error("http error: {0}")]
     Http(#[from] reqwest::Error),
 
@@ -33,7 +85,16 @@ pub enum MicrosandboxError {
     #[error("libkrunfw not found: {0}")]
     LibkrunfwNotFound(String),
 
+    /// Neither member of the host runtime pair is installed.
+    #[error("microsandbox runtime is not installed: {0}")]
+    RuntimeNotInstalled(String),
+
+    /// Only one member of the host runtime pair is available.
+    #[error("microsandbox runtime installation is incomplete: {0}")]
+    RuntimeIncomplete(String),
+
     /// A database error occurred.
+    #[cfg(feature = "local")]
     #[error("database error: {0}")]
     Database(#[from] sea_orm::DbErr),
 
@@ -81,14 +142,39 @@ pub enum MicrosandboxError {
     #[error("sandbox {0}")]
     SandboxNotRunning(String),
 
+    /// Graceful sandbox shutdown did not converge before the requested deadline.
+    #[error(
+        "timed out after {timeout:?} waiting for sandbox {name:?} to stop; the accepted stop may still complete"
+    )]
+    SandboxStopTimedOut {
+        /// Sandbox whose shutdown is still in progress.
+        name: String,
+        /// Time spent waiting for stopped-state observation.
+        timeout: std::time::Duration,
+    },
+
     /// A runtime error occurred.
     #[error("runtime error: {0}")]
     Runtime(String),
+
+    /// Graceful shutdown did not establish completion within the caller's budget.
+    #[error(
+        "graceful stop of sandbox {name:?} ({identity}) timed out after {timeout:?} waiting for shutdown completion and runtime release; the shutdown request may still complete; no kill was requested"
+    )]
+    StopTimeout {
+        /// Sandbox name.
+        name: String,
+        /// Persisted identity targeted by this stop operation.
+        identity: String,
+        /// Total budget including dispatch and ownership observation.
+        timeout: std::time::Duration,
+    },
 
     /// The sandbox process exited before the agent relay became
     /// available. Carries the sandbox name and the structured
     /// `boot-error.json` record so the CLI can render a useful inline
     /// error with hints.
+    #[cfg(feature = "local")]
     #[error("failed to start {name:?}: {}", .err.message)]
     BootStart {
         /// The name of the sandbox that failed to start.
@@ -109,13 +195,39 @@ pub enum MicrosandboxError {
     #[error("agent client error: {0}")]
     AgentClient(#[from] crate::agent::AgentClientError),
 
+    /// A runtime control operation failed; the source retains delivery certainty
+    /// and the original peer response. Shared setup failures use one owned source.
+    #[error("control client error: {0}")]
+    ControlClient(#[source] std::sync::Arc<microsandbox_control_client::ControlClientError>),
+
+    /// The run or active configuration changed after a live control operation.
+    /// The live operation may have applied; callers must inspect fresh state
+    /// before deciding whether to submit a new modification.
+    #[error(
+        "runtime or active configuration changed while recording a live control result; the live change may already have applied"
+    )]
+    ControlStateChanged,
+
+    /// The runtime applied an ordered prefix of a secret batch before failure.
+    #[error(
+        "secret update stopped after {applied_count} applied entries; failed index {failed_index}"
+    )]
+    ControlSecretBatch {
+        /// Number of successfully completed entries, including no-ops.
+        applied_count: u32,
+        /// First failed entry; subsequent entries were not applied.
+        failed_index: u32,
+        /// Structured peer failure; earlier entries remain applied.
+        error: microsandbox_protocol::control::ControlError,
+    },
+
     /// A nix/errno error occurred.
-    #[cfg(unix)]
+    #[cfg(all(feature = "local", unix))]
     #[error("nix error: {0}")]
     Nix(#[from] nix::errno::Errno),
 
     /// A Windows host prerequisite is missing for local sandbox execution.
-    #[cfg(windows)]
+    #[cfg(all(feature = "local", windows))]
     #[error("{0}")]
     WindowsHostSetup(#[from] crate::setup::WindowsHostSetupError),
 
@@ -156,6 +268,7 @@ pub enum MicrosandboxError {
     VolumeAlreadyExists(String),
 
     /// An OCI image operation failed.
+    #[cfg(feature = "local")]
     #[error("image error: {0}")]
     Image(#[from] microsandbox_image::ImageError),
 
@@ -190,6 +303,10 @@ pub enum MicrosandboxError {
     /// The snapshot artifact failed integrity verification.
     #[error("snapshot integrity check failed: {0}")]
     SnapshotIntegrity(String),
+
+    /// A checkpoint was captured, but restoring the source's execution state failed.
+    #[error("{0}")]
+    SnapshotSourceRecovery(Box<SnapshotSourceRecoveryError>),
 
     /// An adjacent-release snapshot artifact migration is blocked.
     #[error("snapshot artifact migration failed for {artifact} during {phase}: {code}: {detail}")]
@@ -257,6 +374,10 @@ pub enum Operation {
     SandboxStart,
     /// `Sandbox::stop`.
     SandboxStop,
+    /// `Sandbox::pause`.
+    SandboxPause,
+    /// `Sandbox::resume`.
+    SandboxResume,
     /// `Sandbox::remove`.
     SandboxRemove,
     /// `Sandbox::remove_persisted`.
@@ -425,6 +546,8 @@ impl Operation {
             Operation::SandboxCreate => "Sandbox::create",
             Operation::SandboxStart => "Sandbox::start",
             Operation::SandboxStop => "Sandbox::stop",
+            Operation::SandboxPause => "Sandbox::pause",
+            Operation::SandboxResume => "Sandbox::resume",
             Operation::SandboxRemove => "Sandbox::remove",
             Operation::SandboxRemovePersisted => "Sandbox::remove_persisted",
             Operation::SandboxKill => "Sandbox::kill",
@@ -536,6 +659,35 @@ impl MicrosandboxError {
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
 
+impl std::fmt::Display for SnapshotSourceRecoveryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(artifact) = &self.artifact {
+            write!(
+                f,
+                "snapshot {} saved at {}; ",
+                artifact.snapshot_id,
+                artifact.path.display()
+            )?;
+        } else {
+            write!(
+                f,
+                "checkpoint {} retained at {}; requested snapshot publication is unconfirmed; ",
+                self.checkpoint_id,
+                self.checkpoint_path.display()
+            )?;
+        }
+        write!(
+            f,
+            "source sandbox {:?} requires recovery: {}",
+            self.source_sandbox, self.detail
+        )?;
+        if let Some(error) = &self.publication_error {
+            write!(f, "; snapshot publication failed: {error}")?;
+        }
+        Ok(())
+    }
+}
+
 impl From<microsandbox_types::TypesError> for MicrosandboxError {
     fn from(value: microsandbox_types::TypesError) -> Self {
         match value {
@@ -553,6 +705,13 @@ impl From<microsandbox_types::CommandResolutionError> for MicrosandboxError {
     }
 }
 
+impl From<microsandbox_types::SnapshotManifestError> for MicrosandboxError {
+    fn from(value: microsandbox_types::SnapshotManifestError) -> Self {
+        Self::SnapshotIntegrity(value.to_string())
+    }
+}
+
+#[cfg(feature = "local")]
 impl microsandbox_db::retry::IsSqliteBusy for MicrosandboxError {
     fn is_sqlite_busy(&self) -> bool {
         matches!(self, MicrosandboxError::Database(db_err) if microsandbox_db::retry::is_sqlite_busy(db_err))
@@ -566,6 +725,43 @@ impl microsandbox_db::retry::IsSqliteBusy for MicrosandboxError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn snapshot_source_recovery_details_keep_artifact_and_diagnostics_structured() {
+        let mut details = SnapshotSourceRecoveryError {
+            source_sandbox: "box".into(),
+            checkpoint_id: "checkpoint_test".into(),
+            checkpoint_root: "sha256:checkpoint".into(),
+            checkpoint_path: "/runtime/checkpoint_test".into(),
+            artifact: Some(PublishedSnapshotArtifact {
+                kind: SnapshotArtifactKind::Archive,
+                path: "/snapshots/saved.tar".into(),
+                snapshot_id: "snap_test".into(),
+                digest: "sha256:descriptor".into(),
+            }),
+            detail: "thaw timed out; re-pause failed".into(),
+            publication_error: None,
+        };
+        let json = serde_json::to_value(&details).unwrap();
+        assert_eq!(json["artifact"]["kind"], "archive");
+        assert_eq!(json["artifact"]["path"], "/snapshots/saved.tar");
+        assert_eq!(json["detail"], details.detail);
+        assert!(json["publication_error"].is_null());
+        assert!(
+            details
+                .to_string()
+                .contains("saved at /snapshots/saved.tar")
+        );
+
+        details.artifact = None;
+        details.publication_error = Some("destination fsync failed".into());
+        let json = serde_json::to_value(&details).unwrap();
+        assert!(json["artifact"].is_null());
+        let rendered = MicrosandboxError::SnapshotSourceRecovery(Box::new(details)).to_string();
+        assert!(rendered.contains("publication is unconfirmed"));
+        assert!(rendered.contains("thaw timed out; re-pause failed"));
+        assert!(rendered.contains("destination fsync failed"));
+    }
 
     #[test]
     fn unsupported_renders_operation_and_reason() {
@@ -591,6 +787,19 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "Sandbox::create is not supported by this backend: the ca_certs option is not accepted here"
+        );
+    }
+
+    #[test]
+    fn sandbox_stop_timeout_explains_that_shutdown_continues() {
+        let error = MicrosandboxError::SandboxStopTimedOut {
+            name: "cloud-sandbox".into(),
+            timeout: std::time::Duration::from_secs(360),
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "timed out after 360s waiting for sandbox \"cloud-sandbox\" to stop; the accepted stop may still complete"
         );
     }
 }

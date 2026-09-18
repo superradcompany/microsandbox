@@ -14,14 +14,21 @@ use sea_orm::entity::prelude::*;
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
 #[sea_orm(table_name = "snapshot_index")]
 pub struct Model {
-    /// Manifest digest (`sha256:hex`). Canonical snapshot identity.
-    #[sea_orm(primary_key, auto_increment = false)]
+    /// Descriptor digest, shared by identical artifacts in different local groups.
     pub digest: String,
-    /// Convenience name (unique when present). NULL for digest-only entries.
+    /// Stable opaque snapshot identity.
+    pub snapshot_id: Option<String>,
+    /// SHA-256 of canonical descriptor bytes.
+    pub descriptor_digest: Option<String>,
+    /// Convenience name, unique within its group directory.
     pub name: Option<String>,
-    /// Manifest digest of the parent snapshot, or NULL for a root.
+    /// Local group label, absent for explicitly opened ungrouped artifacts.
+    pub group_name: Option<String>,
+    /// Absolute group directory, which scopes member aliases across storage roots.
+    pub group_path: Option<String>,
+    /// Stable identity of the parent snapshot, or NULL for a root.
     pub parent_digest: Option<String>,
-    /// Snapshot payload scope (`disk` today, `resumable` in the future).
+    /// Snapshot payload scope (`disk` or `full`).
     pub scope: String,
     /// Closed descriptor state discriminant (`file` or `checkpoint`).
     pub state_kind: String,
@@ -36,6 +43,7 @@ pub struct Model {
     /// Checkpoint-manifest digest for checkpoint state.
     pub checkpoint_manifest_digest: Option<String>,
     /// Absolute path to the artifact directory on this host.
+    #[sea_orm(primary_key, auto_increment = false)]
     pub artifact_path: String,
     /// Apparent size of the upper file in bytes.
     pub size_bytes: Option<i64>,
@@ -53,7 +61,7 @@ pub struct Model {
     pub created_at: DateTime,
     /// When this row was inserted/refreshed.
     pub indexed_at: DateTime,
-    /// Number of indexed snapshots whose `parent_digest == self.digest`.
+    /// Number of distinct child identities whose parent is this snapshot's stable identity.
     pub child_count: i32,
 }
 

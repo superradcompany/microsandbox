@@ -17,11 +17,15 @@ use std::{
     time::Duration,
 };
 
+use serde::{Deserialize, Serialize};
+
 use super::passthroughfs::{PassthroughConfig, PassthroughFs};
 use crate::{
     Context, DirEntry, DynFileSystem, Entry, FsOptions, GetxattrReply, ListxattrReply, OpenOptions,
     SetattrValid, ZeroCopyReader, ZeroCopyWriter, stat64, statvfs64,
 };
+
+mod mobility;
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -55,9 +59,10 @@ pub struct SingleFileFs {
     current_inode: AtomicU64,
     lookup_refs: RwLock<HashMap<u64, u64>>,
     open_handles: RwLock<HashMap<u64, OpenHandleAdmission>>,
+    checkpoint_remapped: bool,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Deserialize, Serialize)]
 struct OpenHandleAdmission {
     guest_inode: u64,
     inner_inode: u64,
@@ -124,6 +129,10 @@ impl SingleFileFs {
         // AUTO_INVAL_DATA negotiated below, each guest read revalidates mtime
         // and invalidates cached contents when the host changed them.
         cfg.attr_timeout = Duration::ZERO;
+        let checkpoint_remapped = cfg
+            .external_checkpoint
+            .as_ref()
+            .is_some_and(|options| options.remapped);
 
         let inner_name = CString::new(inner_name).map_err(|_| {
             io::Error::new(io::ErrorKind::InvalidInput, "host filename contains NUL")
@@ -145,7 +154,13 @@ impl SingleFileFs {
             current_inode: AtomicU64::new(0),
             lookup_refs: RwLock::new(HashMap::new()),
             open_handles: RwLock::new(HashMap::new()),
+            checkpoint_remapped,
         })
+    }
+
+    /// Validate an external single-file checkpoint without opening destination paths.
+    pub fn validate_external_state(bytes: &[u8]) -> io::Result<()> {
+        mobility::validate_unavailable(bytes)
     }
 
     /// Resolve the selected name and update its admission state.
@@ -264,6 +279,31 @@ impl SingleFileFs {
 //--------------------------------------------------------------------------------------------------
 
 impl DynFileSystem for SingleFileFs {
+    fn capture_state(&self) -> io::Result<Vec<u8>> {
+        mobility::capture(self)
+    }
+
+    fn validate_state(&self, bytes: &[u8]) -> io::Result<()> {
+        mobility::validate(self, bytes)
+    }
+
+    fn restore_state(&self, bytes: &[u8]) -> io::Result<()> {
+        mobility::restore(self, bytes)
+    }
+
+    fn request_error(&self, inode: u64) -> Option<i32> {
+        // Admission IDs are guest-visible IDs, so retain their stale outcome even
+        // when no inner file handle could safely be reconstructed.
+        self.inner.request_error(inode).or_else(|| {
+            self.open_handles
+                .read()
+                .unwrap()
+                .values()
+                .filter(|admission| admission.guest_inode == inode)
+                .find_map(|admission| self.inner.request_error(admission.inner_inode))
+        })
+    }
+
     fn init(&self, capable: FsOptions) -> io::Result<FsOptions> {
         let options = self.inner.init(capable)?;
         let options = if capable.contains(FsOptions::AUTO_INVAL_DATA) {

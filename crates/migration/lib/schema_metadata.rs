@@ -51,6 +51,12 @@ pub const SANDBOX_NETWORK_SLOT_MIGRATION_ID: &str = "m20260818_000001_sandbox_ne
 /// Migration that prevents old binaries from discarding persisted mount ownership.
 pub const MOUNT_OWNER_CONFIG_MIGRATION_ID: &str = "m20260824_000001_mount_owner_config";
 
+/// Migration that separates stable snapshot identity from descriptor integrity.
+pub const SNAPSHOT_IDENTITY_MIGRATION_ID: &str = "m20260829_000001_split_snapshot_identity";
+
+/// Migration that separates local group membership from portable snapshot identity.
+pub const SNAPSHOT_GROUPS_MIGRATION_ID: &str = "m20260910_000001_snapshot_groups";
+
 /// Frozen migration baseline for the transitional 0.6.0 release.
 ///
 /// The released 0.6.0 binary predates `msb __schema-baseline --json`, so
@@ -255,6 +261,20 @@ pub const MIGRATION_METADATA: &[MigrationMetadata] = &[
         affects_user_data: false,
         summary: "retain the compatible sandbox network slot column",
     },
+    MigrationMetadata {
+        id: SNAPSHOT_IDENTITY_MIGRATION_ID,
+        reversible: true,
+        affects_cache: true,
+        affects_user_data: true,
+        summary: "reverse final snapshot descriptors before dropping identity projections",
+    },
+    MigrationMetadata {
+        id: SNAPSHOT_GROUPS_MIGRATION_ID,
+        reversible: true,
+        affects_cache: false,
+        affects_user_data: true,
+        summary: "restore the flat snapshot index only when no groups or duplicate identities remain",
+    },
 ];
 
 //--------------------------------------------------------------------------------------------------
@@ -341,6 +361,8 @@ mod tests {
     #[test]
     fn canonical_applied_prefix_uses_metadata_order() {
         let applied = [
+            SNAPSHOT_GROUPS_MIGRATION_ID,
+            SNAPSHOT_IDENTITY_MIGRATION_ID,
             MOUNT_OWNER_CONFIG_MIGRATION_ID,
             SANDBOX_NETWORK_SLOT_MIGRATION_ID,
             SHARED_CPU_ALLOCATION_MIGRATION_ID,
@@ -384,6 +406,47 @@ mod tests {
 
         assert_eq!(applied.last(), Some(&MOUNT_OWNER_CONFIG_MIGRATION_ID));
         assert!(canonical_applied_prefix(applied).is_some());
+    }
+
+    #[test]
+    fn snapshot_stack_follows_released_v0_6_18_prefix() {
+        // This is also main's complete prefix at the v0.7.0 integration point.
+        // Keep execution order, not timestamp order: every main migration must
+        // precede the unreleased snapshot migrations when the branches converge.
+        let released = [
+            "m20260305_000001_create_image_tables",
+            "m20260305_000002_create_sandbox_tables",
+            "m20260305_000003_create_storage_tables",
+            "m20260305_000004_create_sandbox_images_table",
+            "m20260410_000001_erofs_image_schema",
+            "m20260501_000001_create_snapshot_index",
+            "m20260517_000001_drop_sandbox_metric",
+            "m20260527_000001_migrate_oci_rootfs_source",
+            "m20260531_000001_create_sandbox_labels",
+            "m20260531_000002_index_sandbox_labels_key_value",
+            "m20260606_000001_named_volume_kinds",
+            "m20260621_000001_add_sandbox_ephemeral",
+            "m20260621_000002_create_maintenance_lease",
+            "m20260703_000001_add_sandbox_active_config",
+            "m20260708_000001_migrate_bind_rootfs_source",
+            "m20260710_000001_migrate_root_disk",
+            "m20260714_000001_add_snapshot_scope",
+            "m20260723_000001_snapshot_artifact_transition",
+            "m20260719_000001_create_cpu_allocations",
+            "m20260803_000001_create_writeback_allocations",
+            "m20260808_000001_create_memory_allocation_nodes",
+            "m20260810_000001_rebuild_sandbox_labels",
+            "m20260813_000001_share_cpu_allocations",
+            "m20260824_000001_mount_owner_config",
+            "m20260818_000001_sandbox_network_slot",
+        ];
+        let current: Vec<_> = migration_ids().collect();
+        assert!(current.starts_with(&released));
+        assert_eq!(
+            &current[released.len()..],
+            &[SNAPSHOT_IDENTITY_MIGRATION_ID, SNAPSHOT_GROUPS_MIGRATION_ID],
+        );
+        assert!(canonical_applied_prefix(released).is_some());
     }
 
     #[test]

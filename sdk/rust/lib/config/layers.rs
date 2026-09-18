@@ -46,11 +46,16 @@ pub(crate) struct ConfigLayers<P> {
 impl BackendConfig {
     /// Borrow the settings captured by the sandbox's backend, independent of ambient routing.
     pub(crate) fn for_backend(backend: &dyn crate::backend::Backend) -> Option<&Self> {
+        #[cfg(feature = "local")]
         if let Some(local) = backend.as_local() {
-            Some(local.config_sources())
-        } else {
-            backend.as_cloud().map(|cloud| cloud.config_sources())
+            return Some(local.config_sources());
         }
+        #[cfg(feature = "cloud")]
+        if let Some(cloud) = backend.as_cloud() {
+            return Some(cloud.config_sources());
+        }
+        let _ = backend;
+        None
     }
 
     /// Capture explicit ordinary and managed sources without reading files.
@@ -354,32 +359,70 @@ mod tests {
     #[test]
     fn runtime_paths_are_captured_once_below_managed_overrides() {
         let _guard = crate::test_support::lock_env();
-        let previous = std::env::var_os("MSB_PATH");
+        let previous = ["MSB_PATH", "MSB_LIBKRUNFW_PATH", "MSB_AGENTD_PATH"]
+            .map(|name| (name, std::env::var_os(name)));
+        let _restore = scopeguard::guard(previous, |previous| {
+            for (name, value) in previous {
+                // SAFETY: the shared lock remains held through restoration.
+                unsafe {
+                    match value {
+                        Some(value) => std::env::set_var(name, value),
+                        None => std::env::remove_var(name),
+                    }
+                }
+            }
+        });
+        let directory = tempfile::tempdir().unwrap();
+        let environment = directory.path().join("environment");
+        let administrator = directory.path().join("administrator");
+        for directory in [&environment, &administrator] {
+            std::fs::create_dir(directory).unwrap();
+            std::fs::write(directory.join("msb"), b"fixture").unwrap();
+            std::fs::write(
+                directory.join(microsandbox_utils::libkrunfw_filename(std::env::consts::OS)),
+                b"fixture",
+            )
+            .unwrap();
+        }
         // SAFETY: environment-mutating tests hold the shared lock.
-        unsafe { std::env::set_var("MSB_PATH", "env-msb") };
+        unsafe {
+            std::env::set_var("MSB_PATH", environment.join("msb"));
+            std::env::remove_var("MSB_LIBKRUNFW_PATH");
+            std::env::set_var("MSB_AGENTD_PATH", "environment-agentd");
+        }
         let ordinary = BackendConfig::new(Default::default(), Default::default())
             .prepare_for_local_backend(Default::default())
             .unwrap();
-        let managed =
-            serde_json::from_str(r#"{"paths":{"msb":"admin-msb","libkrunfw":null}}"#).unwrap();
+        let managed = serde_json::from_value(serde_json::json!({"paths": {
+            "msb": administrator.join("msb"), "libkrunfw": null, "agentd": null
+        }}))
+        .unwrap();
         let enforced = BackendConfig::new(Default::default(), managed)
             .prepare_for_local_backend(Default::default())
             .unwrap();
+        // Changing ambient paths after construction cannot bypass the captured policy.
         unsafe {
-            match previous {
-                Some(value) => std::env::set_var("MSB_PATH", value),
-                None => std::env::remove_var("MSB_PATH"),
-            }
+            std::env::set_var("MSB_PATH", "changed-msb");
+            std::env::set_var("MSB_AGENTD_PATH", "changed-agentd");
         }
         assert_eq!(
             ordinary.resolved_config().resolve_msb_path().unwrap(),
-            std::path::PathBuf::from("env-msb")
+            environment.join("msb")
         );
         assert_eq!(
             enforced.resolved_config().resolve_msb_path().unwrap(),
-            std::path::PathBuf::from("admin-msb")
+            administrator.join("msb")
+        );
+        assert_eq!(
+            enforced.resolved_config().resolve_libkrunfw_path().unwrap(),
+            administrator.join(microsandbox_utils::libkrunfw_filename(std::env::consts::OS))
         );
         assert_eq!(enforced.resolved_config().paths.libkrunfw, None);
+        assert_eq!(
+            ordinary.resolved_config().paths.agentd.as_deref(),
+            Some(Path::new("environment-agentd"))
+        );
+        assert_eq!(enforced.resolved_config().paths.agentd, None);
     }
 
     #[test]

@@ -21,16 +21,19 @@ use super::Backend;
 use crate::MicrosandboxResult;
 use crate::agent::AgentClient;
 use crate::logs::{BootError, LogEntry, LogOptions, LogStreamOptions};
+#[cfg(feature = "local")]
 use crate::runtime::ProcessHandle;
 use crate::sandbox::exec::{ExecHandle, ExecOptions, ExecOutput};
 use crate::sandbox::fs::{FsEntry, FsMetadata, FsReadStream, FsWriteSink};
 use crate::sandbox::metrics::SandboxMetrics;
 use crate::sandbox::{
-    Sandbox, SandboxConfig, SandboxHandle, SandboxListBuilder, SandboxPage, SandboxStatus,
+    DEFAULT_STOP_TIMEOUT, Sandbox, SandboxConfig, SandboxHandle, SandboxListBuilder, SandboxPage,
+    SandboxStatus,
 };
 
 // Keep the pre-split path `crate::backend::sandbox::cloud_status_to_sandbox_status`
 // working for callers like `sandbox/handle.rs`.
+#[cfg(feature = "cloud")]
 pub(crate) use super::cloud::sandbox::{
     cloud_status_to_sandbox_status, sandbox_config_from_cloud_spec,
 };
@@ -67,6 +70,7 @@ pub struct SandboxLocalState {
     /// SQLite row id for this sandbox.
     pub db_id: i32,
     /// Owned libkrun process handle, when this `Sandbox` owns the lifecycle.
+    #[cfg(feature = "local")]
     pub handle: Option<Arc<tokio::sync::Mutex<ProcessHandle>>>,
     /// UDS connection to the in-VM agentd relay.
     pub client: Arc<AgentClient>,
@@ -148,6 +152,25 @@ pub struct SandboxHandleCloudState {
 /// `Sandbox::create`) resolve the backend via
 /// [`default_backend`](super::default_backend) and forward it through.
 pub trait SandboxBackend: Send + Sync {
+    /// Suggested budget for callers choosing a bounded graceful-stop observation.
+    ///
+    /// Backends whose stop path includes durable persistence work may suggest a longer budget.
+    /// `SandboxHandle::stop` waits without a deadline; `stop_with_timeout` uses the caller's
+    /// explicit budget. Neither operation applies this hint implicitly.
+    fn default_stop_timeout(&self) -> Duration {
+        DEFAULT_STOP_TIMEOUT
+    }
+
+    /// Backend preference for callers implementing an explicit timeout-escalation policy.
+    ///
+    /// The SDK's graceful-stop methods never escalate implicitly. Callers must explicitly
+    /// choose `kill` for force termination; a backend whose accepted stop continues
+    /// asynchronously can return `false` to advise against that policy.
+    #[doc(hidden)]
+    fn should_force_kill_after_stop_timeout(&self) -> bool {
+        true
+    }
+
     /// Create a sandbox. The returned outer [`Sandbox`] carries the supplied
     /// `backend` Arc and the variant-specific state inside `SandboxInner`.
     ///
@@ -557,7 +580,7 @@ pub trait SandboxBackend: Send + Sync {
         })
     }
 
-    /// Copy a guest file out to the host.
+    /// Copy a guest file out to the host with buffered atomic publication.
     fn fs_copy_to_host<'a>(
         &'a self,
         backend: Arc<dyn Backend>,

@@ -11,7 +11,25 @@ icon: "hard-drive"
 
 Volumes give a sandbox persistent or shared storage by mounting host data, managed storage, disk images, or in-memory filesystems into the guest. Mounts provide direct filesystem access and are significantly faster than the [filesystem API](/sandboxes/filesystem), which transfers files individually, so they are preferable for anything beyond ad-hoc reads and writes.
 
-microsandbox supports four mount types on both backends: bind mounts, named volumes, disk-image volumes, and tmpfs.
+Choose bind mounts, named volumes, disk-image volumes, or tmpfs. Local sandboxes also support owned volumes: private storage that lives and dies with the sandbox.
+
+## Temporary files
+
+For OCI sandboxes with a disk-backed root, `/tmp` uses the root disk unless you
+explicitly mount another filesystem there. Large package downloads and build
+files therefore consume disk capacity and leave guest RAM available for build
+processes.
+For a new Cloud OCI sandbox that omits disk size, the writable-disk default
+matches requested RAM, bounded to 4–16 GiB. Explicit disk sizes and restored
+snapshot sizes take precedence.
+
+Disk-backed temporary files can survive stop/start and be included in snapshots;
+remove them when they are no longer needed.
+
+An explicit tmpfs mount remains available for workloads that need RAM-backed,
+per-boot scratch space. Existing sandbox configurations with a saved tmpfs mount
+retain it on restart. OCI roots explicitly configured as tmpfs keep their bounded
+`/tmp` tmpfs default.
 
 ## Cloud default volume
 
@@ -110,6 +128,57 @@ File mounts expose the selected host inode through an isolated one-entry filesys
 msb create alpine --name config-reader \
   --mount-file ./config.toml:/etc/app/config.toml:ro,nodev
 ```
+
+## Owned volumes
+
+<Tooltip tip="Owned volumes are currently local-only."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+Use an owned volume when the data belongs to one sandbox. No volume name or separate cleanup is needed. It starts empty, survives stop/start, and is removed with the sandbox. Mounting over an existing image directory hides its contents; it does not copy them into the volume.
+
+<CodeGroup>
+```bash CLI
+msb create alpine --name app --mount-owned /data
+
+# An ext4 disk, useful for Docker's data root
+msb create docker:dind --name docker-app \
+  --mount-owned /var/lib/docker:kind=disk,size=10G
+```
+
+```typescript TypeScript
+const sb = await Sandbox.builder("app").image("alpine")
+  .volume("/data", (v) => v.owned())
+  .volume("/disk", (v) => v.owned({ kind: "disk", sizeMib: 1024 }))
+  .create();
+```
+
+```rust Rust
+let sb = Sandbox::builder("app")
+    .image("alpine")
+    .volume("/data", |v| v.owned())
+    .volume("/disk", |v| v.owned_with(|d| d.disk().size(1024_u32)))
+    .create().await?;
+```
+
+```python Python
+sb = await Sandbox.create("app", image="alpine", volumes={
+    "/data": Volume.owned(),
+    "/disk": Volume.owned(kind=VolumeKind.DISK, size_mib=1024),
+})
+```
+
+```go Go
+sb, err := m.CreateSandbox(ctx, "app", m.WithImage("alpine"),
+    m.WithMounts(map[string]m.MountConfig{
+        "/data": m.Mount.Owned(m.OwnedVolumeOptions{}),
+        "/disk": m.Mount.Owned(m.OwnedVolumeOptions{Kind: m.VolumeKindDisk, SizeMiB: 1024}),
+    }),
+)
+```
+</CodeGroup>
+
+Disk-only snapshots capture owned data too. Full snapshots and branches retain it along with execution state. Restoring or branching creates private copies automatically; no mount mapping or inheritance flag is needed, and child writes never change the source's data. Use a named volume instead when data should outlive or be shared between sandboxes.
+
+Owned-directory snapshots retain platform-specific filesystem metadata and cannot move between Unix (macOS/Linux) and Windows. Owned disks do not have this directory-format restriction; full snapshots still require a compatible execution-state restore target.
 
 ## Named volumes
 
@@ -393,7 +462,7 @@ Both IDs are required together and may range from `0` through `4294967295`. Moun
 
 ### CLI syntax and flags
 
-CLI mount flags use `SOURCE:DEST[:OPTIONS]`. The `:` before `OPTIONS` starts the option block, and commas separate options inside that block.
+Most CLI mount flags use `SOURCE:DEST[:OPTIONS]`; `--mount-owned` only needs `DEST[:OPTIONS]`. The `:` before `OPTIONS` starts the option block, and commas separate options inside that block.
 
 | Flag | Source | Options |
 |------|--------|---------|
@@ -401,6 +470,7 @@ CLI mount flags use `SOURCE:DEST[:OPTIONS]`. The `:` before `OPTIONS` starts the
 | `--mount-file` | Host file | `ro`, `rw`, `noexec`, `nosuid`, `nodev`, `stat-virt=strict\|relaxed\|off`, `host-perms=private\|mirror`, `quota=<size>`, paired `uid=<N>,gid=<N>` |
 | `--mount-named` | Named volume | `ro`, `rw`, `noexec`, `nosuid`, `nodev`, `kind=dir\|disk`, `size=<size>` for `kind=disk`, `quota=<size>` for directory volumes; directory-backed named volumes also support `stat-virt=strict\|relaxed\|off`, `host-perms=private\|mirror`, paired `uid=<N>,gid=<N>` |
 | `--mount-disk` | Host disk image | `ro`, `rw`, `noexec`, `nosuid`, `nodev`, `format=raw\|qcow2\|vmdk`, `fstype=<type>` |
+| `--mount-owned` | Guest path | `ro`, `rw`, `noexec`, `nosuid`, `nodev`, `kind=dir\|disk`; disks require `size=<size>`; directories accept `quota=<size>`, `stat-virt=strict\|relaxed\|off`, `host-perms=private\|mirror`, paired `uid=<N>,gid=<N>` |
 | `--tmpfs` | Guest path | `ro`, `rw`, `noexec`, `nosuid`, `nodev`; size may be passed as `PATH:SIZE[:OPTIONS]` |
 
 ## Combining mounts

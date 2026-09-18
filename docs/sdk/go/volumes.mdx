@@ -6,6 +6,24 @@ keywords: ["Go SDK", "Go volumes", "microsandbox volumes"]
 
 Create, manage, and mount named volumes. See [Volumes](/sandboxes/volumes) for usage examples.
 
+## Sandbox-owned mounts
+
+Use `Mount.Owned(OwnedVolumeOptions)` for local storage allocated for one sandbox. It starts empty, survives stop/start and reboot, and is deleted with the sandbox. Owned mounts do not appear in `ListVolumes()` and cannot be shared or removed independently. Cloud rejects owned mounts.
+
+```go
+sb, err := m.CreateSandbox(ctx, "worker",
+    m.WithImage("python"),
+    m.WithMounts(map[string]m.MountConfig{
+        "/cache": m.Mount.Owned(m.OwnedVolumeOptions{QuotaMiB: 2048}),
+        "/data": m.Mount.Owned(m.OwnedVolumeOptions{
+            Kind: m.VolumeKindDisk, SizeMiB: 10240,
+        }),
+    }),
+)
+```
+
+`OwnedVolumeOptions.Kind` defaults to `VolumeKindDir`; `QuotaMiB` applies only to directories. `VolumeKindDisk` creates raw ext4 and requires positive `SizeMiB`. Common flags are `Readonly`, `Noexec`, `Nosuid`, and `Nodev`. `StatVirtualization`, `HostPermissions`, and `Owner` apply only to directories. No host path or volume name is accepted. Mounting over an existing image directory hides its contents without copying them.
+
 ## Functions
 
 #### <span className="msb-recv"></span><span className="msb-hn">GetDefaultVolume()</span>

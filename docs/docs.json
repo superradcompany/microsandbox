@@ -63,20 +63,19 @@
             "icon": "network-wired",
             "pages": [
               "networking/overview",
+              "networking/tls",
               "networking/dns",
               "networking/outbound-proxy",
-              "networking/tls",
               "networking/host-sockets"
             ]
           },
           {
-            "group": "Operations",
+            "group": "Deep dive",
             "icon": "gauge",
             "pages": [
-              "operations/configuration",
               "operations/backends",
+              "operations/configuration",
               "observability/msb-metrics",
-              "observability/deep-dive",
               "sandboxes/optimization"
             ]
           },
@@ -220,97 +219,20 @@
             ]
           },
           {
-            "group": "Sandboxes",
-            "icon": "cube",
+            "group": "API keys",
+            "icon": "key",
             "openapi": {
               "source": "/api-reference/openapi.json",
               "directory": "api-reference/endpoints"
-            },
-            "pages": [
-              "POST /v1/sandboxes",
-              "GET /v1/sandboxes",
-              "GET /v1/sandboxes/{sandbox_id}",
-              "GET /v1/sandboxes/by-name/{name}",
-              "POST /v1/sandboxes/{sandbox_id}/start",
-              "POST /v1/sandboxes/by-name/{name}/start",
-              "POST /v1/sandboxes/{sandbox_id}/stop",
-              "POST /v1/sandboxes/by-name/{name}/stop",
-              "PATCH /v1/sandboxes/{sandbox_id}",
-              "DELETE /v1/sandboxes/{sandbox_id}",
-              "DELETE /v1/sandboxes/by-name/{name}"
-            ]
+            }
           },
           {
-            "group": "Volumes",
-            "icon": "hard-drive",
+            "group": "Personal tokens",
+            "icon": "user",
             "openapi": {
-              "source": "/api-reference/openapi.json",
-              "directory": "api-reference/endpoints"
-            },
-            "pages": [
-              "POST /v1/volumes",
-              "GET /v1/volumes",
-              "PATCH /v1/volumes/{id}",
-              "DELETE /v1/volumes/{id}"
-            ]
-          },
-          {
-            "group": "Quotas",
-            "icon": "gauge-high",
-            "openapi": {
-              "source": "/api-reference/openapi.json",
-              "directory": "api-reference/endpoints"
-            },
-            "pages": [
-              "GET /v1/quotas"
-            ]
-          },
-          {
-            "group": "Usage",
-            "icon": "chart-line",
-            "openapi": {
-              "source": "/api-reference/openapi.json",
-              "directory": "api-reference/endpoints"
-            },
-            "pages": [
-              "GET /v1/billing/usage",
-              "GET /v1/billing/usage/sandbox",
-              "GET /v1/billing/usage/storage"
-            ]
-          },
-          {
-            "group": "Audit events",
-            "icon": "clipboard-list",
-            "openapi": {
-              "source": "/api-reference/openapi.json",
-              "directory": "api-reference/endpoints"
-            },
-            "pages": [
-              "GET /v1/events",
-              "GET /v1/events/{event_id}"
-            ]
-          },
-          {
-            "group": "Organization",
-            "icon": "building",
-            "openapi": {
-              "source": "/api-reference/openapi.json",
-              "directory": "api-reference/endpoints"
-            },
-            "pages": [
-              "GET /v1/me/org"
-            ]
-          },
-          {
-            "group": "Members",
-            "icon": "users",
-            "openapi": {
-              "source": "/api-reference/openapi.json",
-              "directory": "api-reference/endpoints"
-            },
-            "pages": [
-              "GET /v1/members"
-            ]
+              "source": "/api-reference/openapi.personal.json",
+              "directory": "api-reference/personal"
+            }
           }
         ]
       },
@@ -318,10 +240,16 @@
         "tab": "Examples",
         "groups": [
           {
-            "group": "Agents",
+            "group": "Overview",
+            "icon": "flask",
+            "pages": [
+              "examples/overview"
+            ]
+          },
+          {
+            "group": "AI Agents",
             "icon": "robot",
             "pages": [
-              "examples/overview",
               "examples/agents/claude-code",
               "examples/agents/codex",
               "examples/agents/opencode",
@@ -333,56 +261,70 @@
             ]
           },
           {
-            "group": "CI/CD",
+            "group": "Dev Environments",
+            "icon": "code",
+            "pages": [
+              "examples/development/vscode",
+              "examples/development/code-server",
+              "examples/development/jupyterlab",
+              "examples/development/vnc-desktop"
+            ]
+          },
+          {
+            "group": "CI/CD & Jobs",
             "icon": "code-pull-request",
             "pages": [
               "examples/ci-cd/github-actions-runner",
               "examples/ci-cd/pr-checks",
               "examples/ci-cd/compose-tests",
-              "examples/ci-cd/preview-deploys"
-            ]
-          },
-          {
-            "group": "Docker",
-            "icon": "docker",
-            "pages": [
-              "examples/docker/docker-in-sandbox",
-              "examples/docker/docker",
-              "examples/docker/local-images"
-            ]
-          },
-          {
-            "group": "Sandbox Workflows",
-            "icon": "shield-halved",
-            "pages": [
-              "examples/sandboxing/warm-workers",
-              "examples/development/vnc-desktop",
-              "examples/guest/systemd-services",
-              "examples/development/code-server",
-              "examples/development/jupyterlab"
-            ]
-          },
-          {
-            "group": "Automation & Tooling",
-            "icon": "gears",
-            "pages": [
+              "examples/ci-cd/preview-deploys",
               "examples/automation/dependency-audits",
               "examples/automation/parallel-batch-jobs",
-              "examples/plugins/terraform",
+              "examples/sandboxing/warm-workers"
+            ]
+          },
+          {
+            "group": "Browser & Web Automation",
+            "icon": "globe",
+            "pages": [
+              "examples/browser-automation/browser-use",
               "examples/browser-automation/playwright",
-              "examples/web-automation/scrapy",
+              "examples/web-automation/scrapy"
+            ]
+          },
+          {
+            "group": "File Processing",
+            "icon": "file",
+            "pages": [
               "examples/file-processing/libreoffice-pdf",
               "examples/file-processing/ffmpeg"
             ]
           },
           {
-            "group": "Data & Observability",
+            "group": "Docker & System Tools",
+            "icon": "docker",
+            "pages": [
+              "examples/docker/docker-in-sandbox",
+              "examples/docker/docker",
+              "examples/docker/local-images",
+              "examples/guest/systemd-services",
+              "examples/plugins/terraform"
+            ]
+          },
+          {
+            "group": "Data & Storage",
             "icon": "database",
             "pages": [
               "examples/data/juicefs-s3",
               "examples/data/postgresql",
               "examples/data/migration-rehearsal",
-              "examples/data/redis",
+              "examples/data/redis"
+            ]
+          },
+          {
+            "group": "Observability",
+            "icon": "chart-line",
+            "pages": [
               "examples/metrics-backends/grafana-cloud",
               "examples/metrics-backends/grafana-alloy",
               "examples/metrics-backends/otel-collector",
@@ -419,8 +361,16 @@
             "icon": "clock-rotate-left",
             "pages": [
               {
-                "group": "August 2026",
+                "group": "September 2026",
                 "expanded": true,
+                "pages": [
+                  "changelog/2026-09-11",
+                  "changelog/2026-09-04"
+                ]
+              },
+              {
+                "group": "August 2026",
+                "expanded": false,
                 "pages": [
                   "changelog/2026-08-28",
                   "changelog/2026-08-26",
@@ -486,12 +436,16 @@
       "destination": "/operations/backends"
     },
     {
+      "source": "/observability/deep-dive",
+      "destination": "/observability/msb-metrics#metrics"
+    },
+    {
       "source": "/optimization/overview",
       "destination": "/sandboxes/optimization"
     },
     {
       "source": "/sandboxes/cpu-placement",
-      "destination": "/sandboxes/optimization#cpu-placement"
+      "destination": "/sandboxes/optimization#cpu"
     },
     {
       "source": "/images/disk-images",

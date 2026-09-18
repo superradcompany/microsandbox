@@ -853,20 +853,32 @@ fn strict(self, enabled: bool) -> Self
 
 Require hostname-based policy allows to use an inspectable request authority. Default: `false`. Plain HTTP exposes that authority in `Host`; HTTPS only exposes it when TLS interception is enabled and not bypassed. Without that visibility, strict mode denies HTTPS that would otherwise be allowed only by a hostname rule.
 
-#### <span className="msb-recv">network.</span><span className="msb-hn">max_connections()</span>
+#### <span className="msb-recv">network.</span><span className="msb-hn">max_udp_connections()</span>
 
 ```rust
-fn max_connections(self, max: usize) -> Self
+fn max_udp_connections(self, max: usize) -> Self
 ```
 
-Limit the maximum number of concurrent network connections from the sandbox. Default: `256`.
+Set the runtime UDP relay session limit. Omission is unlimited in single-tenant mode and defaults to 1,024 in multi-tenant mode; zero explicitly selects unlimited. At a finite limit, a new session evicts the least recently active session. Sessions expire after 60 seconds of inactivity. Historical runtime launch contracts reject explicit UDP limits, including zero, with an upgrade-required error.
+
+#### <span className="msb-recv">network.</span><span className="msb-hn">max_tcp_connections()</span>
+
+`max_connections` remains a deprecated alias for this builder method. The last call sets the TCP limit. Either method can be combined with the UDP limit.
+
+```rust
+fn max_tcp_connections(self, max: usize) -> Self
+```
+
+Limit the maximum number of concurrent TCP connections from the sandbox. When omitted, single-tenant mode is unlimited and multi-tenant mode defaults to 1,024. A positive value overrides the default; passing zero explicitly selects unlimited in either mode. Hosting services are responsible for restricting tenant overrides. See [deployment profiles](/networking/overview#deployment-profiles) for historical TCP limits and defaults.
+
+For dedicated snapshot restore, `RestoreBuilder::max_tcp_connections` and `RestoreBuilder::max_udp_connections` set the destination limits. `RestoreBuilder::max_connections` remains a deprecated TCP alias; the last TCP setter call wins.
 
 <p className="msb-label">Parameters</p>
 
 <div className="msb-params">
   <div className="msb-param">
     <div className="msb-param-key"><code>max</code><span className="msb-type">usize</span></div>
-    <div className="msb-param-desc">Maximum concurrent connections.</div>
+    <div className="msb-param-desc">Maximum concurrent TCP connections.</div>
   </div>
 </div>
 
@@ -952,29 +964,14 @@ fn enabled(self, enabled: bool) -> Self
 
 Enable or disable networking. Default: `true`. To fully turn networking off, prefer [`SandboxBuilder::disable_network()`](/sdk/rust/sandbox#sandbox-disable_network), which also sets the policy to [`NetworkPolicy::none()`](#networkpolicy-none).
 
-#### <span className="msb-recv">network.</span><span className="msb-hn">on_secret_violation()</span>
+#### <span className="msb-recv">network.</span><span className="msb-hn">secret_violation_action()</span>
 
 ```rust
-fn on_secret_violation(
-    self,
-    f: impl FnOnce(ViolationActionBuilder) -> ViolationActionBuilder,
-) -> Self
+fn secret_violation_action(self, action: SecretViolationAction) -> Self
 ```
 
-<Accordion title="Example">
+Set the sandbox-wide blocking action. Passthrough hosts are configured per secret with `allow_passthrough_for()`.
 
-```rust
-.network(|n| n.on_secret_violation(|v| v
-    .block_and_log()
-    .passthrough_host("api.anthropic.com")
-    .passthrough_host_pattern("*.example.com")))
-```
-
-</Accordion>
-
-Set the sandbox-wide action taken when a secret placeholder is detected in traffic to a host not in the secret's allow list. See [`ViolationActionBuilder`](#violationactionbuilder).
-
-Passthrough hosts receive the placeholder unchanged. They do **not** receive real secret values.
 
 #### <span className="msb-recv">network.</span><span className="msb-hn">secret()</span>
 
@@ -1134,75 +1131,6 @@ fn verify_upstream_for(
 
 Whether the proxy verifies upstream server certificates only when the upstream SNI matches `pattern`. Pattern syntax matches [`bypass()`](#tls-bypass): exact hosts and `*.suffix` wildcards are supported. Setting `verify` to `false` is the proxy-side equivalent of `curl -k` for matching hosts; TLS interception still runs.
 
-## ViolationActionBuilder
-
-Builder for secret-violation behavior.
-
-#### <span className="msb-recv">violation.</span><span className="msb-hn">block()</span>
-
-```rust
-fn block(self) -> Self
-```
-
-Block the request silently.
-
-#### <span className="msb-recv">violation.</span><span className="msb-hn">block_and_log()</span>
-
-```rust
-fn block_and_log(self) -> Self
-```
-
-Block the request and emit a warning log on the host. This is the [`ViolationAction`](#violationaction) default.
-
-#### <span className="msb-recv">violation.</span><span className="msb-hn">block_and_terminate()</span>
-
-```rust
-fn block_and_terminate(self) -> Self
-```
-
-Block the request and terminate the entire sandbox.
-
-#### <span className="msb-recv">violation.</span><span className="msb-hn">passthrough_host()</span>
-
-```rust
-fn passthrough_host(self, host: impl Into<String>) -> Self
-```
-
-Allow an exact host to receive secret placeholders unchanged (no substitution).
-
-<p className="msb-label">Parameters</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><code>host</code><span className="msb-type">impl Into&lt;String&gt;</span></div>
-    <div className="msb-param-desc">Exact host.</div>
-  </div>
-</div>
-
-#### <span className="msb-recv">violation.</span><span className="msb-hn">passthrough_host_pattern()</span>
-
-```rust
-fn passthrough_host_pattern(self, pattern: impl Into<String>) -> Self
-```
-
-Allow hosts matching a wildcard pattern (e.g. `*.example.com`) to receive placeholders unchanged.
-
-#### <span className="msb-recv">violation.</span><span className="msb-hn">passthrough_all_hosts()</span>
-
-```rust
-fn passthrough_all_hosts(self, i_understand_the_risk: bool) -> Self
-```
-
-Allow **any** host to receive placeholders unchanged. Takes effect only when `i_understand_the_risk` is `true`.
-
-<p className="msb-label">Parameters</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><code>i_understand_the_risk</code><span className="msb-type">bool</span></div>
-    <div className="msb-param-desc">Must be <code>true</code> to take effect.</div>
-  </div>
-</div>
 
 ## NetworkRateLimiterBuilder
 
@@ -1611,15 +1539,14 @@ Errors surfaced by the builders' `build()` methods. The same enum covers [`Netwo
 
 Inside `SandboxBuilder::build()`, `BuildError` is wrapped as `MicrosandboxError::NetworkBuilder(BuildError)`.
 
-### ViolationAction
+### SecretViolationAction
 
-<p className="msb-backref">Built by <a href="#violationactionbuilder">ViolationActionBuilder</a> · used by <a href="#network-on_secret_violation">on_secret_violation()</a></p>
+<p className="msb-backref">Used by <a href="#network-secret_violation_action">secret_violation_action()</a></p>
 
-Action taken when a secret placeholder is sent to a disallowed host. Also documented on the [Secrets](/sdk/rust/secrets#violationaction) page, where it pairs with [`SecretBuilder`](/sdk/rust/secrets#secretbuilder).
+Action taken when a secret placeholder is sent to a disallowed host. Also documented on the [Secrets](/sdk/rust/secrets#secretviolationaction) page, where it pairs with [`SecretBuilder`](/sdk/rust/secrets#secretbuilder).
 
 | Value | Wire format | Description |
 |-------|-------------|-------------|
 | `Block` | `"block"` | Silently drop the request |
 | `BlockAndLog` | `"block-and-log"` | Drop the request and emit a warning log (the default) |
 | `BlockAndTerminate` | `"block-and-terminate"` | Drop the request, log an error, and shut down the sandbox |
-| `Passthrough(Vec<`[`HostPattern`](/sdk/rust/secrets#hostpattern)`>)` | `"passthrough"` | Forward matching hosts with the placeholder unchanged; non-matching hosts use the default action |

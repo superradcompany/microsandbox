@@ -7,8 +7,9 @@
 //! so a journal this module rejects leaves the image untouched.
 
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::SeekFrom;
+
+use super::storage::Ext4Storage;
 
 use super::format::{
     EXT4_BLOCK_SIZE, EXT4_EH_MAGIC, EXT4_EXTENTS_FL, EXT4_INODE_SIZE, EXT4_JOURNAL_INO, JBD2_MAGIC,
@@ -101,7 +102,7 @@ struct DescriptorTag {
 /// Locate the journal via inode 8, trusting nothing: the inode checksum, file type, extent flag, and the formatter's single depth-0 extent shape are all verified. The journal
 /// inode is never itself journaled, so the on-disk copy is authoritative even on a dirty image.
 pub(super) fn locate_journal(
-    file: &mut File,
+    file: &mut impl Ext4Storage,
     inode_table_block: u64,
     csum_seed: u32,
 ) -> Result<JournalLocation, Ext4Error> {
@@ -159,7 +160,7 @@ pub(super) fn locate_journal(
 /// [`Ext4Error::Unsupported`] with the image untouched. A journal with `s_start == 0` needs no recovery and is not written at all. After replay the data is fsynced, then the
 /// jbd2 superblock is rewritten with `s_start = 0` and `s_sequence` advanced past every replayed transaction so stale commit blocks can never match again.
 pub(super) fn recover_journal(
-    file: &mut File,
+    file: &mut impl Ext4Storage,
     loc: &JournalLocation,
     fs_uuid: &[u8; 16],
     fs_num_blocks: u64,
@@ -219,7 +220,7 @@ pub(super) fn recover_journal(
 /// tag, commit) simply terminates the walk — the partially written transaction was never committed, so ignoring it is the correct crash semantics. Only impossible states
 /// (targets out of bounds, malformed tags or revoke counts) are hard errors.
 fn scan_log(
-    file: &mut File,
+    file: &mut impl Ext4Storage,
     loc: &JournalLocation,
     jsb: &JournalSuperblock,
     jseed: u32,
@@ -315,7 +316,7 @@ fn scan_log(
 /// Read and strictly validate the jbd2 superblock: magic, v2 block type, checksum, feature masks (exactly the formatter's), crc32c checksum type, matching filesystem UUID, no
 /// recorded error, 4 KiB block size, and geometry fields consistent with the journal extent.
 fn read_journal_superblock(
-    file: &mut File,
+    file: &mut impl Ext4Storage,
     loc: &JournalLocation,
     fs_uuid: &[u8; 16],
 ) -> Result<JournalSuperblock, Ext4Error> {
@@ -471,7 +472,7 @@ fn tag_checksum_ok(data: &[u8], jseed: u32, seq: u32, expected: u32) -> bool {
 //--------------------------------------------------------------------------------------------------
 
 fn read_log_block(
-    file: &mut File,
+    file: &mut impl Ext4Storage,
     loc: &JournalLocation,
     index: u32,
 ) -> Result<Vec<u8>, Ext4Error> {
@@ -508,7 +509,7 @@ pub(super) struct TestTransaction {
 /// journal superblock) so replay fixtures exercise the same on-disk format the recovery code parses. Data blocks beginning with the jbd2 magic are escaped automatically.
 #[cfg(test)]
 pub(super) fn write_test_log(
-    file: &mut File,
+    file: &mut impl Ext4Storage,
     loc: &JournalLocation,
     fs_uuid: &[u8; 16],
     start_seq: u32,
@@ -516,7 +517,12 @@ pub(super) fn write_test_log(
 ) -> Result<(), Ext4Error> {
     let jseed = crc32c::crc32c_raw(0xFFFF_FFFF, fs_uuid);
     let mut cursor = 1u32;
-    let emit = |file: &mut File, cursor: &mut u32, block: &[u8]| -> Result<(), Ext4Error> {
+    fn emit(
+        file: &mut impl Ext4Storage,
+        cursor: &mut u32,
+        block: &[u8],
+        loc: &JournalLocation,
+    ) -> Result<(), Ext4Error> {
         assert!(
             *cursor < loc.len_blocks,
             "test log fixture overflows the journal"
@@ -527,7 +533,7 @@ pub(super) fn write_test_log(
         file.write_all(block)?;
         *cursor += 1;
         Ok(())
-    };
+    }
 
     for (index, txn) in transactions.iter().enumerate() {
         let seq = start_seq + index as u32;
@@ -545,7 +551,7 @@ pub(super) fn write_test_log(
                 off += 8;
             }
             set_tail_checksum(&mut block, jseed);
-            emit(file, &mut cursor, &block)?;
+            emit(file, &mut cursor, &block, loc)?;
         }
 
         if !txn.writes.is_empty() {
@@ -583,9 +589,9 @@ pub(super) fn write_test_log(
                 stored.push(data);
             }
             set_tail_checksum(&mut desc, jseed);
-            emit(file, &mut cursor, &desc)?;
+            emit(file, &mut cursor, &desc, loc)?;
             for data in &stored {
-                emit(file, &mut cursor, data)?;
+                emit(file, &mut cursor, data, loc)?;
             }
         }
 
@@ -603,7 +609,7 @@ pub(super) fn write_test_log(
                 checksum
             },
         );
-        emit(file, &mut cursor, &commit)?;
+        emit(file, &mut cursor, &commit, loc)?;
     }
 
     let mut raw = vec![0u8; JBD2_SB_SIZE];

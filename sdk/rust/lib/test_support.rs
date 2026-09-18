@@ -19,6 +19,7 @@ pub(crate) fn lock_env() -> MutexGuard<'static, ()> {
 }
 
 /// Construct a cloud backend with explicitly empty config sources, independent of the host.
+#[cfg(feature = "cloud")]
 pub(crate) fn cloud_backend(
     url: impl Into<String>,
     api_key: impl Into<String>,
@@ -31,4 +32,17 @@ pub(crate) fn cloud_backend(
             Default::default(),
         ))
         .build()
+}
+
+/// Construct a local backend from explicit settings without reading machine configuration.
+#[cfg(feature = "local")]
+pub(crate) fn local_backend(config: crate::config::GlobalConfig) -> crate::LocalBackend {
+    crate::LocalBackend::from_backend_config(
+        crate::config::layers::BackendConfig::new(
+            crate::config::GlobalConfigPatch::from_present_fields(config),
+            Default::default(),
+        ),
+        crate::BackendSelectionSource::Programmatic,
+        None,
+    )
 }

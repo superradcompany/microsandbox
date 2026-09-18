@@ -1,0 +1,104 @@
+{
+  "name": "catalog-fixture",
+  "image": {
+    "Oci": {
+      "reference": "alpine:3.21",
+      "upper_size_mib": 4096
+    }
+  },
+  "resources": {
+    "cpus": 1,
+    "memory_mib": 256
+  },
+  "runtime": {
+    "workdir": "/",
+    "shell": null,
+    "scripts": {},
+    "entrypoint": null,
+    "cmd": [
+      "/bin/sh"
+    ],
+    "hostname": null,
+    "user": null,
+    "log_level": null,
+    "metrics_sample_interval_ms": 1000,
+    "disable_metrics_sample": false
+  },
+  "env": [
+    {
+      "key": "PATH",
+      "value": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    }
+  ],
+  "labels": {},
+  "rlimits": [],
+  "mounts": [
+    {
+      "type": "Tmpfs",
+      "guest": "/tmp",
+      "size_mib": 64,
+      "options": {
+        "readonly": false,
+        "noexec": false,
+        "nosuid": false,
+        "nodev": false
+      }
+    }
+  ],
+  "patches": [],
+  "network": {
+    "enabled": true,
+    "interface": {
+      "ipv4_address": null,
+      "ipv4_pool": null,
+      "ipv6_address": null,
+      "ipv6_pool": null,
+      "mac": null,
+      "mtu": null
+    },
+    "ports": [],
+    "policy": {
+      "default_egress": "deny",
+      "default_ingress": "deny",
+      "rules": []
+    },
+    "dns": {
+      "nameservers": [],
+      "query_timeout_ms": 5000,
+      "rebind_protection": true
+    },
+    "tls": {
+      "block_quic_on_intercept": true,
+      "bypass": [],
+      "cache": {
+        "capacity": 1000,
+        "validity_hours": 24
+      },
+      "enabled": false,
+      "intercept_ca": {
+        "cert_path": null,
+        "key_path": null
+      },
+      "intercepted_ports": [
+        443
+      ],
+      "upstream_ca_cert": [],
+      "verify_upstream": true
+    },
+    "secrets": {
+      "on_violation": "block-and-log",
+      "secrets": []
+    },
+    "max_connections": null,
+    "trust_host_cas": false
+  },
+  "init": null,
+  "pull_policy": "IfMissing",
+  "security_profile": "default",
+  "lifecycle": {
+    "ephemeral": false,
+    "max_duration_secs": 180,
+    "idle_timeout_secs": null
+  },
+  "manifest_digest": "sha256:1832327faf048390adc33852575d37c7ba155e064a339e78b9bd81983a8c7a00"
+}

@@ -21,19 +21,25 @@ mod registry;
 use std::{
     collections::{BTreeMap, HashMap},
     num::NonZero,
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{Arc, OnceLock},
 };
 
-use microsandbox_runtime::logging::LogLevel;
+use microsandbox_types::SandboxLogLevel as LogLevel;
 use microsandbox_types::{
     ConfigPatch, CpuPlacement, DeploymentProfile, OutboundProxy, PlacementProfile, RootDisk,
     TransparentHugePagePolicy,
 };
 use serde::{Deserialize, Serialize};
 
+use crate::backend::Profile;
+#[cfg(feature = "local")]
+use crate::error::Operation;
 use crate::{MicrosandboxError, MicrosandboxResult};
-use crate::{backend::Profile, error::Operation};
+#[cfg(test)]
+use std::path::Path;
+
+mod runtime_paths;
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -114,15 +120,11 @@ mod deployment_profile_serde {
 // Statics: Layer 1 (process-level)
 //--------------------------------------------------------------------------------------------------
 
-/// SDK-provided path to the bundled `msb` binary. Set via [`set_sdk_msb_path`]
-/// by FFI bindings that ship a binary inside their language package and need
-/// an in-process channel that doesn't fight user env. Tier 2 of the
-/// resolution ladder (below `MSB_PATH` env, above config + filesystem
-/// fallbacks).
+/// Explicit process-level executable override, below `MSB_PATH` and above
+/// configuration and filesystem candidates. Package discovery uses its own fallback.
 static SDK_MSB_PATH: OnceLock<PathBuf> = OnceLock::new();
 
-/// SDK-provided path to the bundled `libkrunfw` dylib. Set via
-/// [`set_sdk_libkrunfw_path`]. Tier 2 of the libkrunfw resolution ladder.
+/// Explicit process-level firmware override set via [`set_sdk_libkrunfw_path`].
 static SDK_LIBKRUNFW_PATH: OnceLock<PathBuf> = OnceLock::new();
 
 //--------------------------------------------------------------------------------------------------
@@ -264,13 +266,16 @@ pub struct DatabaseConfig {
 #[config_patch(serde)]
 pub struct PathsConfig {
     /// Path to `msb` binary.
-    ///
-    /// Resolution: `MSB_PATH` env → SDK runtime path → this →
-    /// workspace-local (debug only) → `~/.microsandbox/bin/msb` → PATH lookup.
     pub msb: Option<PathBuf>,
 
     /// Path to `libkrunfw.{so,dylib}`.
     pub libkrunfw: Option<PathBuf>,
+
+    /// Path to the Linux guest Agentd executable.
+    ///
+    /// `MSB_AGENTD_PATH` takes precedence. When neither is set, the runtime
+    /// uses the Agentd payload embedded in `msb`.
+    pub agentd: Option<PathBuf>,
 
     /// Cache directory.
     pub cache: Option<PathBuf>,
@@ -401,6 +406,18 @@ pub enum BlockWritebackConfig {
 //--------------------------------------------------------------------------------------------------
 
 impl GlobalConfig {
+    /// Resolve the executable from the same complete pair used for sandbox launches.
+    #[cfg(feature = "local")]
+    pub fn resolve_msb_path(&self) -> MicrosandboxResult<PathBuf> {
+        crate::setup::resolve_runtime(self).map(|runtime| runtime.msb_path)
+    }
+
+    /// Resolve the firmware from the same complete pair used for sandbox launches.
+    #[cfg(feature = "local")]
+    pub fn resolve_libkrunfw_path(&self) -> MicrosandboxResult<PathBuf> {
+        crate::setup::resolve_runtime(self).map(|runtime| runtime.libkrunfw_path)
+    }
+
     /// Validate defaults that affect sandbox construction.
     pub(crate) fn validate_sandbox_defaults(&self) -> MicrosandboxResult<()> {
         #[cfg(not(feature = "net"))]
@@ -513,6 +530,7 @@ impl GlobalConfig {
 
     /// Resolve the optional diagnostic file under `run/metrics` that records
     /// the derived shared-memory registry name and capacity.
+    #[cfg(feature = "local")]
     pub fn metrics_registry_name_path(&self) -> PathBuf {
         self.run_dir()
             .join(microsandbox_utils::METRICS_RUN_SUBDIR)
@@ -524,6 +542,7 @@ impl GlobalConfig {
     /// Deterministic POSIX shared-memory object name for the live metrics
     /// registry. Hashes the resolved home directory so concurrent
     /// `MSB_HOME`-isolated environments do not collide.
+    #[cfg(feature = "local")]
     pub fn metrics_registry_shm_name(&self) -> String {
         microsandbox_utils::metrics_registry_shm_name(
             &self.home(),
@@ -533,102 +552,13 @@ impl GlobalConfig {
 
     /// Resolved capacity for the live metrics registry. Falls back to the
     /// built-in default when `metrics.capacity` is zero or unset.
+    #[cfg(feature = "local")]
     pub fn metrics_registry_capacity(&self) -> u32 {
         if self.metrics.capacity == 0 {
             microsandbox_metrics::default_capacity()
         } else {
             self.metrics.capacity
         }
-    }
-
-    /// Resolve the path to the `msb` binary for this local config.
-    ///
-    /// Uses the already-layered `paths.msb`, then workspace-local builds (debug only),
-    /// `{home}/bin/msb`, and PATH. Backend construction captures SDK and environment
-    /// inputs below managed overrides; this accessor does not reload configuration.
-    pub fn resolve_msb_path(&self) -> MicrosandboxResult<PathBuf> {
-        let debug_probe = || -> Option<PathBuf> {
-            // Only probe workspace-local dev builds in debug builds to prevent
-            // binary hijacking from untrusted parent directories in production.
-            #[cfg(debug_assertions)]
-            {
-                let mut local_candidates = Vec::new();
-                if let Ok(current_dir) = std::env::current_dir() {
-                    local_candidates.extend(dev_msb_candidates_from(&current_dir));
-                }
-                if let Ok(current_exe) = std::env::current_exe()
-                    && let Some(exe_dir) = current_exe.parent()
-                {
-                    local_candidates.extend(dev_msb_candidates_from(exe_dir));
-                }
-                dedupe_paths(&mut local_candidates);
-                local_candidates.into_iter().find(|path| path.is_file())
-            }
-            #[cfg(not(debug_assertions))]
-            {
-                None
-            }
-        };
-
-        let home_probe = || -> Option<PathBuf> {
-            let home_bin = self.home().join(microsandbox_utils::BIN_SUBDIR).join(
-                microsandbox_utils::msb_binary_filename(std::env::consts::OS),
-            );
-            home_bin.is_file().then_some(home_bin)
-        };
-
-        let which_probe =
-            || -> Option<PathBuf> { which::which(microsandbox_utils::MSB_BINARY).ok() };
-
-        resolve_msb_path_from(
-            self.paths.msb.as_deref(),
-            &debug_probe,
-            &home_probe,
-            &which_probe,
-        )
-    }
-
-    /// Resolve the path to `libkrunfw` for this local config.
-    ///
-    /// Uses the already-layered `paths.libkrunfw`, then a sibling of the resolved
-    /// `msb` binary, its `../lib/` directory, and `{home}/lib/`. SDK and environment
-    /// inputs are captured during backend construction below managed overrides.
-    pub fn resolve_libkrunfw_path(&self) -> MicrosandboxResult<PathBuf> {
-        if let Some(path) = &self.paths.libkrunfw {
-            if path.is_file() {
-                return Ok(path.clone());
-            }
-            return Err(MicrosandboxError::LibkrunfwNotFound(format!(
-                "configured path does not exist: {}",
-                path.display()
-            )));
-        }
-
-        let filename = microsandbox_utils::libkrunfw_filename(libkrunfw_target_os());
-        let home_fallback = self
-            .home()
-            .join(microsandbox_utils::LIB_SUBDIR)
-            .join(&filename);
-
-        let mut candidates = Vec::new();
-        if let Ok(msb_path) = self.resolve_msb_path() {
-            candidates.extend(libkrunfw_candidates_from_msb(&msb_path, &filename));
-        }
-        candidates.push(home_fallback);
-
-        if let Some(path) = candidates.iter().find(|path| path.is_file()) {
-            tracing::debug!(path = %path.display(), "resolved libkrunfw path");
-            return Ok(path.clone());
-        }
-
-        let searched = candidates
-            .iter()
-            .map(|path| path.display().to_string())
-            .collect::<Vec<_>>()
-            .join(", ");
-        Err(MicrosandboxError::LibkrunfwNotFound(format!(
-            "searched: {searched}"
-        )))
     }
 }
 
@@ -638,18 +568,12 @@ impl PathsConfigPatch {
         let libkrunfw = std::env::var("MSB_LIBKRUNFW_PATH")
             .ok()
             .map(PathBuf::from)
-            .or_else(|| {
-                // Missing SDK firmware retains filesystem fallback behavior.
-                SDK_LIBKRUNFW_PATH
-                    .get()
-                    .filter(|path| path.is_file())
-                    .cloned()
-            });
+            .or_else(sdk_libkrunfw_path);
 
         let msb = std::env::var("MSB_PATH")
             .ok()
             .map(PathBuf::from)
-            .or_else(|| SDK_MSB_PATH.get().cloned());
+            .or_else(sdk_msb_path);
 
         let mut patch = Self::new();
         if let Some(msb) = msb {
@@ -657,6 +581,9 @@ impl PathsConfigPatch {
         }
         if let Some(libkrunfw) = libkrunfw {
             patch.libkrunfw_mut(libkrunfw);
+        }
+        if let Some(agentd) = std::env::var_os("MSB_AGENTD_PATH") {
+            patch.agentd_mut(PathBuf::from(agentd));
         }
         patch
     }
@@ -672,7 +599,7 @@ impl Default for DatabaseConfig {
             url: None,
             max_connections: DEFAULT_MAX_CONNECTIONS,
             connect_timeout_secs: DEFAULT_CONNECT_TIMEOUT_SECS,
-            busy_timeout_secs: microsandbox_db::pool::DEFAULT_BUSY_TIMEOUT_SECS,
+            busy_timeout_secs: 5,
         }
     }
 }
@@ -720,6 +647,7 @@ impl Default for BlockWritebackConfig {
 /// This is the ambient convenience path for callers that do not explicitly
 /// construct a [`LocalBackend`](crate::backend::LocalBackend). It returns
 /// [`MicrosandboxError::Unsupported`] when the active backend is cloud.
+#[cfg(feature = "local")]
 pub fn config() -> MicrosandboxResult<Arc<GlobalConfig>> {
     let backend = crate::backend::default_backend();
     let local = backend
@@ -750,7 +678,9 @@ pub fn save_persisted_config(config: &GlobalConfig) -> MicrosandboxResult<()> {
     patch.save()
 }
 
-/// Set the `msb` binary path resolved by an SDK package.
+/// Set an explicit process-level `msb` path.
+///
+/// Automatic package discovery should use [`set_sdk_packaged_msb_path`] instead.
 ///
 /// This is an internal SDK bridge for runtimes where mutating `process.env`
 /// does not update the native process environment. User-provided `MSB_PATH`
@@ -759,121 +689,35 @@ pub fn set_sdk_msb_path(path: impl Into<PathBuf>) {
     let _ = SDK_MSB_PATH.set(path.into());
 }
 
-/// Resolve the path to the `msb` binary for the ambient local config.
-pub fn resolve_msb_path() -> MicrosandboxResult<PathBuf> {
-    config()?.resolve_msb_path()
+pub(crate) fn sdk_msb_path() -> Option<PathBuf> {
+    SDK_MSB_PATH.get().cloned()
 }
 
-/// Pure precedence ladder for `resolve_msb_path`. Probe closures encapsulate
-/// the filesystem-touching tiers so unit tests can supply fakes.
-fn resolve_msb_path_from(
-    config_msb: Option<&Path>,
-    debug_probe: &dyn Fn() -> Option<PathBuf>,
-    home_probe: &dyn Fn() -> Option<PathBuf>,
-    which_probe: &dyn Fn() -> Option<PathBuf>,
-) -> MicrosandboxResult<PathBuf> {
-    if let Some(path) = config_msb {
-        tracing::debug!(path = %path.display(), source = "config.paths.msb", "resolved msb binary");
-        return Ok(path.to_path_buf());
-    }
-    if let Some(path) = debug_probe() {
-        tracing::debug!(path = %path.display(), source = "workspace-local msb", "resolved msb binary");
-        return Ok(path);
-    }
-    if let Some(path) = home_probe() {
-        tracing::debug!(path = %path.display(), source = "~/.microsandbox/bin/msb", "resolved msb binary");
-        return Ok(path);
-    }
-    if let Some(path) = which_probe() {
-        tracing::debug!(path = %path.display(), source = "PATH lookup", "resolved msb binary");
-        return Ok(path);
-    }
-    Err(MicrosandboxError::Custom(
-        "msb binary not found. Run `cargo clean -p microsandbox && cargo build` to reinstall, \
-         or set MSB_PATH to the binary location"
-            .into(),
-    ))
+/// Resolve the ambient runtime executable as part of a complete runtime pair.
+#[cfg(feature = "local")]
+pub fn resolve_msb_path() -> MicrosandboxResult<PathBuf> {
+    config()?.resolve_msb_path()
 }
 
 /// Set the `libkrunfw` path resolved by an SDK package (e.g. one that ships a
 /// bundled libkrunfw dylib inside its language-package wheel/npm-package).
 ///
-/// Set-once: subsequent calls are ignored. Sits at tier 2 of
-/// [`resolve_libkrunfw_path`] — below user env (`MSB_LIBKRUNFW_PATH`) so a user
-/// override always wins, above the config + filesystem fallbacks.
+/// Set-once: subsequent calls are ignored. The user-facing
+/// `MSB_LIBKRUNFW_PATH` environment override still wins.
 ///
 /// Mirrors [`set_sdk_msb_path`]; both share the same precedence shape.
 pub fn set_sdk_libkrunfw_path(path: impl Into<PathBuf>) {
     let _ = SDK_LIBKRUNFW_PATH.set(path.into());
 }
 
-/// Resolve the path to `libkrunfw` for the ambient local config.
+pub(crate) fn sdk_libkrunfw_path() -> Option<PathBuf> {
+    SDK_LIBKRUNFW_PATH.get().cloned()
+}
+
+/// Resolve the ambient firmware library as part of a complete runtime pair.
+#[cfg(feature = "local")]
 pub fn resolve_libkrunfw_path() -> MicrosandboxResult<PathBuf> {
     config()?.resolve_libkrunfw_path()
-}
-
-fn libkrunfw_candidates_from_msb(msb_path: &Path, filename: &str) -> Vec<PathBuf> {
-    let mut candidates = Vec::new();
-
-    if let Some(msb_dir) = msb_path.parent() {
-        candidates.push(msb_dir.join(filename));
-
-        if let Some(parent) = msb_dir.parent() {
-            candidates.push(parent.join(microsandbox_utils::LIB_SUBDIR).join(filename));
-        }
-    }
-
-    let mut deduped = Vec::new();
-    for path in candidates {
-        if !deduped.iter().any(|existing| existing == &path) {
-            deduped.push(path);
-        }
-    }
-
-    deduped
-}
-
-fn libkrunfw_target_os() -> &'static str {
-    if cfg!(target_os = "macos") {
-        "macos"
-    } else if cfg!(target_os = "windows") {
-        "windows"
-    } else {
-        "linux"
-    }
-}
-
-#[cfg(debug_assertions)]
-fn dev_msb_candidates_from(start: &Path) -> Vec<PathBuf> {
-    let mut candidates = Vec::new();
-
-    for ancestor in start.ancestors() {
-        if !ancestor.join("Cargo.toml").is_file() {
-            continue;
-        }
-
-        candidates.push(
-            ancestor
-                .join("build")
-                .join(microsandbox_utils::msb_binary_filename(
-                    std::env::consts::OS,
-                )),
-        );
-    }
-
-    dedupe_paths(&mut candidates);
-    candidates
-}
-
-#[cfg(debug_assertions)]
-fn dedupe_paths(paths: &mut Vec<PathBuf>) {
-    let mut deduped = Vec::new();
-    for path in paths.drain(..) {
-        if !deduped.iter().any(|existing| existing == &path) {
-            deduped.push(path);
-        }
-    }
-    *paths = deduped;
 }
 
 /// Resolve the default home directory (`~/.microsandbox`, or non-empty `$MSB_HOME`).
@@ -929,6 +773,7 @@ mod tests {
             },
             "paths": {
                 "msb": "/configured/msb",
+                "agentd": "/configured/agentd",
                 "libkrunfw": "/configured/libkrunfw",
                 "cache": "/configured/cache",
                 "sandboxes": "/configured/sandboxes",
@@ -997,6 +842,7 @@ mod tests {
         assert_eq!(patch.database.url, Some(None));
         for path in [
             &patch.paths.msb,
+            &patch.paths.agentd,
             &patch.paths.libkrunfw,
             &patch.paths.cache,
             &patch.paths.sandboxes,
@@ -1506,118 +1352,26 @@ mod tests {
     }
 
     #[test]
+    fn test_deserialize_agentd_path() {
+        let json = r#"{"paths": {"agentd": "/opt/microsandbox/agentd"}}"#;
+        let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
+
+        assert_eq!(
+            cfg.paths.agentd,
+            Some(PathBuf::from("/opt/microsandbox/agentd"))
+        );
+    }
+
+    #[test]
     fn test_load_config_from_missing_file() {
         let result = GlobalConfigPatch::load_from(Path::new("/nonexistent/config.json"));
         assert!(result.unwrap().is_empty());
     }
-
-    #[test]
-    fn test_libkrunfw_candidates_for_build_msb() {
-        let msb = PathBuf::from("/repo/build/msb");
-        let paths = libkrunfw_candidates_from_msb(&msb, "libkrunfw.5.dylib");
-        assert_eq!(paths[0], PathBuf::from("/repo/build/libkrunfw.5.dylib"));
-        assert_eq!(paths[1], PathBuf::from("/repo/lib/libkrunfw.5.dylib"));
-    }
-
-    #[test]
-    fn test_libkrunfw_candidates_for_target_msb() {
-        let msb = PathBuf::from("/repo/target/debug/msb");
-        let paths = libkrunfw_candidates_from_msb(&msb, "libkrunfw.5.dylib");
-        assert_eq!(
-            paths[0],
-            PathBuf::from("/repo/target/debug/libkrunfw.5.dylib")
-        );
-        assert_eq!(
-            paths[1],
-            PathBuf::from("/repo/target/lib/libkrunfw.5.dylib")
-        );
-        assert_eq!(paths.len(), 2);
-    }
-
-    #[test]
-    fn test_libkrunfw_target_os_uses_windows_dll_name() {
-        let filename = microsandbox_utils::libkrunfw_filename(libkrunfw_target_os());
-
-        if cfg!(target_os = "windows") {
-            assert_eq!(filename, "libkrunfw.dll");
-        } else if cfg!(target_os = "macos") {
-            assert!(filename.ends_with(".dylib"));
-        } else {
-            assert!(filename.ends_with(".so.5.6.1"));
-        }
-    }
-
-    #[test]
-    fn test_dev_msb_candidates_from_workspace_root() {
-        let temp = tempfile::tempdir().unwrap();
-        std::fs::write(temp.path().join("Cargo.toml"), "[workspace]\n").unwrap();
-
-        let paths = dev_msb_candidates_from(temp.path());
-        assert_eq!(paths.len(), 1);
-        assert_eq!(
-            paths[0],
-            temp.path()
-                .join("build")
-                .join(microsandbox_utils::msb_binary_filename(
-                    std::env::consts::OS
-                ))
-        );
-    }
-
-    //----------------------------------------------------------------------------------------------
-    // resolve_msb_path precedence
-    //----------------------------------------------------------------------------------------------
-
-    fn pb(s: &str) -> PathBuf {
-        PathBuf::from(s)
-    }
-
-    fn none() -> Option<PathBuf> {
-        None
-    }
-
-    #[test]
-    fn resolve_msb_path_config_wins_over_filesystem_tiers() {
-        let got = resolve_msb_path_from(
-            Some(Path::new("/from/config")),
-            &|| Some(pb("/from/debug")),
-            &|| Some(pb("/from/home")),
-            &|| Some(pb("/from/which")),
-        )
-        .unwrap();
-        assert_eq!(got, pb("/from/config"));
-    }
-
-    #[test]
-    fn resolve_msb_path_debug_probe_wins_over_home_and_which() {
-        let got = resolve_msb_path_from(
-            None,
-            &|| Some(pb("/from/debug")),
-            &|| Some(pb("/from/home")),
-            &|| Some(pb("/from/which")),
-        )
-        .unwrap();
-        assert_eq!(got, pb("/from/debug"));
-    }
-
-    #[test]
-    fn resolve_msb_path_home_wins_over_which() {
-        let got = resolve_msb_path_from(None, &none, &|| Some(pb("/from/home")), &|| {
-            Some(pb("/from/which"))
-        })
-        .unwrap();
-        assert_eq!(got, pb("/from/home"));
-    }
-
-    #[test]
-    fn resolve_msb_path_which_is_last_resort() {
-        let got = resolve_msb_path_from(None, &none, &none, &|| Some(pb("/from/which"))).unwrap();
-        assert_eq!(got, pb("/from/which"));
-    }
-
-    #[test]
-    fn resolve_msb_path_errors_when_all_tiers_empty() {
-        let result = resolve_msb_path_from(None, &none, &none, &none);
-        assert!(matches!(result, Err(MicrosandboxError::Custom(_))));
-    }
 }
+
+//--------------------------------------------------------------------------------------------------
+// Re-Exports
+//--------------------------------------------------------------------------------------------------
+
+pub(crate) use runtime_paths::sdk_packaged_msb_path;
+pub use runtime_paths::set_sdk_packaged_msb_path;

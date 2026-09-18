@@ -21,11 +21,16 @@ use std::{path::Path, sync::Arc};
 
 use serde::{Deserialize, Serialize};
 
-use super::{Backend, BackendSelectionSource, CloudBackend, CloudBackendBuilder, LocalBackend};
-use crate::{
-    MicrosandboxError, MicrosandboxResult,
-    config::{backend::BackendSelection, layers::BackendConfig},
-};
+use super::Backend;
+#[cfg(feature = "cloud")]
+use super::BackendSelectionSource;
+#[cfg(feature = "local")]
+use super::LocalBackend;
+#[cfg(feature = "cloud")]
+use super::{CloudBackend, CloudBackendBuilder};
+#[cfg(feature = "cloud")]
+use crate::{MicrosandboxError, config::layers::BackendConfig};
+use crate::{MicrosandboxResult, config::backend::BackendSelection};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -69,6 +74,7 @@ pub enum ProfileBackend {
 
 impl Profile {
     /// Resolve this profile's connection settings before backend construction.
+    #[cfg(feature = "cloud")]
     pub(crate) fn cloud_builder(&self, name: &str) -> MicrosandboxResult<CloudBackendBuilder> {
         if self.backend != ProfileBackend::Cloud {
             return Err(MicrosandboxError::InvalidConfig(format!(
@@ -109,13 +115,19 @@ fn resolve_default_backend_from(
     managed_path: Option<&Path>,
 ) -> MicrosandboxResult<Arc<dyn Backend>> {
     let (selection, source, config) = BackendSelection::resolve(user_path, managed_path)?;
+    #[cfg(not(feature = "local"))]
+    let _ = (&source, &config);
     match selection {
+        #[cfg(not(feature = "local"))]
+        BackendSelection::Local { .. } => Err(crate::config::backend::feature_disabled("local")),
+        #[cfg(feature = "local")]
         BackendSelection::Local { profile } => Ok(Arc::new(LocalBackend::from_backend_config(
             config.prepare_for_local_backend(Default::default())?,
             source,
             profile,
         ))),
 
+        #[cfg(feature = "cloud")]
         BackendSelection::Cloud { profile: None } => Ok(Arc::new(
             CloudBackendBuilder::from_env()?
                 .config_sources(config)
@@ -123,6 +135,7 @@ fn resolve_default_backend_from(
                 .with_selection_metadata(source, None),
         )),
 
+        #[cfg(feature = "cloud")]
         BackendSelection::Cloud {
             profile: Some((name, builder)),
         } => Ok(Arc::new(
@@ -134,6 +147,7 @@ fn resolve_default_backend_from(
     }
 }
 
+#[cfg(feature = "cloud")]
 pub(crate) fn cloud_backend_from_profile(name: &str) -> MicrosandboxResult<CloudBackend> {
     let config = BackendConfig::load()?;
     let resolved = config.global_layers().build();
@@ -152,6 +166,7 @@ pub(crate) fn cloud_backend_from_profile(name: &str) -> MicrosandboxResult<Cloud
 
 /// Resolve an `api_key_ref` string (`keyring:…` / `env:VAR` / `inline:msb_…`)
 /// to the actual API key value.
+#[cfg(feature = "cloud")]
 fn resolve_api_key_ref(profile: &str, key_ref: &str) -> MicrosandboxResult<String> {
     if let Some(rest) = key_ref.strip_prefix("env:") {
         let var = rest.trim();
@@ -263,6 +278,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "cloud")]
     fn api_key_ref_inline() {
         let key = resolve_api_key_ref("p", "inline:msb_live_abc").unwrap();
         assert_eq!(key, "msb_live_abc");
@@ -306,6 +322,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "cloud")]
     #[test]
     fn api_key_ref_inline_trims_and_rejects_empty() {
         let key = resolve_api_key_ref("p", "inline:  msb_live_abc  ").unwrap();
@@ -314,6 +331,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "cloud")]
     fn api_key_ref_env_when_set() {
         let _env_guard = crate::test_support::lock_env();
         // SAFETY: every environment-mutating SDK unit test holds the shared lock.
@@ -324,6 +342,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "cloud")]
     fn api_key_ref_env_rejects_empty_value() {
         let _env_guard = crate::test_support::lock_env();
         // SAFETY: every environment-mutating SDK unit test holds the shared lock.
@@ -333,6 +352,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "cloud")]
     fn api_key_ref_env_missing() {
         let _env_guard = crate::test_support::lock_env();
         // SAFETY: every environment-mutating SDK unit test holds the shared lock.
@@ -341,18 +361,22 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "cloud")]
     fn api_key_ref_rejects_unknown_scheme() {
         assert!(resolve_api_key_ref("p", "vault:foo").is_err());
         assert!(resolve_api_key_ref("p", "plaintext").is_err());
     }
 
     #[test]
+    #[cfg(feature = "cloud")]
     fn api_key_ref_keyring_returns_explicit_error_for_now() {
         // Keyring path is parsed (validates the format) but signals "not yet wired".
         let err = resolve_api_key_ref("p", "keyring:msb:prod").unwrap_err();
         assert!(err.to_string().contains("not yet wired"));
     }
 
+    #[cfg(feature = "cloud")]
+    #[cfg(feature = "local")]
     #[test]
     fn managed_file_controls_selection_and_invalid_policy_blocks_cloud() {
         let _env_guard = crate::test_support::lock_env();
@@ -433,6 +457,7 @@ mod tests {
         assert_eq!(sources.resolved_config().sandbox_defaults.cpus, 2);
     }
 
+    #[cfg(feature = "cloud")]
     #[test]
     fn resolved_profiles_preserve_metadata_and_validate_only_local_defaults() {
         let _env_guard = crate::test_support::lock_env();
@@ -516,6 +541,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "cloud")]
     #[test]
     fn cloud_profile_builder_rejects_local_profile() {
         let p = Profile {
@@ -526,6 +552,7 @@ mod tests {
         assert!(p.cloud_builder("local").is_err());
     }
 
+    #[cfg(feature = "cloud")]
     #[test]
     fn resolve_default_backend_honors_explicit_backend_over_cloud_env() {
         let temp = tempfile::tempdir().unwrap();
@@ -557,6 +584,7 @@ mod tests {
         assert_eq!(cloud.info().profile, None);
     }
 
+    #[cfg(feature = "cloud")]
     #[test]
     fn explicit_cloud_without_credentials_fails_closed() {
         let temp = tempfile::tempdir().unwrap();
@@ -583,6 +611,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "cloud")]
     fn backend_from_cloud_profile_missing_url_uses_default() {
         let p = Profile {
             backend: ProfileBackend::Cloud,
@@ -594,6 +623,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "cloud")]
     fn backend_from_cloud_profile_missing_key_ref() {
         let p = Profile {
             backend: ProfileBackend::Cloud,
