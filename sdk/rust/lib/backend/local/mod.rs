@@ -1515,6 +1515,25 @@ mod tests {
         std::fs::write(&managed, r#"{"overrides":{"sandbox_defaults":{"cpus":2}}}"#).unwrap();
         assert_eq!(build().unwrap().config().sandbox_defaults.cpus, 2);
 
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            for path in [managed.as_path(), dir.path()] {
+                let original = std::fs::metadata(path).unwrap().permissions();
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o777)).unwrap();
+                let result = build();
+                std::fs::set_permissions(path, original).unwrap();
+                let error = result.err().expect("unsafe policy must block construction");
+                assert!(
+                    error
+                        .to_string()
+                        .contains("unsafe managed config permissions")
+                );
+                assert!(error.to_string().contains(&path.display().to_string()));
+            }
+        }
+
         for raw in [
             "not json",
             r#"{"version":2}"#,

@@ -140,7 +140,7 @@ Install supported [CLI](/getting-started/quickstart) and [SDK runtime](/sdk/setu
 | macOS / Linux | Root-owned directory `0755` and file `0644`; no employee write access through ACLs |
 | Windows | Administrators and SYSTEM have full control; employees can read the file and traverse the directory, without write or replacement access |
 
-On macOS and Linux, the loader warns if the file or its immediate parent directory is not root-owned or is group- or world-writable. These checks do not reject the policy or inspect ACLs and other ancestor directories. Windows permissions are not checked. Protect the complete path, and keep secrets in [credential stores or references](/configuration#registries).
+On macOS and Linux, backend construction fails if the file or its immediate parent directory is not root-owned or is group- or world-writable, or if their permissions cannot be checked. An administrator must correct the reported ownership or permissions before retrying. These checks do not inspect ACLs or other ancestor directories; Windows permissions are not checked. Protect the complete path, and keep secrets in [credential stores or references](/configuration#registries).
 
 <Note>
   Older CLI and SDK releases do not enforce managed settings. Include supported versions in your rollout. Local administrators can remove policy or replace the runtime.

@@ -120,13 +120,23 @@ impl GlobalConfigPatch {
 impl ManagedConfig {
     /// Internal path injection for tests; production callers use the system path.
     pub(super) fn load(path: Option<&Path>) -> MicrosandboxResult<Self> {
+        let owner_uid = 0;
+        // Explicit test paths use the test user's ownership; the system path
+        // still requires root. Both paths run the same permission checks.
+        #[cfg(all(test, unix))]
+        let owner_uid = if path.is_some() {
+            // SAFETY: geteuid has no preconditions or side effects.
+            unsafe { libc::geteuid() }
+        } else {
+            owner_uid
+        };
         match path {
-            Some(path) => Self::load_from(path),
-            None => Self::load_from(&Self::path()?),
+            Some(path) => Self::load_from(path, owner_uid),
+            None => Self::load_from(&Self::path()?, owner_uid),
         }
     }
 
-    fn load_from(path: &Path) -> MicrosandboxResult<Self> {
+    fn load_from(path: &Path, _owner_uid: u32) -> MicrosandboxResult<Self> {
         let raw = match fs::read_to_string(path) {
             Ok(raw) => raw,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -144,7 +154,7 @@ impl ManagedConfig {
         };
 
         #[cfg(unix)]
-        Self::warn_permissions(path);
+        Self::validate_permissions(path, _owner_uid)?;
         let mut ignored = BTreeSet::new();
         let mut deserializer = serde_json::Deserializer::from_str(&raw);
         let config: Self = serde_ignored::deserialize(&mut deserializer, |key| {
@@ -176,23 +186,27 @@ impl ManagedConfig {
     }
 
     #[cfg(unix)]
-    fn warn_permissions(path: &Path) {
+    fn validate_permissions(path: &Path, owner_uid: u32) -> MicrosandboxResult<()> {
         // These basic Unix checks do not inspect ACLs or the full ancestor chain.
         for path in std::iter::once(path).chain(path.parent()) {
-            match fs::metadata(path) {
-                Ok(metadata) => {
-                    if metadata.uid() != 0 || metadata.mode() & 0o022 != 0 {
-                        tracing::warn!(path = %path.display(), owner_uid = metadata.uid(),
-                            mode = format_args!("{:o}", metadata.mode() & 0o7777),
-                            "managed config path should be root-owned and not group or \
-                            world-writable; policy may be changed by other users"
-                        );
-                    }
-                }
-                Err(error) => tracing::warn!(path = %path.display(), %error,
-                    "could not check managed config permissions"),
+            let metadata = fs::metadata(path).map_err(|error| {
+                MicrosandboxError::InvalidConfig(format!(
+                    "failed to check managed config permissions on `{}`: {error}",
+                    path.display()
+                ))
+            })?;
+            if metadata.uid() != owner_uid || metadata.mode() & 0o022 != 0 {
+                return Err(MicrosandboxError::InvalidConfig(format!(
+                    "unsafe managed config permissions on `{}`: expected owner uid \
+                    {owner_uid} and no group or world write access, found uid {} and \
+                    mode {:04o}; ask an administrator to correct ownership and permissions",
+                    path.display(),
+                    metadata.uid(),
+                    metadata.mode() & 0o7777,
+                )));
             }
         }
+        Ok(())
     }
 
     fn path() -> MicrosandboxResult<PathBuf> {
@@ -253,8 +267,91 @@ mod tests {
 
     use super::*;
 
+    #[cfg(unix)]
     #[test]
-    fn managed_warnings_are_advisory_and_do_not_log_values() {
+    fn managed_permissions_reject_wrong_ownership_and_writable_paths() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("managed.json");
+        fs::write(&path, r#"{"overrides":{"sandbox_defaults":{"cpus":2}}}"#).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o755)).unwrap();
+        let owner_uid = fs::metadata(&path).unwrap().uid();
+        assert_eq!(
+            ManagedConfig::load_from(&path, owner_uid)
+                .unwrap()
+                .overrides
+                .sandbox_defaults
+                .cpus,
+            Some(2)
+        );
+
+        // Vary the required owner so this also exercises rejection when run as root.
+        let error = ManagedConfig::load_from(&path, owner_uid.wrapping_add(1))
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(
+            error.contains("unsafe managed config permissions"),
+            "{error}"
+        );
+        assert!(error.contains(&path.display().to_string()), "{error}");
+        if owner_uid != 0 {
+            assert!(ManagedConfig::load_from(&path, 0).is_err());
+        }
+
+        for (unsafe_path, mode, safe_mode) in [
+            (path.as_path(), 0o664, 0o644),
+            (path.as_path(), 0o646, 0o644),
+            (directory.path(), 0o775, 0o755),
+            (directory.path(), 0o757, 0o755),
+        ] {
+            fs::set_permissions(unsafe_path, fs::Permissions::from_mode(mode)).unwrap();
+            let result = ManagedConfig::load_from(&path, owner_uid);
+            fs::set_permissions(unsafe_path, fs::Permissions::from_mode(safe_mode)).unwrap();
+            let error = result
+                .err()
+                .expect("unsafe policy must be rejected")
+                .to_string();
+            assert!(
+                error.contains("unsafe managed config permissions"),
+                "{error}"
+            );
+            assert!(
+                error.contains(&unsafe_path.display().to_string()),
+                "{error}"
+            );
+            assert!(error.contains("ask an administrator"), "{error}");
+        }
+        assert!(ManagedConfig::load_from(&path, owner_uid).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_permission_inspection_errors_are_fatal() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("missing.json");
+        let error = ManagedConfig::validate_permissions(&path, 0)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("failed to check managed config permissions"),
+            "{error}"
+        );
+        assert!(error.contains(&path.display().to_string()), "{error}");
+        // An absent policy remains optional; this is distinct from a failed
+        // permission check on a policy that was read successfully.
+        assert!(
+            ManagedConfig::load_from(&path, 0)
+                .unwrap()
+                .overrides
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn unknown_managed_keys_warn_without_logging_values() {
         // Tracing caches callsite interest globally. Isolate log capture from other
         // tests loading managed files before this thread installs its subscriber.
         const CHILD: &str = "MSB_TEST_MANAGED_WARNING_CHILD";
@@ -262,7 +359,7 @@ mod tests {
             let output = std::process::Command::new(std::env::current_exe().unwrap())
                 .args([
                     "--exact",
-                    "config::persistence::tests::managed_warnings_are_advisory_and_do_not_log_values",
+                    "config::persistence::tests::unknown_managed_keys_warn_without_logging_values",
                     "--nocapture",
                 ])
                 .env(CHILD, "1")
@@ -298,45 +395,6 @@ mod tests {
                 .contains("unrecognized managed config keys")
         );
 
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-
-            // Even root-owned fixtures must warn when either path is writable by others.
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o666)).unwrap();
-            fs::set_permissions(&policy_dir, fs::Permissions::from_mode(0o777)).unwrap();
-            let before = fs::read_to_string(log.path()).unwrap().len();
-            let config = ManagedConfig::load(Some(&path)).unwrap();
-            assert_eq!(config.overrides.sandbox_defaults.cpus, Some(2));
-            let output = fs::read_to_string(log.path()).unwrap();
-            let warnings = &output[before..];
-            assert_eq!(
-                warnings
-                    .matches("managed config path should be root-owned")
-                    .count(),
-                2,
-                "{warnings}"
-            );
-            assert!(warnings.contains(&path.display().to_string()));
-            assert!(warnings.contains(&policy_dir.display().to_string()));
-
-            // With safe mode bits, only non-root ownership should produce a warning.
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
-            fs::set_permissions(&policy_dir, fs::Permissions::from_mode(0o755)).unwrap();
-            let before = output.len();
-            ManagedConfig::load(Some(&path)).unwrap();
-            let output = fs::read_to_string(log.path()).unwrap();
-            let expected = [&path, &policy_dir]
-                .into_iter()
-                .filter(|path| fs::metadata(path).unwrap().uid() != 0)
-                .count();
-            assert_eq!(
-                output[before..]
-                    .matches("managed config path should be root-owned")
-                    .count(),
-                expected
-            );
-        }
         fs::write(
             &path,
             r#"{
@@ -548,7 +606,7 @@ mod tests {
             r#"{"future":true,"overrides":{"sandbox_defaults":{"cpus":3,"workdir":null,"future":true}}}"#,
         )
         .unwrap();
-        let managed = ManagedConfig::load_from(&path).unwrap();
+        let managed = ManagedConfig::load(Some(&path)).unwrap();
         assert_eq!(managed.overrides.sandbox_defaults.cpus, Some(3));
         assert_eq!(managed.overrides.sandbox_defaults.workdir, Some(None));
         assert_eq!(managed.overrides.sandbox_defaults.shell, None);
@@ -677,8 +735,8 @@ mod tests {
     fn managed_file_is_optional_but_invalid_files_fail() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("managed.json");
-        assert!(ManagedConfig::load_from(&path).is_ok());
-        assert!(ManagedConfig::load_from(dir.path()).is_err());
+        assert!(ManagedConfig::load(Some(&path)).is_ok());
+        assert!(ManagedConfig::load(Some(dir.path())).is_err());
         for raw in [
             "{}",
             r#"{"overrides":{}}"#,
@@ -688,7 +746,7 @@ mod tests {
             r#"{"version":1,"overrides":{"database":{"future":1}}}"#,
         ] {
             fs::write(&path, raw).unwrap();
-            let managed = ManagedConfig::load_from(&path).unwrap();
+            let managed = ManagedConfig::load(Some(&path)).unwrap();
             assert_eq!(managed.version, 1);
             assert!(managed.overrides.is_empty());
         }
@@ -710,7 +768,7 @@ mod tests {
             r#"{"version":1,"overrides":{"sandbox_defaults":{"outbound_proxy":{"protocol":"http","address":"127.0.0.1:1080"}}}}"#,
         ] {
             fs::write(&path, raw).unwrap();
-            assert!(ManagedConfig::load_from(&path).is_err(), "{raw}");
+            assert!(ManagedConfig::load(Some(&path)).is_err(), "{raw}");
         }
     }
 
@@ -723,7 +781,7 @@ mod tests {
             r#"{"version":1,"overrides":{"sandbox_defaults":{"cpus":2,"workdir":null}}}"#,
         ] {
             fs::write(&path, raw).unwrap();
-            let managed = ManagedConfig::load_from(&path).unwrap();
+            let managed = ManagedConfig::load(Some(&path)).unwrap();
             assert_eq!(managed.version, 1);
             let mut config = GlobalConfig::default();
             config.sandbox_defaults.cpus = 4;
@@ -749,7 +807,7 @@ mod tests {
             "ssh":{"inactivity_timeout_secs":42},"metrics":{"capacity":128},
             "registries":{"hosts":{"example.com":{"insecure":false}}}
         }}"#).unwrap();
-        let managed = ManagedConfig::load_from(&path).unwrap();
+        let managed = ManagedConfig::load(Some(&path)).unwrap();
         managed.overrides.apply_to(&mut config);
         assert_eq!(config.home.as_deref(), Some(Path::new("/admin/home")));
         assert_eq!(config.paths.cache, None);
@@ -774,7 +832,7 @@ mod tests {
         assert_eq!(config.metrics.capacity, 128);
         assert!(!config.registries.hosts["example.com"].insecure);
         fs::write(&path, r#"{"version":1,"overrides":{"deployment_profile":null,"sandbox_defaults":{"metrics_sample_interval_ms":null}}}"#).unwrap();
-        let clear = ManagedConfig::load_from(&path).unwrap();
+        let clear = ManagedConfig::load(Some(&path)).unwrap();
         clear.overrides.apply_to(&mut config);
         assert_eq!(config.deployment_profile, None);
         assert_eq!(config.sandbox_defaults.metrics_sample_interval_ms, None);
@@ -786,7 +844,7 @@ mod tests {
         let path = dir.path().join("managed.json");
         let mut cfg: GlobalConfig = serde_json::from_str(r#"{"active_profile":"user","profiles":{"user":{"backend":"cloud","url":"https://user.invalid","api_key_ref":"inline:user"},"keep":{"backend":"local"}}}"#).unwrap();
         fs::write(&path, r#"{"version":1,"overrides":{"active_profile":null,"profiles":{"user":{"backend":"local"}}}}"#).unwrap();
-        ManagedConfig::load_from(&path)
+        ManagedConfig::load(Some(&path))
             .unwrap()
             .overrides
             .apply_to(&mut cfg);
