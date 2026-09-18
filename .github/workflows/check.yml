@@ -386,7 +386,7 @@ jobs:
           cache-bin: false
           cache-targets: true
 
-      - uses: taiki-e/install-action@d438492cf8a250514fa2d34b30bc3c0dc37c65ff # v2
+      - uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 # v2
         with:
           tool: cargo-nextest@0.9.143
 
@@ -905,7 +905,7 @@ jobs:
       - name: Set up mold
         uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # 2.41.0
 
-      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
         with:
           enable-cache: true
           cache-dependency-glob: "sdk/python/uv.lock"
@@ -953,7 +953,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
         with:
           enable-cache: true
           cache-dependency-glob: "sdk/python/uv.lock"
@@ -995,7 +995,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1
+      - uses: ruby/setup-ruby@bec3f19a76460dbe12f60def7d1a77585f07516c # v1
         with:
           ruby-version: ${{ matrix.ruby }}
 
@@ -1056,7 +1056,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1
+      - uses: ruby/setup-ruby@bec3f19a76460dbe12f60def7d1a77585f07516c # v1
         with:
           ruby-version: "4.0"
 
@@ -1161,7 +1161,7 @@ jobs:
           name: agentd-${{ matrix.agentd }}-linux-musl
           path: build/
 
-      - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1
+      - uses: ruby/setup-ruby@bec3f19a76460dbe12f60def7d1a77585f07516c # v1
         if: "!contains(matrix.platform, 'mingw')"
         with:
           ruby-version: "3.1"
@@ -1182,7 +1182,7 @@ jobs:
         working-directory: sdk/ruby
         run: cargo tree --manifest-path ext/microsandbox/Cargo.toml --depth 1 | grep "sdk.rust)"
 
-      - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1
+      - uses: ruby/setup-ruby@bec3f19a76460dbe12f60def7d1a77585f07516c # v1
         if: "!contains(matrix.platform, 'mingw')"
         with:
           ruby-version: "3.2"
@@ -1199,7 +1199,7 @@ jobs:
           gem install rake rake-compiler rb_sys --no-document
           rake gem:stage
 
-      - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1
+      - uses: ruby/setup-ruby@bec3f19a76460dbe12f60def7d1a77585f07516c # v1
         if: "!contains(matrix.platform, 'mingw')"
         with:
           ruby-version: "3.3"
@@ -1216,7 +1216,7 @@ jobs:
           gem install rake rake-compiler rb_sys --no-document
           rake gem:stage
 
-      - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1
+      - uses: ruby/setup-ruby@bec3f19a76460dbe12f60def7d1a77585f07516c # v1
         if: "!contains(matrix.platform, 'mingw')"
         with:
           ruby-version: "3.4"
@@ -1233,7 +1233,7 @@ jobs:
           gem install rake rake-compiler rb_sys --no-document
           rake gem:stage
 
-      - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1
+      - uses: ruby/setup-ruby@bec3f19a76460dbe12f60def7d1a77585f07516c # v1
         if: "!contains(matrix.platform, 'mingw')"
         with:
           ruby-version: "4.0"
@@ -1327,7 +1327,7 @@ jobs:
           - platform: x64-mingw-ucrt
             runner: windows-latest
     steps:
-      - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1
+      - uses: ruby/setup-ruby@bec3f19a76460dbe12f60def7d1a77585f07516c # v1
         with:
           ruby-version: ${{ matrix.ruby }}
 
@@ -1535,7 +1535,7 @@ jobs:
       - name: Clean runner disk
         run: scripts/ci/clean-runner-disk.sh
 
-      - uses: taiki-e/install-action@d438492cf8a250514fa2d34b30bc3c0dc37c65ff # v2
+      - uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 # v2
         with:
           tool: cargo-nextest@0.9.143
 
@@ -1813,7 +1813,7 @@ jobs:
       - name: Clean runner disk
         run: scripts/ci/clean-runner-disk.sh
 
-      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
         with:
           # Persistent runners already retain a bounded local cache. Restoring a
           # multi-GB Actions cache here can exhaust the shared disk before tests.
@@ -1872,7 +1872,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
         with:
           enable-cache: true
           cache-dependency-glob: "sdk/python/uv.lock"
