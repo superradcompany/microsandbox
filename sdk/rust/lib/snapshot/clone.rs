@@ -30,8 +30,8 @@ pub struct CloneOpts {
 
     /// Deallocate host storage for blocks the guest ext4 filesystem has already freed, while
     /// cloning. Opt-in: never changes guest-visible content, only host disk usage, and never
-    /// fails the clone if compaction itself fails.
-    pub compact: bool,
+    /// fails the clone if sparsification itself fails.
+    pub sparsify: bool,
 
     /// Grow the cloned upper's ext4 filesystem to this size in MiB, offline, before recording
     /// the artifact. `None` keeps the source's size. Grow-only: a target at or below the

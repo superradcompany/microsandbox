@@ -24,7 +24,7 @@ pub struct JsSnapshotConfig {
     pub force: bool,
     pub record_integrity: bool,
     pub full: bool,
-    pub compact: bool,
+    pub sparsify: bool,
 }
 
 #[derive(Clone)]
@@ -48,7 +48,7 @@ pub struct JsSnapshotBuilder {
     force: bool,
     record_integrity: bool,
     full: bool,
-    compact: bool,
+    sparsify: bool,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -70,7 +70,7 @@ impl JsSnapshotBuilder {
             force: false,
             record_integrity: false,
             full: false,
-            compact: false,
+            sparsify: false,
         }
     }
 
@@ -144,10 +144,10 @@ impl JsSnapshotBuilder {
     /// Deallocate host storage for blocks the guest ext4 filesystem has
     /// already freed, before recording the artifact.
     #[napi]
-    pub fn compact(&mut self) -> &Self {
+    pub fn sparsify(&mut self) -> &Self {
         let prev = self.take_inner();
-        self.inner = Some(prev.compact());
-        self.compact = true;
+        self.inner = Some(prev.sparsify());
+        self.sparsify = true;
         self
     }
 
@@ -181,7 +181,7 @@ impl JsSnapshotBuilder {
             force: self.force,
             record_integrity: self.record_integrity,
             full: self.full,
-            compact: self.compact,
+            sparsify: self.sparsify,
         }
     }
 

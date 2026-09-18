@@ -114,7 +114,7 @@ pub struct JsCloneOpts {
     pub force: Option<bool>,
     /// Deallocate host storage for blocks the guest ext4 filesystem has
     /// already freed, while cloning.
-    pub compact: Option<bool>,
+    pub sparsify: Option<bool>,
     /// Grow the cloned upper's ext4 filesystem to this size in MiB,
     /// offline, before recording the artifact. Grow-only: a target at or
     /// below the source's current size errors.
@@ -285,7 +285,7 @@ impl JsSnapshot {
                 .map(|l| (l.key, l.value))
                 .collect(),
             force: opts.force.unwrap_or(false),
-            compact: opts.compact.unwrap_or(false),
+            sparsify: opts.sparsify.unwrap_or(false),
             root_disk_size_mib: opts.root_disk_size_mib,
         };
         let snap = RustSnapshot::clone_snapshot(&source, &new_name, rust_opts)

@@ -242,7 +242,7 @@ async def create(
     force: bool = False,
     record_integrity: bool = False,
     full: bool = False,
-    compact: bool = False,
+    sparsify: bool = False,
 ) -> Snapshot
 ```
 
@@ -280,8 +280,8 @@ Create a disk snapshot, or set `full=True` to include memory and execution state
     <div className="msb-param-desc">Capture disk, memory, execution, and device state from a running or paused sandbox. Default <code>False</code> captures disk state from running, paused, stopped, or crashed sources.</div>
   </div>
   <div className="msb-param">
-    <div className="msb-param-key"><code>compact</code><span className="msb-type">bool</span></div>
-    <div className="msb-param-desc">Deallocate host storage for blocks the guest ext4 filesystem has already freed, before recording the artifact. Never changes guest-visible content, and a compaction failure never fails creation. Default <code>False</code>.</div>
+    <div className="msb-param-key"><code>sparsify</code><span className="msb-type">bool</span></div>
+    <div className="msb-param-desc">Deallocate host storage for blocks the guest ext4 filesystem has already freed, before recording the artifact. Never changes guest-visible content, and a sparsification failure never fails creation. Default <code>False</code>.</div>
   </div>
 </div>
 
@@ -674,12 +674,12 @@ async def clone(
     dest_dir: str | os.PathLike[str] | None = None,
     labels: dict[str, str] | None = None,
     force: bool = False,
-    compact: bool = False,
+    sparsify: bool = False,
     root_disk_size_mib: int | None = None,
 ) -> Snapshot
 ```
 
-Clone `source` (path, name, or digest) into a new snapshot named `new_name`. Always writes a new artifact rather than mutating `source` in place: `source` and anything referencing it by digest are left untouched. With `compact=True`, also reclaims host disk space for blocks the guest filesystem has already freed. With `root_disk_size_mib`, grows the clone's root disk in place (grow-only). If `source` recorded content integrity, the new artifact's integrity is recomputed fresh.
+Clone `source` (path, name, or digest) into a new snapshot named `new_name`. Always writes a new artifact rather than mutating `source` in place: `source` and anything referencing it by digest are left untouched. With `sparsify=True`, also reclaims host disk space for blocks the guest filesystem has already freed. With `root_disk_size_mib`, grows the clone's root disk in place (grow-only). If `source` recorded content integrity, the new artifact's integrity is recomputed fresh.
 
 <p className="msb-label">Parameters</p>
 
@@ -705,7 +705,7 @@ Clone `source` (path, name, or digest) into a new snapshot named `new_name`. Alw
     <div className="msb-param-desc">Overwrite an existing artifact at the destination. Default <code>False</code>.</div>
   </div>
   <div className="msb-param">
-    <div className="msb-param-key"><code>compact</code><span className="msb-type">bool</span></div>
+    <div className="msb-param-key"><code>sparsify</code><span className="msb-type">bool</span></div>
     <div className="msb-param-desc">Deallocate host storage for blocks the guest ext4 filesystem has already freed, while cloning. Default <code>False</code>.</div>
   </div>
   <div className="msb-param">
@@ -729,7 +729,7 @@ Clone `source` (path, name, or digest) into a new snapshot named `new_name`. Alw
 slim = await Snapshot.clone(
     "bloated",
     "slim",
-    compact=True,
+    sparsify=True,
     root_disk_size_mib=8192,
 )
 ```

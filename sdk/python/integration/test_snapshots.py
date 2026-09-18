@@ -121,7 +121,7 @@ async def test_snapshot_create_open_list_and_boot(sandbox_name, tmp_path, source
 
 
 @pytest.mark.asyncio
-async def test_snapshot_clone_compacts_and_grows_root_disk(sandbox_name):
+async def test_snapshot_clone_sparsifies_and_grows_root_disk(sandbox_name):
     base_name = sandbox_name("py-sdk-clone-base")
     snapshot_name = sandbox_name("py-sdk-clone-snap")
     cloned_name = sandbox_name("py-sdk-clone-cloned")
@@ -140,7 +140,7 @@ async def test_snapshot_clone_compacts_and_grows_root_disk(sandbox_name):
         cloned = await Snapshot.clone(
             snapshot_name,
             cloned_name,
-            compact=True,
+            sparsify=True,
             root_disk_size_mib=8192,
         )
         assert cloned.digest != snapshot.digest

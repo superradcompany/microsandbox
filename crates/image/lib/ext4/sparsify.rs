@@ -1,4 +1,4 @@
-//! Offline compactor for ext4 upper images produced by this crate's formatter.
+//! Offline sparsifier for ext4 upper images produced by this crate's formatter.
 //!
 //! Snapshotting a sandbox's upper layer copies every byte the guest ever wrote, including blocks
 //! the guest has since deleted: ext4 marks those blocks free in its own block bitmap, but the raw
@@ -25,14 +25,14 @@ use super::resizer::{parse_and_validate, read_block_at};
 // Types
 //--------------------------------------------------------------------------------------------------
 
-/// Result of a compaction pass.
+/// Result of a sparsification pass.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct CompactOutcome {
+pub struct SparsifyOutcome {
     /// Bytes deallocated on the host by this pass. Never reflects guest-visible content, only
     /// host storage no longer reserved for it.
     pub bytes_reclaimed: u64,
 
-    /// True when the image needed journal recovery and compaction was skipped rather than
+    /// True when the image needed journal recovery and sparsification was skipped rather than
     /// attempted. The caller decides whether that's worth surfacing; it's never an error.
     pub skipped_dirty: bool,
 }
@@ -47,15 +47,15 @@ pub struct CompactOutcome {
 /// This never mutates ext4 metadata: the bitmap already says these blocks are free, so there is
 /// nothing to update on the filesystem side, only on the host's physical allocation of the file.
 ///
-/// If the image needs journal recovery (the guest never cleanly unmounted), compaction is skipped
+/// If the image needs journal recovery (the guest never cleanly unmounted), sparsification is skipped
 /// rather than attempted — recovering a pending journal is out of scope here, and this is a pure
 /// size optimization that must never risk the correctness of the image it runs on.
-pub fn compact_image(path: &Path) -> Result<CompactOutcome, Ext4Error> {
+pub fn sparsify_image(path: &Path) -> Result<SparsifyOutcome, Ext4Error> {
     let mut file = OpenOptions::new().read(true).write(true).open(path)?;
     let img = parse_and_validate(&mut file)?;
 
     if img.needs_recovery {
-        return Ok(CompactOutcome {
+        return Ok(SparsifyOutcome {
             skipped_dirty: true,
             ..Default::default()
         });
@@ -89,7 +89,7 @@ pub fn compact_image(path: &Path) -> Result<CompactOutcome, Ext4Error> {
         }
     }
 
-    Ok(CompactOutcome {
+    Ok(SparsifyOutcome {
         bytes_reclaimed,
         skipped_dirty: false,
     })
@@ -148,24 +148,24 @@ mod tests {
     }
 
     #[test]
-    fn compact_image_punches_holes_for_guest_free_blocks_without_touching_metadata() {
+    fn sparsify_image_punches_holes_for_guest_free_blocks_without_touching_metadata() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("upper.ext4");
         format_image(&path, 256 * MIB);
         let free_bit = write_garbage_into_a_free_block(&path);
 
-        let outcome = compact_image(&path).unwrap();
+        let outcome = sparsify_image(&path).unwrap();
         assert!(!outcome.skipped_dirty);
         assert!(outcome.bytes_reclaimed >= u64::from(EXT4_BLOCK_SIZE));
 
-        // Bitmap must be byte-for-byte what it was: compaction never writes ext4 metadata.
+        // Bitmap must be byte-for-byte what it was: sparsification never writes ext4 metadata.
         let mut file = OpenOptions::new().read(true).write(true).open(&path).unwrap();
         let img = parse_and_validate(&mut file).unwrap();
         let geo = img.geometry();
         let bitmap = read_block_at(&mut file, geo.group_block_bitmap_block(0)).unwrap();
         assert!(
             !bit_is_set(&bitmap, free_bit),
-            "compaction must not mark the block used"
+            "sparsification must not mark the block used"
         );
 
         // Full invariant re-check: checksums, free counters, and inode structure all still hold.
@@ -177,13 +177,13 @@ mod tests {
             let allocated = microsandbox_utils::extent::allocated_file_bytes(&path).unwrap();
             assert!(
                 allocated < apparent_len,
-                "expected the compacted image to have real holes: allocated={allocated} apparent={apparent_len}"
+                "expected the sparsified image to have real holes: allocated={allocated} apparent={apparent_len}"
             );
         }
     }
 
     #[test]
-    fn compact_image_skips_images_needing_journal_recovery() {
+    fn sparsify_image_skips_images_needing_journal_recovery() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("upper.ext4");
         format_image(&path, 256 * MIB);
@@ -198,7 +198,7 @@ mod tests {
         write_sb(&mut file, &sb);
         drop(file);
 
-        let outcome = compact_image(&path).unwrap();
+        let outcome = sparsify_image(&path).unwrap();
         assert!(outcome.skipped_dirty);
         assert_eq!(outcome.bytes_reclaimed, 0);
     }

@@ -1,5 +1,4 @@
 mod chain;
-mod compact;
 mod format;
 mod formatter;
 mod jbd2;
@@ -7,6 +6,7 @@ mod layout;
 mod resize_inode;
 mod resizer;
 mod rootfs;
+mod sparsify;
 mod storage;
 
 //--------------------------------------------------------------------------------------------------
@@ -14,9 +14,9 @@ mod storage;
 //--------------------------------------------------------------------------------------------------
 
 pub use chain::grow_chain;
-pub use compact::{CompactOutcome, compact_image};
 pub use formatter::{Ext4Error, Ext4FormatOptions, format_ext4, format_ext4_with_tree};
 pub use resizer::{GrowOutcome, grow_image};
+pub use sparsify::{SparsifyOutcome, sparsify_image};
 pub use rootfs::{
     EXT4_ROOTFS_MATERIALIZER_ABI, Ext4Artifact, Ext4RootfsOptions, materialize_ext4_rootfs,
 };

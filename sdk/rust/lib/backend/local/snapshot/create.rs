@@ -250,7 +250,7 @@ pub(super) async fn publish_with_name_retry(
 ///
 /// Always writes a fresh artifact rather than mutating `source` in place: punching holes into
 /// the upper changes its raw bytes (freed-but-stale garbage -> logical zero), so an in-place
-/// compaction would rewrite `source`'s content digest and break anything referencing it. A
+/// sparsification would rewrite `source`'s content digest and break anything referencing it. A
 /// brand-new descriptor gets a fresh identity, integrity (when the source had it) is recomputed
 /// fresh, and the source closure is left untouched.
 pub(super) async fn clone_snapshot(
@@ -264,7 +264,7 @@ pub(super) async fn clone_snapshot(
         group,
         labels,
         force,
-        compact,
+        sparsify,
         root_disk_size_mib,
     } = opts;
 
@@ -336,7 +336,7 @@ pub(super) async fn clone_snapshot(
     tokio::fs::create_dir_all(&member_dir).await?;
     eprintln!("DBG clone: group_dir={:?} member_dir={:?}\n", group_dir, member_dir);
 
-    // Stage the head copy; resize then compact before integrity so both see final geometry and
+    // Stage the head copy; resize then sparsify before integrity so both see final geometry and
     // the sparse-aware Merkle pass sees punched holes as holes.
     let layer_id = DiskLayerId::new(format!("layer_{:032x}", rand::random::<u128>()))
         .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
@@ -358,31 +358,31 @@ pub(super) async fn clone_snapshot(
         virtual_size = grow_clone_upper(staged_path.clone(), resize_mib, virtual_size).await?;
     }
 
-    if compact {
-        let staged_for_compact = staged_path.clone();
+    if sparsify {
+        let staged_for_sparsify = staged_path.clone();
         let outcome = tokio::task::spawn_blocking(move || {
-            microsandbox_image::ext4::compact_image(&staged_for_compact)
+            microsandbox_image::ext4::sparsify_image(&staged_for_sparsify)
         })
         .await
         .map_err(|error| {
-            MicrosandboxError::Custom(format!("snapshot clone compact task: {error}"))
+            MicrosandboxError::Custom(format!("snapshot clone sparsify task: {error}"))
         });
         match outcome {
             Ok(Ok(outcome)) => {
                 if outcome.skipped_dirty {
-                    tracing::debug!("skipped --compact (clone): upper needs journal recovery");
+                    tracing::debug!("skipped --sparsify (clone): upper needs journal recovery");
                 } else {
                     tracing::debug!(
                         bytes_reclaimed = outcome.bytes_reclaimed,
-                        "compacted cloned snapshot upper"
+                        "sparsified cloned snapshot upper"
                     );
                 }
             }
             Ok(Err(error)) => {
-                tracing::warn!(%error, "clone compaction failed; continuing uncompacted");
+                tracing::warn!(%error, "clone sparsification failed; continuing unsparsified");
             }
             Err(error) => {
-                tracing::warn!(%error, "clone compaction task failed; continuing uncompacted");
+                tracing::warn!(%error, "clone sparsification task failed; continuing unsparsified");
             }
         }
     }
@@ -516,7 +516,7 @@ async fn capture_installed(
         force,
         record_integrity,
         full,
-        compact,
+        sparsify,
     } = config;
 
     // Validate the destination before anything else so name errors surface
@@ -656,7 +656,7 @@ async fn capture_installed(
         &disk,
         &labels,
         record_integrity,
-        compact,
+        sparsify,
         FileSnapshotMetadata {
             image_reference,
             manifest_digest: manifest_digest_str,
@@ -850,7 +850,7 @@ pub(super) async fn create_snapshot_archive(
         force,
         record_integrity,
         full,
-        compact,
+        sparsify,
     } = config;
     if dest_dir.is_some() || group.is_some() {
         return Err(MicrosandboxError::InvalidConfig(
@@ -964,11 +964,11 @@ pub(super) async fn create_snapshot_archive(
     )
     .await?;
     lineage.validate_source(local, &source_sandbox).await?;
-    // A direct archive has an operation-owned stage, so compaction can safely run on a private
-    // copy of the head layer (never in place on the source sandbox disk). Compaction only
+    // A direct archive has an operation-owned stage, so sparsification can safely run on a private
+    // copy of the head layer (never in place on the source sandbox disk). Sparsification only
     // reclaims host space for already-freed blocks; failures are logged, never fatal.
-    let _compact_staging = if compact {
-        stage_compact_head(&mut disk).await?
+    let _sparsify_staging = if sparsify {
+        stage_sparsify_head(&mut disk).await?
     } else {
         None
     };
@@ -1331,7 +1331,7 @@ async fn build_artifact(
     disk: &SnapshotDiskClosure,
     labels: &BTreeMap<String, String>,
     record_integrity: bool,
-    compact: bool,
+    sparsify: bool,
     metadata: FileSnapshotMetadata<'_>,
 ) -> MicrosandboxResult<(String, Manifest)> {
     let FileSnapshotMetadata {
@@ -1388,33 +1388,33 @@ async fn build_artifact(
     // Reclaim host disk space for blocks the guest ext4 filesystem has already freed, before
     // integrity is computed so the sparse-aware Merkle pass sees the punched holes as holes.
     // Runs on the private staged copy (the head layer) and never on the source. This is a size
-    // optimization, not a correctness requirement, so a compaction error is logged and ignored.
-    if compact
+    // optimization, not a correctness requirement, so a sparsification error is logged and ignored.
+    if sparsify
         && let Some((_, _, head)) = captured.last()
     {
         let head = head.clone();
         let outcome =
-            tokio::task::spawn_blocking(move || microsandbox_image::ext4::compact_image(&head))
+            tokio::task::spawn_blocking(move || microsandbox_image::ext4::sparsify_image(&head))
                 .await
                 .map_err(|error| {
-                    MicrosandboxError::Custom(format!("snapshot compact task: {error}"))
+                    MicrosandboxError::Custom(format!("snapshot sparsify task: {error}"))
                 });
         match outcome {
             Ok(Ok(outcome)) => {
                 if outcome.skipped_dirty {
-                    tracing::debug!("skipped --compact: upper needs journal recovery");
+                    tracing::debug!("skipped --sparsify: upper needs journal recovery");
                 } else {
                     tracing::debug!(
                         bytes_reclaimed = outcome.bytes_reclaimed,
-                        "compacted snapshot upper"
+                        "sparsified snapshot upper"
                     );
                 }
             }
             Ok(Err(error)) => {
-                tracing::warn!(%error, "snapshot compaction failed; continuing uncompacted");
+                tracing::warn!(%error, "snapshot sparsification failed; continuing unsparsified");
             }
             Err(error) => {
-                tracing::warn!(%error, "snapshot compaction task failed; continuing uncompacted");
+                tracing::warn!(%error, "snapshot sparsification task failed; continuing unsparsified");
             }
         }
     }
@@ -1614,11 +1614,11 @@ fn new_file_manifest_with_id(
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
 
-/// Copy the head disk layer into a private stage, compact it (best-effort), and repoint the
-/// disk closure's head at the compacted copy so direct-archive capture reclaims already-freed
-/// blocks without ever compacting the source sandbox disk in place. Returns the stage so it
-/// outlives archive writing. Compaction is a size optimization: failures are logged, ignored.
-async fn stage_compact_head(
+/// Copy the head disk layer into a private stage, sparsify it (best-effort), and repoint the
+/// disk closure's head at the sparsified copy so direct-archive capture reclaims already-freed
+/// blocks without ever sparsifying the source sandbox disk in place. Returns the stage so it
+/// outlives archive writing. Sparsification is a size optimization: failures are logged, ignored.
+async fn stage_sparsify_head(
     disk: &mut SnapshotDiskClosure,
 ) -> MicrosandboxResult<Option<tempfile::TempDir>> {
     let Some(head_index) = disk.sources.len().checked_sub(1) else {
@@ -1626,9 +1626,9 @@ async fn stage_compact_head(
     };
     let head = disk.sources[head_index].clone();
     let stage = tempfile::Builder::new()
-        .prefix("snapshot-compact-")
+        .prefix("snapshot-sparsify-")
         .tempdir()
-        .map_err(|error| MicrosandboxError::Custom(format!("snapshot compact stage: {error}")))?;
+        .map_err(|error| MicrosandboxError::Custom(format!("snapshot sparsify stage: {error}")))?;
     let dst = stage.path().join("head.disk");
     let src = head.path.clone();
     let dst_for_copy = dst.clone();
@@ -1636,31 +1636,31 @@ async fn stage_compact_head(
         microsandbox_utils::copy::fast_copy(&src, &dst_for_copy)
     })
     .await
-    .map_err(|error| MicrosandboxError::Custom(format!("snapshot compact copy task: {error}")))??;
-    let dst_for_compact = dst.clone();
+    .map_err(|error| MicrosandboxError::Custom(format!("snapshot sparsify copy task: {error}")))??;
+    let dst_for_sparsify = dst.clone();
     let outcome = tokio::task::spawn_blocking(move || {
-        microsandbox_image::ext4::compact_image(&dst_for_compact)
+        microsandbox_image::ext4::sparsify_image(&dst_for_sparsify)
     })
     .await
-    .map_err(|error| MicrosandboxError::Custom(format!("snapshot compact task: {error}")));
+    .map_err(|error| MicrosandboxError::Custom(format!("snapshot sparsify task: {error}")));
     match outcome {
         Ok(Ok(outcome)) => {
             if outcome.skipped_dirty {
-                tracing::debug!("skipped --compact (archive): upper needs journal recovery");
+                tracing::debug!("skipped --sparsify (archive): upper needs journal recovery");
             } else {
                 tracing::debug!(
                     bytes_reclaimed = outcome.bytes_reclaimed,
-                    "compacted snapshot head for archive"
+                    "sparsified snapshot head for archive"
                 );
             }
         }
         Ok(Err(error)) => {
-            tracing::warn!(%error, "snapshot archive compaction failed; continuing uncompacted");
+            tracing::warn!(%error, "snapshot archive sparsification failed; continuing unsparsified");
         }
         Err(error) => {
             tracing::warn!(
                 %error,
-                "snapshot archive compaction task failed; continuing uncompacted"
+                "snapshot archive sparsification task failed; continuing unsparsified"
             );
         }
     }

@@ -103,10 +103,10 @@ pub struct SnapshotCreateArgs {
     /// freed, before recording the artifact.
     ///
     /// Never changes guest-visible content and never fails snapshot
-    /// creation if compaction itself fails — it's a size optimization on
+    /// creation if sparsification itself fails — it's a size optimization on
     /// top of a snapshot that's created either way.
     #[arg(long)]
-    pub compact: bool,
+    pub sparsify: bool,
 
     /// Suppress output.
     #[arg(short, long)]
@@ -257,10 +257,10 @@ pub struct SnapshotCloneArgs {
     /// freed, while cloning.
     ///
     /// Never changes guest-visible content and never fails the clone if
-    /// compaction itself fails — it's a size optimization on top of a clone
+    /// sparsification itself fails — it's a size optimization on top of a clone
     /// that's created either way.
     #[arg(long)]
-    pub compact: bool,
+    pub sparsify: bool,
 
     /// Grow the cloned root disk to this size, such as `8G` (grow-only;
     /// the source's current size is the floor).
@@ -317,8 +317,8 @@ async fn create(args: SnapshotCreateArgs) -> anyhow::Result<()> {
     if args.full {
         builder = builder.full();
     }
-    if args.compact {
-        builder = builder.compact();
+    if args.sparsify {
+        builder = builder.sparsify();
     }
 
     let spinner = if args.quiet {
@@ -353,8 +353,8 @@ async fn create(args: SnapshotCreateArgs) -> anyhow::Result<()> {
                 }
                 println!("{}", snap.id());
                 println!("{}", format_reference(&snap.reference()));
-                if args.compact {
-                    print_compaction_summary(&snap);
+                if args.sparsify {
+                    print_sparsification_summary(&snap);
                 }
             }
             Ok(())
@@ -366,10 +366,10 @@ async fn create(args: SnapshotCreateArgs) -> anyhow::Result<()> {
     }
 }
 
-/// Best-effort "how much did compaction actually help" line: compares the upper file's apparent
+/// Best-effort "how much did sparsification actually help" line: compares the upper file's apparent
 /// size against what the host has allocated for it. Purely informational — a stat failure here
 /// must never affect the command's success.
-fn print_compaction_summary(snap: &Snapshot) {
+fn print_sparsification_summary(snap: &Snapshot) {
     let Some(state) = snap.state().as_file() else {
         return;
     };
@@ -380,7 +380,7 @@ fn print_compaction_summary(snap: &Snapshot) {
         return;
     };
     println!(
-        "Compacted: {} allocated of {} apparent",
+        "Sparsified: {} allocated of {} apparent",
         ui::format_size(allocated),
         ui::format_size(state.virtual_size)
     );
@@ -683,7 +683,7 @@ async fn clone_snapshot(args: SnapshotCloneArgs) -> anyhow::Result<()> {
         group: None,
         labels,
         force: args.force,
-        compact: args.compact,
+        sparsify: args.sparsify,
         root_disk_size_mib,
     };
 
@@ -699,8 +699,8 @@ async fn clone_snapshot(args: SnapshotCloneArgs) -> anyhow::Result<()> {
             if !args.quiet {
                 println!("{}", snap.digest());
                 println!("{}", snap.path()?.display());
-                if args.compact {
-                    print_compaction_summary(&snap);
+                if args.sparsify {
+                    print_sparsification_summary(&snap);
                 }
             }
             Ok(())
@@ -844,23 +844,23 @@ mod tests {
     }
 
     #[test]
-    fn create_parses_compact_flag() {
-        let args = parse_snapshot_args(&["create", "clean", "--from-sandbox", "box", "--compact"]);
+    fn create_parses_sparsify_flag() {
+        let args = parse_snapshot_args(&["create", "clean", "--from-sandbox", "box", "--sparsify"]);
         let SnapshotCommands::Create(args) = args.command else {
             panic!("expected create command");
         };
         assert_eq!(args.name.as_deref(), Some("clean"));
         assert_eq!(args.from_sandbox, "box");
-        assert!(args.compact);
+        assert!(args.sparsify);
     }
 
     #[test]
-    fn create_defaults_compact_to_false() {
+    fn create_defaults_sparsify_to_false() {
         let args = parse_snapshot_args(&["create", "clean", "--from-sandbox", "box"]);
         let SnapshotCommands::Create(args) = args.command else {
             panic!("expected create command");
         };
-        assert!(!args.compact);
+        assert!(!args.sparsify);
     }
 
     #[test]
@@ -1021,12 +1021,12 @@ mod tests {
         assert_eq!(args.source, "bloated");
         assert_eq!(args.new_name, "slim");
         assert!(!args.force);
-        assert!(!args.compact);
+        assert!(!args.sparsify);
         assert!(args.labels.is_empty());
     }
 
     #[test]
-    fn clone_parses_dest_dir_label_force_and_compact() {
+    fn clone_parses_dest_dir_label_force_and_sparsify() {
         let parsed = parse_snapshot_args(&[
             "clone",
             "bloated",
@@ -1036,7 +1036,7 @@ mod tests {
             "--label",
             "stage=deps",
             "--force",
-            "--compact",
+            "--sparsify",
         ]);
         let SnapshotCommands::Clone(args) = parsed.command else {
             panic!("expected clone command");
@@ -1047,7 +1047,7 @@ mod tests {
         );
         assert_eq!(args.labels, vec!["stage=deps".to_string()]);
         assert!(args.force);
-        assert!(args.compact);
+        assert!(args.sparsify);
     }
 
     #[test]

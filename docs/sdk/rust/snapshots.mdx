@@ -507,7 +507,7 @@ println!("loaded {}", h.digest());
 async fn clone_snapshot(source: &str, new_name: &str, opts: CloneOpts) -> MicrosandboxResult<Snapshot>
 ```
 
-Clone `source` (path, name, or digest) into a new snapshot named `new_name`. Always writes a new artifact rather than mutating `source` in place: `source` and anything referencing it by digest are left untouched. With [`CloneOpts::compact`](#cloneopts), also reclaims host disk space for blocks the guest filesystem has already freed. With [`CloneOpts::root_disk_size_mib`](#cloneopts), grows the clone's root disk in place (grow-only). If `source` recorded content integrity, the new artifact's integrity is recomputed fresh — there's no stale-digest hazard, since it's a brand-new digest either way.
+Clone `source` (path, name, or digest) into a new snapshot named `new_name`. Always writes a new artifact rather than mutating `source` in place: `source` and anything referencing it by digest are left untouched. With [`CloneOpts::sparsify`](#cloneopts), also reclaims host disk space for blocks the guest filesystem has already freed. With [`CloneOpts::root_disk_size_mib`](#cloneopts), grows the clone's root disk in place (grow-only). If `source` recorded content integrity, the new artifact's integrity is recomputed fresh — there's no stale-digest hazard, since it's a brand-new digest either way.
 
 <p className="msb-label">Parameters</p>
 
@@ -522,7 +522,7 @@ Clone `source` (path, name, or digest) into a new snapshot named `new_name`. Alw
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>opts</code><a className="msb-type" href="#cloneopts">CloneOpts</a></div>
-    <div className="msb-param-desc">Destination directory, labels, force, compaction, and root disk size.</div>
+    <div className="msb-param-desc">Destination directory, labels, force, sparsification, and root disk size.</div>
   </div>
 </div>
 
@@ -544,7 +544,7 @@ let slim = Snapshot::clone_snapshot(
     "bloated",
     "slim",
     CloneOpts {
-        compact: true,
+        sparsify: true,
         root_disk_size_mib: Some(8192),
         ..Default::default()
     },
@@ -1059,14 +1059,14 @@ Capture disk, memory, execution, and device state from a running sandbox. The ru
 
 ---
 
-#### <span className="msb-recv">snapshot_builder.</span><span className="msb-hn">compact()</span>
+#### <span className="msb-recv">snapshot_builder.</span><span className="msb-hn">sparsify()</span>
 <div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```rust
-fn compact(self) -> Self
+fn sparsify(self) -> Self
 ```
 
-Deallocate host storage for blocks the guest ext4 filesystem has already freed, before recording the artifact. Never changes guest-visible content — it only reclaims host disk space the guest no longer considers in use — and a compaction failure never fails snapshot creation.
+Deallocate host storage for blocks the guest ext4 filesystem has already freed, before recording the artifact. Never changes guest-visible content — it only reclaims host disk space the guest no longer considers in use — and a sparsification failure never fails snapshot creation.
 
 #### <span className="msb-recv">snapshot_builder.</span><span className="msb-hn">build()</span>
 #### <span className="msb-recv">.</span><span className="msb-hn">build()</span>
@@ -1177,7 +1177,7 @@ Inputs to create a snapshot. A type alias for `SnapshotSpec`. Usually built via 
 | force | `bool` | Overwrite a direct archive output; rejected for installed group members |
 | record_integrity | `bool` | Compute and record upper-layer integrity at creation |
 | full | `bool` | Include memory and execution state from a running or paused source; `false` captures disk state from running, paused, stopped, or crashed sources |
-| compact | `bool` | Deallocate host storage for blocks the guest ext4 filesystem has already freed, before recording the artifact |
+| sparsify | `bool` | Deallocate host storage for blocks the guest ext4 filesystem has already freed, before recording the artifact |
 
 ### SnapshotFormat
 
@@ -1223,14 +1223,14 @@ Options for [`Snapshot::save()`](#snapshotsave) and instance `save_to()` methods
 
 <p className="msb-backref">Used by <a href="#snapshotclone_snapshot">Snapshot::clone_snapshot()</a></p>
 
-Options for [`Snapshot::clone_snapshot()`](#snapshotclone_snapshot). Implements `Default`; `CloneOpts::default()` clones into the default snapshots directory without compacting or resizing.
+Options for [`Snapshot::clone_snapshot()`](#snapshotclone_snapshot). Implements `Default`; `CloneOpts::default()` clones into the default snapshots directory without sparsifying or resizing.
 
 | Field | Type | Description |
 |-------|------|-------------|
 | dest_dir | `Option<PathBuf>` | Parent directory for the new artifact. `None` uses the default snapshots directory |
 | labels | `Vec<(String, String)>` | User-supplied labels for the new snapshot. Not inherited from the source |
 | force | `bool` | Overwrite an existing artifact at the destination |
-| compact | `bool` | Deallocate host storage for blocks the guest ext4 filesystem has already freed, while cloning |
+| sparsify | `bool` | Deallocate host storage for blocks the guest ext4 filesystem has already freed, while cloning |
 | root_disk_size_mib | `Option<u32>` | Grow the clone's ext4 filesystem to this size in MiB, offline, before recording the artifact. Grow-only: a target at or below the source's current size errors |
 
 ### SnapshotVerifyReport

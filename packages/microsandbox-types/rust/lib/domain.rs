@@ -863,11 +863,11 @@ pub struct SnapshotSpec {
     /// Opt-in: this walks the copied upper image's block bitmaps and does a
     /// real (if small) amount of extra work at creation time. Never changes
     /// guest-visible content — it only reclaims host disk space the guest
-    /// itself no longer considers in use. Failure to compact never fails
+    /// itself no longer considers in use. Failure to sparsify never fails
     /// snapshot creation; it's a size optimization, not a correctness
     /// requirement.
     #[serde(default)]
-    pub compact: bool,
+    pub sparsify: bool,
 }
 
 //--------------------------------------------------------------------------------------------------

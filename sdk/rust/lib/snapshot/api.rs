@@ -60,7 +60,7 @@ pub struct SnapshotBuilder {
     force: bool,
     record_integrity: bool,
     full: bool,
-    compact: bool,
+    sparsify: bool,
 }
 
 /// Lightweight handle backed by a backend snapshot listing.
@@ -128,7 +128,7 @@ impl Snapshot {
             force: false,
             record_integrity: false,
             full: false,
-            compact: false,
+            sparsify: false,
         }
     }
 
@@ -162,7 +162,7 @@ impl Snapshot {
     /// Clone `source` (path, name, or digest) into a new snapshot named `new_name`.
     ///
     /// Always writes a new artifact rather than mutating `source` in place: `source` and
-    /// anything referencing it by digest are left untouched. With [`CloneOpts::compact`], also
+    /// anything referencing it by digest are left untouched. With [`CloneOpts::sparsify`], also
     /// reclaims host disk space for blocks the guest filesystem has already freed. If `source`
     /// recorded content integrity, the new artifact's integrity is recomputed fresh.
     pub async fn clone_snapshot(
@@ -562,9 +562,9 @@ impl SnapshotBuilder {
     /// before recording the artifact.
     ///
     /// Opt-in: never changes guest-visible content, only host disk usage, and never fails
-    /// snapshot creation if compaction itself fails.
-    pub fn compact(mut self) -> Self {
-        self.compact = true;
+    /// snapshot creation if sparsification itself fails.
+    pub fn sparsify(mut self) -> Self {
+        self.sparsify = true;
         self
     }
 
@@ -585,7 +585,7 @@ impl SnapshotBuilder {
             force: self.force,
             record_integrity: self.record_integrity,
             full: self.full,
-            compact: self.compact,
+            sparsify: self.sparsify,
         })
     }
 

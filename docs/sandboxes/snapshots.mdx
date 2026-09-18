@@ -732,9 +732,9 @@ msb snapshot inspect baseline:after-pip-install --verify
 
 `msb snapshot save` and `msb snapshot load` preserve recorded integrity but do not silently execute it. They still enforce the archive grammar, path confinement, entry sizes, descriptor identities, and ordinary archive-entry hashes. Run `msb snapshot verify` explicitly after receiving a snapshot when your workflow requires an independent payload scan. Released `msb-sparse-sha256-v1` descriptors remain readable and verifiable, but ordinary open, boot, save, load, and upgrade paths do not pay their full logical-size SHA cost.
 
-## Compact and grow a snapshot's disk
+## Sparsify and grow a snapshot's disk
 
-A snapshot's upper file can carry host disk blocks the guest ext4 filesystem has already freed (deleted files, package-manager cache churn, etc.). Compaction punches holes for those blocks — sparse-aware, so file size on disk shrinks while the recorded apparent size and guest-visible content are unchanged. Pass `--compact` at create time to compact the freshly captured upper before it's recorded:
+A snapshot's upper file can carry host disk blocks the guest ext4 filesystem has already freed (deleted files, package-manager cache churn, etc.). Sparsification punches holes for those blocks — sparse-aware, so file size on disk shrinks while the recorded apparent size and guest-visible content are unchanged. Pass `--sparsify` at create time to sparsify the freshly captured upper before it's recorded:
 
 <CodeGroup>
 ```typescript TypeScript
@@ -742,7 +742,7 @@ import { Snapshot } from "microsandbox";
 
 const snap = await Snapshot.builder("after-pip-install")
   .fromSandbox("baseline")
-  .compact()
+  .sparsify()
   .create();
 ```
 
@@ -751,7 +751,7 @@ use microsandbox::Snapshot;
 
 let snap = Snapshot::builder("after-pip-install")
     .from_sandbox("baseline")
-    .compact()
+    .sparsify()
     .create()
     .await?;
 ```
@@ -762,7 +762,7 @@ from microsandbox import Snapshot
 snap = await Snapshot.create(
     "after-pip-install",
     from_sandbox="baseline",
-    compact=True,
+    sparsify=True,
 )
 ```
 
@@ -771,27 +771,27 @@ snap, err := m.Snapshot.Create(ctx,
     m.SnapshotCreateOptions{
         Name:        "after-pip-install",
         FromSandbox: "baseline",
-        Compact:     true,
+        Sparsify:    true,
     },
 )
 ```
 
 ```bash CLI
-msb snapshot create after-pip-install --from baseline --compact
+msb snapshot create after-pip-install --from baseline --sparsify
 ```
 
 </CodeGroup>
 
-Compaction is a size optimization, not a correctness requirement: it never changes guest-visible content, and a compaction failure never fails snapshot creation.
+Sparsification is a size optimization, not a correctness requirement: it never changes guest-visible content, and a sparsification failure never fails snapshot creation.
 
-To compact an *existing* snapshot, or to change its root disk size, clone it into a new artifact instead. Cloning never mutates the source — it always writes a fresh snapshot under a new name, so the original (and anything with a `parent` reference to its digest) stays untouched:
+To sparsify an *existing* snapshot, or to change its root disk size, clone it into a new artifact instead. Cloning never mutates the source — it always writes a fresh snapshot under a new name, so the original (and anything with a `parent` reference to its digest) stays untouched:
 
 <CodeGroup>
 ```typescript TypeScript
 import { Snapshot } from "microsandbox";
 
 const slim = await Snapshot.clone("bloated", "slim", {
-  compact: true,
+  sparsify: true,
   rootDiskSizeMib: 8192, // grow-only
 });
 ```
@@ -804,7 +804,7 @@ let slim = Snapshot::clone_snapshot(
     "bloated",
     "slim",
     CloneOpts {
-        compact: true,
+        sparsify: true,
         root_disk_size_mib: Some(8192), // grow-only
         ..Default::default()
     },
@@ -818,7 +818,7 @@ from microsandbox import Snapshot
 slim = await Snapshot.clone(
     "bloated",
     "slim",
-    compact=True,
+    sparsify=True,
     root_disk_size_mib=8192,  # grow-only
 )
 ```
@@ -826,14 +826,14 @@ slim = await Snapshot.clone(
 ```go Go
 slim, err := m.Snapshot.Clone(ctx, "bloated", "slim",
     m.SnapshotCloneOptions{
-        Compact:         true,
+        Sparsify:        true,
         RootDiskSizeMib: 8192, // grow-only
     },
 )
 ```
 
 ```bash CLI
-msb snapshot clone bloated slim --compact --root-disk 8G
+msb snapshot clone bloated slim --sparsify --root-disk 8G
 ```
 
 </CodeGroup>

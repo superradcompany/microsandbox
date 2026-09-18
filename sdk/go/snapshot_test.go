@@ -166,13 +166,13 @@ func marshalSnapshotCloneOptions(t *testing.T, opts ffi.SnapshotCloneOptions) ma
 	return out
 }
 
-func TestFFIWireShape_SnapshotCloneCompactAndRootDisk(t *testing.T) {
+func TestFFIWireShape_SnapshotCloneSparsifyAndRootDisk(t *testing.T) {
 	got := marshalSnapshotCloneOptions(t, ffi.SnapshotCloneOptions{
-		Compact:         true,
+		Sparsify:        true,
 		RootDiskSizeMib: 8192,
 	})
-	if v := mustField(t, got, "compact"); v != true {
-		t.Fatalf("compact = %v, want true", v)
+	if v := mustField(t, got, "sparsify"); v != true {
+		t.Fatalf("sparsify = %v, want true", v)
 	}
 	if v := mustField(t, got, "root_disk_size_mib"); v != float64(8192) {
 		t.Fatalf("root_disk_size_mib = %v, want 8192", v)
@@ -182,10 +182,10 @@ func TestFFIWireShape_SnapshotCloneCompactAndRootDisk(t *testing.T) {
 	}
 }
 
-func TestFFIWireShape_SnapshotCloneDefaultsOmitCompactAndRootDisk(t *testing.T) {
+func TestFFIWireShape_SnapshotCloneDefaultsOmitSparsifyAndRootDisk(t *testing.T) {
 	got := marshalSnapshotCloneOptions(t, ffi.SnapshotCloneOptions{})
-	if _, present := got["compact"]; present {
-		t.Fatal("compact must not appear in payload when unset")
+	if _, present := got["sparsify"]; present {
+		t.Fatal("sparsify must not appear in payload when unset")
 	}
 	if _, present := got["root_disk_size_mib"]; present {
 		t.Fatal("root_disk_size_mib must not appear in payload when unset")

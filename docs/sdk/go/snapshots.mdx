@@ -467,7 +467,7 @@ h, err := m.Snapshot.Load(ctx, "/tmp/snap.msb", "")
 func (snapshotFactory) Clone(ctx context.Context, source, newName string, opts SnapshotCloneOptions) (*SnapshotArtifact, error)
 ```
 
-Clone `source` (path, name, or digest) into a new snapshot named `newName`. Always writes a new artifact rather than mutating `source` in place: `source` and anything referencing it by digest are left untouched. With [`SnapshotCloneOptions.Compact`](#snapshotcloneoptionsstruct), also reclaims host disk space for blocks the guest filesystem has already freed. With [`SnapshotCloneOptions.RootDiskSizeMib`](#snapshotcloneoptionsstruct), grows the clone's root disk in place (grow-only). If `source` recorded content integrity, the new artifact's integrity is recomputed fresh.
+Clone `source` (path, name, or digest) into a new snapshot named `newName`. Always writes a new artifact rather than mutating `source` in place: `source` and anything referencing it by digest are left untouched. With [`SnapshotCloneOptions.Sparsify`](#snapshotcloneoptionsstruct), also reclaims host disk space for blocks the guest filesystem has already freed. With [`SnapshotCloneOptions.RootDiskSizeMib`](#snapshotcloneoptionsstruct), grows the clone's root disk in place (grow-only). If `source` recorded content integrity, the new artifact's integrity is recomputed fresh.
 
 <p className="msb-label">Parameters</p>
 
@@ -486,7 +486,7 @@ Clone `source` (path, name, or digest) into a new snapshot named `newName`. Alwa
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>opts</code><a className="msb-type" href="#snapshotcloneoptionsstruct">SnapshotCloneOptions</a></div>
-    <div className="msb-param-desc">Destination directory, group, labels, force, compaction, and root disk size.</div>
+    <div className="msb-param-desc">Destination directory, group, labels, force, sparsification, and root disk size.</div>
   </div>
 </div>
 
@@ -503,7 +503,7 @@ Clone `source` (path, name, or digest) into a new snapshot named `newName`. Alwa
 
 ```go
 slim, err := m.Snapshot.Clone(ctx, "bloated", "slim", m.SnapshotCloneOptions{
-    Compact:         true,
+    Sparsify:        true,
     RootDiskSizeMib: 8192,
 })
 ```
@@ -999,7 +999,7 @@ Configures [`Snapshot.Create`](#snapshot-create). `FromSandbox` is required. An 
 | Force | `bool` | Overwrite a direct archive output; rejected for installed group members |
 | RecordIntegrity | `bool` | Record content hashes so [`Verify`](#s-verify) can recompute them later |
 | Full | `bool` | Include memory and execution state from a running or paused source; `false` captures disk state from running, paused, stopped, or crashed sources |
-| Compact | `bool` | Deallocate host storage for blocks the guest ext4 filesystem has already freed, before recording the artifact |
+| Sparsify | `bool` | Deallocate host storage for blocks the guest ext4 filesystem has already freed, before recording the artifact |
 
 ### SnapshotSaveOptions<span className="msb-tag is-type" style={{marginLeft: "8px"}}>struct</span>
 
@@ -1019,7 +1019,7 @@ Configures [`Snapshot.Save`](#snapshot-save) and instance `SaveTo()` methods.
 
 <p className="msb-backref">Accepted by <a href="#snapshot-clone">Snapshot.Clone()</a></p>
 
-Configures [`Snapshot.Clone`](#snapshot-clone). All fields are optional; a zero value clones into the default snapshots directory without compacting or resizing.
+Configures [`Snapshot.Clone`](#snapshot-clone). All fields are optional; a zero value clones into the default snapshots directory without sparsifying or resizing.
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -1027,7 +1027,7 @@ Configures [`Snapshot.Clone`](#snapshot-clone). All fields are optional; a zero 
 | Group | `string` | Snapshot group to create the clone in; empty creates a group named after the new member |
 | Labels | `map[string]string` | Labels for the new snapshot. Not inherited from the source |
 | Force | `bool` | Overwrite an existing artifact at the destination |
-| Compact | `bool` | Deallocate host storage for blocks the guest ext4 filesystem has already freed, while cloning |
+| Sparsify | `bool` | Deallocate host storage for blocks the guest ext4 filesystem has already freed, while cloning |
 | RootDiskSizeMib | `uint32` | Grow the clone's ext4 filesystem to this size in MiB, offline, before recording the artifact. Zero leaves the size unchanged. Grow-only: a target at or below the source's current size errors |
 
 ### SnapshotVerifyReport<span className="msb-tag is-type" style={{marginLeft: "8px"}}>struct</span>

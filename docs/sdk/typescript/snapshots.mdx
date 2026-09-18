@@ -886,7 +886,7 @@ console.log("loaded", h.digest);
 static clone(source: string, newName: string, opts?: CloneOpts): Promise<Snapshot>
 ```
 
-Clone `source` (path, name, or digest) into a new snapshot named `newName`. Always writes a new artifact rather than mutating `source` in place: `source` and anything referencing it by digest are left untouched. With `opts.compact`, also reclaims host disk space for blocks the guest filesystem has already freed. With `opts.rootDiskSizeMib`, grows the clone's root disk in place (grow-only). If `source` recorded content integrity, the new artifact's integrity is recomputed fresh.
+Clone `source` (path, name, or digest) into a new snapshot named `newName`. Always writes a new artifact rather than mutating `source` in place: `source` and anything referencing it by digest are left untouched. With `opts.sparsify`, also reclaims host disk space for blocks the guest filesystem has already freed. With `opts.rootDiskSizeMib`, grows the clone's root disk in place (grow-only). If `source` recorded content integrity, the new artifact's integrity is recomputed fresh.
 
 <p className="msb-label">Parameters</p>
 
@@ -901,7 +901,7 @@ Clone `source` (path, name, or digest) into a new snapshot named `newName`. Alwa
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>opts</code><a className="msb-type" href="#cloneopts">CloneOpts</a></div>
-    <div className="msb-param-desc">Destination directory, labels, force, compaction, and root disk size.</div>
+    <div className="msb-param-desc">Destination directory, labels, force, sparsification, and root disk size.</div>
   </div>
 </div>
 
@@ -918,7 +918,7 @@ Clone `source` (path, name, or digest) into a new snapshot named `newName`. Alwa
 
 ```typescript
 const slim = await Snapshot.clone("bloated", "slim", {
-  compact: true,
+  sparsify: true,
   rootDiskSizeMib: 8192,
 });
 ```
@@ -1137,14 +1137,14 @@ Capture disk, memory, execution, and device state from a running sandbox. The ru
 
 ---
 
-#### <span className="msb-recv">snapshot.</span><span className="msb-hn">compact()</span>
+#### <span className="msb-recv">snapshot.</span><span className="msb-hn">sparsify()</span>
 <div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
-compact(): this
+sparsify(): this
 ```
 
-Deallocate host storage for blocks the guest ext4 filesystem has already freed, before recording the artifact. Never changes guest-visible content — it only reclaims host disk space the guest no longer considers in use — and a compaction failure never fails snapshot creation.
+Deallocate host storage for blocks the guest ext4 filesystem has already freed, before recording the artifact. Never changes guest-visible content — it only reclaims host disk space the guest no longer considers in use — and a sparsification failure never fails snapshot creation.
 
 ---
 
@@ -1266,7 +1266,7 @@ Bundle options for [`Snapshot.save()`](#snapshot-save) and instance `saveTo()` m
 
 ### CloneOpts <span className="msb-tag is-type">interface</span>
 
-Options for [`Snapshot.clone()`](#snapshot-clone). All fields optional; an empty object clones into the default snapshots directory without compacting or resizing.
+Options for [`Snapshot.clone()`](#snapshot-clone). All fields optional; an empty object clones into the default snapshots directory without sparsifying or resizing.
 
 <p className="msb-backref">Used by <a href="#snapshot-clone">Snapshot.clone()</a></p>
 
@@ -1275,7 +1275,7 @@ Options for [`Snapshot.clone()`](#snapshot-clone). All fields optional; an empty
 | `destDir` | `string` | Parent directory for the new artifact. Defaults to the snapshots directory. |
 | `labels` | `Record<string, string>` | Labels for the new snapshot. Not inherited from the source. |
 | `force` | `boolean` | Overwrite an existing artifact at the destination. |
-| `compact` | `boolean` | Deallocate host storage for blocks the guest ext4 filesystem has already freed, while cloning. |
+| `sparsify` | `boolean` | Deallocate host storage for blocks the guest ext4 filesystem has already freed, while cloning. |
 | `rootDiskSizeMib` | `number` | Grow the clone's ext4 filesystem to this size in MiB, offline, before recording the artifact. Grow-only: a target at or below the source's current size throws. |
 
 ---

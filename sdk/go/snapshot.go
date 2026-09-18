@@ -30,11 +30,11 @@ type SnapshotCreateOptions struct {
 	Full bool
 	// GuestFlush defaults to Auto: flush live disk captures, not full captures.
 	GuestFlush GuestFlush
-	// Compact deallocates host storage for blocks the guest ext4 filesystem
+	// Sparsify deallocates host storage for blocks the guest ext4 filesystem
 	// has already freed, before recording the artifact. Never changes
-	// guest-visible content and never fails creation if compaction itself
+	// guest-visible content and never fails creation if sparsification itself
 	// fails.
-	Compact bool
+	Sparsify bool
 }
 
 // SnapshotSaveOptions configures Snapshot.Save and instance SaveTo methods.
@@ -60,9 +60,9 @@ type SnapshotCloneOptions struct {
 	Labels map[string]string
 	// Overwrite an existing artifact at the destination.
 	Force bool
-	// Compact deallocates host storage for blocks the guest ext4 filesystem
+	// Sparsify deallocates host storage for blocks the guest ext4 filesystem
 	// has already freed, while cloning.
-	Compact bool
+	Sparsify bool
 	// RootDiskSizeMib grows the cloned upper's ext4 filesystem to this size
 	// in MiB, offline, before recording the artifact. Zero leaves the size
 	// unchanged. Grow-only: a target at or below the source's current size
@@ -435,7 +435,7 @@ func (snapshotFactory) Create(ctx context.Context, opts SnapshotCreateOptions) (
 		RecordIntegrity: opts.RecordIntegrity,
 		Full:            opts.Full,
 		GuestFlush:      string(opts.GuestFlush),
-		Compact:         opts.Compact,
+		Sparsify:        opts.Sparsify,
 	})
 	if err != nil {
 		return nil, wrapFFI(err)
@@ -458,7 +458,7 @@ func (snapshotFactory) Clone(ctx context.Context, source, newName string, opts S
 		Group:           opts.Group,
 		Labels:          opts.Labels,
 		Force:           opts.Force,
-		Compact:         opts.Compact,
+		Sparsify:        opts.Sparsify,
 		RootDiskSizeMib: opts.RootDiskSizeMib,
 	})
 	if err != nil {

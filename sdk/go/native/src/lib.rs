@@ -1216,7 +1216,7 @@ struct SnapshotCreateOpts {
     #[serde(default)]
     guest_flush: microsandbox::snapshot::GuestFlush,
     #[serde(default)]
-    compact: bool,
+    sparsify: bool,
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -1228,7 +1228,7 @@ struct SnapshotCloneOpts {
     #[serde(default)]
     force: bool,
     #[serde(default)]
-    compact: bool,
+    sparsify: bool,
     root_disk_size_mib: Option<u32>,
 }
 
@@ -6632,8 +6632,8 @@ fn snapshot_builder_from_opts(
     if opts.full {
         builder = builder.full();
     }
-    if opts.compact {
-        builder = builder.compact();
+    if opts.sparsify {
+        builder = builder.sparsify();
     }
     Ok(builder)
 }
@@ -6698,7 +6698,7 @@ pub unsafe extern "C" fn msb_snapshot_clone(
             group: opts.group,
             labels: opts.labels.into_iter().collect(),
             force: opts.force,
-            compact: opts.compact,
+            sparsify: opts.sparsify,
             root_disk_size_mib: opts.root_disk_size_mib,
         };
         Ok(Box::pin(async move {

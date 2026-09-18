@@ -73,7 +73,7 @@ impl PySnapshot {
         record_integrity = false,
         full = false,
         guest_flush = None,
-        compact = false,
+        sparsify = false,
     ))]
     fn create<'py>(
         py: Python<'py>,
@@ -86,7 +86,7 @@ impl PySnapshot {
         record_integrity: bool,
         full: bool,
         guest_flush: Option<String>,
-        compact: bool,
+        sparsify: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let mut builder = RustSnapshot::builder(name)
@@ -112,8 +112,8 @@ impl PySnapshot {
             if full {
                 builder = builder.full();
             }
-            if compact {
-                builder = builder.compact();
+            if sparsify {
+                builder = builder.sparsify();
             }
             let snap = builder.create().await.map_err(to_py_err)?;
             Ok(PySnapshot::from_rust(snap))
@@ -124,7 +124,7 @@ impl PySnapshot {
     ///
     /// Never mutates the source: writes a new artifact under `new_name`,
     /// leaving the source and anything referencing its digest untouched.
-    /// `compact=True` also reclaims host disk space for blocks the guest
+    /// `sparsify=True` also reclaims host disk space for blocks the guest
     /// filesystem has already freed. `root_disk_size_mib`, when given,
     /// grows the clone's root disk (grow-only — a target at or below the
     /// source's current size raises).
@@ -137,7 +137,7 @@ impl PySnapshot {
         dest_dir = None,
         labels = None,
         force = false,
-        compact = false,
+        sparsify = false,
         root_disk_size_mib = None,
     ))]
     fn clone<'py>(
@@ -147,7 +147,7 @@ impl PySnapshot {
         dest_dir: Option<PathBuf>,
         labels: Option<HashMap<String, String>>,
         force: bool,
-        compact: bool,
+        sparsify: bool,
         root_disk_size_mib: Option<u32>,
     ) -> PyResult<Bound<'py, PyAny>> {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -156,7 +156,7 @@ impl PySnapshot {
                 group: None,
                 labels: labels.map(|m| m.into_iter().collect()).unwrap_or_default(),
                 force,
-                compact,
+                sparsify,
                 root_disk_size_mib,
             };
             let snap = RustSnapshot::clone_snapshot(&source, &new_name, opts)

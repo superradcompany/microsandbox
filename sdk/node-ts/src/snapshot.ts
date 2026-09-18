@@ -84,7 +84,7 @@ export interface CloneOpts {
   /** Overwrite an existing artifact at the destination. */
   force?: boolean;
   /** Deallocate host storage for blocks the guest ext4 filesystem has already freed, while cloning. */
-  compact?: boolean;
+  sparsify?: boolean;
   /**
    * Grow the cloned upper's ext4 filesystem to this size in MiB, offline,
    * before recording the artifact. Grow-only: a target at or below the
@@ -285,7 +285,7 @@ export class Snapshot {
         ? Object.entries(opts.labels).map(([key, value]) => ({ key, value }))
         : undefined,
       force: opts.force,
-      compact: opts.compact,
+      sparsify: opts.sparsify,
       rootDiskSizeMib: opts.rootDiskSizeMib,
     };
     const inner = await withMappedErrors(() =>

@@ -671,7 +671,7 @@ export interface NapiSnapshotBuilderSetters {
   force(): this;
   recordIntegrity(): this;
   full(): this;
-  compact(): this;
+  sparsify(): this;
 }
 
 
@@ -794,7 +794,7 @@ export interface NapiCloneOpts {
   group?: string;
   labels?: NapiSnapshotLabel[];
   force?: boolean;
-  compact?: boolean;
+  sparsify?: boolean;
   rootDiskSizeMib?: number;
 }
 

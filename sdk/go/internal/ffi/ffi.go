@@ -5389,7 +5389,7 @@ type SnapshotCreateOptions struct {
 	RecordIntegrity bool              `json:"record_integrity,omitempty"`
 	Full            bool              `json:"full,omitempty"`
 	GuestFlush      string            `json:"guest_flush,omitempty"`
-	Compact         bool              `json:"compact,omitempty"`
+	Sparsify        bool              `json:"sparsify,omitempty"`
 }
 
 type SnapshotSaveOptions struct {
@@ -5428,9 +5428,9 @@ type SnapshotCloneOptions struct {
 	Group   string            `json:"group,omitempty"`
 	Labels  map[string]string `json:"labels,omitempty"`
 	Force   bool              `json:"force,omitempty"`
-	// Compact deallocates host storage for blocks the guest ext4 filesystem
+	// Sparsify deallocates host storage for blocks the guest ext4 filesystem
 	// has already freed, while cloning.
-	Compact bool `json:"compact,omitempty"`
+	Sparsify bool `json:"sparsify,omitempty"`
 	// RootDiskSizeMib grows the cloned upper's ext4 filesystem to this size
 	// in MiB, offline, before recording the artifact. Grow-only: a target
 	// at or below the source's current size errors. Zero leaves the size
