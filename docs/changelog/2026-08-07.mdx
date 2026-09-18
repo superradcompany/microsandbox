@@ -9,7 +9,7 @@ icon: "bolt"
 
 **Ruby SDK**
 
-microsandbox now ships a first-class Ruby 3.1\+ gem backed by a native Magnus extension. The SDK covers sandbox lifecycle, exec and shell, guest filesystem, logs, metrics, images, volumes, snapshots, SSH exec, and explicit local or cloud backend selection. It supports default-deny network allowlists and hostname-scoped secret injection, releases Ruby's GVL around blocking calls, and rebuilds the native runtime after `fork(2)` so Puma, Resque, and Solid Queue process models are safe.
+microsandbox now ships a first-class Ruby 3.1+ gem backed by a native Magnus extension. The SDK covers sandbox lifecycle, exec and shell, guest filesystem, logs, metrics, images, volumes, snapshots, SSH exec, and explicit local or cloud backend selection. It supports default-deny network allowlists and hostname-scoped secret injection, releases Ruby's GVL around blocking calls, and rebuilds the native runtime after `fork(2)` so Puma, Resque, and Solid Queue process models are safe.
 
 ```ruby
 require "microsandbox"
