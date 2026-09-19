@@ -11,6 +11,7 @@ import (
 )
 
 const (
+	// Restart and Destroy retain their explicit convergence deadline; Stop has none.
 	defaultStopTimeout = 10 * time.Second
 	defaultKillTimeout = 5 * time.Second
 )
@@ -21,6 +22,44 @@ const (
 // Sandbox is safe for concurrent use from multiple goroutines.
 type Sandbox struct {
 	inner *ffi.Sandbox
+}
+
+// GuestFlush controls optional guest filesystem writeback during capture or pause.
+type GuestFlush string
+
+const (
+	// GuestFlushAuto flushes live disk-only captures, but not full captures or branches.
+	GuestFlushAuto GuestFlush = "auto"
+	// GuestFlushRequired requires successful writeback of captured persistent filesystems.
+	GuestFlushRequired GuestFlush = "required"
+	// GuestFlushSkip skips optional writeback, never mandatory storage barriers.
+	GuestFlushSkip GuestFlush = "skip"
+)
+
+// BranchOptions controls optional integrity and guest writeback for a local branch.
+type BranchOptions struct {
+	RecordIntegrity bool
+	GuestFlush      GuestFlush
+}
+
+// BranchOutcome contains either a running child or its startup error.
+type BranchOutcome struct {
+	Name    string
+	Sandbox *Sandbox
+	Error   error
+}
+
+// BranchOption configures a local branch.
+type BranchOption func(*BranchOptions)
+
+// WithBranchIntegrity records disk content hashes; RAM backing remains unhashed.
+func WithBranchIntegrity() BranchOption {
+	return func(options *BranchOptions) { options.RecordIntegrity = true }
+}
+
+// WithBranchGuestFlush selects guest writeback before capturing a branch generation.
+func WithBranchGuestFlush(policy GuestFlush) BranchOption {
+	return func(options *BranchOptions) { options.GuestFlush = policy }
 }
 
 // BackendKind returns the backend retained by this sandbox.
@@ -52,6 +91,9 @@ func createSandboxWithMode(ctx context.Context, name string, connectOrCreate boo
 	}
 
 	if err := resolveRegistryCACertPaths(&o); err != nil {
+		return nil, err
+	}
+	if err := validateOwnedMounts(o.Volumes); err != nil {
 		return nil, err
 	}
 
@@ -91,7 +133,6 @@ func buildFFICreateOptions(o SandboxConfig) ffi.CreateOptions {
 		Image:             o.Image,
 		ImageFstype:       o.ImageFstype,
 		ImageBind:         o.ImageBind,
-		Snapshot:          o.Snapshot,
 		MemoryMiB:         o.MemoryMiB,
 		CPUs:              o.CPUs,
 		MaxMemoryMiB:      o.MaxMemoryMiB,
@@ -176,6 +217,7 @@ func buildFFICreateOptions(o SandboxConfig) ffi.CreateOptions {
 				Named:              m.Named,
 				NamedMode:          m.NamedMode,
 				NamedKind:          m.NamedKind,
+				Owned:              m.Owned,
 				Tmpfs:              m.Tmpfs,
 				Disk:               m.Disk,
 				Format:             m.Format,
@@ -204,13 +246,18 @@ func buildFFICreateOptions(o SandboxConfig) ffi.CreateOptions {
 
 	for _, s := range o.Secrets {
 		ffiOpts.Secrets = append(ffiOpts.Secrets, ffi.SecretOptions{
-			EnvVar:            s.EnvVar,
-			Value:             s.Value,
-			AllowHosts:        s.AllowHosts,
-			AllowHostPatterns: s.AllowHostPatterns,
-			Placeholder:       s.Placeholder,
-			RequireTLS:        s.RequireTLS,
-			OnViolation:       string(s.OnViolation),
+			EnvVar:             s.EnvVar,
+			Value:              s.Value,
+			Allow:              s.Allow,
+			Passthrough:        s.Passthrough,
+			Placeholder:        s.Placeholder,
+			RequireTLSIdentity: s.RequireTLSIdentity,
+			Substitution: ffi.SecretSubstitutionOptions{
+				Headers: s.Substitution.Headers,
+				Query:   s.Substitution.Query,
+				Body:    s.Substitution.Body,
+			},
+			ViolationAction: string(s.ViolationAction),
 		})
 	}
 
@@ -270,15 +317,24 @@ func durationMillisCeil(d time.Duration) uint64 {
 	if d <= 0 {
 		return 0
 	}
-	return uint64((d + time.Millisecond - 1) / time.Millisecond)
+	// Divide before rounding so a large valid Duration cannot overflow.
+	millis := uint64(d / time.Millisecond)
+	if d%time.Millisecond != 0 {
+		millis++
+	}
+	return millis
 }
 
-func stopTimeoutMillis(opts []StopOption) uint64 {
-	o := lifecycleOptions{timeout: defaultStopTimeout}
+func stopTimeoutMillis(opts []StopOption) *uint64 {
+	o := lifecycleOptions{}
 	for _, opt := range opts {
 		opt(&o)
 	}
-	return durationMillisCeil(o.timeout)
+	if !o.timeoutSet {
+		return nil
+	}
+	timeout := durationMillisCeil(o.timeout)
+	return &timeout
 }
 
 func killTimeoutMillis(opts []KillOption) uint64 {
@@ -326,17 +382,19 @@ func sandboxTouchResultFromFFI(result *ffi.SandboxTouchResult) *SandboxTouchResu
 // buildFFINetwork converts a public NetworkConfig into its ffi counterpart.
 func buildFFINetwork(n *NetworkConfig) *ffi.NetworkOptions {
 	out := &ffi.NetworkOptions{
-		DNSRebindProtection: n.DNSRebindProtection,
-		DenyDomains:         n.DenyDomains,
-		DenyDomainSuffixes:  n.DenyDomainSuffixes,
-		Ports:               n.Ports,
-		PortBindings:        buildFFIPortBindings(n.PortBindings),
-		IPv4Pool:            n.IPv4Pool,
-		IPv6Pool:            n.IPv6Pool,
-		MaxConnections:      n.MaxConnections,
-		RateLimiter:         buildFFINetworkRateLimiter(n.RateLimiter),
-		OnSecretViolation:   string(n.OnSecretViolation),
-		TrustHostCAs:        n.TrustHostCAs,
+		DNSRebindProtection:   n.DNSRebindProtection,
+		DenyDomains:           n.DenyDomains,
+		DenyDomainSuffixes:    n.DenyDomainSuffixes,
+		Ports:                 n.Ports,
+		PortBindings:          buildFFIPortBindings(n.PortBindings),
+		IPv4Pool:              n.IPv4Pool,
+		IPv6Pool:              n.IPv6Pool,
+		MaxConnections:        n.MaxConnections,
+		MaxTCPConnections:     n.MaxTCPConnections,
+		MaxUDPConnections:     n.MaxUDPConnections,
+		RateLimiter:           buildFFINetworkRateLimiter(n.RateLimiter),
+		SecretViolationAction: string(n.SecretViolationAction),
+		TrustHostCAs:          n.TrustHostCAs,
 	}
 
 	if n.Strict {
@@ -565,7 +623,8 @@ type sandboxListOptions struct {
 type SandboxListOption func(*sandboxListOptions)
 
 type lifecycleOptions struct {
-	timeout time.Duration
+	timeout    time.Duration
+	timeoutSet bool
 }
 
 type connectOrStartOptions struct {
@@ -620,9 +679,13 @@ type SandboxTouchResult struct {
 	ActivitySeq uint64
 }
 
-// WithStopTimeout sets how long Stop waits for graceful shutdown before force-killing.
+// WithStopTimeout bounds Stop's wait for graceful shutdown. Expiry returns an
+// error without force-killing; zero expires before sending a shutdown request.
 func WithStopTimeout(timeout time.Duration) StopOption {
-	return func(o *lifecycleOptions) { o.timeout = timeout }
+	return func(o *lifecycleOptions) {
+		o.timeout = timeout
+		o.timeoutSet = true
+	}
 }
 
 // WithKillTimeout sets how long Kill waits for stopped-state observation.
@@ -906,14 +969,59 @@ func (h *SandboxHandle) ConnectOrStart(ctx context.Context, opts ...ConnectOrSta
 	return &Sandbox{inner: inner}, nil
 }
 
-// Stop gracefully stops the sandbox and waits until stopped state is observed.
+// Stop requests graceful shutdown and waits for this exact sandbox run to finish.
+// There is no built-in timeout. Context cancellation or WithStopTimeout ends only
+// the wait and never force-kills the sandbox.
 func (h *SandboxHandle) Stop(ctx context.Context, opts ...StopOption) error {
-	return wrapFFI(ffi.SandboxHandleVoidLifecycle(ctx, h.name, h.id, "stop", ffi.SandboxHandleLifecycleOptions{TimeoutMs: stopTimeoutMillis(opts)}))
+	return wrapFFI(ffi.StopSandboxHandle(ctx, h.name, h.id, stopTimeoutMillis(opts)))
+}
+
+// StopWithTimeout bounds graceful shutdown observation without force-killing.
+func (h *SandboxHandle) StopWithTimeout(ctx context.Context, timeout time.Duration) error {
+	return h.Stop(ctx, WithStopTimeout(timeout))
 }
 
 // RequestStop requests graceful shutdown and returns once the request is sent.
 func (h *SandboxHandle) RequestStop(ctx context.Context) error {
 	return wrapFFI(ffi.SandboxHandleVoidLifecycle(ctx, h.name, h.id, "request_stop", ffi.SandboxHandleLifecycleOptions{}))
+}
+
+// BranchMany captures once and returns each named child's startup outcome in input order.
+func (h *SandboxHandle) BranchMany(ctx context.Context, names []string, opts ...BranchOption) ([]BranchOutcome, error) {
+	options := BranchOptions{}
+	for _, opt := range opts {
+		opt(&options)
+	}
+	rows, err := ffi.BranchManyByName(ctx, 0, h.name, h.id, names, options.RecordIntegrity, string(options.GuestFlush))
+	return wrapBranchOutcomes(rows, err)
+}
+
+// Branch creates an independent local CoW child without publishing a durable full snapshot.
+func (h *SandboxHandle) Branch(ctx context.Context, name string, opts ...BranchOption) (*Sandbox, error) {
+	options := BranchOptions{}
+	for _, opt := range opts {
+		opt(&options)
+	}
+	inner, err := ffi.BranchSandboxByName(ctx, h.name, name, options.RecordIntegrity, string(options.GuestFlush))
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	return &Sandbox{inner: inner}, nil
+}
+
+// Pause controls resident execution without creating a snapshot.
+func (h *SandboxHandle) Pause(ctx context.Context) error {
+	return wrapFFI(ffi.PauseSandboxByName(ctx, h.name))
+}
+
+// PauseWithGuestFlush pauses without resuming implicitly to satisfy missing flush coverage.
+func (h *SandboxHandle) PauseWithGuestFlush(ctx context.Context, policy GuestFlush) error {
+	return wrapFFI(ffi.PauseWithGuestFlush(ctx, 0, h.name, h.id, string(policy)))
+}
+
+// Resume controls resident execution without creating a snapshot.
+func (h *SandboxHandle) Resume(ctx context.Context) error {
+	return wrapFFI(ffi.ResumeSandboxByName(ctx, h.name))
 }
 
 // Kill force-kills the sandbox and waits until stopped state is observed.
@@ -988,7 +1096,7 @@ func (h *SandboxHandle) Destroy(ctx context.Context, opts ...DestroyOption) erro
 	}))
 }
 
-// Snapshot captures this stopped sandbox under a bare name in the default
+// Snapshot captures this sandbox's disk under a bare name in the default
 // snapshots directory.
 func (h *SandboxHandle) Snapshot(ctx context.Context, name string) (*SnapshotArtifact, error) {
 	info, err := ffi.SandboxHandleSnapshot(ctx, h.name, name)
@@ -1008,18 +1116,99 @@ func (s *Sandbox) Name() string { return s.inner.Name() }
 // ID returns the stable identity of this persisted sandbox.
 func (s *Sandbox) ID() string { return s.inner.ID() }
 
+// ExternalMountWarning describes an unmapped filesystem or an accepted restore mismatch.
+type ExternalMountWarning struct {
+	GuestPath   string   `json:"guest_path"`
+	Reason      string   `json:"reason"`
+	StaleInodes []uint64 `json:"stale_inodes"`
+}
+
+// RestoreWarnings reports unmapped external filesystems and accepted restore mismatches.
+func (s *Sandbox) RestoreWarnings(ctx context.Context) ([]ExternalMountWarning, error) {
+	data, err := s.inner.RestoreWarnings(ctx)
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	var warnings []ExternalMountWarning
+	if err := json.Unmarshal([]byte(data), &warnings); err != nil {
+		return nil, err
+	}
+	return warnings, nil
+}
+
 func (s *Sandbox) identityHandle() *SandboxHandle {
 	return &SandboxHandle{name: s.Name(), id: s.ID(), backendKind: s.BackendKind()}
 }
 
-// Stop gracefully stops the sandbox and waits until stopped state is observed.
+// Stop requests graceful shutdown and waits for this exact sandbox run to finish.
+// There is no built-in timeout. Context cancellation or WithStopTimeout ends only
+// the wait and never force-kills the sandbox.
 func (s *Sandbox) Stop(ctx context.Context, opts ...StopOption) error {
 	return wrapFFI(s.inner.Stop(ctx, stopTimeoutMillis(opts)))
+}
+
+// StopWithTimeout bounds graceful shutdown observation without force-killing.
+func (s *Sandbox) StopWithTimeout(ctx context.Context, timeout time.Duration) error {
+	return s.Stop(ctx, WithStopTimeout(timeout))
 }
 
 // RequestStop requests graceful shutdown and returns once the request is sent.
 func (s *Sandbox) RequestStop(ctx context.Context) error {
 	return wrapFFI(s.inner.RequestStop(ctx))
+}
+
+// Pause controls resident execution without creating a snapshot.
+func (s *Sandbox) Pause(ctx context.Context) error {
+	return wrapFFI(s.inner.Pause(ctx))
+}
+
+// PauseWithGuestFlush optionally prepares flushed disks for capture while paused.
+func (s *Sandbox) PauseWithGuestFlush(ctx context.Context, policy GuestFlush) error {
+	return wrapFFI(s.inner.PauseWithGuestFlush(ctx, string(policy)))
+}
+
+// Branch creates an independent local CoW child without publishing a durable full snapshot.
+func (s *Sandbox) Branch(ctx context.Context, name string, opts ...BranchOption) (*Sandbox, error) {
+	options := BranchOptions{}
+	for _, opt := range opts {
+		opt(&options)
+	}
+	inner, err := s.inner.Branch(ctx, name, options.RecordIntegrity, string(options.GuestFlush))
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	return &Sandbox{inner: inner}, nil
+}
+
+// Resume controls resident execution without creating a snapshot.
+func (s *Sandbox) Resume(ctx context.Context) error {
+	return wrapFFI(s.inner.Resume(ctx))
+}
+
+// BranchMany captures once and returns each child's outcome in input order.
+// Validation/capture errors fail the call; individual startup failures are returned in Error.
+func (s *Sandbox) BranchMany(ctx context.Context, names []string, opts ...BranchOption) ([]BranchOutcome, error) {
+	options := BranchOptions{}
+	for _, opt := range opts {
+		opt(&options)
+	}
+	rows, err := s.inner.BranchMany(ctx, names, options.RecordIntegrity, string(options.GuestFlush))
+	return wrapBranchOutcomes(rows, err)
+}
+
+func wrapBranchOutcomes(rows []ffi.BranchOutcome, err error) ([]BranchOutcome, error) {
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	results := make([]BranchOutcome, 0, len(rows))
+	for _, row := range rows {
+		item := BranchOutcome{Name: row.Name, Error: wrapFFI(row.Error)}
+		if row.Sandbox != nil {
+			item.Sandbox = &Sandbox{inner: row.Sandbox}
+		}
+		results = append(results, item)
+	}
+	return results, nil
 }
 
 // Kill force-kills the sandbox and waits until stopped state is observed.

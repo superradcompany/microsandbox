@@ -17,8 +17,8 @@
 )]
 
 mod archive;
-mod auth;
 mod cache;
+pub mod checkpoint;
 mod config;
 pub(crate) mod crc32c;
 mod digest;
@@ -45,11 +45,12 @@ pub use archive::{
     ImageArchiveFormat, ImageLoadOptions, ImageSaveConfig, ImageSaveLayer, ImageSaveRequest,
     LoadedImage, load_archive, save_archive, save_docker_archive,
 };
-pub use auth::RegistryAuth;
 pub use cache::{CachedImageMetadata, CachedLayerMetadata, FlatRootfsRef, GlobalCache};
 pub use config::ImageConfig;
 pub use digest::Digest;
 pub use error::{ImageError, ImageResult};
+pub use flat::merge_erofs_layers;
+pub use microsandbox_types::RegistryAuth;
 pub use oci_client::Reference;
 pub use platform::{Arch, Os, Platform};
 pub use progress::{PullProgress, PullProgressHandle, PullProgressSender, progress_channel};

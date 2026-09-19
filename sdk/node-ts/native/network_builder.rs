@@ -11,9 +11,8 @@ use crate::dns_builder::JsDnsBuilder;
 use crate::interface_overrides_builder::JsInterfaceOverridesBuilder;
 use crate::network_policy_builder::JsNetworkPolicyBuilder;
 use crate::rate_limiter_builder::{JsNetworkRateLimiterBuilder, RateLimiterValues};
-use crate::secret_builder::JsSecretBuilder;
+use crate::secret_builder::{JsSecretBuilder, parse_violation_action};
 use crate::tls_builder::JsTlsBuilder;
-use crate::violation_action_builder::JsViolationActionBuilder;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -222,29 +221,37 @@ impl JsNetworkBuilder {
         Ok(self)
     }
 
-    /// Configure the violation action for secrets.
-    #[napi(js_name = "onSecretViolation")]
-    pub fn on_secret_violation(
-        &mut self,
-        env: &Env,
-        configure: Function<
-            ClassInstance<JsViolationActionBuilder>,
-            ClassInstance<JsViolationActionBuilder>,
-        >,
-    ) -> Result<&Self> {
-        let initial = JsViolationActionBuilder::new().into_instance(env)?;
-        let mut returned = configure.call(initial)?;
-        let violation_builder = returned.take_inner_builder()?;
+    /// Configure the default blocking action for secret placeholders.
+    #[napi(js_name = "secretViolationAction")]
+    pub fn secret_violation_action(&mut self, action: String) -> Result<&Self> {
+        let action = parse_violation_action(&action)?;
         let prev = self.take_inner();
-        self.inner = Some(prev.on_secret_violation(|_default| violation_builder));
+        self.inner = Some(prev.secret_violation_action(action));
         Ok(self)
     }
 
-    /// Set the maximum number of concurrent connections.
+    /// @deprecated Use maxTcpConnections instead.
+    #[allow(deprecated)]
     #[napi(js_name = "maxConnections")]
     pub fn max_connections(&mut self, max: u32) -> &Self {
         let prev = self.take_inner();
         self.inner = Some(prev.max_connections(max as usize));
+        self
+    }
+
+    /// Set the TCP connection cap; zero selects unlimited.
+    #[napi(js_name = "maxTcpConnections")]
+    pub fn max_tcp_connections(&mut self, max: u32) -> &Self {
+        let prev = self.take_inner();
+        self.inner = Some(prev.max_tcp_connections(max as usize));
+        self
+    }
+
+    /// Set the UDP session cap; zero selects unlimited. Defaults to unlimited for single-tenant and 1024 for multi-tenant.
+    #[napi(js_name = "maxUdpConnections")]
+    pub fn max_udp_connections(&mut self, max: u32) -> &Self {
+        let prev = self.take_inner();
+        self.inner = Some(prev.max_udp_connections(max as usize));
         self
     }
 

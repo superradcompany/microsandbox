@@ -41,66 +41,13 @@ export type MessageType =
   | "core.tcp.closed"
   | "core.tcp.failed";
 
-/**
- * Outbound message whose payload should be CBOR-encoded by this package.
- */
-export type TypedMessage<T = unknown> = {
-  /** Discriminant for `OutboundMessage`. */
-  kind: "typed";
-  /** Protocol message type. */
-  type: MessageType;
-  /** Native payload object to CBOR-encode into the message envelope. */
-  payload: T;
-};
+// These open-name message types are shared by agent, control, and external protocols.
+import type { OutboundMessage } from "@microsandbox/protocol-client";
+export { typedMessage, encodedMessage } from "@microsandbox/protocol-client";
+export type { TypedMessage, EncodedMessage, OutboundMessage } from "@microsandbox/protocol-client";
 
-/**
- * Outbound message whose payload is already CBOR-encoded.
- */
-export type EncodedMessage = {
-  /** Discriminant for `OutboundMessage`. */
-  kind: "encoded";
-  /** Protocol message type. */
-  type: MessageType;
-  /** CBOR-encoded payload bytes for this message type. */
-  payload: Uint8Array;
-};
-
-/** Message accepted by `AgentClient` send/request APIs. */
-export type OutboundMessage = TypedMessage | EncodedMessage;
-
-/** Decoded CBOR protocol envelope carried inside a transport frame. */
-export type EncodedEnvelope = {
-  /** Protocol generation. */
-  v: number;
-  /** Wire message type. */
-  t: MessageType;
-  /** CBOR-encoded message payload bytes. */
-  p: Uint8Array;
-};
-
-/**
- * Build a typed outbound message.
- *
- * Use this when the agent-client package should CBOR-encode the payload.
- */
-export function typedMessage<T>(
-  type: MessageType,
-  payload: T,
-): TypedMessage<T> {
-  return { kind: "typed", type, payload };
-}
-
-/**
- * Build an encoded outbound message.
- *
- * Use this when another layer already produced CBOR payload bytes.
- */
-export function encodedMessage(
-  type: MessageType,
-  payload: Uint8Array,
-): EncodedMessage {
-  return { kind: "encoded", type, payload };
-}
+/** Agent envelope; supplied encoded payloads keep their original byte representation. */
+export type EncodedEnvelope = { v: number; t: string; p: Uint8Array };
 
 /**
  * Return the CBOR payload bytes for a typed or encoded outbound message.
@@ -122,7 +69,7 @@ export function encodeEnvelope(
   message: OutboundMessage,
   protocolVersion = PROTOCOL_VERSION,
   negotiatedVersion = PROTOCOL_VERSION,
-): { type: MessageType; flags: number; body: Uint8Array } {
+): { type: string; flags: number; body: Uint8Array } {
   if (!supports(message.type, negotiatedVersion)) {
     throw new Error(
       `the sandbox runtime is too old for '${message.type}' ` +
@@ -147,7 +94,7 @@ export function encodeEnvelope(
 /**
  * Return the frame flags required for a message type.
  */
-export function messageFlags(type: MessageType): number {
+export function messageFlags(type: string): number {
   switch (type) {
     case "core.error":
     case "core.exec.exited":
@@ -170,7 +117,7 @@ export function messageFlags(type: MessageType): number {
 /**
  * Return the protocol generation that introduced a message type.
  */
-export function minProtocolVersion(type: MessageType): number {
+export function minProtocolVersion(type: string): number {
   switch (type) {
     case "core.fs.request":
     case "core.fs.response":
@@ -194,6 +141,6 @@ export function minProtocolVersion(type: MessageType): number {
 /**
  * Return whether a peer generation supports a message type.
  */
-export function supports(type: MessageType, peerGeneration: number): boolean {
+export function supports(type: string, peerGeneration: number): boolean {
   return minProtocolVersion(type) <= peerGeneration;
 }

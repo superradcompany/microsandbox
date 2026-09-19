@@ -20,6 +20,8 @@ pub struct JsAttachOptions {
     pub user: Option<String>,
     pub env: HashMap<String, String>,
     pub detach_keys: Option<String>,
+    // Keep the public name stable when napi-rs renders this renamed nested object.
+    #[napi(ts_type = "Array<Rlimit>")]
     pub rlimits: Vec<JsRlimit>,
     /// Whether this session's output is recorded to the sandbox's `exec.log`.
     pub capture: bool,

@@ -31,11 +31,11 @@ See the [Go SDK reference](/sdk/go/sandbox).
 
 **File-first disk snapshots**
 
-Stopped sandboxes can be snapshotted to a content-addressed directory and used to boot fresh sandboxes on any compatible host. Snapshots stay sparse via reflink and `SEEK_DATA`/`SEEK_HOLE` copying, so create and inspect stay fast. The CLI ships `msb snapshot create | open | list | list-dir | remove | reindex | export | import | verify`, and `msb run --from <name|path>` boots a fork. The same surface is available in all four SDKs.
+Stopped sandboxes can be snapshotted to a content-addressed directory and used to boot fresh sandboxes on any compatible host. Snapshots stay sparse via reflink and `SEEK_DATA`/`SEEK_HOLE` copying, so create and inspect stay fast. The CLI ships `msb snapshot create | open | list | list-dir | remove | reindex | export | import | verify`, and `msb run --from-snapshot <name|path>` boots a fork. The same surface is available in all four SDKs.
 
 ```bash
-msb snapshot create my-sandbox --name baseline
-msb run alpine --from baseline --name fork
+msb snapshot create baseline --from-sandbox my-sandbox
+msb run --from-snapshot baseline --name fork
 ```
 
 See [Sandbox snapshots](/sandboxes/snapshots).

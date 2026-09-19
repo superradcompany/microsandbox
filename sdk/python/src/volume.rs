@@ -230,6 +230,48 @@ impl PyVolume {
         Ok(mount_config_class(py)?.call((), Some(&kwargs))?.unbind())
     }
 
+    /// Configure storage retained across restarts and removed with this sandbox.
+    #[staticmethod]
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (*, kind = None, size_mib = None, quota_mib = None, readonly = false, noexec = false, nosuid = false, nodev = false, stat_virtualization = None, host_permissions = None, uid = None, gid = None))]
+    fn owned(
+        py: Python<'_>,
+        kind: Option<Py<PyAny>>,
+        size_mib: Option<Py<PyAny>>,
+        quota_mib: Option<Py<PyAny>>,
+        readonly: bool,
+        noexec: bool,
+        nosuid: bool,
+        nodev: bool,
+        stat_virtualization: Option<Py<PyAny>>,
+        host_permissions: Option<Py<PyAny>>,
+        uid: Option<Py<PyAny>>,
+        gid: Option<Py<PyAny>>,
+    ) -> PyResult<PyObject> {
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("kind", mount_kind(py, "OWNED")?)?;
+        if let Some(kind) = kind {
+            extract_str_enum(kind.bind(py), "VolumeKind")?;
+            kwargs.set_item("owned_kind", kind)?;
+        }
+        if let Some(size) = size_mib {
+            kwargs.set_item("size_mib", size)?;
+        }
+        if let Some(quota) = quota_mib {
+            kwargs.set_item("quota_mib", quota)?;
+        }
+        kwargs.set_item("readonly", readonly)?;
+        kwargs.set_item("noexec", noexec)?;
+        kwargs.set_item("nosuid", nosuid)?;
+        kwargs.set_item("nodev", nodev)?;
+        set_mount_metadata_options(py, &kwargs, stat_virtualization, host_permissions, uid, gid)?;
+        let config = mount_config_class(py)?.call((), Some(&kwargs))?;
+        // Validate Python integers before unsigned native extraction: bools and
+        // out-of-range values must not change the requested storage contract.
+        config.call_method0("_to_dict")?;
+        Ok(config.unbind())
+    }
+
     /// Create a tmpfs mount config.
     #[staticmethod]
     #[pyo3(signature = (*, size_mib = None, readonly = false, noexec = false, nosuid = false, nodev = false))]

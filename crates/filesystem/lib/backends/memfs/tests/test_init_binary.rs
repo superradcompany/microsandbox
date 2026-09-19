@@ -1,5 +1,5 @@
 use super::*;
-use crate::agentd::AGENTD_BYTES;
+use crate::agentd::agentd_bytes;
 
 #[test]
 fn test_init_krun_lookup() {
@@ -9,7 +9,7 @@ fn test_init_krun_lookup() {
     let mode = entry.attr.st_mode as u32;
     assert_eq!(mode & libc::S_IFMT as u32, libc::S_IFREG as u32);
     assert_eq!(mode & 0o777, 0o755);
-    assert_eq!(entry.attr.st_size, AGENTD_BYTES.len() as i64);
+    assert_eq!(entry.attr.st_size, agentd_bytes().len() as i64);
 }
 
 #[test]
@@ -28,10 +28,10 @@ fn test_init_krun_open_and_read() {
     assert_eq!(opts, OpenOptions::KEEP_CACHE);
 
     let data = sb
-        .fuse_read(INIT_INODE, 0, AGENTD_BYTES.len() as u32, 0)
+        .fuse_read(INIT_INODE, 0, agentd_bytes().len() as u32, 0)
         .unwrap();
-    assert_eq!(data.len(), AGENTD_BYTES.len());
-    assert_eq!(&data[..], AGENTD_BYTES);
+    assert_eq!(data.len(), agentd_bytes().len());
+    assert_eq!(&data[..], agentd_bytes());
 }
 
 #[test]
@@ -43,7 +43,7 @@ fn test_init_krun_partial_read() {
     assert_eq!(data.len(), size as usize);
     assert_eq!(
         &data[..],
-        &AGENTD_BYTES[offset as usize..offset as usize + size as usize]
+        &agentd_bytes()[offset as usize..offset as usize + size as usize]
     );
 }
 
@@ -101,7 +101,7 @@ fn test_init_krun_getattr() {
     assert_eq!(st.st_ino, INIT_INODE);
     assert_eq!(st.st_uid, 0);
     assert_eq!(st.st_gid, 0);
-    assert_eq!(st.st_size, AGENTD_BYTES.len() as i64);
+    assert_eq!(st.st_size, agentd_bytes().len() as i64);
     let mode = st.st_mode as u32;
     assert_eq!(mode & libc::S_IFMT as u32, libc::S_IFREG as u32);
     assert_eq!(mode & 0o777, 0o755);

@@ -4,6 +4,14 @@ This guide covers everything you need to build, test, and release microsandbox f
 
 For contribution guidelines (forking, commit signing, pull requests), see [CONTRIBUTING.md](./CONTRIBUTING.md).
 
+## v0.7.0 CLI migration
+
+Sandbox commands share one definition and dispatcher under `crates/cli/lib/commands/sandbox.rs`. `msb sandbox <command>` is the canonical group, `msb sbx <command>` is its visible alias, and `msb <command>` is the recommended everyday shortcut. Keep all forms equivalent when adding commands or flags; README and quickstart examples should continue to prefer the top-level verbs.
+
+The hidden VM process entry point is now `msb machine`, implemented in `crates/cli/lib/machine_cmd.rs`. The SDK invokes it directly, and it must still execute before the CLI's async runtime starts. This is a coordinated v0.7.0 launcher rename: use a matching SDK/runtime pair, including when setting `MSB_PATH` or supplying a runtime through SDK configuration. The old internal `msb sandbox [flags]` invocation is no longer accepted. Guest configuration transport and the boot/restore intent checks are unchanged.
+
+Regenerate installed shell completion scripts after upgrading so they include the new group and alias. See [the launcher compatibility contract](COMPATIBILITY.md#5-launcher-to-runtime-process-protocol).
+
 ## Prerequisites
 
 - **Operating System**:
@@ -94,21 +102,17 @@ just build release && just install
 | `just uninstall` | Remove installed binaries |
 | `just clean` | Remove `build/` artifacts and clean libkrunfw |
 
-### Using a Prebuilt agentd Binary
+### Selecting Embedded Binaries
 
-With the default `prebuilt` feature enabled, downstream consumers of
-`microsandbox-filesystem` can set `MSB_AGENTD_PATH` to an existing guest
-`agentd` binary.
+`microsandbox-filesystem` enables both `download-binaries` and `embed-binaries` by default. `download-binaries` permits Cargo build scripts to fetch missing official artifacts and implies `embed-binaries`; `embed-binaries` controls whether Agentd bytes are compiled into the host binary.
 
-The repository-local `build/agentd` takes precedence. Otherwise, the supplied
-binary is copied into Cargo's `OUT_DIR` instead of downloading the release
-artifact. If no repository-local `build/agentd` exists and `MSB_AGENTD_PATH` is
-set, it must point to an existing file or the build fails.
-The variable is ignored when the `prebuilt` feature is disabled.
+Set `MSB_EMBED_ARTIFACTS_DIR` at build time to an unpacked directory containing `agentd`, `msb`, and the platform `libkrunfw` filename. The repository-local `build/` directory is the next source, followed by an official download when `download-binaries` is enabled. The Rust SDK also accepts `MSB_EMBED_RUNTIME_BUNDLE_PATH` as an exact compressed `msb` plus `libkrunfw` archive when its `embed-binaries` feature is enabled.
 
 ```bash
-MSB_AGENTD_PATH=/path/to/agentd cargo build
+MSB_EMBED_ARTIFACTS_DIR=/path/to/artifacts cargo build
 ```
+
+At runtime, `MSB_AGENTD_PATH` selects an external Agentd executable instead of global `paths.agentd` or the embedded fallback. The file is eagerly read and validated before VM construction; it is never downloaded or copied into `MSB_HOME`.
 
 ## Project Structure
 
@@ -121,6 +125,8 @@ The project is a Cargo workspace. Published crates (in dependency order):
 | `microsandbox-utils` | `crates/utils` | Shared utilities |
 | `microsandbox-types` | `packages/microsandbox-types/rust` | Shared task and wire contract types |
 | `microsandbox-protocol` | `crates/protocol` | Wire protocol definitions ([versioning](./crates/protocol/VERSIONING.md)) |
+| `microsandbox-protocol-client` | `packages/protocol-client/rust` | Generic framed protocol engine and byte transports |
+| `microsandbox-control-client` | `packages/control-client/rust` | Framed control and explicit JSON compatibility |
 | `microsandbox-agent-client` | `packages/agent-client/rust` | Transport-agnostic client for the agent protocol |
 | `microsandbox-agentd` | `crates/agentd` | In-guest agent (guest binary is built separately for musl) |
 | `microsandbox-db` | `crates/db` | Database layer |
@@ -154,6 +160,8 @@ The `examples/rust/*` projects are workspace members as well.
 | `microsandbox` (npm) | `sdk/node-ts` | TypeScript/Node.js SDK (NAPI bindings, plus per-platform sub-packages) |
 | `microsandbox` (PyPI) | `sdk/python` | Python SDK (PyO3 bindings) |
 | `github.com/superradcompany/microsandbox/sdk/go` | `sdk/go` | Go SDK (CGO over `microsandbox-go`), versioned via `sdk/go/vX.Y.Z` tags |
+| `@microsandbox/protocol-client` (npm) | `packages/protocol-client/typescript` | Generic framed protocol engine and byte transports |
+| `@microsandbox/control-client` (npm) | `packages/control-client/typescript` | Framed control and explicit JSON compatibility |
 | `@microsandbox/agent-client` (npm) | `packages/agent-client/typescript` | Transport-agnostic client for the agent protocol |
 | `@microsandbox/types` (npm) | `packages/microsandbox-types/typescript` | Shared task and wire contract types |
 | `microsandbox-mcp` (npm) | `mcp/` (submodule) | MCP server for AI agents |
@@ -185,6 +193,32 @@ Run a specific test:
 ```bash
 cargo test -p microsandbox test_name
 ```
+
+### Snapshot and branch checks
+
+Run the focused logic suite without starting VMs:
+
+```bash
+just test-snapshot
+```
+
+This covers snapshot archives/groups, dependency validation, checkpoint logic, snapshot CLI parsing, and the live-smoke runner's own unit tests. The Rust tests already run in the normal Linux workspace CI lane. Cached test execution is much shorter than a first build; Cargo compilation and dependency setup are additional costs, not snapshot-operation timings.
+
+For a compact end-to-end check, build a matching runtime bundle with `just build`, then run:
+
+```bash
+just test-snapshot-live
+just test-snapshot-live --layout flat
+just test-snapshot-live --binary /path/to/msb --output /tmp/snapshot-smoke-new
+```
+
+The live check requires working virtualization and Python (`python3` on Linux/macOS, `python` on Windows). macOS binaries must be codesigned with `msb-entitlements.plist`; `just build` does this. It uses a new isolated `MSB_HOME`, stops its own VMs, verifies host-process exit, and retains a report and logs in the printed output directory. Successful runs remove their temporary RAM/disk artifacts; failed runs retain their home for investigation. An explicit `--output` directory must not exist; choose a short path under `/tmp` on Unix to stay within socket-path limits. Use `--help` for image and timeout options.
+
+The warm live target is under 60 seconds per layout, excluding compilation and image-pull setup; this is a target, not a guarantee or a performance benchmark. Per-command and suite deadlines bound failures separately. The existing Linux/KVM CLI smoke CI job runs managed and flat layouts and uploads reports/logs even on failure. This compact check complements, rather than replaces, the larger live invariant and benchmark matrices under `scripts/smoke/cli/`.
+
+For inherited-memory branch coverage, run `python3 scripts/smoke/cli/branch-preparation.py --binary build/msb --require-inherited-baseline`. This checks continuous RAM/disk writes, first-grandchild incremental capture, further descendants after source deletion, growth before a child's first branch, paused sources, interleaved durable capture, optional RAM-cache fallback, compaction, and cold restart. It retains runtime phase logs and checks the actual capture mode, not just command success.
+
+For Linux descriptor-backed branching, also run the runtime `memory_handoff::`, `control::`, `launch::`, and `checkpoint::` unit tests. Live qualification must verify sealed memfd ownership, source deletion, private-write isolation, further descendants, and cancellation. Measure concurrent fan-out separately from single-branch latency; report proportional set size and unique backing allocation separately, since adding them would count shared RAM twice.
 
 ## Benchmarking
 
@@ -222,6 +256,12 @@ cargo fmt --all           # Format code
 cargo clippy --workspace  # Run lints
 ```
 
+### Self-hosted CI disk space
+
+The Linux integration runners share a disk. `scripts/ci/clean-runner-disk.sh` removes job artifacts and prunes oversized per-user caches: uv above 1 GiB, npm's download cache above 512 MiB, and Go's build cache above 512 MiB. Small caches, installed toolchains, and npm diagnostic logs are retained. Use `--finish` for end-of-job cleanup; startup additionally requires 25 GiB free (`MSB_CI_MIN_FREE_GIB` overrides the threshold).
+
+This check is a headroom floor, not a disk reservation. If concurrent jobs still exhaust the disk, reduce host concurrency or increase capacity. Do not prune another runner user's files or remove installed tools while jobs are active. Python integration uses its bounded local cache instead of restoring a multi-gigabyte Actions cache.
+
 ## Releasing
 
 Microsandbox releases are automated via CI. All crates and packages share the same version number. The process has two steps:
@@ -232,12 +272,14 @@ Dispatch the **Release version bump** workflow (`.github/workflows/release-bump.
 
 - `Cargo.toml` (workspace `version` field and path-dependency versions — all crates inherit from this)
 - `sdk/node-ts/package.json` and its per-platform sub-packages
+- `packages/protocol-client/typescript/package.json`
 - `packages/agent-client/typescript/package.json`
+- `packages/control-client/typescript/package.json`
 - `packages/microsandbox-types/typescript/package.json`
 - `sdk/go/setup.go` (`sdkVersion`)
 - `examples/typescript/*/package.json` (`microsandbox` dependency pins)
 
-The workflow then regenerates `Cargo.lock` and the npm lockfiles and opens a PR titled `chore: release vX.Y.Z`.
+The workflow then regenerates `Cargo.lock`, the shared `packages/package-lock.json`, and the SDK npm lockfile and opens a PR titled `chore: release vX.Y.Z`.
 
 `microsandbox-mcp` is versioned in its own repository (the `mcp/` submodule). Bump it there and advance the `mcp/` (and, when changed, `skills/`) submodule pointers in the release PR — `release.yml` publishes whatever `microsandbox-mcp` version the submodule pointer holds.
 
@@ -255,14 +297,22 @@ The release workflow (`.github/workflows/release.yml`) will:
 1. Build shared `agentd` and `libkrunfw` artifacts once, then build full-release `msb`, `msb-metrics`, Go FFI, Node, and Python artifacts in parallel for each release platform (linux-x86_64, linux-aarch64, darwin-aarch64, windows-x86_64, windows-aarch64)
 2. Create Unix platform bundles (`.tar.gz`) and Windows platform bundles (`.zip`) with SHA256 checksums
 3. Create a GitHub release with the bundles and installer scripts (`install.sh` and `install.ps1`)
-4. Publish the npm packages: `microsandbox` (+ platform sub-packages), `@microsandbox/agent-client`, and `@microsandbox/types`
+4. Build all shared TypeScript packages through the `packages` workspace; publish `@microsandbox/types` and `@microsandbox/protocol-client`, wait for indexing, then publish `@microsandbox/agent-client` and `@microsandbox/control-client` and wait for indexing before the existing platform and root SDK publication steps
 5. Publish the MCP server to npm (`microsandbox-mcp`, from the `mcp/` submodule)
-6. Discover and publish all 16 Rust crates to crates.io in dependency waves, waiting only for the sparse-index entries required by the next wave
+6. Discover and publish all 18 Rust crates to crates.io in dependency waves, waiting only for the sparse-index entries required by the next wave
 7. Publish the Python SDK to PyPI (`microsandbox`)
 8. Tag the Go SDK (`sdk/go/vX.Y.Z`)
 9. Build and publish Docker images to GHCR
 10. Update the Homebrew tap and winget manifests
 11. Sync docs to Mintlify and refresh the npm lockfile on `main`
+
+### npm publishing and provenance
+
+The Node SDK, shared packages, and native platform packages publish with npm provenance from the GitHub-hosted `npm-publish` job. The job retains `NPM_TOKEN` authentication and requests `id-token: write` only for signing the provenance statement. Each package's repository metadata points to this public repository. MCP remains a separate token-based publication because its source lives in the `microsandbox-mcp` submodule repository.
+
+Pre-publication validation temporarily removes only the SDK's native platform dependencies while installing locked build tools, then restores the original manifest and lockfile before packing. Publication waits for the platform versions to be indexed before refreshing the SDK lockfile, running `npm ci`, and building the SDK. The existing post-release lockfile PR persists registry integrity entries on `main`. Already-published versions are skipped on retries; provenance is not retroactively added to those versions.
+
+Trusted publishing can replace `NPM_TOKEN` later: configure `superradcompany/microsandbox` and workflow filename `release.yml` in each package's npm trusted-publisher settings, and use npm 11.5.1+ with Node 22.14.0+. That switch requires npm-side configuration; this workflow change does not enable it. See [npm provenance](https://docs.npmjs.com/generating-provenance-statements/) and [trusted publishing](https://docs.npmjs.com/trusted-publishers/).
 
 ### Production SDK smoke gate
 

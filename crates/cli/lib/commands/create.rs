@@ -43,6 +43,9 @@ pub async fn run(
 
     let resolved = sandbox_config::resolve(&args.sandbox.config)?;
     let image = resolved.image(args.image.as_deref(), None)?;
+    if matches!(image, sandbox_config::ResolvedImage::Snapshot(_)) {
+        anyhow::bail!("snapshot sources require `msb restore SNAPSHOT --name NAME`");
+    }
     let builder = resolved.apply(Sandbox::builder(&name))?;
     let builder = image.apply(builder)?;
     let builder = if resolved.loaded() {
@@ -51,9 +54,7 @@ pub async fn run(
         apply_sandbox_opts(builder, &args.sandbox)?
     };
 
-    let (mut progress, task) = builder
-        .detached(true)
-        .create_detached_with_pull_progress()?;
+    let (mut progress, task) = builder.detached(true).create_detached_with_progress()?;
     let mut display = if args.sandbox.quiet {
         ui::PullProgressDisplay::quiet(&image.display())
     } else {
@@ -61,12 +62,13 @@ pub async fn run(
     };
 
     while let Some(event) = progress.recv().await {
-        display.handle_event(event);
+        display.handle_creation_event(event);
     }
 
     match task.await {
         Ok(Ok(sandbox)) => {
             display.finish();
+            super::common::display_restore_warnings(&sandbox).await;
             sandbox.detach().await;
             // Print auto-generated name to stdout so it's scriptable.
             if !is_named {

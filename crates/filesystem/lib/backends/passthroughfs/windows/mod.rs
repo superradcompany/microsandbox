@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::agentd::AGENTD_BYTES;
+use crate::agentd::agentd_bytes;
 use crate::{
     AddDirEntry, AddDirEntryPlus, Context, DirEntry, DynFileSystem, Entry, Extensions, FsOptions,
     GetxattrReply, ListxattrReply, OpenOptions, SetattrValid, ZeroCopyReader, ZeroCopyWriter,
@@ -29,11 +29,16 @@ mod dir_ops;
 mod file_ops;
 mod inode;
 mod metadata;
+mod mobility;
 mod ops;
+mod owned_metadata;
 mod remove_ops;
 mod stat_store;
 
-use inode::{DirHandle, HandleData, InodeData, InodeTable};
+use inode::{DirHandle, DirSnapshotEntry, HandleData, InodeData, InodeTable};
+pub(super) use owned_metadata::{
+    capture_owned_metadata, clear_owned_payload_metadata, owned_component, restore_owned_metadata,
+};
 
 pub use builder::{HostPermissions, PassthroughConfig, StatVirtualization};
 
@@ -153,6 +158,7 @@ pub struct PassthroughFs {
     init_file: Option<Mutex<File>>,
     stat_store: Option<StatStore>,
     quota: Option<super::quota::DirQuota>,
+    invalid_inodes: RwLock<std::collections::BTreeSet<u64>>,
 }
 
 #[repr(C, packed)]
@@ -183,6 +189,20 @@ enum StatStoreBackend {
 //--------------------------------------------------------------------------------------------------
 
 impl PassthroughFs {
+    /// Validate an external checkpoint without opening any destination host paths.
+    pub fn validate_external_state(bytes: &[u8]) -> io::Result<()> {
+        mobility::validate_unavailable(bytes)
+    }
+
+    /// Validate and translate only the isolated facade's selected host basename.
+    pub(crate) fn prepare_single_file_state(
+        bytes: &[u8],
+        source: &CStr,
+        destination: &CStr,
+    ) -> io::Result<(Vec<u8>, super::ExternalSingleFileIndex)> {
+        mobility::prepare_single_file_state(bytes, source, destination)
+    }
+
     /// Charge the quota for growing from `old_len` to `new_end` bytes.
     pub(super) fn quota_charge_growth(&self, old_len: u64, new_end: u64) -> io::Result<()> {
         if let Some(quota) = &self.quota {
@@ -633,8 +653,8 @@ fn init_entry(entry_timeout: Duration, attr_timeout: Duration) -> Entry {
 fn init_stat() -> stat64 {
     stat64 {
         st_ino: INIT_INODE,
-        st_size: AGENTD_BYTES.len() as i64,
-        st_blocks: blocks_for_size(AGENTD_BYTES.len() as u64),
+        st_size: agentd_bytes().len() as i64,
+        st_blocks: blocks_for_size(agentd_bytes().len() as u64),
         st_mode: S_IFREG | 0o755,
         st_nlink: 1,
         st_uid: 0,

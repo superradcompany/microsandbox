@@ -12,7 +12,7 @@
 
 use std::{fs::File, io, time::Duration};
 
-use crate::{Entry, ZeroCopyWriter, agentd::AGENTD_BYTES, stat64};
+use crate::{Entry, ZeroCopyWriter, agentd::agentd_bytes, stat64};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -42,8 +42,8 @@ pub(crate) fn init_stat() -> stat64 {
         st.st_mode = super::platform::MODE_REG | 0o755;
         st.st_uid = 0;
         st.st_gid = 0;
-        st.st_size = AGENTD_BYTES.len() as i64;
-        st.st_blocks = ((AGENTD_BYTES.len() as i64) + 511) / 512;
+        st.st_size = agentd_bytes().len() as i64;
+        st.st_blocks = ((agentd_bytes().len() as i64) + 511) / 512;
         st.st_blksize = 4096;
     }
 
@@ -54,8 +54,8 @@ pub(crate) fn init_stat() -> stat64 {
         st.st_mode = libc::S_IFREG | 0o755;
         st.st_uid = 0;
         st.st_gid = 0;
-        st.st_size = AGENTD_BYTES.len() as i64;
-        st.st_blocks = ((AGENTD_BYTES.len() as i64) + 511) / 512;
+        st.st_size = agentd_bytes().len() as i64;
+        st.st_blocks = ((agentd_bytes().len() as i64) + 511) / 512;
         st.st_blksize = 4096;
     }
 
@@ -74,7 +74,7 @@ pub(crate) fn init_entry(entry_timeout: Duration, attr_timeout: Duration) -> Ent
     }
 }
 
-/// Create a `File` backed by a memfd (Linux) or tmpfile (macOS) containing AGENTD_BYTES.
+/// Create a `File` backed by a memfd (Linux) or tmpfile (macOS) containing Agentd.
 ///
 /// This file is stored in `PassthroughFs` and used by `read_init` via `write_from`.
 pub(crate) fn create_init_file() -> io::Result<File> {
@@ -87,7 +87,7 @@ pub(crate) fn create_init_file() -> io::Result<File> {
         if fd < 0 {
             return Err(io::Error::last_os_error());
         }
-        let data = AGENTD_BYTES;
+        let data = agentd_bytes();
         let written = unsafe { libc::write(fd, data.as_ptr() as *const libc::c_void, data.len()) };
         if written < 0 {
             let err = io::Error::last_os_error();
@@ -105,7 +105,7 @@ pub(crate) fn create_init_file() -> io::Result<File> {
     {
         use std::io::Write;
         let mut file = tempfile::tempfile()?;
-        file.write_all(AGENTD_BYTES)?;
+        file.write_all(agentd_bytes())?;
         Ok(file)
     }
 }
@@ -120,7 +120,7 @@ pub(crate) fn read_init(
     size: u32,
     offset: u64,
 ) -> io::Result<usize> {
-    let data_len = AGENTD_BYTES.len() as u64;
+    let data_len = agentd_bytes().len() as u64;
 
     if offset >= data_len {
         return Ok(0);

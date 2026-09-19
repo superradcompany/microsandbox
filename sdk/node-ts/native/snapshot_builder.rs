@@ -3,7 +3,7 @@ use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
 use crate::error::to_napi_error;
-use crate::snapshot::JsSnapshot;
+use crate::snapshot::{JsSnapshot, JsSnapshotArchive};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -13,13 +13,17 @@ use crate::snapshot::JsSnapshot;
 #[derive(Clone)]
 #[napi(object, js_name = "SnapshotConfig")]
 pub struct JsSnapshotConfig {
+    pub guest_flush: String,
     pub name: String,
+    pub group: Option<String>,
     pub source_sandbox: Option<String>,
     pub dest_dir: Option<String>,
+    // Keep the public name stable when napi-rs renders this renamed nested object.
+    #[napi(ts_type = "Array<SnapshotLabel>")]
     pub labels: Vec<JsSnapshotLabel>,
     pub force: bool,
     pub record_integrity: bool,
-    pub resumable: bool,
+    pub full: bool,
 }
 
 #[derive(Clone)]
@@ -33,14 +37,16 @@ pub struct JsSnapshotLabel {
 /// The source sandbox is set with `fromSandbox()` and is required.
 #[napi(js_name = "SnapshotBuilder")]
 pub struct JsSnapshotBuilder {
+    guest_flush: String,
     inner: Option<RustSnapshotBuilder>,
     name: String,
+    group: Option<String>,
     source_sandbox: Option<String>,
     dest_dir: Option<String>,
     labels: Vec<(String, String)>,
     force: bool,
     record_integrity: bool,
-    resumable: bool,
+    full: bool,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -52,24 +58,35 @@ impl JsSnapshotBuilder {
     #[napi(constructor)]
     pub fn new(name: String) -> Self {
         Self {
+            guest_flush: "auto".into(),
             inner: Some(RustSnapshot::builder(&name)),
             name,
+            group: None,
             source_sandbox: None,
             dest_dir: None,
             labels: Vec::new(),
             force: false,
             record_integrity: false,
-            resumable: false,
+            full: false,
         }
     }
 
     /// Create the artifact under this parent directory instead of the
-    /// default snapshots store. The artifact lands at `destDir/<name>`.
+    /// default snapshots store. The snapshot group is created under this root.
     #[napi(js_name = "destDir")]
     pub fn dest_dir(&mut self, dest_dir: String) -> &Self {
         let prev = self.take_inner();
         self.inner = Some(prev.dest_dir(&dest_dir));
         self.dest_dir = Some(dest_dir);
+        self
+    }
+
+    /// Install the snapshot in this group (defaults to the source sandbox's name).
+    #[napi]
+    pub fn group(&mut self, group: String) -> &Self {
+        let prev = self.take_inner();
+        self.inner = Some(prev.group(&group));
+        self.group = Some(group);
         self
     }
 
@@ -94,7 +111,7 @@ impl JsSnapshotBuilder {
         self
     }
 
-    /// Overwrite an existing artifact at the destination.
+    /// Overwrite an archive destination; installed group members are immutable.
     #[napi]
     pub fn force(&mut self) -> &Self {
         let prev = self.take_inner();
@@ -112,20 +129,32 @@ impl JsSnapshotBuilder {
         self
     }
 
-    /// Request a future resumable snapshot.
+    /// Capture disk, memory, execution, and device state from a running sandbox.
     #[napi]
-    pub fn resumable(&mut self) -> &Self {
+    pub fn full(&mut self) -> &Self {
         let prev = self.take_inner();
-        self.inner = Some(prev.resumable());
-        self.resumable = true;
+        self.inner = Some(prev.full());
+        self.full = true;
         self
+    }
+
+    /// Select optional writeback: auto, required, or skip. Required storage barriers remain.
+    #[napi]
+    pub fn guest_flush(&mut self, policy: String) -> Result<&Self> {
+        let parsed = guest_flush_policy(Some(policy.clone()))?;
+        let prev = self.take_inner();
+        self.inner = Some(prev.guest_flush(parsed));
+        self.guest_flush = policy;
+        Ok(self)
     }
 
     /// Snapshot the accumulated configuration.
     #[napi]
     pub fn build(&self) -> JsSnapshotConfig {
         JsSnapshotConfig {
+            guest_flush: self.guest_flush.clone(),
             name: self.name.clone(),
+            group: self.group.clone(),
             source_sandbox: self.source_sandbox.clone(),
             dest_dir: self.dest_dir.clone(),
             labels: self
@@ -138,7 +167,7 @@ impl JsSnapshotBuilder {
                 .collect(),
             force: self.force,
             record_integrity: self.record_integrity,
-            resumable: self.resumable,
+            full: self.full,
         }
     }
 
@@ -158,6 +187,24 @@ impl JsSnapshotBuilder {
         let snap = b.create().await.map_err(to_napi_error)?;
         Ok(JsSnapshot::from_rust(snap))
     }
+
+    /// Capture directly to an archive without installing a snapshot artifact.
+    #[napi(js_name = "createArchive")]
+    pub async unsafe fn create_archive(
+        &mut self,
+        out: String,
+        plain_tar: Option<bool>,
+    ) -> Result<JsSnapshotArchive> {
+        let builder = self
+            .inner
+            .take()
+            .ok_or_else(|| napi::Error::from_reason("SnapshotBuilder already consumed"))?;
+        let archive = builder
+            .create_archive(out, plain_tar.unwrap_or(false))
+            .await
+            .map_err(to_napi_error)?;
+        Ok(JsSnapshotArchive::from_rust(archive))
+    }
 }
 
 impl JsSnapshotBuilder {
@@ -166,4 +213,18 @@ impl JsSnapshotBuilder {
             .take()
             .expect("SnapshotBuilder used after consumption")
     }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Functions
+//--------------------------------------------------------------------------------------------------
+
+pub(crate) fn guest_flush_policy(
+    value: Option<String>,
+) -> Result<microsandbox::snapshot::GuestFlush> {
+    value
+        .as_deref()
+        .unwrap_or("auto")
+        .parse()
+        .map_err(napi::Error::from_reason)
 }

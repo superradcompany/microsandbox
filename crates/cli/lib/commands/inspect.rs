@@ -86,6 +86,17 @@ pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
     let handle = Sandbox::get(&args.name).await?;
     let desired_config = handle.config().ok();
     let active_config = handle.active_config().ok().flatten();
+    let pause_state = if matches!(
+        handle.status_snapshot(),
+        SandboxStatus::Running | SandboxStatus::Paused
+    ) {
+        tokio::time::timeout(std::time::Duration::from_millis(250), handle.pause_state())
+            .await
+            .ok()
+            .and_then(Result::ok)
+    } else {
+        None
+    };
     let pending_changes = pending_config_changes(
         handle.status_snapshot(),
         desired_config.as_ref(),
@@ -98,6 +109,7 @@ pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
         let mut json = serde_json::json!({
             "name": handle.name(),
             "status": format!("{:?}", handle.status_snapshot()),
+            "pause": pause_state,
             "config": config,
             "created_at": handle.created_at().map(|dt| ui::format_json_datetime(&dt)),
             "updated_at": handle.updated_at().map(|dt| ui::format_json_datetime(&dt)),
@@ -116,6 +128,14 @@ pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
 
     ui::detail_kv("Name", handle.name());
     ui::detail_kv("Status", &ui::format_status(&status));
+    if let Some(state) = &pause_state {
+        if state.recovery_required {
+            ui::detail_kv("Recovery", "Required; ordinary resume is fenced");
+        }
+        if let Some(reason) = &state.capture_unavailable {
+            ui::detail_kv("Full snapshot", reason);
+        }
+    }
 
     if let Some(dt) = handle.created_at() {
         ui::detail_kv("Created", &ui::format_datetime(&dt));
@@ -248,6 +268,34 @@ pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
             ui::detail_header("Mounts");
             for mount in &config.spec.mounts {
                 match mount {
+                    VolumeMount::Owned {
+                        guest,
+                        storage,
+                        options,
+                        stat_virtualization,
+                        host_permissions,
+                    } => {
+                        let flags = mount_flags_suffix(*options);
+                        let detail = match storage {
+                            microsandbox::sandbox::OwnedVolumeStorage::Directory { quota_mib } => {
+                                let quota = quota_mib
+                                    .map(|mib| format!(" [quota={mib}MiB]"))
+                                    .unwrap_or_default();
+                                format!(
+                                    "directory{}{quota}",
+                                    mount_policy_suffix(
+                                        *stat_virtualization,
+                                        *host_permissions,
+                                        false
+                                    )
+                                )
+                            }
+                            microsandbox::sandbox::OwnedVolumeStorage::Disk { capacity_mib } => {
+                                format!("ext4 disk ({capacity_mib} MiB)")
+                            }
+                        };
+                        println!("  {guest:<16}\u{2192} owned {detail}{flags}");
+                    }
                     VolumeMount::Bind {
                         host,
                         guest,

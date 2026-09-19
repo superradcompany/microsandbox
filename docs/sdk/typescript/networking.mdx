@@ -592,10 +592,25 @@ Require hostname-based policy allows to use an inspectable request authority. De
   </div>
 </div>
 
-#### <span className="msb-recv">network.</span><span className="msb-hn">maxConnections()</span>
+#### maxUdpConnections()
+
+`network.maxUdpConnections(512)` sets the runtime UDP relay session limit. Omission is unlimited in single-tenant mode and defaults to 1,024 in multi-tenant mode; zero explicitly selects unlimited. At a finite limit, a new session evicts the least recently active session. Sessions expire after 60 seconds of inactivity.
+
+#### <span className="msb-recv">network.</span><span className="msb-hn">maxTcpConnections()</span>
+
+`maxConnections` remains a deprecated alias for this builder method. The last call sets the TCP limit. Either method can be combined with the UDP limit.
+
+Restore uses the same host-side limits without changing the captured guest interface:
 
 ```typescript
-maxConnections(max: number): this
+const restored = await Sandbox.restore("saved").name("child")
+  .maxTcpConnections(64).maxUdpConnections(128).restore();
+```
+
+Omitted restore limits use destination defaults; zero selects unlimited. The same setters work with `restoreWithProgress()`, and `maxConnections()` remains a deprecated TCP-only alias.
+
+```typescript
+maxTcpConnections(max: number): this
 ```
 
 Limit the maximum number of concurrent network connections from the sandbox.
@@ -714,36 +729,13 @@ Enable or disable networking entirely. When `false`, no network interface is cre
   </div>
 </div>
 
-#### <span className="msb-recv">network.</span><span className="msb-hn">onSecretViolation()</span>
+#### <span className="msb-recv">network.</span><span className="msb-hn">secretViolationAction()</span>
 
 ```typescript
-onSecretViolation(configure: (b: ViolationActionBuilder) => ViolationActionBuilder): this
+secretViolationAction(action: "block" | "block-and-log" | "block-and-terminate"): this
 ```
 
-<Accordion title="Example">
-
-```typescript
-.network((n) =>
-  n.onSecretViolation((v) =>
-    v.blockAndLog().passthroughHost("api.anthropic.com"),
-  ),
-)
-```
-
-</Accordion>
-
-Configure the action taken when a secret reaches a disallowed host. See [`ViolationActionBuilder`](#violationactionbuilder).
-
-<p className="msb-label">Parameters</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><code>configure</code><a className="msb-type" href="#violationactionbuilder">ViolationActionBuilder</a></div>
-    <div className="msb-param-desc">Configure the violation action.</div>
-  </div>
-</div>
-
-Passthrough hosts receive placeholders unchanged. They do **not** receive real secret values.
+Set the sandbox-wide blocking action. Passthrough hosts are configured per secret with `allowPassthroughFor()`.
 
 #### <span className="msb-recv" id="nb-secret">network.</span><span className="msb-hn">secret()</span>
 
@@ -751,16 +743,7 @@ Passthrough hosts receive placeholders unchanged. They do **not** receive real s
 secret(configure: (b: SecretBuilder) => SecretBuilder): this
 ```
 
-Add a secret with full configuration. See [`SecretBuilder`](/sdk/typescript/secrets#secretbuilder).
-
-<p className="msb-label">Parameters</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><code>configure</code><a className="msb-type" href="/sdk/typescript/secrets#secretbuilder">SecretBuilder</a></div>
-    <div className="msb-param-desc">Configure the secret.</div>
-  </div>
-</div>
+Add a secret with full configuration. See [`SecretBuilder`](/sdk/typescript/secrets).
 
 #### <span className="msb-recv">network.</span><span className="msb-hn">secretEnv()</span>
 
@@ -1726,84 +1709,6 @@ upstreamCaCertFor(pattern: string, path: string): this
 
 Path to a PEM file with extra root CAs the proxy should trust only when the upstream SNI matches `pattern`. Pattern syntax matches [`bypass()`](#tls-bypass): exact hosts and `*.suffix` wildcards are supported.
 
-## ViolationActionBuilder
-
-Configures the action taken when a secret would be sent to a disallowed host. Used in `NetworkBuilder.onSecretViolation(v => ...)`. Passthrough host calls accumulate; when passthrough hosts are configured, non-matching hosts use the default secret-violation action.
-
-#### <span className="msb-recv" id="va-block">violation.</span><span className="msb-hn">block()</span>
-
-```typescript
-block(): this
-```
-
-Block the request silently.
-
-#### <span className="msb-recv">violation.</span><span className="msb-hn">blockAndLog()</span>
-
-```typescript
-blockAndLog(): this
-```
-
-Block the request and emit a warning log.
-
-#### <span className="msb-recv">violation.</span><span className="msb-hn">blockAndTerminate()</span>
-
-```typescript
-blockAndTerminate(): this
-```
-
-Block the request and terminate the sandbox.
-
-#### <span className="msb-recv">violation.</span><span className="msb-hn">passthroughHost()</span>
-
-```typescript
-passthroughHost(host: string): this
-```
-
-Allow placeholders to pass through unchanged to an exact host. The host receives the placeholder, not the real secret value.
-
-<p className="msb-label">Parameters</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><code>host</code><span className="msb-type">string</span></div>
-    <div className="msb-param-desc">Exact host.</div>
-  </div>
-</div>
-
-#### <span className="msb-recv">violation.</span><span className="msb-hn">passthroughHostPattern()</span>
-
-```typescript
-passthroughHostPattern(pattern: string): this
-```
-
-Allow placeholders to pass through unchanged to matching wildcard hosts.
-
-<p className="msb-label">Parameters</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><code>pattern</code><span className="msb-type">string</span></div>
-    <div className="msb-param-desc">Wildcard host pattern.</div>
-  </div>
-</div>
-
-#### <span className="msb-recv">violation.</span><span className="msb-hn">passthroughAllHosts()</span>
-
-```typescript
-passthroughAllHosts(iUnderstand: boolean): this
-```
-
-Allow placeholders to pass through unchanged to any host. The explicit `iUnderstand` flag must be `true` to acknowledge the broad scope.
-
-<p className="msb-label">Parameters</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><code>iUnderstand</code><span className="msb-type">boolean</span></div>
-    <div className="msb-param-desc">Must be <code>true</code> to opt in.</div>
-  </div>
-</div>
 
 ## NetworkRateLimiterBuilder
 
@@ -1934,8 +1839,9 @@ Built network configuration produced by `NetworkBuilder.build()`. Keys are camel
 | dns | [`DnsConfig`](#dnsconfig) ` \| null` | DNS interception |
 | tls | [`TlsConfig`](#tlsconfig) ` \| null` | TLS interception |
 | secrets | `readonly SecretEntry[]` | Secret entries |
-| secretViolation | [`ViolationAction`](/sdk/typescript/secrets#violationaction) ` \| null` | Action on disallowed secret use |
-| maxConnections | `number \| null` | Maximum concurrent connections |
+| secretViolationAction | [`ViolationAction`](/sdk/typescript/secrets#violationaction) ` \| null` | Action on disallowed secret use |
+| maxTcpConnections | `number \| null` | Maximum concurrent TCP connections |
+| maxUdpConnections | `number \| null` (optional) | Maximum concurrent UDP relay sessions |
 | strict | `boolean` | Strict hostname policy mode |
 | rateLimiter | [`NetworkRateLimiterConfig`](#networkratelimiterconfig) ` \| null` | Local rate limits grouped by direction |
 | interface | `{ ipv4Pool?, ipv6Pool?, ipv4Address?, ipv6Address?, mac?, mtu? }` | Optional interface overrides |
@@ -1972,7 +1878,7 @@ type Direction = "egress" | "ingress" | "any";
 
 ### DestinationGroup
 
-<p className="msb-backref">Used by <a href="#destinationgroup">Destination.group()</a> · <a href="#rd-group">RuleDestinationBuilder.group()</a></p>
+<p className="msb-backref">Used by <a href="#destination-group">Destination.group()</a> · <a href="#rd-group">RuleDestinationBuilder.group()</a></p>
 
 Predefined address group keyword. The runtime constant `DestinationGroups` lists all values.
 

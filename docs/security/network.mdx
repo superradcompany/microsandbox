@@ -6,7 +6,7 @@ icon: "network-wired"
 
 All sandbox traffic flows through a host-side network stack. From inside the VM it looks like a normal network interface. On the host side, a user-space stack terminates every packet and checks it against policy before anything leaves. There is no host kernel routing or NAT in the path. The host process is the sandbox's entire view of the network.
 
-This is the network chapter of the security model: the threats the stack is built to stop and where each defense lives. For day-to-day configuration like policies, ports, DNS knobs, and TLS MITM, see the [Networking guide](/networking/overview).
+This is the network chapter of the security model: the threats the stack is built to stop and where each defense lives. For day-to-day configuration like policies, ports, DNS knobs, and TLS inspection, see the [Networking guide](/networking/overview).
 
 ## Default posture
 
@@ -86,13 +86,13 @@ Domain rules require two things when SNI is present, and both must pass: the SNI
 
 ## The DNS bypass surface
 
-DNS-based defenses like block lists, rebind protection, and domain pinning only act on queries the interceptor sees. The gateway intercepts UDP/53 and TCP/53 directly, and DoT (TCP/853) when TLS MITM is enabled. microsandbox either refuses other transports at the port layer (DoQ, mDNS, LLMNR, NetBIOS-NS) or cannot distinguish them from ordinary traffic (DoH on TCP/443). Tunneled DNS (VPN, SOCKS5 hostname mode, HTTP `CONNECT`) rides inside the outer encrypted flow and never reaches the forwarder.
+DNS-based defenses like block lists, rebind protection, and domain pinning only act on queries the interceptor sees. The gateway intercepts UDP/53 and TCP/53 directly, and DoT (TCP/853) when TLS inspection is enabled. microsandbox either refuses other transports at the port layer (DoQ, mDNS, LLMNR, NetBIOS-NS) or cannot distinguish them from ordinary traffic (DoH on TCP/443). Tunneled DNS (VPN, SOCKS5 hostname mode, HTTP `CONNECT`) rides inside the outer encrypted flow and never reaches the forwarder.
 
 Where DNS integrity matters, pair DoT interception with a policy that denies egress UDP/53, TCP/53, and TCP/853 to everything except the gateway, and close tunnels by restricting egress to an allowlist. See [DNS](/networking/dns) for the transport-by-transport breakdown.
 
 ## Trusting host CAs
 
-TLS MITM uses an auto-generated CA the guest trusts. A separate option, `trust_host_cas`, additionally ships your host's trusted root CAs into the guest so outbound TLS keeps working behind a corporate MITM proxy. It is **off by default** for a reason: anything in your host trust store becomes trusted inside every sandbox, so a CA an attacker managed to plant on your host would be trusted by your guests too. Leave it off unless you specifically need it. See [TLS MITM](/networking/tls).
+TLS inspection uses an auto-generated CA the guest trusts. A separate option, `trust_host_cas`, additionally ships your host's trusted root CAs into the guest so outbound TLS keeps working behind a corporate MITM proxy. It is **off by default** for a reason: anything in your host trust store becomes trusted inside every sandbox, so a CA an attacker managed to plant on your host would be trusted by your guests too. Leave it off unless you specifically need it. See [TLS inspection](/networking/tls).
 
 ## Out of scope
 
@@ -107,5 +107,5 @@ The network stack does not try to defend against:
 
 - [Networking overview](/networking/overview): policies, ports, reaching the host
 - [DNS](/networking/dns): interception and the controls that ride on it
-- [TLS MITM](/networking/tls): plaintext visibility for per-host policy and secret injection
+- [TLS inspection](/networking/tls): plaintext visibility for per-host policy and secret injection
 - [Secret handling](/security/secrets): how the same DNS and SNI machinery gates credential injection

@@ -127,12 +127,20 @@ impl Default for MetricsExporterConfig {
 impl MetricsCollectorBuilder {
     /// Construct a builder that reads from the named shm registry.
     pub(crate) fn new(registry_name: String) -> Self {
+        Self::new_for_registries(vec![(
+            registry_name,
+            microsandbox_metrics::REGISTRY_ABI_VERSION,
+        )])
+    }
+
+    /// Construct a builder that merges snapshots from compatible registries.
+    pub(crate) fn new_for_registries(registries: Vec<(String, u32)>) -> Self {
         Self {
             collect_interval: DEFAULT_COLLECT_INTERVAL,
             max_sample_age: Some(DEFAULT_MAX_SAMPLE_AGE),
             default_collector_config: MetricsExporterConfig::default(),
             collectors: Vec::new(),
-            collect_fn: registry_collect_fn(registry_name),
+            collect_fn: registry_collect_fn(registries),
         }
     }
 

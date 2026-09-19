@@ -15,7 +15,7 @@ async def main():
     # snapshot can race ahead of the writes.
     await baseline.shell("echo 'shipped via snapshot' > /root/marker.txt && sync")
 
-    # Snapshots are stopped-only.
+    # Capture this example after stopping the source.
     await baseline.stop()
 
     h = await Sandbox.get("snapshot-baseline")
@@ -23,13 +23,9 @@ async def main():
     print(f"created snapshot: {snap.digest}")
     print(f"                  {snap.path}")
 
-    # `from_snapshot=` is a peer of `image=`; the fork starts with the
+    # Restore uses the snapshot image and captured state; the child starts with the
     # captured upper layer in place.
-    fork = await Sandbox.create(
-        "snapshot-fork",
-        from_snapshot="snapshot-baseline-state",
-        replace=True,
-    )
+    fork = await Sandbox.restore(snap.path, name="snapshot-fork")
     output = await fork.shell("cat /root/marker.txt")
     print(f"fork sees: {output.stdout_text.strip()}")
 
@@ -37,7 +33,7 @@ async def main():
 
     await Sandbox.remove("snapshot-baseline")
     await Sandbox.remove("snapshot-fork")
-    await Snapshot.remove("snapshot-baseline-state")
+    await Snapshot.remove("snapshot-baseline:snapshot-baseline-state")
 
 
 asyncio.run(main())

@@ -347,7 +347,7 @@ async fn https_connect_proxy_substitutes_secret_in_authorization_header() {
         .secret(|s| {
             s.env("API_KEY")
                 .value(REAL_SECRET)
-                .allow_host("host.microsandbox.internal")
+                .allow("host.microsandbox.internal")
         })
         .network(|n| {
             n.policy(NetworkPolicy::allow_all()).tls(|t| {
@@ -420,7 +420,7 @@ async fn https_connect_proxy_blocks_secret_for_wrong_host() {
         .secret(|s| {
             s.env("API_KEY")
                 .value(REAL_SECRET)
-                .allow_host("api.allowed.test")
+                .allow("api.allowed.test")
         })
         .network(|n| {
             n.policy(NetworkPolicy::allow_all()).tls(|t| {
@@ -497,7 +497,7 @@ async fn https_connect_proxy_leaves_non_intercepted_target_port_opaque() {
         .secret(|s| {
             s.env("API_KEY")
                 .value(REAL_SECRET)
-                .allow_host("host.microsandbox.internal")
+                .allow("host.microsandbox.internal")
         })
         .network(|n| {
             n.policy(NetworkPolicy::allow_all()).tls(|t| {
@@ -569,7 +569,7 @@ async fn https_connect_proxy_blocks_secret_in_outer_connect_headers() {
         .secret(|s| {
             s.env("API_KEY")
                 .value(REAL_SECRET)
-                .allow_host("host.microsandbox.internal")
+                .allow("host.microsandbox.internal")
         })
         .network(|n| n.policy(NetworkPolicy::allow_all()))
         .create()
@@ -628,11 +628,7 @@ async fn https_connect_proxy_substitutes_secret_when_target_not_in_dns_cache() {
         .memory(256)
         .user("0")
         .replace()
-        .secret(|s| {
-            s.env("API_KEY")
-                .value(REAL_SECRET)
-                .allow_host(FAKE_TARGET_HOST)
-        })
+        .secret(|s| s.env("API_KEY").value(REAL_SECRET).allow(FAKE_TARGET_HOST))
         .network(|n| {
             n.policy(NetworkPolicy::allow_all()).tls(|t| {
                 t.intercepted_ports(vec![target_port])
@@ -708,11 +704,7 @@ async fn https_connect_proxy_substitutes_secret_after_prior_dns_lookup() {
         .memory(256)
         .user("0")
         .replace()
-        .secret(|s| {
-            s.env("API_KEY")
-                .value(REAL_SECRET)
-                .allow_host(FAKE_TARGET_HOST)
-        })
+        .secret(|s| s.env("API_KEY").value(REAL_SECRET).allow(FAKE_TARGET_HOST))
         .network(|n| {
             n.policy(NetworkPolicy::allow_all()).tls(|t| {
                 t.intercepted_ports(vec![target_port])

@@ -398,12 +398,14 @@ export type JsMetricsStream = MetricsStream
 /**
  * Fluent builder for a sandbox volume mount.
  *
- * Pick exactly one mount kind via `.bind()`, `.named()`, `.tmpfs()`, or
+ * Pick exactly one mount kind via `.bind()`, `.named()`, `.owned()`, `.tmpfs()`, or
  * `.disk(...)`, then chain modifiers (`.readonly()`, `.noexec()`, `.nosuid()`, `.nodev()`,
  * `.size(mib)` for tmpfs, `.format(fmt)` / `.fstype(s)` for disk).
  * Validation is deferred to the terminal `.build()` call.
  */
 export declare class MountBuilder {
+  /** Restore this captured private disk without a host binding. */
+  captured(): this
   constructor(guest: string)
   /** Bind a host directory at the guest path. */
   bind(host: string): this
@@ -411,6 +413,11 @@ export declare class MountBuilder {
   named(name: string): this
   /** Mount a named volume with explicit existence behavior. */
   namedWith(name: string, mode?: string | undefined | null, kind?: string | undefined | null, sizeMib?: number | undefined | null, quotaMib?: number | undefined | null): this
+  /**
+   * Allocate storage retained across restarts and removed with this sandbox.
+   * Defaults to a directory; disk storage requires a positive `sizeMib`.
+   */
+  owned(options?: { kind?: 'dir' | 'disk'; sizeMib?: number; quotaMib?: number }): this
   /** Mount an in-memory tmpfs at the guest path. */
   tmpfs(): this
   /** Mount a host disk image file as a virtio-blk device. */
@@ -443,19 +450,19 @@ export declare class MountBuilder {
    * Set the guest stat virtualization policy.
    *
    * Accepts `"strict"`, `"relaxed"`, or `"off"`. Valid only for bind and
-   * directory-backed named volume mounts.
+   * directory-backed named or owned volume mounts.
    */
   statVirtualization(policy: string): this
   /**
    * Set the host permission propagation policy.
    *
    * Accepts `"private"` or `"mirror"`. Valid only for bind and
-   * directory-backed named volume mounts.
+   * directory-backed named or owned volume mounts.
    */
   hostPermissions(policy: string): this
   /**
    * Present host files that carry no per-file stat override as this guest
-   * owner. Valid only for bind and directory-backed named volume mounts.
+   * owner. Valid only for bind and directory-backed named or owned volume mounts.
    */
   owner(uid: number, gid: number): this
   /**
@@ -516,10 +523,14 @@ export declare class NetworkBuilder {
    * interface. The closure receives a fresh `InterfaceOverridesBuilder`.
    */
   interface(configure: (arg: InterfaceOverridesBuilder) => InterfaceOverridesBuilder): this
-  /** Configure the violation action for secrets. */
-  onSecretViolation(configure: (arg: JsViolationActionBuilder) => JsViolationActionBuilder): this
-  /** Set the maximum number of concurrent connections. */
+  /** Configure the default blocking action for secret placeholders. */
+  secretViolationAction(action: string): this
+  /** @deprecated Use maxTcpConnections instead. */
   maxConnections(max: number): this
+  /** Set the TCP connection cap; zero selects unlimited. */
+  maxTcpConnections(max: number): this
+  /** Set the UDP session cap; zero selects unlimited. Defaults to unlimited for single-tenant and 1024 for multi-tenant. */
+  maxUdpConnections(max: number): this
   /** Require hostname-based policy allows to use inspectable application authority. */
   strict(enabled: boolean): this
   /** Set the IPv4 pool used for per-sandbox /30 guest subnets. */
@@ -641,6 +652,8 @@ export type JsPatchBuilder = PatchBuilder
  * plus a method to await the final `Sandbox`.
  */
 export declare class PullProgressCreate {
+  /** Cancel creation, independently of whether awaitSandbox is already waiting. */
+  cancel(): void
   /**
    * The progress event stream. Iterate with `for await...of` or
    * poll with `.recv()`. The stream closes once the pull completes.
@@ -650,7 +663,7 @@ export declare class PullProgressCreate {
    * Await the sandbox. Resolves once the pull + boot finishes.
    * Calling more than once errors.
    */
-  awaitSandbox(): Promise<JsSandbox>
+  awaitSandbox(): Promise<Sandbox>
 }
 export type JsPullProgressCreate = PullProgressCreate
 
@@ -729,6 +742,87 @@ export declare class RegistryConfigBuilder {
   build(): RegistryConfig
 }
 export type JsRegistryConfigBuilder = RegistryConfigBuilder
+
+/** Snapshot restoration with explicit destination resource bindings. */
+export declare class RestoreBuilder {
+  /** Select an installed snapshot or archive; this does not start a VM. */
+  constructor(snapshot: string, referenceKind?: string | undefined | null)
+  /** Choose the destination sandbox name. */
+  name(name: string): this
+  /** Set destination CPUs; full execution restore requires the captured count. */
+  cpus(count: number): this
+  /** Set destination memory in MiB; full execution restore requires captured geometry. */
+  memory(mib: number): this
+  /** Set only host-side network policy, without DNS, TLS, or guest bootstrap changes. */
+  networkPolicyJson(json: string): this
+  /** Set host-side policy from the existing policy builder. */
+  networkPolicyFromBuilder(builder: NetworkPolicyBuilder): this
+  /** @deprecated Use maxTcpConnections instead. */
+  maxConnections(count: number): this
+  /** Cap destination host-side TCP connections; zero selects unlimited. */
+  maxTcpConnections(count: number): this
+  /** Cap destination host-side UDP sessions; zero selects unlimited. */
+  maxUdpConnections(count: number): this
+  /** Disable networking; full restore rejects removal of a captured NIC. */
+  disableNetwork(): this
+  /** Set guest security for disk boot; explicit changes are rejected by full restore. */
+  security(profile: 'default' | 'restricted'): this
+  /** Apply the destination host's maximum runtime in seconds; zero expires immediately. */
+  maxDuration(secs: number): this
+  /** Apply the destination host's idle timeout in seconds; zero expires immediately. */
+  idleTimeout(secs: number): this
+  /** Explicitly reuse locally validated source resource bindings. */
+  dangerouslyInheritResources(): this
+  /** Accept missing restore resources without inheriting host resources. */
+  allowMissingResources(): this
+  /** Supply the base for omitted disk layers and RAM objects in a snapshot archive. */
+  snapshotBase(base: string): this
+  /** Cold-boot only the disk state carried by a full snapshot. */
+  diskOnly(): this
+  /** Restore a full snapshot with private copy-on-write memory. */
+  forked(): this
+  /**
+   * Validate authorized filesystem mappings strictly (default) or allow supported mismatches.
+   * Neither policy inherits resources; unmapped filesystems remain unavailable.
+   */
+  externalMountPolicy(policy: 'strict' | 'relaxed'): this
+  /** Override log verbosity: `"trace" | "debug" | "info" | "warn" | "error"`. */
+  logLevel(level: string): this
+  /** Default running user. */
+  user(user: string): this
+  /**
+   * Configure a volume mount via a callback. The callback receives a
+   * `MountBuilder` already pre-bound to `guestPath`.
+   */
+  volume(guestPath: string, configure: (arg: MountBuilder) => MountBuilder): this
+  /** Publish a TCP port from host -> guest. */
+  port(hostPort: number, guestPort: number): this
+  /** Publish a TCP port from host -> guest on a specific host bind address. */
+  portBind(bind: string, hostPort: number, guestPort: number): this
+  /** Publish a UDP port from host -> guest. */
+  portUdp(hostPort: number, guestPort: number): this
+  /** Publish a UDP port from host -> guest on a specific host bind address. */
+  portUdpBind(bind: string, hostPort: number, guestPort: number): this
+  /** Expose a host Unix stream socket or local Windows named pipe on a guest-to-host vsock port. */
+  vsock(hostPath: string, port: number): this
+  /** Expose a host Unix datagram socket on a guest-to-host vsock port. */
+  vsockDgram(hostPath: string, port: number): this
+  /**
+   * Restore a detached sandbox and wait until ready.
+   *
+   * # Safety
+   * The builder is consumed before suspension; callers must not reuse it.
+   */
+  restore(): Promise<Sandbox>
+  /**
+   * Restore with image, snapshot preparation and activation progress.
+   *
+   * # Safety
+   * The builder is consumed before suspension; callers must not reuse it.
+   */
+  restoreWithProgress(): Promise<JsPullProgressCreate>
+}
+export type JsRestoreBuilder = RestoreBuilder
 
 /**
  * Fluent builder for the root disk of an OCI image.
@@ -973,7 +1067,7 @@ export declare class Sandbox {
   /** Execute a shell command with streaming I/O. */
   shellStream(script: string): Promise<ExecHandle>
   /** Get a filesystem handle for operations on the running sandbox. */
-  fs(): JsSandboxFs
+  fs(): SandboxFsOps
   /** Connect a native in-process SSH client to this sandbox. */
   sshConnect(options?: SshClientOptions | undefined | null): Promise<JsSshClient>
   /** Prepare a reusable SSH server endpoint for this sandbox. */
@@ -989,6 +1083,8 @@ export declare class Sandbox {
    * string; the TS wrapper parses it into a `SandboxModificationPlan`.
    */
   modify(options?: SandboxModifyOptions | undefined | null): Promise<string>
+  /** Compact root and owned-data disk prefixes; the limit includes the base, not the writable head. */
+  compact(layers?: number | undefined | null, dryRun?: boolean | undefined | null, disk?: string | undefined | null, rootDiskOnly?: boolean | undefined | null): Promise<string>
   /** Stream metrics snapshots at the requested interval (in milliseconds). */
   metricsStream(intervalMs: number): Promise<MetricsStream>
   /** Attach to the sandbox's effective OCI entrypoint and CMD. */
@@ -1010,11 +1106,21 @@ export declare class Sandbox {
   attachShell(): Promise<number>
   /** Stop the sandbox gracefully and wait for it to exit. */
   stop(): Promise<void>
+  /** Warnings for unmapped external filesystems and accepted restore mismatches. */
+  restoreWarnings(): Promise<Array<ExternalMountWarning>>
+  /** Create an independent local CoW child without a durable full snapshot. */
+  branch(name: string, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null): Promise<Sandbox>
+  /** Capture once and return individual child startup outcomes. */
+  branchMany(names: Array<string>, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null): Promise<Array<JsBranchOutcome>>
+  /** Explicit resident pause through host control. */
+  pause(guestFlush?: string | undefined | null): Promise<void>
+  /** Explicit resident resume through host control. */
+  resume(): Promise<void>
   /** Stop and wait for exit, returning the exit status. */
   stopAndWait(): Promise<ExitStatus>
   /** Request graceful shutdown without waiting for observed exit. */
   requestStop(): Promise<void>
-  /** Stop gracefully with an explicit timeout before escalating to SIGKILL. */
+  /** One graceful-completion budget; expiry rejects without killing, including zero. */
   stopWithTimeout(timeoutMs: number): Promise<void>
   /** Kill the sandbox immediately and wait for observed exit. */
   kill(): Promise<void>
@@ -1036,9 +1142,16 @@ export declare class Sandbox {
   waitUntilStopped(): Promise<SandboxStopResult>
   /** Wait for the sandbox process to exit. */
   wait(): Promise<ExitStatus>
-  /** Detach from the sandbox — it will continue running after this handle is dropped. */
+  /**
+   * Detach from the sandbox — it will continue running after this handle is dropped.
+   * New operations are rejected; already admitted operations retain their connection.
+   */
   detach(): Promise<void>
-  /** Remove the persisted database record after stopping. */
+  /**
+   * Remove the persisted database record after stopping.
+   * Consumes this wrapper even on failure. Already admitted operations may finish or
+   * fail at the runtime boundary; removal does not wait for guest operations to drain.
+   */
   removePersisted(): Promise<void>
   /**
    * Read captured output from `exec.log` for this sandbox.
@@ -1094,12 +1207,6 @@ export declare class SandboxBuilder {
    * ```
    */
   rootDisk(sizeMibOrConfigure: number | ((d: RootDiskBuilder) => RootDiskBuilder)): this
-  /**
-   * Boot a fresh sandbox from a snapshot artifact (path or name).
-   * Mutually exclusive with `image()` / `imageWith()` — the
-   * snapshot already pins the image reference and digest.
-   */
-  fromSnapshot(pathOrName: string): this
   /** Number of virtual CPUs. */
   cpus(count: number): this
   /** Boot-time maximum possible virtual CPUs. */
@@ -1275,14 +1382,14 @@ export declare class SandboxBuilder {
    * synchronously before awaiting; napi-rs requires the `unsafe` tag
    * regardless. JS callers see `create(): Promise<Sandbox>`.
    */
-  create(): Promise<JsSandbox>
+  create(): Promise<Sandbox>
   /**
    * Connect to the persisted sandbox with this name, or create it.
    *
    * # Safety
    * Same justification as `create`.
    */
-  connectOrCreate(): Promise<JsSandbox>
+  connectOrCreate(): Promise<Sandbox>
   /**
    * Create the sandbox with image-pull progress reporting. Returns
    * a `PullProgressStream` of per-layer download/materialization
@@ -1294,6 +1401,13 @@ export declare class SandboxBuilder {
    * Same justification as `create`.
    */
   createWithPullProgress(): Promise<JsPullProgressCreate>
+  /**
+   * Create with image, snapshot preparation and activation progress.
+   *
+   * # Safety
+   * Same consumed-builder ownership requirement as `create`.
+   */
+  createWithProgress(): Promise<JsPullProgressCreate>
 }
 export type JsSandboxBuilder = SandboxBuilder
 
@@ -1375,6 +1489,8 @@ export declare class SandboxHandle {
    * string; the TS wrapper parses it into a `SandboxModificationPlan`.
    */
   modify(options?: SandboxModifyOptions | undefined | null): Promise<string>
+  /** Compact root and owned-data disk prefixes of a running or stopped sandbox. */
+  compact(layers?: number | undefined | null, dryRun?: boolean | undefined | null, disk?: string | undefined | null, rootDiskOnly?: boolean | undefined | null): Promise<string>
   /** Start the sandbox (attached mode) — returns a live Sandbox handle. */
   start(): Promise<Sandbox>
   /** Start the sandbox (detached mode). */
@@ -1394,17 +1510,23 @@ export declare class SandboxHandle {
   /**
    * Stop the sandbox gracefully.
    *
-   * Lets the sandbox finish writing any pending data to disk before
-   * it exits, so files written inside the sandbox aren't lost across
-   * a later restart. Waits 10_000 ms by default before force-kill;
-   * override with `stopWithTimeout(timeoutMs)`.
+   * Wait indefinitely for the targeted runtime to finish gracefully and release
+   * ownership. No implicit kill; use `stopWithTimeout` for a bounded wait.
    */
   stop(): Promise<void>
+  /** Create an independent local CoW child without a durable full snapshot. */
+  branch(name: string, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null): Promise<Sandbox>
+  /** Capture once and return individual child startup outcomes. */
+  branchMany(names: Array<string>, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null): Promise<Array<JsBranchOutcome>>
+  /** Explicit resident pause through host control. */
+  pause(guestFlush?: string | undefined | null): Promise<void>
+  /** Explicit resident resume through host control. */
+  resume(): Promise<void>
   /** Request graceful shutdown without waiting. */
   requestStop(): Promise<void>
   /**
-   * Stop the sandbox gracefully with an explicit timeout in
-   * milliseconds before escalation.
+   * One graceful-completion budget in milliseconds. Timeout rejects without killing;
+   * zero expires before dispatch.
    */
   stopWithTimeout(timeoutMs: number): Promise<void>
   /** Force-kill the sandbox and wait until stopped state is observed. */
@@ -1440,7 +1562,7 @@ export declare class SandboxHandle {
    */
   logStream(opts?: LogStreamOptions | undefined | null): Promise<LogStream>
   /**
-   * Snapshot this (stopped) sandbox under a bare name.
+   * Snapshot this sandbox's disk under a bare name, preserving its running/paused state.
    *
    * Resolves under `~/.microsandbox/snapshots/<name>/`. Move
    * artifacts with `Snapshot.save`/`Snapshot.load`.
@@ -1458,10 +1580,8 @@ export declare class SecretBuilder {
   value(value: string): this
   /** Custom placeholder. Auto-generated as `$MSB_<env>` when unset. */
   placeholder(placeholder: string): this
-  /** Add an allowed exact-match host. */
-  allowHost(host: string): this
-  /** Add an allowed wildcard host pattern (e.g. `*.openai.com`). */
-  allowHostPattern(pattern: string): this
+  /** Add a host allowed to receive the substituted secret value. */
+  allow(host: string): this
   /**
    * Allow any host. **Dangerous** — secret can be exfiltrated.
    * Pass `true` to opt in.
@@ -1469,16 +1589,16 @@ export declare class SecretBuilder {
   allowAnyHostDangerous(iUnderstand: boolean): this
   /** Require verified TLS identity before substituting (default: true). */
   requireTlsIdentity(enabled: boolean): this
-  /** Configure header injection (default: true). */
-  injectHeaders(enabled: boolean): this
-  /** Configure Basic Auth injection (default: true). */
-  injectBasicAuth(enabled: boolean): this
-  /** Configure URL query parameter injection (default: false). */
-  injectQuery(enabled: boolean): this
-  /** Configure request body injection (default: false). */
-  injectBody(enabled: boolean): this
-  /** Configure violation behavior for this secret. */
-  onViolation(configure: (arg: JsViolationActionBuilder) => JsViolationActionBuilder): this
+  /** Allow a host to receive the unchanged placeholder. */
+  allowPassthroughFor(host: string): this
+  /** Configure header substitution (default: true). */
+  substituteInHeaders(enabled: boolean): this
+  /** Configure URL query parameter substitution (default: false). */
+  substituteInQuery(enabled: boolean): this
+  /** Configure request body substitution (default: false). */
+  substituteInBody(enabled: boolean): this
+  /** Configure the blocking action for this secret. */
+  violationAction(action: string): this
   /**
    * Materialize into a `SecretEntry`. Panics if required fields are not
    * set (matches the underlying Rust builder's contract; surface as a
@@ -1487,17 +1607,6 @@ export declare class SecretBuilder {
   build(): SecretEntry
 }
 export type JsSecretBuilder = SecretBuilder
-
-/** Builder for installing the runtime binaries. */
-export declare class Setup {
-  constructor()
-  baseDir(path: string): this
-  version(version: string): this
-  skipVerify(enabled: boolean): this
-  force(enabled: boolean): this
-  install(): Promise<void>
-}
-export type JsSetup = Setup
 
 /** High-level SFTP client session. */
 export declare class SftpClient {
@@ -1524,28 +1633,25 @@ export declare class SftpClient {
 }
 export type JsSftpClient = SftpClient
 
-/** A snapshot artifact on disk. */
+/** A backend-neutral snapshot artifact. */
 export declare class Snapshot {
   static open(pathOrName: string): Promise<Snapshot>
   static get(nameOrDigest: string): Promise<SnapshotHandle>
   static list(): Promise<Array<SnapshotInfo>>
-  /**
-   * Walk `dir` and parse each subdirectory's `snapshot.json`. Does
-   * not touch the local index — useful for inspecting external
-   * snapshot collections (e.g. a mounted volume of artifacts that
-   * were never imported).
-   */
-  static listDir(dir: string): Promise<Array<Snapshot>>
   static remove(pathOrName: string, opts?: SnapshotRemoveOptions | undefined | null): Promise<void>
-  static reindex(dir?: string | undefined | null): Promise<number>
-  /**
-   * Bundle a snapshot into a `.tar.zst` archive. The recorded
-   * manifest is archived as-is, so create the snapshot with
-   * `recordIntegrity()` if receivers must verify content.
-   */
-  static save(nameOrPath: string, out: string, opts?: SaveOpts | undefined | null): Promise<void>
-  static load(archive: string, dest?: string | undefined | null): Promise<SnapshotHandle>
+  static load(archive: string, dest?: string | undefined | null, base?: string | undefined | null): Promise<SnapshotHandle>
+  static loadWithOptions(archive: string, opts?: LoadOpts | undefined | null): Promise<SnapshotHandle>
+  /** Import archives together, resolving dependencies within the batch and destination group. */
+  static loadMany(archives: Array<string>, opts?: LoadOpts | undefined | null): Promise<Array<SnapshotHandle>>
+  /** Read a group's head, or select `group:member` as its head. */
+  static groupHead(selector: string): Promise<HeadUpdate>
+  /** Deprecated: use `reference`. Throws when no local filesystem path exists. */
   get path(): string
+  get reference(): string
+  get referenceKind(): 'id' | 'path'
+  /** Outcome of the group head update performed by this capture. */
+  get headUpdate(): HeadUpdate | null
+  get id(): string
   get digest(): string
   get sizeBytes(): bigint | null
   get imageRef(): string
@@ -1561,13 +1667,36 @@ export declare class Snapshot {
   get checkpointId(): string | null
   get checkpointManifestDigest(): string | null
   get parent(): string | null
-  get scope(): 'disk' | 'resumable'
+  get scope(): 'disk' | 'full'
   get createdAt(): string
   get labels(): Record<string, string>
   get sourceSandbox(): string | null
+  /** Walk `dir` and parse each snapshot artifact within it. */
+  static listDir(dir: string): Promise<Array<Snapshot>>
+  /** Rebuild the backend snapshot index from artifacts in `dir`. */
+  static reindex(dir?: string | undefined | null): Promise<number>
+  /** Bundle a snapshot into a `.tar.zst` archive. */
+  static save(nameOrPath: string, out: string, opts?: SaveOpts | undefined | null): Promise<void>
+  /** Bundle this snapshot into a `.tar.zst` archive. */
+  saveTo(out: string, opts?: SaveOpts | undefined | null): Promise<void>
+  /**
+   * Configure a new archive containing this snapshot's disk data and
+   * replacement labels and integrity metadata.
+   * Returns an unsupported-operation error when artifact archives are unavailable.
+   */
+  copyTo(outputArchivePath: string): JsSnapshotCopyBuilder
+  /** Verify this snapshot's recorded payload integrity. */
   verify(): Promise<SnapshotVerifyReport>
 }
 export type JsSnapshot = Snapshot
+
+/** Result of direct sandbox-to-archive capture. */
+export declare class SnapshotArchive {
+  get id(): string
+  get descriptorDigest(): string
+  get path(): string
+}
+export type JsSnapshotArchive = SnapshotArchive
 
 /**
  * Fluent builder for a snapshot. Returned by `Snapshot.builder(name)`.
@@ -1577,19 +1706,23 @@ export declare class SnapshotBuilder {
   constructor(name: string)
   /**
    * Create the artifact under this parent directory instead of the
-   * default snapshots store. The artifact lands at `destDir/<name>`.
+   * default snapshots store. The snapshot group is created under this root.
    */
   destDir(destDir: string): this
+  /** Install the snapshot in this group (defaults to the source sandbox's name). */
+  group(group: string): this
   /** Set the source sandbox to snapshot. Required. */
   fromSandbox(sourceSandbox: string): this
   /** Attach a key-value label. May be called multiple times. */
   label(key: string, value: string): this
-  /** Overwrite an existing artifact at the destination. */
+  /** Overwrite an archive destination; installed group members are immutable. */
   force(): this
   /** Compute and record content integrity at create time. */
   recordIntegrity(): this
-  /** Request a future resumable snapshot. */
-  resumable(): this
+  /** Capture disk, memory, execution, and device state from a running sandbox. */
+  full(): this
+  /** Select optional writeback: auto, required, or skip. Required storage barriers remain. */
+  guestFlush(policy: string): this
   /** Snapshot the accumulated configuration. */
   build(): SnapshotConfig
   /**
@@ -1602,15 +1735,34 @@ export declare class SnapshotBuilder {
    * `create(): Promise<Snapshot>`.
    */
   create(): Promise<Snapshot>
+  /** Capture directly to an archive without installing a snapshot artifact. */
+  createArchive(out: string, plainTar?: boolean | undefined | null): Promise<SnapshotArchive>
 }
 export type JsSnapshotBuilder = SnapshotBuilder
 
-/** Lightweight snapshot handle from the local index. */
+/** Builder for copying a snapshot archive with replacement metadata. */
+export declare class SnapshotCopyBuilder {
+  /** Replace the copied snapshot's labels. */
+  labels(labels: Record<string, string>): this
+  /** Choose whether to calculate and record disk integrity in the copy. */
+  recordIntegrity(enabled: boolean): this
+  /**
+   * Write the configured snapshot archive.
+   * Returns an unsupported-operation error when artifact archives are unavailable.
+   */
+  save(): Promise<void>
+}
+export type JsSnapshotCopyBuilder = SnapshotCopyBuilder
+
+/** Lightweight snapshot handle returned by the active backend. */
 export declare class SnapshotHandle {
+  get group(): string | null
+  get headUpdate(): HeadUpdate | null
+  get id(): string
   get digest(): string
   get name(): string | null
   get parentDigest(): string | null
-  get scope(): 'disk' | 'resumable'
+  get scope(): 'disk' | 'full'
   get imageRef(): string
   get stateKind(): string
   get format(): string | null
@@ -1622,9 +1774,14 @@ export declare class SnapshotHandle {
   get migrationState(): string
   get migrationErrorCode(): string | null
   get createdAt(): number
+  /** Deprecated: use `reference`. Throws when no local filesystem path exists. */
   get path(): string
+  get reference(): string
+  get referenceKind(): 'id' | 'path'
   open(): Promise<Snapshot>
   remove(opts?: SnapshotRemoveOptions | undefined | null): Promise<void>
+  /** Bundle this snapshot into a `.tar.zst` archive. */
+  saveTo(out: string, opts?: SaveOpts | undefined | null): Promise<void>
 }
 export type JsSnapshotHandle = SnapshotHandle
 
@@ -1689,24 +1846,6 @@ export declare class TlsBuilder {
   build(): TlsConfig
 }
 export type JsTlsBuilder = TlsBuilder
-
-/** Fluent builder for secret violation behavior. */
-export declare class ViolationActionBuilder {
-  constructor()
-  /** Block the request silently. */
-  block(): this
-  /** Block the request and log a warning. */
-  blockAndLog(): this
-  /** Block the request and terminate the sandbox. */
-  blockAndTerminate(): this
-  /** Allow an exact host to receive placeholders unchanged. */
-  passthroughHost(host: string): this
-  /** Allow hosts matching a wildcard pattern to receive placeholders unchanged. */
-  passthroughHostPattern(pattern: string): this
-  /** Allow any host to receive placeholders unchanged. */
-  passthroughAllHosts(iUnderstand: boolean): this
-}
-export type JsViolationActionBuilder = ViolationActionBuilder
 
 export declare class Volume {
   static get(name: string): Promise<VolumeHandle>
@@ -1815,7 +1954,7 @@ export interface AttachOptions {
   user?: string
   env: Record<string, string>
   detachKeys?: string
-  rlimits: Array<JsRlimit>
+  rlimits: Array<Rlimit>
   /** Whether this session's output is recorded to the sandbox's `exec.log`. */
   capture: boolean
 }
@@ -1837,6 +1976,9 @@ export interface DnsConfig {
   /** Per-query timeout in milliseconds. Default: 5000. */
   queryTimeoutMs: number
 }
+
+/** Reuse a resolved pair and install only when it is wholly absent. */
+export declare function ensureRuntime(configJson: string, optionsJson: string): Promise<string>
 
 /** Execution event emitted by `ExecHandle.recv()`. */
 export interface ExecEvent {
@@ -1870,6 +2012,13 @@ export interface ExitStatus {
   success: boolean
 }
 
+/** An unmapped external filesystem or a mismatch accepted during relaxed restore. */
+export interface ExternalMountWarning {
+  guestPath: string
+  reason: string
+  staleInodes: Array<bigint>
+}
+
 /** Filesystem entry metadata returned by `fs.list()`. */
 export interface FsEntry {
   path: string
@@ -1889,6 +2038,15 @@ export interface FsMetadata {
   readonly: boolean
   modified?: number
   created?: number
+}
+
+/** Outcome of reading or selecting a snapshot group's head. */
+export interface HeadUpdate {
+  group: string
+  previous?: string
+  head: string
+  reason: string
+  changed: boolean
 }
 
 /** OCI config fields extracted from the database. */
@@ -1980,14 +2138,11 @@ export declare function imageRemove(reference: string, force?: boolean | undefin
  */
 export declare function imageSave(references: Array<string>, outputPath: string, format?: string | undefined | null): Promise<void>
 
-/**
- * Download and install msb + libkrunfw under non-empty $MSB_HOME, or
- * ~/.microsandbox/ when the override is unset or empty.
- */
-export declare function install(): Promise<void>
+/** Explicitly install a runtime pair from the selected source. */
+export declare function installRuntime(configJson: string, optionsJson: string): Promise<string>
 
-/** Check if msb and libkrunfw are installed and available. */
-export declare function isInstalled(): boolean
+/** Check whether a complete runtime pair resolves. */
+export declare function isRuntimeInstalled(configJson: string): boolean
 
 /** Secret-safe backend diagnostics returned to JavaScript. */
 export interface JsBackendInfo {
@@ -1997,10 +2152,29 @@ export interface JsBackendInfo {
   profile?: string
 }
 
+/** One child result from a capture-once batch, in caller order. */
+export interface JsBranchOutcome {
+  name: string
+  sandbox?: Sandbox
+  error?: string
+}
+
 /** One page returned by `Sandbox.list` / `Sandbox.listWith`. */
 export interface JsSandboxPage {
   sandboxes: Array<JsSandboxHandle>
   nextCursor?: string
+}
+
+/** Options for importing one or more archives into a snapshot group. */
+export interface LoadOpts {
+  /** Parent directory containing snapshot groups. */
+  dest?: string
+  /** External snapshot or standalone archive for dependencies absent from the batch/group. */
+  base?: string
+  /** Destination group (generated when omitted). */
+  group?: string
+  /** Select the unique imported tip even when it is not a fast-forward. */
+  setHead?: boolean
 }
 
 /** One captured log entry from `exec.log`. */
@@ -2171,9 +2345,11 @@ export interface PullProgressEvent {
    *  "layerMaterializeStarted" | "layerMaterializeProgress" |
    *  "layerMaterializeWriting" | "layerMaterializeComplete" |
    *  "stitchMergingTrees" | "stitchWritingFsmeta" |
-   *  "stitchWritingVmdk" | "stitchComplete" | "complete"`.
+   *  "stitchWritingVmdk" | "stitchComplete" | "complete" | "startup"`.
    */
   kind: string
+  phase?: string
+  completedBytes?: number
   reference?: string
   manifestDigest?: string
   layerCount?: number
@@ -2228,6 +2404,12 @@ export interface RegistryConfig {
   /** Filesystem path passed to `caCertsPath(path)`, if any. */
   caCertsPath?: string
 }
+
+/** Resolve the existing runtime pair without installing host binaries. */
+export declare function resolveRuntime(configJson: string): string
+
+/** Read an executable's embedded runtime version without starting it. */
+export declare function resolveRuntimeVersion(executable: string): Promise<string | null>
 
 /** A single rlimit entry. */
 export interface Rlimit {
@@ -2323,7 +2505,7 @@ export interface SandboxTouchResult {
   activitySeq: number
 }
 
-/** Options for `Snapshot.save()`. */
+/** Options for `Snapshot.save()` and instance `saveTo()` methods. */
 export interface SaveOpts {
   /** Walk the parent chain and include each ancestor in the archive. */
   withParents?: boolean
@@ -2331,6 +2513,10 @@ export interface SaveOpts {
   withImage?: boolean
   /** Skip zstd compression and write a plain `.tar`. */
   plainTar?: boolean
+  /** Base snapshot or standalone archive supplying reusable disk layers and RAM objects. */
+  since?: string
+  /** Newest N immutable disk layers to include. */
+  lastLayers?: number
 }
 
 /** Host-scoped upstream CA certificate path. */
@@ -2359,18 +2545,12 @@ export interface SecretEntry {
   allowedHostPatterns: Array<string>
   /** Allow any host. **Dangerous** — secret can be exfiltrated. */
   allowAnyHost: boolean
+  /** Hosts allowed to receive the placeholder unchanged. */
+  passthroughHosts: Array<string>
   /** Require verified TLS identity before substituting (default: true). */
   requireTlsIdentity: boolean
   /** Where the secret may be injected into requests. */
-  injection: JsSecretInjection
-}
-
-/** Injection sites for a secret value. */
-export interface SecretInjection {
-  headers: boolean
-  basicAuth: boolean
-  queryParams: boolean
-  body: boolean
+  substitution: SecretSubstitution
 }
 
 /**
@@ -2395,6 +2575,13 @@ export interface SecretSourceInput {
   var: string
 }
 
+/** Injection sites for a secret value. */
+export interface SecretSubstitution {
+  headers: boolean
+  query: boolean
+  body: boolean
+}
+
 /**
  * Set the process-wide default backend.
  *
@@ -2402,6 +2589,9 @@ export interface SecretSourceInput {
  * API key (with an optional URL override), or a profile.
  */
 export declare function setDefaultBackend(kind: string, url?: string | undefined | null, apiKey?: string | undefined | null, profile?: string | undefined | null): void
+
+/** Register the platform package executable as a fallback after the runtime home. */
+export declare function setPackagedMsbPath(path: string): void
 
 /**
  * Set the `libkrunfw` shared library path resolved by the JS SDK.
@@ -2421,22 +2611,27 @@ export declare function setRuntimeMsbPath(path: string): void
 
 /** Built snapshot configuration produced by `SnapshotBuilder.build()`. */
 export interface SnapshotConfig {
+  guestFlush: string
   name: string
+  group?: string
   sourceSandbox?: string
   destDir?: string
-  labels: Array<JsSnapshotLabel>
+  labels: Array<SnapshotLabel>
   force: boolean
   recordIntegrity: boolean
-  resumable: boolean
+  full: boolean
 }
 
 /** Snapshot index info from the local DB cache. */
 export interface SnapshotInfo {
+  id: string
   digest: string
   name?: string
+  group?: string
+  headUpdate?: HeadUpdate
   parentDigest?: string
   imageRef: string
-  /** `"disk"` today; `"resumable"` once memory/device-state restore lands. */
+  /** `"disk"` for file state or `"full"` for a complete VM checkpoint. */
   scope: string
   /** `"raw"` or `"qcow2"`. */
   stateKind: string
@@ -2449,7 +2644,10 @@ export interface SnapshotInfo {
   migrationState: string
   migrationErrorCode?: string
   createdAt: number
-  path: string
+  /** Local filesystem path, absent for remote snapshots. */
+  path?: string
+  reference: string
+  referenceKind: 'id' | 'path'
 }
 
 export interface SnapshotLabel {
@@ -2474,6 +2672,8 @@ export interface SnapshotVerifyReport {
   upperKind: string
   upperAlgorithm?: string
   upperDigest?: string
+  /** Verified composite-checkpoint root, when the artifact is full. */
+  checkpointRoot?: string
 }
 
 /** Options accepted by `SshClient.attach()`. */
@@ -2538,8 +2738,8 @@ export interface TlsConfig {
   interceptedPorts: Array<number>
   blockQuic: boolean
   upstreamCaCertPaths: Array<string>
-  scopedUpstreamCaCerts: Array<JsScopedUpstreamCaCert>
-  scopedVerifyUpstream: Array<JsScopedVerifyUpstream>
+  scopedUpstreamCaCerts: Array<ScopedUpstreamCaCert>
+  scopedVerifyUpstream: Array<ScopedVerifyUpstream>
   interceptCaCertPath?: string
   interceptCaKeyPath?: string
 }
@@ -2583,22 +2783,30 @@ export interface VolumeMount {
   name?: string
   namedMode?: string
   namedKind?: string
+  /** Storage kind for sandbox-owned mounts: `"dir"` or `"disk"`. */
+  ownedKind?: string
   sizeMib?: number
   quotaMib?: number
   format?: string
   fstype?: string
-  /** `"strict" | "relaxed" | "off"` for bind/named mounts; `None` for tmpfs/disk. */
+  /**
+   * `"strict" | "relaxed" | "off"` for bind/named and owned-directory mounts;
+   * `None` for tmpfs, host disks, or owned disks.
+   */
   statVirtualization?: string
-  /** `"private" | "mirror"` for bind/named mounts; `None` for tmpfs/disk. */
+  /**
+   * `"private" | "mirror"` for bind/named and owned-directory mounts;
+   * `None` for tmpfs, host disks, or owned disks.
+   */
   hostPermissions?: string
   /**
-   * Guest owner uid for host-created files under bind/named mounts; `None`
-   * when unset or for tmpfs/disk. Set together with `override_gid`.
+   * Guest owner uid for host-created files under bind/named or owned-directory mounts;
+   * `None` when unset or for tmpfs/disks. Set together with `override_gid`.
    */
   overrideUid?: number
   /**
-   * Guest owner gid for host-created files under bind/named mounts; `None`
-   * when unset or for tmpfs/disk. Set together with `override_uid`.
+   * Guest owner gid for host-created files under bind/named or owned-directory mounts;
+   * `None` when unset or for tmpfs/disks. Set together with `override_uid`.
    */
   overrideGid?: number
 }

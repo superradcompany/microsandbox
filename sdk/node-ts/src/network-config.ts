@@ -61,10 +61,9 @@ export interface NetworkRateLimiterConfig {
 }
 
 /** Where in the HTTP request the secret value can be substituted. */
-export interface SecretInjection {
+export interface SecretSubstitution {
   readonly headers?: boolean;
-  readonly basicAuth?: boolean;
-  readonly queryParams?: boolean;
+  readonly query?: boolean;
   readonly body?: boolean;
 }
 
@@ -90,8 +89,9 @@ export interface SecretEntry {
   readonly allowedHosts: readonly string[];
   readonly allowedHostPatterns: readonly string[];
   readonly allowAnyHost: boolean;
+  readonly passthroughHosts: readonly string[];
   readonly requireTlsIdentity: boolean;
-  readonly injection: SecretInjection;
+  readonly substitution: SecretSubstitution;
 }
 
 /** Proxy used for outbound sandbox connections. */
@@ -118,8 +118,11 @@ export interface NetworkConfig {
   readonly dns: DnsConfig | null;
   readonly tls: TlsConfig | null;
   readonly secrets: readonly SecretEntry[];
-  readonly secretViolation: ViolationAction | null;
+  readonly secretViolationAction: ViolationAction | null;
+  /** @deprecated Use maxTcpConnections instead. */
   readonly maxConnections: number | null;
+  readonly maxTcpConnections: number | null;
+  readonly maxUdpConnections?: number | null;
   readonly strict: boolean;
   readonly rateLimiter: NetworkRateLimiterConfig | null;
   readonly interface?: {

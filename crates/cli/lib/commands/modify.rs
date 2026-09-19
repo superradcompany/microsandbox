@@ -22,8 +22,29 @@ pub struct ModifyArgs {
     /// Sandbox to modify.
     pub name: String,
 
+    /// Compact sealed layers of the root and sandbox-owned data disks without changing snapshots.
+    #[arg(long, conflicts_with_all = ["cpus", "max_cpus", "memory", "max_memory", "root_disk", "oci_upper_size", "env", "env_remove", "labels", "label_remove", "workdir", "secrets", "secret_remove", "next_start", "restart"])]
+    pub compact: bool,
+
+    /// Merge up to N oldest sealed physical layers per disk, including the base (minimum 2).
+    #[arg(long, requires = "compact", value_name = "N")]
+    pub layers: Option<usize>,
+
+    /// Compact only this owned disk's guest mount path (`/` selects the root).
+    #[arg(
+        long,
+        requires = "compact",
+        conflicts_with = "root_disk_only",
+        value_name = "GUEST"
+    )]
+    pub disk: Option<String>,
+
+    /// Compact only the root disk.
+    #[arg(long, requires = "compact", conflicts_with = "disk")]
+    pub root_disk_only: bool,
+
     /// Desired effective vCPU count.
-    #[arg(long)]
+    #[arg(short = 'c', long)]
     pub cpus: Option<u8>,
 
     /// Desired boot-time maximum possible vCPU count.
@@ -31,7 +52,7 @@ pub struct ModifyArgs {
     pub max_cpus: Option<u8>,
 
     /// Desired effective guest memory size, such as `512M` or `4G`.
-    #[arg(long)]
+    #[arg(short, long)]
     pub memory: Option<String>,
 
     /// Desired boot-time maximum hotpluggable memory, such as `4G` or `16G`.
@@ -53,7 +74,7 @@ pub struct ModifyArgs {
     pub oci_upper_size: Option<String>,
 
     /// Set an environment variable for future execs (`KEY=VALUE`).
-    #[arg(long = "env", value_name = "KEY=VALUE")]
+    #[arg(short, long = "env", value_name = "KEY=VALUE")]
     pub env: Vec<String>,
 
     /// Remove an environment variable by key.
@@ -69,7 +90,7 @@ pub struct ModifyArgs {
     pub label_remove: Vec<String>,
 
     /// Working directory for future execs.
-    #[arg(long, value_name = "PATH")]
+    #[arg(short, long, value_name = "PATH")]
     pub workdir: Option<String>,
 
     /// Add or rotate a secret from a host environment variable
@@ -106,6 +127,47 @@ pub struct ModifyArgs {
 pub async fn run(args: ModifyArgs) -> anyhow::Result<()> {
     let json = args.format.as_deref() == Some("json");
     let handle = Sandbox::get(&args.name).await?;
+    if args.compact {
+        let mut compact = handle.compact();
+        if let Some(layers) = args.layers {
+            compact = compact.layers(layers);
+        }
+        if let Some(disk) = args.disk {
+            compact = compact.disk(disk);
+        }
+        if args.root_disk_only {
+            compact = compact.root_disk_only();
+        }
+        let result = if args.dry_run {
+            compact.dry_run().await?
+        } else {
+            compact.apply().await?
+        };
+        if json {
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        } else {
+            println!(
+                "{}: {} → {} disk layers ({} selected, {} bytes materialized, {:.2} ms paused)",
+                if args.dry_run { "Plan" } else { "Compacted" },
+                result.input_layers,
+                result.output_layers,
+                result.selected_layers,
+                result.materialized_bytes,
+                result.pause_us as f64 / 1000.0
+            );
+            for disk in &result.disks {
+                println!(
+                    "  {}: {} → {} layers ({} selected, {} bytes materialized)",
+                    disk.guest_path,
+                    disk.input_layers,
+                    disk.output_layers,
+                    disk.selected_layers,
+                    disk.materialized_bytes
+                );
+            }
+        }
+        return Ok(());
+    }
     let mut builder = handle.modify();
 
     if args.next_start {
@@ -154,14 +216,13 @@ fn apply_resource_args(
         builder = builder.max_cpus(max_cpus);
     }
     if let Some(memory) = &args.memory {
-        builder = builder.memory_mib(ui::parse_size_mib(memory).map_err(anyhow::Error::msg)?);
+        builder = builder.memory(ui::parse_size_mib(memory).map_err(anyhow::Error::msg)?);
     }
     if let Some(max_memory) = &args.max_memory {
-        builder =
-            builder.max_memory_mib(ui::parse_size_mib(max_memory).map_err(anyhow::Error::msg)?);
+        builder = builder.max_memory(ui::parse_size_mib(max_memory).map_err(anyhow::Error::msg)?);
     }
     if let Some(size) = args.root_disk.as_ref().or(args.oci_upper_size.as_ref()) {
-        builder = builder.root_disk_size_mib(ui::parse_size_mib(size).map_err(anyhow::Error::msg)?);
+        builder = builder.root_disk_size(ui::parse_size_mib(size).map_err(anyhow::Error::msg)?);
     }
     Ok(builder)
 }
@@ -196,19 +257,47 @@ fn apply_secret_args(
 ) -> anyhow::Result<SandboxModificationBuilder> {
     // Group hosts by secret name so repeated `--secret NAME@HOST[,HOST...]`
     // flags accumulate into one declarative spec per name.
-    let mut specs: Vec<(String, Vec<String>)> = Vec::new();
+    let mut specs: Vec<common::ParsedSecret> = Vec::new();
     for secret in &args.secrets {
-        let (name, hosts) = common::parse_secret(secret, "modify")?;
-        match specs.iter_mut().find(|(existing, _)| *existing == name) {
-            Some((_, existing_hosts)) => existing_hosts.extend(hosts),
-            None => specs.push((name, hosts)),
+        let parsed = common::parse_secret(secret, "modify")?;
+        match specs
+            .iter_mut()
+            .find(|existing| existing.env_var == parsed.env_var)
+        {
+            Some(existing) => {
+                for host in parsed.allowed_hosts {
+                    if !existing.allowed_hosts.contains(&host) {
+                        existing.allowed_hosts.push(host);
+                    }
+                }
+                for host in parsed.passthrough_hosts {
+                    if !existing.passthrough_hosts.contains(&host) {
+                        existing.passthrough_hosts.push(host);
+                    }
+                }
+                existing.substitute_headers &= parsed.substitute_headers;
+                existing.substitute_query |= parsed.substitute_query;
+                existing.substitute_body |= parsed.substitute_body;
+            }
+            None => specs.push(parsed),
         }
     }
-    for (name, hosts) in specs {
+    for spec in specs {
+        let name = spec.env_var;
         builder = builder.secret(|mut s| {
-            s = s.env(&name).source(SecretSource::Env { var: name.clone() });
-            for host in hosts {
-                s = s.allow_host(host);
+            s = s
+                .env(&name)
+                .source(SecretSource::Env { var: name.clone() })
+                .substitution(microsandbox_types::SecretSubstitution {
+                    headers: spec.substitute_headers,
+                    query: spec.substitute_query,
+                    body: spec.substitute_body,
+                });
+            for host in spec.allowed_hosts {
+                s = s.allow(host);
+            }
+            for host in spec.passthrough_hosts {
+                s = s.allow_passthrough_for(host);
             }
             s
         });
@@ -601,7 +690,7 @@ fn replayed_args(args: &ModifyArgs) -> String {
     }
     for secret in &args.secrets {
         let sanitized = common::parse_secret(secret, "modify")
-            .map(|(name, hosts)| format!("{name}@{}", hosts.join(",")))
+            .map(|parsed| format!("{}@{}", parsed.env_var, parsed.allowed_hosts.join(",")))
             .unwrap_or_else(|_| "<secret>".to_string());
         rendered.push(format!("--secret {sanitized}"));
     }
@@ -689,6 +778,31 @@ mod tests {
         assert_eq!(args.max_cpus, Some(8));
         assert_eq!(args.max_memory.as_deref(), Some("16G"));
         assert!(args.dry_run);
+    }
+
+    #[test]
+    fn compaction_is_explicit_and_cannot_mix_config_changes() {
+        let args = parse_modify_args(&["api", "--compact", "--layers", "3", "--dry-run"]);
+        assert!(args.compact && args.dry_run);
+        assert_eq!(args.layers, Some(3));
+        assert!(!args.root_disk_only && args.disk.is_none());
+        assert_eq!(
+            parse_modify_args(&["api", "--compact", "--disk", "/data"])
+                .disk
+                .as_deref(),
+            Some("/data")
+        );
+        assert!(parse_modify_args(&["api", "--compact", "--root-disk-only"]).root_disk_only);
+        for flags in [
+            vec!["api", "--layers", "3"],
+            vec!["api", "--disk", "/data"],
+            vec!["api", "--root-disk-only"],
+            vec!["api", "--compact", "--disk", "/", "--root-disk-only"],
+            vec!["api", "--compact", "--cpus", "2"],
+            vec!["api", "--compact", "--restart"],
+        ] {
+            assert!(TestCli::try_parse_from(std::iter::once("msb").chain(flags)).is_err());
+        }
     }
 
     #[test]

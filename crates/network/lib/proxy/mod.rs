@@ -7,6 +7,7 @@ mod types;
 // Re-Exports
 //--------------------------------------------------------------------------------------------------
 
+#[cfg(feature = "engine")]
 pub use crate::tcp::proxy::*;
 
 #[doc(hidden)]

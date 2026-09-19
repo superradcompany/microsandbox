@@ -10,32 +10,22 @@
 //! Auth is API-key-only — the same `msb_live_*` / `msb_test_*` tokens msb-cloud
 //! issues today. No OAuth or session credentials are honored here.
 
+mod agent;
 mod http;
 pub(in crate::backend) mod sandbox;
+mod snapshot;
 mod volume;
 mod ws_io;
 
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use futures::future::BoxFuture;
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue, USER_AGENT};
 use rustls_platform_verifier::BuilderVerifierExt;
-use tokio_tungstenite::{
-    Connector, connect_async_tls_with_config,
-    tungstenite::{
-        client::IntoClientRequest,
-        http::{
-            HeaderValue as WsHeaderValue,
-            header::{AUTHORIZATION as WS_AUTHORIZATION, USER_AGENT as WS_USER_AGENT},
-        },
-    },
-};
+use tokio_tungstenite::Connector;
 
 use self::http::urlencoding;
-use super::{
-    Backend, BackendInfo, BackendKind, BackendSelectionSource, SandboxBackend, VolumeBackend,
-};
+use super::{Backend, BackendSelectionSource};
 use crate::{MicrosandboxError, MicrosandboxResult};
 
 //--------------------------------------------------------------------------------------------------
@@ -84,6 +74,7 @@ pub struct CloudBackend {
     http: reqwest::Client,
     selection_source: BackendSelectionSource,
     profile: Option<String>,
+    agent_identity: Option<(String, String)>,
 }
 
 /// Fluent builder for `CloudBackend`. Use for tuned construction.
@@ -329,6 +320,7 @@ impl CloudBackendBuilder {
             http,
             selection_source: BackendSelectionSource::Programmatic,
             profile: None,
+            agent_identity: None,
         })
     }
 }
@@ -336,86 +328,6 @@ impl CloudBackendBuilder {
 //--------------------------------------------------------------------------------------------------
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
-
-impl Backend for CloudBackend {
-    fn kind(&self) -> BackendKind {
-        BackendKind::Cloud
-    }
-
-    fn info(&self) -> BackendInfo {
-        BackendInfo {
-            kind: BackendKind::Cloud,
-            api_url: Some(self.url.clone()),
-            source: self.selection_source,
-            profile: self.profile.clone(),
-        }
-    }
-
-    fn sandboxes(&self) -> &dyn SandboxBackend {
-        self
-    }
-
-    fn volumes(&self) -> &dyn VolumeBackend {
-        self
-    }
-
-    /// Open an agent connection over `GET /v1/sandboxes/:id/agent`.
-    ///
-    /// The route upgrades to a WebSocket that pipes bytes to and from the
-    /// sandbox's agent, so the standard agent client runs over it unchanged.
-    fn dial_agent<'a>(
-        &'a self,
-        name: &'a str,
-        timeout: std::time::Duration,
-    ) -> BoxFuture<'a, MicrosandboxResult<crate::agent::AgentClient>> {
-        Box::pin(async move {
-            // Treat the caller's timeout as one budget for lookup, WebSocket
-            // establishment, and the agent handshake. In particular, a peer
-            // that accepts TCP but never completes TLS/HTTP upgrade must not
-            // leave exec, filesystem, or attach calls hanging indefinitely.
-            tokio::time::timeout(timeout, async {
-                let sandbox = self.get_sandbox(name).await?;
-                let url = self.agent_ws_url(&sandbox.id)?;
-                let mut request = url
-                    .into_client_request()
-                    .map_err(|e| MicrosandboxError::Runtime(format!("cloud agent request: {e}")))?;
-                let bearer = format!("Bearer {}", self.api_key);
-                let mut auth_value = WsHeaderValue::from_str(&bearer).map_err(|e| {
-                    MicrosandboxError::InvalidConfig(format!("invalid API key header value: {e}"))
-                })?;
-                auth_value.set_sensitive(true);
-                request.headers_mut().insert(WS_AUTHORIZATION, auth_value);
-                request.headers_mut().insert(
-                    WS_USER_AGENT,
-                    WsHeaderValue::from_str(&default_user_agent()).map_err(|e| {
-                        MicrosandboxError::InvalidConfig(format!("invalid user-agent value: {e}"))
-                    })?,
-                );
-
-                let connector = cloud_agent_tls_connector()?;
-                let (socket, _) =
-                    connect_async_tls_with_config(request, None, false, Some(connector))
-                        .await
-                        .map_err(|e| {
-                            MicrosandboxError::Runtime(format!("cloud agent websocket: {e}"))
-                        })?;
-
-                crate::agent::AgentClient::connect_stream_with_timeout(
-                    self::ws_io::WsByteStream::new(socket),
-                    timeout,
-                )
-                .await
-                .map_err(Into::into)
-            })
-            .await
-            .map_err(|_| {
-                MicrosandboxError::Runtime(format!(
-                    "timed out connecting to cloud sandbox agent {name:?} after {timeout:?}"
-                ))
-            })?
-        })
-    }
-}
 
 impl Default for CloudBackendBuilder {
     fn default() -> Self {
@@ -455,7 +367,11 @@ mod tests {
     #[cfg(unix)]
     use tokio_rustls::TlsAcceptor;
 
+    #[cfg(unix)]
+    use tokio_tungstenite::connect_async_tls_with_config;
+
     use super::*;
+    use crate::backend::BackendKind;
 
     #[cfg(unix)]
     const TLS_TEST_CHILD_URL: &str = "MSB_TEST_CLOUD_AGENT_TLS_CHILD_URL";
