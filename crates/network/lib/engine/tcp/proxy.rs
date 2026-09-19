@@ -2201,6 +2201,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn server_first_http_like_binary_first_flight_is_forwarded() {
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            stream
+                .write_all(b"binary server-first greeting")
+                .await
+                .unwrap();
+            stream.flush().await.unwrap();
+
+            let mut received = Vec::new();
+            stream.read_to_end(&mut received).await.unwrap();
+            received
+        });
+
+        let (from_tx, from_rx) = mpsc::channel::<Bytes>(8);
+        let (to_tx, mut to_rx) = mpsc::channel::<Bytes>(8);
+        spawn_tcp_proxy(
+            &tokio::runtime::Handle::current(),
+            addr,
+            addr,
+            from_rx,
+            to_tx,
+            Arc::new(SharedState::new(4)),
+            Arc::new(NetworkPolicy::default()),
+            Arc::new(make_plain_http_secret(
+                "$MSB_UNUSED",
+                "unused-secret-value",
+                false,
+            )),
+            None,
+            false,
+            Arc::new(ProxyConnectState::new()),
+            None,
+        );
+
+        let greeting = to_rx.recv().await.unwrap();
+        assert_eq!(greeting, b"binary server-first greeting"[..]);
+
+        // `BINARY3` is deliberately a valid HTTP token followed by a space,
+        // but the control bytes make this an invalid HTTP request line.
+        let first_flight = Bytes::from_static(b"BINARY3 v1\x00\x01opaque request");
+        from_tx.send(first_flight.clone()).await.unwrap();
+        drop(from_tx);
+
+        let wire = tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .expect("proxy did not finish forwarding the client first flight")
+            .unwrap();
+        assert_eq!(wire, first_flight);
+    }
+
+    #[tokio::test]
     async fn plain_http_substitutes_placeholder_when_host_arrives_in_second_segment() {
         // Host header split across TCP segments — classify_first_flight must keep
         // reading until \r\n\r\n before extract_http_host is called.
