@@ -22,7 +22,7 @@ void msb_free_string(char *ptr);
 
 /**
  * Push the SDK-resolved msb binary path into the Rust resolver's tier 2.
- * Called once from setup.EnsureInstalled after the install dir is known.
+ * An explicit process-level override; automatic home discovery does not set it.
  * Set-once: subsequent calls are ignored (matches the OnceLock in
  * microsandbox::config). Null or invalid-UTF-8 paths are silently ignored
  * since the resolver's lower tiers (~/.microsandbox/bin/msb, PATH) still
@@ -93,6 +93,16 @@ char *msb_sandbox_handle_stop(uint64_t cancel_id,
                               unsigned char *buf,
                               uintptr_t buf_len);
 
+char *msb_sandbox_handle_pause(uint64_t cancel_id,
+                               const char *name,
+                               unsigned char *buf,
+                               uintptr_t buf_len);
+
+char *msb_sandbox_handle_resume(uint64_t cancel_id,
+                                const char *name,
+                                unsigned char *buf,
+                                uintptr_t buf_len);
+
 char *msb_sandbox_handle_request_stop(uint64_t cancel_id,
                                       const char *name,
                                       unsigned char *buf,
@@ -140,15 +150,91 @@ char *msb_sandbox_handle_modify(uint64_t cancel_id,
                                 unsigned char *buf,
                                 uintptr_t buf_len);
 
+/**
+ * Explicit compaction. A nonzero handle retains its backend; zero resolves the supplied name.
+ */
+char *msb_sandbox_compact(uint64_t cancel_id,
+                          Handle handle,
+                          const char *name,
+                          const char *opts_json,
+                          unsigned char *buf,
+                          uintptr_t buf_len);
+
 char *msb_sandbox_close(uint64_t cancel_id, Handle handle, unsigned char *buf, uintptr_t buf_len);
 
 char *msb_sandbox_detach(uint64_t cancel_id, Handle handle, unsigned char *buf, uintptr_t buf_len);
+
+/**
+ * Read structured filesystem warnings retained by relaxed full restore.
+ */
+char *msb_sandbox_restore_warnings(uint64_t cancel_id,
+                                   Handle handle,
+                                   unsigned char *buf,
+                                   uintptr_t buf_len);
 
 char *msb_sandbox_stop(uint64_t cancel_id,
                        Handle handle,
                        uint64_t timeout_ms,
                        unsigned char *buf,
                        uintptr_t buf_len);
+
+/**
+ * Wait for graceful shutdown without forced termination. An absent timeout is unbounded.
+ * This distinct symbol also gates the revised stop semantics for older native libraries.
+ */
+char *msb_sandbox_stop_gracefully(uint64_t cancel_id,
+                                  Handle handle,
+                                  uint8_t has_timeout,
+                                  uint64_t timeout_ms,
+                                  unsigned char *buf,
+                                  uintptr_t buf_len);
+
+char *msb_sandbox_pause(uint64_t cancel_id, Handle handle, unsigned char *buf, uintptr_t buf_len);
+
+/**
+ * Pause with an explicit flush policy. Its presence also advertises policy-aware JSON APIs.
+ */
+char *msb_sandbox_pause_with_guest_flush(uint64_t cancel_id,
+                                         Handle handle,
+                                         const char *source,
+                                         const char *expected_id,
+                                         const char *policy,
+                                         unsigned char *buf,
+                                         uintptr_t buf_len);
+
+/**
+ * Branch by live handle, or by persisted name when handle is zero.
+ */
+char *msb_sandbox_branch(uint64_t cancel_id,
+                         Handle handle,
+                         const char *source,
+                         const char *child,
+                         unsigned char *buf,
+                         uintptr_t buf_len);
+
+/**
+ * Capture once for a JSON request containing child names and return named outcomes.
+ */
+char *msb_sandbox_branch_many(uint64_t cancel_id,
+                              Handle handle,
+                              const char *source,
+                              const char *names,
+                              bool record_integrity,
+                              unsigned char *buf,
+                              uintptr_t buf_len);
+
+/**
+ * Branch with explicit disk content integrity, retaining the original branch ABI.
+ */
+char *msb_sandbox_branch_with_options(uint64_t cancel_id,
+                                      Handle handle,
+                                      const char *source,
+                                      const char *child,
+                                      bool record_integrity,
+                                      unsigned char *buf,
+                                      uintptr_t buf_len);
+
+char *msb_sandbox_resume(uint64_t cancel_id, Handle handle, unsigned char *buf, uintptr_t buf_len);
 
 char *msb_sandbox_request_stop(uint64_t cancel_id,
                                Handle handle,
@@ -729,13 +815,23 @@ char *msb_snapshot_create(uint64_t cancel_id,
                           unsigned char *buf,
                           uintptr_t buf_len);
 
+char *msb_snapshot_create_archive(uint64_t cancel_id,
+                                  const char *source_sandbox,
+                                  const char *archive_path,
+                                  const char *opts_json,
+                                  bool plain_tar,
+                                  unsigned char *buf,
+                                  uintptr_t buf_len);
+
 char *msb_snapshot_open(uint64_t cancel_id,
-                        const char *path_or_name,
+                        const char *reference,
+                        const char *reference_kind,
                         unsigned char *buf,
                         uintptr_t buf_len);
 
 char *msb_snapshot_verify(uint64_t cancel_id,
-                          const char *path_or_name,
+                          const char *reference,
+                          const char *reference_kind,
                           unsigned char *buf,
                           uintptr_t buf_len);
 
@@ -752,7 +848,8 @@ char *msb_snapshot_list_dir(uint64_t cancel_id,
                             uintptr_t buf_len);
 
 char *msb_snapshot_remove(uint64_t cancel_id,
-                          const char *path_or_name,
+                          const char *reference,
+                          const char *reference_kind,
                           bool force,
                           unsigned char *buf,
                           uintptr_t buf_len);
@@ -763,17 +860,62 @@ char *msb_snapshot_reindex(uint64_t cancel_id,
                            uintptr_t buf_len);
 
 char *msb_snapshot_export(uint64_t cancel_id,
-                          const char *name_or_path,
+                          const char *reference,
+                          const char *reference_kind,
                           const char *out,
                           const char *opts_json,
                           unsigned char *buf,
                           uintptr_t buf_len);
+
+char *msb_snapshot_copy(uint64_t cancel_id,
+                        const char *reference,
+                        const char *reference_kind,
+                        const char *output_archive_path,
+                        const char *opts_json,
+                        unsigned char *buf,
+                        uintptr_t buf_len);
 
 char *msb_snapshot_import(uint64_t cancel_id,
                           const char *archive,
                           const char *dest,
                           unsigned char *buf,
                           uintptr_t buf_len);
+
+/**
+ * Import a dependent archive with an explicit base without changing the existing import ABI.
+ */
+char *msb_snapshot_import_with_base(uint64_t cancel_id,
+                                    const char *archive,
+                                    const char *dest,
+                                    const char *base,
+                                    unsigned char *buf,
+                                    uintptr_t buf_len);
+
+/**
+ * Import an archive with group selection without changing the existing import ABI.
+ */
+char *msb_snapshot_import_with_options(uint64_t cancel_id,
+                                       const char *archive,
+                                       const char *opts_json,
+                                       unsigned char *buf,
+                                       uintptr_t buf_len);
+
+/**
+ * Import archives together with dependencies resolved within the batch and destination group.
+ */
+char *msb_snapshot_import_many(uint64_t cancel_id,
+                               const char *archives_json,
+                               const char *opts_json,
+                               unsigned char *buf,
+                               uintptr_t buf_len);
+
+/**
+ * Read a group head, or select a `group:member` as its head.
+ */
+char *msb_snapshot_group_head(uint64_t cancel_id,
+                              const char *selector,
+                              unsigned char *buf,
+                              uintptr_t buf_len);
 
 /**
  * Open a streaming read from a guest file.
@@ -910,5 +1052,36 @@ char *msb_sandbox_attach_shell(uint64_t cancel_id,
                                Handle handle,
                                unsigned char *buf,
                                uintptr_t buf_len);
+
+char *msb_creation_progress_open(unsigned char *buf, uintptr_t len);
+
+char *msb_creation_progress_recv(uint64_t cancel_id,
+                                 uint64_t id,
+                                 unsigned char *buf,
+                                 uintptr_t len);
+
+char *msb_creation_progress_close(uint64_t id, unsigned char *buf, uintptr_t len);
+
+/**
+ * Restore a detached sandbox through a dedicated C entry point.
+ */
+char *msb_sandbox_restore(uint64_t cancel_id,
+                          const char *name,
+                          const char *opts_json,
+                          unsigned char *buf,
+                          uintptr_t buf_len);
+
+/**
+ * Resolve, install, or ensure a runtime pair, returning its JSON description.
+ *
+ * # Safety
+ * Input strings must be NUL-terminated and the output buffer writable for `buf_len` bytes.
+ */
+char *msb_runtime_setup(uint64_t cancel_id,
+                        const char *operation,
+                        const char *config_json,
+                        const char *options_json,
+                        unsigned char *buf,
+                        uintptr_t buf_len);
 
 #endif  /* MICROSANDBOX_GO_FFI_H */

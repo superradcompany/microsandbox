@@ -150,3 +150,7 @@ err := sb.FS().CopyFromHost(ctx, "./local-file.txt", "/app/remote-file.txt")
 <Tip>
   If you need to transfer many files at once, consider using a [bind-mounted volume](/sandboxes/volumes) instead. Volumes give the guest direct filesystem access, whereas the filesystem API transfers each file individually. For bulk operations, volumes are significantly faster.
 </Tip>
+
+## Reference
+
+For exact filesystem APIs, see [TypeScript](/sdk/typescript/filesystem), [Rust](/sdk/rust/filesystem), [Python](/sdk/python/filesystem), or [Go](/sdk/go/filesystem). For host-to-sandbox copies, see [`msb copy`](/cli/sandbox-commands#msb-copy).

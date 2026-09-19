@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::future::BoxFuture;
-use microsandbox_metrics::{MetricsError, MetricsRegistry};
+use microsandbox_metrics::{MetricsError, MetricsRegistryReader, REGISTRY_ABI_VERSION};
 
 use crate::error::MetricsCollectorResult;
 
@@ -32,22 +32,41 @@ pub(crate) type CollectFn =
 /// Build a `CollectFn` that opens the named shm registry on each tick and
 /// reads its active snapshot. Returns an empty collection if the registry
 /// hasn't been created yet (no sandboxes running).
-pub(crate) fn registry_collect_fn(registry_name: String) -> CollectFn {
+pub(crate) fn registry_collect_fn(registries: Vec<(String, u32)>) -> CollectFn {
     Arc::new(move || {
-        let name = registry_name.clone();
+        let registries = registries.clone();
         Box::pin(async move {
             let collected_at = chrono::Utc::now();
-            let sandboxes = match MetricsRegistry::open(&name) {
-                Ok(registry) => registry
-                    .active_snapshot()?
-                    .into_iter()
-                    .map(SandboxMetricSnapshot::from)
-                    .collect(),
-                Err(MetricsError::Io(ref e)) if e.raw_os_error() == Some(libc::ENOENT) => {
-                    Vec::new()
+            let mut snapshots = Vec::new();
+
+            for (name, abi_version) in registries {
+                let registry = match MetricsRegistryReader::open(&name, abi_version) {
+                    Ok(registry) => registry,
+                    Err(MetricsError::Io(ref error))
+                        if error.kind() == std::io::ErrorKind::NotFound
+                            || error.raw_os_error() == Some(libc::ENOENT) =>
+                    {
+                        continue;
+                    }
+                    Err(error) if abi_version != REGISTRY_ABI_VERSION => {
+                        tracing::warn!(
+                            registry = %name,
+                            abi_version,
+                            %error,
+                            "skipping unreadable legacy metrics registry"
+                        );
+                        continue;
+                    }
+                    Err(error) => return Err(error.into()),
+                };
+
+                for snapshot in registry.active_snapshot()? {
+                    snapshots.push((abi_version, SandboxMetricSnapshot::from(snapshot)));
                 }
-                Err(err) => return Err(err.into()),
-            };
+            }
+
+            let sandboxes = merge_snapshots(snapshots);
+
             Ok(MetricsCollection {
                 collected_at,
                 sandboxes,
@@ -55,6 +74,36 @@ pub(crate) fn registry_collect_fn(registry_name: String) -> CollectFn {
             })
         })
     })
+}
+
+fn merge_snapshots(
+    snapshots: impl IntoIterator<Item = (u32, SandboxMetricSnapshot)>,
+) -> Vec<SandboxMetricSnapshot> {
+    let mut merged = HashMap::new();
+
+    for (abi_version, snapshot) in snapshots {
+        let identity = (snapshot.sandbox_id, snapshot.run_id);
+        let replace = merged
+            .get(&identity)
+            .is_none_or(|(existing_version, _)| abi_version >= *existing_version);
+        if replace {
+            merged.insert(identity, (abi_version, snapshot));
+        }
+    }
+
+    let mut snapshots = merged
+        .into_values()
+        .map(|(_, snapshot)| snapshot)
+        .collect::<Vec<_>>();
+    snapshots.sort_by(|left, right| {
+        (left.sandbox_id, left.run_id, &left.name).cmp(&(
+            right.sandbox_id,
+            right.run_id,
+            &right.name,
+        ))
+    });
+
+    snapshots
 }
 
 /// Run the base collect, then resolve and attach per-sandbox labels.
@@ -132,7 +181,96 @@ pub(crate) fn filter_stale_samples(base: CollectFn, max_age: Duration) -> Collec
 
 #[cfg(test)]
 mod tests {
+    use microsandbox_metrics::MetricsRegistry;
+
     use super::*;
+
+    fn unique_registry_name(tag: &str) -> String {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+
+        let short_tag = &tag[..tag.len().min(5)];
+
+        format!("/mcr-{short_tag}-{:x}", nanos & 0xffff_ffff)
+    }
+
+    #[cfg(unix)]
+    fn unlink_registry(name: &str) {
+        let name = std::ffi::CString::new(name).unwrap();
+
+        unsafe { libc::shm_unlink(name.as_ptr()) };
+    }
+
+    #[cfg(target_os = "windows")]
+    fn unlink_registry(_name: &str) {}
+
+    fn snapshot(sandbox_id: i32, run_id: i32, name: &str) -> SandboxMetricSnapshot {
+        let mut snapshot = super::super::mocks::collection(sandbox_id)
+            .sandboxes
+            .remove(0);
+        snapshot.run_id = run_id;
+        snapshot.name = name.to_string();
+        snapshot
+    }
+
+    #[test]
+    fn merge_prefers_the_newest_abi_for_one_runtime() {
+        let snapshots = merge_snapshots([
+            (2, snapshot(1, 10, "legacy")),
+            (REGISTRY_ABI_VERSION, snapshot(1, 10, "current")),
+            (2, snapshot(2, 20, "legacy-only")),
+        ]);
+
+        assert_eq!(snapshots.len(), 2);
+        assert_eq!(snapshots[0].name, "current");
+        assert_eq!(snapshots[1].name, "legacy-only");
+    }
+
+    #[tokio::test]
+    async fn missing_registries_produce_an_empty_collection() {
+        let collect = registry_collect_fn(vec![
+            (unique_registry_name("missing-v2"), 2),
+            (
+                unique_registry_name("missing-current"),
+                REGISTRY_ABI_VERSION,
+            ),
+        ]);
+
+        let collection = collect().await.unwrap();
+
+        assert!(collection.sandboxes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn unreadable_legacy_registry_does_not_block_current_collection() {
+        let name = unique_registry_name("wrong-abi");
+        let registry = MetricsRegistry::open_or_create(&name, 1).unwrap();
+        let collect = registry_collect_fn(vec![
+            (name.clone(), 2),
+            (name.clone(), REGISTRY_ABI_VERSION),
+        ]);
+
+        let collection = collect().await.unwrap();
+
+        assert!(collection.sandboxes.is_empty());
+        drop(registry);
+        unlink_registry(&name);
+    }
+
+    #[tokio::test]
+    async fn registry_that_disappears_between_ticks_becomes_empty() {
+        let name = unique_registry_name("disappears");
+        let registry = MetricsRegistry::open_or_create(&name, 1).unwrap();
+        let collect = registry_collect_fn(vec![(name.clone(), REGISTRY_ABI_VERSION)]);
+
+        assert!(collect().await.unwrap().sandboxes.is_empty());
+        unlink_registry(&name);
+        assert!(collect().await.unwrap().sandboxes.is_empty());
+
+        drop(registry);
+    }
 
     /// In-memory [`LabelSource`] returning labels for known ids only.
     struct MapSource(super::super::types::SandboxLabels);
@@ -178,7 +316,7 @@ mod tests {
             Some([("user.id".to_string(), "alice".to_string())].as_slice())
         );
         // Sandbox 2 has no labels, so no entry is added.
-        assert!(collection.labels.get(&2).is_none());
+        assert!(!collection.labels.contains_key(&2));
     }
 
     #[tokio::test]

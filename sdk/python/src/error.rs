@@ -31,11 +31,37 @@ pub fn local_only(name: &str) -> PyErr {
 pub fn to_py_err(err: microsandbox::MicrosandboxError) -> PyErr {
     use microsandbox::MicrosandboxError::*;
 
+    // Missing snapshot selectors are resolved when the create future is awaited, like explicit
+    // artifact paths. Retain Python's useful missing-file exception without duplicating resolution.
+    if let SnapshotNotFound(_) = &err {
+        return pyo3::exceptions::PyFileNotFoundError::new_err(err.to_string());
+    }
+
     Python::with_gil(|py| {
         let errors_mod = match py.import("microsandbox.errors") {
             Ok(m) => m,
             Err(_) => return pyo3::exceptions::PyRuntimeError::new_err(err.to_string()),
         };
+
+        if let SnapshotSourceRecovery(recovery) = &err {
+            // Keep the structured recovery locator across the native boundary. The Python class
+            // turns this internal payload into typed attributes; callers never parse the message.
+            let instance = (|| -> PyResult<Bound<'_, PyAny>> {
+                let payload = serde_json::to_string(recovery).map_err(|error| {
+                    pyo3::exceptions::PyRuntimeError::new_err(error.to_string())
+                })?;
+                let details = py.import("json")?.call_method1("loads", (payload,))?;
+                let details = details.downcast::<pyo3::types::PyDict>()?;
+                errors_mod
+                    .getattr("SnapshotSourceRecoveryError")?
+                    .call((err.to_string(),), Some(details))
+            })();
+            return match instance {
+                Ok(instance) => PyErr::from_value(instance),
+                // The textual fallback still contains the saved artifact locator.
+                Err(_) => pyo3::exceptions::PyRuntimeError::new_err(err.to_string()),
+            };
+        }
 
         // Unsupported gets a Python-idiom message (`sandbox.kill()` instead of
         // `Sandbox::kill`) plus structured `operation` / `hint` attributes.
@@ -57,7 +83,18 @@ pub fn to_py_err(err: microsandbox::MicrosandboxError) -> PyErr {
             };
         }
 
+        // Preserve the SDK's established Python exception mapping for missing
+        // snapshot references across backends.
+        if matches!(err, SnapshotNotFound(_)) {
+            return pyo3::exceptions::PyFileNotFoundError::new_err(err.to_string());
+        }
+        if matches!(err, SnapshotIntegrity(_)) {
+            return pyo3::exceptions::PyValueError::new_err(err.to_string());
+        }
+
         let (cls_name, msg) = match &err {
+            RuntimeNotInstalled(_) => ("RuntimeNotInstalledError", err.to_string()),
+            RuntimeIncomplete(_) => ("RuntimeIncompleteError", err.to_string()),
             InvalidConfig(_) => ("InvalidConfigError", err.to_string()),
             NoDefaultCommand => ("NoDefaultCommandError", err.to_string()),
             CloudHttp { .. } => ("CloudHttpError", err.to_string()),
@@ -66,7 +103,9 @@ pub fn to_py_err(err: microsandbox::MicrosandboxError) -> PyErr {
             SandboxReplaced { .. } => ("SandboxReplacedError", err.to_string()),
             SandboxStillRunning(_) => ("SandboxStillRunningError", err.to_string()),
             SandboxNotRunning(_) => ("SandboxNotRunningError", err.to_string()),
+            SandboxStopTimedOut { .. } => ("SandboxStopTimedOutError", err.to_string()),
             ExecTimeout(_) => ("ExecTimeoutError", err.to_string()),
+            StopTimeout { .. } => ("StopTimeoutError", err.to_string()),
             SandboxFsOps(_) => ("FilesystemError", err.to_string()),
             ImageNotFound(_) => ("ImageNotFoundError", err.to_string()),
             ImageInUse(_) => ("ImageInUseError", err.to_string()),

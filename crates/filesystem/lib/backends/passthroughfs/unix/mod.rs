@@ -11,6 +11,7 @@ mod file_ops;
 mod host_mode;
 pub(crate) mod inode;
 mod metadata;
+mod mobility;
 mod remove_ops;
 mod special;
 mod xattr_ops;
@@ -113,6 +114,10 @@ pub enum HostPermissions {
 /// Configuration for the passthrough filesystem backend.
 #[derive(Debug, Clone)]
 pub struct PassthroughConfig {
+    /// Seal owned namespace/data and reconstruct private linked or detached objects.
+    pub owned_checkpoint: Option<super::OwnedDirectoryCheckpoint>,
+    /// Capture external-object identity and apply explicit destination reconciliation.
+    pub external_checkpoint: Option<super::ExternalCheckpointOptions>,
     /// Path to the root directory on the host.
     pub root_dir: PathBuf,
 
@@ -184,6 +189,8 @@ pub struct PassthroughConfig {
 /// Implements [`DynFileSystem`] by mapping guest filesystem operations to
 /// the host filesystem, with stat virtualization via xattr.
 pub struct PassthroughFs {
+    /// Invalid restored node identities are never reused when a path later reappears.
+    pub(crate) invalid_inodes: RwLock<std::collections::BTreeSet<u64>>,
     /// Configuration.
     pub(crate) cfg: PassthroughConfig,
 
@@ -228,6 +235,12 @@ pub struct PassthroughFs {
 
 /// Open directory handle with a lazy point-in-time snapshot.
 pub(crate) struct PassthroughDirHandle {
+    /// Guest-visible inode that owns this directory handle.
+    pub inode: u64,
+
+    /// Guest open flags used when the handle was admitted.
+    pub flags: u32,
+
     /// Real open fd for directory operations.
     pub file: RwLock<File>,
 
@@ -261,6 +274,19 @@ pub(crate) struct PassthroughDirEntry {
 //--------------------------------------------------------------------------------------------------
 
 impl PassthroughFs {
+    /// Validate external checkpoint structure without resolving or creating host paths.
+    pub fn validate_external_state(bytes: &[u8]) -> io::Result<()> {
+        mobility::validate_unavailable(bytes)
+    }
+
+    /// Validate the single-file facade's inner namespace before translating its selected name.
+    pub(crate) fn prepare_single_file_state(
+        bytes: &[u8],
+        source: &CStr,
+        destination: &CStr,
+    ) -> io::Result<(Vec<u8>, super::ExternalSingleFileIndex)> {
+        mobility::prepare_single_file_state(bytes, source, destination)
+    }
     /// Create a builder for constructing a `PassthroughFs` instance.
     pub fn builder() -> builder::PassthroughFsBuilder {
         builder::PassthroughFsBuilder::new()
@@ -282,6 +308,13 @@ impl PassthroughFs {
         cfg: PassthroughConfig,
         probe_name: Option<&CStr>,
     ) -> io::Result<Self> {
+        if cfg.owned_checkpoint.is_some() && (cfg.external_checkpoint.is_some() || cfg.inject_init)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "owned directory checkpoints require an ordinary, non-external directory backend",
+            ));
+        }
         // Open the root directory, contained beneath the anchor when one is set.
         let root_fd = open_root(&cfg)?;
 
@@ -339,6 +372,7 @@ impl PassthroughFs {
         });
 
         Ok(Self {
+            invalid_inodes: RwLock::new(std::collections::BTreeSet::new()),
             cfg,
             root_fd,
             inodes: RwLock::new(MultikeyBTreeMap::new()),
@@ -503,6 +537,8 @@ impl PassthroughConfig {
 impl Default for PassthroughConfig {
     fn default() -> Self {
         Self {
+            owned_checkpoint: None,
+            external_checkpoint: None,
             root_dir: PathBuf::new(),
             no_symlink_root: false,
             stat_virtualization: StatVirtualization::Strict,
@@ -531,6 +567,25 @@ pub use stat_override::{BindIdentityMap, BindIdentityMapHandle};
 //--------------------------------------------------------------------------------------------------
 
 impl DynFileSystem for PassthroughFs {
+    fn request_error(&self, inode: u64) -> Option<i32> {
+        self.invalid_inodes
+            .read()
+            .unwrap()
+            .contains(&inode)
+            .then_some(116)
+    }
+    fn capture_state(&self) -> io::Result<Vec<u8>> {
+        mobility::capture(self)
+    }
+
+    fn validate_state(&self, state: &[u8]) -> io::Result<()> {
+        mobility::prepare(self, state).map(drop)
+    }
+
+    fn restore_state(&self, state: &[u8]) -> io::Result<()> {
+        mobility::restore(self, state)
+    }
+
     fn init(&self, capable: FsOptions) -> io::Result<FsOptions> {
         // Register root inode (inode 1) in the inode table.
         // The guest kernel issues GETATTR on the root inode immediately after FUSE_INIT.

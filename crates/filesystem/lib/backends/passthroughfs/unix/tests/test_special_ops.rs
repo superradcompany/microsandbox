@@ -56,6 +56,53 @@ fn test_fallocate() {
 }
 
 #[test]
+fn test_fallocate_within_size_keeps_size_and_data() {
+    let sb = TestSandbox::new();
+    let (entry, handle) = sb.fuse_create_root("alloc_within.bin").unwrap();
+    let data: Vec<u8> = (0..16384u32).map(|i| (i % 251) as u8).collect();
+    sb.fuse_write(entry.inode, handle, &data, 0).unwrap();
+
+    // A range that ends inside the file must not move EOF.
+    sb.fs
+        .fallocate(sb.ctx(), entry.inode, handle, 0, 0, 4096)
+        .unwrap();
+
+    let (st, _timeout) = sb.fs.getattr(sb.ctx(), entry.inode, None).unwrap();
+    assert_eq!(
+        st.st_size as usize,
+        data.len(),
+        "fallocate within the file must not truncate it"
+    );
+    let read = sb
+        .fuse_read(entry.inode, handle, data.len() as u32, 0)
+        .unwrap();
+    assert_eq!(read, data, "file contents must survive fallocate");
+}
+
+#[test]
+fn test_fallocate_across_eof_extends_to_range_end() {
+    let sb = TestSandbox::new();
+    let (entry, handle) = sb.fuse_create_root("alloc_across.bin").unwrap();
+    let data: Vec<u8> = (0..16384u32).map(|i| (i % 241) as u8).collect();
+    sb.fuse_write(entry.inode, handle, &data, 0).unwrap();
+
+    // A range that starts inside the file and ends past EOF grows the file
+    // to exactly offset + length and keeps the existing bytes.
+    sb.fs
+        .fallocate(sb.ctx(), entry.inode, handle, 0, 12288, 8192)
+        .unwrap();
+
+    let (st, _timeout) = sb.fs.getattr(sb.ctx(), entry.inode, None).unwrap();
+    assert_eq!(st.st_size, 12288 + 8192);
+    let read = sb
+        .fuse_read(entry.inode, handle, data.len() as u32, 0)
+        .unwrap();
+    assert_eq!(read, data, "existing bytes must survive fallocate");
+    let tail = sb.fuse_read(entry.inode, handle, 4096, 16384).unwrap();
+    assert_eq!(tail, vec![0u8; 4096], "the extension must read as zeros");
+}
+
+#[test]
 fn test_fallocate_init_rejected() {
     let sb = TestSandbox::new();
     let result = sb

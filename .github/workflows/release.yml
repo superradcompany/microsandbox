@@ -4,6 +4,8 @@ on:
   push:
     tags: ["v*"]
   pull_request:
+    branches-ignore:
+      - mintlify
     paths:
       - .github/workflows/release.yml
       - .github/workflows/release-linux.yml
@@ -13,9 +15,12 @@ on:
       - scripts/ci/publish-crates.py
       - scripts/ci/validate-release-artifacts.py
       - scripts/ci/test_validate_release_artifacts.py
+      - sdk/node-ts/scripts/cloud-release-smoke.mts
+      - sdk/node-ts/scripts/cloud-release-smoke.test.mts
       - scripts/ci/validate_linux_glibc.py
       - scripts/ci/test_validate_linux_glibc.py
       - scripts/ci/wait-for-npm-packages.mjs
+      - scripts/ci/publish-npm-package.mjs
   # Manual runs exercise the full release build and validation graph. Every
   # irreversible job below is independently guarded to tag pushes only.
   workflow_dispatch:
@@ -574,7 +579,7 @@ jobs:
       # -- msb --
       - name: Build msb
         run: |
-          cargo build --release --no-default-features --features net,ssh -p microsandbox-cli
+          cargo build --release --no-default-features --features embed-binaries,net,ssh -p microsandbox-cli
           mkdir -p build
           cp target/release/msb build/msb
 
@@ -610,7 +615,7 @@ jobs:
         working-directory: sdk/node-ts
         run: |
           node scripts/prune-platform-optional-deps.mjs
-          npm install --package-lock=false
+          npm ci
           npm run build:native -- --target ${{ matrix.napi_target }}
           npm run build:ts
 
@@ -790,7 +795,7 @@ jobs:
           $ErrorActionPreference = "Stop"
           . "$env:GITHUB_WORKSPACE\vendor\libkrunfw\scripts\msvc-env.ps1"
           Set-MsvcEnvironment -Architecture ${{ matrix.vs_arch }} -HostArchitecture ${{ matrix.vs_host_arch }}
-          cargo build --release --no-default-features --features net,ssh -p microsandbox-cli --target ${{ matrix.rust_target }}
+          cargo build --release --no-default-features --features embed-binaries,net,ssh -p microsandbox-cli --target ${{ matrix.rust_target }}
           New-Item -ItemType Directory -Force -Path build | Out-Null
           Copy-Item target\${{ matrix.rust_target }}\release\msb.exe build\msb.exe -Force
 
@@ -832,7 +837,7 @@ jobs:
           . "$env:GITHUB_WORKSPACE\vendor\libkrunfw\scripts\msvc-env.ps1"
           Set-MsvcEnvironment -Architecture ${{ matrix.vs_arch }} -HostArchitecture ${{ matrix.vs_host_arch }}
           node scripts/prune-platform-optional-deps.mjs
-          npm install --package-lock=false
+          npm ci
           npm run build:native -- --target ${{ matrix.napi_target }}
           npm run build:ts
 
@@ -968,6 +973,74 @@ jobs:
       - name: Validate crates.io publication graph and package manifests
         run: python3 scripts/ci/publish-crates.py --validate-only
 
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+
+      # Exercise the same packaging path as npm-publish, including the candidate
+      # native binding. No already-published microsandbox package is installed.
+      - name: Build and check TypeScript smoke test
+        working-directory: sdk/node-ts
+        run: |
+          node --test ../../scripts/ci/test-npm-release.mjs
+          node ../../scripts/ci/build-unpublished-node-sdk.mjs
+          npx --no-install tsc --noEmit --strict --skipLibCheck --target ES2023 --module nodenext --allowImportingTsExtensions scripts/cloud-release-smoke.mts scripts/cloud-release-smoke.test.mts
+          node --experimental-strip-types --test scripts/cloud-release-smoke.test.mts
+
+      # Never expose production credentials to PR code. Manual dry-runs run the
+      # live gate only on main; every publishing tag must pass it.
+      - name: Install candidate SDK for production smoke test
+        id: smoke-install
+        if: >-
+          (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
+          (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
+        run: |
+          platform=sdk/node-ts/npm/linux-x64-gnu
+          artifact=node-artifacts/node-sdk-linux-x64-gnu
+          mkdir -p "$platform/bin" "$platform/lib"
+          cp "$artifact/npm/linux-x64-gnu/"*.node "$platform/"
+          cp "$artifact/npm/linux-x64-gnu/bin/"* "$platform/bin/"
+          cp "$artifact/npm/linux-x64-gnu/lib/"* "$platform/lib/"
+          chmod +x "$platform/bin/msb"
+          cp "$artifact/native/index.cjs" sdk/node-ts/native/index.cjs
+          cp "$artifact/native/index.d.ts" sdk/node-ts/native/index.d.cts
+          pack_dir="$RUNNER_TEMP/cloud-smoke-packs"
+          consumer_dir="$RUNNER_TEMP/cloud-smoke-consumer"
+          mkdir -p "$pack_dir" "$consumer_dir"
+          # Keep the smoke consumer entirely on candidate packages, including
+          # the SDK's runtime types dependency before this version is published.
+          types_tarball=$(cd packages/microsandbox-types/typescript && npm pack --silent --pack-destination "$pack_dir")
+          main_tarball=$(cd sdk/node-ts && npm pack --silent --pack-destination "$pack_dir")
+          platform_tarball=$(cd "$platform" && npm pack --silent --pack-destination "$pack_dir")
+          cp sdk/node-ts/scripts/cloud-release-smoke.mts "$consumer_dir/"
+          cd "$consumer_dir"
+          npm init --yes >/dev/null
+          npm install --ignore-scripts --omit=optional "$pack_dir/$types_tarball" "$pack_dir/$main_tarball" "$pack_dir/$platform_tarball"
+          node --input-type=module -e 'await import("microsandbox")'
+
+      - name: Smoke test candidate SDK against production
+        id: cloud-smoke
+        if: steps.smoke-install.outcome == 'success'
+        timeout-minutes: 6
+        env:
+          MSB_API_KEY: ${{ secrets.MSB_API_KEY }}
+          MSB_BACKEND: cloud
+          MSB_API_URL: https://api.microsandbox.dev
+          MSB_HOME: ${{ runner.temp }}/cloud-smoke-home
+          MSB_SMOKE_SANDBOX_NAME: release-smoke-${{ github.run_id }}-${{ github.run_attempt }}
+        run: node --experimental-strip-types "$RUNNER_TEMP/cloud-smoke-consumer/cloud-release-smoke.mts" run
+
+      - name: Clean up production smoke sandbox
+        if: ${{ always() && steps.cloud-smoke.outcome != 'skipped' && steps.smoke-install.outcome == 'success' }}
+        timeout-minutes: 4
+        env:
+          MSB_API_KEY: ${{ secrets.MSB_API_KEY }}
+          MSB_BACKEND: cloud
+          MSB_API_URL: https://api.microsandbox.dev
+          MSB_HOME: ${{ runner.temp }}/cloud-smoke-home
+          MSB_SMOKE_SANDBOX_NAME: release-smoke-${{ github.run_id }}-${{ github.run_attempt }}
+        run: node --experimental-strip-types "$RUNNER_TEMP/cloud-smoke-consumer/cloud-release-smoke.mts" cleanup
+
       - name: Upload validation manifest
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -1075,7 +1148,9 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           branch="mintlify-sync-${{ github.ref_name }}"
-          git push --force origin ${{ github.sha }}:refs/heads/"$branch"
+          git switch --detach "${{ github.sha }}"
+          git commit --allow-empty -m "chore(docs): sync mintlify to ${{ github.ref_name }}"
+          git push --force origin HEAD:refs/heads/"$branch"
           if [ "${{ steps.merge.outputs.result }}" = "clean" ]; then
             body="Syncs mintlify to ${{ github.ref_name }}. The release commit merges cleanly, so this PR was enqueued automatically; the merge queue lands it as a merge commit."
           else
@@ -1171,6 +1246,13 @@ jobs:
     needs: release-ready
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      # Every publish in this job uses the existing token plus GitHub OIDC
+      # provenance. MCP is published separately from its submodule repository.
+      NPM_CONFIG_PROVENANCE: "true"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -1202,34 +1284,43 @@ jobs:
 
           # Copy napi-generated bindings into the root package's native/ dir
           # (use darwin-arm64; all platforms emit identical JS and types).
-          # napi build emits index.d.ts; rename to index.d.cts so nodenext
-          # resolution finds it next to the .cjs binding.
+          # Keep the declaration path aligned with package.json exports/files.
           cp node-artifacts/node-sdk-darwin-arm64/native/index.cjs sdk/node-ts/native/index.cjs
-          cp node-artifacts/node-sdk-darwin-arm64/native/index.d.ts sdk/node-ts/native/index.d.cts
+          cp node-artifacts/node-sdk-darwin-arm64/native/index.d.ts sdk/node-ts/native/index.d.ts
 
-      - name: Build TypeScript output (root package dist/)
-        working-directory: sdk/node-ts
-        run: |
-          npm install --omit=optional --package-lock=false
-          npm run build:ts
-
-      - name: Build and publish agent client package
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        working-directory: packages/agent-client/typescript
+      - name: Build shared TypeScript packages in dependency order
+        working-directory: packages
         run: |
           npm ci
           npm run build
-          npm publish --access public
 
-      - name: Build and publish microsandbox types package
+      - name: Publish shared types and protocol engine
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        working-directory: packages/microsandbox-types/typescript
+        working-directory: packages
         run: |
-          npm ci
-          npm run build
-          npm publish --access public
+          node ../scripts/ci/publish-npm-package.mjs microsandbox-types/typescript
+          node ../scripts/ci/publish-npm-package.mjs protocol-client/typescript
+
+      - name: Wait for shared dependencies to be indexed
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          node scripts/ci/wait-for-npm-packages.mjs "$VERSION" \
+            @microsandbox/types @microsandbox/protocol-client
+
+      - name: Publish agent and control clients
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        working-directory: packages
+        run: |
+          node ../scripts/ci/publish-npm-package.mjs agent-client/typescript
+          node ../scripts/ci/publish-npm-package.mjs control-client/typescript
+
+      - name: Wait for shared clients to be indexed
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          node scripts/ci/wait-for-npm-packages.mjs "$VERSION" \
+            @microsandbox/agent-client @microsandbox/control-client
 
       - name: Publish platform packages
         env:
@@ -1238,7 +1329,7 @@ jobs:
           for dir in darwin-arm64 linux-x64-gnu linux-arm64-gnu win32-x64-msvc win32-arm64-msvc; do
             echo "Publishing @superradcompany/microsandbox-$dir..."
             cd sdk/node-ts/npm/$dir
-            npm publish --access public
+            node ../../../../scripts/ci/publish-npm-package.mjs .
             cd ../../../..
           done
 
@@ -1251,6 +1342,15 @@ jobs:
             @superradcompany/microsandbox-linux-x64-gnu \
             @superradcompany/microsandbox-win32-arm64-msvc \
             @superradcompany/microsandbox-win32-x64-msvc
+
+      - name: Build TypeScript output with published platform dependencies
+        working-directory: sdk/node-ts
+        run: |
+          # A version bump can precede registry entries for its native packages.
+          # Only resolve them after publication, then validate with a clean install.
+          npm install --package-lock-only --ignore-scripts
+          npm ci --omit=optional
+          npm run build:ts
 
       - name: Verify root package platform dependencies
         working-directory: sdk/node-ts
@@ -1280,7 +1380,7 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         working-directory: sdk/node-ts
-        run: npm publish --access public
+        run: node ../../scripts/ci/publish-npm-package.mjs .
 
   # ---------------------------------------------------------------------------
   # Refresh sdk/node-ts/package-lock.json against the just-published platform
@@ -1352,15 +1452,23 @@ jobs:
           VERSION="${GITHUB_REF_NAME#v}"
           node scripts/ci/wait-for-npm-packages.mjs "$VERSION" microsandbox
 
-      - name: Build and publish MCP server
+      - name: Build MCP server
+        working-directory: mcp
+        run: |
+          # The pinned MCP source has no lockfile. Disable dependency lifecycle
+          # scripts during resolution and keep publishing credentials out of build.
+          if [ -f package-lock.json ]; then
+            npm ci --ignore-scripts
+          else
+            npm install --ignore-scripts
+          fi
+          npm run build
+
+      - name: Publish MCP server
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         working-directory: mcp
-        run: |
-          rm -f package-lock.json
-          npm install
-          npm run build
-          npm publish --access public
+        run: node ../scripts/ci/publish-npm-package.mjs .
 
   # ---------------------------------------------------------------------------
   # Publish Rust crates to crates.io

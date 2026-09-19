@@ -167,10 +167,91 @@ impl Registry {
         manifest_digest: &Digest,
     ) -> ImageResult<Option<(PullResult, CachedImageMetadata)>> {
         Ok(
-            resolve_cached_pull_result_by_manifest_digest_async(cache, manifest_digest)
+            resolve_cached_pull_result_by_manifest_digest_async(cache, manifest_digest, false)
                 .await?
                 .map(|cached| (cached.result, cached.metadata)),
         )
+    }
+
+    /// Resolve snapshot image defaults by immutable digest. Flat snapshots own
+    /// their complete disk, so they need metadata but no materialized OCI layers.
+    pub async fn pull_snapshot_cached(
+        cache: &GlobalCache,
+        references: &[oci_client::Reference],
+        manifest_digest: &Digest,
+        materialization: RootfsMaterialization,
+    ) -> ImageResult<Option<(PullResult, CachedImageMetadata)>> {
+        let metadata_only = materialization == RootfsMaterialization::Flat;
+        let expected = manifest_digest.to_string();
+        // Most snapshots retain either their original tag key or a pinned key.
+        // Avoid scanning every unrelated image on this common path.
+        for reference in references {
+            if let Some(metadata) = cache.read_image_metadata_async(reference).await?
+                && metadata.manifest_digest == expected
+                && let Some(cached) =
+                    resolve_snapshot_metadata(cache, metadata, metadata_only).await?
+            {
+                return Ok(Some((cached.result, cached.metadata)));
+            }
+        }
+        Ok(resolve_cached_pull_result_by_manifest_digest_async(
+            cache,
+            manifest_digest,
+            metadata_only,
+        )
+        .await?
+        .map(|cached| (cached.result, cached.metadata)))
+    }
+
+    /// Fetch only the immutable manifest and config needed by a flat snapshot.
+    /// Normal pulls still independently require their filesystem artifacts.
+    pub async fn pull_snapshot_metadata(
+        &self,
+        reference: &oci_client::Reference,
+    ) -> ImageResult<PullResult> {
+        let expected = reference.digest().ok_or_else(|| {
+            ImageError::ManifestParse("snapshot metadata requires a digest-pinned reference".into())
+        })?;
+        let (manifest_bytes, digest, config_bytes) =
+            self.fetch_manifest_and_config(reference).await?;
+        if digest != expected {
+            return Err(ImageError::ManifestParse(
+                "snapshot manifest digest differs from pinned reference".into(),
+            ));
+        }
+        let (manifest, config_bytes, resolved) = self
+            .parse_and_resolve_manifest(&manifest_bytes, config_bytes, reference)
+            .await?;
+        let (config, diff_ids) = ImageConfig::parse(&config_bytes)?;
+        let layers = self.extract_layer_digests(&manifest)?;
+        if layers.len() != diff_ids.len() {
+            return Err(ImageError::ManifestParse(
+                "snapshot manifest/config layer count mismatch".into(),
+            ));
+        }
+        let metadata = CachedImageMetadata {
+            manifest_digest: digest,
+            config_digest: manifest.config_digest().unwrap_or_default(),
+            raw_manifest_json: json_bytes_to_string(&resolved, "resolved manifest")?,
+            raw_config_json: json_bytes_to_string(&config_bytes, "image config")?,
+            config,
+            layers: layers
+                .iter()
+                .zip(diff_ids)
+                .map(|(layer, diff_id)| CachedLayerMetadata {
+                    digest: layer.digest.to_string(),
+                    media_type: layer.media_type.clone(),
+                    size_bytes: layer.size,
+                    diff_id,
+                })
+                .collect(),
+        };
+        let mut result = cached_pull_result(&metadata)?;
+        self.cache
+            .write_image_metadata_async(reference, &metadata)
+            .await?;
+        result.cached = false;
+        Ok(result)
     }
 
     /// Pull an image. Downloads blobs and materializes EROFS layers concurrently.
@@ -1652,9 +1733,9 @@ async fn resolve_cached_pull_result_async(
 async fn resolve_cached_pull_result_by_manifest_digest_async(
     cache: &GlobalCache,
     manifest_digest: &Digest,
+    metadata_only: bool,
 ) -> ImageResult<Option<CachedPullInfo>> {
     let expected = manifest_digest.to_string();
-    let platform = Platform::host_linux();
     let mut entries = tokio::fs::read_dir(cache.manifests_dir())
         .await
         .map_err(|e| ImageError::Cache {
@@ -1683,19 +1764,31 @@ async fn resolve_cached_pull_result_by_manifest_digest_async(
             continue;
         }
 
-        if let Some(cached) = resolve_cached_metadata_pull_result_async(
-            cache,
-            metadata,
-            RootfsMaterialization::Layered,
-            &platform,
-        )
-        .await?
-        {
+        if let Some(cached) = resolve_snapshot_metadata(cache, metadata, metadata_only).await? {
             return Ok(Some(cached));
         }
     }
 
     Ok(None)
+}
+
+async fn resolve_snapshot_metadata(
+    cache: &GlobalCache,
+    metadata: CachedImageMetadata,
+    metadata_only: bool,
+) -> ImageResult<Option<CachedPullInfo>> {
+    if metadata_only {
+        return Ok(cached_pull_result(&metadata)
+            .ok()
+            .map(|result| CachedPullInfo { result, metadata }));
+    }
+    resolve_cached_metadata_pull_result_async(
+        cache,
+        metadata,
+        RootfsMaterialization::Layered,
+        &Platform::host_linux(),
+    )
+    .await
 }
 
 async fn resolve_cached_metadata_pull_result_async(
@@ -1959,6 +2052,51 @@ mod tests {
             metadata.manifest_digest
         );
         assert_eq!(cached.1.manifest_digest, metadata.manifest_digest);
+    }
+
+    #[tokio::test]
+    async fn snapshot_flat_metadata_does_not_require_disks_or_accept_moved_tags() {
+        let temp = tempdir().unwrap();
+        let cache = GlobalCache::new(temp.path()).unwrap();
+        let reference: oci_client::Reference = "docker.io/library/alpine:latest".parse().unwrap();
+        let metadata = write_cached_image_fixture(&cache, &reference, &[false, false]);
+        let digest = parse_digest(&metadata.manifest_digest);
+        for refs in [vec![reference.clone()], vec![]] {
+            let found = super::Registry::pull_snapshot_cached(
+                &cache,
+                &refs,
+                &digest,
+                RootfsMaterialization::Flat,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(found.0.manifest_digest, digest);
+            assert_eq!(found.0.config.env, metadata.config.env);
+            assert!(
+                super::Registry::pull_snapshot_cached(
+                    &cache,
+                    &refs,
+                    &digest,
+                    RootfsMaterialization::Layered
+                )
+                .await
+                .unwrap()
+                .is_none()
+            );
+        }
+        let other = parse_digest(&format!("sha256:{}", "f".repeat(64)));
+        assert!(
+            super::Registry::pull_snapshot_cached(
+                &cache,
+                &[reference],
+                &other,
+                RootfsMaterialization::Flat
+            )
+            .await
+            .unwrap()
+            .is_none()
+        );
     }
 
     #[tokio::test]

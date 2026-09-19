@@ -164,7 +164,7 @@ microsandbox adds these certificates to the default system roots, so public regi
 }
 ```
 
-You can also set these per-sandbox via the SDK, overriding global config:
+Per-sandbox SDK options override user registry settings. [Managed registry settings](/configuration#auth-resolution-order) take precedence over both. Managed `insecure: false` requires TLS without changing credentials; managed `auth: null` forces anonymous access, and managed CA settings replace per-call custom certificates.
 
 <CodeGroup>
 ```typescript TypeScript
@@ -314,3 +314,7 @@ sb2, err := m.CreateSandbox(ctx, "custom-vm-2",
 <Note>
   The filesystem type (`ext4`, `xfs`, etc.) must match what's actually on the disk image. The guest kernel mounts it using the specified filesystem driver.
 </Note>
+
+## Reference
+
+For exact image APIs, see [TypeScript](/sdk/typescript/images), [Rust](/sdk/rust/images), [Python](/sdk/python/images), or [Go](/sdk/go/images). For local image management, see [Image commands](/cli/image-commands).

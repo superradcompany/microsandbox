@@ -9,7 +9,7 @@ use crate::error::ProtocolResult;
 //--------------------------------------------------------------------------------------------------
 
 /// Current protocol version.
-pub const PROTOCOL_VERSION: u8 = 7;
+pub const PROTOCOL_VERSION: u8 = 9;
 
 /// Frame flag: this is the last message for the given correlation ID.
 ///
@@ -27,8 +27,11 @@ pub const FLAG_SESSION_START: u8 = 0b0000_0010;
 /// drain escalation (SIGTERM → SIGKILL) if the guest doesn't exit voluntarily.
 pub const FLAG_SHUTDOWN: u8 = 0b0000_0100;
 
+/// Frame flag: the body is a generation-8 raw bulk record rather than CBOR.
+pub const FLAG_BULK: u8 = 0b0000_1000;
+
 /// Size of the frame header fields that sit between the length prefix and the
-/// CBOR payload: `[id: u32 BE][flags: u8]` = 5 bytes.
+/// control or raw body: `[id: u32 BE][flags: u8]` = 5 bytes.
 pub const FRAME_HEADER_SIZE: usize = 5;
 
 //--------------------------------------------------------------------------------------------------
@@ -90,6 +93,7 @@ pub struct Message {
     Eq,
     Hash,
     strum::IntoStaticStr,
+    strum::AsRefStr,
     strum::EnumString,
     strum::EnumIter,
 )]
@@ -134,9 +138,57 @@ pub enum MessageType {
     #[strum(serialize = "core.touched")]
     Touched,
 
+    /// Host asks agentd to freeze all agent-managed workload processes.
+    #[strum(serialize = "core.workload.freeze")]
+    WorkloadFreeze,
+
+    /// Guest confirms that every agent-managed workload process is frozen.
+    #[strum(serialize = "core.workload.frozen")]
+    WorkloadFrozen,
+
+    /// Host asks agentd to release a previously established workload freeze.
+    #[strum(serialize = "core.workload.thaw")]
+    WorkloadThaw,
+
+    /// Guest confirms that agent-managed workload processes may run again.
+    #[strum(serialize = "core.workload.thawed")]
+    WorkloadThawed,
+
+    /// Guest grants cumulative ordinary input capacity to its host relay.
+    #[strum(serialize = "core.workload.transport.credit")]
+    WorkloadTransportCredit,
+
+    /// Host checks mounted root-filesystem growth before changing block capacity.
+    #[strum(serialize = "core.root_disk.prepare")]
+    RootDiskPrepare,
+
+    /// Host requests mounted root-filesystem expansion after block capacity changed.
+    #[strum(serialize = "core.root_disk.grow")]
+    RootDiskGrow,
+
+    /// Guest reports the root filesystem and device capacities.
+    #[strum(serialize = "core.root_disk.state")]
+    RootDiskState,
+
     /// Peer reports a recoverable protocol-level error.
     #[strum(serialize = "core.error")]
     CoreError,
+
+    /// Guest accepts the raw-bulk offer on an opening operation.
+    #[strum(serialize = "core.bulk.accepted")]
+    BulkAccepted,
+
+    /// Receiver grants an absolute send limit for one bulk flow.
+    #[strum(serialize = "core.bulk.credit")]
+    BulkCredit,
+
+    /// Sender declares the exact final offset of one bulk flow.
+    #[strum(serialize = "core.bulk.finish")]
+    BulkFinish,
+
+    /// Peer asks to stop an entire bulk correlation.
+    #[strum(serialize = "core.bulk.cancel")]
+    BulkCancel,
 
     /// Host requests command execution.
     #[strum(serialize = "core.exec.request")]
@@ -270,11 +322,26 @@ impl Message {
 }
 
 impl MessageType {
+    /// Whether host-to-guest delivery can retain payload credit behind a workload consumer.
+    ///
+    /// The bundled workload barrier uses logical classes, not physical console ports. Payload
+    /// messages (including ordered EOF) share data credit with raw bulk records, leaving control
+    /// capacity available for fresh commands when restored stdin has not yet been consumed.
+    pub fn uses_workload_data_credit(self) -> bool {
+        matches!(
+            self,
+            Self::ExecStdin | Self::FsData | Self::TcpData | Self::TcpEof
+        )
+    }
+
     /// Computes the frame flags byte for this message type.
     pub fn flags(&self) -> u8 {
         match self {
             Self::Pong
             | Self::Touched
+            | Self::WorkloadFrozen
+            | Self::WorkloadThawed
+            | Self::RootDiskState
             | Self::CoreError
             | Self::ExecExited
             | Self::ExecFailed
@@ -329,6 +396,13 @@ impl MessageType {
             Self::CoreError => 5,
             Self::Ping | Self::Pong | Self::Touch | Self::Touched => 6,
             Self::Bootstrap => 7,
+            Self::WorkloadFreeze
+            | Self::WorkloadFrozen
+            | Self::WorkloadThaw
+            | Self::WorkloadThawed
+            | Self::WorkloadTransportCredit => 9,
+            Self::RootDiskPrepare | Self::RootDiskGrow | Self::RootDiskState => 9,
+            Self::BulkAccepted | Self::BulkCredit | Self::BulkFinish | Self::BulkCancel => 8,
             Self::TcpConnect
             | Self::TcpConnected
             | Self::TcpData
@@ -399,6 +473,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn retained_payload_and_eof_use_data_credit_without_changing_frame_flags() {
+        for message in [
+            MessageType::ExecStdin,
+            MessageType::FsData,
+            MessageType::TcpData,
+            MessageType::TcpEof,
+        ] {
+            assert!(message.uses_workload_data_credit());
+            assert_eq!(
+                message.flags(),
+                0,
+                "logical admission must not change the wire header"
+            );
+        }
+        for message in [
+            MessageType::ExecRequest,
+            MessageType::Ping,
+            MessageType::FsRequest,
+            MessageType::TcpConnect,
+            MessageType::ExecSignal,
+            MessageType::BulkFinish,
+            MessageType::BulkCancel,
+            MessageType::RelayClientDisconnected,
+        ] {
+            assert!(!message.uses_workload_data_credit());
+        }
+    }
+
+    #[test]
     fn test_message_type_roundtrip() {
         let types = [
             (MessageType::Bootstrap, "core.bootstrap"),
@@ -415,7 +518,19 @@ mod tests {
             (MessageType::Pong, "core.pong"),
             (MessageType::Touch, "core.touch"),
             (MessageType::Touched, "core.touched"),
+            (MessageType::WorkloadFreeze, "core.workload.freeze"),
+            (MessageType::WorkloadFrozen, "core.workload.frozen"),
+            (MessageType::WorkloadThaw, "core.workload.thaw"),
+            (MessageType::WorkloadThawed, "core.workload.thawed"),
+            (
+                MessageType::WorkloadTransportCredit,
+                "core.workload.transport.credit",
+            ),
             (MessageType::CoreError, "core.error"),
+            (MessageType::BulkAccepted, "core.bulk.accepted"),
+            (MessageType::BulkCredit, "core.bulk.credit"),
+            (MessageType::BulkFinish, "core.bulk.finish"),
+            (MessageType::BulkCancel, "core.bulk.cancel"),
             (MessageType::ExecRequest, "core.exec.request"),
             (MessageType::ExecStarted, "core.exec.started"),
             (MessageType::ExecStdin, "core.exec.stdin"),
@@ -458,7 +573,16 @@ mod tests {
             MessageType::Pong,
             MessageType::Touch,
             MessageType::Touched,
+            MessageType::WorkloadFreeze,
+            MessageType::WorkloadFrozen,
+            MessageType::WorkloadThaw,
+            MessageType::WorkloadThawed,
+            MessageType::WorkloadTransportCredit,
             MessageType::CoreError,
+            MessageType::BulkAccepted,
+            MessageType::BulkCredit,
+            MessageType::BulkFinish,
+            MessageType::BulkCancel,
             MessageType::ExecRequest,
             MessageType::ExecStarted,
             MessageType::ExecStdin,
@@ -518,6 +642,8 @@ mod tests {
         assert_eq!(MessageType::TcpFailed.flags(), FLAG_TERMINAL);
         assert_eq!(MessageType::Pong.flags(), FLAG_TERMINAL);
         assert_eq!(MessageType::Touched.flags(), FLAG_TERMINAL);
+        assert_eq!(MessageType::WorkloadFrozen.flags(), FLAG_TERMINAL);
+        assert_eq!(MessageType::WorkloadThawed.flags(), FLAG_TERMINAL);
         assert_eq!(MessageType::ExecRequest.flags(), FLAG_SESSION_START);
         assert_eq!(MessageType::FsRequest.flags(), FLAG_SESSION_START);
         assert_eq!(MessageType::TcpConnect.flags(), FLAG_SESSION_START);
@@ -529,6 +655,12 @@ mod tests {
         assert_eq!(MessageType::ClockSync.flags(), 0);
         assert_eq!(MessageType::Ping.flags(), 0);
         assert_eq!(MessageType::Touch.flags(), 0);
+        assert_eq!(MessageType::WorkloadFreeze.flags(), 0);
+        assert_eq!(MessageType::WorkloadThaw.flags(), 0);
+        assert_eq!(MessageType::BulkAccepted.flags(), 0);
+        assert_eq!(MessageType::BulkCredit.flags(), 0);
+        assert_eq!(MessageType::BulkFinish.flags(), 0);
+        assert_eq!(MessageType::BulkCancel.flags(), 0);
         assert_eq!(MessageType::ExecStarted.flags(), 0);
         assert_eq!(MessageType::ExecStdin.flags(), 0);
         assert_eq!(MessageType::ExecStdout.flags(), 0);
@@ -593,7 +725,14 @@ mod tests {
         assert!(MessageType::Ping.is_available_at(PROTOCOL_VERSION));
         // Bootstrap is internal to generation-7 host/agent boot.
         assert!(!MessageType::Bootstrap.is_available_at(6));
-        assert!(MessageType::Bootstrap.is_available_at(PROTOCOL_VERSION));
+        // Released generation-8 agents support bulk I/O, not workload latching.
+        assert!(!MessageType::WorkloadFreeze.is_available_at(8));
+        assert!(MessageType::WorkloadFreeze.is_available_at(PROTOCOL_VERSION));
+        assert!(MessageType::Bootstrap.is_available_at(7));
+        // Raw bulk controls are generation-8 only. A bootstrap-capable
+        // generation-7 peer must remain on the framed compatibility path.
+        assert!(!MessageType::BulkAccepted.is_available_at(7));
+        assert!(MessageType::BulkAccepted.is_available_at(8));
     }
 
     #[test]
@@ -642,6 +781,24 @@ mod tests {
         }
 
         assert_eq!(MessageType::Bootstrap.min_protocol_version(), 7);
+        for mt in [
+            MessageType::BulkAccepted,
+            MessageType::BulkCredit,
+            MessageType::BulkFinish,
+            MessageType::BulkCancel,
+        ] {
+            assert_eq!(mt.min_protocol_version(), 8, "{mt:?} should require gen 8");
+        }
+
+        for mt in [
+            MessageType::WorkloadFreeze,
+            MessageType::WorkloadFrozen,
+            MessageType::WorkloadThaw,
+            MessageType::WorkloadThawed,
+            MessageType::WorkloadTransportCredit,
+        ] {
+            assert_eq!(mt.min_protocol_version(), 9, "{mt:?} should require gen 9");
+        }
 
         // Every current type must be sendable to a current peer.
         assert!(MessageType::FsRequest.min_protocol_version() <= PROTOCOL_VERSION);

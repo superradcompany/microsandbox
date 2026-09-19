@@ -1,0 +1,4427 @@
+//! Sandbox process entry point and VM configuration.
+//!
+//! The [`enter()`] function starts background services (agent relay,
+//! heartbeat, idle timeout), configures the VMM, and hands control to
+//! `Vm::enter()` from msb_krun. It **never returns** — the VMM calls
+//! `_exit()` on guest shutdown after running exit observers.
+
+use std::io::Write;
+use std::num::NonZero;
+#[cfg(unix)]
+use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+#[cfg(unix)]
+use std::sync::OnceLock;
+use std::time::Duration;
+
+use microsandbox_db::DbWriteConnection;
+use microsandbox_db::entity::run as run_entity;
+#[cfg(unix)]
+use microsandbox_filesystem::{BindIdentityMap, BindIdentityMapHandle, DynFileSystem};
+use microsandbox_filesystem::{
+    HostPermissions, PassthroughConfig, PassthroughFs, SingleFileFs, StatVirtualization,
+};
+use microsandbox_metrics::{ActivateSlot, MetricsRegistry, ReleaseMode};
+#[cfg(feature = "net")]
+use microsandbox_network::{ResolvedNetworkConfig, network::SmoltcpNetwork};
+use microsandbox_protocol::{
+    bootstrap::{BootstrapBlockRoot, GuestBootstrap},
+    codec,
+    message::{Message, MessageType},
+};
+use microsandbox_types::CpuPlacement;
+#[cfg(feature = "net")]
+use microsandbox_types::DeploymentProfile;
+#[cfg(windows)]
+use microsandbox_vsock::WindowsNamedPipePortBackend;
+#[cfg(unix)]
+use microsandbox_vsock::{UnixDatagramPortBackend, UnixStreamPortBackend};
+use msb_krun::VmBuilder;
+use sea_orm::{ColumnTrait, EntityTrait, Set};
+use serde::Serialize;
+
+#[cfg(windows)]
+use crate::bootstrap_fs::AgentBootstrapFs;
+#[cfg(windows)]
+use crate::console::AgentConsolePipeBridge;
+use crate::console::{AgentConsoleBackend, ConsoleSharedState};
+use crate::heartbeat::{self, HeartbeatDecision, HeartbeatReader};
+use crate::launch::FileMountConfig;
+#[cfg(unix)]
+pub use crate::launch::LIFECYCLE_LOCK_FD;
+pub use crate::launch::{
+    BRANCH_MEMORY_FD, CONFIG_FD, MetricsSlotHandoff, PARENT_WATCH_DETACH, PARENT_WATCH_FD,
+    STARTUP_FD, StartupCommand,
+};
+use crate::logging::LogLevel;
+use crate::metrics::run_metrics_sampler;
+use crate::relay::{self, AgentRelay};
+use crate::{RuntimeError, RuntimeResult};
+
+//--------------------------------------------------------------------------------------------------
+// Constants
+//--------------------------------------------------------------------------------------------------
+
+/// Exit reason tags stored in the shared `AtomicU8`.
+const EXIT_REASON_COMPLETED: u8 = 0;
+const EXIT_REASON_IDLE_TIMEOUT: u8 = 1;
+const EXIT_REASON_MAX_DURATION: u8 = 2;
+const EXIT_REASON_SIGNAL: u8 = 3;
+const EXIT_REASON_PARENT_EXIT: u8 = 4;
+/// Termination reason when agentd never signals readiness within the relay's
+/// boot window (the guest failed to come up). Reused for the boot-failure exit
+/// triggered from the relay's `wait_ready` path.
+const EXIT_REASON_AGENT_UNRESPONSIVE: u8 = 5;
+const EXIT_REASON_SHUTDOWN_REQUESTED: u8 = 6;
+const EXIT_REASON_STARTUP_COMMAND_FAILED: u8 = 7;
+
+/// Bounds how long an existing VMM can retain an obsolete fair share after membership changes.
+const WRITEBACK_PRESSURE_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
+
+/// Virtqueue size retained when the primary agent port carries control traffic only.
+const AGENT_CONTROL_QUEUE_SIZE: u16 = 32;
+
+/// Virtqueue size for every physical port that carries generation-8 bulk records.
+const AGENT_BULK_QUEUE_SIZE: u16 = 256;
+//--------------------------------------------------------------------------------------------------
+// Types
+//--------------------------------------------------------------------------------------------------
+
+/// Internal host/guest topology for the agent data plane.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[doc(hidden)]
+#[non_exhaustive]
+pub enum AgentTransportProfile {
+    /// Offer the dedicated bulk port and retain combined mode when agentd does not select it.
+    #[default]
+    Auto,
+
+    /// Control messages and generation-8 raw records share the `agent` port.
+    Combined,
+
+    /// Raw records use a separately bound `agent-bulk` port.
+    DualPortV1,
+}
+
+/// Host adapters for the physical ports selected by the agent transport profile.
+struct AgentConsoleBackends {
+    control: AgentConsoleBackend,
+    bulk: Option<AgentConsoleBackend>,
+}
+
+/// Full configuration for the sandbox process.
+///
+/// Combines VM hardware settings with sandbox-level metadata (name, DB,
+/// agent relay, lifecycle policies). Passed to [`enter()`].
+#[derive(Debug)]
+pub struct Config {
+    /// Internal per-boot agent transport policy.
+    #[doc(hidden)]
+    pub agent_transport: AgentTransportProfile,
+
+    /// Name of the sandbox.
+    pub sandbox_name: String,
+
+    /// Database ID of the sandbox row.
+    pub sandbox_id: i32,
+
+    /// Selected tracing verbosity.
+    pub log_level: Option<LogLevel>,
+
+    /// Path to the sandbox database file.
+    pub sandbox_db_path: PathBuf,
+
+    /// Timeout when acquiring a sandbox database connection from the pool.
+    pub sandbox_db_connect_timeout_secs: u64,
+
+    /// Directory for log files.
+    pub log_dir: PathBuf,
+
+    /// Runtime directory (scripts, heartbeat).
+    pub runtime_dir: PathBuf,
+
+    /// Root directory holding every sandbox's persisted state
+    /// (`<sandboxes_dir>/<name>`). Passed explicitly so runtime-owned
+    /// lifecycle maintenance can remove ephemeral sandbox directories without
+    /// inferring the path from `log_dir`.
+    pub sandboxes_dir: PathBuf,
+
+    /// Root directory holding ephemeral host-runtime artifacts.
+    pub run_dir: PathBuf,
+
+    /// Process-lifetime ownership of this sandbox's runtime artifacts.
+    pub lifecycle_guard: crate::ipc::SandboxLifecycleGuard,
+
+    /// Internal directory containing process-held CPU allocation leases.
+    pub cpu_lease_dir: PathBuf,
+
+    /// Internal directory containing process-held writeback pressure leases.
+    pub writeback_lease_dir: PathBuf,
+
+    /// Host-global dirty-credit pool shared fairly by live writable disks.
+    pub block_writeback_pool_bytes: Option<u64>,
+
+    /// Path to the Unix domain socket for the agent relay.
+    pub agent_sock_path: PathBuf,
+
+    /// Startup command to execute after agentd reports ready.
+    pub startup_command: Option<StartupCommand>,
+
+    /// Dedicated startup JSON write fd.
+    ///
+    /// When present, startup info is written here instead of stdout so
+    /// detached launchers can detach stdout/stderr from birth.
+    #[cfg(unix)]
+    pub startup_fd: Option<OwnedFd>,
+
+    /// Dedicated Windows startup JSON pipe.
+    ///
+    /// When present, startup info is written here instead of stdout so
+    /// detached launchers can detach stdout/stderr from birth.
+    #[cfg(windows)]
+    pub startup_pipe: Option<String>,
+
+    /// Read end of the attached-parent watchdog pipe.
+    #[cfg(unix)]
+    pub parent_watchdog: Option<OwnedFd>,
+
+    /// Whether to forward VM console output to stdout.
+    pub forward_output: bool,
+
+    /// Idle timeout in seconds (None = no idle timeout).
+    pub idle_timeout_secs: Option<u64>,
+
+    /// Maximum sandbox lifetime in seconds (None = no limit).
+    pub max_duration_secs: Option<u64>,
+
+    /// Metrics sampling interval in milliseconds; `None` disables sampling.
+    pub metrics_sample_interval_ms: Option<NonZero<u64>>,
+
+    /// Shared-memory metrics registry coordinates passed in by the host.
+    ///
+    /// When `None`, the runtime skips metrics activation entirely — either
+    /// metrics sampling is disabled or the host could not reserve a slot.
+    pub metrics_slot: Option<MetricsSlotHandoff>,
+
+    /// VM hardware and rootfs configuration.
+    pub vm: VmConfig,
+}
+
+#[cfg(unix)]
+#[derive(Debug, Eq, PartialEq)]
+enum ParentWatchdogSignal {
+    ParentExited,
+    Detached,
+}
+
+/// One explicitly typed layer in a writable upper block chain.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct UpperLayerSpec {
+    /// Exact host path of this layer.
+    pub path: PathBuf,
+    /// On-disk format of this layer.
+    pub format: msb_krun::DiskImageFormat,
+}
+
+/// Specification for one guest-visible writable upper disk.
+///
+/// `layers` is the complete dependency chain ordered from the oldest base to the active head.
+/// Libkrun composes every entry behind one virtio-blk device; ancestors are opened read-only and
+/// only the final layer may be writable. A flat ext4 upper is therefore a one-layer raw chain,
+/// while checkpoint rollover appends qcow2 heads without changing the guest's device identity.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct UpperSpec {
+    /// Complete, non-empty block dependency chain ordered oldest-to-head.
+    pub layers: Vec<UpperLayerSpec>,
+    /// Whether the final head is read-only.
+    pub read_only: bool,
+}
+
+/// Specification for a disk-image volume mount attached to the guest.
+///
+/// Each entry becomes one extra virtio-blk device. Agentd consumes the
+/// companion typed bootstrap entry to know which device to mount where.
+#[derive(Debug, Clone)]
+pub struct DiskMountSpec {
+    /// Stable block id. Surfaced in the guest as the virtio-blk `serial`
+    /// so agentd can resolve it via `/dev/disk/by-id/virtio-<id>`.
+    pub id: String,
+
+    /// Host path to the disk image file.
+    pub host: PathBuf,
+
+    /// Runtime-recovered owned backing, ordered base to head. Empty means the ordinary single
+    /// `host` image; this field is never supplied through the cross-process launch contract.
+    pub layers: Vec<UpperLayerSpec>,
+
+    /// Guest mount path. Not needed by the VMM, but carried here for
+    /// logging/validation; agentd reads the canonical value from bootstrap.
+    pub guest: String,
+
+    /// Disk image format.
+    pub format: msb_krun::DiskImageFormat,
+
+    /// Inner filesystem type, if specified; otherwise agentd probes.
+    pub fstype: Option<String>,
+
+    /// Whether the mount is read-only.
+    pub readonly: bool,
+
+    /// The trusted launcher established managed ownership and retained the disk mutation lock.
+    /// Managed named disks, lifecycle-owned disks, and restored private copies may set this flag.
+    pub snapshot_owned: bool,
+
+    /// Backing is collected with this sandbox, not a shared named disk.
+    pub lifecycle_owned: bool,
+}
+
+/// VM hardware and rootfs configuration.
+pub struct VmConfig {
+    /// Path to the libkrunfw shared library.
+    pub libkrunfw_path: PathBuf,
+
+    /// Guest transparent huge-page policy selected at boot.
+    pub thp: microsandbox_types::TransparentHugePagePolicy,
+
+    /// Protected memory cache resolved by the sandbox's owning local backend.
+    pub memory_cache_dir: Option<PathBuf>,
+
+    /// Number of virtual CPUs online at boot.
+    pub vcpus: u8,
+
+    /// Memory in MiB at boot.
+    pub memory_mib: u32,
+
+    /// Maximum possible virtual CPUs; CPUs above `vcpus` boot parked for later hotplug.
+    pub max_cpus: u8,
+
+    /// Maximum guest memory in MiB reserved for future hotplug (virtio-mem).
+    pub max_memory_mib: u32,
+
+    /// Requested host CPU placement policy.
+    pub cpu_placement: CpuPlacement,
+
+    /// Selected host profile name, retained for diagnostics.
+    pub placement_profile_name: Option<String>,
+
+    /// Host-resolved placement behavior.
+    pub placement_profile: Option<microsandbox_types::PlacementProfile>,
+
+    /// Per-writable-raw-disk hard budget for buffered host dirty data.
+    pub block_writeback_limit_bytes: Option<u64>,
+
+    /// Root filesystem path for direct passthrough mounts.
+    pub rootfs_path: Option<PathBuf>,
+
+    /// Whether to follow symlinks when resolving a bind (`rootfs_path`) rootfs.
+    ///
+    /// Defaults to `false`: the caller/tenant-provided rootfs path is resolved
+    /// following no symlink, matching the `--mount` protection. Set `true` to
+    /// opt out when the host rootfs path legitimately traverses a symlink.
+    pub rootfs_follow_root_symlinks: bool,
+
+    /// Disk image path for virtio-blk rootfs (single disk, legacy).
+    pub rootfs_disk: Option<PathBuf>,
+
+    /// Disk image format string ("qcow2", "raw", "vmdk").
+    pub rootfs_disk_format: Option<String>,
+
+    /// Whether the disk image is read-only.
+    pub rootfs_disk_readonly: bool,
+
+    /// Complete explicitly typed oldest-to-head chain for a runtime-owned flat root disk.
+    pub rootfs_disk_spec: Option<UpperSpec>,
+
+    /// Whether the direct root disk is sandbox-owned and eligible for checkpoint rollover.
+    pub rootfs_disk_runtime_owned: bool,
+
+    /// VMDK descriptor path for EROFS fsmerge OCI rootfs (read-only).
+    pub rootfs_vmdk: Option<PathBuf>,
+
+    /// Upper ext4 disk path for writable overlay (paired with rootfs_vmdk).
+    ///
+    /// Convenience field equivalent to a one-layer raw `rootfs_upper_spec`. When
+    /// `rootfs_upper_spec` is set, it takes precedence; this field is the fast path for the common
+    /// managed ext4 case.
+    pub rootfs_upper: Option<PathBuf>,
+
+    /// Complete explicitly typed oldest-to-head chain for the writable upper disk.
+    pub rootfs_upper_spec: Option<UpperSpec>,
+
+    /// Additional mounts as `tag:host_path[:opts]` strings.
+    pub mounts: Vec<String>,
+
+    /// Required private volumes retained in every snapshot and branch.
+    pub owned_volumes: Vec<microsandbox_types::VolumeMount>,
+
+    /// Isolated host-file mounts backed by synthetic one-entry filesystems.
+    pub file_mounts: Vec<FileMountConfig>,
+
+    /// Disk-image volume mounts attached as extra virtio-blk devices.
+    pub disks: Vec<DiskMountSpec>,
+
+    /// Host Unix sockets exposed through virtio-vsock.
+    pub vsock: Vec<microsandbox_types::VsockRouteSpec>,
+
+    /// Pre-built filesystem backends as `(tag, backend)` pairs.
+    #[cfg(unix)]
+    pub backends: Vec<(String, Box<dyn DynFileSystem + Send + Sync>)>,
+
+    /// Path to the init binary in the guest.
+    pub init_path: Option<PathBuf>,
+
+    /// Typed one-shot configuration delivered to agentd over its console.
+    pub bootstrap: GuestBootstrap,
+
+    /// Path to the executable to run in the guest.
+    pub exec_path: Option<PathBuf>,
+
+    /// Arguments to the executable.
+    pub exec_args: Vec<String>,
+
+    /// Fully resolved network configuration for the smoltcp in-process stack.
+    #[cfg(feature = "net")]
+    pub network: ResolvedNetworkConfig,
+
+    /// Host-runtime isolation profile enforced by the network backend.
+    #[cfg(feature = "net")]
+    pub deployment_profile: DeploymentProfile,
+
+    /// Sandbox slot for deterministic network address derivation.
+    #[cfg(feature = "net")]
+    pub sandbox_slot: u16,
+
+    /// Construction-only checkpoint restore source for clone/rollback activation.
+    pub checkpoint_restore: Option<crate::launch::CheckpointRestoreConfig>,
+}
+
+/// JSON structure written to stdout on startup.
+#[derive(Debug, Serialize)]
+struct StartupInfo {
+    pid: u32,
+    startup_events: bool,
+}
+
+/// Shared bind identity map registration for user-volume passthrough mounts.
+struct BindIdentityMapRegistration {
+    #[cfg(unix)]
+    handle: Option<BindIdentityMapHandle>,
+    #[cfg(unix)]
+    mount_count: usize,
+}
+
+#[cfg(feature = "net")]
+struct KrunNetworkRateLimiters {
+    rx: Option<msb_krun::RateLimiterConfig>,
+    tx: Option<msb_krun::RateLimiterConfig>,
+}
+
+#[cfg(feature = "net")]
+type NetworkTerminationHandle = microsandbox_network::network::TerminationHandle;
+
+#[cfg(not(feature = "net"))]
+type NetworkTerminationHandle = ();
+
+#[cfg(feature = "net")]
+type NetworkMetricsHandle = microsandbox_network::network::MetricsHandle;
+
+#[cfg(not(feature = "net"))]
+type NetworkMetricsHandle = ();
+
+#[cfg(feature = "net")]
+type NetworkSecretsHandle = microsandbox_network::secrets::handle::SecretsHandle;
+
+#[cfg(not(feature = "net"))]
+type NetworkSecretsHandle = ();
+
+#[cfg(feature = "net")]
+type NetworkActivationHandle = microsandbox_network::network::NetworkActivationHandle;
+
+#[cfg(not(feature = "net"))]
+type NetworkActivationHandle = ();
+
+type VmBuildOutput = (
+    msb_krun::Vm,
+    Option<NetworkTerminationHandle>,
+    Option<NetworkMetricsHandle>,
+    Option<NetworkSecretsHandle>,
+    Option<NetworkActivationHandle>,
+    Option<Vec<u8>>,
+    GuestBootstrap,
+    BindIdentityMapRegistration,
+    Option<crate::checkpoint::RestoredAgentState>,
+    std::collections::BTreeMap<String, microsandbox_filesystem::OwnedDirectoryCheckpoint>,
+);
+
+/// Public runtime endpoints held back until a restored guest is activated.
+struct RestoreEndpointPublication {
+    agent_sock_path: PathBuf,
+    run_dir: PathBuf,
+    sandbox_name: String,
+    control: super::control::ControlContext,
+}
+
+//--------------------------------------------------------------------------------------------------
+// Methods
+//--------------------------------------------------------------------------------------------------
+
+impl AgentTransportProfile {
+    /// Whether this boot should provision the optional bulk port and advertise its kernel hint.
+    ///
+    /// Provisioning is safe for old agentd builds: an agent that does not recognize the hint
+    /// simply leaves the port unbound, and the relay closes it before selecting combined mode.
+    fn offers_dual_port(self) -> bool {
+        matches!(self, Self::Auto | Self::DualPortV1)
+    }
+}
+
+impl BindIdentityMapRegistration {
+    fn new() -> Self {
+        Self {
+            #[cfg(unix)]
+            handle: None,
+            #[cfg(unix)]
+            mount_count: 0,
+        }
+    }
+}
+
+impl RestoreEndpointPublication {
+    fn publish(self, relay: &mut AgentRelay) -> RuntimeResult<()> {
+        relay.bind_public_endpoint()?;
+
+        #[cfg(unix)]
+        if let Err(error) = crate::ipc::publish_legacy_agent_link(
+            &self.run_dir,
+            &self.sandbox_name,
+            &self.agent_sock_path,
+        ) {
+            let _ =
+                crate::ipc::remove_canonical_socket_artifacts(&self.run_dir, &self.sandbox_name);
+            return Err(error.into());
+        }
+
+        if let Err(error) = publish_control_endpoint(
+            crate::control::control_socket_path_for(&self.agent_sock_path),
+            self.control,
+            &self.run_dir,
+            &self.sandbox_name,
+        ) {
+            let _ =
+                crate::ipc::remove_canonical_socket_artifacts(&self.run_dir, &self.sandbox_name);
+            return Err(error);
+        }
+        Ok(())
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Trait Implementations
+//--------------------------------------------------------------------------------------------------
+
+impl std::fmt::Debug for VmConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut debug = f.debug_struct("VmConfig");
+        debug
+            .field("libkrunfw_path", &self.libkrunfw_path)
+            .field("thp", &self.thp)
+            .field("vcpus", &self.vcpus)
+            .field("memory_mib", &self.memory_mib)
+            .field("max_cpus", &self.max_cpus)
+            .field("max_memory_mib", &self.max_memory_mib)
+            .field("placement_profile_name", &self.placement_profile_name)
+            .field(
+                "block_writeback_limit_bytes",
+                &self.block_writeback_limit_bytes,
+            )
+            .field("rootfs_path", &self.rootfs_path)
+            .field("rootfs_vmdk", &self.rootfs_vmdk)
+            .field("rootfs_upper", &self.rootfs_upper)
+            .field("rootfs_upper_spec", &self.rootfs_upper_spec)
+            .field("rootfs_disk", &self.rootfs_disk)
+            .field("rootfs_disk_format", &self.rootfs_disk_format)
+            .field("rootfs_disk_readonly", &self.rootfs_disk_readonly)
+            .field("rootfs_disk_spec", &self.rootfs_disk_spec)
+            .field("rootfs_disk_runtime_owned", &self.rootfs_disk_runtime_owned)
+            .field("mounts", &self.mounts)
+            .field("disks", &self.disks);
+        #[cfg(unix)]
+        debug.field("backends", &format!("[{} backend(s)]", self.backends.len()));
+        debug
+            .field("init_path", &self.init_path)
+            .field("bootstrap", &self.bootstrap)
+            .field("exec_path", &self.exec_path)
+            .field("exec_args", &self.exec_args)
+            .field("checkpoint_restore", &self.checkpoint_restore)
+            .finish()
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Functions
+//--------------------------------------------------------------------------------------------------
+
+/// Enter the sandbox process.
+///
+/// This function **never returns**. It starts background services (agent
+/// relay, heartbeat, idle timeout), configures the VMM, writes a startup
+/// JSON to stdout, and calls `Vm::enter()` which takes over the process.
+pub fn enter(config: Config) -> ! {
+    // Capture log_dir before moving config into run() — we need it after
+    // a failure to write boot-error.json, regardless of how far run() got.
+    let log_dir = config.log_dir.clone();
+    let metrics_slot = config.metrics_slot.clone();
+    let failure_channel = super::progress::StartupFailureChannel::default();
+    let result = run(config, &failure_channel);
+    match result {
+        Ok(infallible) => match infallible {},
+        Err(e) => {
+            release_reserved_metrics_slot(metrics_slot.as_ref());
+            // Write the structured boot-error record so the parent CLI
+            // can surface a real cause inline. Best-effort: any failure
+            // to write falls back to the existing eprintln path, which
+            // is already captured into runtime.log via setup_log_capture.
+            let boot_err = crate::boot_error::BootError::from_runtime_error(&e);
+            if let Err(write_err) = boot_err.write_atomic(&log_dir) {
+                eprintln!("failed to write boot-error.json: {write_err}");
+            }
+            eprintln!("sandbox error: {e}");
+            // `run` has already dropped its telemetry task/runtime. Keep preparation
+            // readers blocked until the structured cause (or stderr fallback) is written.
+            failure_channel.release();
+            std::process::exit(1);
+        }
+    }
+}
+
+fn run(
+    mut config: Config,
+    failure_channel: &super::progress::StartupFailureChannel,
+) -> RuntimeResult<std::convert::Infallible> {
+    // Raise the fd limit before anything else: every guest-held open file on a virtiofs share pins one fd in this process, so the shell's default soft limit
+    // (1024 on many distros) is nowhere near enough for real workloads. Reference virtiofsd raises its own limit for the same reason. Best-effort: failure is
+    // not fatal, just a smaller fd budget.
+    #[cfg(unix)]
+    raise_nofile_limit();
+
+    // Write startup JSON and redirect output FIRST, before any tracing.
+    // This ensures all tracing goes to runtime.log, not the terminal.
+    let pid = std::process::id();
+    #[cfg(unix)]
+    let startup_events = config.startup_fd.is_some();
+    #[cfg(windows)]
+    let startup_events = config.startup_pipe.is_some();
+    let startup = StartupInfo {
+        pid,
+        startup_events,
+    };
+    let startup_json = serde_json::to_string(&startup)
+        .map_err(|e| RuntimeError::Custom(format!("serialize startup: {e}")))?;
+
+    #[cfg(unix)]
+    let startup_writer = write_startup_info(config.startup_fd.as_ref(), &startup_json)?;
+    #[cfg(unix)]
+    drop(config.startup_fd.take()); // The retained writer is the only owner of the reply pipe.
+    #[cfg(windows)]
+    let startup_writer = write_startup_info(config.startup_pipe.as_deref(), &startup_json)?;
+    let startup_writer = startup_writer
+        .map(|writer| failure_channel.retain(writer))
+        .transpose()?;
+    setup_log_capture(&config.log_dir, config.forward_output)?;
+
+    tracing::info!(sandbox = %config.sandbox_name, "sandbox starting");
+
+    let shutdown_flush_timeout = guest_shutdown_flush_timeout(config.vm.init_path.is_some());
+
+    // Each physical port gets an independent byte budget and wake domain.
+    let shared = Arc::new(ConsoleSharedState::new());
+    let bulk_shared = config
+        .agent_transport
+        .offers_dual_port()
+        .then(|| Arc::new(ConsoleSharedState::new()));
+    let console_backends = AgentConsoleBackends {
+        control: AgentConsoleBackend::new(Arc::clone(&shared)),
+        bulk: bulk_shared
+            .as_ref()
+            .map(|shared| AgentConsoleBackend::new(Arc::clone(shared))),
+    };
+
+    // Build tokio runtime for relay, heartbeat, and timer tasks.
+    let tokio_rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .map_err(|e| RuntimeError::Custom(format!("tokio runtime: {e}")))?;
+
+    let startup_progress: crate::startup_progress::StartupProgressCallback = match startup_writer {
+        Some(writer) => super::progress::start(
+            writer,
+            &tokio_rt,
+            if config.vm.checkpoint_restore.is_some() {
+                crate::startup_progress::StartupPhase::PreparingSnapshot
+            } else {
+                // Ordinary boots retain their existing bounded startup behavior; there is no
+                // captured RAM backing to prepare before activation.
+                crate::startup_progress::StartupPhase::Activating
+            },
+            failure_channel.clone(),
+        ),
+        None => Arc::new(|_| {}),
+    };
+
+    // Set up runtime directory.
+    std::fs::create_dir_all(&config.runtime_dir)?;
+    std::fs::create_dir_all(config.runtime_dir.join("scripts"))?;
+    crate::checkpoint::recover_runtime_owned_root(&config.runtime_dir, &mut config.vm).map_err(
+        |error| RuntimeError::Custom(format!("recover runtime-owned root disk: {error}")),
+    )?;
+    recover_owned_disk_layers(&config.runtime_dir, &mut config.vm.disks)?;
+    // Heartbeats are per boot, while the runtime directory persists across starts.
+    heartbeat::clear_stale(&config.runtime_dir)?;
+    if config.vm.checkpoint_restore.is_some() {
+        prepare_runtime_restore_namespace(&config.runtime_dir, config.vm.rootfs_vmdk.is_some())?;
+    }
+
+    #[cfg(unix)]
+    crate::ipc::prepare_canonical_socket_dir(
+        &config.run_dir,
+        &config.sandbox_name,
+        &config.agent_sock_path,
+    )?;
+
+    // Create the relay and persist the run record with a single runtime hop.
+    let (mut relay, db, run_db_id) = tokio_rt.block_on(async {
+        let relay = async {
+            if config.vm.checkpoint_restore.is_some() {
+                Ok(AgentRelay::new_deferred(
+                    &config.agent_sock_path,
+                    Arc::clone(&shared),
+                    bulk_shared.as_ref().map(Arc::clone),
+                ))
+            } else {
+                AgentRelay::new_with_bulk(
+                    &config.agent_sock_path,
+                    Arc::clone(&shared),
+                    bulk_shared.as_ref().map(Arc::clone),
+                )
+                .await
+            }
+        };
+        let db = connect_db(
+            &config.sandbox_db_path,
+            config.sandbox_db_connect_timeout_secs,
+        );
+        let (relay, db) = tokio::try_join!(relay, db)?;
+        let run_db_id = insert_run(&db, config.sandbox_id, pid).await?;
+        Ok::<_, RuntimeError>((relay, db, run_db_id))
+    })?;
+
+    let writeback_disk_paths = match writeback_limited_disk_paths(&config.vm) {
+        Ok(disk_paths) => disk_paths,
+        Err(error) => {
+            let _ = tokio_rt.block_on(mark_run_failed(&db, run_db_id));
+            return Err(error);
+        }
+    };
+
+    let cpu_guard = match tokio_rt.block_on(crate::cpu::acquire(
+        &db,
+        run_db_id,
+        &config.cpu_lease_dir,
+        crate::cpu::PlacementRequest {
+            policy: config.vm.cpu_placement,
+            max_vcpus: config.vm.max_cpus.max(config.vm.vcpus),
+            boot_memory_mib: config.vm.memory_mib,
+            max_memory_mib: config.vm.max_memory_mib.max(config.vm.memory_mib),
+            profile: config.vm.placement_profile,
+        },
+    )) {
+        Ok(guard) => Arc::new(guard),
+        Err(error) => {
+            let _ = tokio_rt.block_on(mark_run_failed(&db, run_db_id));
+            return Err(error);
+        }
+    };
+
+    let writeback_guard = match tokio_rt.block_on(crate::writeback::acquire(
+        &db,
+        run_db_id,
+        &config.writeback_lease_dir,
+        config.block_writeback_pool_bytes,
+        config.vm.block_writeback_limit_bytes,
+        &writeback_disk_paths,
+    )) {
+        Ok(guard) => guard,
+        Err(error) => {
+            if let Err(release_error) = tokio_rt.block_on(cpu_guard.release(&db)) {
+                tracing::warn!(%release_error, "release CPU placement after writeback pressure setup failure");
+            }
+            let _ = tokio_rt.block_on(mark_run_failed(&db, run_db_id));
+            return Err(error);
+        }
+    };
+    let writeback_guard = Arc::new(writeback_guard);
+    let writeback_limit = writeback_guard.limit();
+    if writeback_guard.is_managed() {
+        let pressure_guard = Arc::clone(&writeback_guard);
+        let pressure_db = db.clone();
+        tokio_rt.spawn(async move {
+            monitor_writeback_pressure(pressure_guard, pressure_db).await;
+        });
+    }
+
+    #[cfg(unix)]
+    if config.vm.checkpoint_restore.is_none()
+        && let Err(error) = crate::ipc::publish_legacy_agent_link(
+            &config.run_dir,
+            &config.sandbox_name,
+            &config.agent_sock_path,
+        )
+    {
+        if let Err(release_error) = tokio_rt.block_on(writeback_guard.release(&db)) {
+            tracing::warn!(%release_error, "release writeback admission after legacy endpoint publication failure");
+        }
+        if let Err(release_error) = tokio_rt.block_on(cpu_guard.release(&db)) {
+            tracing::warn!(%release_error, "release CPU placement after legacy endpoint publication failure");
+        }
+        let _ = tokio_rt.block_on(mark_run_failed(&db, run_db_id));
+        // Publication is no-replace. If it collided with another legacy
+        // endpoint, clean only this runtime's canonical namespace.
+        let _ =
+            crate::ipc::remove_canonical_socket_artifacts(&config.run_dir, &config.sandbox_name);
+        return Err(error.into());
+    }
+
+    // Attach the exec.log writer so the ring reader can capture the
+    // primary session's stdout/stderr. Failure to open the file is
+    // non-fatal — log capture is best-effort and must not block boot.
+    let exec_log_writer: Option<Arc<crate::exec_log::LogWriter>> =
+        match crate::exec_log::LogWriter::open(&config.log_dir) {
+            Ok(writer) => {
+                let arc = Arc::new(writer);
+                relay = relay.with_log_writer(Arc::clone(&arc));
+                Some(arc)
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "exec_log: open failed, capture disabled");
+                None
+            }
+        };
+
+    // Shared termination reason — background tasks store the reason before
+    // triggering exit; the exit observer reads it for the DB update.
+    let exit_reason: Arc<std::sync::atomic::AtomicU8> =
+        Arc::new(std::sync::atomic::AtomicU8::new(EXIT_REASON_COMPLETED));
+
+    // Activate the shared-memory metrics writer if the host reserved a slot.
+    // The host always reserves and passes a handoff when sampling is enabled,
+    // so a missing handoff means sampling is disabled for this sandbox.
+    let metrics_writer = activate_metrics_writer(
+        config.metrics_slot.as_ref(),
+        config.metrics_sample_interval_ms,
+        run_db_id,
+        pid,
+    );
+
+    // If the host reserved a slot but activation failed (registry I/O error,
+    // generation mismatch from a stale reservation, etc.), the slot would
+    // otherwise stay in `Reserved` until the catalog reaper notices. Release
+    // it eagerly so it can be reused by other sandboxes.
+    if metrics_writer.is_none()
+        && config.metrics_slot.is_some()
+        && config.metrics_sample_interval_ms.is_some()
+    {
+        release_reserved_metrics_slot(config.metrics_slot.as_ref());
+    }
+
+    // Build the VM with an exit observer for DB cleanup and socket removal.
+    // The on_exit closure runs synchronously on the VMM thread before _exit().
+    let rt_handle = tokio_rt.handle().clone();
+    let exit_db = db.clone();
+    let exit_sandbox_id = config.sandbox_id;
+    let exit_run_id = run_db_id;
+    let exit_reason_for_observer = Arc::clone(&exit_reason);
+    let exit_sock_path = config.agent_sock_path.clone();
+    let exit_run_dir = config.run_dir.clone();
+    let exit_sandbox_name = config.sandbox_name.clone();
+    let exit_sandboxes_dir = config.sandboxes_dir.clone();
+    let exit_log_writer = exec_log_writer.clone();
+    // Capture the activated writer so the exit observer can release the slot
+    // without re-opening the registry (saving two mmap syscalls and a
+    // potential `wait_for_ready` round-trip on the VMM's exit path).
+    let exit_metrics_writer = metrics_writer.clone();
+    let exit_cpu_guard = Arc::clone(&cpu_guard);
+    let exit_writeback_guard = Arc::clone(&writeback_guard);
+    let placement_rt_handle = tokio_rt.handle().clone();
+    let placement_db = db.clone();
+    let placement_cpu_guard = Arc::clone(&cpu_guard);
+    let resolved_numa_topology = cpu_guard.numa_topology();
+    let placement_required = cpu_guard.placement_required();
+    #[cfg(windows)]
+    let _agent_console_pipe_bridge = AgentConsolePipeBridge::spawn(
+        agent_console_pipe_name(config.sandbox_id),
+        Arc::clone(&shared),
+        tokio_rt.handle(),
+    )
+    .map_err(|e| RuntimeError::Custom(format!("agent console pipe bridge: {e}")))?;
+    #[cfg(windows)]
+    let _agent_bulk_console_pipe_bridge = match bulk_shared.as_ref() {
+        Some(bulk_shared) => Some(
+            AgentConsolePipeBridge::spawn(
+                agent_bulk_console_pipe_name(config.sandbox_id),
+                Arc::clone(bulk_shared),
+                tokio_rt.handle(),
+            )
+            .map_err(|e| RuntimeError::Custom(format!("agent bulk console pipe bridge: {e}")))?,
+        ),
+        None => None,
+    };
+    let host_placement = HostPlacement {
+        vcpu_targets: cpu_guard.vcpu_targets(),
+        required: placement_required,
+        numa_topology: resolved_numa_topology,
+    };
+    let build_result = build_vm(
+        &config,
+        console_backends,
+        move |exit_code: i32| {
+            use microsandbox_db::entity::sandbox as sandbox_entity;
+            use sea_orm::QueryFilter;
+            use sea_orm::sea_query::Expr;
+
+            // Map (exit_code, reason tag) → TerminationReason.
+            let reason_tag = exit_reason_for_observer.load(std::sync::atomic::Ordering::SeqCst);
+            let reason = match reason_tag {
+                EXIT_REASON_IDLE_TIMEOUT => run_entity::TerminationReason::IdleTimeout,
+                EXIT_REASON_AGENT_UNRESPONSIVE => run_entity::TerminationReason::AgentUnresponsive,
+                EXIT_REASON_SHUTDOWN_REQUESTED => run_entity::TerminationReason::ShutdownRequested,
+                EXIT_REASON_STARTUP_COMMAND_FAILED => run_entity::TerminationReason::Failed,
+                EXIT_REASON_MAX_DURATION => run_entity::TerminationReason::MaxDurationExceeded,
+                EXIT_REASON_PARENT_EXIT => run_entity::TerminationReason::Signal,
+                EXIT_REASON_SIGNAL => run_entity::TerminationReason::Signal,
+                _ if exit_code == 0 => run_entity::TerminationReason::Completed,
+                _ => run_entity::TerminationReason::Failed,
+            };
+
+            rt_handle.block_on(async {
+                let now = chrono::Utc::now().naive_utc();
+
+                if let Err(error) = exit_writeback_guard.release(&exit_db).await {
+                    tracing::warn!(%error, "release writeback pressure membership at VM exit");
+                }
+                if let Err(error) = exit_cpu_guard.release(&exit_db).await {
+                    tracing::warn!(%error, "release CPU placement at VM exit");
+                }
+
+                // Runtime ownership remains live until this observer returns.
+                // Remove its deterministic endpoints before publishing a
+                // restartable terminal state; on failure, leave the active row
+                // for dead-PID maintenance to retry after the process exits.
+                let bound_result = crate::ipc::remove_socket_pair(&exit_sock_path);
+                let owned_result =
+                    crate::ipc::remove_sandbox_socket_artifacts(&exit_run_dir, &exit_sandbox_name);
+                if let Err(error) = bound_result.and(owned_result) {
+                    tracing::warn!(
+                        sandbox = %exit_sandbox_name,
+                        error = %error,
+                        "runtime exit socket cleanup failed; leaving lifecycle active for reaping"
+                    );
+                    return;
+                }
+
+                // Mark run as terminated with exit code and reason.
+                let _ = run_entity::Entity::update_many()
+                    .col_expr(
+                        run_entity::Column::Status,
+                        Expr::value(run_entity::RunStatus::Terminated),
+                    )
+                    .col_expr(run_entity::Column::TerminationReason, Expr::value(reason))
+                    .col_expr(run_entity::Column::ExitCode, Expr::value(exit_code))
+                    .col_expr(run_entity::Column::TerminatedAt, Expr::value(now))
+                    .filter(run_entity::Column::Id.eq(exit_run_id))
+                    .exec(&exit_db)
+                    .await;
+
+                // Preserve old catalogs while releasing current runtime-owned fields.
+                match crate::maintenance::terminal_sandbox_update(&exit_db).await {
+                    Ok(update) => {
+                        let _ = update
+                            .col_expr(
+                                sandbox_entity::Column::Status,
+                                Expr::value(sandbox_entity::SandboxStatus::Stopped),
+                            )
+                            .col_expr(sandbox_entity::Column::UpdatedAt, Expr::value(now))
+                            .filter(sandbox_entity::Column::Id.eq(exit_sandbox_id))
+                            .exec(&exit_db)
+                            .await;
+                    }
+                    Err(error) => tracing::warn!(%error, "terminal sandbox update failed"),
+                }
+
+                // Self-clean: if this sandbox was created ephemeral, drop its
+                // persisted row + directory now that it is terminal. Reads
+                // `sandbox.ephemeral` from the DB (the runtime is handed
+                // discrete flags, not the full policy) and no-ops for
+                // persistent sandboxes. Best-effort; recovery sweeps from
+                // other runtimes cover any failure here.
+                match crate::maintenance::cleanup_terminal_ephemeral_sandbox_owned(
+                    &exit_db,
+                    &exit_sandboxes_dir,
+                    &exit_run_dir,
+                    exit_sandbox_id,
+                )
+                .await
+                {
+                    Ok(outcome) => {
+                        tracing::debug!(?outcome, "ephemeral exit self-clean")
+                    }
+                    Err(err) => {
+                        tracing::warn!(error = %err, "ephemeral exit self-clean failed")
+                    }
+                }
+            });
+
+            // Inject the exec.log lifecycle-stop marker before _exit().
+            // The relay's async run() loop won't get a chance to write
+            // it because _exit() bypasses task cleanup.
+            if let Some(ref writer) = exit_log_writer {
+                writer.write_system("--- sandbox stopped ---");
+            }
+
+            // Release the metrics slot. `Stale` preserves the last sample
+            // for observers until the slot is reused. Best-effort — the
+            // host's reaper will eventually reclaim it if this path is
+            // bypassed. We reuse the writer's Arc-backed registry handle
+            // rather than re-opening the segment, since `_exit()` is about
+            // to run and extra syscalls here delay the VMM teardown.
+            if let Some(ref writer) = exit_metrics_writer
+                && let Err(err) = writer.clone().release(ReleaseMode::Stale)
+            {
+                tracing::debug!(error = %err, slot = writer.slot(), "metrics slot release at exit");
+            }
+        },
+        move |report: &msb_krun::PlacementReport| {
+            let pinned = report
+                .vcpus
+                .iter()
+                .filter(|result| matches!(result, msb_krun::VcpuPlacementResult::Pinned { .. }))
+                .count();
+            if let Err(error) =
+                placement_rt_handle.block_on(placement_cpu_guard.reconcile(&placement_db, report))
+            {
+                // Placement is already effective at the OS boundary. A catalog failure must not
+                // turn an ordinary best-effort policy into a sandbox-creation failure; the
+                // process-held lease remains conservative until exit or stale-lease recovery.
+                tracing::warn!(%error, "record effective host placement");
+            }
+            tracing::info!(
+                pinned_vcpus = pinned,
+                inherited_vcpus = report.vcpus.len().saturating_sub(pinned),
+                memory = ?report.memory,
+                "host placement acknowledged before guest execution"
+            );
+        },
+        VmBuildRuntime {
+            tokio_handle: tokio_rt.handle().clone(),
+            startup_progress: startup_progress.clone(),
+        },
+        host_placement,
+        writeback_limit.as_ref(),
+    );
+    let (
+        vm,
+        _network_termination_handle,
+        network_metrics_handle,
+        _network_secrets_handle,
+        network_activation_handle,
+        bootstrap_frame,
+        resolved_bootstrap,
+        bind_identity_map,
+        mut restored_agent,
+        owned_directory_checkpoints,
+    ) = match build_result {
+        Ok(vm) => vm,
+        Err(e) => {
+            if let Err(error) = tokio_rt.block_on(writeback_guard.release(&db)) {
+                tracing::warn!(%error, "release writeback pressure membership after VM build failure");
+            }
+            if let Err(error) = tokio_rt.block_on(cpu_guard.release(&db)) {
+                tracing::warn!(%error, "release CPU placement after VM build failure");
+            }
+            let _ = tokio_rt.block_on(mark_run_failed(&db, run_db_id));
+            // Free the slot: build_vm never started the sampler, so no live
+            // sample is worth preserving. Prefer the writer (already holds
+            // the registry handle) when activation succeeded; otherwise
+            // open the registry once via the handoff fields.
+            if let Some(writer) = metrics_writer.clone() {
+                let _ = writer.release(ReleaseMode::Free);
+            } else {
+                release_reserved_metrics_slot(config.metrics_slot.as_ref());
+            }
+            let _ = crate::ipc::remove_socket_pair(&config.agent_sock_path);
+            let _ =
+                crate::ipc::remove_sandbox_socket_artifacts(&config.run_dir, &config.sandbox_name);
+            return Err(e);
+        }
+    };
+
+    // A restored Vm is only a construction recipe here: eager RAM and CPU/device state
+    // are installed later by enter(). Its relay announces activation at the actual
+    // construction pause. Cold boots retain their ordinary bounded startup deadline.
+    if restored_agent.is_none() {
+        startup_progress(crate::startup_progress::StartupProgress::phase(
+            crate::startup_progress::StartupPhase::Activating,
+        ));
+    }
+
+    // This must be the first host-to-guest frame. It is queued before the
+    // watchdog and relay tasks can produce shutdown or init-ack messages, and
+    // remains buffered until agentd opens the console during early boot.
+    if let Some(bootstrap_frame) = bootstrap_frame {
+        relay::push_guest_frame_blocking(&shared, bootstrap_frame)?;
+    }
+
+    #[cfg(unix)]
+    {
+        relay =
+            relay.with_bind_identity_map(bind_identity_map.handle, bind_identity_map.mount_count);
+    }
+    #[cfg(windows)]
+    {
+        let _ = bind_identity_map;
+    }
+    let krun_metrics_handle = vm.metrics_handle();
+    let exit_handle = vm.exit_handle();
+    let upper_host_path = oci_upper_host_path(&config.vm);
+
+    // Serve every host-side control operation through one runtime-owned executor and endpoint.
+    // Restore constructs the executor now but withholds both public endpoints until the guest has
+    // crossed its VMGenID/workload activation barrier.
+    let restore_endpoint_publication = {
+        let control = vm.control_handle();
+        #[cfg(feature = "net")]
+        let secrets = _network_secrets_handle.clone();
+        #[cfg(not(feature = "net"))]
+        let secrets: Option<()> = None;
+        let control_sock_path = crate::control::control_socket_path_for(&config.agent_sock_path);
+        let executor = super::control::RuntimeControlExecutor::new(
+            control,
+            #[cfg(feature = "net")]
+            secrets,
+            &config.runtime_dir,
+            &config.vm,
+            &resolved_bootstrap,
+            tokio_rt.handle().clone(),
+            &config.agent_sock_path,
+            Arc::clone(&shared.workload_control),
+            Arc::clone(&shared.resident_paused),
+            restored_agent
+                .as_mut()
+                .and_then(|agent| agent.inherited_memory.take()),
+            owned_directory_checkpoints,
+        );
+        let context = super::control::ControlContext {
+            executor: match executor {
+                Ok(executor) => Arc::new(executor),
+                Err(error) => {
+                    let _ = tokio_rt.block_on(mark_run_failed(&db, run_db_id));
+                    return Err(RuntimeError::Custom(format!(
+                        "publish runtime control identity: {error}"
+                    )));
+                }
+            },
+        };
+        if restored_agent.is_some() {
+            Some(RestoreEndpointPublication {
+                agent_sock_path: config.agent_sock_path.clone(),
+                run_dir: config.run_dir.clone(),
+                sandbox_name: config.sandbox_name.clone(),
+                control: context,
+            })
+        } else {
+            if let Err(error) = publish_control_endpoint(
+                control_sock_path,
+                context,
+                &config.run_dir,
+                &config.sandbox_name,
+            ) {
+                let _ = tokio_rt.block_on(mark_run_failed(&db, run_db_id));
+                // Preserve the colliding compatibility entry. It may belong
+                // to a still-live older runtime.
+                let _ = crate::ipc::remove_canonical_socket_artifacts(
+                    &config.run_dir,
+                    &config.sandbox_name,
+                );
+                return Err(error);
+            }
+            None
+        }
+    };
+
+    #[cfg(unix)]
+    {
+        if let Some(parent_watchdog) = config.parent_watchdog
+            && let Err(e) = spawn_parent_watchdog(
+                parent_watchdog,
+                Arc::clone(&shared),
+                Arc::clone(&exit_reason),
+                exit_handle.clone(),
+                config.sandbox_name.clone(),
+                shutdown_flush_timeout,
+            )
+        {
+            let _ = tokio_rt.block_on(mark_run_failed(&db, run_db_id));
+            if let Some(writer) = metrics_writer.clone() {
+                let _ = writer.release(ReleaseMode::Free);
+            } else {
+                release_reserved_metrics_slot(config.metrics_slot.as_ref());
+            }
+            let _ = crate::ipc::remove_socket_pair(&config.agent_sock_path);
+            let _ =
+                crate::ipc::remove_sandbox_socket_artifacts(&config.run_dir, &config.sandbox_name);
+            return Err(e);
+        }
+    }
+
+    #[cfg(feature = "net")]
+    if let Some(network_termination_handle) = _network_termination_handle {
+        let network_exit_handle = exit_handle.clone();
+        let network_reason = Arc::clone(&exit_reason);
+        network_termination_handle.set_hook(Arc::new(move || {
+            tracing::warn!("secret violation requested sandbox termination");
+            network_reason.store(EXIT_REASON_SIGNAL, std::sync::atomic::Ordering::SeqCst);
+            network_exit_handle.trigger();
+        }));
+    }
+
+    let metrics_sampler = match (config.metrics_sample_interval_ms, metrics_writer.clone()) {
+        (None, _) => {
+            tracing::debug!(
+                sandbox = %config.sandbox_name,
+                "metrics sampling disabled; not spawning sampler"
+            );
+            None
+        }
+        (Some(_), None) => {
+            // Distinguish "host did not reserve a slot" from "host reserved
+            // but runtime activation failed" so operators reading the warn
+            // can tell which path needs investigation.
+            if config.metrics_slot.is_some() {
+                tracing::warn!(
+                    sandbox = %config.sandbox_name,
+                    "metrics activation failed; slot was released and sampler not spawned"
+                );
+            } else {
+                tracing::warn!(
+                    sandbox = %config.sandbox_name,
+                    "metrics sampling enabled but no slot was reserved by the host; not spawning sampler"
+                );
+            }
+            None
+        }
+        (Some(interval_ms), Some(writer)) => Some((
+            writer,
+            interval_ms,
+            krun_metrics_handle,
+            network_metrics_handle
+                .map(|handle| Box::new(handle) as Box<dyn crate::metrics::NetworkMetrics>),
+            upper_host_path,
+        )),
+    };
+    let metrics_sandbox_id = config.sandbox_id;
+    let metrics_sandbox_name = config.sandbox_name.clone();
+    let metrics_pid = pid;
+    // Same effective ceiling the VMM boots with (max_vcpus is clamped to at
+    // least the online count); used to cap physically impossible CPU spikes.
+    let metrics_max_cpus = config.vm.max_cpus.max(config.vm.vcpus);
+
+    // Opportunistic host-runtime lifecycle maintenance: reconcile stale active
+    // sandboxes and clean terminal ephemeral leftovers from runtimes that died
+    // before they could self-clean. A read-gated DB lease keeps a burst of
+    // starts to one indexed read each; this runs as a bounded background task
+    // so it never delays boot.
+    {
+        let maintenance_db = db.clone();
+        let maintenance_dir = config.sandboxes_dir.clone();
+        let maintenance_run_dir = config.run_dir.clone();
+        tokio_rt.spawn(async move {
+            crate::maintenance::run_startup_maintenance(
+                &maintenance_db,
+                &maintenance_dir,
+                &maintenance_run_dir,
+            )
+            .await;
+        });
+    }
+
+    // Spawn background tasks.
+    let (_relay_shutdown_tx, relay_shutdown_rx) = tokio::sync::watch::channel(false);
+    let (relay_drain_tx, mut relay_drain_rx) = tokio::sync::mpsc::channel::<()>(1);
+
+    // Relay: spawn a blocking task for wait_ready, then run the accept loop.
+    // wait_ready() must run AFTER enter() starts the VM (agentd sends core.ready),
+    // so it runs on a background thread, not blocking the main thread.
+    let relay_exit_handle = exit_handle.clone();
+    let relay_exit_reason = Arc::clone(&exit_reason);
+    let restore_control = restored_agent.as_ref().map(|_| vm.control_handle());
+    let restore_runtime_dir = config.runtime_dir.clone();
+    let relay_boot_log_dir = config.log_dir.clone();
+    let restore_startup_progress = startup_progress.clone();
+    tokio_rt.spawn(async move {
+        let ready_result = tokio::task::spawn_blocking(move || {
+            if let (Some(restored), Some(control)) =
+                (restored_agent.as_ref(), restore_control.as_ref())
+            {
+                relay.activate_restored(
+                    control,
+                    restored,
+                    &restore_runtime_dir,
+                    &restore_startup_progress,
+                )?;
+            } else {
+                relay.wait_ready()?;
+            }
+            Ok::<_, RuntimeError>(relay)
+        })
+        .await;
+
+        match ready_result {
+            Ok(Ok(mut relay)) => {
+                if let Some(publication) = restore_endpoint_publication
+                    && let Err(error) = publication.publish(&mut relay)
+                {
+                    tracing::error!(%error, "publish restored runtime endpoints");
+                    super::progress::publish_failure(&relay_boot_log_dir, &error);
+                    relay_exit_reason.store(
+                        EXIT_REASON_AGENT_UNRESPONSIVE,
+                        std::sync::atomic::Ordering::SeqCst,
+                    );
+                    relay_exit_handle.trigger();
+                    return;
+                }
+                #[cfg(feature = "net")]
+                if let Some(network_activation) = network_activation_handle {
+                    // Published-port listeners and all packet processing start only after the
+                    // restored workload and local control surfaces are ready.
+                    network_activation.activate();
+                }
+                #[cfg(not(feature = "net"))]
+                let _ = network_activation_handle;
+                if let Some((
+                    writer,
+                    interval_ms,
+                    krun_metrics_handle,
+                    network_metrics_handle,
+                    upper_host_path,
+                )) = metrics_sampler
+                {
+                    tracing::debug!(
+                        sandbox = %metrics_sandbox_name,
+                        interval_ms = interval_ms.get(),
+                        "starting metrics sampler after agent ready"
+                    );
+                    tokio::spawn(run_metrics_sampler(crate::metrics::MetricsSamplerSpec {
+                        writer,
+                        sandbox_id: metrics_sandbox_id,
+                        pid: metrics_pid,
+                        interval_ms,
+                        max_cpus: metrics_max_cpus,
+                        krun_metrics: krun_metrics_handle,
+                        network_metrics: network_metrics_handle,
+                        upper_host_path,
+                    }));
+                }
+                if let Err(e) = relay.run(relay_shutdown_rx, relay_drain_tx).await {
+                    tracing::error!("agent relay error: {e}");
+                    relay_exit_reason.store(
+                        EXIT_REASON_AGENT_UNRESPONSIVE,
+                        std::sync::atomic::Ordering::SeqCst,
+                    );
+                    relay_exit_handle.trigger();
+                }
+            }
+            Ok(Err(e)) => {
+                tracing::error!("agent relay wait_ready failed: {e}");
+                super::progress::publish_failure(&relay_boot_log_dir, &e);
+                // agentd never signalled readiness within the relay's boot window
+                // — the guest failed to come up. Reclaim the VM. This is the boot-
+                // failure backstop that used to live in the heartbeat monitor's
+                // boot-grace path (same 180s deadline), now owned by the relay so
+                // the heartbeat monitor can be purely about idle detection.
+                relay_exit_reason.store(
+                    EXIT_REASON_AGENT_UNRESPONSIVE,
+                    std::sync::atomic::Ordering::SeqCst,
+                );
+                relay_exit_handle.trigger();
+            }
+            Err(e) => {
+                tracing::error!("agent relay wait_ready task panicked: {e}");
+                super::progress::publish_failure(
+                    &relay_boot_log_dir,
+                    &RuntimeError::Custom(format!("agent readiness task failed: {e}")),
+                );
+                relay_exit_reason.store(
+                    EXIT_REASON_AGENT_UNRESPONSIVE,
+                    std::sync::atomic::Ordering::SeqCst,
+                );
+                relay_exit_handle.trigger();
+            }
+        }
+    });
+
+    // Record graceful shutdown intent, but let guest poweroff finish the runtime.
+    // A public Stop timeout bounds its caller's wait; it never authorizes killing
+    // a guest that is still draining work or flushing storage. Explicit lifetime
+    // policies below retain their own termination behavior.
+    {
+        let shutdown_reason = Arc::clone(&exit_reason);
+        tokio_rt.spawn(async move {
+            if relay_drain_rx.recv().await.is_some() {
+                shutdown_reason.store(
+                    EXIT_REASON_SHUTDOWN_REQUESTED,
+                    std::sync::atomic::Ordering::SeqCst,
+                );
+                tracing::info!("graceful shutdown requested; waiting for guest poweroff");
+            }
+        });
+    }
+
+    // Startup workload: detached `msb run -- CMD` makes the sandbox process
+    // own the command lifecycle. Once the command terminates, stop the VM so
+    // named sandboxes become stopped and ephemeral sandboxes can self-clean.
+    if let Some(startup_command) = config.startup_command.clone() {
+        let startup_agent_sock_path = config.agent_sock_path.clone();
+        let startup_shared = Arc::clone(&shared);
+        let startup_exit_handle = exit_handle.clone();
+        let startup_reason = Arc::clone(&exit_reason);
+        let startup_shutdown_flush_timeout = shutdown_flush_timeout;
+        tokio_rt.spawn(async move {
+            tracing::info!(
+                cmd = %startup_command.cmd,
+                args = ?startup_command.args,
+                "starting startup command"
+            );
+
+            match crate::startup::run_startup_command(&startup_agent_sock_path, startup_command)
+                .await
+            {
+                Ok(crate::startup::StartupCommandExit::Exited(0)) => {
+                    tracing::info!("startup command exited successfully");
+                }
+                Ok(crate::startup::StartupCommandExit::Exited(code)) => {
+                    startup_reason.store(
+                        EXIT_REASON_STARTUP_COMMAND_FAILED,
+                        std::sync::atomic::Ordering::SeqCst,
+                    );
+                    tracing::warn!(code, "startup command exited with non-zero status");
+                }
+                Ok(crate::startup::StartupCommandExit::Failed(failed)) => {
+                    startup_reason.store(
+                        EXIT_REASON_STARTUP_COMMAND_FAILED,
+                        std::sync::atomic::Ordering::SeqCst,
+                    );
+                    tracing::warn!(error = %failed.message, "startup command failed to spawn");
+                }
+                Err(err) => {
+                    startup_reason.store(
+                        EXIT_REASON_STARTUP_COMMAND_FAILED,
+                        std::sync::atomic::Ordering::SeqCst,
+                    );
+                    tracing::warn!(error = %err, "startup command failed");
+                }
+            }
+
+            if startup_shared
+                .resident_paused
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                startup_exit_handle.trigger();
+                return;
+            }
+            match request_guest_shutdown_async(&startup_shared).await {
+                Ok(()) => {
+                    tokio::time::sleep(startup_shutdown_flush_timeout).await;
+                    tracing::info!("startup command shutdown flush window elapsed");
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        "startup command shutdown request failed, triggering host exit"
+                    );
+                }
+            }
+            startup_exit_handle.trigger();
+        });
+    }
+
+    // Idle monitor. Reclaims the sandbox only when an optional idle timeout is
+    // configured and the guest has been inactive that long. A stale or missing
+    // heartbeat is NOT treated as a failure here — a busy agent is still healthy,
+    // and a guest that never boots is reclaimed by the relay's wait_ready path.
+    {
+        let mut heartbeat_reader = HeartbeatReader::new(&config.runtime_dir);
+        let idle_timeout = config.idle_timeout_secs.map(Duration::from_secs);
+        let heartbeat_exit_handle = exit_handle.clone();
+        let heartbeat_reason = Arc::clone(&exit_reason);
+        let heartbeat_shared = Arc::clone(&shared);
+        let heartbeat_shutdown_flush_timeout = shutdown_flush_timeout;
+        tokio_rt.spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(1));
+            loop {
+                interval.tick().await;
+                if heartbeat_shared
+                    .resident_paused
+                    .load(std::sync::atomic::Ordering::Acquire)
+                {
+                    continue;
+                }
+                let decision = heartbeat_reader.check(idle_timeout);
+
+                match decision {
+                    HeartbeatDecision::Idle(status) => {
+                        let idle_secs = idle_timeout.map(|timeout| timeout.as_secs()).unwrap_or(0);
+                        tracing::info!(
+                            idle_secs,
+                            heartbeat_seq = ?status.heartbeat_seq,
+                            activity_seq = ?status.activity_seq,
+                            idle_for = ?status.idle_for,
+                            active_exec_sessions = status.active_exec_sessions,
+                            active_fs_streams = status.active_fs_streams,
+                            active_tcp_streams = status.active_tcp_streams,
+                            "sandbox idle, requesting guest shutdown"
+                        );
+                        heartbeat_reason.store(
+                            EXIT_REASON_IDLE_TIMEOUT,
+                            std::sync::atomic::Ordering::SeqCst,
+                        );
+                        match request_guest_shutdown_async(&heartbeat_shared).await {
+                            Ok(()) => {
+                                tokio::time::sleep(heartbeat_shutdown_flush_timeout).await;
+                                tracing::info!(
+                                    "idle shutdown flush window elapsed, triggering host exit"
+                                );
+                            }
+                            Err(err) => {
+                                tracing::warn!(
+                                    error = %err,
+                                    "idle shutdown request failed, triggering host exit"
+                                );
+                            }
+                        }
+                        heartbeat_exit_handle.trigger();
+                        break;
+                    }
+                    HeartbeatDecision::PendingBoot(_) | HeartbeatDecision::Active(_) => {}
+                }
+            }
+        });
+    }
+
+    // Max duration timer.
+    if let Some(max_secs) = config.max_duration_secs {
+        let max_exit_handle = exit_handle.clone();
+        let max_reason = Arc::clone(&exit_reason);
+        tokio_rt.spawn(async move {
+            tokio::time::sleep(Duration::from_secs(max_secs)).await;
+            tracing::info!("max duration {max_secs}s exceeded, triggering exit");
+            max_reason.store(
+                EXIT_REASON_MAX_DURATION,
+                std::sync::atomic::Ordering::SeqCst,
+            );
+            max_exit_handle.trigger();
+        });
+    }
+
+    // Forget the tokio runtime (keep background tasks alive).
+    let cleanup_rt_handle = tokio_rt.handle().clone();
+    std::mem::forget(tokio_rt);
+
+    // Enter the VM (never returns).
+    tracing::info!(sandbox = %config.sandbox_name, "entering VM");
+    match vm.enter() {
+        Ok(infallible) => Ok(infallible),
+        Err(e) => {
+            if let Err(error) = cleanup_rt_handle.block_on(writeback_guard.release(&db)) {
+                tracing::warn!(%error, "release writeback pressure membership after VM enter failure");
+            }
+            if let Err(error) = cleanup_rt_handle.block_on(cpu_guard.release(&db)) {
+                tracing::warn!(%error, "release CPU placement after VM enter failure");
+            }
+            if let Some(writer) = metrics_writer {
+                let _ = writer.release(ReleaseMode::Free);
+            }
+            Err(RuntimeError::Custom(format!("VM enter: {e}")))
+        }
+    }
+}
+
+fn oci_upper_host_path(vm: &VmConfig) -> Option<PathBuf> {
+    if vm.rootfs_vmdk.is_some() {
+        return vm
+            .rootfs_upper_spec
+            .as_ref()
+            .and_then(|spec| spec.layers.last())
+            .map(|layer| layer.path.clone())
+            .or_else(|| vm.rootfs_upper.clone());
+    }
+    vm.rootfs_disk_runtime_owned.then(|| {
+        vm.rootfs_disk_spec
+            .as_ref()
+            .and_then(|spec| spec.layers.last())
+            .map(|layer| layer.path.clone())
+            .or_else(|| vm.rootfs_disk.clone())
+    })?
+}
+
+#[cfg(windows)]
+fn agent_console_pipe_name(sandbox_id: i32) -> String {
+    format!(
+        r"\\.\pipe\msb-agent-console-{sandbox_id}-{}",
+        std::process::id()
+    )
+}
+
+#[cfg(windows)]
+fn agent_bulk_console_pipe_name(sandbox_id: i32) -> String {
+    format!(
+        r"\\.\pipe\msb-agent-bulk-console-{sandbox_id}-{}",
+        std::process::id()
+    )
+}
+
+//--------------------------------------------------------------------------------------------------
+// Functions: VM Builder
+//--------------------------------------------------------------------------------------------------
+
+fn apply_block_writeback_limit(
+    mut disk: msb_krun::DiskBuilder,
+    format: msb_krun::DiskImageFormat,
+    read_only: bool,
+    limit: Option<&msb_krun::WritebackLimit>,
+) -> msb_krun::DiskBuilder {
+    if !read_only
+        && matches!(format, msb_krun::DiskImageFormat::Raw)
+        && let Some(limit) = limit
+    {
+        disk = disk.writeback_limit(limit.clone());
+    }
+    disk
+}
+
+fn attach_upper_layers(
+    disk: msb_krun::DiskBuilder,
+    layers: Vec<UpperLayerSpec>,
+) -> msb_krun::DiskBuilder {
+    // A standalone raw disk has no dependency resolver. Keep it on the ordinary raw path so
+    // Linux bounded writeback works identically on initial boot and subsequent restarts.
+    if layers.len() == 1 && matches!(layers[0].format, msb_krun::DiskImageFormat::Raw) {
+        disk.path(&layers[0].path)
+    } else {
+        disk.layers(
+            layers
+                .into_iter()
+                .map(|layer| msb_krun::DiskLayer::new(layer.path, layer.format)),
+        )
+    }
+}
+
+fn validate_upper_layers(spec: &UpperSpec) -> RuntimeResult<Vec<UpperLayerSpec>> {
+    if spec.layers.is_empty() {
+        return Err(RuntimeError::Custom(
+            "upper block chain must contain at least one layer".into(),
+        ));
+    }
+
+    let mut paths = std::collections::BTreeSet::new();
+    for (index, layer) in spec.layers.iter().enumerate() {
+        if layer.path.as_os_str().is_empty() {
+            return Err(RuntimeError::Custom(format!(
+                "upper block chain layer {index} has an empty path"
+            )));
+        }
+        if !paths.insert(layer.path.clone()) {
+            return Err(RuntimeError::Custom(format!(
+                "upper block chain repeats path {}",
+                layer.path.display()
+            )));
+        }
+        match layer.format {
+            msb_krun::DiskImageFormat::Raw if index > 0 => {
+                return Err(RuntimeError::Custom(format!(
+                    "upper block chain layer {index} is raw but has a predecessor"
+                )));
+            }
+            msb_krun::DiskImageFormat::Vmdk => {
+                return Err(RuntimeError::Custom(format!(
+                    "upper block chain layer {index} uses unsupported VMDK format"
+                )));
+            }
+            msb_krun::DiskImageFormat::Raw | msb_krun::DiskImageFormat::Qcow2 => {}
+        }
+    }
+
+    Ok(spec.layers.clone())
+}
+
+/// Resolve a journal before attachment or capture registration. Its nominal initial raw file
+/// may have been retired by restore or compaction, so it is not a fallback for an invalid chain.
+fn recover_owned_disk_layers(runtime_dir: &Path, disks: &mut [DiskMountSpec]) -> RuntimeResult<()> {
+    for disk in disks.iter_mut().filter(|disk| disk.lifecycle_owned) {
+        let chain = crate::checkpoint::load_runtime_owned_disk_chain(runtime_dir, &disk.id)
+            .map_err(|error| {
+                RuntimeError::Custom(format!("recover owned disk {}: {error}", disk.id))
+            })?;
+        let Some(chain) = chain else { continue };
+        if chain.device_id != disk.id {
+            return Err(RuntimeError::Custom(format!(
+                "owned disk {} journal has a different device identity",
+                disk.id
+            )));
+        }
+        disk.layers = chain
+            .layers
+            .into_iter()
+            .map(|layer| {
+                Ok(UpperLayerSpec {
+                    path: layer.path,
+                    format: validate_disk_format(Some(&layer.format)).map_err(|error| {
+                        RuntimeError::Custom(format!(
+                            "owned disk {} layer format: {error}",
+                            disk.id
+                        ))
+                    })?,
+                })
+            })
+            .collect::<RuntimeResult<Vec<_>>>()?;
+        if disk.layers.is_empty() {
+            return Err(RuntimeError::Custom(format!(
+                "owned disk {} journal has no layers",
+                disk.id
+            )));
+        }
+        validate_disk_mount_layers(disk)?;
+    }
+    Ok(())
+}
+
+/// Only owned journals may replace one mount's physical image with an explicit dependency chain.
+fn validate_disk_mount_layers(disk: &DiskMountSpec) -> RuntimeResult<Option<Vec<UpperLayerSpec>>> {
+    if disk.layers.is_empty() {
+        if !disk.host.exists() {
+            return Err(RuntimeError::Custom(format!(
+                "disk {}: host path not found: {}",
+                disk.id,
+                disk.host.display()
+            )));
+        }
+        return Ok(None);
+    }
+    if !disk.lifecycle_owned || !disk.snapshot_owned {
+        return Err(RuntimeError::Custom(format!(
+            "disk {}: explicit mount chains require owned storage",
+            disk.id
+        )));
+    }
+    let layers = validate_upper_layers(&UpperSpec {
+        layers: disk.layers.clone(),
+        read_only: disk.readonly,
+    })?;
+    for layer in &layers {
+        if !std::fs::symlink_metadata(&layer.path)?
+            .file_type()
+            .is_file()
+        {
+            return Err(RuntimeError::Custom(format!(
+                "owned disk {}: layer is not a regular file: {}",
+                disk.id,
+                layer.path.display()
+            )));
+        }
+    }
+    Ok(Some(layers))
+}
+
+fn writeback_limited_disk_paths(vm: &VmConfig) -> RuntimeResult<Vec<PathBuf>> {
+    if vm.block_writeback_limit_bytes.is_none() {
+        return Ok(Vec::new());
+    }
+
+    let mut paths = Vec::new();
+    if vm.rootfs_path.is_some() {
+        // Direct root filesystems do not attach a virtio-blk device.
+    } else if vm.rootfs_vmdk.is_some() {
+        if let Some(spec) = &vm.rootfs_upper_spec {
+            if let Some(head) = spec.layers.last()
+                && is_writeback_limited_disk(head.format, spec.read_only)
+            {
+                paths.push(head.path.clone());
+            }
+        } else if let Some(upper) = &vm.rootfs_upper {
+            paths.push(upper.clone());
+        }
+    } else if let Some(spec) = &vm.rootfs_disk_spec {
+        if let Some(head) = spec.layers.last()
+            && is_writeback_limited_disk(head.format, spec.read_only)
+        {
+            paths.push(head.path.clone());
+        }
+    } else if let Some(rootfs_disk) = &vm.rootfs_disk {
+        let format = validate_disk_format(vm.rootfs_disk_format.as_deref())
+            .map_err(|error| RuntimeError::Custom(format!("disk format: {error}")))?;
+        if is_writeback_limited_disk(format, vm.rootfs_disk_readonly) {
+            paths.push(rootfs_disk.clone());
+        }
+    }
+
+    paths.extend(vm.disks.iter().filter_map(|disk| {
+        let (path, format) = disk
+            .layers
+            .last()
+            .map_or((&disk.host, disk.format), |head| (&head.path, head.format));
+        is_writeback_limited_disk(format, disk.readonly).then(|| path.clone())
+    }));
+    Ok(paths)
+}
+
+fn is_writeback_limited_disk(format: msb_krun::DiskImageFormat, read_only: bool) -> bool {
+    !read_only && matches!(format, msb_krun::DiskImageFormat::Raw)
+}
+
+/// Select the primary agent-port depth from the traffic assigned to it by this VM topology.
+fn agent_primary_queue_size(has_dedicated_bulk_port: bool) -> u16 {
+    if has_dedicated_bulk_port {
+        AGENT_CONTROL_QUEUE_SIZE
+    } else {
+        AGENT_BULK_QUEUE_SIZE
+    }
+}
+
+/// Build the `Vm` from config with an exit observer for cleanup.
+struct HostPlacement<'a> {
+    vcpu_targets: Option<&'a [crate::cpu::LogicalCpuId]>,
+    required: bool,
+    numa_topology: Option<msb_krun::NumaTopology>,
+}
+
+/// Runtime services needed while constructing host devices and restore backing.
+struct VmBuildRuntime {
+    tokio_handle: tokio::runtime::Handle,
+    startup_progress: crate::startup_progress::StartupProgressCallback,
+}
+
+fn build_vm(
+    config: &Config,
+    console_backends: AgentConsoleBackends,
+    on_exit: impl Fn(i32) + Send + 'static,
+    on_placement: impl FnOnce(&msb_krun::PlacementReport) + Send + 'static,
+    runtime: VmBuildRuntime,
+    host_placement: HostPlacement<'_>,
+    writeback_limit: Option<&msb_krun::WritebackLimit>,
+) -> RuntimeResult<VmBuildOutput> {
+    let VmBuildRuntime {
+        tokio_handle,
+        startup_progress,
+    } = runtime;
+    let AgentConsoleBackends {
+        control: console_backend,
+        bulk: bulk_console_backend,
+    } = console_backends;
+    // In combined mode the primary port is also the bulk data plane and needs the same queue depth
+    // as a dedicated bulk port. Once dual-port is selected it returns to the small control queue.
+    let agent_queue_size = agent_primary_queue_size(bulk_console_backend.is_some());
+    let vm = &config.vm;
+    let mut owned_directory_checkpoints = std::collections::BTreeMap::new();
+    // Decode once before constructing devices: unavailable disks need the exact
+    // captured capacity/features, never guessed geometry or a temporary backing.
+    let prepared_restore = vm
+        .checkpoint_restore
+        .as_ref()
+        .map(|restore| {
+            let prepared = if restore.local_branch {
+                crate::checkpoint::PreparedCheckpointRestore::open_local(
+                    restore.closure.clone(),
+                    &restore.checkpoint_id,
+                    restore.memory_descriptor,
+                )
+            } else {
+                crate::checkpoint::PreparedCheckpointRestore::open(
+                    restore.closure.clone(),
+                    &restore.checkpoint_root,
+                )
+            }
+            .map_err(|error| {
+                RuntimeError::Custom(format!("prepare checkpoint restore: {error}"))
+            })?;
+            prepared
+                .validate_geometry(vm)
+                .map_err(RuntimeError::Custom)?;
+            Ok::<_, RuntimeError>(prepared)
+        })
+        .transpose()?;
+    let mut bootstrap = vm.bootstrap.clone();
+    let balloon_stats_interval = config
+        .metrics_sample_interval_ms
+        .map(|interval_ms| Duration::from_millis(interval_ms.get()));
+    #[cfg(unix)]
+    let mut bind_identity_map = BindIdentityMapRegistration::new();
+    #[cfg(windows)]
+    let bind_identity_map = BindIdentityMapRegistration::new();
+
+    let kernel_cmdline = agent_kernel_cmdline(vm.thp, config.agent_transport);
+    let mut builder = VmBuilder::new()
+        .machine(|m| {
+            let mut m = m
+                .vcpus(vm.vcpus)
+                .memory_mib(vm.memory_mib as usize)
+                .max_vcpus(vm.max_cpus.max(vm.vcpus))
+                .max_memory_mib((vm.max_memory_mib.max(vm.memory_mib)) as usize)
+                .balloon_stats_interval(balloon_stats_interval);
+            if let Some(targets) = host_placement.vcpu_targets {
+                let affinity = targets
+                    .iter()
+                    .copied()
+                    .map(|cpu| msb_krun::HostCpuId::in_group(cpu.group, cpu.index))
+                    .collect();
+                m = if host_placement.required {
+                    m.vcpu_affinity(affinity)
+                } else {
+                    m.try_vcpu_affinity(affinity)
+                };
+            }
+            if let Some(topology) = host_placement.numa_topology {
+                m = m.numa_topology(topology);
+            }
+            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+            {
+                m.split_irqchip(true)
+            }
+            #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+            {
+                m
+            }
+        })
+        .kernel(|k| {
+            // Apply the typed policy before PID 1 starts. Keeping the raw
+            // kernel command line internal avoids exposing a general-purpose
+            // boot-argument escape hatch to sandbox users.
+            let k = k.krunfw_path(&vm.libkrunfw_path).cmdline(&kernel_cmdline);
+            if let Some(ref init_path) = vm.init_path {
+                k.init_path(init_path)
+            } else {
+                k
+            }
+        });
+
+    // Root filesystem.
+    if let Some(ref rootfs_path) = vm.rootfs_path {
+        let backend = bind_rootfs_backend(rootfs_path, vm.rootfs_follow_root_symlinks)?;
+        builder = builder.fs(move |fs| fs.tag("/dev/root").custom(Box::new(backend)));
+    } else if let Some(ref vmdk_path) = vm.rootfs_vmdk {
+        // EROFS fsmerge OCI rootfs: VMDK (read-only) + upper.ext4 (writable).
+        #[cfg(unix)]
+        {
+            let backend = bootstrap_trampoline_backend()?;
+            builder = builder.fs(move |fs| fs.tag("/dev/root").custom(Box::new(backend)));
+        }
+        #[cfg(windows)]
+        {
+            let backend = AgentBootstrapFs::new()
+                .map_err(|e| RuntimeError::Custom(format!("bootstrap rootfs: {e}")))?;
+            builder = builder.fs(move |fs| fs.tag("/dev/root").custom(Box::new(backend)));
+        }
+
+        // Attach VMDK as read-only VMDK-format block device.
+        let vmdk = vmdk_path.clone();
+        builder = builder.disk(move |d| {
+            d.path(&vmdk)
+                .format(msb_krun::DiskImageFormat::Vmdk)
+                .read_only(true)
+        });
+
+        // Attach the writable upper. An explicit chain remains one guest-visible block device;
+        // libkrun opens its ancestors read-only and permits writes only through the final head.
+        if let Some(ref spec) = vm.rootfs_upper_spec {
+            let layers = validate_upper_layers(spec)?;
+            let format = layers.last().expect("validated non-empty chain").format;
+            let read_only = spec.read_only;
+            // Keep restart behavior identical to in-process rollover: formatted Linux heads use
+            // direct I/O instead of the raw-only bounded writeback controller.
+            let direct_io =
+                cfg!(target_os = "linux") && matches!(format, msb_krun::DiskImageFormat::Qcow2);
+            let writeback_limit = writeback_limit.cloned();
+            builder = builder.disk(move |d| {
+                let d = attach_upper_layers(d, layers)
+                    .format(format)
+                    .read_only(read_only)
+                    .direct_io(direct_io);
+                apply_block_writeback_limit(d, format, read_only, writeback_limit.as_ref())
+            });
+        } else if let Some(ref upper) = vm.rootfs_upper {
+            let upper = upper.clone();
+            let format = msb_krun::DiskImageFormat::Raw;
+            let writeback_limit = writeback_limit.cloned();
+            builder = builder.disk(move |d| {
+                let d = d.path(&upper).format(format).read_only(false);
+                apply_block_writeback_limit(d, format, false, writeback_limit.as_ref())
+            });
+        }
+    } else if vm.rootfs_disk_spec.is_some() || vm.rootfs_disk.is_some() {
+        #[cfg(unix)]
+        {
+            let backend = bootstrap_trampoline_backend()?;
+            builder = builder.fs(move |fs| fs.tag("/dev/root").custom(Box::new(backend)));
+        }
+        #[cfg(windows)]
+        {
+            let backend = AgentBootstrapFs::new()
+                .map_err(|e| RuntimeError::Custom(format!("bootstrap rootfs: {e}")))?;
+            builder = builder.fs(move |fs| fs.tag("/dev/root").custom(Box::new(backend)));
+        }
+
+        if let Some(ref spec) = vm.rootfs_disk_spec {
+            let layers = validate_upper_layers(spec)?;
+            let format = layers.last().expect("validated non-empty chain").format;
+            let read_only = spec.read_only;
+            let direct_io =
+                cfg!(target_os = "linux") && matches!(format, msb_krun::DiskImageFormat::Qcow2);
+            let writeback_limit = writeback_limit.cloned();
+            builder = builder.disk(move |d| {
+                let d = attach_upper_layers(d, layers)
+                    .format(format)
+                    .read_only(read_only)
+                    .direct_io(direct_io);
+                apply_block_writeback_limit(d, format, read_only, writeback_limit.as_ref())
+            });
+        } else if let Some(ref disk_path) = vm.rootfs_disk {
+            let format = validate_disk_format(vm.rootfs_disk_format.as_deref())
+                .map_err(|e| RuntimeError::Custom(format!("disk format: {e}")))?;
+            let disk_path = disk_path.clone();
+            let readonly = vm.rootfs_disk_readonly;
+            let writeback_limit = writeback_limit.cloned();
+            builder = builder.disk(move |d| {
+                let d = d.path(&disk_path).format(format).read_only(readonly);
+                apply_block_writeback_limit(d, format, readonly, writeback_limit.as_ref())
+            });
+        }
+        if bootstrap.block_root.is_none() {
+            bootstrap.block_root = Some(BootstrapBlockRoot::DiskImage {
+                device: "/dev/vda".to_string(),
+                fstype: None,
+            });
+        }
+    }
+
+    // Runtime directory mount — agentd mounts this at /.msb for scripts
+    // and heartbeat. It is a host↔guest control channel (the host writes
+    // scripts/TLS certs and reads heartbeat.json through it), so it stays a
+    // virtiofs share rather than a block device. A fixed budget caps guest
+    // writes so the channel can never be used to fill the host disk; the
+    // legitimate guest footprint is a ~1 KiB heartbeat, so the budget is
+    // almost entirely abuse headroom and is not user-configurable.
+    {
+        let runtime_tag = microsandbox_protocol::RUNTIME_FS_TAG.to_string();
+        let cfg = PassthroughConfig {
+            root_dir: canonicalize_owned_mount_root(&config.runtime_dir)?,
+            inject_init: false,
+            quota_bytes: Some(microsandbox_protocol::RUNTIME_FS_QUOTA_BYTES),
+            no_symlink_root: true,
+            ..Default::default()
+        };
+        let backend = PassthroughFs::new(cfg)
+            .map_err(|e| RuntimeError::Custom(format!("runtime mount: {e}")))?;
+        builder = builder.fs(move |fs| fs.tag(&runtime_tag).custom(Box::new(backend)));
+    }
+
+    // Isolated file mounts. Each backend exposes a synthetic root containing
+    // only the selected file, so remounting the tag cannot reveal host siblings.
+    let mut external_mount_reports = Vec::new();
+    let relaxed = vm.checkpoint_restore.as_ref().is_some_and(|restore| {
+        restore.external_mount_policy == microsandbox_types::ExternalMountRestorePolicy::Relaxed
+    });
+    let file_inputs = if let Some(restore) = &vm.checkpoint_restore {
+        let mut inputs = Vec::new();
+        for (index, binding) in restore
+            .external_mounts
+            .iter()
+            .filter(|binding| binding.filename.is_some())
+            .enumerate()
+        {
+            if binding.device_id != format!("virtio_fs{}", 2 + index) {
+                return Err(RuntimeError::Custom(
+                    "external file transport topology differs".into(),
+                ));
+            }
+            let spec = vm.file_mounts.iter().find(|spec| {
+                spec.mount
+                    .split_once(':')
+                    .is_some_and(|(tag, _)| tag == binding.mount.tag)
+            });
+            if spec.is_none() && !binding.unavailable {
+                return Err(RuntimeError::Custom(format!(
+                    "file mount {} has no trusted launch binding",
+                    binding.mount.guest_path
+                )));
+            }
+            inputs.push((spec, Some(binding)));
+        }
+        if vm.file_mounts.len() != inputs.iter().filter(|(spec, _)| spec.is_some()).count() {
+            return Err(RuntimeError::Custom(
+                "restore cannot add uncaptured file transports".into(),
+            ));
+        }
+        inputs
+    } else {
+        vm.file_mounts
+            .iter()
+            .map(|spec| (Some(spec), None))
+            .collect()
+    };
+    let captured_file_count = file_inputs.len();
+    for (file_mount, restore_binding) in file_inputs {
+        let Some(file_mount) = file_mount else {
+            let binding = restore_binding.expect("only restore omits backing");
+            // An intentionally unmapped resource is distinct from a supplied mapping
+            // failing strict validation. Keep its guest device but grant no host access.
+            let tag = binding.mount.tag.clone();
+            builder = builder.fs(move |fs| {
+                fs.tag(&tag)
+                    .custom(Box::new(microsandbox_filesystem::UnavailableFs::default()))
+            });
+            external_mount_reports.push(crate::checkpoint::ExternalMountReport {
+                guest_path: binding.mount.guest_path.clone(),
+                unavailable: Some(
+                    "no trusted destination mapping is available; filesystem operations return EIO"
+                        .into(),
+                ),
+                stale_inodes: Default::default(),
+            });
+            continue;
+        };
+        let parsed = parse_mount_spec(&file_mount.mount)
+            .map_err(|e| RuntimeError::Custom(format!("file mount {:?}: {e}", file_mount.mount)))?;
+        let tag = parsed.tag;
+        let host_path = PathBuf::from(&parsed.host_path);
+        let override_owner = match (parsed.override_uid, parsed.override_gid) {
+            (Some(uid), Some(gid)) => Some((uid, gid)),
+            _ => None,
+        };
+        #[cfg(unix)]
+        let mount_bind_identity_map = bind_identity_map_for_mount(
+            &mut bind_identity_map,
+            parsed.stat_virtualization,
+            override_owner,
+        );
+        let external_options = microsandbox_filesystem::ExternalCheckpointOptions {
+            relaxed,
+            remapped: restore_binding.is_some_and(|binding| binding.remapped),
+            ..Default::default()
+        };
+        if let Some(binding) = restore_binding {
+            external_mount_reports.push(crate::checkpoint::ExternalMountReport {
+                guest_path: binding.mount.guest_path.clone(),
+                unavailable: None,
+                stale_inodes: external_options.invalid_inodes.clone(),
+            });
+        }
+        let cfg = PassthroughConfig {
+            external_checkpoint: Some(external_options),
+            stat_virtualization: parsed.stat_virtualization,
+            host_permissions: parsed.host_permissions,
+            readonly: parsed.readonly,
+            quota_bytes: parsed.quota_bytes,
+            #[cfg(unix)]
+            bind_identity_map: mount_bind_identity_map,
+            #[cfg(windows)]
+            default_owner: override_owner,
+            ..Default::default()
+        };
+        let backend =
+            match SingleFileFs::new(host_path.clone(), file_mount.filename.clone(), cfg) {
+                Err(error)
+                    if relaxed
+                        && restore_binding.is_some_and(|binding| !binding.require_backing)
+                        && matches!(
+                            error.kind(),
+                            std::io::ErrorKind::NotFound
+                                | std::io::ErrorKind::PermissionDenied
+                                | std::io::ErrorKind::NotADirectory
+                                | std::io::ErrorKind::IsADirectory
+                        ) =>
+                {
+                    external_mount_reports
+                        .last_mut()
+                        .expect("restore report")
+                        .unavailable = Some(format!(
+                        "external file cannot be opened: {error}; filesystem operations return EIO"
+                    ));
+                    builder = builder.fs(move |fs| {
+                        fs.tag(&tag)
+                            .custom(Box::new(microsandbox_filesystem::UnavailableFs::default()))
+                    });
+                    continue;
+                }
+                result => result,
+            }
+            .map_err(|e| {
+                RuntimeError::Custom(format!(
+                    "file mount {tag}: failed to open host file {}: {e}",
+                    host_path.display()
+                ))
+            })?;
+        builder = builder.fs(move |fs| fs.tag(&tag).custom(Box::new(backend)));
+    }
+
+    // Rebuild captured transports in their original order, including unavailable exports.
+    let mount_inputs = if let Some(restore) = &vm.checkpoint_restore {
+        let mut inputs = Vec::new();
+        for (index, binding) in restore
+            .external_mounts
+            .iter()
+            .filter(|binding| binding.filename.is_none())
+            .enumerate()
+        {
+            if binding.device_id != format!("virtio_fs{}", 2 + captured_file_count + index) {
+                return Err(RuntimeError::Custom(
+                    "external mount transport topology differs".into(),
+                ));
+            }
+            let spec = vm.mounts.iter().find(|spec| {
+                spec.split_once(':')
+                    .is_some_and(|(tag, _)| tag == binding.mount.tag)
+            });
+            if spec.is_none() && !binding.unavailable {
+                return Err(RuntimeError::Custom(format!(
+                    "mount {} has no trusted launch binding",
+                    binding.mount.guest_path
+                )));
+            }
+            inputs.push((spec.map(String::as_str), Some(binding)));
+        }
+        if vm.mounts.len() != inputs.iter().filter(|(spec, _)| spec.is_some()).count() {
+            return Err(RuntimeError::Custom(
+                "restore cannot add uncaptured filesystem transports".into(),
+            ));
+        }
+        inputs
+    } else {
+        vm.mounts
+            .iter()
+            .map(|spec| (Some(spec.as_str()), None))
+            .collect()
+    };
+    for (mount_spec, restore_binding) in mount_inputs {
+        let relaxed = vm.checkpoint_restore.as_ref().is_some_and(|restore| {
+            restore.external_mount_policy == microsandbox_types::ExternalMountRestorePolicy::Relaxed
+        });
+        let Some(mount_spec) = mount_spec else {
+            let binding = restore_binding.expect("only restores have unavailable bindings");
+            // Missing authorization is represented by an error-serving device, not an
+            // empty directory, fallback host path, or removal of the captured mount.
+            {
+                let tag = binding.mount.tag.clone();
+                builder = builder.fs(move |fs| {
+                    fs.tag(&tag)
+                        .custom(Box::new(microsandbox_filesystem::UnavailableFs::default()))
+                });
+                external_mount_reports.push(crate::checkpoint::ExternalMountReport {
+                    guest_path: binding.mount.guest_path.clone(),
+                    unavailable: Some("no trusted destination mapping is available; filesystem operations return EIO".into()),
+                    stale_inodes: Default::default(),
+                });
+                continue;
+            }
+        };
+        let parsed = parse_mount_spec(mount_spec)
+            .map_err(|e| RuntimeError::Custom(format!("--mount {mount_spec:?}: {e}")))?;
+
+        let tag = parsed.tag;
+        // Keep the host path as a PathBuf so mount failures can format it
+        // without relying on the string-only mount spec field.
+        let host_path = PathBuf::from(&parsed.host_path);
+        let owned_mount = vm.owned_volumes.iter().find(|mount| {
+            matches!(
+                mount,
+                microsandbox_types::VolumeMount::Owned {
+                    storage: microsandbox_types::OwnedVolumeStorage::Directory { .. },
+                    ..
+                }
+            ) && microsandbox_types::owned_volume_mount_id(mount.guest()) == tag
+                && vm
+                    .bootstrap
+                    .dir_mounts
+                    .iter()
+                    .any(|binding| binding.tag == tag && binding.guest_path == mount.guest())
+        });
+        let owned_checkpoint =
+            owned_mount.map(|_| microsandbox_filesystem::OwnedDirectoryCheckpoint::default());
+        if let Some(checkpoint) = &owned_checkpoint {
+            if let Some(restore) = &vm.checkpoint_restore {
+                checkpoint
+                    .set_restore(&restore.closure.join("owned").join(&tag))
+                    .map_err(|error| RuntimeError::Custom(format!("owned mount {tag}: {error}")))?;
+            }
+            owned_directory_checkpoints.insert(tag.clone(), checkpoint.clone());
+        }
+        // Explicit guest owner for host files with no per-file override. Parsing
+        // guarantees uid/gid come as a pair, so this is Some only when both are set.
+        let override_owner = match (parsed.override_uid, parsed.override_gid) {
+            (Some(uid), Some(gid)) => Some((uid, gid)),
+            _ => None,
+        };
+        #[cfg(unix)]
+        let mount_bind_identity_map = bind_identity_map_for_mount(
+            &mut bind_identity_map,
+            parsed.stat_virtualization,
+            override_owner,
+        );
+        let external_options = microsandbox_filesystem::ExternalCheckpointOptions {
+            relaxed,
+            remapped: restore_binding.is_some_and(|binding| binding.remapped),
+            ..Default::default()
+        };
+        if let Some(binding) = restore_binding {
+            external_mount_reports.push(crate::checkpoint::ExternalMountReport {
+                guest_path: binding.mount.guest_path.clone(),
+                unavailable: None,
+                stale_inodes: external_options.invalid_inodes.clone(),
+            });
+        }
+        let cfg = PassthroughConfig {
+            root_dir: host_path.clone(),
+            external_checkpoint: owned_checkpoint.is_none().then_some(external_options),
+            owned_checkpoint,
+            inject_init: false,
+            stat_virtualization: parsed.stat_virtualization,
+            host_permissions: parsed.host_permissions,
+            readonly: parsed.readonly,
+            // Default-on protection: resolve the mount root following no symlink
+            // unless the mount opted out via `follow-root-symlinks`.
+            no_symlink_root: !parsed.follow_root_symlinks,
+            #[cfg(unix)]
+            bind_identity_map: mount_bind_identity_map,
+            #[cfg(windows)]
+            default_owner: override_owner,
+            quota_bytes: parsed.quota_bytes,
+            ..Default::default()
+        };
+        let backend = match PassthroughFs::new(cfg) {
+            Err(error) if owned_mount.is_none() && relaxed && restore_binding.is_some_and(|binding| !binding.require_backing)
+                && matches!(error.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::NotADirectory) => {
+                external_mount_reports.last_mut().expect("restore report").unavailable = Some(format!("external export cannot be opened: {error}; filesystem operations return EIO"));
+                builder = builder.fs(move |fs| fs.tag(&tag).custom(Box::new(microsandbox_filesystem::UnavailableFs::default())));
+                continue;
+            }
+            result => result,
+        }.map_err(|e| {
+            // Name the folder on a permission error. The underlying error
+            // distinguishes path access from a strict metadata probe failure.
+            if e.kind() == std::io::ErrorKind::PermissionDenied {
+                #[cfg(target_os = "macos")]
+                let platform_hint =
+                    " On macOS, grant access in System Settings > Privacy & Security.";
+                #[cfg(not(target_os = "macos"))]
+                let platform_hint = "";
+                let policy_hint = if matches!(
+                    parsed.stat_virtualization,
+                    StatVirtualization::Strict
+                ) {
+                    " For a foreign-owned path, use stat-virt=relaxed if full metadata virtualization is not required."
+                } else {
+                    ""
+                };
+                RuntimeError::Custom(format!(
+                    "mount {tag}: permission denied accessing host folder {} ({e}).{platform_hint}{policy_hint}",
+                    host_path.display(),
+                ))
+            } else {
+                RuntimeError::Custom(format!("mount {tag}: {e}"))
+            }
+        })?;
+        builder = builder.fs(move |fs| fs.tag(&tag).custom(Box::new(backend)));
+    }
+
+    // Disk-image volume mounts. Each adds an extra virtio-blk device with
+    // a stable block id so agentd can find it via /dev/disk/by-id/virtio-<id>.
+    let disk_inputs = if let Some(prepared) = &prepared_restore {
+        let captured = prepared.additional_blocks();
+        if vm
+            .disks
+            .iter()
+            .any(|disk| !captured.iter().any(|(id, _)| *id == disk.id))
+        {
+            return Err(RuntimeError::Custom(
+                "restore cannot add uncaptured block devices".into(),
+            ));
+        }
+        captured
+            .into_iter()
+            .map(|(id, state)| {
+                (
+                    vm.disks.iter().find(|disk| disk.id == id),
+                    Some((id, state)),
+                )
+            })
+            .collect::<Vec<_>>()
+    } else {
+        vm.disks.iter().map(|disk| (Some(disk), None)).collect()
+    };
+    for (disk, captured) in disk_inputs {
+        let Some(disk) = disk else {
+            let (id, state) = captured.expect("only restored devices omit backing");
+            let guest = vm
+                .checkpoint_restore
+                .as_ref()
+                .and_then(|restore| restore.unavailable_disks.get(id))
+                .ok_or_else(|| {
+                    RuntimeError::Custom(format!("block {id} has no explicit unavailable binding"))
+                })?;
+            if state.device.id != id {
+                return Err(RuntimeError::Custom(
+                    "captured block identity mismatch".into(),
+                ));
+            }
+            builder = builder.disk(|disk| disk.unavailable(state.clone()));
+            external_mount_reports.push(crate::checkpoint::ExternalMountReport {
+                guest_path: guest.clone(),
+                unavailable: Some("additional disk was not mapped; disk I/O returns EIO and the guest filesystem may abort its journal or become read-only".into()),
+                stale_inodes: Default::default(),
+            });
+            continue;
+        };
+        let layers = validate_disk_mount_layers(disk)?;
+        tracing::debug!(
+            id = %disk.id,
+            guest = %disk.guest,
+            host = %disk.host.display(),
+            ?disk.format,
+            fstype = ?disk.fstype,
+            readonly = disk.readonly,
+            "attaching disk-image volume",
+        );
+        let id = disk.id.clone();
+        let host = disk.host.clone();
+        let format = layers
+            .as_ref()
+            .and_then(|layers| layers.last())
+            .map_or(disk.format, |head| head.format);
+        let readonly = disk.readonly;
+        let direct_io = layers.is_some()
+            && cfg!(target_os = "linux")
+            && matches!(format, msb_krun::DiskImageFormat::Qcow2);
+        let writeback_limit = writeback_limit.cloned();
+        builder = builder.disk(move |d| {
+            let d = d.id(&id);
+            let d = match layers {
+                Some(layers) => attach_upper_layers(d, layers).direct_io(direct_io),
+                None => d.path(&host),
+            };
+            let mut d = d.format(format).read_only(readonly);
+            if readonly {
+                // Read-only images can skip host-side sync entirely.
+                d = d
+                    .cache(msb_krun::CacheMode::Unsafe)
+                    .sync(msb_krun::SyncMode::None);
+            }
+            apply_block_writeback_limit(d, format, readonly, writeback_limit.as_ref())
+        });
+    }
+
+    let mut network_termination_handle = None;
+    let mut network_metrics_handle = None;
+    let mut network_secrets_handle = None;
+    #[cfg(feature = "net")]
+    let mut network_activation_handle = None;
+    #[cfg(not(feature = "net"))]
+    let network_activation_handle: Option<NetworkActivationHandle> = None;
+
+    // Vsock routes are independent of virtio-net. Microsandbox owns the host
+    // local IPC endpoints while libkrun retains framing, queues and credits.
+    #[cfg(unix)]
+    if !vm.vsock.is_empty() {
+        #[cfg(feature = "net")]
+        if vm.deployment_profile == DeploymentProfile::MultiTenant {
+            return Err(RuntimeError::Custom(
+                "host vsock routes are disabled for multi-tenant deployments".to_string(),
+            ));
+        }
+
+        let mut streams: Vec<(u32, Arc<dyn msb_krun::backends::vsock::VsockPortBackend>)> =
+            Vec::new();
+        let mut datagrams: Vec<(
+            u32,
+            Arc<dyn msb_krun::backends::vsock::VsockDatagramPortBackend>,
+        )> = Vec::new();
+
+        for route in &vm.vsock {
+            match route.socket_type {
+                microsandbox_types::VsockSocketType::Stream => {
+                    let backend =
+                        UnixStreamPortBackend::new(&route.host_socket).map_err(|err| {
+                            RuntimeError::Custom(format!(
+                                "initialize stream vsock route {}:{}: {err}",
+                                route.host_socket.display(),
+                                route.port
+                            ))
+                        })?;
+                    streams.push((route.port, Arc::new(backend)));
+                }
+                microsandbox_types::VsockSocketType::Dgram => {
+                    let backend =
+                        UnixDatagramPortBackend::new(&route.host_socket).map_err(|err| {
+                            RuntimeError::Custom(format!(
+                                "initialize datagram vsock route {}:{}: {err}",
+                                route.host_socket.display(),
+                                route.port
+                            ))
+                        })?;
+                    datagrams.push((route.port, Arc::new(backend)));
+                }
+            }
+        }
+
+        builder = builder.vsock(move |mut vsock| {
+            for (port, backend) in streams {
+                vsock = vsock.custom(port, backend);
+            }
+            for (port, backend) in datagrams {
+                vsock = vsock.custom_dgram(port, backend);
+            }
+            vsock
+        });
+    }
+
+    #[cfg(windows)]
+    if !vm.vsock.is_empty() {
+        #[cfg(feature = "net")]
+        if vm.deployment_profile == DeploymentProfile::MultiTenant {
+            return Err(RuntimeError::Custom(
+                "host vsock routes are disabled for multi-tenant deployments".to_string(),
+            ));
+        }
+
+        let mut streams: Vec<(u32, Arc<dyn msb_krun::backends::vsock::VsockPortBackend>)> =
+            Vec::new();
+        for route in &vm.vsock {
+            if route.socket_type == microsandbox_types::VsockSocketType::Dgram {
+                return Err(RuntimeError::Custom(
+                    "vsock datagram routes are not supported on Windows".to_string(),
+                ));
+            }
+            let backend = WindowsNamedPipePortBackend::new(&route.host_socket).map_err(|err| {
+                RuntimeError::Custom(format!(
+                    "initialize stream vsock route {}:{}: {err}",
+                    route.host_socket.display(),
+                    route.port
+                ))
+            })?;
+            streams.push((route.port, Arc::new(backend)));
+        }
+
+        builder = builder.vsock(move |mut vsock| {
+            for (port, backend) in streams {
+                vsock = vsock.custom(port, backend);
+            }
+            vsock
+        });
+    }
+
+    // Network.
+    #[cfg(feature = "net")]
+    if vm.network.config().enabled {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        vm.network
+            .config()
+            .secrets
+            .validate()
+            .map_err(|err| RuntimeError::Custom(format!("invalid network secrets: {err}")))?;
+        let rate_limiters = to_krun_network_rate_limiters(vm.network.config());
+
+        let mut network =
+            SmoltcpNetwork::new(vm.network.clone(), vm.sandbox_slot, vm.deployment_profile)
+                .map_err(|err| RuntimeError::Custom(format!("initialize network: {err}")))?;
+        if let Some(restore) = &vm.checkpoint_restore {
+            let gateway = restore.network_gateway_mac.ok_or_else(|| {
+                RuntimeError::Custom(
+                    "full restore lacks captured gateway MAC; recapture the development snapshot"
+                        .into(),
+                )
+            })?;
+            network = network
+                .with_captured_gateway_mac(gateway)
+                .map_err(|err| RuntimeError::Custom(format!("restore network: {err}")))?;
+        }
+        network_termination_handle = Some(network.termination_handle());
+        network_metrics_handle = Some(network.metrics_handle());
+        // Only sandboxes that booted with secrets can be live-reconfigured:
+        // new placeholders cannot be introduced into a running guest, so a
+        // secret-free boot never needs the secrets side of the control socket.
+        if !vm.network.config().secrets.secrets.is_empty() {
+            network_secrets_handle = Some(network.secrets_handle());
+        }
+
+        if vm.checkpoint_restore.is_some() {
+            network_activation_handle = Some(network.defer_activation());
+        }
+
+        network.start(tokio_handle.clone());
+
+        let guest_mac = network.guest_mac();
+        let net_backend = network.take_backend();
+
+        {
+            let tls_dir = config.runtime_dir.join("tls");
+            let _ = std::fs::create_dir_all(&tls_dir);
+            if let Some(ca_pem) = network.ca_cert_pem() {
+                let _ = std::fs::write(tls_dir.join("ca.pem"), &ca_pem);
+            }
+            if let Some(host_cas_pem) = network.host_cas_cert_pem() {
+                let _ = std::fs::write(tls_dir.join("host-cas.pem"), &host_cas_pem);
+            }
+        }
+
+        bootstrap.network = Some(network.guest_bootstrap_network());
+        bootstrap.host_alias = Some(network.guest_host_alias().to_string());
+        bootstrap.default_env.extend(network.guest_secret_env());
+
+        builder = builder.net(move |mut n| {
+            n = n.mac(guest_mac);
+            if let Some(config) = rate_limiters.rx {
+                n = n.rx_rate_limiter(config);
+            }
+            if let Some(config) = rate_limiters.tx {
+                n = n.tx_rate_limiter(config);
+            }
+            n.custom(net_backend)
+        });
+    }
+
+    // The kernel command line only selects agentd. Workload environment and
+    // cwd now travel through the typed bootstrap and exec protocols.
+    builder = builder.exec(|mut e| {
+        if let Some(ref path) = vm.exec_path {
+            e = e.path(path);
+        }
+        if !vm.exec_args.is_empty() {
+            e = e.args(&vm.exec_args);
+        }
+        e
+    });
+
+    // Console — ring-buffer-based custom backend for agent protocol, plus
+    // console output routed to kernel.log for kernel/init logs.
+    let kernel_log_path = config.log_dir.join("kernel.log");
+    #[cfg(unix)]
+    {
+        builder = builder.console(|c| {
+            let c = c.output(&kernel_log_path).custom_with_options(
+                microsandbox_protocol::AGENT_PORT_NAME,
+                Box::new(console_backend),
+                msb_krun::ConsolePortOptions::new().queue_size(agent_queue_size),
+            );
+            match bulk_console_backend {
+                Some(backend) => c.custom_with_options(
+                    microsandbox_protocol::AGENT_BULK_PORT_NAME,
+                    Box::new(backend),
+                    msb_krun::ConsolePortOptions::new().queue_size(AGENT_BULK_QUEUE_SIZE),
+                ),
+                None => c,
+            }
+        });
+    }
+    #[cfg(windows)]
+    {
+        let _ = (console_backend, bulk_console_backend);
+        let agent_pipe = agent_console_pipe_name(config.sandbox_id);
+        let bulk_pipe = config
+            .agent_transport
+            .offers_dual_port()
+            .then(|| agent_bulk_console_pipe_name(config.sandbox_id));
+        builder = builder.console(|c| {
+            // Windows WHP/x64 currently uses virtio-console for reliable
+            // guest logs; the implicit serial console is present but silent
+            // on the dev hosts used for WHP testing.
+            let c = c
+                .disable_implicit()
+                .virtio_output(&kernel_log_path)
+                .named_pipe_with_options(
+                    microsandbox_protocol::AGENT_PORT_NAME,
+                    agent_pipe,
+                    msb_krun::ConsolePortOptions::new().queue_size(agent_queue_size),
+                );
+            match bulk_pipe {
+                Some(pipe) => c.named_pipe_with_options(
+                    microsandbox_protocol::AGENT_BULK_PORT_NAME,
+                    pipe,
+                    msb_krun::ConsolePortOptions::new().queue_size(AGENT_BULK_QUEUE_SIZE),
+                ),
+                None => c,
+            }
+        });
+    }
+
+    // Exit observer — runs synchronously before _exit() for DB cleanup.
+    builder = builder.on_placement(on_placement).on_exit(on_exit);
+
+    let mut vm = builder
+        .build()
+        .map_err(|e| RuntimeError::Custom(format!("build VM: {e}")))?;
+    let restored_agent = if let Some(restore) = &config.vm.checkpoint_restore {
+        let prepared = prepared_restore.expect("restore was admitted before device construction");
+        // Local branches and durable restores both retain exact immutable disk bindings.
+        // Seed before moving the prepared sources into VM construction.
+        prepared
+            .seed_root_disk(&config.runtime_dir, &config.vm)
+            .map_err(RuntimeError::Custom)?;
+        let cache_root = restore
+            .forked
+            .then(|| {
+                config.vm.memory_cache_dir.clone().ok_or_else(|| {
+                    RuntimeError::Custom(
+                        "CoW memory requires its backend-resolved cache directory".into(),
+                    )
+                })
+            })
+            .transpose()?;
+        let mut restored = prepared
+            .install(&mut vm, cache_root, startup_progress)
+            .map_err(RuntimeError::Custom)?;
+        restored.external_mount_reports = external_mount_reports;
+        Some(restored)
+    } else {
+        None
+    };
+
+    let bootstrap_frame = if restored_agent.is_none() {
+        Some(encode_bootstrap_frame(&bootstrap)?)
+    } else {
+        None
+    };
+
+    Ok((
+        vm,
+        network_termination_handle,
+        network_metrics_handle,
+        network_secrets_handle,
+        network_activation_handle,
+        bootstrap_frame,
+        bootstrap,
+        bind_identity_map,
+        restored_agent,
+        owned_directory_checkpoints,
+    ))
+}
+
+fn encode_bootstrap_frame(bootstrap: &GuestBootstrap) -> RuntimeResult<Vec<u8>> {
+    let message = Message::with_payload(MessageType::Bootstrap, 0, bootstrap)
+        .map_err(|e| RuntimeError::Custom(format!("encode guest bootstrap: {e}")))?;
+    let mut frame = Vec::new();
+    codec::encode_to_buf(&message, &mut frame)
+        .map_err(|e| RuntimeError::Custom(format!("encode guest bootstrap frame: {e}")))?;
+    Ok(frame)
+}
+
+//--------------------------------------------------------------------------------------------------
+// Functions: Helpers
+//--------------------------------------------------------------------------------------------------
+
+fn publish_control_endpoint(
+    control_sock_path: PathBuf,
+    context: super::control::ControlContext,
+    run_dir: &Path,
+    sandbox_name: &str,
+) -> RuntimeResult<()> {
+    // Windows uses named pipes and has no legacy Unix socket link to publish.
+    #[cfg(not(unix))]
+    let _ = (run_dir, sandbox_name);
+
+    match super::control::spawn_control_listener(control_sock_path.clone(), context) {
+        Ok(()) => {
+            #[cfg(unix)]
+            if let Err(error) =
+                crate::ipc::publish_legacy_control_link(run_dir, sandbox_name, &control_sock_path)
+            {
+                if error.kind() == std::io::ErrorKind::InvalidInput {
+                    tracing::warn!(
+                        "legacy runtime control endpoint is unavailable for {sandbox_name}: {error}"
+                    );
+                } else {
+                    return Err(error.into());
+                }
+            }
+        }
+        Err(error) => {
+            // Live control has historically been an optional capability. Keep
+            // ordinary launches running when the listener itself is unavailable.
+            tracing::warn!(
+                "failed to start runtime control listener at {}: {error}",
+                control_sock_path.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "net")]
+fn to_krun_network_rate_limiters(
+    config: &microsandbox_network::config::NetworkConfig,
+) -> KrunNetworkRateLimiters {
+    let rate_limiter = config.rate_limiter.as_ref();
+    KrunNetworkRateLimiters {
+        rx: rate_limiter
+            .and_then(|rate_limiter| rate_limiter.ingress.as_ref())
+            .map(to_krun_rate_limiter),
+        tx: rate_limiter
+            .and_then(|rate_limiter| rate_limiter.egress.as_ref())
+            .map(to_krun_rate_limiter),
+    }
+}
+
+#[cfg(feature = "net")]
+fn to_krun_rate_limiter(
+    config: &microsandbox_types::RateLimiterConfig,
+) -> msb_krun::RateLimiterConfig {
+    fn bucket(config: &microsandbox_types::TokenBucketConfig) -> msb_krun::TokenBucketConfig {
+        msb_krun::TokenBucketConfig {
+            size: config.size,
+            refill_time: Duration::from_millis(config.refill_time_ms),
+            one_time_burst: config.one_time_burst,
+        }
+    }
+
+    msb_krun::RateLimiterConfig {
+        bandwidth: config.bandwidth.as_ref().map(bucket),
+        ops: config.ops.as_ref().map(bucket),
+    }
+}
+
+async fn monitor_writeback_pressure(
+    guard: Arc<crate::writeback::WritebackPressureGuard>,
+    db: DbWriteConnection,
+) {
+    let mut interval = tokio::time::interval(WRITEBACK_PRESSURE_REFRESH_INTERVAL);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // Acquisition already installed the initial target, so avoid an unnecessary immediate query.
+    interval.tick().await;
+    let mut coordination_failed = false;
+
+    loop {
+        interval.tick().await;
+        match guard.refresh(&db).await {
+            Ok(()) if coordination_failed => {
+                tracing::info!("writeback pressure coordination recovered");
+                coordination_failed = false;
+            }
+            Ok(()) => {}
+            Err(error) => {
+                // Losing the coordinator must reduce throughput, never silently restore the full
+                // per-disk window while the active host membership is unknown.
+                guard.fail_closed();
+                if !coordination_failed {
+                    tracing::warn!(%error, "writeback pressure coordination failed closed");
+                    coordination_failed = true;
+                }
+            }
+        }
+    }
+}
+
+/// Raise `RLIMIT_NOFILE` to the hard limit, capped at 1M (the reference virtiofsd default). On macOS the soft limit is additionally clamped to
+/// `kern.maxfilesperproc`, which `setrlimit` enforces even when the hard limit is unlimited.
+#[cfg(unix)]
+fn raise_nofile_limit() {
+    const TARGET: libc::rlim_t = 1_048_576;
+
+    let mut lim = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) } != 0 {
+        tracing::warn!(
+            error = %std::io::Error::last_os_error(),
+            "getrlimit(RLIMIT_NOFILE) failed; keeping inherited fd limit"
+        );
+        return;
+    }
+
+    let want = lim.rlim_max.min(TARGET);
+    #[cfg(target_os = "macos")]
+    let want = macos_maxfilesperproc().map_or(want, |max| want.min(max));
+
+    if want <= lim.rlim_cur {
+        return;
+    }
+
+    let new = libc::rlimit {
+        rlim_cur: want,
+        rlim_max: lim.rlim_max,
+    };
+    if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &new) } != 0 {
+        tracing::warn!(
+            error = %std::io::Error::last_os_error(),
+            soft = lim.rlim_cur,
+            wanted = want,
+            "setrlimit(RLIMIT_NOFILE) failed; keeping inherited fd limit"
+        );
+    } else {
+        tracing::debug!(from = lim.rlim_cur, to = want, "raised RLIMIT_NOFILE");
+    }
+}
+
+/// Read `kern.maxfilesperproc`, the ceiling macOS enforces on the `RLIMIT_NOFILE` soft limit.
+#[cfg(target_os = "macos")]
+fn macos_maxfilesperproc() -> Option<libc::rlim_t> {
+    let mut maxfiles: libc::c_int = 0;
+    let mut len = std::mem::size_of::<libc::c_int>();
+    let ret = unsafe {
+        libc::sysctlbyname(
+            c"kern.maxfilesperproc".as_ptr(),
+            &mut maxfiles as *mut _ as *mut libc::c_void,
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    (ret == 0 && maxfiles > 0).then_some(maxfiles as libc::rlim_t)
+}
+
+/// Build the runtime-owned bootstrap filesystem used before a block root pivots.
+///
+/// Agentd creates these mountpoints before switching to the durable block root.
+/// A restored virtio-fs session retains their inode numbers, so the destination
+/// provider must recreate the same pathname namespace before backend restore.
+#[cfg(unix)]
+fn bootstrap_trampoline_backend() -> RuntimeResult<PassthroughFs> {
+    let trampoline = tempfile::tempdir()?;
+    for directory in ["dev", "sys", "proc", ".msb", "newroot"] {
+        std::fs::create_dir(trampoline.path().join(directory)).map_err(|error| {
+            RuntimeError::Custom(format!("create bootstrap mountpoint {directory}: {error}"))
+        })?;
+    }
+    let cfg = PassthroughConfig {
+        root_dir: canonicalize_owned_mount_root(trampoline.path())?,
+        no_symlink_root: true,
+        ..Default::default()
+    };
+    let backend = PassthroughFs::new(cfg)
+        .map_err(|error| RuntimeError::Custom(format!("trampoline rootfs: {error}")))?;
+    let _ = trampoline.keep();
+    Ok(backend)
+}
+
+/// Recreate runtime-owned paths whose guest-visible inode identities survive a full restore.
+///
+/// The runtime channel itself is fresh on the destination. Restored virtio-fs state reopens paths,
+/// not source host descriptors, so paths created by agentd before capture must exist before device
+/// restore. OCI roots use the two mountpoints while every restored agent session may retain the
+/// atomically published heartbeat pathname. Existing heartbeat contents are never truncated.
+fn prepare_runtime_restore_namespace(runtime_dir: &Path, oci_root: bool) -> RuntimeResult<()> {
+    if oci_root {
+        for directory in ["rootfs/lower", "rootfs/upperfs"] {
+            std::fs::create_dir_all(runtime_dir.join(directory)).map_err(|error| {
+                RuntimeError::Custom(format!(
+                    "create restored runtime mountpoint {directory}: {error}"
+                ))
+            })?;
+        }
+    }
+
+    let heartbeat = runtime_dir.join("heartbeat.json");
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&heartbeat)
+    {
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(error) => Err(RuntimeError::Custom(format!(
+            "create restored runtime heartbeat {}: {error}",
+            heartbeat.display()
+        ))),
+    }
+}
+
+/// Build the host-directory rootfs backend used for `RootfsSource::Bind`.
+///
+/// The path is caller/tenant-provided, so it gets the same default no-follow
+/// root protection as a `--mount`: a symlink at or under the rootfs path is
+/// refused rather than followed out of its intended target. `follow_root_symlinks`
+/// opts out when the host rootfs path legitimately traverses a symlink.
+fn bind_rootfs_backend(
+    rootfs_path: &Path,
+    follow_root_symlinks: bool,
+) -> RuntimeResult<PassthroughFs> {
+    let cfg = PassthroughConfig {
+        root_dir: rootfs_path.to_path_buf(),
+        no_symlink_root: !follow_root_symlinks,
+        ..Default::default()
+    };
+    PassthroughFs::new(cfg).map_err(|e| RuntimeError::Custom(format!("rootfs: {e}")))
+}
+
+/// Canonicalize a microsandbox-owned mount root so it is symlink-free.
+///
+/// These roots are created and owned by the runtime (temp trampolines, the
+/// control-channel directory), never attacker-controlled, so resolving the one
+/// benign system symlink in their prefix (e.g. macOS `/var` -> `/private/var`)
+/// here is safe and lets them keep the default no-follow protection at mount
+/// time instead of following symlinks.
+fn canonicalize_owned_mount_root(path: &Path) -> RuntimeResult<PathBuf> {
+    std::fs::canonicalize(path).map_err(|e| {
+        RuntimeError::Custom(format!("canonicalize mount root {}: {e}", path.display()))
+    })
+}
+
+/// Open the shared-memory registry and promote the host-reserved slot to
+/// `Active`, returning a writer handle for the sampler.
+fn activate_metrics_writer(
+    handoff: Option<&MetricsSlotHandoff>,
+    interval: Option<NonZero<u64>>,
+    run_id: i32,
+    pid: u32,
+) -> Option<microsandbox_metrics::MetricsSlotWriter> {
+    interval?;
+    let handoff = handoff?;
+    let registry = match MetricsRegistry::open(&handoff.shm_name) {
+        Ok(reg) => reg,
+        Err(err) => {
+            tracing::warn!(error = %err, shm = %handoff.shm_name, "failed to open metrics registry");
+            return None;
+        }
+    };
+    let started_at = chrono::Utc::now();
+    match registry.activate_writer(ActivateSlot {
+        slot: handoff.slot,
+        generation: handoff.generation,
+        run_id,
+        pid: pid as i32,
+        started_at,
+    }) {
+        Ok(writer) => Some(writer),
+        Err(err) => {
+            tracing::warn!(error = %err, "failed to activate metrics slot");
+            None
+        }
+    }
+}
+
+/// Best-effort release of a metrics slot that has not been activated yet.
+fn release_reserved_metrics_slot(handoff: Option<&MetricsSlotHandoff>) {
+    let Some(handoff) = handoff else { return };
+    if let Ok(reg) = MetricsRegistry::open(&handoff.shm_name) {
+        let _ = reg.release_reserved(handoff.slot, handoff.generation);
+    }
+}
+
+#[cfg(unix)]
+fn bind_identity_map_for_mount(
+    registration: &mut BindIdentityMapRegistration,
+    stat_virtualization: StatVirtualization,
+    override_owner: Option<(u32, u32)>,
+) -> Option<BindIdentityMapHandle> {
+    if matches!(stat_virtualization, StatVirtualization::Off) {
+        return None;
+    }
+
+    // Explicit ownership is per mount. It must not initialize the shared
+    // default-user handle because doing so would make mount order determine the
+    // ownership of every other stat-virtualized mount in the VM.
+    if let Some((guest_uid, guest_gid)) = override_owner {
+        return Some(Arc::new(OnceLock::from(BindIdentityMap::fixed(
+            guest_uid, guest_gid,
+        ))));
+    }
+
+    registration.mount_count += 1;
+    let handle = registration
+        .handle
+        .get_or_insert_with(|| Arc::new(OnceLock::new()));
+
+    Some(Arc::clone(handle))
+}
+
+/// Set up host log capture.
+///
+/// Redirects stderr through a pipe so a background thread can write to a
+/// rotating log file (`runtime.log`). Stdout is redirected to `/dev/null`
+/// because kernel console output is routed to `kernel.log` directly via
+/// `console_output` in the VM builder.
+///
+/// If `forward` is true, stderr is also tee'd to the original fd.
+#[cfg(unix)]
+fn setup_log_capture(log_dir: &std::path::Path, forward: bool) -> RuntimeResult<()> {
+    // Redirect stdout to /dev/null — kernel console goes to kernel.log
+    // via console_output, so nothing useful writes to stdout after the
+    // startup JSON. This prevents SIGPIPE when the parent drops the pipe.
+    let devnull = std::fs::OpenOptions::new().write(true).open("/dev/null")?;
+    unsafe {
+        libc::dup2(devnull.as_raw_fd(), libc::STDOUT_FILENO);
+    }
+    drop(devnull);
+
+    // Capture stderr → runtime.log (rotating).
+    let (stderr_read, stderr_write) = create_pipe()?;
+
+    let orig_stderr: Option<std::fs::File> = if forward {
+        Some(unsafe { std::fs::File::from_raw_fd(libc::dup(libc::STDERR_FILENO)) })
+    } else {
+        None
+    };
+
+    unsafe {
+        libc::dup2(stderr_write.as_raw_fd(), libc::STDERR_FILENO);
+    }
+    drop(stderr_write);
+
+    spawn_log_thread("log-runtime", stderr_read, log_dir, "runtime", orig_stderr)?;
+
+    Ok(())
+}
+
+/// Set up host log capture.
+#[cfg(windows)]
+fn setup_log_capture(_log_dir: &std::path::Path, _forward: bool) -> RuntimeResult<()> {
+    Ok(())
+}
+
+/// Write startup info JSON to the dedicated startup fd when supplied,
+/// otherwise stdout.
+#[cfg(unix)]
+fn write_startup_info(
+    startup_fd: Option<&OwnedFd>,
+    json: &str,
+) -> RuntimeResult<Option<std::fs::File>> {
+    if let Some(fd) = startup_fd {
+        let dup = unsafe { libc::dup(fd.as_raw_fd()) };
+        if dup < 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        let mut file = unsafe { std::fs::File::from_raw_fd(dup) };
+        writeln!(file, "{json}")?;
+        file.flush()?;
+        return Ok(Some(file));
+    }
+
+    let mut stdout = std::io::stdout().lock();
+    writeln!(stdout, "{json}")?;
+    stdout.flush()?;
+    Ok(None)
+}
+
+/// Write startup info JSON to the dedicated startup pipe when supplied,
+/// otherwise stdout.
+#[cfg(windows)]
+fn write_startup_info(
+    startup_pipe: Option<&str>,
+    json: &str,
+) -> RuntimeResult<Option<std::fs::File>> {
+    if let Some(pipe) = startup_pipe {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(pipe)
+            .map_err(|err| RuntimeError::Custom(format!("open startup pipe {pipe}: {err}")))?;
+        writeln!(file, "{json}")?;
+        file.flush()?;
+        return Ok(Some(file));
+    }
+
+    let mut stdout = std::io::stdout().lock();
+    writeln!(stdout, "{json}")?;
+    stdout.flush()?;
+    Ok(None)
+}
+
+/// Connect to the sandbox database.
+///
+/// Busy timeout uses [`microsandbox_db::pool::DEFAULT_BUSY_TIMEOUT_SECS`]:
+/// the in-VM runtime is not user-configurable, so DB tuning policy lives
+/// with the host (which honours `~/.microsandbox/config.json`).
+async fn connect_db(
+    db_path: &std::path::Path,
+    connect_timeout_secs: u64,
+) -> RuntimeResult<DbWriteConnection> {
+    DbWriteConnection::open(
+        db_path,
+        Duration::from_secs(connect_timeout_secs),
+        Duration::from_secs(microsandbox_db::pool::DEFAULT_BUSY_TIMEOUT_SECS),
+    )
+    .await
+    .map_err(|e| RuntimeError::Custom(format!("database connect: {e}")))
+}
+
+/// Insert a run record into the database.
+async fn insert_run(db: &DbWriteConnection, sandbox_id: i32, pid: u32) -> RuntimeResult<i32> {
+    let now = chrono::Utc::now().naive_utc();
+    let record = run_entity::ActiveModel {
+        sandbox_id: Set(sandbox_id),
+        pid: Set(Some(pid as i32)),
+        status: Set(run_entity::RunStatus::Running),
+        started_at: Set(Some(now)),
+        ..Default::default()
+    };
+    let result = run_entity::Entity::insert(record)
+        .exec(db)
+        .await
+        .map_err(|e| RuntimeError::Custom(format!("insert run: {e}")))?;
+    Ok(result.last_insert_id)
+}
+
+/// Mark a run record as failed (Terminated + InternalError) on startup error.
+async fn mark_run_failed(db: &DbWriteConnection, run_id: i32) -> RuntimeResult<()> {
+    use sea_orm::QueryFilter;
+    use sea_orm::sea_query::Expr;
+
+    let now = chrono::Utc::now().naive_utc();
+    run_entity::Entity::update_many()
+        .col_expr(
+            run_entity::Column::Status,
+            Expr::value(run_entity::RunStatus::Terminated),
+        )
+        .col_expr(
+            run_entity::Column::TerminationReason,
+            Expr::value(run_entity::TerminationReason::InternalError),
+        )
+        .col_expr(run_entity::Column::TerminatedAt, Expr::value(now))
+        .filter(run_entity::Column::Id.eq(run_id))
+        .exec(db)
+        .await
+        .map_err(|e| RuntimeError::Custom(format!("mark run failed: {e}")))?;
+    Ok(())
+}
+
+/// Request guest poweroff through agentd without requiring a client connection.
+#[cfg(any(unix, test))]
+fn request_guest_shutdown(shared: &ConsoleSharedState) -> RuntimeResult<()> {
+    request_guest_shutdown_with_timeout(shared, Duration::from_secs(60))
+}
+
+/// Startup/idle tasks must yield while the relay writer delivers their shutdown request.
+async fn request_guest_shutdown_async(shared: &Arc<ConsoleSharedState>) -> RuntimeResult<()> {
+    relay::push_guest_frame_until_async(shared, guest_shutdown_frame()?, Duration::from_secs(60))
+        .await
+}
+
+#[cfg(any(unix, test))]
+fn request_guest_shutdown_with_timeout(
+    shared: &ConsoleSharedState,
+    timeout: Duration,
+) -> RuntimeResult<()> {
+    relay::push_guest_frame_until(shared, guest_shutdown_frame()?, timeout)
+}
+
+fn guest_shutdown_frame() -> RuntimeResult<Vec<u8>> {
+    let msg = Message::with_payload(MessageType::Shutdown, 0, &())
+        .map_err(|e| RuntimeError::Custom(format!("encode idle shutdown: {e}")))?;
+    let mut frame = Vec::new();
+    codec::encode_to_buf(&msg, &mut frame)
+        .map_err(|e| RuntimeError::Custom(format!("encode idle shutdown frame: {e}")))?;
+    Ok(frame)
+}
+
+fn guest_shutdown_flush_timeout(has_handoff_init: bool) -> Duration {
+    let override_ms = std::env::var("MSB_SHUTDOWN_FLUSH_TIMEOUT_MS").ok();
+    guest_shutdown_flush_timeout_with_override(has_handoff_init, override_ms.as_deref())
+}
+
+fn guest_shutdown_flush_timeout_with_override(
+    has_handoff_init: bool,
+    override_ms: Option<&str>,
+) -> Duration {
+    if let Some(raw) = override_ms {
+        match raw.parse::<u64>() {
+            Ok(ms) => return Duration::from_millis(ms),
+            Err(error) => {
+                tracing::warn!(
+                    value = raw,
+                    error = %error,
+                    "ignoring invalid MSB_SHUTDOWN_FLUSH_TIMEOUT_MS override"
+                );
+            }
+        }
+    }
+
+    if has_handoff_init {
+        microsandbox_protocol::HANDOFF_SHUTDOWN_FLUSH_TIMEOUT
+    } else {
+        microsandbox_protocol::NORMAL_SHUTDOWN_FLUSH_TIMEOUT
+    }
+}
+
+#[cfg(unix)]
+fn spawn_parent_watchdog(
+    parent_watchdog: OwnedFd,
+    shared: Arc<ConsoleSharedState>,
+    exit_reason: Arc<std::sync::atomic::AtomicU8>,
+    exit_handle: msb_krun::ExitHandle,
+    sandbox_name: String,
+    shutdown_flush_timeout: Duration,
+) -> RuntimeResult<()> {
+    std::thread::Builder::new()
+        .name(format!("msb-parent-watch-{sandbox_name}"))
+        .spawn(move || {
+            let mut file = std::fs::File::from(parent_watchdog);
+
+            match read_parent_watchdog_signal(&mut file) {
+                Ok(ParentWatchdogSignal::ParentExited) => {
+                    tracing::info!("creator process exited; stopping attached sandbox");
+                    exit_reason.store(EXIT_REASON_PARENT_EXIT, std::sync::atomic::Ordering::SeqCst);
+                    // A suspended guest cannot process shutdown. Release the resident VM
+                    // directly without thawing user workloads merely to stop them.
+                    if shared
+                        .resident_paused
+                        .load(std::sync::atomic::Ordering::Acquire)
+                    {
+                        exit_handle.trigger();
+                        return;
+                    }
+                    if let Err(err) = request_guest_shutdown(&shared) {
+                        tracing::warn!(error = %err, "parent-watch shutdown request failed");
+                    } else {
+                        std::thread::sleep(shutdown_flush_timeout);
+                    }
+                    exit_handle.trigger();
+                }
+                Ok(ParentWatchdogSignal::Detached) => {
+                    tracing::debug!("attached-parent watchdog detached; leaving sandbox running");
+                }
+                Err(err) => {
+                    tracing::warn!(error = %err, "parent-watch read failed; stopping sandbox");
+                    exit_reason.store(EXIT_REASON_SIGNAL, std::sync::atomic::Ordering::SeqCst);
+                    exit_handle.trigger();
+                }
+            }
+        })
+        .map_err(RuntimeError::Io)?;
+
+    Ok(())
+}
+
+#[cfg(unix)]
+fn read_parent_watchdog_signal(file: &mut std::fs::File) -> std::io::Result<ParentWatchdogSignal> {
+    let mut buf = [0_u8; 1];
+
+    loop {
+        match std::io::Read::read(file, &mut buf) {
+            Ok(0) => return Ok(ParentWatchdogSignal::ParentExited),
+            Ok(_) if buf[0] == PARENT_WATCH_DETACH => return Ok(ParentWatchdogSignal::Detached),
+            Ok(_) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(err) => return Err(err),
+        }
+    }
+}
+
+/// Create a pipe pair, returning `(read_end, write_end)` as `OwnedFd`.
+#[cfg(unix)]
+fn create_pipe() -> RuntimeResult<(OwnedFd, OwnedFd)> {
+    let mut fds = [0i32; 2];
+    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+        return Err(RuntimeError::Io(std::io::Error::last_os_error()));
+    }
+    Ok(unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) })
+}
+
+/// Spawn a background thread that reads from a pipe and writes to a
+/// rotating log file. If `forward` is `Some`, also tees to that file
+/// (typically the original stdout/stderr saved before redirect).
+#[cfg(unix)]
+fn spawn_log_thread(
+    name: &str,
+    pipe_read: OwnedFd,
+    log_dir: &std::path::Path,
+    log_prefix: &str,
+    forward: Option<std::fs::File>,
+) -> RuntimeResult<()> {
+    use crate::logging::RotatingLog;
+    use std::io::Read;
+
+    const MAX_LOG_BYTES: u64 = 10 * 1024 * 1024;
+
+    let log_dir = log_dir.to_path_buf();
+    let log_prefix = log_prefix.to_string();
+
+    std::thread::Builder::new()
+        .name(name.into())
+        .spawn(move || {
+            let mut log = match RotatingLog::new(&log_dir, &log_prefix, MAX_LOG_BYTES) {
+                Ok(log) => log,
+                Err(e) => {
+                    let _ = writeln!(std::io::stderr(), "failed to create {log_prefix} log: {e}");
+                    return;
+                }
+            };
+            let mut reader = unsafe { std::fs::File::from_raw_fd(pipe_read.into_raw_fd()) };
+            let mut fwd = forward;
+            let mut buf = [0u8; 4096];
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        let _ = log.write(&buf[..n]);
+                        if let Some(ref mut f) = fwd {
+                            let _ = std::io::Write::write_all(f, &buf[..n]);
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        })
+        .map_err(|e| RuntimeError::Custom(format!("spawn {name} thread: {e}")))?;
+
+    Ok(())
+}
+
+/// Parsed `--mount` spec: tag, host path, plus optional policies.
+///
+/// Wire format: `tag:host_path[:opts]`.
+/// Defaults: `rw`, `stat-virt=strict`, `host-perms=private`. The `ro` flag is
+/// enforced by the host filesystem server; execution and suid flags are applied
+/// by agentd when the guest mount is installed.
+#[derive(Debug)]
+struct ParsedMountSpec {
+    tag: String,
+    host_path: String,
+    stat_virtualization: StatVirtualization,
+    host_permissions: HostPermissions,
+    readonly: bool,
+    follow_root_symlinks: bool,
+    quota_bytes: Option<u64>,
+    /// Guest uid to present for host files that carry no per-file override
+    /// (`uid=` option). `None` keeps the runtime default. Must be set together
+    /// with [`override_gid`](Self::override_gid).
+    override_uid: Option<u32>,
+    /// Guest gid to present for host files that carry no per-file override
+    /// (`gid=` option). `None` keeps the runtime default. Must be set together
+    /// with [`override_uid`](Self::override_uid).
+    override_gid: Option<u32>,
+}
+
+/// Parse a `--mount` spec into [`ParsedMountSpec`].
+///
+/// Wire grammar: `tag:host_path[:opts]`, where `opts` is a comma-separated
+/// option block of flags (`ro`, `rw`, `noexec`, `nosuid`, `nodev`,
+/// `follow-root-symlinks`) and keyed policies (`stat-virt=...`, `host-perms=...`,
+/// `uid=...`, `gid=...`). The `follow-root-symlinks` flag opts the mount out of the
+/// default no-follow root resolution; its absence keeps the protective default on.
+/// `uid=`/`gid=` set the guest owner presented for host files that have no per-file
+/// override (see [`ParsedMountSpec::override_uid`]); they must be given together.
+fn parse_mount_spec(spec: &str) -> Result<ParsedMountSpec, String> {
+    let (tag, rest) = spec
+        .split_once(':')
+        .ok_or_else(|| format!("expected tag:host_path[:opts] shape, got {spec:?}"))?;
+    if tag.is_empty() {
+        return Err(format!("empty tag in mount spec {spec:?}"));
+    }
+
+    let (host_path, options) = split_mount_host_options(rest);
+
+    if host_path.is_empty() {
+        return Err(format!("empty host path in mount spec {spec:?}"));
+    }
+    if host_path.contains(',') {
+        return Err(format!(
+            "mount options must use tag:host_path:opts syntax, got comma in host path {host_path:?}"
+        ));
+    }
+
+    let mut stat_virtualization = StatVirtualization::Strict;
+    let mut host_permissions = HostPermissions::Private;
+    let mut readonly = false;
+    let mut follow_root_symlinks = false;
+    let mut quota_bytes = None;
+    let mut override_uid = None;
+    let mut override_gid = None;
+    let mut seen_stat_virt = false;
+    let mut seen_host_perms = false;
+    let mut seen_access = false;
+    let mut seen_noexec = false;
+    let mut seen_nosuid = false;
+    let mut seen_nodev = false;
+    let mut seen_follow_root = false;
+    let mut seen_quota = false;
+    let mut seen_uid = false;
+    let mut seen_gid = false;
+
+    if let Some(opts) = options {
+        for opt in opts.split(',') {
+            let opt = opt.trim();
+            if opt.is_empty() {
+                continue;
+            }
+            match opt {
+                "ro" | "rw" => {
+                    if seen_access {
+                        return Err("mount option `ro`/`rw` specified more than once".to_string());
+                    }
+                    seen_access = true;
+                    readonly = opt == "ro";
+                }
+                "noexec" => {
+                    if seen_noexec {
+                        return Err("mount option `noexec` specified more than once".to_string());
+                    }
+                    seen_noexec = true;
+                }
+                "nosuid" => {
+                    if seen_nosuid {
+                        return Err("mount option `nosuid` specified more than once".to_string());
+                    }
+                    seen_nosuid = true;
+                }
+                "nodev" => {
+                    if seen_nodev {
+                        return Err("mount option `nodev` specified more than once".to_string());
+                    }
+                    seen_nodev = true;
+                }
+                "follow-root-symlinks" => {
+                    if seen_follow_root {
+                        return Err(
+                            "mount option `follow-root-symlinks` specified more than once"
+                                .to_string(),
+                        );
+                    }
+                    seen_follow_root = true;
+                    follow_root_symlinks = true;
+                }
+                "suid" | "exec" | "dev" => {
+                    return Err(format!("unsupported mount option {opt:?}"));
+                }
+                _ => {
+                    let (key, value) = opt
+                        .split_once('=')
+                        .ok_or_else(|| format!("expected flag or key=value option, got {opt:?}"))?;
+                    match key {
+                        "stat-virt" => {
+                            if seen_stat_virt {
+                                return Err(
+                                    "mount option `stat-virt` specified more than once".to_string()
+                                );
+                            }
+                            seen_stat_virt = true;
+                            stat_virtualization = match value {
+                                "strict" => StatVirtualization::Strict,
+                                "relaxed" => StatVirtualization::Relaxed,
+                                "off" => StatVirtualization::Off,
+                                other => {
+                                    return Err(format!(
+                                        "invalid stat-virt {other:?} (expected strict|relaxed|off)"
+                                    ));
+                                }
+                            }
+                        }
+                        "host-perms" => {
+                            if seen_host_perms {
+                                return Err("mount option `host-perms` specified more than once"
+                                    .to_string());
+                            }
+                            seen_host_perms = true;
+                            host_permissions = match value {
+                                "private" => HostPermissions::Private,
+                                "mirror" => HostPermissions::Mirror,
+                                other => {
+                                    return Err(format!(
+                                        "invalid host-perms {other:?} (expected private|mirror)"
+                                    ));
+                                }
+                            }
+                        }
+                        "quota" => {
+                            if seen_quota {
+                                return Err(
+                                    "mount option `quota` specified more than once".to_string()
+                                );
+                            }
+                            seen_quota = true;
+                            let mib = value.parse::<u64>().map_err(|_| {
+                                format!(
+                                    "invalid quota {value:?} (expected an integer count of MiB)"
+                                )
+                            })?;
+                            quota_bytes = Some(mib.saturating_mul(1024 * 1024));
+                        }
+                        "uid" => {
+                            if seen_uid {
+                                return Err(
+                                    "mount option `uid` specified more than once".to_string()
+                                );
+                            }
+                            seen_uid = true;
+                            override_uid = Some(value.parse::<u32>().map_err(|_| {
+                                format!("invalid uid {value:?} (expected an unsigned integer)")
+                            })?);
+                        }
+                        "gid" => {
+                            if seen_gid {
+                                return Err(
+                                    "mount option `gid` specified more than once".to_string()
+                                );
+                            }
+                            seen_gid = true;
+                            override_gid = Some(value.parse::<u32>().map_err(|_| {
+                                format!("invalid gid {value:?} (expected an unsigned integer)")
+                            })?);
+                        }
+                        other => return Err(format!("unknown mount option {other:?}")),
+                    }
+                }
+            }
+        }
+    }
+
+    // The override owner is applied host-side (before the guest resolves its
+    // default user), so both halves must be known up front: reject a lone
+    // `uid=`/`gid=`.
+    if override_uid.is_some() != override_gid.is_some() {
+        return Err("mount options `uid` and `gid` must be specified together".to_string());
+    }
+    if override_uid.is_some() && matches!(stat_virtualization, StatVirtualization::Off) {
+        return Err(
+            "mount options `uid` and `gid` cannot be combined with stat-virt=off".to_string(),
+        );
+    }
+
+    Ok(ParsedMountSpec {
+        tag: tag.to_string(),
+        host_path: host_path.to_string(),
+        stat_virtualization,
+        host_permissions,
+        readonly,
+        follow_root_symlinks,
+        quota_bytes,
+        override_uid,
+        override_gid,
+    })
+}
+
+/// Split `host_path[:opts]`, skipping the drive colon in Windows paths.
+fn split_mount_host_options(rest: &str) -> (&str, Option<&str>) {
+    let search = if windows_drive_path_prefix_len(rest).is_some() {
+        &rest[2..]
+    } else {
+        rest
+    };
+
+    match search.rsplit_once(':') {
+        Some((_prefix, opts)) => {
+            let split_at = rest.len() - opts.len() - 1;
+            let host = &rest[..split_at];
+            (host, Some(opts))
+        }
+        None => (rest, None),
+    }
+}
+
+/// Return the length of a Windows drive prefix when this target accepts one.
+fn windows_drive_path_prefix_len(rest: &str) -> Option<usize> {
+    #[cfg(windows)]
+    {
+        microsandbox_utils::is_windows_drive_path_text(rest).then_some(2)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = rest;
+        None
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Functions: Mount Spec Parsing
+//--------------------------------------------------------------------------------------------------
+
+/// Validate a disk image format string.
+pub fn validate_disk_format(format: Option<&str>) -> msb_krun::Result<msb_krun::DiskImageFormat> {
+    match format.unwrap_or("raw") {
+        "qcow2" => Ok(msb_krun::DiskImageFormat::Qcow2),
+        "raw" => Ok(msb_krun::DiskImageFormat::Raw),
+        "vmdk" => Ok(msb_krun::DiskImageFormat::Vmdk),
+        other => Err(msb_krun::Error::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("unknown disk image format: {other}"),
+        ))),
+    }
+}
+
+/// Append the legacy default block-root environment value if not already set.
+///
+/// Retained for downstream source compatibility. VM launch now carries this
+/// value in [`GuestBootstrap`] and does not call this helper.
+pub fn append_block_root_env(env: &mut Vec<String>) {
+    let prefix = format!("{}=", microsandbox_protocol::ENV_BLOCK_ROOT);
+    if env.iter().any(|entry| entry.starts_with(&prefix)) {
+        return;
+    }
+    env.push(format!("{prefix}/dev/vda"));
+}
+
+/// Prepend `/.msb/scripts` to a legacy initial-command environment.
+///
+/// Retained for downstream source compatibility. Agentd now prepares PATH for
+/// each exec request after receiving the typed bootstrap.
+pub fn prepend_scripts_path(env: &mut Vec<String>) {
+    let scripts = microsandbox_protocol::SCRIPTS_PATH;
+    let prefix = "PATH=";
+
+    if let Some(entry) = env.iter_mut().find(|entry| entry.starts_with(prefix)) {
+        let existing = &entry[prefix.len()..];
+        if !existing.split(':').any(|segment| segment == scripts) {
+            *entry = format!("{prefix}{scripts}:{existing}");
+        }
+    } else {
+        env.push(format!(
+            "{prefix}{scripts}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+        ));
+    }
+}
+
+/// Render the validated THP policy as the single Linux boot parameter the VMM appends.
+fn thp_kernel_cmdline(policy: microsandbox_types::TransparentHugePagePolicy) -> String {
+    format!("transparent_hugepage={}", policy.as_str())
+}
+
+fn agent_kernel_cmdline(
+    thp: microsandbox_types::TransparentHugePagePolicy,
+    transport: AgentTransportProfile,
+) -> String {
+    let mut cmdline = thp_kernel_cmdline(thp);
+    if transport.offers_dual_port() {
+        cmdline.push(' ');
+        cmdline.push_str(microsandbox_protocol::AGENT_TRANSPORT_DUAL_PORT_CMDLINE);
+    }
+    cmdline
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    #[cfg(feature = "net")]
+    use super::to_krun_network_rate_limiters;
+    use super::{
+        AGENT_BULK_QUEUE_SIZE, AGENT_CONTROL_QUEUE_SIZE, AgentTransportProfile, ConsoleSharedState,
+        HostPermissions, StatVirtualization, agent_kernel_cmdline, agent_primary_queue_size,
+        append_block_root_env, bind_rootfs_backend, encode_bootstrap_frame,
+        guest_shutdown_flush_timeout, guest_shutdown_flush_timeout_with_override, parse_mount_spec,
+        prepend_scripts_path, request_guest_shutdown, request_guest_shutdown_with_timeout,
+        thp_kernel_cmdline, validate_disk_format,
+    };
+    #[cfg(unix)]
+    use super::{
+        BindIdentityMapRegistration, PARENT_WATCH_DETACH, ParentWatchdogSignal,
+        bind_identity_map_for_mount, bootstrap_trampoline_backend, read_parent_watchdog_signal,
+    };
+    use super::{
+        DiskMountSpec, UpperLayerSpec, UpperSpec, prepare_runtime_restore_namespace,
+        recover_owned_disk_layers, validate_disk_mount_layers, validate_upper_layers,
+    };
+
+    use microsandbox_filesystem::{Context, DynFileSystem, FsOptions};
+    use microsandbox_protocol::{bootstrap::GuestBootstrap, codec, message::MessageType};
+    #[cfg(unix)]
+    use std::io::Write;
+    #[cfg(unix)]
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    fn fs_context() -> Context {
+        Context {
+            uid: 0,
+            gid: 0,
+            pid: 1,
+        }
+    }
+
+    fn owned_disk_spec(directory: &std::path::Path, readonly: bool) -> DiskMountSpec {
+        DiskMountSpec {
+            id: microsandbox_types::owned_volume_mount_id("/data"),
+            host: directory.join("disk.raw"),
+            layers: Vec::new(),
+            guest: "/data".into(),
+            format: msb_krun::DiskImageFormat::Raw,
+            fstype: Some("ext4".into()),
+            readonly,
+            snapshot_owned: true,
+            lifecycle_owned: true,
+        }
+    }
+
+    #[test]
+    fn owned_disk_attachment_uses_explicit_layers_without_the_nominal_raw_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut disk = owned_disk_spec(temp.path(), true);
+        for (name, format) in [
+            ("sealed.raw", msb_krun::DiskImageFormat::Raw),
+            ("head.qcow2", msb_krun::DiskImageFormat::Qcow2),
+        ] {
+            let path = temp.path().join(name);
+            std::fs::write(&path, b"attachment path fixture").unwrap();
+            disk.layers.push(UpperLayerSpec { path, format });
+        }
+        assert!(!disk.host.exists());
+        assert_eq!(
+            validate_disk_mount_layers(&disk).unwrap(),
+            Some(disk.layers.clone())
+        );
+        assert!(disk.readonly);
+        disk.lifecycle_owned = false;
+        assert!(validate_disk_mount_layers(&disk).is_err());
+        disk.lifecycle_owned = true;
+        std::fs::remove_file(&disk.layers[0].path).unwrap();
+        assert!(validate_disk_mount_layers(&disk).is_err());
+    }
+
+    #[test]
+    fn owned_disk_start_recovers_journal_without_changing_readonly_or_falling_back() {
+        for readonly in [false, true] {
+            let home = tempfile::tempdir().unwrap();
+            let runtime = home.path().join("runtime");
+            let id = microsandbox_types::owned_volume_mount_id("/data");
+            let directory = home.path().join("owned-volumes").join(&id);
+            std::fs::create_dir_all(&directory).unwrap();
+            let base = directory.join("sealed.raw");
+            let head = directory.join("head.qcow2");
+            std::fs::write(&base, vec![37; 1024 * 1024]).unwrap();
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(microsandbox_image::checkpoint::create_qcow2_overlay(
+                    &head,
+                    1024 * 1024,
+                    &base,
+                    "raw",
+                ))
+                .unwrap();
+            crate::checkpoint::seed_runtime_owned_disk_chain(
+                &runtime,
+                &id,
+                &directory.join("disk.raw"),
+                &[
+                    crate::checkpoint::RuntimeOwnedRootLayer {
+                        path: base.clone(),
+                        format: "raw".into(),
+                    },
+                    crate::checkpoint::RuntimeOwnedRootLayer {
+                        path: head.clone(),
+                        format: "qcow2".into(),
+                    },
+                ],
+                readonly,
+            )
+            .unwrap();
+            let mut disks = vec![owned_disk_spec(&directory, readonly)];
+            recover_owned_disk_layers(&runtime, &mut disks).unwrap();
+            assert_eq!(disks[0].readonly, readonly);
+            assert_eq!(disks[0].layers.len(), 2);
+            assert_eq!(disks[0].layers[0].path, base);
+            assert_eq!(disks[0].layers[1].path, head);
+            assert!(!disks[0].host.exists());
+            // Even an existing nominal image cannot replace a missing journal dependency.
+            std::fs::write(&disks[0].host, vec![99; 1024 * 1024]).unwrap();
+            std::fs::remove_file(&base).unwrap();
+            assert!(recover_owned_disk_layers(&runtime, &mut disks).is_err());
+            let mut external = owned_disk_spec(&directory, readonly);
+            external.lifecycle_owned = false;
+            recover_owned_disk_layers(&runtime, std::slice::from_mut(&mut external)).unwrap();
+            assert!(external.layers.is_empty());
+        }
+    }
+
+    #[test]
+    fn upper_chain_accepts_one_raw_base_followed_by_qcow2_heads() {
+        let spec = UpperSpec {
+            layers: vec![
+                UpperLayerSpec {
+                    path: "upper.ext4".into(),
+                    format: msb_krun::DiskImageFormat::Raw,
+                },
+                UpperLayerSpec {
+                    path: "upper-2.qcow2".into(),
+                    format: msb_krun::DiskImageFormat::Qcow2,
+                },
+                UpperLayerSpec {
+                    path: "upper-3.qcow2".into(),
+                    format: msb_krun::DiskImageFormat::Qcow2,
+                },
+            ],
+            read_only: false,
+        };
+
+        assert_eq!(validate_upper_layers(&spec).unwrap(), spec.layers);
+    }
+
+    #[test]
+    fn upper_chain_rejects_raw_successors_and_repeated_paths() {
+        let raw_successor = UpperSpec {
+            layers: vec![
+                UpperLayerSpec {
+                    path: "upper.ext4".into(),
+                    format: msb_krun::DiskImageFormat::Raw,
+                },
+                UpperLayerSpec {
+                    path: "upper-next.ext4".into(),
+                    format: msb_krun::DiskImageFormat::Raw,
+                },
+            ],
+            read_only: false,
+        };
+        assert!(validate_upper_layers(&raw_successor).is_err());
+
+        let repeated = UpperSpec {
+            layers: vec![
+                UpperLayerSpec {
+                    path: "upper.ext4".into(),
+                    format: msb_krun::DiskImageFormat::Raw,
+                },
+                UpperLayerSpec {
+                    path: "upper.ext4".into(),
+                    format: msb_krun::DiskImageFormat::Qcow2,
+                },
+            ],
+            read_only: false,
+        };
+        assert!(validate_upper_layers(&repeated).is_err());
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn network_rate_limiters_map_directions_without_losing_precision() {
+        let egress = microsandbox_types::RateLimiterConfig {
+            bandwidth: Some(microsandbox_types::TokenBucketConfig {
+                size: 1_048_576,
+                refill_time_ms: 1_234,
+                one_time_burst: 524_288,
+            }),
+            ops: Some(microsandbox_types::TokenBucketConfig {
+                size: 1_000,
+                refill_time_ms: 7,
+                one_time_burst: 12,
+            }),
+        };
+        let ingress = microsandbox_types::RateLimiterConfig {
+            bandwidth: Some(microsandbox_types::TokenBucketConfig {
+                size: 2_048,
+                refill_time_ms: 99,
+                one_time_burst: 256,
+            }),
+            ops: None,
+        };
+        let config = microsandbox_network::config::NetworkConfig {
+            rate_limiter: Some(microsandbox_types::NetworkRateLimiterConfig {
+                egress: Some(egress),
+                ingress: Some(ingress),
+            }),
+            ..Default::default()
+        };
+
+        let mapped = to_krun_network_rate_limiters(&config);
+
+        assert_eq!(
+            mapped.tx.as_ref().unwrap().bandwidth.as_ref().unwrap(),
+            &msb_krun::TokenBucketConfig {
+                size: 1_048_576,
+                refill_time: Duration::from_millis(1_234),
+                one_time_burst: 524_288,
+            }
+        );
+        assert_eq!(
+            mapped.tx.unwrap().ops.unwrap(),
+            msb_krun::TokenBucketConfig {
+                size: 1_000,
+                refill_time: Duration::from_millis(7),
+                one_time_burst: 12,
+            }
+        );
+        assert_eq!(
+            mapped.rx.unwrap().bandwidth.unwrap(),
+            msb_krun::TokenBucketConfig {
+                size: 2_048,
+                refill_time: Duration::from_millis(99),
+                one_time_burst: 256,
+            }
+        );
+    }
+
+    #[test]
+    fn transparent_huge_page_policy_maps_to_kernel_boot_parameter() {
+        use microsandbox_types::TransparentHugePagePolicy;
+
+        assert_eq!(
+            thp_kernel_cmdline(TransparentHugePagePolicy::Always),
+            "transparent_hugepage=always"
+        );
+        assert_eq!(
+            thp_kernel_cmdline(TransparentHugePagePolicy::Madvise),
+            "transparent_hugepage=madvise"
+        );
+        assert_eq!(
+            thp_kernel_cmdline(TransparentHugePagePolicy::Never),
+            "transparent_hugepage=never"
+        );
+    }
+
+    #[test]
+    fn agent_transport_auto_offers_dual_port_with_combined_escape_hatch() {
+        use microsandbox_types::TransparentHugePagePolicy;
+
+        assert_eq!(
+            AgentTransportProfile::default(),
+            AgentTransportProfile::Auto
+        );
+        assert!(AgentTransportProfile::Auto.offers_dual_port());
+        assert!(AgentTransportProfile::DualPortV1.offers_dual_port());
+        assert!(!AgentTransportProfile::Combined.offers_dual_port());
+
+        let auto = agent_kernel_cmdline(
+            TransparentHugePagePolicy::Madvise,
+            AgentTransportProfile::Auto,
+        );
+        let forced_combined = agent_kernel_cmdline(
+            TransparentHugePagePolicy::Madvise,
+            AgentTransportProfile::Combined,
+        );
+        assert!(auto.contains(microsandbox_protocol::AGENT_TRANSPORT_DUAL_PORT_CMDLINE));
+        assert!(!forced_combined.contains("microsandbox.agent_transport="));
+    }
+
+    #[test]
+    fn test_bind_rootfs_backend_exposes_host_file_and_init() {
+        let rootfs = tempfile::tempdir().unwrap();
+        std::fs::write(rootfs.path().join("host.txt"), b"from host").unwrap();
+
+        // follow=true: the tempdir path may traverse a symlinked prefix (macOS
+        // `/var`); this test exercises backend behavior, not root protection.
+        let fs = bind_rootfs_backend(rootfs.path(), true).unwrap();
+        fs.init(FsOptions::empty()).unwrap();
+
+        let host = fs.lookup(fs_context(), 1, c"host.txt").unwrap();
+        let init = fs.lookup(fs_context(), 1, c"init.krun").unwrap();
+
+        assert_ne!(host.inode, init.inode);
+        assert_eq!(init.inode, 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bootstrap_trampoline_recreates_agent_mountpoints() {
+        let fs = bootstrap_trampoline_backend().unwrap();
+        fs.init(FsOptions::empty()).unwrap();
+        for directory in ["dev", "sys", "proc", ".msb", "newroot"] {
+            fs.lookup(fs_context(), 1, &std::ffi::CString::new(directory).unwrap())
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn restored_runtime_namespace_matches_root_kind_and_preserves_heartbeat() {
+        let oci_runtime = tempfile::tempdir().unwrap();
+        prepare_runtime_restore_namespace(oci_runtime.path(), true).unwrap();
+        assert!(oci_runtime.path().join("rootfs/lower").is_dir());
+        assert!(oci_runtime.path().join("rootfs/upperfs").is_dir());
+        assert_eq!(
+            std::fs::read(oci_runtime.path().join("heartbeat.json")).unwrap(),
+            b""
+        );
+
+        std::fs::write(
+            oci_runtime.path().join("heartbeat.json"),
+            b"destination heartbeat",
+        )
+        .unwrap();
+        prepare_runtime_restore_namespace(oci_runtime.path(), true).unwrap();
+        assert_eq!(
+            std::fs::read(oci_runtime.path().join("heartbeat.json")).unwrap(),
+            b"destination heartbeat"
+        );
+
+        let disk_runtime = tempfile::tempdir().unwrap();
+        prepare_runtime_restore_namespace(disk_runtime.path(), false).unwrap();
+        assert!(!disk_runtime.path().join("rootfs").exists());
+        assert!(disk_runtime.path().join("heartbeat.json").is_file());
+    }
+
+    #[test]
+    fn test_parse_mount_spec_minimal() {
+        let p = parse_mount_spec("foo:/host/data").unwrap();
+        assert_eq!(p.tag, "foo");
+        assert_eq!(p.host_path, "/host/data");
+        assert!(matches!(p.stat_virtualization, StatVirtualization::Strict));
+        assert!(matches!(p.host_permissions, HostPermissions::Private));
+        assert!(!p.readonly);
+        assert_eq!(p.override_uid, None);
+        assert_eq!(p.override_gid, None);
+    }
+
+    #[test]
+    fn test_parse_mount_spec_uid_gid() {
+        let p = parse_mount_spec("home:/host/home:uid=1000,gid=1000").unwrap();
+        assert_eq!(p.override_uid, Some(1000));
+        assert_eq!(p.override_gid, Some(1000));
+
+        // uid 0 (root) is a valid, distinct value from "unset".
+        let p = parse_mount_spec("home:/host/home:uid=0,gid=0").unwrap();
+        assert_eq!(p.override_uid, Some(0));
+        assert_eq!(p.override_gid, Some(0));
+    }
+
+    #[test]
+    fn test_parse_mount_spec_uid_gid_must_be_paired() {
+        assert!(parse_mount_spec("home:/host/home:uid=1000").is_err());
+        assert!(parse_mount_spec("home:/host/home:gid=1000").is_err());
+    }
+
+    #[test]
+    fn test_parse_mount_spec_uid_gid_reject_stat_virt_off() {
+        let err = parse_mount_spec("home:/host/home:uid=1000,gid=1000,stat-virt=off").unwrap_err();
+        assert!(
+            err.contains("cannot be combined with stat-virt=off"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn test_parse_mount_spec_rejects_invalid_uid() {
+        assert!(parse_mount_spec("home:/host/home:uid=abc,gid=1000").is_err());
+    }
+
+    #[test]
+    fn test_parse_mount_spec_with_ro_and_policies() {
+        let p = parse_mount_spec("foo:/host/data:ro,noexec,stat-virt=relaxed,host-perms=mirror")
+            .unwrap();
+        assert_eq!(p.host_path, "/host/data");
+        assert!(matches!(p.stat_virtualization, StatVirtualization::Relaxed));
+        assert!(matches!(p.host_permissions, HostPermissions::Mirror));
+        assert!(p.readonly);
+    }
+
+    #[test]
+    fn test_parse_mount_spec_stat_virt_off() {
+        let p = parse_mount_spec("foo:/host/data:stat-virt=off").unwrap();
+        assert!(matches!(p.stat_virtualization, StatVirtualization::Off));
+        assert!(!p.readonly);
+    }
+
+    #[test]
+    fn test_parse_mount_spec_follow_root_symlinks_default_protected() {
+        // Absent token: protected by default (follow_root_symlinks stays false,
+        // which the construction site inverts into no_symlink_root = true).
+        let p = parse_mount_spec("foo:/host/data").unwrap();
+        assert!(!p.follow_root_symlinks);
+    }
+
+    #[test]
+    fn test_parse_mount_spec_follow_root_symlinks_opt_out() {
+        let p = parse_mount_spec("foo:/host/data:follow-root-symlinks").unwrap();
+        assert!(p.follow_root_symlinks);
+        // Coexists with other options.
+        let p = parse_mount_spec("foo:/host/data:ro,follow-root-symlinks,stat-virt=off").unwrap();
+        assert!(p.follow_root_symlinks);
+        assert!(p.readonly);
+        assert!(matches!(p.stat_virtualization, StatVirtualization::Off));
+    }
+
+    #[test]
+    fn test_parse_mount_spec_rejects_duplicate_follow_root_symlinks() {
+        let err = parse_mount_spec("foo:/host/data:follow-root-symlinks,follow-root-symlinks")
+            .unwrap_err();
+        assert!(err.contains("follow-root-symlinks"), "got: {err}");
+    }
+
+    #[test]
+    fn test_parse_mount_spec_quota_in_mib() {
+        let p = parse_mount_spec("foo:/host/data:quota=2048").unwrap();
+        assert_eq!(p.quota_bytes, Some(2048 * 1024 * 1024));
+    }
+
+    #[test]
+    fn test_parse_mount_spec_quota_default_none() {
+        let p = parse_mount_spec("foo:/host/data:ro").unwrap();
+        assert_eq!(p.quota_bytes, None);
+    }
+
+    #[test]
+    fn test_parse_mount_spec_rejects_duplicate_quota() {
+        let err = parse_mount_spec("foo:/host/data:quota=1,quota=2").unwrap_err();
+        assert!(
+            err.contains("`quota` specified more than once"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_parse_mount_spec_rejects_non_numeric_quota() {
+        let err = parse_mount_spec("foo:/host/data:quota=big").unwrap_err();
+        assert!(err.contains("invalid quota"), "got: {err}");
+    }
+
+    #[test]
+    fn test_parse_mount_spec_rejects_unknown_key() {
+        let err = parse_mount_spec("foo:/host/data:bogus=1").unwrap_err();
+        assert!(err.contains("unknown mount option"), "got: {err}");
+    }
+
+    #[test]
+    fn test_parse_mount_spec_rejects_invalid_stat_virt() {
+        let err = parse_mount_spec("foo:/host/data:stat-virt=nope").unwrap_err();
+        assert!(err.contains("invalid stat-virt"), "got: {err}");
+    }
+
+    #[test]
+    fn test_parse_mount_spec_rejects_invalid_host_perms() {
+        let err = parse_mount_spec("foo:/host/data:host-perms=public").unwrap_err();
+        assert!(err.contains("invalid host-perms"), "got: {err}");
+    }
+
+    #[test]
+    fn test_parse_mount_spec_missing_colon_errors() {
+        let err = parse_mount_spec("nopath").unwrap_err();
+        assert!(err.contains("expected tag:host_path"), "got: {err}");
+    }
+
+    #[test]
+    fn test_parse_mount_spec_empty_tag_errors() {
+        let err = parse_mount_spec(":/host").unwrap_err();
+        assert!(err.contains("empty tag"), "got: {err}");
+    }
+
+    #[test]
+    fn test_parse_mount_spec_with_flags_before_policies() {
+        let p = parse_mount_spec("foo:/host/data:ro,nosuid,stat-virt=relaxed").unwrap();
+        assert_eq!(p.host_path, "/host/data");
+        assert!(matches!(p.stat_virtualization, StatVirtualization::Relaxed));
+    }
+
+    #[test]
+    fn test_parse_mount_spec_rejects_duplicate_stat_virt() {
+        let err = parse_mount_spec("foo:/host:stat-virt=strict,stat-virt=off").unwrap_err();
+        assert!(err.contains("more than once"), "got: {err}");
+    }
+
+    #[test]
+    fn test_parse_mount_spec_rejects_legacy_comma_options() {
+        let err = parse_mount_spec("foo:/host/data,stat-virt=off").unwrap_err();
+        assert!(err.contains("tag:host_path:opts"), "got: {err}");
+    }
+
+    #[test]
+    fn test_parse_mount_spec_rejects_duplicate_flags() {
+        let err = parse_mount_spec("foo:/host:ro,rw").unwrap_err();
+        assert!(err.contains("ro`/`rw"), "got: {err}");
+    }
+
+    #[test]
+    fn test_parse_mount_spec_rejects_unsupported_flags() {
+        let err = parse_mount_spec("foo:/host:exec").unwrap_err();
+        assert!(err.contains("unsupported mount option"), "got: {err}");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_parse_mount_spec_accepts_windows_drive_path() {
+        let p = parse_mount_spec(r"work:C:\Users\Stephen\data:ro,host-perms=mirror").unwrap();
+        assert_eq!(p.tag, "work");
+        assert_eq!(p.host_path, r"C:\Users\Stephen\data");
+        assert!(matches!(p.host_permissions, HostPermissions::Mirror));
+        assert!(p.readonly);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_bind_identity_map_registration_separates_explicit_owners() {
+        let mut registration = BindIdentityMapRegistration {
+            handle: None,
+            mount_count: 0,
+        };
+
+        let first =
+            bind_identity_map_for_mount(&mut registration, StatVirtualization::Strict, None)
+                .unwrap();
+        let second =
+            bind_identity_map_for_mount(&mut registration, StatVirtualization::Relaxed, None)
+                .unwrap();
+        let fixed = bind_identity_map_for_mount(
+            &mut registration,
+            StatVirtualization::Relaxed,
+            Some((1000, 1001)),
+        )
+        .unwrap();
+        let off = bind_identity_map_for_mount(&mut registration, StatVirtualization::Off, None);
+
+        assert!(Arc::ptr_eq(&first, &second));
+        assert!(!Arc::ptr_eq(&first, &fixed));
+        let fixed = fixed.get().unwrap();
+        assert_eq!((fixed.guest_uid, fixed.guest_gid), (1000, 1001));
+        assert_eq!((fixed.overflow_uid, fixed.overflow_gid), (1000, 1001));
+        assert!(off.is_none());
+        assert_eq!(registration.mount_count, 2);
+    }
+
+    #[test]
+    fn test_request_guest_shutdown_enqueues_shutdown_frame() {
+        let shared = ConsoleSharedState::new();
+
+        request_guest_shutdown(&shared).unwrap();
+
+        let mut frame = shared.rx_ring.pop().unwrap().to_vec();
+        let msg = codec::try_decode_from_buf(&mut frame).unwrap().unwrap();
+        assert_eq!(msg.t, MessageType::Shutdown);
+        assert_eq!(msg.id, 0);
+    }
+
+    #[test]
+    fn test_bootstrap_frame_is_a_current_generation_control_message() {
+        let bootstrap = GuestBootstrap {
+            default_env: vec![microsandbox_protocol::bootstrap::BootstrapEnvVar {
+                key: "APP_CONFIG".to_string(),
+                value: "{\"message\":\"hello\"}".to_string(),
+            }],
+            ..GuestBootstrap::default()
+        };
+
+        let mut frame = encode_bootstrap_frame(&bootstrap).unwrap();
+        let message = codec::try_decode_from_buf(&mut frame).unwrap().unwrap();
+
+        assert_eq!(message.t, MessageType::Bootstrap);
+        assert_eq!(message.id, 0);
+        assert_eq!(message.flags, 0);
+        assert_eq!(message.v, microsandbox_protocol::message::PROTOCOL_VERSION);
+        assert_eq!(message.payload::<GuestBootstrap>().unwrap(), bootstrap);
+        assert!(frame.is_empty());
+    }
+
+    #[test]
+    fn test_primary_agent_queue_tracks_whether_it_carries_bulk() {
+        assert_eq!(agent_primary_queue_size(false), AGENT_BULK_QUEUE_SIZE);
+        assert_eq!(agent_primary_queue_size(true), AGENT_CONTROL_QUEUE_SIZE);
+    }
+
+    #[test]
+    fn test_guest_shutdown_flush_timeout_tracks_handoff_mode() {
+        assert_eq!(
+            guest_shutdown_flush_timeout(false),
+            microsandbox_protocol::NORMAL_SHUTDOWN_FLUSH_TIMEOUT
+        );
+        assert_eq!(
+            guest_shutdown_flush_timeout(true),
+            microsandbox_protocol::HANDOFF_SHUTDOWN_FLUSH_TIMEOUT
+        );
+    }
+
+    #[test]
+    fn test_guest_shutdown_flush_timeout_accepts_ms_override() {
+        assert_eq!(
+            guest_shutdown_flush_timeout_with_override(false, Some("0")),
+            Duration::ZERO
+        );
+        assert_eq!(
+            guest_shutdown_flush_timeout_with_override(true, Some("125")),
+            Duration::from_millis(125)
+        );
+    }
+
+    #[test]
+    fn test_guest_shutdown_flush_timeout_ignores_invalid_override() {
+        assert_eq!(
+            guest_shutdown_flush_timeout_with_override(false, Some("nope")),
+            microsandbox_protocol::NORMAL_SHUTDOWN_FLUSH_TIMEOUT
+        );
+        assert_eq!(
+            guest_shutdown_flush_timeout_with_override(true, Some("nope")),
+            microsandbox_protocol::HANDOFF_SHUTDOWN_FLUSH_TIMEOUT
+        );
+    }
+
+    #[test]
+    fn test_request_guest_shutdown_with_timeout_fails_when_ring_full() {
+        let shared = ConsoleSharedState::with_capacity(8);
+        shared.rx_ring.push(b"occupied".to_vec()).unwrap();
+
+        let err = request_guest_shutdown_with_timeout(&shared, Duration::ZERO).unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("timed out sending frame to agentd")
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_parent_watchdog_signal_reports_parent_exit_on_eof() {
+        let (read_fd, write_fd) = super::create_pipe().unwrap();
+        drop(write_fd);
+        let mut reader = std::fs::File::from(read_fd);
+
+        let signal = read_parent_watchdog_signal(&mut reader).unwrap();
+
+        assert_eq!(signal, ParentWatchdogSignal::ParentExited);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_parent_watchdog_signal_reports_detach_byte() {
+        let (read_fd, write_fd) = super::create_pipe().unwrap();
+        let mut writer = std::fs::File::from(write_fd);
+        writer.write_all(&[PARENT_WATCH_DETACH]).unwrap();
+        let mut reader = std::fs::File::from(read_fd);
+
+        let signal = read_parent_watchdog_signal(&mut reader).unwrap();
+
+        assert_eq!(signal, ParentWatchdogSignal::Detached);
+    }
+
+    #[test]
+    fn test_validate_disk_format_rejects_unknown_values() {
+        let err = validate_disk_format(Some("iso")).unwrap_err();
+        assert!(err.to_string().contains("unknown disk image format"));
+    }
+
+    #[test]
+    fn test_append_block_root_env_adds_default_device() {
+        let mut env = vec!["FOO=bar".to_string()];
+        append_block_root_env(&mut env);
+        assert!(env.contains(&"FOO=bar".to_string()));
+        assert!(env.contains(&format!(
+            "{}=/dev/vda",
+            microsandbox_protocol::ENV_BLOCK_ROOT
+        )));
+    }
+
+    #[test]
+    fn test_append_block_root_env_preserves_existing_value() {
+        let existing = format!(
+            "{}=/dev/vdb,fstype=xfs",
+            microsandbox_protocol::ENV_BLOCK_ROOT
+        );
+        let mut env = vec![existing.clone()];
+        append_block_root_env(&mut env);
+        assert_eq!(env, vec![existing]);
+    }
+
+    #[test]
+    fn test_prepend_scripts_path_updates_existing_path() {
+        let mut env = vec!["PATH=/usr/bin:/bin".to_string()];
+        prepend_scripts_path(&mut env);
+        assert_eq!(env, vec!["PATH=/.msb/scripts:/usr/bin:/bin".to_string()]);
+    }
+
+    #[test]
+    fn test_prepend_scripts_path_adds_default_path_when_missing() {
+        let mut env = vec!["LANG=C.UTF-8".to_string()];
+        prepend_scripts_path(&mut env);
+        assert!(
+            env.contains(
+                &"PATH=/.msb/scripts:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn test_prepend_scripts_path_avoids_duplicates() {
+        let mut env = vec!["PATH=/.msb/scripts:/usr/bin".to_string()];
+        prepend_scripts_path(&mut env);
+        assert_eq!(env, vec!["PATH=/.msb/scripts:/usr/bin".to_string()]);
+    }
+}

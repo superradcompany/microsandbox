@@ -40,8 +40,11 @@ pub struct JsExecOptions {
     pub user: Option<String>,
     pub env: HashMap<String, String>,
     pub timeout_ms: Option<u32>,
+    // Keep public names stable when napi-rs renders these renamed nested objects.
+    #[napi(ts_type = "StdinMode")]
     pub stdin: JsStdinMode,
     pub tty: bool,
+    #[napi(ts_type = "Array<Rlimit>")]
     pub rlimits: Vec<JsRlimit>,
 }
 

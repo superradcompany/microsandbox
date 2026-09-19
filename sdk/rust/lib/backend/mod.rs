@@ -20,39 +20,51 @@
 //! full trait-surface spec, and `planning/microsandbox/design/api/ambient-backend.md`
 //! for the resolution ladder + process-level config story.
 
+#[cfg(feature = "cloud")]
 mod cloud;
-mod local;
+mod dispatch;
+#[cfg(feature = "local")]
+pub(crate) mod local;
+
+#[cfg(feature = "local")]
+pub(crate) use local::ControlSession;
 mod misconfigured;
 mod profile;
 pub(crate) mod sandbox;
+pub(crate) mod snapshot;
 pub(crate) mod volume;
 
+#[cfg(feature = "cloud")]
 pub use cloud::{CloudBackend, CloudBackendBuilder, DEFAULT_CLOUD_API_URL};
-use futures::future::BoxFuture;
+pub use dispatch::Backend;
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+pub use local::fuzz_unpack_local_snapshot_archive;
+#[cfg(feature = "local")]
+#[doc(hidden)]
+pub use local::snapshot_downgrade as local_snapshot_downgrade;
+#[cfg(feature = "local")]
 pub use local::{LocalBackend, LocalBackendBuilder};
 pub use microsandbox_types::{
     CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudErrorBody, CloudErrorDetails,
     CloudMessageResponse, CloudPaginated, CloudSandboxStatus, CloudSandboxStatusReason,
 };
-pub use profile::{Profile, ProfileBackend, SdkConfig, load_sdk_config, resolve_default_backend};
+pub use profile::{Profile, ProfileBackend, resolve_default_backend};
 pub use sandbox::{
     SandboxBackend, SandboxCloudState, SandboxHandleCloudState, SandboxHandleInner,
-    SandboxHandleLocalState, SandboxIdentity, SandboxInner, SandboxLocalState,
+    SandboxIdentity, SandboxInner,
 };
+pub use sandbox::{SandboxHandleLocalState, SandboxLocalState};
+pub use snapshot::SnapshotBackend;
 pub use volume::{
     CloudVolumeKind, CloudVolumeStatus, VolumeBackend, VolumeCloudState, VolumeHandleCloudState,
-    VolumeHandleInner, VolumeHandleLocalState, VolumeInner, VolumeLocalState,
+    VolumeHandleInner, VolumeInner,
 };
+pub use volume::{VolumeHandleLocalState, VolumeLocalState};
 
-use std::{
-    sync::{Arc, OnceLock, RwLock},
-    time::Duration,
-};
+use std::sync::{Arc, OnceLock, RwLock};
 
 use serde::{Deserialize, Serialize};
-
-use crate::MicrosandboxResult;
-use crate::error::{Operation, UnsupportedReason};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -139,66 +151,6 @@ impl BackendSelectionSource {
             Self::ActiveProfile => "active_profile",
             Self::Default => "default",
         }
-    }
-}
-
-/// Top-level routing trait for SDK dispatch. Implementations route to
-/// resource-specific sub-traits (sandboxes, volumes, snapshots) via accessor
-/// methods.
-///
-/// Object-safe — handles hold an `Arc<dyn Backend>`. Sub-trait accessors stay
-/// off this trait until each sub-trait's surface is finalised, which lets the
-/// scaffolding land without committing to method signatures that will change.
-/// New methods ship with default implementations, so custom backends
-/// (mocks, proxies) keep compiling as the trait grows.
-pub trait Backend: Send + Sync + 'static {
-    /// Return the kind of backend this is (`Local` or `Cloud`).
-    fn kind(&self) -> BackendKind;
-
-    /// Return a secret-safe description of this backend.
-    fn info(&self) -> BackendInfo {
-        BackendInfo {
-            kind: self.kind(),
-            api_url: None,
-            source: BackendSelectionSource::Programmatic,
-            profile: None,
-        }
-    }
-
-    /// Return the sandbox lifecycle backend.
-    fn sandboxes(&self) -> &dyn SandboxBackend;
-
-    /// Return the volume lifecycle backend.
-    fn volumes(&self) -> &dyn VolumeBackend;
-
-    /// Try downcast to a concrete `&LocalBackend` when in a local context.
-    ///
-    /// Used by helpers that need access to local-only state (DB pool, config
-    /// paths) without keeping a separate `Arc<LocalBackend>` alongside the
-    /// `Arc<dyn Backend>`. Returns `None` for cloud backends.
-    fn as_local(&self) -> Option<&LocalBackend> {
-        None
-    }
-
-    /// Open a fresh agent connection to the named sandbox with an explicit
-    /// handshake timeout. Local dials the relay socket; cloud dials the
-    /// sandbox's agent WebSocket route.
-    /// Exec, attach, and guest-filesystem operations route through this
-    /// connection. The default errors as unsupported for backends that
-    /// cannot reach a sandbox agent.
-    fn dial_agent<'a>(
-        &'a self,
-        _name: &'a str,
-        _timeout: Duration,
-    ) -> BoxFuture<'a, MicrosandboxResult<crate::agent::AgentClient>> {
-        Box::pin(async {
-            Err(crate::MicrosandboxError::unsupported(
-                Operation::AgentConnect,
-                UnsupportedReason::NotAvailable(
-                    "this backend does not provide agent connectivity".into(),
-                ),
-            ))
-        })
     }
 }
 
@@ -326,6 +278,10 @@ mod tests {
             fn volumes(&self) -> &dyn VolumeBackend {
                 unimplemented!("fake backend only tests kind routing")
             }
+
+            fn snapshots(&self) -> &dyn SnapshotBackend {
+                unimplemented!("fake backend only tests kind routing")
+            }
         }
         let fake: Arc<dyn Backend> = Arc::new(Fake(BackendKind::Cloud));
         let observed = with_backend(fake, async { default_backend().kind() }).await;
@@ -351,6 +307,10 @@ mod tests {
             }
 
             fn volumes(&self) -> &dyn VolumeBackend {
+                unimplemented!("fake backend only tests kind routing")
+            }
+
+            fn snapshots(&self) -> &dyn SnapshotBackend {
                 unimplemented!("fake backend only tests kind routing")
             }
         }

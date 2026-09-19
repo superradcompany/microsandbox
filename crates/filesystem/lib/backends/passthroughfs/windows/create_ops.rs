@@ -30,7 +30,7 @@ impl PassthroughFs {
         let file = options.open(&path).map_err(host_error)?;
         reject_reparse_metadata(&file.metadata().map_err(host_error)?)?;
         let metadata = self.safe_metadata(&path)?;
-        let data = self.intern_path(path.clone());
+        let data = self.intern_path(path.clone())?;
         if let Err(error) = self.set_virtual_metadata(
             data.as_ref(),
             ctx.uid,
@@ -91,14 +91,14 @@ impl PassthroughFs {
         reject_reparse_metadata(&file.metadata().map_err(host_error)?)?;
 
         let metadata = self.safe_metadata(&path)?;
-        let data = self.intern_path(path);
+        let data = self.intern_path(path)?;
         let virtual_type = if file_type == 0 { S_IFREG } else { file_type };
         let virtual_mode = virtual_type | (mode & !umask & 0o7777);
         if let Err(error) =
             self.set_virtual_metadata(data.as_ref(), ctx.uid, ctx.gid, virtual_mode, rdev)
         {
-            let _ = std::fs::remove_file(&data.path);
-            self.remove_inode_path(&data.path);
+            let _ = std::fs::remove_file(data.path());
+            self.remove_inode_path(&data.path());
             return Err(error);
         }
 
@@ -143,12 +143,12 @@ impl PassthroughFs {
         }
 
         let metadata = self.safe_metadata(&path)?;
-        let data = self.intern_path(path);
+        let data = self.intern_path(path)?;
         if let Err(error) =
             self.set_virtual_metadata(data.as_ref(), ctx.uid, ctx.gid, S_IFLNK | 0o777, 0)
         {
-            let _ = std::fs::remove_file(&data.path);
-            self.remove_inode_path(&data.path);
+            let _ = std::fs::remove_file(data.path());
+            self.remove_inode_path(&data.path());
             return Err(error);
         }
 
@@ -161,7 +161,7 @@ impl PassthroughFs {
         }
 
         let data = self.inode(inode)?;
-        let metadata = self.safe_metadata(&data.path)?;
+        let metadata = self.safe_metadata(&data.path())?;
         let current = self.current_override(&metadata, data.as_ref())?;
         if current.mode & S_IFMT != S_IFLNK {
             return Err(linux_error(LINUX_EINVAL));
@@ -170,7 +170,7 @@ impl PassthroughFs {
         let mut file = StdOpenOptions::new()
             .read(true)
             .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
-            .open(&data.path)
+            .open(data.path())
             .map_err(host_error)?;
         reject_reparse_metadata(&file.metadata().map_err(host_error)?)?;
         let mut target = Vec::new();
@@ -185,7 +185,7 @@ impl PassthroughFs {
         }
 
         let source = self.inode(inode)?;
-        self.safe_metadata(&source.path)?;
+        self.safe_metadata(&source.path())?;
         let new_path = self.child_path(newparent, newname)?;
         let parent_path = new_path.parent().ok_or_else(|| linux_error(LINUX_EINVAL))?;
         let parent_metadata = self.safe_metadata(parent_path)?;
@@ -193,9 +193,9 @@ impl PassthroughFs {
             return Err(linux_error(LINUX_ENOTDIR));
         }
 
-        std::fs::hard_link(&source.path, &new_path).map_err(host_error)?;
+        std::fs::hard_link(source.path(), &new_path).map_err(host_error)?;
         let metadata = self.safe_metadata(&new_path)?;
-        let data = self.intern_path(new_path);
+        let data = self.intern_path(new_path.clone())?;
         let current = self.current_override(&metadata, source.as_ref())?;
         if let Err(error) = self.set_virtual_metadata(
             data.as_ref(),
@@ -204,8 +204,8 @@ impl PassthroughFs {
             current.mode,
             current.rdev,
         ) {
-            let _ = std::fs::remove_file(&data.path);
-            self.remove_inode_path(&data.path);
+            let _ = std::fs::remove_file(&new_path);
+            self.remove_inode_path(&new_path);
             return Err(error);
         }
 

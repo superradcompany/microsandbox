@@ -495,7 +495,8 @@ impl Image {
             .transaction(|txn| async move {
                 // Check sandbox references inside transaction to avoid TOCTOU.
                 if !force {
-                    let refs = sandbox_rootfs_entity::Entity::find()
+                    let refs = microsandbox_db::catalog::rootfs_query(&txn)
+                        .await?
                         .filter(sandbox_rootfs_entity::Column::ManifestId.eq(manifest_id))
                         .all(&txn)
                         .await?;
@@ -608,7 +609,8 @@ impl Image {
 
         let (mut report, cleanup) = db
             .transaction(|txn| async move {
-                let sandbox_refs = sandbox_rootfs_entity::Entity::find()
+                let sandbox_refs = microsandbox_db::catalog::rootfs_query(&txn)
+                    .await?
                     .all(&txn)
                     .await?
                     .into_iter()
@@ -1123,6 +1125,8 @@ mod tests {
     async fn persist_preserves_oci_labels_for_inspection() {
         let temp = tempfile::tempdir().unwrap();
         let local = LocalBackend::builder()
+            .config_path(temp.path().join("config.json"))
+            .managed_config_path(temp.path().join("managed.json"))
             .home(temp.path())
             .build()
             .await

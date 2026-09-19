@@ -9,9 +9,12 @@
 //! module) and then grown as clean images.
 
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::SeekFrom;
+#[cfg(test)]
+use std::io::{Read, Seek, Write};
 use std::path::Path;
 
+use super::format::{EXT4_BG_BLOCK_UNINIT, EXT4_BG_INODE_UNINIT};
 use super::format::{
     EXT4_BG_INODE_ZEROED, EXT4_BLOCK_SIZE, EXT4_BLOCKS_PER_GROUP, EXT4_DESC_SIZE, EXT4_EH_MAGIC,
     EXT4_EXTENTS_FL, EXT4_FEATURE_COMPAT_DIR_INDEX, EXT4_FEATURE_COMPAT_EXT_ATTR,
@@ -24,7 +27,7 @@ use super::format::{
     EXT4_ROOT_INO, EXT4_SB_ERROR_COUNT_OFFSET, EXT4_SB_OVERHEAD_BLOCKS_OFFSET, EXT4_SUPER_MAGIC,
     S_IFDIR, sparse_super_group,
 };
-use super::formatter::{Ext4Error, mark_sparse};
+use super::formatter::Ext4Error;
 use super::jbd2;
 use super::layout::{
     GroupDescStats, GroupGeometry, MAX_BLOCKS, bitmap_checksum, build_block_bitmap_base,
@@ -33,6 +36,7 @@ use super::layout::{
     write_backup_superblock_at, write_gdt_at,
 };
 use super::resize_inode::{validate_resize_inode, write_resize_inode};
+use super::storage::Ext4Storage;
 use crate::crc32c;
 
 //--------------------------------------------------------------------------------------------------
@@ -176,6 +180,15 @@ impl ParsedImage {
 /// process is interrupted, callers must discard and recreate the artifact rather than use it.
 pub fn grow_image(path: &Path, new_size_bytes: u64) -> Result<GrowOutcome, Ext4Error> {
     let mut file = OpenOptions::new().read(true).write(true).open(path)?;
+    grow_storage(&mut file, new_size_bytes, false)
+}
+
+/// Grow a caller-owned staging disk; errors must never publish the staging artifact.
+pub(crate) fn grow_storage(
+    mut file: &mut impl Ext4Storage,
+    new_size_bytes: u64,
+    allow_completed_target: bool,
+) -> Result<GrowOutcome, Ext4Error> {
     let mut img = parse_and_validate(&mut file)?;
 
     // Replay the journal before anything else: growing with a pending log would let the next kernel mount replay stale transactions over the appended GDT entries. After a
@@ -199,6 +212,16 @@ pub fn grow_image(path: &Path, new_size_bytes: u64) -> Result<GrowOutcome, Ext4E
         return Err(Ext4Error::TooLarge {
             requested_blocks: new_blocks,
             max_blocks: MAX_BLOCKS,
+        });
+    }
+    if allow_completed_target && new_blocks == img.num_blocks {
+        // Recovery may replay a committed online-grow superblock from the journal. Only
+        // acknowledge an already-complete target after normal geometry/checksum validation.
+        return Ok(GrowOutcome {
+            old_blocks: img.num_blocks,
+            new_blocks,
+            old_groups: img.num_groups,
+            new_groups: img.num_groups,
         });
     }
     if new_blocks <= img.num_blocks {
@@ -243,8 +266,7 @@ pub fn grow_image(path: &Path, new_size_bytes: u64) -> Result<GrowOutcome, Ext4E
         }
     }
 
-    mark_sparse(&file)?;
-    file.set_len(new_size_bytes)?;
+    file.grow(new_size_bytes)?;
 
     let mut gdt = img.gdt.clone();
     let mut total_free = img.free_blocks;
@@ -258,7 +280,21 @@ pub fn grow_image(path: &Path, new_size_bytes: u64) -> Result<GrowOutcome, Ext4E
     let new_last_blocks = new_geo.blocks_in_group(old_last);
     let mut extended_last_bitmap: Option<Vec<u8>> = None;
     if new_last_blocks > old_last_blocks {
-        let mut bitmap = read_block_at(&mut file, old_geo.group_block_bitmap_block(old_last))?;
+        let off = old_last as usize * EXT4_DESC_SIZE as usize;
+        let flags = get_le16(&gdt[off..], 0x12);
+        // Online ext4 growth may leave a lazy block bitmap. Its bytes are not meaningful
+        // until initialized, so derive the metadata-only bitmap rather than reading stale data.
+        let mut bitmap = if flags & EXT4_BG_BLOCK_UNINIT != 0 {
+            let expected_free = old_last_blocks - old_geo.group_metadata_blocks(old_last);
+            let recorded_free = u32::from(get_le16(&gdt[off..], 0x0C))
+                | (u32::from(get_le16(&gdt[off..], 0x2C)) << 16);
+            if recorded_free != expected_free {
+                return Err(unsupported("uninitialized group has allocated data"));
+            }
+            build_block_bitmap_base(&old_geo, old_last)
+        } else {
+            read_block_at(&mut file, old_geo.group_block_bitmap_block(old_last))?
+        };
         for bit in old_last_blocks..new_last_blocks {
             bitmap[(bit / 8) as usize] &= !(1 << (bit % 8));
         }
@@ -267,6 +303,7 @@ pub fn grow_image(path: &Path, new_size_bytes: u64) -> Result<GrowOutcome, Ext4E
 
         let off = old_last as usize * EXT4_DESC_SIZE as usize;
         let desc = &mut gdt[off..off + EXT4_DESC_SIZE as usize];
+        put_le16(desc, 0x12, flags & !EXT4_BG_BLOCK_UNINIT);
         let free_blocks =
             (get_le16(desc, 0x0C) as u32 | ((get_le16(desc, 0x2C) as u32) << 16)) + delta;
         put_le16(desc, 0x0C, free_blocks as u16);
@@ -477,8 +514,8 @@ pub(super) fn validate_rootfs_image(path: &Path) -> Result<(), Ext4Error> {
 
 /// Parse the primary superblock and GDT, refusing anything that does not match exactly what this
 /// crate's formatter writes (geometry, feature masks, per-group layout, checksums).
-fn parse_and_validate(file: &mut File) -> Result<ParsedImage, Ext4Error> {
-    let file_len = file.metadata()?.len();
+fn parse_and_validate(file: &mut impl Ext4Storage) -> Result<ParsedImage, Ext4Error> {
+    let file_len = file.length()?;
     if file_len < SB_OFFSET + SB_SIZE as u64 {
         return Err(unsupported("file too small to contain an ext4 superblock"));
     }
@@ -661,7 +698,12 @@ fn parse_and_validate(file: &mut File) -> Result<ParsedImage, Ext4Error> {
                 "group {group} metadata is not at the expected location"
             )));
         }
-        if get_le16(desc, 0x12) != EXT4_BG_INODE_ZEROED {
+        let flags = get_le16(desc, 0x12);
+        let known_flags = EXT4_BG_INODE_ZEROED | EXT4_BG_INODE_UNINIT | EXT4_BG_BLOCK_UNINIT;
+        if flags & !known_flags != 0
+            || (matches!(img.resize_metadata, ResizeMetadata::Legacy)
+                && flags != EXT4_BG_INODE_ZEROED)
+        {
             return Err(unsupported(format!("group {group} has unexpected flags")));
         }
         let mut desc_copy = desc.to_vec();
@@ -705,7 +747,10 @@ fn parse_and_validate(file: &mut File) -> Result<ParsedImage, Ext4Error> {
 /// zero inode 7, place the root directory immediately after the inode table,
 /// and leave every still-reserved primary GDT block sparse-zeroed. These
 /// invariants remain true after any number of grows by the legacy resizer.
-fn validate_legacy_resize_metadata(file: &mut File, img: &ParsedImage) -> Result<(), Ext4Error> {
+fn validate_legacy_resize_metadata(
+    file: &mut impl Ext4Storage,
+    img: &ParsedImage,
+) -> Result<(), Ext4Error> {
     let geometry = img.geometry();
     let resize_inode = read_inode(file, &geometry, EXT4_RESIZE_INO)?;
     if resize_inode.iter().any(|byte| *byte != 0) {
@@ -772,7 +817,7 @@ fn validate_legacy_resize_metadata(file: &mut File, img: &ParsedImage) -> Result
 /// index path preserves that stable fingerprint while accepting extent fanout created by normal
 /// guest writes.
 fn first_extent_physical_block(
-    file: &mut File,
+    file: &mut impl Ext4Storage,
     img: &ParsedImage,
     inode_number: u32,
     inode: &[u8],
@@ -854,7 +899,7 @@ fn first_extent_physical_block(
 }
 
 fn read_inode(
-    file: &mut File,
+    file: &mut impl Ext4Storage,
     geometry: &GroupGeometry,
     inode_number: u32,
 ) -> Result<Vec<u8>, Ext4Error> {
@@ -873,7 +918,10 @@ fn read_inode(
 /// The journal is fully validated before its first write (see [`jbd2::recover_journal`]) and the backup superblocks are validated up front too, so an inconsistent image is
 /// refused untouched. The write ordering is crash-safe: replayed blocks are fsynced, then the jbd2 superblock is reset to empty, then RECOVER is cleared — a tear at any point
 /// leaves an image that the next attempt recovers to the same end state (replaying an already-emptied journal is a no-op).
-fn replay_journal_and_clear_recover(file: &mut File, img: &ParsedImage) -> Result<(), Ext4Error> {
+fn replay_journal_and_clear_recover(
+    file: &mut impl Ext4Storage,
+    img: &ParsedImage,
+) -> Result<(), Ext4Error> {
     let geo = img.geometry();
     let journal = jbd2::locate_journal(file, geo.group_inode_table_block(0), img.csum_seed)?;
     if journal.start_block + journal.len_blocks as u64 > img.num_blocks {
@@ -918,7 +966,11 @@ fn replay_journal_and_clear_recover(file: &mut File, img: &ParsedImage) -> Resul
 }
 
 /// Read a 1024-byte superblock at `offset`, refusing bad magic or checksum.
-fn read_superblock_at(file: &mut File, offset: u64, label: &str) -> Result<Vec<u8>, Ext4Error> {
+fn read_superblock_at(
+    file: &mut impl Ext4Storage,
+    offset: u64,
+    label: &str,
+) -> Result<Vec<u8>, Ext4Error> {
     let mut sb = vec![0u8; SB_SIZE];
     file.seek(SeekFrom::Start(offset))?;
     file.read_exact(&mut sb)?;
@@ -1007,7 +1059,7 @@ fn validate_group_bitmaps(
 }
 
 fn validate_allocated_inode(
-    file: &mut File,
+    file: &mut impl Ext4Storage,
     img: &ParsedImage,
     group: u32,
     local_inode: u32,
@@ -1048,7 +1100,7 @@ fn validate_allocated_inode(
 }
 
 fn validate_inode_extent_tree(
-    file: &mut File,
+    file: &mut impl Ext4Storage,
     img: &ParsedImage,
     inode_number: u32,
     inode: &[u8],
@@ -1144,7 +1196,7 @@ fn validate_extent_entries(
 }
 
 fn validate_external_xattrs(
-    file: &mut File,
+    file: &mut impl Ext4Storage,
     img: &ParsedImage,
     block_number: u64,
     inode_number: u32,
@@ -1208,7 +1260,10 @@ fn validate_xattr_entries(
     Ok(())
 }
 
-fn validate_backup_metadata(file: &mut File, img: &ParsedImage) -> Result<(), Ext4Error> {
+fn validate_backup_metadata(
+    file: &mut impl Ext4Storage,
+    img: &ParsedImage,
+) -> Result<(), Ext4Error> {
     let geometry = img.geometry();
     for group in 1..img.num_groups {
         if !sparse_super_group(group) {
@@ -1231,14 +1286,14 @@ fn validate_backup_metadata(file: &mut File, img: &ParsedImage) -> Result<(), Ex
     Ok(())
 }
 
-fn read_block_at(file: &mut File, block: u64) -> Result<Vec<u8>, Ext4Error> {
+fn read_block_at(file: &mut impl Ext4Storage, block: u64) -> Result<Vec<u8>, Ext4Error> {
     let mut buf = vec![0u8; EXT4_BLOCK_SIZE as usize];
     file.seek(SeekFrom::Start(block * EXT4_BLOCK_SIZE as u64))?;
     file.read_exact(&mut buf)?;
     Ok(buf)
 }
 
-fn write_block_at(file: &mut File, block: u64, data: &[u8]) -> Result<(), Ext4Error> {
+fn write_block_at(file: &mut impl Ext4Storage, block: u64, data: &[u8]) -> Result<(), Ext4Error> {
     file.seek(SeekFrom::Start(block * EXT4_BLOCK_SIZE as u64))?;
     file.write_all(data)?;
     Ok(())
@@ -1276,6 +1331,49 @@ mod tests {
             journal_blocks: 4096,
         };
         format_ext4_legacy_for_test(path, &opts).unwrap();
+    }
+
+    #[test]
+    fn grow_initializes_a_lazy_partial_group_bitmap_before_extending_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("lazy.ext4");
+        format_image(&path, 300 * MIB);
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        let image = parse_and_validate(&mut file).unwrap();
+        let last = image.num_groups - 1;
+        let offset = last as usize * EXT4_DESC_SIZE as usize;
+        let mut descriptor = image.gdt[offset..offset + EXT4_DESC_SIZE as usize].to_vec();
+        put_le16(
+            &mut descriptor,
+            0x12,
+            EXT4_BG_INODE_ZEROED | EXT4_BG_BLOCK_UNINIT,
+        );
+        put_le16(&mut descriptor, 0x1E, 0);
+        let checksum = gdt_checksum(image.csum_seed, last, &descriptor);
+        put_le16(&mut descriptor, 0x1E, checksum);
+        file.seek(SeekFrom::Start(4096 + offset as u64)).unwrap();
+        file.write_all(&descriptor).unwrap();
+        // Bytes of an uninitialized bitmap are deliberately meaningless.
+        write_block_at(
+            &mut file,
+            image.geometry().group_block_bitmap_block(last),
+            &[0xa5; 4096],
+        )
+        .unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+        grow_image(&path, 384 * MIB).unwrap();
+        let mut file = File::open(&path).unwrap();
+        let grown = parse_and_validate(&mut file).unwrap();
+        let desc = &grown.gdt[offset..offset + EXT4_DESC_SIZE as usize];
+        assert_eq!(get_le16(desc, 0x12), EXT4_BG_INODE_ZEROED);
+        let bitmap =
+            read_block_at(&mut file, grown.geometry().group_block_bitmap_block(last)).unwrap();
+        assert_eq!(bitmap, build_block_bitmap_base(&grown.geometry(), last));
     }
 
     /// Reproduce a root directory that has outgrown the inode's inline extent leaf.

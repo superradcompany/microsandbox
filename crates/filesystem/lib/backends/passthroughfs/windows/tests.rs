@@ -101,6 +101,23 @@ fn fs_for(path: &Path) -> PassthroughFs {
     fs
 }
 
+fn external_fs_for(path: &Path, relaxed: bool, remapped: bool) -> PassthroughFs {
+    let fs = PassthroughFs::new(PassthroughConfig {
+        root_dir: path.to_path_buf(),
+        inject_init: false,
+        stat_virtualization: StatVirtualization::Off,
+        external_checkpoint: Some(super::super::ExternalCheckpointOptions {
+            relaxed,
+            remapped,
+            ..Default::default()
+        }),
+        ..Default::default()
+    })
+    .unwrap();
+    fs.init(FsOptions::empty()).unwrap();
+    fs
+}
+
 fn assert_ads_store(fs: &PassthroughFs) {
     let store = fs.stat_store.as_ref().expect("stat store enabled");
     assert!(matches!(
@@ -132,6 +149,106 @@ fn expect_errno<T>(result: io::Result<T>, errno: i32) {
         Ok(_) => panic!("expected errno {errno}"),
         Err(error) => assert_eq!(error.raw_os_error(), Some(errno)),
     }
+}
+
+#[test]
+fn external_checkpoint_changed_file_requires_relaxed_and_retains_stale_ids() {
+    let temp = TempDir::new();
+    std::fs::write(temp.path.join("data"), b"before").unwrap();
+    let source = external_fs_for(&temp.path, false, false);
+    let entry = source.lookup(context(), ROOT_INODE, c"data").unwrap();
+    source.open(context(), entry.inode, false, 0).unwrap();
+    let bytes = source.capture_state().unwrap();
+    std::fs::write(temp.path.join("data"), b"after!").unwrap();
+
+    let strict = external_fs_for(&temp.path, false, false);
+    let untouched = strict.capture_state().unwrap();
+    assert!(strict.restore_state(&bytes).is_err());
+    assert_eq!(strict.capture_state().unwrap(), untouched);
+
+    let relaxed = external_fs_for(&temp.path, true, false);
+    relaxed.restore_state(&bytes).unwrap();
+    assert_eq!(relaxed.request_error(entry.inode), Some(116));
+    assert_eq!(relaxed.request_error(ROOT_INODE), None);
+    assert!(relaxed.handles.read().unwrap().is_empty());
+    let current = relaxed.lookup(context(), ROOT_INODE, c"data").unwrap();
+    assert_ne!(current.inode, entry.inode);
+    assert_eq!(relaxed.request_error(current.inode), None);
+    assert_eq!(
+        *relaxed
+            .cfg
+            .external_checkpoint
+            .as_ref()
+            .unwrap()
+            .invalid_inodes
+            .lock()
+            .unwrap(),
+        vec![entry.inode]
+    );
+
+    // A later checkpoint must not recycle an inode previously reported as stale.
+    let second = relaxed.capture_state().unwrap();
+    let next = external_fs_for(&temp.path, true, false);
+    next.restore_state(&second).unwrap();
+    assert_eq!(next.request_error(entry.inode), Some(116));
+    assert_eq!(
+        next.lookup(context(), ROOT_INODE, c"data").unwrap().inode,
+        current.inode
+    );
+}
+
+#[test]
+fn external_checkpoint_remap_validates_content_and_requires_explicit_policy() {
+    let source_dir = TempDir::new();
+    let destination_dir = TempDir::new();
+    std::fs::write(source_dir.path.join("data"), b"identical").unwrap();
+    std::fs::write(destination_dir.path.join("data"), b"identical").unwrap();
+    let source = external_fs_for(&source_dir.path, false, false);
+    let entry = source.lookup(context(), ROOT_INODE, c"data").unwrap();
+    let bytes = source.capture_state().unwrap();
+    assert!(
+        external_fs_for(&destination_dir.path, false, false)
+            .restore_state(&bytes)
+            .is_err()
+    );
+    let remapped = external_fs_for(&destination_dir.path, false, true);
+    remapped.restore_state(&bytes).unwrap();
+    assert_eq!(
+        remapped
+            .lookup(context(), ROOT_INODE, c"data")
+            .unwrap()
+            .inode,
+        entry.inode
+    );
+    std::fs::write(destination_dir.path.join("data"), b"different").unwrap();
+    assert!(remapped.restore_state(&bytes).is_err());
+}
+
+#[test]
+fn external_checkpoint_refuses_replaced_live_file_handle() {
+    let temp = TempDir::new();
+    std::fs::write(temp.path.join("data"), b"same").unwrap();
+    let source = external_fs_for(&temp.path, false, false);
+    let entry = source.lookup(context(), ROOT_INODE, c"data").unwrap();
+    source.open(context(), entry.inode, false, 0).unwrap();
+    std::fs::rename(temp.path.join("data"), temp.path.join("old-data")).unwrap();
+    std::fs::write(temp.path.join("data"), b"same").unwrap();
+    assert!(source.capture_state().is_err());
+}
+
+#[test]
+fn unavailable_external_checkpoint_validates_bytes_and_always_returns_eio() {
+    let temp = TempDir::new();
+    let source = external_fs_for(&temp.path, false, false);
+    let bytes = source.capture_state().unwrap();
+    let unavailable = crate::UnavailableFs::default();
+    unavailable.restore_state(&bytes).unwrap();
+    assert_eq!(unavailable.request_error(ROOT_INODE), Some(5));
+    assert_eq!(unavailable.request_error(123), Some(5));
+    let relaxed = external_fs_for(&temp.path, true, false);
+    assert!(relaxed.restore_state(&bytes[..bytes.len() - 1]).is_err());
+    assert!(unavailable.restore_state(b"invalid").is_err());
+    assert!(unavailable.capture_state().is_err());
 }
 
 #[test]
@@ -266,6 +383,217 @@ fn quota_rejects_growth_past_limit() {
             &mut second,
             1,
             4,
+            None,
+            false,
+            false,
+            0,
+        ),
+        LINUX_ENOSPC,
+    );
+}
+
+#[test]
+fn mobility_preserves_inode_file_handle_and_directory_cookie_state() {
+    let temp = TempDir::new();
+    std::fs::write(temp.path.join("alpha.txt"), b"alpha").unwrap();
+    std::fs::write(temp.path.join("beta.txt"), b"beta").unwrap();
+    let source = fs_for(&temp.path);
+
+    let alpha = source.lookup(context(), ROOT_INODE, c"alpha.txt").unwrap();
+    let beta = source.lookup(context(), ROOT_INODE, c"beta.txt").unwrap();
+    let (file_handle, _) = source.open(context(), alpha.inode, false, 0).unwrap();
+    let file_handle = file_handle.unwrap();
+    let (dir_handle, _) = source
+        .opendir(context(), ROOT_INODE, LINUX_O_DIRECTORY as u32)
+        .unwrap();
+    let dir_handle = dir_handle.unwrap();
+    let entries = source
+        .readdir(context(), ROOT_INODE, dir_handle, 4096, 0)
+        .unwrap();
+    let cookie = entries
+        .iter()
+        .find(|entry| entry.name == b"alpha.txt")
+        .unwrap()
+        .offset;
+    let expected_tail = source
+        .readdir(context(), ROOT_INODE, dir_handle, 4096, cookie)
+        .unwrap()
+        .into_iter()
+        .map(|entry| (entry.ino, entry.offset, entry.name.to_vec()))
+        .collect::<Vec<_>>();
+    let next_inode = source.next_inode.load(Ordering::Acquire);
+    let next_handle = source.next_handle.load(Ordering::Acquire);
+    let state = source.capture_state().unwrap();
+
+    let destination = fs_for(&temp.path);
+    destination.restore_state(&state).unwrap();
+
+    assert_eq!(
+        destination
+            .lookup(context(), ROOT_INODE, c"alpha.txt")
+            .unwrap()
+            .inode,
+        alpha.inode
+    );
+    assert_eq!(
+        destination
+            .lookup(context(), ROOT_INODE, c"beta.txt")
+            .unwrap()
+            .inode,
+        beta.inode
+    );
+    let mut writer = CaptureWriter { bytes: Vec::new() };
+    destination
+        .read(
+            context(),
+            alpha.inode,
+            file_handle,
+            &mut writer,
+            5,
+            0,
+            None,
+            0,
+        )
+        .unwrap();
+    assert_eq!(writer.bytes, b"alpha");
+    let restored_tail = destination
+        .readdir(context(), ROOT_INODE, dir_handle, 4096, cookie)
+        .unwrap()
+        .into_iter()
+        .map(|entry| (entry.ino, entry.offset, entry.name.to_vec()))
+        .collect::<Vec<_>>();
+    assert_eq!(restored_tail, expected_tail);
+    assert_eq!(destination.next_inode.load(Ordering::Acquire), next_inode);
+    assert_eq!(destination.next_handle.load(Ordering::Acquire), next_handle);
+}
+
+#[test]
+fn mobility_missing_object_rejection_does_not_mutate_destination() {
+    let temp = TempDir::new();
+    std::fs::write(temp.path.join("source.txt"), b"source").unwrap();
+    std::fs::write(temp.path.join("destination.txt"), b"destination").unwrap();
+    let source = fs_for(&temp.path);
+    let source_entry = source.lookup(context(), ROOT_INODE, c"source.txt").unwrap();
+    let (source_handle, _) = source
+        .open(context(), source_entry.inode, false, 0)
+        .unwrap();
+    assert!(source_handle.is_some());
+    let state = source.capture_state().unwrap();
+
+    let destination = fs_for(&temp.path);
+    let destination_entry = destination
+        .lookup(context(), ROOT_INODE, c"destination.txt")
+        .unwrap();
+    let (destination_handle, _) = destination
+        .open(context(), destination_entry.inode, false, 0)
+        .unwrap();
+    assert!(destination_handle.is_some());
+    let before = destination.capture_state().unwrap();
+    drop(source);
+    std::fs::remove_file(temp.path.join("source.txt")).unwrap();
+
+    assert!(destination.restore_state(&state).is_err());
+
+    assert_eq!(destination.capture_state().unwrap(), before);
+    let mut writer = CaptureWriter { bytes: Vec::new() };
+    destination
+        .read(
+            context(),
+            destination_entry.inode,
+            destination_handle.unwrap(),
+            &mut writer,
+            11,
+            0,
+            None,
+            0,
+        )
+        .unwrap();
+    assert_eq!(writer.bytes, b"destination");
+}
+
+#[test]
+fn mobility_preserves_quota_accounting_and_open_handle() {
+    let temp = TempDir::new();
+    let config = PassthroughConfig {
+        root_dir: temp.path.clone(),
+        inject_init: false,
+        quota_bytes: Some(8),
+        ..Default::default()
+    };
+    let source = PassthroughFs::new(config.clone()).unwrap();
+    source.init(FsOptions::empty()).unwrap();
+    let (entry, handle, _) = source
+        .create(
+            context(),
+            ROOT_INODE,
+            c"quota.txt",
+            S_IFREG | 0o644,
+            false,
+            (LINUX_O_CREAT | LINUX_O_RDWR) as u32,
+            0,
+            Extensions::default(),
+        )
+        .unwrap();
+    let handle = handle.unwrap();
+    let mut initial = SourceReader {
+        bytes: b"abcd".to_vec(),
+        pos: 0,
+    };
+    source
+        .write(
+            context(),
+            entry.inode,
+            handle,
+            &mut initial,
+            4,
+            0,
+            None,
+            false,
+            false,
+            0,
+        )
+        .unwrap();
+    let quota_state = source.quota.as_ref().unwrap().capture_state();
+    let state = source.capture_state().unwrap();
+
+    let destination = PassthroughFs::new(config).unwrap();
+    destination.init(FsOptions::empty()).unwrap();
+    destination.restore_state(&state).unwrap();
+
+    assert_eq!(
+        destination.quota.as_ref().unwrap().capture_state(),
+        quota_state
+    );
+    let mut remaining = SourceReader {
+        bytes: b"efgh".to_vec(),
+        pos: 0,
+    };
+    destination
+        .write(
+            context(),
+            entry.inode,
+            handle,
+            &mut remaining,
+            4,
+            4,
+            None,
+            false,
+            false,
+            0,
+        )
+        .unwrap();
+    let mut over = SourceReader {
+        bytes: b"i".to_vec(),
+        pos: 0,
+    };
+    expect_errno(
+        destination.write(
+            context(),
+            entry.inode,
+            handle,
+            &mut over,
+            1,
+            8,
             None,
             false,
             false,
@@ -475,7 +803,7 @@ fn strict_uses_ads_and_does_not_create_sidecar() {
     let data = fs.inode(entry.inode).unwrap();
 
     assert!(!temp.path.join(FALLBACK_METADATA_DIR_NAME).exists());
-    assert_override(&data.path, 111, 222, S_IFREG | 0o644, 0);
+    assert_override(&data.path(), 111, 222, S_IFREG | 0o644, 0);
 }
 
 #[test]
@@ -621,7 +949,7 @@ fn ads_metadata_follows_rename_without_sidecar_move() {
         )
         .unwrap();
     let old_data = fs.inode(entry.inode).unwrap();
-    let old_path = old_data.path.clone();
+    let old_path = old_data.path();
     let attr = stat64 {
         st_uid: 700,
         st_gid: 701,
@@ -646,7 +974,7 @@ fn ads_metadata_follows_rename_without_sidecar_move() {
     );
     let renamed = fs.lookup(context(), ROOT_INODE, c"new.txt").unwrap();
     let data = fs.inode(renamed.inode).unwrap();
-    assert_override(&data.path, 700, 701, S_IFREG | 0o600, 0);
+    assert_override(&data.path(), 700, 701, S_IFREG | 0o600, 0);
     let (st, _) = fs.getattr(context(), renamed.inode, None).unwrap();
     assert_eq!(st.st_uid, 700);
     assert_eq!(st.st_gid, 701);
@@ -698,7 +1026,7 @@ fn corrupt_stat_metadata_fails_closed() {
         .stat_store
         .as_ref()
         .unwrap()
-        .override_file_path(&data.path)
+        .override_file_path(&data.path())
         .unwrap();
     std::fs::write(override_path, b"bad").unwrap();
 
@@ -789,8 +1117,8 @@ fn unlink_removes_ads_metadata_with_file() {
         )
         .unwrap();
     let data = fs.inode(entry.inode).unwrap();
-    assert_override(&data.path, 0, 0, S_IFREG | 0o644, 0);
-    let ads_path = ads_override_path(&data.path);
+    assert_override(&data.path(), 0, 0, S_IFREG | 0o644, 0);
+    let ads_path = ads_override_path(&data.path());
 
     fs.unlink(context(), ROOT_INODE, c"gone.txt").unwrap();
 
@@ -1247,4 +1575,284 @@ fn setattr_preserves_default_owner_for_host_created_file() {
     assert_eq!(st.st_uid, 1000);
     assert_eq!(st.st_gid, 1000);
     assert_eq!(st.st_mode & 0o7777, 0o640);
+}
+
+fn owned_fs_for(path: &Path, checkpoint: crate::OwnedDirectoryCheckpoint) -> PassthroughFs {
+    let fs = PassthroughFs::new(PassthroughConfig {
+        root_dir: path.into(),
+        inject_init: false,
+        owned_checkpoint: Some(checkpoint),
+        ..Default::default()
+    })
+    .unwrap();
+    fs.init(FsOptions::empty()).unwrap();
+    fs
+}
+
+fn owned_read(fs: &PassthroughFs, inode: u64, handle: u64) -> Vec<u8> {
+    let mut output = CaptureWriter { bytes: Vec::new() };
+    fs.read(context(), inode, handle, &mut output, 4096, 0, None, 0)
+        .unwrap();
+    output.bytes
+}
+
+fn owned_write(fs: &PassthroughFs, inode: u64, handle: u64, bytes: &[u8]) {
+    let mut input = SourceReader {
+        bytes: bytes.to_vec(),
+        pos: 0,
+    };
+    assert_eq!(
+        fs.write(
+            context(),
+            inode,
+            handle,
+            &mut input,
+            bytes.len() as u32,
+            0,
+            None,
+            false,
+            false,
+            0
+        )
+        .unwrap(),
+        bytes.len()
+    );
+}
+
+#[test]
+fn owned_detached_roundtrip_keeps_handle_metadata_and_private_generations() {
+    let temp = TempDir::new();
+    let root = temp.path.join("source");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join("file"), b"before").unwrap();
+    std::fs::write(root.join("never-looked-up"), b"whole namespace").unwrap();
+    let checkpoint = crate::OwnedDirectoryCheckpoint::default();
+    let source = owned_fs_for(&root, checkpoint.clone());
+    let inode = source.lookup(context(), ROOT_INODE, c"file").unwrap().inode;
+    let handle = source
+        .open(context(), inode, false, LINUX_O_RDWR as u32)
+        .unwrap()
+        .0
+        .unwrap();
+    source
+        .setattr(
+            context(),
+            inode,
+            stat64 {
+                st_uid: 1234,
+                st_gid: 2345,
+                st_mode: 0o640,
+                ..Default::default()
+            },
+            None,
+            SetattrValid::UID | SetattrValid::GID | SetattrValid::MODE,
+        )
+        .unwrap();
+    source.unlink(context(), ROOT_INODE, c"file").unwrap();
+    owned_write(&source, inode, handle, b"after!");
+    std::fs::write(root.join("file"), b"replacement").unwrap();
+    assert_eq!(
+        source.getattr(context(), inode, None).unwrap().0.st_uid,
+        1234
+    );
+    let reopened = source.open(context(), inode, false, 0).unwrap().0.unwrap();
+    assert_eq!(owned_read(&source, inode, reopened), b"after!");
+    let generation = temp.path.join("generation");
+    checkpoint.prepare_capture(&generation).unwrap();
+    let state = source.capture_state().unwrap();
+    let snapshot = checkpoint.finish_capture().unwrap();
+    drop(source);
+    std::fs::remove_dir_all(&root).unwrap();
+
+    let child = temp.path.join("child");
+    snapshot.materialize(&generation, &child).unwrap();
+    let restored_checkpoint = crate::OwnedDirectoryCheckpoint::default();
+    restored_checkpoint.set_restore(&generation).unwrap();
+    let destination = owned_fs_for(&child, restored_checkpoint.clone());
+    destination.restore_state(&state).unwrap();
+    assert_eq!(owned_read(&destination, inode, handle), b"after!");
+    assert_eq!(std::fs::read(child.join("file")).unwrap(), b"replacement");
+    assert_eq!(
+        std::fs::read(child.join("never-looked-up")).unwrap(),
+        b"whole namespace"
+    );
+    owned_write(&destination, inode, handle, b"child!");
+    destination
+        .setattr(
+            context(),
+            inode,
+            stat64 {
+                st_size: 4,
+                st_uid: 3456,
+                ..Default::default()
+            },
+            None,
+            SetattrValid::SIZE | SetattrValid::UID,
+        )
+        .unwrap();
+    assert_eq!(owned_read(&destination, inode, handle), b"chil");
+    assert_eq!(
+        destination
+            .getattr(context(), inode, None)
+            .unwrap()
+            .0
+            .st_uid,
+        3456
+    );
+
+    let sibling = temp.path.join("sibling");
+    snapshot.materialize(&generation, &sibling).unwrap();
+    let sibling_checkpoint = crate::OwnedDirectoryCheckpoint::default();
+    sibling_checkpoint.set_restore(&generation).unwrap();
+    let other = owned_fs_for(&sibling, sibling_checkpoint);
+    other.restore_state(&state).unwrap();
+    assert_eq!(owned_read(&other, inode, handle), b"after!");
+    restored_checkpoint
+        .prepare_capture(&temp.path.join("second"))
+        .unwrap();
+    destination.capture_state().unwrap();
+    assert!(
+        !restored_checkpoint
+            .finish_capture()
+            .unwrap()
+            .payloads()
+            .is_empty()
+    );
+}
+
+#[test]
+fn owned_detached_reclaims_only_after_last_lookup_and_open_handle() {
+    let temp = TempDir::new();
+    std::fs::write(temp.path.join("file"), b"data").unwrap();
+    let source = owned_fs_for(&temp.path, crate::OwnedDirectoryCheckpoint::default());
+    let inode = source.lookup(context(), ROOT_INODE, c"file").unwrap().inode;
+    source.lookup(context(), ROOT_INODE, c"file").unwrap();
+    let handle = source
+        .open(context(), inode, false, LINUX_O_RDWR as u32)
+        .unwrap()
+        .0
+        .unwrap();
+    source.unlink(context(), ROOT_INODE, c"file").unwrap();
+    source.forget(context(), inode, 1);
+    source
+        .release(context(), inode, 0, handle, false, false, None)
+        .unwrap();
+    assert!(source.inode(inode).is_ok());
+    source.forget(context(), inode, 1);
+    assert!(source.inode(inode).is_err());
+}
+
+#[test]
+fn owned_retained_hardlink_aliases_share_one_restored_object() {
+    for remove_alias in [false, true] {
+        let temp = TempDir::new();
+        let root = temp.path.join("source");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("file"), b"before").unwrap();
+        std::fs::hard_link(root.join("file"), root.join("alias")).unwrap();
+        let checkpoint = crate::OwnedDirectoryCheckpoint::default();
+        let source = owned_fs_for(&root, checkpoint.clone());
+        let inode = source.lookup(context(), ROOT_INODE, c"file").unwrap().inode;
+        let handle = source
+            .open(context(), inode, false, LINUX_O_RDWR as u32)
+            .unwrap()
+            .0
+            .unwrap();
+        let alias = remove_alias.then(|| {
+            let inode = source
+                .lookup(context(), ROOT_INODE, c"alias")
+                .unwrap()
+                .inode;
+            let handle = source
+                .open(context(), inode, false, LINUX_O_RDWR as u32)
+                .unwrap()
+                .0
+                .unwrap();
+            (inode, handle)
+        });
+        source.unlink(context(), ROOT_INODE, c"file").unwrap();
+        if remove_alias {
+            source.unlink(context(), ROOT_INODE, c"alias").unwrap();
+        }
+        let generation = temp.path.join("generation");
+        checkpoint.prepare_capture(&generation).unwrap();
+        let state = source.capture_state().unwrap();
+        let snapshot = checkpoint.finish_capture().unwrap();
+        drop(source);
+        std::fs::remove_dir_all(&root).unwrap();
+        let child = temp.path.join("child");
+        snapshot.materialize(&generation, &child).unwrap();
+        let restored_checkpoint = crate::OwnedDirectoryCheckpoint::default();
+        restored_checkpoint.set_restore(&generation).unwrap();
+        let restored = owned_fs_for(&child, restored_checkpoint);
+        restored.restore_state(&state).unwrap();
+        owned_write(&restored, inode, handle, b"shared");
+        if let Some((inode, handle)) = alias {
+            assert_eq!(owned_read(&restored, inode, handle), b"shared");
+        } else {
+            assert_eq!(std::fs::read(child.join("alias")).unwrap(), b"shared");
+        }
+    }
+}
+
+#[test]
+fn owned_rename_replacement_and_cached_descendants_survive_capture() {
+    let temp = TempDir::new();
+    let root = temp.path.join("source");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::create_dir(root.join("directory")).unwrap();
+    std::fs::write(root.join("directory/file"), b"child").unwrap();
+    std::fs::write(root.join("target"), b"old").unwrap();
+    std::fs::write(root.join("new"), b"new").unwrap();
+    let checkpoint = crate::OwnedDirectoryCheckpoint::default();
+    let source = owned_fs_for(&root, checkpoint.clone());
+    let directory = source
+        .lookup(context(), ROOT_INODE, c"directory")
+        .unwrap()
+        .inode;
+    let child_inode = source.lookup(context(), directory, c"file").unwrap().inode;
+    let old_inode = source
+        .lookup(context(), ROOT_INODE, c"target")
+        .unwrap()
+        .inode;
+    let old_handle = source
+        .open(context(), old_inode, false, LINUX_O_RDWR as u32)
+        .unwrap()
+        .0
+        .unwrap();
+    source
+        .rename(context(), ROOT_INODE, c"new", ROOT_INODE, c"target", 0)
+        .unwrap();
+    source
+        .rename(context(), ROOT_INODE, c"directory", ROOT_INODE, c"moved", 0)
+        .unwrap();
+    assert_eq!(
+        source
+            .getattr(context(), child_inode, None)
+            .unwrap()
+            .0
+            .st_size,
+        5
+    );
+    assert_eq!(owned_read(&source, old_inode, old_handle), b"old");
+    let generation = temp.path.join("generation");
+    checkpoint.prepare_capture(&generation).unwrap();
+    let state = source.capture_state().unwrap();
+    let snapshot = checkpoint.finish_capture().unwrap();
+    let child = temp.path.join("child");
+    snapshot.materialize(&generation, &child).unwrap();
+    let restore = crate::OwnedDirectoryCheckpoint::default();
+    restore.set_restore(&generation).unwrap();
+    let destination = owned_fs_for(&child, restore);
+    destination.restore_state(&state).unwrap();
+    assert_eq!(owned_read(&destination, old_inode, old_handle), b"old");
+    assert_eq!(std::fs::read(child.join("target")).unwrap(), b"new");
+    assert_eq!(
+        destination
+            .getattr(context(), child_inode, None)
+            .unwrap()
+            .0
+            .st_size,
+        5
+    );
 }

@@ -1,6 +1,5 @@
 //! `msb ssh` command — connect to and serve sandboxes over SSH.
 
-use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -11,7 +10,7 @@ use microsandbox::sandbox::{
     SshStdioStream,
 };
 use russh::keys::PublicKeyBase64;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
 use crate::ui;
@@ -25,7 +24,7 @@ use crate::ui;
 #[command(args_conflicts_with_subcommands = true)]
 pub struct SshArgs {
     /// Explicit sandbox name. Useful when the sandbox is named like a subcommand.
-    #[arg(long)]
+    #[arg(short, long)]
     pub name: Option<String>,
 
     /// Sandbox to connect to.
@@ -61,7 +60,7 @@ pub enum SshCommand {
 #[derive(Debug, Args)]
 pub struct SshConnectArgs {
     /// Explicit sandbox name. Useful when the sandbox is named like a subcommand.
-    #[arg(long)]
+    #[arg(short, long)]
     pub name: Option<String>,
 
     /// Sandbox to connect to.
@@ -87,7 +86,7 @@ pub struct SshServeArgs {
     pub host: Option<String>,
 
     /// Listener port.
-    #[arg(long, conflicts_with = "stdio")]
+    #[arg(short, long, conflicts_with = "stdio")]
     pub port: Option<u16>,
 
     /// Serve one SSH transport over stdin/stdout.
@@ -145,7 +144,7 @@ pub async fn run(args: SshArgs) -> anyhow::Result<()> {
     match args.subcommand {
         Some(SshCommand::Connect(connect)) => run_connect_args(connect).await,
         Some(SshCommand::Serve(args)) => run_serve(args).await,
-        Some(SshCommand::Authorize(args)) => run_authorize(args),
+        Some(SshCommand::Authorize(args)) => run_authorize(args).await,
         None => run_connect(args).await,
     }
 }
@@ -252,15 +251,17 @@ async fn run_serve(args: SshServeArgs) -> anyhow::Result<()> {
     result.map_err(Into::into)
 }
 
-fn run_authorize(args: SshAuthorizeArgs) -> anyhow::Result<()> {
-    let key_text = read_public_key_source(args)?;
+async fn run_authorize(args: SshAuthorizeArgs) -> anyhow::Result<()> {
+    let key_text = read_public_key_source(args).await?;
     let (key_base64, line) = parse_public_key_line(&key_text)?;
-    let local_backend = microsandbox::LocalBackend::lazy();
+    let local_backend = microsandbox::LocalBackend::lazy()?;
     let ssh_dir = local_backend.config().ssh_dir();
-    create_secure_dir(&ssh_dir)?;
+    create_secure_dir(&ssh_dir).await?;
     let authorized_keys = ssh_dir.join("authorized_keys");
 
-    let existing = std::fs::read_to_string(&authorized_keys).unwrap_or_default();
+    let existing = tokio::fs::read_to_string(&authorized_keys)
+        .await
+        .unwrap_or_default();
     for existing_line in existing.lines() {
         if let Ok((existing_base64, _)) = parse_public_key_line(existing_line)
             && existing_base64 == key_base64
@@ -270,16 +271,18 @@ fn run_authorize(args: SshAuthorizeArgs) -> anyhow::Result<()> {
         }
     }
 
-    let mut file = std::fs::OpenOptions::new()
+    let mut file = tokio::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(&authorized_keys)
+        .await
         .with_context(|| format!("failed to open {}", authorized_keys.display()))?;
     if !existing.is_empty() && !existing.ends_with('\n') {
-        writeln!(file)?;
+        file.write_all(b"\n").await?;
     }
-    writeln!(file, "{line}")?;
-    set_private_file_permissions(&authorized_keys)?;
+    file.write_all(format!("{line}\n").as_bytes()).await?;
+    file.flush().await?;
+    set_private_file_permissions(&authorized_keys).await?;
     ui::success("Authorized key", &authorized_keys.display().to_string());
     Ok(())
 }
@@ -334,9 +337,10 @@ fn apply_server_inactivity_timeout(
     }
 }
 
-fn read_public_key_source(args: SshAuthorizeArgs) -> anyhow::Result<String> {
+async fn read_public_key_source(args: SshAuthorizeArgs) -> anyhow::Result<String> {
     if let Some(path) = args.file {
-        return std::fs::read_to_string(&path)
+        return tokio::fs::read_to_string(&path)
+            .await
             .with_context(|| format!("failed to read {}", path.display()));
     }
     if let Some(key) = args.key {
@@ -344,8 +348,9 @@ fn read_public_key_source(args: SshAuthorizeArgs) -> anyhow::Result<String> {
     }
     if args.stdin {
         let mut input = String::new();
-        std::io::stdin()
+        tokio::io::stdin()
             .read_to_string(&mut input)
+            .await
             .context("failed to read public key from stdin")?;
         return Ok(input);
     }
@@ -374,21 +379,21 @@ fn parse_public_key_line(line: &str) -> anyhow::Result<(String, String)> {
     Ok((key.public_key_base64(), canonical))
 }
 
-fn create_secure_dir(path: &Path) -> anyhow::Result<()> {
-    std::fs::create_dir_all(path)?;
+async fn create_secure_dir(path: &Path) -> anyhow::Result<()> {
+    tokio::fs::create_dir_all(path).await?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+        tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).await?;
     }
     Ok(())
 }
 
-fn set_private_file_permissions(_path: &Path) -> anyhow::Result<()> {
+async fn set_private_file_permissions(_path: &Path) -> anyhow::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(_path, std::fs::Permissions::from_mode(0o600))?;
+        tokio::fs::set_permissions(_path, std::fs::Permissions::from_mode(0o600)).await?;
     }
     Ok(())
 }

@@ -9,7 +9,6 @@ STUB_PATH = Path(__file__).parent.parent / "microsandbox" / "_microsandbox.pyi"
 
 EXPECTED_KWARGS = [
     "image",
-    "from_snapshot",
     "memory",
     "cpus",
     "max_memory",
@@ -41,7 +40,7 @@ EXPECTED_KWARGS = [
     "vsock",
     "network",
     "secrets",
-    "on_secret_violation",
+    "secret_violation_action",
     "detached",
 ]
 
@@ -156,3 +155,38 @@ def test_lifecycle_convergence_methods_are_typed() -> None:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     }
     assert "connect_or_start" in handle_methods
+
+
+def test_restore_has_only_destination_options() -> None:
+    restore = _method("restore")
+    names = {arg.arg for arg in restore.args.kwonlyargs}
+    assert {"name", "forked", "disk_only", "snapshot_base", "volumes", "ports", "vsock",
+            "allow_missing_resources"} <= names
+    assert not names & {"image", "cmd", "replace", "detached", "from_snapshot", "network"}
+    assert {"cpus", "memory", "network_policy", "max_connections", "disable_network",
+            "security", "max_duration", "idle_timeout"} <= names
+    assert names == {arg.arg for arg in _method("restore_with_progress").args.kwonlyargs}
+
+
+def test_restore_accepts_backend_neutral_snapshot_objects() -> None:
+    # Object seeds preserve an explicit remote ID instead of treating it as a host path.
+    for name in ("restore", "restore_with_progress"):
+        snapshot = _method(name).args.args[0]
+        assert snapshot.arg == "snapshot"
+        assert ast.unparse(snapshot.annotation) == (
+            "Snapshot | SnapshotHandle | str | os.PathLike[str]"
+        )
+
+
+def test_restore_controls_preserve_optional_values_and_policy_type() -> None:
+    for name in ("restore", "restore_with_progress"):
+        method = _method(name)
+        annotations = {arg.arg: ast.unparse(arg.annotation) for arg in method.args.kwonlyargs}
+        defaults = dict(zip(
+            [arg.arg for arg in method.args.kwonlyargs], method.args.kw_defaults, strict=True
+        ))
+        assert annotations["network_policy"] == "NetworkPolicy | None"
+        assert annotations["security"] == "SecurityProfile | None"
+        for option in ("cpus", "memory", "network_policy", "max_connections", "security",
+                       "max_duration", "idle_timeout"):
+            assert ast.literal_eval(defaults[option]) is None

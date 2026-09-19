@@ -4,46 +4,84 @@ description: Install, verify, and configure microsandbox runtime dependencies fr
 icon: "download"
 ---
 
-Local sandboxes use the `msb` executable and `libkrunfw` library. Depending on the SDK and installation method, those runtime files may already be bundled or may need to be downloaded. Each SDK exposes helpers you can use to verify the runtime before creating your first sandbox.
+Local sandboxes use the `msb` executable and `libkrunfw` library. Depending on the SDK and installation method, those runtime files may already be bundled or may need to be downloaded. Each SDK exposes helpers you can use to verify the runtime before creating your first sandbox. Creating a local sandbox resolves an existing runtime; it does not implicitly download or install one.
 
 The default install root is `~/.microsandbox/` (`%USERPROFILE%\.microsandbox` on Windows). Explicit setup is useful when you want installation failures to surface at process startup or when you are preparing an offline environment.
 
-## Install and verify
+## Runtime selection
 
-Check for the runtime and install it only when needed. These installation helpers are idempotent and reuse a matching installation.
+Local SDK calls select an existing `msb` and `libkrunfw` pair in this order:
+
+1. Explicit binary-path overrides: environment variables, process-level setters, then configured paths.
+2. The resolved runtime home: configured `home`, otherwise non-empty `MSB_HOME`, otherwise `~/.microsandbox`.
+3. Binaries supplied by the SDK package, when available.
+
+A complete home installation wins over Python wheel and Node platform-package binaries, even when its release version differs from the SDK. You do not need to set `MSB_HOME` for `~/.microsandbox` to take precedence. The Python and Node CLI entry points follow the same home-first policy. Go's `EnsureRuntime` also reuses a complete home installation without replacing it to match the SDK's pinned download version.
+
+A partial home installation fails with an incomplete-runtime error; it is not silently bypassed by package binaries or repaired by setup. An invalid explicit path also fails instead of falling through. Keep the executable and firmware library from the same runtime bundle, and use compatible SDK/runtime releases.
+
+Updating an SDK does not upgrade an existing runtime's catalog. Supported operations keep using its format; features it cannot represent require a runtime upgrade. After updating `msb`, local creation/start, snapshot, and volume commands prepare the current catalog automatically. If an upgrade requires stopping active sandboxes, list them with `msb ps`, stop them with `msb stop <name>...`, and retry the command.
+
+Host runtime resolution never downloads or extracts `msb` or `libkrunfw`. Rust's embedded archive is an explicit installation source: call `ensure_runtime` with `InstallSource::EmbeddedArchive` to install it only if no runtime resolves. An existing resolved pair wins even when that installation source is requested.
+
+## Bring your own runtime
+
+You can provision `msb` + `libkrunfw` with the [CLI installer](/getting-started/quickstart) or the SDK helpers below. For a custom location, set `MSB_PATH` and `MSB_LIBKRUNFW_PATH` to the matching pair.
+
+- **Node.js:** npm's platform package bundles both the runtime and the required native addon. External runtime paths are supported, but `--omit=optional` also removes the addon; there is no separate runtime-free package today.
+- **Rust:** runtime embedding is opt-in. To also skip the default Cargo-time runtime download, install with:
+
+```bash
+cargo add microsandbox --no-default-features --features local,net
+```
+
+You can still call Rust's `setup::ensure_runtime()` explicitly at startup with these features.
+
+## Resolve, check, install, and ensure
+
+Rust, Python, TypeScript, and Go expose the same four operations. Resolve selects an existing pair without installing host runtime binaries. Check returns a boolean. Install acquires the selected source and returns the installed pair. Ensure resolves first and installs only when the pair is wholly absent; partial installations and invalid explicit paths remain errors.
+
+| Operation | Rust / Python | TypeScript | Go |
+|-----------|---------------|------------|----|
+| Resolve | `resolve_runtime` | `resolveRuntime` | `ResolveRuntime` |
+| Check | `is_runtime_installed` | `isRuntimeInstalled` | `IsRuntimeInstalled` |
+| Install | `install_runtime` | `installRuntime` | `InstallRuntime` |
+| Ensure | `ensure_runtime` | `ensureRuntime` | `EnsureRuntime` |
+
+Resolve, install, and ensure return a `ResolvedRuntime` containing the executable path, firmware-library path, and origin (`environment`, `sdk_package`, `configuration`, `home`, or `installed`). Rust represents origin with `RuntimeOrigin` variants. TypeScript uses `msbPath` and `libkrunfwPath`, Python and Rust use `msb_path` and `libkrunfw_path`, and Go uses `MSBPath` and `LibkrunfwPath`.
 
 <CodeGroup>
 ```typescript TypeScript
-import { install, isInstalled } from "microsandbox";
+import { ensureRuntime } from "microsandbox";
 
-if (!isInstalled()) {
-  await install();
-}
+const runtime = await ensureRuntime();
+console.log(runtime.msbPath, runtime.libkrunfwPath);
 ```
 
 ```rust Rust
-use microsandbox::setup;
+use microsandbox::{config::GlobalConfig, setup::{InstallOptions, ensure_runtime}};
 
-if !setup::is_installed() {
-    setup::install().await?;
-}
+let runtime = ensure_runtime(&GlobalConfig::default(), InstallOptions::default()).await?;
 ```
 
 ```python Python
-from microsandbox import install, is_installed
+from microsandbox import ensure_runtime
 
-if not is_installed():
-    await install()
+runtime = await ensure_runtime()
+print(runtime.msb_path, runtime.libkrunfw_path)
 ```
 
 ```go Go
-import m "github.com/superradcompany/microsandbox/sdk/go"
+import (
+    "fmt"
+    m "github.com/superradcompany/microsandbox/sdk/go"
+)
 
-if !m.IsInstalled() {
-    if err := m.EnsureInstalled(ctx); err != nil {
-        return err
-    }
+runtime, err := m.EnsureRuntime(ctx, m.RuntimeConfig{}, m.InstallOptions{})
+if err != nil {
+    return err
 }
+fmt.Println(runtime.MSBPath, runtime.LibkrunfwPath)
 ```
 
 ```ruby Ruby
@@ -53,69 +91,97 @@ Microsandbox.install unless Microsandbox.installed?
 ```
 </CodeGroup>
 
-| SDK | Install | Check | Behavior |
-|-----|---------|-------|----------|
-| TypeScript | `install(): Promise<void>` | `isInstalled(): boolean` | Downloads the package's pinned runtime and verifies it. |
-| Rust | `setup::install() -> MicrosandboxResult<()>` | `setup::is_installed() -> bool` | Downloads the SDK's pinned runtime and verifies it. |
-| Python | `install() -> Awaitable[None]` | `is_installed() -> bool` | Installs and verifies the runtime; release wheels normally bundle matching files. |
-| Go | `EnsureInstalled(ctx, ...SetupOption) error` | `IsInstalled() bool` | Installs `msb` and `libkrunfw`; the Go FFI library is embedded separately. |
-| Ruby | `Microsandbox.install` | `Microsandbox.installed?` | Installs and verifies the runtime used by the native extension. |
+Ruby retains its existing setup API. Go's first setup call may materialize and load the SDK's embedded FFI library, as other Go SDK operations do; resolving does not install `msb` or `libkrunfw`.
 
-## Customize installation
+## Read a runtime version
 
-TypeScript and Rust expose builders for custom install roots, versions, verification, and forced downloads. Go exposes `WithSkipDownload()` for pre-provisioned or air-gapped environments. Python and Ruby setup helpers use the default installation behavior.
+TypeScript and Rust can read the Cargo package version embedded in an `msb` executable without running it. This is an optional inspection of the specified file; firmware and a complete runtime installation are not required.
 
 <CodeGroup>
 ```typescript TypeScript
-import { setup } from "microsandbox";
+import { resolveRuntimeVersion } from "microsandbox";
 
-await setup()
-  .baseDir("/opt/microsandbox")
-  .version("0.6.8")
-  .skipVerify(false)
-  .force(true)
-  .install();
+const version = await resolveRuntimeVersion("/path/to/msb");
 ```
 
 ```rust Rust
-use microsandbox::setup::Setup;
+use microsandbox::setup::resolve_runtime_version;
 
-Setup::builder()
-    .base_dir("/opt/microsandbox")
-    .version("0.6.8")
-    .skip_verify(false)
-    .force(true)
-    .build()
-    .install()
-    .await?;
+let version = resolve_runtime_version("/path/to/msb")?;
+```
+</CodeGroup>
+
+Rust returns `Option<setup::Version>` and TypeScript returns `string | null`. Older executables without the version section produce `None` or `null`. Invalid executable metadata, malformed version sections and file access failures are errors. The reader supports ELF, PE and thin or universal Mach-O files, limits metadata reads to 4 MiB and version contents to 256 bytes, and never falls back to executing `msb --version`. Universal Mach-O slices must agree on the version, including section absence. The version identifies the build; it does not authenticate the executable or guarantee feature compatibility.
+
+Sandbox startup separately resolves a tested launch contract for the selected runtime. When embedded version metadata is absent, startup may run a bounded `msb --version` probe and cache the result for that native executable's identity within the SDK process. Replacing the executable invalidates that cache. This startup behavior does not change the read-only version inspection methods above.
+
+## Customize installation
+
+Python, TypeScript, and Go accept a `RuntimeConfig` and `InstallOptions`. Their per-call home and binary-path overrides are layered on persisted global configuration. Rust accepts `GlobalConfig` and `InstallOptions` directly. Environment binary-path overrides retain the highest priority.
+
+Use the directory source to provision a runtime from a flat release-bundle directory containing `msb` and `libkrunfw` side by side, without downloading:
+
+<CodeGroup>
+```typescript TypeScript
+import { installRuntime } from "microsandbox";
+
+const runtime = await installRuntime(
+  { home: "/opt/microsandbox" },
+  { source: "directory", sourcePath: "/opt/runtime-bundle" },
+);
+```
+
+```rust Rust
+use microsandbox::{
+    config::GlobalConfig,
+    setup::{InstallOptions, InstallSource, install_runtime},
+};
+
+let config = GlobalConfig { home: Some("/opt/microsandbox".into()), ..Default::default() };
+let runtime = install_runtime(&config, InstallOptions {
+    source: InstallSource::Directory("/opt/runtime-bundle".into()),
+    ..Default::default()
+}).await?;
+```
+
+```python Python
+from microsandbox import InstallOptions, RuntimeConfig, install_runtime
+
+runtime = await install_runtime(
+    RuntimeConfig(home="/opt/microsandbox"),
+    InstallOptions(source="directory", source_path="/opt/runtime-bundle"),
+)
 ```
 
 ```go Go
-import m "github.com/superradcompany/microsandbox/sdk/go"
-
-// Do not download. Return an error if the runtime was not pre-provisioned.
-if err := m.EnsureInstalled(ctx, m.WithSkipDownload()); err != nil {
+runtime, err := m.InstallRuntime(ctx,
+    m.RuntimeConfig{Home: "/opt/microsandbox"},
+    m.InstallOptions{Source: m.InstallSourceDirectory, SourcePath: "/opt/runtime-bundle"},
+)
+if err != nil {
     return err
 }
 ```
 </CodeGroup>
 
-| Option | SDKs | Description |
-|--------|------|-------------|
-| Install root | TypeScript: `baseDir(path)`<br />Rust: `base_dir(path)` | Override `~/.microsandbox/`. |
-| Runtime version | TypeScript: `version(version)`<br />Rust: `version(version)` | Install a specific runtime version instead of the SDK's pinned version. |
-| Skip verification | TypeScript: `skipVerify(enabled)`<br />Rust: `skip_verify(enabled)` | Skip post-install verification. |
-| Force download | TypeScript: `force(enabled)`<br />Rust: `force(enabled)` | Download again even when matching files are present. |
-| Skip download | Go: `WithSkipDownload()` | Require the runtime to be present without fetching it. |
+| Option | Behavior |
+|--------|----------|
+| Home and binary paths | Select the runtime home or explicit pair for this call. |
+| Source | `release_download` (default), `directory`, `archive`, or `embedded_archive`; directory and archive require a source path. |
+| Version | Select the release to download; defaults to the SDK's pinned release. |
+| Force | Replace a complete installation; never repair a partial pair. |
+| Verify | Verify the installed pair; defaults to true. Go uses `*bool` so its zero value preserves this default. |
+| Expected archive SHA-256 | Validate downloaded, local, or embedded archive bytes before publishing files. |
 
-<span id="go-with-skip-download"></span>
-<span id="go-setupoption"></span>
+An embedded source requires a native SDK built with an embedded runtime archive. If unavailable, explicit installation errors. Ensure still reuses an existing pair before acquisition, even when an embedded source is requested. To require a pre-provisioned runtime, call resolve directly. Each call uses its own configuration; Go no longer caches a process-wide successful setup result.
 
-In Go, `WithSkipDownload()` returns a `SetupOption`, whose exported type is `func(*setupConfig)`. Options apply only to the first `EnsureInstalled()` call.
+## Migrate earlier setup calls
+
+The old Python `install` / `is_installed`, TypeScript `install` / `isInstalled` / `setup` / `Setup`, and Go `EnsureInstalled` / `IsInstalled` / `SetupOption` / `WithSkipDownload` entry points have been removed. Replace installation and availability checks with their runtime-named counterparts. Replace the TypeScript builder with `RuntimeConfig` and `InstallOptions`, Go `EnsureInstalled` with `EnsureRuntime`, and skip-download checks with resolve. Installation and ensure now return the selected pair instead of only indicating success. Rust's existing four operation names and Ruby's API are unchanged.
 
 ## Override runtime paths
 
-The TypeScript, Rust, Python, and Ruby SDKs can override the process-wide `libkrunfw` path directly. Call the setter before creating a local sandbox.
+The TypeScript, Rust, Python, and Ruby SDKs can override process-wide runtime paths directly. Call setters before creating a local sandbox. Automatic package discovery is a fallback and does not occupy the explicit setter slot. A public libkrunfw setter overrides the library for the selected executable, whether that executable comes from configured paths, home, or a package.
 
 <CodeGroup>
 ```typescript TypeScript
@@ -125,9 +191,10 @@ setRuntimeLibkrunfwPath("/opt/microsandbox/lib/libkrunfw.dylib");
 ```
 
 ```rust Rust
-use microsandbox::set_libkrunfw_path;
+use microsandbox::config::{set_sdk_libkrunfw_path, set_sdk_msb_path};
 
-set_libkrunfw_path("/opt/microsandbox/lib/libkrunfw.dylib");
+set_sdk_msb_path("/opt/microsandbox/bin/msb");
+set_sdk_libkrunfw_path("/opt/microsandbox/lib/libkrunfw.dylib");
 ```
 
 ```python Python
@@ -143,14 +210,15 @@ Microsandbox.set_runtime_libkrunfw_path("/opt/microsandbox/lib/libkrunfw.dylib")
 ```
 </CodeGroup>
 
-Environment variables work across the SDKs and take precedence over SDK-provided or configured paths:
+Set runtime paths before constructing a backend. Each backend captures these settings; create a new backend to pick up changes. Environment variables work across the SDKs and take precedence over SDK-provided or user-configured paths. [Managed runtime paths](/enterprise/managed-configuration#apply-configuration-updates) take precedence over all three:
 
 | Variable | Purpose |
 |----------|---------|
 | `MSB_PATH` | Override the `msb` executable used by local SDK operations. |
 | `MSB_LIBKRUNFW_PATH` | Override the `libkrunfw` shared library loaded by the process. |
+| `MSB_AGENTD_PATH` | Override the Agentd guest executable read by `msb` before VM startup. |
 
-Set these process-wide overrides before creating any local sandbox. They do not belong to an individual sandbox configuration.
+Set these process-wide overrides before creating any local sandbox. Prefer setting `MSB_PATH` and `MSB_LIBKRUNFW_PATH` together to select a matching pair. `MSB_PATH` alone may resolve a library adjacent to that executable; `MSB_LIBKRUNFW_PATH` alone is incomplete and fails closed. An incomplete explicit pair is not repaired by falling back to another installation. `MSB_AGENTD_PATH` takes precedence over global `paths.agentd`; the selected file is read eagerly and must name a compatible Linux ELF executable. These variables do not belong to an individual sandbox configuration.
 
 ## Inspect Go versions
 

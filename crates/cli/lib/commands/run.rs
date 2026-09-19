@@ -20,22 +20,8 @@ use crate::{sandbox_config, ui};
 pub struct RunArgs {
     /// Image to use (e.g. alpine, python, ./rootfs, ./disk.qcow2).
     ///
-    /// Mutually exclusive with `--from-snapshot`. May be omitted when a config file supplies
-    /// `image`.
-    #[arg(conflicts_with = "from_snapshot")]
+    /// May be omitted when a config file supplies `image`.
     pub image: Option<String>,
-
-    /// Boot a fresh sandbox from a snapshot artifact (path or name).
-    ///
-    /// The snapshot pins the image; passing `--from-snapshot` is equivalent
-    /// to specifying the snapshot's image plus pre-populating the
-    /// upper layer from the artifact.
-    #[arg(
-        long = "from-snapshot",
-        alias = "from-snap",
-        value_name = "PATH_OR_NAME"
-    )]
-    pub from_snapshot: Option<String>,
 
     /// Run the resolved image command in the background and print the sandbox name.
     ///
@@ -172,7 +158,10 @@ async fn run_new(
 ) -> anyhow::Result<()> {
     let launch_started_at = chrono::Utc::now();
     let resolved = sandbox_config::resolve(&args.sandbox.config)?;
-    let image = resolved.image(args.image.as_deref(), args.from_snapshot.as_deref())?;
+    let image = resolved.image(args.image.as_deref(), None)?;
+    if matches!(image, sandbox_config::ResolvedImage::Snapshot(_)) {
+        anyhow::bail!("snapshot sources require `msb restore SNAPSHOT --name NAME`");
+    }
     let builder = resolved.apply(Sandbox::builder(&name))?;
     let builder = image.apply(builder)?;
     if args.sandbox.log_level.is_none()
@@ -201,9 +190,9 @@ async fn run_new(
     // Create sandbox with pull progress — select attached vs detached mode.
     let builder = builder.detached(args.detach);
     let (mut progress, task) = if args.detach {
-        builder.create_detached_with_pull_progress()?
+        builder.create_detached_with_progress()?
     } else {
-        builder.create_with_pull_progress()?
+        builder.create_with_progress()?
     };
 
     let display_label = image.display();
@@ -214,13 +203,31 @@ async fn run_new(
     };
 
     while let Some(event) = progress.recv().await {
-        display.handle_event(event);
+        display.handle_creation_event(event);
     }
 
     display.finish();
     let sandbox = task
         .await
         .map_err(|e| anyhow::anyhow!("create task panicked: {e}"))??;
+
+    super::common::display_restore_warnings(&sandbox).await;
+
+    if sandbox.config().resumed_from_full_snapshot() {
+        if !args.command.is_empty() {
+            ui::warn(&format!(
+                "command ignored because snapshot restore resumed its captured workload (use `msb exec {name} -- ...` after restore)"
+            ));
+        }
+        if !args.detach {
+            ui::warn(
+                "full snapshot restore resumes in the background because it has no new foreground command to attach",
+            );
+        }
+        sandbox.detach().await;
+        println!("{name}");
+        return Ok(());
+    }
 
     // Detach mode: just print the name and exit.
     if args.detach {
@@ -412,15 +419,9 @@ fn handle_exit(exit_code: i32) -> anyhow::Result<()> {
 /// Describe creation-only inputs that are ignored when reusing an
 /// existing named sandbox.
 fn ignored_existing_inputs(args: &RunArgs) -> Option<&'static str> {
-    match (
-        args.from_snapshot.is_some(),
-        args.sandbox.has_creation_flags(),
-    ) {
-        (true, true) => Some("--from-snapshot and creation flags"),
-        (true, false) => Some("--from-snapshot"),
-        (false, true) => Some("creation flags"),
-        (false, false) => None,
-    }
+    args.sandbox
+        .has_creation_flags()
+        .then_some("creation flags")
 }
 
 /// Warn when a detached run reuses an existing sandbox and includes a command.
@@ -642,10 +643,18 @@ mod tests {
     }
 
     #[test]
-    fn existing_reuse_warns_for_snapshot() {
-        let args = parse_run_args(&["--name", "box", "--detach", "--from-snapshot", "clean"]);
-
-        assert_eq!(ignored_existing_inputs(&args), Some("--from-snapshot"));
+    fn existing_reuse_cannot_silently_ignore_a_snapshot_source() {
+        assert!(
+            TestCli::try_parse_from([
+                "msb",
+                "--name",
+                "box",
+                "--detach",
+                "--from-snapshot",
+                "clean"
+            ])
+            .is_err()
+        );
     }
 
     #[cfg(feature = "net")]
@@ -662,11 +671,86 @@ mod tests {
         assert_eq!(ignored_existing_inputs(&args), Some("creation flags"));
     }
 
+    #[cfg(feature = "net")]
     #[test]
-    fn from_snap_is_an_alias_for_from_snapshot() {
-        let args = parse_run_args(&["--name", "box", "--from-snap", "clean"]);
+    fn protocol_specific_proxy_authentication_flags_parse() {
+        let socks4 = parse_run_args(&[
+            "--proxy",
+            "socks4://127.0.0.1:1080",
+            "--socks4-user-id",
+            "sandbox",
+            "alpine",
+        ]);
+        assert_eq!(socks4.sandbox.socks4_user_id.as_deref(), Some("sandbox"));
 
-        assert_eq!(args.from_snapshot.as_deref(), Some("clean"));
+        let socks5 = parse_run_args(&[
+            "--proxy",
+            "socks5://127.0.0.1:1080",
+            "--socks5-username",
+            "sandbox",
+            "--socks5-password-env",
+            "SOCKS5_PASSWORD",
+            "alpine",
+        ]);
+        assert_eq!(socks5.sandbox.socks5_username.as_deref(), Some("sandbox"));
+        assert_eq!(
+            socks5.sandbox.socks5_password_env.as_deref(),
+            Some("SOCKS5_PASSWORD")
+        );
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn socks5_cli_credentials_require_the_complete_pair() {
+        for auth in [
+            &["--socks5-username", "sandbox"][..],
+            &["--socks5-password-env", "SOCKS5_PASSWORD"][..],
+        ] {
+            let argv = ["msb", "--proxy", "socks5://127.0.0.1:1080"]
+                .into_iter()
+                .chain(auth.iter().copied())
+                .chain(["alpine"]);
+            let error = TestCli::try_parse_from(argv).unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
+        }
+    }
+
+    #[test]
+    fn snapshot_source_and_discarded_alias_are_rejected() {
+        for flag in ["--from-snapshot", "--from-snap"] {
+            assert!(TestCli::try_parse_from(["msb", "--name", "box", flag, "clean"]).is_err());
+        }
+    }
+
+    #[test]
+    fn restore_only_flags_are_rejected_by_run() {
+        for flag in ["--disk-only", "--forked"] {
+            assert!(TestCli::try_parse_from(["msb", "alpine", flag]).is_err());
+        }
+    }
+
+    #[test]
+    fn external_mount_policy_is_explicit_and_requires_full_restore() {
+        for args in [
+            vec!["msb", "alpine", "--external-mount-policy", "relaxed"],
+            vec![
+                "msb",
+                "--from-snapshot",
+                "saved",
+                "--external-mount-policy",
+                "unknown",
+            ],
+            vec![
+                "msb",
+                "--from-snapshot",
+                "saved",
+                "--external-mount-policy",
+                "relaxed",
+                "--disk-only",
+            ],
+        ] {
+            assert!(TestCli::try_parse_from(&args).is_err(), "accepted {args:?}");
+        }
     }
 
     #[test]
@@ -677,24 +761,14 @@ mod tests {
             .unwrap();
         let help = String::from_utf8(help).unwrap();
 
-        assert!(help.contains("--from-snapshot"));
+        assert!(!help.contains("--from-snapshot"));
         assert!(!help.contains("--from-snap "));
     }
 
     #[test]
-    fn existing_reuse_warns_for_snapshot_and_creation_flags() {
-        let args = parse_run_args(&[
-            "--name",
-            "box",
-            "--memory",
-            "1G",
-            "--from-snapshot",
-            "clean",
-        ]);
+    fn existing_reuse_warns_for_creation_flags() {
+        let args = parse_run_args(&["--name", "box", "--memory", "1G"]);
 
-        assert_eq!(
-            ignored_existing_inputs(&args),
-            Some("--from-snapshot and creation flags")
-        );
+        assert_eq!(ignored_existing_inputs(&args), Some("creation flags"));
     }
 }

@@ -2,12 +2,10 @@
 export type ViolationAction =
   | "block"
   | "block-and-log"
-  | "block-and-terminate"
-  | "passthrough";
+  | "block-and-terminate";
 
 export const ViolationActions: readonly ViolationAction[] = [
   "block",
   "block-and-log",
   "block-and-terminate",
-  "passthrough",
 ] as const;

@@ -136,7 +136,7 @@ const (
 	ErrCancelled
 
 	// ErrLibraryNotLoaded indicates the microsandbox library has not been
-	// loaded. Call EnsureInstalled() before using any SDK functions.
+	// loaded. SDK operations load the embedded FFI library automatically.
 	ErrLibraryNotLoaded
 
 	// ErrMetricsDisabled indicates metrics sampling is disabled for this sandbox.
@@ -145,8 +145,8 @@ const (
 	// ErrMetricsUnavailable indicates metrics have no current sample for this sandbox.
 	ErrMetricsUnavailable
 
-	// ErrUnsupportedOperation indicates the sandbox runtime is too old for the
-	// requested feature; restart the sandbox to update it.
+	// ErrUnsupportedOperation indicates that the selected backend or sandbox
+	// runtime does not provide the requested operation.
 	ErrUnsupportedOperation
 
 	// ErrInternal is every other error from the runtime.
@@ -158,6 +158,19 @@ const (
 	// ErrSandboxReplaced indicates that a receiver's name now refers to a
 	// different persisted sandbox identity.
 	ErrSandboxReplaced
+
+	// ErrSnapshotSourceRecovery indicates capture succeeded but source recovery failed.
+	ErrSnapshotSourceRecovery
+
+	// ErrStopTimeout indicates graceful shutdown exceeded its budget without requesting a kill.
+	ErrStopTimeout
+	// ErrRuntimeNotInstalled indicates no runtime pair resolves.
+	ErrRuntimeNotInstalled
+	// ErrRuntimeIncomplete indicates a partial or invalid explicitly selected runtime.
+	ErrRuntimeIncomplete
+	// ErrSandboxStopTimedOut indicates graceful shutdown was not observed
+	// before the SDK's deadline and may still complete asynchronously.
+	ErrSandboxStopTimedOut
 )
 
 func (k ErrorKind) String() string {
@@ -170,6 +183,8 @@ func (k ErrorKind) String() string {
 		return "SandboxAlreadyExists"
 	case ErrSandboxReplaced:
 		return "SandboxReplaced"
+	case ErrSandboxStopTimedOut:
+		return "SandboxStopTimedOut"
 	case ErrSandboxStillRunning:
 		return "SandboxStillRunning"
 	case ErrVolumeNotFound:
@@ -178,6 +193,8 @@ func (k ErrorKind) String() string {
 		return "VolumeAlreadyExists"
 	case ErrExecTimeout:
 		return "ExecTimeout"
+	case ErrStopTimeout:
+		return "StopTimeout"
 	case ErrExecFailed:
 		return "ExecFailed"
 	case ErrFilesystem:
@@ -202,6 +219,8 @@ func (k ErrorKind) String() string {
 		return "SnapshotIntegrity"
 	case ErrSnapshotMigration:
 		return "SnapshotMigration"
+	case ErrSnapshotSourceRecovery:
+		return "SnapshotSourceRecovery"
 	case ErrPatchFailed:
 		return "PatchFailed"
 	case ErrNetworkPolicy:
@@ -222,6 +241,10 @@ func (k ErrorKind) String() string {
 		return "BufferTooSmall"
 	case ErrCancelled:
 		return "Cancelled"
+	case ErrRuntimeNotInstalled:
+		return "RuntimeNotInstalled"
+	case ErrRuntimeIncomplete:
+		return "RuntimeIncomplete"
 	case ErrLibraryNotLoaded:
 		return "LibraryNotLoaded"
 	case ErrMetricsDisabled:
@@ -246,6 +269,38 @@ type Error struct {
 	Message string
 	Cause   error
 }
+
+// PublishedSnapshotArtifact names an artifact published despite source recovery failure.
+type PublishedSnapshotArtifact struct {
+	Kind       string
+	Path       string
+	SnapshotID string
+	Digest     string
+}
+
+// SnapshotSourceRecoveryDetails contains recovery locators. Their presence does not
+// imply the source is running, safely paused, or eligible for ordinary resume.
+type SnapshotSourceRecoveryDetails struct {
+	SourceSandbox    string
+	CheckpointID     string
+	CheckpointRoot   string
+	CheckpointPath   string
+	Artifact         *PublishedSnapshotArtifact
+	Detail           string
+	PublicationError *string
+}
+
+// SnapshotSourceRecoveryError reports partial capture success without losing recovery metadata.
+// Use errors.As to obtain this type; IsKind also recognizes ErrSnapshotSourceRecovery.
+type SnapshotSourceRecoveryError struct {
+	Recovery SnapshotSourceRecoveryDetails
+	err      *Error
+}
+
+func (e *SnapshotSourceRecoveryError) Error() string { return e.err.Error() }
+
+// Unwrap preserves access to the standard SDK error kind.
+func (e *SnapshotSourceRecoveryError) Unwrap() error { return e.err }
 
 // Error implements the error interface.
 //
@@ -291,6 +346,22 @@ func wrapFFI(err error) error {
 	}
 	var fe *ffi.Error
 	if errors.As(err, &fe) {
+		if fe.Kind == ffi.KindSnapshotSourceRecovery && fe.Recovery != nil {
+			r := fe.Recovery
+			recovery := SnapshotSourceRecoveryDetails{
+				SourceSandbox: r.SourceSandbox, CheckpointID: r.CheckpointID,
+				CheckpointRoot: r.CheckpointRoot, CheckpointPath: r.CheckpointPath,
+				Detail: r.Detail, PublicationError: cloneStringPtr(r.PublicationError),
+			}
+			if a := r.Artifact; a != nil {
+				recovery.Artifact = &PublishedSnapshotArtifact{
+					Kind: a.Kind, Path: a.Path, SnapshotID: a.SnapshotID, Digest: a.Digest,
+				}
+			}
+			return &SnapshotSourceRecoveryError{
+				Recovery: recovery, err: &Error{Kind: ErrSnapshotSourceRecovery, Message: fe.Message},
+			}
+		}
 		return &Error{Kind: kindFromFFI(fe.Kind), Message: fe.Message}
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -307,6 +378,8 @@ func kindFromFFI(kind string) ErrorKind {
 		return ErrSandboxAlreadyExists
 	case ffi.KindSandboxReplaced:
 		return ErrSandboxReplaced
+	case ffi.KindSandboxStopTimedOut:
+		return ErrSandboxStopTimedOut
 	case ffi.KindSandboxStillRunning:
 		return ErrSandboxStillRunning
 	case ffi.KindVolumeNotFound:
@@ -315,6 +388,8 @@ func kindFromFFI(kind string) ErrorKind {
 		return ErrVolumeAlreadyExists
 	case ffi.KindExecTimeout:
 		return ErrExecTimeout
+	case ffi.KindStopTimeout:
+		return ErrStopTimeout
 	case ffi.KindNoDefaultCommand:
 		return ErrNoDefaultCommand
 	case ffi.KindFilesystem:
@@ -335,6 +410,8 @@ func kindFromFFI(kind string) ErrorKind {
 		return ErrSnapshotIntegrity
 	case ffi.KindSnapshotMigration:
 		return ErrSnapshotMigration
+	case ffi.KindSnapshotSourceRecovery:
+		return ErrSnapshotSourceRecovery
 	case ffi.KindPatchFailed:
 		return ErrPatchFailed
 	case ffi.KindIO:
@@ -349,6 +426,10 @@ func kindFromFFI(kind string) ErrorKind {
 		return ErrBufferTooSmall
 	case ffi.KindCancelled:
 		return ErrCancelled
+	case "runtime_not_installed":
+		return ErrRuntimeNotInstalled
+	case "runtime_incomplete":
+		return ErrRuntimeIncomplete
 	case ffi.KindLibraryNotLoaded:
 		return ErrLibraryNotLoaded
 	case ffi.KindMetricsDisabled:

@@ -81,6 +81,10 @@ pub struct InstallArgs {
     #[arg(long = "mount-named", value_name = "NAME:DEST[:OPTIONS]")]
     pub mount_named: Vec<String>,
 
+    /// Create private storage removed with the sandbox (`DEST[:OPTIONS]`).
+    #[arg(long = "mount-owned", value_name = "DEST[:OPTIONS]")]
+    pub mount_owned: Vec<String>,
+
     /// Set the default working directory for commands.
     #[arg(short, long)]
     pub workdir: Option<String>,
@@ -151,6 +155,9 @@ pub async fn run(args: InstallArgs) -> anyhow::Result<()> {
     }
     for mount in &args.mount_named {
         validate_mount_named_spec(mount)?;
+    }
+    for mount in &args.mount_owned {
+        super::common::validate_mount_owned_spec(mount)?;
     }
 
     // Validate the same merged builder the generated alias will create, before writing anything.
@@ -434,6 +441,7 @@ fn install_sandbox_opts(args: &InstallArgs) -> SandboxOpts {
         mount_file: args.mount_file.clone(),
         mount_disk: args.mount_disk.clone(),
         mount_named: args.mount_named.clone(),
+        mount_owned: args.mount_owned.clone(),
         workdir: args.workdir.clone(),
         shell: args.shell.clone(),
         env: args.env.clone(),
@@ -488,6 +496,10 @@ fn append_resource_options(parts: &mut Vec<String>, args: &InstallArgs, quote: f
     }
     for mount in &args.mount_named {
         parts.push("--mount-named".into());
+        parts.push(quote(mount));
+    }
+    for mount in &args.mount_owned {
+        parts.push("--mount-owned".into());
         parts.push(quote(mount));
     }
     if let Some(ref workdir) = args.workdir {
@@ -672,6 +684,7 @@ mod tests {
             mount_file: Vec::new(),
             mount_disk: Vec::new(),
             mount_named: Vec::new(),
+            mount_owned: Vec::new(),
             workdir: None,
             shell: None,
             env: Vec::new(),

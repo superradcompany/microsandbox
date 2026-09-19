@@ -8,6 +8,7 @@ use crate::ui;
 // Exports
 //--------------------------------------------------------------------------------------------------
 
+pub mod branch;
 pub mod common;
 pub mod completion;
 pub mod context;
@@ -21,13 +22,16 @@ pub mod list;
 pub mod logs;
 pub mod metrics;
 pub mod modify;
+pub mod pause;
 pub mod ping;
 pub mod ps;
 pub mod pull;
 pub mod registry;
 pub mod remove;
 pub mod restart;
+pub mod restore;
 pub mod run;
+pub mod sandbox;
 pub mod self_cmd;
 pub mod snapshot;
 #[cfg(feature = "ssh")]

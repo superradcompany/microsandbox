@@ -243,6 +243,8 @@ rsync -av ./src/ devbox.msb:/app/
 
 Editors that build on OpenSSH, such as VS Code Remote-SSH, connect to the `devbox.msb` host the same way.
 
+For a walkthrough using a TCP listener, see [Using with VS Code](/examples/development/vscode), including key authorization and troubleshooting.
+
 ## Inactivity timeout
 
 SSH sessions disconnect after 10 minutes without SSH traffic by default. Any SSH input or output resets the timer. This transport timeout is independent of the sandbox lifecycle idle timeout: an SSH disconnect does not stop the sandbox.
@@ -257,7 +259,9 @@ Set a global default in `~/.microsandbox/config.json`. Use `0` to disable the ti
 }
 ```
 
-Override the global value for one CLI session with `--inactivity-timeout 30m`, or disable it with `--no-inactivity-timeout`. The same overrides are available when opening native clients or preparing server endpoints through an SDK:
+Override the user-configured value for one CLI session with `--inactivity-timeout 30m`, or disable it with `--no-inactivity-timeout`. A [managed timeout](/configuration#ssh) takes precedence over these options for local and cloud sessions. Each backend retains its loaded settings; construct a new backend to pick up file changes. This does not configure the hosted cloud SSH gateway.
+
+The same per-session options are available when opening native clients or preparing server endpoints through an SDK:
 
 <CodeGroup>
 ```typescript TypeScript
@@ -288,4 +292,6 @@ persistent, err := sb.SSH().OpenClient(ctx, m.WithSSHClientInactivityTimeout(0))
 ```
 </CodeGroup>
 
-For exact SDK signatures, see the SSH reference for [TypeScript](/sdk/typescript/ssh), [Rust](/sdk/rust/ssh), [Python](/sdk/python/ssh), or [Go](/sdk/go/ssh).
+## Reference
+
+For exact SSH APIs, see [TypeScript](/sdk/typescript/ssh), [Rust](/sdk/rust/ssh), [Python](/sdk/python/ssh), or [Go](/sdk/go/ssh). For terminal workflows and serving SSH connections, see [SSH commands](/cli/ssh-commands).

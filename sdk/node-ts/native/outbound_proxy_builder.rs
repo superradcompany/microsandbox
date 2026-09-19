@@ -4,6 +4,7 @@ use std::rc::Rc;
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
+use microsandbox::sandbox::SecretSource;
 use microsandbox_network::{
     OutboundProxy, OutboundProxyBuilder as RustOutboundProxyBuilder, OutboundProxyConfig,
     Socks4ProxyBuilder as RustSocks4ProxyBuilder, Socks5ProxyBuilder as RustSocks5ProxyBuilder,
@@ -35,7 +36,18 @@ pub struct JsSocks4ProxyBuilder {
 
 /// Builds a SOCKS5 outbound proxy.
 #[napi(js_name = "Socks5ProxyBuilder")]
-pub struct JsSocks5ProxyBuilder;
+pub struct JsSocks5ProxyBuilder {
+    selection: SharedOutboundProxySelection,
+}
+
+/// Host-side source for secret material.
+#[napi(object, js_name = "SecretSourceInput")]
+pub struct JsSecretSourceInput {
+    /// Source kind. Currently only `env` is supported for proxy credentials.
+    pub kind: String,
+    /// Host environment variable name.
+    pub var: String,
+}
 
 //--------------------------------------------------------------------------------------------------
 // Methods
@@ -80,7 +92,9 @@ impl JsOutboundProxyBuilder {
         self.selection.replace(Some(OutboundProxySelection::Socks5(
             builder.socks5(address),
         )));
-        Ok(JsSocks5ProxyBuilder)
+        Ok(JsSocks5ProxyBuilder {
+            selection: Rc::clone(&self.selection),
+        })
     }
 }
 
@@ -100,6 +114,37 @@ impl JsSocks4ProxyBuilder {
         };
         self.selection.replace(Some(OutboundProxySelection::Socks4(
             builder.user_id(user_id),
+        )));
+        Ok(self)
+    }
+}
+
+#[napi]
+impl JsSocks5ProxyBuilder {
+    /// Set username authentication and a host-side password source.
+    #[napi]
+    pub fn credentials(
+        &mut self,
+        username: String,
+        password: JsSecretSourceInput,
+    ) -> Result<&Self> {
+        if password.kind != "env" {
+            return Err(napi::Error::from_reason(format!(
+                "unsupported SOCKS5 password source {:?}; only env is supported",
+                password.kind
+            )));
+        }
+        let builder = self
+            .selection
+            .take()
+            .ok_or_else(|| napi::Error::from_reason("Socks5ProxyBuilder already consumed"))?;
+        let OutboundProxySelection::Socks5(builder) = builder else {
+            return Err(napi::Error::from_reason(
+                "Socks5ProxyBuilder selection was replaced",
+            ));
+        };
+        self.selection.replace(Some(OutboundProxySelection::Socks5(
+            builder.credentials(username, SecretSource::env(password.var)),
         )));
         Ok(self)
     }

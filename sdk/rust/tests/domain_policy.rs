@@ -25,6 +25,7 @@ use test_utils::msb_test;
 /// is three digits; `FAIL` is printed by the shell fallback only when
 /// curl's exit status is non-zero.
 const CURL_FAIL: &str = "FAIL";
+const CURL_IMAGE: &str = "mirror.gcr.io/curlimages/curl";
 
 /// Outbound HTTPS (TCP/443) allow rule for a specific hostname.
 fn allow_domain_https(domain: &str) -> Rule {
@@ -33,6 +34,17 @@ fn allow_domain_https(domain: &str) -> Rule {
         destination: Destination::Domain(domain.parse().expect("valid domain")),
         protocols: vec![Protocol::Tcp],
         ports: vec![PortRange::single(443)],
+        action: Action::Allow,
+    }
+}
+
+/// Outbound HTTP (TCP/80) allow rule for a specific hostname.
+fn allow_domain_http(domain: &str) -> Rule {
+    Rule {
+        direction: Direction::Egress,
+        destination: Destination::Domain(domain.parse().expect("valid domain")),
+        protocols: vec![Protocol::Tcp],
+        ports: vec![PortRange::single(80)],
         action: Action::Allow,
     }
 }
@@ -77,6 +89,27 @@ async fn setup_alpine(name: &str, policy: NetworkPolicy) -> Sandbox {
         .await
         .expect("install curl");
     sb
+}
+
+/// Create a curl sandbox without doing any in-guest package install.
+///
+/// This is useful for policy modes that intentionally make
+/// hostname-only HTTPS allows fail closed before TLS interception is
+/// configured.
+async fn setup_curl(name: &str, policy: NetworkPolicy, strict: bool) -> Sandbox {
+    Sandbox::builder(name)
+        .image(CURL_IMAGE)
+        .cpus(1)
+        .memory(256)
+        .user("0")
+        .network(|n| {
+            let n = n.policy(policy);
+            if strict { n.strict(true) } else { n }
+        })
+        .replace()
+        .create()
+        .await
+        .expect("create sandbox")
 }
 
 async fn stop_and_remove(name: &str) {
@@ -154,6 +187,47 @@ async fn probe_https_with_retry(sb: &Sandbox, url: &str) -> String {
             // exec stream the same way they tolerate a dropped TLS
             // handshake. Persistent exec failures still surface in the
             // final assertion with the original runtime error attached.
+            Err(err) => format!("{CURL_FAIL} exec={err}"),
+        };
+        if reached_server(&last) {
+            return last;
+        }
+    }
+    last
+}
+
+/// Plaintext HTTP probe that overrides the request `Host:` header.
+async fn probe_http_with_host(sb: &Sandbox, url: &str, host: &str) -> String {
+    probe_http_result(sb, url, Some(host))
+        .await
+        .unwrap_or_else(|err| format!("{CURL_FAIL} exec={err}"))
+}
+
+async fn probe_http_result(sb: &Sandbox, url: &str, host: Option<&str>) -> Result<String, String> {
+    let host_header = host
+        .map(|host| format!("-H 'Host: {host}' "))
+        .unwrap_or_default();
+    let cmd = format!(
+        "tmp=$(mktemp); \
+         code=$(curl -sS --http1.1 --max-time 30 -o /dev/null \
+                -w '%{{http_code}}' \
+                {host_header}{url} 2>\"$tmp\"); \
+         exit=$?; \
+         err=$(tr '\\n' ' ' <\"$tmp\"; rm -f \"$tmp\"); \
+         case \"$code\" in \
+             000|\"\") printf 'FAIL exit=%s err=%s' \"$exit\" \"$err\" ;; \
+             *) printf '%s' \"$code\" ;; \
+         esac"
+    );
+    collect_probe_output(sb, &cmd).await
+}
+
+/// `probe_http` with a small retry for the success case.
+async fn probe_http_with_retry(sb: &Sandbox, url: &str) -> String {
+    let mut last = String::new();
+    for _ in 0..3 {
+        last = match probe_http_result(sb, url, None).await {
+            Ok(output) => output,
             Err(err) => format!("{CURL_FAIL} exec={err}"),
         };
         if reached_server(&last) {
@@ -358,6 +432,87 @@ async fn domain_policy_deny_domain_blocks_sni_direct_ip_without_dns_cache() {
     );
 
     stop_and_remove(name).await;
+}
+
+/// Plaintext HTTP authority enforcement: allowing one hostname must not
+/// authorize a request whose HTTP Host header names a different host.
+#[msb_test]
+async fn domain_policy_http_host_header_must_match_allowed_domain() {
+    const ALLOWED_HOST: &str = "example.com";
+    const DENIED_HOST: &str = "example.org";
+
+    let name = "net-domain-policy-http-host-switch";
+    let policy = NetworkPolicy {
+        default_egress: Action::Deny,
+        default_ingress: Action::Allow,
+        rules: vec![allow_domain_http(ALLOWED_HOST)],
+    };
+    let sb = setup_alpine(name, policy).await;
+
+    let allowed_ip = dns_lookup(&sb, ALLOWED_HOST).await;
+    assert!(
+        !allowed_ip.is_empty(),
+        "{ALLOWED_HOST} should resolve when it is explicitly allowed"
+    );
+
+    let allowed_url = format!("http://{ALLOWED_HOST}/");
+    let honest = probe_http_with_retry(&sb, &allowed_url).await;
+    assert!(
+        reached_server(&honest),
+        "honest HTTP request to {ALLOWED_HOST} should be allowed: got `{honest}`"
+    );
+
+    let switched = probe_http_with_host(&sb, &allowed_url, DENIED_HOST).await;
+    assert!(
+        curl_failed(&switched),
+        "HTTP request to {ALLOWED_HOST} with Host: {DENIED_HOST} should be denied: got `{switched}`"
+    );
+
+    stop_and_remove(name).await;
+}
+
+/// Strict hostname policy mode: without TLS interception, HTTPS
+/// carries only DNS/SNI at the gateway. A hostname allow rule should
+/// work normally when strict mode is off, but fail closed when strict
+/// mode is on because the encrypted request authority is opaque.
+#[msb_test]
+async fn domain_policy_strict_blocks_unintercepted_hostname_allow_https() {
+    const ALLOWED_HOST: &str = "example.com";
+
+    let policy = NetworkPolicy {
+        default_egress: Action::Deny,
+        default_ingress: Action::Allow,
+        rules: vec![Rule::allow_dns(), allow_domain_https(ALLOWED_HOST)],
+    };
+
+    let baseline_name = "net-domain-policy-strict-off";
+    let baseline = setup_curl(baseline_name, policy.clone(), false).await;
+    let baseline_dns = dns_lookup(&baseline, ALLOWED_HOST).await;
+    assert!(
+        !baseline_dns.is_empty(),
+        "{ALLOWED_HOST} should resolve when DNS is explicitly allowed"
+    );
+    let baseline_probe =
+        probe_https_with_retry(&baseline, &format!("https://{ALLOWED_HOST}/")).await;
+    assert!(
+        reached_server(&baseline_probe),
+        "hostname-allowed HTTPS should work when strict mode is off: got `{baseline_probe}`"
+    );
+    stop_and_remove(baseline_name).await;
+
+    let strict_name = "net-domain-policy-strict-on";
+    let strict = setup_curl(strict_name, policy, true).await;
+    let strict_dns = dns_lookup(&strict, ALLOWED_HOST).await;
+    assert!(
+        !strict_dns.is_empty(),
+        "{ALLOWED_HOST} should still resolve before strict HTTPS enforcement"
+    );
+    let strict_probe = probe_https(&strict, &format!("https://{ALLOWED_HOST}/")).await;
+    assert!(
+        curl_failed(&strict_probe),
+        "hostname-allowed HTTPS should fail closed when strict mode is on without TLS interception: got `{strict_probe}`"
+    );
+    stop_and_remove(strict_name).await;
 }
 
 /// `deny DomainSuffix(".example.com")` denies DNS for the apex and

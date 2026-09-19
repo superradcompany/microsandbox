@@ -28,7 +28,7 @@ pub struct StopArgs {
     #[arg(short, long)]
     pub force: bool,
 
-    /// Seconds to wait for graceful shutdown before force-killing.
+    /// Graceful completion budget in seconds; timeout fails without killing. Omit to wait indefinitely.
     #[arg(short = 't', long)]
     pub timeout: Option<u64>,
 
@@ -120,5 +120,15 @@ mod tests {
         let args = parse_stop_args(&["msb-28b6f33e", "reborn", "renamed"]);
 
         assert_eq!(args.names, vec!["msb-28b6f33e", "reborn", "renamed"]);
+    }
+
+    #[test]
+    fn default_is_unbounded_and_zero_does_not_select_force() {
+        let ordinary = parse_stop_args(&["reborn"]);
+        assert_eq!(ordinary.timeout, None);
+        assert!(!ordinary.force);
+        let zero = parse_stop_args(&["-t", "0", "reborn"]);
+        assert_eq!(zero.timeout, Some(0));
+        assert!(!zero.force);
     }
 }

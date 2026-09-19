@@ -5,6 +5,7 @@ fn assert_same_type<T: 'static, U: 'static>() {
 }
 
 #[test]
+#[cfg(feature = "engine")]
 fn legacy_module_paths_alias_canonical_modules() {
     assert_same_type::<
         microsandbox_network::backend::SmoltcpBackend,
@@ -31,8 +32,8 @@ fn legacy_module_paths_alias_canonical_modules() {
         microsandbox_network::config::NetworkBuilder,
     >();
     assert_same_type::<
-        microsandbox_network::conn::ConnectionTracker,
-        microsandbox_network::tcp::connection::ConnectionTracker,
+        microsandbox_network::conn::TcpConnectionTracker,
+        microsandbox_network::tcp::connection::TcpConnectionTracker,
     >();
     assert_same_type::<
         microsandbox_network::icmp_relay::IcmpRelay,
@@ -45,4 +46,25 @@ fn legacy_module_paths_alias_canonical_modules() {
 
     let _legacy_proxy = microsandbox_network::proxy::spawn_tcp_proxy;
     let _canonical_proxy = microsandbox_network::tcp::proxy::spawn_tcp_proxy;
+}
+
+#[test]
+fn tls_config_path_remains_available_without_the_engine() {
+    assert_same_type::<microsandbox_network::tls::TlsConfig, microsandbox_types::TlsConfig>();
+}
+
+#[test]
+#[cfg(feature = "engine")]
+#[allow(deprecated)]
+fn deprecated_tracker_names_remain_source_compatible() {
+    assert_same_type::<
+        microsandbox_network::conn::ConnectionTracker,
+        microsandbox_network::tcp::connection::TcpConnectionTracker,
+    >();
+    assert_same_type::<
+        microsandbox_network::tcp::connection::ConnectionTracker,
+        microsandbox_network::tcp::connection::TcpConnectionTracker,
+    >();
+    let _ = microsandbox_network::conn::ConnectionTracker::new(None);
+    let _ = microsandbox_network::tcp::connection::ConnectionTracker::new(None);
 }

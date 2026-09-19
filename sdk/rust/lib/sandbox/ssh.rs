@@ -1,35 +1,50 @@
 //! SSH client and server helpers for sandboxes.
 
 use std::collections::HashMap;
-use std::io::Write;
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
 use bytes::Bytes;
+use microsandbox_agent_client::AgentFrame;
 use microsandbox_protocol::{
-    fs::{
-        FS_CHUNK_SIZE, FsData, FsEntryInfo, FsOp, FsOpenOptions, FsRequest, FsResponse,
-        FsResponseData, FsSetAttrs,
+    bulk::{
+        BULK_FLOW_MASK_GUEST_TO_HOST, BULK_FLOW_MASK_HOST_TO_GUEST, BulkCancel, BulkCancelReason,
+        BulkCredit, BulkFinish, BulkFlow, BulkKind, BulkOffer, BulkReceiveState, BulkRecord,
+        BulkSendState,
     },
-    message::{Message, MessageType},
+    fs::{
+        FS_CHUNK_SIZE, FsEntryInfo, FsOp, FsOpenOptions, FsRequest, FsResponse, FsResponseData,
+        FsSetAttrs,
+    },
+    message::MessageType,
     tcp::{TcpClose, TcpClosed, TcpConnect, TcpConnected, TcpData, TcpEof, TcpFailed},
 };
-use microsandbox_types::EnvVar;
+use microsandbox_types::{ConfigPatch, EnvVar};
 use russh::client::Msg as ClientMsg;
-use russh::keys::{Algorithm, PrivateKey, PrivateKeyWithHashAlg, PublicKeyBase64, load_secret_key};
+use russh::keys::{
+    Algorithm, PrivateKey, PrivateKeyWithHashAlg, PublicKeyBase64, decode_secret_key,
+};
 use russh::server::{Auth, ChannelOpenHandle, Msg, Session};
 use russh::{Channel, ChannelId, ChannelMsg, ChannelOpenFailure, Sig};
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
+use tokio::sync::{Mutex, Notify, mpsc};
 
 use super::attach;
 #[cfg(windows)]
 use super::terminal::{
     WindowsTerminalEvent, WindowsTerminalEventPump, WindowsTerminalGuard, current_terminal_size,
+};
+use crate::config::{
+    DEFAULT_SSH_INACTIVITY_TIMEOUT_SECS, GlobalConfigPatch,
+    layers::{BackendConfig, ConfigLayers, Overlay},
 };
 use crate::sandbox::exec::{ExecControl, ExecEvent, ExecOptions, ExecSink, StdinMode};
 use crate::{MicrosandboxError, MicrosandboxResult, Sandbox, agent::AgentClient, error::Operation};
@@ -44,14 +59,44 @@ pub const DEFAULT_SSH_HOST: &str = "127.0.0.1";
 /// Default SSH listener port used by the CLI adapter.
 pub const DEFAULT_SSH_PORT: u16 = 2222;
 
+/// Native in-process SSH uses a smaller receive window so its bounded duplex transport can always
+/// flush one full window in each direction before either session must process a window adjustment.
+const SSH_IN_PROCESS_WINDOW: u32 = 256 * 1024;
+
+/// One native SSH receive window plus ample encryption/framing overhead per direction.
+const SSH_IN_PROCESS_DUPLEX_CAPACITY: usize = 512 * 1024;
+
+/// Russh's advertised maximum channel packet size.
+const SSH_TCP_PACKET_BYTES: usize = 32 * 1024;
+
+/// Mirrors agentd's largest session-output item queue. The negotiated receive window bounds raw
+/// bytes; this item bound lets control credits pass while russh waits for the peer's output window.
+const TCP_OUTPUT_QUEUE_CAPACITY: usize = 1024;
+
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
+
+/// Inactivity timeout after saved settings, server options, and policy are combined.
+#[derive(Clone, Default, ConfigPatch)]
+pub(crate) struct SshTimeout {
+    #[config_patch(nullable)]
+    inactivity: Option<Duration>,
+}
 
 /// SSH namespace for a sandbox.
 #[derive(Clone)]
 pub struct SandboxSshOps {
     sandbox: Sandbox,
+}
+
+/// Host-side SSH defaults resolved from a local backend when one is available.
+///
+/// Owning these values keeps the rest of the SSH implementation backend-neutral: cloud-only SDK
+/// builds never need to name `LocalBackend` or `LocalConfig`.
+struct LocalSshDefaults {
+    authorized_keys_path: PathBuf,
+    host_key_path: PathBuf,
 }
 
 /// Builder for [`SshClientOptions`].
@@ -160,7 +205,15 @@ struct SshSession {
 impl Drop for SshSession {
     fn drop(&mut self) {
         for state in self.channels.values() {
-            if let ChannelState::Tcp { relay, .. } = state {
+            if let ChannelState::Tcp {
+                input,
+                output,
+                relay,
+                ..
+            } = state
+            {
+                input.abort();
+                output.abort();
                 relay.abort();
             }
         }
@@ -180,11 +233,36 @@ enum ChannelState {
     Tcp {
         id: u32,
         client: Arc<AgentClient>,
+        bulk: Option<Arc<TcpBulkSender>>,
+        /// Host-to-guest relay reading Russh's independent channel stream. Agent backpressure can
+        /// stop this task without stopping the SSH session loop that advances the opposite half.
+        input: tokio::task::JoinHandle<()>,
+        /// SSH output worker. Kept separate from the agent stream pump so a full SSH window cannot
+        /// prevent the pump from dispatching bulk-credit control messages.
+        output: tokio::task::JoinHandle<()>,
         /// Guest-to-SSH relay task. It is aborted on channel/session teardown
         /// so a dropped SSH connection does not leave a stream reader behind.
         relay: tokio::task::JoinHandle<()>,
     },
     Sftp,
+}
+
+/// Host-to-guest credit state shared by SSH callbacks and the guest-to-host relay task.
+struct TcpBulkSender {
+    state: Mutex<BulkSendState>,
+    credit_ready: Notify,
+    closed: AtomicBool,
+}
+
+struct TcpRelayCloseGuard(Option<Arc<TcpBulkSender>>);
+
+enum TcpOutput {
+    Data {
+        payload: Bytes,
+        consumed_offset: Option<u64>,
+    },
+    Eof,
+    Close,
 }
 
 #[derive(Clone)]
@@ -262,7 +340,7 @@ impl SandboxSshOps {
         let term = options.term.clone();
         let sftp = options.sftp;
         let inactivity_timeout = options.inactivity_timeout;
-        let server = self
+        let mut server = self
             .server_with(|opts| {
                 let opts = opts
                     .host_key(host_key)
@@ -272,11 +350,18 @@ impl SandboxSshOps {
                 apply_inactivity_timeout(opts, inactivity_timeout)
             })
             .await?;
+        Arc::get_mut(&mut server.config)
+            .expect("new SSH server config is not shared")
+            .window_size = SSH_IN_PROCESS_WINDOW;
 
-        let (client_stream, server_stream) = tokio::io::duplex(64 * 1024);
+        let (client_stream, server_stream) = tokio::io::duplex(SSH_IN_PROCESS_DUPLEX_CAPACITY);
         let server_task = tokio::spawn(async move { server.serve(server_stream).await });
+        let client_config = russh::client::Config {
+            window_size: SSH_IN_PROCESS_WINDOW,
+            ..Default::default()
+        };
         let mut client = match russh::client::connect_stream(
-            Arc::new(russh::client::Config::default()),
+            Arc::new(client_config),
             client_stream,
             SshClientHandler,
         )
@@ -317,10 +402,7 @@ impl SandboxSshOps {
             handle: client,
             term,
             server_task: Some(server_task),
-            negotiated_version: self
-                .sandbox
-                .local()
-                .map(|local| local.client.negotiated_version()),
+            negotiated_version: local_negotiated_version(&self.sandbox),
         })
     }
 
@@ -348,34 +430,45 @@ impl SandboxSshOps {
         f: impl FnOnce(SshServerOptionsBuilder) -> SshServerOptionsBuilder,
     ) -> MicrosandboxResult<SshServer> {
         let options = f(SshServerOptionsBuilder::default()).build();
-        let local_backend = self.sandbox.backend().as_local();
-        let inactivity_timeout = resolve_inactivity_timeout(
-            options.inactivity_timeout,
-            local_backend.map(|backend| backend.config()),
-        );
+        let local_defaults = local_ssh_defaults(&self.sandbox);
+        let layers = match BackendConfig::for_backend(self.sandbox.backend().as_ref()) {
+            Some(config) => config.ssh_layers(),
+            // Custom backends without device settings retain the built-in timeout.
+            None => ConfigLayers::unmanaged().base(SshTimeoutPatch::builtin()),
+        };
+        let inactivity_timeout = layers
+            .options(SshTimeoutPatch::from_options(options.inactivity_timeout))
+            .build()
+            .into_config()
+            .inactivity;
 
         // Explicit/in-memory key material is backend-neutral. Only the
         // convenience defaults live under the local backend's config/runtime
         // directories, so cloud `open_client()` can keep its ephemeral keys
         // entirely in memory without weakening the public server defaults.
-        let authorized_keys =
-            build_authorized_keys(&options, local_backend.map(|backend| backend.config()))?;
+        let authorized_keys = build_authorized_keys(
+            &options,
+            local_defaults
+                .as_ref()
+                .map(|defaults| defaults.authorized_keys_path.as_path()),
+        )
+        .await?;
         let host_key = match options.host_key {
             Some(key) => key,
             None => {
                 let (host_key_path, secure_parent) = match options.host_key_path {
                     Some(path) => (path, false),
                     None => {
-                        let local_backend = local_backend.ok_or_else(|| {
-                            MicrosandboxError::local_only(Operation::SandboxSshServer)
-                        })?;
-                        (
-                            default_host_key_path(local_backend, self.sandbox.name()),
-                            true,
-                        )
+                        let path = local_defaults
+                            .as_ref()
+                            .map(|defaults| defaults.host_key_path.clone())
+                            .ok_or_else(|| {
+                                MicrosandboxError::local_only(Operation::SandboxSshServer)
+                            })?;
+                        (path, true)
                     }
                 };
-                load_or_create_host_key(&host_key_path, secure_parent)?
+                load_or_create_host_key(&host_key_path, secure_parent).await?
             }
         };
         let config = Arc::new(russh::server::Config {
@@ -801,7 +894,6 @@ impl SshClient {
                         };
                         match msg {
                             ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, .. } => {
-                                use tokio::io::AsyncWriteExt;
                                 stdout.write_all(&data).await?;
                                 stdout.flush().await?;
                             }
@@ -980,6 +1072,105 @@ impl SshServer {
 }
 
 //--------------------------------------------------------------------------------------------------
+// Methods: TcpBulkSender
+//--------------------------------------------------------------------------------------------------
+
+impl TcpBulkSender {
+    fn new(state: BulkSendState) -> Self {
+        Self {
+            state: Mutex::new(state),
+            credit_ready: Notify::new(),
+            closed: AtomicBool::new(false),
+        }
+    }
+
+    async fn send(&self, client: &AgentClient, id: u32, data: Bytes) -> MicrosandboxResult<()> {
+        let mut remaining = data;
+        while !remaining.is_empty() {
+            if self.closed.load(Ordering::Acquire) {
+                return Err(MicrosandboxError::Custom(
+                    "TCP bulk stream is already closed".into(),
+                ));
+            }
+            // Register the waiter before inspecting credit so an update cannot be lost between
+            // the check and the await.
+            let notified = self.credit_ready.notified();
+            let next = {
+                let mut state = self.state.lock().await;
+                let len = remaining
+                    .len()
+                    .min(state.max_record_payload() as usize)
+                    .min(state.available_credit() as usize);
+                if len == 0 {
+                    None
+                } else {
+                    let offset = state.admit(len).map_err(|error| {
+                        MicrosandboxError::Custom(format!("admit TCP bulk record: {error}"))
+                    })?;
+                    Some((offset, len))
+                }
+            };
+
+            let Some((offset, len)) = next else {
+                if self.closed.load(Ordering::Acquire) {
+                    return Err(MicrosandboxError::Custom(
+                        "TCP bulk stream closed while waiting for credit".into(),
+                    ));
+                }
+                notified.await;
+                continue;
+            };
+            client
+                .send_bulk(BulkRecord {
+                    id,
+                    kind: BulkKind::Tcp,
+                    flow: BulkFlow::HostToGuest,
+                    offset,
+                    payload: remaining.split_to(len),
+                })
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn apply_credit(&self, credit: BulkCredit) -> MicrosandboxResult<()> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(MicrosandboxError::Custom(
+                "TCP bulk stream is already closed".into(),
+            ));
+        }
+        self.state
+            .lock()
+            .await
+            .apply_credit(credit)
+            .map_err(|error| {
+                MicrosandboxError::Custom(format!("apply TCP bulk credit: {error}"))
+            })?;
+        self.credit_ready.notify_waiters();
+        Ok(())
+    }
+
+    async fn finish(&self, client: &AgentClient, id: u32) -> MicrosandboxResult<()> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(MicrosandboxError::Custom(
+                "TCP bulk stream is already closed".into(),
+            ));
+        }
+        let finish =
+            self.state.lock().await.finish().map_err(|error| {
+                MicrosandboxError::Custom(format!("finish TCP bulk flow: {error}"))
+            })?;
+        client.send(id, MessageType::BulkFinish, &finish).await?;
+        Ok(())
+    }
+
+    fn close(&self) {
+        self.closed.store(true, Ordering::Release);
+        self.credit_ready.notify_waiters();
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
 // Methods: SshSession
 //--------------------------------------------------------------------------------------------------
 
@@ -1152,12 +1343,14 @@ impl SshSession {
         }
 
         let channel_id = channel.id();
-        drop(channel);
         let req = TcpConnect {
             host: host_to_connect.to_string(),
             port: port_to_connect as u16,
+            bulk: client
+                .supports(MessageType::BulkAccepted)
+                .then(BulkOffer::tcp),
         };
-        let (tcp_id, mut tcp_rx) = client.stream(MessageType::TcpConnect, &req).await?;
+        let (tcp_id, mut tcp_rx) = client.stream_frames(MessageType::TcpConnect, &req).await?;
         let Some(first) = tcp_rx.recv().await else {
             tracing::debug!(
                 host = host_to_connect,
@@ -1167,18 +1360,113 @@ impl SshSession {
             return Ok(false);
         };
 
+        let AgentFrame::Control(first) = first else {
+            tracing::warn!(
+                host = host_to_connect,
+                port = port_to_connect,
+                "ssh direct-tcpip received raw data before connect reply"
+            );
+            return Ok(false);
+        };
         match first.t {
             MessageType::TcpConnected => {
                 let _: TcpConnected = first.payload()?;
+                let (bulk_sender, bulk_receiver) = match req.bulk {
+                    Some(offer) => {
+                        let Some(AgentFrame::Control(accepted_message)) = tcp_rx.recv().await
+                        else {
+                            tracing::warn!(
+                                host = host_to_connect,
+                                port = port_to_connect,
+                                "ssh direct-tcpip stream closed before bulk acceptance"
+                            );
+                            return Ok(false);
+                        };
+                        if accepted_message.t != MessageType::BulkAccepted {
+                            tracing::warn!(
+                                host = host_to_connect,
+                                port = port_to_connect,
+                                message_type = accepted_message.t.as_str(),
+                                "ssh direct-tcpip received unexpected bulk negotiation reply"
+                            );
+                            return Ok(false);
+                        }
+                        let accepted = accepted_message
+                            .payload::<microsandbox_protocol::bulk::BulkAccepted>()?;
+                        let accepted = accepted
+                            .validate_against(
+                                offer,
+                                BulkKind::Tcp,
+                                BULK_FLOW_MASK_HOST_TO_GUEST | BULK_FLOW_MASK_GUEST_TO_HOST,
+                            )
+                            .map_err(|error| {
+                                MicrosandboxError::Custom(format!(
+                                    "invalid TCP bulk acceptance: {error}"
+                                ))
+                            })?;
+                        let sender = BulkSendState::new(
+                            BulkKind::Tcp,
+                            BulkFlow::HostToGuest,
+                            accepted.max_record_payload,
+                            accepted.host_to_guest_credit_limit,
+                        )
+                        .map_err(|error| {
+                            MicrosandboxError::Custom(format!(
+                                "create TCP bulk send state: {error}"
+                            ))
+                        })?;
+                        let receiver = BulkReceiveState::new(
+                            BulkKind::Tcp,
+                            BulkFlow::GuestToHost,
+                            accepted.max_record_payload,
+                            accepted.guest_to_host_credit_limit,
+                            offer.guest_to_host_credit_limit,
+                        )
+                        .map_err(|error| {
+                            MicrosandboxError::Custom(format!(
+                                "create TCP bulk receive state: {error}"
+                            ))
+                        })?;
+                        (Some(Arc::new(TcpBulkSender::new(sender))), Some(receiver))
+                    }
+                    None => (None, None),
+                };
+                let bulk_receiver = bulk_receiver.map(|receiver| Arc::new(Mutex::new(receiver)));
                 let session_handle = session.handle();
+                // Russh already routes channel data into this independent stream before invoking
+                // the handler callbacks. Reading it in a dedicated task means waiting on agent
+                // credit never blocks the session loop that must process reverse window updates.
+                let (channel_reader, channel_writer) = tokio::io::split(channel.into_stream());
+                let input = tokio::spawn(relay_ssh_to_tcp(
+                    channel_id,
+                    tcp_id,
+                    channel_reader,
+                    session_handle.clone(),
+                    Arc::clone(&client),
+                    bulk_sender.as_ref().map(Arc::clone),
+                ));
+                let (output_tx, output_rx) = mpsc::channel(TCP_OUTPUT_QUEUE_CAPACITY);
+                let output = tokio::spawn(relay_tcp_output_to_ssh(
+                    channel_id,
+                    tcp_id,
+                    output_rx,
+                    channel_writer,
+                    session_handle.clone(),
+                    Arc::clone(&client),
+                    bulk_receiver.as_ref().map(Arc::clone),
+                ));
+                let relay_sender = bulk_sender.as_ref().map(Arc::clone);
                 let relay = tokio::spawn(async move {
-                    relay_tcp_to_ssh(channel_id, tcp_rx, session_handle).await;
+                    relay_tcp_to_ssh(tcp_rx, output_tx, relay_sender, bulk_receiver).await;
                 });
                 self.channels.insert(
                     channel_id,
                     ChannelState::Tcp {
                         id: tcp_id,
                         client,
+                        bulk: bulk_sender,
+                        input,
+                        output,
                         relay,
                     },
                 );
@@ -1402,20 +1690,10 @@ impl russh::server::Handler for SshSession {
         data: &[u8],
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
-        let tcp = match self.channels.get(&channel) {
-            Some(ChannelState::Tcp { id, client, .. }) => Some((*id, Arc::clone(client))),
-            _ => None,
-        };
-        if let Some((id, client)) = tcp {
-            client
-                .send(
-                    id,
-                    MessageType::TcpData,
-                    &TcpData {
-                        data: data.to_vec(),
-                    },
-                )
-                .await?;
+        // Direct-TCP data is consumed from the `ChannelStream` installed at channel-open time.
+        // Russh mirrors it there before this callback, so doing work here would duplicate bytes
+        // and, more importantly, couple agent backpressure to the SSH session loop.
+        if matches!(self.channels.get(&channel), Some(ChannelState::Tcp { .. })) {
             return Ok(());
         }
 
@@ -1433,12 +1711,8 @@ impl russh::server::Handler for SshSession {
         channel: ChannelId,
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
-        let tcp = match self.channels.get(&channel) {
-            Some(ChannelState::Tcp { id, client, .. }) => Some((*id, Arc::clone(client))),
-            _ => None,
-        };
-        if let Some((id, client)) = tcp {
-            client.send(id, MessageType::TcpEof, &TcpEof {}).await?;
+        // The channel stream observes EOF independently of the callback path.
+        if matches!(self.channels.get(&channel), Some(ChannelState::Tcp { .. })) {
             return Ok(());
         }
 
@@ -1457,9 +1731,33 @@ impl russh::server::Handler for SshSession {
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
         match self.channels.remove(&channel) {
-            Some(ChannelState::Tcp { id, client, relay }) => {
+            Some(ChannelState::Tcp {
+                id,
+                client,
+                bulk,
+                input,
+                output,
+                relay,
+            }) => {
+                input.abort();
+                output.abort();
                 relay.abort();
-                let _ = client.send(id, MessageType::TcpClose, &TcpClose {}).await;
+                if let Some(bulk) = bulk {
+                    bulk.close();
+                    let _ = client
+                        .cancel_bulk(
+                            id,
+                            &BulkCancel {
+                                kind: BulkKind::Tcp,
+                                reason: BulkCancelReason::CallerCancelled,
+                                message: "SSH direct-tcpip channel was closed".into(),
+                            },
+                        )
+                        .await;
+                } else {
+                    let _ = client.send(id, MessageType::TcpClose, &TcpClose {}).await;
+                    client.forget_stream(id).await;
+                }
             }
             Some(ChannelState::Exec { control, stdin }) => {
                 if let Some(stdin) = stdin {
@@ -1511,8 +1809,51 @@ impl russh::server::Handler for SshSession {
 }
 
 //--------------------------------------------------------------------------------------------------
+// Methods
+//--------------------------------------------------------------------------------------------------
+
+impl SshTimeoutPatch {
+    /// Supply the built-in timeout even when no file or caller sets one.
+    pub(crate) fn builtin() -> Self {
+        Self::new().inactivity(Duration::from_secs(DEFAULT_SSH_INACTIVITY_TIMEOUT_SECS))
+    }
+
+    /// Convert saved or managed whole-second settings; zero disables the timeout.
+    pub(crate) fn from_global(global: &GlobalConfigPatch) -> Self {
+        let mut patch = Self::new();
+        if let Some(secs) = global.ssh.inactivity_timeout_secs {
+            patch.set_inactivity_mut((secs > 0).then(|| Duration::from_secs(secs)));
+        }
+        patch
+    }
+
+    /// Preserve caller omission, explicit disabling, and subsecond durations.
+    fn from_options(timeout: Option<Option<Duration>>) -> Self {
+        let mut patch = Self::new();
+        if let Some(timeout) = timeout {
+            patch.set_inactivity_mut(timeout);
+        }
+        patch
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
+
+impl Overlay for SshTimeoutPatch {
+    fn overlay(self, higher: Self) -> Self {
+        self.overlay(higher)
+    }
+}
+
+impl Drop for TcpRelayCloseGuard {
+    fn drop(&mut self) {
+        if let Some(sender) = &self.0 {
+            sender.close();
+        }
+    }
+}
 
 impl russh::client::Handler for SshClientHandler {
     type Error = anyhow::Error;
@@ -1945,72 +2286,306 @@ impl AsyncWrite for SshStdioStream {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-async fn relay_tcp_to_ssh(
+/// Forward SSH input from Russh's independent channel stream.
+///
+/// This task may wait on guest bulk credit safely: the Russh session loop remains free to process
+/// the opposite direction's channel-window updates and outbound data.
+async fn relay_ssh_to_tcp<R>(
     channel: ChannelId,
-    mut tcp_rx: tokio::sync::mpsc::Receiver<Message>,
+    tcp_id: u32,
+    mut input: R,
     session: russh::server::Handle,
-) {
-    while let Some(msg) = tcp_rx.recv().await {
-        match msg.t {
-            MessageType::TcpData => match msg.payload::<TcpData>() {
-                Ok(data) => {
-                    if session.data(channel, Bytes::from(data.data)).await.is_err() {
-                        return;
+    client: Arc<AgentClient>,
+    bulk_sender: Option<Arc<TcpBulkSender>>,
+) where
+    R: AsyncRead + Unpin,
+{
+    let mut read_buf = vec![0u8; SSH_TCP_PACKET_BYTES];
+    loop {
+        let (result, finished) = match input.read(&mut read_buf).await {
+            Ok(0) => (
+                match bulk_sender.as_ref() {
+                    Some(sender) => sender.finish(&client, tcp_id).await,
+                    None => client
+                        .send(tcp_id, MessageType::TcpEof, &TcpEof {})
+                        .await
+                        .map_err(MicrosandboxError::from),
+                },
+                true,
+            ),
+            Ok(read) => (
+                match bulk_sender.as_ref() {
+                    Some(sender) => {
+                        sender
+                            .send(&client, tcp_id, Bytes::copy_from_slice(&read_buf[..read]))
+                            .await
                     }
-                }
-                Err(e) => {
-                    tracing::warn!("ssh direct-tcpip: failed to decode tcp data: {e}");
-                    let _ = session.close(channel).await;
-                    return;
-                }
-            },
-            MessageType::TcpEof => {
-                if let Err(e) = msg.payload::<TcpEof>() {
-                    tracing::warn!("ssh direct-tcpip: failed to decode tcp eof: {e}");
-                }
-                let _ = session.eof(channel).await;
+                    None => client
+                        .send(
+                            tcp_id,
+                            MessageType::TcpData,
+                            &TcpData {
+                                data: read_buf[..read].to_vec(),
+                            },
+                        )
+                        .await
+                        .map_err(MicrosandboxError::from),
+                },
+                false,
+            ),
+            Err(error) => (
+                Err(MicrosandboxError::Custom(format!(
+                    "read SSH direct-tcpip input: {error}"
+                ))),
+                true,
+            ),
+        };
+
+        if let Err(error) = result {
+            tracing::warn!(
+                channel = ?channel,
+                tcp_id,
+                "ssh direct-tcpip: host-to-guest relay failed: {error}"
+            );
+            if let Some(sender) = &bulk_sender {
+                sender.close();
             }
-            MessageType::TcpClosed => {
-                if let Err(e) = msg.payload::<TcpClosed>() {
-                    tracing::warn!("ssh direct-tcpip: failed to decode tcp closed: {e}");
+            let _ = session.close(channel).await;
+            return;
+        }
+        if finished {
+            return;
+        }
+    }
+}
+
+/// Drain guest TCP data into the independently writable Russh channel stream.
+async fn relay_tcp_output_to_ssh<W>(
+    channel: ChannelId,
+    tcp_id: u32,
+    mut output: mpsc::Receiver<TcpOutput>,
+    mut writer: W,
+    session: russh::server::Handle,
+    client: Arc<AgentClient>,
+    bulk_receiver: Option<Arc<Mutex<BulkReceiveState>>>,
+) where
+    W: AsyncWrite + Unpin,
+{
+    while let Some(event) = output.recv().await {
+        match event {
+            TcpOutput::Data {
+                payload,
+                consumed_offset,
+            } => {
+                if writer.write_all(&payload).await.is_err() {
+                    break;
                 }
-                let _ = session.eof(channel).await;
-                let _ = session.close(channel).await;
-                return;
-            }
-            MessageType::TcpFailed => {
-                match msg.payload::<TcpFailed>() {
-                    Ok(failed) => {
-                        tracing::debug!(
-                            error = failed.error,
-                            "ssh direct-tcpip: guest TCP stream failed"
+                let Some(consumed_offset) = consumed_offset else {
+                    continue;
+                };
+                let Some(receiver) = bulk_receiver.as_ref() else {
+                    tracing::warn!("ssh direct-tcpip: raw output lost its receive state");
+                    break;
+                };
+                let credit = match receiver.lock().await.consume(consumed_offset) {
+                    Ok(credit) => credit,
+                    Err(error) => {
+                        tracing::warn!(
+                            "ssh direct-tcpip: failed to advance TCP bulk credit: {error}"
                         );
+                        break;
                     }
-                    Err(e) => {
-                        tracing::warn!("ssh direct-tcpip: failed to decode tcp failed: {e}");
-                    }
+                };
+                if let Some(credit) = credit
+                    && let Err(error) = client.send(tcp_id, MessageType::BulkCredit, &credit).await
+                {
+                    tracing::warn!(
+                        "ssh direct-tcpip: failed to replenish TCP bulk credit: {error}"
+                    );
+                    break;
                 }
-                let _ = session.close(channel).await;
-                return;
             }
-            _ => {}
+            TcpOutput::Eof => {
+                if writer.shutdown().await.is_err() {
+                    break;
+                }
+            }
+            TcpOutput::Close => break,
         }
     }
 
+    let _ = writer.shutdown().await;
+    // EOF closes only the SSH channel's write half. The terminal guest TcpClosed/TcpFailed event
+    // owns the full channel lifecycle and must emit SSH CLOSE so Russh wakes the input half too.
     let _ = session.close(channel).await;
 }
 
-fn build_authorized_keys(
+/// Pump agent frames without waiting on the SSH channel's output window. The bounded output queue
+/// can hold agentd's complete per-flow record queue, while negotiated credit independently bounds
+/// its payload bytes.
+async fn relay_tcp_to_ssh(
+    mut tcp_rx: tokio::sync::mpsc::Receiver<AgentFrame>,
+    output: mpsc::Sender<TcpOutput>,
+    bulk_sender: Option<Arc<TcpBulkSender>>,
+    bulk_receiver: Option<Arc<Mutex<BulkReceiveState>>>,
+) {
+    let _close_guard = TcpRelayCloseGuard(bulk_sender.as_ref().map(Arc::clone));
+    while let Some(frame) = tcp_rx.recv().await {
+        match frame {
+            AgentFrame::Bulk(record) => {
+                let Some(receiver) = bulk_receiver.as_ref() else {
+                    tracing::warn!("ssh direct-tcpip: raw data arrived without bulk negotiation");
+                    break;
+                };
+                let end = match receiver.lock().await.accept_record(&record) {
+                    Ok(end) => end,
+                    Err(error) => {
+                        tracing::warn!("ssh direct-tcpip: invalid raw TCP record: {error}");
+                        break;
+                    }
+                };
+                if output
+                    .send(TcpOutput::Data {
+                        payload: record.payload,
+                        consumed_offset: Some(end),
+                    })
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            AgentFrame::Control(msg) => match msg.t {
+                MessageType::TcpData => {
+                    if bulk_receiver.is_some() {
+                        tracing::warn!(
+                            "ssh direct-tcpip: CBOR TCP data arrived after bulk acceptance"
+                        );
+                        break;
+                    }
+                    let data = match msg.payload::<TcpData>() {
+                        Ok(data) => data,
+                        Err(error) => {
+                            tracing::warn!("ssh direct-tcpip: failed to decode tcp data: {error}");
+                            break;
+                        }
+                    };
+                    if output
+                        .send(TcpOutput::Data {
+                            payload: Bytes::from(data.data),
+                            consumed_offset: None,
+                        })
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+                MessageType::BulkCredit => {
+                    let Some(sender) = bulk_sender.as_ref() else {
+                        tracing::warn!("ssh direct-tcpip: bulk credit arrived without negotiation");
+                        break;
+                    };
+                    let credit = match msg.payload::<BulkCredit>() {
+                        Ok(credit) => credit,
+                        Err(error) => {
+                            tracing::warn!(
+                                "ssh direct-tcpip: failed to decode TCP bulk credit: {error}"
+                            );
+                            break;
+                        }
+                    };
+                    if let Err(error) = sender.apply_credit(credit).await {
+                        tracing::warn!("ssh direct-tcpip: invalid TCP bulk credit: {error}");
+                        break;
+                    }
+                }
+                MessageType::BulkFinish => {
+                    let Some(receiver) = bulk_receiver.as_ref() else {
+                        tracing::warn!("ssh direct-tcpip: bulk finish arrived without negotiation");
+                        break;
+                    };
+                    let finish = match msg.payload::<BulkFinish>() {
+                        Ok(finish) => finish,
+                        Err(error) => {
+                            tracing::warn!(
+                                "ssh direct-tcpip: failed to decode TCP bulk finish: {error}"
+                            );
+                            break;
+                        }
+                    };
+                    if let Err(error) = receiver.lock().await.accept_finish(finish) {
+                        tracing::warn!("ssh direct-tcpip: invalid TCP bulk finish: {error}");
+                        break;
+                    }
+                    if output.send(TcpOutput::Eof).await.is_err() {
+                        return;
+                    }
+                }
+                MessageType::BulkCancel => {
+                    match msg.payload::<BulkCancel>() {
+                        Ok(cancel) => tracing::debug!(
+                            reason = ?cancel.reason,
+                            message = cancel.message,
+                            "ssh direct-tcpip: guest cancelled TCP bulk stream"
+                        ),
+                        Err(error) => tracing::warn!(
+                            "ssh direct-tcpip: failed to decode TCP bulk cancellation: {error}"
+                        ),
+                    }
+                    break;
+                }
+                MessageType::TcpEof => {
+                    if bulk_receiver.is_some() {
+                        tracing::warn!(
+                            "ssh direct-tcpip: CBOR TCP EOF arrived after bulk acceptance"
+                        );
+                        break;
+                    }
+                    if let Err(error) = msg.payload::<TcpEof>() {
+                        tracing::warn!("ssh direct-tcpip: failed to decode tcp eof: {error}");
+                    }
+                    if output.send(TcpOutput::Eof).await.is_err() {
+                        return;
+                    }
+                }
+                MessageType::TcpClosed => {
+                    if let Err(error) = msg.payload::<TcpClosed>() {
+                        tracing::warn!("ssh direct-tcpip: failed to decode tcp closed: {error}");
+                    }
+                    break;
+                }
+                MessageType::TcpFailed => {
+                    match msg.payload::<TcpFailed>() {
+                        Ok(failed) => tracing::debug!(
+                            error = failed.error,
+                            "ssh direct-tcpip: guest TCP stream failed"
+                        ),
+                        Err(error) => {
+                            tracing::warn!("ssh direct-tcpip: failed to decode tcp failed: {error}")
+                        }
+                    }
+                    break;
+                }
+                _ => {}
+            },
+        }
+    }
+
+    let _ = output.send(TcpOutput::Close).await;
+}
+
+async fn build_authorized_keys(
     options: &SshServerOptions,
-    local_config: Option<&crate::config::GlobalConfig>,
+    default_path: Option<&Path>,
 ) -> MicrosandboxResult<Vec<String>> {
     let mut keys = Vec::new();
     if let Some(path) = &options.authorized_keys_path {
-        keys.extend(load_authorized_keys(path)?);
+        keys.extend(load_authorized_keys(path).await?);
     } else if options.authorized_keys.is_empty() {
-        let config = local_config
+        let path = default_path
             .ok_or_else(|| MicrosandboxError::local_only(Operation::SandboxSshServer))?;
-        keys.extend(load_authorized_keys(&default_authorized_keys_path(config))?);
+        keys.extend(load_authorized_keys(path).await?);
     }
     for key in &options.authorized_keys {
         keys.push(parse_authorized_key(key)?);
@@ -2023,56 +2598,86 @@ fn build_authorized_keys(
     Ok(keys)
 }
 
-fn default_authorized_keys_path(config: &crate::config::GlobalConfig) -> PathBuf {
-    config.ssh_dir().join("authorized_keys")
+fn local_negotiated_version(sandbox: &Sandbox) -> Option<u8> {
+    #[cfg(feature = "local")]
+    {
+        sandbox
+            .local()
+            .map(|local| local.client.negotiated_version())
+    }
+
+    #[cfg(not(feature = "local"))]
+    {
+        let _ = sandbox;
+        None
+    }
 }
 
-fn default_host_key_path(
-    local_backend: &crate::backend::LocalBackend,
-    sandbox_name: &str,
-) -> PathBuf {
-    local_backend
-        .sandboxes_dir()
-        .join(sandbox_name)
-        .join(microsandbox_utils::SSH_SUBDIR)
-        .join("host_ed25519")
+fn local_ssh_defaults(sandbox: &Sandbox) -> Option<LocalSshDefaults> {
+    #[cfg(feature = "local")]
+    {
+        let backend = sandbox.backend().as_local()?;
+        let config = backend.config();
+        Some(LocalSshDefaults {
+            authorized_keys_path: config.ssh_dir().join("authorized_keys"),
+            host_key_path: backend
+                .sandboxes_dir()
+                .join(sandbox.name())
+                .join(microsandbox_utils::SSH_SUBDIR)
+                .join("host_ed25519"),
+        })
+    }
+
+    #[cfg(not(feature = "local"))]
+    {
+        let _ = sandbox;
+        None
+    }
 }
 
-fn load_or_create_host_key(path: &Path, secure_parent: bool) -> MicrosandboxResult<PrivateKey> {
-    if path.exists() {
-        set_private_file_permissions(path)?;
-        return load_secret_key(path, None)
+async fn load_or_create_host_key(
+    path: &Path,
+    secure_parent: bool,
+) -> MicrosandboxResult<PrivateKey> {
+    if tokio::fs::try_exists(path).await? {
+        set_private_file_permissions(path).await?;
+        let secret = tokio::fs::read_to_string(path)
+            .await
+            .map_err(|e| MicrosandboxError::Custom(format!("load SSH host key: {e}")))?;
+        return decode_secret_key(&secret, None)
             .map_err(|e| MicrosandboxError::Custom(format!("load SSH host key: {e}")));
     }
 
     if let Some(parent) = path.parent() {
         if secure_parent {
-            create_secure_dir(parent)?;
+            create_secure_dir(parent).await?;
         } else {
-            std::fs::create_dir_all(parent)?;
+            tokio::fs::create_dir_all(parent).await?;
         }
     }
-    let mut rng = russh::keys::key::safe_rng();
-    let key = PrivateKey::random(&mut rng, Algorithm::Ed25519)
-        .map_err(|e| MicrosandboxError::Custom(format!("generate SSH host key: {e}")))?;
+    let key = {
+        let mut rng = russh::keys::key::safe_rng();
+        PrivateKey::random(&mut rng, Algorithm::Ed25519)
+            .map_err(|e| MicrosandboxError::Custom(format!("generate SSH host key: {e}")))?
+    };
     let encoded = key
         .to_openssh(russh::keys::ssh_key::LineEnding::LF)
         .map_err(|e| MicrosandboxError::Custom(format!("encode SSH host key: {e}")))?;
-    let mut open_options = std::fs::OpenOptions::new();
+    let mut open_options = tokio::fs::OpenOptions::new();
     open_options.create_new(true).write(true);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::OpenOptionsExt;
         open_options.mode(0o600);
     }
-    let mut file = open_options.open(path)?;
-    file.write_all(encoded.as_bytes())?;
-    set_private_file_permissions(path)?;
+    let mut file = open_options.open(path).await?;
+    file.write_all(encoded.as_bytes()).await?;
+    file.flush().await?;
+    set_private_file_permissions(path).await?;
     Ok(key)
 }
 
-fn load_authorized_keys(path: &Path) -> MicrosandboxResult<Vec<String>> {
-    let content = std::fs::read_to_string(path).map_err(|error| {
+async fn load_authorized_keys(path: &Path) -> MicrosandboxResult<Vec<String>> {
+    let content = tokio::fs::read_to_string(path).await.map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
             MicrosandboxError::Custom(format!(
                 "SSH authorized keys not found at {}; add one with `msb ssh authorize --file ~/.ssh/id_ed25519.pub`",
@@ -2119,21 +2724,21 @@ fn parse_authorized_key(line: &str) -> MicrosandboxResult<String> {
     Ok(key.public_key_base64())
 }
 
-fn create_secure_dir(path: &Path) -> MicrosandboxResult<()> {
-    std::fs::create_dir_all(path)?;
+async fn create_secure_dir(path: &Path) -> MicrosandboxResult<()> {
+    tokio::fs::create_dir_all(path).await?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+        tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).await?;
     }
     Ok(())
 }
 
-fn set_private_file_permissions(_path: &Path) -> MicrosandboxResult<()> {
+async fn set_private_file_permissions(_path: &Path) -> MicrosandboxResult<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(_path, std::fs::Permissions::from_mode(0o600))?;
+        tokio::fs::set_permissions(_path, std::fs::Permissions::from_mode(0o600)).await?;
     }
     Ok(())
 }
@@ -2215,7 +2820,7 @@ fn signal_to_libc(signal: Sig) -> Option<i32> {
 }
 
 async fn sftp_response(client: &AgentClient, op: FsOp) -> MicrosandboxResult<FsResponse> {
-    let req = FsRequest { op };
+    let req = FsRequest { op, bulk: None };
     let resp_msg = client.request(MessageType::FsRequest, &req).await?;
     let resp: FsResponse = resp_msg.payload()?;
     if resp.ok {
@@ -2288,90 +2893,45 @@ async fn sftp_close_handle(
 }
 
 async fn sftp_read_handle(
-    client: &AgentClient,
+    client: &Arc<AgentClient>,
     handle: crate::sandbox::fs::FsHandle,
     offset: u64,
     len: Option<u64>,
 ) -> MicrosandboxResult<Bytes> {
-    let req = FsRequest {
-        op: FsOp::Read {
-            handle,
-            offset,
-            len,
-        },
-    };
-    let (_id, mut rx) = client.stream(MessageType::FsRequest, &req).await?;
-
+    let mut stream = crate::sandbox::fs::agent::read_handle_stream(
+        Arc::clone(client),
+        handle,
+        offset,
+        len,
+        None,
+    )
+    .await?;
     let mut data = Vec::new();
-    while let Some(msg) = rx.recv().await {
-        match msg.t {
-            MessageType::FsData => {
-                let chunk: FsData = msg.payload()?;
-                data.extend_from_slice(&chunk.data);
-            }
-            MessageType::FsResponse => {
-                let resp: FsResponse = msg.payload()?;
-                if resp.ok {
-                    return Ok(Bytes::from(data));
-                }
-                return Err(MicrosandboxError::SandboxFsOps(
-                    resp.error.unwrap_or_else(|| "unknown error".into()),
-                ));
-            }
-            _ => {}
-        }
+    while let Some(chunk) = stream.recv().await? {
+        data.extend_from_slice(&chunk);
     }
-
-    Err(MicrosandboxError::SandboxFsOps(
-        "channel closed before read response".into(),
-    ))
+    Ok(Bytes::from(data))
 }
 
 async fn sftp_write_handle(
-    client: &AgentClient,
+    client: &Arc<AgentClient>,
     handle: crate::sandbox::fs::FsHandle,
     offset: u64,
     data: Vec<u8>,
 ) -> MicrosandboxResult<()> {
-    let req = FsRequest {
-        op: FsOp::Write {
-            handle,
-            offset,
-            len: Some(data.len() as u64),
-        },
-    };
-    let (id, mut rx) = client.stream(MessageType::FsRequest, &req).await?;
-
+    let sink = crate::sandbox::fs::agent::write_handle_stream(
+        Arc::clone(client),
+        handle,
+        offset,
+        Some(data.len() as u64),
+        None,
+        true,
+    )
+    .await?;
     for chunk in data.chunks(FS_CHUNK_SIZE) {
-        client
-            .send(
-                id,
-                MessageType::FsData,
-                &FsData {
-                    data: chunk.to_vec(),
-                },
-            )
-            .await?;
+        sink.write(chunk).await?;
     }
-    client
-        .send(id, MessageType::FsData, &FsData { data: Vec::new() })
-        .await?;
-
-    while let Some(msg) = rx.recv().await {
-        if msg.t == MessageType::FsResponse {
-            let resp: FsResponse = msg.payload()?;
-            if resp.ok {
-                return Ok(());
-            }
-            return Err(MicrosandboxError::SandboxFsOps(
-                resp.error.unwrap_or_else(|| "unknown error".into()),
-            ));
-        }
-    }
-
-    Err(MicrosandboxError::SandboxFsOps(
-        "channel closed before write response".into(),
-    ))
+    sink.close().await
 }
 
 async fn sftp_stat(
@@ -2542,18 +3102,6 @@ fn apply_inactivity_timeout(
     }
 }
 
-fn resolve_inactivity_timeout(
-    timeout: Option<Option<Duration>>,
-    local_config: Option<&crate::config::GlobalConfig>,
-) -> Option<Duration> {
-    timeout.unwrap_or_else(|| {
-        let secs = local_config
-            .map(|config| config.ssh.inactivity_timeout_secs)
-            .unwrap_or(crate::config::DEFAULT_SSH_INACTIVITY_TIMEOUT_SECS);
-        (secs > 0).then(|| Duration::from_secs(secs))
-    })
-}
-
 fn default_ssh_term() -> String {
     match std::env::var("TERM") {
         Ok(term) if !term.trim().is_empty() && term != "dumb" => term,
@@ -2561,7 +3109,6 @@ fn default_ssh_term() -> String {
     }
 }
 
-#[cfg(unix)]
 #[cfg(unix)]
 fn terminal_path_for_fd(fd: std::os::fd::RawFd) -> std::io::Result<std::path::PathBuf> {
     let mut buf = [0u8; 1024];
@@ -2586,7 +3133,6 @@ fn terminal_path_for_fd(fd: std::os::fd::RawFd) -> std::io::Result<std::path::Pa
 }
 
 #[cfg(unix)]
-#[cfg(unix)]
 fn open_nonblocking_terminal_input(path: &std::path::Path) -> std::io::Result<std::fs::File> {
     use std::os::fd::AsRawFd;
 
@@ -2602,7 +3148,6 @@ fn open_nonblocking_terminal_input(path: &std::path::Path) -> std::io::Result<st
     Ok(file)
 }
 
-#[cfg(unix)]
 #[cfg(unix)]
 fn read_from_fd(fd: std::os::fd::RawFd, buf: &mut [u8]) -> std::io::Result<usize> {
     let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
@@ -2625,8 +3170,218 @@ fn ssh_error(context: &str, error: impl std::fmt::Display) -> MicrosandboxError 
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn persisted_ssh_keys_are_reused_with_private_permissions() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ssh/host_ed25519");
+        let key = load_or_create_host_key(&path, true).await.unwrap();
+        let reloaded = load_or_create_host_key(&path, true).await.unwrap();
+        assert_eq!(key.public_key(), reloaded.public_key());
+
+        let authorized_keys = dir.path().join("authorized_keys");
+        tokio::fs::write(&authorized_keys, key.public_key().to_openssh().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            load_authorized_keys(&authorized_keys).await.unwrap(),
+            vec![key.public_key().public_key_base64()]
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for (path, mode) in [(path.as_path(), 0o600), (path.parent().unwrap(), 0o700)] {
+                let permissions = tokio::fs::metadata(path).await.unwrap().permissions();
+                assert_eq!(permissions.mode() & 0o777, mode);
+            }
+        }
+    }
+
     #[test]
-    fn explicit_authorized_key_does_not_require_local_config() {
+    fn ssh_timeout_preserves_subseconds_and_managed_disable() {
+        let global: GlobalConfigPatch =
+            serde_json::from_str(r#"{"ssh":{"inactivity_timeout_secs":30}}"#).unwrap();
+        let layers = BackendConfig::new(global.clone(), Default::default());
+        let subsecond = Some(Some(Duration::from_millis(250)));
+        assert_eq!(
+            layers
+                .ssh_layers()
+                .options(SshTimeoutPatch::from_options(subsecond))
+                .build()
+                .into_config()
+                .inactivity,
+            subsecond.flatten()
+        );
+        assert_eq!(
+            layers
+                .ssh_layers()
+                .options(SshTimeoutPatch::from_options(Some(None)))
+                .build()
+                .into_config()
+                .inactivity,
+            None
+        );
+        assert_eq!(
+            layers
+                .ssh_layers()
+                .options(SshTimeoutPatch::from_options(None))
+                .build()
+                .into_config()
+                .inactivity,
+            Some(Duration::from_secs(30))
+        );
+        let layers = BackendConfig::new(
+            global.clone(),
+            serde_json::from_str(r#"{"ssh":{"inactivity_timeout_secs":0}}"#).unwrap(),
+        );
+        assert_eq!(
+            layers
+                .ssh_layers()
+                .options(SshTimeoutPatch::from_options(subsecond))
+                .build()
+                .into_config()
+                .inactivity,
+            None
+        );
+        let layers = BackendConfig::new(
+            global.clone(),
+            serde_json::from_str(r#"{"ssh":{"inactivity_timeout_secs":10}}"#).unwrap(),
+        );
+        assert_eq!(
+            layers
+                .ssh_layers()
+                .options(SshTimeoutPatch::from_options(Some(None)))
+                .build()
+                .into_config()
+                .inactivity,
+            Some(Duration::from_secs(10))
+        );
+    }
+
+    #[test]
+    fn ssh_timeout_source_matrix() {
+        for saved in [None, Some(0), Some(30)] {
+            for managed in [None, Some(0), Some(10)] {
+                for option in [None, Some(None), Some(Some(Duration::from_millis(250)))] {
+                    let patch = |secs| {
+                        let mut global = GlobalConfigPatch::new();
+                        global.ssh.inactivity_timeout_secs = secs;
+                        global
+                    };
+                    let layers = BackendConfig::new(patch(saved), patch(managed));
+                    let seconds = |secs| {
+                        if secs == 0 {
+                            None
+                        } else {
+                            Some(Duration::from_secs(secs))
+                        }
+                    };
+                    let expected = managed
+                        .map(seconds)
+                        .or(option)
+                        .or(saved.map(seconds))
+                        .unwrap_or(Some(Duration::from_secs(
+                            DEFAULT_SSH_INACTIVITY_TIMEOUT_SECS,
+                        )));
+                    assert_eq!(
+                        layers
+                            .ssh_layers()
+                            .options(SshTimeoutPatch::from_options(option))
+                            .build()
+                            .into_config()
+                            .inactivity,
+                        expected,
+                        "saved={saved:?}, managed={managed:?}, option={option:?}"
+                    );
+                }
+            }
+        }
+        assert!(
+            serde_json::from_str::<GlobalConfigPatch>(
+                r#"{"ssh":{"inactivity_timeout_secs":null}}"#
+            )
+            .is_err()
+        );
+    }
+
+    fn resolve_inactivity_timeout(
+        timeout: Option<Option<Duration>>,
+        config: Option<&crate::config::GlobalConfig>,
+    ) -> Option<Duration> {
+        crate::config::layers::BackendConfig::new(
+            config
+                .map(|config| config.clone().into())
+                .unwrap_or_default(),
+            Default::default(),
+        )
+        .ssh_layers()
+        .options(SshTimeoutPatch::from_options(timeout))
+        .build()
+        .into_config()
+        .inactivity
+    }
+
+    #[cfg(feature = "cloud")]
+    #[tokio::test]
+    async fn cloud_ssh_uses_its_captured_policy_above_session_options() {
+        let ambient_policy =
+            serde_json::from_str(r#"{"ssh":{"inactivity_timeout_secs":99}}"#).unwrap();
+        let ambient = crate::CloudBackend::builder()
+            .url("https://other-cloud.example")
+            .api_key("test-token")
+            .config_sources(BackendConfig::new(Default::default(), ambient_policy))
+            .build()
+            .unwrap();
+        let key =
+            PrivateKey::random(&mut russh::keys::key::safe_rng(), Algorithm::Ed25519).unwrap();
+        let public_key = key.public_key().public_key_base64();
+        crate::backend::with_backend(ambient, async {
+            for managed in [None, Some(0), Some(10)] {
+                let saved =
+                    serde_json::from_str(r#"{"ssh":{"inactivity_timeout_secs":30}}"#).unwrap();
+                let mut policy = GlobalConfigPatch::new();
+                policy.ssh.inactivity_timeout_secs = managed;
+                let cloud = crate::CloudBackend::builder()
+                    .url("https://cloud.example")
+                    .api_key("test-token")
+                    .config_sources(BackendConfig::new(saved, policy))
+                    .build()
+                    .unwrap();
+                let sandbox = Sandbox::from_cloud_state(
+                    Arc::new(cloud),
+                    crate::backend::SandboxCloudState {
+                        id: "test-sandbox".into(),
+                        org_id: "test-org".into(),
+                        created_at: chrono::Utc::now(),
+                    },
+                    "cloud-timeout".into(),
+                    crate::SandboxConfig::default(),
+                );
+                for timeout in [None, Some(None), Some(Some(Duration::from_millis(250)))] {
+                    let server = sandbox
+                        .ssh()
+                        .server_with(|options| {
+                            let options = options
+                                .host_key(key.clone())
+                                .authorized_key(public_key.clone());
+                            apply_inactivity_timeout(options, timeout)
+                        })
+                        .await
+                        .unwrap();
+                    let expected = match managed {
+                        Some(0) => None,
+                        Some(seconds) => Some(Duration::from_secs(seconds)),
+                        None => timeout.unwrap_or(Some(Duration::from_secs(30))),
+                    };
+                    assert_eq!(server.config.inactivity_timeout, expected);
+                }
+            }
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn explicit_authorized_key_does_not_require_local_config() {
         let mut rng = russh::keys::key::safe_rng();
         let key = PrivateKey::random(&mut rng, Algorithm::Ed25519).unwrap();
         let public_key = key.public_key().public_key_base64();
@@ -2634,16 +3389,16 @@ mod tests {
             .authorized_key(public_key.clone())
             .build();
 
-        let keys = build_authorized_keys(&options, None).unwrap();
+        let keys = build_authorized_keys(&options, None).await.unwrap();
 
         assert_eq!(keys, vec![public_key]);
     }
 
-    #[test]
-    fn implicit_authorized_key_path_still_requires_local_config() {
+    #[tokio::test]
+    async fn implicit_authorized_key_path_still_requires_local_config() {
         let options = SshServerOptionsBuilder::default().build();
 
-        let error = build_authorized_keys(&options, None).unwrap_err();
+        let error = build_authorized_keys(&options, None).await.unwrap_err();
 
         assert!(matches!(error, MicrosandboxError::Unsupported { .. }));
     }
@@ -2658,27 +3413,59 @@ mod tests {
 
     #[test]
     fn inactivity_timeout_uses_global_config() {
-        let mut config = crate::config::GlobalConfig::default();
-        config.ssh.inactivity_timeout_secs = 1800;
-
         assert_eq!(
-            resolve_inactivity_timeout(None, Some(&config)),
+            resolve_inactivity_timeout(
+                None,
+                Some(&crate::config::GlobalConfig {
+                    ssh: crate::config::SshConfig {
+                        inactivity_timeout_secs: 1800
+                    },
+                    ..Default::default()
+                })
+            ),
             Some(Duration::from_secs(1800))
         );
 
-        config.ssh.inactivity_timeout_secs = 0;
-        assert_eq!(resolve_inactivity_timeout(None, Some(&config)), None);
+        assert_eq!(
+            resolve_inactivity_timeout(
+                None,
+                Some(&crate::config::GlobalConfig {
+                    ssh: crate::config::SshConfig {
+                        inactivity_timeout_secs: 0
+                    },
+                    ..Default::default()
+                })
+            ),
+            None
+        );
     }
 
     #[test]
     fn inactivity_timeout_per_call_override_wins() {
-        let config = crate::config::GlobalConfig::default();
-
         assert_eq!(
-            resolve_inactivity_timeout(Some(Some(Duration::from_secs(30))), Some(&config)),
+            resolve_inactivity_timeout(
+                Some(Some(Duration::from_secs(30))),
+                Some(&crate::config::GlobalConfig {
+                    ssh: crate::config::SshConfig {
+                        inactivity_timeout_secs: 1800
+                    },
+                    ..Default::default()
+                })
+            ),
             Some(Duration::from_secs(30))
         );
-        assert_eq!(resolve_inactivity_timeout(Some(None), Some(&config)), None);
+        assert_eq!(
+            resolve_inactivity_timeout(
+                Some(None),
+                Some(&crate::config::GlobalConfig {
+                    ssh: crate::config::SshConfig {
+                        inactivity_timeout_secs: 1800
+                    },
+                    ..Default::default()
+                })
+            ),
+            None
+        );
     }
 }
 

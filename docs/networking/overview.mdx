@@ -53,7 +53,21 @@ The TypeScript and Rust examples disable the network device. Python `Network.non
 
 <Tooltip tip="Managed cloud deployments choose the platform isolation profile; per-sandbox and local-operator profile overrides are not accepted."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
-`single-tenant` is the default and preserves the network configuration requested by the sandbox. `multi-tenant` adds a host-runtime isolation floor: traffic must pass both the platform public-network policy and the sandbox's policy, DNS rebinding protection is forced on, custom DNS servers and interface overrides are removed, host CA import and published ports are disabled, and connection limits are capped. Sandbox policy can further restrict this floor but cannot broaden it.
+`single-tenant` is the default and preserves the network configuration requested by the sandbox. `multi-tenant` adds a host-runtime isolation floor: traffic must pass both the platform public-network policy and the sandbox's policy, and DNS rebinding protection is forced on. Custom DNS servers and interface overrides are removed, host CA import and published ports are disabled. Sandbox policy can further restrict this floor but cannot broaden it.
+
+The per-sandbox `maxTcpConnections` setting optionally limits concurrent TCP connections. `maxConnections` remains a deprecated TCP-only alias. When omitted, `single-tenant` has no connection-count cap and `multi-tenant` defaults to 1,024. An explicit positive value overrides either default; zero explicitly selects unlimited. These are runtime defaults, not operator-enforced ceilings. Services accepting tenant configuration must enforce their own policy on overrides.
+
+Legacy v0.6.x launch contracts keep their historical default of 256 TCP connections when the limit is omitted. The current SDK rejects explicit unlimited TCP connections, values above 4,096, or multi-tenant values above 256 when launching an older runtime because those peers cannot preserve the requested meaning. A current runtime also rejects legacy zero TCP limits: old zero meant deny all connections, not unlimited. Current-contract defaults and explicit limits are unchanged.
+
+`maxUdpConnections` independently limits host-side UDP relay sessions. Omission is unlimited in `single-tenant` mode and defaults to 1,024 in `multi-tenant` mode; zero explicitly selects unlimited. At a finite limit, a new session evicts the least recently active session. Sessions expire after 60 seconds of inactivity. Historical runtime launch contracts do not support an explicit UDP limit, including zero; the SDK rejects that override with an upgrade-required error instead of silently ignoring it.
+
+Each tracked TCP socket currently allocates 64 KiB for receiving and 64 KiB for
+sending. A ceiling of 1024 therefore requires up to 128 MiB of socket-buffer
+capacity per sandbox, in addition to other runtime allocations. Reserve that
+capacity on the host when configuring a ceiling. Selecting unlimited does not
+remove memory or operating-system resource constraints. Closing sockets remain tracked
+until their TCP state permits removal. Host file descriptors and shared egress
+source ports impose additional constraints.
 
 <CodeGroup>
 ```typescript TypeScript
@@ -211,6 +225,14 @@ msb create alpine --name restricted-worker \
 
 Rules can target groups like `public`, `private`, and `host`, or specific IPs, CIDRs, domains, and port ranges. See the [CLI reference](/cli/sandbox-commands#network-rule-syntax) or your language's SDK networking reference for exact syntax.
 
+## Hostname rules and HTTPS
+
+Domain and domain-suffix rules start with the hostname microsandbox can observe. DNS rules see the query name, and TLS connections usually expose SNI before the encrypted session starts. That is enough to decide whether a connection may be opened, but it is not the same as seeing the HTTP request authority.
+
+For plaintext HTTP, microsandbox can inspect the `Host` header and require it to match the hostname that policy allowed. For HTTPS without TLS interception, or for a host that is configured to bypass interception, the HTTP `Host` header and HTTP/2 `:authority` value are encrypted. In that case microsandbox cannot prove which application hostname the request is using after the TLS session starts.
+
+Set strict hostname policy mode when hostname allowlists should fail closed unless microsandbox can inspect the request authority. In strict mode, hostname-based allow rules still work for plaintext HTTP and TLS-intercepted HTTPS. Non-intercepted HTTPS is denied when it would otherwise be allowed only by a hostname rule. IP, CIDR, group, and default allow rules are not treated as hostname-based allows.
+
 ## Port mapping
 
 <Tooltip tip="Publishing host ports is not available on microsandbox cloud; there is no local host to publish to."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
@@ -341,9 +363,14 @@ msb create python --name devbox --net "public,host"
 
 `loopback` means the sandbox's own `127.0.0.1`, not your laptop's localhost. Use `host` for `host.microsandbox.internal`.
 
+## Reference
+
+For exact network APIs, see [TypeScript](/sdk/typescript/networking), [Rust](/sdk/rust/networking), [Python](/sdk/python/networking), or [Go](/sdk/go/networking). For CLI flags and configuration fields, see [Sandbox commands](/cli/sandbox-commands#network-profiles) and [Sandbox configuration](/cli/configuration#network).
+
 ## Next
 
-- [DNS](/networking/dns): domain blocking, pinned nameservers, query timeouts
-- [TLS MITM](/networking/tls): HTTPS inspection with an auto-generated CA
-- [Outbound proxy](/networking/outbound-proxy): route outbound TCP through an external SOCKS4 or SOCKS5 proxy
-- [Security model](/security/overview): the trust boundary, and [network defenses](/security/network) for SSRF, rebinding, and metadata protection
+- [DNS](/networking/dns): domain blocking, pinned nameservers, and query timeouts
+- [Proxies](/networking/outbound-proxy): route outbound TCP and non-DNS UDP through an external SOCKS proxy
+- [TLS inspection](/networking/tls): inspect HTTPS with an auto-generated CA
+- [Host sockets](/networking/host-sockets): connect guest applications to local host IPC without opening a TCP port
+- [Security model](/security/overview): understand the trust boundary, and [network defenses](/security/network) for SSRF, rebinding, and metadata protection
