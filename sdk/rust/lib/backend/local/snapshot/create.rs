@@ -1405,7 +1405,7 @@ async fn capture_disk_source(
         .filter(sandbox_entity::Column::Name.eq(source))
         .one(local.db().await?.read())
         .await?;
-    if !current.is_some_and(|model| model.id == source_id) {
+    if current.is_none_or(|model| model.id != source_id) {
         return Err(MicrosandboxError::Runtime(
             "snapshot source was replaced during disk capture; retry with the current sandbox"
                 .into(),

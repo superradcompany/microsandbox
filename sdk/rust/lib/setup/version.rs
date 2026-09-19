@@ -199,7 +199,7 @@ fn read_macho<M: MachHeader>(reader: MetadataReader<'_>) -> io::Result<Option<Ve
             for section in segment.sections(endian, data).map_err(invalid)? {
                 if section.name() == b"__msbver" && section.segment_name() == b"__TEXT" {
                     let (offset, size) = section
-                        .file_range(endian)
+                        .file_range(endian, u64::from(section.offset(endian)))
                         .ok_or_else(|| invalid("version section has no file data"))?;
                     collect_version(reader, offset, size, &mut version)?;
                 }
@@ -213,7 +213,12 @@ fn read_pe<P: ImageNtHeaders>(reader: MetadataReader<'_>) -> io::Result<Option<V
     let dos = object::pe::ImageDosHeader::parse(reader).map_err(invalid)?;
     let mut offset = u64::from(dos.nt_headers_offset());
     let (header, _) = P::parse(reader, &mut offset).map_err(invalid)?;
-    if header.file_header().characteristics.get(LE) & object::pe::IMAGE_FILE_EXECUTABLE_IMAGE == 0 {
+    if !header
+        .file_header()
+        .characteristics
+        .get(LE)
+        .contains(object::pe::IMAGE_FILE_EXECUTABLE_IMAGE)
+    {
         return Err(invalid("PE file is not an executable image"));
     }
     let sections = header.sections(reader, offset).map_err(invalid)?;
