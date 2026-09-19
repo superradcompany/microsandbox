@@ -339,6 +339,9 @@ pub async fn spawn_sandbox(
     }) {
         super::launch_contract::require_restore_backing(&resolved_runtime.msb_path).await?;
     }
+    if config.spec.runtime.disable_exec_log {
+        super::launch_contract::require_disable_exec_log(&resolved_runtime.msb_path).await?;
+    }
     launch_contract.validate_capacity(
         config.spec.resources.cpus,
         config.spec.resources.max_cpus,

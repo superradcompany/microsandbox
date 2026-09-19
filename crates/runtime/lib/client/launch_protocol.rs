@@ -18,6 +18,10 @@ pub struct LaunchCapabilities {
     /// Older probes omit this feature; ordinary protocol-2 launches are unchanged.
     #[serde(default)]
     pub required_restore_backing: bool,
+    /// `LaunchConfig::disable_exec_log` is honoured. Older probes omit this feature; releases
+    /// that predate the probe would ignore the field or reject it as unknown.
+    #[serde(default)]
+    pub disable_exec_log: bool,
 }
 
 /// Selected launch format. Releases predating the probe need two legacy feature boundaries.

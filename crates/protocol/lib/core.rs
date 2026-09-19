@@ -78,6 +78,15 @@ pub struct Ready {
     /// pause require the supported contract instead of assuming frame safety.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workload_transport_barrier_version: Option<u8>,
+
+    /// The host relay records to `exec.log` only the exec sessions that set
+    /// `ExecRequest::capture`.
+    ///
+    /// Injected by the relay, never by agentd. An older relay records every
+    /// session and leaves this absent, so an SDK refuses an explicit
+    /// `capture(false)` rather than have it silently ignored.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub exec_capture_opt_in: bool,
 }
 
 /// Payload for `core.clock.sync` messages.
@@ -388,6 +397,7 @@ mod tests {
             relay_lease: None,
             local_transport: None,
             workload_transport_barrier_version: None,
+            exec_capture_opt_in: false,
         };
         let mut legacy_bytes = Vec::new();
         ciborium::into_writer(&legacy, &mut legacy_bytes).unwrap();
@@ -399,6 +409,7 @@ mod tests {
         assert!(decoded.bulk_transport.is_none());
         assert!(decoded.relay_lease.is_none());
         assert!(decoded.local_transport.is_none());
+        assert!(!decoded.exec_capture_opt_in);
         assert!(decoded.workload_transport_barrier_version.is_none());
     }
 

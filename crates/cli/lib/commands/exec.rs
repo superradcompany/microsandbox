@@ -209,7 +209,11 @@ async fn run_started(
                 for &(resource, soft, hard) in &rlimits {
                     a = a.rlimit_range(resource, soft, hard);
                 }
-                a.capture(args.capture)
+                // Unset unless asked: an explicit `false` fails on an older runtime.
+                if args.capture {
+                    a = a.capture(true);
+                }
+                a
             })
             .await?;
         Ok(exit_code)
@@ -229,7 +233,10 @@ async fn run_started(
                 if args.tty {
                     e = e.tty(true);
                 }
-                e.capture(args.capture)
+                if args.capture {
+                    e = e.capture(true);
+                }
+                e
             })
             .await?;
 
@@ -291,8 +298,9 @@ async fn run_stream(
 ) -> anyhow::Result<i32> {
     let mut handle = sandbox
         .exec_stream_with(cmd, |e| {
+            let e = e.args(cmd_args).stdin_pipe();
             apply_common_exec_opts(
-                e.args(cmd_args).stdin_pipe().capture(capture),
+                if capture { e.capture(true) } else { e },
                 env_pairs,
                 workdir,
                 user,

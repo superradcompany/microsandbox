@@ -1297,6 +1297,12 @@ impl AgentRelay {
                         dual_port = self.dual_port_active,
                         "agent relay: received core.ready from agentd"
                     );
+                    // This relay records only the exec sessions that ask (see `capture_of`).
+                    // Say so, so an SDK can refuse an explicit opt-out an older relay would ignore.
+                    let ready = Ready {
+                        exec_capture_opt_in: true,
+                        ..ready
+                    };
                     #[cfg(unix)]
                     let ready = {
                         let mut ready = ready;
@@ -6772,6 +6778,9 @@ mod tests {
         );
         #[cfg(not(unix))]
         assert!(cached_ready.local_transport.is_none());
+        // The agentd frame above leaves the capture capability unset; the relay adds it.
+        assert!(captured_ready.exec_capture_opt_in);
+        assert!(cached_ready.exec_capture_opt_in);
         assert!(
             shared.rx_ring.pop().is_none(),
             "no init context means no ack should be sent"

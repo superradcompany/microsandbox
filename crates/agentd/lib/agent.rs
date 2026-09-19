@@ -550,6 +550,8 @@ pub async fn run(
             // the runtime over the guest consoles, so the runtime injects this capability later.
             local_transport: None,
             workload_transport_barrier_version: Some(WORKLOAD_TRANSPORT_BARRIER_VERSION),
+            // Exec capture is decided by the host relay, which injects this capability.
+            exec_capture_opt_in: false,
         },
     )
     .map_err(|e| AgentdError::ExecSession(format!("encode ready: {e}")))?;

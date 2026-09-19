@@ -35,6 +35,8 @@ msb exec devbox --capture -- ./migrate.sh
 
 In the SDK, `.capture(true)` on the exec or attach options does the same. To record nothing at all, not even the workload's output, create the sandbox with `--no-exec-log` (`disable_exec_log()` in the SDK, or `sandbox_defaults.disable_exec_log` in `config.json`).
 
+A runtime older than this behaviour records every exec session. Against such a runtime, an explicit `.capture(false)` and `--no-exec-log` fail with an upgrade-required error instead of being silently ignored; an exec that leaves `capture` unset keeps working and is recorded, as it always was there.
+
 ## Read from the SDK
 
 <CodeGroup>

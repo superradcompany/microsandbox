@@ -44,8 +44,10 @@ pub struct ExecOptions {
     pub rlimits: Vec<Rlimit>,
 
     /// Record this session's output to the sandbox's `exec.log`, where
-    /// [`Sandbox::logs`](super::Sandbox::logs) reads it (default: false).
-    pub capture: bool,
+    /// [`Sandbox::logs`](super::Sandbox::logs) reads it. `None` (the default)
+    /// means not recorded; unlike an explicit `Some(false)`, it is not refused
+    /// by a sandbox whose older runtime records every session.
+    pub capture: Option<bool>,
 }
 
 /// Builder for [`ExecOptions`].
@@ -244,8 +246,11 @@ impl ExecOptionsBuilder {
     /// exec is not, because its output — a shell's above all — can carry
     /// anything typed or printed, and would otherwise reach the host's disk.
     /// Has no effect on a sandbox created with `disable_exec_log`.
+    ///
+    /// An explicit `capture(false)` fails on a sandbox whose runtime predates
+    /// opt-in capture, since that runtime would record the session anyway.
     pub fn capture(mut self, enabled: bool) -> Self {
-        self.options.capture = enabled;
+        self.options.capture = Some(enabled);
         self
     }
 
@@ -585,6 +590,7 @@ pub(crate) mod agent {
             "exec_stream"
         );
 
+        crate::sandbox::require_capture_honoured(client.ready().ok().as_ref(), capture)?;
         let req = build_exec_request(
             config, cmd, args, cwd, user, &env, &rlimits, tty, rows, cols, capture,
         );

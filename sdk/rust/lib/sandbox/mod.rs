@@ -1526,7 +1526,7 @@ pub(crate) fn build_exec_request(
     tty: bool,
     rows: u16,
     cols: u16,
-    capture: bool,
+    capture: Option<bool>,
 ) -> ExecRequest {
     let merged = config::merge_env_pairs(&config.spec.env, env);
     let mut env: Vec<String> = merged
@@ -1560,8 +1560,28 @@ pub(crate) fn build_exec_request(
         rows,
         cols,
         rlimits,
-        capture,
+        capture: capture.unwrap_or(false),
     }
+}
+
+/// Refuse an explicit capture opt-out that the sandbox's relay would ignore.
+///
+/// A relay that predates opt-in capture records every exec session and does not
+/// advertise `exec_capture_opt_in`. Against it, `None` keeps that runtime's
+/// behaviour, since nothing was asked, and `Some(true)` is honoured anyway; only
+/// `Some(false)` would be silently lost, so it fails instead.
+pub(crate) fn require_capture_honoured(
+    ready: Option<&microsandbox_protocol::core::Ready>,
+    capture: Option<bool>,
+) -> MicrosandboxResult<()> {
+    if capture == Some(false) && !ready.is_some_and(|ready| ready.exec_capture_opt_in) {
+        return Err(crate::MicrosandboxError::Runtime(
+            "this sandbox's msb runtime records every exec session, so it cannot honour \
+             capture(false); restart the sandbox with a newer msb, or leave capture unset"
+                .into(),
+        ));
+    }
+    Ok(())
 }
 
 fn default_tty_term() -> String {
@@ -1844,6 +1864,29 @@ mod tests {
     };
     use crate::backend::LocalBackend;
     use crate::runtime::SpawnMode;
+
+    /// An older relay records every session: an explicit opt-out must fail there
+    /// rather than be ignored, while an unset or `true` capture keeps working.
+    #[test]
+    fn an_explicit_capture_opt_out_is_refused_by_a_relay_that_records_everything() {
+        use microsandbox_protocol::core::Ready;
+
+        use super::require_capture_honoured;
+
+        let older = Ready::default();
+        let current = Ready {
+            exec_capture_opt_in: true,
+            ..Ready::default()
+        };
+        for ready in [None, Some(&older)] {
+            assert!(require_capture_honoured(ready, Some(false)).is_err());
+            assert!(require_capture_honoured(ready, None).is_ok());
+            assert!(require_capture_honoured(ready, Some(true)).is_ok());
+        }
+        for capture in [None, Some(false), Some(true)] {
+            assert!(require_capture_honoured(Some(&current), capture).is_ok());
+        }
+    }
 
     #[test]
     fn full_restore_forces_detached_creation_before_spawn() {
