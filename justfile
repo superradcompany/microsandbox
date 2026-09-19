@@ -99,7 +99,7 @@ build-agentd:
         *-unknown-linux-gnu)
             target="${host/-unknown-linux-gnu/-unknown-linux-musl}"
             ;;
-        *-unknown-linux-musl)
+        *-linux-musl*)
             target="$host"
             ;;
         *)
@@ -108,14 +108,19 @@ build-agentd:
             ;;
     esac
 
-    # Native musl hosts already have a suitable system compiler. GNU hosts
-    # need the musl wrapper to link the cross-libc target.
-    if [ "$target" != "$host" ] && ! command -v musl-gcc >/dev/null; then
-        echo "error: musl-gcc not found. Install your distro's musl toolchain."
-        exit 1
+    # Native musl hosts already have the target and a suitable system compiler,
+    # but distro targets such as Alpine may not link statically by default.
+    if [ "$target" = "$host" ]; then
+        export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C target-feature=+crt-static"
+    else
+        # GNU hosts need rustup's musl target and the musl wrapper to link it.
+        if ! command -v musl-gcc >/dev/null; then
+            echo "error: musl-gcc not found. Install your distro's musl toolchain."
+            exit 1
+        fi
+        rustup target add "$target"
     fi
 
-    rustup target add "$target"
     cargo build --release --manifest-path crates/agentd/Cargo.toml --target-dir target --target "$target"
     mkdir -p build
     cp "target/$target/release/agentd" build/agentd
