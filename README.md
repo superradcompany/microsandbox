@@ -482,5 +482,5 @@ Special thanks to all our contributors, testers, and community members who help 
 <br />
 <br />
 
-[^demo]: We have cool demos showcasing these features: [Mario Never Dies](https://github.com/superradcompany/mario-never-dies) and [Multiverse of Madness](https://github.com/superradcompany/multiverse-of-madness)
+[^demo]: We have cool demos showcasing vm pause/resume, snapshotting, and branching: [Mario Never Dies](https://github.com/superradcompany/mario-never-dies) and [Multiverse of Madness](https://github.com/superradcompany/multiverse-of-madness)
 [^boot-time]: Boot time refers to guest boot on an M1 machine.
