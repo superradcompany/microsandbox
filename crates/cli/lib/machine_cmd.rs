@@ -375,6 +375,7 @@ pub fn run(args: MachineArgs) -> ! {
         sandbox_db_path: launch.db_path,
         sandbox_db_connect_timeout_secs: launch.db_connect_timeout_secs,
         log_dir: launch.log_dir,
+        disable_exec_log: launch.disable_exec_log,
         runtime_dir: launch.runtime_dir,
         sandboxes_dir: launch.sandboxes_dir,
         run_dir,
@@ -985,6 +986,35 @@ mod tests {
 
         assert!(loaded.run_dir.as_os_str().is_empty());
         assert_eq!(launch_run_dir(&loaded), PathBuf::from("/tmp/msb/run"));
+    }
+
+    /// A launcher from before `disable_exec_log` sends no such field; its
+    /// sandboxes must keep capturing, which is the default.
+    #[test]
+    fn test_old_launch_config_without_disable_exec_log_keeps_capture_on() {
+        let launch = LaunchConfig {
+            disable_exec_log: true,
+            ..Default::default()
+        };
+        let mut value = serde_json::to_value(&launch).unwrap();
+        value.as_object_mut().unwrap().remove("disable_exec_log");
+        let loaded: LaunchConfig = serde_json::from_value(value).unwrap();
+        assert!(!loaded.disable_exec_log);
+    }
+
+    /// `LaunchConfig` denies unknown fields, so the flag is sent only when set:
+    /// an older runtime then refuses just the launches that asked for it.
+    #[test]
+    fn test_launch_config_sends_disable_exec_log_only_when_set() {
+        let default = serde_json::to_value(LaunchConfig::default()).unwrap();
+        assert!(default.get("disable_exec_log").is_none());
+
+        let disabled = serde_json::to_value(LaunchConfig {
+            disable_exec_log: true,
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(disabled["disable_exec_log"], serde_json::json!(true));
     }
 
     #[test]

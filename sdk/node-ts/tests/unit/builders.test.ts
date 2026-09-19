@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  AttachOptionsBuilder,
+  ExecOptionsBuilder,
   GiB,
   ImageBuilder,
   InterfaceOverridesBuilder,
@@ -646,6 +648,27 @@ describe("SandboxBuilder.build", () => {
       5000,
     );
     expect((cfg.runtime as { disableMetricsSample: boolean }).disableMetricsSample).toBe(true);
+  });
+
+  it("records exec output to exec.log unless disableExecLog is set", async () => {
+    const byDefault = await Sandbox.builder("x").image("alpine").build();
+    expect((byDefault.runtime as { disableExecLog: boolean }).disableExecLog).toBe(false);
+
+    const disabled = await Sandbox.builder("x").image("alpine").disableExecLog().build();
+    expect((disabled.runtime as { disableExecLog: boolean }).disableExecLog).toBe(true);
+  });
+});
+
+describe("exec and attach capture", () => {
+  it("an exec is not recorded unless it asks", () => {
+    expect(new ExecOptionsBuilder().build().capture).toBe(false);
+    expect(new ExecOptionsBuilder().capture(true).build().capture).toBe(true);
+    expect(new ExecOptionsBuilder().capture(true).capture(false).build().capture).toBe(false);
+  });
+
+  it("an attach session is not recorded unless it asks", () => {
+    expect(new AttachOptionsBuilder().build().capture).toBe(false);
+    expect(new AttachOptionsBuilder().capture(true).build().capture).toBe(true);
   });
 });
 

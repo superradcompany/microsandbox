@@ -46,6 +46,8 @@ pub struct JsExecOptions {
     pub tty: bool,
     #[napi(ts_type = "Array<Rlimit>")]
     pub rlimits: Vec<JsRlimit>,
+    /// Whether this session's output is recorded to the sandbox's `exec.log`.
+    pub capture: bool,
 }
 
 /// Fluent builder for per-execution overrides.
@@ -60,6 +62,10 @@ pub struct JsExecOptionsBuilder {
     stdin: JsStdinMode,
     tty: bool,
     rlimits: Vec<JsRlimit>,
+    /// `None` until `capture()` is called, so the default-workload helpers
+    /// can tell "not asked" (recorded, as the workload) from an explicit
+    /// `capture(false)` (opted out).
+    capture: Option<bool>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -83,6 +89,7 @@ impl JsExecOptionsBuilder {
             },
             tty: false,
             rlimits: Vec::new(),
+            capture: None,
         }
     }
 
@@ -193,6 +200,18 @@ impl JsExecOptionsBuilder {
         self
     }
 
+    /// Record this command's output to the sandbox's `exec.log`, where
+    /// `logs()` reads it (default: false). The sandbox's workload
+    /// (`execDefault*`) is recorded without asking; pass `capture(false)`
+    /// there to opt out. No effect on a sandbox built with `disableExecLog()`.
+    #[napi]
+    pub fn capture(&mut self, enabled: bool) -> &Self {
+        let prev = self.take_inner();
+        self.inner = Some(prev.capture(enabled));
+        self.capture = Some(enabled);
+        self
+    }
+
     #[napi]
     pub fn rlimit(&mut self, resource: String, limit: u32) -> Result<&Self> {
         let res = parse_rlimit_resource(&resource)?;
@@ -231,6 +250,7 @@ impl JsExecOptionsBuilder {
             stdin: self.stdin.clone(),
             tty: self.tty,
             rlimits: self.rlimits.clone(),
+            capture: self.capture.unwrap_or(false),
         }
     }
 }
@@ -248,6 +268,19 @@ impl JsExecOptionsBuilder {
         self.inner
             .take()
             .ok_or_else(|| napi::Error::from_reason("ExecOptionsBuilder already consumed"))
+    }
+
+    /// Internal: extract the underlying Rust builder for the sandbox's
+    /// workload (`execDefaultWith*`). Recorded to `exec.log` unless the
+    /// caller explicitly set `capture(false)` — the rule the Rust SDK's own
+    /// `exec_default_with` applies, which the JS builder would otherwise
+    /// replace with a fresh, uncaptured one.
+    pub(crate) fn take_inner_builder_for_workload(&mut self) -> Result<RustExecOptionsBuilder> {
+        let builder = self.take_inner_builder()?;
+        Ok(match self.capture {
+            None => builder.capture(true),
+            Some(_) => builder,
+        })
     }
 }
 

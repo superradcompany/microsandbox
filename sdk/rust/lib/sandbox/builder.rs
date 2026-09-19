@@ -185,6 +185,7 @@ impl SandboxBuilder {
             .metrics_sample_interval_ms
             .map(std::num::NonZero::get);
         self.config.spec.runtime.disable_metrics_sample = defaults.disable_metrics_sample;
+        self.config.spec.runtime.disable_exec_log = defaults.disable_exec_log;
         self.config.spec.runtime.log_level = config.log_level.map(sandbox_log_level_from_runtime);
         self
     }
@@ -456,6 +457,15 @@ impl SandboxBuilder {
     /// Force-disable metrics sampling regardless of `metrics_sample_interval`.
     pub fn disable_metrics_sample(mut self) -> Self {
         self.config.spec.runtime.disable_metrics_sample = true;
+        self
+    }
+
+    /// Do not record exec output to this sandbox's `exec.log` at all — not
+    /// even the startup command's. For workloads whose output must not reach
+    /// the host's disk. [`Sandbox::logs`](crate::Sandbox::logs) then returns
+    /// nothing.
+    pub fn disable_exec_log(mut self) -> Self {
+        self.config.spec.runtime.disable_exec_log = true;
         self
     }
 
@@ -3082,6 +3092,24 @@ mod tests {
         assert!(config.spec.runtime.disable_metrics_sample);
         assert_eq!(config.spec.runtime.metrics_sample_interval_ms, Some(5000));
         assert!(config.effective_metrics_interval().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_builder_disable_exec_log_sets_the_runtime_option() {
+        let default = SandboxBuilder::new("test")
+            .image("alpine")
+            .build()
+            .await
+            .unwrap();
+        assert!(!default.spec.runtime.disable_exec_log);
+
+        let config = SandboxBuilder::new("test")
+            .image("alpine")
+            .disable_exec_log()
+            .build()
+            .await
+            .unwrap();
+        assert!(config.spec.runtime.disable_exec_log);
     }
 
     #[tokio::test]

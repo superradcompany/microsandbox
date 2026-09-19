@@ -604,7 +604,7 @@ char *msb_log_close(Handle stream_handle, unsigned char *buf, uintptr_t buf_len)
  * Start a streaming exec session. Returns `{"exec_handle":<u64>}`.
  * The exec handle MUST be released with msb_exec_close when done.
  *
- * exec_opts_json: same schema as msb_sandbox_exec (args, cwd, timeout_secs).
+ * exec_opts_json: same schema as msb_sandbox_exec (args, cwd, timeout_secs, capture).
  */
 char *msb_sandbox_exec_stream(uint64_t cancel_id,
                               Handle handle,

@@ -40,6 +40,13 @@ pub struct ExecArgs {
     #[arg(long = "no-tty", conflicts_with = "tty")]
     pub no_tty: bool,
 
+    /// Record this command's output to the sandbox's `exec.log`, where
+    /// `msb logs` shows it. Off by default: an exec session's output — an
+    /// interactive shell's above all — is not written to the host's disk
+    /// unless asked.
+    #[arg(long)]
+    pub capture: bool,
+
     /// Kill the command after this duration (e.g. 30s, 5m, 1h).
     #[arg(long)]
     pub timeout: Option<String>,
@@ -172,7 +179,15 @@ async fn run_started(
 
     if args.stream {
         return run_stream(
-            sandbox, cmd, cmd_args, &env_pairs, &workdir, &args.user, timeout, &rlimits,
+            sandbox,
+            cmd,
+            cmd_args,
+            &env_pairs,
+            &workdir,
+            &args.user,
+            timeout,
+            &rlimits,
+            args.capture,
         )
         .await;
     }
@@ -194,6 +209,10 @@ async fn run_started(
                 for &(resource, soft, hard) in &rlimits {
                     a = a.rlimit_range(resource, soft, hard);
                 }
+                // Unset unless asked: an explicit `false` fails on an older runtime.
+                if args.capture {
+                    a = a.capture(true);
+                }
                 a
             })
             .await?;
@@ -213,6 +232,9 @@ async fn run_started(
                 );
                 if args.tty {
                     e = e.tty(true);
+                }
+                if args.capture {
+                    e = e.capture(true);
                 }
                 e
             })
@@ -272,11 +294,13 @@ async fn run_stream(
     user: &Option<String>,
     timeout: Option<Duration>,
     rlimits: &[(RlimitResource, u64, u64)],
+    capture: bool,
 ) -> anyhow::Result<i32> {
     let mut handle = sandbox
         .exec_stream_with(cmd, |e| {
+            let e = e.args(cmd_args).stdin_pipe();
             apply_common_exec_opts(
-                e.args(cmd_args).stdin_pipe(),
+                if capture { e.capture(true) } else { e },
                 env_pairs,
                 workdir,
                 user,

@@ -70,6 +70,13 @@ export declare class AttachOptionsBuilder {
    * `"ctrl-]"` or `"ctrl-p,ctrl-q"`). Default: `Ctrl+]`.
    */
   detachKeys(keys: string): this
+  /**
+   * Record this session's output to the sandbox's `exec.log` (default:
+   * false). An interactive session's transcript can carry anything typed
+   * or printed, so it is recorded only when asked; the sandbox's workload
+   * (`attachDefault*`) is recorded without asking.
+   */
+  capture(enabled: boolean): this
   rlimit(resource: string, limit: number): this
   rlimitRange(resource: string, soft: number, hard: number): this
   /** Snapshot the accumulated configuration. */
@@ -148,6 +155,13 @@ export declare class ExecOptionsBuilder {
   stdinPipe(): this
   stdinBytes(data: Buffer): this
   tty(enabled: boolean): this
+  /**
+   * Record this command's output to the sandbox's `exec.log`, where
+   * `logs()` reads it (default: false). The sandbox's workload
+   * (`execDefault*`) is recorded without asking; pass `capture(false)`
+   * there to opt out. No effect on a sandbox built with `disableExecLog()`.
+   */
+  capture(enabled: boolean): this
   rlimit(resource: string, limit: number): this
   rlimitRange(resource: string, soft: number, hard: number): this
   /** Snapshot the accumulated configuration. */
@@ -1225,6 +1239,11 @@ export declare class SandboxBuilder {
   metricsSampleIntervalMs(ms: number): this
   /** Force-disable metrics sampling regardless of `metricsSampleIntervalMs`. */
   disableMetricsSample(): this
+  /**
+   * Do not record exec output to the sandbox's `exec.log` at all — not
+   * even the workload's. `logs()` then returns nothing.
+   */
+  disableExecLog(): this
   /** Default working directory for commands. */
   workdir(path: string): this
   /** Shell binary used by `Sandbox.shell(...)`. */
@@ -1936,6 +1955,8 @@ export interface AttachOptions {
   env: Record<string, string>
   detachKeys?: string
   rlimits: Array<Rlimit>
+  /** Whether this session's output is recorded to the sandbox's `exec.log`. */
+  capture: boolean
 }
 
 /** Return secret-safe information about the active default backend. */
@@ -1981,6 +2002,8 @@ export interface ExecOptions {
   stdin: StdinMode
   tty: boolean
   rlimits: Array<Rlimit>
+  /** Whether this session's output is recorded to the sandbox's `exec.log`. */
+  capture: boolean
 }
 
 /** Exit status for an executed command. */

@@ -55,7 +55,7 @@ func (s *Sandbox) ExecDefault(ctx context.Context, opts ...ExecOption) (*ExecOut
 	for _, opt := range opts {
 		opt(&o)
 	}
-	ffiOpts := ffi.ExecOptions{Cwd: o.Cwd, TTY: o.TTY, User: o.User, Env: o.Env}
+	ffiOpts := ffi.ExecOptions{Cwd: o.Cwd, TTY: o.TTY, User: o.User, Env: o.Env, Capture: o.Capture}
 	if o.Timeout > 0 {
 		ffiOpts.TimeoutSecs = timeoutSecsCeil(o.Timeout)
 	}
@@ -80,7 +80,7 @@ func (s *Sandbox) Exec(ctx context.Context, cmd string, args []string, opts ...E
 		opt(&o)
 	}
 
-	ffiOpts := ffi.ExecOptions{Args: args, Cwd: o.Cwd, TTY: o.TTY, User: o.User, Env: o.Env}
+	ffiOpts := ffi.ExecOptions{Args: args, Cwd: o.Cwd, TTY: o.TTY, User: o.User, Env: o.Env, Capture: o.Capture}
 	if o.Timeout > 0 {
 		ffiOpts.TimeoutSecs = timeoutSecsCeil(o.Timeout)
 	}
@@ -265,7 +265,7 @@ func (s *Sandbox) ExecStream(ctx context.Context, cmd string, args []string, opt
 	for _, opt := range opts {
 		opt(&o)
 	}
-	ffiOpts := ffi.ExecOptions{Args: args, Cwd: o.Cwd, StdinPipe: o.StdinPipe, TTY: o.TTY, User: o.User, Env: o.Env}
+	ffiOpts := ffi.ExecOptions{Args: args, Cwd: o.Cwd, StdinPipe: o.StdinPipe, TTY: o.TTY, User: o.User, Env: o.Env, Capture: o.Capture}
 	if o.Timeout > 0 {
 		ffiOpts.TimeoutSecs = timeoutSecsCeil(o.Timeout)
 	}
@@ -282,7 +282,7 @@ func (s *Sandbox) ExecDefaultStream(ctx context.Context, opts ...ExecOption) (*E
 	for _, opt := range opts {
 		opt(&o)
 	}
-	ffiOpts := ffi.ExecOptions{Cwd: o.Cwd, StdinPipe: o.StdinPipe, TTY: o.TTY, User: o.User, Env: o.Env}
+	ffiOpts := ffi.ExecOptions{Cwd: o.Cwd, StdinPipe: o.StdinPipe, TTY: o.TTY, User: o.User, Env: o.Env, Capture: o.Capture}
 	if o.Timeout > 0 {
 		ffiOpts.TimeoutSecs = timeoutSecsCeil(o.Timeout)
 	}

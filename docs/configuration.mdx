@@ -228,6 +228,7 @@ For workload effects, host requirements, filesystem expectations, and verificati
 | `workdir` | `null` | Working directory inside the sandbox |
 | `metrics_sample_interval_ms` | `1000` | Runtime metrics sampling interval in milliseconds. Set to `0` to disable sampling. |
 | `disable_metrics_sample` | `false` | Force-disable metrics sampling regardless of `metrics_sample_interval_ms`. |
+| `disable_exec_log` | `false` | Do not record exec output to `exec.log` for new sandboxes, not even the workload's. |
 
 ### `sandbox_defaults.oci`
 

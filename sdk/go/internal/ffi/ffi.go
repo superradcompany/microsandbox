@@ -1738,6 +1738,7 @@ type CreateOptions struct {
 	Init                 *InitOptions         `json:"init,omitempty"`
 	LogLevel             string               `json:"log_level,omitempty"`
 	QuietLogs            bool                 `json:"quiet_logs,omitempty"`
+	DisableExecLog       bool                 `json:"disable_exec_log,omitempty"`
 	Scripts              map[string]string    `json:"scripts,omitempty"`
 	PullPolicy           string               `json:"pull_policy,omitempty"`
 	MaxDurationSecs      uint64               `json:"max_duration_secs,omitempty"`
@@ -3130,6 +3131,9 @@ type ExecOptions struct {
 	TTY         bool              `json:"tty,omitempty"`
 	User        string            `json:"user,omitempty"`
 	Env         map[string]string `json:"env,omitempty"`
+	// Capture is a pointer so an explicit false reaches the native side,
+	// where it opts ExecDefault out of recording; nil omits the key.
+	Capture *bool `json:"capture,omitempty"`
 }
 
 // ExecResult is the collected output of a completed command.
@@ -4258,6 +4262,8 @@ type AttachOptions struct {
 	User       string            `json:"user,omitempty"`
 	Env        map[string]string `json:"env,omitempty"`
 	DetachKeys string            `json:"detach_keys,omitempty"`
+	// Capture: see ExecOptions.Capture.
+	Capture *bool `json:"capture,omitempty"`
 }
 
 // Attach starts an interactive PTY session running cmd with the given options.

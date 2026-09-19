@@ -277,6 +277,15 @@ impl JsSandboxBuilder {
         self
     }
 
+    /// Do not record exec output to the sandbox's `exec.log` at all — not
+    /// even the workload's. `logs()` then returns nothing.
+    #[napi(js_name = "disableExecLog")]
+    pub fn disable_exec_log(&mut self) -> &Self {
+        let prev = self.take_inner();
+        self.inner = Some(prev.disable_exec_log());
+        self
+    }
+
     /// Default working directory for commands.
     #[napi]
     pub fn workdir(&mut self, path: String) -> &Self {

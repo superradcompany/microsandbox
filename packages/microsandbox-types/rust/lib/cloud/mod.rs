@@ -508,6 +508,7 @@ impl CloudSandboxSpec {
             log_level: self.runtime.log_level,
             metrics_sample_interval_ms: None,
             disable_metrics_sample: false,
+            disable_exec_log: false,
         };
 
         Ok(SandboxSpec {

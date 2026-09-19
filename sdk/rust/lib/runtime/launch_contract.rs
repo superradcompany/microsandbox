@@ -249,18 +249,37 @@ pub(super) async fn resolve(path: &Path) -> MicrosandboxResult<LaunchContract> {
 /// Probe only the new combination. Ordinary starts/restores keep their cached,
 /// process-free discovery path, and old runtimes still accept their existing wire.
 pub(super) async fn require_restore_backing(path: &Path) -> MicrosandboxResult<()> {
+    require_launch_capability(
+        path,
+        "relaxed external-object validation with required resource backing",
+        |capabilities| capabilities.required_restore_backing,
+    )
+    .await
+}
+
+/// Probe only when a sandbox disables `exec.log`. An older runtime would record
+/// anyway (v0.6.x ignores the field) or reject it as an unknown field, so ordinary
+/// launches keep the process-free path and this one names the missing feature.
+pub(super) async fn require_disable_exec_log(path: &Path) -> MicrosandboxResult<()> {
+    require_launch_capability(path, "disabling exec.log capture", |capabilities| {
+        capabilities.disable_exec_log
+    })
+    .await
+}
+
+async fn require_launch_capability(
+    path: &Path,
+    feature: &str,
+    advertised: impl FnOnce(&microsandbox_runtime::launch_protocol::LaunchCapabilities) -> bool,
+) -> MicrosandboxResult<()> {
     let output = bounded_probe(path, "__launch-protocol").await?;
     let supported = serde_json::from_slice::<
         microsandbox_runtime::launch_protocol::LaunchCapabilities,
     >(&output)
-    .is_ok_and(|capabilities| {
-        capabilities.protocols.contains(&2) && capabilities.required_restore_backing
-    });
+    .is_ok_and(|capabilities| capabilities.protocols.contains(&2) && advertised(&capabilities));
     if !supported {
         return Err(MicrosandboxError::Runtime(
-            microsandbox_runtime::launch_protocol::upgrade_required(
-                "relaxed external-object validation with required resource backing",
-            ),
+            microsandbox_runtime::launch_protocol::upgrade_required(feature),
         ));
     }
     Ok(())
@@ -356,6 +375,32 @@ mod tests {
             "printf '%s' '{\"protocols\":[2],\"required_restore_backing\":\"true\"}'",
         );
         assert!(require_restore_backing(&malformed).await.is_err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn disable_exec_log_probe_distinguishes_old_and_capable_runtimes() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = script(
+            dir.path(),
+            "old-capabilities",
+            "printf '%s' '{\"protocols\":[2,1],\"required_restore_backing\":true}'",
+        );
+        let error = require_disable_exec_log(&old)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("upgrade msb"));
+        assert!(error.contains("disabling exec.log capture"));
+        // Releases before v0.7.0 have no probe at all.
+        let pre_probe = script(dir.path(), "pre-probe", "exit 2");
+        assert!(require_disable_exec_log(&pre_probe).await.is_err());
+        let new = script(
+            dir.path(),
+            "new-capabilities",
+            "printf '%s' '{\"protocols\":[2,1],\"disable_exec_log\":true}'",
+        );
+        require_disable_exec_log(&new).await.unwrap();
     }
 
     #[cfg(unix)]

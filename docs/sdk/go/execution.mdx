@@ -795,6 +795,38 @@ When enabled, the guest process runs with its stdin, stdout, and stderr connecte
   </div>
 </div>
 
+#### <span className="msb-hn">WithExecCapture()</span>
+
+```go
+func WithExecCapture(enabled bool) ExecOption
+```
+
+<Accordion title="Example">
+
+```go
+out, err := sb.Shell(ctx, "./migrate.sh", m.WithExecCapture(true))
+if err != nil {
+    return err
+}
+_ = out
+
+// Later, even after the sandbox stops:
+entries, err := sb.Logs(ctx, m.LogOptions{})
+```
+
+</Accordion>
+
+Record this command's output to the sandbox's `exec.log`, where [`Logs`](/sdk/go/sandbox#logs) reads it. Default: off for `Exec`, `ExecStream`, `Shell` and `ShellStream`. An ad-hoc command's output, a shell's above all, can carry anything typed or printed, so it is written to the host's disk only when asked. `ExecDefault` and `ExecDefaultStream` run the sandbox's workload and record it without asking; pass `WithExecCapture(false)` there to opt out. No effect on a sandbox created with [`WithDisableExecLog()`](/sdk/go/sandbox#withdisableexeclog).
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>enabled</code><span className="msb-type">bool</span></div>
+    <div className="msb-param-desc"><code>true</code> to record this command's output; <code>false</code> to opt a default-workload call out.</div>
+  </div>
+</div>
+
 #### <span className="msb-hn">WithExecUser()</span>
 
 ```go

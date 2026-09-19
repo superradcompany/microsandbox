@@ -339,6 +339,9 @@ pub async fn spawn_sandbox(
     }) {
         super::launch_contract::require_restore_backing(&resolved_runtime.msb_path).await?;
     }
+    if config.spec.runtime.disable_exec_log {
+        super::launch_contract::require_disable_exec_log(&resolved_runtime.msb_path).await?;
+    }
     launch_contract.validate_capacity(
         config.spec.resources.cpus,
         config.spec.resources.max_cpus,
@@ -2936,6 +2939,7 @@ fn machine_cli_args(
         Some(ms) => launch.metrics.sample_interval_ms = ms.get(),
         None => launch.metrics.disabled = true,
     }
+    launch.disable_exec_log = config.spec.runtime.disable_exec_log;
     if let Some(reservation) = metrics_reservation {
         launch.metrics.slot = Some(MetricsSlotHandoff {
             shm_name: reservation.shm_name.clone(),
@@ -4154,6 +4158,9 @@ mod tests {
             pair(&mut out, "--idle-timeout", i.to_string());
         }
         pair(&mut out, "--libkrunfw-path", path(&launch.libkrunfw_path));
+        if launch.disable_exec_log {
+            out.push("--disable-exec-log".to_string());
+        }
         if launch.metrics.disabled {
             out.push("--disable-metrics-sample".to_string());
         } else {
@@ -4953,6 +4960,32 @@ mod tests {
                 .iter()
                 .any(|arg| arg == "--metrics-sample-interval-ms"),
             "should not also emit interval flag; got {rendered:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_machine_cli_args_carry_disable_exec_log_only_when_asked() {
+        let default = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .build()
+            .await
+            .unwrap();
+        assert!(
+            !render_args(&default)
+                .iter()
+                .any(|arg| arg == "--disable-exec-log")
+        );
+
+        let disabled = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .disable_exec_log()
+            .build()
+            .await
+            .unwrap();
+        assert!(
+            render_args(&disabled)
+                .iter()
+                .any(|arg| arg == "--disable-exec-log")
         );
     }
 

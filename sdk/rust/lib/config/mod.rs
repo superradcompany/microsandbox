@@ -307,6 +307,10 @@ pub struct SandboxDefaults {
     /// Force-disable metrics sampling regardless of `metrics_sample_interval_ms`.
     #[serde(default)]
     pub disable_metrics_sample: bool,
+
+    /// Do not record exec output to `exec.log` for new sandboxes.
+    #[serde(default)]
+    pub disable_exec_log: bool,
 }
 
 /// Default values applied to OCI-rooted sandboxes.
@@ -750,6 +754,7 @@ impl Default for SandboxDefaults {
             workdir: None,
             metrics_sample_interval_ms: default_metrics_sample_interval(),
             disable_metrics_sample: false,
+            disable_exec_log: false,
         }
     }
 }
@@ -1410,6 +1415,19 @@ mod tests {
         let json = r#"{"sandbox_defaults": {"disable_metrics_sample": true}}"#;
         let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
         assert!(cfg.sandbox_defaults.disable_metrics_sample);
+    }
+
+    #[test]
+    fn test_deserialize_disable_exec_log_default_false() {
+        let cfg: GlobalConfig = serde_json::from_str("{}").unwrap();
+        assert!(!cfg.sandbox_defaults.disable_exec_log);
+    }
+
+    #[test]
+    fn test_deserialize_disable_exec_log_true() {
+        let json = r#"{"sandbox_defaults": {"disable_exec_log": true}}"#;
+        let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
+        assert!(cfg.sandbox_defaults.disable_exec_log);
     }
 
     #[test]

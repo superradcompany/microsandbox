@@ -98,6 +98,11 @@ pub struct LaunchConfig {
     /// Directory for log files.
     pub log_dir: PathBuf,
 
+    /// Do not record exec output to `exec.log` at all. Omitted unless set, so
+    /// an older runtime rejects the request instead of recording anyway.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub disable_exec_log: bool,
+
     /// Runtime directory (scripts, heartbeat).
     pub runtime_dir: PathBuf,
 

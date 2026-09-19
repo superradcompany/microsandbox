@@ -260,6 +260,41 @@ func TestWithExecTTY(t *testing.T) {
 	}
 }
 
+func TestWithExecCapture(t *testing.T) {
+	o := ExecConfig{}
+	if o.Capture != nil {
+		t.Fatal("Capture should be unset by default")
+	}
+	WithExecCapture(true)(&o)
+	if o.Capture == nil || !*o.Capture {
+		t.Fatal("Capture should be enabled")
+	}
+	// An explicit false must survive: it is how ExecDefault opts out.
+	WithExecCapture(false)(&o)
+	if o.Capture == nil || *o.Capture {
+		t.Fatal("Capture should be explicitly disabled")
+	}
+}
+
+func TestWithAttachCapture(t *testing.T) {
+	o := AttachConfig{}
+	if o.Capture != nil {
+		t.Fatal("Capture should be unset by default")
+	}
+	WithAttachCapture(false)(&o)
+	if o.Capture == nil || *o.Capture {
+		t.Fatal("Capture should be explicitly disabled")
+	}
+}
+
+func TestWithDisableExecLog(t *testing.T) {
+	o := SandboxConfig{}
+	WithDisableExecLog()(&o)
+	if !o.DisableExecLog {
+		t.Fatal("DisableExecLog should be set")
+	}
+}
+
 func TestWithAttachUser(t *testing.T) {
 	o := AttachConfig{}
 	WithAttachUser("dev")(&o)

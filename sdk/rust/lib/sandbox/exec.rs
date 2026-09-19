@@ -42,6 +42,12 @@ pub struct ExecOptions {
 
     /// Resource limits applied before exec via `setrlimit()`.
     pub rlimits: Vec<Rlimit>,
+
+    /// Record this session's output to the sandbox's `exec.log`, where
+    /// [`Sandbox::logs`](super::Sandbox::logs) reads it. `None` (the default)
+    /// means not recorded; unlike an explicit `Some(false)`, it is not refused
+    /// by a sandbox whose older runtime records every session.
+    pub capture: Option<bool>,
 }
 
 /// Builder for [`ExecOptions`].
@@ -232,6 +238,19 @@ impl ExecOptionsBuilder {
     /// editors, `top`); disable for scripts and batch jobs (default: false).
     pub fn tty(mut self, enabled: bool) -> Self {
         self.options.tty = enabled;
+        self
+    }
+
+    /// Record this command's output to the sandbox's `exec.log` (default:
+    /// false). The sandbox's workload is recorded without asking; an ad-hoc
+    /// exec is not, because its output — a shell's above all — can carry
+    /// anything typed or printed, and would otherwise reach the host's disk.
+    /// Has no effect on a sandbox created with `disable_exec_log`.
+    ///
+    /// An explicit `capture(false)` fails on a sandbox whose runtime predates
+    /// opt-in capture, since that runtime would record the session anyway.
+    pub fn capture(mut self, enabled: bool) -> Self {
+        self.options.capture = Some(enabled);
         self
     }
 
@@ -559,6 +578,7 @@ pub(crate) mod agent {
             tty,
             stdin: stdin_mode,
             timeout: _,
+            capture,
         } = opts;
 
         tracing::debug!(
@@ -570,8 +590,9 @@ pub(crate) mod agent {
             "exec_stream"
         );
 
+        crate::sandbox::require_capture_honoured(client.ready().ok().as_ref(), capture)?;
         let req = build_exec_request(
-            config, cmd, args, cwd, user, &env, &rlimits, tty, rows, cols,
+            config, cmd, args, cwd, user, &env, &rlimits, tty, rows, cols, capture,
         );
         let (id, rx) = client.stream(MessageType::ExecRequest, &req).await?;
 

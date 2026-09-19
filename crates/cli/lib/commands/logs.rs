@@ -98,13 +98,13 @@ pub struct LogsArgs {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 #[value(rename_all = "lowercase")]
 pub enum SourceFilter {
-    /// Captured stdout from the primary exec session (pipe mode).
+    /// Captured stdout from a recorded exec session (pipe mode).
     Stdout,
 
-    /// Captured stderr from the primary exec session (pipe mode).
+    /// Captured stderr from a recorded exec session (pipe mode).
     Stderr,
 
-    /// Merged stdout+stderr from the primary session running in pty
+    /// Merged stdout+stderr from a recorded session running in pty
     /// mode (pty allocation merges streams in the kernel before they
     /// leave the guest).
     Output,

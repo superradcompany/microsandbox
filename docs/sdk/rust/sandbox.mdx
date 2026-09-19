@@ -519,7 +519,7 @@ let recent = handle.logs(&LogOptions {
 
 </Accordion>
 
-Read captured output from the sandbox's `exec.log`. Backed by an on-disk JSON Lines file the runtime writes via the relay tap. Works on running and stopped sandboxes alike; there is no protocol traffic. The same method is available on [`SandboxHandle`](#sandboxhandle) for callers that don't want to start the sandbox first.
+Read captured output from the sandbox's `exec.log`. Backed by an on-disk JSON Lines file the runtime writes via the relay tap. It holds the sandbox's workload output and any exec that asked for capture with `capture(true)`; a sandbox built with `disable_exec_log()` records nothing. Works on running and stopped sandboxes alike; there is no protocol traffic. The same method is available on [`SandboxHandle`](#sandboxhandle) for callers that don't want to start the sandbox first.
 
 The default sources are `Stdout`, `Stderr`, and `Output` (PTY-merged). Pass `LogSource::System` to also include synthetic lifecycle markers and runtime/kernel diagnostic lines. `logs()` is **synchronous** because it's a pure file read.
 
@@ -1018,6 +1018,14 @@ sb.detach().await;
 </Accordion>
 
 Choose whether the sandbox is created in detached/background mode. Detached sandboxes survive the creating process. Defaults to `false`.
+
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">disable_exec_log()</span>
+
+```rust
+fn disable_exec_log(self) -> Self
+```
+
+Do not record exec output to the sandbox's `exec.log` at all, not even the workload's. For workloads whose output must not reach the host's disk; `logs()` then returns nothing. Also settable for every new sandbox with `sandbox_defaults.disable_exec_log` in `config.json`.
 
 <p className="msb-label">Parameters</p>
 
