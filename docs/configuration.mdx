@@ -7,7 +7,19 @@ icon: "gear"
 For guidance on choosing between global configuration, sandbox YAML, CLI
 arguments, and SDK inputs, start with [Configuration](/operations/configuration).
 
-microsandbox reads its global configuration from `~/.microsandbox/config.json`. All fields are optional. A missing file or empty JSON object is equivalent to using the defaults.
+microsandbox reads user configuration from `~/.microsandbox/config.json`, or `MSB_CONFIG_PATH` when set. All fields are optional. A missing file or empty JSON object adds no user overrides; defaults and managed settings still apply.
+
+Newly saved user files include `"version": 1`. An omitted version defaults to `1`; invalid or unsupported versions are rejected.
+
+In Rust, `GlobalConfigPatch::load()` reads saved user settings and `.save()` writes them without filling in defaults. Omitted fields remain omitted, and explicit clears are preserved. Unknown user fields are ignored on load and discarded on save. `GlobalConfig` holds resolved settings after layering; use `LocalBackend::config()` to read the effective backend configuration.
+
+## Managed configuration
+
+Administrators can enforce these same fields using a protected `managed.json` file with the shape `{ "version": 1, "overrides": { ... } }`. Supplied managed values take precedence over ordinary user settings and CLI/SDK options. The user and managed files have independent schema versions, each defaulting to `1` when omitted. Managed values are not automatically saved into the user file.
+
+See [Managed deployment](/enterprise/managed-configuration) for deployment, precedence, clearing, and updates. This page remains the reference for individual fields and accepted values.
+
+## Reference example
 
 <Accordion title="Full example">
 ```json
@@ -112,7 +124,7 @@ microsandbox reads its global configuration from `~/.microsandbox/config.json`. 
 | `deployment_profile` | `null` | Authoritative local host-runtime isolation profile: `single-tenant` or `multi-tenant` |
 | `database` | [reference](#database) | Database connection settings |
 | `paths` | [reference](#paths) | Path overrides for binaries and directories |
-| `sandbox_defaults` | [reference](#sandbox_defaults) | Defaults applied to local sandboxes |
+| `sandbox_defaults` | [reference](#sandbox_defaults) | Defaults applied to new sandboxes, subject to backend support |
 | `runtime` | [reference](#runtime) | Host runtime performance policy |
 | `registries` | [reference](#registries) | Container registry authentication |
 | `ssh` | [reference](#ssh) | Host-side SSH session defaults |
@@ -167,6 +179,8 @@ On Windows, the default `home` is `%USERPROFILE%\.microsandbox`. JSON strings ca
 | `logs` | `{home}/logs` | Sandbox logs |
 | `secrets` | `{home}/secrets` | Secrets. Registry secrets live under `secrets/registries/` |
 
+Runtime path settings are captured during local backend construction, with managed paths taking precedence. Existing backend handles keep their settings until replaced.
+
 ### Rust SDK path helpers
 
 Rust callers can inspect the active config and resolve runtime paths with the same precedence used by sandbox startup:
@@ -192,7 +206,11 @@ let cfg = backend.config();
 let runtime = microsandbox::setup::resolve_runtime(&cfg)?;
 ```
 
-`LocalBackend` has two plain constructors alongside the builder. `LocalBackend::lazy()` is synchronous and defers opening (and migrating) the local sandbox database until the first operation; it is what backend resolution uses when no backend is set explicitly. `LocalBackend::new().await?` opens the database up front, so startup fails fast if the database is unusable.
+`LocalBackend` has two plain constructors alongside the builder. `LocalBackend::lazy()?` is synchronous and defers opening (and migrating) the local sandbox database until the first operation; it is what backend resolution uses when no backend is set explicitly. `LocalBackend::new().await?` opens the database up front, so startup fails fast if the database is unusable. All constructors read, layer, and validate global configuration before returning a backend; only database setup is lazy. Proxy settings are validated after sandbox options and managed overrides are composed, before network use.
+
+`LocalBackendBuilder::build_lazy()` now returns `Result<LocalBackend>`. It replaces `try_build_lazy()`, and `LocalBackend` no longer implements `Default`; use `LocalBackend::lazy()?` instead.
+
+For a long-lived process, construct a new backend to pick up configuration changes. Installing it with `set_default_backend` affects future operations; existing sandbox and volume handles retain their original backend. Construct the replacement successfully before installing it.
 
 ## `ssh`
 
@@ -200,19 +218,21 @@ let runtime = microsandbox::setup::resolve_runtime(&cfg)?;
 |-------|---------|-------------|
 | `inactivity_timeout_secs` | `600` | Disconnect an SSH session after this many seconds without SSH traffic. Set to `0` to disable. |
 
-The timeout applies to host-side SSH sessions created by `msb ssh`, `msb ssh serve`, and the local SDK backend. SSH traffic resets the timer. This setting is separate from a sandbox lifecycle idle timeout: disconnecting SSH does not stop the sandbox, and sandbox activity policy does not change the SSH timeout.
+The timeout applies to host-side SSH sessions created by `msb ssh`, `msb ssh serve`, and the SDK, for both local and cloud sandboxes. SSH traffic resets the timer. This setting is separate from a sandbox lifecycle idle timeout: disconnecting SSH does not stop the sandbox, and sandbox activity policy does not change the SSH timeout.
 
-Explicit CLI or SDK options override this value. The setting is resolved when a client or server endpoint is prepared, so changing `config.json` does not alter existing connections. Programmatic local backends can override the persisted value with `LocalBackendBuilder::ssh_inactivity_timeout_secs()`.
+Explicit CLI or SDK options override the user-configured value; a managed timeout takes precedence over both. The setting is resolved when a client or server endpoint is prepared using the backend's retained configuration, so file changes do not alter existing connections. Programmatic local backends can override the persisted value with `LocalBackendBuilder::ssh_inactivity_timeout_secs()`.
 
 ## `sandbox_defaults`
 
-<Tooltip tip="These defaults are resolved by the local runtime; microsandbox cloud keeps its service-side defaults."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Sandbox settings are applied to local and cloud create requests. Cloud rejects unsupported options such as outbound proxies and custom metrics sampling."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 Defaults applied to sandboxes unless overridden per-sandbox.
 
-Explicit CLI or SDK options win over `config.json`, and `config.json` wins over built-in defaults. microsandbox resolves the effective values once when it creates a local sandbox and persists that resolved sandbox configuration; changing the global file affects future creations, not existing sandboxes.
+Explicit CLI or SDK options win over `config.json`, and managed overrides take precedence over both. microsandbox resolves the effective values before creating a local sandbox or sending a cloud create request. Cloud creation rejects sandbox options it cannot represent. File changes apply after constructing a new backend or starting a new CLI invocation; they do not rewrite existing sandboxes.
 
-`SandboxBuilder::new()` and `Sandbox::builder()` apply this base automatically. Rust applications can use [`SandboxBuilder::overlay`](/sdk/rust/sandbox#sandbox-overlay) to add sparse per-sandbox values, giving the precedence order built-in defaults < `config.json` < per-sandbox patch.
+Rust applications can use [`SandboxBuilder::overlay`](/sdk/rust/sandbox#sandbox-overlay) to add sparse per-sandbox values. Local creation resolves built-in defaults < image defaults < `config.json` < CLI/SDK patches < managed overrides after image metadata is available. Cloud creation applies user settings, request options, and managed overrides on the client; the cloud worker resolves image metadata.
+
+For local `workdir`, omission inherits the lower layer and explicit `null` clears it, including an image working directory. A concrete Rust `SandboxConfig` with `workdir: None` is treated as omitted. Local CPU and memory maxima remain explicit when supplied; otherwise they follow the final size. Cloud supports no separate hotplug maximum: a supplied maximum equal to the requested size follows the final size. A maximum that differs from the final size is rejected.
 
 For workload effects, host requirements, filesystem expectations, and verification steps for these settings, see [Performance](/sandboxes/optimization).
 
@@ -226,12 +246,17 @@ For workload effects, host requirements, filesystem expectations, and verificati
 | `oci` | [reference](#sandbox_defaults-oci) | Defaults for OCI-rooted sandboxes |
 | `shell` | `"/bin/sh"` | Shell for interactive sessions and scripts |
 | `workdir` | `null` | Working directory inside the sandbox |
+| `outbound_proxy` | `null` | Default outbound SOCKS4/SOCKS5 proxy for local sandboxes. Uses the existing proxy object with `protocol`, `address` (`IP:port`), and optional authentication. See [managed proxy configuration](/enterprise/corporate-networking#route-sandbox-traffic). |
 | `metrics_sample_interval_ms` | `1000` | Runtime metrics sampling interval in milliseconds. Set to `0` to disable sampling. |
 | `disable_metrics_sample` | `false` | Force-disable metrics sampling regardless of `metrics_sample_interval_ms`. |
+
+An ordinary `outbound_proxy` default can be overridden per sandbox. A managed value takes precedence over CLI/SDK proxy options; managed `null` clears them. The whole proxy object is replaced, including credentials. SOCKS4 accepts an optional `user_id`; SOCKS5 accepts `credentials` containing `username` and `password: { "kind": "env", "var": "PROXY_PASSWORD" }`. Passwords are resolved at sandbox startup. Proxy defaults do not enable disabled networking or route host downloads. Cloud creation fails if the final configuration contains a proxy, including one supplied by managed policy.
 
 ### `sandbox_defaults.oci`
 
 Defaults applied only when the sandbox rootfs is an OCI image.
+
+User OCI defaults apply to local creation. Managed root-disk settings also apply to cloud create requests, which accept only `kind: "managed"`.
 
 | Field | Default | Description |
 |-------|---------|-------------|
@@ -285,7 +310,7 @@ See the [performance guide](/sandboxes/optimization) for choosing and measuring 
 
 ## `registries`
 
-<Tooltip tip="Registry credentials work everywhere; plain-HTTP registries and custom CA certificates are local-only."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="These user and managed registry settings govern local image pulls. Cloud uses explicitly supplied credentials or credentials stored in the cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 | Field | Default | Description |
 |-------|---------|-------------|
@@ -340,7 +365,9 @@ A map of registry hostnames to settings. Each host entry can mark the registry a
 
 ### Auth resolution order
 
-When pulling from a registry, microsandbox resolves credentials in this order:
+Managed registry hosts merge by field. Setting `insecure: false` enforces TLS while preserving employee credentials. Omitted `auth` keeps the normal credential lookup and CLI/SDK credentials; explicit `auth: null` forces anonymous access. A managed `auth` object replaces credentials, including explicit CLI/SDK credentials. A managed `registries.ca_certs` path replaces user and per-call certificates; `null` clears them. Without a managed certificate setting, per-call certificates append to user certificates.
+
+For local pulls without managed `auth`, microsandbox resolves credentials in this order, including when a managed host entry only sets TLS options:
 
 1. **Explicit SDK auth** via `.registry(|r| r.auth(...))` on the sandbox builder
 2. **OS keyring** entries created by `msb registry login`

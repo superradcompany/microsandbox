@@ -2855,8 +2855,7 @@ mod tests {
     #[tokio::test]
     async fn restored_fixed_cpu_counts_do_not_require_a_hotplug_controller() {
         let home = tempfile::tempdir().unwrap();
-        let local = LocalBackend::builder()
-            .home(home.path())
+        let local = crate::test_support::local_backend_builder(home.path())
             .build()
             .await
             .unwrap();
@@ -2879,8 +2878,7 @@ mod tests {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
         let home = tempfile::tempdir_in("/tmp").unwrap();
-        let local = LocalBackend::builder()
-            .home(home.path())
+        let local = crate::test_support::local_backend_builder(home.path())
             .build()
             .await
             .unwrap();
@@ -2931,8 +2929,7 @@ mod tests {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
         let home = tempfile::tempdir_in("/tmp").unwrap();
-        let local = LocalBackend::builder()
-            .home(home.path())
+        let local = crate::test_support::local_backend_builder(home.path())
             .build()
             .await
             .unwrap();
@@ -2991,13 +2988,11 @@ mod tests {
 
         let first_home = tempfile::tempdir_in("/tmp").unwrap();
         let second_home = tempfile::tempdir_in("/tmp").unwrap();
-        let first = LocalBackend::builder()
-            .home(first_home.path())
+        let first = crate::test_support::local_backend_builder(first_home.path())
             .build()
             .await
             .unwrap();
-        let second = LocalBackend::builder()
-            .home(second_home.path())
+        let second = crate::test_support::local_backend_builder(second_home.path())
             .build()
             .await
             .unwrap();
@@ -3074,13 +3069,11 @@ mod tests {
 
         let first_home = tempfile::tempdir_in("/tmp").unwrap();
         let second_home = tempfile::tempdir_in("/tmp").unwrap();
-        let first = LocalBackend::builder()
-            .home(first_home.path())
+        let first = crate::test_support::local_backend_builder(first_home.path())
             .build()
             .await
             .unwrap();
-        let second = LocalBackend::builder()
-            .home(second_home.path())
+        let second = crate::test_support::local_backend_builder(second_home.path())
             .build()
             .await
             .unwrap();
@@ -3153,8 +3146,7 @@ mod tests {
     async fn size_setters_accept_bare_mib_and_typed_sizes() {
         let temp = tempdir().unwrap();
         let backend: Arc<dyn Backend> = Arc::new(
-            LocalBackend::builder()
-                .home(temp.path())
+            crate::test_support::local_backend_builder(temp.path())
                 .build()
                 .await
                 .unwrap(),
@@ -3240,6 +3232,8 @@ mod tests {
         let temp = tempdir().unwrap();
         let backend: Arc<dyn Backend> = Arc::new(
             LocalBackend::builder()
+                .config_path(temp.path().join("config.json"))
+                .managed_config_path(temp.path().join("managed.json"))
                 .home(temp.path())
                 .build()
                 .await

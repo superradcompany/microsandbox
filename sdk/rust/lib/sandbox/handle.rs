@@ -1016,7 +1016,7 @@ impl std::fmt::Debug for SandboxHandle {
 #[cfg(all(test, feature = "cloud"))]
 mod tests {
     use super::*;
-    use crate::backend::{BackendKind, CloudBackend, CloudSandboxStatus};
+    use crate::backend::{BackendKind, CloudSandboxStatus};
 
     #[tokio::test]
     async fn cloud_connect_rebuilds_live_sandbox_without_http_request() {
@@ -1120,8 +1120,10 @@ mod tests {
     }
 
     fn cloud_handle_with_id(status: CloudSandboxStatus, id: &str) -> SandboxHandle {
-        let backend: Arc<dyn Backend> =
-            Arc::new(CloudBackend::new("https://unused.invalid", "msb_test_connect").unwrap());
+        let backend: Arc<dyn Backend> = Arc::new(
+            crate::test_support::cloud_backend("https://unused.invalid", "msb_test_connect")
+                .unwrap(),
+        );
         SandboxHandle::from_cloud(
             backend,
             CloudCreateSandboxResponse {

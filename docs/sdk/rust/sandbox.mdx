@@ -867,7 +867,7 @@ Request a globally unique cloud slug. When omitted, microsandbox cloud assigns o
 async fn build(self) -> MicrosandboxResult<SandboxConfig>
 ```
 
-Materialize the [`SandboxConfig`](#sandboxconfig) without booting the sandbox. Validates fresh-boot configuration. Use `Sandbox::restore()` for snapshots. For booting, use [`create`](#sandbox-create) instead; call [`detached(true)`](#sandbox-detached) first for background mode. `create()` calls `build` internally.
+Materialize the [`SandboxConfig`](#sandboxconfig) without pulling an image or booting the sandbox. Validates fresh-boot configuration. Use `Sandbox::restore()` for snapshots. For booting, use [`create`](#sandbox-create) instead; call [`detached(true)`](#sandbox-detached) first for background mode. Local `create()` keeps patches until image metadata is available. Cloud `create()` layers settings before sending the request; the cloud worker resolves image metadata.
 
 <p className="msb-label">Returns</p>
 
@@ -884,13 +884,19 @@ Materialize the [`SandboxConfig`](#sandboxconfig) without booting the sandbox. V
 fn overlay(self, patch: SandboxConfigPatch) -> Self
 ```
 
-Apply sparse per-sandbox configuration after built-in and global defaults. Builder methods called after `overlay` take precedence over the patch.
+Apply sparse sandbox settings and create-time options after built-in and global defaults. Builder methods called after `overlay` take precedence over the patch; managed overrides are applied last.
+
+The builder uses the active backend's cached configuration when `build()` or `create()` runs. Local creation stacks image defaults, global defaults, CLI/SDK patches, then managed overrides in one resolver before validation. Omitted fields inherit lower layers; explicit nullable clears survive image defaults. Cloud creation also applies user and managed settings, then rejects unsupported options before sending the request.
+
+`build()` returns a concrete `SandboxConfig` without pulling image metadata. On local creation, `workdir: None` inherits global defaults, then image defaults if global workdir is omitted. A concrete config cannot distinguish omission from an explicit clear; use direct builder `create()` to preserve sparse clears through image resolution. Managed overrides apply last in both paths.
+
+`SandboxConfigPatch` patches the SDK configuration. Its `spec` field is a `SandboxSpecPatch` for shared settings such as image, resources, and networking. Create-time options, including registry credentials, replacement settings, and the requested slug, live alongside `spec`.
 
 <Accordion title="Example">
 
 ```rust
 use microsandbox::{
-    EnvVar, Sandbox, SandboxConfigPatch, SandboxResourcesPatch,
+    EnvVar, Sandbox, SandboxConfigPatch, SandboxResourcesPatch, SandboxSpecPatch,
 };
 
 let resources = SandboxResourcesPatch::new()
@@ -900,8 +906,12 @@ let resources = SandboxResourcesPatch::new()
     .cpus(2);
 
 let patch = SandboxConfigPatch::new()
-    .resources(resources)
-    .env(vec![EnvVar::new("MODE", "production")]);
+    .spec(
+        SandboxSpecPatch::new()
+            .resources(resources)
+            .env(vec![EnvVar::new("MODE", "production")]),
+    )
+    .replace_existing(true);
 
 let sandbox = Sandbox::builder("agent")
     .image("python:3.12")
@@ -915,11 +925,55 @@ let sandbox = Sandbox::builder("agent")
 
 Environment variables merge by variable name, while labels and scripts merge by map key. Secret entries merge by environment-variable name. Later values win when keys match. Use the generated `replace_*` methods to replace a complete collection; `clear_*` removes the field from the patch so the lower-precedence value remains unchanged.
 
-`SandboxConfigPatch` contains typed configuration values only. YAML loading, relative-path resolution, `${ENV}` expansion, registry credentials, and snapshot selection remain separate CLI or builder responsibilities.
+Patch fields preserve the visibility of their source configuration fields, so ordinary fields and nested patches can be updated directly:
+
+```rust
+let mut patch = SandboxConfigPatch::new();
+patch.spec.resources.cpus = Some(2);
+patch.spec.runtime.cmd = Some(vec!["python".into(), "app.py".into()]);
+patch.spec.runtime.workdir = Some(None); // Explicitly clear the working directory.
+patch.registry_auth = Some(None); // Explicitly clear per-create credentials.
+```
+
+For nullable fields, `None` omits the update, `Some(None)` clears the value, and `Some(Some(value))` sets it.
+
+Mergeable collections keep their merge/replacement state private and expose `get_<field>()` for borrowing their pending values. Ordinary fields have no generated getters. The collections’ `get_<field>_mut()` accessors edit pending values without cloning, initializing an absent collection empty in merge mode and preserving any existing replacement mode:
+
+```rust
+patch.spec.get_env_mut().push(EnvVar::new("REGION", "us-east"));
+patch.spec.get_labels_mut().insert("team".into(), "platform".into());
+```
+
+These accessors edit pending values without deduplicating them. Use `env_mut(...)` to merge entries by name immediately, or `replace_env_mut(...)` to replace the collection. Fluent setters, replacements, clears, and `overlay` remain available, along with their `_mut` variants returning `&mut Self`.
+
+Use fluent setters to construct patches and `if let` for optional inputs. Once all overlays are composed, `into_config()` applies the patch to the type's defaults:
+
+```rust
+use microsandbox::{SandboxConfigPatch, SandboxResourcesPatch, SandboxSpecPatch};
+
+let cpus = Some(4);
+let mut resources = SandboxResourcesPatch::new();
+if let Some(cpus) = cpus {
+    resources.cpus_mut(cpus);
+}
+let config = SandboxConfigPatch::new()
+    .spec(
+        SandboxSpecPatch::new()
+            .name("example".into())
+            .resources(resources),
+    )
+    .into_config();
+```
+
+`into_config()` does not load configuration files, consult a backend, or validate the result. Keep patches for `SandboxBuilder::overlay()` when creating a sandbox so backend and managed settings can still be layered. Use `apply_to(&mut config)` when updating an existing value.
+
+Both patches contain typed inputs. YAML loading, relative-path resolution, `${ENV}` expansion, and snapshot lookup remain CLI or builder responsibilities. Runtime metadata stays internal, and create-time credentials and flags retain their existing serialization exclusions.
 
 <Accordion title="Migrating from the earlier patch types">
 
-The generated patch model replaces the handwritten patch hierarchy from microsandbox 0.6.15 and earlier:
+The shared patch previously named `SandboxConfigPatch` is now `SandboxSpecPatch`. To use it with the builder, wrap it with `SandboxConfigPatch::new().spec(spec_patch)`. Update direct field access such as `patch.resources` to `patch.spec.resources` when using the SDK patch. Existing configuration files and serialized sandbox specifications keep their shape.
+
+The generated patch model also replaces the handwritten patch hierarchy from microsandbox 0.6.15 and earlier:
 
 | Earlier type | Current type |
 | --- | --- |
@@ -929,7 +983,9 @@ The generated patch model replaces the handwritten patch hierarchy from microsan
 | `NetworkPolicyConfigPatch` | `SandboxPolicyPatch` |
 | `SecretConfigPatch` | `SecretsConfigPatch` |
 
-Filesystem, script, image, and init values now use `SandboxConfigPatch` and its nested patch types directly. `LocalConfig` remains available as a deprecated alias of `GlobalConfig`.
+Closure-based patch modifiers have been removed. Update Rust call sites to use direct field access or mutable collection accessors instead.
+
+Filesystem, script, image, and init values use `SandboxSpecPatch`, nested under `SandboxConfigPatch.spec` in the SDK. `LocalConfig` remains available as a deprecated alias of `GlobalConfig`.
 
 </Accordion>
 

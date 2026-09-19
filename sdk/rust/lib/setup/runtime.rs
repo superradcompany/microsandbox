@@ -123,8 +123,9 @@ impl Default for InstallOptions {
 
 /// Resolve a complete `msb` and `libkrunfw` pair without network access.
 ///
-/// Explicit overrides take precedence, followed by the resolved home and then
-/// automatically discovered SDK package binaries.
+/// Uses the already-layered runtime paths, followed by the resolved home and then
+/// automatically discovered SDK package binaries. Backend construction captures
+/// environment and SDK overrides below administrator policy.
 ///
 /// This operation never creates directories, extracts archives, or accesses
 /// the network. A partial installation is never repaired implicitly.
@@ -132,11 +133,8 @@ pub fn resolve_runtime(config: &GlobalConfig) -> MicrosandboxResult<ResolvedRunt
     resolve_runtime_candidates(
         config,
         RuntimeCandidates {
-            env_msb: std::env::var_os("MSB_PATH").map(PathBuf::from),
-            env_library: std::env::var_os("MSB_LIBKRUNFW_PATH").map(PathBuf::from),
-            explicit_msb: crate::config::sdk_msb_path(),
-            explicit_library: crate::config::sdk_libkrunfw_path(),
             packaged_msb: crate::config::sdk_packaged_msb_path(),
+            ..Default::default()
         },
     )
 }

@@ -102,6 +102,7 @@ russh-sftp = { workspace = true, optional = true }
 scopeguard.workspace = true
 sea-orm = { workspace = true, optional = true }
 serde.workspace = true
+serde_ignored.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tar = { workspace = true, optional = true }
@@ -129,13 +130,14 @@ tempfile.workspace = true
 test-utils.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tokio-rustls.workspace = true
+tracing-subscriber.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { version = "3.6.3", features = ["apple-native"], optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 keyring = { version = "3.6.3", features = ["windows-native"], optional = true }
-windows-sys = { version = "0.61.2", features = ["Wdk_Foundation", "Wdk_Storage_FileSystem", "Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_LibraryLoader", "Win32_System_Pipes", "Win32_System_Threading"] }
+windows-sys = { version = "0.61.2", features = ["Wdk_Foundation", "Wdk_Storage_FileSystem", "Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_LibraryLoader", "Win32_System_Pipes", "Win32_System_Threading", "Win32_System_Com", "Win32_UI_Shell"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Transitive dep via keyring's Secret Service backend; declared here only to force the `vendored` feature

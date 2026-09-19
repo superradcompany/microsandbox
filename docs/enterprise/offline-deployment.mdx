@@ -1,0 +1,44 @@
+---
+title: Offline deployment
+description: Provision local runtime dependencies and images without internet access on employee devices
+icon: "box-archive"
+---
+
+Prepare runtime files, SDK packages, and images on a connected machine, then transfer them to employee devices.
+
+## Provision the runtime
+
+Package matching `msb`, `libkrunfw`, and SDK dependencies for each target OS and architecture. Preserve the release's executable permissions and library links. Follow [runtime setup](/sdk/setup) and use [managed paths](/configuration#paths) if you install the runtime in a shared location.
+
+Install application dependencies before disconnecting. Setup helpers can download missing or mismatched runtime files; Go provides [`WithSkipDownload()`](/sdk/setup#go-with-skip-download) to require an existing installation.
+
+Use your device manager to distribute approved runtime packages and [managed settings](/enterprise/managed-configuration#choose-your-device-manager). Package runtime dependencies separately from the policy file and verify them in the employee's context.
+
+## Transfer approved images
+
+On a connected machine with the same CPU architecture as the target, pull and export an image. This example uses Alpine; substitute your approved image:
+
+```bash
+msb pull alpine
+msb save --output alpine.tar alpine
+```
+
+Transfer the archive through your distribution system. On the employee device, confirm `msb context` selects the local backend, then import it as the employee who will run sandboxes:
+
+```bash
+msb load --input alpine.tar --tag offline-alpine:approved
+```
+
+Load into the same configured home and cache used by the application. Image export can change manifest and layer digests, so use the imported reference rather than assuming the original digest is preserved. See [image archives](/cli/image-commands#msb-save).
+
+## Verify without downloads
+
+Disconnect public network access, run `msb doctor`, and test the imported image:
+
+```bash
+msb run offline-alpine:approved --pull never --no-net -- /bin/sh -c 'echo offline-ready'
+```
+
+`--pull never` fails if the image is unavailable locally. `--no-net` disables guest networking; it does not control host installer downloads. This unnamed sandbox is removed when the command finishes.
+
+Repeat with your actual application and SDK. Include every image, package, and runtime dependency it needs, then distribute updates through the same process.

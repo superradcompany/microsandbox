@@ -16,8 +16,8 @@ use crate::error::{Operation, UnsupportedReason};
 use crate::logs::{BootError, LogEntry, LogOptions, LogStreamOptions};
 use crate::sandbox::metrics::SandboxMetrics;
 use crate::sandbox::{
-    RootfsSource, Sandbox, SandboxConfig, SandboxHandle, SandboxListBuilder, SandboxPage,
-    SandboxStatus,
+    RootfsSource, Sandbox, SandboxBuilder, SandboxConfig, SandboxHandle, SandboxListBuilder,
+    SandboxPage, SandboxStatus,
 };
 use crate::{MicrosandboxError, MicrosandboxResult};
 use microsandbox_types::RegistryAuth;
@@ -75,6 +75,49 @@ pub(in crate::backend) enum CloudRegistrySelection {
 }
 
 //--------------------------------------------------------------------------------------------------
+// Methods
+//--------------------------------------------------------------------------------------------------
+
+impl CloudBackend {
+    /// Apply captured device settings before validating or sending a cloud create request.
+    pub(crate) async fn create_from_builder(
+        &self,
+        backend: Arc<dyn Backend>,
+        builder: SandboxBuilder,
+        start: bool,
+    ) -> MicrosandboxResult<Sandbox> {
+        let config = self.build_sandbox_config(builder).await?;
+        let (req, config) = cloud_create_body_and_config(config)?;
+        let cloud = self.create_sandbox(&req, start).await?;
+        if start {
+            ensure_cloud_sandbox_ready(&cloud)?;
+        }
+
+        Ok(Sandbox::from_cloud(backend, cloud, config))
+    }
+
+    /// Resolve cloud request settings for both explicit build and immediate creation.
+    pub(crate) async fn build_sandbox_config(
+        &self,
+        mut builder: SandboxBuilder,
+    ) -> MicrosandboxResult<SandboxConfig> {
+        let options = builder.prepare(Arc::new(self.clone())).await?;
+        // Cloud has no hotplug aperture. Equal maxima on concrete configs track the
+        // requested size, so let them follow any managed CPU or memory override.
+        let resources = &mut options.spec.resources;
+        if resources.max_cpus == resources.cpus {
+            resources.max_cpus = None;
+        }
+        if resources.max_memory_mib == resources.memory_mib {
+            resources.max_memory_mib = None;
+        }
+
+        // The cloud worker resolves image metadata. Device policy is applied on this client.
+        builder.finish(Some(self.config_sources()), None)
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
 
@@ -93,14 +136,7 @@ impl SandboxBackend for CloudBackend {
         config: SandboxConfig,
         start: bool,
     ) -> BoxFuture<'a, MicrosandboxResult<Sandbox>> {
-        Box::pin(async move {
-            let (req, config) = cloud_create_body_and_config(config)?;
-            let cloud = CloudBackend::create_sandbox(self, &req, start).await?;
-            if start {
-                ensure_cloud_sandbox_ready(&cloud)?;
-            }
-            Ok(Sandbox::from_cloud(backend, cloud, config))
-        })
+        Box::pin(self.create_from_builder(backend, SandboxBuilder::from(config), start))
     }
 
     fn create_detached<'a>(
@@ -110,12 +146,7 @@ impl SandboxBackend for CloudBackend {
     ) -> BoxFuture<'a, MicrosandboxResult<Sandbox>> {
         // Cloud has no notion of "detached" — the sandbox lifecycle is owned
         // by msb-cloud, not by this process. Reuse the eager-start path.
-        Box::pin(async move {
-            let (req, config) = cloud_create_body_and_config(config)?;
-            let cloud = CloudBackend::create_sandbox(self, &req, true).await?;
-            ensure_cloud_sandbox_ready(&cloud)?;
-            Ok(Sandbox::from_cloud(backend, cloud, config))
-        })
+        self.create(backend, config, true)
     }
 
     fn start<'a>(
@@ -769,7 +800,7 @@ mod tests {
 
     #[test]
     fn cloud_default_stop_timeout_covers_checkpoint_convergence() {
-        let backend = CloudBackend::new("http://127.0.0.1:1", "test-key").unwrap();
+        let backend = crate::test_support::cloud_backend("http://127.0.0.1:1", "test-key").unwrap();
 
         assert_eq!(backend.default_stop_timeout(), Duration::from_secs(360));
         assert!(!backend.should_force_kill_after_stop_timeout());
@@ -778,8 +809,148 @@ mod tests {
     type ConfigMutation = fn(&mut SandboxConfig);
 
     #[tokio::test]
+    async fn every_cloud_create_entry_point_sends_captured_file_policy() {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+
+        for entry in 0..6 {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut reader = BufReader::new(stream);
+                let mut content_length = 0;
+                loop {
+                    let mut line = String::new();
+                    assert_ne!(reader.read_line(&mut line).await.unwrap(), 0);
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some((name, value)) = line.split_once(':')
+                        && name.eq_ignore_ascii_case("content-length")
+                    {
+                        content_length = value.trim().parse::<usize>().unwrap();
+                    }
+                }
+                let mut body = vec![0; content_length];
+                reader.read_exact(&mut body).await.unwrap();
+                let response =
+                    serde_json::to_string(&cloud_response(CloudSandboxStatus::Running)).unwrap();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    response.len(),
+                    response
+                );
+                reader
+                    .get_mut()
+                    .write_all(response.as_bytes())
+                    .await
+                    .unwrap();
+                serde_json::from_slice::<serde_json::Value>(&body).unwrap()
+            });
+            let directory = tempfile::tempdir().unwrap();
+            let user = directory.path().join("config.json");
+            let managed = directory.path().join("managed.json");
+            std::fs::write(
+                &user,
+                r#"{"sandbox_defaults":{"cpus":6,"memory_mib":4096,"workdir":"/user"}}"#,
+            )
+            .unwrap();
+            std::fs::write(&managed, r#"{"version":1,"overrides":{"sandbox_defaults":{"cpus":2,"memory_mib":1024,"workdir":"/managed","shell":"/bin/admin"}}}"#).unwrap();
+            let backend = CloudBackend::builder()
+                .url(url)
+                .api_key("test-token")
+                .config_sources(
+                    crate::config::layers::BackendConfig::load_from(&user, Some(&managed)).unwrap(),
+                )
+                .build()
+                .unwrap();
+            // Existing backends keep captured policy. A new backend must fail on
+            // these invalid files, but no create entry point should reload them.
+            std::fs::write(&user, "invalid").unwrap();
+            std::fs::write(&managed, "invalid").unwrap();
+            assert!(
+                crate::config::layers::BackendConfig::load_from(&user, Some(&managed)).is_err()
+            );
+            let backend: Arc<dyn Backend> = Arc::new(backend);
+            let request = || {
+                SandboxBuilder::new("policy-request")
+                    .image("alpine")
+                    .cpus(8)
+                    .memory(2048)
+                    .workdir("/request")
+                    .shell("/bin/request")
+            };
+            let empty =
+                crate::config::layers::BackendConfig::new(Default::default(), Default::default());
+            let concrete = request().finish(Some(&empty), None).unwrap();
+            let operation = crate::backend::with_backend(backend.clone(), async {
+                match entry {
+                    0 => request().create().await,
+                    1 => request().create_detached().await,
+                    2 => Sandbox::create(concrete).await,
+                    3 => Sandbox::create_detached(concrete).await,
+                    4 => {
+                        let config = SandboxBuilder::from(concrete).build().await?;
+                        Sandbox::create(config).await
+                    }
+                    _ => {
+                        backend
+                            .sandboxes()
+                            .create(backend.clone(), concrete, false)
+                            .await
+                    }
+                }
+            });
+            let sandbox = tokio::time::timeout(Duration::from_secs(5), operation)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(sandbox.config().spec.resources.cpus, 2);
+            let body = server.await.unwrap();
+            assert_eq!(body["resources"]["vcpus"], 2, "entry {entry}");
+            assert_eq!(body["resources"]["memory_mib"], 1024, "entry {entry}");
+            assert_eq!(body["runtime"]["workdir"], "/managed", "entry {entry}");
+            assert_eq!(body["runtime"]["shell"], "/bin/admin", "entry {entry}");
+        }
+    }
+
+    #[tokio::test]
+    async fn unsupported_managed_cloud_settings_fail_before_http() {
+        let policy =
+            serde_json::from_str(r#"{"sandbox_defaults":{"disable_metrics_sample":true}}"#)
+                .unwrap();
+        let backend = CloudBackend::builder()
+            .url("http://127.0.0.1:1")
+            .api_key("test-key")
+            .config_sources(crate::config::layers::BackendConfig::new(
+                Default::default(),
+                policy,
+            ))
+            .build()
+            .unwrap();
+        let error = crate::backend::with_backend(backend, async {
+            SandboxBuilder::new("unsupported-policy")
+                .image("alpine")
+                .cpus(2)
+                .create()
+                .await
+                .err()
+                .unwrap()
+        })
+        .await;
+        assert!(matches!(
+            error,
+            MicrosandboxError::Unsupported {
+                reason: UnsupportedReason::ConfigField("disable_metrics_sample"),
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
     async fn cloud_boot_error_is_absent_until_the_api_exposes_diagnostics() {
-        let backend = Arc::new(CloudBackend::new("http://127.0.0.1:1", "test-key").unwrap());
+        let backend =
+            Arc::new(crate::test_support::cloud_backend("http://127.0.0.1:1", "test-key").unwrap());
         let backend_dyn: Arc<dyn Backend> = backend.clone();
 
         let boot_error = backend
@@ -792,7 +963,8 @@ mod tests {
 
     #[tokio::test]
     async fn cloud_follow_logs_rejects_bounded_filters_before_opening_stream() {
-        let backend = Arc::new(CloudBackend::new("http://127.0.0.1:1", "test-key").unwrap());
+        let backend =
+            Arc::new(crate::test_support::cloud_backend("http://127.0.0.1:1", "test-key").unwrap());
         let now = chrono::Utc::now();
 
         for opts in [

@@ -141,6 +141,7 @@ The same key also authenticates the [REST API](/api-reference/overview) directly
 - **Local or cloud.** Cloud is explicit: set `MSB_BACKEND=cloud`, select a cloud profile, or choose it in code. See [Local or cloud](/operations/backends).
 - **Networking.** Cloud sandboxes get a platform-assigned hostname. SSH works through the same `msb ssh` and SDK SSH clients you use locally.
 - **Images.** Specify an OCI image when you create the sandbox; the cloud pulls it for you.
+- **Managed settings.** [Device policy](/enterprise/managed-configuration) applies to create requests and CLI/SDK SSH sessions. Unsupported create settings fail before the request is sent. Existing cloud sandboxes and the hosted SSH gateway keep their settings.
 - **Keys and billing.** API keys, usage, and invoices live in the [dashboard](https://dashboard.microsandbox.dev).
 
 ## Next steps

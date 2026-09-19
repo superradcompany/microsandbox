@@ -311,8 +311,7 @@ pub async fn spawn_sandbox(
         .resolve(&EnvNetworkSecretResolver)
         .map_err(|error| MicrosandboxError::InvalidConfig(error.to_string()))?;
 
-    // Resolve msb and libkrunfw as one pair so a partial or mixed-version
-    // installation cannot reach process launch.
+    // Resolve the already-layered runtime paths as one compatible pair before launch.
     let global = local.config();
     #[cfg(feature = "embed-binaries")]
     let resolved_runtime = crate::setup::ensure_runtime(
@@ -689,13 +688,11 @@ pub async fn spawn_sandbox(
     cmd.args(visible);
 
     // Agentd selection is process-wide for the VMM. Forward the explicit
-    // environment override first, otherwise map the backend-owned global
-    // config into the child environment. The child validates and eagerly
+    // path from the resolved backend config into the child environment.
+    // Managed clears also remove inherited overrides. The child validates and eagerly
     // reads the selected payload before constructing any filesystem.
-    if let Some(path) = agentd_path_override(
-        std::env::var_os("MSB_AGENTD_PATH"),
-        global.paths.agentd.as_deref(),
-    ) {
+    cmd.env_remove("MSB_AGENTD_PATH");
+    if let Some(path) = &global.paths.agentd {
         cmd.env("MSB_AGENTD_PATH", path);
     }
 
@@ -2722,14 +2719,6 @@ fn append_option_block(spec: &mut String, opts: Vec<String>) {
     spec.push_str(&opts.join(","));
 }
 
-/// Resolve the process-wide Agentd path without consulting the filesystem.
-fn agentd_path_override(
-    environment: Option<OsString>,
-    configured: Option<&Path>,
-) -> Option<OsString> {
-    environment.or_else(|| configured.map(Path::as_os_str).map(OsString::from))
-}
-
 /// Derive a stable, collision-resistant identifier from a guest mount path.
 ///
 /// Used for virtiofs tags and for virtio-blk `serial` fields (the block id
@@ -3343,9 +3332,7 @@ mod tests {
         AUTO_BLOCK_WRITEBACK_LIMIT_BYTES, MIN_BLOCK_WRITEBACK_LIMIT_BYTES,
         auto_block_writeback_pool_bytes, resolve_linux_block_writeback_policy,
     };
-    use super::{
-        agentd_path_override, block_writeback_policy, is_owned_restored_disk, machine_cli_args,
-    };
+    use super::{block_writeback_policy, is_owned_restored_disk, machine_cli_args};
     use crate::{
         LogLevel,
         backend::LocalBackend,
@@ -3355,6 +3342,9 @@ mod tests {
             RootfsSource, SandboxBuilder, SandboxConfig, StatVirtualization, VolumeMount,
         },
         volume::VolumeKind,
+    };
+    use crate::{
+        SandboxConfigPatch, backend::BackendSelectionSource, config::layers::BackendConfig,
     };
 
     #[test]
@@ -4040,11 +4030,16 @@ mod tests {
     // Functions: Helpers
     //----------------------------------------------------------------------------------------------
 
-    /// Build a `LocalBackend` for tests. Uses `lazy()` since these tests only
-    /// exercise the pure-rendering `machine_cli_args` path — no DB / FS
-    /// touches.
+    /// Use isolated configuration for pure `machine_cli_args` rendering tests.
+    /// The database remains unopened.
     fn test_local_backend() -> LocalBackend {
-        LocalBackend::lazy()
+        LocalBackend::from_backend_config(
+            BackendConfig::new(Default::default(), Default::default())
+                .prepare_for_local_backend(Default::default())
+                .unwrap(),
+            BackendSelectionSource::Programmatic,
+            None,
+        )
     }
 
     #[cfg(feature = "net")]
@@ -4088,25 +4083,6 @@ mod tests {
             None,
         );
         launch
-    }
-
-    #[test]
-    fn agentd_environment_override_wins_over_global_config() {
-        assert_eq!(
-            agentd_path_override(
-                Some(OsString::from("/from/environment")),
-                Some(Path::new("/from/config")),
-            ),
-            Some(OsString::from("/from/environment"))
-        );
-    }
-
-    #[test]
-    fn agentd_global_config_is_used_without_environment_override() {
-        assert_eq!(
-            agentd_path_override(None, Some(Path::new("/from/config"))),
-            Some(OsString::from("/from/config"))
-        );
     }
 
     /// Re-expand a [`LaunchConfig`] into the historical `--flag value` token
@@ -4621,7 +4597,9 @@ mod tests {
             .await
             .unwrap();
         config.spec.runtime.cmd = Some(vec!["bash".to_string()]);
-        config.set_background_command(Vec::new());
+        let mut patch = SandboxConfigPatch::new();
+        patch.set_background_command(Vec::new());
+        patch.apply_to(&mut config);
 
         let rendered = render_args(&config);
 
@@ -4706,7 +4684,13 @@ mod tests {
     async fn test_agent_socket_candidates_follow_explicit_local_backend_paths() {
         let temp = tempdir().unwrap();
         let home = temp.path().join("msb-home");
-        let backend = LocalBackend::builder().home(&home).build().await.unwrap();
+        let backend = LocalBackend::builder()
+            .config_path(home.join("config.json"))
+            .managed_config_path(home.join("managed.json"))
+            .home(&home)
+            .build()
+            .await
+            .unwrap();
 
         let candidates =
             super::sandbox_agent_socket_path_candidates_for(&backend, "sdk-socket-test");
@@ -4754,7 +4738,13 @@ mod tests {
         #[cfg(not(unix))]
         let temp = tempfile::Builder::new().prefix("msb").tempdir().unwrap();
         let home = temp.path().join("msb-home");
-        let backend = LocalBackend::builder().home(&home).build().await.unwrap();
+        let backend = LocalBackend::builder()
+            .config_path(home.join("config.json"))
+            .managed_config_path(home.join("managed.json"))
+            .home(&home)
+            .build()
+            .await
+            .unwrap();
 
         let resolved =
             super::resolve_sandbox_agent_socket_path_for(&backend, "sdk-socket-test").unwrap();
@@ -5789,6 +5779,8 @@ mod tests {
         std::fs::create_dir_all(&volumes_dir).unwrap();
         std::fs::write(volumes_dir.join("broken"), b"not a directory").unwrap();
         let local = LocalBackend::builder()
+            .config_path(home.join("config.json"))
+            .managed_config_path(home.join("managed.json"))
             .home(&home)
             .volumes_dir(&volumes_dir)
             .build()
@@ -5823,8 +5815,7 @@ mod tests {
         use microsandbox_utils::process_lock::try_lock_exclusive;
 
         let directory = tempfile::tempdir().unwrap();
-        let local = LocalBackend::builder()
-            .home(directory.path().join("home"))
+        let local = crate::test_support::local_backend_builder(directory.path().join("home"))
             .build()
             .await
             .unwrap();
@@ -5875,6 +5866,8 @@ mod tests {
         let home = temp.path().join("home");
         let volumes_dir = temp.path().join("volumes");
         let local = LocalBackend::builder()
+            .config_path(home.join("config.json"))
+            .managed_config_path(home.join("managed.json"))
             .home(&home)
             .volumes_dir(&volumes_dir)
             .build()
@@ -5917,6 +5910,8 @@ mod tests {
     async fn test_resolve_named_volumes_recovers_disk_metadata_from_store() {
         let temp = tempdir().unwrap();
         let local = LocalBackend::builder()
+            .config_path(temp.path().join("config.json"))
+            .managed_config_path(temp.path().join("managed.json"))
             .home(temp.path())
             .build()
             .await
@@ -5974,6 +5969,8 @@ mod tests {
     async fn test_existing_named_volume_mode_does_not_validate_default_metadata() {
         let temp = tempdir().unwrap();
         let local = LocalBackend::builder()
+            .config_path(temp.path().join("config.json"))
+            .managed_config_path(temp.path().join("managed.json"))
             .home(temp.path())
             .build()
             .await

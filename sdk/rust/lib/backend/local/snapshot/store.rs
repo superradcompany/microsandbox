@@ -661,8 +661,7 @@ mod tests {
     #[tokio::test]
     async fn duplicate_identities_keep_group_addresses_and_remove_only_selected_copy() {
         let home = tempfile::tempdir().unwrap();
-        let local = LocalBackend::builder()
-            .home(home.path())
+        let local = crate::test_support::local_backend_builder(home.path())
             .build()
             .await
             .unwrap();
@@ -707,8 +706,7 @@ mod tests {
     #[tokio::test]
     async fn distinct_child_counts_and_head_guard_survive_reindex() {
         let home = tempfile::tempdir().unwrap();
-        let local = LocalBackend::builder()
-            .home(home.path())
+        let local = crate::test_support::local_backend_builder(home.path())
             .build()
             .await
             .unwrap();
@@ -743,8 +741,7 @@ mod tests {
     #[tokio::test]
     async fn flat_artifact_requires_explicit_path() {
         let home = tempfile::tempdir().unwrap();
-        let local = LocalBackend::builder()
-            .home(home.path())
+        let local = crate::test_support::local_backend_builder(home.path())
             .build()
             .await
             .unwrap();

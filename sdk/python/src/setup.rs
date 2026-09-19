@@ -68,7 +68,7 @@ pub fn set_packaged_msb_path(path: String) {
 /// Resolve the CLI runtime without depending on the selected local/cloud backend.
 #[pyfunction]
 pub fn resolved_cli_msb_path() -> PyResult<String> {
-    let config = microsandbox::config::load_persisted_config_or_default().map_err(to_py_err)?;
+    let config = microsandbox::setup::binding_runtime_config("{}").map_err(to_py_err)?;
     microsandbox::setup::resolve_runtime(&config)
         .map(|runtime| runtime.msb_path.to_string_lossy().into_owned())
         .map_err(to_py_err)

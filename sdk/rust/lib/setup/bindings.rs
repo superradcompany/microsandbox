@@ -4,7 +4,10 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 
-use crate::{MicrosandboxError, MicrosandboxResult, config::GlobalConfig};
+use crate::{
+    MicrosandboxError, MicrosandboxResult,
+    config::{GlobalConfig, GlobalConfigPatch, PathsConfigPatch, layers::BackendConfig},
+};
 
 use super::{InstallOptions, InstallSource};
 
@@ -32,25 +35,37 @@ struct InstallOptionsInput {
 }
 
 //--------------------------------------------------------------------------------------------------
+// Methods
+//--------------------------------------------------------------------------------------------------
+
+impl RuntimeConfigInput {
+    fn resolve(self, sources: BackendConfig) -> MicrosandboxResult<GlobalConfig> {
+        let mut options = GlobalConfigPatch::new();
+        let mut paths = PathsConfigPatch::new();
+        if let Some(home) = self.home {
+            options.home_mut(home);
+        }
+        if let Some(msb) = self.msb_path {
+            paths.msb_mut(msb);
+        }
+        if let Some(library) = self.libkrunfw_path {
+            paths.libkrunfw_mut(library);
+        }
+        let sources = sources.prepare_for_local_backend(options.paths(paths))?;
+        Ok(sources.resolved_config().as_ref().clone())
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-/// Decode language SDK overrides on top of the persisted global configuration.
+/// Resolve language SDK overrides with user settings, process paths, and managed policy.
 #[doc(hidden)]
 pub fn binding_runtime_config(json: &str) -> MicrosandboxResult<GlobalConfig> {
     let input: RuntimeConfigInput = serde_json::from_str(json)
         .map_err(|error| MicrosandboxError::Custom(format!("invalid runtime config: {error}")))?;
-    let mut config = crate::config::load_persisted_config_or_default()?;
-    if let Some(home) = input.home {
-        config.home = Some(home);
-    }
-    if let Some(msb) = input.msb_path {
-        config.paths.msb = Some(msb);
-    }
-    if let Some(library) = input.libkrunfw_path {
-        config.paths.libkrunfw = Some(library);
-    }
-    Ok(config)
+    input.resolve(BackendConfig::load()?)
 }
 
 /// Decode the common installation options without acquiring any artifacts.
@@ -84,6 +99,38 @@ pub fn binding_install_options(json: &str) -> MicrosandboxResult<InstallOptions>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runtime_bindings_keep_process_paths_below_managed_policy() {
+        let _guard = crate::test_support::lock_env();
+        let previous = std::env::var_os("MSB_PATH");
+        let _restore = scopeguard::guard(previous, |previous| unsafe {
+            match previous {
+                Some(value) => std::env::set_var("MSB_PATH", value),
+                None => std::env::remove_var("MSB_PATH"),
+            }
+        });
+        // SAFETY: environment-dependent tests hold the shared lock.
+        unsafe { std::env::set_var("MSB_PATH", "/environment/msb") };
+        for (managed, expected) in [
+            (serde_json::json!({}), "/environment/msb"),
+            (
+                serde_json::json!({"paths":{"msb":"/managed/msb"}}),
+                "/managed/msb",
+            ),
+        ] {
+            let sources = BackendConfig::new(
+                serde_json::from_value(serde_json::json!({"paths":{"msb":"/user/msb"}})).unwrap(),
+                serde_json::from_value(managed).unwrap(),
+            );
+            let input: RuntimeConfigInput =
+                serde_json::from_str(r#"{"msb_path":"/sdk/msb"}"#).unwrap();
+            assert_eq!(
+                input.resolve(sources).unwrap().paths.msb,
+                Some(expected.into())
+            );
+        }
+    }
 
     #[test]
     fn install_defaults_and_explicit_options_match_rust() {

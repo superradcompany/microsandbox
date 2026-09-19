@@ -633,7 +633,9 @@ pub struct NetworkSpec {
 
     /// Proxy used for outbound sandbox connections and supported datagram flows.
     ///
+    /// In Rust SDK creation from a concrete `SandboxConfig`, `None` inherits defaults; use a sparse patch to clear.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[config_patch(nullable)]
     pub outbound_proxy: Option<OutboundProxy>,
 }
 
@@ -866,7 +868,6 @@ pub struct SnapshotSpec {
 ///
 /// This is the durable contract for fields that are already shared across backends. Local-only execution state such as resolved manifest digests, snapshot upper-layer paths, registry credentials, replace flags, and backend dispatch stays outside this type.
 #[derive(Debug, Default, Clone, Serialize, Deserialize, ConfigPatch)]
-#[config_patch(name = SandboxConfigPatch)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(default)]
@@ -955,7 +956,9 @@ pub struct SandboxResources {
     pub cpu_placement: CpuPlacement,
 
     /// Host-defined placement profile selected for this sandbox.
+    /// In Rust SDK creation from a concrete `SandboxConfig`, `None` inherits defaults; use a sparse patch to clear.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[config_patch(nullable)]
     pub placement_profile: Option<String>,
 
     /// Guest transparent huge-page policy selected at boot.
@@ -1045,9 +1048,13 @@ pub enum TransparentHugePagePolicy {
 #[serde(default)]
 pub struct SandboxRuntimeOptions {
     /// Working directory inside the guest.
+    /// In Rust SDK creation from a concrete `SandboxConfig`, `None` inherits defaults; use a sparse patch to clear.
+    #[config_patch(nullable)]
     pub workdir: Option<String>,
 
     /// Default shell for scripts and interactive sessions.
+    /// In Rust SDK creation from a concrete `SandboxConfig`, `None` explicitly clears lower-layer defaults; managed overrides still apply.
+    #[config_patch(nullable)]
     pub shell: Option<String>,
 
     /// Named scripts available inside the guest.
@@ -1067,9 +1074,13 @@ pub struct SandboxRuntimeOptions {
     pub user: Option<String>,
 
     /// Runtime log verbosity.
+    /// In Rust SDK creation from a concrete `SandboxConfig`, `None` explicitly clears lower-layer defaults; managed overrides still apply.
+    #[config_patch(nullable)]
     pub log_level: Option<SandboxLogLevel>,
 
     /// Metrics sampling interval in milliseconds. `None` disables sampling.
+    /// In Rust SDK creation from a concrete `SandboxConfig`, `None` explicitly clears lower-layer defaults; managed overrides still apply.
+    #[config_patch(nullable)]
     pub metrics_sample_interval_ms: Option<u64>,
 
     /// Force-disable metrics sampling regardless of `metrics_sample_interval_ms`.

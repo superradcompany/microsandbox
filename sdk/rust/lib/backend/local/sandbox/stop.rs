@@ -234,8 +234,7 @@ mod tests {
 
     async fn fixture(name: &str) -> (tempfile::TempDir, LocalBackend, i32, i32) {
         let home = tempfile::tempdir().unwrap();
-        let backend = LocalBackend::builder()
-            .home(home.path())
+        let backend = crate::test_support::local_backend_builder(home.path())
             .build()
             .await
             .unwrap();

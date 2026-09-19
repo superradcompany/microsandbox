@@ -1,7 +1,6 @@
 //! SSH client and server helpers for sandboxes.
 
 use std::collections::HashMap;
-use std::io::Write;
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
@@ -28,9 +27,11 @@ use microsandbox_protocol::{
     message::MessageType,
     tcp::{TcpClose, TcpClosed, TcpConnect, TcpConnected, TcpData, TcpEof, TcpFailed},
 };
-use microsandbox_types::EnvVar;
+use microsandbox_types::{ConfigPatch, EnvVar};
 use russh::client::Msg as ClientMsg;
-use russh::keys::{Algorithm, PrivateKey, PrivateKeyWithHashAlg, PublicKeyBase64, load_secret_key};
+use russh::keys::{
+    Algorithm, PrivateKey, PrivateKeyWithHashAlg, PublicKeyBase64, decode_secret_key,
+};
 use russh::server::{Auth, ChannelOpenHandle, Msg, Session};
 use russh::{Channel, ChannelId, ChannelMsg, ChannelOpenFailure, Sig};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
@@ -40,6 +41,10 @@ use super::attach;
 #[cfg(windows)]
 use super::terminal::{
     WindowsTerminalEvent, WindowsTerminalEventPump, WindowsTerminalGuard, current_terminal_size,
+};
+use crate::config::{
+    DEFAULT_SSH_INACTIVITY_TIMEOUT_SECS, GlobalConfigPatch,
+    layers::{BackendConfig, ConfigLayers, Overlay},
 };
 use crate::sandbox::exec::{ExecControl, ExecEvent, ExecOptions, ExecSink, StdinMode};
 use crate::{MicrosandboxError, MicrosandboxResult, Sandbox, agent::AgentClient, error::Operation};
@@ -68,15 +73,16 @@ const SSH_TCP_PACKET_BYTES: usize = 32 * 1024;
 /// bytes; this item bound lets control credits pass while russh waits for the peer's output window.
 const TCP_OUTPUT_QUEUE_CAPACITY: usize = 1024;
 
-/// Backend-neutral fallback used when the active backend has no local SSH configuration.
-///
-/// Keep this aligned with `config::DEFAULT_SSH_INACTIVITY_TIMEOUT_SECS`, which is unavailable in
-/// cloud-only builds because the persisted host configuration is a local-backend concern.
-const DEFAULT_SSH_INACTIVITY_TIMEOUT_SECS: u64 = 600;
-
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
+
+/// Inactivity timeout after saved settings, server options, and policy are combined.
+#[derive(Clone, Default, ConfigPatch)]
+pub(crate) struct SshTimeout {
+    #[config_patch(nullable)]
+    inactivity: Option<Duration>,
+}
 
 /// SSH namespace for a sandbox.
 #[derive(Clone)]
@@ -91,7 +97,6 @@ pub struct SandboxSshOps {
 struct LocalSshDefaults {
     authorized_keys_path: PathBuf,
     host_key_path: PathBuf,
-    inactivity_timeout_secs: u64,
 }
 
 /// Builder for [`SshClientOptions`].
@@ -426,12 +431,16 @@ impl SandboxSshOps {
     ) -> MicrosandboxResult<SshServer> {
         let options = f(SshServerOptionsBuilder::default()).build();
         let local_defaults = local_ssh_defaults(&self.sandbox);
-        let inactivity_timeout = resolve_inactivity_timeout(
-            options.inactivity_timeout,
-            local_defaults
-                .as_ref()
-                .map(|defaults| defaults.inactivity_timeout_secs),
-        );
+        let layers = match BackendConfig::for_backend(self.sandbox.backend().as_ref()) {
+            Some(config) => config.ssh_layers(),
+            // Custom backends without device settings retain the built-in timeout.
+            None => ConfigLayers::unmanaged().base(SshTimeoutPatch::builtin()),
+        };
+        let inactivity_timeout = layers
+            .options(SshTimeoutPatch::from_options(options.inactivity_timeout))
+            .build()
+            .into_config()
+            .inactivity;
 
         // Explicit/in-memory key material is backend-neutral. Only the
         // convenience defaults live under the local backend's config/runtime
@@ -442,7 +451,8 @@ impl SandboxSshOps {
             local_defaults
                 .as_ref()
                 .map(|defaults| defaults.authorized_keys_path.as_path()),
-        )?;
+        )
+        .await?;
         let host_key = match options.host_key {
             Some(key) => key,
             None => {
@@ -458,7 +468,7 @@ impl SandboxSshOps {
                         (path, true)
                     }
                 };
-                load_or_create_host_key(&host_key_path, secure_parent)?
+                load_or_create_host_key(&host_key_path, secure_parent).await?
             }
         };
         let config = Arc::new(russh::server::Config {
@@ -884,7 +894,6 @@ impl SshClient {
                         };
                         match msg {
                             ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, .. } => {
-                                use tokio::io::AsyncWriteExt;
                                 stdout.write_all(&data).await?;
                                 stdout.flush().await?;
                             }
@@ -1800,8 +1809,43 @@ impl russh::server::Handler for SshSession {
 }
 
 //--------------------------------------------------------------------------------------------------
+// Methods
+//--------------------------------------------------------------------------------------------------
+
+impl SshTimeoutPatch {
+    /// Supply the built-in timeout even when no file or caller sets one.
+    pub(crate) fn builtin() -> Self {
+        Self::new().inactivity(Duration::from_secs(DEFAULT_SSH_INACTIVITY_TIMEOUT_SECS))
+    }
+
+    /// Convert saved or managed whole-second settings; zero disables the timeout.
+    pub(crate) fn from_global(global: &GlobalConfigPatch) -> Self {
+        let mut patch = Self::new();
+        if let Some(secs) = global.ssh.inactivity_timeout_secs {
+            patch.set_inactivity_mut((secs > 0).then(|| Duration::from_secs(secs)));
+        }
+        patch
+    }
+
+    /// Preserve caller omission, explicit disabling, and subsecond durations.
+    fn from_options(timeout: Option<Option<Duration>>) -> Self {
+        let mut patch = Self::new();
+        if let Some(timeout) = timeout {
+            patch.set_inactivity_mut(timeout);
+        }
+        patch
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
+
+impl Overlay for SshTimeoutPatch {
+    fn overlay(self, higher: Self) -> Self {
+        self.overlay(higher)
+    }
+}
 
 impl Drop for TcpRelayCloseGuard {
     fn drop(&mut self) {
@@ -2531,17 +2575,17 @@ async fn relay_tcp_to_ssh(
     let _ = output.send(TcpOutput::Close).await;
 }
 
-fn build_authorized_keys(
+async fn build_authorized_keys(
     options: &SshServerOptions,
     default_path: Option<&Path>,
 ) -> MicrosandboxResult<Vec<String>> {
     let mut keys = Vec::new();
     if let Some(path) = &options.authorized_keys_path {
-        keys.extend(load_authorized_keys(path)?);
+        keys.extend(load_authorized_keys(path).await?);
     } else if options.authorized_keys.is_empty() {
         let path = default_path
             .ok_or_else(|| MicrosandboxError::local_only(Operation::SandboxSshServer))?;
-        keys.extend(load_authorized_keys(path)?);
+        keys.extend(load_authorized_keys(path).await?);
     }
     for key in &options.authorized_keys {
         keys.push(parse_authorized_key(key)?);
@@ -2581,7 +2625,6 @@ fn local_ssh_defaults(sandbox: &Sandbox) -> Option<LocalSshDefaults> {
                 .join(sandbox.name())
                 .join(microsandbox_utils::SSH_SUBDIR)
                 .join("host_ed25519"),
-            inactivity_timeout_secs: config.ssh.inactivity_timeout_secs,
         })
     }
 
@@ -2592,41 +2635,49 @@ fn local_ssh_defaults(sandbox: &Sandbox) -> Option<LocalSshDefaults> {
     }
 }
 
-fn load_or_create_host_key(path: &Path, secure_parent: bool) -> MicrosandboxResult<PrivateKey> {
-    if path.exists() {
-        set_private_file_permissions(path)?;
-        return load_secret_key(path, None)
+async fn load_or_create_host_key(
+    path: &Path,
+    secure_parent: bool,
+) -> MicrosandboxResult<PrivateKey> {
+    if tokio::fs::try_exists(path).await? {
+        set_private_file_permissions(path).await?;
+        let secret = tokio::fs::read_to_string(path)
+            .await
+            .map_err(|e| MicrosandboxError::Custom(format!("load SSH host key: {e}")))?;
+        return decode_secret_key(&secret, None)
             .map_err(|e| MicrosandboxError::Custom(format!("load SSH host key: {e}")));
     }
 
     if let Some(parent) = path.parent() {
         if secure_parent {
-            create_secure_dir(parent)?;
+            create_secure_dir(parent).await?;
         } else {
-            std::fs::create_dir_all(parent)?;
+            tokio::fs::create_dir_all(parent).await?;
         }
     }
-    let mut rng = russh::keys::key::safe_rng();
-    let key = PrivateKey::random(&mut rng, Algorithm::Ed25519)
-        .map_err(|e| MicrosandboxError::Custom(format!("generate SSH host key: {e}")))?;
+    let key = {
+        let mut rng = russh::keys::key::safe_rng();
+        PrivateKey::random(&mut rng, Algorithm::Ed25519)
+            .map_err(|e| MicrosandboxError::Custom(format!("generate SSH host key: {e}")))?
+    };
     let encoded = key
         .to_openssh(russh::keys::ssh_key::LineEnding::LF)
         .map_err(|e| MicrosandboxError::Custom(format!("encode SSH host key: {e}")))?;
-    let mut open_options = std::fs::OpenOptions::new();
+    let mut open_options = tokio::fs::OpenOptions::new();
     open_options.create_new(true).write(true);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::OpenOptionsExt;
         open_options.mode(0o600);
     }
-    let mut file = open_options.open(path)?;
-    file.write_all(encoded.as_bytes())?;
-    set_private_file_permissions(path)?;
+    let mut file = open_options.open(path).await?;
+    file.write_all(encoded.as_bytes()).await?;
+    file.flush().await?;
+    set_private_file_permissions(path).await?;
     Ok(key)
 }
 
-fn load_authorized_keys(path: &Path) -> MicrosandboxResult<Vec<String>> {
-    let content = std::fs::read_to_string(path).map_err(|error| {
+async fn load_authorized_keys(path: &Path) -> MicrosandboxResult<Vec<String>> {
+    let content = tokio::fs::read_to_string(path).await.map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
             MicrosandboxError::Custom(format!(
                 "SSH authorized keys not found at {}; add one with `msb ssh authorize --file ~/.ssh/id_ed25519.pub`",
@@ -2673,21 +2724,21 @@ fn parse_authorized_key(line: &str) -> MicrosandboxResult<String> {
     Ok(key.public_key_base64())
 }
 
-fn create_secure_dir(path: &Path) -> MicrosandboxResult<()> {
-    std::fs::create_dir_all(path)?;
+async fn create_secure_dir(path: &Path) -> MicrosandboxResult<()> {
+    tokio::fs::create_dir_all(path).await?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+        tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).await?;
     }
     Ok(())
 }
 
-fn set_private_file_permissions(_path: &Path) -> MicrosandboxResult<()> {
+async fn set_private_file_permissions(_path: &Path) -> MicrosandboxResult<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(_path, std::fs::Permissions::from_mode(0o600))?;
+        tokio::fs::set_permissions(_path, std::fs::Permissions::from_mode(0o600)).await?;
     }
     Ok(())
 }
@@ -3051,16 +3102,6 @@ fn apply_inactivity_timeout(
     }
 }
 
-fn resolve_inactivity_timeout(
-    timeout: Option<Option<Duration>>,
-    configured_secs: Option<u64>,
-) -> Option<Duration> {
-    timeout.unwrap_or_else(|| {
-        let secs = configured_secs.unwrap_or(DEFAULT_SSH_INACTIVITY_TIMEOUT_SECS);
-        (secs > 0).then(|| Duration::from_secs(secs))
-    })
-}
-
 fn default_ssh_term() -> String {
     match std::env::var("TERM") {
         Ok(term) if !term.trim().is_empty() && term != "dumb" => term,
@@ -3129,8 +3170,218 @@ fn ssh_error(context: &str, error: impl std::fmt::Display) -> MicrosandboxError 
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn persisted_ssh_keys_are_reused_with_private_permissions() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ssh/host_ed25519");
+        let key = load_or_create_host_key(&path, true).await.unwrap();
+        let reloaded = load_or_create_host_key(&path, true).await.unwrap();
+        assert_eq!(key.public_key(), reloaded.public_key());
+
+        let authorized_keys = dir.path().join("authorized_keys");
+        tokio::fs::write(&authorized_keys, key.public_key().to_openssh().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            load_authorized_keys(&authorized_keys).await.unwrap(),
+            vec![key.public_key().public_key_base64()]
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for (path, mode) in [(path.as_path(), 0o600), (path.parent().unwrap(), 0o700)] {
+                let permissions = tokio::fs::metadata(path).await.unwrap().permissions();
+                assert_eq!(permissions.mode() & 0o777, mode);
+            }
+        }
+    }
+
     #[test]
-    fn explicit_authorized_key_does_not_require_local_config() {
+    fn ssh_timeout_preserves_subseconds_and_managed_disable() {
+        let global: GlobalConfigPatch =
+            serde_json::from_str(r#"{"ssh":{"inactivity_timeout_secs":30}}"#).unwrap();
+        let layers = BackendConfig::new(global.clone(), Default::default());
+        let subsecond = Some(Some(Duration::from_millis(250)));
+        assert_eq!(
+            layers
+                .ssh_layers()
+                .options(SshTimeoutPatch::from_options(subsecond))
+                .build()
+                .into_config()
+                .inactivity,
+            subsecond.flatten()
+        );
+        assert_eq!(
+            layers
+                .ssh_layers()
+                .options(SshTimeoutPatch::from_options(Some(None)))
+                .build()
+                .into_config()
+                .inactivity,
+            None
+        );
+        assert_eq!(
+            layers
+                .ssh_layers()
+                .options(SshTimeoutPatch::from_options(None))
+                .build()
+                .into_config()
+                .inactivity,
+            Some(Duration::from_secs(30))
+        );
+        let layers = BackendConfig::new(
+            global.clone(),
+            serde_json::from_str(r#"{"ssh":{"inactivity_timeout_secs":0}}"#).unwrap(),
+        );
+        assert_eq!(
+            layers
+                .ssh_layers()
+                .options(SshTimeoutPatch::from_options(subsecond))
+                .build()
+                .into_config()
+                .inactivity,
+            None
+        );
+        let layers = BackendConfig::new(
+            global.clone(),
+            serde_json::from_str(r#"{"ssh":{"inactivity_timeout_secs":10}}"#).unwrap(),
+        );
+        assert_eq!(
+            layers
+                .ssh_layers()
+                .options(SshTimeoutPatch::from_options(Some(None)))
+                .build()
+                .into_config()
+                .inactivity,
+            Some(Duration::from_secs(10))
+        );
+    }
+
+    #[test]
+    fn ssh_timeout_source_matrix() {
+        for saved in [None, Some(0), Some(30)] {
+            for managed in [None, Some(0), Some(10)] {
+                for option in [None, Some(None), Some(Some(Duration::from_millis(250)))] {
+                    let patch = |secs| {
+                        let mut global = GlobalConfigPatch::new();
+                        global.ssh.inactivity_timeout_secs = secs;
+                        global
+                    };
+                    let layers = BackendConfig::new(patch(saved), patch(managed));
+                    let seconds = |secs| {
+                        if secs == 0 {
+                            None
+                        } else {
+                            Some(Duration::from_secs(secs))
+                        }
+                    };
+                    let expected = managed
+                        .map(seconds)
+                        .or(option)
+                        .or(saved.map(seconds))
+                        .unwrap_or(Some(Duration::from_secs(
+                            DEFAULT_SSH_INACTIVITY_TIMEOUT_SECS,
+                        )));
+                    assert_eq!(
+                        layers
+                            .ssh_layers()
+                            .options(SshTimeoutPatch::from_options(option))
+                            .build()
+                            .into_config()
+                            .inactivity,
+                        expected,
+                        "saved={saved:?}, managed={managed:?}, option={option:?}"
+                    );
+                }
+            }
+        }
+        assert!(
+            serde_json::from_str::<GlobalConfigPatch>(
+                r#"{"ssh":{"inactivity_timeout_secs":null}}"#
+            )
+            .is_err()
+        );
+    }
+
+    fn resolve_inactivity_timeout(
+        timeout: Option<Option<Duration>>,
+        config: Option<&crate::config::GlobalConfig>,
+    ) -> Option<Duration> {
+        crate::config::layers::BackendConfig::new(
+            config
+                .map(|config| config.clone().into())
+                .unwrap_or_default(),
+            Default::default(),
+        )
+        .ssh_layers()
+        .options(SshTimeoutPatch::from_options(timeout))
+        .build()
+        .into_config()
+        .inactivity
+    }
+
+    #[cfg(feature = "cloud")]
+    #[tokio::test]
+    async fn cloud_ssh_uses_its_captured_policy_above_session_options() {
+        let ambient_policy =
+            serde_json::from_str(r#"{"ssh":{"inactivity_timeout_secs":99}}"#).unwrap();
+        let ambient = crate::CloudBackend::builder()
+            .url("https://other-cloud.example")
+            .api_key("test-token")
+            .config_sources(BackendConfig::new(Default::default(), ambient_policy))
+            .build()
+            .unwrap();
+        let key =
+            PrivateKey::random(&mut russh::keys::key::safe_rng(), Algorithm::Ed25519).unwrap();
+        let public_key = key.public_key().public_key_base64();
+        crate::backend::with_backend(ambient, async {
+            for managed in [None, Some(0), Some(10)] {
+                let saved =
+                    serde_json::from_str(r#"{"ssh":{"inactivity_timeout_secs":30}}"#).unwrap();
+                let mut policy = GlobalConfigPatch::new();
+                policy.ssh.inactivity_timeout_secs = managed;
+                let cloud = crate::CloudBackend::builder()
+                    .url("https://cloud.example")
+                    .api_key("test-token")
+                    .config_sources(BackendConfig::new(saved, policy))
+                    .build()
+                    .unwrap();
+                let sandbox = Sandbox::from_cloud_state(
+                    Arc::new(cloud),
+                    crate::backend::SandboxCloudState {
+                        id: "test-sandbox".into(),
+                        org_id: "test-org".into(),
+                        created_at: chrono::Utc::now(),
+                    },
+                    "cloud-timeout".into(),
+                    crate::SandboxConfig::default(),
+                );
+                for timeout in [None, Some(None), Some(Some(Duration::from_millis(250)))] {
+                    let server = sandbox
+                        .ssh()
+                        .server_with(|options| {
+                            let options = options
+                                .host_key(key.clone())
+                                .authorized_key(public_key.clone());
+                            apply_inactivity_timeout(options, timeout)
+                        })
+                        .await
+                        .unwrap();
+                    let expected = match managed {
+                        Some(0) => None,
+                        Some(seconds) => Some(Duration::from_secs(seconds)),
+                        None => timeout.unwrap_or(Some(Duration::from_secs(30))),
+                    };
+                    assert_eq!(server.config.inactivity_timeout, expected);
+                }
+            }
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn explicit_authorized_key_does_not_require_local_config() {
         let mut rng = russh::keys::key::safe_rng();
         let key = PrivateKey::random(&mut rng, Algorithm::Ed25519).unwrap();
         let public_key = key.public_key().public_key_base64();
@@ -3138,16 +3389,16 @@ mod tests {
             .authorized_key(public_key.clone())
             .build();
 
-        let keys = build_authorized_keys(&options, None).unwrap();
+        let keys = build_authorized_keys(&options, None).await.unwrap();
 
         assert_eq!(keys, vec![public_key]);
     }
 
-    #[test]
-    fn implicit_authorized_key_path_still_requires_local_config() {
+    #[tokio::test]
+    async fn implicit_authorized_key_path_still_requires_local_config() {
         let options = SshServerOptionsBuilder::default().build();
 
-        let error = build_authorized_keys(&options, None).unwrap_err();
+        let error = build_authorized_keys(&options, None).await.unwrap_err();
 
         assert!(matches!(error, MicrosandboxError::Unsupported { .. }));
     }
@@ -3163,20 +3414,58 @@ mod tests {
     #[test]
     fn inactivity_timeout_uses_global_config() {
         assert_eq!(
-            resolve_inactivity_timeout(None, Some(1800)),
+            resolve_inactivity_timeout(
+                None,
+                Some(&crate::config::GlobalConfig {
+                    ssh: crate::config::SshConfig {
+                        inactivity_timeout_secs: 1800
+                    },
+                    ..Default::default()
+                })
+            ),
             Some(Duration::from_secs(1800))
         );
 
-        assert_eq!(resolve_inactivity_timeout(None, Some(0)), None);
+        assert_eq!(
+            resolve_inactivity_timeout(
+                None,
+                Some(&crate::config::GlobalConfig {
+                    ssh: crate::config::SshConfig {
+                        inactivity_timeout_secs: 0
+                    },
+                    ..Default::default()
+                })
+            ),
+            None
+        );
     }
 
     #[test]
     fn inactivity_timeout_per_call_override_wins() {
         assert_eq!(
-            resolve_inactivity_timeout(Some(Some(Duration::from_secs(30))), Some(1800)),
+            resolve_inactivity_timeout(
+                Some(Some(Duration::from_secs(30))),
+                Some(&crate::config::GlobalConfig {
+                    ssh: crate::config::SshConfig {
+                        inactivity_timeout_secs: 1800
+                    },
+                    ..Default::default()
+                })
+            ),
             Some(Duration::from_secs(30))
         );
-        assert_eq!(resolve_inactivity_timeout(Some(None), Some(1800)), None);
+        assert_eq!(
+            resolve_inactivity_timeout(
+                Some(None),
+                Some(&crate::config::GlobalConfig {
+                    ssh: crate::config::SshConfig {
+                        inactivity_timeout_secs: 1800
+                    },
+                    ..Default::default()
+                })
+            ),
+            None
+        );
     }
 }
 

@@ -169,7 +169,10 @@ fn reset_backend_after_fork(ruby: &Ruby) -> Result<(), Error> {
             let backend = resolve_default_backend().map_err(|error| native_error(ruby, error))?;
             set_default_backend(backend);
         }
-        BackendSelection::Local => set_default_backend(LocalBackend::lazy()),
+        BackendSelection::Local => {
+            let backend = LocalBackend::lazy().map_err(|error| native_error(ruby, error))?;
+            set_default_backend(backend);
+        }
         BackendSelection::Cloud { api_key, url } => {
             let backend = match url {
                 Some(url) => CloudBackend::new(url, api_key),
@@ -1825,7 +1828,8 @@ fn remember_backend_selection(ruby: &Ruby, selection: BackendSelection) -> Resul
 }
 
 fn set_default_backend_local(ruby: &Ruby) -> Result<(), Error> {
-    set_default_backend(LocalBackend::lazy());
+    let backend = LocalBackend::lazy().map_err(|error| native_error(ruby, error))?;
+    set_default_backend(backend);
     remember_backend_selection(ruby, BackendSelection::Local)
 }
 

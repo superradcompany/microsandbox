@@ -335,6 +335,14 @@
         ]
       },
       {
+        "tab": "Enterprise",
+        "pages": [
+          "enterprise/managed-configuration",
+          "enterprise/corporate-networking",
+          "enterprise/offline-deployment"
+        ]
+      },
+      {
         "tab": "Security",
         "pages": [
           "security/overview",
