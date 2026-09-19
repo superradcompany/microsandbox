@@ -192,6 +192,8 @@ mod tests {
         )
         .unwrap();
         let error = LocalBackend::builder()
+            .config_path(home.path().join("config.json"))
+            .managed_config_path(home.path().join("managed.json"))
             .home(home.path())
             .build()
             .await
@@ -211,6 +213,8 @@ mod tests {
         // must not be treated as abandoned merely because its parent exited.
         std::fs::rename(&dir, dir.with_file_name(".cancelled-pending")).unwrap();
         let local = LocalBackend::builder()
+            .config_path(home.path().join("config.json"))
+            .managed_config_path(home.path().join("managed.json"))
             .home(home.path())
             .build()
             .await
@@ -239,7 +243,23 @@ mod tests {
         use std::sync::Arc;
 
         let home = std::env::var("MSB_CATALOG_TEST_HOME").expect("explicit disposable test home");
-        let local = Arc::new(LocalBackend::builder().home(&home).build_lazy());
+        let local = Arc::new(crate::test_support::local_backend(
+            crate::config::GlobalConfig {
+                home: Some(std::path::PathBuf::from(&home)),
+                // This isolated backend does not read environment paths. Supply the
+                // released runtime pair selected by the historical fixture explicitly.
+                paths: crate::config::PathsConfig {
+                    msb: Some(std::env::var_os("MSB_PATH").expect("historical msb").into()),
+                    libkrunfw: Some(
+                        std::env::var_os("MSB_LIBKRUNFW_PATH")
+                            .expect("historical firmware")
+                            .into(),
+                    ),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        ));
         let expected = crate::runtime::launch_contract::catalog_patch(local.config())
             .await
             .unwrap()
@@ -439,6 +459,8 @@ mod tests {
         std::fs::write(sandbox_dir.join("sentinel"), "existing data").unwrap();
         let local = Arc::new(
             LocalBackend::builder()
+                .config_path(home.path().join("config.json"))
+                .managed_config_path(home.path().join("managed.json"))
                 .home(home.path())
                 .build()
                 .await
@@ -479,6 +501,8 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         drop(historical(home.path()).await);
         let sdk = LocalBackend::builder()
+            .config_path(home.path().join("config.json"))
+            .managed_config_path(home.path().join("managed.json"))
             .home(home.path())
             .build()
             .await
@@ -490,7 +514,10 @@ mod tests {
         );
         sdk.prepare_cli_catalog().await.unwrap();
         drop(sdk);
-        let cli = LocalBackend::builder().home(home.path()).build_lazy();
+        let cli = crate::test_support::local_backend(crate::config::GlobalConfig {
+            home: Some(home.path().to_path_buf()),
+            ..Default::default()
+        });
         cli.prepare_cli_catalog().await.unwrap();
         assert!(
             crate::db::admission::is_current(cli.db().await.unwrap().read())

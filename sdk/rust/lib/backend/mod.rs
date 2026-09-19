@@ -49,7 +49,7 @@ pub use microsandbox_types::{
     CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudErrorBody, CloudErrorDetails,
     CloudMessageResponse, CloudPaginated, CloudSandboxStatus, CloudSandboxStatusReason,
 };
-pub use profile::{Profile, ProfileBackend, SdkConfig, load_sdk_config, resolve_default_backend};
+pub use profile::{Profile, ProfileBackend, resolve_default_backend};
 pub use sandbox::{
     SandboxBackend, SandboxCloudState, SandboxHandleCloudState, SandboxHandleInner,
     SandboxIdentity, SandboxInner,

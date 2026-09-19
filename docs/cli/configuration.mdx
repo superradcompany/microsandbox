@@ -107,7 +107,7 @@ complete resolution rules.
 `--net-conf` cannot be combined with `--net`, `--no-net`, `--net-rule`, or `--net-default*`. When network policy is loaded through a root `--conf` file instead, a policy CLI flag replaces it, while `--net-rule` remains additive and is evaluated before rules loaded from the file.
 
 ```bash
-# Files overlay left to right; the explicit CLI value wins over every file.
+# Files overlay left to right; --memory wins unless managed policy overrides it.
 msb run python \
   --conf base.yaml \
   --resource-conf standard.yaml \

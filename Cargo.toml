@@ -141,11 +141,12 @@ rayon = "1.11"
 reflink-copy = "0.1"
 reqwest = { version = "0.13", features = ["json", "stream"] }
 resolv-conf = "0.7"
-object = { version = "0.37.3", default-features = false, features = ["read", "std"] }
+object = { version = "0.40.0", default-features = false, features = ["read", "std"] }
 semver = "1.0.27"
 scopeguard = "1.2"
 serde = { version = "1.0", features = ["derive"] }
 serde_bytes = "0.11"
+serde_ignored = "0.1"
 serde_json = "1.0"
 serde-saphyr = { version = "1.0.1", default-features = false, features = ["deserialize"] }
 sha2 = "0.11.0"

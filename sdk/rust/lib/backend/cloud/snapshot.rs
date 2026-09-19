@@ -619,7 +619,8 @@ mod tests {
 
     #[test]
     fn cloud_projection_retains_source_digest_and_actual_backend_reference() {
-        let cloud = CloudBackend::new("https://example.invalid", "test-key").unwrap();
+        let cloud =
+            crate::test_support::cloud_backend("https://example.invalid", "test-key").unwrap();
         let backend: Arc<dyn Backend> = Arc::new(cloud);
         let wire = wire_manifest();
         let source_bytes = wire.to_canonical_bytes().unwrap();
@@ -685,7 +686,8 @@ mod tests {
 
     #[tokio::test]
     async fn full_capture_and_local_group_requests_reject_before_network_access() {
-        let cloud = CloudBackend::new("https://example.invalid", "test-key").unwrap();
+        let cloud =
+            crate::test_support::cloud_backend("https://example.invalid", "test-key").unwrap();
         let backend: Arc<dyn Backend> = Arc::new(cloud.clone());
         for policy in [
             microsandbox_types::GuestFlush::Required,
@@ -765,7 +767,8 @@ mod tests {
 
     #[tokio::test]
     async fn artifact_file_operations_return_typed_unsupported_errors() {
-        let cloud = CloudBackend::new("https://example.invalid", "test-key").unwrap();
+        let cloud =
+            crate::test_support::cloud_backend("https://example.invalid", "test-key").unwrap();
         let backend: Arc<dyn Backend> = Arc::new(cloud.clone());
 
         assert_unsupported(SnapshotBackend::path(

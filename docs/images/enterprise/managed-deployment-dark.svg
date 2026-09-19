@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 286" width="720" role="img" aria-labelledby="title description" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif">
+  <title id="title">Administrator policy takes precedence on the employee device</title>
+  <desc id="description">Jamf or Intune installs a protected managed.json file on the host. Managed overrides and employee settings are layered into the effective configuration used by the CLI and SDKs. Managed fields win; built-in defaults fill unspecified values.</desc>
+  <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#71717a" /></marker></defs>
+  <rect x="196" y="16" width="510" height="254" rx="10" fill="#19171e" stroke="#52525b" stroke-width="1.2" stroke-dasharray="5 4" />
+  <text x="214" y="42" text-anchor="start" font-size="12" font-weight="600" fill="#a1a1aa">EMPLOYEE DEVICE</text>
+  <rect x="14" y="76" width="146" height="96" rx="10" fill="#2b203c" stroke="#c49aff" stroke-width="1.2" />
+  <text x="87" y="101" text-anchor="middle" font-size="14" font-weight="600" fill="#c49aff">Administrator</text>
+  <text x="87" y="125" text-anchor="middle" font-size="14" font-weight="400" fill="#e5e7eb">Jamf / Intune</text>
+  <text x="87" y="148" text-anchor="middle" font-size="12" font-weight="400" fill="#a1a1aa">Deploy policy</text>
+  <rect x="220" y="68" width="202" height="77" rx="10" fill="#2b203c" stroke="#c49aff" stroke-width="1.2" />
+  <text x="321" y="92" text-anchor="middle" font-size="16" font-weight="600" fill="#c49aff">managed.json</text>
+  <text x="321" y="114" text-anchor="middle" font-size="13" font-weight="400" fill="#a1a1aa">Protected host file</text>
+  <text x="321" y="133" text-anchor="middle" font-size="12" font-weight="600" fill="#c49aff">Highest precedence</text>
+  <rect x="220" y="174" width="202" height="68" rx="10" fill="#24212b" stroke="#52525b" stroke-width="1.2" />
+  <text x="321" y="200" text-anchor="middle" font-size="15" font-weight="600" fill="#e5e7eb">Employee settings</text>
+  <text x="321" y="221" text-anchor="middle" font-size="12" font-weight="400" fill="#a1a1aa">User config + CLI / SDK</text>
+  <rect x="490" y="113" width="194" height="79" rx="10" fill="#24212b" stroke="#52525b" stroke-width="1.2" />
+  <text x="587" y="139" text-anchor="middle" font-size="16" font-weight="600" fill="#e5e7eb">Effective settings</text>
+  <text x="587" y="162" text-anchor="middle" font-size="12" font-weight="400" fill="#a1a1aa">Used by the CLI and SDKs</text>
+  <text x="587" y="180" text-anchor="middle" font-size="12" font-weight="600" fill="#c49aff">Managed fields win</text>
+  <path d="M 160 106 H 219" fill="none" stroke="#71717a" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#arrow)" />
+  <path d="M 422 106 H 456 V 137 H 489" fill="none" stroke="#71717a" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#arrow)" />
+  <path d="M 422 208 H 456 V 169 H 489" fill="none" stroke="#71717a" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#arrow)" />
+  <text x="220" y="259" text-anchor="start" font-size="12" font-weight="400" fill="#a1a1aa">Built-in defaults fill unspecified values.</text>
+</svg>

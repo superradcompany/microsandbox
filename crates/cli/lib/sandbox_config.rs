@@ -5,10 +5,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use base64::Engine;
+use microsandbox::SandboxConfigPatch;
 use microsandbox::sandbox::{
     DiskImageFormat, EnvVar, HandoffInit, HostPermissions, MountBuilder, Patch, PullPolicy, Rlimit,
-    RlimitResource, SandboxBuilder, SandboxConfigPatch, SandboxPolicyPatch, SandboxResourcesPatch,
-    SandboxRuntimeOptionsPatch, SecurityProfile, StatVirtualization, VolumeMount,
+    RlimitResource, SandboxBuilder, SandboxPolicyPatch, SandboxResourcesPatch,
+    SandboxRuntimeOptionsPatch, SandboxSpecPatch, SecurityProfile, StatVirtualization, VolumeMount,
 };
 #[cfg(feature = "net")]
 use microsandbox::sandbox::{
@@ -45,7 +46,7 @@ const MAX_CONFIG_BYTES: usize = 16 * 1024 * 1024;
 pub struct ResolvedSandboxConfig {
     #[cfg(test)]
     input: SandboxConfigInput,
-    config_patch: SandboxConfigPatch,
+    config_patch: SandboxSpecPatch,
     config_scripts: BTreeMap<String, String>,
     image: Option<ResolvedImage>,
     registry_auth: Option<RegistryAuth>,
@@ -545,7 +546,7 @@ impl ResolvedSandboxConfig {
             None => builder,
         };
         let mut builder = builder
-            .overlay(self.config_patch.clone())
+            .overlay(SandboxConfigPatch::new().spec(self.config_patch.clone()))
             .config_scripts(self.config_scripts.clone());
         if let Some(auth) = self.registry_auth.clone() {
             builder = builder.registry(|registry| registry.auth(auth));
@@ -1146,8 +1147,8 @@ fn bind_mount_separator(spec: &str) -> Option<usize> {
 // Functions: Image and Runtime
 //--------------------------------------------------------------------------------------------------
 
-fn materialize_config_patch(input: &SandboxConfigInput) -> anyhow::Result<SandboxConfigPatch> {
-    let mut config_patch = SandboxConfigPatch::new();
+fn materialize_config_patch(input: &SandboxConfigInput) -> anyhow::Result<SandboxSpecPatch> {
+    let mut config_patch = SandboxSpecPatch::new();
     if let Some(policy) = input.pull_policy {
         config_patch = config_patch.pull_policy(match policy {
             PullPolicyInput::Missing => PullPolicy::IfMissing,

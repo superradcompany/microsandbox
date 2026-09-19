@@ -90,10 +90,15 @@ async fn backend(root: &Path, patch: u8) -> Arc<LocalBackend> {
     std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
     let firmware = root.join("firmware");
     std::fs::write(&firmware, b"not launched").unwrap();
-    let mut backend = LocalBackend::builder().home(root.join("home")).build_lazy();
-    let config = Arc::make_mut(&mut backend.config);
-    config.paths.msb = Some(executable);
-    config.paths.libkrunfw = Some(firmware);
+    let backend = crate::test_support::local_backend(crate::config::GlobalConfig {
+        home: Some(root.join("home")),
+        paths: crate::config::PathsConfig {
+            msb: Some(executable),
+            libkrunfw: Some(firmware),
+            ..Default::default()
+        },
+        ..Default::default()
+    });
     backend.db().await.unwrap();
     Arc::new(backend)
 }
@@ -190,6 +195,26 @@ async fn archive_metadata_is_admitted_before_replacement() {
         "config.snapshot_parent",
     )
     .await;
+}
+
+#[tokio::test]
+async fn managed_root_layout_conflict_preserves_replacement_target() {
+    use crate::config::{GlobalConfigPatch, layers::BackendConfig};
+
+    for flat in [false, true] {
+        let root = tempfile::tempdir_in("/tmp").unwrap();
+        let archive = archive(root.path(), flat, false).await;
+        let mut backend = backend(root.path(), 18).await;
+        let user = GlobalConfigPatch::from_present_fields(backend.config().clone());
+        let managed = serde_json::from_value(serde_json::json!({
+            "sandbox_defaults": {"oci": {"root_disk": {
+                "kind": if flat { "managed" } else { "flat" }
+            }}}
+        }))
+        .unwrap();
+        Arc::get_mut(&mut backend).unwrap().config = BackendConfig::new(user, managed);
+        assert_rejection_preserves_target(backend, &archive, "captured root disk layout").await;
+    }
 }
 
 #[tokio::test]
@@ -306,12 +331,15 @@ async fn current_catalog_persistence_is_separate_from_create_admission() {
 #[tokio::test]
 async fn current_catalog_configuration_writes_need_no_runtime_installation() {
     let root = tempfile::tempdir_in("/tmp").unwrap();
-    let mut backend = LocalBackend::builder()
-        .home(root.path().join("home"))
-        .build_lazy();
-    let global = Arc::make_mut(&mut backend.config);
-    global.paths.msb = Some(root.path().join("missing-msb"));
-    global.paths.libkrunfw = Some(root.path().join("missing-firmware"));
+    let backend = crate::test_support::local_backend(crate::config::GlobalConfig {
+        home: Some(root.path().join("home")),
+        paths: crate::config::PathsConfig {
+            msb: Some(root.path().join("missing-msb")),
+            libkrunfw: Some(root.path().join("missing-firmware")),
+            ..Default::default()
+        },
+        ..Default::default()
+    });
     let pools = backend.db().await.unwrap();
     let mut config = SandboxConfig::default();
     config.spec.name = "offline-edit".into();

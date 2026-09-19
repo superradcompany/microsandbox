@@ -164,13 +164,12 @@ mod unix {
             .prefix("msb-reg-")
             .tempdir_in("/tmp")
             .unwrap();
-        let backend = Arc::new(
-            LocalBackend::builder()
-                .home(root.path())
-                .build()
-                .await
-                .unwrap(),
-        );
+        let backend = Arc::new(crate::test_support::local_backend(
+            crate::config::GlobalConfig {
+                home: Some(root.path().to_path_buf()),
+                ..Default::default()
+            },
+        ));
         let pools = backend.db().await.unwrap();
         let mut config = crate::SandboxConfig::default();
         config.spec.name = "control-fixture".into();

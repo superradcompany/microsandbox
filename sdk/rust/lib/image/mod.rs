@@ -1125,6 +1125,8 @@ mod tests {
     async fn persist_preserves_oci_labels_for_inspection() {
         let temp = tempfile::tempdir().unwrap();
         let local = LocalBackend::builder()
+            .config_path(temp.path().join("config.json"))
+            .managed_config_path(temp.path().join("managed.json"))
             .home(temp.path())
             .build()
             .await

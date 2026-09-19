@@ -34,6 +34,9 @@ const MAX_HTTP_BODY_BUFFER_BYTES: usize = 16 * 1024 * 1024;
 /// HTTP/2 client connection preface.
 const HTTP2_PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
 
+/// Header name retained across opaque writes for Basic-auth violation scans.
+const AUTHORIZATION_HEADER_NAME: &[u8] = b"authorization:";
+
 /// Maximum HTTP/2 frame payload the handler buffers at once.
 /// This is the largest value representable in the protocol's 24-bit
 /// frame-length field.
@@ -102,6 +105,8 @@ pub struct SecretsHandler {
     http_state: HttpState,
     /// Authority validator for HTTP/1 `Host` and HTTP/2 `:authority` headers.
     http_authority: Option<HttpAuthorityValidator>,
+    /// Whether a proven non-HTTP stream should bypass HTTP framing permanently.
+    opaque: bool,
     /// Current HTTP/1 request metadata while processing body continuations.
     http1_request_summary: Option<RequestSummary>,
     /// Buffered HTTP bytes while waiting for complete headers or a complete
@@ -302,6 +307,7 @@ enum BlockingAction {
 enum RequestProtocol {
     Http1,
     Http2,
+    Opaque,
 }
 
 /// Request location where a placeholder matched.
@@ -470,6 +476,7 @@ impl fmt::Display for RequestProtocol {
         let value = match self {
             Self::Http1 => "http/1.1",
             Self::Http2 => "http/2",
+            Self::Opaque => "opaque",
         };
         f.write_str(value)
     }
@@ -733,6 +740,7 @@ impl SecretsHandler {
             prev_tail: Vec::new(),
             http_state: HttpState::AwaitingHeaders,
             http_authority,
+            opaque: false,
             http1_request_summary: None,
             http_pending: Vec::new(),
             unsupported_body_tail: Vec::new(),
@@ -766,6 +774,10 @@ impl SecretsHandler {
                 MAX_SECRET_PLACEHOLDER_BYTES
             );
             return Err(SecretViolationAction::Block);
+        }
+
+        if self.opaque {
+            return self.scan_opaque(data);
         }
 
         if self.http2_state.is_some() {
@@ -814,10 +826,16 @@ impl SecretsHandler {
 
         if !self.http_pending.is_empty() {
             self.http_pending.extend_from_slice(data);
+            let header_boundary = find_header_boundary(&self.http_pending);
+            if http_request_line_has_binary_control(&self.http_pending) {
+                let pending = std::mem::take(&mut self.http_pending);
+                let output = self.scan_opaque(&pending)?.into_owned();
+                return Ok(Cow::Owned(output));
+            }
             if self.http_pending.len() > MAX_HTTP_HEADER_BYTES {
                 return Err(SecretViolationAction::Block);
             }
-            if find_header_boundary(&self.http_pending).is_none() {
+            if header_boundary.is_none() {
                 if first_line_is_not_http_request(&self.http_pending)
                     || !looks_like_http_request_prefix(&self.http_pending)
                 {
@@ -833,6 +851,10 @@ impl SecretsHandler {
             return Ok(Cow::Owned(output));
         }
 
+        if http_request_line_has_binary_control(data) {
+            return self.scan_opaque(data);
+        }
+
         if find_header_boundary(data).is_none()
             && looks_like_http_request_prefix(data)
             && !first_line_is_not_http_request(data)
@@ -845,6 +867,64 @@ impl SecretsHandler {
         }
 
         self.substitute_ready(data)
+    }
+
+    fn scan_opaque<'a>(&mut self, data: &'a [u8]) -> Result<Cow<'a, [u8]>, SecretViolationAction> {
+        // Fail closed when invalid bytes still resemble an HTTP request that
+        // requires authority validation. Conclusively opaque streams rely on
+        // the proxy's connection-level policy and still block placeholders.
+        if !self.opaque && self.http_authority.is_some() && opaque_prefix_might_be_http(data) {
+            return Err(SecretViolationAction::Block);
+        }
+        self.opaque = true;
+        let report = detect_blocking_action_with_tail(
+            &self.ineligible_for_substitution,
+            &self.prev_tail,
+            data,
+            "",
+            RequestProtocol::Opaque,
+            RequestLocation::Unknown,
+            None,
+        );
+        self.apply_blocking_action(report)?;
+        self.update_opaque_tail(data);
+        Ok(Cow::Borrowed(data))
+    }
+
+    fn update_opaque_tail(&mut self, data: &[u8]) {
+        let mut scan = Vec::with_capacity(self.prev_tail.len() + data.len());
+        scan.extend_from_slice(&self.prev_tail);
+        scan.extend_from_slice(data);
+
+        let base_len = self
+            .max_detection_window_len
+            .max(AUTHORIZATION_HEADER_NAME.len() + 2)
+            .saturating_sub(1);
+        let authorization_line = scan
+            .windows(AUTHORIZATION_HEADER_NAME.len())
+            .rposition(|window| window.eq_ignore_ascii_case(AUTHORIZATION_HEADER_NAME))
+            .and_then(|start| {
+                let line = &scan[start..];
+                (!line.windows(2).any(|window| window == b"\r\n")).then_some(line)
+            });
+
+        if let Some(line) = authorization_line
+            && line.len() > MAX_HTTP_HEADER_BYTES
+            && let Some(encoded) = opaque_basic_auth_payload(line)
+        {
+            let mut suffix_start = encoded.len().saturating_sub(base_len);
+            suffix_start -= suffix_start % 4;
+            self.prev_tail.clear();
+            self.prev_tail.extend_from_slice(AUTHORIZATION_HEADER_NAME);
+            self.prev_tail.extend_from_slice(b" Basic ");
+            self.prev_tail.extend_from_slice(&encoded[suffix_start..]);
+            return;
+        }
+
+        let tail_len = authorization_line
+            .filter(|line| line.len() <= MAX_HTTP_HEADER_BYTES)
+            .map_or(base_len, <[u8]>::len);
+        update_tail_buffer(&mut self.prev_tail, data, tail_len.max(base_len));
     }
 
     fn substitute_http2<'a>(
@@ -1999,8 +2079,8 @@ impl Http2State {
 /// (case-insensitive).
 fn is_authorization_header(line: &str) -> bool {
     line.as_bytes()
-        .get(..14)
-        .is_some_and(|b| b.eq_ignore_ascii_case(b"authorization:"))
+        .get(..AUTHORIZATION_HEADER_NAME.len())
+        .is_some_and(|bytes| bytes.eq_ignore_ascii_case(AUTHORIZATION_HEADER_NAME))
 }
 
 fn is_http2_preface_prefix(data: &[u8]) -> bool {
@@ -2348,6 +2428,7 @@ fn request_summary(headers: &str, protocol: RequestProtocol) -> RequestSummary {
     match protocol {
         RequestProtocol::Http1 => http1_request_summary(headers),
         RequestProtocol::Http2 => http2_request_summary(headers),
+        RequestProtocol::Opaque => RequestSummary::default(),
     }
 }
 
@@ -2396,13 +2477,84 @@ pub(crate) fn looks_like_http_request_prefix(data: &[u8]) -> bool {
         return true;
     }
 
-    let method_end = data.iter().position(|b| *b == b' ');
+    if http_request_line_has_binary_control(data) {
+        return false;
+    }
+
+    let method_end = data.iter().position(|byte| matches!(byte, b' ' | b'\t'));
     let method = match method_end {
         Some(end) => &data[..end],
         None => data,
     };
 
-    !method.is_empty() && method.iter().copied().all(is_http_token_byte)
+    if method.is_empty() || !method.iter().copied().all(is_http_token_byte) {
+        return false;
+    }
+
+    let Some(tab) = method_end.filter(|end| data[*end] == b'\t') else {
+        return true;
+    };
+    let target = &data[tab + 1..];
+    let target = &target[..target
+        .iter()
+        .position(u8::is_ascii_whitespace)
+        .unwrap_or(target.len())];
+    target.is_empty()
+        || target.starts_with(b"/")
+        || target.starts_with(b"*")
+        || method.eq_ignore_ascii_case(b"CONNECT")
+        || [b"http://".as_slice(), b"https://".as_slice()]
+            .iter()
+            .any(|scheme| {
+                let overlap = target.len().min(scheme.len());
+                target[..overlap].eq_ignore_ascii_case(&scheme[..overlap])
+            })
+}
+
+fn http_request_line_has_binary_control(data: &[u8]) -> bool {
+    let data = skip_leading_empty_http_lines(data);
+    let request_line_end = data
+        .iter()
+        .position(|byte| matches!(byte, b'\r' | b'\n'))
+        .unwrap_or(data.len());
+    data[..request_line_end]
+        .iter()
+        .any(|byte| byte.is_ascii_control() && !byte.is_ascii_whitespace())
+}
+
+fn opaque_prefix_might_be_http(data: &[u8]) -> bool {
+    let data = skip_leading_empty_http_lines(data);
+    let line_end = data
+        .iter()
+        .position(|byte| matches!(byte, b'\r' | b'\n'))
+        .unwrap_or(data.len());
+    let line = &data[..line_end];
+    let delimiter = line
+        .iter()
+        .position(|byte| *byte == b' ' || (!byte.is_ascii_whitespace() && byte.is_ascii_control()))
+        .unwrap_or(line.len());
+    let method = &line[..delimiter];
+    let has_binary_control = line
+        .iter()
+        .any(|byte| byte.is_ascii_control() && !byte.is_ascii_whitespace());
+
+    (has_binary_control
+        && !method.is_empty()
+        && [
+            b"CONNECT".as_slice(),
+            b"DELETE".as_slice(),
+            b"GET".as_slice(),
+            b"HEAD".as_slice(),
+            b"OPTIONS".as_slice(),
+            b"PATCH".as_slice(),
+            b"POST".as_slice(),
+            b"PUT".as_slice(),
+            b"TRACE".as_slice(),
+        ]
+        .contains(&method))
+        || line
+            .windows(5)
+            .any(|window| window.eq_ignore_ascii_case(b"HTTP/"))
 }
 
 pub(crate) fn first_line_is_not_http_request(data: &[u8]) -> bool {
@@ -2526,6 +2678,23 @@ fn decode_basic_credentials(line: &str) -> Option<String> {
     }
     let bytes = BASE64.decode(encoded.trim()).ok()?;
     String::from_utf8(bytes).ok()
+}
+
+fn opaque_basic_auth_payload(line: &[u8]) -> Option<&[u8]> {
+    let value = line
+        .get(AUTHORIZATION_HEADER_NAME.len()..)?
+        .trim_ascii_start();
+    let scheme_end = value.iter().position(|byte| byte.is_ascii_whitespace())?;
+    let (scheme, encoded) = value.split_at(scheme_end);
+    if !scheme.eq_ignore_ascii_case(b"basic") {
+        return None;
+    }
+    let encoded = encoded.trim_ascii_start();
+    (!encoded.is_empty()
+        && encoded
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/' | b'=')))
+    .then_some(encoded)
 }
 
 /// Split an `Authorization` header value into `(scheme, rest)` at the first
@@ -2903,7 +3072,10 @@ fn detect_blocking_action_with_tail(
         .windows(2)
         .any(|window| window == b"\\u")
         .then(|| json_unescape(scan));
-    let basic_auth_credentials = decoded_basic_auth_credentials(headers);
+    let opaque = matches!(protocol, RequestProtocol::Opaque);
+    let opaque_headers = opaque.then(|| String::from_utf8_lossy(scan));
+    let detection_headers = opaque_headers.as_deref().unwrap_or(headers);
+    let basic_auth_credentials = decoded_basic_auth_credentials(detection_headers);
     let request = if is_scoped_fragment_location(location_hint) {
         RequestSummary::default()
     } else {
@@ -2937,7 +3109,7 @@ fn detect_blocking_action_with_tail(
                 location_hint,
             )
         }) {
-            if secret.substitution_allows(location) {
+            if !opaque && secret.substitution_allows(location) {
                 continue;
             }
             let report = SecretViolationReport {
@@ -3385,9 +3557,15 @@ mod tests {
 
         // Both hosts resolve to the same IP and are network-allowed, but only A
         // is permitted to receive this secret. The second request must not leak it.
+        assert!(
+            handler
+                .substitute(b"GET\t/two HTTP/1.1\r\nHost: b.exam")
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(
             handler
-                .substitute(b"GET /two HTTP/1.1\r\nHost: b.example\r\nAuth: $KEY\r\n\r\n",)
+                .substitute(b"ple\r\nAuth: $KEY\r\n\r\n")
                 .unwrap_err(),
             SecretViolationAction::Block
         );
@@ -4520,6 +4698,165 @@ mod tests {
         // Even the Any secret's placeholder is now blocked, not substituted.
         let input = b"GET / HTTP/1.1\r\nAuthorization: Bearer $ANY\r\n\r\n";
         assert!(handler.substitute(input).is_err());
+    }
+
+    #[test]
+    fn opaque_prefix_never_receives_secret_substitution() {
+        let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
+        secret.require_tls_identity = false;
+        secret.allowed_hosts = vec![HostPattern::Any];
+        let config = make_config(vec![secret]);
+        let mut handler = SecretsHandler::new_plain_http_invalid_host(&config);
+        let input = b"BINARY3 v1\0opaque\r\nAuthorization: $KEY\r\n\r\n";
+
+        assert_eq!(handler.substitute(input), Err(SecretViolationAction::Block));
+    }
+
+    #[test]
+    fn opaque_prefix_blocks_basic_auth_encoded_placeholder() {
+        let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
+        secret.require_tls_identity = false;
+        secret.allowed_hosts = vec![HostPattern::Any];
+        let config = make_config(vec![secret]);
+        let mut handler = SecretsHandler::new_plain_http_invalid_host(&config);
+        let input = b"BINARY3 v1\0\r\nAuthorization: Basic dXNlcjokS0VZ\r\n\r\n";
+
+        assert_eq!(handler.substitute(input), Err(SecretViolationAction::Block));
+    }
+
+    #[test]
+    fn opaque_prefix_blocks_basic_auth_split_after_long_prefix() {
+        let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
+        secret.require_tls_identity = false;
+        secret.allowed_hosts = vec![HostPattern::Any];
+        let config = make_config(vec![secret]);
+        let mut handler = SecretsHandler::new_plain_http_invalid_host(&config);
+        let decoded_prefix = format!("user:{}", "x".repeat(97));
+        assert_eq!(decoded_prefix.len() % 3, 0);
+        let encoded_prefix = BASE64.encode(&decoded_prefix);
+        let encoded = BASE64.encode(format!("{decoded_prefix}$KEY"));
+        let first = format!("BINARY3 v1\0\r\nAuthorization: Basic {encoded_prefix}");
+
+        assert_eq!(
+            handler.substitute(first.as_bytes()).unwrap(),
+            first.as_bytes()
+        );
+        assert_eq!(
+            handler.substitute(format!("{}\r\n\r\n", &encoded[encoded_prefix.len()..]).as_bytes()),
+            Err(SecretViolationAction::Block)
+        );
+    }
+
+    #[test]
+    fn opaque_prefix_forwards_oversized_authorization_like_data() {
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "api.openai.com")]);
+        let mut handler = SecretsHandler::new_plain_http_invalid_host(&config);
+        let mut input = b"BINARY3 v1\0\r\naUtHoRiZaTiOn: ".to_vec();
+        input.resize(input.len() + MAX_HTTP_HEADER_BYTES + 1, b'x');
+
+        assert_eq!(handler.substitute(&input).unwrap(), input.as_slice());
+    }
+
+    #[test]
+    fn opaque_prefix_blocks_oversized_basic_auth_split_placeholder() {
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "api.openai.com")]);
+        let mut handler = SecretsHandler::new_plain_http_invalid_host(&config);
+        let decoded_prefix = vec![b'x'; 3 * (MAX_HTTP_HEADER_BYTES / 4 + 1)];
+        let encoded_prefix = BASE64.encode(&decoded_prefix);
+        let encoded = BASE64.encode([decoded_prefix.as_slice(), b"$KEY"].concat());
+        let first = format!("BINARY3 v1\0\r\nAuthorization: Basic {encoded_prefix}");
+
+        assert_eq!(
+            handler.substitute(first.as_bytes()).unwrap(),
+            first.as_bytes()
+        );
+        assert_eq!(
+            handler.substitute(format!("{}\r\n", &encoded[encoded_prefix.len()..]).as_bytes()),
+            Err(SecretViolationAction::Block)
+        );
+    }
+
+    #[test]
+    fn opaque_prefix_blocks_basic_auth_with_split_header_name() {
+        let config = make_config(vec![make_secret("$", "real-secret", "api.openai.com")]);
+        let mut handler = SecretsHandler::new_plain_http_invalid_host(&config);
+        let first = b"BINARY3 v1\0opaque\r\nAuthorizatio";
+
+        assert_eq!(handler.substitute(first).unwrap(), &first[..]);
+        assert_eq!(
+            handler.substitute(b"n: Basic dXNlcjok\r\n\r\n"),
+            Err(SecretViolationAction::Block)
+        );
+    }
+
+    #[test]
+    fn opaque_prefix_blocks_placeholder_split_across_writes() {
+        let mut secret = make_secret("$MSB_KEY", "real-secret", "api.openai.com");
+        secret.require_tls_identity = false;
+        let config = make_config(vec![secret]);
+        let mut handler = SecretsHandler::new_plain_http_invalid_host(&config);
+
+        assert_eq!(
+            handler.substitute(b"BINARY3 v1\0opaque $MS").unwrap(),
+            &b"BINARY3 v1\0opaque $MS"[..]
+        );
+        assert_eq!(
+            handler.substitute(b"B_KEY\0request"),
+            Err(SecretViolationAction::Block)
+        );
+    }
+
+    #[test]
+    fn opaque_prefix_keeps_later_ascii_writes_opaque() {
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "api.openai.com")]);
+        let mut handler = SecretsHandler::new_plain_http_invalid_host(&config);
+
+        assert_eq!(
+            handler.substitute(b"BINARY3 v1\0opaque").unwrap(),
+            &b"BINARY3 v1\0opaque"[..]
+        );
+        assert_eq!(handler.substitute(b"PING").unwrap(), &b"PING"[..]);
+    }
+
+    #[test]
+    fn tab_delimited_non_http_prefix_is_not_buffered() {
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "api.openai.com")]);
+        let mut handler = SecretsHandler::new_plain_http_invalid_host(&config);
+
+        assert_eq!(
+            handler.substitute(b"PING\tpayload").unwrap(),
+            &b"PING\tpayload"[..]
+        );
+    }
+
+    #[test]
+    fn opaque_prefix_uses_connection_policy() {
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "a.example")]);
+        let mut handler = plain_http_policy_handler(&config);
+
+        assert_eq!(
+            handler.substitute(b"AMQP\0\0\x09\x01").unwrap(),
+            &b"AMQP\0\0\x09\x01"[..]
+        );
+        assert_eq!(
+            handler.substitute(b"PING HTTP/1.1").unwrap(),
+            &b"PING HTTP/1.1"[..]
+        );
+        assert_eq!(
+            handler.substitute(b" $KEY"),
+            Err(SecretViolationAction::Block)
+        );
+    }
+
+    #[test]
+    fn http_shaped_binary_control_is_blocked_when_authority_is_required() {
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "a.example")]);
+        let mut handler = plain_http_policy_handler(&config);
+
+        assert_eq!(
+            handler.substitute(b"GET\0 / HTTP/1.1\r\nHost: b.example\r\n\r\n"),
+            Err(SecretViolationAction::Block)
+        );
     }
 
     #[test]

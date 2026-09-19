@@ -7,9 +7,8 @@ use clap::{Args, Subcommand};
 use microsandbox::{
     RegistryAuth,
     config::{
-        RegistryAuthEntry, RegistryCredentialStore, delete_registry_keyring_auth,
-        get_registry_keyring_auth, load_persisted_config_or_default, save_persisted_config,
-        set_registry_keyring_auth,
+        GlobalConfigPatch, RegistryAuthEntry, RegistryCredentialStore,
+        delete_registry_keyring_auth, get_registry_keyring_auth, set_registry_keyring_auth,
     },
 };
 
@@ -92,20 +91,20 @@ fn run_login(args: RegistryLoginArgs) -> anyhow::Result<()> {
         )
     })?;
 
-    let mut config = load_persisted_config_or_default()?;
+    let mut config = GlobalConfigPatch::load()?;
     config
         .registries
-        .hosts
+        .get_hosts_mut()
         .entry(args.registry.clone())
         .or_default()
-        .auth = Some(RegistryAuthEntry {
+        .auth = Some(Some(RegistryAuthEntry {
         username: args.username,
         store: Some(RegistryCredentialStore::Keyring),
         password_env: None,
         secret_name: None,
-    });
+    }));
 
-    if let Err(error) = save_persisted_config(&config) {
+    if let Err(error) = config.save() {
         let restore = match previous_auth {
             Some(RegistryAuth::Basic { username, password }) => {
                 set_registry_keyring_auth(&args.registry, &username, &password)
@@ -130,11 +129,11 @@ fn run_login(args: RegistryLoginArgs) -> anyhow::Result<()> {
 }
 
 fn run_logout(args: RegistryLogoutArgs) -> anyhow::Result<()> {
-    let mut config = load_persisted_config_or_default()?;
+    let mut config = GlobalConfigPatch::load()?;
     let previous_auth = get_registry_keyring_auth(&args.registry).ok().flatten();
     let had_config_entry = config
         .registries
-        .hosts
+        .get_hosts_mut()
         .get_mut(&args.registry)
         .and_then(|e| e.auth.take())
         .is_some();
@@ -150,7 +149,7 @@ fn run_logout(args: RegistryLogoutArgs) -> anyhow::Result<()> {
 
     delete_registry_keyring_auth(&args.registry)?;
 
-    if let Err(error) = save_persisted_config(&config) {
+    if let Err(error) = config.save() {
         if let Some(RegistryAuth::Basic { username, password }) = previous_auth {
             let _ = set_registry_keyring_auth(&args.registry, &username, &password);
         }
@@ -162,12 +161,19 @@ fn run_logout(args: RegistryLogoutArgs) -> anyhow::Result<()> {
 }
 
 fn run_list(_args: RegistryListArgs) -> anyhow::Result<()> {
-    let config = load_persisted_config_or_default()?;
+    let config = GlobalConfigPatch::load()?;
     let auth_entries: Vec<_> = config
         .registries
-        .hosts
-        .iter()
-        .filter_map(|(hostname, entry)| entry.auth.as_ref().map(|auth| (hostname, auth)))
+        .get_hosts()
+        .into_iter()
+        .flat_map(|hosts| hosts.iter())
+        .filter_map(|(hostname, entry)| {
+            entry
+                .auth
+                .as_ref()
+                .and_then(Option::as_ref)
+                .map(|auth| (hostname, auth))
+        })
         .collect();
 
     if auth_entries.is_empty() {

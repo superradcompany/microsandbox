@@ -1195,8 +1195,7 @@ mod tests {
     #[tokio::test]
     async fn batch_rejects_corrupt_borrowed_file_layer_before_publication() {
         let temp = tempfile::tempdir().unwrap();
-        let local = LocalBackend::builder()
-            .home(temp.path().join("home"))
+        let local = crate::test_support::local_backend_builder(temp.path().join("home"))
             .build()
             .await
             .unwrap();
@@ -1332,8 +1331,7 @@ mod tests {
     #[tokio::test]
     async fn delta_load_and_direct_restore_require_exact_base_and_own_their_closure() {
         let temp = tempfile::tempdir().unwrap();
-        let local = LocalBackend::builder()
-            .home(temp.path().join("home"))
+        let local = crate::test_support::local_backend_builder(temp.path().join("home"))
             .build()
             .await
             .unwrap();

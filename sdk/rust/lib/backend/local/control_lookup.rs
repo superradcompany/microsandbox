@@ -168,7 +168,10 @@ mod tests {
 
     async fn fixture() -> (tempfile::TempDir, LocalBackend) {
         let home = tempfile::tempdir().unwrap();
-        let backend = LocalBackend::builder().home(home.path()).build_lazy();
+        let backend = crate::test_support::local_backend(crate::config::GlobalConfig {
+            home: Some(home.path().to_path_buf()),
+            ..Default::default()
+        });
         let pools = backend.db().await.unwrap();
         pools.write().execute_unprepared(
             "INSERT INTO sandbox (id, name, config, status, ephemeral) VALUES (1, 'source', '{}', 'Running', 0)",
@@ -195,7 +198,10 @@ mod tests {
             std::fs::remove_dir(&snapshots).unwrap();
         }
         std::fs::write(&snapshots, b"unrelated snapshot inventory").unwrap();
-        let backend = LocalBackend::builder().home(home.path()).build_lazy();
+        let backend = crate::test_support::local_backend(crate::config::GlobalConfig {
+            home: Some(home.path().to_path_buf()),
+            ..Default::default()
+        });
         let (model, pid) = backend
             .try_control_handle_state("source")
             .await
@@ -268,7 +274,10 @@ mod tests {
     #[tokio::test]
     async fn absent_catalog_and_terminal_target_request_slow_path() {
         let home = tempfile::tempdir().unwrap();
-        let empty = LocalBackend::builder().home(home.path()).build_lazy();
+        let empty = crate::test_support::local_backend(crate::config::GlobalConfig {
+            home: Some(home.path().to_path_buf()),
+            ..Default::default()
+        });
         assert!(
             empty
                 .try_control_handle_state("source")

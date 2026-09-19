@@ -125,7 +125,10 @@ fn build_backend(
     profile: Option<String>,
 ) -> napi::Result<Arc<dyn microsandbox::Backend>> {
     match kind.trim().to_ascii_lowercase().as_str() {
-        "local" => Ok(Arc::new(microsandbox::LocalBackend::lazy())),
+        "local" => Ok(Arc::new(
+            microsandbox::LocalBackend::lazy()
+                .map_err(|e| napi::Error::from_reason(e.to_string()))?,
+        )),
         "cloud" => {
             let cloud = if let Some(profile) = profile {
                 microsandbox::CloudBackend::from_profile(&profile)

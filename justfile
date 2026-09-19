@@ -87,11 +87,43 @@ build-deps: build-agentd build-libkrunfw
 # Build agentd as a static Linux/musl binary. Requires: musl-tools (apt) or musl-dev (apk).
 [linux]
 build-agentd:
-    @command -v musl-gcc >/dev/null || { echo "error: musl-gcc not found. Install your distro's musl toolchain."; exit 1; }
-    rustup target add x86_64-unknown-linux-musl 2>/dev/null || true
-    cargo build --release --manifest-path crates/agentd/Cargo.toml --target-dir target --target x86_64-unknown-linux-musl
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    # Derive the musl target from Rust's host triple instead of maintaining an
+    # architecture allowlist. This keeps local builds aligned with every
+    # Linux target supported by the installed Rust toolchain (x86_64, ARM64,
+    # riscv64, and future targets), while still using the native compiler.
+    host="$(rustc -vV | sed -n 's/^host: //p')"
+    case "$host" in
+        *-unknown-linux-gnu)
+            target="${host/-unknown-linux-gnu/-unknown-linux-musl}"
+            ;;
+        *-linux-musl*)
+            target="$host"
+            ;;
+        *)
+            echo "error: cannot derive a Linux musl target from Rust host '$host'"
+            exit 1
+            ;;
+    esac
+
+    # Native musl hosts already have the target and a suitable system compiler,
+    # but distro targets such as Alpine may not link statically by default.
+    if [ "$target" = "$host" ]; then
+        export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C target-feature=+crt-static"
+    else
+        # GNU hosts need rustup's musl target and the musl wrapper to link it.
+        if ! command -v musl-gcc >/dev/null; then
+            echo "error: musl-gcc not found. Install your distro's musl toolchain."
+            exit 1
+        fi
+        rustup target add "$target"
+    fi
+
+    cargo build --release --manifest-path crates/agentd/Cargo.toml --target-dir target --target "$target"
     mkdir -p build
-    cp target/x86_64-unknown-linux-musl/release/agentd build/agentd
+    cp "target/$target/release/agentd" build/agentd
     touch build/agentd
 
 # Build agentd as a static Linux/musl binary via Docker cross-compilation. Requires: docker.

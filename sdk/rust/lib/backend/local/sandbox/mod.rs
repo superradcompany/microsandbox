@@ -198,7 +198,8 @@ impl LocalBackend {
         // A failed or interrupted first restore is not a stopped ordinary VM. In particular,
         // its sealed base may be hard-linked to a snapshot and must never become a boot disk.
         Self::validate_completed_restore(&config)?;
-        self.apply_deployment_profile(&mut config);
+        config.spec.deployment_profile =
+            self.resolve_deployment_profile(&config.spec.name, config.spec.deployment_profile);
         config.apply_runtime_defaults();
         validate_hostname(config.spec.runtime.hostname.as_deref())?;
         self.validate_sandbox_name_for_runtime(&config.spec.name)?;
@@ -1203,7 +1204,6 @@ impl SandboxBackend for LocalBackend {
         _start: bool,
     ) -> BoxFuture<'a, MicrosandboxResult<Sandbox>> {
         Box::pin(async move {
-            self.warn_cloud_only(&config);
             // Local backend always boots immediately — `start` only differs
             // for cloud where create-without-start is a distinct state.
             self.create_sandbox(backend, config, SpawnMode::Attached, None)
@@ -1217,7 +1217,6 @@ impl SandboxBackend for LocalBackend {
         config: SandboxConfig,
     ) -> BoxFuture<'a, MicrosandboxResult<Sandbox>> {
         Box::pin(async move {
-            self.warn_cloud_only(&config);
             self.create_sandbox(backend, config, SpawnMode::Detached, None)
                 .await
         })
@@ -1569,7 +1568,8 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{SpawnMode, sandbox_entity};
-    use crate::backend::{Backend, LocalBackend, SandboxBackend};
+    use crate::backend::{Backend, BackendSelectionSource, LocalBackend, SandboxBackend};
+    use crate::config::layers::BackendConfig;
     use crate::logs::{LogOptions, LogSource};
     use crate::sandbox::{
         DEFAULT_STOP_TIMEOUT, OciRootfsSource, RootfsSource, SandboxConfig, SandboxListBuilder,
@@ -1578,7 +1578,7 @@ mod tests {
 
     #[test]
     fn local_stop_policy_preserves_existing_escalation() {
-        let backend = LocalBackend::lazy();
+        let backend = crate::test_support::local_backend(Default::default());
 
         assert_eq!(backend.default_stop_timeout(), DEFAULT_STOP_TIMEOUT);
         assert!(backend.should_force_kill_after_stop_timeout());
@@ -1637,8 +1637,7 @@ mod tests {
 
         let home = tempfile::tempdir_in("/tmp").unwrap();
         let backend = Arc::new(
-            LocalBackend::builder()
-                .home(home.path())
+            crate::test_support::local_backend_builder(home.path())
                 .build()
                 .await
                 .unwrap(),
@@ -1700,6 +1699,8 @@ mod tests {
         let temp = tempdir().unwrap();
         let backend = Arc::new(
             LocalBackend::builder()
+                .config_path(temp.path().join("config.json"))
+                .managed_config_path(temp.path().join("managed.json"))
                 .home(temp.path())
                 .build()
                 .await
@@ -1768,6 +1769,8 @@ mod tests {
     async fn list_pages_after_filtering_by_labels() {
         let temp = tempdir().unwrap();
         let backend = LocalBackend::builder()
+            .config_path(temp.path().join("config.json"))
+            .managed_config_path(temp.path().join("managed.json"))
             .home(temp.path())
             .build()
             .await
@@ -1819,6 +1822,8 @@ mod tests {
         let temp = tempdir().unwrap();
         let backend = Arc::new(
             LocalBackend::builder()
+                .config_path(temp.path().join("config.json"))
+                .managed_config_path(temp.path().join("managed.json"))
                 .home(temp.path())
                 .build()
                 .await
@@ -1941,8 +1946,7 @@ mod tests {
         let home = tempfile::tempdir_in("/tmp").unwrap();
         #[cfg(not(unix))]
         let home = tempdir().unwrap();
-        let backend = LocalBackend::builder()
-            .home(home.path())
+        let backend = crate::test_support::local_backend_builder(home.path())
             .build()
             .await
             .unwrap();
@@ -1997,8 +2001,7 @@ mod tests {
     async fn kill_waits_for_start_publication_and_terminates_the_created_run() {
         let home = tempfile::tempdir_in("/tmp").unwrap();
         let backend = Arc::new(
-            LocalBackend::builder()
-                .home(home.path())
+            crate::test_support::local_backend_builder(home.path())
                 .build()
                 .await
                 .unwrap(),
@@ -2266,7 +2269,13 @@ mod tests {
         let sandbox_dir = temp.path().join("missing");
         let config = test_config("missing");
 
-        let backend = LocalBackend::lazy();
+        let backend = LocalBackend::from_backend_config(
+            BackendConfig::new(Default::default(), Default::default())
+                .prepare_for_local_backend(Default::default())
+                .unwrap(),
+            BackendSelectionSource::Programmatic,
+            None,
+        );
         let err = backend
             .validate_start_state(&config, &sandbox_dir)
             .unwrap_err();
@@ -2292,15 +2301,20 @@ mod tests {
         // which depends on the global config. In unit tests without a real
         // config, it succeeds because the cache init may fail gracefully.
         // The key thing is it doesn't panic.
-        let backend = LocalBackend::lazy();
+        let backend = LocalBackend::from_backend_config(
+            BackendConfig::new(Default::default(), Default::default())
+                .prepare_for_local_backend(Default::default())
+                .unwrap(),
+            BackendSelectionSource::Programmatic,
+            None,
+        );
         let _ = backend.validate_start_state(&config, &sandbox_dir);
     }
 
     #[tokio::test]
     async fn flat_restart_does_not_require_layered_image_artifacts() {
         let temp = tempdir().unwrap();
-        let backend = LocalBackend::builder()
-            .home(temp.path())
+        let backend = crate::test_support::local_backend_builder(temp.path())
             .build()
             .await
             .unwrap();

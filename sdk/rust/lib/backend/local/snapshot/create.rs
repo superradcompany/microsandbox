@@ -1405,7 +1405,7 @@ async fn capture_disk_source(
         .filter(sandbox_entity::Column::Name.eq(source))
         .one(local.db().await?.read())
         .await?;
-    if !current.is_some_and(|model| model.id == source_id) {
+    if current.is_none_or(|model| model.id != source_id) {
         return Err(MicrosandboxError::Runtime(
             "snapshot source was replaced during disk capture; retry with the current sandbox"
                 .into(),
@@ -2382,8 +2382,7 @@ mod tests {
             "workload thaw timed out; re-pause failed",
         ] {
             let temp = tempfile::tempdir().unwrap();
-            let local = LocalBackend::builder()
-                .home(temp.path().join("home"))
+            let local = crate::test_support::local_backend_builder(temp.path().join("home"))
                 .build()
                 .await
                 .unwrap();
@@ -2481,8 +2480,7 @@ mod tests {
     #[tokio::test]
     async fn recovery_failure_preserves_published_archive() {
         let temp = tempfile::tempdir().unwrap();
-        let local = LocalBackend::builder()
-            .home(temp.path().join("home"))
+        let local = crate::test_support::local_backend_builder(temp.path().join("home"))
             .build()
             .await
             .unwrap();
@@ -2532,8 +2530,7 @@ mod tests {
     #[tokio::test]
     async fn recovery_failure_keeps_original_artifact_and_both_diagnostics_on_publication_error() {
         let temp = tempfile::tempdir().unwrap();
-        let local = LocalBackend::builder()
-            .home(temp.path().join("home"))
+        let local = crate::test_support::local_backend_builder(temp.path().join("home"))
             .build()
             .await
             .unwrap();
@@ -2593,8 +2590,7 @@ mod tests {
     #[tokio::test]
     async fn successful_source_recovery_keeps_existing_success_result() {
         let temp = tempfile::tempdir().unwrap();
-        let local = LocalBackend::builder()
-            .home(temp.path().join("home"))
+        let local = crate::test_support::local_backend_builder(temp.path().join("home"))
             .build()
             .await
             .unwrap();
@@ -2742,8 +2738,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn stopped_capture_dispatches_owned_chains_off_the_async_executor() {
         let temp = tempfile::tempdir().unwrap();
-        let local = LocalBackend::builder()
-            .home(temp.path().join("home"))
+        let local = crate::test_support::local_backend_builder(temp.path().join("home"))
             .build()
             .await
             .unwrap();
@@ -2823,8 +2818,7 @@ mod tests {
             .unwrap()
             .block_on(async {
                 let temp = tempfile::tempdir().unwrap();
-                let local = LocalBackend::builder()
-                    .home(temp.path().join("home"))
+                let local = crate::test_support::local_backend_builder(temp.path().join("home"))
                     .build()
                     .await
                     .unwrap();
@@ -3025,8 +3019,7 @@ mod tests {
         ] {
             for record_integrity in [false, true] {
                 let temp = tempfile::tempdir().unwrap();
-                let local = LocalBackend::builder()
-                    .home(temp.path().join("home"))
+                let local = crate::test_support::local_backend_builder(temp.path().join("home"))
                     .build()
                     .await
                     .unwrap();

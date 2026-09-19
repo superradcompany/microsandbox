@@ -137,7 +137,7 @@ pub use attach::AttachOptionsBuilder;
 pub use branch::{BranchBuilder, BranchManyBuilder, BranchOutcome};
 pub use builder::{RegistryConfigBuilder, SandboxBuilder};
 pub use compact::{DiskCompactionBuilder, DiskCompactionDiskResult, DiskCompactionResult};
-pub use config::SandboxConfig;
+pub use config::{SandboxConfig, SandboxConfigPatch};
 pub use exec::{ExecOptionsBuilder, ExecOutput, Rlimit, RlimitResource};
 pub use fs::{
     FsEntry, FsEntryKind, FsHandle, FsMetadata, FsOpenOptions, FsReadStream, FsSetAttrs,
@@ -179,9 +179,9 @@ pub use microsandbox_types::{
 };
 pub use microsandbox_types::{
     EnvVar, MAX_HOSTNAME_BYTES, MAX_SANDBOX_NAME_BYTES, NetworkSpec, NetworkSpecPatch,
-    PortProtocol, PublishedPortSpec, SandboxConfigPatch, SandboxLogLevel, SandboxPolicyPatch,
-    SandboxResources, SandboxResourcesPatch, SandboxRuntimeOptions, SandboxRuntimeOptionsPatch,
-    SandboxSpec, TransparentHugePagePolicy, VsockRouteSpec, VsockSocketType, VsockSpec,
+    PortProtocol, PublishedPortSpec, SandboxLogLevel, SandboxPolicyPatch, SandboxResources,
+    SandboxResourcesPatch, SandboxRuntimeOptions, SandboxRuntimeOptionsPatch, SandboxSpec,
+    SandboxSpecPatch, TransparentHugePagePolicy, VsockRouteSpec, VsockSocketType, VsockSpec,
     VsockSpecPatch,
 };
 pub use microsandbox_types::{ExternalMountRestorePolicy, ExternalMountWarning};
@@ -2077,6 +2077,8 @@ mod tests {
     async fn persisted_removal_rejects_a_stale_sandbox_identity() {
         let temp = tempdir().unwrap();
         let backend = LocalBackend::builder()
+            .config_path(temp.path().join("home").join("config.json"))
+            .managed_config_path(temp.path().join("home").join("managed.json"))
             .home(temp.path().join("home"))
             .build()
             .await
@@ -2114,6 +2116,8 @@ mod tests {
 
         let temp = tempdir().unwrap();
         let backend = LocalBackend::builder()
+            .config_path(temp.path().join("home").join("config.json"))
+            .managed_config_path(temp.path().join("home").join("managed.json"))
             .home(temp.path().join("home"))
             .build()
             .await
@@ -2161,8 +2165,7 @@ mod tests {
     async fn persisted_removal_waits_for_snapshot_lineage_owner() {
         let temp = tempdir().unwrap();
         let backend = std::sync::Arc::new(
-            LocalBackend::builder()
-                .home(temp.path().join("home"))
+            crate::test_support::local_backend_builder(temp.path().join("home"))
                 .build()
                 .await
                 .unwrap(),

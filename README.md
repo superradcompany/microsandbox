@@ -30,7 +30,7 @@
 ##
 
 - <img height="14" src="https://octicons-col.vercel.app/shield-lock/A770EF"> **Hardware Isolation**: Hardware-level isolation with tiny virtual machines.
-- <img height="14" src="https://octicons-col.vercel.app/repo-forked/A770EF"> **Branch & Snapshot**: Fork live sandboxes. Save running sandbox state and restore later.
+- <img height="14" src="https://octicons-col.vercel.app/repo-forked/A770EF"> **Branch & Snapshot**: Fork live sandboxes[^demo]. Save running sandbox state and restore later.
 - <img height="14" src="https://octicons-col.vercel.app/globe/A770EF"> **Cross Platform**: Runs on Linux, macOS, and Windows.
 - <img height="14" src="https://octicons-col.vercel.app/package/A770EF"> **OCI Compatible**: Runs standard container images from Docker Hub, GHCR, or any OCI registry.
 - <img height="14" src="https://octicons-col.vercel.app/container/A770EF"> **Docker-Like Workflows**: Familiar image, command, shell, and volume workflows.
@@ -482,4 +482,5 @@ Special thanks to all our contributors, testers, and community members who help 
 <br />
 <br />
 
+[^demo]: We have cool demos showcasing vm pause/resume, snapshotting, and branching: [Mario Never Dies](https://github.com/superradcompany/mario-never-dies) and [Multiverse of Madness](https://github.com/superradcompany/multiverse-of-madness)
 [^boot-time]: Boot time refers to guest boot on an M1 machine.

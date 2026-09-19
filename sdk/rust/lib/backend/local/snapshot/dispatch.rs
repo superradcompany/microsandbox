@@ -309,7 +309,7 @@ mod tests {
 
     #[tokio::test]
     async fn typed_path_selector_rejects_empty_but_preserves_explicit_dot() {
-        let local = LocalBackend::lazy();
+        let local = crate::test_support::local_backend(Default::default());
         assert!(matches!(
             local_selector(&local, SnapshotReference::path("")).await,
             Err(MicrosandboxError::InvalidConfig(message))
@@ -330,7 +330,7 @@ mod tests {
     async fn empty_typed_path_is_rejected_before_open_remove_or_restore() {
         // A lazy backend keeps these admission checks independent of artifact and
         // database contents; none of the rejected operations may initialize storage.
-        let local = Arc::new(LocalBackend::lazy());
+        let local = Arc::new(crate::test_support::local_backend(Default::default()));
         let backend: Arc<dyn Backend> = local.clone();
         let mut config = SandboxConfig {
             snapshot_reference: Some(SnapshotReference::path("")),
@@ -372,8 +372,7 @@ mod tests {
     async fn resolved_builder_reference_is_consumed_once_and_preserves_layer_sources() {
         let temp = tempfile::tempdir().unwrap();
         let local = Arc::new(
-            LocalBackend::builder()
-                .home(temp.path().join("home"))
+            crate::test_support::local_backend_builder(temp.path().join("home"))
                 .build()
                 .await
                 .unwrap(),
