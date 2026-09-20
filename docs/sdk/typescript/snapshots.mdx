@@ -623,6 +623,312 @@ await snap
   .save();
 ```
 
+</Accordion>
+
+Open an existing snapshot artifact. Bare names resolve under the default snapshots directory; anything else is treated as a path. Cheap metadata validation only; it does not read the upper file. Use [`verify()`](#snap-verify) for content checks.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>pathOrName</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Bare name (resolved under the default snapshots dir) or filesystem path.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#snapshot">Promise&lt;Snapshot&gt;</a></div>
+    <div className="msb-param-desc">The opened snapshot.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">Snapshot.</span><span className="msb-hn">get()</span>
+
+```typescript
+static get(nameOrDigest: string): Promise<SnapshotHandle>
+```
+
+<Accordion title="Example">
+
+```typescript
+const h = await Snapshot.get("after-pip-install");
+console.log(h.digest, h.createdAt);
+```
+
+</Accordion>
+
+Look up an indexed snapshot by digest, name, or path. Returns a lightweight [`SnapshotHandle`](#snapshothandle) backed by the local index row.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>nameOrDigest</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Name, digest (<code>sha256:...</code>), or path of an indexed snapshot.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#snapshothandle">Promise&lt;SnapshotHandle&gt;</a></div>
+    <div className="msb-param-desc">Index-backed handle.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">Snapshot.</span><span className="msb-hn">list()</span>
+
+```typescript
+static list(): Promise<SnapshotHandle[]>
+```
+
+<Accordion title="Example">
+
+```typescript
+for (const h of await Snapshot.list()) {
+  console.log(h.name ?? h.digest, h.sizeBytes);
+}
+```
+
+</Accordion>
+
+List indexed snapshots from the local DB cache.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#snapshothandle">Promise&lt;SnapshotHandle[]&gt;</a></div>
+    <div className="msb-param-desc">All indexed snapshot handles.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">Snapshot.</span><span className="msb-hn">listDir()</span>
+
+```typescript
+static listDir(dir: string): Promise<Snapshot[]>
+```
+
+Walk a directory and parse each subdirectory's manifest. Does not touch the index, which makes it useful for inspecting external snapshot collections that were never loaded. Skips entries that don't look like snapshot artifacts.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>dir</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Directory to scan for artifact subdirectories.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#snapshot">Promise&lt;Snapshot[]&gt;</a></div>
+    <div className="msb-param-desc">Parsed snapshots found in the directory.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">Snapshot.</span><span className="msb-hn">remove()</span>
+
+```typescript
+static remove(pathOrName: string, opts?: { force?: boolean }): Promise<void>
+```
+
+<Accordion title="Example">
+
+```typescript
+await Snapshot.remove("after-pip-install", { force: true });
+```
+
+</Accordion>
+
+Remove a snapshot by path, name, or digest. Refuses if the snapshot has indexed children unless `force` is set.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>pathOrName</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Path, name, or digest of the snapshot to remove.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>opts.force</code><span className="msb-type">boolean</span></div>
+    <div className="msb-param-desc">Remove even if the snapshot has indexed children. Defaults to <code>false</code>.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">Snapshot.</span><span className="msb-hn">reindex()</span>
+
+```typescript
+static reindex(dir?: string): Promise<number>
+```
+
+<Accordion title="Example">
+
+```typescript
+const count = await Snapshot.reindex();
+console.log(`reindexed ${count} snapshots`);
+```
+
+</Accordion>
+
+Walk the snapshots directory (default: the configured snapshots dir) and rebuild the local index. Returns the number of artifacts indexed.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>dir</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Directory to scan. Defaults to the configured snapshots dir.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">Promise&lt;number&gt;</span></div>
+    <div className="msb-param-desc">Count of artifacts indexed.</div>
+  </div>
+</div>
+
+---
+
+#### <span className="msb-recv">Snapshot.</span><span className="msb-hn">save()</span>
+<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
+
+```typescript
+static save(nameOrPath: string, out: string, opts?: SaveOpts): Promise<void>
+```
+
+Bundle a snapshot into a `.tar.zst` archive. The recorded manifest is archived as-is, so create the snapshot with [`recordIntegrity()`](#snapshot-recordintegrity) if receivers must verify content. See [`SaveOpts`](#saveopts-interface) for bundling options.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>nameOrPath</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Name or path of the snapshot to bundle.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>out</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Output archive path.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>opts</code><a className="msb-type" href="#saveopts-interface">SaveOpts</a></div>
+    <div className="msb-param-desc">Bundling options. All fields default to <code>false</code>.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```typescript
+await Snapshot.save("after-pip-install", "./baseline.tar.zst", {
+  withImage: true,
+});
+```
+
+</Accordion>
+
+---
+
+#### <span className="msb-recv">Snapshot.</span><span className="msb-hn">load()</span>
+<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
+
+```typescript
+static load(archive: string, dest?: string): Promise<SnapshotHandle>
+```
+
+Unpack a snapshot archive (`.tar.zst` or `.tar`) into the snapshots directory. Structural and archive-entry checks run during import; recorded payload integrity is preserved for explicit [`verify()`](#snap-verify). Compression is detected from magic bytes.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>archive</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Path to the archive to unpack.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>dest</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Destination directory. Defaults to the snapshots directory.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#snapshothandle">Promise&lt;SnapshotHandle&gt;</a></div>
+    <div className="msb-param-desc">Handle to the loaded snapshot.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```typescript
+const h = await Snapshot.load("./baseline.tar.zst");
+console.log("loaded", h.digest);
+```
+
+</Accordion>
+
+---
+
+#### <span className="msb-recv">Snapshot.</span><span className="msb-hn">clone()</span>
+<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
+
+```typescript
+static clone(source: string, newName: string, opts?: CloneOpts): Promise<Snapshot>
+```
+
+Clone `source` (path, name, or digest) into a new snapshot named `newName`. Always writes a new artifact rather than mutating `source` in place: `source` and anything referencing it by digest are left untouched. With `opts.sparsify`, also reclaims host disk space for blocks the guest filesystem has already freed. With `opts.rootDiskSizeMib`, grows the clone's root disk in place (grow-only). If `source` recorded content integrity, the new artifact's integrity is recomputed fresh.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>source</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Path, name, or digest of the snapshot to clone.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>newName</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Bare name for the new snapshot.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>opts</code><a className="msb-type" href="#cloneopts">CloneOpts</a></div>
+    <div className="msb-param-desc">Destination directory, labels, force, sparsification, and root disk size.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#snapshot">Promise&lt;Snapshot&gt;</a></div>
+    <div className="msb-param-desc">The cloned artifact.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```typescript
+const slim = await Snapshot.clone("bloated", "slim", {
+  sparsify: true,
+  rootDiskSizeMib: 8192,
+});
+```
+
+</Accordion>
+
+---
+
+<p className="msb-member-group">Instance methods</p>
+
 #### <span className="msb-recv">snap.</span><span className="msb-hn">verify()</span>
 
 ```typescript
@@ -831,7 +1137,18 @@ Capture disk, memory, execution, and device state from a running sandbox. The ru
 
 ---
 
-#### <span className="msb-recv">.</span><span className="msb-hn">create()</span>
+#### <span className="msb-recv">snapshot.</span><span className="msb-hn">sparsify()</span>
+<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
+
+```typescript
+sparsify(): this
+```
+
+Deallocate host storage for blocks the guest ext4 filesystem has already freed, before recording the artifact. Never changes guest-visible content — it only reclaims host disk space the guest no longer considers in use — and a sparsification failure never fails snapshot creation.
+
+---
+
+#### <span className="msb-recv">snapshot.</span><span className="msb-hn">create()</span>
 
 ```typescript
 create(): Promise<Snapshot>
@@ -944,6 +1261,22 @@ Bundle options for [`Snapshot.save()`](#snapshot-save) and instance `saveTo()` m
 | `withParents` | `boolean` | Walk the parent chain and include each ancestor in the archive. |
 | `withImage` | `boolean` | Include the OCI image cache so the archive boots offline. |
 | `plainTar` | `boolean` | Skip zstd compression and write a plain `.tar`. |
+
+---
+
+### CloneOpts <span className="msb-tag is-type">interface</span>
+
+Options for [`Snapshot.clone()`](#snapshot-clone). All fields optional; an empty object clones into the default snapshots directory without sparsifying or resizing.
+
+<p className="msb-backref">Used by <a href="#snapshot-clone">Snapshot.clone()</a></p>
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `destDir` | `string` | Parent directory for the new artifact. Defaults to the snapshots directory. |
+| `labels` | `Record<string, string>` | Labels for the new snapshot. Not inherited from the source. |
+| `force` | `boolean` | Overwrite an existing artifact at the destination. |
+| `sparsify` | `boolean` | Deallocate host storage for blocks the guest ext4 filesystem has already freed, while cloning. |
+| `rootDiskSizeMib` | `number` | Grow the clone's ext4 filesystem to this size in MiB, offline, before recording the artifact. Grow-only: a target at or below the source's current size throws. |
 
 ---
 

@@ -46,6 +46,9 @@ pub enum SnapshotCommands {
     /// Load a snapshot archive into the snapshots directory.
     Load(SnapshotLoadArgs),
 
+    /// Clone an existing disk snapshot into a new one.
+    Clone(SnapshotCloneArgs),
+
     /// Read a group's head, or select a member as its head.
     Head(SnapshotHeadArgs),
 }
@@ -95,6 +98,15 @@ pub struct SnapshotCreateArgs {
     /// Guest writeback: auto (disk-only default), required, or skip. Mandatory barriers remain.
     #[arg(long, default_value = "auto")]
     pub guest_flush: microsandbox::snapshot::GuestFlush,
+
+    /// Reclaim host disk space for blocks the guest filesystem has already
+    /// freed, before recording the artifact.
+    ///
+    /// Never changes guest-visible content and never fails snapshot
+    /// creation if sparsification itself fails — it's a size optimization on
+    /// top of a snapshot that's created either way.
+    #[arg(long)]
+    pub sparsify: bool,
 
     /// Suppress output.
     #[arg(short, long)]
@@ -218,6 +230,48 @@ pub struct SnapshotHeadArgs {
     pub format: Option<String>,
 }
 
+/// Arguments for `msb snapshot clone`.
+#[derive(Debug, Args)]
+pub struct SnapshotCloneArgs {
+    /// Snapshot to clone (path, name, or digest).
+    pub source: String,
+
+    /// Name for the new, cloned snapshot.
+    pub new_name: String,
+
+    /// Parent directory to create the new artifact in, instead of the
+    /// default snapshots directory.
+    #[arg(long = "dest-dir", value_name = "DIR")]
+    pub dest_dir: Option<std::path::PathBuf>,
+
+    /// Add a `key=value` label to the new snapshot. May be repeated. Not
+    /// inherited from the source.
+    #[arg(long = "label", value_name = "K=V")]
+    pub labels: Vec<String>,
+
+    /// Overwrite an existing artifact at the destination.
+    #[arg(short = 'f', long)]
+    pub force: bool,
+
+    /// Reclaim host disk space for blocks the guest filesystem has already
+    /// freed, while cloning.
+    ///
+    /// Never changes guest-visible content and never fails the clone if
+    /// sparsification itself fails — it's a size optimization on top of a clone
+    /// that's created either way.
+    #[arg(long)]
+    pub sparsify: bool,
+
+    /// Grow the cloned root disk to this size, such as `8G` (grow-only;
+    /// the source's current size is the floor).
+    #[arg(long = "root-disk", value_name = "SIZE")]
+    pub root_disk: Option<String>,
+
+    /// Suppress output.
+    #[arg(short, long)]
+    pub quiet: bool,
+}
+
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
@@ -233,6 +287,7 @@ pub async fn run(args: SnapshotArgs) -> anyhow::Result<()> {
         SnapshotCommands::Reindex(args) => reindex(args).await,
         SnapshotCommands::Save(args) => save(args).await,
         SnapshotCommands::Load(args) => load(args).await,
+        SnapshotCommands::Clone(args) => clone_snapshot(args).await,
         SnapshotCommands::Head(args) => head(args).await,
     }
 }
@@ -261,6 +316,9 @@ async fn create(args: SnapshotCreateArgs) -> anyhow::Result<()> {
     }
     if args.full {
         builder = builder.full();
+    }
+    if args.sparsify {
+        builder = builder.sparsify();
     }
 
     let spinner = if args.quiet {
@@ -295,6 +353,9 @@ async fn create(args: SnapshotCreateArgs) -> anyhow::Result<()> {
                 }
                 println!("{}", snap.id());
                 println!("{}", format_reference(&snap.reference()));
+                if args.sparsify {
+                    print_sparsification_summary(&snap);
+                }
             }
             Ok(())
         }
@@ -303,6 +364,38 @@ async fn create(args: SnapshotCreateArgs) -> anyhow::Result<()> {
             Err(e.into())
         }
     }
+}
+
+/// Best-effort "how much did sparsification actually help" line: compares the upper file's apparent
+/// size against what the host has allocated for it. Purely informational — a stat failure here
+/// must never affect the command's success.
+fn print_sparsification_summary(snap: &Snapshot) {
+    let Some(state) = snap.state().as_file() else {
+        return;
+    };
+    let Some(layer) = state.layers.last() else {
+        return;
+    };
+    let Some(allocated) = allocated_upper_bytes(snap, state, layer) else {
+        return;
+    };
+    println!(
+        "Sparsified: {} allocated of {} apparent",
+        ui::format_size(allocated),
+        ui::format_size(state.virtual_size)
+    );
+}
+
+/// Bytes actually allocated on the host for a file-state snapshot's head
+/// layer, or `None` if the file can't be stat'd (e.g. missing or on a
+/// filesystem without hole/extent support).
+fn allocated_upper_bytes(
+    snap: &Snapshot,
+    state: &microsandbox::FileSnapshotState,
+    layer: &microsandbox::snapshot::DiskLayer,
+) -> Option<u64> {
+    let upper_path = snap.path().ok()?.join(state.layer_path(layer));
+    microsandbox_utils::extent::allocated_file_bytes(&upper_path).ok()
 }
 
 async fn list(args: SnapshotListArgs) -> anyhow::Result<()> {
@@ -367,7 +460,7 @@ async fn list(args: SnapshotListArgs) -> anyhow::Result<()> {
         let name = format_member_selector(s.group(), s.name(), s.id());
         let size = s
             .size_bytes()
-            .map(format_size)
+            .map(ui::format_size)
             .unwrap_or_else(|| "-".to_string());
         let created = ui::format_datetime(&s.created_at().and_utc());
         let digest = short_digest(s.digest());
@@ -572,6 +665,53 @@ async fn head(args: SnapshotHeadArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
+async fn clone_snapshot(args: SnapshotCloneArgs) -> anyhow::Result<()> {
+    let mut labels = Vec::new();
+    for label in &args.labels {
+        let (k, v) = label
+            .split_once('=')
+            .ok_or_else(|| anyhow::anyhow!("invalid --label '{label}': expected K=V"))?;
+        labels.push((k.to_string(), v.to_string()));
+    }
+    let root_disk_size_mib = args
+        .root_disk
+        .as_ref()
+        .map(|size| ui::parse_size_mib(size).map_err(anyhow::Error::msg))
+        .transpose()?;
+    let opts = microsandbox::snapshot::CloneOpts {
+        dest_dir: args.dest_dir.clone(),
+        group: None,
+        labels,
+        force: args.force,
+        sparsify: args.sparsify,
+        root_disk_size_mib,
+    };
+
+    let spinner = if args.quiet {
+        ui::Spinner::quiet()
+    } else {
+        ui::Spinner::start("Cloning", &args.source)
+    };
+
+    match Snapshot::clone_snapshot(&args.source, &args.new_name, opts).await {
+        Ok(snap) => {
+            spinner.finish_success("Cloned");
+            if !args.quiet {
+                println!("{}", snap.digest());
+                println!("{}", snap.path()?.display());
+                if args.sparsify {
+                    print_sparsification_summary(&snap);
+                }
+            }
+            Ok(())
+        }
+        Err(e) => {
+            spinner.finish_clear();
+            Err(e.into())
+        }
+    }
+}
+
 //--------------------------------------------------------------------------------------------------
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
@@ -701,6 +841,26 @@ mod tests {
         assert_eq!(args.name.as_deref(), Some("clean"));
         assert_eq!(args.from_sandbox, "box");
         assert!(args.full);
+    }
+
+    #[test]
+    fn create_parses_sparsify_flag() {
+        let args = parse_snapshot_args(&["create", "clean", "--from-sandbox", "box", "--sparsify"]);
+        let SnapshotCommands::Create(args) = args.command else {
+            panic!("expected create command");
+        };
+        assert_eq!(args.name.as_deref(), Some("clean"));
+        assert_eq!(args.from_sandbox, "box");
+        assert!(args.sparsify);
+    }
+
+    #[test]
+    fn create_defaults_sparsify_to_false() {
+        let args = parse_snapshot_args(&["create", "clean", "--from-sandbox", "box"]);
+        let SnapshotCommands::Create(args) = args.command else {
+            panic!("expected create command");
+        };
+        assert!(!args.sparsify);
     }
 
     #[test]
@@ -850,6 +1010,62 @@ mod tests {
             args.dest.as_deref(),
             Some(std::path::Path::new("/tmp/snaps"))
         );
+    }
+
+    #[test]
+    fn clone_parses_source_and_new_name() {
+        let parsed = parse_snapshot_args(&["clone", "bloated", "slim"]);
+        let SnapshotCommands::Clone(args) = parsed.command else {
+            panic!("expected clone command");
+        };
+        assert_eq!(args.source, "bloated");
+        assert_eq!(args.new_name, "slim");
+        assert!(!args.force);
+        assert!(!args.sparsify);
+        assert!(args.labels.is_empty());
+    }
+
+    #[test]
+    fn clone_parses_dest_dir_label_force_and_sparsify() {
+        let parsed = parse_snapshot_args(&[
+            "clone",
+            "bloated",
+            "slim",
+            "--dest-dir",
+            "/mnt/big",
+            "--label",
+            "stage=deps",
+            "--force",
+            "--sparsify",
+        ]);
+        let SnapshotCommands::Clone(args) = parsed.command else {
+            panic!("expected clone command");
+        };
+        assert_eq!(
+            args.dest_dir.as_deref(),
+            Some(std::path::Path::new("/mnt/big"))
+        );
+        assert_eq!(args.labels, vec!["stage=deps".to_string()]);
+        assert!(args.force);
+        assert!(args.sparsify);
+    }
+
+    #[test]
+    fn clone_parses_root_disk_flag() {
+        let parsed = parse_snapshot_args(&["clone", "bloated", "slim", "--root-disk", "8G"]);
+        let SnapshotCommands::Clone(args) = parsed.command else {
+            panic!("expected clone command");
+        };
+        assert_eq!(args.root_disk.as_deref(), Some("8G"));
+    }
+
+    #[test]
+    fn clone_defaults_root_disk_to_none() {
+        let parsed = parse_snapshot_args(&["clone", "bloated", "slim"]);
+        let SnapshotCommands::Clone(args) = parsed.command else {
+            panic!("expected clone command");
+        };
+        assert!(args.root_disk.is_none());
     }
 
     #[test]

@@ -30,6 +30,11 @@ type SnapshotCreateOptions struct {
 	Full bool
 	// GuestFlush defaults to Auto: flush live disk captures, not full captures.
 	GuestFlush GuestFlush
+	// Sparsify deallocates host storage for blocks the guest ext4 filesystem
+	// has already freed, before recording the artifact. Never changes
+	// guest-visible content and never fails creation if sparsification itself
+	// fails.
+	Sparsify bool
 }
 
 // SnapshotSaveOptions configures Snapshot.Save and instance SaveTo methods.
@@ -42,6 +47,27 @@ type SnapshotSaveOptions struct {
 	WithParents bool
 	WithImage   bool
 	PlainTar    bool
+}
+
+// SnapshotCloneOptions configures Snapshot.Clone.
+type SnapshotCloneOptions struct {
+	// Parent directory to create the new artifact in; empty = the default
+	// snapshots directory.
+	DestDir string
+	// Group to create the clone in; empty creates a group named after the new member.
+	Group string
+	// Labels for the new snapshot. Not inherited from the source.
+	Labels map[string]string
+	// Overwrite an existing artifact at the destination.
+	Force bool
+	// Sparsify deallocates host storage for blocks the guest ext4 filesystem
+	// has already freed, while cloning.
+	Sparsify bool
+	// RootDiskSizeMib grows the cloned upper's ext4 filesystem to this size
+	// in MiB, offline, before recording the artifact. Zero leaves the size
+	// unchanged. Grow-only: a target at or below the source's current size
+	// errors.
+	RootDiskSizeMib uint32
 }
 
 // SnapshotLoadOptions configures importing one or more archives into a snapshot group.
@@ -409,6 +435,31 @@ func (snapshotFactory) Create(ctx context.Context, opts SnapshotCreateOptions) (
 		RecordIntegrity: opts.RecordIntegrity,
 		Full:            opts.Full,
 		GuestFlush:      string(opts.GuestFlush),
+		Sparsify:        opts.Sparsify,
+	})
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	return snapshotFromInfo(info), nil
+}
+
+// Clone copies an existing snapshot (path, name, or digest) into a new one.
+// Never mutates the source: writes a new artifact under newName, leaving the
+// source and anything referencing its digest untouched.
+func (snapshotFactory) Clone(ctx context.Context, source, newName string, opts SnapshotCloneOptions) (*SnapshotArtifact, error) {
+	if source == "" {
+		return nil, &Error{Kind: ErrInvalidConfig, Message: "snapshot clone requires a non-empty source"}
+	}
+	if newName == "" {
+		return nil, &Error{Kind: ErrInvalidConfig, Message: "snapshot clone requires a non-empty newName"}
+	}
+	info, err := ffi.SnapshotClone(ctx, source, newName, ffi.SnapshotCloneOptions{
+		DestDir:         opts.DestDir,
+		Group:           opts.Group,
+		Labels:          opts.Labels,
+		Force:           opts.Force,
+		Sparsify:        opts.Sparsify,
+		RootDiskSizeMib: opts.RootDiskSizeMib,
 	})
 	if err != nil {
 		return nil, wrapFFI(err)

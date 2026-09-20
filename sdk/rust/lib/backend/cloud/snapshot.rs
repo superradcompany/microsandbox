@@ -609,6 +609,7 @@ mod tests {
             force: false,
             record_integrity: false,
             full: false,
+            sparsify: false,
             group: None,
         }
     }

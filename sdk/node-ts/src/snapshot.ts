@@ -2,6 +2,7 @@ import { UnsupportedError } from "./errors.js";
 import { mapNapiError, withMappedErrors } from "./internal/error-mapping.js";
 import {
   napi,
+  type NapiCloneOpts,
   type NapiSnapshot,
   type NapiSnapshotArchive,
   type NapiSnapshotBuilderSetters,
@@ -68,6 +69,28 @@ export interface SaveOpts {
   withImage?: boolean;
   /** Skip zstd compression and write a plain `.tar`. */
   plainTar?: boolean;
+}
+
+/**
+ * Options for `Snapshot.clone`.
+ */
+export interface CloneOpts {
+  /** Parent directory to create the new artifact in, instead of the default snapshots directory. */
+  destDir?: string;
+  /** Snapshot group to create the clone in; defaults to a group named after the new member. */
+  group?: string;
+  /** Labels for the new snapshot. Not inherited from the source. */
+  labels?: Record<string, string>;
+  /** Overwrite an existing artifact at the destination. */
+  force?: boolean;
+  /** Deallocate host storage for blocks the guest ext4 filesystem has already freed, while cloning. */
+  sparsify?: boolean;
+  /**
+   * Grow the cloned upper's ext4 filesystem to this size in MiB, offline,
+   * before recording the artifact. Grow-only: a target at or below the
+   * source's current size throws.
+   */
+  rootDiskSizeMib?: number;
 }
 
 /** Options for importing one or more archives into a snapshot group. */
@@ -244,6 +267,33 @@ export class Snapshot {
     return new SnapshotHandle(raw);
   }
 
+  /**
+   * Clone an existing snapshot (path, name, or digest) into a new one.
+   *
+   * Never mutates the source: writes a new artifact under `newName`,
+   * leaving the source and anything referencing its digest untouched.
+   */
+  static async clone(
+    source: string,
+    newName: string,
+    opts?: CloneOpts,
+  ): Promise<Snapshot> {
+    const nativeOpts: NapiCloneOpts | undefined = opts && {
+      destDir: opts.destDir,
+      group: opts.group,
+      labels: opts.labels
+        ? Object.entries(opts.labels).map(([key, value]) => ({ key, value }))
+        : undefined,
+      force: opts.force,
+      sparsify: opts.sparsify,
+      rootDiskSizeMib: opts.rootDiskSizeMib,
+    };
+    const inner = await withMappedErrors(() =>
+      napi.Snapshot.clone(source, newName, nativeOpts),
+    );
+    return new Snapshot(inner);
+  }
+
   /** Import into a selected or generated group, with optional head selection. */
   static async loadWithOptions(archive: string, opts: LoadOpts = {}): Promise<SnapshotHandle> {
     const raw = await withMappedErrors(() => napi.Snapshot.loadWithOptions(archive, opts));
@@ -260,6 +310,7 @@ export class Snapshot {
   static async groupHead(selector: string): Promise<HeadUpdate> {
     const update = await withMappedErrors(() => napi.Snapshot.groupHead(selector));
     return { ...update, previous: update.previous ?? null };
+
   }
 
   //--------------------------------------------------------------------------

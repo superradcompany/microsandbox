@@ -3,8 +3,8 @@
 use clap::Args;
 use console::style;
 use microsandbox::sandbox::{
-    DeploymentProfile, HostPermissions, MountOptions, Sandbox, SandboxConfig, SandboxStatus,
-    SecurityProfile, StatVirtualization, VolumeMount,
+    DeploymentProfile, HostPermissions, MountOptions, Sandbox, SandboxConfig, SandboxHandle,
+    SandboxStatus, SecurityProfile, StatVirtualization, VolumeMount,
 };
 use serde::Serialize;
 
@@ -120,6 +120,14 @@ pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
             .unwrap_or(serde_json::Value::Null);
         json["active_config"] = active_config_json;
         json["pending_changes"] = serde_json::to_value(&pending_changes)?;
+        json["disk"] = disk_size(&handle)
+            .map(|d| {
+                serde_json::json!({
+                    "apparent_bytes": d.apparent_bytes,
+                    "allocated_bytes": d.allocated_bytes,
+                })
+            })
+            .unwrap_or(serde_json::Value::Null);
         println!("{}", serde_json::to_string_pretty(&json)?);
         return Ok(());
     }
@@ -194,6 +202,16 @@ pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
                 );
             }
             None => {}
+        }
+        if let Some(disk) = disk_size(&handle) {
+            ui::detail_kv(
+                "Size on Disk",
+                &format!(
+                    "{} allocated of {} apparent",
+                    ui::format_size(disk.allocated_bytes),
+                    ui::format_size(disk.apparent_bytes)
+                ),
+            );
         }
 
         let change_for = |field: &str| pending_changes.iter().find(|c| c.field == field);
@@ -417,6 +435,25 @@ fn pending_config_changes(
 
     changes
 }
+
+/// Host-allocated bytes for the sandbox's root disk file vs. its apparent size.
+struct DiskSize {
+    apparent_bytes: u64,
+    allocated_bytes: u64,
+}
+
+/// `None` when there's no disk file to stat (e.g. a tmpfs root disk) or the
+/// stat itself fails.
+fn disk_size(handle: &SandboxHandle) -> Option<DiskSize> {
+    let path = handle.disk_path()?;
+    let apparent_bytes = std::fs::metadata(&path).ok()?.len();
+    let allocated_bytes = microsandbox_utils::extent::allocated_file_bytes(&path).ok()?;
+    Some(DiskSize {
+        apparent_bytes,
+        allocated_bytes,
+    })
+}
+
 
 fn status_has_active_config(status: SandboxStatus) -> bool {
     matches!(

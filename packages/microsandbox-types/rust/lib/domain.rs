@@ -858,6 +858,18 @@ pub struct SnapshotSpec {
     /// Capture disk, memory, execution, and device state from a running sandbox.
     #[serde(default)]
     pub full: bool,
+
+    /// Deallocate host storage for blocks the guest ext4 filesystem has
+    /// already freed, before recording the artifact.
+    ///
+    /// Opt-in: this walks the copied upper image's block bitmaps and does a
+    /// real (if small) amount of extra work at creation time. Never changes
+    /// guest-visible content — it only reclaims host disk space the guest
+    /// itself no longer considers in use. Failure to sparsify never fails
+    /// snapshot creation; it's a size optimization, not a correctness
+    /// requirement.
+    #[serde(default)]
+    pub sparsify: bool,
 }
 
 //--------------------------------------------------------------------------------------------------

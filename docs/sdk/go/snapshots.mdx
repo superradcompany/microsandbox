@@ -458,6 +458,58 @@ h, err := m.Snapshot.Load(ctx, "/tmp/snap.msb", "")
 
 </Accordion>
 
+---
+
+#### <span className="msb-recv">Snapshot.</span><span className="msb-hn">Clone()</span>
+<div className="msb-tags"><span className="msb-tag is-static">function</span></div>
+
+```go
+func (snapshotFactory) Clone(ctx context.Context, source, newName string, opts SnapshotCloneOptions) (*SnapshotArtifact, error)
+```
+
+Clone `source` (path, name, or digest) into a new snapshot named `newName`. Always writes a new artifact rather than mutating `source` in place: `source` and anything referencing it by digest are left untouched. With [`SnapshotCloneOptions.Sparsify`](#snapshotcloneoptionsstruct), also reclaims host disk space for blocks the guest filesystem has already freed. With [`SnapshotCloneOptions.RootDiskSizeMib`](#snapshotcloneoptionsstruct), grows the clone's root disk in place (grow-only). If `source` recorded content integrity, the new artifact's integrity is recomputed fresh.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ctx</code><span className="msb-type">context.Context</span></div>
+    <div className="msb-param-desc">Cancellation and deadline.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>source</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Path, name, or digest of the snapshot to clone.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>newName</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Bare name for the new snapshot.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>opts</code><a className="msb-type" href="#snapshotcloneoptionsstruct">SnapshotCloneOptions</a></div>
+    <div className="msb-param-desc">Destination directory, group, labels, force, sparsification, and root disk size.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#snapshotartifact">*SnapshotArtifact</a></div>
+    <div className="msb-param-desc">The cloned artifact.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```go
+slim, err := m.Snapshot.Clone(ctx, "bloated", "slim", m.SnapshotCloneOptions{
+    Sparsify:        true,
+    RootDiskSizeMib: 8192,
+})
+```
+
+</Accordion>
+
 ## SandboxHandle methods
 
 Snapshots are taken from a metadata handle returned by [`GetSandbox`](/sdk/go/sandbox#m-getsandbox). Disk capture also supports a running or paused sandbox.
@@ -947,6 +999,7 @@ Configures [`Snapshot.Create`](#snapshot-create). `FromSandbox` is required. An 
 | Force | `bool` | Overwrite a direct archive output; rejected for installed group members |
 | RecordIntegrity | `bool` | Record content hashes so [`Verify`](#s-verify) can recompute them later |
 | Full | `bool` | Include memory and execution state from a running or paused source; `false` captures disk state from running, paused, stopped, or crashed sources |
+| Sparsify | `bool` | Deallocate host storage for blocks the guest ext4 filesystem has already freed, before recording the artifact |
 
 ### SnapshotSaveOptions<span className="msb-tag is-type" style={{marginLeft: "8px"}}>struct</span>
 
@@ -961,6 +1014,21 @@ Configures [`Snapshot.Save`](#snapshot-save) and instance `SaveTo()` methods.
 | WithParents | `bool` | Include the snapshot's parent chain in the archive |
 | WithImage | `bool` | Include the base OCI image in the archive |
 | PlainTar | `bool` | Write an uncompressed `.tar` instead of `.msb` |
+
+### SnapshotCloneOptions<span className="msb-tag is-type" style={{marginLeft: "8px"}}>struct</span>
+
+<p className="msb-backref">Accepted by <a href="#snapshot-clone">Snapshot.Clone()</a></p>
+
+Configures [`Snapshot.Clone`](#snapshot-clone). All fields are optional; a zero value clones into the default snapshots directory without sparsifying or resizing.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| DestDir | `string` | Parent directory for the new artifact; empty = the default snapshots directory |
+| Group | `string` | Snapshot group to create the clone in; empty creates a group named after the new member |
+| Labels | `map[string]string` | Labels for the new snapshot. Not inherited from the source |
+| Force | `bool` | Overwrite an existing artifact at the destination |
+| Sparsify | `bool` | Deallocate host storage for blocks the guest ext4 filesystem has already freed, while cloning |
+| RootDiskSizeMib | `uint32` | Grow the clone's ext4 filesystem to this size in MiB, offline, before recording the artifact. Zero leaves the size unchanged. Grow-only: a target at or below the source's current size errors |
 
 ### SnapshotVerifyReport<span className="msb-tag is-type" style={{marginLeft: "8px"}}>struct</span>
 

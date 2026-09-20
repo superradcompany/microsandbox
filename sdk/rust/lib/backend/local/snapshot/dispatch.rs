@@ -10,7 +10,7 @@ use super::{archive, artifact, copy, create, group, store, verify};
 use crate::backend::{Backend, LocalBackend, SnapshotBackend};
 use crate::sandbox::SandboxConfig;
 use crate::snapshot::{
-    HeadUpdate, LoadOpts, Manifest, SaveOpts, Snapshot, SnapshotArchive, SnapshotConfig,
+    CloneOpts, HeadUpdate, LoadOpts, Manifest, SaveOpts, Snapshot, SnapshotArchive, SnapshotConfig,
     SnapshotHandle, SnapshotReference, SnapshotVerifyReport,
 };
 use crate::{MicrosandboxError, MicrosandboxResult, Operation};
@@ -155,6 +155,21 @@ impl SnapshotBackend for LocalBackend {
             labels,
             record_integrity,
         ))
+    }
+
+    fn clone_snapshot<'a>(
+        &'a self,
+        backend: Arc<dyn Backend>,
+        source: &'a str,
+        new_name: &'a str,
+        opts: CloneOpts,
+    ) -> BoxFuture<'a, MicrosandboxResult<Snapshot>> {
+        Box::pin(async move {
+            Ok(from_artifact(
+                backend,
+                create::clone_snapshot(self, source, new_name, opts).await?,
+            ))
+        })
     }
 
     fn list_dir(

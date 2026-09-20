@@ -2618,3 +2618,216 @@ async fn list_dir_skips_dot_prefixed_staging_directories() {
     assert_eq!(snaps.len(), 1);
     assert!(reference_path(snaps[0].reference()).ends_with("real"));
 }
+
+#[tokio::test]
+async fn clone_writes_a_new_artifact_and_leaves_source_untouched() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    let backend = isolated_backend(&home).await;
+
+    microsandbox::with_backend(backend, async {
+        let (src_dir, src_digest) = make_artifact(tmp.path(), "source", b"the upper bytes");
+        let src_bytes_before = std::fs::read(src_dir.join(DEFAULT_UPPER_FILE)).unwrap();
+
+        let dest_parent = tmp.path().join("dest");
+        let cloned = Snapshot::clone_snapshot(
+            src_dir.to_string_lossy().as_ref(),
+            "cloned",
+            microsandbox::snapshot::CloneOpts {
+                dest_dir: Some(dest_parent.clone()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_ne!(cloned.digest(), src_digest, "must be a new artifact identity");
+        assert!(
+            cloned.manifest().parent.is_some(),
+            "a clone records its source as parent"
+        );
+        assert_eq!(
+            cloned.path().unwrap(),
+            dest_parent.join("cloned").join(cloned.id().as_str())
+        );
+
+        // Source is completely untouched.
+        let src_bytes_after = std::fs::read(src_dir.join(DEFAULT_UPPER_FILE)).unwrap();
+        assert_eq!(src_bytes_before, src_bytes_after);
+        let reopened_src = Snapshot::open(src_dir.to_string_lossy().as_ref())
+            .await
+            .unwrap();
+        assert_eq!(reopened_src.digest(), src_digest);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn clone_recomputes_integrity_when_source_recorded_it() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    let backend = isolated_backend(&home).await;
+
+    microsandbox::with_backend(backend, async {
+        let (src_dir, _) =
+            make_artifact_with_integrity(tmp.path(), "source-with-integrity", b"payload bytes", true);
+
+        let dest_parent = tmp.path().join("dest");
+        let cloned = Snapshot::clone_snapshot(
+            src_dir.to_string_lossy().as_ref(),
+            "cloned-with-integrity",
+            microsandbox::snapshot::CloneOpts {
+                dest_dir: Some(dest_parent),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(
+            &cloned
+                .state()
+                .as_file()
+                .unwrap()
+                .layers[0]
+                .payload
+                .integrity,
+            Some(UpperIntegrity::FileMerkleBlake3V1 { .. })
+        ));
+        let report = cloned.verify().await.unwrap();
+        assert!(matches!(
+            report.upper,
+            microsandbox::snapshot::UpperVerifyStatus::Verified { .. }
+        ));
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn clone_rejects_snapshot_with_unsupported_requires() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    let backend = isolated_backend(&home).await;
+
+    microsandbox::with_backend(backend, async {
+        let (src_dir, _) =
+            make_artifact_with_unknown_require(tmp.path(), "future-snap", b"upper");
+
+        let err = Snapshot::clone_snapshot(
+            src_dir.to_string_lossy().as_ref(),
+            "cloned-future",
+            microsandbox::snapshot::CloneOpts {
+                dest_dir: Some(tmp.path().join("dest")),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("msb.future/1"), "unexpected error: {err}");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn clone_rejects_resumable_scope_snapshot() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    let backend = isolated_backend(&home).await;
+
+    microsandbox::with_backend(backend, async {
+        let (src_dir, _) =
+            make_artifact_with_scope(tmp.path(), "ckpt", b"upper", SnapshotScope::Full);
+
+        let err = Snapshot::clone_snapshot(
+            src_dir.to_string_lossy().as_ref(),
+            "cloned-ckpt",
+            microsandbox::snapshot::CloneOpts {
+                dest_dir: Some(tmp.path().join("dest")),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("file-state"),
+            "unexpected error: {err}"
+        );
+    })
+    .await;
+}
+
+fn real_ext4_bytes(dir: &Path, size_bytes: u64) -> Vec<u8> {
+    let path = dir.join("real.ext4");
+    microsandbox_image::ext4::format_ext4(
+        &path,
+        &microsandbox_image::ext4::Ext4FormatOptions {
+            size_bytes,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    std::fs::read(&path).unwrap()
+}
+
+#[tokio::test]
+async fn clone_grows_root_disk_when_requested() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    let backend = isolated_backend(&home).await;
+
+    microsandbox::with_backend(backend, async {
+        let ext4_bytes = real_ext4_bytes(tmp.path(), 256 * 1024 * 1024);
+        let (src_dir, _) = make_artifact(tmp.path(), "source", &ext4_bytes);
+
+        let dest_parent = tmp.path().join("dest");
+        let cloned = Snapshot::clone_snapshot(
+            src_dir.to_string_lossy().as_ref(),
+            "grown",
+            microsandbox::snapshot::CloneOpts {
+                dest_dir: Some(dest_parent),
+                root_disk_size_mib: Some(512),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let state = cloned.state().as_file().unwrap();
+        assert_eq!(state.virtual_size, 512 * 1024 * 1024);
+        let cloned_upper = cloned.path().unwrap().join(state.layer_path(&state.layers[0]));
+        assert_eq!(
+            std::fs::metadata(&cloned_upper).unwrap().len(),
+            512 * 1024 * 1024
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn clone_rejects_root_disk_at_or_below_source_size() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    let backend = isolated_backend(&home).await;
+
+    microsandbox::with_backend(backend, async {
+        let ext4_bytes = real_ext4_bytes(tmp.path(), 256 * 1024 * 1024);
+        let (src_dir, _) = make_artifact(tmp.path(), "source", &ext4_bytes);
+
+        let err = Snapshot::clone_snapshot(
+            src_dir.to_string_lossy().as_ref(),
+            "shrink-attempt",
+            microsandbox::snapshot::CloneOpts {
+                dest_dir: Some(tmp.path().join("dest")),
+                root_disk_size_mib: Some(128),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("shrink is not supported"),
+            "unexpected error: {err}"
+        );
+    })
+    .await;
+}

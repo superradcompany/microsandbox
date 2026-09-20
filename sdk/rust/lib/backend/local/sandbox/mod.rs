@@ -464,7 +464,8 @@ impl LocalBackend {
         expected_id: Option<i32>,
     ) -> MicrosandboxResult<()> {
         let (model, pid) = self.sandbox_handle_state(name, expected_id).await?;
-        let handle = SandboxHandle::from_local_model(backend, model, pid);
+        let path = self.sandboxes_dir().join(&model.name);
+        let handle = SandboxHandle::from_local_model(backend, model, pid, path);
         handle.remove().await
     }
 
@@ -1278,7 +1279,8 @@ impl SandboxBackend for LocalBackend {
         Box::pin(async move {
             let (mut model, pid) = self.sandbox_handle_state(name, None).await?;
             model.status = crate::sandbox::pause::projected_status(self, name, model.status).await;
-            Ok(SandboxHandle::from_local_model(backend, model, pid))
+            let path = self.sandboxes_dir().join(&model.name);
+            Ok(SandboxHandle::from_local_model(backend, model, pid, path))
         })
     }
 
@@ -1299,7 +1301,8 @@ impl SandboxBackend for LocalBackend {
                             model.status,
                         )
                         .await;
-                        SandboxHandle::from_local_model(backend, model, pid)
+                        let path = self.sandboxes_dir().join(&model.name);
+                        SandboxHandle::from_local_model(backend, model, pid, path)
                     }
                 })
                 .buffered(16)

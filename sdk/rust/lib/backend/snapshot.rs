@@ -10,7 +10,7 @@ use super::Backend;
 use crate::MicrosandboxResult;
 use crate::sandbox::SandboxConfig;
 use crate::snapshot::{
-    HeadUpdate, LoadOpts, Manifest, SaveOpts, Snapshot, SnapshotArchive, SnapshotConfig,
+    CloneOpts, HeadUpdate, LoadOpts, Manifest, SaveOpts, Snapshot, SnapshotArchive, SnapshotConfig,
     SnapshotHandle, SnapshotReference, SnapshotVerifyReport,
 };
 
@@ -118,6 +118,24 @@ pub trait SnapshotBackend: Send + Sync {
         labels: BTreeMap<String, String>,
         record_integrity: bool,
     ) -> BoxFuture<'a, MicrosandboxResult<Manifest>>;
+
+    /// Clone an existing snapshot into a new immutable group member.
+    ///
+    /// Only the local backend supports cloning today; other backends return a typed
+    /// local-only error.
+    fn clone_snapshot<'a>(
+        &'a self,
+        _backend: Arc<dyn Backend>,
+        _source: &'a str,
+        _new_name: &'a str,
+        _opts: CloneOpts,
+    ) -> BoxFuture<'a, MicrosandboxResult<Snapshot>> {
+        Box::pin(async {
+            Err(crate::MicrosandboxError::local_only(
+                crate::Operation::SnapshotOps,
+            ))
+        })
+    }
 
     /// Enumerate snapshot artifacts in a backend-specific directory.
     fn list_dir(

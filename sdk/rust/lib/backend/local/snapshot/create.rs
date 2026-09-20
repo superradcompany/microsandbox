@@ -246,6 +246,259 @@ pub(super) async fn publish_with_name_retry(
     }
 }
 
+/// Clone an existing disk snapshot's head layer into a new snapshot artifact.
+///
+/// Always writes a fresh artifact rather than mutating `source` in place: punching holes into
+/// the upper changes its raw bytes (freed-but-stale garbage -> logical zero), so an in-place
+/// sparsification would rewrite `source`'s content digest and break anything referencing it. A
+/// brand-new descriptor gets a fresh identity, integrity (when the source had it) is recomputed
+/// fresh, and the source closure is left untouched.
+pub(super) async fn clone_snapshot(
+    local: &LocalBackend,
+    source: &str,
+    new_name: &str,
+    opts: crate::snapshot::CloneOpts,
+) -> MicrosandboxResult<Snapshot> {
+    let crate::snapshot::CloneOpts {
+        dest_dir,
+        group,
+        labels,
+        force,
+        sparsify,
+        root_disk_size_mib,
+    } = opts;
+
+    validate_snapshot_name(new_name)?;
+    if force {
+        return Err(MicrosandboxError::InvalidConfig(
+            "grouped snapshots are immutable; choose another member name or remove the existing member explicitly".into(),
+        ));
+    }
+
+    // Open + validate the source: only single-layer raw ext4 disk snapshots can be cloned.
+    let src = super::store::open_snapshot(local, source).await?;
+    eprintln!("DBG clone: opened src path={:?}\n", src.path());
+    let src_manifest = src.manifest().clone();
+    let unsupported = src_manifest.unsupported_requires();
+    if !unsupported.is_empty() {
+        return Err(MicrosandboxError::InvalidConfig(format!(
+            "snapshot '{source}' requires extensions this binary doesn't understand ({}); refusing to clone",
+            unsupported.join(", ")
+        )));
+    }
+    let SnapshotState::File(src_state) = &src_manifest.state else {
+        return Err(MicrosandboxError::InvalidConfig(format!(
+            "snapshot '{source}' is not a file-state snapshot; only disk snapshots can be cloned"
+        )));
+    };
+    if src_state.layers.len() != 1 {
+        return Err(MicrosandboxError::InvalidConfig(format!(
+            "snapshot '{source}' does not have a single head layer; cloning only supports single-layer raw ext4 disk snapshots"
+        )));
+    }
+    let head = &src_state.layers[0];
+    if head.format != SnapshotFormat::Raw {
+        return Err(MicrosandboxError::InvalidConfig(format!(
+            "snapshot '{source}' is not a raw disk snapshot; cloning only supports raw ext4 uppers"
+        )));
+    }
+    let record_integrity = head.payload.integrity.is_some();
+    // A canonical single-layer artifact stores its head under `layers/`; a simple artifact keeps
+    // a single raw upper at the artifact root. Mirror `store::open_snapshot`'s fallback so both
+    // layouts clone correctly.
+    let src_head_path = {
+        let canonical = src.path().join(src_state.layer_path(head));
+        if canonical.exists() {
+            canonical
+        } else if src_state.layers.len() == 1
+            && src.path().join(microsandbox_image::snapshot::DEFAULT_UPPER_FILE).exists()
+        {
+            src.path().join(microsandbox_image::snapshot::DEFAULT_UPPER_FILE)
+        } else {
+            canonical
+        }
+    };
+    eprintln!("DBG clone: src_head_path={:?}\n", src_head_path);
+
+    // Destination group. The source and anything referencing it by digest are untouched.
+    let root = dest_dir.unwrap_or_else(|| local.snapshots_dir());
+    let group_name = group.unwrap_or_else(|| new_name.to_string());
+    let group_dir = super::group::ensure(&root, Some(&group_name)).await?;
+    let staging = tempfile::Builder::new()
+        .prefix(".clone-")
+        .tempdir_in(&group_dir)?;
+    let staging_dir = staging.path().to_path_buf();
+    // Publish expects the artifact under a member subdirectory (the create path stages
+    // `<staged>/<member>/snapshot.json` with its `layers/` closure); mirror that layout.
+    let snapshot_id = SnapshotId::new(format!("snap_{:032x}", rand::random::<u128>()))
+        .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+    let member_dir = staging_dir.join(snapshot_id.as_str());
+    tokio::fs::create_dir_all(&member_dir).await?;
+    eprintln!("DBG clone: group_dir={:?} member_dir={:?}\n", group_dir, member_dir);
+
+    // Stage the head copy; resize then sparsify before integrity so both see final geometry and
+    // the sparse-aware Merkle pass sees punched holes as holes.
+    let layer_id = DiskLayerId::new(format!("layer_{:032x}", rand::random::<u128>()))
+        .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+    // `layer_path` already resolves under `layers/`; join it directly onto the member dir so the
+    // staged payload lands at `<member>/layers/<id>.<ext>` (mirrors `build_artifact`).
+    let staged_path = member_dir.join(layer_path(&layer_id, SnapshotFormat::Raw));
+    tokio::fs::create_dir_all(staged_path.parent().expect("layer path has a parent")).await?;
+    let src_head_clone = src_head_path.clone();
+    let staged_for_copy = staged_path.clone();
+    tokio::task::spawn_blocking(move || {
+        microsandbox_utils::copy::fast_copy(&src_head_clone, &staged_for_copy)
+    })
+    .await
+    .map_err(|error| MicrosandboxError::Custom(format!("snapshot clone copy task: {error}")))??;
+    let mut virtual_size = tokio::fs::metadata(&staged_path).await?.len();
+    eprintln!("DBG clone: after copy virtual_size={virtual_size}\n");
+
+    if let Some(resize_mib) = root_disk_size_mib {
+        virtual_size = grow_clone_upper(staged_path.clone(), resize_mib, virtual_size).await?;
+    }
+
+    if sparsify {
+        let staged_for_sparsify = staged_path.clone();
+        let outcome = tokio::task::spawn_blocking(move || {
+            microsandbox_image::ext4::sparsify_image(&staged_for_sparsify)
+        })
+        .await
+        .map_err(|error| {
+            MicrosandboxError::Custom(format!("snapshot clone sparsify task: {error}"))
+        });
+        match outcome {
+            Ok(Ok(outcome)) => {
+                if outcome.skipped_dirty {
+                    tracing::debug!("skipped --sparsify (clone): upper needs journal recovery");
+                } else {
+                    tracing::debug!(
+                        bytes_reclaimed = outcome.bytes_reclaimed,
+                        "sparsified cloned snapshot upper"
+                    );
+                }
+            }
+            Ok(Err(error)) => {
+                tracing::warn!(%error, "clone sparsification failed; continuing unsparsified");
+            }
+            Err(error) => {
+                tracing::warn!(%error, "clone sparsification task failed; continuing unsparsified");
+            }
+        }
+    }
+
+    // Clean shutdown + optional integrity on the staged head.
+    let staged_for_sync = staged_path.clone();
+    tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&staged_for_sync)?
+            .sync_all()
+    })
+    .await
+    .map_err(|error| MicrosandboxError::Custom(format!("snapshot clone fsync task: {error}")))??;
+    let integrity = if record_integrity {
+        Some(super::verify::compute_merkle_integrity(&staged_path).await?)
+    } else {
+        None
+    };
+
+    // Build the descriptor around the staged head.
+    let user = src_manifest.restore_defaults()?.user;
+    let mut manifest = Manifest {
+        schema: SCHEMA.into(),
+        snapshot_id: snapshot_id.clone(),
+        scope: SnapshotScope::Disk,
+        state: SnapshotState::File(FileSnapshotState {
+            disk_format: SnapshotFormat::Raw,
+            filesystem: "ext4".into(),
+            virtual_size,
+            head: layer_id.clone(),
+            layers: vec![DiskLayer {
+                layer_id,
+                format: SnapshotFormat::Raw,
+                virtual_size,
+                backing: None,
+                payload: LayerPayload {
+                    file_kind: LayerFileKind::Regular,
+                    integrity,
+                },
+            }],
+        }),
+        capture: SnapshotCapture {
+            created_at: Utc::now().to_rfc3339(),
+            source_lineage: Some(src_manifest.snapshot_id.to_string()),
+            source_checkpoint: None,
+            consistency: SnapshotConsistency::CrashConsistent,
+        },
+        image: src_manifest.image.clone(),
+        root_disk: src_manifest.root_disk.clone(),
+        parent: Some(src_manifest.snapshot_id.clone()),
+        requires: src_manifest.requires.clone(),
+        extensions: BTreeMap::new(),
+    };
+    manifest.set_restore_defaults(microsandbox_image::snapshot::RestoreDefaults { user })?;
+    manifest
+        .validate()
+        .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+    let canonical = manifest
+        .to_canonical_bytes()
+        .map_err(|error| MicrosandboxError::Custom(format!("manifest serialize: {error}")))?;
+    let digest = manifest
+        .digest()
+        .map_err(|error| MicrosandboxError::Custom(format!("manifest digest: {error}")))?;
+    write_descriptor(&member_dir, &canonical).await?;
+    let labels: BTreeMap<_, _> = labels.into_iter().collect();
+    super::metadata::write(&member_dir, &labels).await?;
+
+    // Publish as a new immutable group member; membership refuses to overwrite.
+    let generated = new_name.is_empty();
+    let update = publish_with_name_retry(
+        &group_dir,
+        &staging_dir,
+        &snapshot_id,
+        new_name.to_owned(),
+        generated,
+        || format!("msb-{:08x}", rand::random::<u32>()),
+    )
+    .await;
+    if let Err(ref error) = update {
+        eprintln!("DBG clone: publish error: {error}\n");
+    }
+    let update = update?;
+
+    let path = group_dir.join(snapshot_id.as_str());
+    if let Err(error) = super::store::index_upsert(local, &path, &digest, &manifest).await {
+        tracing::warn!(%error, "snapshot index update failed after clone publication");
+    }
+    let mut snapshot = Snapshot::from_parts(path, digest, manifest, labels);
+    snapshot.head_update = Some(update);
+    Ok(snapshot)
+}
+
+/// Grow a staged clone's raw ext4 upper in place. Offline and grow-only: a target at or below
+/// the current size is a hard error rather than a silent no-op.
+async fn grow_clone_upper(
+    dst: std::path::PathBuf,
+    resize_mib: u32,
+    current_len: u64,
+) -> MicrosandboxResult<u64> {
+    const BYTES_PER_MIB: u64 = 1024 * 1024;
+    let target_bytes = u64::from(resize_mib) * BYTES_PER_MIB;
+    if target_bytes <= current_len {
+        return Err(MicrosandboxError::InvalidConfig(format!(
+            "--root-disk {resize_mib} MiB is not larger than the current {} MiB; shrink is not supported",
+            current_len / BYTES_PER_MIB
+        )));
+    }
+    tokio::task::spawn_blocking(move || microsandbox_image::ext4::grow_image(&dst, target_bytes))
+        .await
+        .map_err(|error| MicrosandboxError::Custom(format!("snapshot clone resize task: {error}")))?
+        .map(|_| target_bytes)
+        .map_err(|error| MicrosandboxError::Custom(format!("failed to grow root disk: {error}")))
+}
+
 /// Build a complete artifact in operation-owned staging; group publication happens afterward.
 async fn capture_installed(
     local: &LocalBackend,
@@ -263,6 +516,7 @@ async fn capture_installed(
         force,
         record_integrity,
         full,
+        sparsify,
     } = config;
 
     // Validate the destination before anything else so name errors surface
@@ -402,6 +656,7 @@ async fn capture_installed(
         &disk,
         &labels,
         record_integrity,
+        sparsify,
         FileSnapshotMetadata {
             image_reference,
             manifest_digest: manifest_digest_str,
@@ -595,6 +850,7 @@ pub(super) async fn create_snapshot_archive(
         force,
         record_integrity,
         full,
+        sparsify,
     } = config;
     if dest_dir.is_some() || group.is_some() {
         return Err(MicrosandboxError::InvalidConfig(
@@ -695,7 +951,7 @@ pub(super) async fn create_snapshot_archive(
         )));
     }
     let sandbox_dir = local.sandboxes_dir().join(&source_sandbox);
-    let disk = capture_disk_source(
+    let mut disk = capture_disk_source(
         local,
         &sandbox_dir,
         &source_sandbox,
@@ -708,6 +964,14 @@ pub(super) async fn create_snapshot_archive(
     )
     .await?;
     lineage.validate_source(local, &source_sandbox).await?;
+    // A direct archive has an operation-owned stage, so sparsification can safely run on a private
+    // copy of the head layer (never in place on the source sandbox disk). Sparsification only
+    // reclaims host space for already-freed blocks; failures are logged, never fatal.
+    let _sparsify_staging = if sparsify {
+        stage_sparsify_head(&mut disk).await?
+    } else {
+        None
+    };
     let integrity_started = Instant::now();
     let integrities = vec![None; disk.sources.len()];
     let labels: BTreeMap<_, _> = labels.into_iter().collect();
@@ -1067,6 +1331,7 @@ async fn build_artifact(
     disk: &SnapshotDiskClosure,
     labels: &BTreeMap<String, String>,
     record_integrity: bool,
+    sparsify: bool,
     metadata: FileSnapshotMetadata<'_>,
 ) -> MicrosandboxResult<(String, Manifest)> {
     let FileSnapshotMetadata {
@@ -1119,6 +1384,40 @@ async fn build_artifact(
         .map_err(|error| MicrosandboxError::Custom(format!("snapshot fsync task: {error}")))??;
     }
     let payload_sync_us = payload_sync_started.elapsed().as_micros();
+
+    // Reclaim host disk space for blocks the guest ext4 filesystem has already freed, before
+    // integrity is computed so the sparse-aware Merkle pass sees the punched holes as holes.
+    // Runs on the private staged copy (the head layer) and never on the source. This is a size
+    // optimization, not a correctness requirement, so a sparsification error is logged and ignored.
+    if sparsify
+        && let Some((_, _, head)) = captured.last()
+    {
+        let head = head.clone();
+        let outcome =
+            tokio::task::spawn_blocking(move || microsandbox_image::ext4::sparsify_image(&head))
+                .await
+                .map_err(|error| {
+                    MicrosandboxError::Custom(format!("snapshot sparsify task: {error}"))
+                });
+        match outcome {
+            Ok(Ok(outcome)) => {
+                if outcome.skipped_dirty {
+                    tracing::debug!("skipped --sparsify: upper needs journal recovery");
+                } else {
+                    tracing::debug!(
+                        bytes_reclaimed = outcome.bytes_reclaimed,
+                        "sparsified snapshot upper"
+                    );
+                }
+            }
+            Ok(Err(error)) => {
+                tracing::warn!(%error, "snapshot sparsification failed; continuing unsparsified");
+            }
+            Err(error) => {
+                tracing::warn!(%error, "snapshot sparsification task failed; continuing unsparsified");
+            }
+        }
+    }
 
     let integrity_started = Instant::now();
     let mut integrities = Vec::with_capacity(captured.len());
@@ -1314,6 +1613,60 @@ fn new_file_manifest_with_id(
 //--------------------------------------------------------------------------------------------------
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
+
+/// Copy the head disk layer into a private stage, sparsify it (best-effort), and repoint the
+/// disk closure's head at the sparsified copy so direct-archive capture reclaims already-freed
+/// blocks without ever sparsifying the source sandbox disk in place. Returns the stage so it
+/// outlives archive writing. Sparsification is a size optimization: failures are logged, ignored.
+async fn stage_sparsify_head(
+    disk: &mut SnapshotDiskClosure,
+) -> MicrosandboxResult<Option<tempfile::TempDir>> {
+    let Some(head_index) = disk.sources.len().checked_sub(1) else {
+        return Ok(None);
+    };
+    let head = disk.sources[head_index].clone();
+    let stage = tempfile::Builder::new()
+        .prefix("snapshot-sparsify-")
+        .tempdir()
+        .map_err(|error| MicrosandboxError::Custom(format!("snapshot sparsify stage: {error}")))?;
+    let dst = stage.path().join("head.disk");
+    let src = head.path.clone();
+    let dst_for_copy = dst.clone();
+    tokio::task::spawn_blocking(move || {
+        microsandbox_utils::copy::fast_copy(&src, &dst_for_copy)
+    })
+    .await
+    .map_err(|error| MicrosandboxError::Custom(format!("snapshot sparsify copy task: {error}")))??;
+    let dst_for_sparsify = dst.clone();
+    let outcome = tokio::task::spawn_blocking(move || {
+        microsandbox_image::ext4::sparsify_image(&dst_for_sparsify)
+    })
+    .await
+    .map_err(|error| MicrosandboxError::Custom(format!("snapshot sparsify task: {error}")));
+    match outcome {
+        Ok(Ok(outcome)) => {
+            if outcome.skipped_dirty {
+                tracing::debug!("skipped --sparsify (archive): upper needs journal recovery");
+            } else {
+                tracing::debug!(
+                    bytes_reclaimed = outcome.bytes_reclaimed,
+                    "sparsified snapshot head for archive"
+                );
+            }
+        }
+        Ok(Err(error)) => {
+            tracing::warn!(%error, "snapshot archive sparsification failed; continuing unsparsified");
+        }
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "snapshot archive sparsification task failed; continuing unsparsified"
+            );
+        }
+    }
+    disk.sources[head_index].path = dst;
+    Ok(Some(stage))
+}
 
 /// Resolve the root layout carried by a snapshot while retaining the ownership boundary for
 /// caller-provided disk images.
@@ -2973,6 +3326,7 @@ mod tests {
             &disk,
             &BTreeMap::new(),
             false,
+            false,
             file_metadata(SnapshotRootDisk::Managed),
         )
         .await
@@ -2989,6 +3343,7 @@ mod tests {
             &disk,
             &BTreeMap::new(),
             true,
+            false,
             file_metadata(SnapshotRootDisk::Managed),
         )
         .await
@@ -3075,6 +3430,7 @@ mod tests {
                         cut,
                         &BTreeMap::new(),
                         record_integrity,
+                        false,
                         file_metadata(root_disk.clone()),
                     )
                     .await
@@ -3252,6 +3608,7 @@ mod tests {
             &disk,
             &BTreeMap::new(),
             true,
+            false,
             file_metadata(SnapshotRootDisk::Flat),
         )
         .await

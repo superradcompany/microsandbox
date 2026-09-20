@@ -446,6 +446,22 @@ pub fn detail_kv_indent(key: &str, value: &str) {
     println!("  {:<14}{value}", style(format!("{key}:")).dim());
 }
 
+/// Render a byte count as a human-readable size (e.g. "1.5 GiB").
+pub fn format_size(bytes: u64) -> String {
+    const KIB: u64 = 1024;
+    const MIB: u64 = KIB * 1024;
+    const GIB: u64 = MIB * 1024;
+    if bytes >= GIB {
+        format!("{:.1} GiB", bytes as f64 / GIB as f64)
+    } else if bytes >= MIB {
+        format!("{:.1} MiB", bytes as f64 / MIB as f64)
+    } else if bytes >= KIB {
+        format!("{:.1} KiB", bytes as f64 / KIB as f64)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
 /// Parse a human-readable size string (e.g., "512M", "1G", "1.5G") into MiB.
 ///
 /// Bare numbers are treated as MiB.

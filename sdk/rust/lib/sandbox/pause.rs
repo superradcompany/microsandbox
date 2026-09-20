@@ -44,7 +44,13 @@ impl Sandbox {
                 Some(target) => target,
                 None => local.sandbox_handle_state(name, None).await?,
             };
-            return Ok(SandboxHandle::from_local_model(backend, model, pid));
+            let path = local.sandboxes_dir().join(&model.name);
+            return Ok(SandboxHandle::from_local_model(
+                backend,
+                model,
+                pid,
+                path,
+            ));
         }
         backend.sandboxes().get(backend.clone(), name).await
     }
@@ -418,10 +424,12 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+        let stale_path = backend.sandboxes_dir().join(&model.name);
         let stale = SandboxHandle::from_local_model(
             backend.clone(),
             model,
             Some(std::process::id() as i32),
+            stale_path,
         );
         let (client_io, mut server_io) = tokio::io::duplex(4096);
         let handshake = tokio::spawn(async move {

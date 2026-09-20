@@ -640,6 +640,7 @@ export interface NapiSnapshotStatic {
   reindex(dir?: string): Promise<number>;
   save(name: string, out: string, opts?: NapiSaveOpts): Promise<void>;
   load(archive: string, dest?: string, base?: string): Promise<NapiSnapshotHandle>;
+  clone(source: string, newName: string, opts?: NapiCloneOpts): Promise<NapiSnapshot>;
   loadWithOptions(archive: string, opts?: NapiLoadOpts): Promise<NapiSnapshotHandle>;
   loadMany(archives: string[], opts?: NapiLoadOpts): Promise<NapiSnapshotHandle[]>;
   groupHead(selector: string): Promise<NapiHeadUpdate>;
@@ -671,6 +672,7 @@ export interface NapiSnapshotBuilderSetters {
   force(): this;
   recordIntegrity(): this;
   full(): this;
+  sparsify(): this;
 }
 
 
@@ -786,6 +788,20 @@ export interface NapiSaveOpts {
 
 export interface NapiSnapshotRemoveOptions {
   force?: boolean;
+}
+
+export interface NapiCloneOpts {
+  destDir?: string;
+  group?: string;
+  labels?: NapiSnapshotLabel[];
+  force?: boolean;
+  sparsify?: boolean;
+  rootDiskSizeMib?: number;
+}
+
+export interface NapiSnapshotLabel {
+  key: string;
+  value: string;
 }
 
 export interface NapiSnapshotVerifyReport {

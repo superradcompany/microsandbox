@@ -103,7 +103,7 @@ impl ResizeMetadata {
 
 /// Superblock and primary GDT state parsed from an image and validated to match exactly what
 /// this crate's formatter writes.
-struct ParsedImage {
+pub(super) struct ParsedImage {
     /// Raw 1024-byte primary superblock.
     sb: Vec<u8>,
 
@@ -111,10 +111,10 @@ struct ParsedImage {
     gdt: Vec<u8>,
 
     /// `EXT4_FEATURE_INCOMPAT_RECOVER` was set: the guest never unmounted, so the jbd2 log must be replayed before the image can be trusted or grown.
-    needs_recovery: bool,
+    pub(super) needs_recovery: bool,
 
     num_blocks: u64,
-    num_groups: u32,
+    pub(super) num_groups: u32,
     gdt_blocks: u32,
     reserved_gdt_blocks: u32,
     inode_table_blocks: u32,
@@ -130,7 +130,7 @@ struct ParsedImage {
 //--------------------------------------------------------------------------------------------------
 
 impl ParsedImage {
-    fn geometry(&self) -> GroupGeometry {
+    pub(super) fn geometry(&self) -> GroupGeometry {
         GroupGeometry {
             num_blocks: self.num_blocks,
             gdt_blocks: self.gdt_blocks,
@@ -514,7 +514,7 @@ pub(super) fn validate_rootfs_image(path: &Path) -> Result<(), Ext4Error> {
 
 /// Parse the primary superblock and GDT, refusing anything that does not match exactly what this
 /// crate's formatter writes (geometry, feature masks, per-group layout, checksums).
-fn parse_and_validate(file: &mut impl Ext4Storage) -> Result<ParsedImage, Ext4Error> {
+pub(super) fn parse_and_validate(file: &mut impl Ext4Storage) -> Result<ParsedImage, Ext4Error> {
     let file_len = file.length()?;
     if file_len < SB_OFFSET + SB_SIZE as u64 {
         return Err(unsupported("file too small to contain an ext4 superblock"));
@@ -1286,14 +1286,14 @@ fn validate_backup_metadata(
     Ok(())
 }
 
-fn read_block_at(file: &mut impl Ext4Storage, block: u64) -> Result<Vec<u8>, Ext4Error> {
+pub(super) fn read_block_at(file: &mut impl Ext4Storage, block: u64) -> Result<Vec<u8>, Ext4Error> {
     let mut buf = vec![0u8; EXT4_BLOCK_SIZE as usize];
     file.seek(SeekFrom::Start(block * EXT4_BLOCK_SIZE as u64))?;
     file.read_exact(&mut buf)?;
     Ok(buf)
 }
 
-fn write_block_at(file: &mut impl Ext4Storage, block: u64, data: &[u8]) -> Result<(), Ext4Error> {
+pub(super) fn write_block_at(file: &mut impl Ext4Storage, block: u64, data: &[u8]) -> Result<(), Ext4Error> {
     file.seek(SeekFrom::Start(block * EXT4_BLOCK_SIZE as u64))?;
     file.write_all(data)?;
     Ok(())

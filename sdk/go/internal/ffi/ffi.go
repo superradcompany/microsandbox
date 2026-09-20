@@ -239,6 +239,7 @@ typedef char *(*msb_snapshot_reindex_fn)(uint64_t cancel_id, const char *dir, ui
 typedef char *(*msb_snapshot_export_fn)(uint64_t cancel_id, const char *reference, const char *reference_kind, const char *out, const char *opts_json, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_snapshot_copy_fn)(uint64_t cancel_id, const char *reference, const char *reference_kind, const char *output_archive_path, const char *opts_json, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_snapshot_import_fn)(uint64_t cancel_id, const char *archive, const char *dest, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_snapshot_clone_fn)(uint64_t cancel_id, const char *source, const char *new_name, const char *opts_json, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_snapshot_import_with_base_fn)(uint64_t cancel_id, const char *archive, const char *dest, const char *base, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_snapshot_import_with_options_fn)(uint64_t cancel_id, const char *archive, const char *opts_json, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_snapshot_import_many_fn)(uint64_t cancel_id, const char *archives_json, const char *opts_json, uint8_t *buf, size_t buf_len);
@@ -422,6 +423,7 @@ static msb_snapshot_reindex_fn     ptr_msb_snapshot_reindex     = NULL;
 static msb_snapshot_export_fn      ptr_msb_snapshot_export      = NULL;
 static msb_snapshot_copy_fn        ptr_msb_snapshot_copy        = NULL;
 static msb_snapshot_import_fn      ptr_msb_snapshot_import      = NULL;
+static msb_snapshot_clone_fn       ptr_msb_snapshot_clone       = NULL;
 static msb_snapshot_import_with_base_fn ptr_msb_snapshot_import_with_base = NULL;
 static msb_snapshot_import_with_options_fn ptr_msb_snapshot_import_with_options = NULL;
 static msb_snapshot_import_many_fn ptr_msb_snapshot_import_many = NULL;
@@ -620,6 +622,7 @@ const char *load_microsandbox(const char *path) {
 	RESOLVE(msb_snapshot_export);
 	RESOLVE(msb_snapshot_copy);
 	RESOLVE(msb_snapshot_import);
+	RESOLVE(msb_snapshot_clone);
 	RESOLVE(msb_snapshot_import_with_base);
 	RESOLVE(msb_snapshot_import_with_options);
 	RESOLVE(msb_snapshot_import_many);
@@ -1097,6 +1100,9 @@ char *call_msb_snapshot_copy(uint64_t cancel_id, const char *reference, const ch
 }
 char *call_msb_snapshot_import(uint64_t cancel_id, const char *archive, const char *dest, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_snapshot_import ? ptr_msb_snapshot_import(cancel_id, archive, dest, buf, buf_len) : NULL;
+}
+char *call_msb_snapshot_clone(uint64_t cancel_id, const char *source, const char *new_name, const char *opts_json, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_snapshot_clone ? ptr_msb_snapshot_clone(cancel_id, source, new_name, opts_json, buf, buf_len) : NULL;
 }
 
 char *call_msb_snapshot_import_with_base(uint64_t cancel_id, const char *archive, const char *dest, const char *base, uint8_t *buf, size_t buf_len) {
@@ -5383,6 +5389,7 @@ type SnapshotCreateOptions struct {
 	RecordIntegrity bool              `json:"record_integrity,omitempty"`
 	Full            bool              `json:"full,omitempty"`
 	GuestFlush      string            `json:"guest_flush,omitempty"`
+	Sparsify        bool              `json:"sparsify,omitempty"`
 }
 
 type SnapshotSaveOptions struct {
@@ -5411,6 +5418,24 @@ type SnapshotHeadUpdate struct {
 type SnapshotCopyOptions struct {
 	Labels          map[string]string `json:"labels,omitempty"`
 	RecordIntegrity bool              `json:"record_integrity,omitempty"`
+}
+
+// SnapshotCloneOptions configures Snapshot.Clone. Never mutates the source:
+// writes a new artifact under NewName, leaving the source and anything
+// referencing its digest untouched.
+type SnapshotCloneOptions struct {
+	DestDir string            `json:"dest_dir,omitempty"`
+	Group   string            `json:"group,omitempty"`
+	Labels  map[string]string `json:"labels,omitempty"`
+	Force   bool              `json:"force,omitempty"`
+	// Sparsify deallocates host storage for blocks the guest ext4 filesystem
+	// has already freed, while cloning.
+	Sparsify bool `json:"sparsify,omitempty"`
+	// RootDiskSizeMib grows the cloned upper's ext4 filesystem to this size
+	// in MiB, offline, before recording the artifact. Grow-only: a target
+	// at or below the source's current size errors. Zero leaves the size
+	// unchanged.
+	RootDiskSizeMib uint32 `json:"root_disk_size_mib,omitempty"`
 }
 
 func SandboxHandleSnapshot(ctx context.Context, sandboxName, snapshotName string) (*SnapshotInfo, error) {
@@ -5671,6 +5696,33 @@ func SnapshotCopy(ctx context.Context, reference, referenceKind, outputArchivePa
 		return C.call_msb_snapshot_copy(cancelID, cReference, cReferenceKind, cOutputArchivePath, cOpts, buf, bufLen)
 	})
 	return err
+}
+
+func SnapshotClone(ctx context.Context, source, newName string, opts SnapshotCloneOptions) (*SnapshotInfo, error) {
+	if err := ensureLoaded(); err != nil {
+		return nil, err
+	}
+	payload, err := json.Marshal(opts)
+	if err != nil {
+		return nil, err
+	}
+	cSource := C.CString(source)
+	defer C.free(unsafe.Pointer(cSource))
+	cNewName := C.CString(newName)
+	defer C.free(unsafe.Pointer(cNewName))
+	cOpts := C.CString(string(payload))
+	defer C.free(unsafe.Pointer(cOpts))
+	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_snapshot_clone(cancelID, cSource, cNewName, cOpts, buf, bufLen)
+	})
+	if err != nil {
+		return nil, err
+	}
+	var info SnapshotInfo
+	if err := json.Unmarshal([]byte(out), &info); err != nil {
+		return nil, fmt.Errorf("parse snapshot clone: %w", err)
+	}
+	return &info, nil
 }
 
 func SnapshotLoad(ctx context.Context, archive, dest string) (*SnapshotHandleInfo, error) {

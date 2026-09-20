@@ -1012,6 +1012,18 @@ class Snapshot:
         record_integrity: bool = False,
         full: bool = False,
         guest_flush: GuestFlush | None = None,
+        sparsify: bool = False,
+    ) -> Snapshot: ...
+    @staticmethod
+    async def clone(
+        source: str,
+        new_name: str,
+        *,
+        dest_dir: str | os.PathLike[str] | None = None,
+        labels: dict[str, str] | None = None,
+        force: bool = False,
+        sparsify: bool = False,
+        root_disk_size_mib: int | None = None,
     ) -> Snapshot: ...
     @staticmethod
     async def create_archive(

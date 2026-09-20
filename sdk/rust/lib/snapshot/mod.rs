@@ -5,6 +5,7 @@
 //! its own wire contract and reports unsupported local artifact operations explicitly.
 
 mod api;
+mod clone;
 mod copy;
 mod types;
 
@@ -13,6 +14,7 @@ mod types;
 //--------------------------------------------------------------------------------------------------
 
 pub use api::{Snapshot, SnapshotArchive, SnapshotBuilder, SnapshotHandle, SnapshotReference};
+pub use clone::CloneOpts;
 pub use copy::SnapshotCopyBuilder;
 pub use microsandbox_types::snapshot::{
     CheckpointSnapshotState, DESCRIPTOR_FILENAME, DiskLayer, DiskLayerId, FileSnapshotState,

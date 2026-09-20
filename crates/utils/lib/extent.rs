@@ -5,6 +5,10 @@
 //!
 //! Also home to the hole-restoration primitives that the scan's consumers need on platforms where "just don't write the hole" is not enough: NTFS only keeps unwritten ranges
 //! unallocated on files flagged sparse ([`mark_sparse`]), and APFS densifies files on any write, so holes must be punched explicitly ([`punch_hole_aligned`]).
+//!
+//! [`punch_hole_aligned`] only ever deals with ranges that were *never written* — on ext4/XFS/btrfs those already stay holes without help, so it's a no-op there. Deallocating a
+//! range that genuinely holds stale, now-unwanted data (e.g. blocks a guest filesystem has freed but whose bytes are still physically allocated on the host) is a different
+//! operation and needs an explicit deallocate syscall everywhere, including Linux: that's [`punch_hole`].
 
 use std::fs::File;
 use std::io;
@@ -176,6 +180,44 @@ pub fn punch_hole_aligned(file: &File, offset: u64, len: u64) -> io::Result<()> 
 /// Hole punching is unnecessary outside macOS: on ext4/XFS/btrfs (and on NTFS files flagged via [`mark_sparse`]) ranges that are never written stay unallocated.
 #[cfg(not(target_os = "macos"))]
 pub fn punch_hole_aligned(_file: &File, _offset: u64, _len: u64) -> io::Result<()> {
+    Ok(())
+}
+
+/// Deallocate the exact byte range `[offset, offset + len)`, actually freeing host storage even
+/// though the range currently holds real (previously written) data. Unlike [`punch_hole_aligned`],
+/// which is a no-op everywhere but macOS because "never written" already stays a hole on
+/// ext4/XFS/btrfs, this is for the different case of reclaiming a range that *was* written and is
+/// now known to be unused — it does real work on Linux too.
+#[cfg(target_os = "linux")]
+pub fn punch_hole(file: &File, offset: u64, len: u64) -> io::Result<()> {
+    if len == 0 {
+        return Ok(());
+    }
+    let rc = unsafe {
+        libc::fallocate(
+            file.as_raw_fd(),
+            libc::FALLOC_FL_PUNCH_HOLE | libc::FALLOC_FL_KEEP_SIZE,
+            offset as libc::off_t,
+            len as libc::off_t,
+        )
+    };
+    if rc != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// macOS has no unaligned deallocate primitive; snap to allocation-block alignment via
+/// [`punch_hole_aligned`] instead. A caller passing already block-aligned ranges (as the ext4
+/// compactor does) loses nothing.
+#[cfg(target_os = "macos")]
+pub fn punch_hole(file: &File, offset: u64, len: u64) -> io::Result<()> {
+    punch_hole_aligned(file, offset, len)
+}
+
+/// No sparse-deallocation primitive on this platform; best-effort no-op.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub fn punch_hole(_file: &File, _offset: u64, _len: u64) -> io::Result<()> {
     Ok(())
 }
 
@@ -373,5 +415,45 @@ mod tests {
             "extent map misses data at 4 MiB: {:?}",
             map.extents
         );
+    }
+
+    #[test]
+    fn punch_hole_deallocates_written_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("written.bin");
+        let len: u64 = 4 * 1024 * 1024;
+        let f = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&path)
+            .unwrap();
+        f.set_len(len).unwrap();
+        {
+            use std::io::Write;
+            let mut w = &f;
+            w.write_all(&[0xAB; 4096]).unwrap();
+        }
+        f.sync_all().unwrap();
+
+        let before = allocated_file_bytes(&path).unwrap();
+        punch_hole(&f, 0, 4096).unwrap();
+        drop(f);
+        let after = allocated_file_bytes(&path).unwrap();
+
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().len(),
+            len,
+            "punch_hole must not change apparent file size"
+        );
+
+        #[cfg(target_os = "linux")]
+        assert!(
+            after < before,
+            "expected fewer allocated bytes after punch_hole on Linux: before={before} after={after}"
+        );
+        #[cfg(not(target_os = "linux"))]
+        let _ = (before, after);
     }
 }

@@ -64,7 +64,7 @@ use microsandbox::{
         fs::{FsReadStream, FsWriteSink},
         ssh::{SftpClient, SshClient, SshServer, SshStdioStream},
     },
-    snapshot::{SaveOpts, SnapshotFormat, SnapshotScope},
+    snapshot::{CloneOpts, SaveOpts, SnapshotFormat, SnapshotScope},
     volume::{Volume, VolumeBuilder, VolumeFs, VolumeHandle, VolumeKind},
 };
 use microsandbox_network::secrets::config::SecretViolationAction;
@@ -1215,6 +1215,21 @@ struct SnapshotCreateOpts {
     full: bool,
     #[serde(default)]
     guest_flush: microsandbox::snapshot::GuestFlush,
+    #[serde(default)]
+    sparsify: bool,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct SnapshotCloneOpts {
+    dest_dir: Option<String>,
+    group: Option<String>,
+    #[serde(default)]
+    labels: HashMap<String, String>,
+    #[serde(default)]
+    force: bool,
+    #[serde(default)]
+    sparsify: bool,
+    root_disk_size_mib: Option<u32>,
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -6617,6 +6632,9 @@ fn snapshot_builder_from_opts(
     if opts.full {
         builder = builder.full();
     }
+    if opts.sparsify {
+        builder = builder.sparsify();
+    }
     Ok(builder)
 }
 
@@ -6655,6 +6673,38 @@ pub unsafe extern "C" fn msb_snapshot_create(
         let builder = snapshot_builder_from_opts(source_sandbox, opts)?;
         Ok(Box::pin(async move {
             let snap = builder.create().await.map_err(FfiError::from)?;
+            Ok(snapshot_json(&snap).to_string())
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_snapshot_clone(
+    cancel_id: u64,
+    source: *const c_char,
+    new_name: *const c_char,
+    opts_json: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let source = unsafe { cstr(source) }?;
+        let new_name = unsafe { cstr(new_name) }?;
+        let opts_raw = unsafe { cstr(opts_json) }?;
+        let opts: SnapshotCloneOpts = serde_json::from_str(&opts_raw)
+            .map_err(|e| FfiError::invalid_argument(format!("invalid opts JSON: {e}")))?;
+        let clone_opts = CloneOpts {
+            dest_dir: opts.dest_dir.map(PathBuf::from),
+            group: opts.group,
+            labels: opts.labels.into_iter().collect(),
+            force: opts.force,
+            sparsify: opts.sparsify,
+            root_disk_size_mib: opts.root_disk_size_mib,
+        };
+        Ok(Box::pin(async move {
+            let snap = Snapshot::clone_snapshot(&source, &new_name, clone_opts)
+                .await
+                .map_err(FfiError::from)?;
             Ok(snapshot_json(&snap).to_string())
         }))
     })
