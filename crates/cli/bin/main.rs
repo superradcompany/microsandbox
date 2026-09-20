@@ -256,10 +256,16 @@ fn main() {
 
     // Auto-set MSB_PATH so the library can find the msb binary
     // when spawning sandbox processes.
+    // `current_exe` is platform-specific: Linux resolves `/proc/self/exe`, but
+    // macOS returns the path the binary was invoked through, so a symlink such
+    // as `~/.local/bin/msb` is reported as the link rather than its target.
+    // Resolve it so the runtime pair lookup finds `libkrunfw` beside the real
+    // binary instead of failing next to the link.
     // Safety: called before any threads are spawned (single-threaded at this point).
     if std::env::var("MSB_PATH").is_err()
         && let Ok(exe) = std::env::current_exe()
     {
+        let exe = exe.canonicalize().unwrap_or(exe);
         unsafe { std::env::set_var("MSB_PATH", &exe) };
     }
 

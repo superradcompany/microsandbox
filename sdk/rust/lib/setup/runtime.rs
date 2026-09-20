@@ -344,15 +344,26 @@ fn runtime_in_home(config: &GlobalConfig) -> ResolvedRuntime {
     }
 }
 
+/// Locate the `libkrunfw` installed next to an `msb` executable.
+///
+/// The executable path is checked as given and then with symlinks resolved:
+/// installers link `~/.local/bin/msb` to `~/.microsandbox/bin/msb`, and on macOS
+/// `std::env::current_exe` reports the link rather than its target, so the
+/// library only exists beside the resolved binary.
 fn adjacent_library(msb: &Path) -> Option<PathBuf> {
     let filename = microsandbox_utils::libkrunfw_filename(std::env::consts::OS);
-    let parent = msb.parent()?;
-    [
-        parent.join(&filename),
-        parent.join("..").join(LIB_SUBDIR).join(filename),
-    ]
-    .into_iter()
-    .find(|path| path.is_file())
+    let resolved = fs::canonicalize(msb).ok().filter(|path| path != msb);
+    [msb.to_path_buf()]
+        .into_iter()
+        .chain(resolved)
+        .filter_map(|msb| msb.parent().map(Path::to_path_buf))
+        .flat_map(|parent| {
+            [
+                parent.join(&filename),
+                parent.join("..").join(LIB_SUBDIR).join(&filename),
+            ]
+        })
+        .find(|path| path.is_file())
 }
 
 fn install_directory(config: &GlobalConfig, source: &Path, force: bool) -> MicrosandboxResult<()> {
@@ -780,6 +791,44 @@ mod tests {
             ),
             Err(MicrosandboxError::RuntimeIncomplete(_))
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn environment_msb_symlink_resolves_library_beside_its_target() {
+        let temp = tempfile::tempdir().unwrap();
+        let (config, installed_msb) = pair_fixture(temp.path(), "installed");
+        let expected_library = runtime_in_home(&config).libkrunfw_path;
+        // Mirror the installer layout: a `~/.local/bin/msb` link whose directory
+        // has no libkrunfw of its own, which is what macOS `current_exe` reports.
+        let link_dir = temp.path().join("local-bin");
+        fs::create_dir_all(&link_dir).unwrap();
+        let linked_msb = link_dir.join("msb");
+        std::os::unix::fs::symlink(&installed_msb, &linked_msb).unwrap();
+
+        let found = adjacent_library(&linked_msb).expect("library beside the link target");
+        assert_eq!(
+            fs::canonicalize(&found).unwrap(),
+            fs::canonicalize(&expected_library).unwrap()
+        );
+
+        let runtime = resolve_runtime_candidates(
+            &GlobalConfig {
+                home: Some(temp.path().join("absent")),
+                ..Default::default()
+            },
+            RuntimeCandidates {
+                env_msb: Some(linked_msb.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(runtime.msb_path, linked_msb);
+        assert_eq!(
+            fs::canonicalize(&runtime.libkrunfw_path).unwrap(),
+            fs::canonicalize(&expected_library).unwrap()
+        );
+        assert_eq!(runtime.origin, RuntimeOrigin::Environment);
     }
 
     #[test]
