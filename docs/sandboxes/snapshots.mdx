@@ -117,7 +117,7 @@ if err != nil {
 ```
 
 ```bash CLI
-msb snapshot create ready --from-sandbox baseline
+msb snap create ready --sandbox baseline
 ```
 </CodeGroup>
 
@@ -153,7 +153,7 @@ if err != nil {
 
 ```bash CLI
 # Local snapshot selector
-msb restore baseline:ready --name worker
+msb snap restore baseline:ready --name worker
 msb exec worker -- python -c "import requests; print(requests.__version__)"
 ```
 </CodeGroup>
@@ -213,7 +213,7 @@ snapshot, err := m.Snapshot.Create(ctx, m.SnapshotCreateOptions{
 ```
 
 ```bash CLI
-msb snapshot create snap --from-sandbox worker --full
+msb snap create snap --sandbox worker --full
 ```
 </CodeGroup>
 
@@ -246,7 +246,7 @@ if err != nil { return err }
 ```
 
 ```bash CLI
-msb restore worker:snap --name resumed
+msb snap restore worker:snap --name resumed
 ```
 </CodeGroup>
 
@@ -323,8 +323,8 @@ if err != nil { return err }
 ```
 
 ```bash CLI
-msb restore worker:snap --name worker_a --forked
-msb restore worker:snap --name worker_b --forked
+msb snap restore worker:snap --name worker_a --forked
+msb snap restore worker:snap --name worker_b --forked
 ```
 </CodeGroup>
 
@@ -366,7 +366,7 @@ if err != nil { return err }
 ```
 
 ```bash CLI
-msb restore worker:snap --name rebooted --disk-only
+msb snap restore worker:snap --name rebooted --disk-only
 ```
 </CodeGroup>
 
@@ -387,13 +387,13 @@ Use `required` on a full snapshot when you also want to restore its disks withou
 `skip` on a disk-only snapshot accepts crash-consistent root and owned disks: recent buffered writes may be absent and filesystem recovery may be needed. Full snapshots and branches retain those dirty pages in captured RAM. An owned disk does not force guest writeback during plain pause. Earlier guest-flush builds flushed root and owned disks unconditionally when any owned mount existed; do not rely on that incidental behavior with `skip`.
 
 ```bash
-msb snapshot create disk --from-sandbox worker
-msb snapshot create full --from-sandbox worker --full --guest-flush required
+msb snap create disk --sandbox worker
+msb snap create full --sandbox worker --full --guest-flush required
 msb branch worker --name child --guest-flush skip
 
 # Prepare a flush boundary before pausing; capture keeps the source paused.
 msb pause worker --guest-flush required
-msb snapshot create paused --from-sandbox worker
+msb snap create paused --sandbox worker
 msb resume worker
 ```
 
@@ -565,7 +565,7 @@ if err != nil { return err }
 ```
 
 ```bash CLI
-msb restore worker:snap --name child -v /host/project:/work
+msb snap restore worker:snap --name child -v /host/project:/work
 ```
 </CodeGroup>
 
@@ -618,7 +618,7 @@ if err != nil { return err }
 ```
 
 ```bash CLI
-msb restore worker:snap --name child \
+msb snap restore worker:snap --name child \
     -v /host/copy:/work --external-mount-policy relaxed
 ```
 </CodeGroup>
@@ -694,7 +694,7 @@ resumed := result.Sandbox
 
 ```bash CLI
 # Restore shows progress by default.
-msb restore worker:snap --name resumed
+msb snap restore worker:snap --name resumed
 ```
 </CodeGroup>
 
@@ -745,9 +745,10 @@ if err != nil { return err }
 ```
 
 ```bash CLI
-msb snapshots
-msb snapshot inspect baseline:ready
-msb snapshot rm baseline:ready
+msb snap ls
+msb snap ls --group baseline
+msb snap inspect baseline:ready
+msb snap rm baseline:ready
 ```
 </CodeGroup>
 
@@ -853,12 +854,12 @@ if err != nil { return err }
 ```
 
 ```bash CLI
-msb snapshot create cp01 --from-sandbox baseline --group work
-msb snapshot create cp02 --from-sandbox baseline --group work
-msb restore work --name latest
-msb restore work:cp01 --name earlier
-msb snapshot head work           # Show the selected snapshot ID
-msb snapshot head work:cp01      # Explicitly select an earlier checkpoint
+msb snap create cp01 --sandbox baseline --group work
+msb snap create cp02 --sandbox baseline --group work
+msb snap restore work --name latest
+msb snap restore work:cp01 --name earlier
+msb snap head work           # Show the selected snapshot ID
+msb snap head work:cp01      # Explicitly select an earlier checkpoint
 ```
 </CodeGroup>
 
@@ -918,8 +919,8 @@ if err != nil { return err }
 ```
 
 ```bash CLI
-msb snapshot load snap.msb --group work
-msb snapshot load experiment.msb --group work --set-head
+msb snap import snap.msb --group work
+msb snap import experiment.msb --group work --set-head
 ```
 </CodeGroup>
 
@@ -964,7 +965,7 @@ if err != nil { return err }
 ```
 
 ```bash CLI
-msb snapshot save baseline:ready ready.msb --with-image
+msb snap export baseline:ready --output ready.msb --with-image
 ```
 </CodeGroup>
 
@@ -994,7 +995,7 @@ if err != nil { return err }
 ```
 
 ```bash CLI
-msb restore ./ready.msb --name worker
+msb snap restore ./ready.msb --name worker
 ```
 </CodeGroup>
 
@@ -1042,7 +1043,7 @@ if err != nil { return err }
 ```
 
 ```bash CLI
-msb snapshot load changes.msb base.msb --group received --dest /mnt/snapshots
+msb snap import changes.msb base.msb --group received --dest /mnt/snapshots
 ```
 </CodeGroup>
 
@@ -1109,8 +1110,8 @@ if err != nil { return err }
 ```
 
 ```bash CLI
-msb snapshot create v2 --from-sandbox worker --full
-msb snapshot save worker:v2 changes.msb --since worker:v1
+msb snap create v2 --sandbox worker --full
+msb snap export worker:v2 --output changes.msb --since worker:v1
 ```
 </CodeGroup>
 
@@ -1177,8 +1178,8 @@ if err != nil { return err }
 ```
 
 ```bash CLI
-msb snapshot load changes.msb --base worker:v1 --group imported
-msb restore changes.msb --name child --snapshot-base worker:v1
+msb snap import changes.msb --base worker:v1 --group imported
+msb snap restore changes.msb --name child --snapshot-base worker:v1
 ```
 </CodeGroup>
 
@@ -1235,8 +1236,8 @@ archive, err := m.Snapshot.CreateArchive(ctx, m.SnapshotArchiveOptions{
 ```
 
 ```bash CLI
-msb snapshot create deps \
-    --from-sandbox baseline \
+msb snap create deps \
+    --sandbox baseline \
     -o /tmp/deps.msb
 ```
 </CodeGroup>
@@ -1354,9 +1355,9 @@ report, err := snap.Verify(ctx)
 ```
 
 ```bash CLI
-msb snapshot create deps --from-sandbox baseline --integrity
-msb snapshot verify baseline:deps
-msb snapshot inspect baseline:deps --verify
+msb snap create deps --sandbox baseline --integrity
+msb snap verify baseline:deps
+msb snap inspect baseline:deps --verify
 ```
 </CodeGroup>
 
@@ -1419,7 +1420,7 @@ if err != nil { return err }
 ```
 
 ```bash CLI
-msb snapshot create saved --from-sandbox worker --full --integrity
+msb snap create saved --sandbox worker --full --integrity
 msb branch worker --name child --integrity
 ```
 </CodeGroup>
@@ -1434,7 +1435,7 @@ msb branch worker --name child --integrity
 | Full restore rejects resource settings | Keep the captured CPU and memory settings, or restore with `--disk-only`. A full snapshot with a tmpfs root must resume execution. |
 | A restored app loses its connection | Reconnect clients and retry application connections; live host connections are not captured. |
 | Capture fails after saving a snapshot | Inspect the saved snapshot before retrying. The error may mean capture succeeded but the source could not resume. |
-| A local snapshot is missing from the list | Run `msb snapshot reindex` to rebuild the local index. |
+| A local snapshot is missing from the list | Run `msb snap reindex` to rebuild the local index. |
 
 
 ## Reference
@@ -1442,4 +1443,4 @@ msb branch worker --name child --integrity
 See each SDK reference for setup, imports, optional controls, and result fields.
 
 - **SDKs:** [TypeScript](/sdk/typescript/snapshots), [Rust](/sdk/rust/snapshots), [Python](/sdk/python/snapshots), and [Go](/sdk/go/snapshots).
-- **CLI:** Run `msb snapshot --help` or `msb restore --help` for all options.
+- **CLI:** Run `msb snap --help` or `msb snap restore --help` for all options.

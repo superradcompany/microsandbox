@@ -49,8 +49,8 @@ Groups do not magically make random IDs collision-proof. They keep local address
 msb create alpine --name worker --memory 512M
 
 # Group defaults to the source sandbox's name: worker.
-msb snapshot create cp01 --from-sandbox worker --full
-msb snapshot create cp02 --from-sandbox worker --full
+msb snapshot create cp01 --sandbox worker --full
+msb snapshot create cp02 --sandbox worker --full
 
 # A bare group selects its head, currently cp02.
 msb restore worker --name latest --forked
@@ -59,7 +59,7 @@ msb restore worker --name latest --forked
 msb restore worker:cp01 --name earlier --forked
 
 # You can choose a different group, or let a member name be generated.
-msb snapshot create --from-sandbox worker --group experiments --full
+msb snapshot create --sandbox worker --group experiments --full
 ```
 
 `--forked` shares clean restored RAM pages using copy-on-write; child writes remain private. It does not change which snapshot is selected. Omit `--full` at capture for a disk-only snapshot, and omit `--forked` when cold-booting disk state.

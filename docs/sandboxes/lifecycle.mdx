@@ -84,7 +84,7 @@ if err := worker.Resume(ctx); err != nil { return err }
 
 ```bash CLI
 msb pause worker
-msb snapshot create paused-state --from-sandbox worker --full
+msb snapshot create paused-state --sandbox worker --full
 msb resume worker
 ```
 </CodeGroup>

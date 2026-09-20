@@ -75,13 +75,13 @@ When the command exits, `agent-base` is stopped and ready to snapshot.
 <CodeGroup>
 ```sh macOS & Linux
 msb snapshot create coding-agent-base \
-  --from-sandbox agent-base \
+  --sandbox agent-base \
   --integrity
 ```
 
 ```powershell Windows
 msb snapshot create coding-agent-base `
-  --from-sandbox agent-base `
+  --sandbox agent-base `
   --integrity
 ```
 </CodeGroup>
@@ -233,7 +233,7 @@ msb snapshot rm agent-base:coding-agent-base
 Installed snapshot members are immutable. To update packages, recreate `agent-base`, then capture a new member name and use its group-qualified selector for future workers:
 
 ```sh
-msb snapshot create coding-agent-base-v2 --from-sandbox agent-base --integrity
+msb snapshot create coding-agent-base-v2 --sandbox agent-base --integrity
 msb snapshot verify agent-base:coding-agent-base-v2
 ```
 

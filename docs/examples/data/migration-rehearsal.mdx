@@ -82,13 +82,13 @@ msb stop migration-base
 <CodeGroup>
 ```sh macOS & Linux
 msb snapshot create postgres-before-migration \
-  --from-sandbox migration-base \
+  --sandbox migration-base \
   --integrity
 ```
 
 ```powershell Windows
 msb snapshot create postgres-before-migration `
-  --from-sandbox migration-base `
+  --sandbox migration-base `
   --integrity
 ```
 </CodeGroup>

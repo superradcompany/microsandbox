@@ -1,16 +1,26 @@
-//! `msb snapshot` command — manage disk snapshots.
+//! `msb snapshot` command — capture, restore, and manage snapshots.
+
+use std::path::PathBuf;
 
 use clap::{Args, Subcommand};
 use microsandbox::{Snapshot, SnapshotReference};
 
-use crate::ui;
+use super::restore;
+use crate::{commands::restore::RestoreArgs, ui};
 
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
 
-/// Manage disk snapshots.
+/// Capture, restore, and manage disk or full snapshots.
 #[derive(Debug, Args)]
+#[command(
+    after_help = "Examples:\n  msb snap create ready --sandbox app --full\n  \
+    msb snap restore app:ready --name worker\n  msb snap ls --group app\n  \
+    msb snap export app:ready --output ready.msb\n  \
+    msb snap import ready.msb --group received\n\n\
+    'snap' and 'snapshot' are equivalent. Live branching uses 'msb branch'."
+)]
 pub struct SnapshotArgs {
     /// Snapshot subcommand.
     #[command(subcommand)]
@@ -22,6 +32,9 @@ pub struct SnapshotArgs {
 pub enum SnapshotCommands {
     /// Create a disk snapshot, or include memory and execution state with --full.
     Create(SnapshotCreateArgs),
+
+    /// Restore saved state into a new sandbox running in the background.
+    Restore(Box<RestoreArgs>),
 
     /// List indexed snapshots.
     #[command(visible_alias = "ls")]
@@ -40,10 +53,12 @@ pub enum SnapshotCommands {
     /// Rebuild the local index from artifacts on disk.
     Reindex(SnapshotReindexArgs),
 
-    /// Save a snapshot into a `.msb` archive (tar + zstd).
+    /// Export a snapshot to a `.msb` archive (tar + zstd).
+    #[command(name = "export", visible_alias = "save")]
     Save(SnapshotSaveArgs),
 
-    /// Load a snapshot archive into the snapshots directory.
+    /// Import snapshot archives into a local snapshot group.
+    #[command(name = "import", visible_alias = "load")]
     Load(SnapshotLoadArgs),
 
     /// Read a group's head, or select a member as its head.
@@ -52,26 +67,41 @@ pub enum SnapshotCommands {
 
 /// Arguments for `msb snapshot create`.
 #[derive(Debug, Args)]
+#[command(
+    after_help = "Disk capture is the default. Use --full to include memory and running processes.\n\
+    The group defaults to the source sandbox's name; ready --sandbox app creates app:ready.\n\
+    Use --name instead of a positional name, or omit both to generate a snapshot name.\n\n\
+    Examples:\n  \
+    msb snap create ready --sandbox app\n  \
+    msb snap create ready --sandbox app --full\n  \
+    msb snap create ready --sandbox app --group templates\n\n\
+    Compatibility: snapshot create ready --from-sandbox app is still supported."
+)]
 pub struct SnapshotCreateArgs {
-    /// Snapshot member name (generated when omitted).
+    /// Snapshot name within the group (generated when omitted).
+    #[arg(value_name = "NAME")]
+    pub positional_name: Option<String>,
+
+    /// Sandbox to capture.
+    #[arg(long, alias = "from-sandbox", value_name = "SANDBOX")]
+    pub sandbox: String,
+
+    /// Set the snapshot name instead of using the positional argument.
+    #[arg(short, long, conflicts_with = "positional_name")]
     pub name: Option<String>,
 
     /// Snapshot group to create or add to (defaults to the source sandbox name).
     #[arg(long, value_name = "GROUP")]
     pub group: Option<String>,
 
-    /// Source sandbox name. Disk capture also supports running and user-paused sources.
-    #[arg(long, value_name = "SANDBOX")]
-    pub from_sandbox: String,
-
     /// Parent directory to create the artifact in, instead of the
     /// default snapshots directory. The group is created under this root.
     #[arg(long = "dest-dir", value_name = "DIR")]
-    pub dest_dir: Option<std::path::PathBuf>,
+    pub dest_dir: Option<PathBuf>,
 
     /// Write directly to an archive without installing a snapshot directory.
     #[arg(short = 'o', long, value_name = "PATH", conflicts_with = "dest_dir")]
-    pub output: Option<std::path::PathBuf>,
+    pub output: Option<PathBuf>,
 
     /// Write a plain tar archive instead of zstd-compressed tar.
     #[arg(long, requires = "output")]
@@ -104,6 +134,10 @@ pub struct SnapshotCreateArgs {
 /// Arguments for `msb snapshot list`.
 #[derive(Debug, Args)]
 pub struct SnapshotListArgs {
+    /// Show only snapshots in this local group.
+    #[arg(long, value_name = "GROUP")]
+    pub group: Option<String>,
+
     /// Output format (json).
     #[arg(long, value_name = "FORMAT", value_parser = ["json"])]
     pub format: Option<String>,
@@ -151,17 +185,26 @@ pub struct SnapshotRemoveArgs {
 #[derive(Debug, Args)]
 pub struct SnapshotReindexArgs {
     /// Directory to scan (defaults to `~/.microsandbox/snapshots/`).
-    pub dir: Option<std::path::PathBuf>,
+    pub dir: Option<PathBuf>,
 }
 
-/// Arguments for `msb snapshot save`.
+/// Arguments for `msb snapshot export` (also available as `save`).
 #[derive(Debug, Args)]
 pub struct SnapshotSaveArgs {
     /// Snapshot to save (path, name, or digest).
     pub snapshot: String,
 
+    /// Legacy positional output archive path; alternatively use --output.
+    #[arg(
+        value_name = "OUT",
+        required_unless_present = "output",
+        conflicts_with = "output"
+    )]
+    pub out: Option<PathBuf>,
+
     /// Output archive path (`.msb` recommended; explicit filenames are preserved).
-    pub out: std::path::PathBuf,
+    #[arg(short = 'o', long, value_name = "PATH")]
+    pub output: Option<PathBuf>,
 
     /// Walk the parent chain and include each ancestor in the archive.
     #[arg(long)]
@@ -184,16 +227,16 @@ pub struct SnapshotSaveArgs {
     pub last_layers: Option<usize>,
 }
 
-/// Arguments for `msb snapshot load`.
+/// Arguments for `msb snapshot import` (also available as `load`).
 #[derive(Debug, Args)]
 pub struct SnapshotLoadArgs {
     /// Archives to import together; dependencies are resolved regardless of argument order.
     #[arg(required = true, num_args = 1.., value_name = "ARCHIVE")]
-    pub archives: Vec<std::path::PathBuf>,
+    pub archives: Vec<PathBuf>,
 
     /// Destination directory (defaults to `~/.microsandbox/snapshots/`).
     #[arg(long, value_name = "DIR")]
-    pub dest: Option<std::path::PathBuf>,
+    pub dest: Option<PathBuf>,
     /// External base snapshot or standalone archive if batch/group members cannot supply dependencies.
     #[arg(long)]
     pub base: Option<String>,
@@ -219,6 +262,28 @@ pub struct SnapshotHeadArgs {
 }
 
 //--------------------------------------------------------------------------------------------------
+// Methods
+//--------------------------------------------------------------------------------------------------
+
+impl SnapshotCreateArgs {
+    fn snapshot_name(&self) -> &str {
+        self.name
+            .as_deref()
+            .or(self.positional_name.as_deref())
+            .unwrap_or_default()
+    }
+}
+
+impl SnapshotSaveArgs {
+    fn archive_path(&self) -> &std::path::Path {
+        self.output
+            .as_deref()
+            .or(self.out.as_deref())
+            .expect("clap requires an output archive path")
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
 
@@ -226,6 +291,7 @@ pub struct SnapshotHeadArgs {
 pub async fn run(args: SnapshotArgs) -> anyhow::Result<()> {
     match args.command {
         SnapshotCommands::Create(args) => create(args).await,
+        SnapshotCommands::Restore(args) => restore::run(*args, None).await,
         SnapshotCommands::List(args) => list(args).await,
         SnapshotCommands::Inspect(args) => inspect(args).await,
         SnapshotCommands::Verify(args) => verify(args).await,
@@ -238,8 +304,9 @@ pub async fn run(args: SnapshotArgs) -> anyhow::Result<()> {
 }
 
 async fn create(args: SnapshotCreateArgs) -> anyhow::Result<()> {
-    let mut builder = Snapshot::builder(args.name.unwrap_or_default())
-        .from_sandbox(&args.from_sandbox)
+    let source = args.sandbox.clone();
+    let mut builder = Snapshot::builder(args.snapshot_name())
+        .from_sandbox(&source)
         .guest_flush(args.guest_flush);
     if let Some(group) = args.group {
         builder = builder.group(group);
@@ -266,7 +333,7 @@ async fn create(args: SnapshotCreateArgs) -> anyhow::Result<()> {
     let spinner = if args.quiet {
         ui::Spinner::quiet()
     } else {
-        ui::Spinner::start("Snapshotting", &args.from_sandbox)
+        ui::Spinner::start("Snapshotting", &source)
     };
 
     if let Some(archive_path) = args.output.as_ref() {
@@ -306,7 +373,20 @@ async fn create(args: SnapshotCreateArgs) -> anyhow::Result<()> {
 }
 
 async fn list(args: SnapshotListArgs) -> anyhow::Result<()> {
-    let snapshots = Snapshot::list().await?;
+    if args.group.is_some() {
+        // Groups are local metadata; do not silently return an empty cloud listing.
+        super::common::resolve_local_backend()?;
+    }
+
+    let snapshots: Vec<_> = Snapshot::list()
+        .await?
+        .into_iter()
+        .filter(|snapshot| {
+            args.group
+                .as_deref()
+                .is_none_or(|group| snapshot.group() == Some(group))
+        })
+        .collect();
 
     if args.format.as_deref() == Some("json") {
         let entries: Vec<serde_json::Value> = snapshots
@@ -514,6 +594,7 @@ async fn reindex(args: SnapshotReindexArgs) -> anyhow::Result<()> {
 }
 
 async fn save(args: SnapshotSaveArgs) -> anyhow::Result<()> {
+    let out = args.archive_path().to_owned();
     let opts = microsandbox::snapshot::SaveOpts {
         with_parents: args.with_parents,
         with_image: args.with_image,
@@ -521,8 +602,8 @@ async fn save(args: SnapshotSaveArgs) -> anyhow::Result<()> {
         since: args.since,
         last_layers: args.last_layers,
     };
-    Snapshot::save(&args.snapshot, &args.out, opts).await?;
-    println!("{}", args.out.display());
+    Snapshot::save(&args.snapshot, &out, opts).await?;
+    println!("{}", out.display());
     Ok(())
 }
 
@@ -678,18 +759,79 @@ mod tests {
     }
 
     #[test]
-    fn create_requires_explicit_source_sandbox_flag() {
-        let error = TestCli::try_parse_from(["msb", "create", "clean"]).unwrap_err();
+    fn create_requires_a_source_and_rejects_mixed_naming_forms() {
+        let error = TestCli::try_parse_from(["msb", "create"]).unwrap_err();
         assert_eq!(
             error.kind(),
             clap::error::ErrorKind::MissingRequiredArgument
         );
-        assert!(error.to_string().contains("--from-sandbox <SANDBOX>"));
+        for args in [
+            vec!["create", "--name", "ready"],
+            vec![
+                "create",
+                "ready",
+                "--from-sandbox",
+                "app",
+                "--name",
+                "other",
+            ],
+            vec!["create", "ready", "--sandbox", "app", "--name", "other"],
+            vec!["create", "--sandbox", "app", "--from-sandbox", "other"],
+            vec!["create", "--sandbox", "app", "--sandbox", "other"],
+            vec!["create", "app", "--name", "ready"],
+            vec!["create", "--snapshot", "app:ready", "--name", "other"],
+            vec!["create", "app", "ready"],
+        ] {
+            assert!(TestCli::try_parse_from(std::iter::once("msb").chain(args)).is_err());
+        }
 
-        // This is a clean rename, not an alias: reject the old ambiguous spelling.
+        // Do not reintroduce the previously rejected ambiguous spelling.
         let error =
             TestCli::try_parse_from(["msb", "create", "clean", "--from", "box"]).unwrap_err();
         assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
+    }
+
+    #[test]
+    fn explicit_and_legacy_capture_resolve_the_same_names_and_defaults() {
+        for full in [false, true] {
+            for (source, name) in [("app", "ready"), ("create", "restore")] {
+                let mut forms = [
+                    vec!["create", name, "--sandbox", source],
+                    vec!["create", "--sandbox", source, name],
+                    vec!["create", "--sandbox", source, "--name", name],
+                    vec!["create", "--sandbox", source, "-n", name],
+                    vec!["create", name, "--from-sandbox", source],
+                    vec!["create", "--from-sandbox", source, "--name", name],
+                ];
+                for form in &mut forms {
+                    form.extend(["--group", "templates"]);
+                    if full {
+                        form.push("--full");
+                    }
+                    let SnapshotCommands::Create(args) = parse_snapshot_args(form).command else {
+                        panic!("expected create command");
+                    };
+                    assert_eq!(args.sandbox, source);
+                    assert_eq!(args.snapshot_name(), name);
+                    assert_eq!(args.group.as_deref(), Some("templates"));
+                    assert_eq!(args.full, full);
+                    assert_eq!(args.guest_flush, microsandbox::snapshot::GuestFlush::Auto);
+                    assert!(args.output.is_none());
+                }
+            }
+        }
+        for form in [
+            vec!["create", "--sandbox", "app"],
+            vec!["create", "--from-sandbox", "app"],
+        ] {
+            let SnapshotCommands::Create(args) = parse_snapshot_args(&form).command else {
+                panic!("expected create command");
+            };
+            assert_eq!(args.sandbox, "app");
+            assert_eq!(args.snapshot_name(), "");
+            assert!(args.group.is_none());
+            assert!(!args.full);
+        }
     }
 
     #[test]
@@ -698,8 +840,8 @@ mod tests {
         let SnapshotCommands::Create(args) = args.command else {
             panic!("expected create command");
         };
-        assert_eq!(args.name.as_deref(), Some("clean"));
-        assert_eq!(args.from_sandbox, "box");
+        assert_eq!(args.snapshot_name(), "clean");
+        assert_eq!(args.sandbox, "box");
         assert!(args.full);
     }
 
@@ -835,8 +977,101 @@ mod tests {
             panic!("expected save command");
         };
         assert_eq!(args.snapshot, "clean");
-        assert_eq!(args.out, std::path::PathBuf::from("bundle.tar"));
+        assert_eq!(args.archive_path(), std::path::Path::new("bundle.tar"));
         assert!(args.plain_tar);
+    }
+
+    #[test]
+    fn export_accepts_named_or_positional_output_without_changing_options() {
+        for command in ["export", "save"] {
+            for output in [
+                vec!["bundle.msb"],
+                vec!["--output", "bundle.msb"],
+                vec!["-o", "bundle.msb"],
+            ] {
+                let args = [command, "app:ready"]
+                    .into_iter()
+                    .chain(output)
+                    .chain(["--since", "app:base", "--with-image"])
+                    .collect::<Vec<_>>();
+                let SnapshotCommands::Save(args) = parse_snapshot_args(&args).command else {
+                    panic!("expected export command");
+                };
+                assert_eq!(args.archive_path(), std::path::Path::new("bundle.msb"));
+                assert_eq!(args.snapshot, "app:ready");
+                assert_eq!(args.since.as_deref(), Some("app:base"));
+                assert!(args.with_image);
+            }
+            for tail in [
+                vec![],
+                vec!["one.msb", "--output", "two.msb"],
+                vec!["--output"],
+                vec![
+                    "--output",
+                    "one.msb",
+                    "--since",
+                    "app:base",
+                    "--with-parents",
+                ],
+            ] {
+                assert!(
+                    TestCli::try_parse_from(["msb", command, "app:ready"].into_iter().chain(tail))
+                        .is_err()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn import_alias_preserves_batch_dependencies_and_head_options() {
+        for command in ["import", "load"] {
+            let SnapshotCommands::Load(args) = parse_snapshot_args(&[
+                command,
+                "changes.msb",
+                "base.msb",
+                "--base",
+                "app:base",
+                "--group",
+                "received",
+                "--dest",
+                "/tmp/snaps",
+                "--set-head",
+            ])
+            .command
+            else {
+                panic!("expected import command");
+            };
+            assert_eq!(
+                args.archives,
+                [
+                    std::path::PathBuf::from("changes.msb"),
+                    std::path::PathBuf::from("base.msb")
+                ]
+            );
+            assert_eq!(args.base.as_deref(), Some("app:base"));
+            assert_eq!(args.group.as_deref(), Some("received"));
+            assert_eq!(
+                args.dest.as_deref(),
+                Some(std::path::Path::new("/tmp/snaps"))
+            );
+            assert!(args.set_head);
+        }
+    }
+
+    #[test]
+    fn group_filter_parses_with_each_listing_output() {
+        for command in ["list", "ls"] {
+            for output in [vec![], vec!["--quiet"], vec!["--format", "json"]] {
+                let args = [command, "--group", "app"]
+                    .into_iter()
+                    .chain(output)
+                    .collect::<Vec<_>>();
+                let SnapshotCommands::List(args) = parse_snapshot_args(&args).command else {
+                    panic!("expected list command");
+                };
+                assert_eq!(args.group.as_deref(), Some("app"));
+            }
+        }
     }
 
     #[test]
@@ -891,9 +1126,9 @@ mod tests {
         let SnapshotCommands::Create(args) = parsed.command else {
             panic!("expected create command");
         };
-        assert!(args.name.is_none());
+        assert_eq!(args.snapshot_name(), "");
         assert_eq!(args.group.as_deref(), Some("work"));
-        assert_eq!(args.from_sandbox, "box");
+        assert_eq!(args.sandbox, "box");
     }
 
     #[test]

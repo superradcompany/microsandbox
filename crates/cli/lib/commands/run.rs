@@ -160,7 +160,7 @@ async fn run_new(
     let resolved = sandbox_config::resolve(&args.sandbox.config)?;
     let image = resolved.image(args.image.as_deref(), None)?;
     if matches!(image, sandbox_config::ResolvedImage::Snapshot(_)) {
-        anyhow::bail!("snapshot sources require `msb restore SNAPSHOT --name NAME`");
+        anyhow::bail!("snapshot sources require `msb snap restore SNAPSHOT --name NAME`");
     }
     let builder = resolved.apply(Sandbox::builder(&name))?;
     let builder = image.apply(builder)?;
