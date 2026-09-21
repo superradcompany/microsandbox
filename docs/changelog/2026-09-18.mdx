@@ -1,7 +1,7 @@
 ---
 title: "Week of September 18, 2026"
 sidebarTitle: "Week of the 18th"
-description: "Explicit guest filesystem flush policies for snapshots, separate TCP and UDP connection limits, administrator-managed configuration overrides, and fixes across the catalog, snapshots, networking, and macOS filesystems."
+description: "Explicit guest filesystem flush policies for snapshots, separate TCP and UDP connection limits, and fixes across the catalog, snapshots, networking, and macOS filesystems."
 icon: "bolt"
 ---
 
@@ -34,10 +34,6 @@ Legacy v0.6.x launch contracts keep their historical default of 256 TCP connecti
 
 See [Networking overview](/networking/overview#deployment-profiles).
 
-**Administrator-managed configuration overrides**
-
-Administrators can now deploy a protected `managed.json` file that overrides user settings and CLI or SDK options. Managed settings apply across local and cloud backends and support versioned rollout. The CLI and SDKs resolve managed values before user configuration, so operator policy wins consistently across employee devices. Deploy the file with Jamf Pro, Microsoft Intune, or another device manager to the system's protected configuration location.
-
 **Other features**
 
 - **Runtime reliability improvements.** Completed TCP connections are reclaimed sooner, temporary files stay on disk-backed roots, and agent calls bind to the selected sandbox identity so stale objects cannot reach a replacement.
@@ -46,7 +42,7 @@ Administrators can now deploy a protected `managed.json` file that overrides use
 
 - `--guest-flush skip` now actually skips guest writeback for root and owned block disks. Auto and Required continue to require the flush, and Required capture from a pause that did not acknowledge the flush is rejected instead of silently downgrading.
 - Newer SDKs and the CLI can now upgrade the catalog while older sandbox runtimes are still running. Migration locking, exclusive install coordination, transactional rollback, and incomplete-downgrade checks remain in place.
-- Ordinary sandbox creation works again after upgrading from v0.6.18 to v0.7.0. The owning CLI upgrades its catalog on create, start, snapshot, and volume operations, while SDKs launched under an older runtime preserve that runtime's catalog format.
+- Ordinary sandbox creation works again after upgrading from v0.6.18 to v0.7.0. Both the SDK and CLI apply their recognized catalog migrations when opening the catalog, regardless of the selected VM runtime. Selecting an older runtime does not preserve an older catalog format.
 - A TLS ClientHello whose SNI contains a multi-byte character no longer aborts the sandbox process when the network policy includes a domain-suffix rule.
 - On macOS, `fallocate` on a bind mount no longer truncates files that are already larger than the requested range. The passthrough backend only extends past EOF, matching the in-memory backend.
 - `msb-metrics` now reads both the current v3 and legacy v2 shared-memory registries and merges snapshots by sandbox and run, preferring the newer ABI. Long-running sandboxes started against v2 continue to appear in per-sandbox metrics after a collector-only rollout.
