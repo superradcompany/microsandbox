@@ -20,8 +20,8 @@ Snapshots, branches, and pause now accept a single `--guest-flush` policy that c
 This is a breaking change. Owned block disks no longer force a flush during plain pause, full capture, or branching; use `required` if you depended on that.
 
 ```bash
-msb snapshot create disk --from-sandbox worker
-msb snapshot create full --from-sandbox worker --full --guest-flush required
+msb snap create disk --sandbox worker
+msb snap create full --sandbox worker --full --guest-flush required
 msb branch worker --name child --guest-flush skip
 msb pause worker --guest-flush required
 ```
