@@ -19,7 +19,7 @@ Disk is the default. Full adds memory and execution state; there is no memory-on
 
 ## Disk snapshots
 
-Use disk snapshots for installed dependencies, prepared workspaces, and saved files. Local live captures flush guest filesystem writes by default; application buffers and transactions still need application-level coordination. Cloud requires a stopped or crashed source. See [guest flush options](/cli/snapshot-commands#guest-filesystem-flush) for paused sources and the unflushed `skip` policy.
+Use disk snapshots for installed dependencies, prepared workspaces, and saved files. Local live captures flush guest filesystem writes by default; application buffers and transactions still need application-level coordination. Cloud requires a stopped or crashed source. See [guest flush options](/sandboxes/snapshot-consistency#guest-flushing) for paused sources and the unflushed `skip` policy.
 
 <Steps>
 <Step title="Prepare">
@@ -370,12 +370,12 @@ msb snap restore worker:snap --name rebooted --disk-only
 ```
 </CodeGroup>
 
-Disk-only restore copies only the checkpoint's disk chain, creates a fresh writable qcow2 head, and performs an ordinary boot. It does not require the destination to support the checkpoint's memory or execution codec. The disk projection of a full snapshot may omit writes buffered in guest RAM unless capture used `--guest-flush required`; filesystem journal recovery may still run. Full restore preserves those buffers in RAM. Host disk flushes and durable snapshot publication remain enforced regardless of guest-flush policy. A tmpfs-root snapshot cannot restore disk-only.
+Disk-only restore copies only the checkpoint's disk chain, creates a fresh writable qcow2 head, and performs an ordinary boot. It does not require the destination to support the checkpoint's memory or execution codec. The disk projection of a full snapshot may omit writes buffered in guest RAM unless capture used the `required` guest-flush policy; filesystem journal recovery may still run. Full restore preserves those buffers in RAM. Host disk flushes and durable snapshot publication remain enforced regardless of guest-flush policy. A tmpfs-root snapshot cannot restore disk-only.
 
 <a id="guest-filesystem-flush"></a>
 
 <Note>
-Keep the default flush policy for normal captures. If you plan to restore a full snapshot's disks without its memory, capture with `--guest-flush required`. This flushes filesystem caches, not application buffers or transactions. See [guest flush options](/cli/snapshot-commands#guest-filesystem-flush) for policy details and paused-sandbox requirements.
+Keep the default flush policy for normal captures. If you plan to restore a full snapshot's disks without its memory, select the `required` guest-flush policy. This flushes filesystem caches, not application buffers or transactions. See [guest flush options](/sandboxes/snapshot-consistency#guest-flushing) for policy details and paused-sandbox requirements.
 </Note>
 
 ## Branching

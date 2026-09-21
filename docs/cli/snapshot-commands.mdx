@@ -30,7 +30,7 @@ msb snap create ready --sandbox worker
 | `--dest-dir DIR` | Parent directory for local groups |
 | `-o`, `--output PATH` | Capture directly to an archive; conflicts with `--dest-dir` and does not accept `--group` |
 | `--full` | Capture disk, memory, and execution state from a running or paused source |
-| `--guest-flush` | Guest writeback policy: `auto` (default), `required`, or `skip`; see [flush behavior](#guest-filesystem-flush) |
+| `--guest-flush` | Guest writeback policy: `auto` (default), `required`, or `skip`; see [guest flushing](/sandboxes/snapshot-consistency#guest-flushing) |
 | `--integrity` | Record content hashes for later verification |
 | `--label KEY=VALUE` | Attach a label; repeatable |
 | `--plain-tar` | Write uncompressed tar; requires `--output` |
@@ -51,29 +51,7 @@ msb snap create ready --sandbox worker -o ready.msb
 
 <span id="guest-filesystem-flush" />
 
-<Accordion title="Advanced: guest flushing">
-
-`--guest-flush auto|required|skip` controls guest filesystem writeback during `msb snap create`, `msb branch`, and `msb pause`. It applies to the root and captured block disks, including owned disks. Host-backed directory synchronization, host disk-I/O draining, and snapshot durability remain enforced with every policy.
-
-| Policy | Running disk-only capture | Full capture, branch, or pause |
-| --- | --- | --- |
-| `auto` (default) | Require guest writeback | Keep dirty pages in RAM; no optional block-filesystem flush |
-| `required` | Require guest writeback | Also flush captured persistent filesystems |
-| `skip` | Capture unflushed disk state | No optional guest writeback |
-
-Use `required` when a full snapshot must also support disk-only restore. It flushes filesystem caches, not application buffers or transactions, and does not make tmpfs persistent. With `skip`, a disk-only snapshot may omit buffered writes and need filesystem recovery. Full snapshots and branches preserve those writes in RAM.
-
-A paused source must have acknowledged any required flush before pausing; capture fails rather than resuming it to flush. To prepare for a disk snapshot:
-
-```bash
-msb pause worker --guest-flush required
-msb snap create paused --sandbox worker
-msb resume worker
-```
-
-For stopped or crashed sources, `auto` and `skip` capture existing disk state; `required` fails because no guest is running. Older runtimes that cannot enforce a requested policy reject it before capture; restart the source with the updated runtime. Cloud supports only `auto`.
-
-</Accordion>
+Guest flushing is shared by the CLI and SDKs. See [guest flushing](/sandboxes/snapshot-consistency#guest-flushing) for policies and examples.
 
 ## msb snap restore
 
