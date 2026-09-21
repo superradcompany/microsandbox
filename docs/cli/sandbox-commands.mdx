@@ -327,7 +327,7 @@ msb pause devbox
 msb resume devbox
 ```
 
-`pause --guest-flush required` flushes captured persistent filesystems before pausing, so a later disk snapshot can reuse that boundary without resuming. The default `auto` and explicit `skip` omit optional writeback; mandatory storage barriers remain. An already-paused VM without the required flush fails rather than resuming implicitly. `resume` has no flush option. See [guest filesystem flush](#guest-filesystem-flush).
+`pause --guest-flush required` flushes captured persistent filesystems before pausing, so a later disk snapshot can reuse that boundary without resuming. The default `auto` and explicit `skip` omit optional writeback; mandatory storage barriers remain. An already-paused VM without the required flush fails rather than resuming implicitly. `resume` has no flush option. See [guest filesystem flush](/cli/snapshot-commands#guest-filesystem-flush).
 
 <span id="msb-sandbox-branch" />
 
@@ -361,28 +361,6 @@ Both branch forms accept `--guest-flush auto|required|skip`. Auto and skip prese
 Volume, port, user, vsock, inheritance, and mount-policy flags match [`restore`](#msb-restore).
 
 Batch branching captures once. Results follow input order; failed children produce a nonzero exit status without removing successful ones.
-
-## Guest filesystem flush
-
-`--guest-flush auto|required|skip` controls guest filesystem writeback during `msb snap create`, `msb branch`, and `msb pause`. It applies to the root and captured block disks, including owned disks. Host-backed directory synchronization, host disk-I/O draining, and snapshot durability remain enforced with every policy.
-
-| Policy | Running disk-only capture | Full capture, branch, or pause |
-| --- | --- | --- |
-| `auto` (default) | Require guest writeback | Keep dirty pages in RAM; no optional block-filesystem flush |
-| `required` | Require guest writeback | Also flush captured persistent filesystems |
-| `skip` | Capture unflushed disk state | No optional guest writeback |
-
-Use `required` when a full snapshot must also support disk-only restore. It flushes filesystem caches, not application buffers or transactions, and does not make tmpfs persistent. With `skip`, a disk-only snapshot may omit buffered writes and need filesystem recovery. Full snapshots and branches preserve those writes in RAM.
-
-A paused source must have acknowledged any required flush before pausing; capture fails rather than resuming it to flush. To prepare for a disk snapshot:
-
-```bash
-msb pause worker --guest-flush required
-msb snap create paused --sandbox worker
-msb resume worker
-```
-
-For stopped or crashed sources, `auto` and `skip` capture existing disk state; `required` fails because no guest is running. Older runtimes that cannot enforce a requested policy reject it before capture; restart the source with the updated runtime. Cloud supports only `auto`.
 
 <span id="msb-sandbox-restart" />
 
