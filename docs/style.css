@@ -443,9 +443,8 @@ table th code, table td code { white-space: nowrap; }
 /* ----------------------------------------------------------------------------
  * Code surfaces: Mintlify's default dark code background is nearly neutral and
  * can read greenish against the microsandbox palette. Tint standalone code
- * blocks, code groups, and standalone SDK example accordions toward the purple
- * brand color while keeping the contrast restrained in both themes. Accordions
- * inside a group retain Mintlify's neutral, connected-row treatment.
+ * blocks, code groups, and all accordions toward the purple brand color while
+ * keeping the contrast restrained in both themes.
  * -------------------------------------------------------------------------- */
 .code-block, .code-group {
   border-color: var(--msb-code-border) !important;
@@ -507,18 +506,25 @@ html.dark body .code-block-background[data-component-part="code-block-root"] {
   box-shadow: 0 0 0 1px var(--msb-interactive-accent) !important;
 }
 
-details.accordion:has(.code-block):not(.msb-accordion-group *) {
+/* Groups share the same surface, border, and divider color as their rows. */
+.accordion-group,
+details.accordion {
   background-color: var(--msb-code-surface) !important;
   border-color: var(--msb-code-border) !important;
 }
 
-details.accordion:has(.code-block):not(.msb-accordion-group *) > summary {
+details.accordion > summary {
   background-color: var(--msb-code-header) !important;
   color: var(--msb-code-header-text) !important;
 }
 
-details.accordion:has(.code-block):not(.msb-accordion-group *) > summary:hover {
+details.accordion > summary:hover,
+details.accordion > summary:focus-visible {
   background-color: var(--msb-code-header-hover) !important;
+}
+
+details.accordion > [data-component-part="accordion-content"] {
+  padding-top: 0.75rem;
 }
 
 .code-block [data-floating-buttons="true"],

@@ -1,120 +1,376 @@
 ---
 title: Snapshots
-description: Capture a sandbox's disk or full execution state as a portable artifact
+description: Save files or running workloads and restore them into new sandboxes
 icon: "code-branch"
 ---
 
-<Tooltip tip="Cloud supports stopped or crashed disk snapshots and disk restore. Live capture, full checkpoints, branching, groups, and local artifact archives remain local-only."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Cloud supports disk snapshots from stopped or crashed sandboxes and disk restore. Full snapshots, branching, groups, and local archives are not yet available on cloud."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
-A local snapshot is a portable artifact that can hold either a sandbox's writable disk state or a full checkpoint of a running sandbox. Managed and flat OCI roots are supported; the descriptor preserves the root layout so a flat `rootfs.raw` is never mistaken for a managed OverlayFS upper. Move it with `scp`, archive it as `.msb`, or create a child sandbox from it. Cloud disk snapshots use managed storage or the organization's host volume and support create, get, list, open, remove, and dedicated disk restore. Local-only options are rejected explicitly.
+Save a prepared sandbox and reuse it as a starting point. Each restore creates a new sandbox and leaves the source unchanged.
 
-<Note>
-Local disk snapshots work with running, paused, stopped, or crashed sandboxes. A running disk capture briefly pauses the VM, seals its disk, and resumes it without copying RAM. Full snapshots use `--full` to include memory and execution state. A user-paused source stays paused in either mode. Cloud disk capture requires a stopped or crashed source.
-</Note>
+## Snapshot types
 
-<Note>
-Snapshot objects expose a backend-neutral `reference` and reference kind. Pass the snapshot object directly where supported, or pass its typed reference to the dedicated restore API. The local `path` accessor remains available but fails for cloud snapshots, whose storage is not on the client host. A reference preserves addressing; it does not make local-only restore options available on cloud.
-</Note>
+Disk is the default. Full adds memory and execution state; there is no memory-only snapshot.
 
-## What gets captured
+| Type | Saves | On restore |
+| --- | --- | --- |
+| **Disk** | Files and owned volumes | Boots a new VM |
+| **Full** | Disk, memory, and running processes | Resumes execution |
 
-`.msb` is the recommended snapshot archive extension; compression defaults to tar + zstd. Archives are recognized by their contents, so existing `.tar.zst`, `.tar`, and other filenames still work. Explicit output filenames are kept as given. Disk-only, full, and incremental exports use the same extension; the archive records what it contains.
+## Disk snapshots
 
-| Mode | Source | Captured state | Restore behavior |
-| ---- | ------ | -------------- | ---------------- |
-| Disk (default) | Running, paused, stopped, or crashed sandbox | Writable disk closure and pinned image | Cold-boots a fresh VM |
-| Full | Running or user-paused sandbox | Disk, memory, vCPU, device, and admitted resource state | Resumes the captured execution in a child VM |
+Use disk snapshots for installed dependencies, prepared workspaces, and saved files. Local live captures flush guest filesystem writes by default; application buffers and transactions still need application-level coordination. Cloud requires a stopped or crashed source. See [guest filesystem flush](#guest-filesystem-flush) for paused sources and the unflushed `skip` policy.
 
-Both modes produce the same schema-1 `snapshot.json` descriptor. Its closed `state.kind` is either `file` or `checkpoint`, and `root_disk.layout` records `managed`, `flat`, or `tmpfs`. Checkpoint payloads live in a content-addressed closure rather than a standalone disk file. A tmpfs root has no stopped disk snapshot because its writable state exists only in memory, but it is included in a running full snapshot; such a snapshot must be resumed and cannot use `--disk-only`.
+<Steps>
+<Step title="Prepare">
 
-Full restore inherits the captured CPU and memory sizes, including their maximums. Explicit CPU and memory settings in the CLI or SDK restore API must match; conflicting settings are rejected rather than ignored. Disk-only restore boots afresh and can use different resources.
+Start a `python:3.12` sandbox named `baseline` using the [create guide](/sandboxes/lifecycle#create-a-sandbox), then install a dependency:
 
-## Share restored memory with CoW
+<CodeGroup>
+```typescript TypeScript
+const baseline = await Sandbox.get("baseline");
 
-On supported Linux, macOS, and Windows hosts, add `--forked` when restoring a full snapshot to share clean memory pages between children. Writes stay private to each child. Without the flag, restore eagerly copies memory. The source needs no special creation option.
+const session = await baseline.connect();
+await session.exec("pip", ["install", "requests"]);
 
-```bash
-msb create alpine --name baseline --root-disk flat:1G
-msb snapshot create ready --from-sandbox baseline --full
-msb restore baseline:ready --name worker-a --forked
-msb restore baseline:ready --name worker-b --forked
+await baseline.stop();
 ```
 
-The SDK restore options are Rust `.forked()`, Python `forked=True`, TypeScript `.forked()`, and Go `WithForked()`. The option requires a full snapshot and cannot be combined with `--disk-only` or an image cold boot.
+```rust Rust
+let baseline = Sandbox::get("baseline").await?;
 
-Snapshots are still manual. CoW uses a protected local memory cache; the first uncached restore must build it, while later children reuse it. Captures from forked children can prepare later restore backing with filesystem reflinks when available. Removing the input archive does not invalidate a running child's backing. Explicit NUMA placement with CoW is not supported yet; requests fail instead of silently switching modes.
+let session = baseline.connect().await?;
+session.exec("pip", ["install", "requests"]).await?;
 
-If a restore fails after creating a child record, remove that child and create a new one from the snapshot. An incomplete restore cannot be started as a fresh VM or modified; the original snapshot remains reusable.
-
-## External mounts
-
-Full snapshots preserve the guest's open-handle state for directory bind mounts, named directory volumes, and isolated single-file binds. Their host filesystem contents remain external dependencies: capturing a snapshot does not copy or freeze later host edits. Restore validates the captured binding and object identities before resuming. Use the existing mount options, keyed by guest path, when the destination needs an explicit replacement binding; a path recorded by another host is not permission to access it. A remapped single-file bind may use a different host basename while keeping the captured guest filename and sibling isolation.
-
-Capture supports tracked objects that can be reopened safely. Guest-renamed objects are preserved when still reopenable, but open-unlinked files and special objects fail capture explicitly; snapshots do not copy host data to make those cases portable. Symlink validation checks link text without reading target files or recursively copying or hashing target contents.
-
-Full restore requires bindings for captured external filesystems and additional disks. Supply `-v /host/data:/data`, select a private captured disk with `-v /data`, or explicitly authorize validated source-local bindings with `--dangerously-inherit-resources`. Inheritance is not permission to ignore a missing dependency. Owned volumes are reconstructed automatically.
-
-Use `--allow-missing-resources` to resume with unavailable resources and warnings; their backend operations return `EIO`. This does not inherit resources or accept changed objects in a supplied mapping. SDK equivalents are Rust `.allow_missing_resources()`, Python `allow_missing_resources=True`, TypeScript `.allowMissingResources()`, and Go `WithAllowMissingResources()`. Direct branches retain their existing omission behavior. Disk-only restore is a cold boot, not restoration of captured external filesystem handles.
-
-Strict validation is the default for authorized mappings. For example, `msb restore saved --name child -v /host/copy:/work --external-mount-policy relaxed` accepts supported mismatches between the supplied directory and captured state. The SDK equivalents are Rust `.external_mount_policy(ExternalMountRestorePolicy::Relaxed)`, Python `external_mount_policy="relaxed"`, TypeScript `.externalMountPolicy("relaxed")`, and Go `WithExternalMountPolicy(ExternalMountRelaxed)`. Read warnings with Rust/Python `restore_warnings`, TypeScript `restoreWarnings`, or Go `RestoreWarnings`; each identifies the guest path, reason, and stale inode IDs. Stale captured objects fail with `ESTALE` when an operation reaches the filesystem backend. Relaxed mode does not recreate missing files, grant access to unmapped paths, or waive snapshot integrity checks.
-
-Full snapshots also retain clean guest filesystem cache pages. Reads or memory mappings may therefore return previously captured bytes before reaching the backend; relaxed restore does not promise immediate cache invalidation. Capture synchronizes dirty guest writes before admitting external mounts, so the saved cache is not permission to replay stale dirty writes onto a changed destination.
-
-Strict validation checks the mount at restore time; it does not lock the host directory afterward. If source and child map the same host directory, writes reach the same files and host edits can affect both. Cached attributes and file contents can expire separately—even a read's length can be stale. Coordinate shared writes in your application; use managed disk volumes when children need private filesystem state.
-
-Named disk volumes are captured as immutable disk generations. Restored children receive private copies; the source volume is unchanged. Arbitrary external disk-image mounts are not implicitly converted into snapshot-owned volumes.
-
-[Owned volumes](/sandboxes/volumes#owned-volumes) are included automatically in snapshots and branches. Each child gets private directory or disk contents; no host mapping is needed. Full captures also preserve supported open directory-volume handles, including unlinked regular files.
-
-Snapshots containing owned directories cannot move between Unix (macOS/Linux) and Windows: their filesystem metadata is platform-specific. This restriction also applies to disk-only snapshots and archives containing owned directories. Owned disks do not have this directory-format restriction; full restore has its own execution-state compatibility requirements.
-
-## Branch a running sandbox
-
-Use `branch` for an independent local child without first saving a full snapshot:
-
-```bash
-msb branch baseline --name worker
+baseline.stop().await?;
 ```
 
-The child resumes the captured processes, memory, and disk state. Its private memory and managed-disk writes do not affect the source; external mounts remain shared host dependencies unless explicitly remapped. CoW memory is built in—no `--forked` flag is needed. A running source resumes after capture; a user-paused source stays paused. Branches work on supported Linux, macOS, and Windows hosts, require a new child name, and cannot inherit published host ports.
+```python Python
+baseline = await Sandbox.get("baseline")
 
-The SDK methods are Rust `source.branch("worker").branch().await?`, Python `await source.branch("worker")`, TypeScript `await source.branch("worker")`, and Go `source.Branch(ctx, "worker")`. They also work on sandbox handles returned by `get`.
+session = await baseline.connect()
+await session.exec("pip", ["install", "requests"])
 
-For children that should start from the same moment, use `msb branch baseline --names alice bob charlie`. This captures RAM, CPU/device state, and disks once, then starts up to four children concurrently; children share immutable backing and keep their own writes private. The source resumes after capture unless it was already paused. No durable snapshot is created, and deleting the source or one child does not invalidate the others.
+await baseline.stop()
+```
 
-SDKs accept a list of names: Rust `source.branch_many(["alice", "bob"]).branch().await?`, Python `await source.branch_many(["alice", "bob"])`, TypeScript `await source.branchMany(["alice", "bob"])`, and Go `source.BranchMany(ctx, []string{"alice", "bob"})`. Validation or capture errors fail the call. Children can become ready in any order, but results follow input order and contain each child's name and either its sandbox or startup error; successful children are retained. Rust exposes that pair as `name` and `result`; Python/TypeScript use `name`, `sandbox`, and `error`; Go uses `Name`, `Sandbox`, and `Error`.
+```go Go
+baseline, err := m.GetSandbox(ctx, "baseline")
+if err != nil { return err }
 
-Local branching still writes a consistent memory backing file, but skips portable RAM packaging and snapshot registration. It is not a saved recovery point. Use `snapshot create --full` when you need a durable, exportable snapshot.
+session, err := baseline.Connect(ctx)
+if err != nil { return err }
 
-On Linux, eligible later branches use anonymous RAM-backed files (`memfd`) instead of named files in `/dev/shm`. Children own their backing independently, and Linux releases it after the last owner exits. Disk backing is retained when RAM is constrained or filesystem reflinks are available. This does not make separate captures share their backing automatically.
+_, err = session.Exec(ctx, "pip", []string{"install", "requests"})
+if err != nil { return err }
 
-You can branch a child again. While its inherited baseline remains valid, it reuses that memory backing and captures the pages changed since restore, without eagerly copying all RAM when the child starts. Preparing the next backing can still require a copy on filesystems without reflink support.
+err = baseline.Stop(ctx)
+if err != nil { return err }
+```
 
-## Quick start
-
-You'll usually reach for the CLI first:
-
-```bash
-# 1. Boot a sandbox, install state, then stop it
-msb run --name baseline --detach python:3.12
+```bash CLI
 msb exec baseline -- pip install requests
 msb stop baseline
+```
+</CodeGroup>
 
-# 2. Snapshot the stopped sandbox
-msb snapshot create after-pip-install --from-sandbox baseline
+</Step>
+<Step title="Capture">
 
-# 3. Boot a fresh sandbox from the snapshot
-msb restore baseline:after-pip-install --name worker
-msb exec worker -- python -c "import requests; print(requests.__version__)"
+Save the prepared state as `ready`:
+
+<CodeGroup>
+```typescript TypeScript
+import { Sandbox } from "microsandbox";
+
+const baseline = await Sandbox.get("baseline");
+
+const snapshot = await baseline.snapshot("ready");
 ```
 
-<Tip>
-The snapshot belongs to the source's group, `baseline`, and lives at `~/.microsandbox/snapshots/baseline/snap_<id>/`. Its friendly name is `baseline:after-pip-install`.
-</Tip>
+```rust Rust
+use microsandbox::Sandbox;
 
-## Snapshot a sandbox
+let baseline = Sandbox::get("baseline").await?;
 
-Each capture is an immutable member of a snapshot group. The group defaults to the source sandbox's name; use `--group` to choose another. Member names are local aliases, while the descriptor carries a stable `snap_...` identity. Omitting the member name generates one. A destination directory selects another group-store root (`DIR/<group>/<snapshot_id>`).
+let snapshot = baseline.snapshot("ready").await?;
+```
+
+```python Python
+from microsandbox import Sandbox
+
+baseline = await Sandbox.get("baseline")
+
+snapshot = await baseline.snapshot("ready")
+```
+
+```go Go
+baseline, err := m.GetSandbox(ctx, "baseline")
+if err != nil {
+    return err
+}
+
+snapshot, err := baseline.Snapshot(ctx, "ready")
+if err != nil {
+    return err
+}
+```
+
+```bash CLI
+msb snapshot create ready --from-sandbox baseline
+```
+</CodeGroup>
+
+</Step>
+<Step title="Restore">
+
+Restore into `worker`. Its disk writes are independent of the source.
+
+<CodeGroup>
+```typescript TypeScript
+const worker = await Sandbox.restore(snapshot)
+    .name("worker")
+    .restore();
+```
+
+```rust Rust
+let worker = Sandbox::restore_ref(snapshot.reference())
+    .name("worker")
+    .restore()
+    .await?;
+```
+
+```python Python
+worker = await Sandbox.restore(snapshot, name="worker")
+```
+
+```go Go
+worker, err := m.RestoreSandbox(ctx, snapshot, "worker")
+if err != nil {
+    return err
+}
+```
+
+```bash CLI
+# Local snapshot selector
+msb restore baseline:ready --name worker
+msb exec worker -- python -c "import requests; print(requests.__version__)"
+```
+</CodeGroup>
+
+</Step>
+</Steps>
+
+Local snapshots use `group:member` selectors, such as `baseline:ready`. For cloud, pass the snapshot object or reference; it has no client-local path.
+
+## Full snapshots
+
+<Tooltip tip="Full snapshots are not yet available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+Capture a running workload to resume its processes and memory later. A running source briefly pauses during capture, then resumes; an already-paused source stays paused.
+
+<Steps>
+<Step title="Capture">
+
+Start with a running or paused sandbox named `worker`:
+
+<CodeGroup>
+```typescript TypeScript
+import { Snapshot } from "microsandbox";
+
+const snapshot = await Snapshot.builder("snap")
+    .fromSandbox("worker")
+    .full()
+    .create();
+```
+
+```rust Rust
+use microsandbox::Snapshot;
+
+let snapshot = Snapshot::builder("snap")
+    .from_sandbox("worker")
+    .full()
+    .create()
+    .await?;
+```
+
+```python Python
+from microsandbox import Snapshot
+
+snapshot = await Snapshot.create(
+    "snap",
+    from_sandbox="worker",
+    full=True,
+)
+```
+
+```go Go
+snapshot, err := m.Snapshot.Create(ctx, m.SnapshotCreateOptions{
+    Name:        "snap",
+    FromSandbox: "worker",
+    Full:        true,
+})
+```
+
+```bash CLI
+msb snapshot create snap --from-sandbox worker --full
+```
+</CodeGroup>
+
+</Step>
+<Step title="Restore">
+
+Resume in a new sandbox. The image’s startup command does not run again.
+
+<CodeGroup>
+```typescript TypeScript
+const resumed = await Sandbox.restore("worker:snap")
+    .name("resumed")
+    .restore();
+```
+
+```rust Rust
+let resumed = Sandbox::restore("worker:snap")
+    .name("resumed")
+    .restore()
+    .await?;
+```
+
+```python Python
+resumed = await Sandbox.restore("worker:snap", name="resumed")
+```
+
+```go Go
+resumed, err := m.RestoreSandbox(ctx, "worker:snap", "resumed")
+if err != nil { return err }
+```
+
+```bash CLI
+msb restore worker:snap --name resumed
+```
+</CodeGroup>
+
+</Step>
+</Steps>
+
+- **Compatibility:** Use a compatible runtime and guest kernel. CPU and memory settings, including maximums, must match the capture.
+- **Connections:** Reconnect clients and application connections. Host-side connections and transfers are not captured; buffered process output is not replayed.
+- **Mounts:** Owned volumes are private to each child. Host bindings need explicit authorization; see [mount behavior](#mount-behavior).
+
+<Accordion title="Capture or restore fails">
+
+If capture saves an artifact but cannot recover the source, inspect the artifact reported in the error before retrying. A packaging failure may leave only a runtime checkpoint.
+
+If restore leaves an incomplete child, remove it and restore again; the snapshot remains reusable. Older development full snapshots may need recapture or disk-only restore.
+
+</Accordion>
+
+### Share memory
+
+Full restores normally copy memory. Enable copy-on-write (CoW) to share unchanged pages between children while keeping writes private:
+
+<CodeGroup>
+```typescript TypeScript
+const worker_a = await Sandbox.restore("worker:snap")
+    .name("worker_a")
+    .forked()
+    .restore();
+
+const worker_b = await Sandbox.restore("worker:snap")
+    .name("worker_b")
+    .forked()
+    .restore();
+```
+
+```rust Rust
+let worker_a = Sandbox::restore("worker:snap")
+    .name("worker_a")
+    .forked()
+    .restore()
+    .await?;
+
+let worker_b = Sandbox::restore("worker:snap")
+    .name("worker_b")
+    .forked()
+    .restore()
+    .await?;
+```
+
+```python Python
+worker_a = await Sandbox.restore(
+    "worker:snap",
+    name="worker_a",
+    forked=True,
+)
+
+worker_b = await Sandbox.restore(
+    "worker:snap",
+    name="worker_b",
+    forked=True,
+)
+```
+
+```go Go
+worker_a, err := m.RestoreSandbox(ctx, "worker:snap", "worker_a",
+    m.WithForked(),
+)
+if err != nil { return err }
+
+worker_b, err := m.RestoreSandbox(ctx, "worker:snap", "worker_b",
+    m.WithForked(),
+)
+if err != nil { return err }
+```
+
+```bash CLI
+msb restore worker:snap --name worker_a --forked
+msb restore worker:snap --name worker_b --forked
+```
+</CodeGroup>
+
+The first restore prepares a local memory cache; later restores reuse it. No special source setup is needed. CoW requires a full snapshot and cannot be combined with disk-only restore.
+
+### Restore disk only
+
+Boot from a full snapshot’s saved disk without resuming its processes. This allows different CPU and memory settings and needs no compatible memory codec.
+
+<CodeGroup>
+```typescript TypeScript
+const rebooted = await Sandbox.restore("worker:snap")
+    .name("rebooted")
+    .diskOnly()
+    .restore();
+```
+
+```rust Rust
+let rebooted = Sandbox::restore("worker:snap")
+    .name("rebooted")
+    .disk_only()
+    .restore()
+    .await?;
+```
+
+```python Python
+rebooted = await Sandbox.restore(
+    "worker:snap",
+    name="rebooted",
+    disk_only=True,
+)
+```
+
+```go Go
+rebooted, err := m.RestoreSandbox(ctx, "worker:snap", "rebooted",
+    m.WithSnapshotDiskOnly(),
+)
+if err != nil { return err }
+```
+
+```bash CLI
+msb restore worker:snap --name rebooted --disk-only
+```
+</CodeGroup>
+
+Disk-only restore copies only the checkpoint's disk chain, creates a fresh writable qcow2 head, and performs an ordinary boot. It does not require the destination to support the checkpoint's memory or execution codec. The disk projection of a full snapshot may omit writes buffered in guest RAM unless capture used `--guest-flush required`; filesystem journal recovery may still run. Full restore preserves those buffers in RAM. Host disk flushes and durable snapshot publication remain enforced regardless of guest-flush policy. A tmpfs-root snapshot cannot restore disk-only.
 
 ## Guest filesystem flush
 
@@ -126,7 +382,7 @@ Each capture is an immutable member of a snapshot group. The group defaults to t
 | `required` | Require guest writeback | Also flush captured persistent filesystems |
 | `skip` | Accept unflushed disk state | No optional guest writeback |
 
-Use `required` on a full snapshot when you also want to restore its disks without RAM. Flushing writes the guest filesystem cache—not application buffers or transactions—and does not make tmpfs persistent.
+Use `required` on a full snapshot when you also want to restore its disks without RAM. Flushing writes the guest filesystem cache, not application buffers or transactions. It also does not make tmpfs persistent.
 
 `skip` on a disk-only snapshot accepts crash-consistent root and owned disks: recent buffered writes may be absent and filesystem recovery may be needed. Full snapshots and branches retain those dirty pages in captured RAM. An owned disk does not force guest writeback during plain pause. Earlier guest-flush builds flushed root and owned disks unconditionally when any owned mount existed; do not rely on that incidental behavior with `skip`.
 
@@ -145,246 +401,816 @@ A paused source must already have acknowledged the required flush at that pause.
 
 SDK equivalents use the same policy:
 
-```rust
+<CodeGroup>
+```typescript TypeScript
+await Snapshot.builder("full").fromSandbox("worker").full().guestFlush("required").create();
+await source.pause({ guestFlush: "required" });
+await source.branchMany(["alice", "bob"], { guestFlush: "skip" });
+```
+
+```rust Rust
 use microsandbox::{Snapshot, snapshot::GuestFlush};
 Snapshot::builder("full").from_sandbox("worker").full()
     .guest_flush(GuestFlush::Required).create().await?;
 source.pause_with_guest_flush(GuestFlush::Required).await?;
 ```
 
-```python
+```python Python
 from microsandbox import GuestFlush, Snapshot
 await Snapshot.create("full", from_sandbox="worker", full=True, guest_flush=GuestFlush.REQUIRED)
 await source.pause(guest_flush=GuestFlush.REQUIRED)
 ```
 
-```typescript
-await Snapshot.builder("full").fromSandbox("worker").full().guestFlush("required").create();
-await source.pause({ guestFlush: "required" });
-await source.branchMany(["alice", "bob"], { guestFlush: "skip" });
-```
-
-```go
+```go Go
 snapshot, err := msb.Snapshot.Create(ctx, msb.SnapshotCreateOptions{
     Name: "full", FromSandbox: "worker", Full: true, GuestFlush: msb.GuestFlushRequired,
 })
 err = source.PauseWithGuestFlush(ctx, msb.GuestFlushRequired)
 child, err := source.Branch(ctx, "child", msb.WithBranchGuestFlush(msb.GuestFlushSkip))
 ```
+</CodeGroup>
 
-## Groups and head selection
+## Branching
 
-Use a bare group to restore its selected head, or `group:member` for an exact checkpoint:
+<Tooltip tip="Branching is not yet available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
-```bash
-msb snapshot create cp01 --from-sandbox baseline --group work
-msb snapshot create cp02 --from-sandbox baseline --group work
-msb restore work --name latest
-msb restore work:cp01 --name earlier
-
-msb snapshot head work           # Show the selected snapshot ID
-msb snapshot head work:cp01      # Explicitly select an earlier checkpoint
-```
-
-The first snapshot initializes the head. Later captures or imports advance it only when known ancestry proves they descend from the current head. Importing an older checkpoint, a sibling, or one with missing history keeps the head unchanged. Both members remain available. Concurrent siblings use the first successful head update; the other capture still succeeds. There is no special main branch and timestamps do not decide the winner.
-
-```text
-work:cp01 ---- work:cp02 ---- work:cp03  <- head
-                    \
-                     +------ work:experiment
-```
-
-`msb snapshot head work:experiment` selects the other branch. Import with `--set-head` to explicitly select the imported archive's head. Missing historical checkpoints are allowed if the snapshot's disk and RAM dependencies are complete. Imports resolve payload dependencies from the supplied archives and an explicitly named destination group; `--base` supplies an external fallback.
-
-```bash
-msb snapshot load checkpoint.msb --group work
-msb snapshot load experiment.msb --group work --set-head
-```
-
-Loading without `--group` creates a fresh generated group. The same archive can be imported into different groups without overwriting either copy. Within a group, an identical ID/descriptor is reusable; conflicting IDs or names fail. A current head cannot be removed while other members remain—select another first. Existing flat snapshot directories can still be opened by explicit path.
-
-An interrupted call may already have published its snapshot. Inspect the group before retrying; member publication never overwrites an existing snapshot.
-
-## Load a set of archives
-
-Import a baseline and its dependent archives together. The shell expands the wildcard; archive order does not matter:
-
-```bash
-msb snapshot load checkpoints/*.msb --group received
-msb snapshot load changes.msb base.msb --group received --dest /mnt/snapshots
-```
-
-`load` accepts one or more archive paths. Use `--dest DIR` for a different group-store root; a trailing positional path is another archive, not a destination. A batch without `--group` creates one generated group for all its archives. Existing single-archive calls still print the digest followed by the installed path. Multi-archive calls print each result and report the batch's head decision once.
-
-Dependencies are resolved from the batch and exact matching snapshots already installed in the explicitly named destination group. For example, after importing `base.msb` into `received`, `msb snapshot load changes.msb --group received` can reuse that base automatically. Use `--base SOURCE` when a dependency must come from another installed snapshot or standalone archive. Imports do not search unrelated groups or nearby archive files. These operations accept the existing archive format; no format conversion or schema bump is required.
-
-All requested members are validated before publication. A batch with one tip follows the normal head-update rules. If a batch contains divergent tips, the existing group head stays selected; a new group has no head until you choose a member with `msb snapshot head GROUP:MEMBER`. `--set-head` requires a unique batch tip and rejects an ambiguous batch before publishing members. The final printed result is not necessarily the selected head.
-
-## Capture from the SDK
+Create a child directly from a running or paused sandbox, without saving a reusable snapshot. Like full restore, branching preserves disk and execution state. Memory sharing is built in; each child’s writes stay private.
 
 <CodeGroup>
 ```typescript TypeScript
-import { Sandbox } from "microsandbox";
+const source = await Sandbox.get("worker");
 
-const h = await Sandbox.get("baseline");
-
-// Installs in baseline's group; snap.path is the exact artifact directory.
-const snap = await h.snapshot("after-pip-install");
-
-console.log(snap.digest); // sha256:...
+const experiment = await source.branch("experiment");
 ```
 
 ```rust Rust
-use microsandbox::Sandbox;
+let source = Sandbox::get("worker").await?;
 
-let h = Sandbox::get("baseline").await?;
-
-// Installs in baseline's group; snap.path() is the exact artifact directory.
-let snap = h.snapshot("after-pip-install").await?;
-
-println!("{}", snap.digest()); // sha256:...
+let experiment = source.branch("experiment").branch().await?;
 ```
 
 ```python Python
-from microsandbox import Sandbox
+source = await Sandbox.get("worker")
 
-h = await Sandbox.get("baseline")
-
-# Installs in baseline's group; snap.path is the exact artifact directory.
-snap = await h.snapshot("after-pip-install")
-
-print(snap.digest)  # sha256:...
+experiment = await source.branch("experiment")
 ```
 
 ```go Go
-h, err := m.GetSandbox(ctx, "baseline")
-if err != nil {
-    return err
-}
+source, err := m.GetSandbox(ctx, "worker")
+if err != nil { return err }
 
-// Installs in baseline's group; snap.Path() is the exact artifact directory.
-snap, err := h.Snapshot(ctx, "after-pip-install")
-
-fmt.Println(snap.Digest()) // sha256:...
+experiment, err := source.Branch(ctx, "experiment")
+if err != nil { return err }
 ```
 
 ```bash CLI
-msb snapshot create after-pip-install --from-sandbox baseline
-msb snapshot create ready-with-label --from-sandbox baseline --label stage=ready
-
-# Use another group-store root: /mnt/big/baseline/snap_<id>/
-msb snapshot create after-pip-install --from-sandbox baseline --dest-dir /mnt/big
+msb branch worker --name experiment
 ```
 </CodeGroup>
 
-The default disk mode captures the managed or flat root disk and owned volumes. Live captures are crash-consistent: unsaved application buffers and tmpfs contents are not included. Use `--full` when you need memory too. Disk snapshotting preserves the complete raw/qcow2 chain, and every restored child receives a fresh private writable head. Use `--output ./saved.msb` (or `-o ./saved.msb`) in either mode to write an archive without installing a snapshot directory.
+The source returns to its previous running or paused state. Each child needs a new name and cannot inherit published host ports. Host mounts follow the same [binding rules](#external-mounts).
 
-## Capture a running sandbox
+<Accordion title="Create several children">
 
-Use full mode when the child must continue the captured processes and memory instead of cold-booting from disk state:
+Capture once for several children:
 
 <CodeGroup>
 ```typescript TypeScript
-const snap = await Snapshot.builder("worker-checkpoint")
-  .fromSandbox("worker")
-  .full()
-  .create();
+const source = await Sandbox.get("worker");
+
+const children = await source.branchMany(["alice", "bob"]);
 ```
 
 ```rust Rust
-let snap = Snapshot::builder("worker-checkpoint")
-    .from_sandbox("worker")
-    .full()
-    .create()
+let source = Sandbox::get("worker").await?;
+
+let children = source.branch_many(["alice", "bob"]).branch().await?;
+```
+
+```python Python
+source = await Sandbox.get("worker")
+
+children = await source.branch_many(["alice", "bob"])
+```
+
+```go Go
+source, err := m.GetSandbox(ctx, "worker")
+if err != nil { return err }
+
+children, err := source.BranchMany(ctx, []string{"alice", "bob"})
+if err != nil { return err }
+```
+
+```bash CLI
+msb branch worker --names alice bob
+```
+</CodeGroup>
+
+Each child gets its own result; a failed child does not remove successful siblings. Validation or capture errors fail the call. Deleting the source or a sibling does not invalidate other children.
+
+</Accordion>
+
+## Mount behavior
+
+| State | Disk snapshot | Full snapshot |
+| --- | --- | --- |
+| Owned volume contents | Private copy per child | Private copy per child |
+| Host bind-mount files | External; not copied | External; not copied |
+| Open handles and caches | Processes start fresh | Supported state resumes |
+
+Owned directory snapshots cannot move between Unix and Windows. Owned disks do not have this restriction.
+
+### External mounts
+
+Full restore requires bindings for captured external filesystems and additional disks. Supply `-v /host/data:/data`, select a private captured disk with `-v /data`, or explicitly authorize validated source-local bindings with `--dangerously-inherit-resources`. Inheritance is not permission to ignore a missing dependency. Owned volumes are reconstructed automatically.
+
+Use `--allow-missing-resources` to resume with unavailable resources and warnings; their backend operations return `EIO`. This does not inherit resources or accept changed objects in a supplied mapping. SDK equivalents are Rust `.allow_missing_resources()`, Python `allow_missing_resources=True`, TypeScript `.allowMissingResources()`, and Go `WithAllowMissingResources()`. Direct branches retain their existing omission behavior. Disk-only restore is a cold boot, not restoration of captured external filesystem handles.
+
+These explicit bindings work for disk and full snapshots:
+
+<CodeGroup>
+```typescript TypeScript
+const child = await Sandbox.restore("worker:snap")
+    .name("child")
+    .volume("/work", v => v.bind("/host/project"))
+    .restore();
+```
+
+```rust Rust
+let child = Sandbox::restore("worker:snap")
+    .name("child")
+    .volume("/work", |v| v.bind("/host/project"))
+    .restore()
     .await?;
 ```
 
 ```python Python
-snap = await Snapshot.create(
-    "worker-checkpoint",
-    from_sandbox="worker",
-    full=True,
+from microsandbox import Sandbox, Volume
+
+child = await Sandbox.restore(
+    "worker:snap",
+    name="child",
+    volumes={"/work": Volume.bind("/host/project")},
 )
 ```
 
 ```go Go
-snap, err := m.Snapshot.Create(ctx, m.SnapshotCreateOptions{
-    Name:        "worker-checkpoint",
-    FromSandbox: "worker",
-    Full:   true,
-})
+child, err := m.RestoreSandbox(ctx, "worker:snap", "child",
+    m.WithRestoreConfig(m.RestoreConfig{
+        Volumes: map[string]m.MountConfig{
+            "/work": m.Mount.Bind("/host/project", m.MountOptions{}),
+        },
+    }))
+if err != nil { return err }
 ```
 
 ```bash CLI
-msb snapshot create worker-checkpoint --from-sandbox worker --full
+msb restore worker:snap --name child -v /host/project:/work
 ```
 </CodeGroup>
 
-Capture briefly quiesces the VM, publishes one same-epoch checkpoint, and returns the source to running state. The first capture records a full memory generation; later captures may reuse unchanged objects through retained dirty tracking while every published manifest still describes complete logical memory.
+Mapping source and child to the same host directory shares files. Named disk volumes restore privately; arbitrary external disk images are not converted to owned volumes.
 
-If capture saves the snapshot but cannot recover the source, the command fails and prints the saved artifact's location. The snapshot remains usable; do not automatically retry capture or resume the source. SDKs return a `SnapshotSourceRecoveryError` with the saved artifact details (Rust: `MicrosandboxError::SnapshotSourceRecovery`). If packaging also failed, the error identifies only the retained runtime checkpoint, not a completed snapshot.
+### Validate mounts
 
-Creating a sandbox from the resulting snapshot restores into a child-owned disk generation and installs a fresh VM Generation ID. Before your processes continue, the guest kernel corrects its wall clock and acknowledges activation; the runtime then thaws the workload and publishes network access last. Full restore requires the matching clock-aware kernel. Older development full snapshots must be recaptured, or restored with `--disk-only` where supported. Restore is eager: the archive or installed artifact is no longer needed after construction succeeds.
+Full restore and branching validate captured filesystem identities. Strict is the default; relaxed mode accepts supported differences and reports warnings:
 
-RAM preparation has no fixed timeout, including the first forked restore on slow storage. SDK creation progress reports this work; `activating` means the VM is constructed and ready to resume, not that it is already usable. Clock synchronization and workload thaw still have bounded waits. You can cancel creation or apply your own overall deadline.
-
-Full restore preserves captured processes, but not the host connections that controlled them. Open a new client connection after restore. Inherited process output is drained without being sent to new clients; host filesystem and TCP transfers must be restarted.
-
-Application TCP connections also depend on host-side proxy state that is not captured. Applications need reconnect/retry handling; a restored socket can wait for its protocol timeout instead of failing immediately. This is separate from reconnecting the SDK or CLI client.
-
-Full restore and branching preserve the virtual gateway's identity so cached ARP/IPv6 neighbour entries still work. Each child gets an independent host network backend, not the source's connections. Older development full snapshots without a captured gateway identity must be recaptured; `--disk-only` does not require it.
-
-## Export changes and compact a disk chain
-
-Repeated disk and full checkpoints add disk layers. You choose when to export changes and when to compact; neither happens automatically.
-
-```bash
-msb snapshot create checkpoint-b --from-sandbox worker --full
-msb snapshot save worker:checkpoint-b changes.msb --since worker:checkpoint-a
-msb modify worker --compact --layers 3 --dry-run
-msb modify worker --compact --layers 3
-msb modify worker --compact --disk /data --layers 3
-msb modify worker --compact --root-disk-only
+<CodeGroup>
+```typescript TypeScript
+const child = await Sandbox.restore("worker:snap")
+    .name("child")
+    .volume("/work", v => v.bind("/host/copy"))
+    .externalMountPolicy("relaxed")
+    .restore();
 ```
 
-Compaction defaults to the managed or flat root plus every sandbox-owned data disk. Named volumes, external disks, and owned directories are never included. `--disk /data` selects one owned disk by guest mount path; `--disk /` and `--root-disk-only` select only the root. The two selector flags cannot be combined. Explicitly selecting a directory, named/external disk, or absent root fails before compaction.
+```rust Rust
+use microsandbox::ExternalMountRestorePolicy;
 
-`--layers 3` merges **up to** the oldest three sealed physical layers per selected disk, **including the base**. It never includes the writable head, even when stopped. The limit must be at least two. Omit `--layers` to merge all sealed layers; a chain with fewer than two sealed layers is unchanged. Compaction is local-only and requires a running or fully stopped sandbox; paused and draining sources are rejected. Results contain aggregate and per-disk counts. With no eligible disks the default selection succeeds with an empty disk list, zero layer and byte counts, and no VM pause. Existing snapshots remain valid and retain their storage until you remove them separately.
-
-Multi-disk compaction is not an all-or-nothing transaction: each disk has its own durable journal. If a disk commit or backend switch fails, the error names the affected disk and any already committed disks; a running VM remains paused for recovery. Do not assume rollback or blindly retry. Restart the sandbox so each disk reopens from its journal. Existing snapshots are unchanged by this recovery.
-
-The aggregate `total_us` covers the whole operation, and `pause_us` measures the shared live VM pause. Each per-disk `total_us` measures preparation and materialization only, excluding journal adoption and backend switching. All timings are microseconds; materialized bytes measure work performed, not reclaimed disk space.
-
-`--since` omits root and owned-disk layers and, for full checkpoints, RAM objects already supplied by the base. The base must be an exact physical prefix for the root and every owned disk present in both snapshots. A newly added owned disk is exported completely. Owned directory namespaces are always complete; unchanged immutable file payloads can be supplied by the base. Each full archive still includes its complete memory map and CPU/device state; it does not replay earlier memory images. Alternatively, `--last-layers 2` selects the newest root-disk layers while retaining complete owned disks and all required RAM objects. Import these smaller archives with their bases in the same batch, into a named group containing their dependencies, or with an explicit external base. Direct restore still accepts an explicit base:
-
-```bash
-msb snapshot load changes.msb --base worker:checkpoint-a --group imported
-msb restore changes.msb --name child --snapshot-base worker:checkpoint-a
+let child = Sandbox::restore("worker:snap")
+    .name("child")
+    .volume("/work", |v| v.bind("/host/copy"))
+    .external_mount_policy(ExternalMountRestorePolicy::Relaxed)
+    .restore()
+    .await?;
 ```
 
-An explicit external base can also be a standalone snapshot archive. Dependent archives can supply one another within a batch; they need not be loaded in dependency order. Loads resolve disk and RAM dependencies without starting a VM; only the final sandbox creation resumes execution. Missing or incorrect dependencies fail before publication or execution. Loaded snapshots and restored children own their required files, so removing the base later does not break them. Direct restore skips installing an intermediate snapshot. Add `--disk-only` to cold-boot only disk state. After compacting any root or owned-disk prefix, export a new standalone baseline before using `--since` again: a mismatch in any matched disk refuses the export rather than silently including that disk in full. Do not combine compaction with unrelated `modify` options, or `--since`/`--last-layers` with each other or `--with-parents`/whole-group exports.
+```python Python
+from microsandbox import Sandbox, Volume
 
-Live runtime-sealed disk and full checkpoints preserve reusable sealed ancestry. Independently captured stopped root snapshots may receive new layer identities even when bytes are unchanged, including when recapturing a restored chain. Use a standalone export when such a capture does not match the base's exact physical prefix.
+child = await Sandbox.restore(
+    "worker:snap",
+    name="child",
+    volumes={"/work": Volume.bind("/host/copy")},
+    external_mount_policy="relaxed",
+)
+```
 
-## Capture directly to an archive
+```go Go
+child, err := m.RestoreSandbox(ctx, "worker:snap", "child",
+    m.WithRestoreConfig(m.RestoreConfig{
+        Volumes: map[string]m.MountConfig{
+            "/work": m.Mount.Bind("/host/copy", m.MountOptions{}),
+        },
+    }),
+    m.WithExternalMountPolicy(m.ExternalMountRelaxed))
+if err != nil { return err }
+```
 
-When the archive is the desired result, capture straight into it instead of creating an installed snapshot directory and then saving a second copy:
+```bash CLI
+msb restore worker:snap --name child \
+    -v /host/copy:/work --external-mount-policy relaxed
+```
+</CodeGroup>
+
+Relaxed mode validates supplied filesystem objects; it does not grant host access, waive missing-resource checks, recreate missing files, or bypass integrity checks. Full restore requires `--allow-missing-resources` to leave an external filesystem or additional disk unavailable. Root and owned storage must still be complete. Direct branching retains its existing unavailable-resource behavior. Backend I/O returns errors for unavailable devices, which can abort filesystem journals or make them read-only; warnings remain visible with `--quiet`.
+
+<Accordion title="Open files and cached data">
+
+Full snapshots retain clean cache pages, so reads may return captured bytes before reaching the host. Strict validation checks identity at restore time; it does not lock files against later edits.
+
+External files deleted while still open, and special files, can prevent capture. Owned directories support deleted open regular files. Restore warnings identify inaccessible or changed objects; see your [SDK reference](#reference) for details.
+
+</Accordion>
+
+## Manage snapshots
+
+These operations apply to disk and full snapshots. Cloud supports basic disk snapshot management; groups, archives, verification, and disk maintenance below are local-only.
+
+### Restore progress
+
+Track local disk or full restore through image preparation, memory preparation, and activation. Wait for the final result before using the sandbox:
+
+<CodeGroup>
+```typescript TypeScript
+const creation = await Sandbox.restore("worker:snap")
+    .name("resumed")
+    .restoreWithProgress();
+
+for await (const event of creation) {
+    console.log(event);
+}
+
+const resumed = await creation.awaitSandbox();
+```
+
+```rust Rust
+let (mut progress, task) = Sandbox::restore("worker:snap")
+    .name("resumed")
+    .restore_with_progress()?;
+
+while let Some(event) = progress.recv().await {
+    eprintln!("{event:?}");
+}
+
+let resumed = task.await??;
+```
+
+```python Python
+creation = Sandbox.restore_with_progress(
+    "worker:snap",
+    name="resumed",
+)
+
+async for event in creation.progress:
+    print(event)
+
+resumed = await creation.result()
+```
+
+```go Go
+events, results := m.RestoreSandboxWithProgress(
+    ctx, "worker:snap", "resumed",
+)
+
+for event := range events {
+    fmt.Println(event)
+}
+
+result := <-results
+if result.Err != nil { return result.Err }
+resumed := result.Sandbox
+```
+
+```bash CLI
+# Restore shows progress by default.
+msb restore worker:snap --name resumed
+```
+</CodeGroup>
+
+Some stages have no percentage. Memory preparation has no fixed timeout; activation has a separate timeout. Set an overall deadline or use SDK cancellation when needed.
+
+### Manage saved snapshots
+
+List snapshots, inspect one, or remove it:
+
+<CodeGroup>
+```typescript TypeScript
+const snapshots = await Snapshot.list();
+
+const saved = await Snapshot.open("baseline:ready");
+console.log(saved.digest);
+
+await Snapshot.remove("baseline:ready");
+```
+
+```rust Rust
+let snapshots = Snapshot::list().await?;
+
+let saved = Snapshot::open("baseline:ready").await?;
+println!("{}", saved.digest());
+
+Snapshot::remove("baseline:ready", false).await?;
+```
+
+```python Python
+snapshots = await Snapshot.list()
+
+saved = await Snapshot.open("baseline:ready")
+print(saved.digest)
+
+await Snapshot.remove("baseline:ready")
+```
+
+```go Go
+snapshots, err := m.Snapshot.List(ctx)
+if err != nil { return err }
+
+saved, err := m.Snapshot.Open(ctx, "baseline:ready")
+if err != nil { return err }
+
+fmt.Println(saved.Digest())
+err = m.Snapshot.Remove(ctx, "baseline:ready", false)
+if err != nil { return err }
+```
+
+```bash CLI
+msb snapshots
+msb snapshot inspect baseline:ready
+msb snapshot rm baseline:ready
+```
+</CodeGroup>
+
+### Snapshot groups
+
+Locally, `group` selects its head; `group:member` selects an exact snapshot:
+
+<CodeGroup>
+```typescript TypeScript
+await Snapshot.builder("cp01")
+    .fromSandbox("baseline")
+    .group("work")
+    .create();
+
+await Snapshot.builder("cp02")
+    .fromSandbox("baseline")
+    .group("work")
+    .create();
+
+const latest = await Sandbox.restore("work")
+    .name("latest")
+    .restore();
+
+const earlier = await Sandbox.restore("work:cp01")
+    .name("earlier")
+    .restore();
+
+await Snapshot.groupHead("work");
+
+await Snapshot.groupHead("work:cp01");
+```
+
+```rust Rust
+Snapshot::builder("cp01")
+    .from_sandbox("baseline")
+    .group("work")
+    .create()
+    .await?;
+
+Snapshot::builder("cp02")
+    .from_sandbox("baseline")
+    .group("work")
+    .create()
+    .await?;
+
+let latest = Sandbox::restore("work")
+    .name("latest")
+    .restore()
+    .await?;
+
+let earlier = Sandbox::restore("work:cp01")
+    .name("earlier")
+    .restore()
+    .await?;
+
+Snapshot::group_head("work").await?;
+
+Snapshot::group_head("work:cp01").await?;
+```
+
+```python Python
+await Snapshot.create("cp01", from_sandbox="baseline", group="work")
+
+await Snapshot.create("cp02", from_sandbox="baseline", group="work")
+
+latest = await Sandbox.restore("work", name="latest")
+
+earlier = await Sandbox.restore("work:cp01", name="earlier")
+
+await Snapshot.group_head("work")
+
+await Snapshot.group_head("work:cp01")
+```
+
+```go Go
+var err error
+
+_, err = m.Snapshot.Create(ctx, m.SnapshotCreateOptions{
+    Name: "cp01",
+    FromSandbox: "baseline",
+    Group: "work",
+})
+if err != nil { return err }
+
+_, err = m.Snapshot.Create(ctx, m.SnapshotCreateOptions{
+    Name: "cp02",
+    FromSandbox: "baseline",
+    Group: "work",
+})
+if err != nil { return err }
+
+latest, err := m.RestoreSandbox(ctx, "work", "latest")
+if err != nil { return err }
+
+earlier, err := m.RestoreSandbox(ctx, "work:cp01", "earlier")
+if err != nil { return err }
+
+_, err = m.Snapshot.GroupHead(ctx, "work")
+if err != nil { return err }
+
+_, err = m.Snapshot.GroupHead(ctx, "work:cp01")
+if err != nil { return err }
+```
+
+```bash CLI
+msb snapshot create cp01 --from-sandbox baseline --group work
+msb snapshot create cp02 --from-sandbox baseline --group work
+msb restore work --name latest
+msb restore work:cp01 --name earlier
+msb snapshot head work           # Show the selected snapshot ID
+msb snapshot head work:cp01      # Explicitly select an earlier checkpoint
+```
+</CodeGroup>
+
+The first capture sets the head. Later captures or imports advance it only with proven ancestry; older or divergent snapshots leave it unchanged. Select another head before removing the current one if other members remain.
+
+<Accordion title="Import into a group">
+
+Imports without a group create a new one. Select an imported head explicitly when needed:
+
+<CodeGroup>
+```typescript TypeScript
+await Snapshot.loadWithOptions("snap.msb", { group: "work" });
+
+await Snapshot.loadWithOptions("experiment.msb", {
+    group: "work",
+    setHead: true,
+});
+```
+
+```rust Rust
+Snapshot::load_with_options(
+    std::path::Path::new("snap.msb"),
+    microsandbox::snapshot::LoadOpts {
+        group: Some("work".into()),
+        ..Default::default()
+    },
+).await?;
+
+Snapshot::load_with_options(
+    std::path::Path::new("experiment.msb"),
+    microsandbox::snapshot::LoadOpts {
+        group: Some("work".into()),
+        set_head: true,
+        ..Default::default()
+    },
+).await?;
+```
+
+```python Python
+await Snapshot.load("snap.msb", group="work")
+
+await Snapshot.load("experiment.msb", group="work", set_head=True)
+```
+
+```go Go
+var err error
+
+_, err = m.Snapshot.LoadWithOptions(ctx, "snap.msb",
+    m.SnapshotLoadOptions{Group: "work"},
+)
+if err != nil { return err }
+
+_, err = m.Snapshot.LoadWithOptions(ctx, "experiment.msb",
+    m.SnapshotLoadOptions{Group: "work", SetHead: true},
+)
+if err != nil { return err }
+```
+
+```bash CLI
+msb snapshot load snap.msb --group work
+msb snapshot load experiment.msb --group work --set-head
+```
+</CodeGroup>
+
+Identical members can be reused; conflicting IDs or names fail. Publication never overwrites an existing member. Inspect the group before retrying an interrupted import.
+
+</Accordion>
+
+## Move snapshots
+
+Archives let you move local disk or full snapshots between machines.
+
+### Export and restore
+
+Copy either snapshot type to another machine as a `.msb` archive. Include the image for offline restore:
+
+<CodeGroup>
+```typescript TypeScript
+await Snapshot.save("baseline:ready", "ready.msb", { withImage: true });
+```
+
+```rust Rust
+Snapshot::save("baseline:ready",
+    std::path::Path::new("ready.msb"),
+    microsandbox::snapshot::SaveOpts {
+        with_image: true,
+        ..Default::default()
+    },
+).await?;
+```
+
+```python Python
+await Snapshot.save("baseline:ready", "ready.msb", with_image=True)
+```
+
+```go Go
+var err error
+
+err = m.Snapshot.Save(ctx, "baseline:ready", "ready.msb",
+    m.SnapshotSaveOptions{WithImage: true},
+)
+if err != nil { return err }
+```
+
+```bash CLI
+msb snapshot save baseline:ready ready.msb --with-image
+```
+</CodeGroup>
+
+On the destination:
+
+<CodeGroup>
+```typescript TypeScript
+const worker = await Sandbox.restore("./ready.msb")
+    .name("worker")
+    .restore();
+```
+
+```rust Rust
+let worker = Sandbox::restore("./ready.msb")
+    .name("worker")
+    .restore()
+    .await?;
+```
+
+```python Python
+worker = await Sandbox.restore("./ready.msb", name="worker")
+```
+
+```go Go
+worker, err := m.RestoreSandbox(ctx, "./ready.msb", "worker")
+if err != nil { return err }
+```
+
+```bash CLI
+msb restore ./ready.msb --name worker
+```
+</CodeGroup>
+
+The archive keeps its type: disk boots fresh; full resumes execution. Existing `.tar` and `.tar.zst` archives also work. Full compatibility and owned-directory platform restrictions still apply.
+
+### Import archives
+
+Load a base and dependent archives together; order does not matter:
+
+<CodeGroup>
+```typescript TypeScript
+const handles = await Snapshot.loadMany(
+    ["changes.msb", "base.msb"],
+    { group: "received", dest: "/mnt/snapshots" },
+);
+```
+
+```rust Rust
+let archives = vec!["changes.msb".into(), "base.msb".into()];
+
+let handles = Snapshot::load_many(
+    &archives,
+    microsandbox::snapshot::LoadOpts {
+        group: Some("received".into()),
+        dest: Some("/mnt/snapshots".into()),
+        ..Default::default()
+    },
+).await?;
+```
+
+```python Python
+handles = await Snapshot.load_many(
+    ["changes.msb", "base.msb"],
+    group="received",
+    dest="/mnt/snapshots",
+)
+```
+
+```go Go
+handles, err := m.Snapshot.LoadMany(ctx,
+    []string{"changes.msb", "base.msb"},
+    m.SnapshotLoadOptions{Group: "received", Dest: "/mnt/snapshots"},
+)
+if err != nil { return err }
+```
+
+```bash CLI
+msb snapshot load changes.msb base.msb --group received --dest /mnt/snapshots
+```
+</CodeGroup>
+
+Dependencies come from the batch or matching members of the named group. Supply an explicit base for other dependencies; unrelated groups are not searched. All members are validated before publication. Divergent tips require choosing a head; forcing an ambiguous head fails.
+
+<span id="export-changes-and-compact-a-disk-chain" />
+
+### Export changes
+
+Export only disk layers and full-snapshot RAM objects not supplied by an exact base:
+
+<CodeGroup>
+```typescript TypeScript
+await Snapshot.builder("v2")
+    .fromSandbox("worker")
+    .full()
+    .create();
+
+await Snapshot.save("worker:v2", "changes.msb", {
+    since: "worker:v1",
+});
+```
+
+```rust Rust
+Snapshot::builder("v2")
+    .from_sandbox("worker")
+    .full()
+    .create()
+    .await?;
+
+Snapshot::save("worker:v2",
+    std::path::Path::new("changes.msb"),
+    microsandbox::snapshot::SaveOpts {
+        since: Some("worker:v1".into()),
+        ..Default::default()
+    },
+).await?;
+```
+
+```python Python
+await Snapshot.create("v2", from_sandbox="worker", full=True)
+
+await Snapshot.save(
+    "worker:v2",
+    "changes.msb",
+    since="worker:v1",
+)
+```
+
+```go Go
+var err error
+
+_, err = m.Snapshot.Create(ctx, m.SnapshotCreateOptions{
+    Name: "v2",
+    FromSandbox: "worker",
+    Full: true,
+})
+if err != nil { return err }
+
+err = m.Snapshot.Save(ctx, "worker:v2", "changes.msb",
+    m.SnapshotSaveOptions{Since: "worker:v1"},
+)
+if err != nil { return err }
+```
+
+```bash CLI
+msb snapshot create v2 --from-sandbox worker --full
+msb snapshot save worker:v2 changes.msb --since worker:v1
+```
+</CodeGroup>
+
+The root and every shared owned disk must match the base’s physical prefix. New owned disks are complete. Owned directory namespaces and full execution maps remain complete; unchanged payloads may come from the base.
+
+Import or restore with that base:
+
+<CodeGroup>
+```typescript TypeScript
+await Snapshot.loadWithOptions("changes.msb", {
+    group: "imported",
+    base: "worker:v1",
+});
+
+const child = await Sandbox.restore("changes.msb")
+    .name("child")
+    .snapshotBase("worker:v1")
+    .restore();
+```
+
+```rust Rust
+Snapshot::load_with_options(
+    std::path::Path::new("changes.msb"),
+    microsandbox::snapshot::LoadOpts {
+        group: Some("imported".into()),
+        base: Some("worker:v1".into()),
+        ..Default::default()
+    },
+).await?;
+
+let child = Sandbox::restore("changes.msb")
+    .name("child")
+    .snapshot_base("worker:v1")
+    .restore()
+    .await?;
+```
+
+```python Python
+await Snapshot.load(
+    "changes.msb",
+    group="imported",
+    base="worker:v1",
+)
+
+child = await Sandbox.restore(
+    "changes.msb",
+    name="child",
+    snapshot_base="worker:v1",
+)
+```
+
+```go Go
+var err error
+
+_, err = m.Snapshot.LoadWithOptions(ctx, "changes.msb",
+    m.SnapshotLoadOptions{Group: "imported", Base: "worker:v1"},
+)
+if err != nil { return err }
+
+child, err := m.RestoreSandbox(ctx, "changes.msb", "child",
+    m.WithSnapshotBase("worker:v1"),
+)
+if err != nil { return err }
+```
+
+```bash CLI
+msb snapshot load changes.msb --base worker:v1 --group imported
+msb restore changes.msb --name child --snapshot-base worker:v1
+```
+</CodeGroup>
+
+Missing dependencies fail before publication or execution. Once loaded or restored, the result owns its files and no longer depends on the base.
+
+<Accordion title="Other export options">
+
+The last-layers option exports only the newest root layers, keeping owned disks and required RAM complete. Do not combine it with since-base export, or use either with parent-chain or whole-group export.
+
+After compaction, export a new standalone baseline. Independent stopped captures can also get new layer identities despite identical bytes; use a standalone export when the base no longer matches.
+
+</Accordion>
+
+### Capture to an archive
+
+Capture directly to an archive without installing a snapshot locally. Disk is the default; add the full option for execution state:
 
 <CodeGroup>
 ```typescript TypeScript
 import { Snapshot } from "microsandbox";
 
-const archive = await Snapshot.builder("after-pip-install")
-  .fromSandbox("baseline")
-  .createArchive("/tmp/after-pip-install.tar.zst");
+const archive = await Snapshot.builder("deps")
+    .fromSandbox("baseline")
+    .createArchive("/tmp/deps.msb");
 ```
 
 ```rust Rust
 use microsandbox::Snapshot;
 
-let archive = Snapshot::builder("after-pip-install")
+let archive = Snapshot::builder("deps")
     .from_sandbox("baseline")
-    .create_archive("/tmp/after-pip-install.msb", false)
+    .create_archive("/tmp/deps.msb", false)
     .await?;
 ```
 
@@ -392,8 +1218,8 @@ let archive = Snapshot::builder("after-pip-install")
 from microsandbox import Snapshot
 
 archive = await Snapshot.create_archive(
-    "after-pip-install",
-    "/tmp/after-pip-install.msb",
+    "deps",
+    "/tmp/deps.msb",
     from_sandbox="baseline",
 )
 ```
@@ -401,346 +1227,219 @@ archive = await Snapshot.create_archive(
 ```go Go
 archive, err := m.Snapshot.CreateArchive(ctx, m.SnapshotArchiveOptions{
     SnapshotCreateOptions: m.SnapshotCreateOptions{
-        Name:        "after-pip-install",
+        Name:        "deps",
         FromSandbox: "baseline",
     },
-    ArchivePath: "/tmp/after-pip-install.msb",
+    ArchivePath: "/tmp/deps.msb",
 })
 ```
 
 ```bash CLI
-msb snapshot create after-pip-install \
+msb snapshot create deps \
     --from-sandbox baseline \
-    -o /tmp/after-pip-install.msb
+    -o /tmp/deps.msb
 ```
 </CodeGroup>
 
-Direct capture publishes only the archive and returns its snapshot ID and path. It creates no intermediate snapshot directory and no local index row. Add `--full` to capture a running sandbox directly to the same archive, or `--plain-tar` to skip zstd compression.
+Direct capture pins the image but does not bundle its cache. For offline use, create an installed snapshot and [export with the image](#export-and-restore). Restore the archive directly using the same restore APIs.
 
-An explicit archive path can also be used directly as the source of a new sandbox:
+## Compact disks
 
-```bash
-msb restore ./after-pip-install.msb --name worker
-msb exec worker -- python -V
-```
-
-The same archive path works with the SDK restore methods shown below. The archive is unpacked into child-owned staging, so no intermediate installed snapshot is loaded into `~/.microsandbox/snapshots`.
-
-<Note>
-Direct capture records the pinned image identity, but does not bundle the cached OCI image. A flat snapshot already contains the complete disk, so restore only needs the pinned image's configuration from cache or the registry; it does not download the original disk layers again. Layered snapshots still need their base image artifacts. For an offline target, create an installed snapshot and use `msb snapshot save --with-image`: it bundles image configuration for flat roots, and the complete base-image cache for layered roots.
-</Note>
-
-## Boot from a snapshot
-
-A snapshot already pins its image, so booting from one is mutually exclusive with the image source:
+Merge sealed disk layers in a running or fully stopped local sandbox. This affects disk storage, including disks in full snapshots, not memory. Preview before applying:
 
 <CodeGroup>
 ```typescript TypeScript
-import { Sandbox } from "microsandbox";
+const worker = await Sandbox.get("worker");
 
-const sb = await Sandbox.restore("baseline:after-pip-install")
-    .name("worker")
-    .restore();
+const plan = await worker.compact({ layers: 3, dryRun: true });
+
+const result = await worker.compact({ layers: 3 });
 ```
 
 ```rust Rust
-use microsandbox::Sandbox;
+let worker = Sandbox::get("worker").await?;
 
-let sb = Sandbox::restore("baseline:after-pip-install")
-    .name("worker")
-    .restore()
-    .await?;
+let plan = worker.compact().layers(3).dry_run().await?;
+
+let result = worker.compact().layers(3).apply().await?;
 ```
 
 ```python Python
-from microsandbox import Sandbox
+worker = await Sandbox.get("worker")
 
-sb = await Sandbox.restore("baseline:after-pip-install", name="worker")
+plan = await worker.compact(layers=3, dry_run=True)
+
+result = await worker.compact(layers=3)
 ```
 
 ```go Go
-sb, err := m.RestoreSandbox(ctx, "baseline:after-pip-install", "worker")
+worker, err := m.GetSandbox(ctx, "worker")
+if err != nil { return err }
+
+layers := uint32(3)
+plan, err := worker.Compact(ctx, m.DiskCompactionOptions{
+    Layers: &layers,
+    DryRun: true,
+})
+if err != nil { return err }
+
+result, err := worker.Compact(ctx, m.DiskCompactionOptions{Layers: &layers})
+if err != nil { return err }
 ```
 
 ```bash CLI
-msb restore baseline:after-pip-install --name worker
-msb exec worker -- python -V
+msb modify worker --compact --layers 3 --dry-run
+msb modify worker --compact --layers 3
 ```
 </CodeGroup>
 
-For disk state, creation cold-boots from a child-owned writable copy. For checkpoint state, creation eagerly restores the captured execution into child-owned state.
+The default covers the root and owned data disks, excluding named/external volumes and directories. The layer limit includes the base but never the writable head; it must be at least two. Omit it to merge all sealed layers. Existing snapshots remain valid and retain storage until removed.
 
-A full restore does not also run the image CMD: the captured processes are already the workload. `msb restore` runs the restored sandbox in the background. Run new commands afterward with `msb exec`.
+<Warning>
+Each disk commits separately. If compaction fails, a running VM may stay paused. Restart to recover from disk journals; do not assume rollback or blindly retry.
+</Warning>
 
-To discard the captured execution and cold-boot only its filesystem state, select disk-only restore:
+Use the [SDK references](#reference) for disk selection and result fields. Do not combine compaction with unrelated modifications.
 
-<CodeGroup>
-```typescript TypeScript
-const sb = await Sandbox.restore("worker:worker-checkpoint")
-  .name("worker")
-  .diskOnly()
-  .restore();
-```
+## Verify integrity
 
-```rust Rust
-let sb = Sandbox::restore("worker:worker-checkpoint")
-    .name("worker")
-    .disk_only()
-    .restore()
-    .await?;
-```
-
-```python Python
-sb = await Sandbox.restore("worker:worker-checkpoint", name="worker",
-    disk_only=True,
-)
-```
-
-```go Go
-sb, err := m.RestoreSandbox(ctx, "worker:worker-checkpoint", "worker",
-    m.WithSnapshotDiskOnly(),
-)
-```
-
-```bash CLI
-msb restore worker:worker-checkpoint --name worker --disk-only
-```
-</CodeGroup>
-
-Disk-only restore copies only the checkpoint's disk chain, creates a fresh writable qcow2 head, and performs an ordinary boot. It does not require the destination to support the checkpoint's memory or execution codec. The disk projection of a full snapshot may omit writes buffered in guest RAM unless capture used `--guest-flush required`; filesystem journal recovery may still run. Full restore preserves those buffers in RAM. Host disk flushes and durable snapshot publication remain enforced regardless of guest-flush policy.
-
-## List, inspect, and remove
+Disk content hashing is opt-in. Record hashes during capture, then verify when receiving or checking a snapshot:
 
 <CodeGroup>
 ```typescript TypeScript
 import { Snapshot } from "microsandbox";
 
-const all = await Snapshot.list();                       // Indexed snapshots
-const h = await Snapshot.get("baseline:after-pip-install");       // By group/member selector or explicit path
-console.log(`${h.name ?? "-"} (${h.digest})`);
+const snap = await Snapshot.builder("deps")
+    .fromSandbox("baseline")
+    .recordIntegrity()
+    .create();
 
-await Snapshot.remove("baseline:after-pip-install");
-await Snapshot.reindex();                               // Default snapshots directory
-```
-
-```rust Rust
-use microsandbox::Snapshot;
-
-let all = Snapshot::list().await?; // Indexed snapshots
-let h = Snapshot::get("baseline:after-pip-install").await?; // By group/member selector or explicit path
-println!("{} ({})", h.name().unwrap_or("-"), h.digest());
-
-Snapshot::remove("baseline:after-pip-install", false).await?;
-Snapshot::reindex("/data/snapshots").await?;
-```
-
-```python Python
-from microsandbox import Snapshot
-
-all = await Snapshot.list()                              # Indexed snapshots
-h = await Snapshot.get("baseline:after-pip-install")              # By group/member selector or explicit path
-print(f"{h.name or '-'} ({h.digest})")
-
-await Snapshot.remove("baseline:after-pip-install")
-await Snapshot.reindex()                                 # Default snapshots directory
-```
-
-```go Go
-all, err := m.Snapshot.List(ctx)            // Indexed snapshots
-fmt.Printf("%d snapshots\n", len(all))
-h, err := m.Snapshot.Get(ctx, "baseline:after-pip-install") // By group/member selector or explicit path
-name := "-"
-if h.Name() != nil {
-    name = *h.Name()
-}
-fmt.Printf("%s (%s)\n", name, h.Digest())
-
-err = m.Snapshot.Remove(ctx, "baseline:after-pip-install", false)
-_, err = m.Snapshot.Reindex(ctx, "/data/snapshots")
-```
-
-```bash CLI
-msb snapshots                  # Also: msb snaps, msb snapshot ls
-msb snapshot inspect baseline:after-pip-install
-msb snapshot rm baseline:after-pip-install
-
-# Also if it has indexed children
-msb snapshot rm baseline:after-pip-install --force
-
-# Rebuild the index from artifacts on disk
-msb snapshot reindex
-```
-</CodeGroup>
-
-`list` uses a rebuildable local index; group/head selection comes from the artifacts on disk. If the index gets out of sync, `reindex` rebuilds it. Global ID or digest lookup refuses ambiguity when several local copies exist—use a group selector or explicit path. `--force` does not bypass the current-head removal guard.
-
-## Move local snapshots between machines
-
-The snapshot directory is the whole artifact; there is no hidden daemon state. Copy the directory directly, or save it as an archive:
-
-```bash
-# Copy the directory directly with scp (image must be cached or pullable on the target)
-scp -r ~/.microsandbox/snapshots/baseline/snap_<id> other-host:/tmp/saved-snapshot
-# Open that copied artifact by its explicit path; use archive load to add it to a group.
-
-# Bundle into a .msb, transport, then load
-msb snapshot save baseline:after-pip-install /tmp/snap.msb
-scp /tmp/snap.msb other-host:
-ssh other-host msb snapshot load /tmp/snap.msb
-
-# Fully offline: include the OCI image cache so the target needs no network
-msb snapshot save baseline:after-pip-install /tmp/snap.msb --with-image
-ssh other-host msb snapshot load /tmp/snap.msb
-```
-
-Archives use tar + zstd by default; `.msb` is the recommended filename extension. Pass `--plain-tar` for uncompressed tar. SDKs expose the same save and load operations as the CLI.
-
-## Artifact identity and layout
-
-Current file snapshots use a stable opaque snapshot ID, a separate SHA-256 descriptor digest, and one ordered physical layer closure. A normal raw ext4 snapshot is still one layer, whether those bytes represent a managed upper or a complete flat root:
-
-```text
-snapshots/
-└── baseline/
-    ├── group.json                    # selected head ID
-    └── snap_<id>/
-        ├── snapshot.json             # stable ID + parent ID + disk/state references
-        ├── group-member.json         # local name: after-pip-install
-        ├── metadata.json             # optional labels
-        └── layers/
-            └── layer_....raw
-```
-
-`metadata.json` contains mutable local labels and does not participate in the descriptor digest or snapshot identity. The descriptor names each layer by `DiskLayerId`. Once a full snapshot has rolled the sandbox onto qcow2, a later disk snapshot carries the complete oldest-first raw/qcow2 chain in this same artifact family; archive save/load and direct archive restore preserve every member.
-
-### Copy an archive with new metadata
-
-The SDKs can package the same disk data into a new archive while replacing its
-labels and choosing whether to record integrity. The original snapshot and
-archive are not modified. This direct artifact operation is currently
-local-only; cloud backends return a typed unsupported-operation error.
-
-<CodeGroup>
-```typescript TypeScript
-await snapshot
-  .copyTo("/tmp/snapshot-copy.tar.zst")
-  .labels({ environment: "test" })
-  .recordIntegrity(true)
-  .save();
-```
-
-```rust Rust
-use std::collections::BTreeMap;
-
-let copied = snapshot
-    .copy_to("/tmp/snapshot-copy.tar.zst")
-    .labels(BTreeMap::from([("environment".into(), "test".into())]))
-    .record_integrity(true)
-    .save()
-    .await?;
-```
-
-```python Python
-await (
-    snapshot.copy_to("/tmp/snapshot-copy.tar.zst")
-    .labels({"environment": "test"})
-    .record_integrity(True)
-    .save()
-)
-```
-
-```go Go
-err := snapshot.CopyTo("/tmp/snapshot-copy.tar.zst").
-    Labels(map[string]string{"environment": "test"}).
-    RecordIntegrity(true).
-    Save(ctx)
-```
-</CodeGroup>
-
-## Integrity verification
-
-Disk content hashing is optional for disk snapshots, full snapshots and local branches. By default, capture records disk structure and file sizes without scanning the disk for a content hash. Use `--integrity` when you want a persistent disk-content check; already-recorded hashes are retained. Full snapshots still use content-addressed RAM objects. Local branches do not hash RAM.
-
-For example, `msb snapshot create saved --from-sandbox source --full --integrity` records disk integrity alongside the full capture. `msb branch source --name child --integrity` opts in for a local branch. SDKs expose this as `.record_integrity()` in Rust, `record_integrity=True` in Python, `{ recordIntegrity: true }` on TypeScript branches, and `WithBranchIntegrity()` in Go.
-
-Recorded disk integrity uses a fixed 64 KiB-leaf BLAKE3 Merkle tree: known sparse holes collapse into precomputed zero subtrees, while allocated bytes are read and hashed. Verification checks recorded hashes; without them, same-length disk-content corruption cannot be detected by the snapshot layer. File-size, structure and backing-chain checks still apply.
-
-<CodeGroup>
-```typescript TypeScript
-import { Snapshot } from "microsandbox";
-
-// Compute and record an integrity hash at create time
-const snap = await Snapshot.builder("after-pip-install")
-  .fromSandbox("baseline")
-  .recordIntegrity()
-  .create();
-
-// Verify a snapshot's recorded integrity on demand
 const report = await snap.verify();
 ```
 
 ```rust Rust
 use microsandbox::Snapshot;
 
-// Compute and record an integrity hash at create time
-let snap = Snapshot::builder("after-pip-install")
+let snap = Snapshot::builder("deps")
     .from_sandbox("baseline")
     .record_integrity()
     .create()
     .await?;
 
-// Verify a snapshot's recorded integrity on demand
 let report = snap.verify().await?;
-
 ```
 
 ```python Python
 from microsandbox import Snapshot
 
-# Compute and record an integrity hash at create time
 snap = await Snapshot.create(
-    "after-pip-install",
+    "deps",
     from_sandbox="baseline",
     record_integrity=True,
 )
 
-# Verify a snapshot's recorded integrity on demand
 report = await snap.verify()
 ```
 
 ```go Go
-// Compute and record an integrity hash at create time
 snap, err := m.Snapshot.Create(ctx,
     m.SnapshotCreateOptions{
-        Name:            "after-pip-install",
+        Name:            "deps",
         FromSandbox:     "baseline",
         RecordIntegrity: true,
     },
 )
 
-// Verify a snapshot's recorded integrity on demand
 report, err := snap.Verify(ctx)
 ```
 
 ```bash CLI
-# Compute and record an integrity hash at create time
-msb snapshot create after-pip-install --from-sandbox baseline --integrity
-
-# Verify a snapshot's recorded integrity on demand
-msb snapshot verify baseline:after-pip-install
-msb snapshot inspect baseline:after-pip-install --verify
+msb snapshot create deps --from-sandbox baseline --integrity
+msb snapshot verify baseline:deps
+msb snapshot inspect baseline:deps --verify
 ```
 </CodeGroup>
 
-`msb snapshot save` and `msb snapshot load` preserve recorded integrity but do not silently execute it. They still enforce the archive grammar, path confinement, entry sizes, descriptor identities, and ordinary archive-entry hashes. Run `msb snapshot verify` explicitly after receiving a snapshot when your workflow requires an independent payload scan. Released `msb-sparse-sha256-v1` descriptors remain readable and verifiable, but ordinary open, boot, save, load, and upgrade paths do not pay their full logical-size SHA cost.
+Without hashes, size and structure checks cannot detect same-length disk corruption. Save and load preserve recorded integrity but do not scan it automatically. Full-snapshot RAM has separate content-addressed checks; branch RAM is not hashed.
 
-## Use cases
+<Accordion title="Full snapshots and branches">
 
-- **Reusable build state.** Install dependencies once, snapshot, then `msb restore ... --name worker` without paying the install cost again. Common pattern for CI, agent workloads, and reproducible dev environments.
-- **Portable scratch state.** Capture a sandbox after a long setup, hand the artifact to a teammate or push it to shared storage, and let them boot from the same starting point.
-- **Local fork-by-copy.** Multiple sandboxes from one snapshot are independent; each copy of the upper layer diverges on its own.
-- **Disaster recovery.** Snapshot a sandbox before a risky migration; if it goes wrong, restore the pre-migration artifact with `msb restore` under a new name.
+<CodeGroup>
+```typescript TypeScript
+await Snapshot.builder("saved")
+    .fromSandbox("worker")
+    .full()
+    .recordIntegrity()
+    .create();
+
+const source = await Sandbox.get("worker");
+const child = await source.branch("child", { recordIntegrity: true });
+```
+
+```rust Rust
+Snapshot::builder("saved")
+    .from_sandbox("worker")
+    .full()
+    .record_integrity()
+    .create()
+    .await?;
+
+let source = Sandbox::get("worker").await?;
+let child = source.branch("child").record_integrity().branch().await?;
+```
+
+```python Python
+await Snapshot.create(
+    "saved",
+    from_sandbox="worker",
+    full=True,
+    record_integrity=True,
+)
+
+source = await Sandbox.get("worker")
+child = await source.branch("child", record_integrity=True)
+```
+
+```go Go
+var err error
+
+_, err = m.Snapshot.Create(ctx, m.SnapshotCreateOptions{
+    Name: "saved",
+    FromSandbox: "worker",
+    Full: true,
+    RecordIntegrity: true,
+})
+if err != nil { return err }
+
+source, err := m.GetSandbox(ctx, "worker")
+if err != nil { return err }
+
+child, err := source.Branch(ctx, "child", m.WithBranchIntegrity())
+if err != nil { return err }
+```
+
+```bash CLI
+msb snapshot create saved --from-sandbox worker --full --integrity
+msb branch worker --name child --integrity
+```
+</CodeGroup>
+
+</Accordion>
+
+## Troubleshooting
+
+| Problem | What to check |
+| --- | --- |
+| Cloud capture is rejected | Stop the source and use disk mode. Full snapshots and local archive options are unsupported. |
+| Full restore rejects resource settings | Keep the captured CPU and memory settings, or restore with `--disk-only`. A full snapshot with a tmpfs root must resume execution. |
+| A restored app loses its connection | Reconnect clients and retry application connections; live host connections are not captured. |
+| Capture fails after saving a snapshot | Inspect the saved snapshot before retrying. The error may mean capture succeeded but the source could not resume. |
+| A local snapshot is missing from the list | Run `msb snapshot reindex` to rebuild the local index. |
+
 
 ## Reference
 
-For exact snapshot APIs, see [TypeScript](/sdk/typescript/snapshots), [Rust](/sdk/rust/snapshots), [Python](/sdk/python/snapshots), or [Go](/sdk/go/snapshots). The CLI examples above cover creating, inspecting, transferring, and verifying snapshots; run `msb snapshot --help` for the complete command surface.
+See each SDK reference for setup, imports, optional controls, and result fields.
+
+- **SDKs:** [TypeScript](/sdk/typescript/snapshots), [Rust](/sdk/rust/snapshots), [Python](/sdk/python/snapshots), and [Go](/sdk/go/snapshots).
+- **CLI:** Run `msb snapshot --help` or `msb restore --help` for all options.

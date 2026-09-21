@@ -201,9 +201,12 @@
               "cli/overview",
               "cli/configuration",
               "cli/sandbox-commands",
+              "cli/snapshot-commands",
               "cli/ssh-commands",
               "cli/volume-commands",
-              "cli/image-commands"
+              "cli/image-commands",
+              "cli/registry-commands",
+              "cli/management"
             ]
           }
         ]

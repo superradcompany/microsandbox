@@ -8,13 +8,11 @@ icon: "pen-to-square"
 
 You do not need to replace a running sandbox just because its workload changes. `modify` can resize the VM, update host-side metadata, rotate existing secrets, and change the defaults used by future commands while the sandbox stays up.
 
-<Frame>
-  <img src="/images/live-modify.svg" alt="A terminal changes CPU, memory, and a label while the sandbox remains running" />
-</Frame>
+<span id="what-can-modify-change" />
 
-## What can modify change?
+## Supported changes
 
-The live paths come first, but `modify` also plans changes that need a restart or the next start:
+When a change takes effect depends on the setting:
 
 | Change | When it takes effect | Notes |
 | --- | --- | --- |
@@ -28,7 +26,9 @@ The live paths come first, but `modify` also plans changes that need a restart o
 
 The default policy applies only changes that can complete without restarting. If a patch contains one restart-required change, microsandbox rejects the whole patch and the old configuration stays intact.
 
-## Modify a running sandbox
+<span id="modify-a-running-sandbox" />
+
+## Apply changes
 
 This patch doubles the running sandbox's CPU and memory and updates a label in the same operation:
 
@@ -73,7 +73,9 @@ plan, err := sb.Modify(ctx, m.ModifyOptions{
 
 The result is a modification plan showing what changed and whether each change was applied. CPU and memory can take a moment to converge inside the guest. The new host limits take effect immediately, and the workload continues running.
 
-## Reserve resize headroom
+<span id="reserve-resize-headroom" />
+
+## Set resize limits
 
 Live growth needs capacity reserved when the VM boots. Set `max_cpus` and `max_memory` above the starting allocation when you create a sandbox that may need to scale:
 
@@ -131,7 +133,9 @@ The sandbox starts with two vCPUs and 1 GiB of memory, but it can grow live to e
 
 Reserving headroom is cheap: spare vCPUs stay parked, and microsandbox backs spare memory only when the guest uses it. You can lower CPU or memory live without pre-planning, then grow back up to the booted ceiling later.
 
-## Preview before applying
+<span id="preview-before-applying" />
+
+## Preview changes
 
 Use a dry run when a patch mixes settings or you are unsure whether a restart is needed:
 
@@ -175,9 +179,17 @@ The planner classifies every requested field before it changes anything:
 | `requires restart` | Cannot affect the running VM under the default policy |
 | `unsupported` | Is invalid for this sandbox or backing type |
 
-## Live paths in detail
+<span id="live-paths-in-detail" />
 
-### CPU and memory
+## Update settings
+
+<span id="cpu-and-memory" />
+
+### Resize CPU and memory
+
+<Frame>
+  <img src="/images/live-modify.svg" alt="A terminal changes CPU, memory, and a label while the sandbox remains running" />
+</Frame>
 
 Raise or lower CPU and memory while the workload runs:
 
@@ -212,7 +224,9 @@ plan, err := sb.Modify(ctx, m.ModifyOptions{
 
 Use [`msb ps`](/cli/sandbox-commands#msb-status-/-ps) to see allocation as `effective / max`, and [`msb metrics`](/cli/sandbox-commands#msb-metrics) to check real usage before resizing. The apply result reports `applied`, `converging`, `guest-refused`, or `failed` for each resource so automation can wait for the guest to settle.
 
-### Labels
+<span id="labels" />
+
+### Update labels
 
 Labels are host-side metadata, so adding, changing, or removing one is immediate:
 
@@ -253,7 +267,9 @@ plan, err := sb.Modify(ctx, m.ModifyOptions{
 
 Running guest processes do not change. The new labels are available to listing, selection, metrics attribution, and other host-side workflows. See [Labels](/sandboxes/labels) for naming and cardinality guidance.
 
-### Environment and workdir
+<span id="environment-and-workdir" />
+
+### Set command defaults
 
 Environment and workdir updates require no restart, but they affect only commands started after the patch:
 
@@ -298,7 +314,9 @@ out, err := sb.Exec(ctx, "printenv", []string{"MODE"})
 
 Processes that were already running keep their original environment and working directory.
 
-### Secrets
+<span id="secrets" />
+
+### Rotate secrets
 
 Rotating the value of an existing secret is live because substitution happens at the host network boundary. Guest code keeps using the same placeholder while microsandbox begins injecting the new value:
 
@@ -356,7 +374,9 @@ plan, err := sb.Modify(ctx, m.ModifyOptions{
 
 Adding a new secret or changing its guest-visible placeholder requires a restart because existing processes cannot receive a new placeholder. Removing a secret does not require recreating the sandbox. See [Secrets](/sandboxes/secrets) for sources, host allow lists, and storage behavior.
 
-### Root disk growth
+<span id="root-disk-growth" />
+
+### Grow the root disk
 
 Grow an owned managed or flat ext4 root without restarting, including roots backed by checkpoint layers:
 
@@ -388,9 +408,11 @@ Growth is explicit and grow-only. The ext4 image must have enough reserved metad
 
 If the disk grows but guest filesystem expansion fails, the error reports incomplete growth. Retry the same target, or stop and restart to finish recovery. Microsandbox never truncates the disk to roll back; snapshots and compaction stay blocked until recovery completes.
 
-## Changes that need a boot boundary
+<span id="changes-that-need-a-boot-boundary" />
 
-Some settings define VM capacity or disk layout and cannot change in place:
+## Restart required
+
+These changes take effect after a restart:
 
 | Change | Apply now | Defer safely |
 | --- | --- | --- |

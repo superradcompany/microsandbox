@@ -4,126 +4,15 @@ description: Python SDK - Snapshot API reference
 keywords: ["Python SDK", "Python snapshots", "microsandbox snapshots"]
 ---
 
-Create local disk snapshots of running, paused, stopped, or crashed sandboxes, or full checkpoints of running and paused sandboxes. Cloud disk snapshots use managed storage or the organization's host volume. See [Snapshots](/sandboxes/snapshots) for usage and lifecycle concepts.
+<Tooltip tip="Cloud supports disk capture from stopped or crashed sandboxes, lookup, listing, removal, and restore. Live capture, full snapshots, groups, archives, verification, and compaction are local-only."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
-<Note>
-Cloud supports disk snapshot create, get, list, open, remove, and dedicated restore for stopped or crashed sources. Live capture, full checkpoints, branching, groups, archive import/export/copy, verification, and disk maintenance remain local-only. Unsupported options return an explicit error before mutation. Pass snapshot objects or typed references instead of assuming that cloud storage is a path on the client host.
-</Note>
+Create and manage snapshots. See the [snapshot guide](/sandboxes/snapshots) for workflows and examples.
+
+Use snapshot objects or references on cloud. Local operations also accept a group head, `group:member`, or artifact path.
 
 ## Guest writeback
 
 Pass `guest_flush=GuestFlush.REQUIRED` to `Snapshot.create`, `Snapshot.create_archive`, `source.branch`, `source.branch_many`, or `source.pause`. Import `GuestFlush` from `microsandbox`. The default `AUTO` flushes live disk-only captures, but adds no optional flush to full captures, branches, or pause. `SKIP` retains mandatory storage barriers. A paused disk capture needs a matching prior flush; cloud rejects non-Auto policies. See [policy semantics and examples](/sandboxes/snapshots#guest-filesystem-flush).
-
-## Snapshot groups
-
-Installed snapshots belong to a group. A bare group selects its head; `group:member` selects a member by name or stable snapshot ID. Artifact paths remain valid selectors. Creation defaults to the source sandbox's group and generates a member name when omitted; imports without `group=` create a new generated group. `dest_dir` and `dest` select the parent directory containing groups.
-
-```python
-snap = await Snapshot.create("baseline", from_sandbox="box", group="work")
-loaded = await Snapshot.load("changes.msb", base="work:baseline", group="work")
-head = await Snapshot.group_head("work")
-selected = await Snapshot.group_head("work:baseline")
-# Explicitly select an imported member even when it is not a descendant.
-loaded = await Snapshot.load("other.msb", group="work", set_head=True)
-```
-
-`group_head(selector)` returns a dictionary with `group`, `previous`, `head`, `reason`, and `changed`. `previous` and `head` are stable snapshot IDs. Automatic head updates initialize an empty group or advance to a proven descendant; divergent imports and imports with unknown ancestry retain the current head. Reasons are `initialized`, `fast_forwarded`, `selected`, `unchanged`, `diverged`, `unknown_ancestry`, and `ambiguous_candidates`. Direct archive capture creates no group and rejects `group=`.
-
-## Load multiple archives
-
-```python
-from pathlib import Path
-
-handles = await Snapshot.load_many(
-    list(Path("checkpoints").glob("*.msb")),
-    group="received",
-)
-```
-
-`load_many(archives, *, dest=None, base=None, group=None, set_head=False)` returns one `SnapshotHandle` for each supplied archive, in input order. The batch resolves dependencies regardless of argument order, using its archives and exact matching members already installed in an explicitly named destination group. `base` provides an external snapshot or standalone archive when needed. Single-file `load` also reuses dependencies from its named destination group. Omitting `group` creates one generated group for the whole batch.
-
-The importer validates the complete batch before publishing members. `set_head=True` requires a unique tip. With divergent tips and the default `False`, an existing head is retained (`ambiguous_candidates`); a new group has no head and imported handles report `head_update=None`. Select a member explicitly to give that group a head. Existing archive formats are unchanged. The CLI equivalent is `msb snapshot load checkpoints/*.msb --group received`, with `--dest DIR` for another group-store root.
-
-`Snapshot.path` and `SnapshotHandle.path` remain available for local snapshots.
-These accessors are deprecated and raise `UnsupportedError` if no local filesystem
-path exists. Use `reference` for backend-neutral code.
-
-
-## Take a snapshot
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">snapshot()</span>
-
-```python
-async def snapshot(self, name: str) -> Snapshot
-```
-
-Snapshot this sandbox into its default group with the given member name. Live disk captures preserve the source's running or paused state. Use the returned artifact path or `sandbox:member` to open it later. Called on a [`SandboxHandle`](/sdk/python/sandbox#sandboxhandle), obtained from [`Sandbox.get()`](/sdk/python/sandbox#sandbox-get).
-
-<p className="msb-label">Parameters</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><code>name</code><span className="msb-type">str</span></div>
-    <div className="msb-param-desc">Member name within the source sandbox's group.</div>
-  </div>
-</div>
-
-<p className="msb-label">Returns</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#snapshot">Snapshot</a></div>
-    <div className="msb-param-desc">The captured snapshot.</div>
-  </div>
-</div>
-
-<Accordion title="Example">
-
-```python
-handle = await Sandbox.get("baseline")
-snap = await handle.snapshot("after-pip-install")
-print(snap.digest)
-```
-
-</Accordion>
-
----
-
-
-## Restore a sandbox
-
-```python
-child = await Sandbox.restore("api:baseline", name="api-restored", forked=True)
-```
-
-`Sandbox.restore(snapshot, *, name, ...)` accepts a group head, `group:member`, artifact directory, or archive. The returned sandbox is detached. Disk snapshots cold-boot; full snapshots resume captured execution without a new startup command.
-
-Use `forked=True` for private CoW RAM, `disk_only=True` for only a full snapshot's disk, and `snapshot_base="group:member"` for a dependent archive. `Sandbox.restore_with_progress()` accepts the same options and returns a `PullSession`. Image, replacement, and startup-command options are rejected.
-
-Destination options include `cpus`, `memory` (MiB), `network_policy`, `max_connections`, `disable_network`, `security`, `max_duration`, and `idle_timeout`. `network_policy` accepts the existing `NetworkPolicy` type, not a `Network` configuration; it changes host-side filtering without implicitly configuring DNS, TLS, or bootstrap. Durations are non-negative finite seconds rounded up to whole seconds; explicit zero requests immediate expiry. Omit lifetime options or leave them `None` for no limit by default. In contrast, `max_connections=0` means no connection cap. Other omitted controls retain destination defaults.
-
-Full execution restore requires CPU and memory overrides to match captured geometry exactly, and rejects removing a captured NIC. Host-side network policy, connection limits, and lifetime limits can change. An explicit `SecurityProfile`—including `SecurityProfile.DEFAULT`—requires a disk snapshot or `disk_only=True`; it cannot change already-captured execution.
-
-Supply destination bindings with `volumes`, `ports`, and `vsock`, using the same typed values as creation. `captured_volumes=["/data"]` selects private captured disks. `user` changes the default for new execs, and `log_level` configures host logging. Resources are not inherited unless `dangerously_inherit_resources=True` is explicit. Full restore rejects missing external filesystems and additional disks by default; `allow_missing_resources=True` opts into unavailable devices with warnings. `external_mount_policy="strict"` (default) or `"relaxed"` validates supplied filesystem objects, independently of missing-resource permission. Root and owned storage remain required.
-
-## Disk maintenance and incremental export
-
-Exporting since a base omits reusable root/owned-disk layers and RAM objects. Every disk shared with the base must retain its exact physical prefix; compaction of any such disk requires a new standalone baseline. New owned disks are included completely. Owned directory namespaces stay complete while unchanged file payloads can come from the base. Full checkpoints keep the complete memory map and CPU/device state. The last-layers option selects only the newest root-disk layers, retaining complete owned disks and RAM payloads. Imports resolve dependencies from the batch or an explicitly named destination group. Use an external base for missing dependencies; direct restore still accepts an explicit base. Selective export cannot be combined with whole-group/with-parents export.
-
-```python
-worker = await Sandbox.get("worker")
-plan = await worker.compact(layers=3, dry_run=True)
-result = await worker.compact(layers=3)
-await Snapshot.save("worker:checkpoint-b", "changes.msb", since="worker:checkpoint-a")
-await Snapshot.load("changes.msb", base="worker:checkpoint-a")
-child = await Sandbox.restore("changes.msb", name="child", snapshot_base="worker:checkpoint-a")
-```
-
-Compaction defaults to the managed or flat root and all sandbox-owned data disks, never named/external disks or directories. Pass `disk="/data"` to select one owned disk, or `root_disk_only=True` for only the root; these selectors are mutually exclusive. `disk="/"` also selects the root. `layers` limits each disk to up to N oldest sealed physical layers including the base, excluding the writable head; N must be at least two. Omit it to compact all sealed layers. Chains with fewer than two sealed layers are unchanged. Results are dictionaries with aggregate `input_layers`, `selected_layers`, `output_layers`, `materialized_bytes`, `total_us`, `pause_us`, and `dry_run`, plus per-disk `disks` entries keyed by `guest_path`. With no eligible disks the default succeeds with an empty list and zero layer and byte counts. Compaction requires a running or fully stopped local sandbox; multi-disk commits can require [journal-based recovery](/sandboxes/snapshots#export-changes-and-compact-a-disk-chain).
-
-Per-disk `total_us` measures preparation/materialization only; aggregate `total_us` also includes journal adoption and backend switching, and `pause_us` measures the shared VM pause. Timings are microseconds.
-
-Use `last_layers=n` instead of `since` to export the newest N sealed root-disk layers. Owned disks are included completely. See [disk-chain maintenance](/sandboxes/snapshots#export-changes-and-compact-a-disk-chain) for dependency and retention rules.
 
 ## Snapshot
 
@@ -131,103 +20,8 @@ Use `last_layers=n` instead of `since` to export the newest N sealed root-disk l
 
 <p className="msb-backref">Returned by <a href="#handle-snapshot">snapshot()</a> · <a href="#snapshot-create">Snapshot.create()</a> · <a href="#snapshot-open">Snapshot.open()</a> · <a href="#snapshot-list_dir">Snapshot.list_dir()</a> · <a href="#handle-open">handle.open()</a></p>
 
-A fully-parsed snapshot artifact. Properties are read-only attributes (not async).
+Create, open, and manage snapshots. See [properties](#snapshot-properties) for returned metadata.
 
-#### <span className="msb-recv">snapshot.</span><span className="msb-hn">id</span>
-
-`str`
-
-Stable opaque `snap_...` identity
-
-#### <span className="msb-recv">snapshot.</span><span className="msb-hn">path</span>
-
-`str`
-
-Local artifact directory. Raises `UnsupportedError` for cloud snapshots; pass the snapshot object to `Sandbox.restore()` for backend-neutral addressing.
-
-#### <span className="msb-recv">snapshot.</span><span className="msb-hn">digest</span>
-
-`str`
-
-Canonical descriptor digest (`sha256:hex`), separate from the stable snapshot ID
-
-#### <span className="msb-recv">snapshot.</span><span className="msb-hn">size_bytes</span>
-
-`int \| None`
-
-Apparent size of the captured upper layer in bytes (sparse on disk), when recorded
-
-#### <span className="msb-recv">snapshot.</span><span className="msb-hn">image_ref</span>
-
-`str`
-
-Image reference the snapshot was taken from
-
-#### <span className="msb-recv">snapshot.</span><span className="msb-hn">image_manifest_digest</span>
-
-`str`
-
-OCI manifest digest of the pinned image
-
-#### <span className="msb-recv">snapshot.</span><span className="msb-hn">state_kind</span>
-
-[`SnapshotStateKind`](#snapshotstatekind)
-
-File-backed or checkpoint-backed state
-
-#### <span className="msb-recv">snapshot.</span><span className="msb-hn">format</span>
-
-[`SnapshotFormat`](#snapshotformat)` \| None`
-
-On-disk format for file-backed state
-
-#### <span className="msb-recv">snapshot.</span><span className="msb-hn">scope</span>
-
-[`SnapshotScope`](#snapshotscope)
-
-Captured state scope
-
-#### <span className="msb-recv">snapshot.</span><span className="msb-hn">fstype</span>
-
-`str \| None`
-
-Filesystem type for file-backed state (e.g. `"ext4"`)
-
-#### <span className="msb-recv">snapshot.</span><span className="msb-hn">checkpoint_id</span>
-
-`str \| None`
-
-Checkpoint identifier for checkpoint-backed state
-
-#### <span className="msb-recv">snapshot.</span><span className="msb-hn">checkpoint_manifest_digest</span>
-
-`str \| None`
-
-Checkpoint manifest digest for checkpoint-backed state
-
-#### <span className="msb-recv">snapshot.</span><span className="msb-hn">parent</span>
-
-`str \| None`
-
-Parent snapshot's digest, or `None` for a root
-
-#### <span className="msb-recv">snapshot.</span><span className="msb-hn">created_at</span>
-
-`str`
-
-RFC 3339 timestamp
-
-#### <span className="msb-recv">snapshot.</span><span className="msb-hn">labels</span>
-
-`dict[str, str]`
-
-User-supplied labels
-
-#### <span className="msb-recv">snapshot.</span><span className="msb-hn">source_sandbox</span>
-
-`str \| None`
-
-Best-effort source-sandbox name
 #### <span className="msb-recv">Snapshot.</span><span className="msb-hn">create()</span>
 
 ```python
@@ -242,6 +36,7 @@ async def create(
     force: bool = False,
     record_integrity: bool = False,
     full: bool = False,
+    guest_flush: GuestFlush | None = None,
 ) -> Snapshot
 ```
 
@@ -278,6 +73,10 @@ Create a disk snapshot, or set `full=True` to include memory and execution state
     <div className="msb-param-key"><code>full</code><span className="msb-type">bool</span></div>
     <div className="msb-param-desc">Capture disk, memory, execution, and device state from a running or paused sandbox. Default <code>False</code> captures disk state from running, paused, stopped, or crashed sources.</div>
   </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>guest_flush</code><span className="msb-type">GuestFlush | None</span></div>
+    <div className="msb-param-desc">Guest writeback policy. Omitted selects <code>AUTO</code>; see <a href="#guest-writeback">guest writeback</a>.</div>
+  </div>
 </div>
 
 <p className="msb-label">Returns</p>
@@ -293,7 +92,7 @@ Create a disk snapshot, or set `full=True` to include memory and execution state
 
 ```python
 snap = await Snapshot.create(
-    "after-pip-install",
+    "deps",
     from_sandbox="baseline",
     labels={"stage": "post-deps"},
     record_integrity=True,
@@ -319,15 +118,16 @@ async def create_archive(
     record_integrity: bool = False,
     full: bool = False,
     plain_tar: bool = False,
+    guest_flush: GuestFlush | None = None,
 ) -> SnapshotArchive
 ```
 
-Capture directly into an archive without installing a snapshot directory or index row.
+Capture directly into an archive without installing a local snapshot.
 
 ```python
 archive = await Snapshot.create_archive(
-    "after-pip-install",
-    "/tmp/after-pip-install.msb",
+    "deps",
+    "/tmp/deps.msb",
     from_sandbox="baseline",
 )
 ```
@@ -343,7 +143,7 @@ async def open(path_or_name: str) -> Snapshot
 <Accordion title="Example">
 
 ```python
-snap = await Snapshot.open("baseline:after-pip-install")
+snap = await Snapshot.open("baseline:deps")
 print(snap.image_ref)
 ```
 
@@ -379,7 +179,7 @@ async def get(name_or_digest: str) -> SnapshotHandle
 <Accordion title="Example">
 
 ```python
-h = await Snapshot.get("baseline:after-pip-install")
+h = await Snapshot.get("baseline:deps")
 print(h.digest)
 ```
 
@@ -474,7 +274,7 @@ async def remove(path_or_name: str, *, force: bool = False) -> None
 <Accordion title="Example">
 
 ```python
-await Snapshot.remove("baseline:after-pip-install", force=True)
+await Snapshot.remove("baseline:deps", force=True)
 ```
 
 </Accordion>
@@ -555,8 +355,8 @@ async def save(
 
 ```python
 await Snapshot.save(
-    "baseline:after-pip-install",
-    "/tmp/after-pip-install.msb",
+    "baseline:deps",
+    "/tmp/deps.msb",
     with_parents=True,
 )
 ```
@@ -594,8 +394,8 @@ Bundle a snapshot into a `.msb` archive. The existing snapshot manifest is archi
 
 ```python
 await Snapshot.save(
-    "baseline:after-pip-install",
-    "/tmp/after-pip-install.msb",
+    "baseline:deps",
+    "/tmp/deps.msb",
     with_parents=True,
 )
 ```
@@ -603,7 +403,6 @@ await Snapshot.save(
 </Accordion>
 ---
 
-## Move artifacts
 
 ---
 
@@ -649,7 +448,7 @@ Unpack a snapshot archive (`.msb` or `.tar`) into the selected or generated grou
 <Accordion title="Example">
 
 ```python
-h = await Snapshot.load("/tmp/after-pip-install.msb")
+h = await Snapshot.load("/tmp/deps.msb")
 print(h.path)
 ```
 
@@ -657,7 +456,47 @@ print(h.path)
 
 ---
 
-## Inspect
+#### <span className="msb-recv">Snapshot.</span><span className="msb-hn">load_many()</span>
+
+```python
+async def load_many(
+    archives: Sequence[str | os.PathLike[str]],
+    *,
+    dest: str | os.PathLike[str] | None = None,
+    base: str | None = None,
+    group: str | None = None,
+    set_head: bool = False,
+) -> list[SnapshotHandle]
+```
+
+Import archives as one batch. Returns handles in input order. Dependencies resolve from the batch, the named group, or an explicit base; input order does not matter. All members are validated before publication.
+
+#### <span className="msb-recv">Snapshot.</span><span className="msb-hn">group_head()</span>
+
+```python
+async def group_head(selector: str) -> dict[str, str | bool | None]
+```
+
+Read a group’s head, or select an exact member with `group:member`. Returns the group, previous and current snapshot IDs, reason, and whether the head changed. See [group selection](/sandboxes/snapshots#snapshot-groups).
+
+<span id="snapshot-groups" />
+
+<span id="load-multiple-archives" />
+
+### Import options
+
+Options for `load() and load_many()`.
+
+| Option | Purpose |
+| --- | --- |
+| `dest` | Parent directory containing groups. Defaults to the local snapshot store. |
+| `base` | External snapshot or standalone archive for missing dependencies. |
+| `group` | Destination group. Omit to create one group for the import. |
+| `set_head` | Select the imported tip, even with divergent ancestry. Defaults to false; requires a unique tip. |
+
+With divergent tips, the existing head stays selected; a new group has no head. Select a member explicitly. Identical members may be reused; conflicting identities fail. See [archive imports](/sandboxes/snapshots#import-archives).
+
+## Snapshot methods
 
 #### <span className="msb-recv">snap.</span><span className="msb-hn">save_to()</span>
 
@@ -678,9 +517,13 @@ Bundle this snapshot through the backend retained when it was created or
 opened. This avoids resolving its reference through a possibly different
 current default backend. Cloud raises `UnsupportedError`.
 
+<Accordion title="Example">
+
 ```python
-await snap.save_to("/tmp/after-pip-install.tar.zst", with_image=True)
+await snap.save_to("/tmp/deps.tar.zst", with_image=True)
 ```
+
+</Accordion>
 
 #### <span className="msb-recv">snap.</span><span className="msb-hn">copy_to()</span>
 
@@ -692,6 +535,8 @@ Create a new archive from this snapshot's disk data while replacing its labels
 and integrity metadata. The source snapshot is unchanged. Cloud raises
 `UnsupportedError` when `save()` is awaited.
 
+<Accordion title="Example">
+
 ```python
 await (
     snap.copy_to("/tmp/baseline-copy.tar.zst")
@@ -700,6 +545,8 @@ await (
     .save()
 )
 ```
+
+</Accordion>
 
 #### <span className="msb-recv">snap.</span><span className="msb-hn">verify()</span>
 
@@ -741,6 +588,8 @@ The report shape:
 }
 ```
 
+## SnapshotHandle methods
+
 #### <span className="msb-recv">handle.</span><span className="msb-hn">open()</span>
 
 ```python
@@ -750,7 +599,7 @@ async def open(self) -> Snapshot
 <Accordion title="Example">
 
 ```python
-h = await Snapshot.get("baseline:after-pip-install")
+h = await Snapshot.get("baseline:deps")
 snap = await h.open()
 print(snap.fstype)
 ```
@@ -777,7 +626,7 @@ async def remove(self, *, force: bool = False) -> None
 <Accordion title="Example">
 
 ```python
-h = await Snapshot.get("baseline:after-pip-install")
+h = await Snapshot.get("baseline:deps")
 await h.remove(force=False)
 ```
 
@@ -812,9 +661,123 @@ async def save_to(
 Bundle the referenced snapshot through the backend retained by the handle.
 Cloud raises `UnsupportedError`.
 
+<span id="take-a-snapshot" />
+
+## SandboxHandle
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">snapshot()</span>
+
+```python
+async def snapshot(self, name: str) -> Snapshot
+```
+
+Snapshot this sandbox into its default group with the given member name. Live disk captures preserve the source's running or paused state. Use the returned artifact path or `sandbox:member` to open it later. Called on a [`SandboxHandle`](/sdk/python/sandbox#sandboxhandle), obtained from [`Sandbox.get()`](/sdk/python/sandbox#sandbox-get).
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>name</code><span className="msb-type">str</span></div>
+    <div className="msb-param-desc">Member name within the source sandbox's group.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#snapshot">Snapshot</a></div>
+    <div className="msb-param-desc">The captured snapshot.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```python
+handle = await Sandbox.get("baseline")
+snap = await handle.snapshot("deps")
+print(snap.digest)
+```
+
+</Accordion>
+
+---
+
+
+<span id="restore-a-sandbox" />
+
+## Restore
+
+Restore into a new detached sandbox. Disk boots fresh; full resumes execution. See [restore examples](/sandboxes/snapshots#disk-snapshots) and [progress](/sandboxes/snapshots#restore-progress).
+
+<Accordion title="Example">
+
+```python
+child = await Sandbox.restore("api:baseline", name="api-restored", forked=True)
+```
+
+</Accordion>
+
+| Control | Purpose |
+| --- | --- |
+| `forked=True` | Share unchanged full-snapshot memory. |
+| `disk_only=True` | Boot only the saved disk. |
+| `snapshot_base` | Supply an archive dependency. |
+| `Sandbox.restore()` | Return the restored sandbox. |
+| `Sandbox.restore_with_progress()` | Return a `PullSession`; await its result. |
+
+Image, replacement, and startup-command options are not accepted. Full restore requires matching CPU and memory settings, keeps captured network devices, and cannot apply a new guest security profile. Use disk-only restore to change these.
+
+Full restore rejects missing external filesystems and additional disks by default. Use `allow_missing_resources=True` to resume with unavailable devices and warnings. This is separate from strict/relaxed validation of supplied mappings; inheritance does not waive missing backing. Root and owned storage remain required.
+
+<Accordion title="Destination options">
+
+| Option | Purpose |
+| --- | --- |
+| `cpus, memory` | CPU count and memory in MiB. Full restore must match capture. |
+| `network_policy` | Replace host traffic filtering; guest DNS and TLS settings stay unchanged. |
+| `max_connections` | Concurrent TCP limit; zero means unlimited. |
+| `disable_network` | Remove the NIC. Rejected for full snapshots that captured one. |
+| `security` | Guest security profile. Disk boot only, including an explicit default profile. |
+| `max_duration, idle_timeout` | Lifetime and idle limits. Omitted means unlimited; zero expires immediately. |
+| `volumes, captured_volumes` | Map host volumes or select captured private volumes. |
+| `ports` | Bind destination TCP or UDP ports. |
+| `vsock` | Bind destination vsock endpoints. |
+| `user, log_level` | Default user for new execs and host runtime log level. |
+| `dangerously_inherit_resources` | Explicitly inherit host resources. Disabled by default. |
+| `allow_missing_resources=True` | Allow unavailable external filesystems or additional disks, with warnings. Full restore otherwise requires their bindings. |
+| `external_mount_policy` | Validate supplied filesystem mappings: strict (default) or relaxed. Does not grant access. |
+
+Omitted controls retain destination defaults. Durations are non-negative finite seconds, rounded up. Network policy accepts `NetworkPolicy`, not `Network`. `captured_volumes` contains guest paths.
+
+</Accordion>
+
+
+<span id="disk-maintenance-and-incremental-export" />
+
+## Compaction
+
+Compact a local sandbox’s root or owned disks. See [compaction](/sandboxes/snapshots#compact-disks) for examples and recovery requirements.
+
+<Accordion title="Options and results">
+
+| Option | Purpose |
+| --- | --- |
+| `disk` | Select one owned disk by guest path; `/` selects the root. |
+| `root_disk_only` | Select only the root. Cannot combine with the disk selector. |
+| `layers` | Oldest sealed layers to merge, including the base. Minimum two; omit for all. Excludes the writable layer. |
+| `dry_run` | Preview without changing storage. |
+
+Defaults to the root and owned data disks; excludes named/external volumes and directories. Requires a running or fully stopped local sandbox. Fewer than two sealed layers means no change; no eligible disks returns an empty result with zero counts.
+
+Results include aggregate counts and per-disk entries keyed by `guest_path`. `materialized_bytes` counts copied bytes, not reclaimed space. Times are microseconds: per-disk `total_us` covers preparation; aggregate `total_us` also includes switching; `pause_us` measures the shared VM pause.
+
+</Accordion>
+
+
 ## Types
 
-### Snapshot
+### Snapshot properties {#snapshot-properties}
 
 <div className="msb-tags"><span className="msb-tag is-type">class</span></div>
 
@@ -824,31 +787,31 @@ A fully parsed backend-neutral snapshot. Properties are read-only attributes.
 
 | Property / Method | Type | Description |
 |-------------------|------|-------------|
-| `id` | `str` | Stable opaque snapshot identity |
-| `path` | `str` | Local artifact directory; raises `UnsupportedError` on cloud |
+| <span id="snapshot-id" />`id` | `str` | Stable opaque snapshot identity |
+| <span id="snapshot-path" />`path` | `str` | Local artifact directory; raises `UnsupportedError` on cloud |
 | `reference` | `str` | Stable backend-relative restore reference |
 | `reference_kind` | `Literal["id", "path"]` | How the selected backend resolves the reference |
-| `digest` | `str` | Canonical descriptor digest (`sha256:hex`), separate from the stable ID |
-| `size_bytes` | `int \| None` | Backend-reported stored payload size in bytes |
-| `image_ref` | `str` | Image reference the snapshot was taken from |
-| `image_manifest_digest` | `str` | OCI manifest digest of the pinned image |
-| `state_kind` | [`SnapshotStateKind`](#snapshotstatekind) | File-backed or checkpoint-backed state |
-| `format` | [`SnapshotFormat`](#snapshotformat)` \| None` | On-disk format for file-backed state |
-| `scope` | [`SnapshotScope`](#snapshotscope) | Captured state scope |
-| `fstype` | `str \| None` | Filesystem type for file-backed state (e.g. `"ext4"`) |
-| `checkpoint_id` | `str \| None` | Checkpoint identifier for checkpoint-backed state |
-| `checkpoint_manifest_digest` | `str \| None` | Checkpoint manifest digest for checkpoint-backed state |
-| `parent` | `str \| None` | Parent snapshot's digest, or `None` for a root |
-| `created_at` | `str` | RFC 3339 timestamp |
-| `labels` | `dict[str, str]` | User-supplied labels |
-| `source_sandbox` | `str \| None` | Best-effort source-sandbox name |
+| <span id="snapshot-digest" />`digest` | `str` | Canonical descriptor digest (`sha256:hex`), separate from the stable ID |
+| <span id="snapshot-size_bytes" />`size_bytes` | `int \| None` | Backend-reported stored payload size in bytes |
+| <span id="snapshot-image_ref" />`image_ref` | `str` | Image reference the snapshot was taken from |
+| <span id="snapshot-image_manifest_digest" />`image_manifest_digest` | `str` | OCI manifest digest of the pinned image |
+| <span id="snapshot-state_kind" />`state_kind` | [`SnapshotStateKind`](#snapshotstatekind) | File-backed or checkpoint-backed state |
+| <span id="snapshot-format" />`format` | [`SnapshotFormat`](#snapshotformat)` \| None` | On-disk format for file-backed state |
+| <span id="snapshot-scope" />`scope` | [`SnapshotScope`](#snapshotscope) | Captured state scope |
+| <span id="snapshot-fstype" />`fstype` | `str \| None` | Filesystem type for file-backed state (e.g. `"ext4"`) |
+| <span id="snapshot-checkpoint_id" />`checkpoint_id` | `str \| None` | Checkpoint identifier for checkpoint-backed state |
+| <span id="snapshot-checkpoint_manifest_digest" />`checkpoint_manifest_digest` | `str \| None` | Checkpoint manifest digest for checkpoint-backed state |
+| <span id="snapshot-parent" />`parent` | `str \| None` | Parent snapshot's digest, or `None` for a root |
+| <span id="snapshot-created_at" />`created_at` | `str` | RFC 3339 timestamp |
+| <span id="snapshot-labels" />`labels` | `dict[str, str]` | User-supplied labels |
+| <span id="snapshot-source_sandbox" />`source_sandbox` | `str \| None` | Best-effort source-sandbox name |
 | `save_to(...)` | `Awaitable[None]` | Bundle through the backend retained by this snapshot |
 | `copy_to(path)` | [`SnapshotCopyBuilder`](#snapshotcopybuilder) | Configure a copied archive with replacement metadata |
 | `verify()` | `Awaitable[dict[str, Any]]` | Recompute and check the upper-layer integrity hash. See [`verify()`](#snap-verify) |
 
 ### SnapshotCopyBuilder
 
-Returned by [`Snapshot.copy_to()`](#snapcopy_to). Setters mutate the builder and
+Returned by [`Snapshot.copy_to()`](#snap-copy_to). Setters mutate the builder and
 return it so calls can be chained.
 
 | Method | Returns | Description |

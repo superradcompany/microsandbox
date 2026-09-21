@@ -4,14 +4,13 @@ description: Reference for root and scoped YAML files loaded by the CLI
 icon: "file-code"
 ---
 
-For how sandbox YAML fits with global configuration and explicit CLI inputs,
-start with [Configuration](/operations/configuration).
+Load reusable sandbox settings with `--conf`. See [configuration precedence](/operations/configuration#precedence) for global defaults.
 
 <Note>
 Common image, resource, lifecycle, environment, policy, secret, script, and patch fields work everywhere. Host-integrated networking, local rootfs forms, snapshots, replace behavior, and several runtime fields are unavailable on microsandbox cloud.
 </Note>
 
-Sandbox configuration is a reusable, sparse definition for one sandbox. Load it with `msb run`, `msb create`, or `msb install`; explicit CLI arguments are applied on top. The file may have any name when passed with `--conf`.
+Files may have any name and contain only the fields you need. Explicit CLI arguments override their values.
 
 ```yaml
 # sandbox.yaml
@@ -43,11 +42,11 @@ msb create --conf sandbox.yaml --name agent
 msb install --conf sandbox.yaml --name agent
 ```
 
-Sandbox configuration is never auto-discovered. Every root or scoped configuration file must be supplied explicitly with its corresponding flag.
+Files are never auto-discovered; pass each file explicitly.
 
 ## Sparse configuration
 
-Every config file may provide only the fields it owns. Required fields are checked after root config, scoped config, and command-line inputs are merged, so a positional image can complete a network-only file:
+Required fields are checked after merging files and CLI arguments. For example, supply the image separately from a network-only file:
 
 ```yaml
 # net-policy.yaml
@@ -67,7 +66,7 @@ If neither the files nor the arguments provide an image, the command fails befor
 
 ## Scoped config files
 
-Scoped flags accept the contents of one field or field group without its root wrapper. They are useful for focused policies that should fail on unrelated fields.
+Scoped files contain one group of settings without its wrapper key. Unrelated fields are rejected.
 
 | Flag | Accepted fields |
 | --- | --- |

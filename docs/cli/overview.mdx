@@ -5,12 +5,9 @@ description: Manage sandboxes from the terminal
 icon: "book"
 ---
 
-The `msb` CLI lets you create, manage, and interact with sandboxes from the terminal. It auto-detects TTY and interactivity, so no `-it` flags are needed. If your terminal is interactive, `msb` acts accordingly.
+Create and manage local or cloud sandboxes from your terminal. Interactive sessions are detected automatically; no `-it` flags are needed.
 
-The same CLI drives [microsandbox cloud](/cloud/overview) when an API key is set. A few commands are local-only or limited on cloud, including image-cache commands, `msb metrics`, bounded `msb logs`, `msb ssh serve`, and disk-sized volume creation. Individual pages flag these commands, and the [cloud compatibility section](/cloud/overview#compatibility) summarizes them.
-
-For continuous metrics export, install the separate
-[`msb-metrics`](/observability/msb-metrics) binary.
+Set an API key to use [microsandbox cloud](/cloud/overview). Each reference page marks local-only commands and cloud limitations.
 
 ## Install
 
@@ -42,7 +39,7 @@ msb doctor
 
 ## Command forms
 
-Top-level verbs are the recommended everyday form. The canonical `sandbox` group organizes sandbox operations, and `sbx` is its visible alias. All three forms share flags, defaults, and behavior:
+Use short commands for everyday work. These forms are equivalent:
 
 ```bash
 msb run alpine -- echo hello
@@ -50,73 +47,36 @@ msb sandbox run alpine -- echo hello
 msb sbx run alpine -- echo hello
 ```
 
-Existing verb aliases also work inside either group, such as `msb sbx ls`, `msb sandbox rm devbox`, and `msb sbx mod devbox --cpus 2`. This includes `restore`, `pause`, `resume`, and `branch`. The same command forms apply when a cloud backend is selected, subject to each operation's backend support. Cloud supports disk snapshot restore; full restore, pause, resume, and branch remain local-only.
-
-SSH remains a separate top-level command group: use `msb ssh`, `msb ssh serve`, and `msb ssh authorize`.
+Aliases such as `ls`, `rm`, `cp`, and `mod` also work inside `sandbox` and `sbx`.
 
 ## Quick reference
 
+| Commands | Purpose |
+| --- | --- |
+| [`run`, `create`, `start`, `stop`, `restart`](/cli/sandbox-commands) | Manage sandbox lifecycles |
+| [`exec`, `copy`, `logs`](/cli/sandbox-commands#msb-exec) | Run commands and access files or output |
+| [`ls`, `ps`, `inspect`, `metrics`](/cli/sandbox-commands#msb-ls) | Inspect sandboxes |
+| [`modify`, `pause`, `resume`, `branch`, `rm`](/cli/sandbox-commands#msb-modify) | Change, branch, or remove sandboxes |
+| [`snapshot`, `snapshots`, `restore`](/cli/snapshot-commands) | Save and restore state |
+| [`ssh`](/cli/ssh-commands) | SSH sessions, keys, and listeners |
+| [`volume`, `volumes`](/cli/volume-commands) | Manage named storage |
+| [`pull`, `load`, `save`, `images`, `rmi`, `image`](/cli/image-commands) | Manage cached images |
+| [`registry`, `registries`](/cli/registry-commands) | Manage registry credentials |
+| [`context`](/cli/management#msb-context) | Show the active backend |
+| [`install`, `uninstall`](/cli/management#msb-install) | Turn sandboxes into shell commands |
+| [`doctor`, `update`, `downgrade`, `self`](/cli/management#msb-self) | Manage the CLI installation |
+| [`completion`](#shell-completion) | Generate shell completions |
+
+## Quick start
+
 ```bash
-# Run a one-off command (ephemeral, auto-removed)
-msb run python -- python -c "print('Hello!')"
-
-# Interactive shell (auto-detects TTY)
-msb run alpine -- sh
-
-# Create a persistent sandbox
-msb run --name devbox ubuntu -- bash
-
-# Resume later
-msb start devbox
-
-# Execute in a running sandbox
-msb exec devbox -- sh -c "apt update && apt install -y cowsay && /usr/games/cowsay \"Hello from devbox\""
-
-# Manage
-msb ls                   # List all sandboxes
-msb ps                   # Running sandboxes only
-msb metrics              # Live CPU/memory/network stats
-msb inspect devbox       # Detailed info
-msb logs devbox          # Captured stdout/stderr (works on stopped sandboxes too)
-msb logs devbox -f       # Follow live
-msb stop devbox          # Graceful shutdown
-msb rm devbox            # Remove stopped sandbox
-
-# SSH
-msb ssh authorize --file ~/.ssh/id_ed25519.pub
-msb ssh devbox
-msb ssh devbox -- uname -a
-msb ssh serve devbox --host 127.0.0.1 --port 2222
-
-# Images
-msb pull python       # Pre-pull to cache
-msb images            # List cached images
-msb rmi python        # Remove a cached image
-
-# Volumes
-msb volume create data
-msb volumes              # Also: msb vols
-msb volume rm data
-
-# Install as a system command
-msb install ubuntu       # Install as 'ubuntu' command
-msb uninstall ubuntu     # Remove installed command
-
-# Self-management
-msb doctor               # Alias for 'msb self doctor'
-msb doctor --fix         # Try supported host setup fixes
-msb self doctor          # Check runtime files and supported host prerequisites
-msb self update          # Update msb to latest
-msb self downgrade 0.6.0 # Downgrade to a supported older release
-msb self uninstall       # Remove msb
-
-# Shell completion
-msb completion zsh       # Print the zsh completion script
+msb create python --name worker
+msb exec worker -- python -c "print('hello')"
+msb stop worker
+msb rm worker
 ```
 
-<Tip>
-  Unnamed sandboxes (no `--name` flag) are ephemeral. They're automatically removed when the command finishes. Named sandboxes persist and can be stopped, restarted, and inspected later. Names must be non-empty and no longer than 128 UTF-8 bytes.
-</Tip>
+`msb run` without `--name` creates an ephemeral sandbox, removed when its command finishes. Named sandboxes persist. Names must contain 1–128 UTF-8 bytes.
 
 ## Global options
 
@@ -169,7 +129,7 @@ msb completion powershell > (Join-Path $completions "msb.ps1")
 ```
 </CodeGroup>
 
-Then restart your shell. After upgrading, regenerate saved completion scripts to include `sandbox`, `sbx`, and their subcommands.
+Restart your shell. Regenerate saved completions after upgrading.
 
 ## Command tree
 
@@ -188,5 +148,3 @@ msb run --tree      # Show all flags for run
 msb sandbox --tree  # Show the canonical sandbox command group
 msb sbx run --tree  # Show run flags through the group alias
 ```
-
-For detailed command reference, see [Sandbox commands](/cli/sandbox-commands), [SSH commands](/cli/ssh-commands), [Volume commands](/cli/volume-commands), and [Image commands](/cli/image-commands). For the SSH model and usage patterns, see [SSH](/sandboxes/ssh).

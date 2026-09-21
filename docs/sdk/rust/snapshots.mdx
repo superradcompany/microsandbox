@@ -4,71 +4,15 @@ description: Rust SDK - Snapshot API reference
 keywords: ["Rust SDK", "Rust snapshots", "microsandbox snapshots"]
 ---
 
-Create local disk snapshots of running, paused, stopped, or crashed sandboxes, or full checkpoints of running and paused sandboxes. Cloud disk snapshots use managed storage or the organization's host volume. See [Snapshots](/sandboxes/snapshots) for usage and lifecycle concepts.
+<Tooltip tip="Cloud supports disk capture from stopped or crashed sandboxes, lookup, listing, removal, and restore. Live capture, full snapshots, groups, archives, verification, and compaction are local-only."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
-<Note>
-Cloud supports disk snapshot create, get, list, open, remove, and dedicated restore for stopped or crashed sources. Live capture, full checkpoints, branching, groups, archive import/export/copy, verification, and disk maintenance remain local-only. Unsupported options return an explicit error before mutation. Pass snapshot objects or typed references instead of assuming that cloud storage is a path on the client host.
-</Note>
+Create and manage snapshots. See the [snapshot guide](/sandboxes/snapshots) for workflows and examples.
+
+Use snapshot objects or references on cloud. Local operations also accept a group head, `group:member`, or artifact path.
 
 ## Guest writeback
 
 Use `.guest_flush(GuestFlush::Required)` on snapshot, branch, or branch-many builders, or `source.pause_with_guest_flush(GuestFlush::Required)`. Import `GuestFlush` from `microsandbox::snapshot`. The default `Auto` flushes live disk-only captures, but adds no optional flush to full captures, branches, or pause. `Skip` retains mandatory storage barriers. A paused disk capture needs a matching prior flush; cloud rejects non-Auto policies. See [policy semantics and examples](/sandboxes/snapshots#guest-filesystem-flush).
-
-## Snapshot groups
-
-Installed snapshots belong to a group. A bare group selects its head; `group:member` selects a member by name or stable snapshot ID. Artifact paths remain valid selectors. Creation defaults to the source sandbox's group, and an empty builder name generates a member name. Imports without `LoadOpts.group` create a new generated group. `dest_dir` and `LoadOpts.dest` select the parent directory containing groups.
-
-```rust
-use microsandbox::{Snapshot, snapshot::LoadOpts};
-use std::path::Path;
-
-let snap = Snapshot::builder("baseline").from_sandbox("box").group("work").create().await?;
-let loaded = Snapshot::load_with_options(Path::new("changes.msb"), LoadOpts {
-    base: Some("work:baseline".into()),
-    group: Some("work".into()),
-    ..Default::default()
-}).await?;
-let head = Snapshot::group_head("work").await?;
-let selected = Snapshot::group_head("work:baseline").await?;
-```
-
-`LoadOpts` contains `dest: Option<PathBuf>`, `base: Option<String>`, `group: Option<String>`, and `set_head: bool`. `set_head: true` explicitly selects the imported member even when it is not a descendant. `load` and `load_with_base` use generated groups. `group_head` returns `HeadUpdate` with `group`, `previous`, `head`, `reason`, and `changed`; `previous` and `head` are stable snapshot IDs. Automatic head updates initialize an empty group or advance to a proven descendant; divergent imports and imports with unknown ancestry retain the current head. `Snapshot::head_update()` and `SnapshotHandle::head_update()` expose the create/import outcome. Direct archive capture creates no group and rejects `.group(...)`.
-
-## Load multiple archives
-
-```rust
-let archives = vec!["changes.msb".into(), "base.msb".into()];
-let handles = Snapshot::load_many(&archives, LoadOpts {
-    group: Some("received".into()),
-    ..Default::default()
-}).await?;
-```
-
-`Snapshot::load_many(archive_paths: &[PathBuf], opts: LoadOpts)` returns `MicrosandboxResult<Vec<SnapshotHandle>>`, with one handle per supplied archive in input order. Dependencies are resolved regardless of argument order from the batch and exact matching snapshots already installed in an explicitly named destination group. `opts.base` supplies an external snapshot or standalone archive when needed. Single-file `load_with_options` also reuses dependencies from its named destination group. Omitting `group` creates one generated group for the batch.
-
-All batch members are validated before publication. `set_head: true` requires a unique tip. With divergent tips and the default `false`, an existing head is retained (`HeadUpdateReason::AmbiguousCandidates`); a new group has no head and imported handles return `None` from `head_update()`. Select a member explicitly to give that group a head. The archive format is unchanged. The CLI equivalent is `msb snapshot load checkpoints/*.msb --group received`, with `--dest DIR` for another group-store root.
-
-## Disk maintenance and incremental export
-
-Exporting since a base omits reusable root/owned-disk layers and RAM objects. Every disk shared with the base must retain its exact physical prefix; compaction of any such disk requires a new standalone baseline. New owned disks are included completely. Owned directory namespaces stay complete while unchanged file payloads can come from the base. Full checkpoints keep the complete memory map and CPU/device state. The last-layers option selects only the newest root-disk layers, retaining complete owned disks and RAM payloads. Imports resolve dependencies from the batch or an explicitly named destination group. Use an external base for missing dependencies; direct restore still accepts an explicit base. Selective export cannot be combined with whole-group/with-parents export.
-
-```rust
-let worker = Sandbox::get("worker").await?;
-let plan = worker.compact().layers(3).dry_run().await?;
-let result = worker.compact().layers(3).apply().await?;
-Snapshot::save("worker:checkpoint-b", Path::new("changes.msb"), SaveOpts {
-    since: Some("worker:checkpoint-a".into()),
-    ..Default::default()
-}).await?;
-Snapshot::load_with_base(Path::new("changes.msb"), None, "worker:checkpoint-a").await?;
-```
-
-Compaction defaults to the managed or flat root and all sandbox-owned data disks, never named/external disks or directories. Use `.disk("/data")` for one owned disk, or `.root_disk_only()` for only the root; these selectors are mutually exclusive. `.disk("/")` also selects the root. `layers` limits each disk to up to N oldest sealed physical layers including the base, excluding the writable head; N must be at least two. Omit it to compact all sealed layers. Chains with fewer than two sealed layers are unchanged. Results include aggregate metrics and per-disk `disks` entries keyed by `guest_path`. With no eligible disks the default succeeds with an empty list and zero layer and byte counts. Compaction requires a running or fully stopped local sandbox; multi-disk commits can require [journal-based recovery](/sandboxes/snapshots#export-changes-and-compact-a-disk-chain).
-
-Per-disk `total_us` measures preparation/materialization only; aggregate `total_us` also includes journal adoption and backend switching, and `pause_us` measures the shared VM pause. Timings are microseconds.
-
-`last_layers: Some(n)` is an alternative to `since`; they cannot be combined with each other or `with_parents`. For direct restore, use `Sandbox::restore("changes.msb").name("child").snapshot_base("worker:checkpoint-a")`. See [disk-chain maintenance](/sandboxes/snapshots#export-changes-and-compact-a-disk-chain) for dependency and retention rules.
-
 
 ## Static methods
 
@@ -78,7 +22,7 @@ Per-disk `total_us` measures preparation/materialization only; aggregate `total_
 fn builder(name: impl Into<String>) -> SnapshotBuilder
 ```
 
-Start configuring a snapshot member named `name`, generated when empty. The default group is the source sandbox's name; `.group(name)` selects another group and [`dest_dir()`](#snapshot_builder-dest_dir) selects its parent directory. The source sandbox is set with [`from_sandbox()`](#snapshot_builder-from_sandbox), which is required; the other setters cover labels and whether to record content integrity before capturing. See [`SnapshotBuilder`](#snapshotbuilder) for all options.
+Configure a snapshot. Set the required source with `from_sandbox()`; see [SnapshotBuilder](#snapshotbuilder) for options.
 
 <p className="msb-label">Parameters</p>
 
@@ -159,7 +103,9 @@ async fn create_archive(
 ) -> MicrosandboxResult<SnapshotArchive>
 ```
 
-Capture a disk or full snapshot directly into an archive. The operation creates no installed snapshot directory and no index row.
+Capture a disk or full snapshot directly into an archive without installing it locally.
+
+<Accordion title="Example">
 
 ```rust
 let archive = Snapshot::create_archive(
@@ -169,6 +115,8 @@ let archive = Snapshot::create_archive(
 ).await?;
 println!("{} {}", archive.id(), archive.path().display());
 ```
+
+</Accordion>
 
 ---
 
@@ -218,9 +166,13 @@ Use this when passing through a reference returned by another SDK operation;
 it preserves whether the backend should resolve the value as an identifier or
 a path.
 
+<Accordion title="Example">
+
 ```rust
 let snap = Snapshot::open_ref(SnapshotReference::Id(snapshot_id)).await?;
 ```
+
+</Accordion>
 
 #### <span className="msb-recv">Snapshot::</span><span className="msb-hn">get()</span>
 
@@ -360,7 +312,7 @@ over [`remove()`](#snapshotremove) when the value came from
 async fn reindex(dir: impl AsRef<Path>) -> MicrosandboxResult<usize>
 ```
 
-Rebuild the local index from the artifacts in `dir`. Upserts an index row for every artifact found, then recomputes parent-edge child counts in one pass so the cache stays honest about the current set of artifacts.
+Rebuild the local snapshot index from artifacts in `dir`.
 
 <p className="msb-label">Parameters</p>
 
@@ -503,6 +455,67 @@ println!("loaded {}", h.digest());
 <p className="msb-member-group" id="instance-methods">Instance methods</p>
 
 Methods on an opened [`Snapshot`](#snapshotopen) artifact.
+
+#### <span className="msb-recv">Snapshot::</span><span className="msb-hn">load_with_base()</span>
+
+```rust
+async fn load_with_base(
+    path: &Path,
+    dest: Option<&Path>,
+    base: &str,
+) -> MicrosandboxResult<SnapshotHandle>
+```
+
+Import an archive with an explicit dependency base or destination group. See [import options](#import-options).
+
+#### <span className="msb-recv">Snapshot::</span><span className="msb-hn">load_with_options()</span>
+
+```rust
+async fn load_with_options(
+    path: &Path,
+    opts: LoadOpts,
+) -> MicrosandboxResult<SnapshotHandle>
+```
+
+Import an archive with an explicit dependency base or destination group. See [import options](#import-options).
+
+#### <span className="msb-recv">Snapshot::</span><span className="msb-hn">load_many()</span>
+
+```rust
+async fn load_many(
+    paths: &[PathBuf],
+    opts: LoadOpts,
+) -> MicrosandboxResult<Vec<SnapshotHandle>>
+```
+
+Import archives as one batch. Returns handles in input order. Dependencies resolve from the batch, the named group, or an explicit base; input order does not matter. All members are validated before publication.
+
+#### <span className="msb-recv">Snapshot::</span><span className="msb-hn">group_head()</span>
+
+```rust
+async fn group_head(selector: &str) -> MicrosandboxResult<HeadUpdate>
+```
+
+Read a group’s head, or select an exact member with `group:member`. Returns the group, previous and current snapshot IDs, reason, and whether the head changed. See [group selection](/sandboxes/snapshots#snapshot-groups).
+
+<span id="snapshot-groups" />
+
+<span id="load-multiple-archives" />
+
+### Import options
+
+Options for `LoadOpts`.
+
+| Option | Purpose |
+| --- | --- |
+| `dest` | Parent directory containing groups. Defaults to the local snapshot store. |
+| `base` | External snapshot or standalone archive for missing dependencies. |
+| `group` | Destination group. Omit to create one group for the import. |
+| `set_head` | Select the imported tip, even with divergent ancestry. Defaults to false; requires a unique tip. |
+
+With divergent tips, the existing head stays selected; a new group has no head. Select a member explicitly. Identical members may be reused; conflicting identities fail. See [archive imports](/sandboxes/snapshots#import-archives).
+
+## Instance methods
 
 #### <span className="msb-recv">snap.</span><span className="msb-hn">id()</span>
 
@@ -679,7 +692,7 @@ the active backend. Returned by [`Snapshot::get()`](#snapshotget),
 fn digest(&self) -> &str
 ```
 
-Manifest digest (`sha256:hex`), the canonical identity.
+Descriptor digest (`sha256:hex`), separate from the stable snapshot ID.
 
 #### <span className="msb-recv">h.</span><span className="msb-hn">name()</span>
 
@@ -815,103 +828,23 @@ Remove this installed snapshot copy by its stored artifact path. Other groups co
   </div>
 </div>
 
-## RestoreBuilder
-
-`Sandbox::restore(snapshot)` selects a group head, `group:member`, artifact directory, or archive. Set the destination name, then call `restore()`; the result is detached. Disk snapshots cold-boot, while full snapshots resume captured execution without a new startup command.
-
-```rust
-let child = Sandbox::restore("api:baseline")
-    .name("api-restored")
-    .forked()
-    .restore()
-    .await?;
-```
-
-Use `.forked()` for private CoW RAM, `.disk_only()` to cold-boot only a full snapshot's disk, and `.snapshot_base(base)` for a dependent archive. `restore_with_progress()` returns the shared progress stream and result task. Image, replacement, and startup-command setters are not accepted.
-
-Destination controls are applied before disk boot. Full restore can apply host-enforced traffic and lifetime controls but cannot replay guest security initialization. The following methods return `Self`; backend capability checks still apply on cloud.
-
-| Method | Disk boot | Full execution restore |
-| --- | --- | --- |
-| `cpus(u8)`, `memory(impl Into<Mebibytes>)` | Select destination CPU/RAM | Must equal the captured geometry |
-| `network_policy(NetworkPolicy)` | Replace the destination host traffic policy | Applied before network activation; guest identity stays captured |
-| `max_connections(usize)` | Set concurrent TCP cap; zero is unlimited | Same host-side admission control |
-| `disable_network()` | Remove the network device | Rejected when the checkpoint contains a network device |
-| `security(SecurityProfile)` | Apply guest confinement at boot | Explicit values are rejected, even `Default`; use `disk_only()` for a cold boot |
-| `max_duration(u64)`, `idle_timeout(u64)` | Lifetime/inactivity limits in seconds | Enforced by the destination host runtime |
-
-These controls do not add arbitrary network-builder access to guest TLS trust or secret placeholders. Omitted controls keep the configured defaults; explicit network-policy replacement is deliberate. Restore creates an idle detached sandbox for disk snapshots, so use `exec` or `shell` afterward to run a workload.
-
-Destination bindings use `.volume(guest, |v| ...)`, `.port(...)`, `.port_bind(...)`, `.port_udp(...)`, `.port_udp_bind(...)`, `.vsock(...)`, and `.vsock_dgram(...)`. Use `|v| v.captured()` for a captured private volume. `.user(...)` sets the default user for new execs; `.log_level(...)` configures host runtime logging. Host resources are not inherited unless `.dangerously_inherit_resources()` is explicitly selected. `.external_mount_policy(...)` validates supplied filesystem mappings; it does not grant access.
-
-#### <span className="msb-recv">Sandbox::</span><span className="msb-hn">restore_ref()</span>
-
-```rust
-fn restore_ref(reference: impl Into<SnapshotReference>) -> RestoreBuilder
-```
-
-Restore from an explicit backend-neutral snapshot reference. Pass a `Snapshot` or `SnapshotHandle` reference without reinterpreting an identifier as a path. This uses the same dedicated restore options and backend capability checks as `Sandbox::restore()`.
-
-```rust
-let restored = Sandbox::restore_ref(snapshot.reference())
-    .name("api-restored")
-    .restore()
-    .await?;
-```
-
-#### <span className="msb-recv">h.</span><span className="msb-hn">snapshot()</span>
-
-```rust
-async fn snapshot(&self, name: &str) -> MicrosandboxResult<Snapshot>
-```
-
-`SandboxHandle` method. Snapshot this sandbox's disk into its default group with the given member name. Use the returned artifact path or `sandbox:member` to open it later. Live captures are crash-consistent and preserve the source's running/paused state. Local handles only. To place the artifact elsewhere, use [`Snapshot::save()`](#snapshotsave) / [`Snapshot::load()`](#snapshotload) or move the self-contained artifact directory.
-
-<p className="msb-label">Parameters</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><code>name</code><span className="msb-type">&amp;str</span></div>
-    <div className="msb-param-desc">Member name within the source sandbox's group.</div>
-  </div>
-</div>
-
-<p className="msb-label">Returns</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#instance-methods">Snapshot</a></div>
-    <div className="msb-param-desc">The created artifact handle.</div>
-  </div>
-</div>
-
-<Accordion title="Example: capture under another group-store root">
-
-```rust
-let snap = Snapshot::builder("baseline")
-    .from_sandbox("api")
-    .dest_dir("/data/snapshots")
-    .create()
-    .await?;
-// snap.path() is /data/snapshots/api/<snapshot_id>.
-```
-
-</Accordion>
-
----
 
 ## SnapshotBuilder
 
 Builder for a [`SnapshotConfig`](#snapshotconfig). Obtained via [`Snapshot::builder(name)`](#snapshotbuilder). A source sandbox is required ([`from_sandbox`](#from_sandbox)); the other setters are optional. Every setter returns `Self`, so calls chain.
 
+<Accordion title="Example">
+
 ```rust
-let snap = Snapshot::builder("after-pip-install")
+let snap = Snapshot::builder("deps")
     .from_sandbox("api")           // sandbox to capture
     .label("stage", "post-deps")
     .record_integrity()            // hash the upper layer
     .create()
     .await?;
 ```
+
+</Accordion>
 
 ---
 
@@ -922,7 +855,7 @@ let snap = Snapshot::builder("after-pip-install")
 fn from_sandbox(self, source_sandbox: impl Into<String>) -> Self
 ```
 
-Set the sandbox to capture. Required; [`build()`](#snapshot_builder-build) and [`create()`](#snapshot_builder-create) fail without it.
+Set the sandbox to capture. Required; [`build()`](#build) and [`create()`](#create) fail without it.
 
 <p className="msb-label">Parameters</p>
 
@@ -934,6 +867,14 @@ Set the sandbox to capture. Required; [`build()`](#snapshot_builder-build) and [
 </div>
 
 ---
+
+#### <span className="msb-recv">.</span><span className="msb-hn">group()</span>
+
+```rust
+fn group(self, group: impl Into<String>) -> Self
+```
+
+Set the local snapshot group. Defaults to the source sandbox’s name. Direct archive capture does not accept a group.
 
 #### <span className="msb-recv">.</span><span className="msb-hn">dest_dir()</span>
 <div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
@@ -999,7 +940,15 @@ Compute and record sparse-aware BLAKE3 Merkle integrity during creation. [`verif
 fn full(self) -> Self
 ```
 
-Capture disk, memory, execution, and device state from a running sandbox. The runtime briefly quiesces the VM and returns the source to running state after checkpoint publication.
+Capture disk, memory, and execution state. The source must be running or paused and returns to that state after capture.
+
+#### <span className="msb-recv">.</span><span className="msb-hn">guest_flush()</span>
+
+```rust
+fn guest_flush(self, policy: GuestFlush) -> Self
+```
+
+Select guest writeback before capture. Defaults to `GuestFlush::Auto`; see [guest writeback](#guest-writeback).
 
 #### <span className="msb-recv">.</span><span className="msb-hn">build()</span>
 
@@ -1007,7 +956,7 @@ Capture disk, memory, execution, and device state from a running sandbox. The ru
 fn build(self) -> MicrosandboxResult<SnapshotConfig>
 ```
 
-Materialize the [`SnapshotConfig`](#snapshotconfig) without creating the snapshot. Errors with `InvalidConfig` if [`from_sandbox`](#snapshot_builder-from_sandbox) was not called. For capturing, use [`create`](#snapshot_builder-create) instead; it calls `build` internally.
+Materialize the [`SnapshotConfig`](#snapshotconfig) without creating the snapshot. Errors with `InvalidConfig` if [`from_sandbox`](#from_sandbox) was not called. For capturing, use [`create`](#create) instead; it calls `build` internally.
 
 <p className="msb-label">Returns</p>
 
@@ -1037,7 +986,7 @@ Build and execute the snapshot in one step. Equivalent to [`Snapshot::create(sel
 
 ## SnapshotCopyBuilder
 
-Returned by [`Snapshot::copy_to()`](#snapcopy_to). It reuses the source disk
+Returned by [`Snapshot::copy_to()`](#snap-copy_to). It reuses the source disk
 data while replacing explicit-snapshot metadata in a new archive.
 
 | Method | Returns | Description |
@@ -1045,6 +994,138 @@ data while replacing explicit-snapshot metadata in a new archive.
 | `labels(BTreeMap<String, String>)` | `Self` | Replace all labels in the copied manifest |
 | `record_integrity(bool)` | `Self` | Compute integrity when true, or omit it when false |
 | `save()` | `MicrosandboxResult<Manifest>` | Write the archive and return its manifest |
+
+## RestoreBuilder
+
+Restore into a new detached sandbox. Disk boots fresh; full resumes execution. See [restore examples](/sandboxes/snapshots#disk-snapshots) and [progress](/sandboxes/snapshots#restore-progress).
+
+<Accordion title="Example">
+
+```rust
+let child = Sandbox::restore("api:baseline")
+    .name("api-restored")
+    .forked()
+    .restore()
+    .await?;
+```
+
+</Accordion>
+
+| Control | Purpose |
+| --- | --- |
+| `forked()` | Share unchanged full-snapshot memory. |
+| `disk_only()` | Boot only the saved disk. |
+| `snapshot_base(base)` | Supply an archive dependency. |
+| `restore()` | Return the restored sandbox. |
+| `restore_with_progress()` | Return the progress receiver and result task. |
+
+Image, replacement, and startup-command options are not accepted. Full restore requires matching CPU and memory settings, keeps captured network devices, and cannot apply a new guest security profile. Use disk-only restore to change these.
+
+Full restore rejects missing external filesystems and additional disks by default. Use `allow_missing_resources()` to resume with unavailable devices and warnings. This is separate from strict/relaxed validation of supplied mappings; inheritance does not waive missing backing. Root and owned storage remain required.
+
+<Accordion title="Destination options">
+
+| Option | Purpose |
+| --- | --- |
+| `cpus(), memory()` | CPU count and memory in MiB. Full restore must match capture. |
+| `network_policy()` | Replace host traffic filtering; guest DNS and TLS settings stay unchanged. |
+| `max_connections()` | Concurrent TCP limit; zero means unlimited. |
+| `disable_network()` | Remove the NIC. Rejected for full snapshots that captured one. |
+| `security()` | Guest security profile. Disk boot only, including an explicit default profile. |
+| `max_duration(), idle_timeout()` | Lifetime and idle limits. Omitted means unlimited; zero expires immediately. |
+| `volume()` | Map host volumes or select captured private volumes. |
+| `port(), port_bind(), port_udp(), port_udp_bind()` | Bind destination TCP or UDP ports. |
+| `vsock(), vsock_dgram()` | Bind destination vsock endpoints. |
+| `user(), log_level()` | Default user for new execs and host runtime log level. |
+| `dangerously_inherit_resources()` | Explicitly inherit host resources. Disabled by default. |
+| `allow_missing_resources()` | Allow unavailable external filesystems or additional disks, with warnings. Full restore otherwise requires their bindings. |
+| `external_mount_policy()` | Validate supplied filesystem mappings: strict (default) or relaxed. Does not grant access. |
+
+Omitted controls retain destination defaults. Durations are whole seconds. Network policy accepts `NetworkPolicy`. Use `|v| v.captured()` for a private captured volume.
+
+</Accordion>
+
+#### <span className="msb-recv">Sandbox::</span><span className="msb-hn">restore_ref()</span>
+
+```rust
+fn restore_ref(reference: impl Into<SnapshotReference>) -> RestoreBuilder
+```
+
+Restore from an explicit backend-neutral snapshot reference. Pass a `Snapshot` or `SnapshotHandle` reference without reinterpreting an identifier as a path. This uses the same dedicated restore options and backend capability checks as `Sandbox::restore()`.
+
+<Accordion title="Example">
+
+```rust
+let restored = Sandbox::restore_ref(snapshot.reference())
+    .name("api-restored")
+    .restore()
+    .await?;
+```
+
+</Accordion>
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">snapshot()</span>
+
+```rust
+async fn snapshot(&self, name: &str) -> MicrosandboxResult<Snapshot>
+```
+
+`SandboxHandle` method. Snapshot this sandbox's disk into its default group with the given member name. Use the returned artifact path or `sandbox:member` to open it later. Live captures are crash-consistent and preserve the source's running/paused state. Local handles only. To place the artifact elsewhere, use [`Snapshot::save()`](#snapshotsave) / [`Snapshot::load()`](#snapshotload) or move the self-contained artifact directory.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>name</code><span className="msb-type">&amp;str</span></div>
+    <div className="msb-param-desc">Member name within the source sandbox's group.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#instance-methods">Snapshot</a></div>
+    <div className="msb-param-desc">The created artifact handle.</div>
+  </div>
+</div>
+
+<Accordion title="Example: capture under another group-store root">
+
+```rust
+let snap = Snapshot::builder("baseline")
+    .from_sandbox("api")
+    .dest_dir("/data/snapshots")
+    .create()
+    .await?;
+// snap.path() is /data/snapshots/api/<snapshot_id>.
+```
+
+</Accordion>
+
+---
+
+<span id="disk-maintenance-and-incremental-export" />
+
+## Compaction
+
+Compact a local sandbox’s root or owned disks. See [compaction](/sandboxes/snapshots#compact-disks) for examples and recovery requirements.
+
+<Accordion title="Options and results">
+
+| Option | Purpose |
+| --- | --- |
+| `disk()` | Select one owned disk by guest path; `/` selects the root. |
+| `root_disk_only()` | Select only the root. Cannot combine with the disk selector. |
+| `layers()` | Oldest sealed layers to merge, including the base. Minimum two; omit for all. Excludes the writable layer. |
+| `dry_run()` | Preview without changing storage. |
+
+Defaults to the root and owned data disks; excludes named/external volumes and directories. Requires a running or fully stopped local sandbox. Fewer than two sealed layers means no change; no eligible disks returns an empty result with zero counts.
+
+Results include aggregate counts and per-disk entries keyed by `guest_path`. `materialized_bytes` counts copied bytes, not reclaimed space. Times are microseconds: per-disk `total_us` covers preparation; aggregate `total_us` also includes switching; `pause_us` measures the shared VM pause.
+
+</Accordion>
+
 
 ## Types
 
@@ -1095,7 +1176,7 @@ read the snapshot metadata. The handle retains its backend, so `open()` and
 
 ### SnapshotConfig
 
-<p className="msb-backref">Used by <a href="#snapshotcreate">Snapshot::create()</a> · returned by <a href="#snapshot_builder-build">build()</a></p>
+<p className="msb-backref">Used by <a href="#snapshotcreate">Snapshot::create()</a> · returned by <a href="#build">build()</a></p>
 
 Inputs to create a snapshot. A type alias for `SnapshotSpec`. Usually built via [`SnapshotBuilder`](#snapshotbuilder) rather than constructed directly.
 
@@ -1109,6 +1190,7 @@ Inputs to create a snapshot. A type alias for `SnapshotSpec`. Usually built via 
 | force | `bool` | Overwrite a direct archive output; rejected for installed group members |
 | record_integrity | `bool` | Compute and record upper-layer integrity at creation |
 | full | `bool` | Include memory and execution state from a running or paused source; `false` captures disk state from running, paused, stopped, or crashed sources |
+| guest_flush | `GuestFlush` | Guest writeback policy; defaults to `GuestFlush::Auto`. See [guest writeback](#guest-writeback) |
 
 ### SnapshotFormat
 

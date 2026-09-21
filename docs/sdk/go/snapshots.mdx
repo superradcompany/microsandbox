@@ -4,91 +4,17 @@ description: Go SDK - Snapshot API reference
 keywords: ["Go SDK", "Go snapshots", "microsandbox snapshots"]
 ---
 
-Create local disk snapshots of running, paused, stopped, or crashed sandboxes, or full checkpoints of running and paused sandboxes. Cloud disk snapshots use managed storage or the organization's host volume. See [Snapshots](/sandboxes/snapshots) for usage and lifecycle concepts.
+<Tooltip tip="Cloud supports disk capture from stopped or crashed sandboxes, lookup, listing, removal, and restore. Live capture, full snapshots, groups, archives, verification, and compaction are local-only."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
-<Note>
-Cloud supports disk snapshot create, get, list, open, remove, and dedicated restore for stopped or crashed sources. Live capture, full checkpoints, branching, groups, archive import/export/copy, verification, and disk maintenance remain local-only. Unsupported options return an explicit error before mutation. Pass snapshot objects or typed references instead of assuming that cloud storage is a path on the client host.
-</Note>
+Create and manage snapshots. See the [snapshot guide](/sandboxes/snapshots) for workflows and examples.
 
-## Restore a sandbox
-
-```go
-child, err := m.RestoreSandbox(ctx, "api:baseline", "api-restored", m.WithForked())
-```
-
-`RestoreSandbox` accepts an installed selector or archive and returns a detached sandbox. Disk snapshots cold-boot; full snapshots resume captured execution. Use `WithForked()` for CoW RAM, `WithSnapshotDiskOnly()` for disk-only restore, and `WithSnapshotBase(base)` for dependent archives. `RestoreSandboxWithProgress` provides progress events and a result channel.
-
-Use `WithRestoreConfig(RestoreConfig{...})` for explicit `Volumes`, `CapturedVolumes`, `Ports`, `Vsock`, `User`, and `LogLevel`. Image, replacement, and startup-command options are not accepted. Host resources remain unmapped unless explicitly supplied or `WithDangerouslyInheritResources()` is selected. Full restore rejects missing external filesystems and additional disks by default; `WithAllowMissingResources()` opts into unavailable devices with warnings. `WithExternalMountPolicy` validates supplied filesystem objects, independently of missing-resource permission. Root and owned storage remain required.
-
-Destination controls use `WithRestoreCPUs(uint8)`, `WithRestoreMemory(uint32)` in MiB, `WithRestoreNetworkPolicy(*NetworkConfig)`, `WithRestoreMaxConnections(uint)`, `WithRestoreDisableNetwork()`, `WithRestoreSecurityProfile(SecurityProfile)`, `WithRestoreMaxDuration(time.Duration)`, and `WithRestoreIdleTimeout(time.Duration)`. These options also work with `RestoreSandboxWithProgress`. Network policy accepts the existing `NetworkPolicy` factory results, or `NetworkConfig` with only `Rules`, `DefaultEgress`, and `DefaultIngress`; other network fields are rejected rather than silently changing DNS, TLS, or bootstrap. Lifetime limits round up to whole seconds; explicit zero requests immediate expiry. Omit lifetime options or leave their `RestoreConfig` pointers `nil` for no limit by default. In contrast, `WithRestoreMaxConnections(0)` means no connection cap. Optional pointers distinguish omitted controls from explicit zero values.
-
-Full execution restore requires CPU and memory overrides to match captured geometry exactly, and rejects removing a captured NIC. Host-side network policy, connection limits, and lifetime limits can change. An explicit security profile—including `SecurityProfileDefault`—requires a disk snapshot or `WithSnapshotDiskOnly()`; it cannot change already-captured execution.
+Use snapshot objects or references on cloud. Local operations also accept a group head, `group:member`, or artifact path.
 
 ## Guest writeback
 
 Set `SnapshotCreateOptions.GuestFlush` to `msb.GuestFlushRequired`, pass `msb.WithBranchGuestFlush(msb.GuestFlushRequired)` to `Branch`/`BranchMany`, or call `source.PauseWithGuestFlush(ctx, msb.GuestFlushRequired)`. The default `GuestFlushAuto` flushes live disk-only captures, but adds no optional flush to full captures, branches, or pause. `GuestFlushSkip` retains mandatory storage barriers. A paused disk capture needs a matching prior flush; cloud rejects non-Auto policies. See [policy semantics and examples](/sandboxes/snapshots#guest-filesystem-flush).
 
 Disk capture, including `SandboxHandle.Snapshot`, requires a native library that supports guest-flush policies. Older libraries return an upgrade-required error, including for stopped disk captures. Full Auto capture and unrelated operations retain their compatibility.
-
-## Snapshot groups
-
-Installed snapshots belong to a group. A bare group selects its head; `group:member` selects a member by name or stable snapshot ID. Artifact paths remain valid selectors. Creation defaults to the source sandbox's group and generates a member name when empty; imports without a group create a new generated group. `DestDir` and `SnapshotLoadOptions.Dest` select the parent directory containing groups.
-
-```go
-snap, err := m.Snapshot.Create(ctx, m.SnapshotCreateOptions{
-    Name: "baseline", FromSandbox: "box", Group: "work",
-})
-loaded, err := m.Snapshot.LoadWithOptions(ctx, "changes.msb", m.SnapshotLoadOptions{
-    Base: "work:baseline", Group: "work",
-})
-head, err := m.Snapshot.GroupHead(ctx, "work")
-selected, err := m.Snapshot.GroupHead(ctx, "work:baseline")
-loaded, err = m.Snapshot.LoadWithOptions(ctx, "other.msb", m.SnapshotLoadOptions{
-    Group: "work", SetHead: true,
-})
-```
-
-`SnapshotLoadOptions` contains `Dest`, `Base`, `Group`, and `SetHead`. `Load` and `LoadWithBase` use generated groups. `GroupHead` returns `SnapshotHeadUpdate` with `Group`, `Previous`, `Head`, `Reason`, and `Changed`; `Previous` and `Head` are stable snapshot IDs. Automatic head updates initialize an empty group or advance to a proven descendant; divergent imports and imports with unknown ancestry retain the current head. Reasons are `initialized`, `fast_forwarded`, `selected`, `unchanged`, `diverged`, `unknown_ancestry`, and `ambiguous_candidates`. Direct archive capture creates no group and rejects a nonempty `Group`.
-
-## Load multiple archives
-
-```go
-handles, err := m.Snapshot.LoadMany(ctx,
-    []string{"changes.msb", "base.msb"},
-    m.SnapshotLoadOptions{Group: "received"},
-)
-if err != nil { return err }
-```
-
-`LoadMany(ctx, archives []string, opts SnapshotLoadOptions)` returns `([]*SnapshotHandle, error)`, with one handle per supplied archive in input order. Dependencies are resolved regardless of argument order from the batch and exact matching snapshots already installed in an explicitly named destination group. `Base` supplies an external snapshot or standalone archive when needed. Single-file `LoadWithOptions` also reuses dependencies from its named destination group. An empty `Group` creates one generated group for the batch.
-
-All batch members are validated before publication. `SetHead: true` requires a unique tip. With divergent tips and the default `false`, an existing head is retained (`ambiguous_candidates`); a new group has no head and imported handles return `nil` from `HeadUpdate()`. Select a member explicitly to give that group a head. The archive format is unchanged. The CLI equivalent is `msb snapshot load checkpoints/*.msb --group received`, with `--dest DIR` for another group-store root.
-
-## Disk maintenance and incremental export
-
-Exporting since a base omits reusable root/owned-disk layers and RAM objects. Every disk shared with the base must retain its exact physical prefix; compaction of any such disk requires a new standalone baseline. New owned disks are included completely. Owned directory namespaces stay complete while unchanged file payloads can come from the base. Full checkpoints keep the complete memory map and CPU/device state. The last-layers option selects only the newest root-disk layers, retaining complete owned disks and RAM payloads. Imports resolve dependencies from the batch or an explicitly named destination group. Use an external base for missing dependencies; direct restore still accepts an explicit base. Selective export cannot be combined with whole-group/with-parents export.
-
-```go
-worker, err := m.GetSandbox(ctx, "worker")
-if err != nil { return err }
-layers := uint32(3)
-result, err := worker.Compact(ctx, m.DiskCompactionOptions{Layers: &layers})
-if err != nil { return err }
-err = m.Snapshot.Save(ctx, "worker:checkpoint-b", "changes.msb", m.SnapshotSaveOptions{Since: "worker:checkpoint-a"})
-if err != nil { return err }
-snapshot, err := m.Snapshot.LoadWithBase(ctx, "changes.msb", "", "worker:checkpoint-a")
-```
-
-Compaction defaults to the managed or flat root and all sandbox-owned data disks, never named/external disks or directories. Set `Disk: "/data"` to select one owned disk, or `RootDiskOnly: true` for only the root; these selectors are mutually exclusive. `Disk: "/"` also selects the root. `Layers` limits each disk to up to N oldest sealed physical layers including the base, excluding the writable head; N must be at least two. A nil `Layers` selects all sealed layers. Chains with fewer than two sealed layers are unchanged. `DryRun: true` only resolves the plan. Results contain aggregate metrics and per-disk `Disks` entries keyed by `GuestPath`. With no eligible disks the default succeeds with an empty list and zero layer and byte counts. Compaction requires a running or fully stopped local sandbox; multi-disk commits can require [journal-based recovery](/sandboxes/snapshots#export-changes-and-compact-a-disk-chain).
-
-Per-disk `TotalUs` measures preparation/materialization only; aggregate `TotalUs` also includes journal adoption and backend switching, and `PauseUs` measures the shared VM pause. Timings are microseconds.
-
-`LastLayers` is an alternative to `Since` for export. For direct restore use `RestoreSandbox(ctx, "changes.msb", "child", WithSnapshotBase("worker:checkpoint-a"))`. See [disk-chain maintenance](/sandboxes/snapshots#export-changes-and-compact-a-disk-chain) for dependency and retention rules.
-
-`SnapshotArtifact.Path()` and `SnapshotHandle.Path()` remain available for local
-snapshots. These accessors are deprecated and panic if no local filesystem path
-exists. Use `Reference()` for backend-neutral code.
-
 
 ## Snapshot functions
 
@@ -128,7 +54,7 @@ Create a disk snapshot, or set `Full` to include memory and execution state. [`S
 
 ```go
 snap, err := m.Snapshot.Create(ctx, m.SnapshotCreateOptions{
-    Name:            "after-pip-install",
+    Name:            "deps",
     FromSandbox:     "baseline",
     Labels:          map[string]string{"stage": "post-deps"},
     RecordIntegrity: true,
@@ -145,17 +71,21 @@ snap, err := m.Snapshot.Create(ctx, m.SnapshotCreateOptions{
 func (snapshotFactory) CreateArchive(ctx context.Context, opts SnapshotArchiveOptions) (*SnapshotArchive, error)
 ```
 
-Capture directly into an archive without installing a snapshot directory or index row.
+Capture directly into an archive without installing a local snapshot.
+
+<Accordion title="Example">
 
 ```go
 archive, err := m.Snapshot.CreateArchive(ctx, m.SnapshotArchiveOptions{
     SnapshotCreateOptions: m.SnapshotCreateOptions{
-        Name:        "after-pip-install",
+        Name:        "deps",
         FromSandbox: "baseline",
     },
-    ArchivePath: "/tmp/after-pip-install.msb",
+    ArchivePath: "/tmp/deps.msb",
 })
 ```
+
+</Accordion>
 
 ---
 
@@ -168,7 +98,7 @@ func (snapshotFactory) Open(ctx context.Context, pathOrName string) (*SnapshotAr
 <Accordion title="Example">
 
 ```go
-snap, err := m.Snapshot.Open(ctx, "baseline:after-pip-install")
+snap, err := m.Snapshot.Open(ctx, "baseline:deps")
 ```
 
 </Accordion>
@@ -206,7 +136,7 @@ func (snapshotFactory) Get(ctx context.Context, nameOrDigest string) (*SnapshotH
 <Accordion title="Example">
 
 ```go
-h, err := m.Snapshot.Get(ctx, "baseline:after-pip-install")
+h, err := m.Snapshot.Get(ctx, "baseline:deps")
 ```
 
 </Accordion>
@@ -304,7 +234,7 @@ func (snapshotFactory) Remove(ctx context.Context, pathOrName string, force bool
 <Accordion title="Example">
 
 ```go
-err := m.Snapshot.Remove(ctx, "baseline:after-pip-install", false)
+err := m.Snapshot.Remove(ctx, "baseline:deps", false)
 ```
 
 </Accordion>
@@ -404,7 +334,7 @@ Bundle a snapshot into a `.msb` archive at `outPath`. Set [`SnapshotSaveOptions.
 <Accordion title="Example">
 
 ```go
-err := m.Snapshot.Save(ctx, "baseline:after-pip-install", "/tmp/snap.msb",
+err := m.Snapshot.Save(ctx, "baseline:deps", "/tmp/snap.msb",
     m.SnapshotSaveOptions{WithParents: true},
 )
 ```
@@ -458,6 +388,63 @@ h, err := m.Snapshot.Load(ctx, "/tmp/snap.msb", "")
 
 </Accordion>
 
+#### <span className="msb-recv">Snapshot.</span><span className="msb-hn">LoadWithBase()</span>
+
+```go
+func (snapshotFactory) LoadWithBase(
+    ctx context.Context, archive, dest, base string,
+) (*SnapshotHandle, error)
+```
+
+Import an archive with an explicit dependency base or destination group. See [import options](#import-options).
+
+#### <span className="msb-recv">Snapshot.</span><span className="msb-hn">LoadWithOptions()</span>
+
+```go
+func (snapshotFactory) LoadWithOptions(
+    ctx context.Context, archive string, opts SnapshotLoadOptions,
+) (*SnapshotHandle, error)
+```
+
+Import an archive with an explicit dependency base or destination group. See [import options](#import-options).
+
+#### <span className="msb-recv">Snapshot.</span><span className="msb-hn">LoadMany()</span>
+
+```go
+func (snapshotFactory) LoadMany(
+    ctx context.Context, archives []string, opts SnapshotLoadOptions,
+) ([]*SnapshotHandle, error)
+```
+
+Import archives as one batch. Returns handles in input order. Dependencies resolve from the batch, the named group, or an explicit base; input order does not matter. All members are validated before publication.
+
+#### <span className="msb-recv">Snapshot.</span><span className="msb-hn">GroupHead()</span>
+
+```go
+func (snapshotFactory) GroupHead(
+    ctx context.Context, selector string,
+) (*SnapshotHeadUpdate, error)
+```
+
+Read a group’s head, or select an exact member with `group:member`. Returns the group, previous and current snapshot IDs, reason, and whether the head changed. See [group selection](/sandboxes/snapshots#snapshot-groups).
+
+<span id="snapshot-groups" />
+
+<span id="load-multiple-archives" />
+
+### Import options
+
+Options for `SnapshotLoadOptions`.
+
+| Option | Purpose |
+| --- | --- |
+| `Dest` | Parent directory containing groups. Defaults to the local snapshot store. |
+| `Base` | External snapshot or standalone archive for missing dependencies. |
+| `Group` | Destination group. Omit to create one group for the import. |
+| `SetHead` | Select the imported tip, even with divergent ancestry. Defaults to false; requires a unique tip. |
+
+With divergent tips, the existing head stays selected; a new group has no head. Select a member explicitly. Identical members may be reused; conflicting identities fail. See [archive imports](/sandboxes/snapshots#import-archives).
+
 ## SandboxHandle methods
 
 Snapshots are taken from a metadata handle returned by [`GetSandbox`](/sdk/go/sandbox#m-getsandbox). Disk capture also supports a running or paused sandbox.
@@ -470,7 +457,7 @@ h, err := m.GetSandbox(ctx, "baseline")
 if err != nil {
     return err
 }
-snap, err := h.Snapshot(ctx, "after-pip-install")
+snap, err := h.Snapshot(ctx, "deps")
 ```
 
 #### <span className="msb-recv">h.</span><span className="msb-hn">Snapshot()</span>
@@ -506,7 +493,7 @@ Snapshot this sandbox into its default group with the given member name. Live di
 <Accordion title="Example">
 
 ```go
-snap, err := h.Snapshot(ctx, "after-pip-install")
+snap, err := h.Snapshot(ctx, "deps")
 ```
 
 </Accordion>
@@ -853,6 +840,77 @@ func (h *SnapshotHandle) CreatedAt() time.Time
 
 Snapshot creation time, decoded from the index's Unix timestamp.
 
+<span id="restore-a-sandbox" />
+
+## Restore
+
+Restore into a new detached sandbox. Disk boots fresh; full resumes execution. See [restore examples](/sandboxes/snapshots#disk-snapshots) and [progress](/sandboxes/snapshots#restore-progress).
+
+<Accordion title="Example">
+
+```go
+child, err := m.RestoreSandbox(ctx, "api:baseline", "api-restored", m.WithForked())
+```
+
+</Accordion>
+
+| Control | Purpose |
+| --- | --- |
+| `WithForked()` | Share unchanged full-snapshot memory. |
+| `WithSnapshotDiskOnly()` | Boot only the saved disk. |
+| `WithSnapshotBase(base)` | Supply an archive dependency. |
+| `RestoreSandbox` | Return the restored sandbox. |
+| `RestoreSandboxWithProgress` | Return event and result channels. |
+
+Image, replacement, and startup-command options are not accepted. Full restore requires matching CPU and memory settings, keeps captured network devices, and cannot apply a new guest security profile. Use disk-only restore to change these.
+
+Full restore rejects missing external filesystems and additional disks by default. Use `WithAllowMissingResources()` to resume with unavailable devices and warnings. This is separate from strict/relaxed validation of supplied mappings; inheritance does not waive missing backing. Root and owned storage remain required.
+
+<Accordion title="Destination options">
+
+| Option | Purpose |
+| --- | --- |
+| `WithRestoreCPUs, WithRestoreMemory` | CPU count and memory in MiB. Full restore must match capture. |
+| `WithRestoreNetworkPolicy` | Replace host traffic filtering; guest DNS and TLS settings stay unchanged. |
+| `WithRestoreMaxConnections` | Concurrent TCP limit; zero means unlimited. |
+| `WithRestoreDisableNetwork` | Remove the NIC. Rejected for full snapshots that captured one. |
+| `WithRestoreSecurityProfile` | Guest security profile. Disk boot only, including an explicit default profile. |
+| `WithRestoreMaxDuration, WithRestoreIdleTimeout` | Lifetime and idle limits. Omitted means unlimited; zero expires immediately. |
+| `Volumes, CapturedVolumes` | Map host volumes or select captured private volumes. |
+| `Ports` | Bind destination TCP or UDP ports. |
+| `Vsock` | Bind destination vsock endpoints. |
+| `User, LogLevel` | Default user for new execs and host runtime log level. |
+| `WithDangerouslyInheritResources` | Explicitly inherit host resources. Disabled by default. |
+| `WithAllowMissingResources()` | Allow unavailable external filesystems or additional disks, with warnings. Full restore otherwise requires their bindings. |
+| `WithExternalMountPolicy` | Validate supplied filesystem mappings: strict (default) or relaxed. Does not grant access. |
+
+Omitted controls retain destination defaults. Durations use `time.Duration`, rounded up to seconds. Binding fields belong in `WithRestoreConfig(RestoreConfig{...})`; nil pointers mean omitted. Network policy accepts factory results or `NetworkConfig` with only `Rules`, `DefaultEgress`, and `DefaultIngress`.
+
+</Accordion>
+
+
+<span id="disk-maintenance-and-incremental-export" />
+
+## Compaction
+
+Compact a local sandbox’s root or owned disks. See [compaction](/sandboxes/snapshots#compact-disks) for examples and recovery requirements.
+
+<Accordion title="Options and results">
+
+| Option | Purpose |
+| --- | --- |
+| `Disk` | Select one owned disk by guest path; `/` selects the root. |
+| `RootDiskOnly` | Select only the root. Cannot combine with the disk selector. |
+| `Layers` | Oldest sealed layers to merge, including the base. Minimum two; omit for all. Excludes the writable layer. |
+| `DryRun` | Preview without changing storage. |
+
+Defaults to the root and owned data disks; excludes named/external volumes and directories. Requires a running or fully stopped local sandbox. Fewer than two sealed layers means no change; no eligible disks returns an empty result with zero counts.
+
+Results include aggregate counts and per-disk entries keyed by `GuestPath`. `MaterializedBytes` counts copied bytes, not reclaimed space. Times are microseconds: per-disk `TotalUs` covers preparation; aggregate `TotalUs` also includes switching; `PauseUs` measures the shared VM pause.
+
+</Accordion>
+
+
 ## Constants
 
 <p className="msb-member-group">Snapshot scopes</p>
@@ -867,11 +925,13 @@ Scope of what a snapshot captures: disk-only or disk plus complete VM state.
 | `SnapshotScopeFull` | `"full"` | Disk plus complete VM execution state |
 ## Types
 
+<span id="snapshotartifact" />
+
 ### SnapshotArtifact<span className="msb-tag is-type" style={{marginLeft: "8px"}}>struct</span>
 
 <p className="msb-backref">Returned by <a href="#snapshot-create">Snapshot.Create()</a> · <a href="#snapshot-open">Snapshot.Open()</a> · <a href="#snapshot-listdir">Snapshot.ListDir()</a> · <a href="#h-snapshot">h.Snapshot()</a> · <a href="#h-open">h.Open()</a></p>
 
-A backend-neutral disk snapshot. Fields are unexported; read them through the
+A backend-neutral snapshot. Fields are unexported; read them through the
 accessor methods below.
 
 | Method | Returns | Description |
@@ -905,6 +965,8 @@ the fluent methods below.
 | `Labels(map[string]string)` | `*SnapshotCopyBuilder` | Replace all labels in the copied manifest |
 | `RecordIntegrity(bool)` | `*SnapshotCopyBuilder` | Compute integrity when true, or omit it when false |
 | `Save(context.Context)` | `error` | Write the configured archive |
+
+<span id="snapshothandle" />
 
 ### SnapshotHandle<span className="msb-tag is-type" style={{marginLeft: "8px"}}>struct</span>
 
@@ -947,6 +1009,7 @@ Configures [`Snapshot.Create`](#snapshot-create). `FromSandbox` is required. An 
 | Force | `bool` | Overwrite a direct archive output; rejected for installed group members |
 | RecordIntegrity | `bool` | Record content hashes so [`Verify`](#s-verify) can recompute them later |
 | Full | `bool` | Include memory and execution state from a running or paused source; `false` captures disk state from running, paused, stopped, or crashed sources |
+| GuestFlush | `GuestFlush` | Guest writeback policy; defaults to `GuestFlushAuto`. See [guest writeback](#guest-writeback) |
 
 ### SnapshotSaveOptions<span className="msb-tag is-type" style={{marginLeft: "8px"}}>struct</span>
 
