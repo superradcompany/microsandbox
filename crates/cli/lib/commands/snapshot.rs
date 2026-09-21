@@ -5,8 +5,10 @@ use std::path::PathBuf;
 use clap::{Args, Subcommand};
 use microsandbox::{Snapshot, SnapshotReference};
 
-use super::restore;
-use crate::{commands::restore::RestoreArgs, ui};
+use crate::{
+    commands::restore::{self, RestoreArgs},
+    ui,
+};
 
 //--------------------------------------------------------------------------------------------------
 // Types
