@@ -19,7 +19,7 @@ Disk is the default. Full adds memory and execution state; there is no memory-on
 
 ## Disk snapshots
 
-Use disk snapshots for installed dependencies, prepared workspaces, and saved files. Cloud requires a stopped or crashed source. See [guest flushing](#guest-flushing) for how pending writes are handled.
+Use disk snapshots for installed dependencies, prepared workspaces, and saved files. Cloud requires a stopped or crashed source. See [guest flushing](#guest-flushing) for how microsandbox handles pending writes.
 
 <Steps>
 <Step title="Prepare">
@@ -254,7 +254,7 @@ msb snap restore worker:snap --name resumed
 </Steps>
 
 - **Compatibility:** Use a compatible runtime and guest kernel. CPU and memory settings, including maximums, must match the capture.
-- **Connections:** Reconnect clients and application connections. Host-side connections and transfers are not captured; buffered process output is not replayed.
+- **Connections:** Reconnect clients and application connections. Microsandbox does not capture host-side connections or transfers, and does not replay buffered process output.
 - **Mounts:** Owned volumes are private to each child. Host bindings need explicit authorization; see [mount behavior](#mount-behavior).
 
 <Accordion title="Capture or restore fails">
@@ -539,7 +539,7 @@ Owned directory snapshots cannot move between Unix and Windows. Owned disks do n
 
 ### External mounts
 
-Host-mounted files are not included in snapshots. Supply their host paths when restoring; owned volumes restore automatically. Full restore requires all captured external filesystems and additional disks to be available.
+Snapshots do not include host-mounted files. Supply their host paths when restoring. Owned volumes restore automatically. Full restore requires every captured external filesystem and additional disk to be available.
 
 For either a disk or full snapshot, mount a host directory like this:
 
