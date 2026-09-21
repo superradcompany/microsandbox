@@ -1,9 +1,11 @@
 ---
 title: "Week of September 18, 2026"
 sidebarTitle: "Week of the 18th"
-description: "Explicit guest filesystem flush policies for snapshots, separate TCP and UDP connection limits, and fixes across the catalog, snapshots, networking, and macOS filesystems."
+description: "Explicit guest filesystem flush policies for snapshots, separate TCP and UDP connection limits, administrator-managed configuration overrides, and fixes across the catalog, snapshots, networking, and macOS filesystems."
 icon: "bolt"
 ---
+
+This entry covers changes merged into `main` this week, including changes not yet included in a published release.
 
 <Tip>
   **Released this week:** [v0.7.0](https://github.com/superradcompany/microsandbox/releases/tag/v0.7.0) · [v0.7.1](https://github.com/superradcompany/microsandbox/releases/tag/v0.7.1) · [v0.7.2](https://github.com/superradcompany/microsandbox/releases/tag/v0.7.2)
@@ -33,6 +35,10 @@ Sandboxes can now cap TCP and UDP concurrency independently. `maxTcpConnections`
 Legacy v0.6.x launch contracts keep their historical default of 256 TCP connections, and the SDK rejects UDP overrides against those older runtimes with an upgrade-required error.
 
 See [Networking overview](/networking/overview#deployment-profiles).
+
+**Administrator-managed configuration overrides**
+
+Administrators can deploy a protected `managed.json` file to enforce settings across local and cloud backends. Managed overrides are applied after user settings and CLI or SDK options, so administrator policy takes precedence. Deploy the file to the system's protected configuration location using a device manager such as Jamf Pro or Microsoft Intune.
 
 **Other features**
 
