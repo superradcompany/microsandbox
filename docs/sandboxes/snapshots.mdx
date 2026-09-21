@@ -588,13 +588,105 @@ Using the same host directory for the source and restored sandbox shares its fil
 
 <Accordion title="Advanced restore options">
 
-- **Reuse source bindings:** `--dangerously-inherit-resources` explicitly allows validated bindings from the source on the same host. Missing dependencies still cause restore to fail.
-- **Select a captured disk:** Use `-v /data` to restore a private named disk volume. Arbitrary external disk images are not converted to owned volumes.
-- **Allow missing resources:** `--allow-missing-resources` lets a full restore continue without an external filesystem or additional disk. Root and owned storage must still be complete. Access to missing resources returns `EIO`, which can disrupt applications or make filesystems read-only. Warnings remain visible with `--quiet`.
+- **Reuse source bindings:** Restore on the same host using the source's validated mounts. Missing dependencies still cause restore to fail.
+- **Select a captured disk:** Restore a private copy of a named disk volume. External disk images are not converted to owned volumes.
+- **Allow missing resources:** Continue without an external filesystem or additional disk. Root and owned storage must still be complete. Access to missing resources fails and may disrupt applications or make filesystems read-only.
 
-The SDK options for allowing missing resources are TypeScript `.allowMissingResources()`, Rust `.allow_missing_resources()`, Python `allow_missing_resources=True`, and Go `WithAllowMissingResources()`.
+Each example below restores a separate sandbox using one of these options:
 
-Allowing missing resources does not reuse source bindings or accept changed files in a supplied mapping; see [Validate mounts](#validate-mounts). Direct branching keeps its existing behavior for unavailable resources. Disk-only restore boots fresh rather than resuming open filesystem handles.
+<CodeGroup>
+```typescript TypeScript
+// Reuse source bindings.
+const inherited = await Sandbox.restore("worker:snap")
+    .name("inherited")
+    .dangerouslyInheritResources()
+    .restore();
+
+// Select a captured disk.
+const privateDisk = await Sandbox.restore("worker:snap")
+    .name("private-disk")
+    .volume("/data", v => v.captured())
+    .restore();
+
+// Allow missing resources.
+const partial = await Sandbox.restore("worker:snap")
+    .name("partial")
+    .allowMissingResources()
+    .restore();
+```
+
+```rust Rust
+// Reuse source bindings.
+let inherited = Sandbox::restore("worker:snap")
+    .name("inherited")
+    .dangerously_inherit_resources()
+    .restore()
+    .await?;
+
+// Select a captured disk.
+let private_disk = Sandbox::restore("worker:snap")
+    .name("private-disk")
+    .volume("/data", |v| v.captured())
+    .restore()
+    .await?;
+
+// Allow missing resources.
+let partial = Sandbox::restore("worker:snap")
+    .name("partial")
+    .allow_missing_resources()
+    .restore()
+    .await?;
+```
+
+```python Python
+# Reuse source bindings.
+inherited = await Sandbox.restore(
+    "worker:snap", name="inherited", dangerously_inherit_resources=True,
+)
+
+# Select a captured disk.
+private_disk = await Sandbox.restore(
+    "worker:snap", name="private-disk", captured_volumes=["/data"],
+)
+
+# Allow missing resources.
+partial = await Sandbox.restore(
+    "worker:snap", name="partial", allow_missing_resources=True,
+)
+```
+
+```go Go
+// Reuse source bindings.
+inherited, err := m.RestoreSandbox(ctx, "worker:snap", "inherited",
+    m.WithDangerouslyInheritResources())
+if err != nil { return err }
+
+// Select a captured disk.
+privateDisk, err := m.RestoreSandbox(ctx, "worker:snap", "private-disk",
+    m.WithRestoreConfig(m.RestoreConfig{CapturedVolumes: []string{"/data"}}))
+if err != nil { return err }
+
+// Allow missing resources.
+partial, err := m.RestoreSandbox(ctx, "worker:snap", "partial",
+    m.WithAllowMissingResources())
+if err != nil { return err }
+```
+
+```bash CLI
+# Reuse source bindings.
+msb snap restore worker:snap --name inherited --dangerously-inherit-resources
+
+# Select a captured disk.
+msb snap restore worker:snap --name private-disk -v /data
+
+# Allow missing resources.
+msb snap restore worker:snap --name partial --allow-missing-resources
+```
+</CodeGroup>
+
+Allowing missing resources does not reuse source bindings or accept changed files; see [Validate mounts](#validate-mounts). Warnings remain visible even when progress output is suppressed.
+
+Direct branching keeps its existing behavior for unavailable resources. Disk-only restore boots fresh rather than resuming open filesystem handles.
 
 </Accordion>
 
