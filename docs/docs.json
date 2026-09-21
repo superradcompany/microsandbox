@@ -359,6 +359,7 @@
                 "group": "September 2026",
                 "expanded": true,
                 "pages": [
+                  "changelog/2026-09-18",
                   "changelog/2026-09-11",
                   "changelog/2026-09-04"
                 ]
