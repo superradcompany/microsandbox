@@ -23,6 +23,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     ffi::{OsStr, OsString},
     fs::File,
+    future::Future,
     io::{Seek, SeekFrom, Write as IoWrite},
     path::{Path, PathBuf},
     process::Stdio,
@@ -1612,7 +1613,11 @@ pub(crate) async fn ensure_named_volumes(
     local: &LocalBackend,
     config: &SandboxConfig,
 ) -> MicrosandboxResult<EnsuredNamedVolumes> {
-    let locks = lock_named_volume_mounts(local, config).await?;
+    let locks = lock_named_volume_mounts(config, |name| async move {
+        lock_volume_name(local, &name).await
+    })
+    .await?;
+
     let mut created = Vec::new();
 
     if let Err(err) = ensure_named_volumes_inner(local, config, &mut created).await {
@@ -1753,10 +1758,13 @@ async fn rollback_created_named_volume_records(
     }
 }
 
-async fn lock_named_volume_mounts(
-    local: &LocalBackend,
+async fn lock_named_volume_mounts<Guard, Acquire>(
     config: &SandboxConfig,
-) -> MicrosandboxResult<Vec<File>> {
+    mut acquire: impl FnMut(String) -> Acquire,
+) -> MicrosandboxResult<Vec<Guard>>
+where
+    Acquire: Future<Output = MicrosandboxResult<Guard>>,
+{
     let mut names = BTreeSet::new();
     for mount in &config.spec.mounts {
         if let VolumeMount::Named { name, .. } = mount {
@@ -1767,7 +1775,7 @@ async fn lock_named_volume_mounts(
 
     let mut locks = Vec::with_capacity(names.len());
     for name in names {
-        locks.push(lock_volume_name(local, &name).await?);
+        locks.push(acquire(name).await?);
     }
     Ok(locks)
 }
@@ -5812,52 +5820,58 @@ mod tests {
 
     #[tokio::test]
     async fn named_volume_waiter_yields_and_cancellation_releases_partial_locks() {
-        use microsandbox_utils::process_lock::try_lock_exclusive;
+        use std::cell::RefCell;
 
-        let directory = tempfile::tempdir().unwrap();
-        let local = crate::test_support::local_backend_builder(directory.path().join("home"))
-            .build()
-            .await
-            .unwrap();
-        let winner = crate::volume::lock_volume_name(&local, "z-shared")
-            .await
-            .unwrap();
+        use tokio::sync::oneshot;
+
         let config = SandboxBuilder::new("waiter")
             .image("/tmp/rootfs")
             // Deliberately reverse the mount order: acquisition must still take a-first
             // before waiting for z-shared, and cancellation must release that partial set.
             .volume("/shared", |mount| mount.named("z-shared"))
             .volume("/first", |mount| mount.named("a-first"))
+            .volume("/first-again", |mount| mount.named("a-first"))
             .build()
             .await
             .unwrap();
-        let mut waiter = Box::pin(super::lock_named_volume_mounts(&local, &config));
+        // Dropping the sender reports guard release without OS locks that unrelated
+        // parallel tests can inherit between fork and exec.
+        let (first_guard, mut first_released) = oneshot::channel::<()>();
+        let mut first_guard = Some(first_guard);
+        let attempts = RefCell::new(Vec::new());
+        let mut waiter = Box::pin(super::lock_named_volume_mounts(&config, |name| {
+            attempts.borrow_mut().push(name.clone());
+            let guard = match name.as_str() {
+                "a-first" => Some(first_guard.take().expect("lock acquired only once")),
+                "z-shared" => None,
+                _ => panic!("unexpected volume: {name}"),
+            };
+            async move {
+                match guard {
+                    Some(guard) => Ok(guard),
+                    None => std::future::pending().await,
+                }
+            }
+        }));
+
+        // One poll must yield at the contended second lock while retaining the first.
         assert!(futures::poll!(waiter.as_mut()).is_pending());
-        let first_probe = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(local.volumes_dir().join(".locks/a-first.lock"))
-            .unwrap();
-        assert!(!try_lock_exclusive(&first_probe).unwrap());
-        // This is a current-thread runtime. The timer can fire only if the contended
-        // lock yields instead of blocking the task that also owns the winning create.
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(20), waiter.as_mut())
-                .await
-                .is_err()
+        assert_eq!(*attempts.borrow(), ["a-first", "z-shared"]);
+        assert_eq!(
+            first_released.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
         );
+
         drop(waiter);
-        assert!(try_lock_exclusive(&first_probe).unwrap());
-        drop(first_probe);
-        drop(winner);
-        let locks = tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            super::lock_named_volume_mounts(&local, &config),
-        )
-        .await
-        .expect("cancelled waiter retained a volume lock")
-        .unwrap();
-        assert_eq!(locks.len(), 2);
+        assert_eq!(
+            first_released.try_recv(),
+            Err(oneshot::error::TryRecvError::Closed)
+        );
+
+        let locks = super::lock_named_volume_mounts(&config, |name| std::future::ready(Ok(name)))
+            .await
+            .unwrap();
+        assert_eq!(locks, ["a-first", "z-shared"]);
     }
 
     #[tokio::test]

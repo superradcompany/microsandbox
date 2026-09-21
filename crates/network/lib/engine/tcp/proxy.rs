@@ -193,12 +193,28 @@ impl TcpProxy {
             outbound_proxy,
         } = self;
 
+        // Mirror the SYN-time policy walk so only flows that actually reached a
+        // hostname rule wait for client bytes. A domain rule elsewhere in the
+        // policy must not stall unrelated or server-first traffic.
+        let hostname_policy_deferred = match network_policy.evaluate_egress_with_source(
+            guest_dst,
+            Protocol::Tcp,
+            &shared,
+            HostnameSource::Deferred,
+        ) {
+            EgressEvaluation::Allow => false,
+            EgressEvaluation::DeferUntilHostname => true,
+            // Preserve the existing fail-closed path if a DNS-cache binding
+            // expires between the SYN evaluation and proxy startup.
+            EgressEvaluation::Deny => network_policy.has_domain_rules(),
+        };
+
         // Pre-connect peek is only for domain policy: the hostname has to be known
         // before we dial upstream so a Deny never opens a connection. Secrets do
         // *not* gate the connect, so they no longer force a peek here — that work is
         // deferred to `classify_first_flight` after the socket is open, where it can
         // run without stalling server-first protocols (see below).
-        let (mut initial_buf, sni) = if network_policy.has_domain_rules() {
+        let (initial_buf, sni) = if hostname_policy_deferred {
             peek_for_sni(&mut from_smoltcp, PEEK_BUF_SIZE, PEEK_BUDGET).await
         } else {
             (Vec::new(), None)
@@ -209,7 +225,7 @@ impl TcpProxy {
         // refines over-allow when the cache matched a shared CDN IP;
         // CacheOnly is the non-TLS fallback path so Domain rules still
         // gate plain HTTP / SSH / etc.
-        if network_policy.has_domain_rules() {
+        if hostname_policy_deferred {
             let source = match sni.as_deref() {
                 Some(name) => HostnameSource::Sni(name),
                 None => HostnameSource::CacheOnly,
@@ -258,29 +274,28 @@ impl TcpProxy {
             }
         }
 
-        // Peek for HTTP CONNECT before dialing upstream; hand off if detected.
-        if let Some(tls_state) = tls_state.clone() {
-            if initial_buf.is_empty() {
-                let (peeked, _) = peek_for_sni(&mut from_smoltcp, PEEK_BUF_SIZE, PEEK_BUDGET).await;
-                initial_buf = peeked;
-            }
-            if could_be_connect_request(&initial_buf) {
-                return handle_connect_tunnel(
-                    guest_dst,
-                    connect_target,
-                    initial_buf,
-                    from_smoltcp,
-                    to_smoltcp,
-                    shared,
-                    network_policy,
-                    tls_state,
-                    strict,
-                    proxy_connect,
-                    outbound_proxy,
-                    None,
-                )
-                .await;
-            }
+        // A policy-required peek may already have captured a CONNECT request.
+        // Otherwise the post-connect paths below classify it without delaying
+        // server-first protocols.
+        if let Some(tls_state) = tls_state.clone()
+            && !initial_buf.is_empty()
+            && could_be_connect_request(&initial_buf)
+        {
+            return handle_connect_tunnel(
+                guest_dst,
+                connect_target,
+                initial_buf,
+                from_smoltcp,
+                to_smoltcp,
+                shared,
+                network_policy,
+                tls_state,
+                strict,
+                proxy_connect,
+                outbound_proxy,
+                None,
+            )
+            .await;
         }
 
         // Connect upstream *before* finishing the secrets-side classification. A
@@ -321,8 +336,8 @@ impl TcpProxy {
         if let Some(tls_state) = tls_state.clone()
             && could_be_connect_request(&initial_buf)
         {
-            // The pre-connect CONNECT peek can miss a client whose first bytes arrive
-            // after we dial upstream. Once classify_first_flight has captured that
+            // A policy-required peek can miss a client whose first bytes arrive
+            // after we dial upstream. Once classify_first_flight has captured the
             // request, rejoin the already-open proxy socket and use the CONNECT path
             // so intercepted tunnels still get TLS substitution and policy checks.
             let proxy_stream = server_rx
@@ -1906,6 +1921,74 @@ mod tests {
             received
         });
         (addr, handle)
+    }
+
+    async fn assert_server_first_banner_is_immediate(
+        policy: NetworkPolicy,
+        tls_state: Option<Arc<TlsState>>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            stream.write_all(b"READY\n").await.unwrap();
+            let mut received = Vec::new();
+            stream.read_to_end(&mut received).await.unwrap();
+        });
+
+        let (from_tx, from_rx) = mpsc::channel::<Bytes>(8);
+        let (to_tx, mut to_rx) = mpsc::channel::<Bytes>(8);
+        spawn_tcp_proxy(
+            &tokio::runtime::Handle::current(),
+            addr,
+            addr,
+            from_rx,
+            to_tx,
+            Arc::new(SharedState::new(4)),
+            Arc::new(policy),
+            Arc::new(SecretsConfig::default()),
+            tls_state,
+            false,
+            Arc::new(ProxyConnectState::new()),
+            None,
+        );
+
+        let banner = tokio::time::timeout(Duration::from_secs(1), to_rx.recv())
+            .await
+            .expect("server-first banner was delayed by a pre-connect peek")
+            .expect("proxy closed before relaying the server-first banner");
+        assert_eq!(banner, b"READY\n"[..]);
+
+        drop(from_tx);
+        tokio::time::timeout(Duration::from_secs(7), server)
+            .await
+            .expect("proxy did not close the upstream connection")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn server_first_connection_skips_unrelated_domain_policy_peek() {
+        let policy = NetworkPolicy {
+            default_egress: Action::Allow,
+            default_ingress: Action::Allow,
+            rules: vec![allow_https("unused.example")],
+        };
+
+        assert_server_first_banner_is_immediate(policy, None).await;
+    }
+
+    #[tokio::test]
+    async fn server_first_connection_skips_eager_connect_peek() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let tls_state = Arc::new(
+            TlsState::new(
+                microsandbox_types::TlsConfig::default(),
+                crate::secrets::handle::SecretsHandle::new(SecretsConfig::default()),
+            )
+            .unwrap(),
+        );
+
+        assert_server_first_banner_is_immediate(NetworkPolicy::default(), Some(tls_state)).await;
     }
 
     async fn relay_through_proxy(
