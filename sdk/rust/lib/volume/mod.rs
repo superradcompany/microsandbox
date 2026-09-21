@@ -968,6 +968,56 @@ mod tests {
 
     use super::*;
 
+    #[cfg(feature = "local")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn named_volume_lock_contention_yields_to_executor() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        use microsandbox_utils::process_lock::unlock;
+
+        let directory = tempfile::tempdir().unwrap();
+        let local = crate::test_support::local_backend_builder(directory.path().join("home"))
+            .build()
+            .await
+            .unwrap();
+        let winner = lock_volume_name(&local, "shared").await.unwrap();
+        let (release_tx, release_rx) = mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            // Release even if a blocking acquisition stalls the executor, so the
+            // regression fails an assertion instead of hanging the test suite.
+            let released_by_test = release_rx.recv_timeout(Duration::from_secs(5)).is_ok();
+            // Closing alone can leave a lock held by an unrelated parallel test's
+            // pre-exec child. Explicit unlock releases it across inherited copies.
+            unlock(&winner).unwrap();
+            released_by_test
+        });
+
+        let mut waiter = Box::pin(lock_volume_name(&local, "shared"));
+        let stayed_pending = tokio::time::timeout(Duration::from_millis(20), waiter.as_mut())
+            .await
+            .is_err();
+
+        // Reaching this point while the holder is still locked proves the timer
+        // could run on the same executor as the contended acquisition.
+        let _ = release_tx.send(());
+        let released_by_test = holder.join().unwrap();
+        assert!(
+            released_by_test,
+            "lock acquisition blocked the executor until the watchdog fired"
+        );
+        assert!(
+            stayed_pending,
+            "contended acquisition returned before the holder unlocked"
+        );
+
+        let acquired = tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("waiter did not acquire the released lock")
+            .unwrap();
+        unlock(&acquired).unwrap();
+    }
+
     #[test]
     #[cfg(feature = "cloud")]
     fn cloud_managed_volume_reports_directory_storage_kind() {
