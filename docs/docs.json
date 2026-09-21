@@ -51,7 +51,6 @@
               "sandboxes/volumes",
               "sandboxes/ssh",
               "sandboxes/snapshots",
-              "sandboxes/snapshot-consistency",
               "sandboxes/tuning",
               "sandboxes/labels",
               "sandboxes/logs",

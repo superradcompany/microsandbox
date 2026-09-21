@@ -30,7 +30,7 @@ msb snap create ready --sandbox worker
 | `--dest-dir DIR` | Parent directory for local groups |
 | `-o`, `--output PATH` | Capture directly to an archive; conflicts with `--dest-dir` and does not accept `--group` |
 | `--full` | Capture disk, memory, and execution state from a running or paused source |
-| `--guest-flush` | Guest writeback policy: `auto` (default), `required`, or `skip`; see [guest flushing](/sandboxes/snapshot-consistency#guest-flushing) |
+| `--guest-flush` | Guest writeback policy: `auto` (default), `required`, or `skip`; see [guest flushing](/sandboxes/snapshots#guest-flushing) |
 | `--integrity` | Record content hashes for later verification |
 | `--label KEY=VALUE` | Attach a label; repeatable |
 | `--plain-tar` | Write uncompressed tar; requires `--output` |
@@ -51,7 +51,7 @@ msb snap create ready --sandbox worker -o ready.msb
 
 <span id="guest-filesystem-flush" />
 
-Guest flushing is shared by the CLI and SDKs. See [guest flushing](/sandboxes/snapshot-consistency#guest-flushing) for policies and examples.
+Guest flushing is shared by the CLI and SDKs. See [guest flushing](/sandboxes/snapshots#guest-flushing) for policies and examples.
 
 ## msb snap restore
 

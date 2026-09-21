@@ -19,7 +19,7 @@ Disk is the default. Full adds memory and execution state; there is no memory-on
 
 ## Disk snapshots
 
-Use disk snapshots for installed dependencies, prepared workspaces, and saved files. Local live captures flush guest filesystem writes by default; application buffers and transactions still need application-level coordination. Cloud requires a stopped or crashed source. See [guest flush options](/sandboxes/snapshot-consistency#guest-flushing) for paused sources and the unflushed `skip` policy.
+Use disk snapshots for installed dependencies, prepared workspaces, and saved files. Cloud requires a stopped or crashed source. See [guest flushing](#guest-flushing) for how pending writes are handled.
 
 <Steps>
 <Step title="Prepare">
@@ -332,7 +332,7 @@ The first restore prepares a local memory cache; later restores reuse it. No spe
 
 ### Restore disk only
 
-Boot from a full snapshot’s saved disk without resuming its processes. This allows different CPU and memory settings and needs no compatible memory codec.
+Boot a fresh VM from a full snapshot’s saved disk without resuming its processes. You can choose different CPU and memory settings.
 
 <CodeGroup>
 ```typescript TypeScript
@@ -370,13 +370,82 @@ msb snap restore worker:snap --name rebooted --disk-only
 ```
 </CodeGroup>
 
-Disk-only restore copies only the checkpoint's disk chain, creates a fresh writable qcow2 head, and performs an ordinary boot. It does not require the destination to support the checkpoint's memory or execution codec. The disk projection of a full snapshot may omit writes buffered in guest RAM unless capture used the `required` guest-flush policy; filesystem journal recovery may still run. Full restore preserves those buffers in RAM. Host disk flushes and durable snapshot publication remain enforced regardless of guest-flush policy. A tmpfs-root snapshot cannot restore disk-only.
+Snapshots with a tmpfs root cannot be restored disk-only.
 
 <a id="guest-filesystem-flush"></a>
 
-<Note>
-Keep the default flush policy for normal captures. If you plan to restore a full snapshot's disks without its memory, select the `required` guest-flush policy. This flushes filesystem caches, not application buffers or transactions. See [guest flush options](/sandboxes/snapshot-consistency#guest-flushing) for policy details and paused-sandbox requirements.
-</Note>
+### Guest flushing
+
+Guest flushing writes pending filesystem changes from memory to disk. It works the same way in the CLI and all SDKs, for snapshots, branching, and pausing.
+
+The default `auto` policy flushes running disk snapshots. Full snapshots and branches keep those changes in memory instead. Choose `required` if you plan to restore a full snapshot's disks without its memory:
+
+<CodeGroup>
+```typescript TypeScript
+import { Snapshot } from "microsandbox";
+
+const snapshot = await Snapshot.builder("ready")
+    .fromSandbox("worker")
+    .full()
+    .guestFlush("required")
+    .create();
+```
+
+```rust Rust
+use microsandbox::{snapshot::GuestFlush, Snapshot};
+
+let snapshot = Snapshot::builder("ready")
+    .from_sandbox("worker")
+    .full()
+    .guest_flush(GuestFlush::Required)
+    .create()
+    .await?;
+```
+
+```python Python
+from microsandbox import GuestFlush, Snapshot
+
+snapshot = await Snapshot.create(
+    "ready",
+    from_sandbox="worker",
+    full=True,
+    guest_flush=GuestFlush.REQUIRED,
+)
+```
+
+```go Go
+import m "github.com/superradcompany/microsandbox/sdk/go"
+
+snapshot, err := m.Snapshot.Create(ctx, m.SnapshotCreateOptions{
+    Name:        "ready",
+    FromSandbox: "worker",
+    Full:        true,
+    GuestFlush:  m.GuestFlushRequired,
+})
+if err != nil { return err }
+```
+
+```bash CLI
+msb snap create ready --sandbox worker --full --guest-flush required
+```
+</CodeGroup>
+
+Flushing does not save data still buffered by your application or commit database transactions. Save or commit that data before capturing the snapshot.
+
+<Accordion title="Advanced flush behavior">
+
+| Policy | Behavior |
+| --- | --- |
+| `auto` (default) | Flush before a running disk-only capture; no extra flush for full captures, branching, or pausing |
+| `required` | Require a successful flush before capture or pause |
+| `skip` | Skip guest flushing; disk-only snapshots may miss buffered writes and need filesystem recovery |
+
+- **Paused sandboxes:** Pause with `required` before taking a disk snapshot. Capture fails if the needed flush was not done before pausing; it never resumes the sandbox to flush.
+- **Stopped or crashed sandboxes:** `auto` and `skip` capture the saved disk state. `required` fails because no guest is running.
+- **Storage:** Flushing covers the root and captured block disks, including owned disks. It does not make tmpfs persistent. Host storage synchronization and snapshot durability remain enforced with every policy.
+- **Compatibility:** Older runtimes may reject the policy; restart the sandbox with an updated runtime. Cloud supports only `auto`.
+
+</Accordion>
 
 ## Branching
 

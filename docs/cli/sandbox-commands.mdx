@@ -327,7 +327,7 @@ msb pause devbox
 msb resume devbox
 ```
 
-`pause --guest-flush required` flushes captured persistent filesystems before pausing, so a later disk snapshot can reuse that boundary without resuming. The default `auto` and explicit `skip` omit optional writeback; mandatory storage barriers remain. An already-paused VM without the required flush fails rather than resuming implicitly. `resume` has no flush option. See [guest filesystem flush](/sandboxes/snapshot-consistency#guest-flushing).
+`pause --guest-flush required` flushes captured persistent filesystems before pausing, so a later disk snapshot can reuse that boundary without resuming. The default `auto` and explicit `skip` omit optional writeback; mandatory storage barriers remain. An already-paused VM without the required flush fails rather than resuming implicitly. `resume` has no flush option. See [guest filesystem flush](/sandboxes/snapshots#guest-flushing).
 
 <span id="msb-sandbox-branch" />
 
@@ -352,7 +352,7 @@ msb branch devbox --names worker-{1..10} # Bash/Zsh expand the names
 | --- | --- |
 | `-n`, `--name NAME` | One child name; conflicts with `--names` |
 | `--names NAME...` | Several child names from one capture |
-| `--guest-flush` | Guest writeback policy: `auto` (default), `required`, or `skip`; see [advanced guest flushing](/sandboxes/snapshot-consistency#guest-flushing) |
+| `--guest-flush` | Guest writeback policy: `auto` (default), `required`, or `skip`; see [advanced guest flushing](/sandboxes/snapshots#guest-flushing) |
 | `--integrity` | Record disk content hashes |
 | `-q`, `--quiet` | Suppress progress |
 
