@@ -82,7 +82,9 @@ def main():
             _, checks = diagnose(command, home, env)
             for label, expected in (("msb", expected_msb), ("libkrunfw", installed_firmware)):
                 state, value = checks[label]
-                if state != "✓" or Path(value).resolve(strict=True) != expected:
+                # Windows may report a verbatim (\\?\) path. Compare file identity,
+                # not spelling, so prefixes and equivalent symlinks are accepted.
+                if state != "✓" or not Path(value).samefile(expected):
                     raise RuntimeError(f"{command}: {label} did not resolve to {expected}")
 
         # Prove we inspect runtime discovery, not just a successful CLI launch.
