@@ -21,7 +21,7 @@
         "tags": [
           "Account"
         ],
-        "summary": "Get your profile",
+        "summary": "Get the current user",
         "operationId": "get_me",
         "responses": {
           "200": {
@@ -48,8 +48,8 @@
         "tags": [
           "Account"
         ],
-        "summary": "Delete your account",
-        "description": "Deletes the account's personal information, signs out active sessions, removes\norganization memberships, and revokes pending invitations sent by the user.\nAudit history is retained.\n\nRequires fresh credential proof: the current password (password-backed\naccounts) or a TOTP code (MFA-enabled accounts). At least one must be\nsupplied; both being valid is fine but a single matching proof is enough.\n\nReturns `409 Conflict` if the user is the sole owner of an organization -\nownership must be transferred first.",
+        "summary": "Delete the current user",
+        "description": "The user's PII (email, name, password hash, MFA secret, avatar) is cleared\nand the row is tombstoned with `deleted_at`. Sessions are invalidated, org\nmemberships removed, and pending invites issued by this user revoked. Audit\nevents are preserved.\n\nRequires fresh credential proof: the current password (password-backed\naccounts) or a TOTP code (MFA-enabled accounts). At least one must be\nsupplied; both being valid is fine but a single matching proof is enough.\n\nReturns `409 Conflict` if the user is the sole owner of an organization -\nownership must be transferred first.",
         "operationId": "delete_me",
         "requestBody": {
           "content": {
@@ -92,7 +92,7 @@
         "tags": [
           "Account"
         ],
-        "summary": "Update your profile",
+        "summary": "Update the current user",
         "operationId": "update_me",
         "requestBody": {
           "content": {
@@ -131,7 +131,7 @@
         "tags": [
           "Organization"
         ],
-        "summary": "List your organizations",
+        "summary": "List the current user's organizations",
         "operationId": "list_orgs",
         "responses": {
           "200": {
@@ -418,7 +418,7 @@
         "tags": [
           "Members"
         ],
-        "summary": "Remove a member",
+        "summary": "Remove an organization member",
         "operationId": "remove_member",
         "parameters": [
           {
@@ -475,7 +475,7 @@
         "tags": [
           "Members"
         ],
-        "summary": "Change a member's role",
+        "summary": "Change an organization member's role",
         "operationId": "update_member_role",
         "parameters": [
           {
@@ -541,7 +541,7 @@
         "tags": [
           "Invites"
         ],
-        "summary": "Accept an invite",
+        "summary": "Accept an organization invite",
         "operationId": "accept_invite",
         "parameters": [
           {
@@ -587,7 +587,7 @@
         "tags": [
           "Invites"
         ],
-        "summary": "Decline an invite",
+        "summary": "Decline an organization invite",
         "operationId": "decline_invite",
         "parameters": [
           {
@@ -633,7 +633,7 @@
         "tags": [
           "Invites"
         ],
-        "summary": "List pending invites",
+        "summary": "List pending organization invites",
         "operationId": "list_invites",
         "parameters": [
           {
@@ -677,7 +677,7 @@
         "tags": [
           "Invites"
         ],
-        "summary": "Invite a member",
+        "summary": "Invite an organization member",
         "operationId": "create_invite",
         "parameters": [
           {
@@ -736,7 +736,7 @@
         "tags": [
           "Invites"
         ],
-        "summary": "Cancel an invite",
+        "summary": "Cancel an organization invite",
         "operationId": "cancel_invite",
         "parameters": [
           {
@@ -996,7 +996,7 @@
         "tags": [
           "Credentials"
         ],
-        "summary": "List personal tokens",
+        "summary": "List personal access tokens",
         "description": "Returns metadata without token values.",
         "operationId": "list_pats",
         "responses": {
@@ -1022,6 +1022,50 @@
             "bearer": []
           }
         ]
+      },
+      "post": {
+        "tags": [
+          "Credentials"
+        ],
+        "summary": "Create a personal access token",
+        "description": "The token value is returned only once.",
+        "operationId": "create_pat",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreatePersonalAccessTokenRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "PAT created (raw token returned once)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreatePersonalAccessTokenResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "PATs cannot mint other PATs"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
       }
     },
     "/v1/users/me/pats/{id}": {
@@ -1029,7 +1073,7 @@
         "tags": [
           "Credentials"
         ],
-        "summary": "Revoke a personal token",
+        "summary": "Revoke a personal access token",
         "description": "Returns not found when the token is missing or already revoked.",
         "operationId": "revoke_pat",
         "parameters": [
@@ -1232,8 +1276,7 @@
         "tags": [
           "Sandboxes"
         ],
-        "summary": "Check sandbox name availability",
-        "description": "Check whether the sandbox slug is valid and available.",
+        "summary": "Check whether a sandbox slug is valid and available",
         "operationId": "check_slug",
         "parameters": [
           {
@@ -1282,8 +1325,7 @@
         "tags": [
           "Sandboxes"
         ],
-        "summary": "Suggest a sandbox name",
-        "description": "Generate an available sandbox slug.",
+        "summary": "Suggest an available sandbox slug",
         "operationId": "suggest_slug",
         "parameters": [
           {
@@ -2576,49 +2618,6 @@
         ]
       }
     },
-    "/v1/orgs/{slug}/volumes/default": {
-      "get": {
-        "tags": [
-          "Volumes"
-        ],
-        "summary": "Get the default volume",
-        "operationId": "get_default",
-        "parameters": [
-          {
-            "name": "slug",
-            "in": "path",
-            "description": "Organization slug",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Get the default volume",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/VolumeResponse"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Unauthorized"
-          },
-          "403": {
-            "description": "Insufficient permissions"
-          }
-        },
-        "security": [
-          {
-            "bearer": []
-          }
-        ]
-      }
-    },
     "/v1/orgs/{slug}/volumes/{id}": {
       "delete": {
         "tags": [
@@ -2739,736 +2738,6 @@
           },
           "409": {
             "description": "The host volume cannot be capped"
-          }
-        },
-        "security": [
-          {
-            "bearer": []
-          }
-        ]
-      }
-    },
-    "/v1/orgs/{slug}/volumes/{id}/files": {
-      "get": {
-        "tags": [
-          "Volumes"
-        ],
-        "summary": "List directory contents",
-        "operationId": "list_directory_contents",
-        "parameters": [
-          {
-            "name": "slug",
-            "in": "path",
-            "description": "Organization slug",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "id",
-            "in": "path",
-            "description": "Volume UUID",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          },
-          {
-            "name": "x-msb-file-path",
-            "in": "header",
-            "description": "URL-safe base64 encoded volume-relative UTF-8 path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "List directory contents",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/VolumeFileListResponse"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Invalid request"
-          },
-          "401": {
-            "description": "Unauthorized"
-          },
-          "403": {
-            "description": "Insufficient permissions"
-          },
-          "404": {
-            "description": "Volume or path not found"
-          },
-          "502": {
-            "description": "Volume filesystem unavailable"
-          }
-        },
-        "security": [
-          {
-            "bearer": []
-          }
-        ]
-      },
-      "delete": {
-        "tags": [
-          "Volumes"
-        ],
-        "summary": "Delete a file or directory",
-        "operationId": "remove",
-        "parameters": [
-          {
-            "name": "slug",
-            "in": "path",
-            "description": "Organization slug",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "id",
-            "in": "path",
-            "description": "Volume UUID",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          },
-          {
-            "name": "x-msb-file-path",
-            "in": "header",
-            "description": "URL-safe base64 encoded volume-relative UTF-8 path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "x-msb-file-recursive",
-            "in": "header",
-            "description": "Recursively remove a directory; defaults to false",
-            "required": false,
-            "schema": {
-              "type": [
-                "boolean",
-                "null"
-              ]
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Delete a file or directory",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/VolumeFileMutationResponse"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Invalid request"
-          },
-          "401": {
-            "description": "Unauthorized"
-          },
-          "403": {
-            "description": "Insufficient permissions"
-          },
-          "404": {
-            "description": "Volume or path not found"
-          },
-          "502": {
-            "description": "Volume filesystem unavailable"
-          }
-        },
-        "security": [
-          {
-            "bearer": []
-          }
-        ]
-      }
-    },
-    "/v1/orgs/{slug}/volumes/{id}/files/content": {
-      "get": {
-        "tags": [
-          "Volumes"
-        ],
-        "summary": "Read a file",
-        "operationId": "read",
-        "parameters": [
-          {
-            "name": "slug",
-            "in": "path",
-            "description": "Organization slug",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "id",
-            "in": "path",
-            "description": "Volume UUID",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          },
-          {
-            "name": "x-msb-file-path",
-            "in": "header",
-            "description": "URL-safe base64 encoded volume-relative UTF-8 path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Read a file",
-            "content": {
-              "application/octet-stream": {
-                "schema": {
-                  "$ref": "#/components/schemas/VolumeFileContent"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Invalid request"
-          },
-          "401": {
-            "description": "Unauthorized"
-          },
-          "403": {
-            "description": "Insufficient permissions"
-          },
-          "404": {
-            "description": "Volume or path not found"
-          },
-          "502": {
-            "description": "Volume filesystem unavailable"
-          }
-        },
-        "security": [
-          {
-            "bearer": []
-          }
-        ]
-      },
-      "put": {
-        "tags": [
-          "Volumes"
-        ],
-        "summary": "Write a file",
-        "operationId": "write",
-        "parameters": [
-          {
-            "name": "slug",
-            "in": "path",
-            "description": "Organization slug",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "id",
-            "in": "path",
-            "description": "Volume UUID",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          },
-          {
-            "name": "x-msb-file-path",
-            "in": "header",
-            "description": "URL-safe base64 encoded volume-relative UTF-8 path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/octet-stream": {
-              "schema": {
-                "$ref": "#/components/schemas/VolumeFileContent"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "Write a file",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/VolumeFileMutationResponse"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Invalid request"
-          },
-          "401": {
-            "description": "Unauthorized"
-          },
-          "403": {
-            "description": "Insufficient permissions"
-          },
-          "404": {
-            "description": "Volume or path not found"
-          },
-          "502": {
-            "description": "Volume filesystem unavailable"
-          }
-        },
-        "security": [
-          {
-            "bearer": []
-          }
-        ]
-      }
-    },
-    "/v1/orgs/{slug}/volumes/{id}/files/copy": {
-      "post": {
-        "tags": [
-          "Volumes"
-        ],
-        "summary": "Copy a file or directory",
-        "operationId": "copy",
-        "parameters": [
-          {
-            "name": "slug",
-            "in": "path",
-            "description": "Organization slug",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "id",
-            "in": "path",
-            "description": "Volume UUID",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/FileMoveRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "Copy a file or directory",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/VolumeFileMutationResponse"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Invalid request"
-          },
-          "401": {
-            "description": "Unauthorized"
-          },
-          "403": {
-            "description": "Insufficient permissions"
-          },
-          "404": {
-            "description": "Volume or path not found"
-          },
-          "502": {
-            "description": "Volume filesystem unavailable"
-          }
-        },
-        "security": [
-          {
-            "bearer": []
-          }
-        ]
-      }
-    },
-    "/v1/orgs/{slug}/volumes/{id}/files/exists": {
-      "get": {
-        "tags": [
-          "Volumes"
-        ],
-        "summary": "Check if a file exists",
-        "operationId": "exists",
-        "parameters": [
-          {
-            "name": "slug",
-            "in": "path",
-            "description": "Organization slug",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "id",
-            "in": "path",
-            "description": "Volume UUID",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          },
-          {
-            "name": "x-msb-file-path",
-            "in": "header",
-            "description": "URL-safe base64 encoded volume-relative UTF-8 path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Check if a file exists",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/VolumeFileExistsResponse"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Invalid request"
-          },
-          "401": {
-            "description": "Unauthorized"
-          },
-          "403": {
-            "description": "Insufficient permissions"
-          },
-          "404": {
-            "description": "Volume or path not found"
-          },
-          "502": {
-            "description": "Volume filesystem unavailable"
-          }
-        },
-        "security": [
-          {
-            "bearer": []
-          }
-        ]
-      },
-      "post": {
-        "tags": [
-          "Volumes"
-        ],
-        "summary": "Check if files exist",
-        "operationId": "exists_batch",
-        "parameters": [
-          {
-            "name": "slug",
-            "in": "path",
-            "description": "Organization slug",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "id",
-            "in": "path",
-            "description": "Volume UUID",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/FilePathsRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "Check if files exist",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/VolumeFileExistsBatchResponse"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Invalid request"
-          },
-          "401": {
-            "description": "Unauthorized"
-          },
-          "403": {
-            "description": "Insufficient permissions"
-          },
-          "404": {
-            "description": "Volume or path not found"
-          },
-          "502": {
-            "description": "Volume filesystem unavailable"
-          }
-        },
-        "security": [
-          {
-            "bearer": []
-          }
-        ]
-      }
-    },
-    "/v1/orgs/{slug}/volumes/{id}/files/mkdir": {
-      "post": {
-        "tags": [
-          "Volumes"
-        ],
-        "summary": "Create a directory",
-        "operationId": "mkdir",
-        "parameters": [
-          {
-            "name": "slug",
-            "in": "path",
-            "description": "Organization slug",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "id",
-            "in": "path",
-            "description": "Volume UUID",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/FilePathRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "Create a directory",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/VolumeFileMutationResponse"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Invalid request"
-          },
-          "401": {
-            "description": "Unauthorized"
-          },
-          "403": {
-            "description": "Insufficient permissions"
-          },
-          "404": {
-            "description": "Volume or path not found"
-          },
-          "502": {
-            "description": "Volume filesystem unavailable"
-          }
-        },
-        "security": [
-          {
-            "bearer": []
-          }
-        ]
-      }
-    },
-    "/v1/orgs/{slug}/volumes/{id}/files/rename": {
-      "post": {
-        "tags": [
-          "Volumes"
-        ],
-        "summary": "Move a file or directory",
-        "operationId": "rename",
-        "parameters": [
-          {
-            "name": "slug",
-            "in": "path",
-            "description": "Organization slug",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "id",
-            "in": "path",
-            "description": "Volume UUID",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/FileMoveRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "Move a file or directory",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/VolumeFileMutationResponse"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Invalid request"
-          },
-          "401": {
-            "description": "Unauthorized"
-          },
-          "403": {
-            "description": "Insufficient permissions"
-          },
-          "404": {
-            "description": "Volume or path not found"
-          },
-          "502": {
-            "description": "Volume filesystem unavailable"
-          }
-        },
-        "security": [
-          {
-            "bearer": []
-          }
-        ]
-      }
-    },
-    "/v1/orgs/{slug}/volumes/{id}/files/stat": {
-      "get": {
-        "tags": [
-          "Volumes"
-        ],
-        "summary": "Get file details",
-        "operationId": "stat",
-        "parameters": [
-          {
-            "name": "slug",
-            "in": "path",
-            "description": "Organization slug",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "id",
-            "in": "path",
-            "description": "Volume UUID",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          },
-          {
-            "name": "x-msb-file-path",
-            "in": "header",
-            "description": "URL-safe base64 encoded volume-relative UTF-8 path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Get file details",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/VolumeFileStatResponse"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Invalid request"
-          },
-          "401": {
-            "description": "Unauthorized"
-          },
-          "403": {
-            "description": "Insufficient permissions"
-          },
-          "404": {
-            "description": "Volume or path not found"
-          },
-          "502": {
-            "description": "Volume filesystem unavailable"
           }
         },
         "security": [
@@ -3662,8 +2931,7 @@
         "tags": [
           "Billing"
         ],
-        "summary": "Cancel the subscription",
-        "description": "Cancellation takes effect at the end of the billing period.",
+        "summary": "Cancel the subscription at the end of the billing period",
         "operationId": "cancel_subscription",
         "parameters": [
           {
@@ -5107,7 +4375,16 @@
               "integer",
               "null"
             ],
-            "description": "Max concurrent guest connections.",
+            "description": "Max concurrent TCP connections.",
+            "default": null,
+            "minimum": 0
+          },
+          "max_udp_connections": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Max concurrent UDP relay sessions. Omitted is unlimited for single-tenant and 1024 for multi-tenant; zero means unlimited.",
             "default": null,
             "minimum": 0
           },
@@ -5401,7 +4678,7 @@
             }
           }
         ],
-        "description": "Filesystem change applied before the sandbox starts. The type field selects the operation."
+        "description": "Rootfs patch applied before VM start. Twin of [`Patch`], internally tagged\nwith a snake_case `type` instead of the domain's external PascalCase tag."
       },
       "CloudPullPolicy": {
         "type": "string",
@@ -6310,7 +5587,7 @@
             }
           }
         ],
-        "description": "Persistent volume mounted at a path inside the sandbox."
+        "description": "Cloud volume mount. Internal-tagged mirror of the domain [`VolumeMount`];\nthe transient `create` field is not carried on the wire."
       },
       "CreateInviteRequest": {
         "type": "object",
@@ -6341,6 +5618,65 @@
           },
           "slug": {
             "type": "string"
+          }
+        }
+      },
+      "CreatePersonalAccessTokenRequest": {
+        "type": "object",
+        "description": "POST /v1/users/me/pats",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "expires_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "Optional ISO-8601 expiry. Omitted = no expiry."
+          },
+          "name": {
+            "type": "string",
+            "description": "Human-readable label for the token (e.g. \"macbook-cli\")."
+          }
+        }
+      },
+      "CreatePersonalAccessTokenResponse": {
+        "type": "object",
+        "description": "Returned to the caller once on creation - includes the full plaintext token.",
+        "required": [
+          "id",
+          "name",
+          "prefix",
+          "token",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "expires_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "prefix": {
+            "type": "string"
+          },
+          "token": {
+            "type": "string",
+            "description": "Raw bearer token in the form `msb_pat_<env>_<random>`. Surfaced once."
           }
         }
       },
@@ -6506,7 +5842,7 @@
             }
           }
         ],
-        "description": "Traffic destination matched by a network rule, such as an IP range or domain name."
+        "description": "Traffic destination filter for a [`Rule`].\n\nThe `Cidr`, `Domain`, and `DomainSuffix` leaves carry their canonical\nstring form (e.g. `\"10.0.0.0/8\"`, `\"example.com\"`); the local network\nengine re-parses and validates them into its richer internal types at\nload time."
       },
       "DestinationGroup": {
         "type": "string",
@@ -6726,48 +6062,6 @@
           "timestamp": {
             "type": "string",
             "format": "date-time"
-          }
-        }
-      },
-      "FileMoveRequest": {
-        "type": "object",
-        "required": [
-          "from",
-          "to"
-        ],
-        "properties": {
-          "from": {
-            "type": "string"
-          },
-          "to": {
-            "type": "string"
-          }
-        }
-      },
-      "FilePathRequest": {
-        "type": "object",
-        "required": [
-          "path"
-        ],
-        "properties": {
-          "path": {
-            "type": "string"
-          }
-        }
-      },
-      "FilePathsRequest": {
-        "type": "object",
-        "required": [
-          "paths"
-        ],
-        "properties": {
-          "paths": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            },
-            "description": "Volume-relative paths to check, at most 100 per request.",
-            "maxItems": 100
           }
         }
       },
@@ -7879,7 +7173,7 @@
       },
       "RegistryCredentialResponse": {
         "type": "object",
-        "description": "Registry credential metadata. Secret values are never returned.",
+        "description": "Registry credential metadata returned in list/upsert responses. Never includes\nthe secret or the internal vault path.",
         "required": [
           "id",
           "registry_host",
@@ -8356,6 +7650,13 @@
             ],
             "minimum": 0
           },
+          "max_udp_connections": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
           "policy": {
             "oneOf": [
               {
@@ -8423,7 +7724,7 @@
       },
       "SandboxResponse": {
         "type": "object",
-        "description": "Sandbox details and resolved configuration.",
+        "description": "The API view of a [`Sandbox`]: an explicit allowlist of user-facing fields.\nInternal columns (registry selection, sync bookkeeping, resolved refs) never\nappear; the resolved spec surfaces only as the curated [`SandboxSpecResponse`].",
         "required": [
           "id",
           "org_id",
@@ -8651,7 +7952,7 @@
       },
       "SandboxSpecResponse": {
         "type": "object",
-        "description": "Resolved sandbox configuration. Secret values are omitted.",
+        "description": "A curated, user-facing projection of a sandbox's resolved spec. Built from\n[`ResolvedSandboxSpec`]; omits every internal resolution (secret\nvalues/vault paths, volume ids).",
         "required": [
           "resources",
           "runtime",
@@ -9589,7 +8890,7 @@
       },
       "User": {
         "type": "object",
-        "description": "Registered user profile.",
+        "description": "An active registered human user.\n\nRepository methods returning this type exclude soft-deleted rows, so email\nis always present. Use [`UserRecord`] for lookups that include tombstones.",
         "required": [
           "id",
           "email",
@@ -9643,153 +8944,6 @@
           "pending_verification"
         ]
       },
-      "VolumeFileContent": {
-        "type": "string",
-        "format": "binary",
-        "description": "Raw bytes uploaded to or downloaded from a file."
-      },
-      "VolumeFileExistsBatchResponse": {
-        "type": "object",
-        "description": "Requested paths that exist in the volume.",
-        "required": [
-          "existing_paths"
-        ],
-        "properties": {
-          "existing_paths": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          }
-        }
-      },
-      "VolumeFileExistsResponse": {
-        "type": "object",
-        "description": "Whether the requested path exists.",
-        "required": [
-          "exists"
-        ],
-        "properties": {
-          "exists": {
-            "type": "boolean"
-          }
-        }
-      },
-      "VolumeFileInfo": {
-        "type": "object",
-        "description": "Metadata for a file or directory within a volume.",
-        "required": [
-          "path",
-          "kind",
-          "size",
-          "mode",
-          "uid",
-          "gid",
-          "readonly"
-        ],
-        "properties": {
-          "accessed_at": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "format": "date-time"
-          },
-          "created_at": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "format": "date-time"
-          },
-          "gid": {
-            "type": "integer",
-            "format": "int32",
-            "minimum": 0
-          },
-          "kind": {
-            "$ref": "#/components/schemas/VolumeFileKind"
-          },
-          "mode": {
-            "type": "integer",
-            "format": "int32",
-            "description": "Unix file mode bits.",
-            "minimum": 0
-          },
-          "modified_at": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "format": "date-time"
-          },
-          "path": {
-            "type": "string",
-            "description": "Volume-relative path."
-          },
-          "readonly": {
-            "type": "boolean"
-          },
-          "size": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Size in bytes.",
-            "minimum": 0
-          },
-          "uid": {
-            "type": "integer",
-            "format": "int32",
-            "minimum": 0
-          }
-        }
-      },
-      "VolumeFileKind": {
-        "type": "string",
-        "description": "Type of a volume entry.",
-        "enum": [
-          "file",
-          "directory"
-        ]
-      },
-      "VolumeFileListResponse": {
-        "type": "object",
-        "description": "Immediate entries in a directory.",
-        "required": [
-          "entries"
-        ],
-        "properties": {
-          "entries": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/VolumeFileInfo"
-            }
-          }
-        }
-      },
-      "VolumeFileMutationResponse": {
-        "type": "object",
-        "description": "Confirmation that a filesystem change succeeded.",
-        "required": [
-          "ok"
-        ],
-        "properties": {
-          "ok": {
-            "type": "boolean"
-          }
-        }
-      },
-      "VolumeFileStatResponse": {
-        "type": "object",
-        "description": "Metadata for the requested path.",
-        "required": [
-          "metadata"
-        ],
-        "properties": {
-          "metadata": {
-            "$ref": "#/components/schemas/VolumeFileInfo"
-          }
-        }
-      },
       "VolumeIdentity": {
         "type": "object",
         "description": "Minimal volume display info - the directory that turns the `volume_id`s in a\n[`StorageBreakdown`](crate::StorageBreakdown)'s rows into human labels. A\ndeleted volume's intervals outlive its row, so a breakdown may reference ids\nabsent from this directory; the client labels those as deleted.",
@@ -9812,7 +8966,7 @@
       },
       "VolumeKind": {
         "type": "string",
-        "description": "Volume role: the organization's shared host volume or a named managed volume.",
+        "description": "What kind of volume this is - its storage source / role. The host volume is\nthe org's single shared \"host disk\"; managed volumes are user-created, named,\nplatform-provisioned (JuiceFS over our object store). (A future `External`\nvariant - bring-your-own S3/GCS - is intentionally out of scope for now.)",
         "enum": [
           "host",
           "managed"
@@ -9853,7 +9007,7 @@
       },
       "VolumeResponse": {
         "type": "object",
-        "description": "Volume details and usage.",
+        "description": "Volume metadata returned in list/create responses. The GCS storage path is\nderived (not stored) and never exposed.",
         "required": [
           "id",
           "kind",
