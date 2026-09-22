@@ -15,6 +15,7 @@ on:
       - scripts/ci/publish-crates.py
       - scripts/ci/validate-release-artifacts.py
       - scripts/ci/test_validate_release_artifacts.py
+      - scripts/smoke/cli/runtime-discovery.py
       - sdk/node-ts/scripts/cloud-release-smoke.mts
       - sdk/node-ts/scripts/cloud-release-smoke.test.mts
       - scripts/ci/validate_linux_glibc.py

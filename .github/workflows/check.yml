@@ -318,6 +318,11 @@ jobs:
           cargo build --profile ci --no-default-features --features embed-binaries,net,ssh -p microsandbox-cli
           cp target/ci/msb build/msb
 
+      - name: Smoke test installed runtime discovery
+        run: |
+          python3 scripts/smoke/cli/runtime-discovery.py \
+            --msb build/msb --libkrunfw build/libkrunfw.so.${{ env.LIBKRUNFW_VERSION }}
+
       # Upload immediately. All KVM lanes can begin while independent quality
       # and cross-platform checks continue in parallel.
       - name: Upload runtime artifacts
@@ -696,6 +701,11 @@ jobs:
           cargo +stable build --profile ci --no-default-features --features embed-binaries,net,ssh -p microsandbox-cli --target ${{ matrix.rust_target }}
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Copy-Item "target\${{ matrix.rust_target }}\ci\msb.exe" build\msb.exe -Force
+
+      - name: Smoke test installed runtime discovery
+        if: matrix.component == 'CLI'
+        shell: pwsh
+        run: python scripts/smoke/cli/runtime-discovery.py --msb build/msb.exe --libkrunfw build/libkrunfw.dll
 
       - name: Build Go FFI cdylib
         if: matrix.component == 'Go'

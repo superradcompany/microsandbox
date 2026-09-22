@@ -345,6 +345,9 @@ fn runtime_in_home(config: &GlobalConfig) -> ResolvedRuntime {
 }
 
 fn adjacent_library(msb: &Path) -> Option<PathBuf> {
+    // Installers expose msb through symlinks (for example ~/.local/bin/msb).
+    // Discover the matching firmware beside the executable, not the launcher link.
+    let msb = msb.canonicalize().ok()?;
     let filename = microsandbox_utils::libkrunfw_filename(std::env::consts::OS);
     let parent = msb.parent()?;
     [
@@ -676,6 +679,60 @@ mod tests {
         fs::write(&runtime.msb_path, b"an older installed runtime").unwrap();
         fs::write(&runtime.libkrunfw_path, b"matching firmware").unwrap();
         (config, runtime.msb_path)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_executable_uses_target_firmware() {
+        let temp = tempfile::tempdir().unwrap();
+        let (config, msb) = pair_fixture(temp.path(), "runtime");
+        let library = runtime_in_home(&config).libkrunfw_path;
+        let link_dir = temp.path().join("local/bin");
+        fs::create_dir_all(&link_dir).unwrap();
+        let link = link_dir.join("msb");
+        // Cover the installer's command alias and relative symlink chains too.
+        std::os::unix::fs::symlink("msb", msb.with_file_name("microsandbox")).unwrap();
+        std::os::unix::fs::symlink("../../runtime/bin/microsandbox", &link).unwrap();
+        let unrelated = link_dir.join(microsandbox_utils::libkrunfw_filename(std::env::consts::OS));
+        fs::write(&unrelated, b"unrelated firmware").unwrap();
+
+        for flat_layout in [false, true] {
+            let expected = if flat_layout {
+                let adjacent = msb.parent().unwrap().join(library.file_name().unwrap());
+                fs::rename(&library, &adjacent).unwrap();
+                adjacent
+            } else {
+                library.clone()
+            };
+            let mut config = config.clone();
+            config.paths.msb = Some(link.clone());
+            let runtime = resolve_runtime(&config).unwrap();
+            assert_eq!(runtime.msb_path, link);
+            assert_eq!(
+                runtime.libkrunfw_path.canonicalize().unwrap(),
+                expected.canonicalize().unwrap()
+            );
+
+            // Explicit overrides still take precedence over inferred firmware.
+            config.paths.libkrunfw = Some(unrelated.clone());
+            assert_eq!(resolve_runtime(&config).unwrap().libkrunfw_path, unrelated);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_incomplete_runtime_does_not_fall_back_to_home() {
+        let temp = tempfile::tempdir().unwrap();
+        let (mut config, _) = pair_fixture(temp.path(), "home");
+        let (incomplete, msb) = pair_fixture(temp.path(), "incomplete");
+        fs::remove_file(runtime_in_home(&incomplete).libkrunfw_path).unwrap();
+        let link = temp.path().join("msb");
+        std::os::unix::fs::symlink(&msb, &link).unwrap();
+        config.paths.msb = Some(link);
+        assert!(matches!(
+            resolve_runtime(&config),
+            Err(MicrosandboxError::RuntimeIncomplete(_))
+        ));
     }
 
     #[test]
