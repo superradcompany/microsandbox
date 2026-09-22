@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/superradcompany/microsandbox/sdk/go/internal/ffi"
 )
@@ -198,6 +199,64 @@ func (h *SandboxHandle) Modify(ctx context.Context, opts ModifyOptions) (*Sandbo
 	return parseModificationPlan(out)
 }
 
+// ResizeStatus reads the current live CPU and memory resize status. It is
+// empty when the sandbox is not running.
+func (s *Sandbox) ResizeStatus(ctx context.Context) ([]ResourceResizeStatus, error) {
+	out, err := s.inner.ResizeStatus(ctx)
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	return parseResizeStatus(out)
+}
+
+// WaitUntilResized waits until every live resize reaches a terminal state.
+// There is no built-in deadline; cancel ctx to stop waiting.
+func (s *Sandbox) WaitUntilResized(ctx context.Context) ([]ResourceResizeStatus, error) {
+	out, err := s.inner.WaitUntilResized(ctx, 0)
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	return parseResizeStatus(out)
+}
+
+// WaitUntilResizedWithTimeout waits for live resizes to settle within
+// timeout. Expiry returns ErrResizeTimeout.
+func (s *Sandbox) WaitUntilResizedWithTimeout(ctx context.Context, timeout time.Duration) ([]ResourceResizeStatus, error) {
+	out, err := s.inner.WaitUntilResized(ctx, resizeTimeoutMillis(timeout))
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	return parseResizeStatus(out)
+}
+
+// ResizeStatus reads the current live CPU and memory resize status by name.
+func (h *SandboxHandle) ResizeStatus(ctx context.Context) ([]ResourceResizeStatus, error) {
+	out, err := ffi.ResizeStatusSandboxByName(ctx, h.name)
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	return parseResizeStatus(out)
+}
+
+// WaitUntilResized waits by name until every live resize reaches a terminal state.
+func (h *SandboxHandle) WaitUntilResized(ctx context.Context) ([]ResourceResizeStatus, error) {
+	out, err := ffi.WaitUntilResizedSandboxByName(ctx, h.name, 0)
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	return parseResizeStatus(out)
+}
+
+// WaitUntilResizedWithTimeout waits by name for live resizes to settle within
+// timeout. Expiry returns ErrResizeTimeout.
+func (h *SandboxHandle) WaitUntilResizedWithTimeout(ctx context.Context, timeout time.Duration) ([]ResourceResizeStatus, error) {
+	out, err := ffi.WaitUntilResizedSandboxByName(ctx, h.name, resizeTimeoutMillis(timeout))
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	return parseResizeStatus(out)
+}
+
 // modifyEnvVar mirrors the core EnvVar serde shape.
 type modifyEnvVar struct {
 	Key   string `json:"key"`
@@ -338,6 +397,22 @@ func parseModificationPlan(raw string) (*SandboxModificationPlan, error) {
 		return nil, fmt.Errorf("parse modification plan: %w", err)
 	}
 	return &plan, nil
+}
+
+func parseResizeStatus(raw string) ([]ResourceResizeStatus, error) {
+	var status []ResourceResizeStatus
+	if err := json.Unmarshal([]byte(raw), &status); err != nil {
+		return nil, fmt.Errorf("parse resize status: %w", err)
+	}
+	return status, nil
+}
+
+// resizeTimeoutMillis keeps sub-millisecond budgets bounded; 0 means no deadline natively.
+func resizeTimeoutMillis(timeout time.Duration) uint64 {
+	if timeout < time.Millisecond {
+		return 1
+	}
+	return uint64(timeout / time.Millisecond)
 }
 
 func sortedKeys[V any](m map[string]V) []string {

@@ -32,6 +32,7 @@ from microsandbox.types import (
     PullEventType,
     PullPolicy,
     RegistryAuth,
+    ResourceResizeStatus,
     Rlimit,
     RootDiskConfig,
     SandboxModificationPlan,
@@ -412,6 +413,10 @@ class Sandbox:
         policy: ModificationPolicy | None = None,
         dry_run: bool = False,
     ) -> SandboxModificationPlan: ...
+    async def resize_status(self) -> list[ResourceResizeStatus]: ...
+    async def wait_until_resized(
+        self, *, timeout: float | None = None
+    ) -> list[ResourceResizeStatus]: ...
     async def metrics_stream(self, interval: float = 1.0) -> MetricsStream: ...
     async def logs(
         self,
@@ -534,6 +539,10 @@ class SandboxHandle:
         policy: ModificationPolicy | None = None,
         dry_run: bool = False,
     ) -> SandboxModificationPlan: ...
+    async def resize_status(self) -> list[ResourceResizeStatus]: ...
+    async def wait_until_resized(
+        self, *, timeout: float | None = None
+    ) -> list[ResourceResizeStatus]: ...
     async def logs(
         self,
         tail: int | None = None,

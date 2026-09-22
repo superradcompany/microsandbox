@@ -944,6 +944,33 @@ impl PySandbox {
         })
     }
 
+    /// Read the current live CPU and memory resize status.
+    fn resize_status<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let sandbox = Self::clone_sandbox(&inner).await?;
+            resize_status_result_to_py(sandbox.resize_status().await)
+        })
+    }
+
+    /// Wait until every live resize reaches a terminal state.
+    #[pyo3(signature = (*, timeout = None))]
+    fn wait_until_resized<'py>(
+        &self,
+        py: Python<'py>,
+        timeout: Option<f64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let timeout = optional_duration(timeout)?;
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let sandbox = Self::clone_sandbox(&inner).await?;
+            resize_status_result_to_py(match timeout {
+                Some(timeout) => sandbox.wait_until_resized_with_timeout(timeout).await,
+                None => sandbox.wait_until_resized().await,
+            })
+        })
+    }
+
     //----------------------------------------------------------------------------------------------
     // Logs
     //----------------------------------------------------------------------------------------------
@@ -1656,6 +1683,14 @@ fn planned_change_to_py(py: Python<'_>, value: serde_json::Value) -> PyResult<Py
         dict.set_item(key, value)?;
     }
     Ok(dict.unbind().into())
+}
+
+pub(crate) fn resize_status_result_to_py(
+    status: microsandbox::MicrosandboxResult<Vec<microsandbox::sandbox::ResourceResizeStatus>>,
+) -> PyResult<PyObject> {
+    let value = serde_json::to_value(status.map_err(to_py_err)?)
+        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+    Python::with_gil(|py| resize_statuses_to_py(py, value))
 }
 
 fn resize_statuses_to_py(py: Python<'_>, value: serde_json::Value) -> PyResult<PyObject> {

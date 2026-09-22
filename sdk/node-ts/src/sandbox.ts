@@ -8,7 +8,10 @@ import {
 import {
   modificationPlanFromJson,
   modifyOptionsToNapi,
+  resizeStatusFromJson,
+  validateResizeTimeout,
   type ModifyOptions,
+  type ResourceResizeStatus,
   type SandboxModificationPlan,
 } from "./modify.js";
 import {
@@ -553,6 +556,24 @@ export class Sandbox implements AsyncDisposable {
       this.inner.modify(modifyOptionsToNapi(opts)),
     );
     return modificationPlanFromJson(raw);
+  }
+
+  /** Read the current live CPU and memory resize status. Empty when not running. */
+  async resizeStatus(): Promise<ResourceResizeStatus[]> {
+    return resizeStatusFromJson(
+      await withMappedErrors(() => this.inner.resizeStatus()),
+    );
+  }
+
+  /**
+   * Wait until every live resize reaches a terminal state. Omitted waits
+   * without a deadline; `0` checks once. Expiry throws `ResizeTimeoutError`.
+   */
+  async waitUntilResized(timeoutMs?: number): Promise<ResourceResizeStatus[]> {
+    validateResizeTimeout(timeoutMs);
+    return resizeStatusFromJson(
+      await withMappedErrors(() => this.inner.waitUntilResized(timeoutMs)),
+    );
   }
 
   /** Compact sealed root and owned-data disk layers without rewriting existing snapshots. */

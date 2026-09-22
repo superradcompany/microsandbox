@@ -171,6 +171,8 @@ const (
 	// ErrSandboxStopTimedOut indicates graceful shutdown was not observed
 	// before the SDK's deadline and may still complete asynchronously.
 	ErrSandboxStopTimedOut
+	// ErrResizeTimeout indicates a live resize did not converge before its deadline.
+	ErrResizeTimeout
 )
 
 func (k ErrorKind) String() string {
@@ -195,6 +197,8 @@ func (k ErrorKind) String() string {
 		return "ExecTimeout"
 	case ErrStopTimeout:
 		return "StopTimeout"
+	case ErrResizeTimeout:
+		return "ResizeTimeout"
 	case ErrExecFailed:
 		return "ExecFailed"
 	case ErrFilesystem:
@@ -390,6 +394,8 @@ func kindFromFFI(kind string) ErrorKind {
 		return ErrExecTimeout
 	case ffi.KindStopTimeout:
 		return ErrStopTimeout
+	case ffi.KindResizeTimeout:
+		return ErrResizeTimeout
 	case ffi.KindNoDefaultCommand:
 		return ErrNoDefaultCommand
 	case ffi.KindFilesystem:

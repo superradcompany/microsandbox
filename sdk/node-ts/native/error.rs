@@ -58,6 +58,7 @@ fn error_type_str(err: &MicrosandboxError) -> &'static str {
         MicrosandboxError::WindowsHostSetup(_) => "WindowsHostSetup",
         MicrosandboxError::ExecTimeout(_) => "ExecTimeout",
         MicrosandboxError::StopTimeout { .. } => "StopTimeout",
+        MicrosandboxError::ResizeTimeout { .. } => "ResizeTimeout",
         MicrosandboxError::ExecFailed(_) => "ExecFailed",
         MicrosandboxError::Terminal(_) => "Terminal",
         MicrosandboxError::SandboxFsOps(_) => "SandboxFsOps",

@@ -387,7 +387,8 @@ pub enum ResourceConvergenceState {
     /// The guest and VMM are still converging on the requested state.
     Converging,
 
-    /// Desired, actual, and enforced state match.
+    /// Desired, actual, and enforced state match; for a shrink, the guest has
+    /// released the capacity.
     Applied,
 
     /// The guest refused or failed to cooperate.
@@ -418,6 +419,17 @@ pub struct ResourceResizeStatus {
 }
 
 //--------------------------------------------------------------------------------------------------
+// Methods
+//--------------------------------------------------------------------------------------------------
+
+impl ResourceConvergenceState {
+    /// Whether the state can no longer change without a new request.
+    pub fn is_terminal(self) -> bool {
+        matches!(self, Self::Applied | Self::GuestRefused | Self::Failed)
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
 
@@ -430,5 +442,23 @@ impl std::fmt::Debug for SecretModificationPatch {
             .field("placeholder", &self.placeholder)
             .field("allowed_hosts", &self.allowed_hosts)
             .finish()
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn convergence_terminality() {
+        assert!(!ResourceConvergenceState::Accepted.is_terminal());
+        assert!(!ResourceConvergenceState::Converging.is_terminal());
+        assert!(ResourceConvergenceState::Applied.is_terminal());
+        assert!(ResourceConvergenceState::GuestRefused.is_terminal());
+        assert!(ResourceConvergenceState::Failed.is_terminal());
     }
 }

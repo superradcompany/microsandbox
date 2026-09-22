@@ -1,7 +1,10 @@
 //! `msb modify` command — plan and apply sandbox configuration changes.
 
+use std::time::Duration;
+
 use clap::Args;
 use console::style;
+use microsandbox::MicrosandboxError;
 use microsandbox::sandbox::{
     ChangeKind, ConfigPlannedChange, ModificationDisposition, ModificationWarning, PlannedChange,
     ResourceConvergenceState, ResourceKind, ResourceResizeStatus, Sandbox,
@@ -11,6 +14,12 @@ use microsandbox::sandbox::{
 
 use super::common;
 use crate::ui;
+
+//--------------------------------------------------------------------------------------------------
+// Constants
+//--------------------------------------------------------------------------------------------------
+
+const DEFAULT_RESIZE_WAIT_SECS: u64 = 60;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -114,6 +123,14 @@ pub struct ModifyArgs {
     #[arg(long)]
     pub restart: bool,
 
+    /// Wait for any pending live CPU and memory resize to converge in the guest.
+    #[arg(long, conflicts_with_all = ["dry_run", "next_start", "compact"])]
+    pub wait: bool,
+
+    /// Resize wait budget in seconds (default 60; 0 checks once).
+    #[arg(long, requires = "wait", value_name = "SECS")]
+    pub timeout: Option<u64>,
+
     /// Output format.
     #[arg(long, value_name = "FORMAT", value_parser = ["json"])]
     pub format: Option<String>,
@@ -195,14 +212,57 @@ pub async fn run(args: ModifyArgs) -> anyhow::Result<()> {
         return Err(ui::AlreadyRenderedError.into());
     }
 
-    let applied = builder.apply().await?;
+    let mut applied = builder.apply().await?;
+    let resized = !applied.resize_status.is_empty();
+    if args.wait {
+        let timeout = resize_wait_budget(args.timeout);
+        match handle.wait_until_resized_with_timeout(timeout).await {
+            Ok(status) => {
+                applied.resize_status = status;
+            }
+            Err(MicrosandboxError::ResizeTimeout {
+                timeout, status, ..
+            }) => {
+                applied.resize_status = status;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&applied)?);
+                } else {
+                    ui::success("Modified", &applied.sandbox);
+                    print_resize_status(&applied.resize_status);
+                    print_resize_timeout(&args.name, timeout);
+                }
+                return Err(ui::AlreadyRenderedError.into());
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
     if json {
         println!("{}", serde_json::to_string_pretty(&applied)?);
     } else {
-        print_apply_success(&applied);
+        print_apply_success(&applied, args.wait && resized);
     }
 
     Ok(())
+}
+
+fn resize_wait_budget(timeout_secs: Option<u64>) -> Duration {
+    Duration::from_secs(timeout_secs.unwrap_or(DEFAULT_RESIZE_WAIT_SECS))
+}
+
+fn print_resize_timeout(name: &str, timeout: Duration) {
+    let title = format!(
+        "resize did not converge within {}s",
+        timeout.as_secs_f64().round() as u64
+    );
+    let retry = format!("run `msb modify {name} --wait --timeout 600` to keep waiting");
+    ui::error_with_lines(
+        &title,
+        &[
+            ui::ErrorLine::Cause("the host already enforces the new limit"),
+            ui::ErrorLine::Hint("the guest may still converge"),
+            ui::ErrorLine::Hint(&retry),
+        ],
+    );
 }
 
 fn apply_resource_args(
@@ -406,16 +466,11 @@ fn apply_blocker(args: &ModifyArgs, plan: &SandboxModificationPlan) -> Option<Ap
         .into_iter()
         .map(BlockerLine::cause)
         .collect::<Vec<_>>();
+    let [restart, next_start] = restart_commands(args);
     lines.push(BlockerLine::hint("no changes were applied"));
+    lines.push(BlockerLine::hint(format!("run `{restart}` to apply now")));
     lines.push(BlockerLine::hint(format!(
-        "run `msb modify {} {}--restart` to apply now",
-        args.name,
-        replayed_args(args)
-    )));
-    lines.push(BlockerLine::hint(format!(
-        "run `msb modify {} {}--next-start` to save for the next start",
-        args.name,
-        replayed_args(args)
+        "run `{next_start}` to save for the next start"
     )));
 
     Some(ApplyBlocker {
@@ -485,7 +540,7 @@ fn print_apply_blocker(blocked: &ApplyBlocker) {
     ui::error_with_lines(&blocked.title, &lines);
 }
 
-fn print_apply_success(plan: &SandboxModificationPlan) {
+fn print_apply_success(plan: &SandboxModificationPlan, waited: bool) {
     if plan.policy == microsandbox::sandbox::ModificationPolicy::Restart
         && plan_has_restart_required(plan)
     {
@@ -501,6 +556,10 @@ fn print_apply_success(plan: &SandboxModificationPlan) {
         };
 
         ui::success("Modified", &target);
+    }
+
+    if waited && !plan.resize_status.is_empty() {
+        ui::success("Resized", &plan.sandbox);
     }
 
     if should_render_resize_status(&plan.resize_status) {
@@ -650,6 +709,14 @@ fn parse_key_value(entry: &str, flag: &str) -> anyhow::Result<(String, String)> 
         anyhow::bail!("{flag} key must not be empty");
     }
     Ok((key.to_string(), value.to_string()))
+}
+
+fn restart_commands(args: &ModifyArgs) -> [String; 2] {
+    let replayed = replayed_args(args);
+    [
+        format!("msb modify {} {replayed}--restart", args.name),
+        format!("msb modify {} {replayed}--next-start", args.name),
+    ]
 }
 
 fn replayed_args(args: &ModifyArgs) -> String {
@@ -802,6 +869,60 @@ mod tests {
             vec!["api", "--compact", "--restart"],
         ] {
             assert!(TestCli::try_parse_from(std::iter::once("msb").chain(flags)).is_err());
+        }
+    }
+
+    #[test]
+    fn parses_wait_and_timeout() {
+        let args = parse_modify_args(&["api", "--cpus", "4", "--wait", "--timeout", "30"]);
+        assert!(args.wait);
+        assert_eq!(args.timeout, Some(30));
+        assert_eq!(resize_wait_budget(args.timeout), Duration::from_secs(30));
+        assert_eq!(
+            resize_wait_budget(None),
+            Duration::from_secs(DEFAULT_RESIZE_WAIT_SECS)
+        );
+        assert_eq!(resize_wait_budget(Some(0)), Duration::ZERO);
+    }
+
+    #[test]
+    fn restart_hints_parse() {
+        let args = parse_modify_args(&[
+            "api",
+            "--cpus",
+            "4",
+            "--memory",
+            "4G",
+            "--label",
+            "tier=web",
+            "--secret",
+            "API_KEY@api.example.com",
+            "--wait",
+            "--timeout",
+            "30",
+        ]);
+        for command in restart_commands(&args) {
+            assert!(!command.contains("--wait") && !command.contains("--timeout"));
+            let parsed = TestCli::try_parse_from(command.split_whitespace().skip(1))
+                .unwrap_or_else(|error| panic!("`{command}` does not parse: {error}"));
+            assert_eq!(parsed.args.cpus, Some(4));
+        }
+    }
+
+    #[test]
+    fn timeout_requires_wait() {
+        let flags = ["msb", "api", "--cpus", "4", "--timeout", "30"];
+        assert!(TestCli::try_parse_from(flags).is_err());
+    }
+
+    #[test]
+    fn wait_conflicts_with_dry_run() {
+        for flags in [
+            vec!["msb", "api", "--cpus", "4", "--wait", "--dry-run"],
+            vec!["msb", "api", "--cpus", "4", "--wait", "--next-start"],
+            vec!["msb", "api", "--compact", "--wait"],
+        ] {
+            assert!(TestCli::try_parse_from(flags).is_err());
         }
     }
 

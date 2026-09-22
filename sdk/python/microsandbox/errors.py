@@ -80,6 +80,11 @@ class StopTimeoutError(MicrosandboxError, TimeoutError):
     code = "stop-timeout"
 
 
+class ResizeTimeoutError(MicrosandboxError, TimeoutError):
+    """A live resize did not converge within its budget; the host still enforces the target."""
+    code = "resize-timeout"
+
+
 class ExecFailedError(MicrosandboxError):
     """Command execution failed."""
     code = "exec-failed"

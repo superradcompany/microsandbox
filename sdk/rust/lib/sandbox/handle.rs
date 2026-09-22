@@ -22,7 +22,7 @@ use crate::{
 };
 
 #[cfg(feature = "local")]
-use super::SandboxModificationBuilder;
+use super::{ResourceResizeStatus, SandboxModificationBuilder};
 use super::{Sandbox, SandboxConfig, SandboxId, SandboxStatus, SandboxStopResult};
 
 //--------------------------------------------------------------------------------------------------
@@ -286,6 +286,31 @@ impl SandboxHandle {
     #[cfg(feature = "local")]
     pub fn modify(&self) -> SandboxModificationBuilder {
         SandboxModificationBuilder::new(self.backend.clone(), self.name.clone())
+    }
+
+    /// Read the current live CPU and memory resize status.
+    ///
+    /// Returns an empty list when the sandbox is not running.
+    #[cfg(feature = "local")]
+    pub async fn resize_status(&self) -> MicrosandboxResult<Vec<ResourceResizeStatus>> {
+        super::resize::resize_status(&self.backend, &self.name).await
+    }
+
+    /// Wait until every live resize reaches a terminal state.
+    #[cfg(feature = "local")]
+    pub async fn wait_until_resized(&self) -> MicrosandboxResult<Vec<ResourceResizeStatus>> {
+        super::resize::wait_until_resized(&self.backend, &self.name, None).await
+    }
+
+    /// Wait until every live resize reaches a terminal state within `timeout`.
+    ///
+    /// Expiry returns [`MicrosandboxError::ResizeTimeout`].
+    #[cfg(feature = "local")]
+    pub async fn wait_until_resized_with_timeout(
+        &self,
+        timeout: std::time::Duration,
+    ) -> MicrosandboxResult<Vec<ResourceResizeStatus>> {
+        super::resize::wait_until_resized(&self.backend, &self.name, Some(timeout)).await
     }
 
     /// Compact sealed backing layers of the root and sandbox-owned data disks, running or stopped.

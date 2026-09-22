@@ -618,6 +618,9 @@ let plan = sb.modify()
 for r in &plan.resize_status {
     println!("{:?}: requested {} · actual {} · {:?}", r.resource, r.requested, r.actual, r.state);
 }
+
+// Wait for the guest to converge.
+let settled = sb.wait_until_resized_with_timeout(Duration::from_secs(60)).await?;
 ```
 
 </Accordion>
@@ -797,6 +800,54 @@ Block until the sandbox is observed in a terminal non-running state. Owned local
     <div className="msb-param-desc">Observed terminal sandbox state.</div>
   </div>
 </div>
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">resize_status()</span>
+
+<Tooltip tip="Live resize is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+```rust
+async fn resize_status(&self) -> MicrosandboxResult<Vec<ResourceResizeStatus>>
+```
+
+Read the current live CPU and memory resize status without changing anything. Returns an empty list when the sandbox is not running.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#resourceresizestatus">Vec&lt;ResourceResizeStatus&gt;</a></div>
+    <div className="msb-param-desc">One entry per resizable resource.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">wait_until_resized()</span>
+
+<Tooltip tip="Live resize is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+```rust
+async fn wait_until_resized(&self) -> MicrosandboxResult<Vec<ResourceResizeStatus>>
+```
+
+Wait until every resource reaches `Applied`, `GuestRefused`, or `Failed`. There is no deadline; a guest that never converges keeps this waiting.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#resourceresizestatus">Vec&lt;ResourceResizeStatus&gt;</a></div>
+    <div className="msb-param-desc">The settled status.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">wait_until_resized_with_timeout()</span>
+
+<Tooltip tip="Live resize is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+```rust
+async fn wait_until_resized_with_timeout(&self, timeout: Duration) -> MicrosandboxResult<Vec<ResourceResizeStatus>>
+```
+
+Same as [`wait_until_resized()`](#sb-wait_until_resized) within `timeout`. `Duration::ZERO` checks once. Expiry returns `MicrosandboxError::ResizeTimeout` with the last observed status. The host still enforces the new limit.
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">wait_for_status()</span>
 
@@ -1999,7 +2050,7 @@ async fn apply(self) -> MicrosandboxResult<SandboxModificationPlan>
 
 Apply the changes. Live changes are made to the running sandbox first, and the new config is saved only after they succeed, so a failed apply leaves the old config in place. Changes for a stopped sandbox, or requested with [`next_start()`](#modification-next_start), are saved and take effect on the next start. With [`restart()`](#modification-restart), `apply()` stops and starts the sandbox so that restart-required changes take effect.
 
-A live CPU or memory resize can take a moment to settle. The returned plan's `resize_status` reports progress per resource; see [`ResourceResizeStatus`](#resourceresizestatus).
+A live CPU or memory resize can take a moment to settle. The returned plan's `resize_status` is a single reading taken when the change was accepted; see [`ResourceResizeStatus`](#resourceresizestatus). Use [`wait_until_resized()`](#sb-wait_until_resized) to wait for the guest.
 
 <p className="msb-label">Returns</p>
 
@@ -2762,6 +2813,35 @@ Block until terminal state is observed
 
 `Result<`[`SandboxStopResult`](#sandboxstopresult)`>`
 
+#### <span className="msb-recv">h.</span><span className="msb-hn">resize_status()</span>
+
+<Tooltip tip="Live resize is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+```rust
+resize_status()
+```
+
+Current live CPU and memory resize status. Empty when not running.
+
+<p className="msb-label">Returns</p>
+
+`Result<Vec<`[`ResourceResizeStatus`](#resourceresizestatus)`>>`
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">wait_until_resized()</span>
+
+<Tooltip tip="Live resize is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+```rust
+wait_until_resized()
+wait_until_resized_with_timeout(timeout)
+```
+
+Wait until every live resize is terminal. The timed variant returns `MicrosandboxError::ResizeTimeout` on expiry.
+
+<p className="msb-label">Returns</p>
+
+`Result<Vec<`[`ResourceResizeStatus`](#resourceresizestatus)`>>`
+
 ## SecretPatchBuilder
 
 <p className="msb-backref">Used by <a href="#sandboxmodificationbuilder-secret">secret()</a></p>
@@ -3120,9 +3200,11 @@ Runtime convergence status for a live resource resize. Enforcement applies immed
 |-------|-------------|
 | `Accepted` | The runtime accepted the request |
 | `Converging` | The guest and VMM are still converging on the requested state |
-| `Applied` | Desired, actual, and enforced state match |
+| `Applied` | Desired, actual, and enforced state match. A shrink is applied only after the guest releases the CPUs or memory |
 | `GuestRefused` | The guest would not cooperate; the host enforces the new limit anyway |
 | `Failed` | The resize failed |
+
+`Applied`, `GuestRefused`, and `Failed` are terminal; [`wait_until_resized()`](#sb-wait_until_resized) returns once every resource reaches one of them.
 
 ### SandboxStopResult
 

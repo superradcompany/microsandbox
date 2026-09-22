@@ -20,6 +20,7 @@ export type MicrosandboxErrorCode =
   | "nix"
   | "execTimeout"
   | "stopTimeout"
+  | "resizeTimeout"
   | "terminal"
   | "sandboxFsOps"
   | "imageNotFound"
@@ -172,6 +173,13 @@ export class ExecTimeoutError extends MicrosandboxError {
 export class StopTimeoutError extends MicrosandboxError {
   constructor(message: string, options?: ErrorOptions) {
     super("stopTimeout", message, options);
+  }
+}
+
+/** A live resize did not converge before its deadline; the host still enforces the target. */
+export class ResizeTimeoutError extends MicrosandboxError {
+  constructor(message: string, options?: ErrorOptions) {
+    super("resizeTimeout", message, options);
   }
 }
 
