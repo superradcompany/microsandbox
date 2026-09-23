@@ -13,6 +13,10 @@
     "light": "#BF84FE",
     "dark": "#BF84FE"
   },
+  "thumbnails": {
+    "appearance": "dark",
+    "background": "/images/og-background.png"
+  },
   "navbar": {
     "primary": {
       "type": "github",
@@ -31,7 +35,6 @@
               "getting-started/introduction",
               "getting-started/quickstart",
               "cloud/overview",
-              "getting-started/backends",
               "getting-started/agents"
             ]
           },
@@ -44,12 +47,11 @@
               "sandboxes/commands",
               "sandboxes/filesystem",
               "sandboxes/secrets",
-              "sandboxes/tuning",
-              "sandboxes/ssh",
-              "sandboxes/volumes",
               "images/overview",
-              "images/disk-images",
+              "sandboxes/volumes",
+              "sandboxes/ssh",
               "sandboxes/snapshots",
+              "sandboxes/tuning",
               "sandboxes/labels",
               "sandboxes/logs",
               "sandboxes/metrics",
@@ -61,19 +63,20 @@
             "icon": "network-wired",
             "pages": [
               "networking/overview",
-              "networking/host-sockets",
+              "networking/tls",
               "networking/dns",
-              "networking/tls"
+              "networking/outbound-proxy",
+              "networking/host-sockets"
             ]
           },
           {
-            "group": "Operations",
+            "group": "Deep dive",
             "icon": "gauge",
             "pages": [
+              "operations/backends",
+              "operations/configuration",
               "observability/msb-metrics",
-              "observability/deep-dive",
-              "sandboxes/optimization",
-              "sandboxes/cpu-placement"
+              "sandboxes/optimization"
             ]
           },
           {
@@ -105,23 +108,6 @@
             "icon": "code",
             "pages": [
               {
-                "group": "Rust",
-                "icon": "rust",
-                "expanded": false,
-                "pages": [
-                  "sdk/rust/sandbox",
-                  "sdk/rust/execution",
-                  "sdk/rust/ssh",
-                  "sdk/rust/filesystem",
-                  "sdk/rust/volumes",
-                  "sdk/rust/networking",
-                  "sdk/rust/secrets",
-                  "sdk/rust/snapshots",
-                  "sdk/rust/images",
-                  "sdk/rust/agent-client"
-                ]
-              },
-              {
                 "group": "TypeScript",
                 "icon": "js",
                 "expanded": false,
@@ -132,10 +118,31 @@
                   "sdk/typescript/filesystem",
                   "sdk/typescript/volumes",
                   "sdk/typescript/networking",
+                  "sdk/typescript/proxies",
+                  "sdk/typescript/vsock",
                   "sdk/typescript/secrets",
                   "sdk/typescript/snapshots",
                   "sdk/typescript/images",
                   "sdk/typescript/agent-client"
+                ]
+              },
+              {
+                "group": "Rust",
+                "icon": "rust",
+                "expanded": false,
+                "pages": [
+                  "sdk/rust/sandbox",
+                  "sdk/rust/execution",
+                  "sdk/rust/ssh",
+                  "sdk/rust/filesystem",
+                  "sdk/rust/volumes",
+                  "sdk/rust/networking",
+                  "sdk/rust/proxies",
+                  "sdk/rust/vsock",
+                  "sdk/rust/secrets",
+                  "sdk/rust/snapshots",
+                  "sdk/rust/images",
+                  "sdk/rust/agent-client"
                 ]
               },
               {
@@ -149,6 +156,8 @@
                   "sdk/python/filesystem",
                   "sdk/python/volumes",
                   "sdk/python/networking",
+                  "sdk/python/proxies",
+                  "sdk/python/vsock",
                   "sdk/python/secrets",
                   "sdk/python/snapshots",
                   "sdk/python/images",
@@ -167,9 +176,20 @@
                   "sdk/go/volumes",
                   "sdk/go/images",
                   "sdk/go/networking",
+                  "sdk/go/proxies",
+                  "sdk/go/vsock",
                   "sdk/go/secrets",
                   "sdk/go/snapshots",
                   "sdk/go/agent-client"
+                ]
+              },
+              {
+                "group": "Ruby",
+                "icon": "gem",
+                "expanded": false,
+                "pages": [
+                  "sdk/ruby/sandbox",
+                  "sdk/ruby/vsock"
                 ]
               }
             ]
@@ -181,9 +201,12 @@
               "cli/overview",
               "cli/configuration",
               "cli/sandbox-commands",
+              "cli/snapshot-commands",
               "cli/ssh-commands",
               "cli/volume-commands",
-              "cli/image-commands"
+              "cli/image-commands",
+              "cli/registry-commands",
+              "cli/management"
             ]
           }
         ]
@@ -199,97 +222,20 @@
             ]
           },
           {
-            "group": "Sandboxes",
-            "icon": "cube",
+            "group": "API keys",
+            "icon": "key",
             "openapi": {
               "source": "/api-reference/openapi.json",
               "directory": "api-reference/endpoints"
-            },
-            "pages": [
-              "POST /v1/sandboxes",
-              "GET /v1/sandboxes",
-              "GET /v1/sandboxes/{sandbox_id}",
-              "GET /v1/sandboxes/by-name/{name}",
-              "POST /v1/sandboxes/{sandbox_id}/start",
-              "POST /v1/sandboxes/by-name/{name}/start",
-              "POST /v1/sandboxes/{sandbox_id}/stop",
-              "POST /v1/sandboxes/by-name/{name}/stop",
-              "PATCH /v1/sandboxes/{sandbox_id}",
-              "DELETE /v1/sandboxes/{sandbox_id}",
-              "DELETE /v1/sandboxes/by-name/{name}"
-            ]
+            }
           },
           {
-            "group": "Volumes",
-            "icon": "hard-drive",
+            "group": "Personal tokens",
+            "icon": "user",
             "openapi": {
-              "source": "/api-reference/openapi.json",
-              "directory": "api-reference/endpoints"
-            },
-            "pages": [
-              "POST /v1/volumes",
-              "GET /v1/volumes",
-              "PATCH /v1/volumes/{id}",
-              "DELETE /v1/volumes/{id}"
-            ]
-          },
-          {
-            "group": "Quotas",
-            "icon": "gauge-high",
-            "openapi": {
-              "source": "/api-reference/openapi.json",
-              "directory": "api-reference/endpoints"
-            },
-            "pages": [
-              "GET /v1/quotas"
-            ]
-          },
-          {
-            "group": "Usage",
-            "icon": "chart-line",
-            "openapi": {
-              "source": "/api-reference/openapi.json",
-              "directory": "api-reference/endpoints"
-            },
-            "pages": [
-              "GET /v1/billing/usage",
-              "GET /v1/billing/usage/sandbox",
-              "GET /v1/billing/usage/storage"
-            ]
-          },
-          {
-            "group": "Audit events",
-            "icon": "clipboard-list",
-            "openapi": {
-              "source": "/api-reference/openapi.json",
-              "directory": "api-reference/endpoints"
-            },
-            "pages": [
-              "GET /v1/events",
-              "GET /v1/events/{event_id}"
-            ]
-          },
-          {
-            "group": "Organization",
-            "icon": "building",
-            "openapi": {
-              "source": "/api-reference/openapi.json",
-              "directory": "api-reference/endpoints"
-            },
-            "pages": [
-              "GET /v1/me/org"
-            ]
-          },
-          {
-            "group": "Members",
-            "icon": "users",
-            "openapi": {
-              "source": "/api-reference/openapi.json",
-              "directory": "api-reference/endpoints"
-            },
-            "pages": [
-              "GET /v1/members"
-            ]
+              "source": "/api-reference/openapi.personal.json",
+              "directory": "api-reference/personal"
+            }
           }
         ]
       },
@@ -297,10 +243,18 @@
         "tab": "Examples",
         "groups": [
           {
-            "group": "Agents",
+            "group": "Overview",
+            "icon": "flask",
+            "pages": [
+              "examples/overview"
+            ]
+          },
+          {
+            "group": "AI Agents",
             "icon": "robot",
             "pages": [
-              "examples/overview",
+              "examples/agents/claude-code",
+              "examples/agents/codex",
               "examples/agents/opencode",
               "examples/agents/openclaw",
               "examples/agents/goose",
@@ -310,55 +264,70 @@
             ]
           },
           {
-            "group": "CI/CD",
+            "group": "Dev Environments",
+            "icon": "code",
+            "pages": [
+              "examples/development/vscode",
+              "examples/development/code-server",
+              "examples/development/jupyterlab",
+              "examples/development/vnc-desktop"
+            ]
+          },
+          {
+            "group": "CI/CD & Jobs",
             "icon": "code-pull-request",
             "pages": [
               "examples/ci-cd/github-actions-runner",
               "examples/ci-cd/pr-checks",
               "examples/ci-cd/compose-tests",
-              "examples/ci-cd/preview-deploys"
-            ]
-          },
-          {
-            "group": "Docker",
-            "icon": "docker",
-            "pages": [
-              "examples/docker/docker-in-sandbox",
-              "examples/docker/docker",
-              "examples/docker/local-images"
-            ]
-          },
-          {
-            "group": "Sandbox Workflows",
-            "icon": "shield-halved",
-            "pages": [
-              "examples/sandboxing/warm-workers",
-              "examples/development/vnc-desktop",
-              "examples/guest/systemd-services",
-              "examples/development/code-server",
-              "examples/development/jupyterlab"
-            ]
-          },
-          {
-            "group": "Automation & Tooling",
-            "icon": "gears",
-            "pages": [
+              "examples/ci-cd/preview-deploys",
               "examples/automation/dependency-audits",
               "examples/automation/parallel-batch-jobs",
-              "examples/plugins/terraform",
+              "examples/sandboxing/warm-workers"
+            ]
+          },
+          {
+            "group": "Browser & Web Automation",
+            "icon": "globe",
+            "pages": [
+              "examples/browser-automation/browser-use",
               "examples/browser-automation/playwright",
-              "examples/web-automation/scrapy",
+              "examples/web-automation/scrapy"
+            ]
+          },
+          {
+            "group": "File Processing",
+            "icon": "file",
+            "pages": [
               "examples/file-processing/libreoffice-pdf",
               "examples/file-processing/ffmpeg"
             ]
           },
           {
-            "group": "Data & Observability",
+            "group": "Docker & System Tools",
+            "icon": "docker",
+            "pages": [
+              "examples/docker/docker-in-sandbox",
+              "examples/docker/docker",
+              "examples/docker/local-images",
+              "examples/guest/systemd-services",
+              "examples/plugins/terraform"
+            ]
+          },
+          {
+            "group": "Data & Storage",
             "icon": "database",
             "pages": [
+              "examples/data/juicefs-s3",
               "examples/data/postgresql",
               "examples/data/migration-rehearsal",
-              "examples/data/redis",
+              "examples/data/redis"
+            ]
+          },
+          {
+            "group": "Observability",
+            "icon": "chart-line",
+            "pages": [
               "examples/metrics-backends/grafana-cloud",
               "examples/metrics-backends/grafana-alloy",
               "examples/metrics-backends/otel-collector",
@@ -366,6 +335,14 @@
               "examples/metrics-backends/datadog"
             ]
           }
+        ]
+      },
+      {
+        "tab": "Enterprise",
+        "pages": [
+          "enterprise/managed-configuration",
+          "enterprise/corporate-networking",
+          "enterprise/offline-deployment"
         ]
       },
       {
@@ -387,9 +364,21 @@
             "icon": "clock-rotate-left",
             "pages": [
               {
-                "group": "August 2026",
+                "group": "September 2026",
                 "expanded": true,
                 "pages": [
+                  "changelog/2026-09-11",
+                  "changelog/2026-09-04"
+                ]
+              },
+              {
+                "group": "August 2026",
+                "expanded": false,
+                "pages": [
+                  "changelog/2026-08-28",
+                  "changelog/2026-08-26",
+                  "changelog/2026-08-21",
+                  "changelog/2026-08-14",
                   "changelog/2026-08-07"
                 ]
               },
@@ -442,8 +431,28 @@
   },
   "redirects": [
     {
+      "source": "/getting-started/backends",
+      "destination": "/operations/backends"
+    },
+    {
+      "source": "/operations/backend-selection",
+      "destination": "/operations/backends"
+    },
+    {
+      "source": "/observability/deep-dive",
+      "destination": "/observability/msb-metrics#metrics"
+    },
+    {
       "source": "/optimization/overview",
       "destination": "/sandboxes/optimization"
+    },
+    {
+      "source": "/sandboxes/cpu-placement",
+      "destination": "/sandboxes/optimization#cpu"
+    },
+    {
+      "source": "/images/disk-images",
+      "destination": "/images/overview#disk-images"
     },
     {
       "source": "/networking/vsock",
@@ -470,6 +479,10 @@
       "destination": "/examples/:slug*"
     },
     {
+      "source": "/examples/data/juicefs-r2",
+      "destination": "/examples/data/juicefs-s3"
+    },
+    {
       "source": "/cloud/compatibility",
       "destination": "/cloud/overview#compatibility"
     }
@@ -484,6 +497,18 @@
     "default": "system"
   },
   "description": "Easy, fast microVMs for untrusted workloads, on your machine or in the cloud",
+  "seo": {
+    "organization": {
+      "id": "https://microsandbox.dev/#organization",
+      "name": "microsandbox",
+      "url": "https://microsandbox.dev",
+      "sameAs": [
+        "https://github.com/superradcompany/microsandbox",
+        "https://www.linkedin.com/company/superradcompany",
+        "https://x.com/microsandbox"
+      ]
+    }
+  },
   "footer": {
     "socials": {
       "github": "https://github.com/superradcompany/microsandbox",

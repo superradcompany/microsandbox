@@ -1,0 +1,107 @@
+---
+title: Using with VS Code
+sidebarTitle: VS Code
+description: Edit files and run tools in a sandbox with VS Code Remote-SSH
+icon: "code"
+---
+
+Connect VS Code to a local or cloud sandbox over SSH. Your files, terminal, and remote extensions run inside the sandbox.
+
+Before you start, install [VS Code Remote-SSH](https://code.visualstudio.com/docs/remote/ssh) and have a running sandbox with an image that meets [VS Code's Linux requirements](https://code.visualstudio.com/docs/remote/linux). Alpine is not supported by Remote-SSH.
+
+## Connect to your sandbox
+
+<Steps>
+<Step title="Set up SSH">
+
+Run these commands on your host. The examples use `~/.ssh/id_ed25519`; use your own key path if different. If you need a key, create one with `ssh-keygen -t ed25519`.
+
+<Tabs>
+<Tab title="Cloud">
+
+Add your public key to the sandbox's **SSH keys** page in the dashboard, or use an existing organization SSH key. Copy the sandbox's SSH command, for example:
+
+```bash
+ssh crimson-summit-7fa1@msb.run
+```
+
+Add this entry to `~/.ssh/config`, replacing `crimson-summit-7fa1` with your sandbox's slug:
+
+```sshconfig
+Host devbox.msb
+  HostName msb.run
+  User crimson-summit-7fa1
+  IdentityFile ~/.ssh/id_ed25519
+  IdentitiesOnly yes
+```
+
+</Tab>
+<Tab title="Local">
+
+Authorize your public key and serve your sandbox, replacing `devbox` with its name:
+
+```bash
+msb ssh authorize --file ~/.ssh/id_ed25519.pub
+msb ssh serve devbox
+```
+
+Leave that terminal running. Add this entry to `~/.ssh/config`:
+
+```sshconfig
+Host devbox.msb
+  HostName 127.0.0.1
+  Port 2222
+  User root
+  IdentityFile ~/.ssh/id_ed25519
+  IdentitiesOnly yes
+```
+
+</Tab>
+</Tabs>
+
+In another host terminal, run `ssh devbox.msb`. On first connection, verify the host key and type `yes` to trust it. Once connected, run `exit`.
+
+</Step>
+<Step title="Open VS Code">
+
+1. Open the Command Palette and select **Remote-SSH: Connect to Host...**.
+2. Select **devbox.msb**, then **Linux** if prompted.
+3. Wait for setup to finish, then use **File > Open Folder...** to open your project inside the sandbox.
+
+Clone or copy your project into the sandbox first; connecting does not copy host files. Use the integrated terminal for commands and the **Ports** view to access apps running in the sandbox.
+
+</Step>
+</Steps>
+
+## Troubleshooting
+
+<AccordionGroup>
+<Accordion title="SSH will not connect">
+
+Check **View > Output > Remote - SSH** for the error. Confirm that the private key in `IdentityFile` matches an authorized public key. For cloud, check the sandbox slug and dashboard SSH keys. For local, keep `msb ssh serve` running and check that its port matches your SSH configuration.
+
+Leave **Remote.SSH: Remote Server Listen On Socket** disabled; use TCP forwarding.
+
+</Accordion>
+<Accordion title="Host key changed or forwarding disabled">
+
+For local sandboxes, serving a different sandbox on the same port can cause `MitmPortForwardingDisabled`. After verifying that the key change is expected, remove the old entry on your host:
+
+```bash
+ssh-keygen -R '[127.0.0.1]:2222'
+ssh devbox.msb
+```
+
+Verify and accept the new key, then reconnect in VS Code. This command applies to the local configuration above. Investigate unexpected key changes; do not disable host-key checking.
+
+</Accordion>
+<Accordion title="VS Code Server or extensions fail">
+
+Check **Remote - SSH** and **Log (Remote Extension Host)** in the Output panel. Verify the image's [libraries and architecture](https://code.visualstudio.com/docs/remote/linux), available memory, disk space, and download access.
+
+If the terminal works but extensions fail, disable remote extensions and re-enable them one at a time. Install missing guest libraries or a compatible extension build; increase memory if logs show an out-of-memory kill.
+
+</Accordion>
+</AccordionGroup>
+
+See [SSH](/sandboxes/ssh) for forwarding, custom ports, and [idle timeouts](/sandboxes/ssh#inactivity-timeout).

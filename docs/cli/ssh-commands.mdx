@@ -20,7 +20,7 @@ msb ssh --name serve -- uptime
 | Argument | Description |
 |----------|-------------|
 | `sandbox` | Sandbox name, up to 128 UTF-8 bytes |
-| `--name NAME` | Explicit sandbox name, up to 128 UTF-8 bytes; useful when the name collides with `serve`, `authorize`, or `help` |
+| `-n`, `--name NAME` | Explicit sandbox name, up to 128 UTF-8 bytes; useful when the name collides with `serve`, `authorize`, or `help` |
 | `--inactivity-timeout DURATION` | Disconnect after this much SSH inactivity; accepts values such as `30s`, `10m`, or `1h`. Use `0` to disable |
 | `--no-inactivity-timeout` | Disable the SSH inactivity timeout |
 | `-- COMMAND...` | Remote command to run through the sandbox shell |
@@ -58,7 +58,7 @@ msb ssh serve devbox --stdio
 | Flag | Description |
 |------|-------------|
 | `--host HOST` | Listener host. Defaults to `127.0.0.1` |
-| `--port PORT` | Listener port. Defaults to `2222` |
+| `-p`, `--port PORT` | Listener port. Defaults to `2222` |
 | `--stdio` | Serve one SSH transport over stdin/stdout for OpenSSH `ProxyCommand` |
 | `--inactivity-timeout DURATION` | Disconnect each connection after this much SSH inactivity. Use `0` to disable |
 | `--no-inactivity-timeout` | Disable the SSH inactivity timeout |
@@ -84,22 +84,13 @@ Host devbox.msb
 
 ## msb ssh connect
 
-Explicit subcommand form for native SSH client sessions.
+Explicit form of [`msb ssh`](#msb-ssh), with the same arguments and options.
 
 ```bash
 msb ssh connect devbox
-msb ssh connect devbox -- uname -a
 ```
 
-| Argument | Description |
-|----------|-------------|
-| `sandbox` | Sandbox name, up to 128 UTF-8 bytes |
-| `--name NAME` | Explicit sandbox name, up to 128 UTF-8 bytes |
-| `--inactivity-timeout DURATION` | Disconnect after this much SSH inactivity. Use `0` to disable |
-| `--no-inactivity-timeout` | Disable the SSH inactivity timeout |
-| `-- COMMAND...` | Remote command to run through the sandbox shell |
-
-All SSH commands inherit `ssh.inactivity_timeout_secs` from the global configuration when neither timeout flag is present. The built-in default is 10 minutes.
+All SSH commands inherit `ssh.inactivity_timeout_secs` from user configuration when neither timeout flag is present. The built-in default is 10 minutes. A [managed timeout](/configuration#ssh) takes precedence over both flags, including `--no-inactivity-timeout`, for local and cloud sessions.
 
 ## SSH state
 

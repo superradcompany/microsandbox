@@ -1,0 +1,30 @@
+---
+title: "Week of August 26, 2026"
+sidebarTitle: "Week of the 26th"
+description: "Reuse named sandboxes safely across every SDK."
+icon: "bolt"
+---
+
+## New features
+
+**Reuse named sandboxes**
+
+Every SDK now has a connect-or-create operation for reusable sandbox names: `connect_or_create` in Rust, Python, and Ruby, `connectOrCreate` in TypeScript, and `ConnectOrCreateSandbox` in Go. It connects when the sandbox is running, starts it when it is stopped or crashed, and creates it only when the name is unused. Existing sandboxes keep their saved configuration.
+
+```python
+sb = await Sandbox.connect_or_create(
+    "worker",
+    image="python",
+    memory=1024,
+)
+```
+
+Metadata handles also gain `connect_or_start` and its language-specific equivalents, along with methods for waiting on a state, restarting, and stopping and removing a sandbox. See [Reuse or create a named sandbox](/sandboxes/lifecycle#reuse-or-create-a-named-sandbox).
+
+The SDK references show the exact method names for Rust, TypeScript, Python, Go, and Ruby.
+
+**Handles stay attached to one sandbox**
+
+Live sandboxes and metadata handles now expose a stable ID. Lifecycle calls use that ID, so removing a sandbox and recreating its name cannot redirect an old handle to the replacement. Rust, TypeScript, Python, and Go return typed replacement errors; Ruby reports the same refusal through `Microsandbox::Error`.
+
+See [Names, handles, and concurrent callers](/sandboxes/lifecycle#names-handles-and-concurrent-callers) and [Error handling](/sdk/errors#when-a-sandbox-object-is-stale) for details.

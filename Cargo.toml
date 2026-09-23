@@ -10,6 +10,8 @@ members = [
     "crates/metrics",
     "crates/metrics-collector",
     "packages/agent-client/rust",
+    "packages/control-client/rust",
+    "packages/protocol-client/rust",
     "packages/microsandbox-types/macros",
     "packages/microsandbox-types/rust",
     "sdk/rust",
@@ -24,6 +26,7 @@ members = [
     "examples/rust/cloud-backend",
     "examples/rust/fs-read-stream",
     "examples/rust/init-handoff",
+    "examples/rust/lifecycle-convergence",
     "examples/rust/logs-read",
     "examples/rust/metrics-stream",
     "examples/rust/net-basic",
@@ -49,7 +52,7 @@ members = [
 [workspace.package]
 authors = ["Super Rad Company <development@superrad.company>"]
 repository = "https://github.com/superradcompany/microsandbox"
-version = "0.6.15"
+version = "0.7.2"
 license = "Apache-2.0"
 edition = "2024"
 
@@ -76,22 +79,25 @@ strip = false
 # Exact (`=`) pins: these crates share private, unstable APIs across patch
 # releases, so every published version must resolve its siblings to the same
 # version. Caret would let an older release pull newer siblings and break.
-microsandbox = { version = "=0.6.15", path = "sdk/rust", default-features = false }
-microsandbox-agent-client = { version = "=0.6.15", path = "packages/agent-client/rust" }
-microsandbox-db = { version = "=0.6.15", path = "crates/db" }
-microsandbox-filesystem = { version = "=0.6.15", path = "crates/filesystem", default-features = false }
-microsandbox-image = { version = "=0.6.15", path = "crates/image" }
-microsandbox-metrics = { version = "=0.6.15", path = "crates/metrics" }
-microsandbox-types-macros = { version = "=0.6.15", path = "packages/microsandbox-types/macros" }
-microsandbox-types = { version = "=0.6.15", path = "packages/microsandbox-types/rust" }
-microsandbox-migration = { version = "=0.6.15", path = "crates/migration" }
-microsandbox-network = { version = "=0.6.15", path = "crates/network" }
-microsandbox-protocol = { version = "=0.6.15", path = "crates/protocol" }
-microsandbox-runtime = { version = "=0.6.15", path = "crates/runtime", default-features = false }
-microsandbox-utils = { version = "=0.6.15", path = "crates/utils" }
-microsandbox-vsock = { version = "=0.6.15", path = "crates/vsock" }
-msb_krun = "=0.1.32"
-msb_krun_utils = "=0.1.32"
+microsandbox = { version = "=0.7.2", path = "sdk/rust", default-features = false }
+microsandbox-agent-client = { version = "=0.7.2", path = "packages/agent-client/rust" }
+microsandbox-control-client = { version = "=0.7.2", path = "packages/control-client/rust" }
+microsandbox-protocol-client = { version = "=0.7.2", path = "packages/protocol-client/rust" }
+microsandbox-db = { version = "=0.7.2", path = "crates/db" }
+microsandbox-filesystem = { version = "=0.7.2", path = "crates/filesystem", default-features = false }
+microsandbox-image = { version = "=0.7.2", path = "crates/image" }
+microsandbox-metrics = { version = "=0.7.2", path = "crates/metrics" }
+microsandbox-types-macros = { version = "=0.7.2", path = "packages/microsandbox-types/macros" }
+microsandbox-types = { version = "=0.7.2", path = "packages/microsandbox-types/rust" }
+microsandbox-migration = { version = "=0.7.2", path = "crates/migration" }
+microsandbox-network = { version = "=0.7.2", path = "crates/network", default-features = false }
+microsandbox-protocol = { version = "=0.7.2", path = "crates/protocol" }
+microsandbox-runtime = { version = "=0.7.2", path = "crates/runtime", default-features = false }
+microsandbox-utils = { version = "=0.7.2", path = "crates/utils" }
+microsandbox-vsock = { version = "=0.7.2", path = "crates/vsock" }
+# Keep the inherited-baseline API and its runtime types on the same published release.
+msb_krun = "=0.1.39"
+msb_krun_utils = "=0.1.39"
 test-macros = { path = "crates/testing/macros" }
 test-utils = { path = "crates/testing/utils" }
 
@@ -106,12 +112,13 @@ cap-primitives = "4.0.2"
 cap-std = "4.0.2"
 chrono = { version = "0.4", features = ["serde"] }
 ciborium = "0.2"
+ciborium-ll = "0.2"
 clap = { version = "4.6", features = ["color", "derive"] }
 clap_complete = "4.6"
 console = "0.16"
 crossbeam-queue = "0.3"
 crossterm = { version = "0.29.0", features = ["events"] }
-dirs = "6.0"
+dirs = "7.0"
 etherparse = "0.19"
 flate2 = { version = "1.0", features = ["zlib-rs"] }
 futures = "0.3"
@@ -120,9 +127,11 @@ hex = "0.4"
 hickory-net = "0.26.1"
 hickory-proto = "0.26.1"
 httlib-hpack = "0.1.3"
+imago = { package = "msb-imago", version = "0.1.7" }
 indicatif = "0.18"
 ipnetwork = { version = "0.21.0", features = ["serde"] }
 libc = "0.2"
+memmap2 = "0.9"
 nix = "0.31"
 notify = "8"
 oci-client = "0.17"
@@ -132,13 +141,16 @@ rayon = "1.11"
 reflink-copy = "0.1"
 reqwest = { version = "0.13", features = ["json", "stream"] }
 resolv-conf = "0.7"
+object = { version = "0.40.0", default-features = false, features = ["read", "std"] }
+semver = "1.0.27"
 scopeguard = "1.2"
 serde = { version = "1.0", features = ["derive"] }
 serde_bytes = "0.11"
+serde_ignored = "0.1"
 serde_json = "1.0"
 serde-saphyr = { version = "1.0.1", default-features = false, features = ["deserialize"] }
 sha2 = "0.11.0"
-smoltcp = { version = "0.13", default-features = false }
+smoltcp = { version = "0.14", default-features = false }
 socket2 = "0.6"
 strum = { version = "0.28", features = ["derive"] }
 tar = "0.4"
@@ -162,6 +174,7 @@ tokio = { version = "1.52", features = [
     "sync",
     "time",
 ] }
+tokio-socks = "0.5.3"
 tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-webpki-roots"] }
 tokio-util = { version = "0.7", features = ["io"] }
 tracing = "0.1"
@@ -204,5 +217,5 @@ rcgen = { version = "0.14", features = ["x509-parser"] }
 lru = "0.18.0"
 parking_lot = "0.12"
 rpassword = "7"
-russh = "0.62.4"
+russh = "0.63.1"
 russh-sftp = "2.3.0"

@@ -1,24 +1,24 @@
 ---
 title: Pi coding agent
 sidebarTitle: Pi
-description: Run the Pi terminal coding agent in an isolated project copy
+description: Run the Pi terminal coding agent against a project on your host
 icon: "/images/recipes/agents/pi.svg"
 ---
 
-Pi is a terminal coding agent distributed as a Node.js package. This example pins the tested package version and gives it a copied workspace inside the microVM.
+Pi is a terminal coding agent distributed as a Node.js package. This example pins the tested package version and gives it writable access to a project mounted from your host.
 
 ## Run Pi
 
 <Steps>
 <Step title="Start Pi">
 
-<Tooltip tip="This agent works on microsandbox cloud after omitting replace-on-create from the command."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Writable host-directory mounts are local-only. On microsandbox cloud, use the isolated-copy alternative and omit replace-on-create."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 <CodeGroup>
 ```sh macOS & Linux
 msb run -t --name pi-demo --replace \
   --cpus 2 --memory 2G --root-disk 4G \
-  --copy-dir ./my-project:/workspace \
+  --mount-dir ./my-project:/workspace:rw \
   --workdir /workspace \
   node:24-bookworm-slim -- sh -lc '
     apt-get update &&
@@ -31,7 +31,7 @@ msb run -t --name pi-demo --replace \
 ```powershell Windows
 msb run -t --name pi-demo --replace `
   --cpus 2 --memory 2G --root-disk 4G `
-  --copy-dir ./my-project:/workspace `
+  --mount-dir ./my-project:/workspace:rw `
   --workdir /workspace `
   node:24-bookworm-slim -- sh -lc '
     apt-get update &&
@@ -43,6 +43,10 @@ msb run -t --name pi-demo --replace `
 </CodeGroup>
 
 The tested install downloads 188 packages and takes about a minute on a warm Node image cache. Configure a provider from the TUI when prompted.
+
+<Tip>
+  For an isolated workspace, or when using microsandbox cloud, replace `--mount-dir ./my-project:/workspace:rw` with `--copy-dir ./my-project:/workspace`.
+</Tip>
 
 </Step>
 
@@ -68,9 +72,15 @@ The pinned example prints `0.73.1`.
 
 </Step>
 
-<Step title="Export changes">
+<Step title="Review or export changes">
 
-Create a patch inside the sandbox:
+With the default writable mount, changes are already in the host checkout. Review them inside the sandbox:
+
+```sh
+msb exec pi-demo -- sh -lc 'cd /workspace && git status --short && git diff --stat && git diff'
+```
+
+If you chose the isolated `--copy-dir` alternative, create a patch inside the sandbox:
 
 ```sh
 msb exec pi-demo -- sh -lc 'cd /workspace && git add -N . && git diff --binary > /tmp/pi.patch'
@@ -95,6 +105,8 @@ git apply --check ./pi.patch
 ```sh
 msb rm -f pi-demo
 ```
+
+Changes made through the default workspace mount remain in the host checkout.
 
 </Step>
 </Steps>

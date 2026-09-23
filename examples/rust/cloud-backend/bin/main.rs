@@ -25,7 +25,6 @@ async fn main() -> anyhow::Result<()> {
             "for i in 1 2 3; do echo rust-cloud-$i; sleep 1; done",
         ])
         .max_duration(60)
-        .replace()
         .create()
         .await?;
 

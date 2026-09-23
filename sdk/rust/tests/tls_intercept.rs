@@ -124,8 +124,8 @@ async fn spawn_secret_curl_sandbox(name: &str, port: u16, allowed_host: &str) ->
         .secret(|s| {
             s.env("API_KEY")
                 .value("real-secret")
-                .allow_host(allowed_host)
-                .inject_body(true)
+                .allow(allowed_host)
+                .substitute_in_body(true)
         })
         .network(|n| {
             n.policy(NetworkPolicy::allow_all())

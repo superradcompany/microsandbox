@@ -241,8 +241,8 @@ async fn main() -> anyhow::Result<()> {
 //--------------------------------------------------------------------------------------------------
 
 async fn run_otel(args: OtelArgs) -> anyhow::Result<()> {
-    let registry_name = resolve_registry_name(args.collector.msb_home.as_deref())?;
-    info!(registry = %registry_name, endpoint = %args.endpoint, "starting msb-metrics otel");
+    let registries = resolve_registry_names(args.collector.msb_home.as_deref())?;
+    info!(registry_count = registries.len(), endpoint = %args.endpoint, "starting msb-metrics otel");
 
     let mut exporter_builder = OtelExporter::builder()
         .endpoint(&args.endpoint)
@@ -263,7 +263,7 @@ async fn run_otel(args: OtelArgs) -> anyhow::Result<()> {
     }
     let exporter = exporter_builder.build().context("build OTel exporter")?;
 
-    let mut builder = MetricsCollector::builder(registry_name)
+    let mut builder = MetricsCollector::builder_for_registries(registries)
         .collect_interval(args.collector.collect_interval)
         .flush_interval(args.collector.flush_interval)
         .max_buffered_collections(args.collector.max_buffered)
@@ -290,11 +290,14 @@ async fn run_otel(args: OtelArgs) -> anyhow::Result<()> {
 }
 
 async fn run_stdout(args: StdoutArgs) -> anyhow::Result<()> {
-    let registry_name = resolve_registry_name(args.collector.msb_home.as_deref())?;
-    info!(registry = %registry_name, "starting msb-metrics stdout");
+    let registries = resolve_registry_names(args.collector.msb_home.as_deref())?;
+    info!(
+        registry_count = registries.len(),
+        "starting msb-metrics stdout"
+    );
 
     let exporter = StdoutExporter::new();
-    let mut builder = MetricsCollector::builder(registry_name)
+    let mut builder = MetricsCollector::builder_for_registries(registries)
         .collect_interval(args.collector.collect_interval)
         .flush_interval(args.collector.flush_interval)
         .max_buffered_collections(args.collector.max_buffered)
@@ -359,13 +362,22 @@ fn resolve_msb_home(msb_home: Option<&std::path::Path>) -> anyhow::Result<PathBu
     }
 }
 
-/// Derive the shm registry name from the resolved `MSB_HOME`.
-fn resolve_registry_name(msb_home: Option<&std::path::Path>) -> anyhow::Result<String> {
+/// Derive every readable shm registry name from the resolved `MSB_HOME`.
+fn resolve_registry_names(
+    msb_home: Option<&std::path::Path>,
+) -> anyhow::Result<Vec<(String, u32)>> {
     let home = resolve_msb_home(msb_home)?;
-    Ok(microsandbox_utils::metrics_registry_shm_name(
-        &home,
-        microsandbox_metrics::REGISTRY_ABI_VERSION,
-    ))
+
+    Ok(microsandbox_metrics::READABLE_REGISTRY_ABI_VERSIONS
+        .iter()
+        .copied()
+        .map(|abi_version| {
+            (
+                microsandbox_utils::metrics_registry_shm_name(&home, abi_version),
+                abi_version,
+            )
+        })
+        .collect())
 }
 
 /// Path to the catalog DB (`$MSB_HOME/db/msb.db`) used for label lookups. The
@@ -433,16 +445,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_resolve_registry_name_follows_abi_version() {
+    fn test_resolve_registry_names_include_legacy_and_current_abis() {
         let home = std::path::Path::new("/tmp/msb-metrics-home");
 
         assert_eq!(microsandbox_metrics::REGISTRY_ABI_VERSION, 3);
         assert_eq!(
-            resolve_registry_name(Some(home)).unwrap(),
-            microsandbox_utils::metrics_registry_shm_name(
-                home,
-                microsandbox_metrics::REGISTRY_ABI_VERSION,
-            )
+            resolve_registry_names(Some(home)).unwrap(),
+            vec![
+                (microsandbox_utils::metrics_registry_shm_name(home, 2), 2,),
+                (
+                    microsandbox_utils::metrics_registry_shm_name(
+                        home,
+                        microsandbox_metrics::REGISTRY_ABI_VERSION,
+                    ),
+                    microsandbox_metrics::REGISTRY_ABI_VERSION,
+                ),
+            ]
         );
     }
 }

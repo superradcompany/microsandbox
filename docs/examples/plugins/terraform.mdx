@@ -5,7 +5,7 @@ description: Download a provider once, then validate and plan without network ac
 icon: "cubes"
 ---
 
-<Tooltip tip="This workflow prepares and restores a local disk snapshot, which is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="This workflow uses local snapshot verification and destination security/network controls."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 Terraform providers are native executables. Prepare the provider in one microVM, snapshot it, then run validation and planning in a fresh networkless worker.
 
@@ -68,20 +68,20 @@ Capture the downloaded provider:
 
 <CodeGroup>
 ```sh macOS & Linux
-msb snapshot create terraform-runtime \
-  --from terraform-base --integrity --force
+msb snap create terraform-runtime \
+  --sandbox terraform-base --integrity
 ```
 
 ```powershell Windows
-msb snapshot create terraform-runtime `
-  --from terraform-base --integrity --force
+msb snap create terraform-runtime `
+  --sandbox terraform-base --integrity
 ```
 </CodeGroup>
 
 Verify the snapshot before using it:
 
 ```sh
-msb snapshot verify terraform-runtime
+msb snap verify terraform-base:terraform-runtime
 ```
 
 `terraform init` downloads the provider and creates `.terraform.lock.hcl`. The copy on the host is ready to review and commit when adapting this to a real module.
@@ -90,27 +90,27 @@ msb snapshot verify terraform-runtime
 
 <Step title="Plan offline">
 
+Restore applies the offline policy and restricted guest profile before boot. It creates an idle detached sandbox; `exec` runs the plan separately. The destination name must be unused, so remove a previous stopped `terraform-vet` explicitly before repeating this step.
+
 <CodeGroup>
 ```sh macOS & Linux
-msb run --name terraform-vet --replace \
-  --from-snapshot terraform-runtime \
-  --workdir /workspace --user 65534:65534 \
-  --env HOME=/tmp \
-  --cpus 1 --memory 512M --max-duration 1m \
-  --no-net --security restricted \
-  --entrypoint sh -- -lc \
+msb snap restore terraform-base:terraform-runtime --name terraform-vet \
+  --user 65534:65534 --cpus 1 --memory 512M \
+  --no-net --security restricted --max-duration 1m
+msb exec --workdir /workspace --user 65534:65534 --env HOME=/tmp \
+  --timeout 1m terraform-vet -- sh -lc \
     'terraform fmt -check && terraform validate && terraform plan -refresh=false -input=false -lock=false'
+msb stop terraform-vet
 ```
 
 ```powershell Windows
-msb run --name terraform-vet --replace `
-  --from-snapshot terraform-runtime `
-  --workdir /workspace --user 65534:65534 `
-  --env HOME=/tmp `
-  --cpus 1 --memory 512M --max-duration 1m `
-  --no-net --security restricted `
-  --entrypoint sh -- -lc `
+msb snap restore terraform-base:terraform-runtime --name terraform-vet `
+  --user 65534:65534 --cpus 1 --memory 512M `
+  --no-net --security restricted --max-duration 1m
+msb exec --workdir /workspace --user 65534:65534 --env HOME=/tmp `
+  --timeout 1m terraform-vet -- sh -lc `
     'terraform fmt -check && terraform validate && terraform plan -refresh=false -input=false -lock=false'
+msb stop terraform-vet
 ```
 </CodeGroup>
 
@@ -131,7 +131,7 @@ msb rm -f terraform-base terraform-vet
 Remove the reusable snapshot:
 
 ```sh
-msb snapshot remove terraform-runtime
+msb snap rm terraform-base:terraform-runtime
 ```
 
 </Step>

@@ -101,6 +101,16 @@ impl MetricsCollector {
         MetricsCollectorBuilder::new(registry_name.into())
     }
 
+    /// Build a collector that reads and merges multiple registry ABI names.
+    ///
+    /// When the same sandbox run appears in more than one registry, the
+    /// snapshot from the highest ABI version wins.
+    pub fn builder_for_registries(
+        registries: impl IntoIterator<Item = (String, u32)>,
+    ) -> MetricsCollectorBuilder {
+        MetricsCollectorBuilder::new_for_registries(registries.into_iter().collect())
+    }
+
     /// Construct a driver from validated configuration. Called by the builder.
     pub(crate) fn from_config(config: CollectorConfig) -> Self {
         Self {

@@ -12,6 +12,9 @@ pub type AgentClientResult<T> = std::result::Result<T, AgentClientError>;
 /// Errors raised by [`AgentClient`](super::AgentClient).
 #[derive(Debug, thiserror::Error)]
 pub enum AgentClientError {
+    /// Shared-router failure, retaining its delivery uncertainty.
+    #[error(transparent)]
+    Client(#[from] microsandbox_protocol_client::ClientError),
     /// Failed to open the Unix socket connection to the relay.
     #[error("connect {path}: {source}")]
     Connect {
@@ -41,6 +44,10 @@ pub enum AgentClientError {
     /// A wire-protocol error (framing, CBOR, oversize frame).
     #[error("protocol: {0}")]
     Protocol(#[from] microsandbox_protocol::ProtocolError),
+
+    /// The optional Unix-local shared-memory transport failed before or during use.
+    #[error("local transport: {0}")]
+    LocalTransport(String),
 
     /// CBOR encoding or decoding failed.
     #[error("cbor: {0}")]

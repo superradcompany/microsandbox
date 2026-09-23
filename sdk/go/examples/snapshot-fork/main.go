@@ -24,21 +24,22 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	if err := microsandbox.EnsureInstalled(ctx); err != nil {
-		log.Fatalf("EnsureInstalled: %v", err)
+	if _, err := microsandbox.EnsureRuntime(ctx, microsandbox.RuntimeConfig{}, microsandbox.InstallOptions{}); err != nil {
+		log.Fatalf("EnsureRuntime: %v", err)
 	}
 
 	suffix := time.Now().Unix()
 	baseName := fmt.Sprintf("go-sdk-snapshot-base-%d", suffix)
 	forkName := fmt.Sprintf("go-sdk-snapshot-fork-%d", suffix)
 	snapshotName := fmt.Sprintf("go-sdk-snapshot-%d", suffix)
+	snapshotSelector := baseName + ":" + snapshotName
 
 	base, err := microsandbox.CreateSandbox(ctx, baseName, microsandbox.WithImage("alpine:3.19"))
 	if err != nil {
 		log.Fatalf("CreateSandbox base: %v", err)
 	}
 	defer cleanupSandbox(baseName)
-	defer cleanupSnapshot(snapshotName)
+	defer cleanupSnapshot(snapshotSelector)
 
 	payload := fmt.Sprintf("created by %s\n", baseName)
 	if err := base.FS().WriteString(ctx, markerPath, payload); err != nil {
@@ -72,7 +73,7 @@ func main() {
 	}
 	fmt.Printf("snapshot verified: upper=%s\n", report.Upper.Kind)
 
-	handle, err := microsandbox.Snapshot.Get(ctx, snapshotName)
+	handle, err := microsandbox.Snapshot.Get(ctx, snapshotSelector)
 	if err != nil {
 		log.Fatalf("Snapshot.Get: %v", err)
 	}
@@ -82,9 +83,9 @@ func main() {
 	}
 	fmt.Printf("snapshot index entry: name=%s digest=%s\n", name, handle.Digest())
 
-	fork, err := microsandbox.CreateSandbox(ctx, forkName, microsandbox.WithFromSnapshot(snapshotName))
+	fork, err := microsandbox.RestoreSandbox(ctx, snapshotSelector, forkName)
 	if err != nil {
-		log.Fatalf("CreateSandbox fork: %v", err)
+		log.Fatalf("RestoreSandbox fork: %v", err)
 	}
 	defer func() {
 		stopCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

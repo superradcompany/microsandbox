@@ -11,19 +11,25 @@ edition.workspace = true
 path = "lib/lib.rs"
 
 [dependencies]
+bincode = { version = "2.0.1", features = ["serde"] }
+hex.workspace = true
 libc.workspace = true
 microsandbox-utils.workspace = true
 msb_krun.workspace = true
+sha2.workspace = true
 scopeguard.workspace = true
+serde.workspace = true
 tempfile.workspace = true
+thiserror.workspace = true
 tracing.workspace = true
 
 [features]
-default = ["prebuilt"]
-prebuilt = ["microsandbox-utils/http-client"]
+default = ["download-binaries", "embed-binaries"]
+download-binaries = ["embed-binaries", "microsandbox-utils/http-client"]
+embed-binaries = []
 
 [build-dependencies]
 microsandbox-utils.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61.2", features = ["Win32_Storage_FileSystem", "Win32_System_SystemServices"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Storage_FileSystem", "Win32_System_SystemServices", "Win32_System_IO"] }

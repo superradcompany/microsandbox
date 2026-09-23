@@ -1,6 +1,7 @@
 ---
 title: Images
 description: Rust SDK - Image cache API reference
+keywords: ["Rust SDK", "Rust images", "microsandbox images"]
 ---
 
 <Tooltip tip="The image-cache API manages the local cache and is local-only. On microsandbox cloud, specify an OCI image when creating the sandbox and it is pulled for you."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
@@ -205,7 +206,7 @@ async fn save_local(local: &LocalBackend, references: &[String], output: &Path, 
 ## ImageHandle
 
 
-<p className="msb-backref">Returned by <a href="#image-get">get()</a> · <a href="#image-list">list()</a></p>
+<p className="msb-backref">Returned by <a href="#imageget">get()</a> · <a href="#imagelist">list()</a></p>
 
 A lightweight metadata handle for a cached OCI image.
 
@@ -310,7 +311,7 @@ First-pulled time
 
 ### ImageDetail
 
-<p className="msb-backref">Returned by <a href="#image-inspect">inspect()</a></p>
+<p className="msb-backref">Returned by <a href="#imageinspect">inspect()</a></p>
 
 Full detail for a cached image.
 
@@ -354,9 +355,9 @@ Metadata for one image layer.
 
 ### ImagePruneReport
 
-<p className="msb-backref">Returned by <a href="#image-prune">prune()</a></p>
+<p className="msb-backref">Returned by <a href="#imageprune">prune()</a></p>
 
-Summary of cached image data removed by [`Image::prune()`](#image-prune).
+Summary of cached image data removed by [`Image::prune()`](#imageprune).
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -371,9 +372,9 @@ Summary of cached image data removed by [`Image::prune()`](#image-prune).
 
 <div className="msb-tags"><span className="msb-tag is-type">enum</span></div>
 
-<p className="msb-backref">Used by <a href="#image-save">save()</a></p>
+<p className="msb-backref">Used by <a href="#imagesave">save()</a></p>
 
-Archive layout to write when exporting images with [`Image::save()`](#image-save).
+Archive layout to write when exporting images with [`Image::save()`](#imagesave).
 
 | Variant | Description |
 |---------|-------------|

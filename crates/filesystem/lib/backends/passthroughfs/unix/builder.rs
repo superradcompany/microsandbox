@@ -166,6 +166,8 @@ impl PassthroughFsBuilder {
         }
 
         let cfg_probe = super::PassthroughConfig {
+            owned_checkpoint: None,
+            external_checkpoint: None,
             root_dir: root_dir.clone(),
             no_symlink_root: self.no_symlink_root,
             stat_virtualization: self.stat_virtualization,
@@ -216,6 +218,7 @@ impl PassthroughFsBuilder {
         });
 
         Ok(PassthroughFs {
+            invalid_inodes: RwLock::new(std::collections::BTreeSet::new()),
             cfg,
             root_fd,
             inodes: RwLock::new(MultikeyBTreeMap::new()),

@@ -1,0 +1,188 @@
+---
+title: Corporate networking
+description: Use company routing, DNS, certificates, and registries with local sandboxes
+icon: "network-wired"
+---
+
+Connect local sandboxes to your company's existing network. Configure routing, private DNS, and certificate trust, then verify access from the CLI and SDKs.
+
+<Frame>
+  <img className="block dark:hidden" src="/images/enterprise/corporate-networking-light.svg" alt="Guest connections cross the microVM boundary into the host runtime, then use host routing directly or through an optional local SOCKS proxy. DNS and host image downloads follow separate paths that can also be covered by host VPN or traffic steering policy." />
+  <img className="hidden dark:block" src="/images/enterprise/corporate-networking-dark.svg" alt="Guest connections cross the microVM boundary into the host runtime, then use host routing directly or through an optional local SOCKS proxy. DNS and host image downloads follow separate paths that can also be covered by host VPN or traffic steering policy." />
+</Frame>
+
+<Note>
+  Managed configuration can enforce registry settings and the outbound proxy. DNS, network rules, certificate trust for guests, and published ports are currently [per-sandbox settings](/cli/configuration#network), also available through the SDKs.
+
+  An enforced `multi-tenant` [deployment profile](/networking/overview#deployment-profiles) removes custom DNS, blocks private-network access, and disables host CA import and published ports.
+</Note>
+
+## Route sandbox traffic
+
+Connect the company network client on the host and confirm an approved service is reachable there. Sandbox connections originate from the host runtime and must also pass the sandbox's network policy.
+
+| Company connection | Configure |
+| --- | --- |
+| Host VPN or traffic-steering client | Host routes and sandbox destination rules |
+| SOCKS4 or SOCKS5 proxy | `sandbox_defaults.outbound_proxy` in managed configuration |
+| HTTP proxy or PAC file | Proxy settings in the guest application; no direct managed support |
+
+For a SOCKS proxy, add this to `managed.json`, using your listener's reachable `IP:port`:
+
+```json
+{
+  "version": 1,
+  "overrides": {
+    "sandbox_defaults": {
+      "outbound_proxy": {
+        "protocol": "socks5",
+        "address": "127.0.0.1:1080"
+      }
+    }
+  }
+}
+```
+
+A managed proxy replaces per-sandbox proxy settings, including credentials; `null` clears them. It does not enable disabled networking or route DNS and host image downloads. Cloud creation fails while a proxy is enforced because cloud does not support outbound proxies. SOCKS4 carries TCP only; SOCKS5 also supports non-DNS UDP. See [proxy authentication and limits](/networking/outbound-proxy).
+
+Use supported CLI and SDK releases; older releases ignore this global proxy setting.
+
+<Accordion title="Examples: host VPNs and traffic steering">
+  - **Cloudflare WARP:** enroll the host client with the administrator's **Traffic and DNS** profile. Check that [split tunnels and private DNS](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/private-net/cloudflared/private-dns/) cover the required services.
+  - **GlobalProtect:** with [application-based split tunneling](https://docs.paloaltonetworks.com/globalprotect/administration/globalprotect-gateways/split-tunnel-traffic-on-globalprotect-gateways/configure-a-split-tunnel-based-on-the-domain-and-application), check the host runtime executable in traffic logs. A guest command such as `curl` is not the host process opening the connection. SDK image pulls may use a different process; test TCP and UDP separately when needed.
+  - **Netskope:** confirm the client's [steering configuration](https://docs.netskope.com/en/steering-configuration). Cloud Apps, Web Traffic, and All Traffic cover different traffic; DNS inspection has separate requirements.
+  - **Tailscale:** permit the service in the tailnet access policy. Routing public Internet traffic through the tailnet also requires a configured [exit node](https://tailscale.com/docs/features/exit-nodes).
+</Accordion>
+
+<Accordion title="Examples: local SOCKS listeners and HTTP proxies">
+  **Tailscale:** if your administrator runs its [userspace SOCKS5 listener](https://tailscale.com/docs/concepts/userspace-networking) on port `1055`, use `127.0.0.1:1055` in the managed example above.
+
+  **Cloudflare WARP:** for **Local proxy** mode, use `socks5` with `127.0.0.1:40000`, or the configured listener port. This mode requires MASQUE, provides HTTP filtering, and has a ten-second request limit. It does not provide the full tunnel's DNS or network filtering. See [client modes](https://developers.cloudflare.com/cloudflare-one/team-and-resources/devices/cloudflare-one-client/configure/modes/).
+
+  **HTTP proxies:** [Prisma Access Explicit Proxy](https://docs.paloaltonetworks.com/prisma-access/administration/prisma-access-mobile-users/mobile-users-explicit-proxy/explicit-proxy-guidelines) and [Netskope Cloud Explicit Proxy](https://docs.netskope.com/en/explicit-proxy) use HTTP(S) proxy configuration and their own authentication requirements. Their URLs cannot be used as managed SOCKS endpoints. A PAC file or browser sign-in does not automatically configure guest applications.
+</Accordion>
+
+## Configure corporate DNS
+
+The sandbox's DNS forwarder runs on the host. By default, it uses host DNS. Set explicit nameservers when private company names need particular resolvers.
+
+Replace the two resolver addresses, service IP, and hostname below with your company's values. Cache the Alpine image first:
+
+```bash
+msb run alpine --pull never \
+  --dns-nameserver 10.20.0.53 \
+  --dns-nameserver 10.20.0.54 \
+  --dns-query-timeout-ms 3000 \
+  --net-default deny \
+  --net-rule "allow@dns,allow@10.20.30.40" \
+  -- nslookup service.corp.example
+```
+
+- **Resolver failover:** servers are tried in order after a timeout or connection failure. A DNS response such as `REFUSED` or `SERVFAIL` does not trigger failover.
+- **Split DNS:** macOS supplies its primary resolver list, not per-domain VPN resolver selection. An explicit nameserver handles sandbox lookups; it does not recreate the host's split-DNS rules. Use an approved resolver that can answer the names the workload needs.
+- **DNS access:** `allow@dns` permits queries through the gateway. The service address rule permits its private DNS answer, as explained below.
+
+Nameserver settings select the default upstreams. Applications can request another resolver if network policy allows it, and DNS over HTTPS looks like ordinary HTTPS. Pair corporate DNS with destination restrictions when all lookups must follow company policy. See [DNS configuration](/networking/dns) for SDK examples and transport behavior.
+
+<Accordion title="Example: Tailscale MagicDNS">
+  Use the service's full [MagicDNS name](https://tailscale.com/docs/features/magicdns). A reachable host [Quad100 resolver](https://tailscale.com/docs/reference/quad100) can be an explicit upstream; validate it for the installed client mode.
+
+  The resolved tailnet addresses still need the private-address rules below. Configuring a Tailscale SOCKS listener does not send sandbox DNS through it.
+</Accordion>
+
+## Allow internal services
+
+Private addresses are blocked by default, including VPN ranges and synthetic addresses returned by private-access clients. Allow the approved service's actual A and AAAA addresses or required CIDRs.
+
+The example's `allow@10.20.30.40` allows that IP **on all ports** and permits its private DNS answers through rebinding protection. A domain or port-scoped rule alone does not permit private DNS answers. Keep rebinding protection enabled and use narrow address exceptions; see [network defenses](/security/network#dns-rebinding) for rule ordering.
+
+<Accordion title="Examples: private-access address ranges">
+  - **Tailscale:** the default sandbox policy blocks tailnet addresses in `100.64.0.0/10` and IPv6 ULA space.
+  - **Netskope Private Access:** some tenants return synthetic addresses from [`100.64.0.0/16`](https://docs.netskope.com/en/cgnat-address-support-for-local-dns-resolution). This can overlap Tailscale when both clients are installed.
+
+  Inspect the actual DNS answers and allow only the destinations your workload needs. Test client coexistence if the address ranges overlap.
+</Accordion>
+
+<Accordion title="When a VPN address overlaps the guest network">
+  The default guest pools are `172.16.0.0/12` and `fd42:6d73:62::/48`. Each sandbox uses a smaller subnet from those pools. If its assigned subnet overlaps a company destination, choose non-overlapping pools with `--net-ipv4-pool` and `--net-ipv6-pool` when creating the sandbox.
+
+  Select ranges with your network administrator and leave enough capacity for the sandbox network slots. These options change guest addressing; they do not change VPN routes or grant access to private destinations.
+</Accordion>
+
+## Trust corporate certificates
+
+Deploy the company's CA through your device manager, then configure trust for the connection that needs it:
+
+| Connection | Trust setting |
+| --- | --- |
+| Host image pulls | Managed `registries.ca_certs`, shown below |
+| Guest HTTPS and other TLS clients | `--trust-host-cas`, which copies trusted host roots into the guest |
+| microsandbox's own TLS interception | [Upstream CA settings](/networking/tls#upstream-ca-trust) for the host-side connection |
+
+Host CA import gives the guest **all trusted host roots**. Applications with their own trust store may need separate configuration. Keep certificate verification enabled.
+
+Enable microsandbox [TLS interception](/networking/tls) when you need HTTP inspection or [host-bound credential injection](/security/secrets). It is separate from the company's network inspection. Guest mTLS and certificate-pinned services need appropriate bypass rules; bypassed connections remain encrypted and cannot use content inspection or secret injection.
+
+<Accordion title="Example: Netskope certificate inspection">
+  Deploy the corporate CA to the host and enable guest trust as described above. Check the certificate issuer and [Netskope traffic events](https://docs.netskope.com/en/netskope-client-troubleshooting-guide) for an approved request to confirm inspection.
+
+  If network inspection breaks a certificate-pinned application, have the administrator review a scoped exception. Keep TLS verification enabled in the application.
+</Accordion>
+
+## Connect to private registries
+
+Configure image pulls separately from guest traffic. Add your registry, corporate CA bundle, and credential reference to `managed.json`:
+
+```json
+{
+  "version": 1,
+  "overrides": {
+    "registries": {
+      "ca_certs": "/etc/company/registry-ca.pem",
+      "hosts": {
+        "registry.example.com": {
+          "insecure": false,
+          "auth": {
+            "username": "employee",
+            "password_env": "CORPORATE_REGISTRY_TOKEN"
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+Replace the sample host and CA path. Make the PEM bundle administrator-owned and employee-readable, and provision the token separately in the CLI or SDK process's environment.
+
+Managed host entries override only the fields they supply. Use `insecure: false` to require TLS while keeping employee credentials. Supply `auth` to enforce credentials, or `auth: null` to require anonymous access. Managed `ca_certs` replaces user and per-call custom registry certificates. See [registry configuration](/configuration#registries).
+
+## Keep development services private
+
+Published ports bind to loopback by default. Use an explicit mapping such as `-p 127.0.0.1:8080:8000` to expose guest port `8000` only on the employee device. A LAN address or `0.0.0.0` exposes a host listener beyond the device, subject to the host firewall and company policy. See [port mapping](/networking/overview#port-mapping).
+
+For a guest connection back to a host service, use [`host.microsandbox.internal`](/networking/overview#reaching-the-host) with an explicit allow rule. Guest `localhost` stays inside the VM. Host-alias connections bypass the sandbox SOCKS proxy.
+
+## Verify private services
+
+Use the same company values from the DNS check to test an approved HTTPS endpoint:
+
+```bash
+msb run alpine --pull never \
+  --dns-nameserver 10.20.0.53 \
+  --dns-nameserver 10.20.0.54 \
+  --net-default deny \
+  --net-rule "allow@dns,allow@10.20.30.40" \
+  --trust-host-cas -- wget -qO- https://service.corp.example/health
+```
+
+Provider examples assume an enrolled host client and are not validated integrations. Before rollout, check each path in a pilot environment:
+
+| Check | Expected result |
+| --- | --- |
+| Pull an approved, uncached registry image with `msb pull` | Host routing, CA trust, and registry authentication succeed |
+| Resolve the private hostname | Company DNS returns the expected addresses |
+| Request an allowed and a blocked destination | The intended vendor policy is applied; confirm logs and employee identity where available |
+| Connect to a published development port | Reachable only on the intended host interface |
+
+Repeat with the employees' SDKs and after a VPN reconnect. Recreate test sandboxes when checking changed resolver settings.

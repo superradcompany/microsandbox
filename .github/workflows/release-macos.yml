@@ -121,7 +121,7 @@ jobs:
 
       - name: Build msb
         run: |
-          cargo build --release --no-default-features --features net,ssh -p microsandbox-cli
+          cargo build --release --no-default-features --features embed-binaries,net,ssh -p microsandbox-cli
           cp target/release/msb build/msb
 
       - name: Codesign msb (macOS)
@@ -130,6 +130,11 @@ jobs:
 
       - name: Verify runtime binary
         run: build/msb --version
+
+      - name: Smoke test installed runtime discovery
+        run: |
+          python3 scripts/smoke/cli/runtime-discovery.py \
+            --msb build/msb --libkrunfw build/${{ inputs.libkrunfw_file }}
 
       - name: Upload runtime artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -241,7 +246,7 @@ jobs:
         working-directory: sdk/node-ts
         run: |
           node scripts/prune-platform-optional-deps.mjs
-          npm install --package-lock=false
+          npm ci
           npm run build:native -- --target ${{ inputs.napi_target }}
           node -e 'require("./native/index.cjs")'
 

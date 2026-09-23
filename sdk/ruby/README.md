@@ -132,6 +132,25 @@ exception is preserved.
 Blocking calls do not prevent other Ruby threads from running. Forked child
 processes recreate the native runtime before use.
 
+Use `connect_or_create` when a stable name should converge on one persisted sandbox. Existing configuration wins; options are used only if creation is necessary. Handles retain a stable `id`, so lifecycle calls on stale receivers refuse to act on a replacement that reused the name.
+
+```ruby
+sandbox = Microsandbox::Sandbox.connect_or_create(
+  "worker",
+  image: "python",
+  memory: 1024
+)
+
+puts "#{sandbox.name}: #{sandbox.id}"
+running = Microsandbox::Sandbox.get("worker").connect_or_start
+running.request_stop
+stopped = running.wait_for_status("stopped")
+restarted = stopped.restart
+restarted.destroy
+```
+
+Run `ruby examples/lifecycle_convergence.rb` from `sdk/ruby` to exercise the complete local lifecycle against a live microVM. The example verifies convergence, restart, destroy, and stale-handle identity safety, then emits machine-readable timing metrics.
+
 ## Networking and secrets
 
 `network: :none` disables networking. An allowlist creates a default-deny
@@ -154,6 +173,28 @@ The guest receives a placeholder for each secret. The host proxy substitutes
 the real value only for the allowed TLS hostname. Secret values persist in
 host-side sandbox configuration, so load them from a secret manager, never log
 them, and rotate them after suspected host compromise.
+
+## Snapshots
+
+Snapshot operations use the selected backend and preserve whether a snapshot
+reference is an ID or a path. Existing static save calls remain available, and
+opened snapshots and live handles can save through the backend they retain:
+
+```ruby
+snapshot = Microsandbox::Snapshot.open("after-pip-install")
+snapshot.save_to("/tmp/after-pip-install.tar.zst", with_image: true)
+
+handle = Microsandbox::Snapshot.get("after-pip-install")
+handle.save_to("/tmp/after-pip-install.tar.zst")
+
+Microsandbox::Snapshot.save(
+  "after-pip-install",
+  "/tmp/after-pip-install.tar.zst",
+  plain_tar: false
+)
+```
+
+Snapshot archive operations are currently local-only. With the cloud backend, `save`, `save_to`, direct directory enumeration, reindexing, archive loading, and payload verification raise an unsupported-operation error. Capture, lookup, listing, open, and removal remain backend-neutral. The Ruby SDK does not yet expose dedicated sandbox restoration; use another SDK or the CLI for that operation.
 
 ## Supported surface
 

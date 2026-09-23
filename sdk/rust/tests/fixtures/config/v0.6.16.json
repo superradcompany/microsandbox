@@ -1,0 +1,88 @@
+{
+  "home": "/custom/path/.microsandbox",
+  "log_level": "info",
+  "deployment_profile": "multi-tenant",
+  "database": {
+    "url": "sqlite:///tmp/msb.db",
+    "max_connections": 10,
+    "connect_timeout_secs": 30,
+    "busy_timeout_secs": 30
+  },
+  "paths": {
+    "msb": "/usr/local/bin/msb",
+    "libkrunfw": "/usr/local/lib/libkrunfw.so",
+    "cache": "/mnt/fast/msb-cache",
+    "sandboxes": null,
+    "volumes": null,
+    "snapshots": null,
+    "logs": null,
+    "secrets": null
+  },
+  "sandbox_defaults": {
+    "cpus": 2,
+    "memory_mib": 1024,
+    "cpu_placement": "auto",
+    "placement_profile": "latency",
+    "thp": "madvise",
+    "oci": {
+      "root_disk": {
+        "kind": "flat",
+        "size_mib": 8192,
+        "clone": "auto"
+      }
+    },
+    "shell": "/bin/bash",
+    "workdir": "/app"
+  },
+  "runtime": {
+    "placement_profiles": {
+      "latency": {
+        "numa": { "mode": "prefer_single" },
+        "memory": { "mode": "follow_cpu" }
+      }
+    },
+    "block_writeback": {
+      "mode": "auto"
+    }
+  },
+  "registries": {
+    "ca_certs": "/path/to/corporate-ca.pem",
+    "hosts": {
+      "ghcr.io": {
+        "auth": {
+          "username": "octocat",
+          "store": "keyring"
+        }
+      },
+      "registry.example.com": {
+        "insecure": true,
+        "auth": {
+          "username": "deploy",
+          "password_env": "REGISTRY_TOKEN"
+        }
+      },
+      "docker.io": {
+        "auth": {
+          "username": "user",
+          "secret_name": "dockerhub-token"
+        }
+      }
+    }
+  },
+  "ssh": {
+    "inactivity_timeout_secs": 600
+  },
+  "metrics": {
+    "capacity": 4096
+  },
+  "active_profile": "prod",
+  "profiles": {
+    "prod": {
+      "backend": "cloud",
+      "api_key_ref": "env:MSB_API_KEY"
+    },
+    "local": {
+      "backend": "local"
+    }
+  }
+}

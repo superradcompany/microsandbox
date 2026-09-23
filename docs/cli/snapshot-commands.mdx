@@ -1,0 +1,202 @@
+---
+title: Snapshot commands
+sidebarTitle: "Snapshots"
+description: Capture, inspect, restore, and move snapshots from the CLI
+icon: "code-branch"
+---
+
+<Tooltip tip="Cloud supports disk capture from stopped or crashed sandboxes, listing, inspection, removal, and restore. Full snapshots, groups, archives, and verification are local-only."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+Manage saved snapshots with `msb snap`. See the [snapshot guide](/sandboxes/snapshots) for workflows.
+
+Local selectors accept a group head, `group:member`, an unambiguous ID or digest, or an artifact path. On cloud, use the snapshot reference returned by the command.
+
+<span id="msb-snapshot-create" />
+
+## msb snap create
+
+Capture disk state. Add `--full` to include memory and running processes.
+
+```bash
+msb snap create ready --sandbox worker
+```
+
+| Argument / flag | Description |
+| --- | --- |
+| `NAME` | Positional member name; generated when omitted |
+| `-n`, `--name NAME` | Set the name instead of the positional argument; do not supply both |
+| `--sandbox NAME` | Required source sandbox; `--from-sandbox` remains an alias |
+| `--group GROUP` | Local group; defaults to the source sandbox’s name |
+| `--dest-dir DIR` | Parent directory for local groups |
+| `-o`, `--output PATH` | Capture directly to an archive; conflicts with `--dest-dir` and does not accept `--group` |
+| `--full` | Capture disk, memory, and execution state from a running or paused source |
+| `--guest-flush` | Guest writeback policy: `auto` (default), `required`, or `skip`; see [guest flushing](/sandboxes/snapshots#guest-flushing) |
+| `--integrity` | Record content hashes for later verification |
+| `--label KEY=VALUE` | Attach a label; repeatable |
+| `--plain-tar` | Write uncompressed tar; requires `--output` |
+| `-f`, `--force` | Overwrite an archive output; not allowed for installed members |
+| `-q`, `--quiet` | Suppress output |
+
+Local disk capture accepts running, paused, stopped, or crashed sources. Cloud requires a stopped or crashed source.
+
+<Accordion title="Examples">
+
+```bash
+msb snap create snap --sandbox worker --full
+msb snap create ready --sandbox worker --integrity
+msb snap create ready --sandbox worker -o ready.msb
+```
+
+</Accordion>
+
+<span id="guest-filesystem-flush" />
+
+Guest flushing is shared by the CLI and SDKs. See [guest flushing](/sandboxes/snapshots#guest-flushing) for policies and examples.
+
+## msb snap restore
+
+Restore a saved snapshot into a new sandbox. Disk snapshots boot fresh; full snapshots resume captured execution.
+
+```bash
+msb snap restore worker:ready --name restored
+```
+
+`--name` is required. See [restore options](/cli/sandbox-commands#msb-snap-restore) for memory sharing, disk-only restore, and resource bindings. Existing top-level `restore` commands remain supported.
+
+<span id="msb-snapshot-list" />
+
+## msb snap ls
+
+List snapshots. Use `--group` to filter a local group; it is unavailable on cloud.
+
+```bash
+msb snap ls
+msb snap ls --group worker
+```
+
+| Flag | Description |
+| --- | --- |
+| `--group GROUP` | Show only snapshots in this local group |
+| `--format json` | JSON output |
+| `-q`, `--quiet` | Show only digests |
+
+<span id="msb-snapshot-inspect" />
+
+## msb snap inspect
+
+Show snapshot metadata. Add `--verify` to check recorded content hashes.
+
+```bash
+msb snap inspect worker:ready
+msb snap inspect worker:ready --verify
+```
+
+<span id="msb-snapshot-verify" />
+
+## msb snap verify
+
+Check recorded content integrity. Local-only; capture with `--integrity` to record disk hashes.
+
+```bash
+msb snap verify worker:ready
+```
+
+Without disk hashes, size and structure checks cannot detect same-size corruption. Full snapshots also validate their memory and execution objects. See [integrity](/sandboxes/snapshots#verify-integrity).
+
+<span id="msb-snapshot-remove" />
+
+## msb snap rm
+
+Delete one or more snapshots.
+
+```bash
+msb snap rm worker:ready
+```
+
+| Flag | Description |
+| --- | --- |
+| `-f`, `--force` | Remove even when indexed children exist |
+| `-q`, `--quiet` | Suppress output |
+
+If other group members remain, select another head before removing the current one. `--force` does not bypass this rule.
+
+<span id="msb-snapshot-head" />
+
+## msb snap head
+
+Read a local group’s head, or select a member as its head.
+
+```bash
+msb snap head worker
+msb snap head worker:ready
+```
+
+Use `--format json` for structured output. The first capture sets the head; later captures advance it only when ancestry proves they descend from it. See [snapshot groups](/sandboxes/snapshots#snapshot-groups).
+
+<span id="msb-snapshot-save" />
+
+## msb snap export
+
+Export a local snapshot to a compressed `.msb` archive. The `save` alias remains supported.
+
+```bash
+msb snap export worker:ready --output ready.msb --with-image
+```
+
+| Flag | Description |
+| --- | --- |
+| `-o`, `--output PATH` | Output archive path; a positional path is also accepted |
+| `--with-image` | Bundle the OCI image for offline restore |
+| `--with-parents` | Include the parent chain |
+| `--plain-tar` | Write uncompressed tar |
+| `--since BASE` | Omit disk layers and RAM objects supplied by an exact base |
+| `--last-layers N` | Export the newest N sealed root-disk layers; the omitted base is needed on import |
+
+`--since`, `--last-layers`, and `--with-parents` are mutually exclusive. Export preserves recorded hashes but does not verify them. See [incremental exports](/sandboxes/snapshots#export-changes) for base requirements.
+
+<span id="msb-snapshot-load" />
+
+## msb snap import
+
+Import one or more local archives. The `load` alias remains supported. Dependencies resolve regardless of input order; all members are validated before publication.
+
+```bash
+msb snap import ready.msb
+```
+
+| Flag | Description |
+| --- | --- |
+| `--dest DIR` | Parent directory for groups; defaults to the configured snapshot store |
+| `--group GROUP` | Destination group; generated when omitted |
+| `--base SNAPSHOT` | External snapshot or standalone archive for missing dependencies |
+| `--set-head` | Select the imported tip even with divergent ancestry; requires a unique tip |
+
+Dependencies come from the batch, matching members in the named group, or `--base`. Import preserves recorded hashes; run `verify` to check them.
+
+<Accordion title="Examples">
+
+```bash
+msb snap import changes.msb base.msb --group received
+msb snap import changes.msb --base worker:ready --group received
+msb snap import experiment.msb --group worker --set-head
+```
+
+</Accordion>
+
+<span id="msb-snapshot-reindex" />
+
+## msb snap reindex
+
+Rebuild the local snapshot index from artifacts on disk. An omitted directory uses the configured snapshot store.
+
+```bash
+msb snap reindex
+msb snap reindex /mnt/snapshots
+```
+
+## Related commands
+
+| Command | Purpose |
+| --- | --- |
+| [`msb branch`](/cli/sandbox-commands#msb-sandbox-branch) | Copy running execution without saving a snapshot |
+| [`msb modify --compact`](/cli/sandbox-commands#compaction) | Merge sealed disk layers |

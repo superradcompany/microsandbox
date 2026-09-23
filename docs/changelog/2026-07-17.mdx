@@ -44,7 +44,7 @@ The snapshot surface is now locked in across the CLI and every SDK ahead of 1.0.
 Booting from a snapshot is spelled the same way everywhere: `--from-snapshot`, `from_snapshot=`, `fromSnapshot`, and Go `WithFromSnapshot`.
 
 ```bash
-msb snapshot create clean --from box --dest-dir /mnt/big
+msb snapshot create clean --from-sandbox box --dest-dir /mnt/big
 msb snapshot save clean /tmp/clean.tar.zst --with-image
 msb snapshot load /tmp/clean.tar.zst
 msb run --name worker --from-snapshot clean -- python -V

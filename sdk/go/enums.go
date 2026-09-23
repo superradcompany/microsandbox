@@ -9,11 +9,13 @@ package microsandbox
 type SandboxStatus string
 
 const (
+	SandboxStatusCreated  SandboxStatus = "created"
+	SandboxStatusStarting SandboxStatus = "starting"
 	SandboxStatusRunning  SandboxStatus = "running"
-	SandboxStatusStopped  SandboxStatus = "stopped"
-	SandboxStatusCrashed  SandboxStatus = "crashed"
 	SandboxStatusDraining SandboxStatus = "draining"
 	SandboxStatusPaused   SandboxStatus = "paused"
+	SandboxStatusStopped  SandboxStatus = "stopped"
+	SandboxStatusCrashed  SandboxStatus = "crashed"
 )
 
 // FsEntryKind classifies a directory listing entry.

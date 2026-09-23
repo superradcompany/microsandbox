@@ -48,20 +48,26 @@ struct PyBackendInfo {
 #[pymodule]
 fn _microsandbox(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(version, m)?)?;
-    m.add_function(wrap_pyfunction!(setup::install, m)?)?;
-    m.add_function(wrap_pyfunction!(setup::is_installed, m)?)?;
+    m.add_function(wrap_pyfunction!(setup::resolve_runtime, m)?)?;
+    m.add_function(wrap_pyfunction!(setup::is_runtime_installed, m)?)?;
+    m.add_function(wrap_pyfunction!(setup::install_runtime, m)?)?;
+    m.add_function(wrap_pyfunction!(setup::ensure_runtime, m)?)?;
     m.add_function(wrap_pyfunction!(set_runtime_msb_path, m)?)?;
+    m.add_function(wrap_pyfunction!(setup::set_packaged_msb_path, m)?)?;
     m.add_function(wrap_pyfunction!(set_runtime_libkrunfw_path, m)?)?;
     m.add_function(wrap_pyfunction!(set_default_backend, m)?)?;
     m.add_function(wrap_pyfunction!(backend_scope, m)?)?;
     m.add_function(wrap_pyfunction!(default_backend_kind, m)?)?;
     m.add_function(wrap_pyfunction!(default_backend_info, m)?)?;
     m.add_function(wrap_pyfunction!(resolved_msb_path, m)?)?;
+    m.add_function(wrap_pyfunction!(setup::resolved_cli_msb_path, m)?)?;
     m.add_function(wrap_pyfunction!(metrics::all_sandbox_metrics, m)?)?;
     m.add_class::<sandbox::PySandbox>()?;
+    m.add_class::<sandbox::PyBranchOutcome>()?;
     m.add_class::<sandbox::PySandboxStopResult>()?;
     m.add_class::<sandbox::PySandboxPingResult>()?;
     m.add_class::<sandbox::PySandboxTouchResult>()?;
+    m.add_class::<sandbox::PyExternalMountWarning>()?;
     m.add_class::<sandbox::PySandboxPage>()?;
     m.add_class::<sandbox_handle::PySandboxHandle>()?;
     m.add_class::<exec::PyExecOutput>()?;
@@ -81,6 +87,8 @@ fn _microsandbox(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<volume::PyVolumeHandle>()?;
     m.add_class::<volume::PyVolumeFs>()?;
     m.add_class::<snapshot::PySnapshot>()?;
+    m.add_class::<snapshot::PySnapshotArchive>()?;
+    m.add_class::<snapshot::PySnapshotCopyBuilder>()?;
     m.add_class::<snapshot::PySnapshotHandle>()?;
     m.add_class::<metrics::PyMetricsStream>()?;
     m.add_class::<metrics::PySandboxMetrics>()?;
@@ -199,10 +207,8 @@ fn resolved_msb_path() -> PyResult<String> {
     let local = backend
         .as_local()
         .ok_or_else(|| error::local_only("resolved_msb_path"))?;
-    local
-        .config()
-        .resolve_msb_path()
-        .map(|path| path.to_string_lossy().into_owned())
+    microsandbox::setup::resolve_runtime(local.config())
+        .map(|runtime| runtime.msb_path.to_string_lossy().into_owned())
         .map_err(error::to_py_err)
 }
 
@@ -213,7 +219,9 @@ fn build_backend(
     profile: Option<String>,
 ) -> PyResult<Arc<dyn microsandbox::Backend>> {
     match kind.trim().to_ascii_lowercase().as_str() {
-        "local" => Ok(Arc::new(microsandbox::LocalBackend::lazy())),
+        "local" => Ok(Arc::new(
+            microsandbox::LocalBackend::lazy().map_err(error::to_py_err)?,
+        )),
         "cloud" => {
             let cloud = if let Some(profile) = profile {
                 microsandbox::CloudBackend::from_profile(&profile)

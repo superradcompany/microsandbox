@@ -17,7 +17,9 @@ use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use futures::future::BoxFuture;
 
-use super::{Backend, LocalBackend};
+use super::Backend;
+#[cfg(feature = "local")]
+use super::LocalBackend;
 use crate::MicrosandboxResult;
 use crate::sandbox::fs::{FsEntry, FsMetadata};
 use crate::volume::{
@@ -291,6 +293,7 @@ pub trait VolumeBackend: Send + Sync {
 // Trait Implementations: LocalBackend
 //--------------------------------------------------------------------------------------------------
 
+#[cfg(feature = "local")]
 impl VolumeBackend for LocalBackend {
     fn create<'a>(
         &'a self,
@@ -440,7 +443,7 @@ impl VolumeBackend for LocalBackend {
 // Tests
 //--------------------------------------------------------------------------------------------------
 
-#[cfg(test)]
+#[cfg(all(test, feature = "local"))]
 mod tests {
     use super::*;
     use crate::MicrosandboxError;
@@ -452,6 +455,8 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let backend: Arc<dyn Backend> = Arc::new(
             LocalBackend::builder()
+                .config_path(home.path().join("config.json"))
+                .managed_config_path(home.path().join("managed.json"))
                 .home(home.path())
                 .build()
                 .await
@@ -486,6 +491,8 @@ mod tests {
 
         let backend_a: Arc<dyn Backend> = Arc::new(
             LocalBackend::builder()
+                .config_path(home_a.path().join("config.json"))
+                .managed_config_path(home_a.path().join("managed.json"))
                 .home(home_a.path())
                 .build()
                 .await
@@ -493,6 +500,8 @@ mod tests {
         );
         let backend_b: Arc<dyn Backend> = Arc::new(
             LocalBackend::builder()
+                .config_path(home_b.path().join("config.json"))
+                .managed_config_path(home_b.path().join("managed.json"))
                 .home(home_b.path())
                 .build()
                 .await

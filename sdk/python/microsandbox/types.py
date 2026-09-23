@@ -5,6 +5,7 @@ from __future__ import annotations
 import enum
 import os
 import sys
+import warnings
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Literal, TypeAlias, TypedDict
@@ -147,6 +148,7 @@ class ExecEventType(StrEnum):
 
 
 class PullEventType(StrEnum):
+    STARTUP = "startup"
     RESOLVING = "resolving"
     RESOLVED = "resolved"
     LAYER_DOWNLOAD_PROGRESS = "layer_download_progress"
@@ -213,69 +215,12 @@ class ViolationAction(StrEnum):
     BLOCK = "block"
     BLOCK_AND_LOG = "block-and-log"
     BLOCK_AND_TERMINATE = "block-and-terminate"
-    PASSTHROUGH = "passthrough"
-
-
-@dataclass(frozen=True, slots=True)
-class ViolationPolicy:
-    """Secret violation behavior, including optional passthrough hosts."""
-
-    fallback: ViolationAction = ViolationAction.BLOCK_AND_LOG
-    passthrough_hosts: tuple[str, ...] = ()
-    passthrough_host_patterns: tuple[str, ...] = ()
-    passthrough_all_hosts: bool = False
-
-    @classmethod
-    def block(cls) -> ViolationPolicy:
-        return cls(fallback=ViolationAction.BLOCK)
-
-    @classmethod
-    def block_and_log(cls) -> ViolationPolicy:
-        return cls(fallback=ViolationAction.BLOCK_AND_LOG)
-
-    @classmethod
-    def block_and_terminate(cls) -> ViolationPolicy:
-        return cls(fallback=ViolationAction.BLOCK_AND_TERMINATE)
-
-    @classmethod
-    def passthrough(
-        cls,
-        *,
-        hosts: Sequence[str] = (),
-        host_patterns: Sequence[str] = (),
-        all_hosts: bool = False,
-    ) -> ViolationPolicy:
-        return cls(
-            passthrough_hosts=tuple(hosts),
-            passthrough_host_patterns=tuple(host_patterns),
-            passthrough_all_hosts=all_hosts,
-        )
-
-    def _to_dict(self) -> ViolationAction | dict:
-        # Validate the fallback even when passthrough is selected. Ignoring a
-        # malformed enum on one serialization branch would make the public
-        # type boundary depend on unrelated host-list fields.
-        _enum_value(self.fallback, ViolationAction, "ViolationPolicy.fallback")
-        if (
-            not self.passthrough_hosts
-            and not self.passthrough_host_patterns
-            and not self.passthrough_all_hosts
-        ):
-            return self.fallback
-
-        passthrough: dict = {}
-        if self.passthrough_hosts:
-            passthrough["hosts"] = list(self.passthrough_hosts)
-        if self.passthrough_host_patterns:
-            passthrough["host_patterns"] = list(self.passthrough_host_patterns)
-        if self.passthrough_all_hosts:
-            passthrough["all_hosts"] = True
-        return {"passthrough": passthrough}
 
 
 class MountKind(StrEnum):
     BIND = "bind"
     NAMED = "named"
+    OWNED = "owned"
     TMPFS = "tmpfs"
     DISK = "disk"
 
@@ -372,9 +317,17 @@ class SnapshotFormat(StrEnum):
     QCOW2 = "qcow2"
 
 
+class GuestFlush(StrEnum):
+    """Optional guest writeback; mandatory storage barriers always apply."""
+
+    AUTO = "auto"
+    REQUIRED = "required"
+    SKIP = "skip"
+
+
 class SnapshotScope(StrEnum):
     DISK = "disk"
-    RESUMABLE = "resumable"
+    FULL = "full"
 
 class RlimitResource(StrEnum):
     CPU = "cpu"
@@ -437,6 +390,37 @@ class SecretModifySpec(TypedDict, total=False):
     store: str
     placeholder: str
     allowed_hosts: list[str]
+
+
+class DiskCompactionDiskResult(TypedDict):
+    """Per-disk physical counts; bytes are not reclaimed space.
+
+    ``total_us`` measures preparation/materialization, excluding journal adoption
+    and backend switching. Timings are microseconds.
+    """
+
+    guest_path: str
+    input_layers: int
+    selected_layers: int
+    output_layers: int
+    materialized_bytes: int
+    total_us: int
+
+
+class DiskCompactionResult(TypedDict):
+    """Aggregate compaction outcome, including unchanged selected disks.
+
+    ``total_us`` includes the shared journal/backend adoption phase.
+    """
+
+    dry_run: bool
+    input_layers: int
+    selected_layers: int
+    output_layers: int
+    materialized_bytes: int
+    total_us: int
+    pause_us: int
+    disks: list[DiskCompactionDiskResult]
 
 
 class ModificationConflict(TypedDict):
@@ -682,7 +666,7 @@ class MountConfig:
     """Volume mount configuration.
 
     ``stat_virtualization`` and ``host_permissions`` are only meaningful for
-    virtiofs-backed mounts (``BIND`` and ``NAMED``). Setting either on a
+    virtiofs-backed mounts (``BIND``, ``NAMED`` and directory-backed ``OWNED``). Setting either on a
     ``TMPFS`` or ``DISK`` mount raises ``ValueError`` at serialization time.
     """
 
@@ -706,6 +690,8 @@ class MountConfig:
     #: Must be set together with ``override_gid``. BIND/NAMED mounts only.
     override_uid: int | None = None
     override_gid: int | None = None
+    #: Backing kind for storage allocated and removed with the sandbox.
+    owned_kind: VolumeKind | None = None
 
     def _to_dict(self) -> dict:
         # Validate every supplied enum before selecting a mount arm. This
@@ -722,6 +708,13 @@ class MountConfig:
             if self.named_kind is not None
             else None
         )
+        owned_kind = (
+            _enum_value(self.owned_kind, VolumeKind, "MountConfig.owned_kind")
+            if self.owned_kind is not None
+            else None
+        )
+        if owned_kind is not None and self.kind != MountKind.OWNED:
+            raise ValueError("owned_kind is only valid for OWNED mounts")
         disk_format = (
             _enum_value(self.format, DiskImageFormat, "MountConfig.format")
             if self.format is not None
@@ -772,6 +765,35 @@ class MountConfig:
                 d["size_mib"] = self.size_mib
             if self.quota_mib is not None:
                 d["quota_mib"] = self.quota_mib
+        elif self.kind == MountKind.OWNED:
+            if any(value is not None for value in (
+                self.bind, self.named, self.named_mode, self.named_kind,
+                self.disk, self.format, self.fstype,
+            )):
+                raise ValueError(
+                    "OWNED mounts cannot specify a source, name, mode, format or fstype"
+                )
+            # A separate selector makes old native bindings reject the mount;
+            # never encode ownership as an optional field on a named volume.
+            d["owned"] = owned_kind or VolumeKind.DIRECTORY.value
+            if self.size_mib is not None:
+                d["size_mib"] = _owned_volume_size(self.size_mib, "size_mib")
+            if self.quota_mib is not None:
+                d["quota_mib"] = _owned_volume_size(self.quota_mib, "quota_mib")
+            if d["owned"] == VolumeKind.DISK.value:
+                if not self.size_mib:
+                    raise ValueError("disk-backed OWNED mounts require positive size_mib")
+                if self.quota_mib is not None:
+                    raise ValueError("quota_mib is only valid for directory-backed OWNED mounts")
+                if any(value is not None for value in (
+                    self.stat_virtualization, self.host_permissions,
+                    self.override_uid, self.override_gid,
+                )):
+                    raise ValueError(
+                        "metadata policies are not supported for disk-backed OWNED mounts"
+                    )
+            elif self.size_mib is not None:
+                raise ValueError("size_mib is only valid for disk-backed OWNED mounts")
         elif self.kind == MountKind.TMPFS:
             d["tmpfs"] = True
             if self.size_mib is not None:
@@ -788,7 +810,9 @@ class MountConfig:
             raise ValueError(f"unknown MountKind: {self.kind!r}")
 
         # Per-mount policies — only valid for virtiofs-backed kinds.
-        if self.kind in (MountKind.BIND, MountKind.NAMED):
+        if self.kind in (MountKind.BIND, MountKind.NAMED) or (
+            self.kind == MountKind.OWNED and owned_kind != VolumeKind.DISK.value
+        ):
             if stat_virtualization is not None:
                 d["stat_virtualization"] = stat_virtualization
             if host_permissions is not None:
@@ -815,8 +839,9 @@ class MountConfig:
             or self.override_gid is not None
         ):
             raise ValueError(
-                f"stat_virtualization/host_permissions/override_uid/override_gid are only "
-                f"valid for BIND/NAMED mounts (got kind={self.kind.value})"
+                "stat_virtualization/host_permissions/override_uid/override_gid are only "
+                "valid for BIND/NAMED or directory-backed OWNED mounts "
+                f"(got kind={self.kind.value})"
             )
         return d
 
@@ -830,6 +855,13 @@ def _enum_value(value: enum.Enum, expected: type[enum.Enum], field_name: str) ->
 
 def _mount_owner_id(value: object, field_name: str) -> int:
     """Validate an owner ID without accepting bool or lossy numeric coercions."""
+    if type(value) is not int or not 0 <= value <= 0xFFFFFFFF:
+        raise ValueError(f"{field_name} must be an integer between 0 and 4294967295")
+    return value
+
+
+def _owned_volume_size(value: object, field_name: str) -> int:
+    """Preserve capacities and quotas across the unsigned native boundary."""
     if type(value) is not int or not 0 <= value <= 0xFFFFFFFF:
         raise ValueError(f"{field_name} must be an integer between 0 and 4294967295")
     return value
@@ -1125,22 +1157,19 @@ class Patch:
 
 
 @dataclass(frozen=True, slots=True)
-class SecretInjection:
+class SecretSubstitution:
     """Where in the HTTP request the secret value can be substituted."""
 
     headers: bool = True
-    basic_auth: bool = True
-    query_params: bool = False
+    query: bool = False
     body: bool = False
 
     def _to_dict(self) -> dict:
         d: dict = {}
         if not self.headers:
             d["headers"] = False
-        if not self.basic_auth:
-            d["basic_auth"] = False
-        if self.query_params:
-            d["query_params"] = True
+        if self.query:
+            d["query"] = True
         if self.body:
             d["body"] = True
         return d
@@ -1152,31 +1181,32 @@ class SecretEntry:
 
     env_var: str
     value: str
-    allow_hosts: tuple[str, ...] = ()
-    allow_host_patterns: tuple[str, ...] = ()
+    allow: tuple[str, ...] = ()
+    passthrough: tuple[str, ...] = ()
     placeholder: str | None = None
-    require_tls: bool = True
-    on_violation: ViolationAction | ViolationPolicy = ViolationAction.BLOCK_AND_LOG
-    injection: SecretInjection = field(default_factory=SecretInjection)
+    require_tls_identity: bool = True
+    violation_action: ViolationAction | None = None
+    substitution: SecretSubstitution = field(default_factory=SecretSubstitution)
 
     def _to_dict(self) -> dict:
         d: dict = {"env_var": self.env_var, "value": self.value}
-        if self.allow_hosts:
-            d["allow_hosts"] = list(self.allow_hosts)
-        if self.allow_host_patterns:
-            d["allow_host_patterns"] = list(self.allow_host_patterns)
+        if self.allow:
+            d["allow"] = list(self.allow)
+        if self.passthrough:
+            d["passthrough"] = list(self.passthrough)
         if self.placeholder is not None:
             d["placeholder"] = self.placeholder
-        if not self.require_tls:
-            d["require_tls"] = False
-        violation = violation_policy_to_dict(self.on_violation)
-        if violation != str(ViolationAction.BLOCK_AND_LOG):
-            d["on_violation"] = violation
-        if not isinstance(self.injection, SecretInjection):
-            raise TypeError("SecretEntry.injection must be SecretInjection")
-        injection = self.injection._to_dict()
-        if injection:
-            d["injection"] = injection
+        if not self.require_tls_identity:
+            d["require_tls_identity"] = False
+        if self.violation_action is not None:
+            d["violation_action"] = _enum_value(
+                self.violation_action, ViolationAction, "SecretEntry.violation_action"
+            )
+        if not isinstance(self.substitution, SecretSubstitution):
+            raise TypeError("SecretEntry.substitution must be SecretSubstitution")
+        substitution = self.substitution._to_dict()
+        if substitution:
+            d["substitution"] = substitution
         return d
 
 
@@ -1188,22 +1218,22 @@ class Secret:
         env_var: str,
         *,
         value: str,
-        allow_hosts: Sequence[str] = (),
-        allow_host_patterns: Sequence[str] = (),
+        allow: Sequence[str] = (),
+        passthrough: Sequence[str] = (),
         placeholder: str | None = None,
-        require_tls: bool = True,
-        on_violation: ViolationAction | ViolationPolicy = ViolationAction.BLOCK_AND_LOG,
-        injection: SecretInjection | None = None,
+        require_tls_identity: bool = True,
+        violation_action: ViolationAction | None = None,
+        substitution: SecretSubstitution | None = None,
     ) -> SecretEntry:
         return SecretEntry(
             env_var=env_var,
             value=value,
-            allow_hosts=tuple(allow_hosts),
-            allow_host_patterns=tuple(allow_host_patterns),
+            allow=tuple(allow),
+            passthrough=tuple(passthrough),
             placeholder=placeholder,
-            require_tls=require_tls,
-            on_violation=on_violation,
-            injection=injection if injection is not None else SecretInjection(),
+            require_tls_identity=require_tls_identity,
+            violation_action=violation_action,
+            substitution=substitution if substitution is not None else SecretSubstitution(),
         )
 
 
@@ -1542,6 +1572,79 @@ class PortBinding:
 
 
 @dataclass(frozen=True, slots=True)
+class SecretSource:
+    """Host-side source for secret material."""
+
+    kind: Literal["env"]
+    var: str
+
+    def __post_init__(self) -> None:
+        if self.kind != "env":
+            raise ValueError("only environment-backed secret sources are supported")
+        if not self.var:
+            raise ValueError("secret source environment variable must not be empty")
+
+    @classmethod
+    def env(cls, variable: str) -> SecretSource:
+        """Resolve the secret from this host environment variable."""
+        return cls(kind="env", var=variable)
+
+    def _to_dict(self) -> dict:
+        return {"kind": self.kind, "var": self.var}
+
+
+@dataclass(frozen=True, slots=True)
+class OutboundProxy:
+    """Proxy used for outbound sandbox connections."""
+
+    protocol: Literal["socks4", "socks5"]
+    address: str
+    user_id: str | None = None
+    username: str | None = None
+    password: SecretSource | None = None
+
+    def __post_init__(self) -> None:
+        if self.protocol != "socks4" and self.user_id is not None:
+            raise ValueError("user_id is only supported for SOCKS4 proxies")
+        if self.protocol != "socks5" and (self.username is not None or self.password is not None):
+            raise ValueError("credentials are only supported for SOCKS5 proxies")
+        if (self.username is None) != (self.password is None):
+            raise ValueError("SOCKS5 username and password must be provided together")
+
+    @classmethod
+    def socks4(cls, address: str, *, user_id: str | None = None) -> OutboundProxy:
+        """Create a SOCKS4 outbound proxy."""
+        return cls(protocol="socks4", address=address, user_id=user_id)
+
+    @classmethod
+    def socks5(cls, address: str) -> OutboundProxy:
+        """Create a SOCKS5 outbound proxy."""
+        return cls(protocol="socks5", address=address)
+
+    def credentials(self, username: str, password: SecretSource) -> OutboundProxy:
+        """Set username authentication and a host-side password source."""
+        if self.protocol != "socks5":
+            raise ValueError("credentials are only supported for SOCKS5 proxies")
+        return OutboundProxy(
+            protocol=self.protocol,
+            address=self.address,
+            username=username,
+            password=password,
+        )
+
+    def _to_dict(self) -> dict:
+        value = {"protocol": self.protocol, "address": self.address}
+        if self.user_id is not None:
+            value["user_id"] = self.user_id
+        if self.username is not None and self.password is not None:
+            value["credentials"] = {
+                "username": self.username,
+                "password": self.password._to_dict(),
+            }
+        return value
+
+
+@dataclass(frozen=True, slots=True)
 class TokenBucket:
     """One token bucket of a rate limiter.
 
@@ -1647,6 +1750,9 @@ class Network:
     layers as `deny_domains`."""
     dns: DnsConfig | None = None
     tls: TlsConfig | None = None
+    strict: bool = False
+    """Require hostname-based policy allows to use inspectable application
+    authority. Defaults to ``False``."""
     ipv4_pool: str | None = None
     """IPv4 pool used to derive per-sandbox /30 guest subnets. Defaults
     to ``172.16.0.0/12``."""
@@ -1654,9 +1760,14 @@ class Network:
     """IPv6 pool used to derive per-sandbox /64 guest prefixes. Defaults
     to ``fd42:6d73:62::/48``."""
     max_connections: int | None = None
+    """Deprecated: use ``max_tcp_connections`` instead."""
+    max_tcp_connections: int | None = field(default=None, kw_only=True)
+    max_udp_connections: int | None = field(default=None, kw_only=True)
+    """UDP session limit. Defaults to unlimited for single-tenant and 1024 for
+    multi-tenant; zero means unlimited."""
     rate_limiter: NetworkRateLimiter | None = None
     """Local egress and ingress rate limits. ``None`` means unlimited."""
-    on_secret_violation: ViolationAction | ViolationPolicy = ViolationAction.BLOCK_AND_LOG
+    secret_violation_action: ViolationAction = ViolationAction.BLOCK_AND_LOG
 
     @classmethod
     def none(cls) -> Network:
@@ -1703,29 +1814,37 @@ class Network:
             if not isinstance(self.tls, TlsConfig):
                 raise TypeError("Network.tls must be TlsConfig or None")
             d["tls"] = self.tls._to_dict()
+        if self.strict:
+            d["strict"] = self.strict
         if self.ipv4_pool is not None:
             d["ipv4_pool"] = self.ipv4_pool
         if self.ipv6_pool is not None:
             d["ipv6_pool"] = self.ipv6_pool
+        if self.max_connections is not None and self.max_tcp_connections is not None:
+            raise ValueError("max_connections and max_tcp_connections are mutually exclusive")
         if self.max_connections is not None:
-            d["max_connections"] = self.max_connections
+            warnings.warn(
+                "max_connections is deprecated; use max_tcp_connections",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            d["max_tcp_connections"] = self.max_connections
+        elif self.max_tcp_connections is not None:
+            d["max_tcp_connections"] = self.max_tcp_connections
+        if self.max_udp_connections is not None:
+            d["max_udp_connections"] = self.max_udp_connections
         if self.rate_limiter is not None:
             if not isinstance(self.rate_limiter, NetworkRateLimiter):
                 raise TypeError("Network.rate_limiter must be NetworkRateLimiter or None")
             d["rate_limiter"] = self.rate_limiter._to_dict()
-        violation = violation_policy_to_dict(self.on_secret_violation)
+        violation = _enum_value(
+            self.secret_violation_action,
+            ViolationAction,
+            "Network.secret_violation_action",
+        )
         if violation != str(ViolationAction.BLOCK_AND_LOG):
-            d["on_secret_violation"] = violation
+            d["secret_violation_action"] = violation
         return d
-
-
-def violation_policy_to_dict(
-    policy: ViolationAction | ViolationPolicy,
-) -> ViolationAction | dict:
-    if isinstance(policy, ViolationPolicy):
-        return policy._to_dict()
-    _enum_value(policy, ViolationAction, "on_violation")
-    return policy
 
 
 # --------------------------------------------------------------------------------------------------

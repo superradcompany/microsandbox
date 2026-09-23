@@ -1,0 +1,26 @@
+[package]
+name = "microsandbox-protocol-client"
+description = "Protocol-independent framed clients with owned routing and transports."
+version.workspace = true
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+edition.workspace = true
+
+[lib]
+path = "lib/lib.rs"
+
+[features]
+default = []
+uds = []
+named-pipe = []
+
+[dependencies]
+microsandbox-protocol.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

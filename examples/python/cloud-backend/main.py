@@ -3,7 +3,13 @@
 import asyncio
 import time
 
-from microsandbox import BackendKind, LogReadSource, Sandbox, SandboxStatus, default_backend_kind
+from microsandbox import (
+    BackendKind,
+    LogReadSource,
+    Sandbox,
+    SandboxStatus,
+    default_backend_kind,
+)
 
 
 def configure_cloud_backend():
@@ -39,7 +45,6 @@ async def main():
             "for i in 1 2 3; do echo python-cloud-$i; sleep 1; done",
         ],
         max_duration=60,
-        replace=True,
     )
 
     output = await sandbox.shell("printf 'cloud exec from python\\n'; uname -m")

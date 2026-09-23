@@ -4,9 +4,9 @@ description: Run a persistent PostgreSQL service with a localhost-only forwarded
 icon: "database"
 ---
 
-<Tooltip tip="This example depends on a disk-kind named volume and a published client-host port, which are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="This example publishes a client-host port, which is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
-This example runs PostgreSQL 17 in a microVM, stores the database on a disk-backed named volume, and publishes the service only to host loopback.
+This example runs PostgreSQL 17 in a microVM, stores the database on a sized root disk, and publishes the service only to host loopback.
 
 <Note>
   The current `postgres:17-alpine` image contains tab characters in `DOCKER_PG_LLVM_DEPS`. Passing `-e DOCKER_PG_LLVM_DEPS=` is a temporary compatibility workaround for microsandbox's guest environment validation.
@@ -38,23 +38,21 @@ Start the database:
 <CodeGroup>
 ```sh macOS & Linux
 msb run -d --name postgres-demo --replace \
-  --cpus 1 --memory 1G --root-disk 2G \
+  --cpus 1 --memory 1G --root-disk 6G \
   -p 127.0.0.1:55432:5432 \
   -e POSTGRES_PASSWORD="$POSTGRES_PASSWORD" \
   -e POSTGRES_DB=examples \
   -e DOCKER_PG_LLVM_DEPS= \
-  --mount-named postgres-data:/var/lib/postgresql/data:kind=disk,size=5G \
   postgres:17-alpine
 ```
 
 ```powershell Windows
 msb run -d --name postgres-demo --replace `
-  --cpus 1 --memory 1G --root-disk 2G `
+  --cpus 1 --memory 1G --root-disk 6G `
   -p 127.0.0.1:55432:5432 `
   -e "POSTGRES_PASSWORD=$env:POSTGRES_PASSWORD" `
   -e POSTGRES_DB=examples `
   -e DOCKER_PG_LLVM_DEPS= `
-  --mount-named postgres-data:/var/lib/postgresql/data:kind=disk,size=5G `
   postgres:17-alpine
 ```
 </CodeGroup>
@@ -99,18 +97,12 @@ Applications on the host can connect to `127.0.0.1:55432` with the same database
 
 </Step>
 
-<Step title="Clean up or keep the data">
+<Step title="Clean up">
 
-Remove the VM while keeping its database:
+Remove the sandbox and its database:
 
 ```sh
 msb rm -f postgres-demo
-```
-
-Remove the database volume only when you no longer need its contents:
-
-```sh
-msb volume rm postgres-data
 ```
 
 Clear the password from the host shell:

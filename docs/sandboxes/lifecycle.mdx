@@ -4,45 +4,235 @@ description: Create, start, stop, and manage sandbox state
 icon: "rotate"
 ---
 
-Each sandbox runs as a child process of whatever application creates it. `Sandbox.builder(...).create()` boots a microVM, starts the guest agent inside it, and establishes a communication channel back to the host.
-
-Understanding the lifecycle is useful once you start managing long-running sandboxes, graceful shutdown, or resilient agent workflows.
-
-```mermaid
-stateDiagram-v2
-    [*] --> Creating: create()
-    Creating --> Running: boot complete
-    Running --> Draining: request_drain()
-    Running --> Stopped: stop()
-    Running --> Crashed: unexpected exit
-    Draining --> Stopped: drain complete
-    Stopped --> Running: start()
-    Stopped --> [*]: remove()
-    Crashed --> [*]: remove()
-```
-
-## States
-
-| Status | Description |
-|--------|-------------|
-| **Creating** | The VM is booting. The kernel is loaded, the filesystem is mounted, and the guest agent is initializing (configuring network, setting up the environment). |
-| **Running** | The guest agent is ready. You can call `exec`, `shell`, and `fs`. |
-| **Draining** | Graceful shutdown in progress. Existing commands run to completion, but new `exec` calls are rejected. Transitions to Stopped when all commands finish. |
-| **Stopped** | The VM has shut down. Sandbox configuration and state are persisted to the database and can be restarted. |
-| **Crashed** | The VM exited unexpectedly (e.g., kernel panic, OOM kill). |
+Create a sandbox, stop and restart it as needed, and remove it when you are finished. Stopping keeps its configuration and filesystem; removing deletes its saved state.
 
 ## Create a sandbox
 
-<Tooltip tip="Local attached SDK handles stop their sandbox when the client process exits. Cloud sandboxes are service-owned, so stop or remove them explicitly."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Note>
+By default, sandboxes created through a local SDK stop when your application exits. To keep one running, [detach it](#keep-a-sandbox-running). Cloud sandboxes keep running until stopped or removed, subject to their lifetime limits.
+</Note>
 
-Creating a sandbox boots the microVM, mounts the filesystem, initializes the guest agent, and waits until it's ready to accept commands. Names must be non-empty and no longer than 128 UTF-8 bytes.
+Creating a sandbox starts it and waits until it is ready for commands. Give it a name so you can find it later. Names must be non-empty and no longer than 128 UTF-8 bytes.
 
 <CodeGroup>
-```rust Rust
-// Local attached handle: sandbox stops when your process exits
-let sb = Sandbox::builder("worker").image("python").create().await?;
+```typescript TypeScript
+await using sb = await Sandbox.builder("worker").image("python").create();
+```
 
-// Detached: sandbox survives after your process exits
+```rust Rust
+let sb = Sandbox::builder("worker")
+    .image("python")
+    .create()
+    .await?;
+```
+
+```python Python
+sb = await Sandbox.create("worker", image="python")
+```
+
+```go Go
+sb, err := m.CreateSandbox(ctx, "worker", m.WithImage("python"))
+```
+
+```ruby Ruby
+sb = Microsandbox::Sandbox.create("worker", image: "python")
+```
+
+```bash CLI
+msb create python --name worker
+```
+</CodeGroup>
+
+## Pause and resume
+
+Pause freezes a local sandbox in memory. Resume continues where it left off. New commands are rejected while paused, and network connections may time out. Pause and resume are not supported on cloud.
+
+Time spent paused does not count toward the [60-second limit for waiting input](#when-input-gets-stuck).
+If new connections were already blocked, they stay blocked until input starts flowing again.
+
+<CodeGroup>
+```typescript TypeScript
+const worker = await Sandbox.get("worker");
+await worker.pause();
+await worker.resume();
+```
+
+```rust Rust
+let worker = Sandbox::get("worker").await?;
+worker.pause().await?;
+worker.resume().await?;
+```
+
+```python Python
+worker = await Sandbox.get("worker")
+await worker.pause()
+await worker.resume()
+```
+
+```go Go
+worker, err := m.GetSandbox(ctx, "worker")
+if err != nil { return err }
+if err := worker.Pause(ctx); err != nil { return err }
+if err := worker.Resume(ctx); err != nil { return err }
+```
+
+```bash CLI
+msb pause worker
+msb resume worker
+```
+</CodeGroup>
+
+Use `resume` for a paused sandbox and `start` for a stopped one. Repeating `pause` or `resume` is safe. Pausing does not create a snapshot; taking a [full snapshot](/sandboxes/snapshots) while paused leaves it paused. Pause/resume requires a matching runtime and guest kernel.
+
+## Stop and start again
+
+Stopping shuts down the sandbox and its processes while keeping its configuration and filesystem. Starting it again boots a new VM; it does not resume the old processes.
+
+`stop()` waits for graceful shutdown with no default timeout. Use your SDK's stop-with-timeout method to limit the wait. A timeout returns an error without force-killing; the shutdown may still finish later. Resume a paused sandbox before stopping it.
+
+See the SDK references for timeout options and cancellation rules: [TypeScript](/sdk/typescript/sandbox), [Rust](/sdk/rust/sandbox), [Python](/sdk/python/sandbox), or [Go](/sdk/go/sandbox). Cancelling a wait does not disable automatic cleanup or [lifetime limits](#automatic-lifecycle-policies).
+
+<CodeGroup>
+```typescript TypeScript
+await sb.stop();
+
+const sb = await Sandbox.start("worker");
+```
+
+```rust Rust
+sb.stop().await?;
+
+let sb = Sandbox::start("worker").await?;
+```
+
+```python Python
+await sb.stop()
+
+sb = await Sandbox.start("worker")
+```
+
+```go Go
+_ = sb.Stop(ctx)
+
+sb, err := m.StartSandbox(ctx, "worker")
+```
+
+```ruby Ruby
+sb.stop
+
+sb = Microsandbox::Sandbox.start("worker")
+```
+
+```bash CLI
+msb stop worker
+msb start worker
+```
+</CodeGroup>
+
+Use `restart` to stop and start in one operation. If the sandbox is already stopped or crashed, it starts directly.
+
+```bash CLI
+msb restart worker
+```
+
+If graceful shutdown times out, restart fails without starting a new VM. For a sandbox that will not stop, see [Stop an unresponsive sandbox](#stop-an-unresponsive-sandbox).
+
+## Reuse or create a named sandbox
+
+Use `connect_or_create` to reuse a named sandbox or create it if it does not exist.
+
+The operation:
+
+- Connects if the sandbox is running
+- Starts it if it is stopped or crashed
+- Creates it if the name does not exist
+
+<CodeGroup>
+```typescript TypeScript
+const sb = await Sandbox.builder("worker")
+  .image("python")
+  .memory(MiB(1024))
+  .connectOrCreate();
+```
+
+```rust Rust
+let sb = Sandbox::builder("worker")
+    .image("python")
+    .memory(1024)
+    .connect_or_create()
+    .await?;
+```
+
+```python Python
+sb = await Sandbox.connect_or_create(
+    "worker",
+    image="python",
+    memory=1024,
+)
+```
+
+```go Go
+sb, err := m.ConnectOrCreateSandbox(ctx, "worker",
+    m.WithImage("python"),
+    m.WithMemory(1024),
+)
+```
+
+```ruby Ruby
+sb = Microsandbox::Sandbox.connect_or_create(
+  "worker",
+  image: "python",
+  memory: 1024
+)
+```
+</CodeGroup>
+
+<Warning>
+Creation options apply only to new sandboxes. An existing sandbox keeps its saved configuration. To recreate it with different settings, use [replacement locally](/sandboxes/overview#naming-conflicts), or remove and recreate it on cloud.
+</Warning>
+
+If you already have a `SandboxHandle`, use `connect_or_start` to connect to that exact sandbox or start it when needed.
+
+<CodeGroup>
+```typescript TypeScript
+const handle = await Sandbox.get("worker");
+const sb = await handle.connectOrStart();
+```
+
+```rust Rust
+let handle = Sandbox::get("worker").await?;
+let sb = handle.connect_or_start().await?;
+```
+
+```python Python
+handle = await Sandbox.get("worker")
+sb = await handle.connect_or_start()
+```
+
+```go Go
+handle, err := m.GetSandbox(ctx, "worker")
+sb, err := handle.ConnectOrStart(ctx)
+```
+
+```ruby Ruby
+handle = Microsandbox::Sandbox.get("worker")
+sb = handle.connect_or_start
+```
+</CodeGroup>
+
+## Keep a sandbox running
+
+Detach a local sandbox when it should keep running after the client process exits. You can reconnect to it later by name.
+
+<CodeGroup>
+```typescript TypeScript
+const sb = await Sandbox.builder("worker")
+  .image("python")
+  .detached(true)
+  .create();
+```
+
+```rust Rust
 let sb = Sandbox::builder("worker")
     .image("python")
     .detached(true)
@@ -50,108 +240,116 @@ let sb = Sandbox::builder("worker")
     .await?;
 ```
 
-```typescript TypeScript
-// Local attached handle: sandbox stops when your process exits
-await using sb = await Sandbox.builder("worker").image("python").create();
-
-// Detached: sandbox survives after your process exits
-const detached = await Sandbox.builder("worker")
-  .image("python")
-  .detached(true)
-  .create();
-```
-
 ```python Python
-# Local attached handle: sandbox stops when your process exits
-sb = await Sandbox.create("worker", image="python")
-
-# Detached: sandbox survives after your process exits
 sb = await Sandbox.create("worker", image="python", detached=True)
-await sb.detach()
 ```
 
 ```go Go
-// Local attached handle: sandbox stops when your process exits
-sb, err := m.CreateSandbox(ctx, "worker", m.WithImage("python"))
-
-// Detached: sandbox survives after your process exits
-detached, err := m.CreateSandbox(ctx, "worker",
+sb, err := m.CreateSandbox(ctx, "worker",
     m.WithImage("python"),
     m.WithDetached(),
 )
 ```
 
-```bash CLI
-# Attached
-msb create python --name worker
+```ruby Ruby
+sb = Microsandbox::Sandbox.create("worker", image: "python", detached: true)
+```
 
-# Detached
+```bash CLI
 msb run -d python --name worker
 ```
-
 </CodeGroup>
 
-## Stop and restart
+To detach a sandbox you already created, call `detach()` (`Detach` in Go).
 
-Stopping gracefully terminates guest processes and shuts down the VM. The sandbox moves to `Stopped` and can be restarted later with all its configuration preserved.
+## List and inspect
+
+List sandboxes to discover what exists, or get one by name when you already know which sandbox you need.
 
 <CodeGroup>
-```rust Rust
-sb.stop().await?;
+```typescript TypeScript
+const page = await Sandbox.list();
+for (const handle of page.sandboxes) {
+  console.log(`${handle.name}: ${handle.status}`);
+}
 
-let sb = Sandbox::start("worker").await?;
+const handle = await Sandbox.get("worker");
+console.log(handle.status);
 ```
 
-```typescript TypeScript
-await sb.stop()
-
-// Later, resume where you left off
-const sb = await Sandbox.start("worker")
+```rust Rust
+for handle in Sandbox::list().await?.sandboxes {
+    println!("{}: {:?}", handle.name(), handle.status_snapshot());
+}
 ```
 
 ```python Python
-await sb.stop()
+for handle in (await Sandbox.list()).sandboxes:
+    print(f"{handle.name}: {handle.status}")
 
-# Later, resume where you left off
-sb = await Sandbox.start("worker")
+handle = await Sandbox.get("worker")
+print(handle.status)
 ```
 
 ```go Go
-_ = sb.Stop(ctx)
+page, err := m.ListSandboxes(ctx)
+for _, handle := range page.Sandboxes {
+    fmt.Printf("%s: %s\n", handle.Name(), handle.Status())
+}
 
-// Later, resume where you left off
-sb, err := m.StartSandbox(ctx, "worker")
+handle, err := m.GetSandbox(ctx, "worker")
+fmt.Println(handle.Status())
 ```
 
 ```bash CLI
-msb stop worker
-
-# Later, resume where you left off
-msb start worker
-
-# Or stop and start in one command
-msb restart worker
+msb ls
+msb ps worker
 ```
-
 </CodeGroup>
 
-`msb restart` follows the same lifecycle semantics as `msb stop` followed by `msb start`. If the sandbox is already stopped or crashed, it starts it directly.
+## Wait for a state
 
-## Configuration
-
-Use `msb modify`, or the SDK `modify()` methods, to change an existing sandbox without recreating it. Some changes apply live, some affect future execs only, and some need a restart or the next start.
+Use `wait_until_stopped` to wait for a sandbox to stop without requesting a shutdown yourself. To request shutdown now and wait separately, use `request_stop` first; see your [SDK reference](#reference) for the method names.
 
 <CodeGroup>
+```typescript TypeScript
+const result = await sb.waitUntilStopped();
+```
+
+```rust Rust
+let result = sb.wait_until_stopped().await?;
+```
+
+```python Python
+result = await sb.wait_until_stopped()
+```
+
+```go Go
+result, err := sb.WaitUntilStopped(ctx)
+```
+
+```ruby Ruby
+result = sb.wait_until_stopped
+```
+</CodeGroup>
+
+Use `wait_for_status` (`waitForStatus` in TypeScript and `WaitForStatus` in Go) when you need to wait for a specific lifecycle state. It has no built-in timeout, so use the language's normal timeout or cancellation primitive around it.
+
+## Change configuration
+
+Use `msb modify`, or the SDK `modify()` methods, to change an existing sandbox without recreating it. Some changes apply immediately, some affect future commands, and some take effect after a restart.
+
+<CodeGroup>
+```typescript TypeScript
+const plan = await sandbox.modify({ cpus: 4, memory: 4096 });
+```
+
 ```rust Rust
 let plan = sb.modify()
     .cpus(4)
     .memory(4096)
     .apply()
     .await?;
-```
-
-```typescript TypeScript
-const plan = await sandbox.modify({ cpus: 4, memory: 4096 });
 ```
 
 ```python Python
@@ -167,15 +365,24 @@ msb modify api --cpus 4 --memory 4G
 ```
 </CodeGroup>
 
-See [Tuning](/sandboxes/tuning) for the change model, CPU and memory resize, labels, environment variables, secrets, and storage sizing.
+See [Live Modify](/sandboxes/tuning) for the change model, CPU and memory resize, labels, environment variables, secrets, and storage sizing.
 
-## Ping and touch
+## Check health and keep a sandbox active
 
-<Tooltip tip="Not yet available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Note>
+Ping and touch are currently available only for local sandboxes.
+</Note>
 
-Use `ping` to check that a running sandbox's guest agent is reachable, and `touch` to intentionally refresh its idle timer. Ping is a health check only: it does not count as sandbox activity and will not keep an idle sandbox alive by itself. Touch is the explicit keepalive.
+Use `ping` to check that a running sandbox's guest agent is reachable. A ping is only a health check and does not reset the idle timer. Use `touch` when you intentionally want to keep the sandbox active.
 
 <CodeGroup>
+```typescript TypeScript
+const ping = await sb.ping();
+console.log(`agent reachable in ${ping.latencyMs.toFixed(1)} ms`);
+
+await sb.touch();
+```
+
 ```rust Rust
 let ping = sb.ping().await?;
 println!("agent reachable in {:?}", ping.latency);
@@ -187,77 +394,26 @@ sb.touch().await?;
 msb ping worker
 msb touch worker
 
-# Health check and then keep alive if reachable
+# Check health, then keep the sandbox active if it is reachable
 msb ping worker --touch
 ```
-
 </CodeGroup>
 
-## Kill immediately
+## Drain before stopping
 
-<Tooltip tip="Not yet available on microsandbox cloud; use a graceful stop instead."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Note>
+Draining is currently available only for local sandboxes. Use a graceful stop on microsandbox cloud.
+</Note>
 
-If a sandbox is unresponsive (e.g., stuck in a tight loop or a panic), force-kill it. The sandbox is terminated immediately with no graceful shutdown.
+Use a drain when existing commands should finish but new commands should be rejected. The sandbox moves to `Draining`, waits for in-flight commands, and then stops. This is useful when rotating worker sandboxes without interrupting active jobs.
 
 <CodeGroup>
-```rust Rust
-sb.kill().await?;
-```
-
 ```typescript TypeScript
-await sb.kill()
+await sb.requestDrain();
 ```
 
-```python Python
-await sb.kill()
-```
-
-```go Go
-err := sb.Kill(ctx)
-```
-
-```bash CLI
-msb stop --force worker
-```
-
-</CodeGroup>
-
-## Detach
-
-Keeps a sandbox running after the parent process exits. It becomes a background process that you can reconnect to later with `Sandbox::get("worker")`.
-
-<CodeGroup>
-```rust Rust
-sb.detach().await;
-```
-
-```typescript TypeScript
-await sb.detach()
-```
-
-```python Python
-await sb.detach()
-```
-
-```go Go
-err := sb.Detach(ctx)
-```
-
-</CodeGroup>
-
-## Request drain
-
-<Tooltip tip="Not yet available on microsandbox cloud; use a graceful stop instead."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
-
-Trigger a graceful shutdown that lets existing commands finish but rejects new ones. The sandbox moves to `Draining` and transitions to `Stopped` when all in-flight commands complete. This is useful for zero-downtime rotation of worker sandboxes.
-
-<CodeGroup>
 ```rust Rust
 sb.request_drain().await?;
-```
-
-```typescript TypeScript
-await sb.requestDrain()
 ```
 
 ```python Python
@@ -267,43 +423,43 @@ await sb.request_drain()
 ```go Go
 err := sb.RequestDrain(ctx)
 ```
-
 </CodeGroup>
 
-## Wait until stopped
+## Destroy or remove
 
-Block until the sandbox is observed in a terminal non-running state, without triggering a stop or kill request.
+Use `destroy` to stop and remove a sandbox in one operation. If graceful shutdown times out, it leaves the saved data intact. It will not remove a different sandbox that has reused the same name.
 
 <CodeGroup>
-```rust Rust
-let result = sb.wait_until_stopped().await?;
+```typescript TypeScript
+await sb.destroy();
 ```
 
-```typescript TypeScript
-const result = await sb.waitUntilStopped()
+```rust Rust
+sb.destroy().await?;
 ```
 
 ```python Python
-result = await sb.wait_until_stopped()
+await sb.destroy()
 ```
 
 ```go Go
-result, err := sb.WaitUntilStopped(ctx)
+err := sb.Destroy(ctx)
 ```
 
+```ruby Ruby
+sb.destroy
+```
 </CodeGroup>
 
-## Remove
-
-Delete a stopped sandbox. Every local SDK entry point and `msb rm` uses the same deletion scope.
+Use `remove` when the sandbox is already stopped and you want to delete it by name.
 
 <CodeGroup>
-```rust Rust
-Sandbox::remove("worker").await?;
+```typescript TypeScript
+await Sandbox.remove("worker");
 ```
 
-```typescript TypeScript
-await Sandbox.remove("worker")
+```rust Rust
+Sandbox::remove("worker").await?;
 ```
 
 ```python Python
@@ -314,10 +470,13 @@ await Sandbox.remove("worker")
 err := m.RemoveSandbox(ctx, "worker")
 ```
 
+```ruby Ruby
+Microsandbox::Sandbox.remove("worker")
+```
+
 ```bash CLI
 msb rm worker
 ```
-
 </CodeGroup>
 
 For a local sandbox, removal deletes sandbox-owned state while leaving independently managed resources intact:
@@ -332,91 +491,19 @@ For a local sandbox, removal deletes sandbox-owned state while leaving independe
 
 Removing a sandbox does not undo writes made to a named volume, bind mount, or user-supplied disk image. On cloud, removal deletes the remote sandbox resource; the local disk details above do not apply.
 
-## List and inspect
+## Automatic lifecycle policies
+
+For production workloads, configure a maximum lifetime or idle timeout so sandboxes shut down automatically.
 
 <CodeGroup>
-```rust Rust
-for handle in Sandbox::list().await?.sandboxes {
-    println!("{}: {:?}", handle.name(), handle.status_snapshot());
-}
-```
-
 ```typescript TypeScript
-const page = await Sandbox.list();
-for (const handle of page.sandboxes) {
-    console.log(`${handle.name}: ${handle.status}`);
-}
-
-const handle = await Sandbox.get("worker");
-console.log(handle.status); // "running" | "stopped" | ...
+await using sb = await Sandbox.builder("worker")
+    .image("python")
+    .maxDuration(3600)   // maximum sandbox lifetime in seconds
+    .idleTimeout(300)    // auto-drain after 5 minutes of inactivity
+    .create();
 ```
 
-```python Python
-for handle in (await Sandbox.list()).sandboxes:
-    print(f"{handle.name}: {handle.status}")
-
-handle = await Sandbox.get("worker")
-print(handle.status)  # "running" | "stopped" | ...
-```
-
-```go Go
-page, err := m.ListSandboxes(ctx)
-for _, handle := range page.Sandboxes {
-    fmt.Printf("%s: %s\n", handle.Name(), handle.Status())
-}
-
-handle, err := m.GetSandbox(ctx, "worker")
-fmt.Println(handle.Status()) // "running" | "stopped" | ...
-```
-
-```bash CLI
-msb ls
-msb ps worker
-```
-
-</CodeGroup>
-
-## Runtime process architecture
-
-At runtime, your application talks to a host-side sandbox process, and that process relays requests to the guest agent inside the VM.
-
-```mermaid
-graph TD
-    subgraph Host["Host"]
-        A["Your Application<br/><small>microsandbox SDK</small>"]
-        B["Sandbox Process<br/><small>VM + networking + lifecycle</small>"]
-    end
-
-    subgraph Guest["Guest VM"]
-        F["agentd<br/><small>exec, fs</small>"]
-    end
-
-    A -- "spawn" --> B
-    B -- "boot" --> F
-    A -. "commands & responses" .-> F
-
-    style Host fill:#f5f0ff,stroke:#a770ef,color:#333
-    style Guest fill:#fef4e8,stroke:#e8a838,color:#333
-    style A fill:#d4bfff,stroke:#8b5cf6,color:#1a1a1a
-    style B fill:#d4bfff,stroke:#8b5cf6,color:#1a1a1a
-    style F fill:#fdd49e,stroke:#d97706,color:#1a1a1a
-```
-
-The sandbox process also handles:
-
-- Graceful stop and drain signals
-- Cleanup when the sandbox exits
-- Idle detection and maximum lifetime enforcement
-
-## Logs and diagnostics
-
-Use [`msb logs`](/cli/sandbox-commands#msb-logs) or the SDK `logs()` method to read captured output from running, stopped, or crashed sandboxes. For source semantics, boot errors, and diagnostic flows, see [Logs](/sandboxes/logs).
-
-## Sandbox process policies
-
-For production workloads, configure how the sandbox process handles shutdown, idle detection, and maximum lifetime.
-
-<CodeGroup>
 ```rust Rust
 let sb = Sandbox::builder("worker")
     .image("python")
@@ -424,14 +511,6 @@ let sb = Sandbox::builder("worker")
     .idle_timeout(300)
     .create()
     .await?;
-```
-
-```typescript TypeScript
-await using sb = await Sandbox.builder("worker")
-    .image("python")
-    .maxDuration(3600)   // maximum sandbox lifetime in seconds
-    .idleTimeout(300)    // auto-drain after 5 minutes of inactivity
-    .create();
 ```
 
 ```python Python
@@ -450,5 +529,74 @@ sb, err := m.CreateSandbox(ctx, "worker",
     m.WithIdleTimeout(5*time.Minute),
 )
 ```
-
 </CodeGroup>
+
+## Lifecycle states
+
+Use these states to display status or decide what to do next.
+
+| Status | Meaning |
+|--------|---------|
+| **Created** | Configuration has been saved, but the sandbox has not started yet. |
+| **Starting** | The VM and guest agent are starting. Commands are not ready yet. |
+| **Running** | The sandbox is ready for `exec`, `shell`, and filesystem operations. |
+| **Paused** | The local VM and its RAM remain resident. Resume continues the same processes. |
+| **Draining** | Existing commands may finish, but new commands are rejected. The sandbox stops when the drain completes. |
+| **Stopped** | The VM is off. Configuration and sandbox state are preserved for a later start. |
+| **Crashed** | The VM exited unexpectedly and can be started again. |
+
+## Names, handles, and concurrent callers
+
+A name identifies the sandbox currently saved under it. An SDK handle identifies one specific sandbox. If that sandbox is removed and its name is reused, the old handle will not act on the replacement.
+
+Concurrent callers can safely use `connect_or_create` or `connect_or_start` to reuse a sandbox. If it is still starting, they wait rather than start another VM. See your [SDK reference](#reference) for identity checks and replacement errors.
+
+## Troubleshooting
+
+### Stop an unresponsive sandbox
+
+<Note>
+Force kill is currently available only for local sandboxes. Use a graceful stop on microsandbox cloud.
+</Note>
+
+If [graceful stop](#stop-and-start-again) does not work, use `kill` to end the VM immediately. Running work is interrupted and unsaved data may be lost.
+
+<CodeGroup>
+```typescript TypeScript
+await sb.kill();
+```
+
+```rust Rust
+sb.kill().await?;
+```
+
+```python Python
+await sb.kill()
+```
+
+```go Go
+err := sb.Kill(ctx)
+```
+
+```bash CLI
+msb stop --force worker
+```
+</CodeGroup>
+
+### When input gets stuck
+
+If input has to wait because the sandbox’s input queue has been full for 60 seconds,
+Microsandbox stops accepting new connections. It keeps existing connections and pending requests open, and
+output and logs remain available. It does not stop the sandbox or its workloads.
+New connections are accepted again once input starts flowing.
+
+You can set request timeouts in your application. A timeout does not necessarily
+mean the request failed to run.
+
+### Logs and diagnostics
+
+Use [`msb logs`](/cli/sandbox-commands#msb-logs) or the SDK `logs()` method to read sandbox output, even after it stops or crashes. See [Logs](/sandboxes/logs) for troubleshooting startup and other failures.
+
+## Reference
+
+For exact lifecycle APIs, see [TypeScript](/sdk/typescript/sandbox), [Rust](/sdk/rust/sandbox), [Python](/sdk/python/sandbox), or [Go](/sdk/go/sandbox). For lifecycle commands and the REST surface, see [Sandbox commands](/cli/sandbox-commands) and the [Cloud API](/api-reference/overview).

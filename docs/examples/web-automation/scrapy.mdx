@@ -5,7 +5,7 @@ description: Run a bounded crawler with a single-site network allowlist
 icon: "spider"
 ---
 
-<Tooltip tip="This workflow prepares and restores a local disk snapshot, which is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="This workflow uses local snapshot verification and explicit destination security/network controls."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 Run a Scrapy spider in a disposable microVM and export only its JSON result. This example targets [Books to Scrape](https://books.toscrape.com/), a public practice site.
 
@@ -68,20 +68,20 @@ Capture the prepared environment:
 
 <CodeGroup>
 ```sh macOS & Linux
-msb snapshot create scrapy-runtime \
-  --from scrapy-base --integrity --force
+msb snap create scrapy-runtime \
+  --sandbox scrapy-base --integrity
 ```
 
 ```powershell Windows
-msb snapshot create scrapy-runtime `
-  --from scrapy-base --integrity --force
+msb snap create scrapy-runtime `
+  --sandbox scrapy-base --integrity
 ```
 </CodeGroup>
 
 Verify the snapshot before using it:
 
 ```sh
-msb snapshot verify scrapy-runtime
+msb snap verify scrapy-base:scrapy-runtime
 ```
 
 The snapshot avoids reinstalling Scrapy for every crawl.
@@ -90,33 +90,37 @@ The snapshot avoids reinstalling Scrapy for every crawl.
 
 <Step title="Crawl the site">
 
+The destination name must be unused. Restore installs the deny-by-default allowlist, connection cap, restricted guest profile, and lifetime bound before boot. Copy the spider into the root-owned `/work` directory and make it read-only before running it as the unprivileged user; no host directory is exposed.
+
 <CodeGroup>
 ```sh macOS & Linux
-msb run --name scrapy-books --replace \
-  --from-snapshot scrapy-runtime \
-  --mount-file ./books_spider.py:/work/books_spider.py:ro \
-  --workdir /work --user 65534:65534 --env HOME=/tmp \
-  --memory 1G --max-duration 2m \
+msb snap restore scrapy-base:scrapy-runtime --name scrapy-books \
+  --user 65534:65534 --memory 1G --max-duration 2m \
   --net-default deny \
   --net-rule 'allow@books.toscrape.com:tcp:443' \
-  --max-connections 8 --security restricted \
-  --rlimit fsize=8388608 \
-  -- scrapy runspider books_spider.py \
+  --max-connections 8 --security restricted
+msb cp ./books_spider.py scrapy-books:/work/books_spider.py
+msb exec --user root scrapy-books -- chmod 0444 /work/books_spider.py
+msb exec --workdir /work --user 65534:65534 --env HOME=/tmp \
+  --timeout 2m --rlimit fsize=8388608 \
+  scrapy-books -- scrapy runspider books_spider.py \
     --loglevel WARNING -O /var/tmp/books.json
+msb stop scrapy-books
 ```
 
 ```powershell Windows
-msb run --name scrapy-books --replace `
-  --from-snapshot scrapy-runtime `
-  --mount-file ./books_spider.py:/work/books_spider.py:ro `
-  --workdir /work --user 65534:65534 --env HOME=/tmp `
-  --memory 1G --max-duration 2m `
+msb snap restore scrapy-base:scrapy-runtime --name scrapy-books `
+  --user 65534:65534 --memory 1G --max-duration 2m `
   --net-default deny `
   --net-rule 'allow@books.toscrape.com:tcp:443' `
-  --max-connections 8 --security restricted `
-  --rlimit fsize=8388608 `
-  -- scrapy runspider books_spider.py `
+  --max-connections 8 --security restricted
+msb cp ./books_spider.py scrapy-books:/work/books_spider.py
+msb exec --user root scrapy-books -- chmod 0444 /work/books_spider.py
+msb exec --workdir /work --user 65534:65534 --env HOME=/tmp `
+  --timeout 2m --rlimit fsize=8388608 `
+  scrapy-books -- scrapy runspider books_spider.py `
     --loglevel WARNING -O /var/tmp/books.json
+msb stop scrapy-books
 ```
 </CodeGroup>
 
@@ -157,7 +161,7 @@ msb rm -f scrapy-base scrapy-books
 Remove the reusable snapshot:
 
 ```sh
-msb snapshot remove scrapy-runtime
+msb snap rm scrapy-base:scrapy-runtime
 ```
 
 </Step>

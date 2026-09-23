@@ -1,0 +1,168 @@
+---
+title: Managed deployment
+description: Deploy administrator settings with Jamf or Microsoft Intune
+icon: "file-shield"
+---
+
+Deploy a protected `managed.json` file to employee devices. Its settings take precedence over user configuration and CLI or SDK options.
+
+<Frame>
+  <img className="block dark:hidden" src="/images/enterprise/managed-deployment-light.svg" alt="An administrator deploys a protected managed.json file to the employee device. Managed overrides take precedence over employee settings when the CLI and SDKs resolve their configuration." />
+  <img className="hidden dark:block" src="/images/enterprise/managed-deployment-dark.svg" alt="An administrator deploys a protected managed.json file to the employee device. Managed overrides take precedence over employee settings when the CLI and SDKs resolve their configuration." />
+</Frame>
+
+## Choose your device manager
+
+Prepare [your policy](#define-managed-settings), then follow the steps for your tool. Each deployment must install the same JSON file at the [protected system location](#deploy-to-employee-devices).
+
+<Tabs>
+  <Tab title="Jamf Pro">
+    <Steps>
+      <Step title="Build a configuration package">
+        On a packaging Mac, place `managed.json` in `/Library/Application Support/microsandbox/`. Drag the folder into [Composer](https://learn.jamf.com/r/en-US/jamf-connect-documentation-current/Packaging_Files_and_Images_with_Composer) to create a package source.
+
+        Set the owner to **root**, group to **wheel**, directory permissions to `0755`, and file permissions to `0644`. Select **Build as PKG** and sign according to your organization's policy.
+      </Step>
+      <Step title="Upload the package">
+        In Jamf Pro, open **Settings > Computer management > Packages > New**. [Upload the PKG](https://learn.jamf.com/r/en-US/jamf-pro-documentation-current/Uploading_a_Package_to_Jamf_Pro) and make it available on your distribution point.
+      </Step>
+      <Step title="Create a deployment policy">
+        Open **Computers > Policies > New**. In **General**, select **Recurring Check-in** and a daily execution frequency. Under **Packages**, add the PKG with the **Install** action.
+      </Step>
+      <Step title="Deploy to a pilot group">
+        In **Scope**, select your pilot computers and save the [policy](https://learn.jamf.com/r/en-US/jamf-pro-documentation-current/Deploying_a_Package_Using_a_Policy). After check-in, review its logs and [verify the effective settings](#verify-the-configuration) as an employee before expanding the scope.
+      </Step>
+    </Steps>
+  </Tab>
+  <Tab title="Intune macOS">
+    <Steps>
+      <Step title="Prepare the file deployment">
+        Use Intune's [macOS shell-script workflow](https://learn.microsoft.com/en-us/intune/device-management/tools/run-shell-scripts-macos). Your organization's deployment script must write the JSON to the macOS path below, apply the required permissions, and safely replace an existing policy. It should succeed when the correct file is already present.
+      </Step>
+      <Step title="Add the deployment in Intune">
+        Open **Devices > By platform > macOS > Manage devices > Scripts > Add**. Give the policy a name in **Basics**, then upload your script under **Script settings**.
+      </Step>
+      <Step title="Configure execution">
+        | Setting | Value |
+        | --- | --- |
+        | Run script as signed-in user | **No**, so it runs as root |
+        | Script frequency | Daily |
+        | Max number of times to retry if script fails | Set a retry count |
+
+        The Intune management agent must be installed. Microsoft's script prerequisites require direct Internet access; proxy connections are unsupported for this delivery path.
+      </Step>
+      <Step title="Assign and verify">
+        Under **Assignments**, include a pilot device group. Select **Review + add > Add**, then review **Device status**. [Verify the effective settings](#verify-the-configuration) in an employee session before extending the assignment.
+      </Step>
+    </Steps>
+  </Tab>
+  <Tab title="Intune Windows">
+    <Steps>
+      <Step title="Package the policy">
+        Use your application-packaging tool to create a per-machine MSI that installs `managed.json` beneath the system ProgramData folder with the [Windows permissions below](#deploy-to-employee-devices). This is your organization's configuration package, separate from the microsandbox runtime.
+
+        Wrap the MSI as an `.intunewin` file with Microsoft's [Win32 Content Prep Tool](https://learn.microsoft.com/en-us/intune/app-management/deployment/create-win32-package).
+      </Step>
+      <Step title="Create a Win32 app">
+        Open **Apps > All Apps > Create**. Choose **Windows app (Win32)** and upload the `.intunewin` file. On **Program**, enter the MSI's silent installation and uninstallation commands, choose **System** install behavior, and set **Allow available uninstall** to **No**.
+      </Step>
+      <Step title="Configure detection">
+        In **Detection rules**, choose **Manually configure detection rules**, add an **MSI** rule, and enter your package's product code and version check. See [Intune's Win32 app guide](https://learn.microsoft.com/en-us/intune/app-management/deployment/add-win32).
+
+        MSI detection confirms package installation. It does not prove that the JSON content or permissions still match your policy.
+      </Step>
+      <Step title="Assign and verify">
+        Assign the app as **Required** to a pilot device group, then create it. Review installation status and [verify the effective settings](#verify-the-configuration) as an employee before widening the assignment.
+      </Step>
+    </Steps>
+  </Tab>
+</Tabs>
+
+## Define managed settings
+
+Save the settings you want to enforce as `managed.json`:
+
+```json
+{
+  "version": 1,
+  "overrides": {
+    "sandbox_defaults": {
+      "cpus": 2,
+      "memory_mib": 1024
+    },
+    "ssh": {
+      "inactivity_timeout_secs": 900
+    }
+  }
+}
+```
+
+This example enforces **two vCPUs and 1 GiB of memory** for new local and cloud sandboxes, plus a **15-minute inactivity timeout** for SSH sessions created through the CLI or SDK, including sessions to cloud sandboxes.
+
+- **`version`** identifies the managed file format and defaults to `1` when omitted. It is independent of the user config version.
+- **`overrides`** accepts the fields in [Global config](/configuration), including registries, paths, runtime settings, and [outbound proxies](/enterprise/corporate-networking#route-sandbox-traffic).
+- **Omitted settings** remain under employee control. Managed values are never written into the user's `config.json`.
+- **Unrecognized keys** are ignored with a warning listing their paths. Check warnings during rollout to catch misspelled settings.
+
+<Accordion title="How overrides are merged">
+  Precedence, from lowest to highest: **built-in defaults → user config → CLI/SDK options → managed overrides**.
+
+  | Value | Behavior |
+  | --- | --- |
+  | Omitted field | Keep the lower-layer value |
+  | `null` | Clear a nullable field |
+  | Nested section | Merge by field |
+  | Registry hosts | Merge by host and field; omitted auth keeps employee credentials |
+  | Other maps | Merge by key; replace each supplied entry |
+  | Array or tagged value | Replace the whole value |
+
+  Tagged values need their discriminator, such as `kind`, `mode`, or `protocol`. See [registry rules](/configuration#auth-resolution-order) and [backend selection](/operations/backends#resolution-order) for their specific behavior. Sandbox settings are applied before cloud create requests are sent. Unsupported sandbox options cause an error. Snapshot restores reject managed settings that conflict with the captured root-disk layout or full-checkpoint CPU and memory geometry. Registry settings govern local pulls; cloud pulls use explicit or cloud-stored credentials. Host runtime and data-path settings remain local; this file does not reconfigure the cloud service or its hosted SSH gateway.
+</Accordion>
+
+## Deploy to employee devices
+
+Install supported [CLI](/getting-started/quickstart) and [SDK runtime](/sdk/setup) releases. Provision runtime files in the employee's context or a shared protected location, rather than root's or SYSTEM's home.
+
+### File location
+
+| Platform | Managed file |
+| --- | --- |
+| macOS | `/Library/Application Support/microsandbox/managed.json` |
+| Linux | `/etc/microsandbox/managed.json` |
+| Windows | System ProgramData folder + `microsandbox\managed.json`, usually `C:\ProgramData\microsandbox\managed.json` |
+
+`MSB_HOME` and `MSB_CONFIG_PATH` do not change this location. microsandbox needs no additional enrollment, daemon, plist, or mobileconfig.
+
+### File protection
+
+| Platform | Required deployment permissions |
+| --- | --- |
+| macOS / Linux | Root-owned directory `0755` and file `0644`; no employee write access through ACLs |
+| Windows | Administrators and SYSTEM have full control; employees can read the file and traverse the directory, without write or replacement access |
+
+On macOS and Linux, backend construction fails if the file or its immediate parent directory is not root-owned or is group- or world-writable, or if their permissions cannot be checked. An administrator must correct the reported ownership or permissions before retrying. These checks do not inspect ACLs or other ancestor directories; Windows permissions are not checked. Protect the complete path, and keep secrets in [credential stores or references](/configuration#registries).
+
+<Note>
+  Older CLI and SDK releases do not enforce managed settings. Include supported versions in your rollout. Local administrators can remove policy or replace the runtime.
+</Note>
+
+## Verify the configuration
+
+1. Sign in as an employee and open a fresh terminal. Confirm `msb context` selects a local backend.
+2. Create a sandbox with values that conflict with the sample policy:
+
+   ```bash
+   msb create alpine --name managed-check --cpus 1 --memory 512M
+   msb inspect managed-check --format json
+   ```
+
+3. Confirm `config.resources.cpus` is `2` and `config.resources.memory_mib` is `1024`. Repeat with your employees' SDKs.
+4. Remove the test sandbox with `msb rm --force managed-check`.
+
+## Apply configuration updates
+
+- **Publish:** replace the complete file atomically, preserving permissions. Update the device-manager package or action and its detection rules together.
+- **Apply:** new CLI invocations and backend instances load the new settings. Existing backend handles, sandbox records, and SSH sessions retain theirs. There are no file watchers.
+- **Roll back:** redeploy the previous policy through the same tool. Removing a device from a deployment's scope does not remove its file.
+
+Runtime binary path settings are captured by each backend too. Keep the previous binaries available until applications restart or replace their backend handles. Changing data paths does not migrate existing data. A missing file means no managed overrides; an invalid or unreadable file causes an error when loaded.

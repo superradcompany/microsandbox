@@ -1,0 +1,201 @@
+---
+title: Sandbox
+description: Ruby SDK - Sandbox lifecycle API reference
+keywords: ["Ruby SDK", "Ruby sandbox", "microsandbox sandbox"]
+---
+
+Create and control a microVM sandbox from Ruby. The SDK supports local and cloud backends; blocking native calls release Ruby's global VM lock (GVL) so other Ruby threads can continue running. See [Lifecycle](/sandboxes/lifecycle) for the shared state model and [Error handling](/sdk/errors) for cross-SDK behavior.
+
+## Installation
+
+```bash
+gem install microsandbox
+```
+
+Ruby 3.1 and newer are supported. When a matching platform gem is available, it carries the native extension; otherwise the source gem requires Rust 1.85 or newer to build it locally.
+
+```ruby
+require "microsandbox"
+
+Microsandbox.install unless Microsandbox.installed?
+```
+
+## Reuse or create a sandbox
+
+#### <span className="msb-recv">Microsandbox::Sandbox.</span><span className="msb-hn">connect_or_create()</span>
+
+```ruby
+Microsandbox::Sandbox.connect_or_create(name, **options) # => Sandbox
+```
+
+Reuse or create the sandbox with this name. The method connects when it is running, waits while it is starting, starts it when it is created, stopped, or crashed, and creates it only when the name is unused. Options apply only to a new sandbox, and concurrent callers reuse the same sandbox. Replace options are rejected because they request a different sandbox.
+
+```ruby
+sandbox = Microsandbox::Sandbox.connect_or_create(
+  "worker",
+  image: "python",
+  memory: 1024,
+  env: { "ROLE" => "worker" }
+)
+```
+
+Use `Sandbox.create` when name conflicts must remain an error, or explicit replace options when the old identity should be discarded.
+
+## SandboxBuilder
+
+#### <span className="msb-recv">builder.</span><span className="msb-hn">connect_or_create()</span>
+
+```ruby
+Microsandbox::Sandbox.builder(name).connect_or_create # => Sandbox
+```
+
+Builder terminal with the same reuse, creation-option, concurrency, and replace-option behavior as `Microsandbox::Sandbox.connect_or_create`.
+
+## Sandbox
+
+A live sandbox connection returned by `create`, `connect_or_create`, `start`, `connect_or_start`, or `restart`.
+
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">stop()</span>
+
+```ruby
+sandbox.stop # => nil
+sandbox.stop(timeout: 30) # Existing optional bounded form
+```
+
+Request graceful shutdown and wait for this exact sandbox run to finish, including local runtime ownership release. There is no built-in deadline or automatic force-kill. A supplied `timeout:` bounds the wait without changing graceful shutdown into forced termination. These semantics require the matching updated native extension and runtime.
+
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">stop_with_timeout()</span>
+
+```ruby
+sandbox.stop_with_timeout(30) # Seconds; => nil after shutdown
+```
+
+Bound graceful shutdown with an explicit finite, non-negative timeout. The deadline covers local transition ownership, request dispatch, and termination observation. Expiry raises `Microsandbox::Error` without force-killing; zero expires before sending a request. Call `kill` separately when forced termination is intended.
+
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">request_stop()</span>
+
+```ruby
+sandbox.request_stop # => nil
+```
+
+Send the graceful shutdown request without waiting for termination or scheduling a force-kill. Pair with `wait_until_stopped` to observe completion.
+
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">id</span>
+
+```ruby
+sandbox.id # => String
+```
+
+Opaque stable identity of the persisted sandbox. It remains unchanged across stop and restart and changes when a removed name is recreated. Use it for equality, logging, and correlation; do not parse it.
+
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">wait_for_status()</span>
+
+```ruby
+sandbox.wait_for_status(status) # => SandboxHandle
+```
+
+Wait without a built-in timeout until this exact sandbox reaches one of `created`, `starting`, `running`, `draining`, `paused`, `stopped`, or `crashed`. Returns a refreshed metadata handle. Use Ruby's `Timeout.timeout` or an application cancellation mechanism when a deadline is required.
+
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">restart()</span>
+
+```ruby
+sandbox.restart(force: false, timeout: nil, detached: false) # => Sandbox
+```
+
+Restart this exact sandbox. Defaults to graceful shutdown, the SDK's ten-second timeout, and attached local start. A created, stopped, or crashed sandbox starts directly; a starting sandbox is observed until it settles. Set `force: true` to kill, `timeout:` in seconds to change how long shutdown can take, or `detached: true` for a local background start.
+
+On microsandbox cloud, graceful restart is supported, but timeout expiry cannot escalate to force kill. `force: true` is local-only, and `detached:` affects only local process ownership.
+
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">destroy()</span>
+
+```ruby
+sandbox.destroy(force: false, timeout: nil) # => nil
+```
+
+Stop and remove this exact sandbox. Defaults to graceful shutdown with the SDK's ten-second timeout. Identity checks refuse to delete a same-name replacement.
+
+## SandboxHandle
+
+Obtain a metadata handle without opening the guest-agent connection:
+
+```ruby
+handle = Microsandbox::Sandbox.get("worker")
+```
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">id</span>
+
+```ruby
+handle.id # => String
+```
+
+Opaque stable identity captured by this handle. Receiver lifecycle calls remain bound to this value.
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">stop()</span>
+
+```ruby
+handle.stop # No built-in deadline
+handle.stop(timeout: 30) # Existing optional bounded form
+handle.stop_with_timeout(30) # Explicit bounded form
+```
+
+Request graceful shutdown for this exact sandbox run and wait for termination and local runtime ownership release. `stop` has no built-in timeout. Both bounded forms raise `Microsandbox::Error` on expiry without force-killing; zero expires before sending a request. A stale identity is refused rather than stopping a replacement.
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">connect_or_start()</span>
+
+```ruby
+handle.connect_or_start(detached: false) # => Sandbox
+```
+
+Connect when this exact sandbox is running, wait through `starting`, or start it when it is `created`, `stopped`, or `crashed`. `draining` and `paused` are rejected. `detached: true` affects only a required local start; connecting to an already-running sandbox does not change ownership.
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">wait_for_status()</span>
+
+```ruby
+handle.wait_for_status(status) # => SandboxHandle
+```
+
+Wait until this exact sandbox reaches `status`, returning a refreshed handle. The method does not have a built-in timeout.
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">stop()</span>
+
+<Tooltip tip="On Cloud, the timeout only limits how long the SDK waits; the accepted stop may continue server-side."><span className="msb-badge-limited">Different on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+```ruby
+handle.stop(timeout: nil) # => nil
+```
+
+Gracefully shut down with the same Local and Cloud timeout behavior as `Sandbox#stop`.
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">restart()</span>
+
+```ruby
+handle.restart(force: false, timeout: nil, detached: false) # => Sandbox
+```
+
+Restart this exact sandbox with the same state and option semantics as `Sandbox#restart`.
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">destroy()</span>
+
+```ruby
+handle.destroy(force: false, timeout: nil) # => nil
+```
+
+Stop and remove this exact sandbox. A stale handle refuses to destroy a replacement that reused the name.
+
+## Identity errors
+
+Ruby currently surfaces stale identity protection through `Microsandbox::Error`. The message includes `was replaced`; unlike Rust, TypeScript, Python, and Go, the Ruby SDK does not yet expose a dedicated `SandboxReplacedError` subclass.
+
+```ruby
+begin
+  stale_handle.destroy
+rescue Microsandbox::Error => error
+  raise unless error.message.include?("was replaced")
+end
+```
+
+See [When a sandbox object is stale](/sdk/errors#when-a-sandbox-object-is-stale) for the typed equivalents in the other SDKs and [Names, handles, and concurrent callers](/sandboxes/lifecycle#names-handles-and-concurrent-callers) for the race this prevents.
+
+## Live lifecycle example
+
+Run `ruby examples/lifecycle_convergence.rb` from `sdk/ruby` to exercise sandbox creation and reuse, stable identity, connect, wait, exec, restart, destroy, same-name replacement, and stale-handle rejection against a live microVM.

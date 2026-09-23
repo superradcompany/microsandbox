@@ -8,7 +8,7 @@ if (!version || packages.length === 0) {
   process.exit(2);
 }
 
-const timeoutMs = Number(process.env.NPM_INDEX_TIMEOUT_MS ?? 180_000);
+const timeoutMs = Number(process.env.NPM_INDEX_TIMEOUT_MS ?? 900_000);
 const deadline = Date.now() + timeoutMs;
 let delayMs = 1_000;
 let pending = [...packages];

@@ -10,10 +10,12 @@ For the full API reference and longer guides, use the docs site:
 - [SDK overview](https://docs.microsandbox.dev/sdk/overview)
 - [Repository examples](../../examples/typescript)
 
+A complete runtime in the configured home (`MSB_HOME`, or `~/.microsandbox` by default) takes precedence over platform-package binaries. Explicit binary paths still win. A partial home installation errors instead of falling back to the package. This also applies to the `msb` and `microsandbox` CLI entry points.
+
 ## Features
 
 - Hardware VM isolation with a guest Linux kernel
-- ESM-first TypeScript API with generated native bindings
+- ESM-first API with CommonJS `require()` support and generated native bindings
 - Collected and streaming command execution
 - Guest filesystem read, write, list, copy, stat, and stream operations
 - Named volumes, bind mounts, tmpfs mounts, and disk-image mounts
@@ -28,10 +30,14 @@ For the full API reference and longer guides, use the docs site:
 - Linux with KVM, macOS with Apple Silicon, or Windows 11 with WHP enabled
 - Windows support is currently preview; see the [Windows troubleshooting guide](https://docs.microsandbox.dev/troubleshooting/windows) for WHP and runtime setup notes.
 
-The package root is ESM-only for normal imports:
+The package root supports both ESM imports and CommonJS `require()` on Node.js 22+:
 
 ```typescript
 import { Sandbox } from "microsandbox";
+```
+
+```javascript
+const { Sandbox } = require("microsandbox");
 ```
 
 ## Supported Platforms
@@ -44,13 +50,24 @@ import { Sandbox } from "microsandbox";
 | Windows | x86_64 | `@superradcompany/microsandbox-win32-x64-msvc` |
 | Windows | ARM64 | `@superradcompany/microsandbox-win32-arm64-msvc` |
 
-The matching platform package is installed through npm optional dependencies and carries the native addon plus runtime binaries. If optional dependencies are omitted, reinstall with optional dependencies enabled, install the matching platform package explicitly, or set `MSB_PATH` to a working `msb` binary.
+The matching platform package carries the native addon plus runtime binaries. Keep npm optional dependencies enabled: omitting them also removes the required addon, which `MSB_PATH` cannot replace.
 
 ## Installation
 
 ```bash
 npm install microsandbox
 ```
+
+Runtime setup is normally included. To provision `msb` + `libkrunfw` separately, use the [CLI installer](https://docs.microsandbox.dev/getting-started/quickstart) or explicitly install them from your application:
+
+```typescript
+import { ensureRuntime } from "microsandbox";
+
+const runtime = await ensureRuntime();
+console.log(runtime.msbPath, runtime.libkrunfwPath);
+```
+
+Use `MSB_PATH` and `MSB_LIBKRUNFW_PATH` to select an external runtime; this does not remove the npm package's bundled files. See [Runtime setup](https://docs.microsandbox.dev/sdk/setup) for custom paths and versions.
 
 ## Quick Start
 
@@ -69,6 +86,24 @@ console.log(output.stdout().trim());
 ```
 
 `await using` calls `Sandbox.stop()` when the handle leaves scope. Use a plain `const sandbox = ...` and call lifecycle methods yourself when you need finer control.
+
+### Reusable Lifecycle Convergence
+
+Use `connectOrCreate` when a stable name should converge on one persisted sandbox. Existing configuration wins; the builder is used only if creation is necessary. Handles retain a stable `id`, so lifecycle calls on stale receivers refuse to act on a replacement that reused the name.
+
+```typescript
+const sandbox = await Sandbox.builder("worker")
+  .image("python")
+  .memory(MiB(1024))
+  .connectOrCreate();
+
+console.log(`${sandbox.name}: ${sandbox.id}`);
+const running = await (await Sandbox.get("worker")).connectOrStart();
+await running.requestStop();
+const stopped = await running.waitForStatus("stopped");
+const restarted = await stopped.restart();
+await restarted.destroy();
+```
 
 ## Common Examples
 
@@ -307,6 +342,16 @@ try {
 - The `microsandbox` and `msb` bin shims forward to the resolved `msb` binary. They do not install runtime files.
 - If no platform package is present, reinstall with optional dependencies enabled, install the matching `@superradcompany/microsandbox-<platform>` package, or set `MSB_PATH`.
 
+## Inspect a runtime version
+
+```typescript
+import { resolveRuntimeVersion } from "microsandbox";
+
+const version = await resolveRuntimeVersion("/path/to/msb");
+```
+
+This reads the embedded semantic version without executing the file or requiring firmware. It returns a version string, or `null` for older executables without the section. File access failures, malformed executable metadata and invalid version sections reject the promise. There is no implicit `--version` subprocess fallback, and normal sandbox launch does not perform this optional inspection.
+
 ## More Documentation
 
 - [Sandbox lifecycle](https://docs.microsandbox.dev/sdk/typescript/sandbox)
@@ -341,3 +386,5 @@ npm start
 ## License
 
 Apache-2.0
+
+The size helpers and `Mebibytes` type are re-exported from `@microsandbox/types/size`, so values can be passed directly between this SDK and the standalone control client. The local npm workspace links that shared package with a versioned dependency for publishing. `npm ci`, `npm run build:ts`, and `npm run typecheck` work from this directory; the build and typecheck scripts build the shared types first.

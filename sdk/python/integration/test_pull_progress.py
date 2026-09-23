@@ -36,7 +36,7 @@ async def test_create_with_progress_emits_events_and_returns_sandbox(sandbox_nam
         assert all(isinstance(event_type, PullEventType) for event_type in event_types)
         assert event_types[0] is PullEventType.RESOLVING
         assert PullEventType.RESOLVED in event_types
-        assert event_types[-1] is PullEventType.COMPLETE
+        assert PullEventType.COMPLETE in event_types
 
         resolved = next(event for event in events if event.event_type is PullEventType.RESOLVED)
         assert resolved.reference
@@ -110,7 +110,7 @@ async def test_create_with_progress_detached_returns_detached_sandbox(sandbox_na
         assert all(isinstance(event_type, PullEventType) for event_type in event_types)
         assert event_types[0] is PullEventType.RESOLVING
         assert PullEventType.RESOLVED in event_types
-        assert event_types[-1] is PullEventType.COMPLETE
+        assert PullEventType.COMPLETE in event_types
         assert await sandbox.name == name
         assert await sandbox.owns_lifecycle is False
 

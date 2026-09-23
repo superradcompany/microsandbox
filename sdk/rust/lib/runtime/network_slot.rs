@@ -22,13 +22,23 @@ impl NetworkSlot {
         self.0.get()
     }
 
-    /// Assign the lowest available network slot to a running sandbox.
+    /// Assign the lowest available network slot to an active sandbox start.
     ///
     /// The slot is released when the sandbox stops and may change after a
     /// restart. Concurrent starts cannot receive the same slot.
     pub(super) async fn lease(local: &LocalBackend, sandbox_id: i32) -> MicrosandboxResult<Self> {
         let pools = local.db().await?;
         let db = pools.write();
+        if !microsandbox_db::catalog::has_column(db, "sandbox", "network_slot").await? {
+            // Historical runtimes derive addresses from the unique catalog ID.
+            // Preserve that namespace while older participants share this catalog.
+            let slot = u16::try_from(sandbox_id).map_err(|_| {
+                MicrosandboxError::Runtime(
+                    "historical network slot exceeds the address pool".into(),
+                )
+            })?;
+            return Self::try_from(slot);
+        }
 
         if let Some(slot) = Self::try_lease(db, sandbox_id).await? {
             return Ok(slot);
@@ -45,6 +55,31 @@ impl NetworkSlot {
             Ok((txn, slot))
         })
         .await
+    }
+
+    /// Reserve the ID-derived address used by pre-v0.6.16 runtimes.
+    pub(super) async fn lease_legacy(
+        local: &LocalBackend,
+        sandbox_id: i32,
+    ) -> MicrosandboxResult<Self> {
+        let slot = Self::try_from(u16::try_from(sandbox_id).map_err(|_| {
+            MicrosandboxError::Runtime("historical network slot exceeds the address pool".into())
+        })?)?;
+        let pools = local.db().await?;
+        let db = pools.write();
+        if microsandbox_db::catalog::has_column(db, "sandbox", "network_slot").await? {
+            // Share the current lease namespace; never collide with a newer run
+            // whose allocator independently selected this historical ID.
+            let result = db.execute_raw(Statement::from_sql_and_values(db.get_database_backend(),
+                "UPDATE sandbox SET network_slot = ? WHERE id = ? AND status IN ('Starting', 'Running') AND (network_slot IS NULL OR network_slot = ?) AND NOT EXISTS (SELECT 1 FROM sandbox WHERE network_slot = ? AND id != ?)",
+                [slot.get().into(), sandbox_id.into(), slot.get().into(), slot.get().into(), sandbox_id.into()])).await?;
+            if result.rows_affected() != 1 {
+                return Err(MicrosandboxError::Runtime(
+                    "historical runtime network slot is already leased".into(),
+                ));
+            }
+        }
+        Ok(slot)
     }
 
     /// Atomically claim the lowest available slot, returning `None` at capacity.
@@ -67,13 +102,14 @@ impl NetworkSlot {
                     ON occupied.network_slot = candidate.slot
                 WHERE occupied.network_slot IS NULL
             ))
-            WHERE id = ? AND status = ?
+            WHERE id = ? AND status IN (?, ?)
             RETURNING network_slot
         ";
 
         let values = [
             u16::MAX.into(),
             sandbox_id.into(),
+            sandbox_entity::SandboxStatus::Starting.into_value().into(),
             sandbox_entity::SandboxStatus::Running.into_value().into(),
         ];
 
@@ -82,7 +118,7 @@ impl NetworkSlot {
             .await?
             .ok_or_else(|| {
                 MicrosandboxError::Runtime(format!(
-                    "sandbox {sandbox_id} is missing or not running"
+                    "sandbox {sandbox_id} is missing or not starting"
                 ))
             })?
             .try_get_by_index::<Option<u16>>(0)?
@@ -165,9 +201,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn historical_and_current_runs_share_the_slot_namespace() {
+        let temp = tempdir().unwrap();
+        let backend = crate::test_support::local_backend_builder(temp.path().join("msb-home"))
+            .build()
+            .await
+            .unwrap();
+        insert_sandbox_rows_with_ids(&backend, &[1, 2, 65_700]).await;
+        assert_eq!(NetworkSlot::lease(&backend, 65_700).await.unwrap().get(), 1);
+        assert!(NetworkSlot::lease_legacy(&backend, 1).await.is_err());
+        assert_eq!(
+            NetworkSlot::lease_legacy(&backend, 2).await.unwrap().get(),
+            2
+        );
+        // Repeated launch preparation retains ownership of the same slot.
+        assert_eq!(
+            NetworkSlot::lease_legacy(&backend, 2).await.unwrap().get(),
+            2
+        );
+        assert_eq!(NetworkSlot::lease(&backend, 1).await.unwrap().get(), 3);
+        assert!(NetworkSlot::lease_legacy(&backend, 65_700).await.is_err());
+    }
+
+    #[tokio::test]
     async fn allocates_the_lowest_free_slot() {
         let temp = tempdir().unwrap();
         let backend = LocalBackend::builder()
+            .config_path(temp.path().join("msb-home").join("config.json"))
+            .managed_config_path(temp.path().join("msb-home").join("managed.json"))
             .home(temp.path().join("msb-home"))
             .build()
             .await
@@ -182,6 +243,8 @@ mod tests {
     async fn recycles_the_lowest_free_slot_past_the_id_cap() {
         let temp = tempdir().unwrap();
         let backend = LocalBackend::builder()
+            .config_path(temp.path().join("msb-home").join("config.json"))
+            .managed_config_path(temp.path().join("msb-home").join("managed.json"))
             .home(temp.path().join("msb-home"))
             .build()
             .await
@@ -205,6 +268,8 @@ mod tests {
     async fn finds_a_gap_below_the_highest_lease() {
         let temp = tempdir().unwrap();
         let backend = LocalBackend::builder()
+            .config_path(temp.path().join("msb-home").join("config.json"))
+            .managed_config_path(temp.path().join("msb-home").join("managed.json"))
             .home(temp.path().join("msb-home"))
             .build()
             .await
@@ -228,6 +293,8 @@ mod tests {
     async fn high_ids_get_distinct_persisted_slots() {
         let temp = tempdir().unwrap();
         let backend = LocalBackend::builder()
+            .config_path(temp.path().join("msb-home").join("config.json"))
+            .managed_config_path(temp.path().join("msb-home").join("managed.json"))
             .home(temp.path().join("msb-home"))
             .build()
             .await
@@ -256,6 +323,8 @@ mod tests {
     async fn repeated_lease_keeps_the_existing_slot() {
         let temp = tempdir().unwrap();
         let backend = LocalBackend::builder()
+            .config_path(temp.path().join("msb-home").join("config.json"))
+            .managed_config_path(temp.path().join("msb-home").join("managed.json"))
             .home(temp.path().join("msb-home"))
             .build()
             .await
@@ -280,7 +349,13 @@ mod tests {
         let home = temp.path().join("msb-home");
         let mut backends = Vec::with_capacity(COUNT);
         for _ in 0..COUNT {
-            let backend = LocalBackend::builder().home(&home).build().await.unwrap();
+            let backend = LocalBackend::builder()
+                .config_path(home.join("config.json"))
+                .managed_config_path(home.join("managed.json"))
+                .home(&home)
+                .build()
+                .await
+                .unwrap();
             backend.db().await.unwrap();
             backends.push(backend);
         }
@@ -308,6 +383,8 @@ mod tests {
     async fn does_not_lease_after_start_is_stopped() {
         let temp = tempdir().unwrap();
         let backend = LocalBackend::builder()
+            .config_path(temp.path().join("msb-home").join("config.json"))
+            .managed_config_path(temp.path().join("msb-home").join("managed.json"))
             .home(temp.path().join("msb-home"))
             .build()
             .await
@@ -331,7 +408,7 @@ mod tests {
             .expect_err("a stopped start attempt must not acquire a lease");
         assert!(
             err.to_string()
-                .contains("sandbox 65700 is missing or not running")
+                .contains("sandbox 65700 is missing or not starting")
         );
         let slot: Option<u16> = sandbox_entity::Entity::find_by_id(65_700)
             .select_only()
@@ -345,9 +422,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn leases_while_starting_before_readiness_is_published() {
+        let temp = tempdir().unwrap();
+        let backend = LocalBackend::builder()
+            .config_path(temp.path().join("msb-home").join("config.json"))
+            .managed_config_path(temp.path().join("msb-home").join("managed.json"))
+            .home(temp.path().join("msb-home"))
+            .build()
+            .await
+            .unwrap();
+        insert_sandbox_rows_with_ids(&backend, &[65_700]).await;
+
+        let pools = backend.db().await.unwrap();
+        sandbox_entity::Entity::update_many()
+            .col_expr(
+                sandbox_entity::Column::Status,
+                sea_orm::sea_query::Expr::value(sandbox_entity::SandboxStatus::Starting),
+            )
+            .filter(sandbox_entity::Column::Id.eq(65_700))
+            .exec(pools.write())
+            .await
+            .unwrap();
+
+        assert_eq!(NetworkSlot::lease(&backend, 65_700).await.unwrap().get(), 1);
+    }
+
+    #[tokio::test]
     async fn exhaustion_reclaims_inactive_slots_and_retries() {
         let temp = tempdir().unwrap();
         let backend = LocalBackend::builder()
+            .config_path(temp.path().join("msb-home").join("config.json"))
+            .managed_config_path(temp.path().join("msb-home").join("managed.json"))
             .home(temp.path().join("msb-home"))
             .build()
             .await
@@ -382,6 +487,8 @@ mod tests {
     async fn pool_exhaustion_is_a_clear_error() {
         let temp = tempdir().unwrap();
         let backend = LocalBackend::builder()
+            .config_path(temp.path().join("msb-home").join("config.json"))
+            .managed_config_path(temp.path().join("msb-home").join("managed.json"))
             .home(temp.path().join("msb-home"))
             .build()
             .await

@@ -9,7 +9,6 @@ STUB_PATH = Path(__file__).parent.parent / "microsandbox" / "_microsandbox.pyi"
 
 EXPECTED_KWARGS = [
     "image",
-    "from_snapshot",
     "memory",
     "cpus",
     "max_memory",
@@ -41,7 +40,7 @@ EXPECTED_KWARGS = [
     "vsock",
     "network",
     "secrets",
-    "on_secret_violation",
+    "secret_violation_action",
     "detached",
 ]
 
@@ -63,11 +62,13 @@ def _method(name: str) -> ast.FunctionDef | ast.AsyncFunctionDef:
 
 def test_create_methods_have_explicit_keyword_only_contracts() -> None:
     create = _method("create")
+    connect_or_create = _method("connect_or_create")
     create_with_progress = _method("create_with_progress")
 
     assert isinstance(create, ast.AsyncFunctionDef)
+    assert isinstance(connect_or_create, ast.AsyncFunctionDef)
     assert isinstance(create_with_progress, ast.FunctionDef)
-    for method in (create, create_with_progress):
+    for method in (create, connect_or_create, create_with_progress):
         assert method.args.kwarg is None
         assert [arg.arg for arg in method.args.kwonlyargs] == EXPECTED_KWARGS
         assert all(default is not None for default in method.args.kw_defaults)
@@ -130,3 +131,62 @@ def test_default_workload_methods_have_explicit_keyword_only_contracts() -> None
         "env",
         "detach_keys",
     ]
+
+
+def test_lifecycle_convergence_methods_are_typed() -> None:
+    tree = ast.parse(STUB_PATH.read_text())
+    classes = {
+        node.name: node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name in {"Sandbox", "SandboxHandle"}
+    }
+
+    for class_name in ("Sandbox", "SandboxHandle"):
+        methods = {
+            node.name
+            for node in classes[class_name].body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        }
+        assert {"id", "wait_for_status", "restart", "destroy"} <= methods
+
+    handle_methods = {
+        node.name
+        for node in classes["SandboxHandle"].body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    assert "connect_or_start" in handle_methods
+
+
+def test_restore_has_only_destination_options() -> None:
+    restore = _method("restore")
+    names = {arg.arg for arg in restore.args.kwonlyargs}
+    assert {"name", "forked", "disk_only", "snapshot_base", "volumes", "ports", "vsock",
+            "allow_missing_resources"} <= names
+    assert not names & {"image", "cmd", "replace", "detached", "from_snapshot", "network"}
+    assert {"cpus", "memory", "network_policy", "max_connections", "disable_network",
+            "security", "max_duration", "idle_timeout"} <= names
+    assert names == {arg.arg for arg in _method("restore_with_progress").args.kwonlyargs}
+
+
+def test_restore_accepts_backend_neutral_snapshot_objects() -> None:
+    # Object seeds preserve an explicit remote ID instead of treating it as a host path.
+    for name in ("restore", "restore_with_progress"):
+        snapshot = _method(name).args.args[0]
+        assert snapshot.arg == "snapshot"
+        assert ast.unparse(snapshot.annotation) == (
+            "Snapshot | SnapshotHandle | str | os.PathLike[str]"
+        )
+
+
+def test_restore_controls_preserve_optional_values_and_policy_type() -> None:
+    for name in ("restore", "restore_with_progress"):
+        method = _method(name)
+        annotations = {arg.arg: ast.unparse(arg.annotation) for arg in method.args.kwonlyargs}
+        defaults = dict(zip(
+            [arg.arg for arg in method.args.kwonlyargs], method.args.kw_defaults, strict=True
+        ))
+        assert annotations["network_policy"] == "NetworkPolicy | None"
+        assert annotations["security"] == "SecurityProfile | None"
+        for option in ("cpus", "memory", "network_policy", "max_connections", "security",
+                       "max_duration", "idle_timeout"):
+            assert ast.literal_eval(defaults[option]) is None

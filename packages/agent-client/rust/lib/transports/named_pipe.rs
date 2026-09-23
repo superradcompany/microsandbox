@@ -4,13 +4,13 @@
 //! local microsandbox relay pipes on Windows hosts.
 
 use std::ffi::OsStr;
-use std::future::Future;
 use std::pin::Pin;
+use std::task::{Context, Poll};
 
 use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeClient};
 
 use crate::AgentClientResult;
-use crate::transport::{AgentTransport, TransportPacket, read_packet_from_io, write_packet_to_io};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -18,7 +18,7 @@ use crate::transport::{AgentTransport, TransportPacket, read_packet_from_io, wri
 
 /// Agent transport backed by a Windows named pipe.
 ///
-/// This adapter implements the generic [`AgentTransport`] trait. Most SDK code
+/// This adapter implements the byte transport accepted by the shared client. Most SDK code
 /// should use [`AgentClient::connect`](crate::AgentClient::connect), which
 /// performs the relay handshake and starts request routing.
 pub struct NamedPipeTransport {
@@ -33,8 +33,7 @@ impl NamedPipeTransport {
     /// Connect to a Windows named-pipe path.
     ///
     /// The returned transport is connected but not handshaken. Pass it to a
-    /// client constructor that accepts custom transports when such a constructor
-    /// is available, or use [`AgentClient::connect`](crate::AgentClient::connect)
+    /// `AgentClient::connect_stream`, or use [`AgentClient::connect`](crate::AgentClient::connect)
     /// for the built-in path.
     pub async fn connect(path: impl AsRef<OsStr>) -> AgentClientResult<Self> {
         let stream = ClientOptions::new().open(path)?;
@@ -46,17 +45,28 @@ impl NamedPipeTransport {
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
 
-impl AgentTransport for NamedPipeTransport {
-    fn read_packet(
-        &mut self,
-    ) -> Pin<Box<dyn Future<Output = AgentClientResult<Option<TransportPacket>>> + Send + '_>> {
-        Box::pin(read_packet_from_io(&mut self.stream))
+impl AsyncRead for NamedPipeTransport {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.stream).poll_read(cx, buf)
     }
+}
 
-    fn write_packet(
-        &mut self,
-        packet: TransportPacket,
-    ) -> Pin<Box<dyn Future<Output = AgentClientResult<()>> + Send + '_>> {
-        Box::pin(write_packet_to_io(&mut self.stream, packet))
+impl AsyncWrite for NamedPipeTransport {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bytes: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.stream).poll_write(cx, bytes)
+    }
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.stream).poll_flush(cx)
+    }
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.stream).poll_shutdown(cx)
     }
 }

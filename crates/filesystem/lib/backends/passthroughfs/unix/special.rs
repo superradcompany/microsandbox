@@ -9,7 +9,9 @@
 //! ## fallocate
 //!
 //! On macOS, uses `fcntl(F_PREALLOCATE)` + `ftruncate` since `fallocate64` doesn't exist.
-//! Tries contiguous allocation first, falls back to non-contiguous.
+//! Only the part of the range past EOF is reserved and made visible; a range that ends inside
+//! the file leaves the size alone. Tries contiguous allocation first, falls back to
+//! non-contiguous.
 
 use std::{io, os::fd::AsRawFd};
 
@@ -132,14 +134,36 @@ pub(crate) fn do_fallocate(
             )));
         }
 
-        let alloc_len = i64::try_from(length)
-            .map_err(|_| platform::linux_error(io::Error::from_raw_os_error(libc::EOVERFLOW)))?;
+        // In the default mode `fallocate(2)` says the file size "will be
+        // changed if offset+size is greater than the file size". macOS has no
+        // way to reserve blocks for a range inside the file (`F_PEOFPOSMODE`
+        // only allocates past EOF), so the part of the range that ends inside
+        // the file is left alone and only the tail past EOF is reserved and
+        // then made visible with ftruncate. A host process that grows the
+        // file between this fstat and the ftruncate can still lose that
+        // growth; a guest writer cannot, because the guest kernel holds the
+        // inode lock for the whole fallocate.
+        let new_size = offset
+            .checked_add(length)
+            .ok_or_else(|| platform::linux_error(io::Error::from_raw_os_error(libc::EOVERFLOW)))
+            .and_then(|size| {
+                i64::try_from(size).map_err(|_| {
+                    platform::linux_error(io::Error::from_raw_os_error(libc::EOVERFLOW))
+                })
+            })?;
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        if unsafe { libc::fstat(fd, &mut st) } < 0 {
+            return Err(platform::linux_error(io::Error::last_os_error()));
+        }
+        if new_size <= st.st_size {
+            return Ok(());
+        }
 
         let mut store = libc::fstore_t {
             fst_flags: libc::F_ALLOCATECONTIG,
             fst_posmode: libc::F_PEOFPOSMODE,
             fst_offset: 0,
-            fst_length: alloc_len,
+            fst_length: new_size - st.st_size,
             fst_bytesalloc: 0,
         };
 
@@ -153,15 +177,6 @@ pub(crate) fn do_fallocate(
             }
         }
 
-        // Extend file size if needed.
-        let new_size = offset
-            .checked_add(length)
-            .ok_or_else(|| platform::linux_error(io::Error::from_raw_os_error(libc::EOVERFLOW)))
-            .and_then(|size| {
-                i64::try_from(size).map_err(|_| {
-                    platform::linux_error(io::Error::from_raw_os_error(libc::EOVERFLOW))
-                })
-            })?;
         let ret = unsafe { libc::ftruncate(fd, new_size) };
         if ret < 0 {
             return Err(platform::linux_error(io::Error::last_os_error()));

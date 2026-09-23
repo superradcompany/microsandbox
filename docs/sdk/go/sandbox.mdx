@@ -1,12 +1,49 @@
 ---
 title: Sandbox
 description: Go SDK - Sandbox API reference
+keywords: ["Go SDK", "Go sandbox", "microsandbox sandbox"]
 ---
 
 Create and control a microVM sandbox: boot it from an image, run commands, stream logs and metrics, then shut it down. See [Overview](/sandboxes/overview) for configuration examples and [Lifecycle](/sandboxes/lifecycle) for state management.
 
+## Reuse and restart sandboxes
+
+```go
+ConnectOrCreateSandbox(ctx, name, opts...) (*Sandbox, error)
+handle.ConnectOrStart(ctx, opts...) (*Sandbox, error)
+handle.WaitForStatus(ctx, status) (*SandboxHandle, error)
+handle.Restart(ctx, opts...) (*Sandbox, error)
+handle.Destroy(ctx, opts...) error
+sandbox.ID() string
+handle.ID() string
+```
+
+Use `ConnectOrCreateSandbox` when a named sandbox might already exist. It connects to a running sandbox, starts a stopped or crashed sandbox, and creates one only when the name is unused. Options apply only to a new sandbox.
+
+Lifecycle methods on a `Sandbox` or `SandboxHandle` stay attached to its opaque `ID`. If the name is removed and reused, an old receiver returns `ErrSandboxReplaced` instead of acting on the replacement. See [Reuse or create a named sandbox](/sandboxes/lifecycle#reuse-or-create-a-named-sandbox) for examples.
+
 
 ## Functions
+
+### External mount restore
+
+Full restores use strict external-filesystem admission by default. Pass `WithExternalMountPolicy(ExternalMountRelaxed)` to accept supported mismatches, then inspect `sandbox.RestoreWarnings(ctx)`. Each `ExternalMountWarning` has `GuestPath`, `Reason`, and `StaleInodes []uint64`. `ExternalMountStrict` explicitly selects the default. Existing mount options select the destination paths. See [Snapshot external mounts](/sandboxes/snapshots#external-mounts).
+
+### Creation and restore progress
+
+`CreateSandboxWithProgress` and `RestoreSandboxWithProgress` return a bounded event channel and a single-result channel. Ignoring events does not delay the operation. Always receive the result and close the handle when finished; restored sandboxes are detached, so use `Stop` or `Destroy` to stop them. Cancel `ctx` to cancel the operation.
+
+```go
+events, result := m.RestoreSandboxWithProgress(ctx, "saved", "child", m.WithForked())
+for event := range events {
+    fmt.Println(event.Kind, event.Progress.Phase, event.Progress.CompletedBytes)
+}
+created := <-result
+if created.Err != nil { return created.Err }
+defer created.Sandbox.Close()
+```
+
+`Kind` is `"pull"` or `"startup"`. Startup phases distinguish backing preparation, waits, reuse, syncing, and activation. `TotalBytes == nil` means indeterminate work. Preparation has no fixed deadline and does not consume the activation timeout; an optional context deadline still bounds the entire operation.
 
 #### <span className="msb-recv">m.</span><span className="msb-hn">CreateSandbox()</span>
 
@@ -34,7 +71,7 @@ defer func() {
 
 </Accordion>
 
-Create and boot a new sandbox. Pulls the image if needed, boots the VM, starts the guest agent, and waits until it is ready to accept commands. Sandbox names must be non-empty and no longer than 128 UTF-8 bytes. The returned [`*Sandbox`](#methods) owns the VM process. Call `Close` (or `Stop` + `Close`) when done. See [Options](#options) for all configuration knobs.
+Create and boot a new sandbox. Pulls the image if needed, boots the VM, starts the guest agent, and waits until it is ready to accept commands. Sandbox names must be non-empty and no longer than 128 UTF-8 bytes. The returned [`*Sandbox`](#sandbox) owns the VM process. Call `Close` (or `Stop` + `Close`) when done. See [Options](#options) for all configuration knobs.
 
 <p className="msb-label">Parameters</p>
 
@@ -57,14 +94,32 @@ Create and boot a new sandbox. Pulls the image if needed, boots the VM, starts t
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#methods">*Sandbox</a></div>
+    <div className="msb-param-key"><a className="msb-type" href="#sandbox">*Sandbox</a></div>
     <div className="msb-param-desc">Running sandbox. Safe for concurrent use from multiple goroutines.</div>
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><span className="msb-type">error</span></div>
-    <div className="msb-param-desc">Typed <code>*Error</code>, see <a href="/sdk/errors">Error Handling</a>.</div>
+    <div className="msb-param-desc">Typed <code>*Error</code>, see <a href="/sdk/errors">Error handling</a>.</div>
   </div>
 </div>
+
+#### <span className="msb-recv">m.</span><span className="msb-hn">ConnectOrCreateSandbox()</span>
+
+```go
+func ConnectOrCreateSandbox(ctx context.Context, name string, opts ...SandboxOption) (*Sandbox, error)
+```
+
+Reuse or create the sandbox with this name. The function connects when it is running, waits while it is starting, starts it when it is created, stopped, or crashed, and creates it only when the name is unused. Options apply only to a new sandbox. Concurrent callers reuse the same sandbox. `WithReplace` and `WithReplaceWithTimeout` are invalid with this function.
+
+<p className="msb-label">Parameters</p>
+
+- `ctx`: controls this operation; cancellation does not stop a sandbox already returned.
+- `name`: reusable sandbox name, up to 128 UTF-8 bytes.
+- `opts`: the same creation options accepted by [`CreateSandbox`](#m-createsandbox), used only when creation is necessary.
+
+<p className="msb-label">Returns</p>
+
+`(*`[`Sandbox`](#sandbox)`, error)`
 
 #### <span className="msb-recv">m.</span><span className="msb-hn">GetSandbox()</span>
 
@@ -198,7 +253,7 @@ sb, err := m.StartSandbox(ctx, "api")
 
 </Accordion>
 
-Restart a previously stopped sandbox. The VM reboots using the persisted configuration and returns a live [`*Sandbox`](#methods).
+Restart a previously stopped sandbox. The VM reboots using the persisted configuration and returns a live [`*Sandbox`](#sandbox).
 
 <p className="msb-label">Parameters</p>
 
@@ -213,7 +268,7 @@ Restart a previously stopped sandbox. The VM reboots using the persisted configu
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#methods">*Sandbox</a></div>
+    <div className="msb-param-key"><a className="msb-type" href="#sandbox">*Sandbox</a></div>
     <div className="msb-param-desc">Running sandbox.</div>
   </div>
 </div>
@@ -239,7 +294,7 @@ Boot a stopped sandbox in detached mode. The VM keeps running after the returned
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#methods">*Sandbox</a></div>
+    <div className="msb-param-key"><a className="msb-type" href="#sandbox">*Sandbox</a></div>
     <div className="msb-param-desc">Running sandbox in detached mode.</div>
   </div>
 </div>
@@ -258,7 +313,7 @@ err := m.RemoveSandbox(ctx, "api")
 
 </Accordion>
 
-Delete a stopped sandbox by name. See [Remove](/sandboxes/lifecycle#remove) for the exact local deletion scope and the external resources that are preserved. Fails if the sandbox is still running; stop it first.
+Delete a stopped sandbox by name. See [Destroy or remove](/sandboxes/lifecycle#destroy-or-remove) for the exact local deletion scope and the external resources that are preserved. Fails if the sandbox is still running; stop it first.
 
 <p className="msb-label">Parameters</p>
 
@@ -326,6 +381,14 @@ Return the sandbox name.
     <div className="msb-param-desc">Sandbox name, up to 128 UTF-8 bytes.</div>
   </div>
 </div>
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">ID()</span>
+
+```go
+func (s *Sandbox) ID() string
+```
+
+Return the opaque stable identity of this persisted sandbox. It remains unchanged across stop and restart and changes when the reusable name is removed and recreated. Use it for equality, logging, and correlation; do not parse it.
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">FS()</span>
 
@@ -561,10 +624,9 @@ _, err = sb.Modify(ctx, m.ModifyOptions{
     Env:    map[string]string{"MODE": "prod"},
     Policy: m.ModificationPolicyRestart,
 })
-// Grow the managed OCI root disk offline and restart
+// Grow the owned OCI root disk while it is running
 _, err = sb.Modify(ctx, m.ModifyOptions{
     RootDiskSizeMiB: 8192,
-    Policy:          m.ModificationPolicyRestart,
 })
 
 // Add or rotate a host-environment secret; restart if it is newly added
@@ -586,11 +648,11 @@ _, err = sb.Modify(ctx, m.ModifyOptions{
 
 </Accordion>
 
-Plan or apply a configuration change. The returned plan labels each change `"live"`, `"next start"`, `"requires restart"`, or `"unsupported"`, and apply is all-or-nothing.
+Plan or apply a configuration change. The returned plan labels each change `"live"`, `"next start"`, `"requires restart"`, or `"unsupported"`.
 
-`CPUs` and `MemoryMiB` resize live within the [`WithMaxCPUs`](#withmaxcpus) / [`WithMaxMemory`](#withmaxmemory) ceilings; raising a ceiling requires a restart. `RootDiskSizeMiB` changes are offline: managed and flat OCI root disks grow only, tmpfs root disks can change in either direction on the next boot, and user-supplied disk images are rejected. Env and workdir changes affect future execs only. On a stopped sandbox, changes are saved for the next boot.
+`CPUs` and `MemoryMiB` resize live within the [`WithMaxCPUs`](#withmaxcpus) / [`WithMaxMemory`](#withmaxmemory) ceilings; raising a ceiling requires a restart. `RootDiskSizeMiB` grows owned managed and flat ext4 roots live, including checkpoint-backed roots, tmpfs root disks can change in either direction on the next boot, and user-supplied disk images are rejected. Env and workdir changes affect future execs only. Stopped roots grow before the new size is saved. Explicit restart and next-start policies remain available.
 
-Secret specs are keyed by stable secret name. Each `SecretModifySpec` selects at most one source—`Env`, `Value`, or `Store`—and may also set `Placeholder` and `AllowedHosts`; omitting a source updates only the other supplied fields. Plans expose only safe references and metadata; raw secret values never appear in a plan. Removal is explicit through `SecretsRemove`.
+Secret specs are keyed by stable secret name. Each `SecretModifySpec` selects at most one source (`Env`, `Value`, or `Store`) and may also set `Placeholder` and `AllowedHosts`; omitting a source updates only the other supplied fields. Plans expose only safe references and metadata; raw secret values never appear in a plan. Removal is explicit through `SecretsRemove`.
 
 A live CPU or memory resize can take a moment to settle. The new limits are enforced immediately, and the returned plan's `ResizeStatus` reports when the sandbox has finished adjusting. See [`SandboxModificationPlan`](#sandboxmodificationplan).
 
@@ -784,7 +846,7 @@ Attach to the sandbox's default shell (configured via [`WithShell`](#withshell),
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">Stop()</span>
 
-<Tooltip tip="Graceful stop works on microsandbox cloud; timeout expiry cannot escalate to force kill."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On Cloud, the timeout only limits how long the SDK waits; the accepted stop may continue server-side."><span className="msb-badge-limited">Different on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 func (s *Sandbox) Stop(ctx context.Context, opts ...StopOption) error
@@ -793,21 +855,33 @@ func (s *Sandbox) Stop(ctx context.Context, opts ...StopOption) error
 <Accordion title="Example">
 
 ```go
-err := sb.Stop(ctx, m.WithStopTimeout(30*time.Second))
+err := sb.Stop(ctx)
 ```
 
 </Accordion>
 
-Gracefully shut down the sandbox and wait until stopped state is observed. Lets the workload finish writing any pending data to disk before it exits. Defaults to a ten-second graceful window before force-kill; pass [`WithStopTimeout`](#withstoptimeout) to change it.
+Request graceful shutdown and wait for the same sandbox run to finish, including local runtime ownership release. There is no built-in deadline and no automatic force-kill. Cancelling `ctx` ends the wait without force-killing. Use [`StopWithTimeout`](#sb-stopwithtimeout) or [`WithStopTimeout`](#withstoptimeout) for a bounded wait. These semantics require the matching updated native SDK and runtime; an older native library returns an unsupported-operation error.
 
 <p className="msb-label">Parameters</p>
 
 <div className="msb-params">
   <div className="msb-param">
     <div className="msb-param-key"><code>opts</code><a className="msb-type" href="#withstoptimeout">...StopOption</a></div>
-    <div className="msb-param-desc">Graceful shutdown window, e.g. <code>WithStopTimeout(30 * time.Second)</code>.</div>
+    <div className="msb-param-desc">Optional wait deadline, e.g. <code>WithStopTimeout(30 * time.Second)</code>; expiry never force-kills.</div>
   </div>
 </div>
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">StopWithTimeout()</span>
+
+```go
+func (s *Sandbox) StopWithTimeout(ctx context.Context, timeout time.Duration) error
+```
+
+Bound graceful shutdown with an explicit deadline. The deadline includes local transition ownership, request dispatch, and termination observation. Expiry returns `ErrStopTimeout` without force-killing; zero or a negative duration expires before sending a request. Use [`Kill`](#sb-kill) separately when forced termination is intended.
+
+```go
+err := sb.StopWithTimeout(ctx, 30*time.Second)
+```
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">RequestStop()</span>
 
@@ -815,7 +889,7 @@ Gracefully shut down the sandbox and wait until stopped state is observed. Lets 
 func (s *Sandbox) RequestStop(ctx context.Context) error
 ```
 
-Request graceful shutdown and return once the request is sent, without waiting for the sandbox to reach stopped state. Pair with [`WaitUntilStopped`](#sb-waituntilstopped) to await termination.
+Request graceful shutdown and return once the request is sent, without waiting for the sandbox to reach stopped state or scheduling a force-kill. Pair with [`WaitUntilStopped`](#sb-waituntilstopped) to await termination. A paused sandbox is not force-killed merely because its agent cannot process shutdown.
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">Kill()</span>
 
@@ -890,6 +964,30 @@ Block until the sandbox is observed in a terminal state, then return how it ende
   </div>
 </div>
 
+#### <span className="msb-recv">sb.</span><span className="msb-hn">WaitForStatus()</span>
+
+```go
+func (s *Sandbox) WaitForStatus(ctx context.Context, status SandboxStatus) (*SandboxHandle, error)
+```
+
+Wait until this exact sandbox reaches `status`, returning a refreshed metadata handle. The context supplies cancellation or a deadline. Returns `ErrSandboxReplaced` rather than following a reused name.
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">Restart()</span>
+
+```go
+func (s *Sandbox) Restart(ctx context.Context, opts ...RestartOption) (*Sandbox, error)
+```
+
+Restart this exact sandbox. Defaults to graceful shutdown, a ten-second timeout, and attached local start. A created, stopped, or crashed sandbox starts directly; a starting sandbox is observed until it settles. Use `WithRestartForce`, `WithRestartTimeout`, and `WithRestartDetached` for explicit controls.
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">Destroy()</span>
+
+```go
+func (s *Sandbox) Destroy(ctx context.Context, opts ...DestroyOption) error
+```
+
+Stop and remove this exact sandbox. Defaults to graceful shutdown with a ten-second timeout. Use `WithDestroyForce` or `WithDestroyTimeout` for explicit controls. Returns `ErrSandboxReplaced` instead of deleting a same-name replacement.
+
 #### <span className="msb-recv">sb.</span><span className="msb-hn">Detach()</span>
 
 ```go
@@ -930,7 +1028,7 @@ Release the Rust-side handle. Safe to call multiple times; the second call retur
 func (s *Sandbox) OwnsLifecycle() (bool, error)
 ```
 
-Report whether this handle owns the VM process. Local attached handles return `true`; local detached handles and all cloud handles return `false`, because the cloud worker owns the sandbox process. The error return covers stale handles and FFI failures; use [`OwnsLifecycleOrFalse`](#sb-ownslifecycleorfalse) when you don't care.
+Report whether this handle owns the VM process. Local attached handles return `true`; local detached handles and all cloud handles return `false`, because the cloud worker owns the sandbox process. The error return covers stale handles and FFI failures; use [`OwnsLifecycleOrFalse`](#sb-ownslifecycleorfalse) for callers that don't need the error.
 
 <p className="msb-label">Returns</p>
 
@@ -1021,7 +1119,7 @@ Require every supplied label. Repeated selectors are AND-matched.
 func WithImage(image string) SandboxOption
 ```
 
-Set the root filesystem source: an OCI image name, local directory path, or disk image path (e.g. `"python:3.12"`, `"docker.io/library/alpine"`). Required unless [`WithFromSnapshot`](#withfromsnapshot) is used. Use [`WithImageDisk`](#withimagedisk) when a disk-image root needs an explicit filesystem type.
+Set the root filesystem source: an OCI image name, local directory path, or disk image path (e.g. `"python:3.12"`, `"docker.io/library/alpine"`). Required for creation; use `RestoreSandbox` for snapshots. Use [`WithImageDisk`](#withimagedisk) when a disk-image root needs an explicit filesystem type.
 
 <p className="msb-label">Parameters</p>
 
@@ -1032,13 +1130,41 @@ Set the root filesystem source: an OCI image name, local directory path, or disk
   </div>
 </div>
 
+#### <span className="msb-recv"></span><span className="msb-hn">WithRootDisk()</span>
+
+```go
+func WithRootDisk(disk RootDiskConfig) SandboxOption
+```
+
+Configure root storage for an OCI image. Construct the value with the [`RootDisk`](#rootdisk) factory.
+
+<Accordion title="Example">
+
+```go
+sb, err := m.CreateSandbox(ctx, "worker",
+    m.WithImage("python:3.12"),
+    m.WithRootDisk(m.RootDisk.Managed(8192)),
+)
+```
+
+</Accordion>
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>disk</code><span className="msb-type">RootDiskConfig</span></div>
+    <div className="msb-param-desc">Managed, tmpfs, user-supplied disk-image, or flat OCI root storage.</div>
+  </div>
+</div>
+
 #### <span className="msb-recv"></span><span className="msb-hn">WithOCIUpperSize()</span>
 
 ```go
 func WithOCIUpperSize(mebibytes uint32) SandboxOption
 ```
 
-Set the writable overlay upper size for an OCI image, in MiB. Valid only with an OCI image rootfs, not disk images or snapshots.
+Deprecated alias for `WithRootDisk(RootDisk.Managed(mebibytes))`.
 
 <p className="msb-label">Parameters</p>
 
@@ -1074,25 +1200,6 @@ Use a disk image as the root filesystem and optionally provide the inner filesys
 
 ---
 
-#### <span className="msb-recv"></span><span className="msb-hn">WithFromSnapshot()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">option</span></div>
-
-<Tooltip tip="Snapshots use local disk artifacts and are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
-
-```go
-func WithFromSnapshot(pathOrName string) SandboxOption
-```
-
-Boot from a snapshot artifact by bare name or filesystem path. Mutually exclusive with [`WithImage`](#withimage). See [Snapshots](/sdk/go/snapshots).
-
-<p className="msb-label">Parameters</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><code>pathOrName</code><span className="msb-type">string</span></div>
-    <div className="msb-param-desc">Snapshot artifact path or bare name.</div>
-  </div>
-</div>
 
 #### <span className="msb-recv"></span><span className="msb-hn">WithMemory()</span>
 
@@ -1682,6 +1789,23 @@ Configure the network stack: profiles, custom rules, DNS, and TLS interception. 
   </div>
 </div>
 
+#### <span className="msb-recv"></span><span className="msb-hn">WithProxy()</span>
+
+```go
+func WithProxy(proxy *OutboundProxy) SandboxOption
+```
+
+Configure the single proxy used for outbound sandbox connections. See [Proxies](/sdk/go/proxies) for constructors and examples.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>proxy</code><a className="msb-type" href="/sdk/go/proxies#outboundproxy">*OutboundProxy</a></div>
+    <div className="msb-param-desc">Protocol-specific outbound proxy configuration.</div>
+  </div>
+</div>
+
 #### <span className="msb-recv"></span><span className="msb-hn">WithSecrets()</span>
 
 ```go
@@ -1694,7 +1818,7 @@ Append credential secrets to the sandbox. Secrets never enter the VM; the networ
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><code>secrets</code><a className="msb-type" href="/sdk/go/secrets#secretentry">...SecretEntry</a></div>
+    <div className="msb-param-key"><code>secrets</code><a className="msb-type" href="/sdk/go/secrets#secretentrystruct">...SecretEntry</a></div>
     <div className="msb-param-desc">Secret injection entries.</div>
   </div>
 </div>
@@ -1767,16 +1891,64 @@ Add volume mount configurations keyed by guest path. Build values via the [`Moun
 func WithStopTimeout(timeout time.Duration) StopOption
 ```
 
-Set how long [`Stop`](#sb-stop) waits for graceful shutdown before force-killing. Default: 10 seconds. This is a `StopOption`, not a `SandboxOption`. Pass it to [`Stop`](#sb-stop).
+Set a deadline for [`Stop`](#sb-stop), which otherwise waits without a built-in timeout. Expiry returns `ErrStopTimeout` without force-killing. Zero or a negative duration expires before sending a shutdown request. This is a `StopOption`, not a `SandboxOption`; pass it to [`Stop`](#sb-stop), or use [`StopWithTimeout`](#sb-stopwithtimeout).
 
 <p className="msb-label">Parameters</p>
 
 <div className="msb-params">
   <div className="msb-param">
     <div className="msb-param-key"><code>timeout</code><span className="msb-type">time.Duration</span></div>
-    <div className="msb-param-desc">Graceful shutdown window.</div>
+    <div className="msb-param-desc">Stopped-state observation deadline.</div>
   </div>
 </div>
+
+#### <span className="msb-recv"></span><span className="msb-hn">WithConnectOrStartDetached()</span>
+
+```go
+func WithConnectOrStartDetached() ConnectOrStartOption
+```
+
+When `ConnectOrStart` must start a local sandbox, start it in detached/background mode. This option does not change ownership when the sandbox is already running.
+
+#### <span className="msb-recv"></span><span className="msb-hn">WithRestartForce()</span>
+
+```go
+func WithRestartForce() RestartOption
+```
+
+Force-kill instead of requesting graceful shutdown during `Restart`.
+
+#### <span className="msb-recv"></span><span className="msb-hn">WithRestartTimeout()</span>
+
+```go
+func WithRestartTimeout(timeout time.Duration) RestartOption
+```
+
+Set how long `Restart` waits for graceful shutdown before it times out. The default is ten seconds.
+
+#### <span className="msb-recv"></span><span className="msb-hn">WithRestartDetached()</span>
+
+```go
+func WithRestartDetached() RestartOption
+```
+
+Start the restarted local sandbox in detached/background mode.
+
+#### <span className="msb-recv"></span><span className="msb-hn">WithDestroyForce()</span>
+
+```go
+func WithDestroyForce() DestroyOption
+```
+
+Force-kill instead of requesting graceful shutdown during `Destroy`.
+
+#### <span className="msb-recv"></span><span className="msb-hn">WithDestroyTimeout()</span>
+
+```go
+func WithDestroyTimeout(timeout time.Duration) DestroyOption
+```
+
+Set how long `Destroy` waits for graceful shutdown before it times out. The default is ten seconds.
 
 #### <span className="msb-recv"></span><span className="msb-hn">WithKillTimeout()</span>
 
@@ -1784,7 +1956,7 @@ Set how long [`Stop`](#sb-stop) waits for graceful shutdown before force-killing
 func WithKillTimeout(timeout time.Duration) KillOption
 ```
 
-Set how long [`Kill`](#sb-kill) waits for stopped-state observation. Default: 5 seconds. This is a `KillOption`, pass it to [`Kill`](#sb-kill).
+Set how long [`Kill`](#sb-kill) waits for stopped-state observation. The default is five seconds. This is a `KillOption`; pass it to [`Kill`](#sb-kill).
 
 <p className="msb-label">Parameters</p>
 
@@ -1795,9 +1967,7 @@ Set how long [`Kill`](#sb-kill) waits for stopped-state observation. Default: 5 
   </div>
 </div>
 
-<span id="withskipdownload"></span>
-
-The setup-only `WithSkipDownload()` option is documented under [Runtime setup](/sdk/setup#customize-installation).
+Use `ResolveRuntime(RuntimeConfig{})` to require a pre-provisioned runtime without downloading. See [Runtime setup](/sdk/setup#customize-installation).
 
 <p className="msb-member-group">Attach options</p>
 
@@ -2124,6 +2294,14 @@ Sandbox name, up to 128 UTF-8 bytes
 
 `string`
 
+#### <span className="msb-recv">h.</span><span className="msb-hn">ID()</span>
+
+```go
+func (h *SandboxHandle) ID() string
+```
+
+Return the opaque stable identity captured by this metadata handle. Receiver lifecycle calls remain bound to this value and return `ErrSandboxReplaced` when the reusable name now points to another sandbox.
+
 #### <span className="msb-recv">h.</span><span className="msb-hn">Status()</span>
 
 ```go
@@ -2290,7 +2468,15 @@ Reattach to the running sandbox
 
 <p className="msb-label">Returns</p>
 
-`(*`[`Sandbox`](#methods)`, error)`
+`(*`[`Sandbox`](#sandbox)`, error)`
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">ConnectOrStart()</span>
+
+```go
+func (h *SandboxHandle) ConnectOrStart(ctx context.Context, opts ...ConnectOrStartOption) (*Sandbox, error)
+```
+
+Connect when this exact sandbox is running, wait through `SandboxStatusStarting`, or start it when it is created, stopped, or crashed. Draining and paused states are rejected. `WithConnectOrStartDetached` affects only a required local start; connecting to an already-running sandbox does not change ownership.
 
 #### <span className="msb-recv">h.</span><span className="msb-hn">Start()</span>
 
@@ -2302,7 +2488,7 @@ Boot a stopped sandbox. The returned local handle is attached; a cloud handle do
 
 <p className="msb-label">Returns</p>
 
-`(*`[`Sandbox`](#methods)`, error)`
+`(*`[`Sandbox`](#sandbox)`, error)`
 
 #### <span className="msb-recv">h.</span><span className="msb-hn">StartDetached()</span>
 
@@ -2314,21 +2500,53 @@ Boot a stopped sandbox in detached mode
 
 <p className="msb-label">Returns</p>
 
-`(*`[`Sandbox`](#methods)`, error)`
+`(*`[`Sandbox`](#sandbox)`, error)`
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">WaitForStatus()</span>
+
+```go
+func (h *SandboxHandle) WaitForStatus(ctx context.Context, status SandboxStatus) (*SandboxHandle, error)
+```
+
+Wait until this exact sandbox reaches `status`, returning a refreshed handle. The context supplies cancellation or a deadline. Returns `ErrSandboxReplaced` rather than rebinding to a replacement.
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">Restart()</span>
+
+```go
+func (h *SandboxHandle) Restart(ctx context.Context, opts ...RestartOption) (*Sandbox, error)
+```
+
+Restart this exact sandbox with the same state and option semantics as [`Sandbox.Restart`](#sb-restart).
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">Destroy()</span>
+
+```go
+func (h *SandboxHandle) Destroy(ctx context.Context, opts ...DestroyOption) error
+```
+
+Stop and remove this exact sandbox. A stale handle returns `ErrSandboxReplaced` instead of destroying a same-name replacement.
 
 #### <span className="msb-recv">h.</span><span className="msb-hn">Stop()</span>
 
-<Tooltip tip="Graceful stop works on microsandbox cloud; timeout expiry cannot escalate to force kill."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On Cloud, the timeout only limits how long the SDK waits; the accepted stop may continue server-side."><span className="msb-badge-limited">Different on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 Stop(ctx, opts...)
 ```
 
-Graceful shutdown; accepts [`StopOption`](#withstoptimeout)
+Request graceful shutdown and wait for this exact sandbox run and local runtime ownership release, without a built-in deadline or force-kill. Accepts [`StopOption`](#withstoptimeout); context cancellation ends only the wait.
 
 <p className="msb-label">Returns</p>
 
 `error`
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">StopWithTimeout()</span>
+
+```go
+StopWithTimeout(ctx, timeout)
+```
+
+Bound graceful shutdown for this exact sandbox run. Expiry returns `ErrStopTimeout` without force-killing; zero or a negative duration expires before sending a request.
 
 #### <span className="msb-recv">h.</span><span className="msb-hn">RequestStop()</span>
 
@@ -2336,7 +2554,7 @@ Graceful shutdown; accepts [`StopOption`](#withstoptimeout)
 RequestStop(ctx)
 ```
 
-Async stop request
+Send a graceful shutdown request without waiting for completion or scheduling forced termination.
 
 <p className="msb-label">Returns</p>
 
@@ -2410,13 +2628,13 @@ Delete sandbox and persisted state
 
 #### <span className="msb-recv">h.</span><span className="msb-hn">Snapshot()</span>
 
-<Tooltip tip="Snapshots use local disk artifacts and are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Cloud disk snapshots require a stopped or crashed source. Local snapshots also support running or paused sources."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 Snapshot(ctx, name)
 ```
 
-Snapshot a stopped sandbox under a bare name
+Capture a disk snapshot. Locally, the name selects a member within the sandbox's snapshot group. See [Snapshots](/sdk/go/snapshots).
 
 <p className="msb-label">Returns</p>
 
@@ -2662,8 +2880,8 @@ The full configuration of a sandbox. Most callers build a sandbox via `CreateSan
 | Name | `string` | Sandbox name, up to 128 UTF-8 bytes |
 | Image | `string` | OCI image, local path, or disk image |
 | ImageFstype | `string` | Optional inner filesystem type for disk-image roots |
-| OCIUpperSizeMiB | `uint32` | Writable overlay upper size for OCI image roots |
-| Snapshot | `string` | Snapshot artifact path or bare name; mutually exclusive with `Image` |
+| RootDisk | [`*RootDiskConfig`](#rootdiskconfig) | Root storage for an OCI image |
+| OCIUpperSizeMiB | `uint32` | Deprecated managed-root-disk size alias; ignored when `RootDisk` is set |
 | MemoryMiB | `uint32` | Guest memory in MiB |
 | CPUs | `uint8` | Virtual CPUs |
 | MaxMemoryMiB | `uint32` | Boot-time maximum hotpluggable memory in MiB |
@@ -2685,7 +2903,7 @@ The full configuration of a sandbox. Most callers build a sandbox via `CreateSan
 | LogLevel | [`LogLevel`](#loglevel) | Sandbox log verbosity override |
 | QuietLogs | `bool` | Suppress sandbox-level log output |
 | Scripts | `map[string]string` | Named scripts mounted at `/.msb/scripts/` |
-| PullPolicy | [`PullPolicy`](#pullpolicy) | Image pull behaviour |
+| PullPolicy | [`PullPolicy`](#pullpolicy) | Image pull behavior |
 | MaxDuration | `time.Duration` | Maximum sandbox lifetime |
 | IdleTimeout | `time.Duration` | Idle timeout |
 | RegistryAuth | [`*RegistryAuth`](#registryauth) | Private registry credentials |
@@ -2693,9 +2911,78 @@ The full configuration of a sandbox. Most callers build a sandbox via `CreateSan
 | PortsUDP | `map[uint16]uint16` | Host to guest UDP port mappings |
 | PortBindings | [`[]PortBinding`](/sdk/go/networking#portbinding) | Port mappings with explicit bind addresses |
 | Network | [`*NetworkConfig`](/sdk/go/networking#networkconfig) | Network policy and configuration |
-| Secrets | [`[]SecretEntry`](/sdk/go/secrets#secretentry) | Secret injection entries |
+| Secrets | [`[]SecretEntry`](/sdk/go/secrets#secretentrystruct) | Secret injection entries |
 | Patches | [`[]PatchConfig`](#patchconfig) | Rootfs modifications applied before boot |
 | Volumes | `map[string]MountConfig` | Volume mounts keyed by guest path |
+
+### RootDisk
+
+Factory namespace for [`RootDiskConfig`](#rootdiskconfig) values. Pass the result to [`WithRootDisk`](#withrootdisk).
+
+```go
+m.RootDisk.Managed(8192)
+m.RootDisk.Tmpfs(m.RootDiskTmpfsOptions{SizeMiB: 512})
+m.RootDisk.Disk("./scratch.qcow2", m.RootDiskImageOptions{Format: "qcow2", Fstype: "ext4"})
+m.RootDisk.Flat(m.RootDiskFlatOptions{SizeMiB: 8192, Clone: m.FlatCloneAuto})
+```
+
+### RootDiskConfig
+
+Root storage configuration returned by the [`RootDisk`](#rootdisk) factory. Use [`Kind()`](#rootdiskconfig-kind) to inspect its backing.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `SizeMiB` | `uint32` | Managed, tmpfs, or flat root-disk size; zero selects the runtime default where supported |
+| `Path` | `string` | Host path for a user-supplied disk image |
+| `Format` | `string` | Disk-image format: `raw` or `qcow2`; inferred from the path when empty |
+| `Fstype` | `string` | Inner filesystem type; defaults to `ext4` |
+| `Clone` | [`FlatClone`](#flatclone) | Private flat-root provisioning strategy |
+
+#### <span className="msb-recv">rootDiskConfig.</span><span className="msb-hn">Kind()</span>
+
+```go
+func (r RootDiskConfig) Kind() RootDiskKind
+```
+
+Return the configured root-disk backing.
+
+### RootDiskKind
+
+| Constant | Description |
+|----------|-------------|
+| `RootDiskKindManaged` | Microsandbox-owned sparse ext4 writable layer |
+| `RootDiskKindTmpfs` | Ephemeral RAM-backed writable layer |
+| `RootDiskKindDiskImage` | User-supplied writable disk image |
+| `RootDiskKindFlat` | Complete OCI root filesystem mounted without guest OverlayFS |
+
+### RootDiskTmpfsOptions
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `SizeMiB` | `uint32` | Tmpfs size; zero uses half of sandbox memory |
+
+### RootDiskImageOptions
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `Format` | `string` | Optional `raw` or `qcow2` format; inferred from the path when empty |
+| `Fstype` | `string` | Optional inner filesystem type; defaults to `ext4` |
+
+### RootDiskFlatOptions
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `SizeMiB` | `uint32` | Final guest capacity; zero uses the runtime default |
+| `Fstype` | `string` | Generated filesystem type; currently `ext4` |
+| `Clone` | [`FlatClone`](#flatclone) | Private disk provisioning strategy |
+
+### FlatClone
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `FlatCloneAuto` | `"auto"` | Try a native reflink, then fall back to a sparse copy |
+| `FlatCloneCopy` | `"copy"` | Always create a sparse copy |
+| `FlatCloneReflink` | `"reflink"` | Require a native reflink and fail when unavailable |
 
 ### SandboxOption
 
@@ -2778,11 +3065,13 @@ type SandboxStatus string
 
 | Constant | Value | Description |
 |----------|-------|-------------|
+| `SandboxStatusCreated` | `"created"` | Persisted resource exists but has not started |
+| `SandboxStatusStarting` | `"starting"` | Runtime is booting or waiting for capacity |
 | `SandboxStatusRunning` | `"running"` | Guest agent is ready; `Exec`, `Shell`, `FS` work |
-| `SandboxStatusStopped` | `"stopped"` | VM shut down; configuration persisted; can be restarted |
-| `SandboxStatusCrashed` | `"crashed"` | VM exited unexpectedly (kernel panic, OOM, etc.) |
 | `SandboxStatusDraining` | `"draining"` | Graceful shutdown in progress; existing commands finish, new ones rejected |
 | `SandboxStatusPaused` | `"paused"` | VM is paused |
+| `SandboxStatusStopped` | `"stopped"` | VM shut down; configuration persisted; can be restarted |
+| `SandboxStatusCrashed` | `"crashed"` | VM exited unexpectedly (kernel panic, OOM, etc.) |
 
 ### LogOptions
 
@@ -2823,7 +3112,7 @@ type LogSource string
 |----------|-------|-------------|
 | `LogSourceStdout` | `"stdout"` | Captured stdout (pipe mode, streams stayed separated) |
 | `LogSourceStderr` | `"stderr"` | Captured stderr (pipe mode) |
-| `LogSourceOutput` | `"output"` | PTY-merged stdout and stderr from a session running in pty mode |
+| `LogSourceOutput` | `"output"` | PTY-merged stdout and stderr from a session running in PTY mode |
 | `LogSourceSystem` | `"system"` | Synthetic lifecycle markers plus runtime/kernel diagnostic lines |
 
 ### LogLevel
@@ -2919,7 +3208,7 @@ A single rootfs patch. Construct via the [`Patch`](#patch) factory; the fields p
 
 | Field | Type | Description |
 |-------|------|-------------|
-| Kind | [`PatchKind`](#patchkind) | Patch flavour |
+| Kind | [`PatchKind`](#patchkind) | Patch flavor |
 | Path | `string` | Absolute guest path (text / append / mkdir / remove) |
 | Content | `string` | Text content (text / append) |
 | Mode | `*uint32` | File or directory mode, e.g. `0o644` |
@@ -2960,6 +3249,6 @@ Discriminator for [`PatchConfig`](#patchconfig). Prefer the [`Patch`](#patch) fa
 | `PatchKindCopyFile` | `"copy_file"` |
 | `PatchKindCopyDir` | `"copy_dir"` |
 
-### SetupOption
+### InstallOptions
 
-The setup-only `SetupOption` type is documented under [Runtime setup](/sdk/setup#customize-installation).
+The setup-only `InstallOptions` type is documented under [Runtime setup](/sdk/setup#customize-installation).
