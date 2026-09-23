@@ -97,6 +97,20 @@ impl LaunchProtocol {
             }
             *network = flat.clone();
         }
+        #[cfg(feature = "net")]
+        if let Some(network) = value
+            .get_mut("network")
+            .filter(|network| !network.is_null())
+        {
+            let network = if resolved_network {
+                &mut network["config"]
+            } else {
+                network
+            };
+            if let Some(secrets) = network.get_mut("secrets").and_then(Value::as_object_mut) {
+                microsandbox_types::compatibility::v0_6::local::secrets::encode(secrets)?;
+            }
+        }
         serde_json::to_vec(&value).map_err(|e| e.to_string())
     }
 }

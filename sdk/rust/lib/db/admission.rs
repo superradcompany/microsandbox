@@ -99,8 +99,8 @@ pub(super) fn same_historical_schema(left: u64, right: u64) -> bool {
 }
 
 /// Returns true only for a new catalog or interrupted pre-floor initialization.
-/// Complete supported catalogs remain in their existing schema and retain their
-/// migration history, including known released schemas ahead of this checkout.
+/// Known complete prefixes use the normal upgrade path. Unknown or gapped
+/// histories are refused rather than guessed from their migration count.
 pub(crate) async fn requires_initialization<C: ConnectionTrait>(
     db: &C,
 ) -> MicrosandboxResult<bool> {
@@ -132,9 +132,9 @@ pub(crate) async fn requires_initialization<C: ConnectionTrait>(
         if prefix.len() < schema_metadata::BASELINE_0_6_0_MIGRATIONS.len() {
             return Ok(true);
         }
-        if prefix.len() == schema_metadata::migration_ids().count() {
-            return Ok(false);
-        }
+        // Adding a migration makes the previous current schema a proper
+        // prefix. It must remain upgradeable without a frozen release profile.
+        return Ok(false);
     }
     Err(MicrosandboxError::Runtime(
         "database schema is newer than this msb binary or has an unknown migration prefix; refusing to change an unrecognized catalog".into(),
@@ -190,6 +190,32 @@ mod tests {
         )
         .await
         .unwrap();
+        assert!(requires_initialization(&db).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn every_known_post_floor_prefix_can_upgrade() {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        db.execute_unprepared(
+            "CREATE TABLE seaql_migrations (version TEXT PRIMARY KEY, applied_at BIGINT NOT NULL)",
+        )
+        .await
+        .unwrap();
+        let floor = schema_metadata::BASELINE_0_6_0_MIGRATIONS.len();
+        for (index, version) in schema_metadata::migration_ids().enumerate() {
+            db.execute_raw(Statement::from_sql_and_values(
+                DbBackend::Sqlite,
+                "INSERT INTO seaql_migrations VALUES (?, 1)",
+                [version.into()],
+            ))
+            .await
+            .unwrap();
+            assert_eq!(
+                requires_initialization(&db).await.unwrap(),
+                index + 1 < floor
+            );
+        }
+        db.execute_unprepared("DELETE FROM seaql_migrations WHERE version = (SELECT version FROM seaql_migrations ORDER BY version LIMIT 1)").await.unwrap();
         assert!(requires_initialization(&db).await.is_err());
     }
 

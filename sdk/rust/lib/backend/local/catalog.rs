@@ -466,6 +466,23 @@ mod tests {
                 .await
                 .unwrap(),
         );
+        local.db().await.unwrap();
+        let migrated = pools
+            .read()
+            .query_one_raw(sea_orm::Statement::from_string(
+                sea_orm::DbBackend::Sqlite,
+                "SELECT config FROM sandbox WHERE id = 1",
+            ))
+            .await
+            .unwrap()
+            .unwrap()
+            .try_get_by_index::<String>(0)
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(serde_json::from_str::<crate::SandboxConfig>(&migrated).unwrap())
+                .unwrap(),
+            serde_json::to_value(crate::db::config::decode(&original).unwrap()).unwrap()
+        );
         let backend: Arc<dyn crate::backend::Backend> = local;
         let result = crate::backend::with_backend(backend, async {
             crate::Sandbox::builder("preserved")
@@ -488,7 +505,7 @@ mod tests {
         let row = pools.read().query_one_raw(sea_orm::Statement::from_string(
             sea_orm::DbBackend::Sqlite, "SELECT config FROM sandbox WHERE id = 1 AND name = 'preserved' AND status = 'Stopped'"
         )).await.unwrap().unwrap();
-        assert_eq!(row.try_get_by_index::<String>(0).unwrap(), original);
+        assert_eq!(row.try_get_by_index::<String>(0).unwrap(), migrated);
         assert!(
             crate::db::admission::is_current(pools.read())
                 .await
@@ -714,6 +731,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn catalog_upgrade_migrates_saved_and_active_secret_policies() {
+        let home = tempfile::tempdir().unwrap();
+        let pools = historical(home.path()).await;
+        let raw =
+            include_str!("../../db/fixtures/config-0.6.18-global-passthrough-with-entries.json");
+        pools.write().execute_raw(sea_orm::Statement::from_sql_and_values(sea_orm::DbBackend::Sqlite,
+            "INSERT INTO sandbox (name, config, active_config, status, ephemeral) VALUES ('secret-migration', ?, ?, 'Running', 0)",
+            [raw.into(), raw.into()],
+        )).await.unwrap();
+        let expected = serde_json::to_value(crate::db::config::decode(raw).unwrap()).unwrap();
+        upgrade(&pools).await.unwrap();
+        for column in ["config", "active_config"] {
+            let row = pools
+                .read()
+                .query_one_raw(sea_orm::Statement::from_string(
+                    sea_orm::DbBackend::Sqlite,
+                    format!("SELECT {column} FROM sandbox WHERE name = 'secret-migration'"),
+                ))
+                .await
+                .unwrap()
+                .unwrap();
+            let stored: String = row.try_get_by_index(0).unwrap();
+            assert!(!stored.contains("\"injection\""));
+            assert!(stored.contains("\"substitution\""));
+            assert_eq!(
+                serde_json::to_value(
+                    serde_json::from_str::<crate::SandboxConfig>(&stored).unwrap()
+                )
+                .unwrap(),
+                expected
+            );
+        }
+        upgrade(&pools).await.unwrap();
+    }
+
+    #[tokio::test]
     async fn historical_active_config_survives_catalog_upgrade() {
         for (patch, raw) in [
             (0, include_str!("../../db/fixtures/config-0.6.0.json")),
@@ -764,7 +817,10 @@ mod tests {
                 .try_get_by_index::<String>(0)
                 .unwrap();
             assert_eq!(
-                serde_json::to_value(crate::db::config::decode(&updated).unwrap()).unwrap(),
+                serde_json::to_value(
+                    serde_json::from_str::<crate::SandboxConfig>(&updated).unwrap()
+                )
+                .unwrap(),
                 expected,
                 "patch {patch}"
             );
@@ -781,7 +837,10 @@ mod tests {
                     .try_get_by_index::<String>(0)
                     .unwrap();
                 assert_eq!(
-                    serde_json::to_value(crate::db::config::decode(&active).unwrap()).unwrap(),
+                    serde_json::to_value(
+                        serde_json::from_str::<crate::SandboxConfig>(&active).unwrap()
+                    )
+                    .unwrap(),
                     expected
                 );
             }

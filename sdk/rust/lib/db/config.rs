@@ -4,7 +4,9 @@
 //! against the typed result so an unrecognized historical policy cannot be
 //! silently discarded by serde's default handling of unknown fields.
 
-use serde_json::{Map, Value, json};
+use serde_json::Value;
+#[cfg(test)]
+use serde_json::json;
 
 use crate::{MicrosandboxError, MicrosandboxResult, SandboxConfig};
 
@@ -13,7 +15,7 @@ use crate::{MicrosandboxError, MicrosandboxResult, SandboxConfig};
 //--------------------------------------------------------------------------------------------------
 
 pub(crate) fn decode(input: &str) -> MicrosandboxResult<SandboxConfig> {
-    let super::json::UniqueValue(mut value) =
+    let crate::db::json::UniqueValue(mut value) =
         serde_json::from_str(input).map_err(|_| unsupported("invalid JSON or duplicate field"))?;
     normalize(&mut value)?;
     let config: SandboxConfig = serde_json::from_value(value.clone())
@@ -29,111 +31,8 @@ fn unsupported(reason: &str) -> MicrosandboxError {
     ))
 }
 
-fn rename(object: &mut Map<String, Value>, old: &str, new: &str) -> MicrosandboxResult<()> {
-    if let Some(value) = object.remove(old)
-        && object.insert(new.to_owned(), value).is_some()
-    {
-        return Err(unsupported("conflicting historical and current fields"));
-    }
-    Ok(())
-}
-
-pub(super) fn normalize(value: &mut Value) -> MicrosandboxResult<()> {
-    let object = value
-        .as_object_mut()
-        .ok_or_else(|| unsupported("expected an object"))?;
-    if let Some(image) = object.get_mut("image").and_then(Value::as_object_mut) {
-        for (old, new) in [
-            ("oci", "Oci"),
-            ("bind", "Bind"),
-            ("disk_image", "DiskImage"),
-        ] {
-            rename(image, old, new)?;
-        }
-        if let Some(bind) = image.get_mut("Bind")
-            && let Some(path) = bind.as_str()
-        {
-            *bind = json!({"path": path, "follow_root_symlinks": false});
-        }
-        if let Some(oci) = image.get_mut("Oci").and_then(Value::as_object_mut)
-            && let Some(size) = oci.remove("upper_size_mib")
-        {
-            // A legacy null uses the historical default managed root size.
-            // Preserve explicit sizes; never replace a requested disk kind.
-            if oci.contains_key("root_disk") {
-                return Err(unsupported("conflicting root-disk representations"));
-            }
-            if !size.is_null() {
-                oci.insert(
-                    "root_disk".into(),
-                    json!({"kind":"managed", "size_mib":size}),
-                );
-            }
-        }
-    }
-    if let Some(resources) = object.get_mut("resources").and_then(Value::as_object_mut) {
-        rename(resources, "vcpus", "cpus")?;
-        rename(resources, "max_vcpus", "max_cpus")?;
-    }
-    if let Some(mounts) = object.get_mut("mounts").and_then(Value::as_array_mut) {
-        for mount in mounts {
-            let Some(old) = mount.as_object_mut() else {
-                continue;
-            };
-            if old.contains_key("type") {
-                continue;
-            }
-            let variants = [
-                ("bind", "Bind"),
-                ("named", "Named"),
-                ("tmpfs", "Tmpfs"),
-                ("disk_image", "DiskImage"),
-            ];
-            if let Some((key, tag)) = variants.into_iter().find(|(key, _)| old.contains_key(*key)) {
-                if old.len() != 1 {
-                    return Err(unsupported("ambiguous mount representation"));
-                }
-                let mut fields = old
-                    .remove(key)
-                    .and_then(|value| value.as_object().cloned())
-                    .ok_or_else(|| unsupported("invalid mount fields"))?;
-                if fields.insert("type".into(), json!(tag)).is_some() {
-                    return Err(unsupported("conflicting mount tag"));
-                }
-                *mount = Value::Object(fields);
-            }
-        }
-    }
-    if let Some(policy) = object.get_mut("pull_policy") {
-        match policy.as_str() {
-            Some("if_missing") => *policy = json!("IfMissing"),
-            Some("always") => *policy = json!("Always"),
-            Some("never") => *policy = json!("Never"),
-            _ => {}
-        }
-    }
-    if let Some(secrets) = object
-        .get_mut("network")
-        .and_then(|network| network.get_mut("secrets"))
-        .and_then(Value::as_object_mut)
-    {
-        rename(secrets, "entries", "secrets")?;
-        rename(secrets, "on_violation", "violation_action")?;
-        if let Some(entries) = secrets.get_mut("secrets").and_then(Value::as_array_mut) {
-            for entry in entries {
-                if let Some(entry) = entry.as_object_mut() {
-                    rename(entry, "injection", "substitution")?;
-                    rename(entry, "on_violation", "violation_action")?;
-                }
-            }
-        }
-        if let Some(policy) = secrets.get_mut("violation_action")
-            && policy.as_str() == Some("block_and_log")
-        {
-            *policy = json!("block-and-log");
-        }
-    }
-    Ok(())
+pub(crate) fn normalize(value: &mut Value) -> MicrosandboxResult<()> {
+    microsandbox_types::compatibility::v0_6::local::config::normalize(value).map_err(unsupported)
 }
 
 fn preserve_values(input: &Value, output: &Value, path: &str) -> MicrosandboxResult<()> {
@@ -167,6 +66,54 @@ mod tests {
     const SNAKE: &str = include_str!("fixtures/config-0.6.5.json");
     const TYPED: &str = include_str!("fixtures/config-0.6.9.json");
     const LATEST: &str = include_str!("fixtures/config-0.6.18.json");
+
+    // Captured from sandboxes created by the released 0.6.18 Python SDK and
+    // runtime. The only secret value is synthetic test material.
+    #[test]
+    fn released_secret_configurations_decode() {
+        for raw in [
+            include_str!("fixtures/config-0.6.18-secret-default.json"),
+            include_str!("fixtures/config-0.6.18-global-passthrough.json"),
+            // Hand-extended released fixture: inheritance, blocking override, and entry passthrough.
+            include_str!("fixtures/config-0.6.18-global-passthrough-with-entries.json"),
+            include_str!("fixtures/config-0.6.18-secret-passthrough.json"),
+        ] {
+            let original: Value = serde_json::from_str(raw).unwrap();
+            let config = decode(raw).unwrap();
+            assert_eq!(config.spec.name, original["name"].as_str().unwrap());
+            assert_eq!(
+                config.spec.network.secrets.as_ref().unwrap().secrets.len(),
+                original["network"]["secrets"]["secrets"]
+                    .as_array()
+                    .unwrap()
+                    .len()
+            );
+        }
+    }
+
+    #[test]
+    fn typed_secret_conversion_does_not_hide_unknown_saved_fields() {
+        for location in [
+            "/network/secrets",
+            "/network/secrets/secrets/0",
+            "/network/secrets/secrets/0/injection",
+            "/network/secrets/secrets/0/source",
+        ] {
+            let mut value: Value =
+                serde_json::from_str(include_str!("fixtures/config-0.6.18-secret-default.json"))
+                    .unwrap();
+            value["network"]["secrets"]["secrets"][0]["source"] = json!({"kind":"env","var":"KEY"});
+            value
+                .pointer_mut(location)
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .insert("future_policy".into(), json!("synthetic-private"));
+            let error = decode(&value.to_string()).unwrap_err().to_string();
+            assert!(error.contains("cannot be preserved"), "{error}");
+            assert!(!error.contains("synthetic-private"));
+        }
+    }
 
     #[test]
     fn released_configs_decode_without_losing_resources_or_mounts() {

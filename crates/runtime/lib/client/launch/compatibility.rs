@@ -95,17 +95,7 @@ pub(super) fn decode(bytes: &[u8]) -> Result<LaunchConfig, String> {
             .pointer_mut("/config/secrets")
             .and_then(Value::as_object_mut)
         {
-            // Do not let serde ignore a historical security policy and apply defaults.
-            rename(secrets, "entries", "secrets")?;
-            rename(secrets, "on_violation", "violation_action")?;
-            if let Some(entries) = secrets.get_mut("secrets").and_then(Value::as_array_mut) {
-                for entry in entries {
-                    if let Some(fields) = entry.as_object_mut() {
-                        rename(fields, "injection", "substitution")?;
-                        rename(fields, "on_violation", "violation_action")?;
-                    }
-                }
-            }
+            microsandbox_types::compatibility::v0_6::local::secrets::normalize(secrets)?;
         }
     }
     // Historical optional fields were absent before the launch contract grew.
@@ -158,14 +148,4 @@ fn run_dir(launch: &LaunchConfig) -> PathBuf {
         .filter(|home| !home.as_os_str().is_empty())
         .map(|home| home.join(microsandbox_utils::RUN_SUBDIR))
         .unwrap_or_default()
-}
-
-#[cfg(feature = "net")]
-fn rename(fields: &mut serde_json::Map<String, Value>, old: &str, new: &str) -> Result<(), String> {
-    if let Some(value) = fields.remove(old)
-        && fields.insert(new.into(), value).is_some()
-    {
-        return Err("conflicting historical and current network policy fields".into());
-    }
-    Ok(())
 }

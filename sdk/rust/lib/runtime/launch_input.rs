@@ -6,7 +6,7 @@ use microsandbox_runtime::launch::LaunchConfig;
 use microsandbox_types::{CpuPlacement, TransparentHugePagePolicy};
 use serde_json::{Value, json};
 
-use super::launch_contract::LaunchContract;
+use crate::runtime::launch_contract::LaunchContract;
 use crate::{MicrosandboxError, MicrosandboxResult};
 
 //--------------------------------------------------------------------------------------------------
@@ -37,10 +37,32 @@ const RESERVED: &[&str] = &[
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-pub(super) fn encode(launch: &LaunchConfig, contract: LaunchContract) -> MicrosandboxResult<Value> {
+pub(crate) fn encode(launch: &LaunchConfig, contract: LaunchContract) -> MicrosandboxResult<Value> {
     if contract.machine {
-        return Ok(serde_json::to_value(launch)?);
+        let value = serde_json::to_value(launch)?;
+        #[cfg(feature = "net")]
+        let value = {
+            let mut value = value;
+            if let Some(source) = launch
+                .network
+                .as_ref()
+                .map(|network| &network.config().secrets)
+            {
+                value["network"]["config"]["secrets"] = serde_json::to_value(
+                    microsandbox_types::compatibility::v0_6::local::secrets::for_current_runtime(
+                        source,
+                    ),
+                )?;
+            }
+            value
+        };
+        Ok(value)
+    } else {
+        encode_historical(launch, contract)
     }
+}
+
+fn encode_historical(launch: &LaunchConfig, contract: LaunchContract) -> MicrosandboxResult<Value> {
     if launch.execution != microsandbox_runtime::launch::ExecutionIntent::Boot {
         return unsupported("execution restore");
     }
@@ -161,31 +183,8 @@ pub(super) fn encode(launch: &LaunchConfig, contract: LaunchContract) -> Microsa
             network["max_connections"] = json!(256);
         }
         if let Some(secrets) = network.get_mut("secrets").and_then(Value::as_object_mut) {
-            if let Some(action) = secrets.remove("violation_action") {
-                secrets.insert("on_violation".into(), action);
-            }
-            if let Some(entries) = secrets.get_mut("secrets").and_then(Value::as_array_mut) {
-                for entry in entries {
-                    if let Some(fields) = entry.as_object_mut() {
-                        if fields
-                            .get("passthrough_hosts")
-                            .and_then(Value::as_array)
-                            .is_some_and(|hosts| !hosts.is_empty())
-                        {
-                            return unsupported("secret passthrough hosts");
-                        }
-                        fields.remove("passthrough_hosts");
-                        for (current, legacy) in [
-                            ("substitution", "injection"),
-                            ("violation_action", "on_violation"),
-                        ] {
-                            if let Some(value) = fields.remove(current) {
-                                fields.insert(legacy.into(), value);
-                            }
-                        }
-                    }
-                }
-            }
+            microsandbox_types::compatibility::v0_6::local::secrets::encode(secrets)
+                .map_err(|reason| MicrosandboxError::InvalidConfig(reason.into()))?;
         }
     }
     Ok(value)
@@ -453,6 +452,130 @@ fn unsupported<T>(feature: &str) -> MicrosandboxResult<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "net")]
+    fn saved_secret_policy() -> microsandbox_types::SecretsConfig {
+        let config = crate::db::config::decode(include_str!(
+            "../db/fixtures/config-0.6.18-secret-default.json"
+        ))
+        .unwrap();
+        config.spec.network.secrets.unwrap()
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn current_launch_projects_legacy_secrets_without_capability_fields() {
+        use microsandbox_network::config::{EnvNetworkSecretResolver, NetworkConfig};
+        let mut source = saved_secret_policy();
+        source.passthrough_hosts = Some(vec![microsandbox_types::HostPattern::Exact(
+            "global.example".into(),
+        )]);
+        let original = serde_json::to_value(&source).unwrap();
+        let network: NetworkConfig = serde_json::from_value(json!({"secrets":source})).unwrap();
+        let launch = LaunchConfig {
+            network: Some(network.resolve(&EnvNetworkSecretResolver).unwrap()),
+            ..Default::default()
+        };
+        let wire = encode(
+            &launch,
+            LaunchContract {
+                patch: 18,
+                machine: true,
+            },
+        )
+        .unwrap();
+        let secrets = &wire["network"]["config"]["secrets"];
+        assert!(secrets.get("passthrough_hosts").is_none());
+        assert_eq!(
+            secrets["secrets"][0]["substitution"]
+                .as_object()
+                .unwrap()
+                .len(),
+            3
+        );
+        let projected: microsandbox_types::SecretsConfig =
+            serde_json::from_value(secrets.clone()).unwrap();
+        assert!(projected.secrets[0].passthrough_hosts.contains(
+            &microsandbox_types::HostPattern::Exact("global.example".into())
+        ));
+        for allowed in &source.secrets[0].allowed_hosts {
+            assert!(!projected.secrets[0].passthrough_hosts.contains(allowed));
+        }
+        assert_eq!(serde_json::to_value(&source).unwrap(), original);
+        // The original global default still applies to a subsequently added entry.
+        let mut added = source.secrets[0].clone();
+        added.env_var = "ADDED".into();
+        added.placeholder = "$ADDED".into();
+        source.secrets.push(added);
+        assert!(
+            microsandbox_types::compatibility::v0_6::local::secrets::for_current_runtime(&source)
+                .secrets[1]
+                .passthrough_hosts
+                .contains(&microsandbox_types::HostPattern::Exact(
+                    "global.example".into()
+                ))
+        );
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn projection_preserves_overrides_and_does_not_share_explicit_passthrough() {
+        use microsandbox_types::{HostPattern, SecretViolationAction};
+        let mut source = saved_secret_policy();
+        source.passthrough_hosts = Some(vec![HostPattern::Exact("global.example".into())]);
+        source.secrets[0].passthrough_hosts = vec![HostPattern::Exact("entry.example".into())];
+        let mut other = source.secrets[0].clone();
+        other.env_var = "OTHER".into();
+        other.allowed_hosts = vec![HostPattern::Exact("other.example".into())];
+        other.passthrough_hosts.clear();
+        other.violation_action = Some(SecretViolationAction::BlockAndTerminate);
+        source.secrets.push(other);
+        let output =
+            microsandbox_types::compatibility::v0_6::local::secrets::for_current_runtime(&source);
+        assert!(
+            !output.secrets[0]
+                .passthrough_hosts
+                .contains(&HostPattern::Exact("other.example".into()))
+        );
+        assert!(
+            !output.secrets[1]
+                .passthrough_hosts
+                .contains(&HostPattern::Exact("global.example".into()))
+        );
+        assert!(
+            !output.secrets[1]
+                .passthrough_hosts
+                .contains(&HostPattern::Exact("entry.example".into()))
+        );
+        assert_eq!(
+            output.secrets[1].violation_action,
+            Some(SecretViolationAction::BlockAndTerminate)
+        );
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn projection_never_invents_wildcard_permission_or_enabled_scopes() {
+        use microsandbox_types::HostPattern;
+        let mut source = saved_secret_policy();
+        source.secrets[0].allowed_hosts = vec![HostPattern::Any];
+        source.secrets[0].substitution.headers = false;
+        source.secrets[0].substitution.query = false;
+        source.secrets[0].substitution.body = false;
+        let output =
+            microsandbox_types::compatibility::v0_6::local::secrets::for_current_runtime(&source);
+        assert!(output.secrets[0].passthrough_hosts.is_empty());
+        assert!(!output.secrets[0].substitution.headers);
+        assert!(!output.secrets[0].substitution.query);
+        assert!(!output.secrets[0].substitution.body);
+        source.secrets[0].passthrough_hosts.push(HostPattern::Any);
+        assert_eq!(
+            microsandbox_types::compatibility::v0_6::local::secrets::for_current_runtime(&source)
+                .secrets[0]
+                .passthrough_hosts,
+            vec![HostPattern::Any]
+        );
+    }
 
     #[cfg(feature = "net")]
     #[test]

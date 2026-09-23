@@ -1392,6 +1392,29 @@ mod tests {
     }
 
     #[test]
+    fn cloud_create_translates_historical_secret_policies() {
+        for raw in [
+            include_str!("../../db/fixtures/config-0.6.18-secret-default.json"),
+            include_str!("../../db/fixtures/config-0.6.18-global-passthrough.json"),
+            // Hand-extended released fixture: inheritance, blocking override, and entry passthrough.
+            include_str!("../../db/fixtures/config-0.6.18-global-passthrough-with-entries.json"),
+            include_str!("../../db/fixtures/config-0.6.18-secret-passthrough.json"),
+        ] {
+            let legacy = crate::db::config::decode(raw).unwrap();
+            let mut config = base_cloud_config();
+            let expected = serde_json::to_value(&legacy.spec.network.secrets).unwrap();
+            config.spec.network.secrets = legacy.spec.network.secrets;
+            let request = CloudCreateBody::try_from(config).unwrap();
+            let secrets = &request.envelope.sandbox_spec().network.secrets;
+            let wire = serde_json::to_value(secrets.as_ref().unwrap()).unwrap();
+            let decoded: microsandbox_types::CloudSecretsConfig =
+                serde_json::from_value(wire).unwrap();
+            let domain = microsandbox_types::SecretsConfig::from(decoded);
+            assert_eq!(serde_json::to_value(domain).unwrap(), expected);
+        }
+    }
+
+    #[test]
     fn cloud_create_request_rejects_fields_missing_from_the_wire() {
         let cases: [(&str, ConfigMutation); 9] = [
             ("max_cpus", |config| config.spec.resources.max_cpus = 2),

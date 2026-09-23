@@ -1,17 +1,15 @@
-//! Database entity + pool type re-exports.
+//! Catalog configuration access, writes, and database type re-exports.
 //!
 //! The actual `DbPools` instance is owned by [`LocalBackend`](crate::backend::LocalBackend)
-//! per D6.7. This module just re-exports the entity types and pool aliases so
-//! the rest of the crate has one place to import them from.
+//! per D6.7. Catalog migrations normalize saved configurations before use.
 
-// Configuration decoding is pure JSON and is also used by backend-neutral
-// handles. Only catalog access and writes require the local backend feature.
+// Historical codecs are used at conversion boundaries, not normal application reads.
 #[cfg(feature = "local")]
 pub(crate) mod admission;
 pub(crate) mod config;
 #[cfg(feature = "local")]
-mod historical;
-mod json;
+pub(crate) mod historical;
+pub(crate) mod json;
 #[cfg(feature = "local")]
 pub(crate) mod writing;
 

@@ -7,6 +7,8 @@ mod command;
 mod domain;
 mod error;
 
+#[doc(hidden)]
+pub mod compatibility;
 mod guest_flush;
 #[doc(hidden)]
 pub mod helpers;

@@ -2,8 +2,8 @@
 
 use super::*;
 use crate::domain::{
-    DEFAULT_SANDBOX_CPUS, DEFAULT_SANDBOX_MEMORY_MIB, OciRootfsSource, RootDisk, RootfsSource,
-    SecretSubstitution, SecretsConfig,
+    DEFAULT_SANDBOX_CPUS, DEFAULT_SANDBOX_MEMORY_MIB, HostPattern, OciRootfsSource, RootDisk,
+    RootfsSource, SecretSubstitution, SecretsConfig,
 };
 use crate::snapshot::cloud_manifest::Manifest as SnapshotManifest;
 
@@ -230,9 +230,13 @@ fn cloud_secrets_config_round_trips_through_domain() {
             violation_action: Some(CloudViolationAction::BlockAndTerminate),
             require_tls_identity: true,
         }],
+        passthrough_hosts: Some(vec![CloudHostPattern::Any]),
         violation_action: CloudViolationAction::BlockAndLog,
     };
 
+    let wire = serde_json::to_value(&cloud).unwrap();
+    let decoded: CloudSecretsConfig = serde_json::from_value(wire.clone()).unwrap();
+    assert_eq!(serde_json::to_value(decoded).unwrap(), wire);
     let back: CloudSecretsConfig = SecretsConfig::from(cloud.clone()).into();
     assert_eq!(back.entries.len(), 1);
     assert_eq!(back.entries[0].value, "sk-x");
@@ -837,4 +841,167 @@ fn tcp_aliases_preserve_the_existing_cloud_wire_key() {
         }))
         .is_err()
     );
+}
+
+#[test]
+fn historical_cloud_secrets_translate_to_current_wire() {
+    for headers in [false, true] {
+        for basic_auth in [false, true] {
+            let value = serde_json::json!({
+                "on_violation":{"type":"passthrough","hosts":[{"type":"exact","value":"global.example"}]},
+                "entries":[{
+                    "env_var":"KEY","value":"synthetic","placeholder":"$KEY",
+                    "allowed_hosts":[{"type":"exact","value":"allowed.example"}],
+                    "injection":{"headers":headers,"basic_auth":basic_auth,"query_params":true,"body":false},
+                    "on_violation":{"type":"passthrough","hosts":[{"type":"exact","value":"entry.example"}]}
+                }]
+            });
+            let cloud: CloudSecretsConfig = serde_json::from_value(value).unwrap();
+            let wire = serde_json::to_value(&cloud).unwrap();
+            assert_eq!(
+                wire["entries"][0]["substitution"]["headers"],
+                headers || basic_auth
+            );
+            assert_eq!(wire["entries"][0]["substitution"]["query"], true);
+            assert!(!wire.to_string().contains("unknown_future_scope"));
+            assert!(wire.get("on_violation").is_none());
+            let domain = SecretsConfig::from(cloud);
+            assert_eq!(
+                domain.passthrough_hosts,
+                Some(vec![HostPattern::Exact("global.example".into())])
+            );
+            assert_eq!(
+                domain.secrets[0].passthrough_hosts,
+                vec![HostPattern::Exact("entry.example".into())]
+            );
+        }
+    }
+}
+
+#[test]
+fn cloud_current_scopes_ignore_unknown_fields_and_preserve_block_override() {
+    let cloud: CloudSecretsConfig = serde_json::from_value(serde_json::json!({
+        "on_violation":{"type":"passthrough","hosts":[{"type":"any"}]},
+        "entries":[{"env_var":"KEY","placeholder":"$KEY", "allowed_hosts":[{"type":"any"}],
+            "substitution":{"headers":false,"query":true,"body":false,"unknown_future_scope":true},
+            "violation_action":{"type":"block"}}]
+    }))
+    .unwrap();
+    let entry = &cloud.entries[0];
+    assert!(!entry.substitution.headers);
+    assert!(entry.passthrough_hosts.is_empty());
+    let wire = serde_json::to_value(cloud).unwrap();
+    assert_eq!(wire["entries"][0]["violation_action"]["type"], "block");
+}
+
+#[test]
+fn cloud_conflicting_old_and_new_fields_are_rejected() {
+    for value in [
+        serde_json::json!({"on_violation":{"type":"block"}, "violation_action":{"type":"block"}}),
+        serde_json::json!({"entries":[{"env_var":"KEY","placeholder":"$KEY", "injection":{},"substitution":{}}]}),
+    ] {
+        assert!(serde_json::from_value::<CloudSecretsConfig>(value).is_err());
+    }
+}
+
+#[test]
+fn cloud_global_passthrough_survives_roundtrip_and_later_secret_additions() {
+    for value in [
+        serde_json::json!({"on_violation":{"type":"passthrough","hosts":[{"type":"exact","value":"global.example"}]}}),
+        serde_json::json!({"passthrough_hosts":[{"type":"exact","value":"global.example"}]}),
+    ] {
+        let cloud: CloudSecretsConfig = serde_json::from_value(value).unwrap();
+        let wire = serde_json::to_value(cloud).unwrap();
+        assert_eq!(wire["passthrough_hosts"][0]["value"], "global.example");
+        let mut cloud: CloudSecretsConfig = serde_json::from_value(wire).unwrap();
+        for action in [None, Some(serde_json::json!({"type":"block"}))] {
+            cloud.entries.push(
+                serde_json::from_value(serde_json::json!({
+                    "env_var":"KEY", "placeholder":"$KEY", "violation_action":action
+                }))
+                .unwrap(),
+            );
+        }
+        let domain = SecretsConfig::from(cloud);
+        let launch = crate::compatibility::v0_6::local::secrets::for_current_runtime(&domain);
+        assert_eq!(
+            launch.secrets[0].passthrough_hosts,
+            vec![HostPattern::Exact("global.example".into())]
+        );
+        assert!(launch.secrets[1].passthrough_hosts.is_empty());
+        assert!(domain.secrets[0].passthrough_hosts.is_empty());
+        assert!(domain.passthrough_hosts.is_some());
+    }
+}
+
+#[test]
+fn cloud_global_passthrough_preserves_absent_and_empty_defaults() {
+    for value in [
+        serde_json::json!({}),
+        serde_json::json!({"passthrough_hosts":[]}),
+    ] {
+        let cloud: CloudSecretsConfig = serde_json::from_value(value.clone()).unwrap();
+        let back: CloudSecretsConfig = SecretsConfig::from(cloud).into();
+        let wire = serde_json::to_value(back).unwrap();
+        assert_eq!(
+            wire.get("passthrough_hosts"),
+            value.get("passthrough_hosts")
+        );
+    }
+}
+
+#[test]
+fn cloud_historical_injection_defaults_and_current_scopes_stay_distinct() {
+    for (scope, expected_headers) in [
+        (serde_json::json!({"injection":{"headers":false}}), true),
+        (serde_json::json!({"substitution":{"headers":false}}), false),
+        (serde_json::json!({}), true),
+    ] {
+        let mut value = serde_json::json!({"env_var":"KEY", "placeholder":"$KEY"});
+        value
+            .as_object_mut()
+            .unwrap()
+            .extend(scope.as_object().unwrap().clone());
+        let entry: CloudSecretEntry = serde_json::from_value(value).unwrap();
+        assert_eq!(entry.substitution.headers, expected_headers);
+        assert!(!entry.substitution.query);
+        assert!(!entry.substitution.body);
+        assert!(entry.require_tls_identity);
+    }
+}
+
+#[test]
+fn cloud_typed_inputs_reject_conflicts_and_malformed_values_without_echoing_secrets() {
+    for policy in [
+        serde_json::json!({"injection":null}),
+        serde_json::json!({"substitution":null}),
+        serde_json::json!({"injection":{},"substitution":{}}),
+        serde_json::json!({"injection":{"query_params":false,"query":true}}),
+        serde_json::json!({"injection":{"basic_auth":"private-token"}}),
+        serde_json::json!({"passthrough_hosts":null}),
+        serde_json::json!({"on_violation":null,"violation_action":null}),
+        serde_json::json!({"on_violation":{"type":"passthrough","hosts":[]},"passthrough_hosts":[]}),
+        serde_json::json!({"source":{"type":"private-token"}}),
+    ] {
+        let mut entry =
+            serde_json::json!({"env_var":"KEY","placeholder":"$KEY","value":"private-token"});
+        entry
+            .as_object_mut()
+            .unwrap()
+            .extend(policy.as_object().unwrap().clone());
+        let error = serde_json::from_value::<CloudSecretEntry>(entry).unwrap_err();
+        assert!(!error.to_string().contains("private-token"));
+    }
+    for value in [
+        serde_json::json!({"violation_action":null}),
+        serde_json::json!({"on_violation":null}),
+        serde_json::json!({"on_violation":{"type":"passthrough","hosts":[]},"passthrough_hosts":null}),
+    ] {
+        assert!(serde_json::from_value::<CloudSecretsConfig>(value).is_err());
+    }
+    let entry: CloudSecretEntry = serde_json::from_value(serde_json::json!({
+        "env_var":"KEY","placeholder":"$KEY","violation_action":null
+    }))
+    .unwrap();
+    assert!(entry.violation_action.is_none());
 }

@@ -10,7 +10,7 @@ use crate::{MicrosandboxError, MicrosandboxResult, SandboxConfig};
 //--------------------------------------------------------------------------------------------------
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct HistoricalFormat {
+pub(crate) struct HistoricalFormat {
     pub patch: u64,
     pub snake: bool,
 }
@@ -20,14 +20,14 @@ pub(super) struct HistoricalFormat {
 //--------------------------------------------------------------------------------------------------
 
 impl HistoricalFormat {
-    pub(super) fn for_patch(patch: u64) -> Self {
+    pub(crate) fn for_patch(patch: u64) -> Self {
         Self {
             patch,
             snake: (5..=6).contains(&patch),
         }
     }
 
-    pub(super) fn encode(self, config: &SandboxConfig) -> MicrosandboxResult<String> {
+    pub(crate) fn encode(self, config: &SandboxConfig) -> MicrosandboxResult<String> {
         let expected = serde_json::to_value(config)?;
         let mut value = expected.clone();
         // Only fields in the released contract are emitted. Dropping a field is
@@ -106,23 +106,19 @@ impl HistoricalFormat {
             remove(network, "outbound_proxy");
         }
         if let Some(secrets) = network.get_mut("secrets") {
-            rename(secrets, "violation_action", "on_violation");
-            if let Some(entries) = secrets.get_mut("secrets").and_then(Value::as_array_mut) {
-                for entry in entries {
-                    remove(entry, "passthrough_hosts");
-                    if let Some(substitution) = entry.get_mut("substitution") {
-                        remove(substitution, "query");
-                    }
-                    rename(entry, "substitution", "injection");
-                    rename(entry, "violation_action", "on_violation");
-                }
-            }
-            if self.snake {
-                rename(secrets, "secrets", "entries");
-                if secrets["on_violation"] == "block-and-log" {
-                    secrets["on_violation"] = json!("block_and_log");
-                }
-            }
+            let encode = if self.snake {
+                microsandbox_types::compatibility::v0_6::local::catalog_v0_6_5::encode
+            } else {
+                microsandbox_types::compatibility::v0_6::local::secrets::encode
+            };
+            encode(
+                secrets
+                    .as_object_mut()
+                    .ok_or_else(|| unavailable("config.network.secrets"))?,
+            )
+            .map_err(|reason| {
+                MicrosandboxError::InvalidConfig(format!("config.network.secrets: {reason}"))
+            })?;
         }
         if let Some(mounts) = value["mounts"].as_array_mut() {
             for mount in mounts {
@@ -244,6 +240,76 @@ fn unavailable(path: &str) -> MicrosandboxError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn historical_secret_configs_round_trip() {
+        for raw in [
+            include_str!("fixtures/config-0.6.18-secret-default.json"),
+            include_str!("fixtures/config-0.6.18-global-passthrough.json"),
+            // Hand-extended released fixture: inheritance, blocking override, and entry passthrough.
+            include_str!("fixtures/config-0.6.18-global-passthrough-with-entries.json"),
+            include_str!("fixtures/config-0.6.18-secret-passthrough.json"),
+        ] {
+            let config = decode(raw).unwrap();
+            let encoded = HistoricalFormat::for_patch(18).encode(&config).unwrap();
+            assert_eq!(
+                serde_json::to_value(decode(&encoded).unwrap()).unwrap(),
+                serde_json::to_value(config).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn catalog_errors_retain_secret_policy_reasons_without_values() {
+        for (global, reason) in [
+            (
+                true,
+                "legacy global passthrough requires the block-and-log fallback",
+            ),
+            (
+                false,
+                "legacy per-secret passthrough cannot override the global fallback",
+            ),
+        ] {
+            let mut config =
+                decode(include_str!("fixtures/config-0.6.18-secret-default.json")).unwrap();
+            let policy = config.spec.network.secrets.as_mut().unwrap();
+            if global {
+                policy.passthrough_hosts = Some(vec![microsandbox_types::HostPattern::Any]);
+                policy.violation_action =
+                    microsandbox_types::SecretViolationAction::BlockAndTerminate;
+            } else {
+                policy.secrets[0].passthrough_hosts = vec![microsandbox_types::HostPattern::Any];
+                policy.secrets[0].violation_action =
+                    Some(microsandbox_types::SecretViolationAction::Block);
+            }
+            policy.secrets[0].value = zeroize::Zeroizing::new("synthetic-private-value".into());
+            let error = HistoricalFormat::for_patch(18)
+                .encode(&config)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(reason), "{error}");
+            assert!(!error.contains("synthetic-private-value"));
+        }
+    }
+
+    #[test]
+    fn new_secret_scopes_remain_representable_on_legacy_runtimes() {
+        for headers in [false, true] {
+            let mut config =
+                decode(include_str!("fixtures/config-0.6.18-secret-default.json")).unwrap();
+            let substitution =
+                &mut config.spec.network.secrets.as_mut().unwrap().secrets[0].substitution;
+            substitution.headers = headers;
+            substitution.query = true;
+            let encoded = HistoricalFormat::for_patch(18).encode(&config).unwrap();
+            let value: Value = serde_json::from_str(&encoded).unwrap();
+            let injection = &value["network"]["secrets"]["secrets"][0]["injection"];
+            assert_eq!(injection["headers"], headers);
+            assert_eq!(injection["basic_auth"], headers);
+            assert_eq!(injection["query_params"], true);
+        }
+    }
 
     #[test]
     fn released_formats_accept_zero_one_and_multiple_mounts() {

@@ -32,6 +32,9 @@ use windows_sys::Win32::System::IO::OVERLAPPED;
 
 use super::install::is_generated_alias;
 use crate::ui;
+use secret_config::{requires_secret_config_downgrade, requires_secret_config_rewrite};
+
+mod secret_config;
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -1018,7 +1021,9 @@ async fn execute_prepared_downgrade(
 
     let backup_path = if operation.journal.backup_path.is_some() {
         operation.journal.backup_path.clone()
-    } else if rollback_plan.steps() > 0 && !args.no_backup {
+    } else if (rollback_plan.steps() > 0 || requires_secret_config_rewrite(target_version))
+        && !args.no_backup
+    {
         let path = next_backup_path(&db_dir, current_version, target_version)?;
         operation.set_backup_path(Some(path.clone()))?;
         Some(path)
@@ -1126,7 +1131,10 @@ async fn run_downgrade_with_db(
             unreachable!("refuse_static always returns an error");
         }
 
-        if fresh_plan.steps() > 0 || (cfg!(windows) && !fresh_applied.is_empty()) {
+        if fresh_plan.steps() > 0
+            || requires_secret_config_rewrite(ctx.target_version)
+            || (cfg!(windows) && !fresh_applied.is_empty())
+        {
             refuse_if_active_sandboxes(ctx.db.inner()).await?;
         }
 
@@ -1179,14 +1187,22 @@ async fn run_downgrade_with_db(
             } else {
                 None
             };
+            // Recheck read-only compatibility on resume too, before artifact changes.
+            if fresh_plan.steps() == 0
+                && requires_secret_config_downgrade(ctx.target_version)
+                && !requires_secret_config_rewrite(ctx.target_version)
+            {
+                secret_config::prepare(ctx.db.inner(), ctx.target_version).await?;
+            }
             if ctx.operation.phase() < DowngradePhase::PreflightComplete {
-                if fresh_plan.steps() > 0 {
+                if fresh_plan.steps() > 0 || requires_secret_config_rewrite(ctx.target_version) {
                     let spinner = ui::Spinner::start("Checking", "database rollback");
                     let preflight_path = ctx.operation.recovery_dir().join("schema-preflight.db");
                     match preflight_schema_rollback(
                         ctx.db.inner(),
                         &preflight_path,
                         fresh_plan.steps(),
+                        ctx.target_version,
                     )
                     .await
                     {
@@ -1263,10 +1279,15 @@ async fn run_downgrade_with_db(
                 ctx.operation.set_phase(DowngradePhase::ArtifactsReverted)?;
             }
 
-            if fresh_plan.steps() > 0 {
+            if fresh_plan.steps() > 0 || requires_secret_config_rewrite(ctx.target_version) {
                 let spinner = ui::Spinner::start("Rolling back", "local database changes");
                 match run_with_install_lease_renewal(ctx.db, &mut ctx.install_lease, async {
-                    rollback_schema(ctx.db.inner(), fresh_plan.steps()).await
+                    rollback_schema_for_target(
+                        ctx.db.inner(),
+                        fresh_plan.steps(),
+                        Some(ctx.target_version),
+                    )
+                    .await
                 })
                 .await
                 {
@@ -2850,6 +2871,7 @@ async fn preflight_schema_rollback(
     db: &DatabaseConnection,
     preflight_path: &Path,
     steps: usize,
+    target_version: Version,
 ) -> anyhow::Result<()> {
     if let Some(parent) = preflight_path.parent() {
         fs::create_dir_all(parent)?;
@@ -2874,7 +2896,7 @@ async fn preflight_schema_rollback(
         Err(error) if is_missing_table_or_column(&error) => {}
         Err(error) => return Err(error.into()),
     }
-    rollback_schema(preflight.inner(), steps).await?;
+    rollback_schema_for_target(preflight.inner(), steps, Some(target_version)).await?;
     drop(preflight);
     verify_sqlite_backup(preflight_path).await
 }
@@ -2895,9 +2917,27 @@ async fn verify_sqlite_backup(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 async fn rollback_schema(db: &DatabaseConnection, steps: usize) -> anyhow::Result<()> {
+    rollback_schema_for_target(db, steps, None).await
+}
+
+async fn rollback_schema_for_target(
+    db: &DatabaseConnection,
+    steps: usize,
+    target: Option<Version>,
+) -> anyhow::Result<()> {
     db.execute_unprepared("BEGIN EXCLUSIVE").await?;
-    let down_result = Migrator::down(db, Some(steps as u32)).await;
+    let down_result: anyhow::Result<()> = async {
+        if let Some(version) = target.filter(|version| requires_secret_config_downgrade(*version)) {
+            secret_config::prepare(db, version).await?;
+        }
+        if steps > 0 {
+            Migrator::down(db, Some(steps as u32)).await?;
+        }
+        Ok(())
+    }
+    .await;
 
     match down_result {
         Ok(()) => {
@@ -2906,7 +2946,7 @@ async fn rollback_schema(db: &DatabaseConnection, steps: usize) -> anyhow::Resul
         }
         Err(err) => {
             let _ = db.execute_unprepared("ROLLBACK").await;
-            Err(err.into())
+            Err(err)
         }
     }
 }
@@ -3830,6 +3870,9 @@ mod tests {
         .await
         .unwrap();
         Migrator::up(db.inner(), None).await.unwrap();
+
+        // Empty catalogs have no secret policies requiring downgrade conversion.
+        rollback_schema(db.inner(), 1).await.unwrap();
 
         // Empty databases can drop grouped addressing without discarding any instances.
         rollback_schema(db.inner(), 1).await.unwrap();
