@@ -237,26 +237,28 @@ exec-failed, and volume-already-exists classes follow the Go SDK's finer
 coverage. All classes are direct subclasses of `Microsandbox::Error`
 (code `microsandbox-error`):
 
-| Group                 | Classes                                                                                                                                                                 |
-| --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Configuration         | `InvalidConfigError`, `NoDefaultCommandError`                                                                                                                           |
-| Lifecycle             | `SandboxNotFoundError`, `SandboxNotRunningError`, `SandboxAlreadyExistsError`, `SandboxStillRunningError`                                                               |
-| Execution             | `ExecTimeoutError`, `ExecFailedError`                                                                                                                                   |
-| Filesystem            | `FilesystemError`, `PathNotFoundError`                                                                                                                                  |
-| Volumes and images    | `VolumeNotFoundError`, `VolumeAlreadyExistsError`, `ImageNotFoundError`, `ImageInUseError`, `ImagePullFailedError`                                                      |
-| Snapshots             | `SnapshotNotFoundError`, `SnapshotAlreadyExistsError`, `SnapshotSandboxRunningError`, `SnapshotImageMissingError`, `SnapshotIntegrityError`, `SnapshotMigrationError` |
-| Networking            | `NetworkPolicyError`, `SecretViolationError`, `TlsError`                                                                                                                |
-| I/O                   | `IoError`                                                                                                                                                               |
-| Metrics               | `MetricsDisabledError`, `MetricsUnavailableError`                                                                                                                       |
-| Runtime compatibility | `UnsupportedOperationError`                                                                                                                                             |
-| Backend routing       | `CloudHttpError`, `UnsupportedError`                                                                                                                                    |
+| Group                 | Classes                                                                                                                                                                                              |
+| --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Runtime bootstrap     | `RuntimeNotInstalledError`, `RuntimeIncompleteError`                                                                                                                                                 |
+| Configuration         | `InvalidConfigError`, `NoDefaultCommandError`                                                                                                                                                        |
+| Lifecycle             | `SandboxNotFoundError`, `SandboxNotRunningError`, `SandboxAlreadyExistsError`, `SandboxReplacedError`, `SandboxStillRunningError`, `SandboxStopTimedOutError`, `StopTimeoutError`                    |
+| Execution             | `ExecTimeoutError`, `ExecFailedError`                                                                                                                                                                |
+| Filesystem            | `FilesystemError`, `PathNotFoundError`                                                                                                                                                               |
+| Volumes and images    | `VolumeNotFoundError`, `VolumeAlreadyExistsError`, `ImageNotFoundError`, `ImageInUseError`, `ImagePullFailedError`                                                                                   |
+| Snapshots             | `SnapshotNotFoundError`, `SnapshotAlreadyExistsError`, `SnapshotSandboxRunningError`, `SnapshotImageMissingError`, `SnapshotIntegrityError`, `SnapshotSourceRecoveryError`, `SnapshotMigrationError` |
+| Networking            | `NetworkPolicyError`, `SecretViolationError`, `TlsError`                                                                                                                                             |
+| I/O                   | `IoError`                                                                                                                                                                                            |
+| Metrics               | `MetricsDisabledError`, `MetricsUnavailableError`                                                                                                                                                    |
+| Runtime compatibility | `UnsupportedOperationError`                                                                                                                                                                          |
+| Backend routing       | `CloudHttpError`, `UnsupportedError`                                                                                                                                                                 |
 
 Each class exposes its stable, machine-readable code through `.code` and
 `#code` (for example `Microsandbox::ExecTimeoutError.code == "exec-timeout"`).
 Core errors without a dedicated class raise `Microsandbox::Error` itself.
-`PathNotFoundError`, `ImagePullFailedError`, `SecretViolationError`, and
-`TlsError` are defined for parity with the Python SDK but are not raised by
-the current core.
+`PathNotFoundError`, `ImagePullFailedError`, `SecretViolationError`,
+`TlsError`, and `SandboxStopTimedOutError` are defined for parity with the
+Python SDK but are not raised by the current core; an explicit
+`stop_with_timeout` that runs out of time raises `StopTimeoutError`.
 
 `UnsupportedError` is raised when the selected backend does not implement an
 operation. Its message names the Ruby API and the remedy, both also available
@@ -272,6 +274,16 @@ rescue Microsandbox::UnsupportedError => error
   error.hint      # => "the replace option is not accepted here"
 end
 ```
+
+`SnapshotSourceRecoveryError` is raised when a snapshot was captured but the
+source sandbox failed to recover its prior execution state. It carries the
+recovery locator as attributes, so there is no need to parse the message:
+`source_sandbox`, `checkpoint_id`, `checkpoint_root`, `checkpoint_path`,
+`detail`, `publication_error`, and `artifact`. `artifact` is a Hash with
+`"kind"` (`"installed"` or `"archive"`), `"path"`, `"snapshot_id"`, and
+`"digest"` keys, set only when the requested snapshot was published;
+otherwise `checkpoint_path` names the retained runtime-local checkpoint. The
+error does not imply that the source is running or safe to resume.
 
 Argument validation is not covered by that guarantee: unknown keywords and
 wrongly typed values keep raising Ruby's `ArgumentError` and `TypeError`

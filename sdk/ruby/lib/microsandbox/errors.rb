@@ -34,6 +34,13 @@ module Microsandbox
   end
   private_class_method :define_error
 
+  # Runtime bootstrap errors ------------------------------------------------
+  # Neither member of the host runtime pair (msb + libkrunfw) is installed;
+  # Microsandbox.install fetches it.
+  define_error(:RuntimeNotInstalledError, "runtime-not-installed")
+  # Only one member of the host runtime pair is available.
+  define_error(:RuntimeIncompleteError, "runtime-incomplete")
+
   # Configuration / validation errors --------------------------------------
   define_error(:InvalidConfigError, "invalid-config")
   # exec_default/attach_default on an image whose ENTRYPOINT+CMD provide no
@@ -44,7 +51,16 @@ module Microsandbox
   define_error(:SandboxNotFoundError, "sandbox-not-found")
   define_error(:SandboxNotRunningError, "sandbox-not-running")
   define_error(:SandboxAlreadyExistsError, "sandbox-already-exists")
+  # A handle was bound to an older sandbox that has since been replaced by
+  # another sandbox with the same name; the stale lifecycle call is refused.
+  define_error(:SandboxReplacedError, "sandbox-replaced")
   define_error(:SandboxStillRunningError, "sandbox-still-running")
+  # Reserved for parity with the Python SDK; no core code path raises this
+  # variant today.
+  define_error(:SandboxStopTimedOutError, "sandbox-stop-timed-out")
+  # A graceful stop with an explicit timeout did not complete in time. The
+  # shutdown request may still complete; no kill was requested.
+  define_error(:StopTimeoutError, "stop-timeout")
 
   # Execution errors --------------------------------------------------------
   define_error(:ExecTimeoutError, "exec-timeout")
@@ -72,6 +88,9 @@ module Microsandbox
   define_error(:SnapshotSandboxRunningError, "snapshot-sandbox-running")
   define_error(:SnapshotImageMissingError, "snapshot-image-missing")
   define_error(:SnapshotIntegrityError, "snapshot-integrity")
+  # Capture completed, but the source sandbox failed to recover its prior
+  # execution state; see the class body below for the recovery locator.
+  define_error(:SnapshotSourceRecoveryError, "snapshot-source-recovery")
   # The automatic adjacent-release snapshot migration was blocked.
   define_error(:SnapshotMigrationError, "snapshot-migration")
 
@@ -109,5 +128,28 @@ module Microsandbox
     attr_reader :operation
     # @return [String, nil] why it was rejected or what to use instead
     attr_reader :hint
+  end
+
+  # The native layer attaches the recovery locator as attributes, mirroring
+  # the Python SDK's +SnapshotSourceRecoveryError+. +artifact+ is set only when
+  # the requested snapshot was published; otherwise +checkpoint_path+ names the
+  # retained runtime-local checkpoint, which removing the source may remove.
+  # This error does not imply that the source is running or safe to resume.
+  class SnapshotSourceRecoveryError
+    # @return [String, nil] the sandbox whose post-capture recovery failed
+    attr_reader :source_sandbox
+    # @return [String, nil] the verified runtime checkpoint identity
+    attr_reader :checkpoint_id
+    # @return [String, nil] the content-addressed root of that checkpoint
+    attr_reader :checkpoint_root
+    # @return [String, nil] the runtime-local checkpoint path
+    attr_reader :checkpoint_path
+    # @return [Hash, nil] the published snapshot, with "kind" ("installed" or
+    #   "archive"), "path", "snapshot_id", and "digest" keys
+    attr_reader :artifact
+    # @return [String, nil] the runtime's recovery diagnostic
+    attr_reader :detail
+    # @return [String, nil] a further failure publishing the requested artifact
+    attr_reader :publication_error
   end
 end

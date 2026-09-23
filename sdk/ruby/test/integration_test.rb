@@ -183,7 +183,9 @@ class MicrosandboxIntegrationTest < Test::Unit::TestCase
         assert_raise(ArgumentError) { receiver.stop_with_timeout(timeout) }
       end
       assert_raise(TypeError) { receiver.stop_with_timeout(nil) }
-      error = assert_raise(Microsandbox::Error) { receiver.stop_with_timeout(0) }
+      error = assert_raise(Microsandbox::StopTimeoutError) { receiver.stop_with_timeout(0) }
+      assert_true Microsandbox::Error === error
+      assert_equal "stop-timeout", error.code
       assert_match(/timed out/, error.message)
       assert_equal "running", Microsandbox::Sandbox.get(sandbox.name).refresh.status
     end

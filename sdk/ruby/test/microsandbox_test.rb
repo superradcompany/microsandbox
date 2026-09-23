@@ -9,13 +9,15 @@ class MicrosandboxTest < Test::Unit::TestCase
   # Mirrors sdk/python/microsandbox/errors.py plus the Go SDK's snapshot,
   # exec-failed, and volume-already-exists granularity.
   ERROR_CLASSES = %i[
+    RuntimeNotInstalledError RuntimeIncompleteError
     InvalidConfigError NoDefaultCommandError
-    SandboxNotFoundError SandboxNotRunningError SandboxAlreadyExistsError SandboxStillRunningError
+    SandboxNotFoundError SandboxNotRunningError SandboxAlreadyExistsError SandboxReplacedError
+    SandboxStillRunningError SandboxStopTimedOutError StopTimeoutError
     ExecTimeoutError ExecFailedError
     FilesystemError PathNotFoundError
     VolumeNotFoundError VolumeAlreadyExistsError ImageNotFoundError ImageInUseError ImagePullFailedError
     SnapshotNotFoundError SnapshotAlreadyExistsError SnapshotSandboxRunningError
-    SnapshotImageMissingError SnapshotIntegrityError SnapshotMigrationError
+    SnapshotImageMissingError SnapshotIntegrityError SnapshotSourceRecoveryError SnapshotMigrationError
     NetworkPolicyError SecretViolationError TlsError
     IoError
     MetricsDisabledError MetricsUnavailableError
@@ -164,6 +166,15 @@ class MicrosandboxTest < Test::Unit::TestCase
     assert_nil error.operation
     assert_nil error.hint
     assert_equal "unsupported", error.code
+  end
+
+  def test_snapshot_source_recovery_error_attributes_default_to_nil
+    error = Microsandbox::SnapshotSourceRecoveryError.new("boom")
+
+    %i[source_sandbox checkpoint_id checkpoint_root checkpoint_path artifact detail publication_error].each do |name|
+      assert_nil error.public_send(name), name
+    end
+    assert_equal "snapshot-source-recovery", error.code
   end
 
   def test_missing_sandbox_raises_sandbox_not_found_error
