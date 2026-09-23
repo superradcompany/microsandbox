@@ -11,6 +11,7 @@ mod sandbox_handle;
 mod setup;
 mod snapshot;
 mod ssh;
+mod storage;
 mod volume;
 
 use std::sync::Arc;
@@ -83,6 +84,12 @@ fn _microsandbox(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<image::PyImageConfigDetail>()?;
     m.add_class::<image::PyImageLayerDetail>()?;
     m.add_class::<image::PyImagePruneReport>()?;
+    m.add_class::<storage::PyStorage>()?;
+    m.add_class::<storage::PyStorageUsage>()?;
+    m.add_class::<storage::PyStorageCategoryUsage>()?;
+    m.add_class::<storage::PyStorageItemUsage>()?;
+    m.add_class::<storage::PyMemoryCacheEntry>()?;
+    m.add_class::<storage::PyMemoryCacheReport>()?;
     m.add_class::<volume::PyVolume>()?;
     m.add_class::<volume::PyVolumeHandle>()?;
     m.add_class::<volume::PyVolumeFs>()?;

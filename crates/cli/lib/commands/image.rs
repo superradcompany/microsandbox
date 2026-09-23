@@ -250,12 +250,9 @@ async fn run_pull_inner(
         }
 
         if !quiet {
-            eprintln!(
-                "   {} {:<12} {}{}",
-                style("✓").green(),
+            ui::success(
                 "Pulled",
-                reference,
-                style(" (already cached)").dim()
+                &format!("{reference}{}", style(" (already cached)").dim()),
             );
         }
 
@@ -360,13 +357,7 @@ async fn run_pull_inner(
             }
         };
 
-        eprintln!(
-            "   {} {:<12} {}{}",
-            style("✓").green(),
-            "Pulled",
-            reference,
-            style(suffix).dim()
-        );
+        ui::success("Pulled", &format!("{reference}{}", style(suffix).dim()));
     }
 
     Ok(())
@@ -688,12 +679,7 @@ pub async fn run_load(args: ImageLoadArgs) -> anyhow::Result<()> {
 
     if !args.quiet {
         for image in &loaded {
-            eprintln!(
-                "   {} {:<12} {}",
-                style("✓").green(),
-                "Loaded",
-                image.reference
-            );
+            ui::success("Loaded", &image.reference);
         }
     }
 
@@ -725,12 +711,7 @@ pub async fn run_save(args: ImageSaveArgs) -> anyhow::Result<()> {
         io::copy(&mut file, &mut stdout)?;
         stdout.flush()?;
     } else if !args.quiet {
-        eprintln!(
-            "   {} {:<12} {}",
-            style("✓").green(),
-            "Saved",
-            output_path.display()
-        );
+        ui::success("Saved", &output_path.display().to_string());
     }
 
     Ok(())
@@ -859,7 +840,7 @@ fn format_bytes_u64(bytes: u64) -> String {
 /// Print the pull failure indicator line to stderr.
 fn pull_failure_line(quiet: bool, reference: &str) {
     if !quiet {
-        eprintln!("   {} {:<12} {}", style("✗").red(), "Pulling", reference);
+        ui::failure("Pulling", reference);
     }
 }
 

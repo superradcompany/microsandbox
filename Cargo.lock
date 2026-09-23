@@ -4223,6 +4223,7 @@ version = "0.7.2"
 dependencies = [
  "base64 0.23.1",
  "bytes",
+ "cap-primitives",
  "chrono",
  "ciborium-ll",
  "clap",

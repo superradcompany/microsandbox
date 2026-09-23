@@ -303,6 +303,27 @@ for name, sample in (await all_sandbox_metrics()).items():
     print(f"{name}: {sample.cpu_percent:.1f}%")
 ```
 
+### Storage Usage and Runtime Cache Cleanup
+
+`Storage.usage()` reports the selected local backend's aggregate storage. Sandbox and snapshot handles also provide `storage_usage()` for their managed files. Reports contain raw integer byte counts; `None` means unknown. Logical sizes and allocated-block observations do not measure exclusive physical ownership on filesystems that share copy-on-write blocks.
+
+```python
+from microsandbox import Storage
+
+usage = await Storage.usage()
+print(usage.branch_memory.logical_bytes)
+
+preview = await Storage.prune(dry_run=True, older_than_seconds=600)
+for entry in preview.entries:
+    print(entry.path, entry.state, entry.logical_bytes)
+
+# Explicitly remove currently unused runtime RAM after rechecking ownership.
+result = await Storage.prune(older_than_seconds=600)
+print(result.logical_bytes_removed)
+```
+
+Pruning preserves durable snapshots, sandbox disks, named volumes, and stable lock files. Pending handoffs, live or paused VMs, and retained baselines protect their RAM. The report lists skipped entries and per-file errors, including partial success; `physical_bytes_reclaimed` remains `None`. Remote backend storage operations raise `UnsupportedError`. Static storage calls retain the backend selected when called, and handle methods retain the backend that created the handle.
+
 ### Typed Errors
 
 Python exports typed errors for the common SDK categories and falls back to `MicrosandboxError` for unmapped runtime variants. Catch specific errors when you need category-specific handling, and catch `MicrosandboxError` as the broad SDK base class.

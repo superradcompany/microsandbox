@@ -2,6 +2,7 @@
 
 #[cfg(feature = "runner")]
 mod additional_disk;
+mod cache_storage;
 #[cfg(feature = "runner")]
 mod capture_pipeline;
 mod compaction;
@@ -26,6 +27,10 @@ mod restore;
 // Re-Exports
 //--------------------------------------------------------------------------------------------------
 
+pub use cache_storage::{
+    MemoryCacheEntry, MemoryCacheKind, MemoryCacheReport, MemoryCacheState, MemoryPruneOptions,
+    inspect_memory_cache, prune_memory_cache,
+};
 pub use compaction::compact_stopped_disks;
 #[cfg(feature = "runner")]
 pub(crate) use coordinator::{CheckpointCoordinator, CheckpointResult, UserPause};

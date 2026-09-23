@@ -38,6 +38,7 @@
 mod creation_progress;
 mod restore;
 mod setup;
+mod storage;
 
 use std::{
     collections::HashMap,

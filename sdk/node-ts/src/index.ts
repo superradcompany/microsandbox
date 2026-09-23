@@ -133,6 +133,19 @@ export type {
   SnapshotVerifyReport,
 } from "./snapshot.js";
 
+// Local storage observations and runtime cache cleanup
+export { Storage } from "./storage.js";
+export type {
+  StorageUsage,
+  StorageCategoryUsage,
+  StorageItemUsage,
+  StoragePruneOptions,
+  MemoryCacheKind,
+  MemoryCacheState,
+  MemoryCacheEntry,
+  MemoryCacheReport,
+} from "./storage.js";
+
 // Image management
 export { Image, ImageHandle } from "./image.js";
 export type {

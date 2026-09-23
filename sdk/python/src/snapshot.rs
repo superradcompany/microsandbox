@@ -51,6 +51,15 @@ pub struct PySnapshotHandle {
 
 #[pymethods]
 impl PySnapshot {
+    /// Observe artifact storage through this snapshot's captured backend.
+    fn storage_usage<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let snapshot = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let usage = snapshot.storage_usage().await.map_err(to_py_err)?;
+            Ok(crate::storage::PyStorageItemUsage::from_rust(usage))
+        })
+    }
+
     /// Create a disk snapshot, or include memory and execution state with full=True.
     ///
     /// The artifact is installed in a snapshot group under the default snapshots
@@ -688,6 +697,15 @@ impl PySnapshot {
 
 #[pymethods]
 impl PySnapshotHandle {
+    /// Observe artifact storage through this handle's captured backend.
+    fn storage_usage<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let handle = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let usage = handle.storage_usage().await.map_err(to_py_err)?;
+            Ok(crate::storage::PyStorageItemUsage::from_rust(usage))
+        })
+    }
+
     /// Local group containing this indexed snapshot.
     #[getter]
     fn group(&self) -> Option<&str> {

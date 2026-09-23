@@ -212,6 +212,27 @@ impl LocalBackend {
                         .await?;
                     }
                 }
+                // VM teardown uses _exit(), which bypasses Rust drop guards. Only retry
+                // cache reclamation after runtime ownership is gone; surviving source,
+                // paused-child and pending-handoff locks still protect shared generations.
+                // Release sandbox ownership before scheduling unrelated cache I/O. A slow
+                // sweep must not delay restart/removal or occupy an async runtime worker.
+                drop(_disk_guards);
+                drop(_ownership);
+                drop(transition);
+                let root = self.cache_dir().join("memory");
+                tokio::task::spawn_blocking(move || {
+                    let options = microsandbox_runtime::checkpoint::MemoryPruneOptions {
+                        branches_only: true,
+                        max_entries: Some(256),
+                        ..Default::default()
+                    };
+                    if let Err(error) =
+                        microsandbox_runtime::checkpoint::prune_memory_cache(&root, &options)
+                    {
+                        tracing::debug!(%error, "deferred stopped sandbox memory cleanup");
+                    }
+                });
                 return Ok(());
             }
             drop(transition);

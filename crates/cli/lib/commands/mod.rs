@@ -38,6 +38,7 @@ pub mod snapshot;
 pub mod ssh;
 pub mod start;
 pub mod stop;
+pub mod storage;
 pub mod touch;
 pub mod uninstall;
 pub mod volume;

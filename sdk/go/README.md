@@ -338,6 +338,37 @@ if err == nil && sample != nil {
 }
 ```
 
+### Storage Usage and Runtime Cache Cleanup
+
+```go
+usage, err := microsandbox.StorageUsage(ctx)
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Println(usage.BranchMemory.LogicalBytes)
+
+item, err := sb.StorageUsage(ctx)
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Println(item.Name, item.LogicalBytes)
+
+preview, err := microsandbox.PruneStorage(ctx, microsandbox.StoragePruneOptions{
+    DryRun: true,
+    OlderThanSeconds: 600,
+})
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Println(preview.Entries)
+```
+
+Reports contain integer byte counts; optional pointer fields are `nil` when unknown. Logical bytes are file lengths, and allocated bytes may count shared CoW blocks repeatedly. They do not measure exclusive disk ownership. `sb.StorageUsage(ctx)` observes the live sandbox's managed directory through its retained backend and stable identity; host bind mounts and shared runtime-memory caches are excluded.
+
+Go's metadata-only `SandboxHandle`, `SnapshotArtifact`, and `SnapshotHandle` do not yet expose per-object storage methods because they do not retain a native backend-bound receiver. Use the detailed `Sandboxes.Items` and `Snapshots.Items` fields in `StorageUsage(ctx)` for observations through the selected backend.
+
+`PruneStorage` is an explicit cleanup operation and does not prompt. `DryRun: true` only previews; calling with `DryRun: false` rechecks ownership and removes unused runtime RAM. It retains durable snapshots, named volumes, sandbox disks, and handoff locks. Check each entry for partial errors. Logical bytes removed are reported separately from physical bytes reclaimed, which remain unknown. Remote backends and native bundles predating storage support return `ErrUnsupportedOperation`.
+
 ### Typed Errors
 
 Go SDK errors can be checked with `IsKind` and unwrapped with `errors.As`.
@@ -420,6 +451,13 @@ Use `libmicrosandbox_go_ffi.so` for Linux. Full integration tests require local 
 ```bash
 go test -tags "smoke microsandbox_ffi_path" -count=1 .
 go test -tags "integration microsandbox_ffi_path" -v -count=1 ./integration/...
+```
+
+The storage smoke test uses a fresh process and temporary home, requires no VM, and only prunes its own synthetic RAM files:
+
+```bash
+MSB_STORAGE_NATIVE_LIBRARY="$PWD/../../target/debug/libmicrosandbox_go_ffi.dylib" \
+    go test -tags storage_native ./internal/ffi -run '^TestStorageNativeReportsAndPruning$' -count=1
 ```
 
 ## License

@@ -2,6 +2,7 @@
 
 use clap::{Args, Subcommand};
 use microsandbox::volume::{Volume, VolumeKind};
+use microsandbox_utils::format::format_bytes;
 
 use crate::ui;
 
@@ -293,16 +294,7 @@ async fn remove(args: VolumeRemoveArgs) -> anyhow::Result<()> {
 
 /// Format MiB as a human-readable string.
 fn format_mib(mib: u32) -> String {
-    if mib >= 1024 && mib.is_multiple_of(1024) {
-        format!("{} GiB", mib / 1024)
-    } else {
-        format!("{mib} MiB")
-    }
-}
-
-fn format_bytes(bytes: u64) -> String {
-    let mib = bytes / (1024 * 1024);
-    format_mib(mib as u32)
+    format_bytes(u64::from(mib) * 1024 * 1024)
 }
 
 fn parse_volume_kind(kind: &str) -> anyhow::Result<VolumeKind> {
