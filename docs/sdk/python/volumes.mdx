@@ -1,13 +1,31 @@
 ---
 title: Volumes
 description: Python SDK - Volume API reference
+keywords: ["Python SDK", "Python volumes", "microsandbox volumes"]
 ---
 
 Create, manage, and mount named volumes. See [Volumes](/sandboxes/volumes) for usage examples.
 
 ## Volume
 
-<p className="msb-member-group">Instance properties</p>
+Use `Volume.owned()` to configure local storage allocated for one sandbox. It starts empty, survives stop/start and reboot, and is deleted with the sandbox. Owned mounts do not appear in `Volume.list()` and cannot be shared or removed independently. Cloud rejects owned mounts.
+
+```python
+from microsandbox import Sandbox, Volume, VolumeKind
+
+sb = await Sandbox.create(
+    "worker",
+    image="python",
+    volumes={
+        "/cache": Volume.owned(quota_mib=2048),
+        "/data": Volume.owned(kind=VolumeKind.DISK, size_mib=10240),
+    },
+)
+```
+
+`Volume.owned()` returns a `MountConfig`. `kind` defaults to `VolumeKind.DIRECTORY`; `quota_mib` applies only to directories. `VolumeKind.DISK` creates raw ext4 and requires positive `size_mib`. Common flags are `readonly`, `noexec`, `nosuid`, and `nodev`. `stat_virtualization`, `host_permissions`, and paired `uid`/`gid` apply only to directories. No host path or volume name is accepted. Mounting over an existing image directory hides its contents without copying them.
+
+<p className="msb-member-group" id="instance-properties">Instance properties</p>
 
 #### <span className="msb-recv">volume.</span><span className="msb-hn">name</span>
 
@@ -193,7 +211,7 @@ Delete a named volume and its contents. Fails if the volume is currently mounted
   </div>
 </div>
 
-<p className="msb-member-group">Mount factories</p>
+<p className="msb-member-group" id="mount-factories">Mount factories</p>
 
 Static factory methods on `Volume` that build a [`MountConfig`](#mountconfig). Pass the result as a value in the `volumes` dict when creating a sandbox, keyed by the guest mount point.
 

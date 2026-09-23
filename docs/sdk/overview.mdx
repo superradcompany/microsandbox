@@ -1,20 +1,21 @@
 ---
 title: Overview
 description: Install the SDK and create your first sandbox
+keywords: ["microsandbox SDK", "Python SDK", "TypeScript SDK", "Rust SDK", "Go SDK"]
 icon: "play"
 ---
 
-The SDK embeds the microsandbox runtime directly into your application. Running locally, creating a sandbox spawns a VM as a child process; there is no daemon to install and no server to connect to. With an API key set, the same SDK runs sandboxes on [microsandbox cloud](/cloud/overview) instead.
+The SDK runs microsandbox directly from your application. Running locally, creating a sandbox spawns a VM as a child process; there is no daemon to install and no server to connect to. With an API key set, the same SDK runs sandboxes on [microsandbox cloud](/cloud/overview) instead.
 
 ## Installation
 
 <CodeGroup>
-```bash Rust
-cargo add microsandbox
-```
-
 ```bash TypeScript
 npm install microsandbox
+```
+
+```bash Rust
+cargo add microsandbox
 ```
 
 ```bash Python
@@ -24,15 +25,30 @@ pip install microsandbox
 ```bash Go
 go get github.com/superradcompany/microsandbox/sdk/go
 ```
+
+```bash Ruby
+gem install microsandbox
+```
 </CodeGroup>
 
-For explicit runtime installation, verification, custom install locations, and environment overrides, see [Runtime setup](/sdk/setup).
+Prefer to provision the runtime separately? Node supports external runtime paths but still bundles its runtime and native addon together; Rust lets you disable Cargo-time downloads and leave embedding off. See [Runtime setup](/sdk/setup#bring-your-own-runtime) for installer and SDK setup options.
 
 ## Small example
 
 Create a sandbox from a container image, run a command, print the output, and stop it.
 
 <CodeGroup>
+```typescript TypeScript
+import { Sandbox } from "microsandbox";
+
+await using sb = await Sandbox.builder("hello")
+    .image("python")
+    .create();
+
+const output = await sb.exec("python", ["-c", "print('Hello, World!')"]);
+console.log("Output:", output.stdout());
+```
+
 ```rust Rust
 use microsandbox::Sandbox;
 
@@ -49,17 +65,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     sb.stop().await?;
     Ok(())
 }
-```
-
-```typescript TypeScript
-import { Sandbox } from "microsandbox";
-
-await using sb = await Sandbox.builder("hello")
-    .image("python")
-    .create();
-
-const output = await sb.exec("python", ["-c", "print('Hello, World!')"]);
-console.log("Output:", output.stdout());
 ```
 
 ```python Python
@@ -94,7 +99,7 @@ import (
 func main() {
     ctx := context.Background()
 
-    if err := m.EnsureInstalled(ctx); err != nil {
+    if _, err := m.EnsureRuntime(ctx, m.RuntimeConfig{}, m.InstallOptions{}); err != nil {
         log.Fatal(err)
     }
 
@@ -115,15 +120,27 @@ func main() {
 }
 ```
 
+```ruby Ruby
+require "microsandbox"
+
+Microsandbox.install unless Microsandbox.installed?
+
+Microsandbox::Sandbox.with("hello", image: "python") do |sandbox|
+  output = sandbox.exec("python", ["-c", "print('Hello, World!')"])
+  puts "Output: #{output.stdout}"
+end
+```
+
 </CodeGroup>
 
 ## Reference
 
 Choose the SDK for your language:
 
-- [Rust SDK](/sdk/rust/sandbox)
 - [TypeScript SDK](/sdk/typescript/sandbox)
+- [Rust SDK](/sdk/rust/sandbox)
 - [Python SDK](/sdk/python/sandbox)
 - [Go SDK](/sdk/go/sandbox)
+- [Ruby SDK](/sdk/ruby/sandbox)
 
-For low-level protocol integrations, see the Agent Client references for [Rust](/sdk/rust/agent-client), [TypeScript](/sdk/typescript/agent-client), [Python](/sdk/python/agent-client), and [Go](/sdk/go/agent-client). See also [error handling](/sdk/errors).
+For low-level protocol integrations, see the Agent Client references for [TypeScript](/sdk/typescript/agent-client), [Rust](/sdk/rust/agent-client), [Python](/sdk/python/agent-client), and [Go](/sdk/go/agent-client). See also [error handling](/sdk/errors).

@@ -17,7 +17,9 @@ microsandbox = { workspace = true, default-features = true, features = ["ssh"] }
 microsandbox-network.workspace = true
 chrono = { workspace = true }
 ipnetwork = { version = "0.21.0", features = ["serde"] }
-pyo3 = { version = "0.24", features = ["abi3-py310", "extension-module"] }
+# Maturin enables extension-module in pyproject.toml when packaging wheels.
+# Rust test executables must instead link libpython to resolve Python symbols.
+pyo3 = { version = "0.24", features = ["abi3-py310"] }
 pyo3-async-runtimes = { version = "0.24", features = ["tokio-runtime"] }
 serde_json = { workspace = true }
 tempfile = { workspace = true }

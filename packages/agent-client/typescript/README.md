@@ -1,213 +1,118 @@
 # @microsandbox/agent-client
 
-Low-level TypeScript client for speaking the microsandbox agent protocol from Node.js or browser/front-end runtimes.
-
-This package sits below the high-level microsandbox SDK. It owns the transport connection, relay handshake, correlation ID allocation, request/stream routing, message framing, protocol-version gating, and typed/encoded message helpers. It does not create sandboxes, resolve sandbox names, pull images, manage volumes, or expose high-level process/filesystem convenience APIs.
-
-Use this package when you already have an agent relay endpoint and want direct protocol access from TypeScript. Use a higher-level microsandbox SDK when you want sandbox lifecycle management.
-
-## Install
-
-```bash
-npm install @microsandbox/agent-client
-```
-
-Node.js 22 or newer is required.
-
-## Entry Points
-
-The default entry is browser-safe and does not import Node builtins:
-
-```ts
-import {
-  AgentClient,
-  WebSocketTransport,
-  typedMessage,
-} from "@microsandbox/agent-client";
-```
-
-Unix domain sockets are Node-only and live behind a separate entry:
-
-```ts
-import { connectUnix } from "@microsandbox/agent-client/node";
-```
-
-This split matters for front-end builds: importing from `@microsandbox/agent-client` is browser-safe, while `@microsandbox/agent-client/node` imports Node's `net` module.
-
-## Protocol Model
-
-The agent protocol is a length-prefixed binary frame:
+Low-level TypeScript access to the microsandbox agent protocol. `AgentClient` is `Client<AgentProtocol>` from `@microsandbox/protocol-client`; the agent package supplies relay setup, its existing encoder, and generation gates. The shared engine owns framing, IDs, queues, cancellation, and transport lifetime. Sandbox lifecycle and process/filesystem convenience APIs belong to the SDK.
 
 ```text
-[len: u32 BE][id: u32 BE][flags: u8][CBOR Message body]
+AgentProtocol (setup, encoder, gates)
+                 |
+          Client<AgentProtocol>
+            /          \
+ native / encoded     raw / exact packets
+                 |
+       Unix socket / named pipe / WebSocket
 ```
 
-The CBOR `Message` body contains:
+## Installation and entry points
 
-```text
-{ v, t, p }
-```
+Install with `npm install @microsandbox/agent-client`. Node.js 22 or newer is required for native transports. The root entry is browser-safe. `@microsandbox/agent-client/node` imports Node's `net` module and accepts native endpoint paths verbatim, including Windows named-pipe names.
 
-- `v`: protocol generation.
-- `t`: wire message type such as `"core.exec.request"`.
-- `p`: CBOR-encoded payload for that message type.
-
-`AgentClient` owns correlation IDs from the relay-assigned range. Callers pass typed or already-encoded messages; the client computes flags, gates unsupported message types against the negotiated protocol generation, frames messages, and routes responses by ID.
-
-The relay handshake happens before regular frames:
-
-```text
-[id_min: u32 BE][id_max: u32 BE][core.ready packet]
-```
-
-`id_min..id_max` is the correlation ID range reserved for this client connection. `core.ready` advertises the agent protocol generation and runtime metadata; the client uses it to negotiate the effective protocol version.
-
-Payload objects passed to `typedMessage()` must match the CBOR schema expected by `microsandbox-protocol` for the selected message type. This package validates message type support and frame shape, but it does not yet ship generated domain payload types.
-
-## Node UDS Example
+## Native messages
 
 ```ts
 import { connectUnix } from "@microsandbox/agent-client/node";
 import { typedMessage } from "@microsandbox/agent-client";
 
-const client = await connectUnix("/tmp/msb-agent.sock", {
-  handshakeTimeoutMs: 10_000,
-});
-
-const response = await client.request(
-  typedMessage("core.fs.request", {
-    op: {
-      Stat: {
-        path: "/etc/os-release",
-        follow_symlink: true,
-      },
-    },
-  }),
-);
-
-if (response.type === "core.fs.response") {
-  console.log(response.decodePayload());
+const client = await connectUnix("/tmp/msb-agent.sock", { setupTimeoutMs: 10_000 });
+try {
+  const response = await client.request(typedMessage("core.fs.request", {
+    op: { Stat: { path: "/etc/os-release", follow_symlink: true } },
+  }), { requestTimeoutMs: 5_000 });
+  console.log(response.type, response.decodePayload());
+  console.log(client.ready.agentVersion, client.ready.negotiatedVersion);
+} finally {
+  await client.close();
 }
-await client.close();
 ```
 
-## Browser WebSocket Example
+`typedMessage(name, value)` asks the agent codec to encode a native payload. `encodedMessage(name, bytes)` supplies only the application payload; it does not supply an envelope or framed packet. Both paths apply known message gates and flags. Names are open strings, so extensions remain accessible without editing an enum. These methods do not validate an application schema. `requestTyped()` accepts an optional checked request with its own result decoder and requires a terminal response.
+
+The current TypeScript agent encoder continues to emit generation-five envelopes, including its existing CBOR map and byte-string representations. The ready generation controls feature gates. The supported pre-0.5 relay prologue selects generation-one envelopes and rejects unavailable filesystem/TCP operations before sending. The captured ready frame and unknown fields remain available through `client.ready.frame` and `client.ready.readyBytes`.
+
+## Browser streams
 
 ```ts
-import {
-  AgentClient,
-  WebSocketTransport,
-  typedMessage,
-} from "@microsandbox/agent-client";
+import { AgentClient, WebSocketConnector, typedMessage } from "@microsandbox/agent-client";
 
-const transport = await WebSocketTransport.connect(
-  "wss://relay.example.com/agent",
+const client = await AgentClient.connectConnector(
+  new WebSocketConnector("wss://relay.example.com/agent"),
+  { setupTimeoutMs: 10_000 },
 );
-const client = await AgentClient.connectTransport(transport);
-
-const stream = await client.openStream(
-  typedMessage("core.exec.request", {
-    cmd: "sh",
-    args: ["-lc", "echo hello"],
-  }),
-);
-
-for await (const frame of stream) {
-  if (frame.type === "core.exec.stdout") {
-    console.log(frame.decodePayload());
+try {
+  const stream = await client.openStream(typedMessage("core.exec.request", {
+    cmd: "sh", args: ["-lc", "echo hello"],
+  }));
+  try {
+    for await (const frame of stream) {
+      console.log(frame.type, frame.payload);
+    }
+  } finally {
+    stream.close();
   }
-  if (frame.type === "core.exec.exited") break;
-}
-
-await client.close();
-```
-
-Browsers cannot dial Unix domain sockets directly. A front-end integration needs a WebSocket relay endpoint that forwards binary agent protocol packets to the runtime-side agent relay.
-
-## Typed And Encoded Messages
-
-Use `typedMessage()` when this package should CBOR-encode the payload:
-
-```ts
-await client.request(
-  typedMessage("core.fs.request", {
-    op: { List: { path: "/" } },
-  }),
-);
-```
-
-Use `encodedMessage()` when another layer already produced CBOR payload bytes:
-
-```ts
-await client.request(
-  encodedMessage("core.fs.request", payloadBytes),
-);
-```
-
-Both forms still include a message type so the client can compute flags and fail fast when the connected peer does not support that message type.
-
-`encodedMessage()` expects only the CBOR payload bytes for the message type, not the outer `{ v, t, p }` envelope and not the length-prefixed transport frame. The client builds the envelope and frame after it assigns the correlation ID.
-
-## Streams
-
-`openStream()` starts a session and returns an `AgentStream`:
-
-```ts
-const stream = await client.openStream(
-  typedMessage("core.exec.request", { cmd: "cat" }),
-);
-
-await stream.send(
-  typedMessage("core.exec.stdin", {
-    data: new TextEncoder().encode("hello\n"),
-  }),
-);
-
-const frame = await stream.next(5_000);
-```
-
-Streams are async iterable:
-
-```ts
-for await (const frame of stream) {
-  if (frame.isTerminal()) break;
+} finally {
+  await client.close();
 }
 ```
 
-## Protocol Errors
+The relay must forward the agent's binary byte stream, including its prologue. `WebSocketTransport` also wraps a caller-constructed socket for custom authentication. Its incoming queue defaults to 8 MiB and 4096 messages; overflow closes the connection because browser WebSockets cannot pause incoming messages. Outgoing writes wait for the browser's send queue to drain. The connector and handshake share one setup deadline.
 
-Peers may send `core.error` as a terminal response when they can recover from a message-level protocol problem for a specific correlation ID. The client surfaces it as an ordinary `InboundFrame`:
+## Raw and exact access
 
 ```ts
-const frame = await client.request(message);
-if (frame.type === "core.error") {
-  const err = frame.decodePayload<{
-    kind: string;
-    message: string;
-    offending_type?: string;
-  }>();
-  console.error(err.message);
+import { type AgentClient, TransportPacket } from "@microsandbox/agent-client";
+
+async function exchangeOpaque(client: AgentClient, envelope: Uint8Array) {
+  const stream = await client.openStreamRaw(0, envelope);
+  const { sender, receiver } = stream.split();
+  try {
+    await sender.send(0, envelope);
+    await client.sendRaw(sender.id, 0, envelope);
+    return await receiver.next({ requestTimeoutMs: 5_000 });
+  } finally {
+    receiver.close();
+    sender.close();
+  }
+}
+
+async function forwardExactPacket(client: AgentClient, bytes: Uint8Array) {
+  await client.writeUnchecked(TransportPacket.fromBytes(bytes));
 }
 ```
 
-Frame-level transport corruption still closes the connection instead.
+Raw APIs leave envelope and payload bytes opaque. `requestRaw(flags, body)` returns the first raw reply. `openStreamRaw()` receives through the terminal reply. `sendRaw(id, flags, body)` requires an active ID owned by this connection. A split sender retains its original lease and cannot regain permission if the numeric ID is reused. `writeUnchecked(bytes)` can write even deliberately malformed transport bytes; `TransportPacket.fromBytes()` optionally validates a single packet first.
 
-## TransportPacket Escape Hatch
+Native replies retain the complete original raw frame as `frame.raw`, including unknown envelope fields. `core.error` is an ordinary terminal agent response; interpreting it belongs to the caller or a checked request decoder.
 
-`TransportPacket` represents exact wire bytes, including the length prefix. Use `writeUnchecked()` only for relays, tests, and specialized protocol tooling:
+## Ownership and failures
 
-```ts
-await client.writeUnchecked(TransportPacket.fromBytes(bytes));
-```
+Streams own their send and receive halves. `split()` transfers those halves and invalidates the original stream's send/receive methods. Closing a receiver or leaving async iteration stops local delivery; it sends no remote cancel, signal, or EOF. An abandoned ID remains draining until its terminal frame arrives. A timed-out `next()` does not consume the next arriving frame.
 
-Ordinary callers should use `request()`, `openStream()`, and `stream.send()`.
+`client.clone()` shares the connection. `client.close()` closes every shared handle and wakes pending operations. Explicitly close clients and streams: JavaScript garbage collection only offers best-effort cleanup. A request deadline covers writer admission and the local response wait; it does not cancel remote execution. `ClientError.delivery` is `not_sent` before admission and `unknown` afterward. Nothing automatically retries an admitted operation.
 
-## Validation
+## Migration from the previous package API
 
-Focused package checks:
+| Previous surface | Shared-engine surface |
+| --- | --- |
+| Independent `AgentClient` class/router | `AgentClient = Client<AgentProtocol>` plus convenience constructors |
+| `handshakeTimeoutMs` | `setupTimeoutMs`, covering dial and handshake together |
+| `client.negotiatedVersion()` | `client.ready.negotiatedVersion` |
+| Closed `MessageType` parameter | Open string names; `MessageType` still lists known names |
+| Packet-oriented custom `AgentTransport` | Ordered `read(maxBytes)`, `write(bytes)`, `close()` byte transport |
+| `InboundFrame.fromRawFrame(frame)` | `new AgentEnvelopeCodec().decode(frame)` |
+| `new AgentStream(...)` | Obtain owned streams from `client.openStream()` or `openStreamRaw()` |
+| Request, encoded payload, stream, exact packet methods | Retained on the generic client, with additional raw and split interfaces |
 
-```bash
-npm run typecheck
-npm run build
-npm test
-```
+These are public source API changes. Existing agent wire behavior is preserved; source and byte tests do not replace the required historical runtime/SDK launch tests.
+
+## Development
+
+From the repository's `packages` directory, run `npm ci`, `npm run build`, `npm run typecheck`, and `npm test`. The private workspace links the shared package locally; published dependency metadata uses the release version. The README's TypeScript examples are checked with the public package declarations.

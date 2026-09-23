@@ -5,12 +5,12 @@ description: Snapshot PostgreSQL, apply a risky migration, and restore the basel
 icon: "rotate-left"
 ---
 
-<Tooltip tip="This workflow creates and restores local disk snapshots, which are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="This workflow uses local snapshot verification and a published client-host PostgreSQL port."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 Use a snapshot to rehearse a schema migration against a realistic PostgreSQL data directory, inspect the result, and return to the exact pre-migration disk state. The disposable rehearsal does not require a down migration.
 
 <Warning>
-  Keep `PGDATA` in the sandbox root filesystem for this example. Snapshots capture the sandbox's writable layer, but they do not capture external named or bind-mounted volumes.
+  Keep `PGDATA` in the sandbox root filesystem for this example. This keeps the database self-contained in the captured root disk. Do not rely on external named-directory or bind-mounted storage being copied into the snapshot.
 </Warning>
 
 ## Rehearse a migration
@@ -34,25 +34,29 @@ $env:POSTGRES_PASSWORD = -join ($bytes | ForEach-Object { $_.ToString('x2') })
 ```
 </CodeGroup>
 
-Start the baseline database:
+Start the baseline database. The shell keeps the VM available after PostgreSQL stops, until the explicit `msb stop` below:
 
 <CodeGroup>
 ```sh macOS & Linux
 msb run -d --name migration-base --replace \
   --cpus 1 --memory 1G --root-disk 4G \
+  --entrypoint /bin/sh \
   -e POSTGRES_PASSWORD="$POSTGRES_PASSWORD" \
   -e POSTGRES_DB=examples \
   -e DOCKER_PG_LLVM_DEPS= \
-  postgres:17-alpine
+  postgres:17-alpine -- \
+  -ec 'docker-entrypoint.sh postgres & wait "$!"; exec sleep infinity'
 ```
 
 ```powershell Windows
 msb run -d --name migration-base --replace `
   --cpus 1 --memory 1G --root-disk 4G `
+  --entrypoint /bin/sh `
   -e "POSTGRES_PASSWORD=$env:POSTGRES_PASSWORD" `
   -e POSTGRES_DB=examples `
   -e DOCKER_PG_LLVM_DEPS= `
-  postgres:17-alpine
+  postgres:17-alpine -- `
+  -ec 'docker-entrypoint.sh postgres & wait "$!"; exec sleep infinity'
 ```
 </CodeGroup>
 
@@ -64,9 +68,10 @@ msb exec migration-base -- sh -lc '
 '
 ```
 
-Stop it cleanly before taking the snapshot:
+Shut PostgreSQL down with its own control command before stopping the VM and taking the snapshot. VM shutdown alone does not guarantee a clean database shutdown:
 
 ```sh
+msb exec --no-tty --user postgres migration-base -- /usr/local/bin/pg_ctl -D /var/lib/postgresql/data -m fast -w stop
 msb stop migration-base
 ```
 
@@ -76,14 +81,14 @@ msb stop migration-base
 
 <CodeGroup>
 ```sh macOS & Linux
-msb snapshot create postgres-before-migration \
-  --from migration-base \
+msb snap create postgres-before-migration \
+  --sandbox migration-base \
   --integrity
 ```
 
 ```powershell Windows
-msb snapshot create postgres-before-migration `
-  --from migration-base `
+msb snap create postgres-before-migration `
+  --sandbox migration-base `
   --integrity
 ```
 </CodeGroup>
@@ -91,40 +96,37 @@ msb snapshot create postgres-before-migration `
 Verify the captured snapshot:
 
 ```sh
-msb snapshot verify postgres-before-migration
+msb snap verify migration-base:postgres-before-migration
 ```
 
 </Step>
 
 <Step title="Apply the migration">
 
-Boot a fresh database from the snapshot:
+Restore into an unused sandbox name, then start PostgreSQL explicitly. Dedicated restore boots an idle detached sandbox instead of running the image entrypoint. The database, role password, and initialization settings already live in the captured data directory; the `POSTGRES_*` initialization variables do not need to be replayed.
+
+[`pg_ctl`](https://www.postgresql.org/docs/17/app-pg-ctl.html) starts PostgreSQL in its own process group with output redirected to the log, so it survives the startup exec completing. The separate status check below reconnects after that exec has exited.
 
 <CodeGroup>
 ```sh macOS & Linux
-msb run -d --name migration-test --replace \
-  --from-snapshot postgres-before-migration \
-  --memory 1G \
-  -p 127.0.0.1:55432:5432 \
-  -e POSTGRES_PASSWORD="$POSTGRES_PASSWORD" \
-  -e POSTGRES_DB=examples \
-  -e DOCKER_PG_LLVM_DEPS=
+msb snap restore migration-base:postgres-before-migration --name migration-test \
+  --memory 1G -p 127.0.0.1:55432:5432
+msb exec --no-tty --user postgres migration-test -- \
+  /usr/local/bin/pg_ctl -D /var/lib/postgresql/data -l /var/lib/postgresql/data/rehearsal.log -w start
 ```
 
 ```powershell Windows
-msb run -d --name migration-test --replace `
-  --from-snapshot postgres-before-migration `
-  --memory 1G `
-  -p 127.0.0.1:55432:5432 `
-  -e "POSTGRES_PASSWORD=$env:POSTGRES_PASSWORD" `
-  -e POSTGRES_DB=examples `
-  -e DOCKER_PG_LLVM_DEPS=
+msb snap restore migration-base:postgres-before-migration --name migration-test `
+  --memory 1G -p 127.0.0.1:55432:5432
+msb exec --no-tty --user postgres migration-test -- `
+  /usr/local/bin/pg_ctl -D /var/lib/postgresql/data -l /var/lib/postgresql/data/rehearsal.log -w start
 ```
 </CodeGroup>
 
 Wait for the restored database to become ready:
 
 ```sh
+msb exec --no-tty --user postgres migration-test -- /usr/local/bin/pg_ctl -D /var/lib/postgresql/data status
 msb exec migration-test -- sh -lc '
   until pg_isready -h 127.0.0.1 -d examples -U postgres; do sleep 1; done
 '
@@ -159,36 +161,33 @@ Replace those statements with your real migration command and validation suite.
 Stop the mutated database and boot another clean copy of the baseline under the same name:
 
 ```sh
+msb exec --no-tty --user postgres migration-test -- /usr/local/bin/pg_ctl -D /var/lib/postgresql/data -m fast -w stop
 msb stop migration-test
+msb rm migration-test
 ```
 
-Replace it with a fresh sandbox from the snapshot:
+After removing the stopped sandbox, restore a fresh copy under the same name and start PostgreSQL:
 
 <CodeGroup>
 ```sh macOS & Linux
-msb run -d --name migration-test --replace \
-  --from-snapshot postgres-before-migration \
-  --memory 1G \
-  -p 127.0.0.1:55432:5432 \
-  -e POSTGRES_PASSWORD="$POSTGRES_PASSWORD" \
-  -e POSTGRES_DB=examples \
-  -e DOCKER_PG_LLVM_DEPS=
+msb snap restore migration-base:postgres-before-migration --name migration-test \
+  --memory 1G -p 127.0.0.1:55432:5432
+msb exec --no-tty --user postgres migration-test -- \
+  /usr/local/bin/pg_ctl -D /var/lib/postgresql/data -l /var/lib/postgresql/data/rehearsal.log -w start
 ```
 
 ```powershell Windows
-msb run -d --name migration-test --replace `
-  --from-snapshot postgres-before-migration `
-  --memory 1G `
-  -p 127.0.0.1:55432:5432 `
-  -e "POSTGRES_PASSWORD=$env:POSTGRES_PASSWORD" `
-  -e POSTGRES_DB=examples `
-  -e DOCKER_PG_LLVM_DEPS=
+msb snap restore migration-base:postgres-before-migration --name migration-test `
+  --memory 1G -p 127.0.0.1:55432:5432
+msb exec --no-tty --user postgres migration-test -- `
+  /usr/local/bin/pg_ctl -D /var/lib/postgresql/data -l /var/lib/postgresql/data/rehearsal.log -w start
 ```
 </CodeGroup>
 
 Wait for the clean database to become ready:
 
 ```sh
+msb exec --no-tty --user postgres migration-test -- /usr/local/bin/pg_ctl -D /var/lib/postgresql/data status
 msb exec migration-test -- sh -lc '
   until pg_isready -h 127.0.0.1 -d examples -U postgres; do sleep 1; done
 '
@@ -216,16 +215,18 @@ The result should be `rolled-back`.
 
 <Step title="Clean up">
 
-Remove the database sandboxes:
+Stop the restored database cleanly, then remove the stopped sandboxes:
 
 ```sh
-msb rm -f migration-base migration-test
+msb exec --no-tty --user postgres migration-test -- /usr/local/bin/pg_ctl -D /var/lib/postgresql/data -m fast -w stop
+msb stop migration-test
+msb rm migration-base migration-test
 ```
 
 Remove the snapshot:
 
 ```sh
-msb snapshot rm postgres-before-migration
+msb snap rm migration-base:postgres-before-migration
 ```
 
 Clear the password from the host shell:

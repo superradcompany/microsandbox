@@ -82,8 +82,25 @@ fn main() {
         .build()
         .expect("agentd: failed to build tokio runtime");
 
+    let bulk_port = match agent::open_and_bind_bulk_port() {
+        Ok(port) => port,
+        Err(e) => {
+            eprintln!("agentd: bulk transport binding failed: {e}");
+            process::exit(1);
+        }
+    };
+
     rt.block_on(async {
-        match agent::run(boot_time_ns, init_time_ns, &config, port, boot_console).await {
+        match agent::run(
+            boot_time_ns,
+            init_time_ns,
+            &config,
+            port,
+            boot_console,
+            bulk_port,
+        )
+        .await
+        {
             Ok(()) => {}
             Err(AgentdError::Shutdown) => {}
             Err(e) => {

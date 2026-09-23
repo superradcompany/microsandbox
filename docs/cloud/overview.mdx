@@ -1,6 +1,7 @@
 ---
-title: "Cloud"
-description: "Run the same sandboxes on hosted infrastructure with an API key"
+title: Cloud
+description: Run the same sandboxes on hosted infrastructure with an API key
+keywords: ["microsandbox cloud", "hosted sandboxes", "cloud API keys"]
 icon: "cloud"
 ---
 
@@ -15,13 +16,36 @@ microsandbox cloud runs your sandboxes on hosted infrastructure. The SDKs and th
 ```bash
 export MSB_BACKEND=cloud
 export MSB_API_KEY="msb_..."
+msb context
 ```
+
+`msb context` confirms that subsequent commands will run on cloud and shows what selected it without exposing the API key. For profiles, SDK selection, and precedence, see [Local or cloud](/operations/backends).
+
+## Sandbox identity
+
+Looking up a sandbox by name selects the sandbox currently using that name.
+The returned object retains that sandbox's ID for lifecycle operations, commands,
+and file access. If the sandbox is deleted and its name reused, operations on
+an old object fail instead of reaching the replacement. Fetch the sandbox by
+name again to select the replacement; you do not need to manage IDs yourself.
 
 ## Same code, different backend
 
 Everything from the [quickstart](/getting-started/quickstart) works unchanged. With cloud selected and the API key exported, this creates a sandbox on cloud instead of your machine:
 
 <CodeGroup>
+```typescript TypeScript
+import { Sandbox } from "microsandbox";
+
+await using sb = await Sandbox.builder("hello")
+    .image("python")
+    .memory(512)
+    .create();
+
+const output = await sb.exec("python", ["-c", "print('Hello from the cloud!')"]);
+console.log(output.stdout());
+```
+
 ```rust Rust
 use microsandbox::Sandbox;
 
@@ -35,18 +59,6 @@ let output = sb.exec("python", ["-c", "print('Hello from the cloud!')"]).await?;
 println!("{}", output.stdout()?);
 
 sb.stop().await?;
-```
-
-```typescript TypeScript
-import { Sandbox } from "microsandbox";
-
-await using sb = await Sandbox.builder("hello")
-    .image("python")
-    .memory(512)
-    .create();
-
-const output = await sb.exec("python", ["-c", "print('Hello from the cloud!')"]);
-console.log(output.stdout());
 ```
 
 ```python Python
@@ -116,7 +128,7 @@ Across the docs, no badge means a feature works everywhere. Exceptions use only 
 | SSH | **Limited on cloud** | Native SDK sessions and `msb ssh` work. `msb ssh serve` is local-only; reusable SDK servers require explicit key material. |
 | Images | **Limited on cloud** | OCI image references and registry credentials work. Local cache commands, host-directory or disk-image roots, plain-HTTP registries, and custom registry CAs are local-only. |
 | Reconfiguration | **Local-only** | Recreate the sandbox with the new CPU, memory, mounts, or other settings instead of using `modify`. |
-| Snapshots | **Local-only** | Use a named volume for state that must survive sandbox replacement. |
+| Snapshots | **Limited on cloud** | Create and restore disk snapshots of stopped or crashed sandboxes. Live capture, full checkpoints, branching, groups, and local artifact archives remain local-only. |
 | Resource metrics | **Local-only** | Instrument the workload with an external monitoring system. |
 | Process controls | **Limited on cloud** | Graceful stop plus maximum-duration and idle-timeout policies work. Force kill, drain, ping, and touch are local-only. |
 
@@ -126,9 +138,10 @@ The same key also authenticates the [REST API](/api-reference/overview) directly
 
 ## What to know
 
-- **Backend selection.** Cloud is explicit: set `MSB_BACKEND=cloud`, select a cloud profile, or choose it in code. See [Backends](/getting-started/backends).
+- **Local or cloud.** Cloud is explicit: set `MSB_BACKEND=cloud`, select a cloud profile, or choose it in code. See [Local or cloud](/operations/backends).
 - **Networking.** Cloud sandboxes get a platform-assigned hostname. SSH works through the same `msb ssh` and SDK SSH clients you use locally.
 - **Images.** Specify an OCI image when you create the sandbox; the cloud pulls it for you.
+- **Managed settings.** [Device policy](/enterprise/managed-configuration) applies to create requests and CLI/SDK SSH sessions. Unsupported create settings fail before the request is sent. Existing cloud sandboxes and the hosted SSH gateway keep their settings.
 - **Keys and billing.** API keys, usage, and invoices live in the [dashboard](https://dashboard.microsandbox.dev).
 
 ## Next steps
@@ -138,7 +151,7 @@ The same key also authenticates the [REST API](/api-reference/overview) directly
     The REST API behind the SDKs, authenticated with your API key.
   </Card>
 
-  <Card title="Backends" icon="route" href="/getting-started/backends">
+  <Card title="Local or cloud" icon="cloud-arrow-up" href="/operations/backends">
     Force local, select in code, or switch with profiles.
   </Card>
 

@@ -1,26 +1,33 @@
-import { withMappedErrors } from "./internal/error-mapping.js";
+import { UnsupportedError } from "./errors.js";
+import { mapNapiError, withMappedErrors } from "./internal/error-mapping.js";
 import type {
   NapiSnapshotHandle,
   NapiSnapshotInfo,
 } from "./internal/napi.js";
-import { Snapshot, type SnapshotScope } from "./snapshot.js";
+import { Snapshot, type HeadUpdate, type SaveOpts, type SnapshotScope } from "./snapshot.js";
 
 const READ_ONLY_MSG =
   "SnapshotHandle is read-only — fetch a live handle via Snapshot.get(name) for lifecycle methods.";
 
 /**
- * Lightweight handle backed by an index row.
+ * Lightweight handle returned by the active snapshot backend.
  *
  * Returned by `Snapshot.list()` and `Snapshot.get(...)`. Values are
- * snapshotted from the index at construction time — call
+ * snapshotted at construction time — call
  * `Snapshot.get(...)` again for a fresh reading if needed.
  */
 export class SnapshotHandle {
   private readonly inner: NapiSnapshotHandle | NapiSnapshotInfo;
+  /** Stable opaque snapshot identity. */
+  readonly id: string;
   /** Manifest digest (`sha256:hex`) — canonical identity. */
   readonly digest: string;
   /** Convenience name. `null` for digest-only entries. */
   readonly name: string | null;
+  /** Local group containing this indexed snapshot. */
+  readonly group: string | null;
+  /** Outcome of the group head update performed by this import. */
+  readonly headUpdate: HeadUpdate | null;
   /** Manifest digest of the parent snapshot, or `null` for a root. */
   readonly parentDigest: string | null;
   /** Snapshot payload scope. */
@@ -35,7 +42,7 @@ export class SnapshotHandle {
   readonly fstype: string | null;
   /** Checkpoint manifest digest for checkpoint state. */
   readonly checkpointManifestDigest: string | null;
-  /** Apparent size of the upper file at index time. */
+  /** Backend-reported stored payload size, when known. */
   readonly sizeBytes: bigint | null;
   /** Embedded versus provider-linked payload placement. */
   readonly locality: string;
@@ -47,14 +54,21 @@ export class SnapshotHandle {
   readonly migrationErrorCode: string | null;
   /** Snapshot creation time (from manifest). */
   readonly createdAt: Date;
-  /** Local artifact directory path. */
-  readonly path: string;
+  /** Stable value accepted by `Sandbox.restore()`. */
+  readonly reference: string;
+  /** How the backend resolves `reference`. */
+  readonly referenceKind: "id" | "path";
 
   /** @internal */
   constructor(inner: NapiSnapshotHandle | NapiSnapshotInfo) {
     this.inner = inner;
+    this.id = inner.id;
     this.digest = inner.digest;
     this.name = (inner.name ?? null) as string | null;
+    this.group = inner.group ?? null;
+    this.headUpdate = inner.headUpdate
+      ? { ...inner.headUpdate, previous: inner.headUpdate.previous ?? null }
+      : null;
     this.parentDigest = (inner.parentDigest ?? null) as string | null;
     this.scope = inner.scope as SnapshotScope;
     this.imageRef = inner.imageRef;
@@ -68,7 +82,23 @@ export class SnapshotHandle {
     this.migrationState = inner.migrationState;
     this.migrationErrorCode = inner.migrationErrorCode ?? null;
     this.createdAt = new Date(inner.createdAt);
-    this.path = inner.path;
+    this.reference = inner.reference;
+    this.referenceKind = inner.referenceKind;
+  }
+
+  /** @deprecated Use `reference`. Throws UnsupportedError for remote snapshots. */
+  get path(): string {
+    try {
+      const path = this.inner.path;
+      if (path == null) {
+        throw new UnsupportedError(
+          "Snapshot has no local filesystem path; use reference instead.",
+        );
+      }
+      return path;
+    } catch (error) {
+      throw mapNapiError(error);
+    }
   }
 
   /** Open and metadata-validate the underlying artifact. */
@@ -92,6 +122,19 @@ export class SnapshotHandle {
     }
     await withMappedErrors(() =>
       (this.inner as NapiSnapshotHandle).remove({ force: opts?.force ?? false }),
+    );
+  }
+
+  /**
+   * Bundle this snapshot into a `.tar.zst` archive.
+   * Throws `UnsupportedError` when the backend does not expose artifact archives.
+   */
+  async saveTo(out: string, opts?: SaveOpts): Promise<void> {
+    if (typeof (this.inner as NapiSnapshotHandle).saveTo !== "function") {
+      throw new Error(READ_ONLY_MSG);
+    }
+    await withMappedErrors(() =>
+      (this.inner as NapiSnapshotHandle).saveTo(out, opts),
     );
   }
 }

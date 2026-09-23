@@ -1,7 +1,6 @@
 import { createRequire } from "node:module";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { homedir } from "node:os";
 
 function detectTriple(): string {
   const p = process.platform;
@@ -51,28 +50,8 @@ function resolvePlatformRoot(): string | null {
   return null;
 }
 
-let cachedBinDir: string | null = null;
-
-function resolveBinDir(): string {
-  if (cachedBinDir) return cachedBinDir;
-  const root = resolvePlatformRoot();
-  if (root) {
-    cachedBinDir = join(root, "bin");
-    return cachedBinDir;
-  }
-  // Fall back to ~/.microsandbox if no platform package carries binaries.
-  const home = process.env.HOME ?? process.env.USERPROFILE ?? homedir();
-  cachedBinDir = join(home, ".microsandbox", "bin");
-  return cachedBinDir;
-}
-
-/** Path to the bundled `msb` binary, or null if not yet installed.
- *
- * No MSB_PATH env-var read here on purpose — the Rust resolver honours
- * MSB_PATH natively as its highest-precedence tier, so duplicating the
- * read at the JS layer just adds an alternate code path for the same
- * outcome. */
+/** Discover only packaged binaries; the Rust resolver owns home precedence. */
 export function msbPath(): string | null {
-  const p = join(resolveBinDir(), msbFileName());
-  return existsSync(p) ? p : null;
+  const root = resolvePlatformRoot();
+  return root ? join(root, "bin", msbFileName()) : null;
 }

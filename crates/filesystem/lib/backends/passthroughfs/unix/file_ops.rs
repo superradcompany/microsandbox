@@ -91,6 +91,8 @@ pub(crate) fn do_open(
 
     let handle = fs.next_handle.fetch_add(1, Ordering::Relaxed);
     let data = Arc::new(HandleData {
+        inode,
+        flags,
         file: RwLock::new(file),
     });
 

@@ -1,13 +1,22 @@
 ---
 title: Snapshots
 description: Go SDK - Snapshot API reference
+keywords: ["Go SDK", "Go snapshots", "microsandbox snapshots"]
 ---
 
-<Tooltip tip="Snapshot creation, restore, import, and export use local disk artifacts and are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Cloud supports disk capture from stopped or crashed sandboxes, lookup, listing, removal, and restore. Live capture, full snapshots, groups, archives, verification, and compaction are local-only."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
-Create and manage disk-only snapshots of stopped sandboxes. See [Snapshots](/sandboxes/snapshots) for usage and lifecycle concepts.
+Create and manage snapshots. See the [snapshot guide](/sandboxes/snapshots) for workflows and examples.
 
-## Snapshot
+Use snapshot objects or references on cloud. Local operations also accept a group head, `group:member`, or artifact path.
+
+## Guest writeback
+
+Set `SnapshotCreateOptions.GuestFlush` to `msb.GuestFlushRequired`, pass `msb.WithBranchGuestFlush(msb.GuestFlushRequired)` to `Branch`/`BranchMany`, or call `source.PauseWithGuestFlush(ctx, msb.GuestFlushRequired)`. The default `GuestFlushAuto` flushes live disk-only captures, but adds no optional flush to full captures, branches, or pause. `GuestFlushSkip` retains mandatory storage barriers. A paused disk capture needs a matching prior flush; cloud rejects non-Auto policies. See [guest flush policy reference](/sandboxes/snapshots#guest-flushing).
+
+Disk capture, including `SandboxHandle.Snapshot`, requires a native library that supports guest-flush policies. Older libraries return an upgrade-required error, including for stopped disk captures. Full Auto capture and unrelated operations retain their compatibility.
+
+## Snapshot functions
 
 Package-level helpers for snapshot artifacts. Access them through the exported `Snapshot` value, e.g. `m.Snapshot.Create(ctx, ...)`.
 
@@ -17,7 +26,7 @@ Package-level helpers for snapshot artifacts. Access them through the exported `
 func (snapshotFactory) Create(ctx context.Context, opts SnapshotCreateOptions) (*SnapshotArtifact, error)
 ```
 
-Create a snapshot from a stopped or crashed sandbox. [`SnapshotCreateOptions.Name`](#snapshotcreateoptionsstruct) (resolved under the default snapshots directory) and [`SnapshotCreateOptions.FromSandbox`](#snapshotcreateoptionsstruct) (the sandbox to capture) are both required.
+Create a disk snapshot, or set `Full` to include memory and execution state. [`SnapshotCreateOptions.FromSandbox`](#snapshotcreateoptionsstruct) is required. An empty `Name` is generated; an empty `Group` uses the source sandbox's name.
 
 <p className="msb-label">Parameters</p>
 
@@ -36,8 +45,8 @@ Create a snapshot from a stopped or crashed sandbox. [`SnapshotCreateOptions.Nam
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#snapshotartifactstruct">*SnapshotArtifact</a></div>
-    <div className="msb-param-desc">The created artifact on disk.</div>
+    <div className="msb-param-key"><a className="msb-type" href="#snapshotartifact">*SnapshotArtifact</a></div>
+    <div className="msb-param-desc">The created local or cloud snapshot.</div>
   </div>
 </div>
 
@@ -45,10 +54,34 @@ Create a snapshot from a stopped or crashed sandbox. [`SnapshotCreateOptions.Nam
 
 ```go
 snap, err := m.Snapshot.Create(ctx, m.SnapshotCreateOptions{
-    Name:            "after-pip-install",
+    Name:            "deps",
     FromSandbox:     "baseline",
     Labels:          map[string]string{"stage": "post-deps"},
     RecordIntegrity: true,
+})
+```
+
+</Accordion>
+
+---
+
+#### <span className="msb-recv">Snapshot.</span><span className="msb-hn">CreateArchive()</span>
+
+```go
+func (snapshotFactory) CreateArchive(ctx context.Context, opts SnapshotArchiveOptions) (*SnapshotArchive, error)
+```
+
+Capture directly into an archive without installing a local snapshot.
+
+<Accordion title="Example">
+
+```go
+archive, err := m.Snapshot.CreateArchive(ctx, m.SnapshotArchiveOptions{
+    SnapshotCreateOptions: m.SnapshotCreateOptions{
+        Name:        "deps",
+        FromSandbox: "baseline",
+    },
+    ArchivePath: "/tmp/deps.msb",
 })
 ```
 
@@ -65,12 +98,12 @@ func (snapshotFactory) Open(ctx context.Context, pathOrName string) (*SnapshotAr
 <Accordion title="Example">
 
 ```go
-snap, err := m.Snapshot.Open(ctx, "after-pip-install")
+snap, err := m.Snapshot.Open(ctx, "baseline:deps")
 ```
 
 </Accordion>
 
-Open an existing artifact by bare name or filesystem path. This validates metadata only; call [`s.Verify()`](#s-verify) for content checks.
+Open an existing artifact by group head, `group:member`, or filesystem path. This validates metadata only; call [`s.Verify()`](#s-verify) for content checks.
 
 <p className="msb-label">Parameters</p>
 
@@ -81,7 +114,7 @@ Open an existing artifact by bare name or filesystem path. This validates metada
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>pathOrName</code><span className="msb-type">string</span></div>
-    <div className="msb-param-desc">Bare name (resolved under the default snapshots directory) or artifact directory path.</div>
+    <div className="msb-param-desc">Group head or <code>group:member</code> selector or artifact directory path.</div>
   </div>
 </div>
 
@@ -89,8 +122,8 @@ Open an existing artifact by bare name or filesystem path. This validates metada
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#snapshotartifactstruct">*SnapshotArtifact</a></div>
-    <div className="msb-param-desc">The artifact on disk.</div>
+    <div className="msb-param-key"><a className="msb-type" href="#snapshotartifact">*SnapshotArtifact</a></div>
+    <div className="msb-param-desc">The opened local or cloud snapshot.</div>
   </div>
 </div>
 
@@ -103,12 +136,12 @@ func (snapshotFactory) Get(ctx context.Context, nameOrDigest string) (*SnapshotH
 <Accordion title="Example">
 
 ```go
-h, err := m.Snapshot.Get(ctx, "after-pip-install")
+h, err := m.Snapshot.Get(ctx, "baseline:deps")
 ```
 
 </Accordion>
 
-Look up a lightweight handle in the local index by name, digest, or path.
+Look up a lightweight handle by group head, `group:member`, stable snapshot ID, descriptor digest, or artifact path. Global IDs and digests must resolve unambiguously.
 
 <p className="msb-label">Parameters</p>
 
@@ -119,7 +152,7 @@ Look up a lightweight handle in the local index by name, digest, or path.
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>nameOrDigest</code><span className="msb-type">string</span></div>
-    <div className="msb-param-desc">Bare name, manifest digest, or artifact path.</div>
+    <div className="msb-param-desc">Group head, <code>group:member</code>, stable snapshot ID, digest, or artifact path.</div>
   </div>
 </div>
 
@@ -127,8 +160,8 @@ Look up a lightweight handle in the local index by name, digest, or path.
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#snapshothandlestruct">*SnapshotHandle</a></div>
-    <div className="msb-param-desc">Index-backed handle.</div>
+    <div className="msb-param-key"><a className="msb-type" href="#snapshothandle">*SnapshotHandle</a></div>
+    <div className="msb-param-desc">Lightweight handle returned by the active backend.</div>
   </div>
 </div>
 
@@ -149,13 +182,14 @@ for _, h := range handles {
 
 </Accordion>
 
-List indexed snapshots from the local DB cache.
+List snapshots visible through the active backend. Cloud lists managed
+snapshots; host-volume artifacts are opened explicitly by reference.
 
 <p className="msb-label">Returns</p>
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#snapshothandlestruct">[]*SnapshotHandle</a></div>
+    <div className="msb-param-key"><a className="msb-type" href="#snapshothandle">[]*SnapshotHandle</a></div>
     <div className="msb-param-desc">All indexed handles.</div>
   </div>
 </div>
@@ -166,7 +200,8 @@ List indexed snapshots from the local DB cache.
 func (snapshotFactory) ListDir(ctx context.Context, dir string) ([]*SnapshotArtifact, error)
 ```
 
-Walk a directory and parse each subdirectory's manifest without touching the index.
+Walk a local directory and parse each subdirectory's manifest without touching
+the local index. Cloud returns `ErrUnsupportedOperation`.
 
 <p className="msb-label">Parameters</p>
 
@@ -185,7 +220,7 @@ Walk a directory and parse each subdirectory's manifest without touching the ind
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#snapshotartifactstruct">[]*SnapshotArtifact</a></div>
+    <div className="msb-param-key"><a className="msb-type" href="#snapshotartifact">[]*SnapshotArtifact</a></div>
     <div className="msb-param-desc">One artifact per parsed subdirectory.</div>
   </div>
 </div>
@@ -199,12 +234,13 @@ func (snapshotFactory) Remove(ctx context.Context, pathOrName string, force bool
 <Accordion title="Example">
 
 ```go
-err := m.Snapshot.Remove(ctx, "after-pip-install", false)
+err := m.Snapshot.Remove(ctx, "baseline:deps", false)
 ```
 
 </Accordion>
 
-Remove a snapshot artifact and its index row. Refuses to delete a snapshot with indexed children unless `force` is true.
+Remove a snapshot through the active backend. Locally, removal also updates
+the index and refuses indexed children unless `force` is true.
 
 <p className="msb-label">Parameters</p>
 
@@ -215,7 +251,7 @@ Remove a snapshot artifact and its index row. Refuses to delete a snapshot with 
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>pathOrName</code><span className="msb-type">string</span></div>
-    <div className="msb-param-desc">Bare name or artifact path.</div>
+    <div className="msb-param-desc">Group head, <code>group:member</code>, or artifact path.</div>
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>force</code><span className="msb-type">bool</span></div>
@@ -238,7 +274,8 @@ fmt.Printf("indexed %d snapshots\n", n)
 
 </Accordion>
 
-Walk `dir` and rebuild the local index from the artifacts it finds.
+Walk `dir` and rebuild the local index from the artifacts it finds. Cloud
+returns `ErrUnsupportedOperation`.
 
 <p className="msb-label">Parameters</p>
 
@@ -271,7 +308,7 @@ Walk `dir` and rebuild the local index from the artifacts it finds.
 func (snapshotFactory) Save(ctx context.Context, nameOrPath, outPath string, opts SnapshotSaveOptions) error
 ```
 
-Bundle a snapshot into a `.tar.zst` archive at `outPath`. Set [`SnapshotSaveOptions.PlainTar`](#snapshotsaveoptionsstruct) to skip compression.
+Bundle a snapshot into a `.msb` archive at `outPath`. Set [`SnapshotSaveOptions.PlainTar`](#snapshotsaveoptionsstruct) to skip compression.
 
 <p className="msb-label">Parameters</p>
 
@@ -282,7 +319,7 @@ Bundle a snapshot into a `.tar.zst` archive at `outPath`. Set [`SnapshotSaveOpti
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>nameOrPath</code><span className="msb-type">string</span></div>
-    <div className="msb-param-desc">Bare name or artifact path to save.</div>
+    <div className="msb-param-desc">Group head, <code>group:member</code>, or artifact path to save.</div>
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>outPath</code><span className="msb-type">string</span></div>
@@ -297,7 +334,7 @@ Bundle a snapshot into a `.tar.zst` archive at `outPath`. Set [`SnapshotSaveOpti
 <Accordion title="Example">
 
 ```go
-err := m.Snapshot.Save(ctx, "after-pip-install", "/tmp/snap.tar.zst",
+err := m.Snapshot.Save(ctx, "baseline:deps", "/tmp/snap.msb",
     m.SnapshotSaveOptions{WithParents: true},
 )
 ```
@@ -313,7 +350,9 @@ err := m.Snapshot.Save(ctx, "after-pip-install", "/tmp/snap.tar.zst",
 func (snapshotFactory) Load(ctx context.Context, archive, dest string) (*SnapshotHandle, error)
 ```
 
-Unpack a snapshot archive into the snapshots directory or an explicit `dest` directory. Pass `""` for the default destination.
+Unpack a snapshot archive into the local snapshots directory or an explicit
+`dest` directory. Pass `""` for the default destination. Cloud returns
+`ErrUnsupportedOperation`.
 
 <p className="msb-label">Parameters</p>
 
@@ -336,7 +375,7 @@ Unpack a snapshot archive into the snapshots directory or an explicit `dest` dir
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#snapshothandlestruct">*SnapshotHandle</a></div>
+    <div className="msb-param-key"><a className="msb-type" href="#snapshothandle">*SnapshotHandle</a></div>
     <div className="msb-param-desc">Handle to the loaded snapshot.</div>
   </div>
 </div>
@@ -344,14 +383,71 @@ Unpack a snapshot archive into the snapshots directory or an explicit `dest` dir
 <Accordion title="Example">
 
 ```go
-h, err := m.Snapshot.Load(ctx, "/tmp/snap.tar.zst", "")
+h, err := m.Snapshot.Load(ctx, "/tmp/snap.msb", "")
 ```
 
 </Accordion>
 
-## SandboxHandle
+#### <span className="msb-recv">Snapshot.</span><span className="msb-hn">LoadWithBase()</span>
 
-Snapshots are taken from a metadata handle, so stop the sandbox first and then call [`GetSandbox`](/sdk/go/sandbox#getsandbox).
+```go
+func (snapshotFactory) LoadWithBase(
+    ctx context.Context, archive, dest, base string,
+) (*SnapshotHandle, error)
+```
+
+Import an archive with an explicit dependency base or destination group. See [import options](#import-options).
+
+#### <span className="msb-recv">Snapshot.</span><span className="msb-hn">LoadWithOptions()</span>
+
+```go
+func (snapshotFactory) LoadWithOptions(
+    ctx context.Context, archive string, opts SnapshotLoadOptions,
+) (*SnapshotHandle, error)
+```
+
+Import an archive with an explicit dependency base or destination group. See [import options](#import-options).
+
+#### <span className="msb-recv">Snapshot.</span><span className="msb-hn">LoadMany()</span>
+
+```go
+func (snapshotFactory) LoadMany(
+    ctx context.Context, archives []string, opts SnapshotLoadOptions,
+) ([]*SnapshotHandle, error)
+```
+
+Import archives as one batch. Returns handles in input order. Dependencies resolve from the batch, the named group, or an explicit base; input order does not matter. All members are validated before publication.
+
+#### <span className="msb-recv">Snapshot.</span><span className="msb-hn">GroupHead()</span>
+
+```go
+func (snapshotFactory) GroupHead(
+    ctx context.Context, selector string,
+) (*SnapshotHeadUpdate, error)
+```
+
+Read a group’s head, or select an exact member with `group:member`. Returns the group, previous and current snapshot IDs, reason, and whether the head changed. See [group selection](/sandboxes/snapshots#snapshot-groups).
+
+<span id="snapshot-groups" />
+
+<span id="load-multiple-archives" />
+
+### Import options
+
+Options for `SnapshotLoadOptions`.
+
+| Option | Purpose |
+| --- | --- |
+| `Dest` | Parent directory containing groups. Defaults to the local snapshot store. |
+| `Base` | External snapshot or standalone archive for missing dependencies. |
+| `Group` | Destination group. Omit to create one group for the import. |
+| `SetHead` | Select the imported tip, even with divergent ancestry. Defaults to false; requires a unique tip. |
+
+With divergent tips, the existing head stays selected; a new group has no head. Select a member explicitly. Identical members may be reused; conflicting identities fail. See [archive imports](/sandboxes/snapshots#import-archives).
+
+## SandboxHandle methods
+
+Snapshots are taken from a metadata handle returned by [`GetSandbox`](/sdk/go/sandbox#m-getsandbox). Disk capture also supports a running or paused sandbox.
 
 ```go
 _ = sb.Stop(ctx)
@@ -361,7 +457,7 @@ h, err := m.GetSandbox(ctx, "baseline")
 if err != nil {
     return err
 }
-snap, err := h.Snapshot(ctx, "after-pip-install")
+snap, err := h.Snapshot(ctx, "deps")
 ```
 
 #### <span className="msb-recv">h.</span><span className="msb-hn">Snapshot()</span>
@@ -370,7 +466,7 @@ snap, err := h.Snapshot(ctx, "after-pip-install")
 func (h *SandboxHandle) Snapshot(ctx context.Context, name string) (*SnapshotArtifact, error)
 ```
 
-Snapshot this sandbox under a bare name in the default snapshots directory. The sandbox must be stopped or crashed. To place the artifact elsewhere, use [`Snapshot.Save`](#snapshot-save) / [`Snapshot.Load`](#snapshot-load) or move the self-contained artifact directory.
+Snapshot this sandbox into its default group with the given member name. Live disk captures preserve the source's running or paused state. Use the returned artifact path or `sandbox:member` to open it later.
 
 <p className="msb-label">Parameters</p>
 
@@ -381,7 +477,7 @@ Snapshot this sandbox under a bare name in the default snapshots directory. The 
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>name</code><span className="msb-type">string</span></div>
-    <div className="msb-param-desc">Bare name for the artifact.</div>
+    <div className="msb-param-desc">Member name within the source sandbox's group.</div>
   </div>
 </div>
 
@@ -389,7 +485,7 @@ Snapshot this sandbox under a bare name in the default snapshots directory. The 
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#snapshotartifactstruct">*SnapshotArtifact</a></div>
+    <div className="msb-param-key"><a className="msb-type" href="#snapshotartifact">*SnapshotArtifact</a></div>
     <div className="msb-param-desc">The created artifact.</div>
   </div>
 </div>
@@ -397,19 +493,58 @@ Snapshot this sandbox under a bare name in the default snapshots directory. The 
 <Accordion title="Example">
 
 ```go
-snap, err := h.Snapshot(ctx, "after-pip-install")
+snap, err := h.Snapshot(ctx, "deps")
 ```
 
 </Accordion>
 
-## SnapshotArtifact
+## SnapshotArtifact methods
 
-<div className="msb-tags"><span className="msb-tag is-type" style={{marginLeft: "8px"}}>struct</span></div>
+A local or cloud disk snapshot. The accessors below are plain field reads.
 
+#### <span className="msb-recv">s.</span><span className="msb-hn">SaveTo()</span>
 
-<p className="msb-backref">Returned by <a href="#snapshot-create">Snapshot.Create()</a> · <a href="#snapshot-open">Snapshot.Open()</a> · <a href="#snapshot-listdir">Snapshot.ListDir()</a> · <a href="#h-snapshot">h.Snapshot()</a> · <a href="#h-open">h.Open()</a></p>
+```go
+func (s *SnapshotArtifact) SaveTo(
+    ctx context.Context,
+    outPath string,
+    opts SnapshotSaveOptions,
+) error
+```
 
-A snapshot artifact on disk.
+Bundle this snapshot through the active backend while preserving its typed
+identifier-or-path reference. Cloud returns `ErrUnsupportedOperation`.
+
+```go
+err := snap.SaveTo(ctx, "/tmp/snap.tar.zst", m.SnapshotSaveOptions{
+    WithImage: true,
+})
+```
+
+#### <span className="msb-recv">s.</span><span className="msb-hn">CopyTo()</span>
+
+```go
+func (s *SnapshotArtifact) CopyTo(outputArchivePath string) *SnapshotCopyBuilder
+```
+
+Create a new archive from this snapshot's disk data while replacing its labels
+and integrity metadata. The source snapshot is unchanged. Cloud returns
+`ErrUnsupportedOperation` when `Save` is called.
+
+```go
+err := snap.CopyTo("/tmp/snap-copy.tar.zst").
+    Labels(map[string]string{"environment": "test"}).
+    RecordIntegrity(true).
+    Save(ctx)
+```
+
+#### <span className="msb-recv">s.</span><span className="msb-hn">ID()</span>
+
+```go
+func (s *SnapshotArtifact) ID() string
+```
+
+Stable opaque `snap_...` identity.
 
 #### <span className="msb-recv">s.</span><span className="msb-hn">Verify()</span>
 
@@ -417,7 +552,7 @@ A snapshot artifact on disk.
 func (s *SnapshotArtifact) Verify(ctx context.Context) (*SnapshotVerifyReport, error)
 ```
 
-Recompute the upper layer's recorded content integrity and compare against the descriptor. Current BLAKE3 Merkle integrity skips known all-hole subtrees and hashes allocated leaves in batches; released SHA descriptors retain their exact, potentially O(logical size), verifier. The report's `Upper.Kind` is `"not_recorded"` when the artifact was created without [`RecordIntegrity`](#snapshotcreateoptionsstruct), and `"verified"` when the recorded value matched.
+Verify the snapshot's complete state closure. File state recomputes recorded upper-layer integrity. Checkpoint state validates the complete checkpoint closure and returns its root in `Checkpoint`.
 
 <p className="msb-label">Returns</p>
 
@@ -444,13 +579,22 @@ if report.Upper.Kind == "not_recorded" {
 
 </Accordion>
 
-#### <span className="msb-recv">s.</span><span className="msb-hn">Path()</span>
+#### <span className="msb-recv">s.</span><span className="msb-hn">Reference()</span>
 
 ```go
-func (s *SnapshotArtifact) Path() string
+func (s *SnapshotArtifact) Reference() string
 ```
 
-Artifact directory on disk.
+Stable backend-relative value. Prefer passing the `SnapshotArtifact` itself to `RestoreSandbox` so its typed reference is preserved as well.
+
+#### <span className="msb-recv">s.</span><span className="msb-hn">ReferenceKind()</span>
+
+```go
+func (s *SnapshotArtifact) ReferenceKind() string
+```
+
+Returns `"id"` or `"path"`. Most callers can pass the artifact itself and
+never inspect this value.
 
 #### <span className="msb-recv">s.</span><span className="msb-hn">Digest()</span>
 
@@ -463,10 +607,10 @@ Canonical manifest digest (`sha256:...`).
 #### <span className="msb-recv">s.</span><span className="msb-hn">SizeBytes()</span>
 
 ```go
-func (s *SnapshotArtifact) SizeBytes() uint64
+func (s *SnapshotArtifact) SizeBytes() *uint64
 ```
 
-Apparent upper-layer size in bytes.
+Backend-reported stored payload size in bytes.
 
 #### <span className="msb-recv">s.</span><span className="msb-hn">ImageRef()</span>
 
@@ -501,7 +645,7 @@ Upper-layer disk format: `"raw"` or `"qcow2"`.
 func (s *SnapshotArtifact) Scope() string
 ```
 
-Snapshot scope: `SnapshotScopeDisk` (`"disk"`) or `SnapshotScopeResumable` (`"resumable"`). Always `SnapshotScopeDisk` today; `SnapshotScopeResumable` is reserved for resumable snapshots.
+Snapshot scope: `SnapshotScopeDisk` (`"disk"`) or `SnapshotScopeFull` (`"full"`).
 
 ---
 
@@ -545,14 +689,11 @@ func (s *SnapshotArtifact) SourceSandbox() *string
 
 Best-effort source sandbox name, or `nil`. Returns a defensive copy.
 
-## SnapshotHandle
+## SnapshotHandle methods
 
-<div className="msb-tags"><span className="msb-tag is-type" style={{marginLeft: "8px"}}>struct</span></div>
-
-
-<p className="msb-backref">Returned by <a href="#snapshot-get">Snapshot.Get()</a> · <a href="#snapshot-list">Snapshot.List()</a> · <a href="#snapshot-load">Snapshot.Load()</a></p>
-
-A snapshot handle backed by the local index.
+A lightweight handle returned by the active backend. The handle retains a
+stable reference used by [`Open`](#h-open), [`Remove`](#h-remove), and
+[`SaveTo`](#h-saveto).
 
 #### <span className="msb-recv">h.</span><span className="msb-hn">Open()</span>
 
@@ -568,13 +709,13 @@ snap, err := h.Open(ctx)
 
 </Accordion>
 
-Open the underlying artifact metadata. Equivalent to [`Snapshot.Open`](#snapshot-open) on this handle's path.
+Open the underlying snapshot metadata using this handle's stable reference.
 
 <p className="msb-label">Returns</p>
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#snapshotartifactstruct">*SnapshotArtifact</a></div>
+    <div className="msb-param-key"><a className="msb-type" href="#snapshotartifact">*SnapshotArtifact</a></div>
     <div className="msb-param-desc">The opened artifact.</div>
   </div>
 </div>
@@ -593,7 +734,7 @@ err := h.Remove(ctx, false)
 
 </Accordion>
 
-Remove this snapshot. Equivalent to [`Snapshot.Remove`](#snapshot-remove) on this handle's digest.
+Remove this installed snapshot copy by its stored artifact path. Other groups containing the same snapshot ID or digest remain unchanged.
 
 <p className="msb-label">Parameters</p>
 
@@ -607,6 +748,20 @@ Remove this snapshot. Equivalent to [`Snapshot.Remove`](#snapshot-remove) on thi
     <div className="msb-param-desc">Delete even if the snapshot has indexed children.</div>
   </div>
 </div>
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">SaveTo()</span>
+
+```go
+func (h *SnapshotHandle) SaveTo(
+    ctx context.Context,
+    outPath string,
+    opts SnapshotSaveOptions,
+) error
+```
+
+Bundle the referenced snapshot through the active backend while preserving the
+handle's typed identifier-or-path reference. Cloud returns
+`ErrUnsupportedOperation`.
 
 #### <span className="msb-recv">h.</span><span className="msb-hn">Digest()</span>
 
@@ -622,7 +777,7 @@ Manifest digest.
 func (h *SnapshotHandle) Name() *string
 ```
 
-Bare-name alias, if the snapshot was indexed with one; otherwise `nil`. Returns a defensive copy.
+Member name within its group, or `nil` when no alias is recorded. Returns a defensive copy.
 
 #### <span className="msb-recv">h.</span><span className="msb-hn">ParentDigest()</span>
 
@@ -657,7 +812,7 @@ Upper-layer disk format: `"raw"` or `"qcow2"`.
 func (h *SnapshotHandle) Scope() string
 ```
 
-Snapshot scope: `SnapshotScopeDisk` (`"disk"`) or `SnapshotScopeResumable` (`"resumable"`). Always `SnapshotScopeDisk` today.
+Snapshot scope: `SnapshotScopeDisk` (`"disk"`) or `SnapshotScopeFull` (`"full"`).
 
 ---
 
@@ -667,15 +822,15 @@ Snapshot scope: `SnapshotScopeDisk` (`"disk"`) or `SnapshotScopeResumable` (`"re
 func (h *SnapshotHandle) SizeBytes() *uint64
 ```
 
-Apparent upper size at index time, or `nil` if unknown. Returns a defensive copy.
+Backend-reported stored payload size, or `nil` if unknown.
 
-#### <span className="msb-recv">h.</span><span className="msb-hn">Path()</span>
+#### <span className="msb-recv">h.</span><span className="msb-hn">ReferenceKind()</span>
 
 ```go
-func (h *SnapshotHandle) Path() string
+func (h *SnapshotHandle) ReferenceKind() string
 ```
 
-Artifact directory on disk.
+Returns `"id"` or `"path"` for the handle's backend-neutral reference.
 
 #### <span className="msb-recv">h.</span><span className="msb-hn">CreatedAt()</span>
 
@@ -685,48 +840,190 @@ func (h *SnapshotHandle) CreatedAt() time.Time
 
 Snapshot creation time, decoded from the index's Unix timestamp.
 
+<span id="restore-a-sandbox" />
+
+## Restore
+
+Restore into a new detached sandbox. Disk boots fresh; full resumes execution. See [restore examples](/sandboxes/snapshots#disk-snapshots) and [progress](/sandboxes/snapshots#restore-progress).
+
+<Accordion title="Example">
+
+```go
+child, err := m.RestoreSandbox(ctx, "api:baseline", "api-restored", m.WithForked())
+```
+
+</Accordion>
+
+| Control | Purpose |
+| --- | --- |
+| `WithForked()` | Share unchanged full-snapshot memory. |
+| `WithSnapshotDiskOnly()` | Boot only the saved disk. |
+| `WithSnapshotBase(base)` | Supply an archive dependency. |
+| `RestoreSandbox` | Return the restored sandbox. |
+| `RestoreSandboxWithProgress` | Return event and result channels. |
+
+Image, replacement, and startup-command options are not accepted. Full restore requires matching CPU and memory settings, keeps captured network devices, and cannot apply a new guest security profile. Use disk-only restore to change these.
+
+Full restore rejects missing external filesystems and additional disks by default. Use `WithAllowMissingResources()` to resume with unavailable devices and warnings. This is separate from strict/relaxed validation of supplied mappings; inheritance does not waive missing backing. Root and owned storage remain required.
+
+<Accordion title="Destination options">
+
+| Option | Purpose |
+| --- | --- |
+| `WithRestoreCPUs, WithRestoreMemory` | CPU count and memory in MiB. Full restore must match capture. |
+| `WithRestoreNetworkPolicy` | Replace host traffic filtering; guest DNS and TLS settings stay unchanged. |
+| `WithRestoreMaxConnections` | Concurrent TCP limit; zero means unlimited. |
+| `WithRestoreDisableNetwork` | Remove the NIC. Rejected for full snapshots that captured one. |
+| `WithRestoreSecurityProfile` | Guest security profile. Disk boot only, including an explicit default profile. |
+| `WithRestoreMaxDuration, WithRestoreIdleTimeout` | Lifetime and idle limits. Omitted means unlimited; zero expires immediately. |
+| `Volumes, CapturedVolumes` | Map host volumes or select captured private volumes. |
+| `Ports` | Bind destination TCP or UDP ports. |
+| `Vsock` | Bind destination vsock endpoints. |
+| `User, LogLevel` | Default user for new execs and host runtime log level. |
+| `WithDangerouslyInheritResources` | Explicitly inherit host resources. Disabled by default. |
+| `WithAllowMissingResources()` | Allow unavailable external filesystems or additional disks, with warnings. Full restore otherwise requires their bindings. |
+| `WithExternalMountPolicy` | Validate supplied filesystem mappings: strict (default) or relaxed. Does not grant access. |
+
+Omitted controls retain destination defaults. Durations use `time.Duration`, rounded up to seconds. Binding fields belong in `WithRestoreConfig(RestoreConfig{...})`; nil pointers mean omitted. Network policy accepts factory results or `NetworkConfig` with only `Rules`, `DefaultEgress`, and `DefaultIngress`.
+
+</Accordion>
+
+
+<span id="disk-maintenance-and-incremental-export" />
+
+## Compaction
+
+Compact a local sandbox’s root or owned disks. See [compaction](/sandboxes/snapshots#compact-disks) for examples and recovery requirements.
+
+<Accordion title="Options and results">
+
+| Option | Purpose |
+| --- | --- |
+| `Disk` | Select one owned disk by guest path; `/` selects the root. |
+| `RootDiskOnly` | Select only the root. Cannot combine with the disk selector. |
+| `Layers` | Oldest sealed layers to merge, including the base. Minimum two; omit for all. Excludes the writable layer. |
+| `DryRun` | Preview without changing storage. |
+
+Defaults to the root and owned data disks; excludes named/external volumes and directories. Requires a running or fully stopped local sandbox. Fewer than two sealed layers means no change; no eligible disks returns an empty result with zero counts.
+
+Results include aggregate counts and per-disk entries keyed by `GuestPath`. `MaterializedBytes` counts copied bytes, not reclaimed space. Times are microseconds: per-disk `TotalUs` covers preparation; aggregate `TotalUs` also includes switching; `PauseUs` measures the shared VM pause.
+
+</Accordion>
+
+
 ## Constants
 
 <p className="msb-member-group">Snapshot scopes</p>
 
 <p className="msb-backref">Returned by <a href="#s-scope">s.Scope()</a> · <a href="#h-scope">h.Scope()</a></p>
 
-Scope of what a snapshot captures. Every snapshot today is disk-only; the resumable scope (disk plus VM state) is reserved for resumable snapshots.
+Scope of what a snapshot captures: disk-only or disk plus complete VM state.
 
 | Constant | Value | Description |
 |----------|-------|-------------|
 | `SnapshotScopeDisk` | `"disk"` | Disk-only snapshot |
-| `SnapshotScopeResumable` | `"resumable"` | Disk plus VM state (not yet supported) |
-
+| `SnapshotScopeFull` | `"full"` | Disk plus complete VM execution state |
 ## Types
+
+<span id="snapshotartifact" />
+
+### SnapshotArtifact<span className="msb-tag is-type" style={{marginLeft: "8px"}}>struct</span>
+
+<p className="msb-backref">Returned by <a href="#snapshot-create">Snapshot.Create()</a> · <a href="#snapshot-open">Snapshot.Open()</a> · <a href="#snapshot-listdir">Snapshot.ListDir()</a> · <a href="#h-snapshot">h.Snapshot()</a> · <a href="#h-open">h.Open()</a></p>
+
+A backend-neutral snapshot. Fields are unexported; read them through the
+accessor methods below.
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `ID()` | `string` | Stable opaque snapshot identity |
+| `Path()` | `string` | Local artifact directory; panics on cloud |
+| `Reference()` | `string` | Stable backend-relative restore reference |
+| `ReferenceKind()` | `string` | `id` or `path` |
+| [`Digest()`](#s-digest) | `string` | Canonical manifest digest (`sha256:...`) |
+| [`SizeBytes()`](#s-sizebytes) | `*uint64` | Backend-reported stored payload size, when known |
+| [`ImageRef()`](#s-imageref) | `string` | Image reference the snapshot was taken from |
+| [`ImageManifestDigest()`](#s-imagemanifestdigest) | `string` | Pinned OCI manifest digest |
+| [`Format()`](#s-format) | `string` | `"raw"` or `"qcow2"` |
+| [`Scope()`](#s-scope) | `string` | `SnapshotScopeDisk` or `SnapshotScopeFull` |
+| [`Fstype()`](#s-fstype) | `string` | Filesystem type inside the upper layer |
+| [`Parent()`](#s-parent) | `*string` | Parent digest, or nil |
+| [`CreatedAt()`](#s-createdat) | `string` | RFC 3339 timestamp |
+| [`Labels()`](#s-labels) | `map[string]string` | User labels |
+| [`SourceSandbox()`](#s-sourcesandbox) | `*string` | Best-effort source sandbox name |
+| [`SaveTo(ctx, outPath, opts)`](#s-saveto) | `error` | Bundle using this snapshot's typed reference |
+| [`CopyTo(outputArchivePath)`](#s-copyto) | `*SnapshotCopyBuilder` | Configure a copied archive with replacement metadata |
+| [`Verify(ctx)`](#s-verify) | `(*SnapshotVerifyReport, error)` | Recompute content integrity |
+
+### SnapshotCopyBuilder<span className="msb-tag is-type" style={{marginLeft: "8px"}}>struct</span>
+
+Returned by [`SnapshotArtifact.CopyTo`](#s-copyto). Fields are unexported; use
+the fluent methods below.
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `Labels(map[string]string)` | `*SnapshotCopyBuilder` | Replace all labels in the copied manifest |
+| `RecordIntegrity(bool)` | `*SnapshotCopyBuilder` | Compute integrity when true, or omit it when false |
+| `Save(context.Context)` | `error` | Write the configured archive |
+
+<span id="snapshothandle" />
+
+### SnapshotHandle<span className="msb-tag is-type" style={{marginLeft: "8px"}}>struct</span>
+
+<p className="msb-backref">Returned by <a href="#snapshot-get">Snapshot.Get()</a> · <a href="#snapshot-list">Snapshot.List()</a> · <a href="#snapshot-load">Snapshot.Load()</a></p>
+
+A lightweight handle returned by the active backend. Fields are unexported;
+read them through the accessor methods below.
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `ID()` | `string` | Stable opaque snapshot identity |
+| `Path()` | `string` | Local artifact directory; panics on cloud |
+| [`Digest()`](#h-digest) | `string` | Manifest digest |
+| [`Name()`](#h-name) | `*string` | Bare-name alias, if indexed with one |
+| [`ParentDigest()`](#h-parentdigest) | `*string` | Parent digest, or nil |
+| [`ImageRef()`](#h-imageref) | `string` | Pinned image reference |
+| [`Format()`](#h-format) | `string` | `"raw"` or `"qcow2"` |
+| [`Scope()`](#h-scope) | `string` | `SnapshotScopeDisk` or `SnapshotScopeFull` |
+| [`SizeBytes()`](#h-sizebytes) | `*uint64` | Backend-reported stored payload size |
+| `Reference()` | `string` | Stable backend-relative restore reference |
+| `ReferenceKind()` | `string` | `id` or `path` |
+| [`CreatedAt()`](#h-createdat) | `time.Time` | Snapshot creation time |
+| [`Open(ctx)`](#h-open) | `(*SnapshotArtifact, error)` | Open the artifact metadata |
+| [`Remove(ctx, force)`](#h-remove) | `error` | Remove this snapshot |
+| [`SaveTo(ctx, outPath, opts)`](#h-saveto) | `error` | Bundle using this handle's typed reference |
 
 ### SnapshotCreateOptions<span className="msb-tag is-type" style={{marginLeft: "8px"}}>struct</span>
 
 <p className="msb-backref">Accepted by <a href="#snapshot-create">Snapshot.Create()</a></p>
 
-Configures [`Snapshot.Create`](#snapshot-create). `Name` and `FromSandbox` are both required.
+Configures [`Snapshot.Create`](#snapshot-create). `FromSandbox` is required. An empty `Name` is generated; an empty `Group` uses the source sandbox's name.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| Name | `string` | Bare name; always the artifact directory's basename |
-| FromSandbox | `string` | Name of the stopped or crashed sandbox to capture |
-| DestDir | `string` | Parent directory for the artifact (`DestDir/<name>`); empty = the default snapshots directory |
+| Name | `string` | Member name within its group; generated when empty |
+| Group | `string` | Destination snapshot group; defaults to the source sandbox's name |
+| FromSandbox | `string` | Name of the source sandbox; disk capture supports running, paused, stopped, and crashed sources |
+| DestDir | `string` | Parent directory containing snapshot groups; empty = the default snapshots directory |
 | Labels | `map[string]string` | Arbitrary user labels recorded in the manifest |
-| Force | `bool` | Overwrite an existing artifact with the same name |
+| Force | `bool` | Overwrite a direct archive output; rejected for installed group members |
 | RecordIntegrity | `bool` | Record content hashes so [`Verify`](#s-verify) can recompute them later |
-| Resumable | `bool` | Request a resumable snapshot; returns an unsupported-feature error today |
+| Full | `bool` | Include memory and execution state from a running or paused source; `false` captures disk state from running, paused, stopped, or crashed sources |
+| GuestFlush | `GuestFlush` | Guest writeback policy; defaults to `GuestFlushAuto`. See [guest writeback](#guest-writeback) |
 
 ### SnapshotSaveOptions<span className="msb-tag is-type" style={{marginLeft: "8px"}}>struct</span>
 
-<p className="msb-backref">Accepted by <a href="#snapshot-save">Snapshot.Save()</a></p>
+<p className="msb-backref">Accepted by <a href="#snapshot-save">Snapshot.Save()</a> and instance <code>SaveTo()</code> methods</p>
 
-Configures [`Snapshot.Save`](#snapshot-save).
+Configures [`Snapshot.Save`](#snapshot-save) and instance `SaveTo()` methods.
 
 | Field | Type | Description |
 |-------|------|-------------|
+| Since | `string` | Omit disk layers and RAM objects supplied by an exact base; incompatible with `LastLayers` and `WithParents` |
+| LastLayers | `*uint32` | Include the newest N sealed root-disk layers; owned disks and full execution state remain complete |
 | WithParents | `bool` | Include the snapshot's parent chain in the archive |
 | WithImage | `bool` | Include the base OCI image in the archive |
-| PlainTar | `bool` | Write an uncompressed `.tar` instead of `.tar.zst` |
+| PlainTar | `bool` | Write an uncompressed `.tar` instead of `.msb` |
 
 ### SnapshotVerifyReport<span className="msb-tag is-type" style={{marginLeft: "8px"}}>struct</span>
 
@@ -739,6 +1036,7 @@ Result of [`Verify`](#s-verify).
 | Digest | `string` | Recomputed manifest digest |
 | Path | `string` | Artifact directory that was verified |
 | Upper | [`SnapshotUpperVerifyStatus`](#snapshotupperverifystatusstruct) | Upper-layer integrity status |
+| Checkpoint | `*SnapshotCheckpointVerifyStatus` | Verified checkpoint root for full state; otherwise `nil` |
 
 ### SnapshotUpperVerifyStatus<span className="msb-tag is-type" style={{marginLeft: "8px"}}>struct</span>
 

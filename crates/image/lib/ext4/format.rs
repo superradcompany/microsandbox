@@ -46,6 +46,8 @@ pub const EXT4_FEATURE_RO_COMPAT_METADATA_CSUM: u32 = 0x400;
 
 // Group descriptor flags
 pub const EXT4_BG_INODE_ZEROED: u16 = 0x04;
+pub const EXT4_BG_INODE_UNINIT: u16 = 0x01;
+pub const EXT4_BG_BLOCK_UNINIT: u16 = 0x02;
 
 // jbd2 constants (big-endian on disk)
 pub const JBD2_MAGIC: u32 = 0xC03B3998;

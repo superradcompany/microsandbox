@@ -17,26 +17,30 @@ pub mod fs;
 pub use fs::{VolumeFs, VolumeFsReadStream, VolumeFsWriteSink};
 pub use microsandbox_types::{VolumeKind, VolumeSpec, VolumeSpec as VolumeConfig};
 
+#[cfg(feature = "local")]
 use std::fs::File;
-#[cfg(unix)]
+#[cfg(all(feature = "local", unix))]
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+#[cfg(feature = "local")]
 use microsandbox_image::ext4::{self, Ext4FormatOptions};
+#[cfg(feature = "local")]
 use sea_orm::ConnectionTrait;
+#[cfg(feature = "local")]
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, Set};
 
 use crate::backend::{
-    Backend, BackendKind, LocalBackend, VolumeCloudState, VolumeHandleCloudState,
-    VolumeHandleInner, VolumeHandleLocalState, VolumeInner, VolumeLocalState,
+    Backend, BackendKind, VolumeCloudState, VolumeHandleCloudState, VolumeHandleInner,
+    VolumeHandleLocalState, VolumeInner, VolumeLocalState,
 };
+use crate::{MicrosandboxError, MicrosandboxResult, error::Operation, size::Mebibytes};
+#[cfg(feature = "local")]
 use crate::{
-    MicrosandboxError, MicrosandboxResult,
+    backend::LocalBackend,
     db::entity::{sandbox as sandbox_entity, volume as volume_entity},
-    error::Operation,
     sandbox::{SandboxConfig, SandboxStatus, VolumeMount},
-    size::Mebibytes,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -137,6 +141,7 @@ impl Volume {
 
 impl Volume {
     /// Build an outer `Volume` from local-variant inner state.
+    #[cfg(feature = "local")]
     pub(crate) fn from_local(
         backend: Arc<dyn Backend>,
         local: VolumeLocalState,
@@ -151,6 +156,7 @@ impl Volume {
     }
 
     /// Build an outer `Volume` from cloud-variant inner state.
+    #[cfg(feature = "cloud")]
     pub(crate) fn from_cloud(
         backend: Arc<dyn Backend>,
         cloud: VolumeCloudState,
@@ -270,6 +276,7 @@ impl VolumeHandle {
     /// Panics if `backend` is not a [`LocalBackend`]; this is the local
     /// construction path and is only called from `get_local` / `list_local`,
     /// which have already routed through the local trait impl.
+    #[cfg(feature = "local")]
     pub(crate) fn from_local_model(backend: Arc<dyn Backend>, model: volume_entity::Model) -> Self {
         let labels = model
             .labels
@@ -310,6 +317,7 @@ impl VolumeHandle {
     ///
     /// The org's shared default volume has no name and carries an empty one
     /// here; it is addressed by kind, not name.
+    #[cfg(feature = "cloud")]
     pub(crate) fn from_cloud(
         backend: Arc<dyn Backend>,
         cloud: VolumeHandleCloudState,
@@ -568,6 +576,7 @@ impl std::fmt::Debug for VolumeHandle {
 /// Local create path. Inserts a DB record, creates the host directory, and
 /// returns a wrapped [`Volume`]. On directory-create failure rolls back the
 /// DB insert so we don't leak phantom rows.
+#[cfg(feature = "local")]
 pub(crate) async fn create_local(
     backend: Arc<dyn Backend>,
     config: VolumeConfig,
@@ -580,7 +589,7 @@ pub(crate) async fn create_local(
         .as_local()
         .ok_or_else(|| MicrosandboxError::local_only(Operation::VolumeCreate))?;
     let pools = local_backend.db().await?;
-    let _name_lock = lock_volume_name(local_backend, &config.name)?;
+    let _name_lock = lock_volume_name(local_backend, &config.name).await?;
 
     // Check for existing volume.
     let existing = volume_entity::Entity::find()
@@ -640,6 +649,7 @@ pub(crate) async fn create_local(
 
 /// Local get path. Loads a volume row by name and wraps it in a
 /// [`VolumeHandle`] bound to the supplied backend.
+#[cfg(feature = "local")]
 pub(crate) async fn get_local(
     backend: Arc<dyn Backend>,
     name: &str,
@@ -660,6 +670,7 @@ pub(crate) async fn get_local(
 }
 
 /// Local list path. Returns all volumes ordered newest-first.
+#[cfg(feature = "local")]
 pub(crate) async fn list_local(backend: Arc<dyn Backend>) -> MicrosandboxResult<Vec<VolumeHandle>> {
     let local_backend = backend
         .as_local()
@@ -678,6 +689,7 @@ pub(crate) async fn list_local(backend: Arc<dyn Backend>) -> MicrosandboxResult<
 }
 
 /// Local remove path. Deletes the DB record first, then the directory.
+#[cfg(feature = "local")]
 pub(crate) async fn remove_local(backend: Arc<dyn Backend>, name: &str) -> MicrosandboxResult<()> {
     let local_backend = backend
         .as_local()
@@ -690,7 +702,7 @@ pub(crate) async fn remove_local(backend: Arc<dyn Backend>, name: &str) -> Micro
         .await?
         .ok_or_else(|| MicrosandboxError::VolumeNotFound(name.into()))?;
     let handle = VolumeHandle::from_local_model(backend.clone(), model);
-    let _name_lock = lock_volume_name(local_backend, name)?;
+    let _name_lock = lock_volume_name(local_backend, name).await?;
     let _disk_lock = lock_disk_volume_for_remove(&handle)?;
     ensure_volume_not_referenced_by_active_sandbox(pools.read(), name).await?;
 
@@ -713,6 +725,7 @@ pub(crate) async fn remove_local(backend: Arc<dyn Backend>, name: &str) -> Micro
 /// Materialize a volume under a temporary sibling directory, then atomically
 /// rename it into place. This keeps failed disk formatting from exposing a
 /// half-populated final volume path.
+#[cfg(feature = "local")]
 pub(crate) async fn materialize_volume_path(
     config: &VolumeConfig,
     path: &Path,
@@ -738,6 +751,7 @@ pub(crate) async fn materialize_volume_path(
     Ok(())
 }
 
+#[cfg(feature = "local")]
 pub(crate) async fn provision_volume_path(
     config: &VolumeConfig,
     path: &Path,
@@ -768,7 +782,8 @@ pub(crate) async fn provision_volume_path(
     }
 }
 
-pub(crate) fn lock_volume_name(local: &LocalBackend, name: &str) -> MicrosandboxResult<File> {
+#[cfg(feature = "local")]
+pub(crate) async fn lock_volume_name(local: &LocalBackend, name: &str) -> MicrosandboxResult<File> {
     let volumes_dir = local.volumes_dir();
     std::fs::create_dir_all(&volumes_dir)?;
     let locks_dir = volumes_dir.join(".locks");
@@ -781,14 +796,19 @@ pub(crate) fn lock_volume_name(local: &LocalBackend, name: &str) -> Microsandbox
         .write(true)
         .open(&path)?;
 
-    #[cfg(unix)]
-    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
-        return Err(std::io::Error::last_os_error().into());
+    // A sibling create can hold this lock while awaiting its guest's readiness. Never block
+    // the task polling both creates, and keep the file owned by this future during each wait
+    // so cancellation releases it without leaving a background lock-acquisition worker.
+    // Use the shared primitive on Windows too: a no-op would let batch siblings provision
+    // the same name concurrently before either publishes its volume record.
+    while !microsandbox_utils::process_lock::try_lock_exclusive(&file)? {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
 
     Ok(file)
 }
 
+#[cfg(feature = "local")]
 fn lock_disk_volume_for_remove(handle: &VolumeHandle) -> MicrosandboxResult<Option<File>> {
     if handle.kind() != VolumeKind::Disk {
         return Ok(None);
@@ -830,6 +850,7 @@ fn lock_disk_volume_for_remove(handle: &VolumeHandle) -> MicrosandboxResult<Opti
     Ok(Some(file))
 }
 
+#[cfg(feature = "local")]
 async fn ensure_volume_not_referenced_by_active_sandbox<C>(
     db: &C,
     name: &str,
@@ -837,8 +858,12 @@ async fn ensure_volume_not_referenced_by_active_sandbox<C>(
 where
     C: ConnectionTrait,
 {
-    let sandboxes = sandbox_entity::Entity::find()
+    let sandboxes = microsandbox_db::catalog::sandbox_query(db)
+        .await?
         .filter(sandbox_entity::Column::Status.is_in([
+            // A cancelled create can retain its provisional row while the runtime still
+            // owns startup. Its named mounts are no less live than a Running sandbox's.
+            SandboxStatus::Starting,
             SandboxStatus::Running,
             SandboxStatus::Draining,
             SandboxStatus::Paused,
@@ -847,7 +872,7 @@ where
         .await?;
 
     for sandbox in sandboxes {
-        let config: SandboxConfig = serde_json::from_str(&sandbox.config)?;
+        let config: SandboxConfig = crate::db::config::decode(&sandbox.config)?;
         if config.spec.mounts.iter().any(|mount| {
             matches!(
                 mount,
@@ -928,22 +953,77 @@ pub(crate) fn validate_volume_name(name: &str) -> MicrosandboxResult<()> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "cloud")]
     use std::sync::Arc;
 
+    #[cfg(feature = "local")]
     use sea_orm::{ActiveModelTrait, Set};
 
-    use crate::backend::{
-        Backend, CloudBackend, CloudVolumeKind, CloudVolumeStatus, LocalBackend,
-        VolumeHandleCloudState,
-    };
+    #[cfg(feature = "local")]
+    use crate::backend::LocalBackend;
+    #[cfg(feature = "cloud")]
+    use crate::backend::{Backend, CloudVolumeKind, CloudVolumeStatus, VolumeHandleCloudState};
+    #[cfg(feature = "local")]
     use crate::sandbox::{HostPermissions, MountOptions, SandboxStatus, StatVirtualization};
 
     use super::*;
 
+    #[cfg(feature = "local")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn named_volume_lock_contention_yields_to_executor() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        use microsandbox_utils::process_lock::unlock;
+
+        let directory = tempfile::tempdir().unwrap();
+        let local = crate::test_support::local_backend_builder(directory.path().join("home"))
+            .build()
+            .await
+            .unwrap();
+        let winner = lock_volume_name(&local, "shared").await.unwrap();
+        let (release_tx, release_rx) = mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            // Release even if a blocking acquisition stalls the executor, so the
+            // regression fails an assertion instead of hanging the test suite.
+            let released_by_test = release_rx.recv_timeout(Duration::from_secs(5)).is_ok();
+            // Closing alone can leave a lock held by an unrelated parallel test's
+            // pre-exec child. Explicit unlock releases it across inherited copies.
+            unlock(&winner).unwrap();
+            released_by_test
+        });
+
+        let mut waiter = Box::pin(lock_volume_name(&local, "shared"));
+        let stayed_pending = tokio::time::timeout(Duration::from_millis(20), waiter.as_mut())
+            .await
+            .is_err();
+
+        // Reaching this point while the holder is still locked proves the timer
+        // could run on the same executor as the contended acquisition.
+        let _ = release_tx.send(());
+        let released_by_test = holder.join().unwrap();
+        assert!(
+            released_by_test,
+            "lock acquisition blocked the executor until the watchdog fired"
+        );
+        assert!(
+            stayed_pending,
+            "contended acquisition returned before the holder unlocked"
+        );
+
+        let acquired = tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("waiter did not acquire the released lock")
+            .unwrap();
+        unlock(&acquired).unwrap();
+    }
+
     #[test]
+    #[cfg(feature = "cloud")]
     fn cloud_managed_volume_reports_directory_storage_kind() {
-        let backend: Arc<dyn Backend> =
-            Arc::new(CloudBackend::new("https://msb.example.com", "msb_test_abc").unwrap());
+        let backend: Arc<dyn Backend> = Arc::new(
+            crate::test_support::cloud_backend("https://msb.example.com", "msb_test_abc").unwrap(),
+        );
         let now = chrono::Utc::now();
         let handle = VolumeHandle::from_cloud(
             backend,
@@ -966,9 +1046,11 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "cloud")]
     async fn cloud_default_volume_is_identified_and_cannot_be_removed() {
-        let backend: Arc<dyn Backend> =
-            Arc::new(CloudBackend::new("https://msb.example.com", "msb_test_abc").unwrap());
+        let backend: Arc<dyn Backend> = Arc::new(
+            crate::test_support::cloud_backend("https://msb.example.com", "msb_test_abc").unwrap(),
+        );
         let now = chrono::Utc::now();
         let handle = VolumeHandle::from_cloud(
             backend,
@@ -993,11 +1075,13 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
-    async fn test_remove_local_rejects_active_named_volume_reference() {
+    #[cfg(feature = "local")]
+    async fn exercise_active_named_volume_reference(status: SandboxStatus) {
         let temp = tempfile::tempdir().unwrap();
         let local = Arc::new(
             LocalBackend::builder()
+                .config_path(temp.path().join("home").join("config.json"))
+                .managed_config_path(temp.path().join("home").join("managed.json"))
                 .home(temp.path().join("home"))
                 .build()
                 .await
@@ -1017,7 +1101,7 @@ mod tests {
         .await
         .unwrap();
 
-        let config = SandboxConfig {
+        let mut config = SandboxConfig {
             spec: microsandbox_types::SandboxSpec {
                 name: "active-sandbox".to_string(),
                 mounts: vec![VolumeMount::Named {
@@ -1033,10 +1117,25 @@ mod tests {
             },
             ..Default::default()
         };
-        sandbox_entity::ActiveModel {
+        if status == SandboxStatus::Starting {
+            config.checkpoint_restore =
+                Some(microsandbox_runtime::launch::CheckpointRestoreConfig {
+                    memory_descriptor: false,
+                    network_gateway_mac: None,
+                    external_mount_policy: Default::default(),
+                    external_mounts: Vec::new(),
+                    unavailable_disks: Default::default(),
+                    local_branch: false,
+                    forked: true,
+                    closure: temp.path().join("pending-checkpoint"),
+                    checkpoint_root: "blake3:pending".into(),
+                    checkpoint_id: "pending".into(),
+                });
+        }
+        let sandbox = sandbox_entity::ActiveModel {
             name: Set("active-sandbox".to_string()),
             config: Set(serde_json::to_string(&config).unwrap()),
-            status: Set(SandboxStatus::Running),
+            status: Set(status),
             ephemeral: Set(false),
             created_at: Set(Some(chrono::Utc::now().naive_utc())),
             updated_at: Set(Some(chrono::Utc::now().naive_utc())),
@@ -1045,10 +1144,42 @@ mod tests {
         .insert(local.db().await.unwrap().write())
         .await
         .unwrap();
+        let sentinel = local.volume_path("active-cache").join("sentinel");
+        std::fs::write(&sentinel, b"runtime-owned data").unwrap();
 
         let err = remove_local(backend, "active-cache").await.unwrap_err();
 
         assert!(err.to_string().contains("attached to active sandbox"));
-        assert!(local.volume_path("active-cache").exists());
+        assert_eq!(std::fs::read(sentinel).unwrap(), b"runtime-owned data");
+        let pools = local.db().await.unwrap();
+        assert!(
+            volume_entity::Entity::find()
+                .filter(volume_entity::Column::Name.eq("active-cache"))
+                .one(pools.read())
+                .await
+                .unwrap()
+                .is_some()
+        );
+        // Removal refusal must leave both the active status and any incomplete restore
+        // discriminator untouched; releasing transient creator leases is not completion.
+        assert_eq!(
+            sandbox_entity::Entity::find_by_id(sandbox.id)
+                .one(pools.read())
+                .await
+                .unwrap(),
+            Some(sandbox)
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "local")]
+    async fn test_remove_local_rejects_active_named_volume_reference() {
+        exercise_active_named_volume_reference(SandboxStatus::Running).await;
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "local")]
+    async fn test_remove_local_preserves_starting_restore_named_volume_reference() {
+        exercise_active_named_volume_reference(SandboxStatus::Starting).await;
     }
 }

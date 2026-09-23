@@ -9,6 +9,7 @@ use napi_derive::napi;
 use tokio::sync::Mutex;
 
 use crate::error::to_napi_error;
+use crate::shared_handle::SharedHandle;
 use crate::types::*;
 
 //--------------------------------------------------------------------------------------------------
@@ -18,10 +19,8 @@ use crate::types::*;
 /// Filesystem operations on a running sandbox (via agent protocol).
 #[napi(js_name = "SandboxFsOps")]
 pub struct JsSandboxFsOps {
-    sandbox: Arc<Mutex<Option<microsandbox::sandbox::Sandbox>>>,
+    sandbox: Arc<SharedHandle<microsandbox::sandbox::Sandbox>>,
 }
-
-pub type JsSandboxFs = JsSandboxFsOps;
 
 /// A streaming reader for file data from the sandbox.
 ///
@@ -48,7 +47,7 @@ pub struct JsFsWriteSink {
 //--------------------------------------------------------------------------------------------------
 
 impl JsSandboxFsOps {
-    pub fn new(sandbox: Arc<Mutex<Option<microsandbox::sandbox::Sandbox>>>) -> Self {
+    pub(crate) fn new(sandbox: Arc<SharedHandle<microsandbox::sandbox::Sandbox>>) -> Self {
         Self { sandbox }
     }
 }
@@ -58,8 +57,7 @@ impl JsSandboxFsOps {
     /// Read a file as a Buffer.
     #[napi]
     pub async fn read(&self, path: String) -> Result<Buffer> {
-        let guard = self.sandbox.lock().await;
-        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let sb = self.sandbox.get().await.ok_or_else(consumed_error)?;
         let data = sb.fs().read(&path).await.map_err(to_napi_error)?;
         Ok(data.to_vec().into())
     }
@@ -67,8 +65,7 @@ impl JsSandboxFsOps {
     /// Read a file as a UTF-8 string.
     #[napi]
     pub async fn read_string(&self, path: String) -> Result<String> {
-        let guard = self.sandbox.lock().await;
-        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let sb = self.sandbox.get().await.ok_or_else(consumed_error)?;
         sb.fs().read_to_string(&path).await.map_err(to_napi_error)
     }
 
@@ -76,16 +73,14 @@ impl JsSandboxFsOps {
     #[napi]
     pub async fn write(&self, path: String, data: Buffer) -> Result<()> {
         let bytes: Vec<u8> = data.to_vec();
-        let guard = self.sandbox.lock().await;
-        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let sb = self.sandbox.get().await.ok_or_else(consumed_error)?;
         sb.fs().write(&path, &bytes).await.map_err(to_napi_error)
     }
 
     /// List directory contents.
     #[napi]
     pub async fn list(&self, path: String) -> Result<Vec<FsEntry>> {
-        let guard = self.sandbox.lock().await;
-        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let sb = self.sandbox.get().await.ok_or_else(consumed_error)?;
         let entries = sb.fs().list(&path).await.map_err(to_napi_error)?;
         Ok(entries.iter().map(fs_entry_to_js).collect())
     }
@@ -93,48 +88,42 @@ impl JsSandboxFsOps {
     /// Create a directory.
     #[napi]
     pub async fn mkdir(&self, path: String) -> Result<()> {
-        let guard = self.sandbox.lock().await;
-        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let sb = self.sandbox.get().await.ok_or_else(consumed_error)?;
         sb.fs().mkdir(&path).await.map_err(to_napi_error)
     }
 
     /// Remove a directory.
     #[napi]
     pub async fn remove_dir(&self, path: String) -> Result<()> {
-        let guard = self.sandbox.lock().await;
-        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let sb = self.sandbox.get().await.ok_or_else(consumed_error)?;
         sb.fs().remove_dir(&path).await.map_err(to_napi_error)
     }
 
     /// Remove a file.
     #[napi]
     pub async fn remove(&self, path: String) -> Result<()> {
-        let guard = self.sandbox.lock().await;
-        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let sb = self.sandbox.get().await.ok_or_else(consumed_error)?;
         sb.fs().remove(&path).await.map_err(to_napi_error)
     }
 
     /// Copy a file within the sandbox.
     #[napi]
     pub async fn copy(&self, from: String, to: String) -> Result<()> {
-        let guard = self.sandbox.lock().await;
-        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let sb = self.sandbox.get().await.ok_or_else(consumed_error)?;
         sb.fs().copy(&from, &to).await.map_err(to_napi_error)
     }
 
     /// Rename a file within the sandbox.
     #[napi]
     pub async fn rename(&self, from: String, to: String) -> Result<()> {
-        let guard = self.sandbox.lock().await;
-        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let sb = self.sandbox.get().await.ok_or_else(consumed_error)?;
         sb.fs().rename(&from, &to).await.map_err(to_napi_error)
     }
 
     /// Get file or directory metadata.
     #[napi]
     pub async fn stat(&self, path: String) -> Result<FsMetadata> {
-        let guard = self.sandbox.lock().await;
-        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let sb = self.sandbox.get().await.ok_or_else(consumed_error)?;
         let meta = sb.fs().stat(&path).await.map_err(to_napi_error)?;
         Ok(fs_metadata_to_js(&meta))
     }
@@ -142,16 +131,14 @@ impl JsSandboxFsOps {
     /// Check if a path exists.
     #[napi]
     pub async fn exists(&self, path: String) -> Result<bool> {
-        let guard = self.sandbox.lock().await;
-        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let sb = self.sandbox.get().await.ok_or_else(consumed_error)?;
         sb.fs().exists(&path).await.map_err(to_napi_error)
     }
 
     /// Copy a file from the host into the sandbox.
     #[napi]
     pub async fn copy_from_host(&self, host_path: String, guest_path: String) -> Result<()> {
-        let guard = self.sandbox.lock().await;
-        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let sb = self.sandbox.get().await.ok_or_else(consumed_error)?;
         sb.fs()
             .copy_from_host(&host_path, &guest_path)
             .await
@@ -161,8 +148,7 @@ impl JsSandboxFsOps {
     /// Copy a file from the sandbox to the host.
     #[napi]
     pub async fn copy_to_host(&self, guest_path: String, host_path: String) -> Result<()> {
-        let guard = self.sandbox.lock().await;
-        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let sb = self.sandbox.get().await.ok_or_else(consumed_error)?;
         sb.fs()
             .copy_to_host(&guest_path, &host_path)
             .await
@@ -172,8 +158,7 @@ impl JsSandboxFsOps {
     /// Read a file with streaming (~3 MiB chunks).
     #[napi(js_name = "readStream")]
     pub async fn read_stream(&self, path: String) -> Result<JsFsReadStream> {
-        let guard = self.sandbox.lock().await;
-        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let sb = self.sandbox.get().await.ok_or_else(consumed_error)?;
         let stream = sb.fs().read_stream(&path).await.map_err(to_napi_error)?;
         Ok(JsFsReadStream {
             inner: Arc::new(Mutex::new(stream)),
@@ -183,8 +168,7 @@ impl JsSandboxFsOps {
     /// Write a file with streaming. Returns a sink the caller writes to.
     #[napi(js_name = "writeStream")]
     pub async fn write_stream(&self, path: String) -> Result<JsFsWriteSink> {
-        let guard = self.sandbox.lock().await;
-        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let sb = self.sandbox.get().await.ok_or_else(consumed_error)?;
         let sink = sb.fs().write_stream(&path).await.map_err(to_napi_error)?;
         Ok(JsFsWriteSink {
             inner: Arc::new(Mutex::new(Some(sink))),

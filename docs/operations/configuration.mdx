@@ -1,0 +1,172 @@
+---
+title: Configuration
+description: How sandbox settings resolve across defaults, global config, YAML, and explicit inputs
+icon: "sliders"
+---
+
+A sandbox's settings can come from built-in defaults, the global `config.json`
+on the machine, sandbox YAML files, and values passed directly through the CLI
+or an SDK. Administrator-managed settings apply above these sources. Which sources apply depends on how the sandbox is created, so the
+resolution order below is split between command-line and SDK usage.
+
+## Precedence
+
+Layers are applied from lowest to highest precedence. When two layers set the
+same value, the later layer wins.
+
+<Tabs>
+  <Tab title="Command line">
+    <Steps>
+      <Step title="Built-in defaults">
+        Used when no other layer sets a value. This layer is always present.
+      </Step>
+
+      <Step title="Global sandbox defaults">
+        Loaded automatically from `sandbox_defaults` in
+        `~/.microsandbox/config.json`; nothing needs to be passed to load them.
+        A missing file behaves like an empty JSON object.
+
+        These defaults apply to local and cloud creation, subject to backend support.
+        Cloud workers supply image metadata and service-side defaults.
+
+        [Global sandbox defaults reference](/configuration#sandbox_defaults)
+      </Step>
+
+      <Step title="Sandbox configuration files">
+        Root files are passed with `--conf`. Scoped files are passed with
+        `--net-conf`, `--resource-conf`, `--runtime-conf`, `--fs-conf`,
+        `--secret-conf`, or `--script-conf`.
+
+        These files are used by the CLI only and are never auto-discovered.
+        Every file must be named explicitly. Multiple files are applied from
+        left to right on the command line.
+
+        [Sandbox config reference](/cli/configuration)
+      </Step>
+
+      <Step title="CLI input">
+        Explicit flags and positional arguments override user files.
+        Use them to specialize a file for one invocation.
+
+        [Sandbox commands and flags](/cli/sandbox-commands)
+      </Step>
+      <Step title="Managed overrides">
+        Administrator settings apply last and override user files and explicit
+        CLI or SDK input. See [Managed deployment](/enterprise/managed-configuration).
+      </Step>
+    </Steps>
+  </Tab>
+
+  <Tab title="SDKs">
+    <Steps>
+      <Step title="Built-in defaults">
+        Used when no other layer sets a value. This layer is always present.
+      </Step>
+
+      <Step title="Global sandbox defaults">
+        Local and cloud backends automatically load `sandbox_defaults` from
+        `~/.microsandbox/config.json`, subject to backend support.
+
+        [Global sandbox defaults reference](/configuration#sandbox_defaults)
+      </Step>
+
+      <Step title="SDK input">
+        Explicit arguments, options, or builder methods override user defaults.
+
+        [SDK overview](/sdk/overview)
+      </Step>
+      <Step title="Managed overrides">
+        Administrator settings apply last and override user files and explicit
+        CLI or SDK input. See [Managed deployment](/enterprise/managed-configuration).
+      </Step>
+    </Steps>
+
+    <Note>
+      Sandbox YAML is a CLI configuration surface. SDKs do not load
+      `sandbox.yaml`, root configuration files, or scoped configuration files.
+      Rust applications can use
+      [`SandboxBuilder::overlay`](/sdk/rust/sandbox#sandbox-overlay) for a typed
+      sparse-overlay model instead.
+    </Note>
+  </Tab>
+</Tabs>
+
+## Merge precedence
+
+In the command-line path, each root or scoped file overlays the files to its
+left. Explicit CLI input is applied after every file.
+
+| Value | Merge behavior |
+| --- | --- |
+| Scalar | A later value replaces the earlier value |
+| Map | Keys are combined; a later value replaces an earlier value with the same key |
+| List | A later list replaces the entire earlier list |
+| Network policy | When a later source provides `policy`, `allow`, or `deny`, those values replace the complete earlier policy; other network fields continue to merge |
+
+Maps merge recursively for nested `init`, `network.dns`, `network.tls`, and
+secret definitions. See [Combining files](/cli/configuration#combining-files)
+for CLI-specific constraints and path resolution.
+
+## Exceptions
+
+Some settings resolve outside the sandbox precedence rules above.
+
+<Warning>
+  Host-owned policy is not an overridable sandbox default. A global
+  `deployment_profile` sets the local host's isolation floor and cannot be
+  weakened by a sandbox file, CLI flag, or SDK option.
+</Warning>
+
+Local or cloud selection resolves across explicit SDK selection, environment
+variables, profiles, and the local default. See the
+[selection precedence](/operations/backends#precedence).
+
+Registry authentication resolves across explicit secret names, environment
+variables, and the operating-system keyring. See the
+[authentication resolution order](/configuration#auth-resolution-order).
+Registry and backend credentials should use environment or keyring references
+rather than workload files.
+
+## Existing sandboxes
+
+<Note>
+  Resolved values are persisted when a local sandbox is created. Editing global
+  or sandbox configuration changes future creations, not an existing sandbox.
+  Use `msb inspect <name> --format json` to inspect effective configuration and
+  [`msb modify`](/cli/sandbox-commands#msb-modify) to plan or apply supported
+  changes. See [Live Modify](/sandboxes/tuning) for the complete change model.
+</Note>
+
+## Ownership
+
+| If the setting is... | Put it in... | It applies to... |
+| --- | --- | --- |
+| A temporary change or experiment | CLI flags | One invocation |
+| Owned by a reusable workload or repository | [Sandbox YAML](/cli/configuration) | Sandboxes the CLI creates from that file |
+| Selected by application logic | [SDK input](/sdk/overview) | The sandbox created by the application |
+| Owned by a user | [Global `config.json`](/configuration) | New local and cloud sandboxes, subject to backend support |
+| Enforced by an administrator | [Managed configuration](/enterprise/managed-configuration) | Supported settings on the device, including cloud requests |
+
+## References
+
+<CardGroup cols={2}>
+  <Card title="Global config reference" icon="list" href="/configuration">
+    Look up shared defaults, host policy, registries, metrics, and backend
+    profiles.
+  </Card>
+
+  <Card title="Sandbox config reference" icon="file-code" href="/cli/configuration">
+    Look up root and scoped YAML fields, validation, and merge behavior.
+  </Card>
+
+  <Card title="CLI sandbox commands" icon="terminal" href="/cli/sandbox-commands">
+    Look up flags for creating, running, inspecting, and modifying sandboxes.
+  </Card>
+
+  <Card title="SDK overview" icon="code" href="/sdk/overview">
+    Choose an SDK and configure sandboxes from application code.
+  </Card>
+</CardGroup>
+
+For resource, placement, storage, and writeback guidance, continue to
+[Performance](/sandboxes/optimization).

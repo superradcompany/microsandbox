@@ -87,11 +87,43 @@ build-deps: build-agentd build-libkrunfw
 # Build agentd as a static Linux/musl binary. Requires: musl-tools (apt) or musl-dev (apk).
 [linux]
 build-agentd:
-    @command -v musl-gcc >/dev/null || { echo "error: musl-gcc not found. Install your distro's musl toolchain."; exit 1; }
-    rustup target add x86_64-unknown-linux-musl 2>/dev/null || true
-    cargo build --release --manifest-path crates/agentd/Cargo.toml --target-dir target --target x86_64-unknown-linux-musl
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    # Derive the musl target from Rust's host triple instead of maintaining an
+    # architecture allowlist. This keeps local builds aligned with every
+    # Linux target supported by the installed Rust toolchain (x86_64, ARM64,
+    # riscv64, and future targets), while still using the native compiler.
+    host="$(rustc -vV | sed -n 's/^host: //p')"
+    case "$host" in
+        *-unknown-linux-gnu)
+            target="${host/-unknown-linux-gnu/-unknown-linux-musl}"
+            ;;
+        *-linux-musl*)
+            target="$host"
+            ;;
+        *)
+            echo "error: cannot derive a Linux musl target from Rust host '$host'"
+            exit 1
+            ;;
+    esac
+
+    # Native musl hosts already have the target and a suitable system compiler,
+    # but distro targets such as Alpine may not link statically by default.
+    if [ "$target" = "$host" ]; then
+        export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C target-feature=+crt-static"
+    else
+        # GNU hosts need rustup's musl target and the musl wrapper to link it.
+        if ! command -v musl-gcc >/dev/null; then
+            echo "error: musl-gcc not found. Install your distro's musl toolchain."
+            exit 1
+        fi
+        rustup target add "$target"
+    fi
+
+    cargo build --release --manifest-path crates/agentd/Cargo.toml --target-dir target --target "$target"
     mkdir -p build
-    cp target/x86_64-unknown-linux-musl/release/agentd build/agentd
+    cp "target/$target/release/agentd" build/agentd
     touch build/agentd
 
 # Build agentd as a static Linux/musl binary via Docker cross-compilation. Requires: docker.
@@ -189,14 +221,14 @@ build-libkrunfw:
 # Build the msb CLI binary.
 [linux]
 build-msb mode="debug": build-agentd
-    cargo build {{ if mode == "release" { "--release" } else { "" } }} --no-default-features --features net,ssh -p microsandbox-cli
+    cargo build {{ if mode == "release" { "--release" } else { "" } }} --no-default-features --features embed-binaries,net,ssh -p microsandbox-cli
     mkdir -p build
     cp target/{{ mode }}/msb build/msb
 
 # Build and sign the msb CLI binary.
 [macos]
 build-msb mode="debug": build-agentd
-    cargo build {{ if mode == "release" { "--release" } else { "" } }} --no-default-features --features net,ssh -p microsandbox-cli
+    cargo build {{ if mode == "release" { "--release" } else { "" } }} --no-default-features --features embed-binaries,net,ssh -p microsandbox-cli
     mkdir -p build
     cp target/{{ mode }}/msb build/msb
     codesign --entitlements msb-entitlements.plist --force -s - build/msb
@@ -217,6 +249,30 @@ build mode="debug": (build-msb mode) _ensure-libkrunfw
 # Build everything: agentd, libkrunfw, and msb.
 [windows]
 build mode="debug": (build-msb mode) _ensure-libkrunfw
+
+# Run snapshot/archive/group and checkpoint logic tests without starting VMs.
+test-snapshot:
+    cargo test -p microsandbox --lib snapshot::
+    cargo test -p microsandbox --test snapshot_artifact
+    cargo test -p microsandbox-runtime --lib checkpoint::
+    cargo test -p microsandbox-cli --lib commands::snapshot::tests
+    {{ if os_family() == "windows" { "python" } else { "python3" } }} -m unittest discover -s scripts/smoke/cli -p test_snapshot_branch.py
+
+# Run the compact live snapshot/branch smoke. Forward arguments without shell re-parsing.
+[unix]
+[script("python3")]
+[positional-arguments]
+test-snapshot-live *args:
+    import runpy
+    runpy.run_path("scripts/smoke/cli/snapshot-branch.py", run_name="__main__")
+
+# Run the same smoke with the native Windows Python launcher.
+[windows]
+[script("python")]
+[positional-arguments]
+test-snapshot-live *args:
+    import runpy
+    runpy.run_path("scripts/smoke/cli/snapshot-branch.py", run_name="__main__")
 
 # Install msb and libkrunfw to ~/.microsandbox/{bin,lib}/ and configure shell paths. Requires: just build.
 [linux]

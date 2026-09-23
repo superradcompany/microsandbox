@@ -5,7 +5,7 @@ description: Prepare LibreOffice once, then convert untrusted documents without 
 icon: "file-pdf"
 ---
 
-<Tooltip tip="This workflow prepares and restores a local disk snapshot, which is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="This workflow uses local snapshot verification and destination security/network controls."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 Document parsers process complex, attacker-controlled file formats. This example installs LibreOffice and Poppler once, snapshots the toolchain, and performs each conversion in a fresh worker with networking disabled.
 
@@ -85,13 +85,13 @@ msb run --name office-base --replace `
 Capture the prepared toolchain:
 
 ```sh
-msb snapshot create office-tools --from office-base --integrity --force
+msb snap create office-tools --sandbox office-base --integrity
 ```
 
 Verify the snapshot before using it:
 
 ```sh
-msb snapshot verify office-tools
+msb snap verify office-base:office-tools
 ```
 
 Bookworm currently downloads roughly 130 MB and adds about 440 MB to the guest for this toolchain; package updates can change those numbers. The snapshot lets later workers skip that installation.
@@ -100,25 +100,23 @@ Bookworm currently downloads roughly 130 MB and adds about 440 MB to the guest f
 
 <Step title="Start an offline worker">
 
+Restore boots an idle detached sandbox with the requested security, network, resource, and lifetime controls already applied. Use an unused destination name; remove a previous stopped worker explicitly before reusing its name. Workload commands run separately with `msb exec`.
+
 The example accepts a Word document named `input.docx`:
 
 <CodeGroup>
 ```sh macOS & Linux
-msb run -d --name document-worker --replace \
-  --from-snapshot office-tools \
+msb snap restore office-base:office-tools --name document-worker \
   --cpus 2 --memory 2G \
   --user converter --security restricted \
-  --no-net --max-duration 2m \
-  -- sh -lc 'exec sleep 2m'
+  --no-net --max-duration 2m
 ```
 
 ```powershell Windows
-msb run -d --name document-worker --replace `
-  --from-snapshot office-tools `
+msb snap restore office-base:office-tools --name document-worker `
   --cpus 2 --memory 2G `
   --user converter --security restricted `
-  --no-net --max-duration 2m `
-  -- sh -lc 'exec sleep 2m'
+  --no-net --max-duration 2m
 ```
 </CodeGroup>
 
@@ -154,7 +152,7 @@ msb exec --user converter --timeout 90s `
 ```
 </CodeGroup>
 
-The worker boots before the document is copied because rootfs patches cannot be combined with `--from-snapshot`. The root-owned input directory prevents the unprivileged converter from replacing the document, while its home directory and `/out` hold the only workload-writable state. The untrusted conversion command sets its own process, file-descriptor, and per-file limits.
+The worker boots before the document is copied because dedicated restore does not accept rootfs patches. The root-owned input directory prevents the unprivileged converter from replacing the document, while its home directory and `/out` hold the only workload-writable state. The untrusted conversion command sets its own process, file-descriptor, and per-file limits.
 
 </Step>
 
@@ -255,7 +253,7 @@ Remove-Item prepare-office.sh, convert-document.sh
 Remove the reusable toolchain snapshot:
 
 ```sh
-msb snapshot rm office-tools
+msb snap rm office-base:office-tools
 ```
 
 The checked `output.pdf` and `preview.png` remain in the artifact directory configured above.

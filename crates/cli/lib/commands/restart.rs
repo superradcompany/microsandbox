@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use clap::Args;
-use microsandbox::sandbox::{Sandbox, SandboxStatus};
+use microsandbox::sandbox::{DEFAULT_STOP_TIMEOUT, Sandbox, SandboxStatus};
 
 use crate::ui;
 
@@ -30,7 +30,7 @@ pub struct RestartArgs {
     #[arg(short, long)]
     pub force: bool,
 
-    /// Seconds to wait for graceful shutdown before force-killing.
+    /// Total graceful-completion budget in seconds; expiry fails without killing.
     #[arg(short = 't', long)]
     pub timeout: Option<u64>,
 
@@ -114,7 +114,9 @@ async fn stop_for_restart(
             .stop_with_timeout(Duration::from_secs(timeout_secs))
             .await
     } else {
-        handle.stop().await
+        // Restart retains its existing explicit budget even though standalone Stop
+        // now waits indefinitely. Expiry must not start a replacement or force-kill.
+        handle.stop_with_timeout(DEFAULT_STOP_TIMEOUT).await
     };
 
     match result {

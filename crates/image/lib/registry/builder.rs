@@ -4,8 +4,9 @@ use oci_client::{
 };
 use rustls_pki_types::{CertificateDer, pem::PemObject};
 
+use microsandbox_types::RegistryAuth;
+
 use crate::{
-    auth::RegistryAuth,
     cache::GlobalCache,
     error::{ImageError, ImageResult},
     platform::Platform,
@@ -44,7 +45,12 @@ impl RegistryBuilder {
 
     /// Set authentication credentials for the registry.
     pub fn auth(mut self, auth: RegistryAuth) -> Self {
-        self.auth = (&auth).into();
+        self.auth = match auth {
+            RegistryAuth::Anonymous => oci_client::secrets::RegistryAuth::Anonymous,
+            RegistryAuth::Basic { username, password } => {
+                oci_client::secrets::RegistryAuth::Basic(username, password)
+            }
+        };
         self
     }
 

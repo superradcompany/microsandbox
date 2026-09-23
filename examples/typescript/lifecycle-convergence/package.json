@@ -1,0 +1,12 @@
+{
+  "name": "lifecycle-convergence",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "tsx main.ts"
+  },
+  "devDependencies": {
+    "tsx": "^4"
+  }
+}

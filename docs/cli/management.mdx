@@ -1,0 +1,109 @@
+---
+title: CLI management
+sidebarTitle: "Management"
+description: Inspect the active backend, diagnose setup, and manage the CLI
+icon: "wrench"
+---
+
+Inspect your CLI setup and manage the local installation.
+
+## msb context
+
+Show the selected backend, API endpoint, and how it was selected. Credentials are not printed. Alias: `msb ctx`.
+
+```bash
+msb context
+msb context --format json
+```
+
+## msb install
+
+Install a sandbox as a system command. Creates an executable in `~/.microsandbox/bin/` that launches `msb run` with the specified image and options.
+
+```bash
+msb install ubuntu                   # Install as 'ubuntu' command
+msb install --name nodebox node      # Custom command name
+msb install --tmp alpine             # Fresh sandbox every invocation
+msb install -c 2 -m 1G python  # With resource limits
+msb install --list                   # List installed commands
+```
+
+| Flag | Description |
+|------|-------------|
+| `-n`, `--name` | Command name for the alias (defaults to image name) |
+| `-c`, `--cpus` | Number of virtual CPUs to allocate |
+| `-m`, `--memory` | Amount of memory (e.g. `512M`, `1G`) |
+| `-v`, `--volume` | Mount a host path or named volume (`SOURCE:DEST[:OPTIONS]`, e.g. `./src:/app:ro,noexec`) |
+| `--mount-dir` | Mount a host directory: `SOURCE:DEST[:OPTIONS]`. Supports `quota` and paired `uid`/`gid` |
+| `--mount-file` | Mount a host file: `SOURCE:DEST[:OPTIONS]`. Supports `quota` and paired `uid`/`gid` |
+| `--mount-disk` | Mount a disk image: `SOURCE:DEST[:OPTIONS]` |
+| `--mount-named` | Create or reuse a named volume: `NAME:DEST[:OPTIONS]`. See [kind, size, and quota options](/cli/volume-commands#using-volumes-with-sandboxes) |
+| `--security` | In-guest security profile (`default` or `restricted`) |
+| `-w`, `--workdir` | Working directory inside the sandbox |
+| `--shell` | Shell for interactive sessions |
+| `-e`, `--env` | Set an environment variable (`KEY=VALUE`) |
+| `-f`, `--force` | Overwrite an existing alias with the same name |
+| `--no-pull` | Don't pull the image before installing |
+| `--tmp` | Create a fresh sandbox on every invocation (no persistent state) |
+| `-l`, `--list` | List all installed sandbox commands |
+| `--conf` | Load an explicit sparse [sandbox configuration](/cli/configuration). Repeatable |
+| `--net-conf`, `--resource-conf`, `--runtime-conf`, `--fs-conf`, `--secret-conf`, `--script-conf` | Load an explicit [scoped config](/cli/configuration#scoped-config-files). Repeatable |
+
+## msb uninstall
+
+Remove an installed sandbox command.
+
+```bash
+msb uninstall nodebox
+msb uninstall ubuntu alpine   # Remove multiple
+```
+
+## msb self
+
+Diagnose, update, downgrade, or remove the CLI. `msb doctor`, `msb update` (alias: `upgrade`), and `msb downgrade` are also available at the top level.
+
+<Accordion title="Examples">
+
+```bash
+msb doctor                   # Alias for msb self doctor
+msb doctor --fix             # Try supported host setup fixes
+msb self doctor              # Check runtime files and supported host prerequisites
+msb self check               # Alias for doctor
+msb self update               # Update msb and libkrunfw to latest
+msb self update --force       # Re-download even if up to date
+msb self downgrade 0.6.0      # Downgrade to a supported older release
+msb self downgrade 0.6.0 -y   # Skip downgrade confirmations
+msb self uninstall            # Remove msb (with confirmation prompt)
+msb self uninstall --yes      # Skip confirmation
+```
+
+</Accordion>
+
+| Subcommand | Description |
+|------------|-------------|
+| `doctor` (alias: `check`) | Check runtime files, supported host virtualization prerequisites, and non-blocking host performance capabilities |
+| `update` (alias: `upgrade`) | Update msb and libkrunfw to the latest release and refresh command links |
+| `downgrade <version>` | Downgrade msb and compatible local state to a supported older release at or above 0.6.0, refusing unsafe downgrades before touching files or state |
+| `uninstall` | Remove msb, libkrunfw, and command links |
+
+`msb self update` always targets the latest release; it does not accept a version argument. Use `msb self downgrade <version>` to move to a supported older release.
+
+Only one downgrade can run per installation. A second command fails immediately; wait for the first to finish or cancel it before retrying.
+
+Downgrade checks compatibility and requires affected sandboxes to be stopped. Releases below 0.6.0 and irreversible state changes are rejected. Database rollback creates a retained backup unless `--no-backup` is set; affected image caches are cleared unless `--keep-cache` is set.
+
+| Flag | Subcommand | Description |
+|------|------------|-------------|
+| `--fix` | `doctor` | Try supported host setup fixes; on Windows this opens an elevated PowerShell prompt to enable Windows Hypervisor Platform without forcing an immediate reboot |
+| `-f`, `--force` | `update` | Re-download even if already on the latest version |
+| `-f`, `--force` | `downgrade` | Accepted for an explicit reinstall request; downgrade always reinstalls the target and this flag does not bypass safety checks |
+| `-y`, `--yes` | `downgrade` | Skip destructive-step confirmations |
+| `--keep-cache` | `downgrade` | Keep the image cache even when rollback metadata marks it affected |
+| `--no-backup` | `downgrade` | Skip the database backup before rolling back local state |
+| `-y`, `--yes` | `uninstall` | Skip confirmation prompt |
+
+Doctor reports supported virtualization and storage capabilities. Disabled interrupt acceleration is a performance warning, not a failed health check; doctor does not reload kernel modules.
+
+A temporary clone probe checks whether flat roots can use native copy-on-write. Probe files are removed afterward. See [Performance](/sandboxes/optimization) for details.
+
+See [Performance](/sandboxes/optimization) for interpreting these checks, choosing sandbox-level policies, and preparing the host storage and virtualization environment.

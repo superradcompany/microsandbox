@@ -5,9 +5,9 @@ description: Manage sandboxes from the terminal
 icon: "book"
 ---
 
-The `msb` CLI lets you create, manage, and interact with sandboxes from the terminal. It auto-detects TTY and interactivity, so no `-it` flags are needed. If your terminal is interactive, `msb` acts accordingly.
+Create and manage local or cloud sandboxes from your terminal. Interactive sessions are detected automatically; no `-it` flags are needed.
 
-The same CLI drives [microsandbox cloud](/cloud/overview) when an API key is set. A few commands are local-only or limited on cloud, including image-cache commands, `msb metrics`, bounded `msb logs`, `msb ssh serve`, and disk-sized volume creation. Individual pages flag these commands, and the [cloud compatibility section](/cloud/overview#compatibility) summarizes them.
+Set an API key to use [microsandbox cloud](/cloud/overview). Each reference page marks local-only commands and cloud limitations.
 
 ## Install
 
@@ -25,10 +25,10 @@ irm https://install.microsandbox.dev/windows | iex
 ```
 </CodeGroup>
 
-On Linux and macOS, the install script writes the runtime to `~/.microsandbox/` and creates command links in `~/.local/bin/`. It does not edit shell startup files. If `~/.local/bin` is not on your `PATH`, the installer prints the command to add it. On macOS, Homebrew provides the same CLI through the official tap. On Windows, use PowerShell; Windows support is currently in preview, and Windows 11 is the tested path.
+On Linux and macOS, the install script writes the runtime to `~/.microsandbox/` and creates command links in `~/.local/bin/`. It does not edit shell startup files. If `~/.local/bin` is not on your `PATH`, the installer prints the command to add it. On macOS, Homebrew provides the same CLI through the official tap. On Windows, use PowerShell. Windows support is currently in preview.
 
 <Note>
-  microsandbox requires glibc-based Linux with KVM enabled, macOS with Apple Silicon (M-series chip), or Windows 11 with Windows Hypervisor Platform enabled. Local sandboxes use hardware virtualization. See [Linux troubleshooting](/troubleshooting/linux), [macOS troubleshooting](/troubleshooting/macos), or [Windows troubleshooting](/troubleshooting/windows) for platform-specific notes.
+  Local sandboxes require Linux with glibc 2.28 or newer and KVM, an Apple Silicon Mac, or an x64 or ARM64 machine running Windows 10 or later with Windows Hypervisor Platform enabled. See [Linux troubleshooting](/troubleshooting/linux), [macOS troubleshooting](/troubleshooting/macos), or [Windows troubleshooting](/troubleshooting/windows) for setup help.
 </Note>
 
 Check your local setup with:
@@ -37,69 +37,58 @@ Check your local setup with:
 msb doctor
 ```
 
-## Quick reference
+## Command forms
+
+Use short commands for everyday work. These forms are equivalent:
 
 ```bash
-# Run a one-off command (ephemeral, auto-removed)
-msb run python -- python -c "print('Hello!')"
-
-# Interactive shell (auto-detects TTY)
-msb run alpine -- sh
-
-# Create a persistent sandbox
-msb run --name devbox ubuntu -- bash
-
-# Resume later
-msb start devbox
-
-# Execute in a running sandbox
-msb exec devbox -- sh -c "apt update && apt install -y cowsay && /usr/games/cowsay \"Hello from devbox\""
-
-# Manage
-msb ls                   # List all sandboxes
-msb ps                   # Running sandboxes only
-msb metrics              # Live CPU/memory/network stats
-msb inspect devbox       # Detailed info
-msb logs devbox          # Captured stdout/stderr (works on stopped sandboxes too)
-msb logs devbox -f       # Follow live
-msb stop devbox          # Graceful shutdown
-msb rm devbox            # Remove stopped sandbox
-
-# SSH
-msb ssh authorize --file ~/.ssh/id_ed25519.pub
-msb ssh devbox
-msb ssh devbox -- uname -a
-msb ssh serve devbox --host 127.0.0.1 --port 2222
-
-# Images
-msb pull python       # Pre-pull to cache
-msb images            # List cached images
-msb rmi python        # Remove a cached image
-
-# Volumes
-msb volume create data --size 10G
-msb volumes              # Also: msb vols
-msb volume rm data
-
-# Install as a system command
-msb install ubuntu       # Install as 'ubuntu' command
-msb uninstall ubuntu     # Remove installed command
-
-# Self-management
-msb doctor               # Alias for 'msb self doctor'
-msb doctor --fix         # Try supported host setup fixes
-msb self doctor          # Check runtime files and supported host prerequisites
-msb self update          # Update msb to latest
-msb self downgrade 0.6.0 # Downgrade to a supported older release
-msb self uninstall       # Remove msb
-
-# Shell completion
-msb completion zsh       # Print the zsh completion script
+msb run alpine -- echo hello
+msb sandbox run alpine -- echo hello
+msb sbx run alpine -- echo hello
 ```
 
-<Tip>
-  Unnamed sandboxes (no `--name` flag) are ephemeral. They're automatically removed when the command finishes. Named sandboxes persist and can be stopped, restarted, and inspected later. Names must be non-empty and no longer than 128 UTF-8 bytes.
-</Tip>
+Aliases such as `ls`, `rm`, `cp`, and `mod` also work inside `sandbox` and `sbx`.
+
+Saved-state operations are grouped under `msb snap`. The equivalent long form, `msb snapshot`, is also supported; this documentation uses `msb snap` consistently:
+
+```bash
+msb snap create ready --sandbox devbox --full
+msb snap restore devbox:ready --name worker
+msb snap ls --group devbox
+msb snap export devbox:ready --output ready.msb
+msb snap import ready.msb --group received
+```
+
+Omit `--full` to save disk state for a fresh boot. The group defaults to the source sandbox's name, so the first command creates `devbox:ready`. Full captures, live branches, groups, and archive operations are local-only. Use `msb branch devbox --names worker-a worker-b` to create children directly from the same live moment. See [Snapshots](/sandboxes/snapshots) for backend limits and resource bindings. Existing top-level `restore` and snapshot `save`/`load` commands remain supported.
+
+## Quick reference
+
+| Commands | Purpose |
+| --- | --- |
+| [`run`, `create`, `start`, `stop`, `restart`](/cli/sandbox-commands) | Manage sandbox lifecycles |
+| [`exec`, `copy`, `logs`](/cli/sandbox-commands#msb-exec) | Run commands and access files or output |
+| [`ls`, `ps`, `inspect`, `metrics`](/cli/sandbox-commands#msb-ls) | Inspect sandboxes |
+| [`modify`, `pause`, `resume`, `branch`, `rm`](/cli/sandbox-commands#msb-modify) | Change, branch, or remove sandboxes |
+| [`snap`](/cli/snapshot-commands) | Save and restore state |
+| [`ssh`](/cli/ssh-commands) | SSH sessions, keys, and listeners |
+| [`volume`, `volumes`](/cli/volume-commands) | Manage named storage |
+| [`pull`, `load`, `save`, `images`, `rmi`, `image`](/cli/image-commands) | Manage cached images |
+| [`registry`, `registries`](/cli/registry-commands) | Manage registry credentials |
+| [`context`](/cli/management#msb-context) | Show the active backend |
+| [`install`, `uninstall`](/cli/management#msb-install) | Turn sandboxes into shell commands |
+| [`doctor`, `update`, `downgrade`, `self`](/cli/management#msb-self) | Manage the CLI installation |
+| [`completion`](#shell-completion) | Generate shell completions |
+
+## Quick start
+
+```bash
+msb create python --name worker
+msb exec worker -- python -c "print('hello')"
+msb stop worker
+msb rm worker
+```
+
+`msb run` without `--name` creates an ephemeral sandbox, removed when its command finishes. Named sandboxes persist. Names must contain 1–128 UTF-8 bytes.
 
 ## Global options
 
@@ -152,7 +141,7 @@ msb completion powershell > (Join-Path $completions "msb.ps1")
 ```
 </CodeGroup>
 
-Then restart your shell.
+Restart your shell. Regenerate saved completions after upgrading.
 
 ## Command tree
 
@@ -168,6 +157,6 @@ You can scope it to a specific subcommand:
 msb image --tree    # Show only image commands
 msb volume --tree   # Show only volume commands
 msb run --tree      # Show all flags for run
+msb sandbox --tree  # Show the canonical sandbox command group
+msb sbx run --tree  # Show run flags through the group alias
 ```
-
-For detailed command reference, see [Sandbox commands](/cli/sandbox-commands), [SSH commands](/cli/ssh-commands), [Volume commands](/cli/volume-commands), and [Image commands](/cli/image-commands). For the SSH model and usage patterns, see [SSH](/sandboxes/ssh).

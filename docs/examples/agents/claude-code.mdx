@@ -1,0 +1,124 @@
+---
+title: Claude Code
+description: Run Anthropic's Claude Code against a project on your host
+icon: "/images/recipes/agents/claude-code.svg"
+---
+
+This example installs a pinned Claude Code release inside a Node.js microVM and opens it in a project mounted from your host. Claude Code can edit the checkout directly, while its installation, authentication, settings, and sessions stay on the sandbox's root disk.
+
+## Run Claude Code
+
+<Steps>
+<Step title="Start Claude Code">
+
+<Tooltip tip="Writable host-directory mounts are local-only. On microsandbox cloud, use the isolated-copy alternative and omit replace-on-create."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+Replace `./my-project` with the project directory you want Claude Code to work on:
+
+<CodeGroup>
+```sh macOS & Linux
+msb run -t --name claude-code-demo --replace \
+  --cpus 2 --memory 4G --root-disk 4G \
+  --mount-dir ./my-project:/workspace:rw \
+  --workdir /workspace \
+  node:24-bookworm-slim -- sh -lc '
+    apt-get update &&
+    apt-get install -y --no-install-recommends ca-certificates git &&
+    npm install -g @anthropic-ai/claude-code@2.1.235 &&
+    exec claude
+  '
+```
+
+```powershell Windows
+msb run -t --name claude-code-demo --replace `
+  --cpus 2 --memory 4G --root-disk 4G `
+  --mount-dir ./my-project:/workspace:rw `
+  --workdir /workspace `
+  node:24-bookworm-slim -- sh -lc '
+    apt-get update &&
+    apt-get install -y --no-install-recommends ca-certificates git &&
+    npm install -g @anthropic-ai/claude-code@2.1.235 &&
+    exec claude
+  '
+```
+</CodeGroup>
+
+Choose a terminal theme, then follow the sign-in prompts. If Claude Code cannot open a browser from the microVM, copy the displayed login URL and open it in a browser on your host.
+
+Anthropic recommends its standalone installer for normal host installations. This example uses the pinned npm package for a reproducible sandbox setup; the package installs the same platform-native Claude Code binary.
+
+<Tip>
+  For an isolated workspace, or when using microsandbox cloud, replace `--mount-dir ./my-project:/workspace:rw` with `--copy-dir ./my-project:/workspace`.
+</Tip>
+
+</Step>
+
+<Step title="Start another session">
+
+After leaving Claude Code, return to the same sandbox and workspace with:
+
+```sh
+msb exec -t claude-code-demo -- claude
+```
+
+The sandbox root disk retains Claude Code's authentication, configuration, and conversation state between sessions.
+
+</Step>
+
+<Step title="Verify the installation">
+
+Exit the TUI and run:
+
+```sh
+msb exec claude-code-demo -- claude --version
+```
+
+The pinned example prints `2.1.235 (Claude Code)`.
+
+</Step>
+
+<Step title="Review or export changes">
+
+With the default writable mount, changes are already in the host checkout. Review them inside the sandbox:
+
+```sh
+msb exec claude-code-demo -- sh -lc 'cd /workspace && git status --short && git diff --stat && git diff'
+```
+
+If you chose the isolated `--copy-dir` alternative, create a patch inside the sandbox:
+
+```sh
+msb exec claude-code-demo -- sh -lc 'cd /workspace && git add -N . && git diff --binary > /tmp/claude-code.patch'
+```
+
+Copy the patch to the host:
+
+```sh
+msb cp claude-code-demo:/tmp/claude-code.patch ./claude-code.patch
+```
+
+Check that it applies cleanly before applying it:
+
+```sh
+git apply --check ./claude-code.patch
+```
+
+</Step>
+
+<Step title="Clean up">
+
+Remove the sandbox:
+
+```sh
+msb rm -f claude-code-demo
+```
+
+Removing the sandbox also removes its Claude Code credentials, settings, and sessions. Changes made through the default workspace mount remain in the host checkout.
+
+</Step>
+</Steps>
+
+## Reference
+
+- [Claude Code setup](https://code.claude.com/docs/en/setup)
+- [Claude Code authentication](https://code.claude.com/docs/en/authentication)

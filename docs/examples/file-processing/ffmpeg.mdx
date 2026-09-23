@@ -5,7 +5,7 @@ description: Prepare FFmpeg once and process untrusted media in an offline worke
 icon: "film"
 ---
 
-<Tooltip tip="This workflow prepares and restores a local disk snapshot, which is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="This workflow uses local snapshot verification and destination security/network controls."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 Media parsers are a natural fit for disposable microVMs. This example snapshots a prepared FFmpeg toolchain, copies one input file into a networkless worker, and exports only the transcoded result.
 
@@ -87,36 +87,34 @@ msb run --name ffmpeg-base --replace `
 Capture the prepared toolchain:
 
 ```sh
-msb snapshot create ffmpeg-tools --from ffmpeg-base --integrity --force
+msb snap create ffmpeg-tools --sandbox ffmpeg-base --integrity
 ```
 
 Verify the snapshot before using it:
 
 ```sh
-msb snapshot verify ffmpeg-tools
+msb snap verify ffmpeg-base:ffmpeg-tools
 ```
 
 </Step>
 
 <Step title="Start an offline worker">
 
+Restore boots an idle detached sandbox with the requested security, network, resource, and lifetime controls already applied. Use an unused destination name; remove a previous stopped worker explicitly before reusing its name. Workload commands run separately with `msb exec`.
+
 <CodeGroup>
 ```sh macOS & Linux
-msb run -d --name ffmpeg-worker --replace \
-  --from-snapshot ffmpeg-tools \
+msb snap restore ffmpeg-base:ffmpeg-tools --name ffmpeg-worker \
   --cpus 2 --memory 2G \
   --user media --security restricted \
-  --no-net --max-duration 10m \
-  -- sh -lc 'exec sleep 10m'
+  --no-net --max-duration 10m
 ```
 
 ```powershell Windows
-msb run -d --name ffmpeg-worker --replace `
-  --from-snapshot ffmpeg-tools `
+msb snap restore ffmpeg-base:ffmpeg-tools --name ffmpeg-worker `
   --cpus 2 --memory 2G `
   --user media --security restricted `
-  --no-net --max-duration 10m `
-  -- sh -lc 'exec sleep 10m'
+  --no-net --max-duration 10m
 ```
 </CodeGroup>
 
@@ -152,7 +150,7 @@ msb exec --user media --timeout 9m `
 ```
 </CodeGroup>
 
-The worker boots before the input is copied because rootfs patches cannot be combined with `--from-snapshot`. The root-owned input directory prevents the unprivileged media process from replacing the copied file, while `/out` is the only workload-owned data directory. The untrusted transcode command sets its own process, file-descriptor, and per-file limits.
+The worker boots before the input is copied because dedicated restore does not accept rootfs patches. The root-owned input directory prevents the unprivileged media process from replacing the copied file, while `/out` is the only workload-owned data directory. The untrusted transcode command sets its own process, file-descriptor, and per-file limits.
 
 </Step>
 
@@ -248,7 +246,7 @@ Remove-Item prepare-ffmpeg.sh, transcode-video.sh
 Remove the reusable toolchain snapshot:
 
 ```sh
-msb snapshot rm ffmpeg-tools
+msb snap rm ffmpeg-base:ffmpeg-tools
 ```
 
 The checked output remains in the artifact directory configured above until you remove it.

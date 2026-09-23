@@ -1,16 +1,16 @@
 ---
-title: Configuration file
-description: Configure sandboxes created by the CLI with root or scoped YAML files
+title: Configuration
+description: Reference for root and scoped YAML files loaded by the CLI
 icon: "file-code"
 ---
 
-<Tooltip tip="Common image, resource, lifecycle, environment, policy, secret, script, and patch fields work everywhere. Host-integrated networking, local rootfs forms, snapshots, replace behavior, and several runtime fields are unavailable on microsandbox cloud.">
-  <span className="msb-badge-limited">
-    Limited on cloud <Icon icon="circle-info" size={11} />
-  </span>
-</Tooltip>
+Load reusable sandbox settings with `--conf`. See [configuration precedence](/operations/configuration#precedence) for global defaults.
 
-Sandbox configuration is a reusable, sparse definition for one sandbox. Load it with `msb run`, `msb create`, or `msb install`; explicit CLI arguments are applied on top. The file may have any name when passed with `--conf`.
+<Note>
+Common image, resource, lifecycle, environment, policy, secret, script, and patch fields work everywhere. Host-integrated networking, local rootfs forms, snapshots, replace behavior, and several runtime fields are unavailable on microsandbox cloud.
+</Note>
+
+Files may have any name and contain only the fields you need. Explicit CLI arguments override their values.
 
 ```yaml
 # sandbox.yaml
@@ -23,9 +23,15 @@ mounts:
 network:
   allow: ["api.openai.com"]
   ports: ["8000:8000"]
+secret_violation_action: block-and-log
 secrets:
   OPENAI_API_KEY:
     allow: ["api.openai.com"]
+    substitution:
+      headers: true
+      query: false
+      body: false
+    passthrough: ["telemetry.example.com"]
 scripts:
   start: "python app.py"
 ```
@@ -36,11 +42,11 @@ msb create --conf sandbox.yaml --name agent
 msb install --conf sandbox.yaml --name agent
 ```
 
-Sandbox configuration is never auto-discovered. Every root or scoped configuration file must be supplied explicitly with its corresponding flag.
+Files are never auto-discovered; pass each file explicitly.
 
 ## Sparse configuration
 
-Every config file may provide only the fields it owns. Required fields are checked after root config, scoped config, and command-line inputs are merged, so a positional image can complete a network-only file:
+Required fields are checked after merging files and CLI arguments. For example, supply the image separately from a network-only file:
 
 ```yaml
 # net-policy.yaml
@@ -60,17 +66,17 @@ If neither the files nor the arguments provide an image, the command fails befor
 
 ## Scoped config files
 
-Scoped flags accept the contents of one field or field group without its root wrapper. They are useful for focused policies that should fail on unrelated fields.
+Scoped files contain one group of settings without its wrapper key. Unrelated fields are rejected.
 
-| Flag                   | Accepted fields                                                                                  |
-| ---------------------- | ------------------------------------------------------------------------------------------------ |
-| `--conf PATH`          | Any sandbox configuration field                                                                  |
-| `--net-conf PATH`      | `policy`, `allow`, `deny`, `ports`, `dns`, `tls`, `trust_host_cas`, `max_connections`            |
-| `--resource-conf PATH` | `cpus`, `memory`, `max_duration`, `idle_timeout`, `rlimits`                                      |
-| `--runtime-conf PATH`  | `workdir`, `shell`, `user`, `hostname`, `security`, `entrypoint`, `cmd`, `env`, `labels`, `init` |
-| `--fs-conf PATH`       | `mounts`, `patch_files`, `patches`                                                               |
-| `--secret-conf PATH`   | A map of secret names to secret definitions                                                      |
-| `--script-conf PATH`   | A map of script names to shell snippets                                                          |
+| Flag | Accepted fields |
+| --- | --- |
+| `--conf PATH` | Any sandbox configuration field |
+| `--net-conf PATH` | `policy`, `allow`, `deny`, `ports`, `dns`, `tls`, `strict`, `trust_host_cas`, `max_tcp_connections`, `max_udp_connections` |
+| `--resource-conf PATH` | `cpus`, `memory`, `max_duration`, `idle_timeout`, `rlimits` |
+| `--runtime-conf PATH` | `workdir`, `shell`, `user`, `hostname`, `security`, `entrypoint`, `cmd`, `env`, `labels`, `init` |
+| `--fs-conf PATH` | `mounts`, `patch_files`, `patches` |
+| `--secret-conf PATH` | A map of secret names to secret definitions |
+| `--script-conf PATH` | A map of script names to shell snippets |
 
 For example, `--net-conf` expects this unwrapped document:
 
@@ -86,22 +92,21 @@ deny:
 msb run python --net-conf net-policy.yaml
 ```
 
-Passing `network: {...}` to `--net-conf` is an error; use `--conf` for a root-shaped document. Every root and scoped config flag is repeatable, and different config flag kinds may be interleaved freely.
+Passing `network: {...}` to `--net-conf` is an error; use `--conf` for a
+root-shaped document.
 
-## Precedence and merging
+## Combining files
 
-Configuration resolves from lower to higher precedence:
-
-1. Built-in and global `config.json` defaults
-2. Every `--conf` and scoped config occurrence, from left to right on the command line
-3. Explicit non-config CLI flags and positional arguments
-
-Higher-precedence scalars replace lower values. Maps merge by key, including nested `init`, `network.dns`, `network.tls`, and secret definitions. A list supplied by a higher-precedence config file replaces the lower list. Network policy is atomic: when a higher config source supplies any of `policy`, `allow`, or `deny`, those values replace the complete lower-layer policy while sibling network fields continue to merge. Repeating the same config flag works exactly like interleaving different config flags: each file overlays everything to its left.
+Root and scoped configuration flags are repeatable and may be interleaved. The
+CLI applies each file from left to right, then applies explicit flags and
+positional arguments. See [Precedence](/operations/configuration#precedence)
+and [Merge precedence](/operations/configuration#merge-precedence) for the
+complete resolution rules.
 
 `--net-conf` cannot be combined with `--net`, `--no-net`, `--net-rule`, or `--net-default*`. When network policy is loaded through a root `--conf` file instead, a policy CLI flag replaces it, while `--net-rule` remains additive and is evaluated before rules loaded from the file.
 
 ```bash
-# Files overlay left to right; the explicit CLI value wins over every file.
+# Files overlay left to right; --memory wins unless managed policy overrides it.
 msb run python \
   --conf base.yaml \
   --resource-conf standard.yaml \
@@ -112,38 +117,7 @@ msb run python \
 
 Relative host paths are resolved against the file that contains them. Paths inside a file listed by `patch_files` are resolved against that patch file.
 
-## Rust SDK patches
-
-`SandboxConfigPatch` is the typed sparse representation for per-sandbox configuration. Its nested patch types are generated from the canonical sandbox configuration, compose with right-hand-side precedence, and are applied by `SandboxBuilder::overlay` before later fluent builder calls:
-
-```rust
-use microsandbox::{
-    EnvVar, Sandbox, SandboxConfigPatch, SandboxResourcesPatch,
-};
-
-let resources_patch = SandboxResourcesPatch::new()
-  .max_memory_mib(1024)
-  .memory_mib(1024)
-  .max_cpus(2)
-  .cpus(2);
-
-let patch = SandboxConfigPatch::new()
-    .resources(resources_patch)
-    .env(vec![EnvVar::new("MODE", "production")]);
-
-let sandbox = Sandbox::builder("agent")
-    .image("python:3.12")
-    .overlay(patch)
-    .memory(2048) // Explicit builder calls are higher precedence.
-    .create()
-    .await?;
-```
-
-Every canonical nested struct has a corresponding generated patch type. Adding a field to the source struct adds it to the patch API and its overlay/apply implementations automatically. Patch types do not read YAML, resolve relative paths, expand `${ENV}`, or carry registry credentials and snapshot-selection state; those remain file-adapter or explicit builder responsibilities. `SandboxConfig` remains the complete durable configuration.
-
-Collection fields are atomic unless their canonical field declares a merge strategy. Environment variables merge by variable name, labels and scripts merge by map key, and secret entries merge by environment-variable name; higher values win when keys match. Their normal setters merge, while generated `replace_*` methods replace the complete collection. Calling `clear_*` removes that field from the patch, so applying the patch leaves the lower-layer value unchanged.
-
-The generated model replaces the earlier handwritten patch hierarchy. Use `SandboxResourcesPatch`, `SandboxRuntimeOptionsPatch`, `NetworkSpecPatch`, `SandboxPolicyPatch`, and `SecretsConfigPatch` in place of the former resource, runtime, network, network-policy, and secret patch types. Filesystem, script, image, and init changes are now expressed directly through `SandboxConfigPatch` and its canonical nested patches. The old `LocalConfig` name remains as a deprecated alias of `GlobalConfig`.
+Rust applications can apply the same sparse configuration model without loading YAML. See [`SandboxBuilder::overlay`](/sdk/rust/sandbox#sandbox-overlay) for the typed API, merge behavior, and migration from the earlier patch types.
 
 ## Schema
 
@@ -153,7 +127,7 @@ The common image form is a string. Local paths beginning with `.`, `..`, or `/` 
 
 ```yaml
 image: "python:3.12"
-pull_policy: missing # missing | always | never
+pull_policy: missing       # missing | always | never
 registry:
   username: "deploy"
   password_env: "REGISTRY_TOKEN"
@@ -191,7 +165,7 @@ workdir: "/app"
 shell: "/bin/bash"
 user: "app"
 hostname: "api"
-security: restricted # default | restricted
+security: restricted       # default | restricted
 entrypoint: ["/usr/bin/tini", "--"]
 cmd: ["python", "app.py"]
 env:
@@ -199,7 +173,7 @@ env:
 labels:
   team: "platform"
 init:
-  cmd: auto # auto or an absolute guest path
+  cmd: auto                # auto or an absolute guest path
   args: []
   env: {}
 ```
@@ -250,17 +224,10 @@ Patch files run first in listed order, followed by inline patches:
 patch_files:
   - "./patches/common.yaml"
 patches:
-  - copy_file:
-      {
-        src: "./config.toml",
-        dst: "/etc/app/config.toml",
-        mode: "0644",
-        replace: true,
-      }
+  - copy_file: { src: "./config.toml", dst: "/etc/app/config.toml", mode: "0644", replace: true }
   - copy_dir: { src: "./certs", dst: "/etc/app/certs" }
   - text: { path: "/etc/app/build.txt", content: "release", mode: "0644" }
-  - file:
-      { path: "/etc/app/blob.bin", content_base64: "SGVsbG8=", mode: "0600" }
+  - file: { path: "/etc/app/blob.bin", content_base64: "SGVsbG8=", mode: "0600" }
   - mkdir: { path: "/var/cache/app", mode: "0755" }
   - symlink: { target: "/etc/app/config.toml", link: "/etc/app/active.toml" }
   - append: { path: "/etc/hosts", content: "10.0.0.5 db.internal\n" }
@@ -274,7 +241,7 @@ A patch file has one top-level `patches` list using the same operations. File mo
 Use a preset string for the common cases:
 
 ```yaml
-network: public # none | public | open
+network: public             # none | public | open
 ```
 
 `public`, the default, permits public internet access while blocking private, loopback, link-local, and metadata destinations. `none` denies ingress and egress. `open` is unrestricted.
@@ -296,11 +263,12 @@ network:
     bypass: ["*.internal.example"]
     verify_upstream: true
     block_quic: true
+  strict: false
   trust_host_cas: false
-  max_connections: 256
+  max_tcp_connections: 256
 ```
 
-A non-empty `allow` list implies deny-by-default egress. Top-level `ports` is shorthand for `network.ports`; when both are present, the lists are combined and duplicate host ports are rejected.
+A non-empty `allow` list implies deny-by-default egress. `strict: true` requires hostname-based allow rules to use an inspectable request authority. Plain HTTP exposes that authority in `Host`; HTTPS only exposes it when TLS interception is enabled and not bypassed. Without that visibility, strict mode denies HTTPS that would otherwise be allowed only by a hostname rule. Top-level `ports` is shorthand for `network.ports`; when both are present, the lists are combined and duplicate host ports are rejected.
 
 ### Secrets
 
@@ -313,11 +281,16 @@ secrets:
   DATABASE_URL:
     value: "${DB_DSN}"
     allow: ["db.internal"]
-    inject: [headers]
+    substitution:
+      headers: false
+      query: false
+      body: true
+    passthrough: ["audit.internal"]
+    violation_action: block-and-terminate
     require_tls_identity: true
 ```
 
-`inject` accepts `headers`, `basic_auth`, and `query_params`; it defaults to `headers`. Declaring a secret enables TLS interception and DNS-rebind protection.
+`substitution` controls headers, query parameters, and request bodies independently; it defaults to headers only, and Basic authentication follows the header setting. Disabled locations still block the placeholder unless the destination appears in `passthrough`. `secret_violation_action` sets the sandbox-wide blocking action, while a per-secret `violation_action` overrides it. Declaring a secret enables TLS interception and DNS-rebind protection.
 
 ### Scripts
 
@@ -336,10 +309,16 @@ Run a script like any other guest command:
 msb run --conf sandbox.yaml -- migrate
 ```
 
-## Strict YAML and environment substitution
+## Validation
 
 Sandbox configuration is data, not a templating language. The loader rejects unknown fields, duplicate keys, multiple YAML documents, anchors, aliases, merge keys, and custom tags. Bare YAML 1.1 booleans such as `yes`, `no`, `on`, and `off` are rejected. Quote modes, sizes, durations, ports, domains, image references, and other typed strings.
 
 Only `${NAME}` environment substitution is supported. Substituted variables must exist when the config is loaded; an exact secret `value: "${NAME}"` is the exception because it records a host-side source that is resolved when the sandbox starts. Shell-style operators such as `${NAME:-fallback}`, includes, templates, loops, and expressions are not supported.
 
 Project envelope fields such as `sandboxes`, `volumes`, and `layers`, plus per-project fields such as `depends_on`, are rejected in single-sandbox configuration.
+
+### UDP session limit
+
+Set `max_udp_connections` in the network configuration, or pass `--max-udp-connections 512`. The default is unlimited in single-tenant mode and 1,024 relay sessions in multi-tenant mode; zero explicitly selects unlimited. At capacity, new sessions evict the least recently active session.
+
+`max_connections` and `--max-connections` remain deprecated TCP-only aliases for `max_tcp_connections` and `--max-tcp-connections`. Specifying both TCP names in one configuration or command is an error. The UDP limit is independent.

@@ -10,7 +10,8 @@ use std::path::{Path, PathBuf};
 
 use microsandbox_utils::copy::{FastCopyStrategy, fast_copy_with_strategy};
 
-use crate::config::{self, GlobalConfig};
+use crate::MicrosandboxResult;
+use crate::config::{GlobalConfig, layers::BackendConfig};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -222,7 +223,7 @@ pub fn diagnose() -> Diagnosis {
     let mut sections = Vec::new();
     let mut problems = Vec::new();
 
-    let (runtime, mut runtime_problems) = runtime_section();
+    let (runtime, mut runtime_problems) = runtime_section(BackendConfig::load());
     sections.push(runtime);
     problems.append(&mut runtime_problems);
 
@@ -234,16 +235,27 @@ pub fn diagnose() -> Diagnosis {
 }
 
 /// Build the "Runtime" section: install root and resolved runtime files.
-fn runtime_section() -> (Section, Vec<Problem>) {
-    let (config, config_error) = match config::load_persisted_config_or_default() {
-        Ok(config) => (config, None),
-        Err(error) => (GlobalConfig::default(), Some(error.to_string())),
+fn runtime_section(config: MicrosandboxResult<BackendConfig>) -> (Section, Vec<Problem>) {
+    let sources = match config
+        .and_then(|config| config.prepare_for_local_backend(Default::default()))
+    {
+        Ok(config) => config,
+        Err(error) => {
+            let unavailable = "unavailable because configuration could not be resolved".to_string();
+            return runtime_section_from_results(
+                None,
+                Some(error.to_string()),
+                Err(unavailable.clone()),
+                Err(unavailable),
+            );
+        }
     };
+    let config = sources.resolved_config();
     let base = config.home();
-    let msb = resolve_msb_runtime_file(&config);
-    let libkrunfw = resolve_libkrunfw_runtime_file(&config);
+    let msb = resolve_msb_runtime_file(config);
+    let libkrunfw = resolve_libkrunfw_runtime_file(config);
 
-    let (mut section, problems) = runtime_section_from_results(&base, config_error, msb, libkrunfw);
+    let (mut section, problems) = runtime_section_from_results(Some(&base), None, msb, libkrunfw);
 
     // `clone=auto` is only cheap when both artifacts live on a filesystem whose native clone
     // primitive succeeds. Probe the configured home itself so bind mounts and per-directory
@@ -256,15 +268,16 @@ fn runtime_section() -> (Section, Vec<Problem>) {
 }
 
 fn runtime_section_from_results(
-    base: &Path,
+    base: Option<&Path>,
     config_error: Option<String>,
     msb: Result<PathBuf, String>,
     libkrunfw: Result<PathBuf, String>,
 ) -> (Section, Vec<Problem>) {
-    let mut checks = vec![
-        Check::info("Version", &format!("v{PACKAGE_VERSION}")),
-        Check::info("MSB_HOME", &base.display().to_string()),
-    ];
+    let home = match base {
+        Some(base) => Check::info("MSB_HOME", &base.display().to_string()),
+        None => Check::fail("MSB_HOME", "unavailable"),
+    };
+    let mut checks = vec![Check::info("Version", &format!("v{PACKAGE_VERSION}")), home];
     if config_error.is_some() {
         checks.push(Check::fail("config", "invalid"));
     }
@@ -279,12 +292,11 @@ fn runtime_section_from_results(
             "microsandbox config could not be read",
             vec![
                 error,
-                "fix the config file or set MSB_CONFIG_PATH to a valid config".to_string(),
+                "fix the reported config file; managed.json must be corrected by its administrator"
+                    .to_string(),
             ],
         ));
-    }
-
-    if msb.is_err() || libkrunfw.is_err() {
+    } else if msb.is_err() || libkrunfw.is_err() {
         let mut hints = Vec::new();
         if let Err(error) = &msb {
             hints.push(format!("msb: {error}"));
@@ -367,9 +379,9 @@ fn concise_io_error(error: &io::Error) -> &'static str {
 }
 
 fn resolve_msb_runtime_file(config: &GlobalConfig) -> Result<PathBuf, String> {
-    let path = config
-        .resolve_msb_path()
-        .map_err(|error| error.to_string())?;
+    let path = super::resolve_runtime(config)
+        .map_err(|error| error.to_string())?
+        .msb_path;
     if path.is_file() {
         Ok(path)
     } else {
@@ -378,8 +390,8 @@ fn resolve_msb_runtime_file(config: &GlobalConfig) -> Result<PathBuf, String> {
 }
 
 fn resolve_libkrunfw_runtime_file(config: &GlobalConfig) -> Result<PathBuf, String> {
-    config
-        .resolve_libkrunfw_path()
+    super::resolve_runtime(config)
+        .map(|runtime| runtime.libkrunfw_path)
         .map_err(|error| error.to_string())
 }
 
@@ -427,6 +439,87 @@ mod tests {
     use super::*;
 
     #[test]
+    fn runtime_section_uses_managed_paths_and_reports_config_errors() {
+        let _env_guard = crate::test_support::lock_env();
+        let dir = tempfile::tempdir().unwrap();
+        let user = dir.path().join("config.json");
+        let managed = dir.path().join("managed.json");
+        let msb = dir.path().join("msb");
+        let libkrunfw = dir.path().join("libkrunfw");
+        std::fs::write(&msb, "").unwrap();
+        std::fs::write(&libkrunfw, "").unwrap();
+        let previous =
+            ["MSB_PATH", "MSB_LIBKRUNFW_PATH"].map(|name| (name, std::env::var_os(name)));
+        let _restore = scopeguard::guard(previous, |previous| {
+            for (name, value) in previous {
+                // SAFETY: the shared environment lock remains held during restoration.
+                unsafe {
+                    match value {
+                        Some(value) => std::env::set_var(name, value),
+                        None => std::env::remove_var(name),
+                    }
+                }
+            }
+        });
+        let user_config = serde_json::json!({
+            "home": dir.path(),
+            "paths": {"msb": "/user/msb", "libkrunfw": "/user/libkrunfw"}
+        });
+        std::fs::write(&user, user_config.to_string()).unwrap();
+        for with_managed in [false, true] {
+            let (env_msb, env_libkrunfw) = if with_managed {
+                (Path::new("/env/msb"), Path::new("/env/libkrunfw"))
+            } else {
+                (msb.as_path(), libkrunfw.as_path())
+            };
+            // SAFETY: environment-dependent SDK tests hold the shared lock.
+            unsafe {
+                std::env::set_var("MSB_PATH", env_msb);
+                std::env::set_var("MSB_LIBKRUNFW_PATH", env_libkrunfw);
+            }
+            if with_managed {
+                let policy = serde_json::json!({"overrides": {
+                    "paths": {"msb": msb, "libkrunfw": libkrunfw}
+                }});
+                std::fs::write(&managed, policy.to_string()).unwrap();
+            }
+            let (section, problems) =
+                runtime_section(BackendConfig::load_from(&user, Some(&managed)));
+            for (label, expected) in [("msb", &msb), ("libkrunfw", &libkrunfw)] {
+                let check = section
+                    .checks
+                    .iter()
+                    .find(|check| check.label == label)
+                    .unwrap();
+                assert_eq!(check.state, CheckState::Pass);
+                assert_eq!(check.value, expected.display().to_string());
+            }
+            assert!(problems.is_empty());
+        }
+        for invalid in [&managed, &user] {
+            std::fs::write(&user, user_config.to_string()).unwrap();
+            std::fs::write(&managed, "{}").unwrap();
+            std::fs::write(invalid, "invalid").unwrap();
+            let (section, problems) =
+                runtime_section(BackendConfig::load_from(&user, Some(&managed)));
+            assert!(!problems.is_empty());
+            assert!(
+                section
+                    .checks
+                    .iter()
+                    .any(|check| check.label == "config" && check.state == CheckState::Fail)
+            );
+            assert!(
+                section
+                    .checks
+                    .iter()
+                    .filter(|check| ["msb", "libkrunfw"].contains(&check.label.as_str()))
+                    .all(|check| check.state == CheckState::Fail)
+            );
+        }
+    }
+
+    #[test]
     fn root_clone_probe_cleans_up_its_temporary_files() {
         let base = tempfile::tempdir().unwrap();
 
@@ -446,7 +539,7 @@ mod tests {
         let libkrunfw = dir.join(microsandbox_utils::libkrunfw_filename("windows"));
 
         let (section, problems) = runtime_section_from_results(
-            Path::new("C:/Users/me/.microsandbox"),
+            Some(Path::new("C:/Users/me/.microsandbox")),
             None,
             Ok(msb.clone()),
             Ok(libkrunfw.clone()),
@@ -465,7 +558,7 @@ mod tests {
     #[test]
     fn runtime_section_reports_resolution_errors() {
         let (section, problems) = runtime_section_from_results(
-            Path::new("/home/me/.microsandbox"),
+            Some(Path::new("/home/me/.microsandbox")),
             None,
             Err("resolved path is not a file: /tmp/msb".to_string()),
             Err("searched: /tmp/libkrunfw.so.5.6.1".to_string()),
@@ -481,7 +574,7 @@ mod tests {
     #[test]
     fn runtime_section_reports_config_errors() {
         let (section, problems) = runtime_section_from_results(
-            Path::new("/home/me/.microsandbox"),
+            Some(Path::new("/home/me/.microsandbox")),
             Some("failed to parse config `/home/me/.microsandbox/config.json`".to_string()),
             Ok(PathBuf::from("/usr/bin/msb")),
             Ok(PathBuf::from("/usr/lib/libkrunfw.so.5.6.1")),

@@ -1,17 +1,17 @@
 ---
 title: OpenCode
-description: Run the OpenCode terminal agent against an isolated copy of a project
+description: Run the OpenCode terminal agent against a project on your host
 icon: "/images/recipes/agents/opencode.svg"
 ---
 
-This example installs OpenCode in a microVM and opens its terminal UI in an isolated workspace. Project files are copied into the sandbox rather than bind-mounted, so commands and edits cannot directly change the host checkout.
+This example installs OpenCode in a microVM and opens its terminal UI in a project mounted from your host. OpenCode edits the source checkout directly while its tools and dependencies stay inside the sandbox.
 
 ## Run OpenCode
 
 <Steps>
 <Step title="Start OpenCode">
 
-<Tooltip tip="On microsandbox cloud, create the named volumes first and omit replace-on-create from this command."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Writable host-directory mounts are local-only. On microsandbox cloud, use the isolated-copy alternative and omit replace-on-create."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 Replace `./my-project` with the project directory you want OpenCode to work on:
 
@@ -19,10 +19,8 @@ Replace `./my-project` with the project directory you want OpenCode to work on:
 ```sh macOS & Linux
 msb run -t --name opencode-demo --replace \
   --cpus 2 --memory 2G --root-disk 4G \
-  --copy-dir ./my-project:/workspace \
+  --mount-dir ./my-project:/workspace:rw \
   --workdir /workspace \
-  --mount-named opencode-config:/root/.config/opencode \
-  --mount-named opencode-data:/root/.local/share/opencode \
   node:24-bookworm-slim -- sh -lc '
     apt-get update &&
     apt-get install -y --no-install-recommends ca-certificates git &&
@@ -34,10 +32,8 @@ msb run -t --name opencode-demo --replace \
 ```powershell Windows
 msb run -t --name opencode-demo --replace `
   --cpus 2 --memory 2G --root-disk 4G `
-  --copy-dir ./my-project:/workspace `
+  --mount-dir ./my-project:/workspace:rw `
   --workdir /workspace `
-  --mount-named opencode-config:/root/.config/opencode `
-  --mount-named opencode-data:/root/.local/share/opencode `
   node:24-bookworm-slim -- sh -lc '
     apt-get update &&
     apt-get install -y --no-install-recommends ca-certificates git &&
@@ -47,10 +43,10 @@ msb run -t --name opencode-demo --replace `
 ```
 </CodeGroup>
 
-The first run downloads the package and may take a couple of minutes. OpenCode should render its prompt and offer `/connect` for provider setup. The two named volumes retain its normal XDG configuration and data directories if you recreate the sandbox.
+The first run downloads the package and may take a couple of minutes. OpenCode should render its prompt and offer `/connect` for provider setup. Its XDG configuration, provider connections, and session data live on the sandbox's 4 GiB root disk and remain available when the sandbox stops and starts.
 
 <Tip>
-  To try the TUI without a project, replace `--copy-dir ./my-project:/workspace` with `--mkdir /workspace`.
+  For an isolated workspace, or when using microsandbox cloud, replace `--mount-dir ./my-project:/workspace:rw` with `--copy-dir ./my-project:/workspace`. To try the TUI without a project, use `--mkdir /workspace` instead.
 </Tip>
 
 </Step>
@@ -77,15 +73,15 @@ The pinned example prints `1.18.4`.
 
 </Step>
 
-<Step title="Export changes">
+<Step title="Review or export changes">
 
-Review the diff inside the sandbox before copying anything back:
+With the default writable mount, changes are already in the host checkout. Review the diff from either side of the mount:
 
 ```sh
 msb exec opencode-demo -- sh -lc 'cd /workspace && git status --short && git diff --stat && git diff'
 ```
 
-For a Git repository, export a patch instead of replacing your host checkout:
+If you chose the isolated `--copy-dir` alternative, export a patch from the sandbox:
 
 ```sh
 msb exec opencode-demo -- sh -lc 'cd /workspace && git add -N . && git diff --binary > /tmp/opencode.patch'
@@ -113,13 +109,7 @@ Remove the sandbox:
 msb rm -f opencode-demo
 ```
 
-Remove persisted configuration and data only when you no longer need them:
-
-```sh
-msb volume rm opencode-config opencode-data
-```
-
-Keep the volumes if you want to retain provider connections, sessions, and OpenCode configuration. Never copy an agent's entire home directory back to the host.
+Removing the sandbox also removes its provider connections, sessions, and OpenCode configuration. Changes made through the default workspace mount remain in the host checkout. Never copy an agent's entire home directory back to the host.
 
 </Step>
 </Steps>

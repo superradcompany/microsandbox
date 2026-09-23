@@ -496,7 +496,7 @@ pub(crate) fn forget_one_locked(
 
                     #[cfg(target_os = "macos")]
                     {
-                        let ufd = data.unlinked_fd.load(Ordering::Acquire);
+                        let ufd = data.unlinked_fd.swap(-1, Ordering::AcqRel);
                         if ufd >= 0 {
                             unsafe { libc::close(ufd as i32) };
                         }
@@ -653,7 +653,7 @@ fn build_alias_components_locked(
 }
 
 #[cfg(target_os = "linux")]
-fn build_anchor_components_locked(
+pub(crate) fn build_anchor_components_locked(
     inodes: &MultikeyBTreeMap<u64, InodeAltKey, Arc<InodeData>>,
     inode: u64,
     seen: &mut HashSet<u64>,
@@ -685,7 +685,7 @@ fn validate_component(component: &[u8]) -> io::Result<()> {
 }
 
 #[cfg(target_os = "linux")]
-fn secure_open_path_linux(
+pub(crate) fn secure_open_path_linux(
     fs: &PassthroughFs,
     components: &[Vec<u8>],
     flags: i32,

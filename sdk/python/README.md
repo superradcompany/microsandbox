@@ -10,6 +10,8 @@ For the full API reference and longer guides, use the docs site:
 - [SDK overview](https://docs.microsandbox.dev/sdk/overview)
 - [Repository examples](../../examples/python)
 
+A complete runtime in the configured home (`MSB_HOME`, or `~/.microsandbox` by default) takes precedence over wheel binaries. Explicit binary paths still win. A partial home installation errors instead of falling back to the wheel. This also applies to the packaged CLI entry points.
+
 ## Features
 
 - Hardware VM isolation with a guest Linux kernel
@@ -62,6 +64,23 @@ asyncio.run(main())
 ```
 
 `async with` stops and removes the sandbox when the block exits. Use `Sandbox.create(...)` without a context manager when you want to control `stop()`, `kill()`, or `remove()` yourself.
+
+### Reusable Lifecycle Convergence
+
+Use `connect_or_create` when a stable name should converge on one persisted sandbox. Existing configuration wins; creation arguments are used only if creation is necessary. Handles retain a stable `id`, so lifecycle calls on stale receivers refuse to act on a replacement that reused the name.
+
+```python
+from microsandbox import SandboxStatus
+
+sandbox = await Sandbox.connect_or_create("worker", image="python", memory=1024)
+
+print(f"{await sandbox.name}: {await sandbox.id}")
+running = await (await Sandbox.get("worker")).connect_or_start()
+await running.request_stop()
+stopped = await running.wait_for_status(SandboxStatus.STOPPED)
+restarted = await stopped.restart()
+await restarted.destroy()
+```
 
 ## Common Examples
 
@@ -195,7 +214,7 @@ sandbox = await Sandbox.create(
         Secret.env(
             "OPENAI_API_KEY",
             value=os.environ["OPENAI_API_KEY"],
-            allow_hosts=["api.openai.com"],
+            allow=["api.openai.com"],
         ),
     ],
     replace=True,
@@ -304,10 +323,10 @@ except MicrosandboxError as exc:
 Installed wheels bundle the runtime files. The setup helpers are useful for source checkouts, shared runtime installs, and surfacing setup failures at process startup.
 
 ```python
-from microsandbox import install, is_installed
+from microsandbox import ensure_runtime
 
-if not is_installed():
-    await install()
+runtime = await ensure_runtime()
+print(runtime.msb_path, runtime.libkrunfw_path)
 ```
 
 ## More Documentation

@@ -1,13 +1,51 @@
 ---
 title: Sandbox
 description: Rust SDK - Sandbox API reference
+keywords: ["Rust SDK", "Rust sandbox", "microsandbox sandbox"]
 ---
 
 Create and control a microVM sandbox: boot it from an image, run commands, stream logs and metrics, then shut it down. See [Overview](/sandboxes/overview) for configuration examples and [Lifecycle](/sandboxes/lifecycle) for state management.
 
 For local runtime installation and verification, see [Runtime setup](/sdk/setup#install-and-verify).
 
+## Reuse and restart sandboxes
+
+```rust
+SandboxBuilder::connect_or_create(self) -> MicrosandboxResult<Sandbox>
+SandboxHandle::connect_or_start(&self) -> MicrosandboxResult<Sandbox>
+SandboxHandle::wait_for_status(&self, status: SandboxStatus) -> MicrosandboxResult<SandboxHandle>
+SandboxHandle::restart(&self) -> MicrosandboxResult<Sandbox>
+SandboxHandle::destroy(&self) -> MicrosandboxResult<()>
+Sandbox::id(&self) -> SandboxId
+SandboxHandle::id(&self) -> SandboxId
+```
+
+Use `connect_or_create` when a named sandbox might already exist. It connects to a running sandbox, starts a stopped or crashed sandbox, and creates one only when the name is unused. Builder options apply only to a new sandbox.
+
+Lifecycle methods on a `Sandbox` or `SandboxHandle` stay attached to its opaque `SandboxId`. If the name is removed and reused, an old receiver returns `MicrosandboxError::SandboxReplaced` instead of acting on the replacement. Custom backends provide the same behavior by implementing the `*_identified` methods on `SandboxBackend`. See [Reuse or create a named sandbox](/sandboxes/lifecycle#reuse-or-create-a-named-sandbox) for examples.
+
 ## Sandbox
+
+### External mount restore
+
+Full restore requires captured external filesystems and additional disks by default. Supply bindings or explicitly request validated source-local inheritance; `.allow_missing_resources()` instead accepts unavailable resources with warnings. `ExternalMountRestorePolicy::Strict` validates supplied objects; `.external_mount_policy(ExternalMountRestorePolicy::Relaxed)` accepts supported object mismatches without waiving required bindings. Direct branches retain their existing omission behavior. `sandbox.restore_warnings().await?` reports unavailable filesystems and accepted mismatches through `guest_path`, `reason`, and `stale_inodes`. See [Snapshot external mounts](/sandboxes/snapshots#external-mounts).
+
+### Creation and restore progress
+
+Use `create_with_progress()` for fresh creation and `restore_with_progress()` for snapshots. Progress covers image preparation, snapshot RAM backing preparation, and activation. Await the task for the result; ignoring or dropping progress does not cancel the operation.
+
+```rust
+let (mut progress, task) = Sandbox::restore("saved")
+    .name("child")
+    .forked()
+    .restore_with_progress()?;
+while let Some(event) = progress.recv().await {
+    eprintln!("{event:?}");
+}
+let sandbox = task.await??;
+```
+
+Local startup events distinguish waiting for backing, preparing it, reusing it, syncing, and activating. Byte totals cover required data slices, not reserved RAM. Lock waits and syncing have no percentage. Preparation has no fixed deadline; the activation timeout begins afterward. Abort the creation task to cancel, or wrap the operation in your own overall deadline. `create_detached_with_progress()` provides the same events for detached creation. Existing pull-only APIs remain available.
 
 #### <span className="msb-recv">Sandbox::</span><span className="msb-hn">builder()</span>
 
@@ -33,7 +71,7 @@ Create a builder for configuring a new sandbox. The builder lets you set the ima
 <div className="msb-params">
   <div className="msb-param">
     <div className="msb-param-key"><code>name</code><span className="msb-type">impl Into&lt;String&gt;</span></div>
-    <div className="msb-param-desc">Sandbox name - must be unique and no longer than 128 UTF-8 bytes.</div>
+    <div className="msb-param-desc">Sandbox name. Must be unique and no longer than 128 UTF-8 bytes.</div>
   </div>
 </div>
 
@@ -149,7 +187,7 @@ Sandbox::remove("api").await?;
 
 </Accordion>
 
-Delete a stopped sandbox by name. Locally, this removes the same state as [`sb.remove_persisted()`](#remove-persisted); see [Remove](/sandboxes/lifecycle#remove) for the exact deletion scope. Unlike `remove_persisted()`, this associated function routes through the default backend and also supports cloud sandboxes. Fails if the sandbox is still running—stop it first.
+Delete a stopped sandbox by name. Locally, this removes the same state as [`sb.remove_persisted()`](#sb-remove_persisted); see [Destroy or remove](/sandboxes/lifecycle#destroy-or-remove) for the exact deletion scope. Unlike `remove_persisted()`, this associated function routes through the default backend and also supports cloud sandboxes. Fails if the sandbox is still running. Stop it first.
 
 <p className="msb-label">Parameters</p>
 
@@ -220,7 +258,7 @@ Restart a stopped sandbox in detached mode. The sandbox survives after your proc
   </div>
 </div>
 
-<p className="msb-member-group">Instance methods</p>
+<p className="msb-member-group" id="instance-methods">Instance methods</p>
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">config()</span>
 
@@ -247,6 +285,14 @@ Access the sandbox's full configuration.
   </div>
 </div>
 
+#### <span className="msb-recv">sb.</span><span className="msb-hn">id()</span>
+
+```rust
+fn id(&self) -> SandboxId
+```
+
+Return the opaque stable identity of this persisted sandbox. The ID is backend-qualified, remains unchanged across stop and restart, and changes when the name is removed and recreated. Treat it as an equality and correlation token; do not parse it.
+
 #### <span className="msb-recv">sb.</span><span className="msb-hn">detach()</span>
 
 ```rust
@@ -261,7 +307,7 @@ sb.detach().await; // keeps running in the background
 
 </Accordion>
 
-Release the handle without stopping the sandbox. The sandbox continues running as a background process. Reconnect later with [`Sandbox::get()`](#sandboxget).
+Release the handle without stopping the sandbox. The sandbox continues running as a background process. Reconnect later with [`Sandbox::get()`](#sandbox-get).
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">drain()</span>
 
@@ -332,7 +378,7 @@ sb.kill().await?; // SIGKILL, no graceful shutdown
 
 </Accordion>
 
-Force-terminate the sandbox immediately with SIGKILL. No graceful shutdown - use when the sandbox is unresponsive. Waits up to five seconds for stopped-state observation after the kill request. Pending writes that the workload hasn't `fsync`'d may be lost, same durability semantics as a sudden power loss on a physical machine. Prefer [`stop()`](#sb-stop) for graceful shutdown that gives the workload a chance to flush.
+Force-terminate the sandbox immediately with SIGKILL. No graceful shutdown; use when the sandbox is unresponsive. Waits up to five seconds for stopped-state observation after the kill request. Pending writes that the workload hasn't `fsync`'d may be lost, same durability semantics as a sudden power loss on a physical machine. Prefer [`stop()`](#sb-stop) for graceful shutdown that gives the workload a chance to flush.
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">kill_with_timeout()</span>
 
@@ -576,9 +622,9 @@ for r in &plan.resize_status {
 
 </Accordion>
 
-Plan or apply a configuration change. Set what to change (CPUs, memory, env vars, labels, workdir, secrets), then call [`dry_run()`](#dry_run) to preview or [`apply()`](#apply) to commit; both return a [`SandboxModificationPlan`](#sandboxmodificationplan) labeling each change `live`, `next start`, `requires restart`, or `unsupported`. Apply is all-or-nothing.
+Plan or apply a configuration change. Set what to change (CPUs, memory, env vars, labels, workdir, secrets), then call [`dry_run()`](#modification-dry_run) to preview or [`apply()`](#modification-apply) to commit. Both return a [`SandboxModificationPlan`](#sandboxmodificationplan) labeling each change `live`, `next start`, `requires restart`, or `unsupported`. Apply is all-or-nothing.
 
-CPU and memory resize live within the [`max_cpus`](#max_cpus) / [`max_memory`](#max_memory) ceilings; raising a ceiling requires a restart. Env and workdir changes affect future execs only. On a stopped sandbox, changes are saved for the next boot.
+CPU and memory resize live within the [`max_cpus`](#modification-max_cpus) / [`max_memory`](#modification-max_memory) ceilings; raising a ceiling requires a restart. Env and workdir changes affect future execs only. On a stopped sandbox, changes are saved for the next boot.
 
 See [`SandboxModificationBuilder`](#sandboxmodificationbuilder) for all setters and [`msb modify`](/cli/sandbox-commands#msb-modify) for the CLI.
 
@@ -642,7 +688,7 @@ sb.remove_persisted().await?;
 
 </Accordion>
 
-Delete this stopped sandbox's persisted state. This receiver-based form is useful when you still hold the `Sandbox` instance; it has exactly the same deletion scope as [`Sandbox::remove(name)`](#remove). It does **not** perform additional cleanup. See [Remove](/sandboxes/lifecycle#remove) for what is deleted and which external resources are preserved.
+Delete this stopped sandbox's persisted state. This receiver-based form is useful when you still hold the `Sandbox` instance; it has exactly the same deletion scope as [`Sandbox::remove(name)`](#sandbox-remove). It does **not** perform additional cleanup. See [Destroy or remove](/sandboxes/lifecycle#destroy-or-remove) for what is deleted and which external resources are preserved.
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">request_stop()</span>
 
@@ -654,7 +700,7 @@ Request graceful shutdown and return once the request is sent, without waiting f
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">stop()</span>
 
-<Tooltip tip="Graceful stop works on microsandbox cloud; timeout expiry cannot escalate to force kill."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On Cloud, the timeout only limits how long the SDK waits; the accepted stop may continue server-side."><span className="msb-badge-limited">Different on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```rust
 async fn stop(&self) -> MicrosandboxResult<()>
@@ -668,17 +714,17 @@ sb.stop().await?;
 
 </Accordion>
 
-Gracefully shut down the sandbox. Lets the sandbox finish writing any pending data to disk before it exits, so files written inside the sandbox aren't lost across a later restart. Waits up to ten seconds for a clean exit; if the sandbox is still running after that, it is force-killed.
+Request graceful shutdown and wait indefinitely for the targeted run to become terminal and release runtime ownership. Success allows immediate removal without racing teardown. Cancelling the wait does not kill the sandbox or undo a delivered request. Paused or unreachable sandboxes return an error; resume explicitly or choose `kill()` when force termination is intended.
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">stop_with_timeout()</span>
 
-<Tooltip tip="Graceful stop works on microsandbox cloud; timeout expiry cannot escalate to force kill."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On Cloud, the timeout only limits how long the SDK waits; the accepted stop may continue server-side."><span className="msb-badge-limited">Different on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```rust
 async fn stop_with_timeout(&self, timeout: Duration) -> MicrosandboxResult<()>
 ```
 
-Gracefully shut down the sandbox with an explicit timeout before escalation. `Duration::ZERO` skips graceful shutdown and force-kills immediately.
+Apply one total budget to graceful dispatch and completion. Expiry returns `MicrosandboxError::StopTimeout` without killing; `Duration::ZERO` expires before dispatch. A shutdown request already sent may complete later. Only explicit `kill()` requests force termination.
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">stop_and_wait()</span>
 
@@ -697,7 +743,7 @@ println!("exited: {}", status.success());
 
 </Accordion>
 
-Stop the sandbox and wait for the exit status. This is a local-backend compatibility helper; prefer [`stop()`](#sb-stop) or [`stop_with_timeout()`](#sb-stop_with_timeout) when the caller only needs stopped-state observation.
+Stop the sandbox and wait for runtime completion. An owned child-process handle supplies its actual exit status. Detached or connected handles retain the existing synthetic success status; use [`stop()`](#sb-stop) or [`stop_with_timeout()`](#sb-stop_with_timeout) when you only need completion.
 
 <p className="msb-label">Returns</p>
 
@@ -743,11 +789,54 @@ async fn wait_until_stopped(&self) -> MicrosandboxResult<SandboxStopResult>
 
 Block until the sandbox is observed in a terminal non-running state. Owned local sandboxes can include process exit details; detached, name-addressed, and cloud-backed sandboxes report the observed backend state.
 
-**Returns**
+<p className="msb-label">Returns</p>
 
-| Type | Description |
-|------|-------------|
-| [`SandboxStopResult`](#sandboxstopresult) | Observed terminal sandbox state |
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#sandboxstopresult">SandboxStopResult</a></div>
+    <div className="msb-param-desc">Observed terminal sandbox state.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">wait_for_status()</span>
+
+```rust
+async fn wait_for_status(&self, status: SandboxStatus) -> MicrosandboxResult<SandboxHandle>
+```
+
+Wait until this exact persisted sandbox reaches `status`. The method intentionally has no built-in timeout; wrap the future with `tokio::time::timeout` or another cancellation primitive when a deadline is required. Returns `SandboxReplaced` rather than following a reused name.
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">restart()</span>
+
+```rust
+async fn restart(&self) -> MicrosandboxResult<Sandbox>
+```
+
+Gracefully stop and start this exact sandbox using the persisted configuration. A stopped, crashed, or newly created sandbox starts directly; a starting sandbox is observed until it settles. Returns an attached local handle or a service-owned cloud handle.
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">restart_with()</span>
+
+```rust
+async fn restart_with(&self, options: RestartOptions) -> MicrosandboxResult<Sandbox>
+```
+
+Restart with explicit lifecycle controls. `RestartOptions` defaults to graceful shutdown, a ten-second timeout, and attached local start. Set `force` to kill instead of draining, `timeout` to control how long shutdown can take, and `detached` to start a local background sandbox.
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">destroy()</span>
+
+```rust
+async fn destroy(&self) -> MicrosandboxResult<()>
+```
+
+Gracefully stop and remove this exact sandbox. Unlike [`remove_persisted()`](#sb-remove_persisted), `destroy` accepts a running sandbox, waits for it to shut down, and then deletes its persisted state.
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">destroy_with()</span>
+
+```rust
+async fn destroy_with(&self, options: DestroyOptions) -> MicrosandboxResult<()>
+```
+
+Destroy with explicit shutdown controls. `DestroyOptions` defaults to graceful shutdown with a ten-second timeout; set `force` to kill immediately or `timeout` to change how long shutdown can take. Identity checks prevent this receiver from deleting a same-name replacement.
 
 ## SandboxBuilder
 
@@ -778,7 +867,7 @@ Request a globally unique cloud slug. When omitted, microsandbox cloud assigns o
 async fn build(self) -> MicrosandboxResult<SandboxConfig>
 ```
 
-Materialize the [`SandboxConfig`](#sandboxconfig) without booting the sandbox. Validates the configuration and, if `from_snapshot` was called, opens the snapshot manifest to pin its image reference and upper-layer source. For booting, use [`create`](#create) instead; call [`detached(true)`](#detached) first for background mode. `create()` calls `build` internally.
+Materialize the [`SandboxConfig`](#sandboxconfig) without pulling an image or booting the sandbox. Validates fresh-boot configuration. Use `Sandbox::restore()` for snapshots. For booting, use [`create`](#sandbox-create) instead; call [`detached(true)`](#sandbox-detached) first for background mode. Local `create()` keeps patches until image metadata is available. Cloud `create()` layers settings before sending the request; the cloud worker resolves image metadata.
 
 <p className="msb-label">Returns</p>
 
@@ -788,6 +877,117 @@ Materialize the [`SandboxConfig`](#sandboxconfig) without booting the sandbox. V
     <div className="msb-param-desc">Validated, ready-to-boot configuration.</div>
   </div>
 </div>
+
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">overlay()</span>
+
+```rust
+fn overlay(self, patch: SandboxConfigPatch) -> Self
+```
+
+Apply sparse sandbox settings and create-time options after built-in and global defaults. Builder methods called after `overlay` take precedence over the patch; managed overrides are applied last.
+
+The builder uses the active backend's cached configuration when `build()` or `create()` runs. Local creation stacks image defaults, global defaults, CLI/SDK patches, then managed overrides in one resolver before validation. Omitted fields inherit lower layers; explicit nullable clears survive image defaults. Cloud creation also applies user and managed settings, then rejects unsupported options before sending the request.
+
+`build()` returns a concrete `SandboxConfig` without pulling image metadata. On local creation, `workdir: None` inherits global defaults, then image defaults if global workdir is omitted. A concrete config cannot distinguish omission from an explicit clear; use direct builder `create()` to preserve sparse clears through image resolution. Managed overrides apply last in both paths.
+
+`SandboxConfigPatch` patches the SDK configuration. Its `spec` field is a `SandboxSpecPatch` for shared settings such as image, resources, and networking. Create-time options, including registry credentials, replacement settings, and the requested slug, live alongside `spec`.
+
+<Accordion title="Example">
+
+```rust
+use microsandbox::{
+    EnvVar, Sandbox, SandboxConfigPatch, SandboxResourcesPatch, SandboxSpecPatch,
+};
+
+let resources = SandboxResourcesPatch::new()
+    .max_memory_mib(1024)
+    .memory_mib(1024)
+    .max_cpus(2)
+    .cpus(2);
+
+let patch = SandboxConfigPatch::new()
+    .spec(
+        SandboxSpecPatch::new()
+            .resources(resources)
+            .env(vec![EnvVar::new("MODE", "production")]),
+    )
+    .replace_existing(true);
+
+let sandbox = Sandbox::builder("agent")
+    .image("python:3.12")
+    .overlay(patch)
+    .memory(2048)
+    .create()
+    .await?;
+```
+
+</Accordion>
+
+Environment variables merge by variable name, while labels and scripts merge by map key. Secret entries merge by environment-variable name. Later values win when keys match. Use the generated `replace_*` methods to replace a complete collection; `clear_*` removes the field from the patch so the lower-precedence value remains unchanged.
+
+Patch fields preserve the visibility of their source configuration fields, so ordinary fields and nested patches can be updated directly:
+
+```rust
+let mut patch = SandboxConfigPatch::new();
+patch.spec.resources.cpus = Some(2);
+patch.spec.runtime.cmd = Some(vec!["python".into(), "app.py".into()]);
+patch.spec.runtime.workdir = Some(None); // Explicitly clear the working directory.
+patch.registry_auth = Some(None); // Explicitly clear per-create credentials.
+```
+
+For nullable fields, `None` omits the update, `Some(None)` clears the value, and `Some(Some(value))` sets it.
+
+Mergeable collections keep their merge/replacement state private and expose `get_<field>()` for borrowing their pending values. Ordinary fields have no generated getters. The collections’ `get_<field>_mut()` accessors edit pending values without cloning, initializing an absent collection empty in merge mode and preserving any existing replacement mode:
+
+```rust
+patch.spec.get_env_mut().push(EnvVar::new("REGION", "us-east"));
+patch.spec.get_labels_mut().insert("team".into(), "platform".into());
+```
+
+These accessors edit pending values without deduplicating them. Use `env_mut(...)` to merge entries by name immediately, or `replace_env_mut(...)` to replace the collection. Fluent setters, replacements, clears, and `overlay` remain available, along with their `_mut` variants returning `&mut Self`.
+
+Use fluent setters to construct patches and `if let` for optional inputs. Once all overlays are composed, `into_config()` applies the patch to the type's defaults:
+
+```rust
+use microsandbox::{SandboxConfigPatch, SandboxResourcesPatch, SandboxSpecPatch};
+
+let cpus = Some(4);
+let mut resources = SandboxResourcesPatch::new();
+if let Some(cpus) = cpus {
+    resources.cpus_mut(cpus);
+}
+let config = SandboxConfigPatch::new()
+    .spec(
+        SandboxSpecPatch::new()
+            .name("example".into())
+            .resources(resources),
+    )
+    .into_config();
+```
+
+`into_config()` does not load configuration files, consult a backend, or validate the result. Keep patches for `SandboxBuilder::overlay()` when creating a sandbox so backend and managed settings can still be layered. Use `apply_to(&mut config)` when updating an existing value.
+
+Both patches contain typed inputs. YAML loading, relative-path resolution, `${ENV}` expansion, and snapshot lookup remain CLI or builder responsibilities. Runtime metadata stays internal, and create-time credentials and flags retain their existing serialization exclusions.
+
+<Accordion title="Migrating from the earlier patch types">
+
+The shared patch previously named `SandboxConfigPatch` is now `SandboxSpecPatch`. To use it with the builder, wrap it with `SandboxConfigPatch::new().spec(spec_patch)`. Update direct field access such as `patch.resources` to `patch.spec.resources` when using the SDK patch. Existing configuration files and serialized sandbox specifications keep their shape.
+
+The generated patch model also replaces the handwritten patch hierarchy from microsandbox 0.6.15 and earlier:
+
+| Earlier type | Current type |
+| --- | --- |
+| `ResourceConfigPatch` | `SandboxResourcesPatch` |
+| `RuntimeConfigPatch` | `SandboxRuntimeOptionsPatch` |
+| `NetworkConfigPatch` | `NetworkSpecPatch` |
+| `NetworkPolicyConfigPatch` | `SandboxPolicyPatch` |
+| `SecretConfigPatch` | `SecretsConfigPatch` |
+
+Closure-based patch modifiers have been removed. Update Rust call sites to use direct field access or mutable collection accessors instead.
+
+Filesystem, script, image, and init values use `SandboxSpecPatch`, nested under `SandboxConfigPatch.spec` in the SDK. `LocalConfig` remains available as a deprecated alias of `GlobalConfig`.
+
+</Accordion>
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">cpus()</span>
 
@@ -842,6 +1042,18 @@ Boot the sandbox. Local handles use attached mode and stop the sandbox when the 
   </div>
 </div>
 
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">connect_or_create()</span>
+
+```rust
+async fn connect_or_create(self) -> MicrosandboxResult<Sandbox>
+```
+
+Reuse or create the sandbox with this name. The method connects when it is running, waits while it is starting, starts it when it is created, stopped, or crashed, and creates it only when the name is unused. Builder configuration applies only to a new sandbox. Concurrent callers reuse the same sandbox. Combining this method with [`replace()`](#sandbox-replace) returns `InvalidConfig`.
+
+<p className="msb-label">Returns</p>
+
+`MicrosandboxResult<`[`Sandbox`](#instance-methods)`>`
+
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">detached()</span>
 
 ```rust
@@ -890,7 +1102,7 @@ sb.detach().await;
 
 </Accordion>
 
-Boot the sandbox in detached mode. This is a compatibility helper for `.detached(true).create()`. Prefer [`detached(true)`](#detached) with [`create()`](#create) for new code so attached and detached creation use the same flow.
+Boot the sandbox in detached mode. This is a compatibility helper for `.detached(true).create()`. Prefer [`detached(true)`](#sandbox-detached) with [`create()`](#sandbox-create) for new code so attached and detached creation use the same flow.
 
 <p className="msb-label">Returns</p>
 
@@ -1017,9 +1229,9 @@ let sb = Sandbox::builder("worker")
 
 </Accordion>
 
-Hand off PID 1 inside the guest to `cmd` after agentd finishes its boot-time setup. The agent forks; the parent execs the init and becomes PID 1, the agent continues as a child process. See [Custom init system](/sandboxes/bootstrap#custom-init-system) for image picks, shutdown semantics, and tradeoffs.
+Hand off PID 1 inside the guest to `cmd` after agentd finishes its boot-time setup. The agent forks; the parent execs the init and becomes PID 1; the agent continues as a child process. See [Custom init system](/sandboxes/bootstrap#custom-init-system) for image picks, shutdown semantics, and tradeoffs.
 
-`cmd` is either an absolute path inside the guest rootfs or the literal `"auto"`. Auto first honors a known init at the start of the image ENTRYPOINT, such as `/init` in s6-overlay images, then falls back to probing `/sbin/init`, `/lib/systemd/systemd`, and `/usr/lib/systemd/systemd` inside the guest. When attached `msb run` uses an image-declared init entrypoint, the remaining ENTRYPOINT plus CMD or trailing command is passed to that init instead of direct-executed through agentd. For init binaries that take argv or extra env (rare), use [`init_with`](#init_with).
+`cmd` is either an absolute path inside the guest rootfs or the literal `"auto"`. Auto first honors a known init at the start of the image ENTRYPOINT, such as `/init` in s6-overlay images, then falls back to probing `/sbin/init`, `/lib/systemd/systemd`, and `/usr/lib/systemd/systemd` inside the guest. When attached `msb run` uses an image-declared init entrypoint, the remaining ENTRYPOINT plus CMD or trailing command is passed to that init instead of direct-executed through agentd. For init binaries that take argv or extra env (rare), use [`init_with`](#sandbox-init_with).
 
 <p className="msb-label">Parameters</p>
 
@@ -1054,7 +1266,7 @@ let sb = Sandbox::builder("worker")
 
 </Accordion>
 
-Like [`init`](#init), but with a closure-builder for argv and env vars. Mirrors `exec_with` in shape. The builder exposes `arg`, `args`, `env`, and `envs`. Calling `init` or `init_with` more than once overwrites, unlike `env`, which appends. The init is one-shot pre-boot.
+Like [`init`](#sandbox-init), but with a closure-builder for argv and env vars. Mirrors `exec_with` in shape. The builder exposes `arg`, `args`, `env`, and `envs`. Calling `init` or `init_with` more than once overwrites, unlike `env`, which appends. The init is one-shot pre-boot.
 
 <p className="msb-label">Parameters</p>
 
@@ -1102,14 +1314,14 @@ fn image_with(self, f: impl FnOnce(ImageBuilder) -> ImageBuilder) -> Self
 use microsandbox::size::SizeExt;
 
 let sb = Sandbox::builder("worker")
-    .image_with(|i| i.oci("python:3.12").upper_size(8.gib()))
+    .image_with(|i| i.oci("python:3.12").root_disk(8.gib()))
     .create()
     .await?;
 ```
 
 </Accordion>
 
-Configure an explicit rootfs source. Use this for OCI-only settings such as the writable overlay upper size, or for disk images when the filesystem type can't be auto-detected.
+Configure an explicit rootfs source. Use this for OCI-only settings such as the writable root disk, or for disk images when the filesystem type can't be auto-detected.
 
 <p className="msb-label">Parameters</p>
 
@@ -1143,7 +1355,7 @@ Override the sandbox process's log verbosity.
 fn max_duration(self, secs: u64) -> Self
 ```
 
-Set the maximum sandbox lifetime in seconds. When exceeded, the sandbox is drained and stopped. Enforced on the host side - the guest cannot override it.
+Set the maximum sandbox lifetime in seconds. When exceeded, the host drains and stops the sandbox. Enforced on the host side; the guest cannot override it.
 
 <p className="msb-label">Parameters</p>
 
@@ -1224,13 +1436,23 @@ Configure networking. See [Networking](/sdk/rust/networking) for the full builde
   </div>
 </div>
 
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">proxy()</span>
+
+```rust
+fn proxy<P>(self, configure: impl FnOnce(OutboundProxyBuilder) -> P) -> Self
+where
+    P: OutboundProxyConfig
+```
+
+Configure the single proxy used for outbound sandbox connections. See [Proxies](/sdk/rust/proxies) for the protocol builders and examples.
+
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">patch()</span>
 
 ```rust
 fn patch(self, f: impl FnOnce(PatchBuilder) -> PatchBuilder) -> Self
 ```
 
-Modify the rootfs before the VM boots. Patches go into the writable layer - the base image is untouched. See [`PatchBuilder`](#patchbuilder) for the operations.
+Modify the rootfs before the VM boots. Patches go into the writable layer; the base image is untouched. See [`PatchBuilder`](#patchbuilder) for the operations.
 
 <p className="msb-label">Parameters</p>
 
@@ -1448,7 +1670,7 @@ Add a secret with full configuration. See [Secrets](/sdk/rust/secrets) for the b
 fn secret_env(self, env_var: impl Into<String>, value: impl Into<String>, allowed_host: impl Into<String>) -> Self
 ```
 
-Shorthand for adding a header-injected secret. Equivalent to `.secret(|s| s.env(env_var).value(value).allow_host(allowed_host))`.
+Shorthand for adding a header-injected secret. Equivalent to `.secret(|s| s.env(env_var).value(value).allow(allowed_host))`.
 
 <Warning>
   **Plaintext at rest.** The value is persisted verbatim in the durable sandbox config until a later `modify` rotate migrates the entry to a source reference. Prefer `.secret(|s| s.source(..))` when the value can be referenced; use this path when you hold only a value. A future host-side secret store will switch this method to import-then-reference with no signature change.
@@ -1775,7 +1997,7 @@ Builder for planning or applying sandbox configuration changes.
 async fn apply(self) -> MicrosandboxResult<SandboxModificationPlan>
 ```
 
-Apply the changes. Live changes are made to the running sandbox first, and the new config is saved only after they succeed, so a failed apply leaves the old config in place. Changes for a stopped sandbox, or requested with [`next_start()`](#next_start), are saved and take effect on the next start. With [`restart()`](#restart), the sandbox is stopped and started so that restart-required changes take effect.
+Apply the changes. Live changes are made to the running sandbox first, and the new config is saved only after they succeed, so a failed apply leaves the old config in place. Changes for a stopped sandbox, or requested with [`next_start()`](#modification-next_start), are saved and take effect on the next start. With [`restart()`](#modification-restart), `apply()` stops and starts the sandbox so that restart-required changes take effect.
 
 A live CPU or memory resize can take a moment to settle. The returned plan's `resize_status` reports progress per resource; see [`ResourceResizeStatus`](#resourceresizestatus).
 
@@ -1882,7 +2104,7 @@ Set an environment variable for future execs. Can be called multiple times. On a
 fn remove_env(self, key: impl Into<String>) -> Self
 ```
 
-Remove an environment variable. Same future-execs-only semantics as [`env()`](#env-2).
+Remove an environment variable. Same future-execs-only semantics as [`env()`](#modification-env).
 
 <p className="msb-label">Parameters</p>
 
@@ -1954,7 +2176,7 @@ Set the desired effective guest memory. Applies live to a running sandbox when t
 fn memory_mib(self, memory_mib: u32) -> Self
 ```
 
-Set the desired effective guest memory in MiB. Same as [`memory()`](#memory-2) with an explicit unit.
+Set the desired effective guest memory in MiB. Same as [`memory()`](#modification-memory) with an explicit unit.
 
 <p className="msb-label">Parameters</p>
 
@@ -1992,7 +2214,7 @@ Set the desired boot-time maximum hotpluggable memory. Capacity is fixed at boot
 fn max_memory_mib(self, max_memory_mib: u32) -> Self
 ```
 
-Set the desired boot-time maximum hotpluggable memory in MiB. Same as [`max_memory()`](#max_memory-2) with an explicit unit.
+Set the desired boot-time maximum hotpluggable memory in MiB. Same as [`max_memory()`](#modification-max_memory) with an explicit unit.
 
 <p className="msb-label">Parameters</p>
 
@@ -2017,7 +2239,7 @@ Persist the requested changes for the next start, leaving any running VM unchang
 fn restart(self) -> Self
 ```
 
-Plan under restart-backed apply semantics. When the patch contains restart-required changes, [`apply()`](#apply) stops the sandbox, persists the config, and starts it again so the changes become active now.
+Plan under restart-backed apply semantics. When the patch contains restart-required changes, [`apply()`](#modification-apply) stops the sandbox, persists the config, and starts it again so the changes become active now.
 
 #### <span className="msb-recv">modification.</span><span className="msb-hn" id="sandboxmodificationbuilder-secret">secret()</span>
 
@@ -2034,14 +2256,14 @@ let plan = sb.modify()
     .secret(|s| s
         .env("API_KEY")
         .source(SecretSource::Env { var: "API_KEY".into() })
-        .allow_host("api.example.com"))
+        .allow("api.example.com"))
     .apply()
     .await?;
 ```
 
 </Accordion>
 
-Declare the desired state of one secret via a [`SecretPatchBuilder`](#secretpatchbuilder) closure. The spec mirrors the create-time [`SecretBuilder`](/sdk/rust/secrets#secretbuilder) vocabulary, and the planner diffs it against the existing config to infer the change: a secret that does not exist yet is `added`, material on an existing secret `rotated`, and host or placeholder differences update those aspects. Declaring the same secret again replaces the earlier spec; removal is always explicit through [`remove_secret()`](#remove_secret).
+Declare the desired state of one secret via a [`SecretPatchBuilder`](#secretpatchbuilder) closure. The spec mirrors the create-time [`SecretBuilder`](/sdk/rust/secrets#secretbuilder) vocabulary. The planner diffs it against the existing config to infer the change: a secret that does not exist yet is `added`, material on an existing secret `rotated`, and host or placeholder differences update those aspects. Declaring the same secret again replaces the earlier spec; removal is always explicit through [`remove_secret()`](#modification-remove_secret).
 
 <p className="msb-label">Parameters</p>
 
@@ -2089,9 +2311,9 @@ Set the working directory for future execs. On a running sandbox this applies to
 ## RegistryConfigBuilder
 
 
-<p className="msb-backref">Used by <a href="#registry">registry()</a></p>
+<p className="msb-backref">Used by <a href="#sandbox-registry">registry()</a></p>
 
-Builder passed to [`registry()`](#registry) for per-sandbox registry connection settings.
+Builder passed to [`registry()`](#sandbox-registry) for per-sandbox registry connection settings.
 
 
 #### <span className="msb-recv">registry.</span><span className="msb-hn">auth()</span>
@@ -2121,7 +2343,7 @@ Trust additional PEM-encoded CA certificates
 ## SandboxListBuilder
 
 
-Fluent configuration passed to [`Sandbox::list_with()`](#sandboxlist_with). Keep the labels and limit unchanged when continuing with a cursor.
+Fluent configuration passed to [`Sandbox::list_with()`](#sandbox-list_with). Keep the labels and limit unchanged when continuing with a cursor.
 
 
 #### <span className="msb-recv">list.</span><span className="msb-hn">limit()</span>
@@ -2159,7 +2381,7 @@ Add several AND-matched labels
 ## SandboxHandle
 
 
-<p className="msb-backref">Returned by <a href="#sandboxget">Sandbox::get()</a> · <a href="#sandboxlist">Sandbox::list()</a></p>
+<p className="msb-backref">Returned by <a href="#sandbox-get">Sandbox::get()</a> · <a href="#sandbox-list">Sandbox::list()</a></p>
 
 A sandbox metadata and lifecycle handle that does not require an active guest-agent connection.
 
@@ -2213,6 +2435,22 @@ Same as `connect()` with an explicit timeout
 <p className="msb-label">Returns</p>
 
 `Result<`[`Sandbox`](#instance-methods)`>`
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">connect_or_start()</span>
+
+```rust
+async fn connect_or_start(&self) -> MicrosandboxResult<Sandbox>
+```
+
+Connect to this exact sandbox when it is running, wait through `Starting`, or start it in attached mode when it is `Created`, `Stopped`, or `Crashed`. `Draining` and `Paused` are rejected. If another caller starts it at the same time, both callers connect to the same sandbox without following a same-name replacement.
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">connect_or_start_detached()</span>
+
+```rust
+async fn connect_or_start_detached(&self) -> MicrosandboxResult<Sandbox>
+```
+
+Behaves like [`connect_or_start()`](#h-connect_or_start), but starts a local stopped sandbox in detached/background mode. Connecting to an already-running sandbox never changes its ownership.
 
 #### <span className="msb-recv">h.</span><span className="msb-hn">created_at()</span>
 
@@ -2308,6 +2546,14 @@ Sandbox name, up to 128 UTF-8 bytes
 
 `&str`
 
+#### <span className="msb-recv">h.</span><span className="msb-hn">id()</span>
+
+```rust
+fn id(&self) -> SandboxId
+```
+
+Return the stable identity captured by this metadata handle. Receiver lifecycle calls stay bound to this ID and return `SandboxReplaced` if the reusable name now points to another sandbox.
+
 #### <span className="msb-recv">h.</span><span className="msb-hn">ping()</span>
 
 <Tooltip tip="Not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
@@ -2398,6 +2644,46 @@ Start in detached mode
 
 `Result<`[`Sandbox`](#instance-methods)`>`
 
+#### <span className="msb-recv">h.</span><span className="msb-hn">wait_for_status()</span>
+
+```rust
+async fn wait_for_status(&self, status: SandboxStatus) -> MicrosandboxResult<SandboxHandle>
+```
+
+Wait without a built-in timeout until this exact sandbox reaches `status`, returning a refreshed handle. Returns `SandboxReplaced` rather than rebinding to a same-name replacement.
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">restart()</span>
+
+```rust
+async fn restart(&self) -> MicrosandboxResult<Sandbox>
+```
+
+Gracefully restart this exact sandbox with default options.
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">restart_with()</span>
+
+```rust
+async fn restart_with(&self, options: RestartOptions) -> MicrosandboxResult<Sandbox>
+```
+
+Restart with explicit force, shutdown timeout, and detached-start controls. See [`sb.restart_with()`](#sb-restart_with) for state behavior and defaults.
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">destroy()</span>
+
+```rust
+async fn destroy(&self) -> MicrosandboxResult<()>
+```
+
+Gracefully stop and remove this exact sandbox. A stale handle cannot destroy a replacement that reused the name.
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">destroy_with()</span>
+
+```rust
+async fn destroy_with(&self, options: DestroyOptions) -> MicrosandboxResult<()>
+```
+
+Destroy with explicit force and shutdown-timeout controls. See [`sb.destroy_with()`](#sb-destroy_with) for defaults.
+
 #### <span className="msb-recv">h.</span><span className="msb-hn">status()</span>
 
 ```rust
@@ -2412,13 +2698,13 @@ Current status
 
 #### <span className="msb-recv">h.</span><span className="msb-hn">stop()</span>
 
-<Tooltip tip="Graceful stop works on microsandbox cloud; timeout expiry cannot escalate to force kill."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On Cloud, the timeout only limits how long the SDK waits; the accepted stop may continue server-side."><span className="msb-badge-limited">Different on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```rust
 stop()
 ```
 
-Gracefully shut down. Waits up to ten seconds for pending writes to flush, then force-kills
+Wait indefinitely for graceful completion and release of the same runtime's ownership. No implicit kill; cancellation stops only the wait.
 
 <p className="msb-label">Returns</p>
 
@@ -2426,13 +2712,13 @@ Gracefully shut down. Waits up to ten seconds for pending writes to flush, then 
 
 #### <span className="msb-recv">h.</span><span className="msb-hn">stop_with_timeout()</span>
 
-<Tooltip tip="Graceful stop works on microsandbox cloud; timeout expiry cannot escalate to force kill."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On Cloud, the timeout only limits how long the SDK waits; the accepted stop may continue server-side."><span className="msb-badge-limited">Different on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```rust
 stop_with_timeout(timeout)
 ```
 
-Same as `stop()` with an explicit timeout; `Duration::ZERO` force-kills immediately
+Same completion contract as `stop()` under one total budget. Expiry returns `MicrosandboxError::StopTimeout` without killing; `Duration::ZERO` expires before dispatch.
 
 <p className="msb-label">Returns</p>
 
@@ -2550,10 +2836,10 @@ Set the guest-visible placeholder. Placeholder changes cannot reach already-runn
   </div>
 </div>
 
-#### <span className="msb-recv">secret.</span><span className="msb-hn" id="secretpatchbuilder-allow_host">allow_host()</span>
+#### <span className="msb-recv">secret.</span><span className="msb-hn" id="secretpatchbuilder-allow">allow()</span>
 
 ```rust
-fn allow_host(self, host: impl Into<String>) -> Self
+fn allow(self, host: impl Into<String>) -> Self
 ```
 
 Add an allowed host pattern, such as `api.example.com`, `*.example.org`, or `*`. A non-empty list replaces the secret's current allow-list; an empty list leaves it unchanged. A new secret needs at least one.
@@ -2566,6 +2852,38 @@ Add an allowed host pattern, such as `api.example.com`, `*.example.org`, or `*`.
     <div className="msb-param-desc">Allowed exact host, wildcard host pattern, or <code>*</code>.</div>
   </div>
 </div>
+
+#### <span className="msb-recv">secret.</span><span className="msb-hn" id="secretpatchbuilder-substitution">substitution()</span>
+
+```rust
+fn substitution(self, value: SecretSubstitution) -> Self
+```
+
+Replace the enabled request locations for this secret. Omit this method to leave existing settings unchanged. At least one location must remain enabled. See [SecretSubstitution](/sdk/rust/secrets#secretsubstitution) for defaults and protocol limits.
+
+#### <span className="msb-recv">secret.</span><span className="msb-hn" id="secretpatchbuilder-allow_passthrough_for">allow_passthrough_for()</span>
+
+```rust
+fn allow_passthrough_for(self, host: impl Into<String>) -> Self
+```
+
+Add a destination allowed to receive the unchanged placeholder. This does not grant access to the real secret.
+
+#### <span className="msb-recv">secret.</span><span className="msb-hn" id="secretpatchbuilder-violation_action">violation_action()</span>
+
+```rust
+fn violation_action(self, value: SecretViolationAction) -> Self
+```
+
+Set the per-secret blocking action. See [SecretViolationAction](/sdk/rust/secrets#secretviolationaction).
+
+#### <span className="msb-recv">secret.</span><span className="msb-hn" id="secretpatchbuilder-require_tls_identity">require_tls_identity()</span>
+
+```rust
+fn require_tls_identity(self, value: bool) -> Self
+```
+
+Set whether substitution requires a verified TLS identity. Omit this method to retain the existing setting.
 
 ## Types
 
@@ -2584,7 +2902,7 @@ A single captured log entry returned by [`logs()`](#sb-logs).
 
 ### LogLevel
 
-<p className="msb-backref">Used by <a href="#log_level">log_level()</a></p>
+<p className="msb-backref">Used by <a href="#sandbox-log_level">log_level()</a></p>
 
 Sandbox process log verbosity.
 
@@ -2594,7 +2912,7 @@ Sandbox process log verbosity.
 | `Warn` | Warnings and errors only |
 | `Info` | Info and higher |
 | `Debug` | Debug and higher |
-| `Trace` | Most verbose - all diagnostic output |
+| `Trace` | Most verbose, all diagnostic output |
 
 ### LogOptions
 
@@ -2646,7 +2964,7 @@ Result of an explicit idle-timer refresh.
 
 ### PullPolicy
 
-<p className="msb-backref">Used by <a href="#pull_policy">pull_policy()</a></p>
+<p className="msb-backref">Used by <a href="#sandbox-pull_policy">pull_policy()</a></p>
 
 Controls when the SDK fetches an OCI image from the registry.
 
@@ -2658,7 +2976,7 @@ Controls when the SDK fetches an OCI image from the registry.
 
 ### RegistryAuth
 
-<p className="msb-backref">Used by <a href="#registry">registry()</a></p>
+<p className="msb-backref">Used by <a href="#sandbox-registry">registry()</a></p>
 
 Credentials for authenticating to a private container registry.
 
@@ -2668,7 +2986,7 @@ Credentials for authenticating to a private container registry.
 
 ### SandboxConfig
 
-<p className="msb-backref">Returned by <a href="#sb-config">config()</a> · <a href="#build">build()</a></p>
+<p className="msb-backref">Returned by <a href="#sb-config">config()</a> · <a href="#sandbox-build">build()</a></p>
 
 The full configuration of a sandbox. Obtained via [`config()`](#sb-config) or built via [`SandboxBuilder`](#sandboxbuilder). Contains all settings used to create the sandbox.
 
@@ -2691,7 +3009,7 @@ The full configuration of a sandbox. Obtained via [`config()`](#sb-config) or bu
 
 ### SandboxPage
 
-One stable, newest-first page returned by [`Sandbox::list()`](#sandboxlist) or [`Sandbox::list_with()`](#sandboxlist_with).
+One stable, newest-first page returned by [`Sandbox::list()`](#sandbox-list) or [`Sandbox::list_with()`](#sandbox-list_with).
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -2700,7 +3018,7 @@ One stable, newest-first page returned by [`Sandbox::list()`](#sandboxlist) or [
 
 ### SandboxModificationPlan
 
-<p className="msb-backref">Returned by <a href="#dry_run">dry_run()</a> · <a href="#apply">apply()</a></p>
+<p className="msb-backref">Returned by <a href="#modification-dry_run">dry_run()</a> · <a href="#modification-apply">apply()</a></p>
 
 Dry-run or apply plan for a sandbox modification. Values never appear in a plan: secret entries carry only guest-visible references.
 
@@ -2781,7 +3099,7 @@ When or whether a planned change can take effect. Serializes as the quoted strin
 |-------|-------------|
 | `Live` (`"live"`) | Applies to the running VM now |
 | `NextStart` (`"next start"`) | Persists to the desired config and applies the next time the sandbox starts |
-| `RequiresRestart` (`"requires restart"`) | Needs a restart before it can take effect; `apply()` refuses it unless the [`restart()`](#restart) policy is selected |
+| `RequiresRestart` (`"requires restart"`) | Needs a restart before it can take effect; `apply()` refuses it unless the [`restart()`](#modification-restart) policy is selected |
 | `Unsupported` (`"unsupported"`) | Cannot be changed by `modify` |
 
 ### ResourceResizeStatus
@@ -2846,7 +3164,10 @@ Point-in-time resource usage snapshot.
 
 | Value | Description |
 |-------|-------------|
-| `Crashed` | VM exited unexpectedly (kernel panic, OOM, etc.) |
-| `Draining` | Graceful shutdown in progress; existing commands finish, new ones rejected |
-| `Running` | Guest agent is ready; `exec`, `shell`, `fs` work |
+| `Created` | Persisted resource exists but has not started |
+| `Starting` | Runtime is booting and the guest agent is not ready yet |
+| `Running` | Guest agent is ready; `exec`, `shell`, and `fs` work |
+| `Draining` | Graceful shutdown in progress; existing commands finish and new ones are rejected |
+| `Paused` | VM is paused |
 | `Stopped` | VM shut down; configuration persisted; can be restarted |
+| `Crashed` | VM exited unexpectedly (kernel panic, OOM, etc.) |

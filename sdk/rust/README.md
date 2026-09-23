@@ -38,16 +38,26 @@ cargo add microsandbox
 
 | Feature | Default | Description |
 | --- | --- | --- |
+| `local` | yes | Local runtime, setup, image cache, snapshots, metrics, and filesystem-backed volume APIs |
+| `cloud` | yes | Cloud API backend and remote sandbox/volume operations |
 | `keyring` | yes | Registry credential lookup through the platform keyring |
-| `net` | yes | Networking, port publishing, policies, TLS interception, and secrets |
-| `prebuilt` | yes | Use prebuilt runtime artifacts where available |
+| `net` | yes | Network configuration, port publishing, policies, TLS interception, and secrets; the SDK uses the type/builder surface without compiling the host network engine |
+| `download-binaries` | yes | Install a matching official `msb` + `libkrunfw` pair during Cargo builds; implies `local` |
+| `embed-binaries` | no | Embed a compressed `msb` + `libkrunfw` archive for offline runtime installation; implies `local` |
 | `ssh` | no | SSH, SFTP, and interactive SSH helpers |
 
-To build without the networking stack while keeping the default keyring and prebuilt-runtime behavior:
-
 ```bash
-cargo add microsandbox --no-default-features --features keyring,prebuilt
+# Cloud only
+cargo add microsandbox --no-default-features --features cloud,net
+
+# Local, with automatic runtime installation at build time
+cargo add microsandbox --no-default-features --features local,net,download-binaries,keyring
+
+# Local, without downloading or embedding runtime binaries
+cargo add microsandbox --no-default-features --features local,net
 ```
+
+For the last option, install the runtime with the [CLI installer](https://docs.microsandbox.dev/getting-started/quickstart) or call `setup::ensure_runtime()` at startup. See [Runtime setup](https://docs.microsandbox.dev/sdk/setup) for details.
 
 ## Quick Start
 
@@ -72,6 +82,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
+```
+
+### Reusable Lifecycle Convergence
+
+Use `connect_or_create` when a stable name should converge on one persisted sandbox. Existing configuration wins; the builder is used only if creation is necessary. Handles retain a stable `id`, so lifecycle calls on stale receivers refuse to act on a replacement that reused the name.
+
+```rust
+let sandbox = Sandbox::builder("worker")
+    .image("python")
+    .memory(1024)
+    .connect_or_create()
+    .await?;
+
+println!("{}: {}", sandbox.name(), sandbox.id());
+let running = Sandbox::get("worker").await?.connect_or_start().await?;
+running.request_stop().await?;
+let stopped = running
+    .wait_for_status(microsandbox::sandbox::SandboxStatus::Stopped)
+    .await?;
+let restarted = stopped.restart().await?;
+restarted.destroy().await?;
 ```
 
 ## Common Examples

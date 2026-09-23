@@ -1,25 +1,24 @@
 ---
 title: Gemini CLI
-description: Run Google's Gemini CLI against a copied project in a microVM
+description: Run Google's Gemini CLI against a project on your host
 icon: "/images/recipes/agents/gemini-cli.svg"
 ---
 
-This example runs the official scoped Gemini CLI package inside a disposable Node.js microVM. The project is copied into the guest, while Gemini authentication and settings live in a named volume.
+This example runs the official scoped Gemini CLI package inside a disposable Node.js microVM. The project is mounted from your host, while Gemini authentication and settings live on the sandbox's root disk.
 
 ## Run Gemini CLI
 
 <Steps>
 <Step title="Start Gemini CLI">
 
-<Tooltip tip="On microsandbox cloud, create the named volume first and omit replace-on-create from this command."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Writable host-directory mounts are local-only. On microsandbox cloud, use the isolated-copy alternative and omit replace-on-create."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 <CodeGroup>
 ```sh macOS & Linux
 msb run -t --name gemini-demo --replace \
   --cpus 2 --memory 2G --root-disk 4G \
-  --copy-dir ./my-project:/workspace \
+  --mount-dir ./my-project:/workspace:rw \
   --workdir /workspace \
-  --mount-named gemini-data:/root/.gemini \
   node:24-bookworm-slim -- sh -lc '
     apt-get update &&
     apt-get install -y --no-install-recommends ca-certificates git &&
@@ -31,9 +30,8 @@ msb run -t --name gemini-demo --replace \
 ```powershell Windows
 msb run -t --name gemini-demo --replace `
   --cpus 2 --memory 2G --root-disk 4G `
-  --copy-dir ./my-project:/workspace `
+  --mount-dir ./my-project:/workspace:rw `
   --workdir /workspace `
-  --mount-named gemini-data:/root/.gemini `
   node:24-bookworm-slim -- sh -lc '
     apt-get update &&
     apt-get install -y --no-install-recommends ca-certificates git &&
@@ -43,7 +41,11 @@ msb run -t --name gemini-demo --replace `
 ```
 </CodeGroup>
 
-Gemini CLI first asks whether you trust the workspace. Review the copied files, then continue to authentication. The sandbox cannot directly modify the original host directory.
+Gemini CLI first asks whether you trust the workspace. Review the mounted project, then continue to authentication.
+
+<Tip>
+  For an isolated workspace, or when using microsandbox cloud, replace `--mount-dir ./my-project:/workspace:rw` with `--copy-dir ./my-project:/workspace`.
+</Tip>
 
 <Warning>
   Install the scoped package exactly as shown: `@google/gemini-cli`. Do not substitute similarly named unscoped packages.
@@ -73,9 +75,15 @@ The pinned example prints `0.52.0`.
 
 </Step>
 
-<Step title="Export changes">
+<Step title="Review or export changes">
 
-Create a patch inside the sandbox:
+With the default writable mount, changes are already in the host checkout. Review them inside the sandbox:
+
+```sh
+msb exec gemini-demo -- sh -lc 'cd /workspace && git status --short && git diff --stat && git diff'
+```
+
+If you chose the isolated `--copy-dir` alternative, create a patch inside the sandbox:
 
 ```sh
 msb exec gemini-demo -- sh -lc 'cd /workspace && git add -N . && git diff --binary > /tmp/gemini.patch'
@@ -103,11 +111,7 @@ Remove the sandbox:
 msb rm -f gemini-demo
 ```
 
-Remove persisted Gemini data only when you no longer need it:
-
-```sh
-msb volume rm gemini-data
-```
+Removing the sandbox also removes its Gemini authentication and settings. Changes made through the default workspace mount remain in the host checkout.
 
 </Step>
 </Steps>

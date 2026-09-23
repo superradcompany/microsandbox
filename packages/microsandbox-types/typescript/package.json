@@ -1,10 +1,19 @@
 {
   "name": "@microsandbox/types",
-  "version": "0.6.15",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/superradcompany/microsandbox.git",
+    "directory": "packages/microsandbox-types/typescript"
+  },
+  "version": "0.7.2",
   "type": "module",
   "main": "./dist/cloud.js",
   "types": "./dist/cloud.d.ts",
   "exports": {
+    "./size": {
+      "types": "./dist/size.d.ts",
+      "import": "./dist/size.js"
+    },
     ".": {
       "types": "./dist/cloud.d.ts",
       "import": "./dist/cloud.js"

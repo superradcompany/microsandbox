@@ -93,6 +93,13 @@ pub const REGISTRY_VERSION: u32 = 3;
 /// value so incompatible slot layouts never share the same POSIX shm object.
 pub const REGISTRY_ABI_VERSION: u32 = REGISTRY_VERSION;
 
+/// Registry ABI versions that the read-only metrics path can consume.
+///
+/// Writers always use [`REGISTRY_ABI_VERSION`]. Keeping the previous ABI
+/// readable lets a newly deployed collector continue observing sandboxes
+/// whose runtime processes predate the rollout.
+pub const READABLE_REGISTRY_ABI_VERSIONS: &[u32] = &[2, REGISTRY_ABI_VERSION];
+
 /// Default slot capacity used by the host process when global config does
 /// not override it. At 512 bytes per slot, 1024 slots = ~512 KiB plus the
 /// 256-byte header — enough headroom for the documented 20–560 sandbox

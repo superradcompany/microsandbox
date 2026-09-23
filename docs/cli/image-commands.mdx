@@ -9,7 +9,7 @@ icon: "layer-group"
 
 ## msb pull
 
-Pre-pull an image to the local cache. Layers are fetched in parallel with per-layer progress bars. Once cached, layers are content-addressable and deduplicated, so shared layers across images are only stored once.
+Download an image to the local cache. Shared layers are stored once.
 
 ```bash
 msb pull python
@@ -29,11 +29,12 @@ Expanded form: `msb image pull`.
 | `--ca-certs <PATH>` | Path to a PEM file with additional CA root certificates |
 | `--materialize <MODE>` | Explicitly prepare `layered`, `flat`, or `all` rootfs artifacts |
 
-`flat` creates a reusable, validated raw ext4 base with no guest OverlayFS in the final rootfs. Shared layers are downloaded and verified once, cached as EROFS by their uncompressed OCI `diff_id`, and reused across image manifests. Flat mode merges those EROFS inputs into ext4 without producing layered-only fsmeta or VMDK artifacts. `all` runs the shared layer stage once and prepares both representations.
+[Managed registry settings](/configuration#auth-resolution-order) take precedence over `--insecure`, `--ca-certs`, and supplied credentials. A managed TLS-only entry preserves normal credential lookup.
 
-When `--materialize` is omitted, `msb pull` follows `sandbox_defaults.oci.root_disk`: a flat default prepares the flat artifact, while the built-in managed default prepares the layered representation. An explicit flag always wins.
+`layered` prepares the standard root; `flat` prepares a complete ext4 base; `all` prepares both. See [flat roots](/cli/sandbox-commands#flat-oci-rootfs).
 
-Flat artifacts live under the configured cache directory. `flat/refs/<manifest>.json` records the requested manifest and verified result, `flat/blobs/<artifact>.raw` stores immutable content-addressed ext4 bytes, and `flat/locks/<derivation>.lock` coordinates concurrent materialization. A ref whose blob is missing or has the wrong logical size is treated as a cache miss.
+Without `--materialize`, the configured `sandbox_defaults.oci.root_disk` selects the layout. The built-in default is layered.
+
 
 <Tip>
   Pre-pulling is useful when you want sandbox creation to be instant. Without a pre-pull, the first `Sandbox.create` with a new image will block on the download.
@@ -75,7 +76,7 @@ Expanded form: `msb image save`.
 | `-o`, `--output <PATH>` | Write archive to a tar file instead of stdout |
 | `-q`, `--quiet` | Suppress output |
 
-`msb save` re-exports images from microsandbox's EROFS cache. The saved archive is semantically equivalent, but it is not a byte-for-byte copy of the originally pulled image. Manifest digest and layer digests can change because layer tar streams are regenerated.
+Exports preserve image contents, but regenerated layers can change image and layer digests.
 
 ## msb images
 
@@ -133,7 +134,7 @@ msb image prune --yes
 msb image prune --format json
 ```
 
-Prune never removes images used by existing sandboxes or indexed snapshots. It also cleans up image metadata, unreachable manifests, orphaned layers, layer EROFS artifacts, fsmeta EROFS artifacts, and VMDK descriptor artifacts. Use `msb rmi --force` when you want to remove a specific image even though it is still referenced by a sandbox.
+Images referenced by sandboxes or indexed snapshots are kept. To remove a specific referenced image, use `msb rmi --force`.
 
 | Flag | Description |
 |------|-------------|
@@ -143,36 +144,4 @@ Prune never removes images used by existing sandboxes or indexed snapshots. It a
 
 ## msb registry
 
-Manage registry authentication.
-
-```bash
-msb registry login ghcr.io --username octocat
-printf '%s\n' "$GHCR_TOKEN" | msb registry login ghcr.io --username octocat --password-stdin
-msb registry logout ghcr.io
-msb registries                 # Also: msb regs, msb registry ls
-```
-
-| Subcommand | Description |
-|------------|-------------|
-| `login` | Store credentials for a registry in the OS credential store |
-| `logout` | Remove stored credentials for a registry |
-| `list` (alias: `ls`) | List configured registries without printing secrets |
-
-**`msb registry login` flags:**
-
-| Flag | Description |
-|------|-------------|
-| `--username` | Registry username |
-| `--password-stdin` | Read password from stdin |
-
-`msb registry login` stores the secret in the OS credential store (for example Keychain, Credential Manager, or Secret Service) and writes only metadata to `~/.microsandbox/config.json`.
-
-For CI or other headless environments, configure `registries.hosts.<host>.auth` in `~/.microsandbox/config.json` with `password_env`. Advanced host setups can also use `secret_name` to point at a file-backed secret under `~/.microsandbox/secrets/registries/`.
-
-When pulling from a registry, microsandbox resolves auth in this order:
-
-1. Explicit SDK auth (`.registry(|r| r.auth(...))`)
-2. OS credential store
-3. `registries.hosts.<host>.auth` config
-4. Docker credential store/config
-5. Anonymous
+See [Registry commands](/cli/registry-commands) for login, logout, and stored credentials.
