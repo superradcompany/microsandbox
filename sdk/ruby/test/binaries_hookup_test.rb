@@ -28,13 +28,13 @@ class MicrosandboxBinariesHookupTest < Test::Unit::TestCase
     end
   end
 
-  def test_same_series_companion_sets_both_paths_and_leaves_env_alone
+  def test_same_series_companion_registers_packaged_msb_and_leaves_env_alone
     Dir.mktmpdir do |directory|
       calls = File.join(directory, "calls")
       write_native_stub(directory)
       # Patch-level difference on purpose: the same-minor rule accepts it, the
-      # hookup publishes both bundled paths in order, and it must not touch an
-      # explicit MSB_PATH while doing so.
+      # hookup registers only the packaged msb (never the explicit setters),
+      # and it must not touch an explicit MSB_PATH while doing so.
       write_companion_stub(directory, version: other_patch_version)
 
       stdout, stderr, status = run_ruby(
@@ -47,11 +47,11 @@ class MicrosandboxBinariesHookupTest < Test::Unit::TestCase
       assert_predicate status, :success?, stderr
       assert_equal "/explicit/msb\n", stdout
       assert_equal "", stderr
-      assert_equal "msb=/bundled/msb\nlibkrunfw=/bundled/libkrunfw.4.dylib\n", File.read(calls)
+      assert_equal "packaged_msb=/bundled/msb\n", File.read(calls)
     end
   end
 
-  def test_companion_paths_are_resolved_before_either_setter
+  def test_companion_payload_is_validated_before_registration
     Dir.mktmpdir do |directory|
       calls = File.join(directory, "calls")
       write_native_stub(directory)
@@ -158,8 +158,9 @@ class MicrosandboxBinariesHookupTest < Test::Unit::TestCase
     )
   end
 
-  # The setters always record: reaching one without MSB_HOOK_CALLS raises
-  # KeyError, which fails louder than a silently ignored path would.
+  # The packaged setter always records: reaching it without MSB_HOOK_CALLS
+  # raises KeyError, which fails louder than a silently ignored path would.
+  # The explicit setters must never be reached by the hookup.
   def write_native_stub(directory)
     abi = RUBY_VERSION[/\d+\.\d+/]
     path = File.join(directory, "lib", "microsandbox", abi, "microsandbox.rb")
@@ -173,8 +174,9 @@ class MicrosandboxBinariesHookupTest < Test::Unit::TestCase
           File.open(ENV.fetch("MSB_HOOK_CALLS"), "a") { |file| file.puts("#{name}=#{path}") }
         end
 
-        def self.set_runtime_msb_path(path) = record_runtime_path("msb", path)
-        def self.set_runtime_libkrunfw_path(path) = record_runtime_path("libkrunfw", path)
+        def self.set_packaged_msb_path(path) = record_runtime_path("packaged_msb", path)
+        def self.set_runtime_msb_path(_path) = raise("hookup reached the explicit msb setter")
+        def self.set_runtime_libkrunfw_path(_path) = raise("hookup reached the explicit libkrunfw setter")
       end
     RUBY
   end

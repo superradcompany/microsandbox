@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require "open3"
+require "rbconfig"
 require "securerandom"
 require "test/unit"
 
@@ -47,23 +49,27 @@ class MicrosandboxBinariesIntegrationTest < Test::Unit::TestCase
     assert_equal "binaries-gem-ok", output.stdout
     sandbox.stop
 
-    ENV["MSB_PATH"] = "/nonexistent/msb"
+    # The local backend snapshots its runtime configuration when it is first
+    # created, so the override is exercised in a fresh process.
+    override = sandbox_name("override")
     started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-    error = assert_raise(Microsandbox::Error) do
-      Microsandbox::Sandbox.create(
-        sandbox_name("override"),
-        image: IMAGE,
-        cpus: 1,
-        memory: 256,
-        replace: true
-      )
-    end
+    stdout, stderr, status = Open3.capture3(
+      { "MSB_PATH" => "/nonexistent/msb" },
+      RbConfig.ruby, "-I", File.expand_path("../lib", __dir__), "-e", <<~RUBY
+        require "microsandbox"
+        begin
+          Microsandbox::Sandbox.create(#{override.inspect}, image: #{IMAGE.inspect}, cpus: 1, memory: 256, replace: true)
+        rescue Microsandbox::Error => error
+          puts error.message
+          exit 3
+        end
+      RUBY
+    )
     elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started_at
 
-    assert_include error.message, "No such file or directory"
+    assert_equal 3, status.exitstatus, "explicit MSB_PATH should make create fail: #{stdout}#{stderr}"
+    assert_include stdout, "/nonexistent/msb"
     assert_operator elapsed, :<, 10.0, "explicit MSB_PATH should fail before runtime boot"
-  ensure
-    ENV.delete("MSB_PATH")
   end
 
   private

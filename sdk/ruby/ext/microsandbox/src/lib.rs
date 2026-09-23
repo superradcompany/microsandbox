@@ -1985,6 +1985,11 @@ fn set_runtime_libkrunfw_path(path: String) {
     microsandbox_core::config::set_sdk_libkrunfw_path(path);
 }
 
+/// Register the companion gem executable as a fallback after the runtime home.
+fn set_packaged_msb_path(path: String) {
+    microsandbox_core::config::set_sdk_packaged_msb_path(path);
+}
+
 fn default_backend_kind_str() -> String {
     match default_backend().kind() {
         BackendKind::Local => "local",
@@ -2593,6 +2598,7 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
         "set_runtime_libkrunfw_path",
         function!(set_runtime_libkrunfw_path, 1),
     )?;
+    module.define_module_function("set_packaged_msb_path", function!(set_packaged_msb_path, 1))?;
     module.define_module_function(
         "default_backend_kind",
         function!(default_backend_kind_str, 0),
