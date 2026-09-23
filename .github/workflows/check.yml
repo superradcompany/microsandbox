@@ -1120,11 +1120,9 @@ jobs:
   # missing from the published closure. Skipped with a notice while the pin
   # names a version crates.io does not carry yet (the version-bump PR ahead
   # of a core release); release.yml refreshes the lock once it is published.
-  # Compiling is deliberately not attempted: without the `prebuilt` feature,
-  # which the extension does not enable, the published core crates' build
-  # scripts require the workspace's build/agentd and cannot run from a
-  # registry checkout, so a registry compile fails for reasons unrelated to
-  # the lock.
+  # Compiling is deliberately not attempted: resolution is all the committed
+  # lock controls, and a registry compile of the core crate closure is a
+  # release-sized build that would tell this check nothing more about it.
   # ---------------------------------------------------------------------------
   ruby-standalone-pin:
     name: Ruby standalone crates.io pin

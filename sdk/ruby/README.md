@@ -61,7 +61,7 @@ To build a platform gem from a checkout, install every target Ruby, then run
 from `sdk/ruby`:
 
 ```sh
-rake version_check cargo:patch_workspace
+rake cargo:patch_workspace version_check
 rake gem:stage # Once per installed Ruby, 3.1 through 4.0
 GEM_PLATFORM=arm64-darwin rake gem:platform
 ```
@@ -75,7 +75,10 @@ single local Ruby; CI never sets it.
 resolve against the patched path. When you are done, run
 `rake cargo:unpatch_workspace` — it removes the gitignored patch config (which
 would otherwise keep later local builds silently resolving against the in-tree
-SDK) and restores the lockfile.
+SDK) and restores the lockfile. Patch first, as CI does: `version_check` then
+still asserts the gem, extension, and Rust SDK versions agree, but skips the
+crates.io lock check, which a release-bump checkout cannot pass until the new
+core crate is published.
 
 To use the local backend, install the microsandbox runtime and firmware once:
 
