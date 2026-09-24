@@ -93,14 +93,18 @@ def unpack_release(archive: Path, checksums: str, destination: Path) -> None:
     with tarfile.open(archive, "r:gz") as bundle:
         members = []
         for name in ("msb", firmware_name()):
-            matches = [member for member in bundle.getmembers() if member.name == name]
+            matches = [member for member in bundle.getmembers()
+                       if member.name == name or (
+                           name == firmware_name() and platform.system() == "Linux"
+                           and member.name.startswith("libkrunfw.so.5.")
+                           and "/" not in member.name)]
             if len(matches) != 1 or not matches[0].isfile():
                 raise SmokeError(f"expected one regular release file: {name}")
             members.append(matches[0])
         # Do not apply archive paths, links, ownership, or permissions. Validate
         # both members before writing either half of the runtime pair.
         for member in members:
-            target = destination / member.name
+            target = destination / ("msb" if member.name == "msb" else firmware_name())
             with bundle.extractfile(member) as source, target.open("wb") as output:
                 shutil.copyfileobj(source, output)
             target.chmod(0o700 if member.name == "msb" else 0o600)

@@ -3954,6 +3954,7 @@ dependencies = [
  "rpassword",
  "russh",
  "sea-orm",
+ "semver",
  "serde",
  "serde-saphyr",
  "serde_json",
@@ -3988,7 +3989,10 @@ name = "microsandbox-db"
 version = "0.7.2"
 dependencies = [
  "async-trait",
+ "microsandbox-types",
  "sea-orm",
+ "semver",
+ "serde_json",
  "sqlx",
  "tempfile",
  "tokio",
@@ -4105,6 +4109,8 @@ dependencies = [
 name = "microsandbox-migration"
 version = "0.7.2"
 dependencies = [
+ "microsandbox-db",
+ "microsandbox-types",
  "sea-orm-migration",
  "serde_json",
  "tokio",

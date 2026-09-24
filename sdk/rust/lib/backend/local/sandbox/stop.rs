@@ -7,7 +7,7 @@ use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder};
 
 use crate::db::entity::run;
 use crate::sandbox::SandboxStatus;
-use crate::{MicrosandboxError, MicrosandboxResult};
+use crate::{MicrosandboxError, MicrosandboxResult, SandboxConfig};
 
 use super::LocalBackend;
 
@@ -175,7 +175,7 @@ impl LocalBackend {
                 // requires the retained process object to exit; its unused lock proves nothing.
                 let _disk_guards = if let Some(model) = model.as_ref() {
                     let config: crate::sandbox::SandboxConfig =
-                        crate::db::config::decode(&model.config)?;
+                        serde_json::from_str::<SandboxConfig>(&model.config)?;
                     match crate::runtime::owned_volumes::try_acquire_disk_guards(
                         &self.sandboxes_dir().join(name),
                         &config.spec.mounts,

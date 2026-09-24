@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
+use crate::compat;
 use crate::domain::{
     HostPattern, SecretEntry, SecretSubstitution, SecretViolationAction, SecretsConfig,
 };
@@ -13,20 +14,24 @@ use crate::modify::SecretSource;
 //--------------------------------------------------------------------------------------------------
 
 /// Secret-substitution config for the cloud API. Twin of domain [`SecretsConfig`].
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct CloudSecretsConfig {
     /// Secrets to inject.
     #[serde(default)]
     pub entries: Vec<CloudSecretEntry>,
+    /// Default placeholder passthrough hosts, including for secrets added later.
+    /// A per-secret violation action overrides this default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub passthrough_hosts: Option<Vec<CloudHostPattern>>,
     /// Default action when a placeholder leaks to a disallowed host.
     #[serde(default)]
     pub violation_action: CloudViolationAction,
 }
 
 /// A single cloud secret entry. Twin of domain [`SecretEntry`].
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct CloudSecretEntry {
@@ -53,7 +58,8 @@ pub struct CloudSecretEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub violation_action: Option<CloudViolationAction>,
     /// Require verified TLS identity before substituting (default: true).
-    #[serde(default = "cloud_default_true")]
+    #[serde(default)]
+    #[cfg_attr(feature = "utoipa", schema(default = true))]
     pub require_tls_identity: bool,
 }
 
@@ -111,8 +117,20 @@ pub enum CloudViolationAction {
     BlockAndTerminate,
 }
 
-fn cloud_default_true() -> bool {
-    true
+//--------------------------------------------------------------------------------------------------
+// Trait Implementations
+//--------------------------------------------------------------------------------------------------
+
+impl<'de> Deserialize<'de> for CloudSecretsConfig {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        compat::cloud::deserialize_secrets_config(deserializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for CloudSecretEntry {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        compat::cloud::deserialize_secret_entry(deserializer)
+    }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -221,6 +239,9 @@ impl From<SecretsConfig> for CloudSecretsConfig {
     fn from(config: SecretsConfig) -> Self {
         Self {
             entries: config.secrets.into_iter().map(Into::into).collect(),
+            passthrough_hosts: config
+                .passthrough_hosts
+                .map(|hosts| hosts.into_iter().map(Into::into).collect()),
             violation_action: config.violation_action.into(),
         }
     }
@@ -230,6 +251,9 @@ impl From<CloudSecretsConfig> for SecretsConfig {
     fn from(config: CloudSecretsConfig) -> Self {
         Self {
             secrets: config.entries.into_iter().map(Into::into).collect(),
+            passthrough_hosts: config
+                .passthrough_hosts
+                .map(|hosts| hosts.into_iter().map(Into::into).collect()),
             violation_action: config.violation_action.into(),
         }
     }
