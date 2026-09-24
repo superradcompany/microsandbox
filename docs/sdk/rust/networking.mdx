@@ -1134,7 +1134,7 @@ Configure the runtime-to-guest direction.
 
 Builder for one direction's rate limiter, supplied to [`NetworkRateLimiterBuilder::egress()`](#egress) or [`ingress()`](#ingress). A limiter caps bandwidth (bytes) and packet rate (frames) independently; leaving a bucket unset leaves that dimension unlimited. Buckets start full plus their one-time burst and refill continuously. Every setter returns `Self`.
 
-Validation runs at `NetworkBuilder::build()`: a limiter with neither bucket, a zero bucket size or refill interval, a burst without its bucket, or a refill interval that does not fit in u64 milliseconds surfaces as [`BuildError`](#builderror).
+Validation runs at `NetworkBuilder::build()`. Each of these surfaces as [`BuildError`](#builderror): a limiter with neither bucket, a zero bucket size or refill interval, a burst without its bucket, or a refill interval that does not fit in u64 milliseconds.
 
 #### <span className="msb-recv">.</span><span className="msb-hn">bandwidth()</span>
 
