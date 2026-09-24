@@ -74,7 +74,7 @@ class MicrosandboxTest < Test::Unit::TestCase
   def test_create_accepts_proxy_keyword
     proxy = Microsandbox::OutboundProxy.socks5("not-an-address")
 
-    error = assert_raise(Microsandbox::Error) do
+    error = assert_raise(Microsandbox::NetworkPolicyError) do
       Microsandbox::Sandbox.create("ruby-test", proxy: proxy)
     end
 
@@ -83,13 +83,13 @@ class MicrosandboxTest < Test::Unit::TestCase
 
   def test_create_applies_protocol_specific_proxy_authentication
     socks4 = Microsandbox::OutboundProxy.socks4("127.0.0.1:1080").user_id("")
-    socks4_error = assert_raise(Microsandbox::Error) do
+    socks4_error = assert_raise(Microsandbox::NetworkPolicyError) do
       Microsandbox::Sandbox.create("ruby-test", proxy: socks4)
     end
 
     password = Microsandbox::SecretSource.env("SOCKS5_PASSWORD")
     socks5 = Microsandbox::OutboundProxy.socks5("127.0.0.1:1080").credentials("", password)
-    socks5_error = assert_raise(Microsandbox::Error) do
+    socks5_error = assert_raise(Microsandbox::NetworkPolicyError) do
       Microsandbox::Sandbox.create("ruby-test", proxy: socks5)
     end
 
