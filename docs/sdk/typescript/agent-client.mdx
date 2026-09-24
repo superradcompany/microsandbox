@@ -135,7 +135,7 @@ const path = AgentClient.socketPath("dev");
 
 </Accordion>
 
-Resolve a sandbox's `agentd` relay socket path **without connecting**. Returns the same path [`connectSandbox()`](#agentclient-connectsandbox) would dial, so you can talk to `agentd` over a raw byte transport (for example a transparent relay that splices bytes to and from the socket) instead of this frame client. The sandbox need not be running. Sandbox names are limited to 128 UTF-8 bytes.
+Resolve a sandbox's `agentd` relay socket path **without connecting**. Returns the same path [`connectSandbox()`](#agentclient-connectsandbox) would dial. Use it to talk to `agentd` over a raw byte transport instead of this frame client, for example a transparent relay that splices bytes to and from the socket. The sandbox need not be running. Sandbox names are limited to 128 UTF-8 bytes.
 
 <p className="msb-label">Parameters</p>
 
