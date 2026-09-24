@@ -2207,7 +2207,7 @@ m.WithInit(m.Init.Auto())
 
 </Accordion>
 
-Use a known init at the start of the image ENTRYPOINT when present, preserving attached init-entrypoint commands; otherwise delegate to agentd to probe common init paths (`/sbin/init`, `/lib/systemd/systemd`, ...) inside the guest.
+Use a known init at the start of the image ENTRYPOINT when present, preserving attached init-entrypoint commands. Otherwise, delegate to agentd to probe common init paths (`/sbin/init`, `/lib/systemd/systemd`, ...) inside the guest.
 
 <p className="msb-label">Returns</p>
 
