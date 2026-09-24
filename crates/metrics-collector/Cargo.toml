@@ -50,13 +50,13 @@ humantime = "2"
 
 # OTel exporter (backs the `msb-metrics otel` subcommand).
 opentelemetry = "0.33"
-opentelemetry-otlp = { version = "0.32", default-features = false, features = [
+opentelemetry-otlp = { version = "0.33", default-features = false, features = [
     "grpc-tonic",
     "gzip-tonic",
     "http-proto",
     "metrics",
     "reqwest-blocking-client",
-    "tls",
+    "tls-ring",
     "tls-webpki-roots",
 ] }
 opentelemetry_sdk = { version = "0.33", features = [
