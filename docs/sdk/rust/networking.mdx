@@ -8,28 +8,6 @@ Configure sandbox networking. See [Networking](/networking/overview) for usage a
 
 ## NetworkPolicy
 
-<p className="msb-backref">Built by <a href="#networkpolicybuilder">NetworkPolicy::builder()</a> · used by <a href="#network-policy">policy()</a></p>
-
-Ordered rules with per-direction defaults.
-
-#### <span className="msb-recv">NetworkPolicy::</span><span className="msb-hn">default_egress</span>
-
-[`Action`](#action)
-
-Action when no egress-applicable rule matches
-
-#### <span className="msb-recv">NetworkPolicy::</span><span className="msb-hn">default_ingress</span>
-
-[`Action`](#action)
-
-Action when no ingress-applicable rule matches
-
-#### <span className="msb-recv">NetworkPolicy::</span><span className="msb-hn">rules</span>
-
-`Vec<`[`Rule`](#rule)`>`
-
-Ordered rules; first match wins per direction
-
 #### <span className="msb-recv">NetworkPolicy::</span><span className="msb-hn">builder()</span>
 
 ```rust
@@ -49,7 +27,7 @@ let policy = NetworkPolicy::builder()
 
 </Accordion>
 
-Start the fluent [`NetworkPolicyBuilder`](#networkpolicybuilder). The primary construction path. String inputs (`.ip`, `.cidr`, `.domain`, `.domain_suffix`) are stored raw and parsed at [`build()`](#policy-build), so the chain stays clean and the first parse or validation failure surfaces as [`BuildError`](#builderror).
+Create a [`NetworkPolicyBuilder`](#networkpolicybuilder) to configure rules and per-direction defaults. The first matching rule wins in each direction. String inputs (`.ip`, `.cidr`, `.domain`, `.domain_suffix`) are validated by [`build()`](#policy-build), which returns a [`BuildError`](#builderror) for invalid input.
 
 <p className="msb-label">Returns</p>
 
@@ -247,7 +225,7 @@ Set both `default_egress` and `default_ingress` to [`Allow`](#action).
 fn default_egress(self, action: Action) -> Self
 ```
 
-Per-direction override for the egress default action.
+Set the action when no egress rule matches.
 
 <p className="msb-label">Parameters</p>
 
@@ -264,7 +242,7 @@ Per-direction override for the egress default action.
 fn default_ingress(self, action: Action) -> Self
 ```
 
-Per-direction override for the ingress default action.
+Set the action when no ingress rule matches.
 
 <p className="msb-label">Parameters</p>
 
@@ -1212,35 +1190,13 @@ Grant a one-time startup burst of extra frames on top of the ops bucket. Require
 
 A single policy rule. The `destination` interpretation is direction-dependent: egress destination, or ingress peer/source. `ports` is always the guest-side port (egress destination port / ingress listening port).
 
-#### <span className="msb-recv">Rule::</span><span className="msb-hn">direction</span>
-
-[`Direction`](#direction)
-
-Which evaluator considers this rule
-
-#### <span className="msb-recv">Rule::</span><span className="msb-hn">destination</span>
-
-[`Destination`](#destination)
-
-Target filter
-
-#### <span className="msb-recv">Rule::</span><span className="msb-hn">protocols</span>
-
-`Vec<`[`Protocol`](#protocol)`>`
-
-Set semantics; empty = any protocol
-
-#### <span className="msb-recv">Rule::</span><span className="msb-hn">ports</span>
-
-`Vec<`[`PortRange`](#portrange)`>`
-
-Set semantics; empty = any port
-
-#### <span className="msb-recv">Rule::</span><span className="msb-hn">action</span>
-
-[`Action`](#action)
-
-What to do on match
+| Field | Type | Description |
+|---|---|---|
+| <span id="ruledirection"></span>`direction` | [`Direction`](#direction) | Which evaluator considers this rule |
+| <span id="ruledestination"></span>`destination` | [`Destination`](#destination) | Target filter |
+| <span id="ruleprotocols"></span>`protocols` | [`Vec<Protocol>`](#protocol) | Set semantics; empty = any protocol |
+| <span id="ruleports"></span>`ports` | [`Vec<PortRange>`](#portrange) | Set semantics; empty = any port |
+| <span id="ruleaction"></span>`action` | [`Action`](#action) | What to do on match |
 
 Convenience constructors build any-protocol, any-port rules:
 
@@ -1316,18 +1272,10 @@ Deny plain DNS (UDP/53 + TCP/53) to the gateway forwarder; place before profile-
 
 An inclusive port range.
 
-#### <span className="msb-recv">PortRange::</span><span className="msb-hn">start</span>
-
-`u16`
-
-Start port (inclusive)
-
-#### <span className="msb-recv">PortRange::</span><span className="msb-hn">end</span>
-
-`u16`
-
-End port (inclusive)
-
+| Field | Type | Description |
+|---|---|---|
+| <span id="portrangestart"></span>`start` | `u16` | Start port (inclusive) |
+| <span id="portrangeend"></span>`end` | `u16` | End port (inclusive) |
 
 #### <span className="msb-recv">PortRange::</span><span className="msb-hn">single()</span>
 

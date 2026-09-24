@@ -498,23 +498,11 @@ The factories set the corresponding [`StdinMode`](#stdinmode) member.
 
 Frozen dataclass describing a POSIX resource limit. Construct one directly or via a factory, then pass a list as the `rlimits` argument.
 
-#### <span className="msb-recv">rlimit.</span><span className="msb-hn">resource</span>
-
-[`RlimitResource`](#rlimitresource)
-
-Which resource is limited
-
-#### <span className="msb-recv">rlimit.</span><span className="msb-hn">soft</span>
-
-`int`
-
-Soft limit
-
-#### <span className="msb-recv">rlimit.</span><span className="msb-hn">hard</span>
-
-`int`
-
-Hard limit
+| Field | Type | Description |
+|---|---|---|
+| <span id="rlimit-resource"></span>`resource` | [`RlimitResource`](#rlimitresource) | Which resource is limited |
+| <span id="rlimit-soft"></span>`soft` | `int` | Soft limit |
+| <span id="rlimit-hard"></span>`hard` | `int` | Hard limit |
 
 #### <span className="msb-recv">Rlimit.</span><span className="msb-hn">nofile()</span>
 

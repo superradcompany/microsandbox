@@ -4,23 +4,7 @@ description: TypeScript SDK - Sandbox API reference
 keywords: ["TypeScript SDK", "TypeScript sandbox", "microsandbox sandbox"]
 ---
 
-Create and control a microVM sandbox: boot it from an image, run commands, stream logs and metrics, then shut it down. See [Overview](/sandboxes/overview) for configuration examples and [Lifecycle](/sandboxes/lifecycle) for state management.
-
-## Reuse and restart sandboxes
-
-```typescript
-Sandbox.builder(name).connectOrCreate(): Promise<Sandbox>
-handle.connectOrStart(options?): Promise<Sandbox>
-handle.waitForStatus(status): Promise<SandboxHandle>
-handle.restart(options?): Promise<Sandbox>
-handle.destroy(options?): Promise<void>
-sandbox.id: string
-handle.id: string
-```
-
-Use `connectOrCreate` when a named sandbox might already exist. It connects to a running sandbox, starts a stopped or crashed sandbox, and creates one only when the name is unused. Builder options apply only to a new sandbox.
-
-Lifecycle methods on a `Sandbox` or `SandboxHandle` stay attached to its opaque `id`. If the name is removed and reused, an old receiver throws `SandboxReplacedError` instead of acting on the replacement. See [Reuse or create a named sandbox](/sandboxes/lifecycle#reuse-or-create-a-named-sandbox) for examples.
+Create and control microVM sandboxes. See [Overview](/sandboxes/overview) for configuration and [Lifecycle](/sandboxes/lifecycle) for state management.
 
 ## Functions
 
@@ -35,27 +19,6 @@ allSandboxMetrics(): Promise<Record<string, SandboxMetrics>>
 Return one [`SandboxMetrics`](#sandboxmetrics) snapshot for every running sandbox, keyed by sandbox name. See [Metrics](/sandboxes/metrics) for a complete example.
 
 ## Sandbox
-
-### External mount restore
-
-`Sandbox.restore()` leaves host resources unmapped unless explicitly supplied or inherited. `.externalMountPolicy("strict")` validates supplied filesystem bindings; `"relaxed"` accepts supported mismatches without granting access to omitted resources. Inspect `await sandbox.restoreWarnings()` for unmapped paths and accepted mismatches. Each warning has `guestPath`, `reason`, and `staleInodes: readonly bigint[]`. See [Snapshot external mounts](/sandboxes/snapshots#external-mounts).
-
-### Creation and restore progress
-
-Use `createWithProgress()` for fresh creation and `restoreWithProgress()` for snapshots. Ignoring events does not delay the operation; `awaitSandbox()` supplies the authoritative result.
-
-```typescript
-const creation = await Sandbox.restore("saved")
-  .name("child")
-  .forked()
-  .restoreWithProgress();
-for await (const event of creation) {
-  if (event.kind === "startup") console.log(event.phase, event.completedBytes, event.totalBytes);
-}
-const sandbox = await creation.awaitSandbox();
-```
-
-Startup phases report preparing, waiting for RAM backing, preparing RAM backing, reusing backing, syncing, and activating. Totals are absent for indeterminate work. Preparation does not consume the activation timeout. Call `creation.cancel()` to cancel creation, then await its result. `createWithPullProgress()` remains image-only.
 
 #### <span className="msb-recv">Sandbox.</span><span className="msb-hn">builder()</span>
 
@@ -2132,35 +2095,13 @@ Write UTF-8 text content at `path`.
 
 A class wrapping one captured log entry from `exec.log`. Bytes are exposed via `data`; use `text()` for a UTF-8-lossy decode.
 
-#### <span className="msb-recv">entry.</span><span className="msb-hn">timestamp</span>
-
-`Date`
-
-Wall-clock capture time on the host
-
-#### <span className="msb-recv">entry.</span><span className="msb-hn">source</span>
-
-[`LogSource`](#logsource)
-
-Where the chunk came from
-
-#### <span className="msb-recv">entry.</span><span className="msb-hn">sessionId</span>
-
-`number \| null`
-
-Relay-monotonic session id; `null` for `"system"` entries
-
-#### <span className="msb-recv">entry.</span><span className="msb-hn">data</span>
-
-`Uint8Array`
-
-The captured chunk's bytes (UTF-8 lossy decoded by default)
-
-#### <span className="msb-recv">entry.</span><span className="msb-hn">cursor</span>
-
-`string`
-
-Opaque resume token; pass to [`LogStreamOptions.fromCursor`](#logstreamoptions) to resume
+| Field | Type | Description |
+|---|---|---|
+| <span id="entry-timestamp"></span>`timestamp` | `Date` | Wall-clock capture time on the host |
+| <span id="entry-source"></span>`source` | [`LogSource`](#logsource) | Where the chunk came from |
+| <span id="entry-sessionid"></span>`sessionId` | `number \| null` | Relay-monotonic session id; `null` for `"system"` entries |
+| <span id="entry-data"></span>`data` | `Uint8Array` | The captured chunk's bytes (UTF-8 lossy decoded by default) |
+| <span id="entry-cursor"></span>`cursor` | `string` | Opaque resume token; pass to [`LogStreamOptions.fromCursor`](#logstreamoptions) to resume |
 
 #### <span className="msb-recv">entry.</span><span className="msb-hn">text()</span>
 
@@ -2342,41 +2283,14 @@ Add several AND-matched labels
 
 A metadata and lifecycle handle for an existing sandbox.
 
-#### <span className="msb-recv">handle.</span><span className="msb-hn">name</span>
-
-`string`
-
-Sandbox name, up to 128 UTF-8 bytes
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">id</span>
-
-`string`
-
-Opaque stable identity captured by this handle. Receiver lifecycle methods remain bound to this value and throw `SandboxReplacedError` if the reusable name now points to another sandbox.
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">status</span>
-
-[`SandboxStatus`](#sandboxstatus)
-
-Current status
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">configJson</span>
-
-`string`
-
-Raw JSON configuration
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">createdAt</span>
-
-`Date \| null`
-
-Creation timestamp
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">updatedAt</span>
-
-`Date \| null`
-
-Last update timestamp
+| Field | Type | Description |
+|---|---|---|
+| <span id="handle-name"></span>`name` | `string` | Sandbox name, up to 128 UTF-8 bytes |
+| <span id="handle-id"></span>`id` | `string` | Opaque stable identity captured by this handle. Receiver lifecycle methods remain bound to this value and throw `SandboxReplacedError` if the reusable name now points to another sandbox. |
+| <span id="handle-status"></span>`status` | [`SandboxStatus`](#sandboxstatus) | Current status |
+| <span id="handle-configjson"></span>`configJson` | `string` | Raw JSON configuration |
+| <span id="handle-createdat"></span>`createdAt` | `Date \| null` | Creation timestamp |
+| <span id="handle-updatedat"></span>`updatedAt` | `Date \| null` | Last update timestamp |
 
 #### <span className="msb-recv">handle.</span><span className="msb-hn">config()</span>
 

@@ -6,19 +6,6 @@ keywords: ["Rust SDK", "Rust volumes", "microsandbox volumes"]
 
 Create, manage, and mount named volumes. See [Volumes](/sandboxes/volumes) for usage examples.
 
-## Sandbox-owned mounts
-
-Local storage can belong directly to a sandbox, with no volume name or separate cleanup:
-
-```rust
-let sb = Sandbox::builder("worker").image("alpine")
-    .volume("/cache", |v| v.owned())
-    .volume("/data", |v| v.owned_with(|d| d.disk().size(1024_u32)))
-    .create().await?;
-```
-
-`.owned()` creates an empty directory. `.owned_with(...)` accepts `.directory().quota(...)` or `.disk().size(...)`; disks are raw ext4 and require a positive size. Common mount flags stay on `MountBuilder`. The backing survives stop/start, is captured by snapshots and branches, and is removed with the sandbox. Restore makes private copies automatically. Cloud rejects owned mounts.
-
 ## Volume
 
 #### <span className="msb-recv">Volume::</span><span className="msb-hn">get_default()</span>
@@ -31,11 +18,15 @@ async fn get_default() -> MicrosandboxResult<VolumeHandle>
 
 Get the Cloud account's always-present default volume. It has no user-assigned name, cannot be removed, and supports direct filesystem operations through `.fs()`. The local backend returns a typed `Unsupported` error; it never substitutes a directory from the caller's machine.
 
+<Accordion title="Example">
+
 ```rust
 let volume = Volume::get_default().await?;
 volume.fs().write("customers/acme.json", br#"{"active":true}"#).await?;
 println!("{}", volume.fs().read_to_string("customers/acme.json").await?);
 ```
+
+</Accordion>
 
 #### <span className="msb-recv">Volume::</span><span className="msb-hn">builder()</span>
 
