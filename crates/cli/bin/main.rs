@@ -8,7 +8,10 @@ use clap::{CommandFactory, Parser, Subcommand};
 use console::style;
 use microsandbox_cli::{
     commands::{
-        completion, context, image, install, pull, registry, sandbox, self_cmd, snapshot,
+        completion, context, image, install, pull, registry,
+        sandbox::{self, SandboxCommands},
+        self_cmd,
+        snapshot::{self, SnapshotCommands},
         uninstall, volume,
     },
     log_args::{self, LogArgs},
@@ -91,7 +94,7 @@ enum Commands {
 
     /// Convenient top-level forms of the sandbox commands.
     #[command(flatten)]
-    SandboxShortcut(sandbox::SandboxCommands),
+    SandboxShortcut(SandboxCommands),
 
     /// Print the schema baseline owned by this binary (internal).
     #[command(name = "__schema-baseline", hide = true)]
@@ -149,7 +152,7 @@ enum Commands {
     #[command(visible_alias = "vol")]
     Volume(volume::VolumeArgs),
 
-    /// Manage disk snapshots.
+    /// Capture, restore, and manage disk or full snapshots.
     #[command(visible_alias = "snap")]
     Snapshot(snapshot::SnapshotArgs),
 
@@ -202,6 +205,11 @@ impl Commands {
     fn into_canonical(self) -> Self {
         match self {
             Self::SandboxShortcut(command) => Self::Sandbox(sandbox::SandboxArgs { command }),
+            Self::Snapshot(snapshot::SnapshotArgs {
+                command: SnapshotCommands::Restore(args),
+            }) => Self::Sandbox(sandbox::SandboxArgs {
+                command: SandboxCommands::Restore(*args),
+            }),
             command => command,
         }
     }
@@ -687,7 +695,7 @@ fn run_async_command_anyhow(
             }
             Commands::Snapshots(args) => {
                 snapshot::run(snapshot::SnapshotArgs {
-                    command: snapshot::SnapshotCommands::List(args),
+                    command: SnapshotCommands::List(args),
                 })
                 .await
             }
@@ -859,6 +867,104 @@ mod command_tests {
         for command in ["registries", "regs"] {
             let cli = Cli::try_parse_from(["msb", command]).unwrap();
             assert!(matches!(cli.command, Commands::Registries(_)));
+        }
+    }
+
+    #[test]
+    fn snapshot_restore_aliases_share_sandbox_routing_and_controls() {
+        let flags = ["app:ready", "--name", "worker", "--forked", "--disk-only"];
+        let mut expected = None;
+        for prefix in [
+            vec!["restore"],
+            vec!["sandbox", "restore"],
+            vec!["sbx", "restore"],
+            vec!["snapshot", "restore"],
+            vec!["snap", "restore"],
+        ] {
+            let cli = Cli::try_parse_from(
+                ["msb", "--debug"]
+                    .into_iter()
+                    .chain(prefix.iter().copied())
+                    .chain(flags[..4].iter().copied()),
+            )
+            .unwrap();
+            assert_eq!(
+                cli.logs.selected_level(),
+                Some(microsandbox::LogLevel::Debug)
+            );
+            let command = cli.command.into_canonical();
+            assert!(requires_current_catalog(&command));
+            assert!(!is_backend_independent_maintenance_command(&command));
+            let Commands::Sandbox(sandbox::SandboxArgs {
+                command: sandbox::SandboxCommands::Restore(args),
+            }) = command
+            else {
+                panic!("expected canonical sandbox restore");
+            };
+            let parsed = format!("{args:?}");
+            if let Some(expected) = &expected {
+                assert_eq!(&parsed, expected);
+            } else {
+                expected = Some(parsed);
+            }
+            assert!(
+                Cli::try_parse_from(
+                    ["msb"]
+                        .into_iter()
+                        .chain(prefix.iter().copied())
+                        .chain(flags)
+                )
+                .is_err()
+            );
+            assert!(
+                Cli::try_parse_from(
+                    ["msb"]
+                        .into_iter()
+                        .chain(prefix.iter().copied())
+                        .chain(["app:ready"])
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn snapshot_aliases_accept_explicit_capture_and_filtered_lists() {
+        for command in ["snapshot", "snap"] {
+            let cli = Cli::try_parse_from([
+                "msb",
+                command,
+                "create",
+                "ready",
+                "--sandbox",
+                "app",
+                "--full",
+            ])
+            .unwrap();
+            assert!(matches!(
+                cli.command,
+                Commands::Snapshot(snapshot::SnapshotArgs {
+                    command: snapshot::SnapshotCommands::Create(_)
+                })
+            ));
+        }
+        for prefix in [
+            vec!["snapshot", "ls"],
+            vec!["snap", "ls"],
+            vec!["snapshots"],
+            vec!["snaps"],
+        ] {
+            let cli =
+                Cli::try_parse_from(["msb"].into_iter().chain(prefix).chain(["--group", "app"]))
+                    .unwrap();
+            let args = match cli.command {
+                Commands::Snapshots(args) => args,
+                Commands::Snapshot(snapshot::SnapshotArgs {
+                    command: snapshot::SnapshotCommands::List(args),
+                }) => args,
+                _ => panic!("expected snapshot list"),
+            };
+            assert_eq!(args.group.as_deref(), Some("app"));
         }
     }
 }

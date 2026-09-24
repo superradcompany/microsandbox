@@ -225,14 +225,16 @@ msb create --replace-with-timeout 0 python --name worker    # SIGKILL immediatel
 
 <span id="msb-sandbox-restore" />
 
-## msb restore
+<a id="msb-restore"></a>
 
-Restore into a new sandbox. Disk snapshots boot fresh; full snapshots resume execution. Cloud supports disk restore. Use `msb exec` to run new commands.
+## msb snap restore
+
+Restore into a new sandbox. Disk snapshots boot fresh; full snapshots resume execution. Cloud supports disk restore. Use `msb exec` to run new commands. The existing `msb restore`, `msb sandbox restore`, and `msb sbx restore` forms accept the same flags.
 
 ```bash
-msb restore devbox:ready --name worker --forked
+msb snap restore devbox:ready --name worker --forked
 msb exec worker -- echo hello
-msb sbx restore ./saved.msb --name disk-copy --disk-only
+msb snap restore ./saved.msb --name disk-copy --disk-only
 ```
 
 | Flag | Description |
@@ -270,8 +272,8 @@ Network flags replace the destination policy. `--net-rule` requires `--net-defau
 Restore and branch do not reuse host resources by default. Map directories with `-v /host/path:/guest/path`, select a private captured disk with `-v /guest/path`, and publish new listeners with `-p HOST:GUEST`. Full restore refuses missing external filesystems and additional disks unless `--allow-missing-resources` is explicit. Opting out leaves those devices unavailable: backend I/O returns errors, although data cached in guest RAM may remain readable. Disk errors can abort a guest filesystem journal or make it read-only. Warnings remain visible with `--quiet`. `--external-mount-policy relaxed` permits supported stale-object mismatches; it does not waive missing backing. `--dangerously-inherit-resources` authorizes validated source-local bindings, not missing ones. Direct branching retains its existing unavailable-resource behavior. Root and owned storage are always reconstructed; the opt-out cannot waive corrupt or missing snapshot data. Custom vsock routes are not inherited; use `--vsock HOST_PATH:PORT` to authorize a service for clients to reconnect to.
 
 ```bash
-msb restore saved.msb --name worker -v /srv/project:/work -v /data
-msb restore saved.msb --name inspection --allow-missing-resources
+msb snap restore saved.msb --name worker -v /srv/project:/work -v /data
+msb snap restore saved.msb --name inspection --allow-missing-resources
 ```
 
 <span id="msb-sandbox-start" />
@@ -325,7 +327,7 @@ msb pause devbox
 msb resume devbox
 ```
 
-`pause --guest-flush required` flushes captured persistent filesystems before pausing, so a later disk snapshot can reuse that boundary without resuming. The default `auto` and explicit `skip` omit optional writeback; mandatory storage barriers remain. An already-paused VM without the required flush fails rather than resuming implicitly. `resume` has no flush option. See [guest filesystem flush](/sandboxes/snapshots#guest-filesystem-flush).
+`pause --guest-flush required` flushes captured persistent filesystems before pausing, so a later disk snapshot can reuse that boundary without resuming. The default `auto` and explicit `skip` omit optional writeback; mandatory storage barriers remain. An already-paused VM without the required flush fails rather than resuming implicitly. `resume` has no flush option. See [guest filesystem flush](/sandboxes/snapshots#guest-flushing).
 
 <span id="msb-sandbox-branch" />
 
@@ -350,7 +352,7 @@ msb branch devbox --names worker-{1..10} # Bash/Zsh expand the names
 | --- | --- |
 | `-n`, `--name NAME` | One child name; conflicts with `--names` |
 | `--names NAME...` | Several child names from one capture |
-| `--guest-flush` | Guest writeback policy: `auto` (default), `required`, or `skip` |
+| `--guest-flush` | Guest writeback policy: `auto` (default), `required`, or `skip`; see [advanced guest flushing](/sandboxes/snapshots#guest-flushing) |
 | `--integrity` | Record disk content hashes |
 | `-q`, `--quiet` | Suppress progress |
 

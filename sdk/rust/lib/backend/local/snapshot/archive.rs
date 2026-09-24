@@ -4151,8 +4151,7 @@ mod tests {
     #[tokio::test]
     async fn direct_materialization_future_has_bounded_stack_footprint() {
         let temporary = tempfile::tempdir().unwrap();
-        let local = LocalBackend::builder()
-            .home(temporary.path().join("home"))
+        let local = crate::test_support::local_backend_builder(temporary.path().join("home"))
             .build()
             .await
             .unwrap();
@@ -4228,8 +4227,7 @@ mod tests {
     #[tokio::test]
     async fn with_parents_prefers_group_members_when_global_identities_repeat() {
         let home = tempfile::tempdir().unwrap();
-        let local = LocalBackend::builder()
-            .home(home.path())
+        let local = crate::test_support::local_backend_builder(home.path())
             .build()
             .await
             .unwrap();
@@ -4296,8 +4294,7 @@ mod tests {
     #[tokio::test]
     async fn legacy_suggested_name_that_is_not_a_group_alias_does_not_block_import() {
         let home = tempfile::tempdir().unwrap();
-        let local = LocalBackend::builder()
-            .home(home.path())
+        let local = crate::test_support::local_backend_builder(home.path())
             .build()
             .await
             .unwrap();
@@ -4373,16 +4370,15 @@ mod tests {
     #[tokio::test]
     async fn flat_archive_bundles_offline_config_without_layered_materialization() {
         let directory = tempfile::tempdir().unwrap();
-        let local = LocalBackend::builder()
-            .home(directory.path().join("source"))
+        let local = crate::test_support::local_backend_builder(directory.path().join("source"))
             .build()
             .await
             .unwrap();
-        let destination = LocalBackend::builder()
-            .home(directory.path().join("destination"))
-            .build()
-            .await
-            .unwrap();
+        let destination =
+            crate::test_support::local_backend_builder(directory.path().join("destination"))
+                .build()
+                .await
+                .unwrap();
         let mut manifest = grouped_archive_manifest(31, None);
         manifest.root_disk = SnapshotRootDisk::Flat;
         let image_ref = manifest.image.reference.parse().unwrap();
@@ -4551,7 +4547,10 @@ mod tests {
             extensions: BTreeMap::new(),
             requires: Vec::new(),
         };
-        let local = LocalBackend::builder().home(&home).build().await.unwrap();
+        let local = crate::test_support::local_backend_builder(&home)
+            .build()
+            .await
+            .unwrap();
 
         // The suffix is only a user-facing convention, never the encoding discriminator.
         // Exercise compressed and plain tar under both conventional and misleading names.
@@ -4659,7 +4658,10 @@ mod tests {
             extensions: BTreeMap::new(),
             requires: Vec::new(),
         };
-        let local = LocalBackend::builder().home(&home).build().await.unwrap();
+        let local = crate::test_support::local_backend_builder(&home)
+            .build()
+            .await
+            .unwrap();
 
         save_direct_file_snapshot(
             &manifest,
@@ -4833,7 +4835,10 @@ mod tests {
             extensions: BTreeMap::new(),
             requires: Vec::new(),
         };
-        let local = LocalBackend::builder().home(&home).build().await.unwrap();
+        let local = crate::test_support::local_backend_builder(&home)
+            .build()
+            .await
+            .unwrap();
 
         save_direct_checkpoint_snapshot(
             &manifest,

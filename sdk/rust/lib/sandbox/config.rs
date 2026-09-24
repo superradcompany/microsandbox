@@ -8,8 +8,9 @@ use std::path::PathBuf;
 use microsandbox_runtime::launch::{CheckpointRestoreConfig, RootfsUpperLayerConfig};
 use microsandbox_types::SandboxLogLevel as LogLevel;
 use microsandbox_types::{
-    EnvVar, SandboxLogLevel, SandboxResources, SandboxRuntimeOptions, SandboxSpec,
-    TransparentHugePagePolicy,
+    ConfigPatch, EnvVar, NetworkSpecPatch, SandboxLogLevel, SandboxResources,
+    SandboxResourcesPatch, SandboxRuntimeOptions, SandboxRuntimeOptionsPatch, SandboxSpec,
+    SandboxSpecPatch, TransparentHugePagePolicy,
 };
 use serde::{Deserialize, Serialize};
 
@@ -19,9 +20,12 @@ use microsandbox_protocol::{HANDOFF_INIT_AUTO, HANDOFF_INIT_IMAGE_ENTRYPOINT_CAN
 use microsandbox_types::RegistryAuth;
 use typed_path::Utf8UnixPath;
 
-#[cfg(feature = "local")]
-use super::types::RootfsSource;
-use super::types::{MountOptions, RootDisk, VolumeMount};
+use crate::config::{
+    GlobalConfigPatch, OciSandboxDefaultsPatch, SandboxDefaultsPatch,
+    layers::{BackendConfig, ConfigLayers, Overlay},
+};
+
+use super::types::{MountOptions, RootDisk, RootfsSource, VolumeMount};
 use crate::snapshot::SnapshotReference;
 
 //--------------------------------------------------------------------------------------------------
@@ -129,7 +133,7 @@ pub(crate) struct RestoreOverrideIntent {
 /// The durable task description lives in [`SandboxSpec`]. This type keeps
 /// local SDK/runtime operation state beside that shared contract, such as
 /// registry credentials, replacement flags, and resolved snapshot metadata.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ConfigPatch)]
 pub struct SandboxConfig {
     /// Operation-local observer; never persisted or retained as a stream owner.
     #[cfg(feature = "local")]
@@ -137,6 +141,7 @@ pub struct SandboxConfig {
     pub(crate) creation_progress: Option<tokio::sync::mpsc::WeakSender<crate::CreationProgress>>,
     /// Backend-neutral sandbox task description shared across SDKs and services.
     #[serde(flatten)]
+    #[config_patch(nested)]
     pub spec: SandboxSpec,
 
     /// Registry authentication for private OCI registries.
@@ -144,6 +149,7 @@ pub struct SandboxConfig {
     /// Redacted (set to `None`) before serialization to database — credentials
     /// are only needed during the pull.
     #[serde(default, skip_serializing)]
+    #[config_patch(nullable)]
     pub registry_auth: Option<RegistryAuth>,
 
     /// Access the registry over plain HTTP (SDK override).
@@ -183,6 +189,7 @@ pub struct SandboxConfig {
     ///
     /// This is a create-time option, not persisted sandbox state.
     #[serde(skip)]
+    #[config_patch(nullable)]
     pub slug: Option<String>,
 
     /// Manifest digest for the resolved OCI image.
@@ -190,6 +197,7 @@ pub struct SandboxConfig {
     /// Set at create time. Used by spawn to derive VMDK and fsmeta paths
     /// from the global cache. `None` for non-OCI rootfs sources.
     #[serde(default)]
+    #[config_patch(nullable)]
     pub(crate) manifest_digest: Option<String>,
 
     /// Path to a file snapshot's writable root disk to copy into the new
@@ -198,6 +206,7 @@ pub struct SandboxConfig {
     /// Transient: populated during snapshot preparation and consumed when creating
     /// the sandbox's root disk. Never persisted.
     #[serde(skip)]
+    #[config_patch(nullable)]
     pub(crate) snapshot_upper_source: Option<PathBuf>,
 
     /// Original backend-neutral reference supplied to `Sandbox::restore_ref`.
@@ -315,7 +324,260 @@ pub struct SandboxConfig {
 // Methods
 //--------------------------------------------------------------------------------------------------
 
+impl SandboxConfigPatch {
+    /// Convert ordinary backend defaults; host deployment policy is applied during local creation.
+    pub(crate) fn from_defaults(global: &GlobalConfigPatch) -> Self {
+        let mut patch = Self::from_global(global);
+        patch.spec.clear_deployment_profile_mut();
+        patch
+    }
+
+    /// Convert administrator settings, preserving explicit clears and no-policy deployment profiles.
+    pub(crate) fn from_managed(global: &GlobalConfigPatch) -> Self {
+        Self::from_global(global)
+    }
+
+    /// Copy the sandbox-related settings from this global patch into a sandbox patch.
+    fn from_global(global: &GlobalConfigPatch) -> Self {
+        // Merge fields on GlobalConfigPatch are private to config; the field matrix
+        // exhaustively classifies GlobalConfig below. Keep sandbox defaults exhaustive here.
+        let GlobalConfigPatch {
+            sandbox_defaults,
+            log_level,
+            deployment_profile,
+            ..
+        } = global;
+        let SandboxDefaultsPatch {
+            cpus,
+            memory_mib,
+            cpu_placement,
+            placement_profile,
+            thp,
+            shell,
+            workdir,
+            outbound_proxy,
+            metrics_sample_interval_ms,
+            disable_metrics_sample,
+            // Resolved by OciSandboxDefaultsPatch::from_managed() and SandboxConfig::apply_rootfs_defaults().
+            oci: _,
+        } = sandbox_defaults;
+
+        let mut resources = SandboxResourcesPatch::new();
+        if let Some(cpus) = cpus {
+            resources.cpus_mut(*cpus);
+        }
+        if let Some(memory_mib) = memory_mib {
+            resources.memory_mib_mut(*memory_mib);
+        }
+        if let Some(cpu_placement) = cpu_placement {
+            resources.cpu_placement_mut(*cpu_placement);
+        }
+        if let Some(placement_profile) = placement_profile {
+            resources.set_placement_profile_mut(placement_profile.clone());
+        }
+        if let Some(thp) = thp {
+            resources.thp_mut(*thp);
+        }
+
+        let mut runtime = SandboxRuntimeOptionsPatch::new();
+        if let Some(shell) = shell {
+            runtime.shell_mut(shell.clone());
+        }
+        if let Some(workdir) = workdir {
+            runtime.set_workdir_mut(workdir.clone());
+        }
+        if let Some(interval) = metrics_sample_interval_ms {
+            runtime.set_metrics_sample_interval_ms_mut(interval.map(std::num::NonZero::get));
+        }
+        if let Some(disable_metrics_sample) = disable_metrics_sample {
+            runtime.disable_metrics_sample_mut(*disable_metrics_sample);
+        }
+        if let Some(log_level) = log_level {
+            runtime.set_log_level_mut(log_level.map(sandbox_log_level_from_runtime));
+        }
+
+        let mut network = NetworkSpecPatch::new();
+        if let Some(outbound_proxy) = outbound_proxy {
+            network.set_outbound_proxy_mut(outbound_proxy.clone());
+        }
+        let mut spec = SandboxSpecPatch::new()
+            .resources(resources)
+            .runtime(runtime)
+            .network(network);
+        if let Some(deployment_profile) = deployment_profile.flatten() {
+            spec.deployment_profile_mut(deployment_profile);
+        }
+        SandboxConfigPatch::new().spec(spec)
+    }
+
+    /// Resolve the rootfs choice needed before pulling an image.
+    /// Sizes that depend on final sandbox memory are resolved after layering.
+    pub(crate) fn resolve_image(&self, backend_config: &BackendConfig) -> RootfsSource {
+        let mut image = self.spec.image.clone().unwrap_or_default();
+        if let RootfsSource::Oci(oci) = &mut image {
+            oci.root_disk = backend_config
+                .root_disk_layers()
+                .options(OciSandboxDefaultsPatch::new().set_root_disk(oci.root_disk.take()))
+                .build()
+                .into_config()
+                .root_disk;
+            if oci.root_disk.is_none() {
+                oci.root_disk = backend_config
+                    .resolved_config()
+                    .sandbox_defaults
+                    .oci
+                    .root_disk
+                    .clone();
+            }
+        }
+        image
+    }
+
+    /// Translate image metadata into the lowest-priority sandbox input.
+    #[cfg(feature = "local")]
+    pub(crate) fn from_image(image: &ImageConfig) -> Self {
+        let ImageConfig {
+            env,
+            cmd,
+            entrypoint,
+            working_dir,
+            user,
+            labels,
+            // These OCI declarations are not inherited by sandbox configuration.
+            exposed_ports: _,
+            volumes: _,
+            stop_signal: _,
+        } = image;
+
+        let mut runtime = SandboxRuntimeOptionsPatch::new();
+        if let Some(cmd) = cmd {
+            runtime.cmd_mut(cmd.clone());
+        }
+        if let Some(entrypoint) = entrypoint {
+            runtime.entrypoint_mut(entrypoint.clone());
+        }
+        if let Some(workdir) = working_dir
+            && !workdir.is_empty()
+        {
+            runtime.workdir_mut(workdir.clone());
+        }
+        if let Some(user) = user
+            && !user.is_empty()
+        {
+            runtime.user_mut(user.clone());
+        }
+
+        let patch = SandboxSpecPatch::new()
+            .replace_env(merge_env(env, &[]))
+            .labels(merge_image_labels(labels, &BTreeMap::new()))
+            .runtime(runtime);
+
+        Self::new().spec(patch)
+    }
+
+    /// Select the foreground launch path for attached `msb run`.
+    pub(crate) fn set_foreground_command(&mut self, command: Vec<String>) {
+        self.launch_intent = Some(LaunchIntent::Foreground {
+            command: (!command.is_empty()).then_some(command),
+        });
+    }
+
+    /// Select the background launch path for detached `msb run -d`.
+    ///
+    /// A non-empty command replaces the image CMD while preserving the effective entrypoint. An
+    /// empty command intentionally keeps the image CMD so detached and attached runs resolve the
+    /// same OCI process.
+    pub(crate) fn set_background_command(&mut self, command: Vec<String>) {
+        if !command.is_empty() {
+            if self.launch_cmd_before_override.is_none() {
+                self.launch_cmd_before_override = Some(self.spec.runtime.cmd.clone());
+            }
+            self.spec.runtime.cmd_mut(command);
+        }
+        self.launch_intent = Some(LaunchIntent::Background);
+    }
+}
+
+impl OciSandboxDefaultsPatch {
+    /// Normalize managed root-disk and legacy size settings into a complete disk choice.
+    pub(crate) fn from_managed(global: &GlobalConfigPatch) -> Self {
+        let Self {
+            root_disk,
+            upper_size_mib,
+        } = &global.sandbox_defaults.oci;
+
+        let mut patch = Self::new();
+        if let Some(Some(root_disk)) = root_disk {
+            patch.root_disk_mut(root_disk.clone());
+        } else if root_disk.is_some() || upper_size_mib.is_some() {
+            patch.root_disk_mut(RootDisk::Managed {
+                size_mib: upper_size_mib.flatten(),
+            });
+        }
+
+        patch
+    }
+}
+
 impl SandboxConfig {
+    /// Apply the composed patches, then resolve sandbox defaults that depend on the final values.
+    pub(super) fn apply_layers(
+        &mut self,
+        backend_config: Option<&BackendConfig>,
+        mut options: SandboxConfigPatch,
+        image_defaults: Option<SandboxConfigPatch>,
+    ) {
+        let inherited_entrypoint = options.spec.runtime.entrypoint.is_none();
+        let image_entrypoint = image_defaults
+            .as_ref()
+            .and_then(|patch| patch.spec.runtime.entrypoint.clone());
+        let image_defaults = image_defaults.unwrap_or_default();
+
+        if let Some(env) = options.spec.get_env() {
+            // OCI inheritance retains SDK env append order and duplicates, including
+            // when a sparse overlay replaced the builder's earlier environment.
+            let image_env = image_defaults
+                .spec
+                .get_env()
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            let env = merge_env_pairs(image_env, env);
+            options.spec.replace_env_mut(env);
+        }
+
+        let layers = match backend_config {
+            Some(config) => config.sandbox_layers(),
+            // Custom backends without device settings supply their own configuration behavior.
+            None => ConfigLayers::unmanaged(),
+        };
+        let patch = layers.base(image_defaults).options(options).build();
+        let max_cpus = patch.spec.resources.max_cpus;
+        let max_memory_mib = patch.spec.resources.max_memory_mib;
+        patch.apply_to(self);
+
+        if let Some(config) = backend_config
+            && let RootfsSource::Oci(oci) = &mut self.spec.image
+        {
+            oci.root_disk = config
+                .root_disk_layers()
+                .options(OciSandboxDefaultsPatch::new().set_root_disk(oci.root_disk.take()))
+                .build()
+                .into_config()
+                .root_disk;
+        }
+
+        let resources = &mut self.spec.resources;
+        resources.max_cpus = max_cpus.unwrap_or(resources.cpus);
+        resources.max_memory_mib = max_memory_mib.unwrap_or(resources.memory_mib);
+
+        if let Some(image_entrypoint) = image_entrypoint {
+            self.resolve_auto_init_from_image_entrypoint(
+                Some(&image_entrypoint),
+                inherited_entrypoint,
+            );
+        }
+    }
+
     /// Resolve the effective metrics sampling interval, accounting for the disable override.
     pub fn effective_metrics_interval(&self) -> Option<NonZero<u64>> {
         if self.spec.runtime.disable_metrics_sample {
@@ -380,18 +642,12 @@ impl SandboxConfig {
         config
     }
 
-    /// Select the foreground launch path for attached `msb run`.
-    pub(crate) fn set_foreground_command(&mut self, command: Vec<String>) {
-        self.launch_intent = LaunchIntent::Foreground {
-            command: (!command.is_empty()).then_some(command),
-        };
-    }
-
     /// Select the background launch path for detached `msb run -d`.
     ///
     /// A non-empty command replaces the image CMD while preserving the effective entrypoint. An
     /// empty command intentionally keeps the image CMD so detached and attached runs resolve the
     /// same OCI process.
+    #[cfg(test)]
     pub(crate) fn set_background_command(&mut self, command: Vec<String>) {
         if !command.is_empty() {
             if self.launch_cmd_before_override.is_none() {
@@ -659,7 +915,7 @@ impl SandboxConfig {
 
 /// Merge two sets of env-var pairs. Base entries are kept unless overridden by
 /// key, then all override entries are appended.
-pub(crate) fn merge_env_pairs(base: &[EnvVar], overrides: &[EnvVar]) -> Vec<EnvVar> {
+pub(super) fn merge_env_pairs(base: &[EnvVar], overrides: &[EnvVar]) -> Vec<EnvVar> {
     let override_keys: HashSet<&str> = overrides.iter().map(|var| var.key.as_str()).collect();
 
     let mut merged: Vec<EnvVar> = base
@@ -788,6 +1044,18 @@ impl SandboxConfig {
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
 
+impl Overlay for SandboxConfigPatch {
+    fn overlay(self, higher: Self) -> Self {
+        self.overlay(higher)
+    }
+}
+
+impl Overlay for OciSandboxDefaultsPatch {
+    fn overlay(self, higher: Self) -> Self {
+        self.overlay(higher)
+    }
+}
+
 impl From<SandboxSpec> for SandboxConfig {
     /// Build a config from a full durable spec, defaulting all local
     /// operational state (registry auth, replace flags, snapshot metadata).
@@ -873,7 +1141,7 @@ mod tests {
 
     use microsandbox_runtime::launch::CheckpointRestoreConfig;
 
-    use super::{SandboxConfig, SnapshotRestoreMode, merge_env};
+    use super::{SandboxConfig, SandboxConfigPatch, SnapshotRestoreMode, merge_env};
     use crate::sandbox::{
         HandoffInit, MountOptions, NamedVolumeMode, RootDisk, RootfsSource, StatVirtualization,
         VolumeMount,
@@ -884,6 +1152,23 @@ mod tests {
         EnvVar, NamedVolumeCreate, SandboxLogLevel, SandboxPolicy, SandboxResources,
         SandboxRuntimeOptions, SandboxSpec, SecurityProfile, TransparentHugePagePolicy, VolumeKind,
     };
+
+    fn assert_image_defaults(config: &mut SandboxConfig, image: &ImageConfig) {
+        let mut layered = config.clone();
+        layered.apply_layers(
+            Some(&crate::config::layers::BackendConfig::new(
+                Default::default(),
+                Default::default(),
+            )),
+            crate::SandboxConfigPatch::from_present_fields(config.clone()),
+            Some(SandboxConfigPatch::from_image(image)),
+        );
+        config.merge_image_defaults(image);
+        assert_eq!(
+            serde_json::to_value(&layered).unwrap(),
+            serde_json::to_value(&config).unwrap()
+        );
+    }
 
     #[test]
     fn test_merge_env_image_base_with_user_override() {
@@ -945,7 +1230,7 @@ mod tests {
         };
 
         let mut config = SandboxConfig::default();
-        config.merge_image_defaults(&image);
+        assert_image_defaults(&mut config, &image);
 
         assert_eq!(config.spec.runtime.cmd, Some(vec!["python3".to_string()]));
         assert_eq!(
@@ -978,7 +1263,7 @@ mod tests {
             },
             ..Default::default()
         };
-        config.merge_image_defaults(&image);
+        assert_image_defaults(&mut config, &image);
 
         assert_eq!(config.spec.runtime.cmd, Some(vec!["bash".to_string()]));
         assert_eq!(
@@ -1031,7 +1316,7 @@ mod tests {
             },
             ..Default::default()
         };
-        config.merge_image_defaults(&image);
+        assert_image_defaults(&mut config, &image);
 
         let init = config
             .spec
@@ -1068,8 +1353,10 @@ mod tests {
             },
             ..Default::default()
         };
-        config.set_foreground_command(vec!["gateway".to_string(), "run".to_string()]);
-        config.merge_image_defaults(&image);
+        let mut command_patch = crate::SandboxConfigPatch::new();
+        command_patch.set_foreground_command(vec!["gateway".to_string(), "run".to_string()]);
+        command_patch.apply_to(&mut config);
+        assert_image_defaults(&mut config, &image);
 
         let init = config
             .spec
@@ -1125,8 +1412,10 @@ mod tests {
             },
             ..Default::default()
         };
-        config.set_foreground_command(vec!["gateway".to_string(), "run".to_string()]);
-        config.merge_image_defaults(&image);
+        let mut command_patch = crate::SandboxConfigPatch::new();
+        command_patch.set_foreground_command(vec!["gateway".to_string(), "run".to_string()]);
+        command_patch.apply_to(&mut config);
+        assert_image_defaults(&mut config, &image);
 
         let init = config
             .spec
@@ -1166,8 +1455,10 @@ mod tests {
             },
             ..Default::default()
         };
-        config.set_background_command(vec!["gateway".to_string(), "run".to_string()]);
-        config.merge_image_defaults(&image);
+        let mut command_patch = crate::SandboxConfigPatch::new();
+        command_patch.set_background_command(vec!["gateway".to_string(), "run".to_string()]);
+        command_patch.apply_to(&mut config);
+        assert_image_defaults(&mut config, &image);
 
         let init = config.spec.init.as_ref().expect("runtime init");
         assert_eq!(init.cmd, "/init");
@@ -1207,11 +1498,13 @@ mod tests {
     fn test_background_command_sets_runtime_cmd() {
         let mut config = SandboxConfig::default();
 
-        config.set_background_command(vec![
+        let mut command_patch = crate::SandboxConfigPatch::new();
+        command_patch.set_background_command(vec![
             "/bin/sh".to_string(),
             "-lc".to_string(),
             "echo detached".to_string(),
         ]);
+        command_patch.apply_to(&mut config);
 
         assert_eq!(
             config.spec.runtime.cmd,
@@ -1237,7 +1530,9 @@ mod tests {
             ..Default::default()
         };
 
-        config.set_background_command(Vec::new());
+        let mut command_patch = crate::SandboxConfigPatch::new();
+        command_patch.set_background_command(Vec::new());
+        command_patch.apply_to(&mut config);
 
         assert_eq!(config.spec.runtime.cmd, Some(vec!["python3".to_string()]));
         assert!(config.should_launch_background_command());
@@ -1260,8 +1555,10 @@ mod tests {
             ..Default::default()
         };
 
-        config.set_background_command(Vec::new());
-        config.merge_image_defaults(&image);
+        let mut command_patch = crate::SandboxConfigPatch::new();
+        command_patch.set_background_command(Vec::new());
+        command_patch.apply_to(&mut config);
+        assert_image_defaults(&mut config, &image);
 
         assert_eq!(
             config.spec.runtime.entrypoint,
@@ -1372,8 +1669,10 @@ mod tests {
             },
             ..Default::default()
         };
-        config.set_foreground_command(Vec::new());
-        config.merge_image_defaults(&image);
+        let mut command_patch = crate::SandboxConfigPatch::new();
+        command_patch.set_foreground_command(Vec::new());
+        command_patch.apply_to(&mut config);
+        assert_image_defaults(&mut config, &image);
 
         let init = config
             .spec
@@ -1410,8 +1709,10 @@ mod tests {
             },
             ..Default::default()
         };
-        config.set_foreground_command(vec!["bash".to_string()]);
-        config.merge_image_defaults(&image);
+        let mut command_patch = crate::SandboxConfigPatch::new();
+        command_patch.set_foreground_command(vec!["bash".to_string()]);
+        command_patch.apply_to(&mut config);
+        assert_image_defaults(&mut config, &image);
 
         let init = config
             .spec
@@ -1449,8 +1750,10 @@ mod tests {
             },
             ..Default::default()
         };
-        config.set_foreground_command(vec!["gateway".to_string(), "run".to_string()]);
-        config.merge_image_defaults(&image);
+        let mut command_patch = crate::SandboxConfigPatch::new();
+        command_patch.set_foreground_command(vec!["gateway".to_string(), "run".to_string()]);
+        command_patch.apply_to(&mut config);
+        assert_image_defaults(&mut config, &image);
 
         let init = config
             .spec
@@ -1483,7 +1786,7 @@ mod tests {
             },
             ..Default::default()
         };
-        config.merge_image_defaults(&image);
+        assert_image_defaults(&mut config, &image);
 
         assert_eq!(
             config.spec.init.expect("init should remain configured").cmd,
@@ -1526,7 +1829,7 @@ mod tests {
             },
             ..Default::default()
         };
-        config.merge_image_defaults(&image);
+        assert_image_defaults(&mut config, &image);
 
         assert_eq!(
             config
@@ -1557,7 +1860,7 @@ mod tests {
         };
 
         let mut config = SandboxConfig::default();
-        config.merge_image_defaults(&image);
+        assert_image_defaults(&mut config, &image);
 
         assert!(
             config.spec.runtime.workdir.is_none(),
@@ -2199,6 +2502,435 @@ mod tests {
                 assert_eq!(*options, MountOptions::default());
             }
             mount => panic!("expected tmpfs mount, got {mount:?}"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod layering_tests {
+    use super::*;
+    use microsandbox_types::{CpuPlacement, DeploymentProfile, OutboundProxy};
+
+    #[test]
+    fn sandbox_patch_maps_supplied_values() {
+        let global: GlobalConfigPatch = serde_json::from_value(serde_json::json!({
+            "log_level": "debug",
+            "deployment_profile": "multi-tenant",
+            "sandbox_defaults": {
+                "cpus": 4,
+                "memory_mib": 2048,
+                "cpu_placement": "spread",
+                "placement_profile": "latency",
+                "thp": "always",
+                "shell": "/bin/bash",
+                "workdir": "/workspace",
+                "outbound_proxy": {"protocol": "socks4", "address": "127.0.0.1:1080", "user_id": "employee"},
+                "metrics_sample_interval_ms": 2500,
+                "disable_metrics_sample": true
+            }
+        }))
+        .unwrap();
+        let mut sandbox = crate::SandboxConfig::default();
+        SandboxConfigPatch::from_managed(&global).apply_to(&mut sandbox);
+
+        let resources = &sandbox.spec.resources;
+        assert_eq!(resources.cpus, 4);
+        assert_eq!(resources.memory_mib, 2048);
+        assert_eq!(resources.cpu_placement, CpuPlacement::Spread);
+        assert_eq!(resources.placement_profile.as_deref(), Some("latency"));
+        assert_eq!(resources.thp, TransparentHugePagePolicy::Always);
+        let runtime = &sandbox.spec.runtime;
+        assert_eq!(runtime.shell.as_deref(), Some("/bin/bash"));
+        assert_eq!(runtime.workdir.as_deref(), Some("/workspace"));
+        assert_eq!(runtime.log_level, Some(SandboxLogLevel::Debug));
+        assert_eq!(runtime.metrics_sample_interval_ms, Some(2500));
+        assert!(runtime.disable_metrics_sample);
+        assert_eq!(
+            sandbox.spec.deployment_profile,
+            DeploymentProfile::MultiTenant
+        );
+        assert_eq!(
+            sandbox.spec.network.outbound_proxy,
+            Some(OutboundProxy::Socks4 {
+                address: "127.0.0.1:1080".into(),
+                user_id: Some("employee".into()),
+            })
+        );
+    }
+
+    #[test]
+    fn sandbox_patch_preserves_explicit_clears() {
+        for interval in [serde_json::json!(0), serde_json::Value::Null] {
+            let global: GlobalConfigPatch = serde_json::from_value(serde_json::json!({
+                "log_level": null,
+                "deployment_profile": null,
+                "sandbox_defaults": {
+                    "placement_profile": null,
+                    "workdir": null,
+                    "outbound_proxy": null,
+                    "metrics_sample_interval_ms": interval,
+                    "disable_metrics_sample": false
+                }
+            }))
+            .unwrap();
+            let patch = SandboxConfigPatch::from_managed(&global);
+            assert_eq!(patch.spec.resources.placement_profile, Some(None));
+            assert_eq!(patch.spec.runtime.workdir, Some(None));
+            assert_eq!(patch.spec.runtime.log_level, Some(None));
+            assert_eq!(patch.spec.runtime.metrics_sample_interval_ms, Some(None));
+            assert_eq!(patch.spec.network.outbound_proxy, Some(None));
+            assert_eq!(patch.spec.deployment_profile, None);
+            assert_eq!(patch.spec.runtime.shell, None);
+
+            let mut sandbox = crate::SandboxConfig::default();
+            sandbox.spec.resources.placement_profile = Some("old".into());
+            sandbox.spec.runtime.shell = Some("/bin/zsh".into());
+            sandbox.spec.runtime.workdir = Some("/old".into());
+            sandbox.spec.runtime.log_level = Some(SandboxLogLevel::Trace);
+            sandbox.spec.runtime.metrics_sample_interval_ms = Some(1000);
+            sandbox.spec.runtime.disable_metrics_sample = true;
+            sandbox.spec.network.outbound_proxy = Some(OutboundProxy::Socks5 {
+                address: "127.0.0.1:2080".into(),
+                credentials: None,
+            });
+            sandbox.spec.deployment_profile = DeploymentProfile::MultiTenant;
+            patch.apply_to(&mut sandbox);
+
+            assert_eq!(sandbox.spec.resources.placement_profile, None);
+            assert_eq!(sandbox.spec.runtime.shell.as_deref(), Some("/bin/zsh"));
+            assert_eq!(sandbox.spec.runtime.workdir, None);
+            assert_eq!(sandbox.spec.runtime.log_level, None);
+            assert_eq!(sandbox.spec.runtime.metrics_sample_interval_ms, None);
+            assert!(!sandbox.spec.runtime.disable_metrics_sample);
+            assert_eq!(sandbox.spec.network.outbound_proxy, None);
+            assert_eq!(
+                sandbox.spec.deployment_profile,
+                DeploymentProfile::MultiTenant
+            );
+        }
+    }
+
+    #[test]
+    fn sandbox_patch_leaves_omitted_and_separately_resolved_settings_unchanged() {
+        let global: GlobalConfigPatch = serde_json::from_value(serde_json::json!({
+            "active_profile": "work",
+            "profiles": {"work": {"backend": "local"}},
+            "home": "/host/home",
+            "paths": {"cache": "/host/cache"},
+            "database": {"max_connections": 11},
+            "runtime": {"block_writeback": {"mode": "off"}},
+            "registries": {"ca_certs": "/host/ca.pem"},
+            "ssh": {"inactivity_timeout_secs": 30},
+            "metrics": {"capacity": 128},
+            "sandbox_defaults": {"oci": {"root_disk": {"kind": "tmpfs", "size_mib": 4096}}}
+        }))
+        .unwrap();
+        let patch = SandboxConfigPatch::from_managed(&global);
+        assert!(patch.spec.image.is_none());
+        let mut sandbox = crate::SandboxConfig::default();
+        sandbox.spec.resources.cpus = 6;
+        sandbox.spec.resources.memory_mib = 3072;
+        sandbox.spec.resources.cpu_placement = CpuPlacement::Spread;
+        sandbox.spec.resources.placement_profile = Some("keep".into());
+        sandbox.spec.resources.thp = TransparentHugePagePolicy::Never;
+        sandbox.spec.runtime.shell = Some("/bin/zsh".into());
+        sandbox.spec.runtime.workdir = Some("/keep".into());
+        sandbox.spec.runtime.log_level = Some(SandboxLogLevel::Trace);
+        sandbox.spec.runtime.metrics_sample_interval_ms = Some(500);
+        sandbox.spec.runtime.disable_metrics_sample = true;
+        sandbox.spec.network.outbound_proxy = Some(OutboundProxy::Socks5 {
+            address: "127.0.0.1:2080".into(),
+            credentials: None,
+        });
+        sandbox.spec.deployment_profile = DeploymentProfile::MultiTenant;
+        sandbox.replace_existing = true;
+        let expected = serde_json::to_value(&sandbox).unwrap();
+        patch.apply_to(&mut sandbox);
+
+        assert!(sandbox.replace_existing);
+        assert_eq!(serde_json::to_value(sandbox).unwrap(), expected);
+    }
+
+    #[test]
+    fn sandbox_source_field_matrix() {
+        use serde_json::{Value, json};
+
+        // This value type has public fields; the patch's merge fields are private.
+        // New global fields must be classified here and covered by the matrix below.
+        let crate::config::GlobalConfig {
+            sandbox_defaults: _,
+            log_level: _,
+            deployment_profile: _,
+            active_profile: _,
+            profiles: _,
+            home: _,
+            database: _,
+            paths: _,
+            runtime: _,
+            registries: _,
+            ssh: _,
+            metrics: _,
+        } = crate::config::GlobalConfig::default();
+        // Every global field is mapped here, excluded below, or handled separately.
+        // Each mapped field has its own null semantics; omission always stays sparse.
+        let fields = [
+            (
+                "sandbox_defaults.cpus",
+                "spec.resources.cpus",
+                json!(4),
+                false,
+            ),
+            (
+                "sandbox_defaults.memory_mib",
+                "spec.resources.memory_mib",
+                json!(2048),
+                false,
+            ),
+            (
+                "sandbox_defaults.cpu_placement",
+                "spec.resources.cpu_placement",
+                json!("spread"),
+                false,
+            ),
+            (
+                "sandbox_defaults.placement_profile",
+                "spec.resources.placement_profile",
+                json!("latency"),
+                true,
+            ),
+            (
+                "sandbox_defaults.thp",
+                "spec.resources.thp",
+                json!("always"),
+                false,
+            ),
+            (
+                "sandbox_defaults.shell",
+                "spec.runtime.shell",
+                json!("/bin/bash"),
+                false,
+            ),
+            (
+                "sandbox_defaults.workdir",
+                "spec.runtime.workdir",
+                json!("/work"),
+                true,
+            ),
+            (
+                "sandbox_defaults.outbound_proxy",
+                "spec.network.outbound_proxy",
+                json!({"protocol":"socks5","address":"127.0.0.1:1080"}),
+                true,
+            ),
+            (
+                "sandbox_defaults.metrics_sample_interval_ms",
+                "spec.runtime.metrics_sample_interval_ms",
+                json!(2500),
+                true,
+            ),
+            (
+                "sandbox_defaults.disable_metrics_sample",
+                "spec.runtime.disable_metrics_sample",
+                json!(false),
+                false,
+            ),
+            ("log_level", "spec.runtime.log_level", json!("debug"), true),
+            (
+                "deployment_profile",
+                "spec.deployment_profile",
+                json!("multi-tenant"),
+                true,
+            ),
+        ];
+        for (source, target, value, nullable) in fields {
+            for managed in [false, true] {
+                for supplied in [None, Some(Value::Null), Some(value.clone())] {
+                    let mut input = json!({});
+                    if let Some(value) = supplied.clone() {
+                        set_field(&mut input, source, value);
+                    }
+                    let global = serde_json::from_value::<GlobalConfigPatch>(input);
+                    if supplied == Some(Value::Null) && !nullable {
+                        assert!(global.is_err(), "{source} must reject null");
+                        continue;
+                    }
+                    let global = global.unwrap();
+                    let layers = if managed {
+                        BackendConfig::new(Default::default(), global)
+                    } else {
+                        BackendConfig::new(global, Default::default())
+                    };
+                    let actual = layers
+                        .sandbox_layers()
+                        .base(Default::default())
+                        .options(Default::default())
+                        .build();
+                    let expected = if source == "deployment_profile"
+                        && (!managed || supplied == Some(Value::Null))
+                    {
+                        None
+                    } else if source == "deployment_profile" && supplied.is_some() {
+                        Some(json!("multi_tenant"))
+                    } else {
+                        supplied
+                    };
+                    assert_eq!(
+                        sandbox_field(&actual, target),
+                        expected,
+                        "{source}, managed={managed}"
+                    );
+                }
+            }
+        }
+
+        // These host fields are excluded; OCI is resolved at its own stages.
+        for input in [
+            json!({"active_profile":"work"}),
+            json!({"profiles":{"work":{"backend":"local"}}}),
+            json!({"home":"/host"}),
+            json!({"database":{"max_connections":11}}),
+            json!({"paths":{"msb":"/host/msb"}}),
+            json!({"runtime":{"block_writeback":{"mode":"off"}}}),
+            json!({"registries":{"ca_certs":"/host/ca.pem"}}),
+            json!({"ssh":{"inactivity_timeout_secs":30}}),
+            json!({"metrics":{"capacity":128}}),
+            json!({"sandbox_defaults":{"oci":{"root_disk":{"kind":"tmpfs"},"upper_size_mib":null}}}),
+        ] {
+            let global: GlobalConfigPatch = serde_json::from_value(input.clone()).unwrap();
+            for layers in [
+                BackendConfig::new(global.clone(), Default::default()),
+                BackendConfig::new(Default::default(), global),
+            ] {
+                let actual = layers
+                    .sandbox_layers()
+                    .base(Default::default())
+                    .options(Default::default())
+                    .build();
+                assert_eq!(
+                    serde_json::to_value(actual.into_config()).unwrap(),
+                    serde_json::to_value(crate::SandboxConfig::default()).unwrap(),
+                    "excluded: {input}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pre_pull_disk_fallback_and_managed_normalization() {
+        use serde_json::json;
+        let user: GlobalConfigPatch = serde_json::from_value(
+            json!({"sandbox_defaults":{"oci":{"root_disk":{"kind":"tmpfs","size_mib":128}}}}),
+        )
+        .unwrap();
+        for (managed, expected) in [
+            (
+                json!({}),
+                RootDisk::Tmpfs {
+                    size_mib: Some(128),
+                },
+            ),
+            (
+                json!({"root_disk":{"kind":"managed","size_mib":2048}}),
+                RootDisk::Managed {
+                    size_mib: Some(2048),
+                },
+            ),
+            (
+                json!({"root_disk":null}),
+                RootDisk::Managed { size_mib: None },
+            ),
+            (
+                json!({"upper_size_mib":1024}),
+                RootDisk::Managed {
+                    size_mib: Some(1024),
+                },
+            ),
+            (
+                json!({"upper_size_mib":null}),
+                RootDisk::Managed { size_mib: None },
+            ),
+        ] {
+            let layers = BackendConfig::new(
+                user.clone(),
+                serde_json::from_value(json!({"sandbox_defaults":{"oci":managed}})).unwrap(),
+            );
+            let request = SandboxConfigPatch::new()
+                .spec(SandboxSpecPatch::new().image(microsandbox_types::RootfsSource::default()));
+            let microsandbox_types::RootfsSource::Oci(image) = request.resolve_image(&layers)
+            else {
+                panic!("expected OCI image")
+            };
+            assert_eq!(image.root_disk, Some(expected));
+        }
+        // User disk fallback belongs to pre-pull selection, not managed normalization.
+        assert_eq!(
+            BackendConfig::new(user, Default::default())
+                .root_disk_layers()
+                .build()
+                .root_disk,
+            None
+        );
+    }
+
+    #[test]
+    fn managed_workdir_clear_survives_image_defaults() {
+        let layers = BackendConfig::new(
+            Default::default(),
+            serde_json::from_str(r#"{"sandbox_defaults":{"workdir":null}}"#).unwrap(),
+        );
+        let image = SandboxConfigPatch::new().spec(
+            SandboxSpecPatch::new()
+                .runtime(SandboxRuntimeOptionsPatch::new().workdir("/image".into())),
+        );
+        let config = layers
+            .sandbox_layers()
+            .base(image)
+            .options(Default::default())
+            .build()
+            .into_config();
+        assert_eq!(config.spec.runtime.workdir, None);
+    }
+
+    fn sandbox_field(patch: &SandboxConfigPatch, path: &str) -> Option<serde_json::Value> {
+        fn value<T: serde::Serialize>(field: &Option<T>) -> Option<serde_json::Value> {
+            field
+                .as_ref()
+                .map(|value| serde_json::to_value(value).unwrap())
+        }
+        match path {
+            "spec.resources.cpus" => value(&patch.spec.resources.cpus),
+            "spec.resources.memory_mib" => value(&patch.spec.resources.memory_mib),
+            "spec.resources.cpu_placement" => value(&patch.spec.resources.cpu_placement),
+            "spec.resources.placement_profile" => value(&patch.spec.resources.placement_profile),
+            "spec.resources.thp" => value(&patch.spec.resources.thp),
+            "spec.runtime.shell" => value(&patch.spec.runtime.shell),
+            "spec.runtime.workdir" => value(&patch.spec.runtime.workdir),
+            "spec.runtime.metrics_sample_interval_ms" => {
+                value(&patch.spec.runtime.metrics_sample_interval_ms)
+            }
+            "spec.runtime.disable_metrics_sample" => {
+                value(&patch.spec.runtime.disable_metrics_sample)
+            }
+            "spec.runtime.log_level" => value(&patch.spec.runtime.log_level),
+            "spec.network.outbound_proxy" => value(&patch.spec.network.outbound_proxy),
+            "spec.deployment_profile" => value(&patch.spec.deployment_profile),
+            _ => panic!("unclassified field {path}"),
+        }
+    }
+
+    fn set_field(object: &mut serde_json::Value, path: &str, value: serde_json::Value) {
+        if let Some((head, tail)) = path.split_once('.') {
+            let nested = object
+                .as_object_mut()
+                .unwrap()
+                .entry(head)
+                .or_insert_with(|| serde_json::json!({}));
+            set_field(nested, tail, value);
+        } else {
+            object
+                .as_object_mut()
+                .unwrap()
+                .insert(path.to_owned(), value);
         }
     }
 }

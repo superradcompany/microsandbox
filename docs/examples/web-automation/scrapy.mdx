@@ -68,20 +68,20 @@ Capture the prepared environment:
 
 <CodeGroup>
 ```sh macOS & Linux
-msb snapshot create scrapy-runtime \
-  --from-sandbox scrapy-base --integrity
+msb snap create scrapy-runtime \
+  --sandbox scrapy-base --integrity
 ```
 
 ```powershell Windows
-msb snapshot create scrapy-runtime `
-  --from-sandbox scrapy-base --integrity
+msb snap create scrapy-runtime `
+  --sandbox scrapy-base --integrity
 ```
 </CodeGroup>
 
 Verify the snapshot before using it:
 
 ```sh
-msb snapshot verify scrapy-base:scrapy-runtime
+msb snap verify scrapy-base:scrapy-runtime
 ```
 
 The snapshot avoids reinstalling Scrapy for every crawl.
@@ -94,7 +94,7 @@ The destination name must be unused. Restore installs the deny-by-default allowl
 
 <CodeGroup>
 ```sh macOS & Linux
-msb restore scrapy-base:scrapy-runtime --name scrapy-books \
+msb snap restore scrapy-base:scrapy-runtime --name scrapy-books \
   --user 65534:65534 --memory 1G --max-duration 2m \
   --net-default deny \
   --net-rule 'allow@books.toscrape.com:tcp:443' \
@@ -109,7 +109,7 @@ msb stop scrapy-books
 ```
 
 ```powershell Windows
-msb restore scrapy-base:scrapy-runtime --name scrapy-books `
+msb snap restore scrapy-base:scrapy-runtime --name scrapy-books `
   --user 65534:65534 --memory 1G --max-duration 2m `
   --net-default deny `
   --net-rule 'allow@books.toscrape.com:tcp:443' `
@@ -161,7 +161,7 @@ msb rm -f scrapy-base scrapy-books
 Remove the reusable snapshot:
 
 ```sh
-msb snapshot remove scrapy-base:scrapy-runtime
+msb snap rm scrapy-base:scrapy-runtime
 ```
 
 </Step>

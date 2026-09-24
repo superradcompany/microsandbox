@@ -81,25 +81,34 @@ impl RestoreBuilder {
         let mut inner = SandboxBuilder::new("").with_snapshot_reference(reference);
         // Global creation defaults must not silently authorize host access or override the
         // captured exec user. Destination bindings come only from this operation's builder.
-        inner.config.spec.mounts.clear();
-        inner.config.spec.network.ports.clear();
+        inner.config.spec.mounts = Some(Vec::new());
+        inner.config.spec.network.ports = Some(Vec::new());
         inner.config.spec.vsock = Default::default();
         inner.config.spec.runtime.user = None;
-        inner.config.restore_resources.require_complete = true;
+        inner
+            .config
+            .restore_resources
+            .get_or_insert_with(Default::default)
+            .require_complete = true;
         Self { inner }
     }
 
     /// Resume even when captured external resources have no destination backing.
     /// Does not inherit host resources or relax validation of supplied objects.
     pub fn allow_missing_resources(mut self) -> Self {
-        self.inner.config.restore_resources.require_complete = false;
-        self.inner.config.restore_resources.allow_missing = true;
+        let resources = self
+            .inner
+            .config
+            .restore_resources
+            .get_or_insert_with(Default::default);
+        resources.require_complete = false;
+        resources.allow_missing = true;
         self
     }
 
     /// Set the unique destination sandbox name.
     pub fn name(mut self, name: impl Into<String>) -> Self {
-        self.inner.config.spec.name = name.into();
+        self.inner.config.spec.name = Some(name.into());
         self
     }
 
@@ -161,7 +170,11 @@ impl RestoreBuilder {
     /// Captured processes cannot be retroactively confined, so full restore rejects this setter.
     pub fn security(mut self, profile: SecurityProfile) -> Self {
         self.inner = self.inner.security(profile);
-        self.inner.config.restore_boot_overrides.security = true;
+        self.inner
+            .config
+            .restore_boot_overrides
+            .get_or_insert_with(Default::default)
+            .security = true;
         self
     }
 
@@ -240,30 +253,24 @@ macro_rules! resource_methods {
                 guest: impl Into<String>,
                 configure: impl FnOnce(MountBuilder) -> MountBuilder,
             ) -> Self {
+                let resources = self
+                    .inner
+                    .config
+                    .restore_resources
+                    .get_or_insert_with(Default::default);
+                let mounts = self.inner.config.spec.mounts.get_or_insert_with(Vec::new);
                 match configure(MountBuilder::new(guest)).build_restore() {
                     Ok(Ok(mount)) => {
                         let guest = mount.guest();
-                        self.inner.config.restore_resources.captured.remove(guest);
-                        self.inner
-                            .config
-                            .restore_resources
-                            .mapped
-                            .insert(guest.into());
-                        self.inner
-                            .config
-                            .spec
-                            .mounts
-                            .retain(|existing| existing.guest() != guest);
-                        self.inner.config.spec.mounts.push(mount);
+                        resources.captured.remove(guest);
+                        resources.mapped.insert(guest.into());
+                        mounts.retain(|existing| existing.guest() != guest);
+                        mounts.push(mount);
                     }
                     Ok(Err(guest)) => {
-                        self.inner.config.restore_resources.mapped.remove(&guest);
-                        self.inner
-                            .config
-                            .spec
-                            .mounts
-                            .retain(|existing| existing.guest() != guest);
-                        self.inner.config.restore_resources.captured.insert(guest);
+                        resources.mapped.remove(&guest);
+                        mounts.retain(|existing| existing.guest() != guest);
+                        resources.captured.insert(guest);
                     }
                     Err(error) => {
                         self.inner.build_error = Some(error);
@@ -286,7 +293,11 @@ macro_rules! resource_methods {
 
             /// Fill unspecified resources from validated local source records. Explicit choices win.
             pub fn dangerously_inherit_resources(mut self) -> Self {
-                self.inner.config.restore_resources.inherit = true;
+                self.inner
+                    .config
+                    .restore_resources
+                    .get_or_insert_with(Default::default)
+                    .inherit = true;
                 self
             }
 
@@ -340,20 +351,24 @@ resource_methods!(super::branch::BranchManyBuilder);
 mod tests {
     use super::*;
 
+    fn config(builder: &RestoreBuilder) -> crate::SandboxConfig {
+        builder.inner.config.clone().into_config()
+    }
+
     #[test]
     fn restore_requires_resources_independently_of_inheritance_and_object_policy() {
         let restore = Sandbox::restore("saved")
             .name("child")
             .dangerously_inherit_resources()
             .external_mount_policy(ExternalMountRestorePolicy::Relaxed);
-        assert!(restore.inner.config.restore_resources.require_complete);
-        assert!(!restore.inner.config.restore_resources.allow_missing);
+        assert!(config(&restore).restore_resources.require_complete);
+        assert!(!config(&restore).restore_resources.allow_missing);
         let restore = restore.allow_missing_resources();
-        assert!(!restore.inner.config.restore_resources.require_complete);
-        assert!(restore.inner.config.restore_resources.allow_missing);
-        assert!(restore.inner.config.restore_resources.inherit);
+        assert!(!config(&restore).restore_resources.require_complete);
+        assert!(config(&restore).restore_resources.allow_missing);
+        assert!(config(&restore).restore_resources.inherit);
         assert_eq!(
-            restore.inner.config.external_mount_policy,
+            config(&restore).external_mount_policy,
             ExternalMountRestorePolicy::Relaxed
         );
     }
@@ -387,8 +402,8 @@ mod tests {
     fn security_setter_keeps_explicit_intent_even_for_default_profile() {
         for profile in [SecurityProfile::Default, SecurityProfile::Restricted] {
             let restore = Sandbox::restore("saved").name("child").security(profile);
-            assert!(restore.inner.config.restore_boot_overrides.security);
-            assert_eq!(restore.inner.config.spec.security_profile, profile);
+            assert!(config(&restore).restore_boot_overrides.security);
+            assert_eq!(config(&restore).spec.security_profile, profile);
         }
     }
 
@@ -400,17 +415,11 @@ mod tests {
             .memory(2048)
             .max_duration(600)
             .idle_timeout(120);
-        assert_eq!(restore.inner.config.spec.resources.cpus, 2);
-        assert_eq!(restore.inner.config.spec.resources.memory_mib, 2048);
-        assert_eq!(
-            restore.inner.config.spec.lifecycle.max_duration_secs,
-            Some(600)
-        );
-        assert_eq!(
-            restore.inner.config.spec.lifecycle.idle_timeout_secs,
-            Some(120)
-        );
-        assert!(!restore.inner.config.restore_boot_overrides.security);
+        assert_eq!(config(&restore).spec.resources.cpus, 2);
+        assert_eq!(config(&restore).spec.resources.memory_mib, 2048);
+        assert_eq!(config(&restore).spec.lifecycle.max_duration_secs, Some(600));
+        assert_eq!(config(&restore).spec.lifecycle.idle_timeout_secs, Some(120));
+        assert!(!config(&restore).restore_boot_overrides.security);
     }
 
     #[cfg(feature = "net")]
@@ -421,7 +430,7 @@ mod tests {
             .network_policy(NetworkPolicy::none())
             .max_tcp_connections(8)
             .max_udp_connections(4);
-        let network = restore.inner.config.local_network_config().unwrap();
+        let network = config(&restore).local_network_config().unwrap();
         assert!(network.enabled);
         assert_eq!(
             serde_json::to_value(network.policy).unwrap(),
@@ -430,39 +439,29 @@ mod tests {
         assert_eq!(network.max_tcp_connections, Some(8.into()));
         assert_eq!(network.max_udp_connections, Some(4.into()));
         assert!(network.interface.mac.is_none());
-        assert!(!restore.inner.config.restore_boot_overrides.security);
+        assert!(!config(&restore).restore_boot_overrides.security);
         let unlimited = Sandbox::restore("saved")
             .name("child")
             .max_tcp_connections(0)
             .max_udp_connections(0);
+        assert_eq!(config(&unlimited).spec.network.max_tcp_connections, Some(0));
+        assert_eq!(config(&unlimited).spec.network.max_udp_connections, Some(0));
         assert_eq!(
-            unlimited.inner.config.spec.network.max_tcp_connections,
-            Some(0)
-        );
-        assert_eq!(
-            unlimited.inner.config.spec.network.max_udp_connections,
-            Some(0)
-        );
-        assert_eq!(
-            unlimited
-                .inner
-                .config
+            config(&unlimited)
                 .local_network_config()
                 .unwrap()
                 .max_tcp_connections,
             Some(microsandbox_network::config::ConnectionLimit::Unlimited)
         );
         assert_eq!(
-            unlimited
-                .inner
-                .config
+            config(&unlimited)
                 .local_network_config()
                 .unwrap()
                 .max_udp_connections,
             Some(microsandbox_network::config::ConnectionLimit::Unlimited)
         );
         let disabled = Sandbox::restore("saved").name("child").disable_network();
-        assert!(!disabled.inner.config.spec.network.enabled);
+        assert!(!config(&disabled).spec.network.enabled);
     }
 
     #[cfg(feature = "net")]
@@ -470,23 +469,20 @@ mod tests {
     #[allow(deprecated)]
     fn destination_connection_limits_preserve_omission_and_tcp_alias() {
         let defaults = Sandbox::restore("saved");
-        assert_eq!(defaults.inner.config.spec.network.max_tcp_connections, None);
-        assert_eq!(defaults.inner.config.spec.network.max_udp_connections, None);
+        assert_eq!(config(&defaults).spec.network.max_tcp_connections, None);
+        assert_eq!(config(&defaults).spec.network.max_udp_connections, None);
         let legacy = Sandbox::restore("saved").max_connections(0);
-        assert_eq!(
-            legacy.inner.config.spec.network.max_tcp_connections,
-            Some(0)
-        );
-        assert_eq!(legacy.inner.config.spec.network.max_udp_connections, None);
+        assert_eq!(config(&legacy).spec.network.max_tcp_connections, Some(0));
+        assert_eq!(config(&legacy).spec.network.max_udp_connections, None);
     }
 
     #[test]
     fn restore_starts_without_host_bindings() {
         let restore = Sandbox::restore("saved").name("child");
-        assert!(restore.inner.config.spec.mounts.is_empty());
-        assert!(restore.inner.config.spec.network.ports.is_empty());
-        assert!(!restore.inner.config.restore_resources.inherit);
-        assert!(restore.inner.config.spec.runtime.user.is_none());
+        assert!(config(&restore).spec.mounts.is_empty());
+        assert!(config(&restore).spec.network.ports.is_empty());
+        assert!(!config(&restore).restore_resources.inherit);
+        assert!(config(&restore).spec.runtime.user.is_none());
     }
 
     #[test]
@@ -495,31 +491,15 @@ mod tests {
             .name("child")
             .volume("/data", |v| v.bind("/tmp/explicit-restore-binding"))
             .volume("/private", |v| v.captured());
+        assert!(config(&restore).restore_resources.mapped.contains("/data"));
         assert!(
-            restore
-                .inner
-                .config
-                .restore_resources
-                .mapped
-                .contains("/data")
-        );
-        assert!(
-            restore
-                .inner
-                .config
+            config(&restore)
                 .restore_resources
                 .captured
                 .contains("/private")
         );
         let restore = restore.volume("/data", |v| v.captured());
-        assert!(
-            !restore
-                .inner
-                .config
-                .restore_resources
-                .mapped
-                .contains("/data")
-        );
-        assert!(restore.inner.config.spec.mounts.is_empty());
+        assert!(!config(&restore).restore_resources.mapped.contains("/data"));
+        assert!(config(&restore).spec.mounts.is_empty());
     }
 }

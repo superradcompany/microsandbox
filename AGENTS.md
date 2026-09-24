@@ -339,6 +339,14 @@ git diff origin/main..HEAD --name-status
 ## Documentation And Examples
 
 - Update docs when behavior, configuration, CLI flags, SDK APIs, or examples change.
+- Keep SDK reference introductions to a short purpose statement and a link to the relevant usage guide, then go straight into API entries. Follow the concise structure of the execution and networking reference pages across all SDK languages.
+- Start reference type sections directly with their members when the type heading is sufficient. Avoid redundant “Built by” / “Used by” rows and introductory text that repeats the member descriptions.
+- Do not prepend feature walkthroughs, lifecycle summaries, implementation details, or long examples to reference pages or type sections. Put API-specific details beside the relevant member and broader explanations in the usage guides; avoid duplicating those guides in the reference.
+- In SDK reference pages, wrap usage examples in a collapsed `<Accordion title="Example">`. Keep API signatures and type definitions visible outside the accordion.
+- When removing reference overviews, preserve unique signatures, constraints, result fields, and resource-cleanup requirements beside the relevant member or in the linked usage guide.
+- Omit field tables that only repeat documented builder options. Keep field references for returned data and properties not covered by the builder.
+- Group simple fields and properties into compact tables with field, type, and description columns; add a default column when needed. Omit repeated receiver prefixes, render each type as one code label, and preserve links and existing anchors. Reserve individual sections for methods and members that need longer explanations or examples.
+- In Rust documentation examples, import types at the top of each snippet and use their short names in the body instead of fully qualified paths. Group standard-library imports before external-crate imports.
 - Keep examples realistic and runnable. Do not invent APIs or flags.
 - Prefer editing existing examples over adding new example projects unless the new example is requested or clearly fills a missing user workflow.
 - Documentation should describe current behavior, not future plans, unless the page is explicitly about roadmap work.

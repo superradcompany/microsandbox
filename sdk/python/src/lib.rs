@@ -219,7 +219,9 @@ fn build_backend(
     profile: Option<String>,
 ) -> PyResult<Arc<dyn microsandbox::Backend>> {
     match kind.trim().to_ascii_lowercase().as_str() {
-        "local" => Ok(Arc::new(microsandbox::LocalBackend::lazy())),
+        "local" => Ok(Arc::new(
+            microsandbox::LocalBackend::lazy().map_err(error::to_py_err)?,
+        )),
         "cloud" => {
             let cloud = if let Some(profile) = profile {
                 microsandbox::CloudBackend::from_profile(&profile)

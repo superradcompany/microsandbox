@@ -62,4 +62,3 @@ finally:
         except Exception as error:
             print(f"Cleanup needs attention for {name}: {error}", flush=True)
     print(f"Evidence retained: {root}", flush=True)
-

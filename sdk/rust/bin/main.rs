@@ -5,10 +5,7 @@ use std::{
     process::{Command, ExitCode},
 };
 
-use microsandbox::{
-    config::GlobalConfig,
-    setup::{InstallOptions, ensure_runtime},
-};
+use microsandbox::setup::{InstallOptions, binding_runtime_config, ensure_runtime};
 
 //--------------------------------------------------------------------------------------------------
 // Functions
@@ -19,11 +16,9 @@ fn main() -> ExitCode {
         .enable_all()
         .build()
         .and_then(|runtime| {
+            let config = binding_runtime_config("{}").map_err(std::io::Error::other)?;
             runtime
-                .block_on(ensure_runtime(
-                    &GlobalConfig::default(),
-                    InstallOptions::default(),
-                ))
+                .block_on(ensure_runtime(&config, InstallOptions::default()))
                 .map_err(std::io::Error::other)
         }) {
         Ok(runtime) => runtime,

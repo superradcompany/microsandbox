@@ -275,8 +275,7 @@ mod tests {
     #[tokio::test]
     async fn restored_origin_advances_only_after_successful_publication() {
         let home = tempfile::tempdir().unwrap();
-        let local = LocalBackend::builder()
-            .home(home.path())
+        let local = crate::test_support::local_backend_builder(home.path())
             .build()
             .await
             .unwrap();
@@ -300,8 +299,7 @@ mod tests {
     #[tokio::test]
     async fn replacement_waits_for_cursor_publication_and_gets_independent_ancestry() {
         let home = tempfile::tempdir().unwrap();
-        let local = LocalBackend::builder()
-            .home(home.path())
+        let local = crate::test_support::local_backend_builder(home.path())
             .build()
             .await
             .unwrap();
@@ -339,13 +337,11 @@ mod tests {
     async fn same_named_sources_in_different_backends_keep_separate_ancestry() {
         let first_home = tempfile::tempdir().unwrap();
         let second_home = tempfile::tempdir().unwrap();
-        let first = LocalBackend::builder()
-            .home(first_home.path())
+        let first = crate::test_support::local_backend_builder(first_home.path())
             .build()
             .await
             .unwrap();
-        let second = LocalBackend::builder()
-            .home(second_home.path())
+        let second = crate::test_support::local_backend_builder(second_home.path())
             .build()
             .await
             .unwrap();
@@ -361,8 +357,7 @@ mod tests {
     #[tokio::test]
     async fn cursor_from_a_different_source_incarnation_is_rejected() {
         let home = tempfile::tempdir().unwrap();
-        let local = LocalBackend::builder()
-            .home(home.path())
+        let local = crate::test_support::local_backend_builder(home.path())
             .build()
             .await
             .unwrap();
@@ -386,8 +381,7 @@ mod tests {
     #[tokio::test]
     async fn completed_capture_accepts_status_changes_but_rejects_replacement() {
         let home = tempfile::tempdir().unwrap();
-        let local = LocalBackend::builder()
-            .home(home.path())
+        let local = crate::test_support::local_backend_builder(home.path())
             .build()
             .await
             .unwrap();

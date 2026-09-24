@@ -439,8 +439,7 @@ mod tests {
     #[tokio::test]
     async fn missing_named_external_mount_never_recreates_catalog_or_directory() {
         let temp = tempfile::tempdir().unwrap();
-        let local = LocalBackend::builder()
-            .home(temp.path())
+        let local = crate::test_support::local_backend_builder(temp.path())
             .build()
             .await
             .unwrap();
@@ -464,8 +463,7 @@ mod tests {
     #[tokio::test]
     async fn existing_named_external_mount_loses_creation_intent_without_creating_path() {
         let temp = tempfile::tempdir().unwrap();
-        let local = LocalBackend::builder()
-            .home(temp.path())
+        let local = crate::test_support::local_backend_builder(temp.path())
             .build()
             .await
             .unwrap();
@@ -489,8 +487,7 @@ mod tests {
     #[tokio::test]
     async fn named_disk_cannot_replace_an_external_filesystem_transport() {
         let temp = tempfile::tempdir().unwrap();
-        let local = LocalBackend::builder()
-            .home(temp.path())
+        let local = crate::test_support::local_backend_builder(temp.path())
             .build()
             .await
             .unwrap();

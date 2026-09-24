@@ -19,7 +19,7 @@ Disk is the default. Full adds memory and execution state; there is no memory-on
 
 ## Disk snapshots
 
-Use disk snapshots for installed dependencies, prepared workspaces, and saved files. Local live captures flush guest filesystem writes by default; application buffers and transactions still need application-level coordination. Cloud requires a stopped or crashed source. See [guest filesystem flush](#guest-filesystem-flush) for paused sources and the unflushed `skip` policy.
+Use disk snapshots for installed dependencies, prepared workspaces, and saved files. Cloud requires a stopped or crashed source. See [guest flushing](#guest-flushing) for how microsandbox handles pending writes.
 
 <Steps>
 <Step title="Prepare">
@@ -117,7 +117,7 @@ if err != nil {
 ```
 
 ```bash CLI
-msb snapshot create ready --from-sandbox baseline
+msb snap create ready --sandbox baseline
 ```
 </CodeGroup>
 
@@ -153,7 +153,7 @@ if err != nil {
 
 ```bash CLI
 # Local snapshot selector
-msb restore baseline:ready --name worker
+msb snap restore baseline:ready --name worker
 msb exec worker -- python -c "import requests; print(requests.__version__)"
 ```
 </CodeGroup>
@@ -213,7 +213,7 @@ snapshot, err := m.Snapshot.Create(ctx, m.SnapshotCreateOptions{
 ```
 
 ```bash CLI
-msb snapshot create snap --from-sandbox worker --full
+msb snap create snap --sandbox worker --full
 ```
 </CodeGroup>
 
@@ -246,7 +246,7 @@ if err != nil { return err }
 ```
 
 ```bash CLI
-msb restore worker:snap --name resumed
+msb snap restore worker:snap --name resumed
 ```
 </CodeGroup>
 
@@ -254,7 +254,7 @@ msb restore worker:snap --name resumed
 </Steps>
 
 - **Compatibility:** Use a compatible runtime and guest kernel. CPU and memory settings, including maximums, must match the capture.
-- **Connections:** Reconnect clients and application connections. Host-side connections and transfers are not captured; buffered process output is not replayed.
+- **Connections:** Reconnect clients and application connections. Microsandbox does not capture host-side connections or transfers, and does not replay buffered process output.
 - **Mounts:** Owned volumes are private to each child. Host bindings need explicit authorization; see [mount behavior](#mount-behavior).
 
 <Accordion title="Capture or restore fails">
@@ -323,8 +323,8 @@ if err != nil { return err }
 ```
 
 ```bash CLI
-msb restore worker:snap --name worker_a --forked
-msb restore worker:snap --name worker_b --forked
+msb snap restore worker:snap --name worker_a --forked
+msb snap restore worker:snap --name worker_b --forked
 ```
 </CodeGroup>
 
@@ -332,7 +332,7 @@ The first restore prepares a local memory cache; later restores reuse it. No spe
 
 ### Restore disk only
 
-Boot from a full snapshot’s saved disk without resuming its processes. This allows different CPU and memory settings and needs no compatible memory codec.
+Boot a fresh VM from a full snapshot’s saved disk without resuming its processes. You can choose different CPU and memory settings.
 
 <CodeGroup>
 ```typescript TypeScript
@@ -366,69 +366,86 @@ if err != nil { return err }
 ```
 
 ```bash CLI
-msb restore worker:snap --name rebooted --disk-only
+msb snap restore worker:snap --name rebooted --disk-only
 ```
 </CodeGroup>
 
-Disk-only restore copies only the checkpoint's disk chain, creates a fresh writable qcow2 head, and performs an ordinary boot. It does not require the destination to support the checkpoint's memory or execution codec. The disk projection of a full snapshot may omit writes buffered in guest RAM unless capture used `--guest-flush required`; filesystem journal recovery may still run. Full restore preserves those buffers in RAM. Host disk flushes and durable snapshot publication remain enforced regardless of guest-flush policy. A tmpfs-root snapshot cannot restore disk-only.
+Snapshots with a tmpfs root cannot be restored disk-only.
 
-## Guest filesystem flush
+<a id="guest-filesystem-flush"></a>
 
-`--guest-flush auto|required|skip` controls guest writeback for the root and captured block disks, including owned disks, during snapshot creation, branching, and pause. Host-backed directories (owned directories and external virtiofs mounts) retain their synchronization barriers. Host disk-I/O draining and snapshot durability are unchanged.
+### Guest flushing
 
-| Policy | Live disk-only snapshot | Full snapshot, branch, or pause |
-| --- | --- | --- |
-| `auto` (default) | Require guest writeback | Preserve dirty pages in RAM; no block-filesystem flush |
-| `required` | Require guest writeback | Also flush captured persistent filesystems |
-| `skip` | Accept unflushed disk state | No optional guest writeback |
+Guest flushing writes pending filesystem changes from memory to disk. It works the same way in the CLI and all SDKs, for snapshots, branching, and pausing.
 
-Use `required` on a full snapshot when you also want to restore its disks without RAM. Flushing writes the guest filesystem cache, not application buffers or transactions. It also does not make tmpfs persistent.
-
-`skip` on a disk-only snapshot accepts crash-consistent root and owned disks: recent buffered writes may be absent and filesystem recovery may be needed. Full snapshots and branches retain those dirty pages in captured RAM. An owned disk does not force guest writeback during plain pause. Earlier guest-flush builds flushed root and owned disks unconditionally when any owned mount existed; do not rely on that incidental behavior with `skip`.
-
-```bash
-msb snapshot create disk --from-sandbox worker
-msb snapshot create full --from-sandbox worker --full --guest-flush required
-msb branch worker --name child --guest-flush skip
-
-# Prepare a flush boundary before pausing; capture keeps the source paused.
-msb pause worker --guest-flush required
-msb snapshot create paused --from-sandbox worker
-msb resume worker
-```
-
-A paused source must already have acknowledged the required flush at that pause. Otherwise capture fails without resuming it. For a stopped or crashed source, `auto` and `skip` capture existing disk state; `required` fails because no guest is running. Older runtimes that cannot enforce a requested policy reject it before capture; restart the source with the updated runtime.
-
-SDK equivalents use the same policy:
+The default `auto` policy flushes running disk snapshots. Full snapshots and branches keep those changes in memory instead. Choose `required` if you plan to restore a full snapshot's disks without its memory:
 
 <CodeGroup>
 ```typescript TypeScript
-await Snapshot.builder("full").fromSandbox("worker").full().guestFlush("required").create();
-await source.pause({ guestFlush: "required" });
-await source.branchMany(["alice", "bob"], { guestFlush: "skip" });
+import { Snapshot } from "microsandbox";
+
+const snapshot = await Snapshot.builder("ready")
+    .fromSandbox("worker")
+    .full()
+    .guestFlush("required")
+    .create();
 ```
 
 ```rust Rust
-use microsandbox::{Snapshot, snapshot::GuestFlush};
-Snapshot::builder("full").from_sandbox("worker").full()
-    .guest_flush(GuestFlush::Required).create().await?;
-source.pause_with_guest_flush(GuestFlush::Required).await?;
+use microsandbox::{snapshot::GuestFlush, Snapshot};
+
+let snapshot = Snapshot::builder("ready")
+    .from_sandbox("worker")
+    .full()
+    .guest_flush(GuestFlush::Required)
+    .create()
+    .await?;
 ```
 
 ```python Python
 from microsandbox import GuestFlush, Snapshot
-await Snapshot.create("full", from_sandbox="worker", full=True, guest_flush=GuestFlush.REQUIRED)
-await source.pause(guest_flush=GuestFlush.REQUIRED)
+
+snapshot = await Snapshot.create(
+    "ready",
+    from_sandbox="worker",
+    full=True,
+    guest_flush=GuestFlush.REQUIRED,
+)
 ```
 
 ```go Go
-snapshot, err := msb.Snapshot.Create(ctx, msb.SnapshotCreateOptions{
-    Name: "full", FromSandbox: "worker", Full: true, GuestFlush: msb.GuestFlushRequired,
+import m "github.com/superradcompany/microsandbox/sdk/go"
+
+snapshot, err := m.Snapshot.Create(ctx, m.SnapshotCreateOptions{
+    Name:        "ready",
+    FromSandbox: "worker",
+    Full:        true,
+    GuestFlush:  m.GuestFlushRequired,
 })
-err = source.PauseWithGuestFlush(ctx, msb.GuestFlushRequired)
-child, err := source.Branch(ctx, "child", msb.WithBranchGuestFlush(msb.GuestFlushSkip))
+if err != nil { return err }
+```
+
+```bash CLI
+msb snap create ready --sandbox worker --full --guest-flush required
 ```
 </CodeGroup>
+
+Flushing does not save data still buffered by your application or commit database transactions. Save or commit that data before capturing the snapshot.
+
+<Accordion title="Advanced flush behavior">
+
+| Policy | Behavior |
+| --- | --- |
+| `auto` (default) | Flush before a running disk-only capture; no extra flush for full captures, branching, or pausing |
+| `required` | Require a successful flush before capture or pause |
+| `skip` | Skip guest flushing; disk-only snapshots may miss buffered writes and need filesystem recovery |
+
+- **Paused sandboxes:** Pause with `required` before taking a disk snapshot. Capture fails if the needed flush was not done before pausing; it never resumes the sandbox to flush.
+- **Stopped or crashed sandboxes:** `auto` and `skip` capture the saved disk state. `required` fails because no guest is running.
+- **Storage:** Flushing covers the root and captured block disks, including owned disks. It does not make tmpfs persistent. Host storage synchronization and snapshot durability remain enforced with every policy.
+- **Compatibility:** Older runtimes may reject the policy; restart the sandbox with an updated runtime. Cloud supports only `auto`.
+
+</Accordion>
 
 ## Branching
 
@@ -522,11 +539,9 @@ Owned directory snapshots cannot move between Unix and Windows. Owned disks do n
 
 ### External mounts
 
-Full restore requires bindings for captured external filesystems and additional disks. Supply `-v /host/data:/data`, select a private captured disk with `-v /data`, or explicitly authorize validated source-local bindings with `--dangerously-inherit-resources`. Inheritance is not permission to ignore a missing dependency. Owned volumes are reconstructed automatically.
+Snapshots do not include host-mounted files. Supply their host paths when restoring. Owned volumes restore automatically. Full restore requires every captured external filesystem and additional disk to be available.
 
-Use `--allow-missing-resources` to resume with unavailable resources and warnings; their backend operations return `EIO`. This does not inherit resources or accept changed objects in a supplied mapping. SDK equivalents are Rust `.allow_missing_resources()`, Python `allow_missing_resources=True`, TypeScript `.allowMissingResources()`, and Go `WithAllowMissingResources()`. Direct branches retain their existing omission behavior. Disk-only restore is a cold boot, not restoration of captured external filesystem handles.
-
-These explicit bindings work for disk and full snapshots:
+For either a disk or full snapshot, mount a host directory like this:
 
 <CodeGroup>
 ```typescript TypeScript
@@ -565,11 +580,115 @@ if err != nil { return err }
 ```
 
 ```bash CLI
-msb restore worker:snap --name child -v /host/project:/work
+msb snap restore worker:snap --name child -v /host/project:/work
 ```
 </CodeGroup>
 
-Mapping source and child to the same host directory shares files. Named disk volumes restore privately; arbitrary external disk images are not converted to owned volumes.
+Using the same host directory for the source and restored sandbox shares its files.
+
+<Accordion title="Advanced restore options">
+
+- **Reuse source bindings:** Restore on the same host using the source's validated mounts. Missing dependencies still cause restore to fail.
+- **Select a captured disk:** Restore a private copy of a named disk volume. External disk images are not converted to owned volumes.
+- **Allow missing resources:** Continue without an external filesystem or additional disk. Root and owned storage must still be complete. Access to missing resources fails and may disrupt applications or make filesystems read-only.
+
+Each example below restores a separate sandbox using one of these options:
+
+<CodeGroup>
+```typescript TypeScript
+// Reuse source bindings.
+const inherited = await Sandbox.restore("worker:snap")
+    .name("inherited")
+    .dangerouslyInheritResources()
+    .restore();
+
+// Select a captured disk.
+const privateDisk = await Sandbox.restore("worker:snap")
+    .name("private-disk")
+    .volume("/data", v => v.captured())
+    .restore();
+
+// Allow missing resources.
+const partial = await Sandbox.restore("worker:snap")
+    .name("partial")
+    .allowMissingResources()
+    .restore();
+```
+
+```rust Rust
+// Reuse source bindings.
+let inherited = Sandbox::restore("worker:snap")
+    .name("inherited")
+    .dangerously_inherit_resources()
+    .restore()
+    .await?;
+
+// Select a captured disk.
+let private_disk = Sandbox::restore("worker:snap")
+    .name("private-disk")
+    .volume("/data", |v| v.captured())
+    .restore()
+    .await?;
+
+// Allow missing resources.
+let partial = Sandbox::restore("worker:snap")
+    .name("partial")
+    .allow_missing_resources()
+    .restore()
+    .await?;
+```
+
+```python Python
+# Reuse source bindings.
+inherited = await Sandbox.restore(
+    "worker:snap", name="inherited", dangerously_inherit_resources=True,
+)
+
+# Select a captured disk.
+private_disk = await Sandbox.restore(
+    "worker:snap", name="private-disk", captured_volumes=["/data"],
+)
+
+# Allow missing resources.
+partial = await Sandbox.restore(
+    "worker:snap", name="partial", allow_missing_resources=True,
+)
+```
+
+```go Go
+// Reuse source bindings.
+inherited, err := m.RestoreSandbox(ctx, "worker:snap", "inherited",
+    m.WithDangerouslyInheritResources())
+if err != nil { return err }
+
+// Select a captured disk.
+privateDisk, err := m.RestoreSandbox(ctx, "worker:snap", "private-disk",
+    m.WithRestoreConfig(m.RestoreConfig{CapturedVolumes: []string{"/data"}}))
+if err != nil { return err }
+
+// Allow missing resources.
+partial, err := m.RestoreSandbox(ctx, "worker:snap", "partial",
+    m.WithAllowMissingResources())
+if err != nil { return err }
+```
+
+```bash CLI
+# Reuse source bindings.
+msb snap restore worker:snap --name inherited --dangerously-inherit-resources
+
+# Select a captured disk.
+msb snap restore worker:snap --name private-disk -v /data
+
+# Allow missing resources.
+msb snap restore worker:snap --name partial --allow-missing-resources
+```
+</CodeGroup>
+
+Allowing missing resources does not reuse source bindings or accept changed files; see [Validate mounts](#validate-mounts). Warnings remain visible even when progress output is suppressed.
+
+Direct branching keeps its existing behavior for unavailable resources. Disk-only restore boots fresh rather than resuming open filesystem handles.
+
+</Accordion>
 
 ### Validate mounts
 
@@ -618,12 +737,12 @@ if err != nil { return err }
 ```
 
 ```bash CLI
-msb restore worker:snap --name child \
+msb snap restore worker:snap --name child \
     -v /host/copy:/work --external-mount-policy relaxed
 ```
 </CodeGroup>
 
-Relaxed mode validates supplied filesystem objects; it does not grant host access, waive missing-resource checks, recreate missing files, or bypass integrity checks. Full restore requires `--allow-missing-resources` to leave an external filesystem or additional disk unavailable. Root and owned storage must still be complete. Direct branching retains its existing unavailable-resource behavior. Backend I/O returns errors for unavailable devices, which can abort filesystem journals or make them read-only; warnings remain visible with `--quiet`.
+Relaxed mode accepts supported changes to supplied filesystem objects. It still checks integrity and requires access to the supplied paths. It does not recreate missing files or allow missing resources.
 
 <Accordion title="Open files and cached data">
 
@@ -690,13 +809,16 @@ for event := range events {
 result := <-results
 if result.Err != nil { return result.Err }
 resumed := result.Sandbox
+defer resumed.Close()
 ```
 
 ```bash CLI
 # Restore shows progress by default.
-msb restore worker:snap --name resumed
+msb snap restore worker:snap --name resumed
 ```
 </CodeGroup>
+
+In Go, always receive the result and close its sandbox handle when finished, even if you ignore progress events. Closing a restored handle does not stop the detached sandbox; call `Stop` or `Destroy` when needed. Cancel the context to cancel the operation.
 
 Some stages have no percentage. Memory preparation has no fixed timeout; activation has a separate timeout. Set an overall deadline or use SDK cancellation when needed.
 
@@ -745,9 +867,10 @@ if err != nil { return err }
 ```
 
 ```bash CLI
-msb snapshots
-msb snapshot inspect baseline:ready
-msb snapshot rm baseline:ready
+msb snap ls
+msb snap ls --group baseline
+msb snap inspect baseline:ready
+msb snap rm baseline:ready
 ```
 </CodeGroup>
 
@@ -853,12 +976,12 @@ if err != nil { return err }
 ```
 
 ```bash CLI
-msb snapshot create cp01 --from-sandbox baseline --group work
-msb snapshot create cp02 --from-sandbox baseline --group work
-msb restore work --name latest
-msb restore work:cp01 --name earlier
-msb snapshot head work           # Show the selected snapshot ID
-msb snapshot head work:cp01      # Explicitly select an earlier checkpoint
+msb snap create cp01 --sandbox baseline --group work
+msb snap create cp02 --sandbox baseline --group work
+msb snap restore work --name latest
+msb snap restore work:cp01 --name earlier
+msb snap head work           # Show the selected snapshot ID
+msb snap head work:cp01      # Explicitly select an earlier checkpoint
 ```
 </CodeGroup>
 
@@ -879,17 +1002,21 @@ await Snapshot.loadWithOptions("experiment.msb", {
 ```
 
 ```rust Rust
+use std::path::Path;
+
+use microsandbox::{snapshot::LoadOpts, Snapshot};
+
 Snapshot::load_with_options(
-    std::path::Path::new("snap.msb"),
-    microsandbox::snapshot::LoadOpts {
+    Path::new("snap.msb"),
+    LoadOpts {
         group: Some("work".into()),
         ..Default::default()
     },
 ).await?;
 
 Snapshot::load_with_options(
-    std::path::Path::new("experiment.msb"),
-    microsandbox::snapshot::LoadOpts {
+    Path::new("experiment.msb"),
+    LoadOpts {
         group: Some("work".into()),
         set_head: true,
         ..Default::default()
@@ -918,8 +1045,8 @@ if err != nil { return err }
 ```
 
 ```bash CLI
-msb snapshot load snap.msb --group work
-msb snapshot load experiment.msb --group work --set-head
+msb snap import snap.msb --group work
+msb snap import experiment.msb --group work --set-head
 ```
 </CodeGroup>
 
@@ -941,9 +1068,13 @@ await Snapshot.save("baseline:ready", "ready.msb", { withImage: true });
 ```
 
 ```rust Rust
+use std::path::Path;
+
+use microsandbox::{snapshot::SaveOpts, Snapshot};
+
 Snapshot::save("baseline:ready",
-    std::path::Path::new("ready.msb"),
-    microsandbox::snapshot::SaveOpts {
+    Path::new("ready.msb"),
+    SaveOpts {
         with_image: true,
         ..Default::default()
     },
@@ -964,7 +1095,7 @@ if err != nil { return err }
 ```
 
 ```bash CLI
-msb snapshot save baseline:ready ready.msb --with-image
+msb snap export baseline:ready --output ready.msb --with-image
 ```
 </CodeGroup>
 
@@ -994,7 +1125,7 @@ if err != nil { return err }
 ```
 
 ```bash CLI
-msb restore ./ready.msb --name worker
+msb snap restore ./ready.msb --name worker
 ```
 </CodeGroup>
 
@@ -1013,11 +1144,13 @@ const handles = await Snapshot.loadMany(
 ```
 
 ```rust Rust
+use microsandbox::{snapshot::LoadOpts, Snapshot};
+
 let archives = vec!["changes.msb".into(), "base.msb".into()];
 
 let handles = Snapshot::load_many(
     &archives,
-    microsandbox::snapshot::LoadOpts {
+    LoadOpts {
         group: Some("received".into()),
         dest: Some("/mnt/snapshots".into()),
         ..Default::default()
@@ -1042,7 +1175,7 @@ if err != nil { return err }
 ```
 
 ```bash CLI
-msb snapshot load changes.msb base.msb --group received --dest /mnt/snapshots
+msb snap import changes.msb base.msb --group received --dest /mnt/snapshots
 ```
 </CodeGroup>
 
@@ -1067,6 +1200,10 @@ await Snapshot.save("worker:v2", "changes.msb", {
 ```
 
 ```rust Rust
+use std::path::Path;
+
+use microsandbox::{snapshot::SaveOpts, Snapshot};
+
 Snapshot::builder("v2")
     .from_sandbox("worker")
     .full()
@@ -1074,8 +1211,8 @@ Snapshot::builder("v2")
     .await?;
 
 Snapshot::save("worker:v2",
-    std::path::Path::new("changes.msb"),
-    microsandbox::snapshot::SaveOpts {
+    Path::new("changes.msb"),
+    SaveOpts {
         since: Some("worker:v1".into()),
         ..Default::default()
     },
@@ -1109,8 +1246,8 @@ if err != nil { return err }
 ```
 
 ```bash CLI
-msb snapshot create v2 --from-sandbox worker --full
-msb snapshot save worker:v2 changes.msb --since worker:v1
+msb snap create v2 --sandbox worker --full
+msb snap export worker:v2 --output changes.msb --since worker:v1
 ```
 </CodeGroup>
 
@@ -1132,9 +1269,13 @@ const child = await Sandbox.restore("changes.msb")
 ```
 
 ```rust Rust
+use std::path::Path;
+
+use microsandbox::{snapshot::LoadOpts, Sandbox, Snapshot};
+
 Snapshot::load_with_options(
-    std::path::Path::new("changes.msb"),
-    microsandbox::snapshot::LoadOpts {
+    Path::new("changes.msb"),
+    LoadOpts {
         group: Some("imported".into()),
         base: Some("worker:v1".into()),
         ..Default::default()
@@ -1177,8 +1318,8 @@ if err != nil { return err }
 ```
 
 ```bash CLI
-msb snapshot load changes.msb --base worker:v1 --group imported
-msb restore changes.msb --name child --snapshot-base worker:v1
+msb snap import changes.msb --base worker:v1 --group imported
+msb snap restore changes.msb --name child --snapshot-base worker:v1
 ```
 </CodeGroup>
 
@@ -1235,8 +1376,8 @@ archive, err := m.Snapshot.CreateArchive(ctx, m.SnapshotArchiveOptions{
 ```
 
 ```bash CLI
-msb snapshot create deps \
-    --from-sandbox baseline \
+msb snap create deps \
+    --sandbox baseline \
     -o /tmp/deps.msb
 ```
 </CodeGroup>
@@ -1354,9 +1495,9 @@ report, err := snap.Verify(ctx)
 ```
 
 ```bash CLI
-msb snapshot create deps --from-sandbox baseline --integrity
-msb snapshot verify baseline:deps
-msb snapshot inspect baseline:deps --verify
+msb snap create deps --sandbox baseline --integrity
+msb snap verify baseline:deps
+msb snap inspect baseline:deps --verify
 ```
 </CodeGroup>
 
@@ -1419,7 +1560,7 @@ if err != nil { return err }
 ```
 
 ```bash CLI
-msb snapshot create saved --from-sandbox worker --full --integrity
+msb snap create saved --sandbox worker --full --integrity
 msb branch worker --name child --integrity
 ```
 </CodeGroup>
@@ -1434,7 +1575,7 @@ msb branch worker --name child --integrity
 | Full restore rejects resource settings | Keep the captured CPU and memory settings, or restore with `--disk-only`. A full snapshot with a tmpfs root must resume execution. |
 | A restored app loses its connection | Reconnect clients and retry application connections; live host connections are not captured. |
 | Capture fails after saving a snapshot | Inspect the saved snapshot before retrying. The error may mean capture succeeded but the source could not resume. |
-| A local snapshot is missing from the list | Run `msb snapshot reindex` to rebuild the local index. |
+| A local snapshot is missing from the list | Run `msb snap reindex` to rebuild the local index. |
 
 
 ## Reference
@@ -1442,4 +1583,4 @@ msb branch worker --name child --integrity
 See each SDK reference for setup, imports, optional controls, and result fields.
 
 - **SDKs:** [TypeScript](/sdk/typescript/snapshots), [Rust](/sdk/rust/snapshots), [Python](/sdk/python/snapshots), and [Go](/sdk/go/snapshots).
-- **CLI:** Run `msb snapshot --help` or `msb restore --help` for all options.
+- **CLI:** Run `msb snap --help` or `msb snap restore --help` for all options.

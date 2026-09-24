@@ -839,6 +839,8 @@ mod tests {
     async fn local_backend() -> (tempfile::TempDir, LocalBackend) {
         let temp = tempfile::tempdir().unwrap();
         let backend = LocalBackend::builder()
+            .config_path(temp.path().join("config.json"))
+            .managed_config_path(temp.path().join("managed.json"))
             .home(temp.path())
             .build()
             .await

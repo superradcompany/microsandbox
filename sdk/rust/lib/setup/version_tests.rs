@@ -205,6 +205,11 @@ fn missing_files_and_non_executables_are_errors() {
     let mut bytes = elf(b"1.2.3", true);
     u16_at(&mut bytes, 16, 1); // ET_REL is not an executable.
     assert!(inspect(&bytes).is_err());
+    let mut bytes = pe(b"1.2.3", true);
+    u16_at(&mut bytes, 150, 0x20); // Large-address-aware alone is not executable.
+    assert!(inspect(&bytes).is_err());
+    u16_at(&mut bytes, 150, 0x22); // Unrelated flags may accompany the executable bit.
+    assert_eq!(inspect(&bytes).unwrap(), Some(Version::new(1, 2, 3)));
 }
 
 #[test]

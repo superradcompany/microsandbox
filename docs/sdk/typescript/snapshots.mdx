@@ -12,7 +12,7 @@ Use snapshot objects or references on cloud. Local operations also accept a grou
 
 ## Guest writeback
 
-Use `.guestFlush("required")` on snapshot builders or `{ guestFlush: "required" }` in `source.branch`, `source.branchMany`, and `source.pause` options. The default `"auto"` flushes live disk-only captures, but adds no optional flush to full captures, branches, or pause. `"skip"` retains mandatory storage barriers. A paused disk capture needs a matching prior flush; cloud rejects non-Auto policies. See [policy semantics and examples](/sandboxes/snapshots#guest-filesystem-flush).
+Use `.guestFlush("required")` on snapshot builders or `{ guestFlush: "required" }` in `source.branch`, `source.branchMany`, and `source.pause` options. The default `"auto"` flushes live disk-only captures, but adds no optional flush to full captures, branches, or pause. `"skip"` retains mandatory storage barriers. A paused disk capture needs a matching prior flush; cloud rejects non-Auto policies. See [guest flush policy reference](/sandboxes/snapshots#guest-flushing).
 
 ## Snapshot
 
@@ -443,131 +443,23 @@ A `Snapshot` represents a backend-neutral snapshot and retains the backend
 that created or opened it. Returned by [`Snapshot.builder().create()`](#snapshotbuilder),
 [`Snapshot.open()`](#snapshot-open), and [`handle.snapshot()`](#handle-snapshot).
 
-#### <span className="msb-recv">snap.</span><span className="msb-hn">id</span>
-
-```typescript
-get id(): string
-```
-
-Stable opaque `snap_...` identity, separate from the descriptor digest.
-
-#### <span className="msb-recv">snap.</span><span className="msb-hn">path</span>
-
-```typescript
-get path(): string
-```
-
-Local artifact directory. Throws `UnsupportedError` for cloud snapshots; use the snapshot object or its typed reference for backend-neutral operations.
-
-#### <span className="msb-recv">snap.</span><span className="msb-hn">reference</span>
-
-```typescript
-get reference(): string
-```
-
-Stable backend-relative value. Pass the snapshot object to `Sandbox.restore(snapshot)` to preserve both this value and its reference kind.
-
-#### <span className="msb-recv">snap.</span><span className="msb-hn">referenceKind</span>
-
-```typescript
-get referenceKind(): "id" | "path"
-```
-
-How the selected backend resolves `reference`. Most callers can pass the
-snapshot object directly and never inspect this value.
-
-#### <span className="msb-recv">snap.</span><span className="msb-hn">digest</span>
-
-```typescript
-get digest(): string
-```
-
-Canonical descriptor digest (`sha256:hex`), separate from the stable snapshot ID.
-
-#### <span className="msb-recv">snap.</span><span className="msb-hn">sizeBytes</span>
-
-```typescript
-get sizeBytes(): bigint | null
-```
-
-Backend-reported stored payload size in bytes, or `null` when unavailable.
-
-#### <span className="msb-recv">snap.</span><span className="msb-hn">imageRef</span>
-
-```typescript
-get imageRef(): string
-```
-
-Image reference the snapshot was taken from.
-
-#### <span className="msb-recv">snap.</span><span className="msb-hn">imageManifestDigest</span>
-
-```typescript
-get imageManifestDigest(): string
-```
-
-OCI manifest digest of the pinned image.
-
-#### <span className="msb-recv">snap.</span><span className="msb-hn">format</span>
-
-```typescript
-get format(): "raw" | "qcow2" | null
-```
-
-On-disk format of the upper layer.
-
----
-
-#### <span className="msb-recv">snap.</span><span className="msb-hn">scope</span>
-<div className="msb-tags"><span className="msb-tag is-instance">getter</span></div>
-
-```typescript
-get scope(): SnapshotScope
-```
-
-Snapshot scope: `"disk"` for a disk-only snapshot or `"full"` for disk plus VM execution state. See [`SnapshotScope`](#snapshotscope-type).
-
----
-
-#### <span className="msb-recv">snap.</span><span className="msb-hn">fstype</span>
-
-```typescript
-get fstype(): string | null
-```
-
-Filesystem type inside the upper (e.g. `"ext4"`).
-
-#### <span className="msb-recv">snap.</span><span className="msb-hn">parent</span>
-
-```typescript
-get parent(): string | null
-```
-
-Manifest digest of the parent snapshot, or `null` for a root.
-
-#### <span className="msb-recv">snap.</span><span className="msb-hn">createdAt</span>
-
-```typescript
-get createdAt(): string
-```
-
-RFC 3339 timestamp when the snapshot was created.
-
-#### <span className="msb-recv">snap.</span><span className="msb-hn">labels</span>
-
-```typescript
-get labels(): ReadonlyArray<readonly [string, string]>
-```
-
-User-supplied labels (sorted by key in canonical form), as `[key, value]` pairs.
-
-#### <span className="msb-recv">snap.</span><span className="msb-hn">sourceSandbox</span>
-
-```typescript
-get sourceSandbox(): string | null
-```
-
-Best-effort source-sandbox name, if recorded. `null` when the manifest has no source recorded.
+| Field | Type | Description |
+|---|---|---|
+| <span id="snap-id"></span>`id` | `string` | Stable opaque `snap_...` identity, separate from the descriptor digest. |
+| <span id="snap-path"></span>`path` | `string` | Local artifact directory. Throws `UnsupportedError` for cloud snapshots; use the snapshot object or its typed reference for backend-neutral operations. |
+| <span id="snap-reference"></span>`reference` | `string` | Stable backend-relative value. Pass the snapshot object to `Sandbox.restore(snapshot)` to preserve both this value and its reference kind. |
+| <span id="snap-referencekind"></span>`referenceKind` | `"id" \| "path"` | How the selected backend resolves `reference`. Most callers can pass the snapshot object directly and never inspect this value. |
+| <span id="snap-digest"></span>`digest` | `string` | Canonical descriptor digest (`sha256:hex`), separate from the stable snapshot ID. |
+| <span id="snap-sizebytes"></span>`sizeBytes` | `bigint \| null` | Backend-reported stored payload size in bytes, or `null` when unavailable. |
+| <span id="snap-imageref"></span>`imageRef` | `string` | Image reference the snapshot was taken from. |
+| <span id="snap-imagemanifestdigest"></span>`imageManifestDigest` | `string` | OCI manifest digest of the pinned image. |
+| <span id="snap-format"></span>`format` | `"raw" \| "qcow2" \| null` | On-disk format of the upper layer. |
+| <span id="snap-scope"></span>`scope` | `SnapshotScope` | Snapshot scope: `"disk"` for a disk-only snapshot or `"full"` for disk plus VM execution state. See [`SnapshotScope`](#snapshotscope-type). |
+| <span id="snap-fstype"></span>`fstype` | `string \| null` | Filesystem type inside the upper (e.g. `"ext4"`). |
+| <span id="snap-parent"></span>`parent` | `string \| null` | Manifest digest of the parent snapshot, or `null` for a root. |
+| <span id="snap-createdat"></span>`createdAt` | `string` | RFC 3339 timestamp when the snapshot was created. |
+| <span id="snap-labels"></span>`labels` | `ReadonlyArray<readonly [string, string]>` | User-supplied labels (sorted by key in canonical form), as `[key, value]` pairs. |
+| <span id="snap-sourcesandbox"></span>`sourceSandbox` | `string \| null` | Best-effort source-sandbox name, if recorded. `null` when the manifest has no source recorded. |
 
 #### <span className="msb-recv">snap.</span><span className="msb-hn">saveTo()</span>
 
@@ -648,59 +540,17 @@ A metadata and lifecycle handle for an existing snapshot.
 
 <p className="msb-backref">Returned by <a href="#snapshot-get">Snapshot.get()</a>, <a href="#snapshot-list">Snapshot.list()</a>, <a href="#snapshot-load">Snapshot.load()</a></p>
 
-#### <span className="msb-recv">snapshotHandle.</span><span className="msb-hn">digest</span>
-
-`string`
-
-Descriptor digest (`sha256:hex`), separate from the stable snapshot ID.
-
-#### <span className="msb-recv">snapshotHandle.</span><span className="msb-hn">name</span>
-
-`string \| null`
-
-Member name within its group, or `null` when no alias is recorded.
-
-#### <span className="msb-recv">snapshotHandle.</span><span className="msb-hn">parentDigest</span>
-
-`string \| null`
-
-Parent snapshot's manifest digest, or `null` for a root.
-
-#### <span className="msb-recv">snapshotHandle.</span><span className="msb-hn">scope</span>
-
-[`SnapshotScope`](#snapshotscope-type)
-
-Snapshot payload scope (`"disk"` today).
-
-#### <span className="msb-recv">snapshotHandle.</span><span className="msb-hn">imageRef</span>
-
-`string`
-
-Image reference the snapshot was taken from.
-
-#### <span className="msb-recv">snapshotHandle.</span><span className="msb-hn">format</span>
-
-`"raw" \| "qcow2"`
-
-On-disk format of the upper layer.
-
-#### <span className="msb-recv">snapshotHandle.</span><span className="msb-hn">sizeBytes</span>
-
-`bigint \| null`
-
-Apparent size of the upper file at index time.
-
-#### <span className="msb-recv">snapshotHandle.</span><span className="msb-hn">createdAt</span>
-
-`Date`
-
-Snapshot creation time (from manifest).
-
-#### <span className="msb-recv">snapshotHandle.</span><span className="msb-hn">path</span>
-
-`string`
-
-Local artifact directory path.
+| Field | Type | Description |
+|---|---|---|
+| <span id="snapshothandle-digest"></span>`digest` | `string` | Descriptor digest (`sha256:hex`), separate from the stable snapshot ID. |
+| <span id="snapshothandle-name"></span>`name` | `string \| null` | Member name within its group, or `null` when no alias is recorded. |
+| <span id="snapshothandle-parentdigest"></span>`parentDigest` | `string \| null` | Parent snapshot's manifest digest, or `null` for a root. |
+| <span id="snapshothandle-scope"></span>`scope` | [`SnapshotScope`](#snapshotscope-type) | Snapshot payload scope (`"disk"` today). |
+| <span id="snapshothandle-imageref"></span>`imageRef` | `string` | Image reference the snapshot was taken from. |
+| <span id="snapshothandle-format"></span>`format` | `"raw" \| "qcow2"` | On-disk format of the upper layer. |
+| <span id="snapshothandle-sizebytes"></span>`sizeBytes` | `bigint \| null` | Apparent size of the upper file at index time. |
+| <span id="snapshothandle-createdat"></span>`createdAt` | `Date` | Snapshot creation time (from manifest). |
+| <span id="snapshothandle-path"></span>`path` | `string` | Local artifact directory path. |
 
 #### <span className="msb-recv">snapshotHandle.</span><span className="msb-hn">open()</span> {#snapshothandleopen}
 
@@ -727,21 +577,10 @@ await h.remove({ force: false });     // refuse if it has children
 ```
 
 </Accordion>
-#### <span className="msb-recv">snapshotHandle.</span><span className="msb-hn">reference</span>
-
-```typescript
-get reference(): string
-```
-
-Backend-relative snapshot reference.
-
-#### <span className="msb-recv">snapshotHandle.</span><span className="msb-hn">referenceKind</span>
-
-```typescript
-get referenceKind(): "id" | "path"
-```
-
-How the backend resolves the reference.
+| Field | Type | Description |
+|---|---|---|
+| <span id="snapshothandle-reference"></span>`reference` | `string` | Backend-relative snapshot reference. |
+| <span id="snapshothandle-referencekind"></span>`referenceKind` | `"id" \| "path"` | How the backend resolves the reference. |
 
 #### <span className="msb-recv">snapshotHandle.</span><span className="msb-hn">saveTo()</span> {#snapshothandlesaveto}
 

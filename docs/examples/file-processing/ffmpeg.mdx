@@ -87,13 +87,13 @@ msb run --name ffmpeg-base --replace `
 Capture the prepared toolchain:
 
 ```sh
-msb snapshot create ffmpeg-tools --from-sandbox ffmpeg-base --integrity
+msb snap create ffmpeg-tools --sandbox ffmpeg-base --integrity
 ```
 
 Verify the snapshot before using it:
 
 ```sh
-msb snapshot verify ffmpeg-base:ffmpeg-tools
+msb snap verify ffmpeg-base:ffmpeg-tools
 ```
 
 </Step>
@@ -104,14 +104,14 @@ Restore boots an idle detached sandbox with the requested security, network, res
 
 <CodeGroup>
 ```sh macOS & Linux
-msb restore ffmpeg-base:ffmpeg-tools --name ffmpeg-worker \
+msb snap restore ffmpeg-base:ffmpeg-tools --name ffmpeg-worker \
   --cpus 2 --memory 2G \
   --user media --security restricted \
   --no-net --max-duration 10m
 ```
 
 ```powershell Windows
-msb restore ffmpeg-base:ffmpeg-tools --name ffmpeg-worker `
+msb snap restore ffmpeg-base:ffmpeg-tools --name ffmpeg-worker `
   --cpus 2 --memory 2G `
   --user media --security restricted `
   --no-net --max-duration 10m
@@ -246,7 +246,7 @@ Remove-Item prepare-ffmpeg.sh, transcode-video.sh
 Remove the reusable toolchain snapshot:
 
 ```sh
-msb snapshot rm ffmpeg-base:ffmpeg-tools
+msb snap rm ffmpeg-base:ffmpeg-tools
 ```
 
 The checked output remains in the artifact directory configured above until you remove it.

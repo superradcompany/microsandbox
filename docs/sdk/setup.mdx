@@ -210,7 +210,7 @@ Microsandbox.set_runtime_libkrunfw_path("/opt/microsandbox/lib/libkrunfw.dylib")
 ```
 </CodeGroup>
 
-Environment variables work across the SDKs and take precedence over SDK-provided or configured paths:
+Set runtime paths before constructing a backend. Each backend captures these settings; create a new backend to pick up changes. Environment variables work across the SDKs and take precedence over SDK-provided or user-configured paths. [Managed runtime paths](/enterprise/managed-configuration#apply-configuration-updates) take precedence over all three:
 
 | Variable | Purpose |
 |----------|---------|

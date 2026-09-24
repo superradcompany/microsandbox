@@ -81,14 +81,14 @@ msb stop migration-base
 
 <CodeGroup>
 ```sh macOS & Linux
-msb snapshot create postgres-before-migration \
-  --from-sandbox migration-base \
+msb snap create postgres-before-migration \
+  --sandbox migration-base \
   --integrity
 ```
 
 ```powershell Windows
-msb snapshot create postgres-before-migration `
-  --from-sandbox migration-base `
+msb snap create postgres-before-migration `
+  --sandbox migration-base `
   --integrity
 ```
 </CodeGroup>
@@ -96,7 +96,7 @@ msb snapshot create postgres-before-migration `
 Verify the captured snapshot:
 
 ```sh
-msb snapshot verify migration-base:postgres-before-migration
+msb snap verify migration-base:postgres-before-migration
 ```
 
 </Step>
@@ -109,14 +109,14 @@ Restore into an unused sandbox name, then start PostgreSQL explicitly. Dedicated
 
 <CodeGroup>
 ```sh macOS & Linux
-msb restore migration-base:postgres-before-migration --name migration-test \
+msb snap restore migration-base:postgres-before-migration --name migration-test \
   --memory 1G -p 127.0.0.1:55432:5432
 msb exec --no-tty --user postgres migration-test -- \
   /usr/local/bin/pg_ctl -D /var/lib/postgresql/data -l /var/lib/postgresql/data/rehearsal.log -w start
 ```
 
 ```powershell Windows
-msb restore migration-base:postgres-before-migration --name migration-test `
+msb snap restore migration-base:postgres-before-migration --name migration-test `
   --memory 1G -p 127.0.0.1:55432:5432
 msb exec --no-tty --user postgres migration-test -- `
   /usr/local/bin/pg_ctl -D /var/lib/postgresql/data -l /var/lib/postgresql/data/rehearsal.log -w start
@@ -170,14 +170,14 @@ After removing the stopped sandbox, restore a fresh copy under the same name and
 
 <CodeGroup>
 ```sh macOS & Linux
-msb restore migration-base:postgres-before-migration --name migration-test \
+msb snap restore migration-base:postgres-before-migration --name migration-test \
   --memory 1G -p 127.0.0.1:55432:5432
 msb exec --no-tty --user postgres migration-test -- \
   /usr/local/bin/pg_ctl -D /var/lib/postgresql/data -l /var/lib/postgresql/data/rehearsal.log -w start
 ```
 
 ```powershell Windows
-msb restore migration-base:postgres-before-migration --name migration-test `
+msb snap restore migration-base:postgres-before-migration --name migration-test `
   --memory 1G -p 127.0.0.1:55432:5432
 msb exec --no-tty --user postgres migration-test -- `
   /usr/local/bin/pg_ctl -D /var/lib/postgresql/data -l /var/lib/postgresql/data/rehearsal.log -w start
@@ -226,7 +226,7 @@ msb rm migration-base migration-test
 Remove the snapshot:
 
 ```sh
-msb snapshot rm migration-base:postgres-before-migration
+msb snap rm migration-base:postgres-before-migration
 ```
 
 Clear the password from the host shell:

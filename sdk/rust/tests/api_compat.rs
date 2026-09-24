@@ -1,4 +1,19 @@
 #[test]
+fn creation_futures_remain_small_for_concurrent_callers() {
+    let future = microsandbox::Sandbox::builder("stack-probe").create();
+    let detached = microsandbox::Sandbox::builder("stack-probe").create_detached();
+    for bytes in [
+        std::mem::size_of_val(&future),
+        std::mem::size_of_val(&detached),
+    ] {
+        assert!(
+            bytes < 16 * 1024,
+            "create state must not inflate every caller's async stack: {bytes} bytes"
+        );
+    }
+}
+
+#[test]
 #[cfg(feature = "local")]
 fn rust_root_compat_exports_stay_available() {
     // Compile-time tripwire for public root exports restored after the
@@ -49,8 +64,10 @@ fn rust_identity_and_generated_patch_surface_is_backend_neutral() {
     let _ = SandboxHandle::restart;
     let _ = SandboxHandle::destroy;
     let _ = (RestartOptions::default(), DestroyOptions::default());
-    let _ = microsandbox::SandboxConfigPatch::new()
-        .resources(microsandbox::SandboxResourcesPatch::new().cpus(2));
+    let _ = microsandbox::SandboxConfigPatch::new().spec(
+        microsandbox::SandboxSpecPatch::new()
+            .resources(microsandbox::SandboxResourcesPatch::new().cpus(2)),
+    );
 }
 
 #[allow(dead_code)]

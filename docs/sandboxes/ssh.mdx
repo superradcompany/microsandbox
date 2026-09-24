@@ -259,7 +259,9 @@ Set a global default in `~/.microsandbox/config.json`. Use `0` to disable the ti
 }
 ```
 
-Override the global value for one CLI session with `--inactivity-timeout 30m`, or disable it with `--no-inactivity-timeout`. The same overrides are available when opening native clients or preparing server endpoints through an SDK:
+Override the user-configured value for one CLI session with `--inactivity-timeout 30m`, or disable it with `--no-inactivity-timeout`. A [managed timeout](/configuration#ssh) takes precedence over these options for local and cloud sessions. Each backend retains its loaded settings; construct a new backend to pick up file changes. This does not configure the hosted cloud SSH gateway.
+
+The same per-session options are available when opening native clients or preparing server endpoints through an SDK:
 
 <CodeGroup>
 ```typescript TypeScript

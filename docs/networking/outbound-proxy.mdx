@@ -8,6 +8,8 @@ icon: "route"
 
 Configure one SOCKS4 or SOCKS5 proxy for outbound sandbox traffic. The guest connects to its normal destination; microsandbox routes eligible traffic through the proxy on the host.
 
+Set `sandbox_defaults.outbound_proxy` in [global configuration](/configuration#sandbox_defaults) for a shared default. Administrators can enforce or clear it through [managed configuration](/enterprise/corporate-networking#route-sandbox-traffic), which takes precedence over per-sandbox CLI and SDK options.
+
 ## Supported proxies
 
 | Proxy | Authentication | Traffic | Availability |

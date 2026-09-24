@@ -29,6 +29,8 @@ Expanded form: `msb image pull`.
 | `--ca-certs <PATH>` | Path to a PEM file with additional CA root certificates |
 | `--materialize <MODE>` | Explicitly prepare `layered`, `flat`, or `all` rootfs artifacts |
 
+[Managed registry settings](/configuration#auth-resolution-order) take precedence over `--insecure`, `--ca-certs`, and supplied credentials. A managed TLS-only entry preserves normal credential lookup.
+
 `layered` prepares the standard root; `flat` prepares a complete ext4 base; `all` prepares both. See [flat roots](/cli/sandbox-commands#flat-oci-rootfs).
 
 Without `--materialize`, the configured `sandbox_defaults.oci.root_disk` selects the layout. The built-in default is layered.

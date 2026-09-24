@@ -6,7 +6,10 @@ mod cloud;
 mod command;
 mod domain;
 mod error;
+
 mod guest_flush;
+#[doc(hidden)]
+pub mod helpers;
 pub mod modify;
 mod registry;
 pub mod snapshot;
@@ -18,6 +21,8 @@ pub mod typescript;
 //--------------------------------------------------------------------------------------------------
 // Exports
 //--------------------------------------------------------------------------------------------------
+
+pub use microsandbox_types_macros::ConfigPatch;
 
 pub use cloud::{
     CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudCreateSnapshotRequest,
@@ -42,10 +47,10 @@ pub use domain::{
     NetworkRateLimiterConfig, NetworkRateLimiterConfigPatch, NetworkSpec, NetworkSpecPatch,
     NumaPlacement, OciRootfsSource, OutboundProxy, OwnedVolumeStorage, Patch, PlacementProfile,
     PortProtocol, PortRange, Protocol, PublishedPortSpec, PullPolicy, RateLimitConfigError,
-    RateLimiterConfig, Rlimit, RlimitResource, RootDisk, RootfsSource, Rule, SandboxConfigPatch,
-    SandboxLogLevel, SandboxPolicy, SandboxPolicyPatch, SandboxResources, SandboxResourcesPatch,
-    SandboxRuntimeOptions, SandboxRuntimeOptionsPatch, SandboxSpec, ScopedUpstreamCaCert,
-    ScopedVerifyUpstream, SecretConfigError, SecretEntry, SecretSubstitution,
+    RateLimiterConfig, Rlimit, RlimitResource, RootDisk, RootfsSource, Rule, SandboxLogLevel,
+    SandboxPolicy, SandboxPolicyPatch, SandboxResources, SandboxResourcesPatch,
+    SandboxRuntimeOptions, SandboxRuntimeOptionsPatch, SandboxSpec, SandboxSpecPatch,
+    ScopedUpstreamCaCert, ScopedVerifyUpstream, SecretConfigError, SecretEntry, SecretSubstitution,
     SecretViolationAction, SecretsConfig, SecretsConfigPatch, SecurityProfile, SnapshotSpec,
     Socks5Credentials, StatVirtualization, TlsConfig, TlsConfigPatch, TokenBucketConfig,
     TransparentHugePagePolicy, VolumeKind, VolumeMount, VolumeSpec, VsockRouteSpec,

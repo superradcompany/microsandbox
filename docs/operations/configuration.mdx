@@ -6,7 +6,7 @@ icon: "sliders"
 
 A sandbox's settings can come from built-in defaults, the global `config.json`
 on the machine, sandbox YAML files, and values passed directly through the CLI
-or an SDK. Which sources apply depends on how the sandbox is created, so the
+or an SDK. Administrator-managed settings apply above these sources. Which sources apply depends on how the sandbox is created, so the
 resolution order below is split between command-line and SDK usage.
 
 ## Precedence
@@ -26,8 +26,8 @@ same value, the later layer wins.
         `~/.microsandbox/config.json`; nothing needs to be passed to load them.
         A missing file behaves like an empty JSON object.
 
-        These defaults apply to sandboxes created by the local runtime only.
-        Microsandbox cloud uses service-side defaults instead.
+        These defaults apply to local and cloud creation, subject to backend support.
+        Cloud workers supply image metadata and service-side defaults.
 
         [Global sandbox defaults reference](/configuration#sandbox_defaults)
       </Step>
@@ -45,10 +45,14 @@ same value, the later layer wins.
       </Step>
 
       <Step title="CLI input">
-        Explicit flags and positional arguments apply last and have the highest
-        precedence. Use them to specialize a file for one invocation.
+        Explicit flags and positional arguments override user files.
+        Use them to specialize a file for one invocation.
 
         [Sandbox commands and flags](/cli/sandbox-commands)
+      </Step>
+      <Step title="Managed overrides">
+        Administrator settings apply last and override user files and explicit
+        CLI or SDK input. See [Managed deployment](/enterprise/managed-configuration).
       </Step>
     </Steps>
   </Tab>
@@ -60,18 +64,20 @@ same value, the later layer wins.
       </Step>
 
       <Step title="Global sandbox defaults">
-        SDKs using the local backend automatically load `sandbox_defaults` from
-        `~/.microsandbox/config.json`. Microsandbox cloud uses service-side
-        defaults instead.
+        Local and cloud backends automatically load `sandbox_defaults` from
+        `~/.microsandbox/config.json`, subject to backend support.
 
         [Global sandbox defaults reference](/configuration#sandbox_defaults)
       </Step>
 
       <Step title="SDK input">
-        Explicit arguments, options, or builder methods apply last and have the
-        highest precedence.
+        Explicit arguments, options, or builder methods override user defaults.
 
         [SDK overview](/sdk/overview)
+      </Step>
+      <Step title="Managed overrides">
+        Administrator settings apply last and override user files and explicit
+        CLI or SDK input. See [Managed deployment](/enterprise/managed-configuration).
       </Step>
     </Steps>
 
@@ -138,7 +144,8 @@ rather than workload files.
 | A temporary change or experiment | CLI flags | One invocation |
 | Owned by a reusable workload or repository | [Sandbox YAML](/cli/configuration) | Sandboxes the CLI creates from that file |
 | Selected by application logic | [SDK input](/sdk/overview) | The sandbox created by the application |
-| Owned by a machine or deployment | [Global `config.json`](/configuration) | Sandboxes created in that environment |
+| Owned by a user | [Global `config.json`](/configuration) | New local and cloud sandboxes, subject to backend support |
+| Enforced by an administrator | [Managed configuration](/enterprise/managed-configuration) | Supported settings on the device, including cloud requests |
 
 ## References
 

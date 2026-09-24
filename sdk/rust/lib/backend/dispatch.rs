@@ -59,6 +59,12 @@ pub trait Backend: Send + Sync + 'static {
         None
     }
 
+    /// Borrow a cloud backend and its captured device settings.
+    #[cfg(feature = "cloud")]
+    fn as_cloud(&self) -> Option<&super::CloudBackend> {
+        None
+    }
+
     /// Bind agent connections to the sandbox identity captured by a cloud object.
     /// Backends without cloud identities leave the backend unchanged.
     #[doc(hidden)]

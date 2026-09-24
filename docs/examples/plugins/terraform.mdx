@@ -68,20 +68,20 @@ Capture the downloaded provider:
 
 <CodeGroup>
 ```sh macOS & Linux
-msb snapshot create terraform-runtime \
-  --from-sandbox terraform-base --integrity
+msb snap create terraform-runtime \
+  --sandbox terraform-base --integrity
 ```
 
 ```powershell Windows
-msb snapshot create terraform-runtime `
-  --from-sandbox terraform-base --integrity
+msb snap create terraform-runtime `
+  --sandbox terraform-base --integrity
 ```
 </CodeGroup>
 
 Verify the snapshot before using it:
 
 ```sh
-msb snapshot verify terraform-base:terraform-runtime
+msb snap verify terraform-base:terraform-runtime
 ```
 
 `terraform init` downloads the provider and creates `.terraform.lock.hcl`. The copy on the host is ready to review and commit when adapting this to a real module.
@@ -94,7 +94,7 @@ Restore applies the offline policy and restricted guest profile before boot. It 
 
 <CodeGroup>
 ```sh macOS & Linux
-msb restore terraform-base:terraform-runtime --name terraform-vet \
+msb snap restore terraform-base:terraform-runtime --name terraform-vet \
   --user 65534:65534 --cpus 1 --memory 512M \
   --no-net --security restricted --max-duration 1m
 msb exec --workdir /workspace --user 65534:65534 --env HOME=/tmp \
@@ -104,7 +104,7 @@ msb stop terraform-vet
 ```
 
 ```powershell Windows
-msb restore terraform-base:terraform-runtime --name terraform-vet `
+msb snap restore terraform-base:terraform-runtime --name terraform-vet `
   --user 65534:65534 --cpus 1 --memory 512M `
   --no-net --security restricted --max-duration 1m
 msb exec --workdir /workspace --user 65534:65534 --env HOME=/tmp `
@@ -131,7 +131,7 @@ msb rm -f terraform-base terraform-vet
 Remove the reusable snapshot:
 
 ```sh
-msb snapshot remove terraform-base:terraform-runtime
+msb snap rm terraform-base:terraform-runtime
 ```
 
 </Step>

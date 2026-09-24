@@ -203,8 +203,7 @@ mod tests {
     #[tokio::test]
     async fn historical_and_current_runs_share_the_slot_namespace() {
         let temp = tempdir().unwrap();
-        let backend = LocalBackend::builder()
-            .home(temp.path().join("msb-home"))
+        let backend = crate::test_support::local_backend_builder(temp.path().join("msb-home"))
             .build()
             .await
             .unwrap();
@@ -228,6 +227,8 @@ mod tests {
     async fn allocates_the_lowest_free_slot() {
         let temp = tempdir().unwrap();
         let backend = LocalBackend::builder()
+            .config_path(temp.path().join("msb-home").join("config.json"))
+            .managed_config_path(temp.path().join("msb-home").join("managed.json"))
             .home(temp.path().join("msb-home"))
             .build()
             .await
@@ -242,6 +243,8 @@ mod tests {
     async fn recycles_the_lowest_free_slot_past_the_id_cap() {
         let temp = tempdir().unwrap();
         let backend = LocalBackend::builder()
+            .config_path(temp.path().join("msb-home").join("config.json"))
+            .managed_config_path(temp.path().join("msb-home").join("managed.json"))
             .home(temp.path().join("msb-home"))
             .build()
             .await
@@ -265,6 +268,8 @@ mod tests {
     async fn finds_a_gap_below_the_highest_lease() {
         let temp = tempdir().unwrap();
         let backend = LocalBackend::builder()
+            .config_path(temp.path().join("msb-home").join("config.json"))
+            .managed_config_path(temp.path().join("msb-home").join("managed.json"))
             .home(temp.path().join("msb-home"))
             .build()
             .await
@@ -288,6 +293,8 @@ mod tests {
     async fn high_ids_get_distinct_persisted_slots() {
         let temp = tempdir().unwrap();
         let backend = LocalBackend::builder()
+            .config_path(temp.path().join("msb-home").join("config.json"))
+            .managed_config_path(temp.path().join("msb-home").join("managed.json"))
             .home(temp.path().join("msb-home"))
             .build()
             .await
@@ -316,6 +323,8 @@ mod tests {
     async fn repeated_lease_keeps_the_existing_slot() {
         let temp = tempdir().unwrap();
         let backend = LocalBackend::builder()
+            .config_path(temp.path().join("msb-home").join("config.json"))
+            .managed_config_path(temp.path().join("msb-home").join("managed.json"))
             .home(temp.path().join("msb-home"))
             .build()
             .await
@@ -340,7 +349,13 @@ mod tests {
         let home = temp.path().join("msb-home");
         let mut backends = Vec::with_capacity(COUNT);
         for _ in 0..COUNT {
-            let backend = LocalBackend::builder().home(&home).build().await.unwrap();
+            let backend = LocalBackend::builder()
+                .config_path(home.join("config.json"))
+                .managed_config_path(home.join("managed.json"))
+                .home(&home)
+                .build()
+                .await
+                .unwrap();
             backend.db().await.unwrap();
             backends.push(backend);
         }
@@ -368,6 +383,8 @@ mod tests {
     async fn does_not_lease_after_start_is_stopped() {
         let temp = tempdir().unwrap();
         let backend = LocalBackend::builder()
+            .config_path(temp.path().join("msb-home").join("config.json"))
+            .managed_config_path(temp.path().join("msb-home").join("managed.json"))
             .home(temp.path().join("msb-home"))
             .build()
             .await
@@ -408,6 +425,8 @@ mod tests {
     async fn leases_while_starting_before_readiness_is_published() {
         let temp = tempdir().unwrap();
         let backend = LocalBackend::builder()
+            .config_path(temp.path().join("msb-home").join("config.json"))
+            .managed_config_path(temp.path().join("msb-home").join("managed.json"))
             .home(temp.path().join("msb-home"))
             .build()
             .await
@@ -432,6 +451,8 @@ mod tests {
     async fn exhaustion_reclaims_inactive_slots_and_retries() {
         let temp = tempdir().unwrap();
         let backend = LocalBackend::builder()
+            .config_path(temp.path().join("msb-home").join("config.json"))
+            .managed_config_path(temp.path().join("msb-home").join("managed.json"))
             .home(temp.path().join("msb-home"))
             .build()
             .await
@@ -466,6 +487,8 @@ mod tests {
     async fn pool_exhaustion_is_a_clear_error() {
         let temp = tempdir().unwrap();
         let backend = LocalBackend::builder()
+            .config_path(temp.path().join("msb-home").join("config.json"))
+            .managed_config_path(temp.path().join("msb-home").join("managed.json"))
             .home(temp.path().join("msb-home"))
             .build()
             .await

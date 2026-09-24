@@ -135,7 +135,8 @@ impl BranchManyBuilder {
     /// Validate the batch, capture once, and return one startup outcome per name.
     /// Validation/capture failures fail the batch; later child failures do not recapture.
     pub async fn branch(mut self) -> MicrosandboxResult<Vec<BranchOutcome>> {
-        self.inner.validate_vsock_routes()?;
+        let options = self.inner.config.into_config();
+        SandboxBuilder::validate_vsock_routes(&options)?;
         if let Some(error) = self.inner.build_error.take() {
             return Err(error);
         }
@@ -143,7 +144,7 @@ impl BranchManyBuilder {
             self.backend,
             &self.source,
             self.identity,
-            self.inner.config,
+            options,
             self.record_integrity,
             self.names,
             self.guest_flush,
@@ -160,8 +161,8 @@ impl BranchBuilder {
         name: String,
     ) -> Self {
         let mut inner = SandboxBuilder::new(name);
-        inner.config.spec.mounts.clear();
-        inner.config.spec.network.ports.clear();
+        inner.config.spec.mounts = Some(Vec::new());
+        inner.config.spec.network.ports = Some(Vec::new());
         inner.config.spec.vsock = Default::default();
         inner.config.spec.runtime.user = None;
         Self {
@@ -188,7 +189,8 @@ impl BranchBuilder {
 
     /// Capture source execution and start an independent child; preserve source running/paused state.
     pub async fn branch(mut self) -> MicrosandboxResult<Sandbox> {
-        self.inner.validate_vsock_routes()?;
+        let options = self.inner.config.into_config();
+        SandboxBuilder::validate_vsock_routes(&options)?;
         if let Some(error) = self.inner.build_error.take() {
             return Err(error);
         }
@@ -196,7 +198,7 @@ impl BranchBuilder {
             self.backend,
             &self.source,
             self.identity,
-            self.inner.config,
+            options,
             self.record_integrity,
             self.guest_flush,
         )

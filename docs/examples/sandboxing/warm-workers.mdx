@@ -74,14 +74,14 @@ When the command exits, `agent-base` is stopped and ready to snapshot.
 
 <CodeGroup>
 ```sh macOS & Linux
-msb snapshot create coding-agent-base \
-  --from-sandbox agent-base \
+msb snap create coding-agent-base \
+  --sandbox agent-base \
   --integrity
 ```
 
 ```powershell Windows
-msb snapshot create coding-agent-base `
-  --from-sandbox agent-base `
+msb snap create coding-agent-base `
+  --sandbox agent-base `
   --integrity
 ```
 </CodeGroup>
@@ -89,7 +89,7 @@ msb snapshot create coding-agent-base `
 Verify the captured snapshot before using it:
 
 ```sh
-msb snapshot verify agent-base:coding-agent-base
+msb snap verify agent-base:coding-agent-base
 ```
 
 The snapshot captures the writable disk changes and pins the source image. This disk snapshot does not capture memory, running processes, network state, or environment variables. Owned storage is captured; external directory bindings require explicit destination choices. Integrity verification detects later changes to those captured bytes; it does not attest who built the snapshot or whether its packages are trustworthy.
@@ -106,13 +106,13 @@ Restore creates an idle detached sandbox with its security, resource, and lifeti
 
 <CodeGroup>
 ```sh macOS & Linux
-msb restore agent-base:coding-agent-base --name coding-worker-1 \
+msb snap restore agent-base:coding-agent-base --name coding-worker-1 \
   --cpus 2 --memory 2G \
   --user node --security restricted --max-duration 1h
 ```
 
 ```powershell Windows
-msb restore agent-base:coding-agent-base --name coding-worker-1 `
+msb snap restore agent-base:coding-agent-base --name coding-worker-1 `
   --cpus 2 --memory 2G `
   --user node --security restricted --max-duration 1h
 ```
@@ -182,7 +182,7 @@ Create more workers by changing the sandbox name:
 
 <CodeGroup>
 ```sh macOS & Linux
-msb restore agent-base:coding-agent-base --name coding-worker-2 \
+msb snap restore agent-base:coding-agent-base --name coding-worker-2 \
   --user node --security restricted --max-duration 1m
 msb exec --user node --timeout 1m \
   --rlimit nproc=256 --rlimit nofile=1024 --rlimit fsize=268435456 \
@@ -191,7 +191,7 @@ msb stop coding-worker-2
 ```
 
 ```powershell Windows
-msb restore agent-base:coding-agent-base --name coding-worker-2 `
+msb snap restore agent-base:coding-agent-base --name coding-worker-2 `
   --user node --security restricted --max-duration 1m
 msb exec --user node --timeout 1m `
   --rlimit nproc=256 --rlimit nofile=1024 --rlimit fsize=268435456 `
@@ -221,7 +221,7 @@ Remove-Item prepare-worker.sh, verify-worker.sh
 Remove the reusable snapshot only when you no longer need it:
 
 ```sh
-msb snapshot rm agent-base:coding-agent-base
+msb snap rm agent-base:coding-agent-base
 ```
 
 </Step>
@@ -233,8 +233,8 @@ msb snapshot rm agent-base:coding-agent-base
 Installed snapshot members are immutable. To update packages, recreate `agent-base`, then capture a new member name and use its group-qualified selector for future workers:
 
 ```sh
-msb snapshot create coding-agent-base-v2 --from-sandbox agent-base --integrity
-msb snapshot verify agent-base:coding-agent-base-v2
+msb snap create coding-agent-base-v2 --sandbox agent-base --integrity
+msb snap verify agent-base:coding-agent-base-v2
 ```
 
 See [Snapshots](/sandboxes/snapshots) for archive, integrity, and portability details.

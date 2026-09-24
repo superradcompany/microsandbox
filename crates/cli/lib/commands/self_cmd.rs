@@ -17,6 +17,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use clap::{Args, Subcommand};
 use console::{Key, Term, style};
+use microsandbox::config::load_persisted_config_or_default;
 use microsandbox_migration::schema_metadata;
 use microsandbox_migration::{Migrator, MigratorTrait};
 use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, DbErr, Statement};
@@ -1046,7 +1047,7 @@ async fn execute_prepared_downgrade(
         None
     };
 
-    let config = microsandbox::config::load_persisted_config_or_default()?;
+    let config = load_persisted_config_or_default()?;
     let snapshots_dir = config.snapshots_dir();
 
     // Windows cannot atomically replace the running CLI and advance the
@@ -2517,7 +2518,7 @@ async fn open_downgrade_db(
         fs::create_dir_all(parent)?;
     }
 
-    let config = microsandbox::config::load_persisted_config_or_default()?;
+    let config = load_persisted_config_or_default()?;
     let db = microsandbox_db::connection::DbWriteConnection::open(
         db_path,
         std::time::Duration::from_secs(config.database.connect_timeout_secs),

@@ -85,13 +85,13 @@ msb run --name office-base --replace `
 Capture the prepared toolchain:
 
 ```sh
-msb snapshot create office-tools --from-sandbox office-base --integrity
+msb snap create office-tools --sandbox office-base --integrity
 ```
 
 Verify the snapshot before using it:
 
 ```sh
-msb snapshot verify office-base:office-tools
+msb snap verify office-base:office-tools
 ```
 
 Bookworm currently downloads roughly 130 MB and adds about 440 MB to the guest for this toolchain; package updates can change those numbers. The snapshot lets later workers skip that installation.
@@ -106,14 +106,14 @@ The example accepts a Word document named `input.docx`:
 
 <CodeGroup>
 ```sh macOS & Linux
-msb restore office-base:office-tools --name document-worker \
+msb snap restore office-base:office-tools --name document-worker \
   --cpus 2 --memory 2G \
   --user converter --security restricted \
   --no-net --max-duration 2m
 ```
 
 ```powershell Windows
-msb restore office-base:office-tools --name document-worker `
+msb snap restore office-base:office-tools --name document-worker `
   --cpus 2 --memory 2G `
   --user converter --security restricted `
   --no-net --max-duration 2m
@@ -253,7 +253,7 @@ Remove-Item prepare-office.sh, convert-document.sh
 Remove the reusable toolchain snapshot:
 
 ```sh
-msb snapshot rm office-base:office-tools
+msb snap rm office-base:office-tools
 ```
 
 The checked `output.pdf` and `preview.png` remain in the artifact directory configured above.

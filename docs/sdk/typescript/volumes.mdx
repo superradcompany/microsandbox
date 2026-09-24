@@ -6,78 +6,14 @@ keywords: ["TypeScript SDK", "TypeScript volumes", "microsandbox volumes"]
 
 Create, manage, and mount named volumes. See [Volumes](/sandboxes/volumes) for usage examples.
 
-## MountBuilder
-
-Use `owned()` for local storage allocated for one sandbox. It starts empty, survives stop/start and reboot, and is deleted with the sandbox. Owned mounts do not appear in `Volume.list()` and cannot be shared or removed independently. Cloud rejects owned mounts.
-
-```typescript
-const sb = await Sandbox.builder("worker")
-  .image("python")
-  .volume("/cache", mount => mount.owned({ quotaMib: 2048 }))
-  .volume("/data", mount => mount.owned({ kind: "disk", sizeMib: 10240 }))
-  .create();
-```
-
-```typescript
-owned(options?: OwnedVolumeOptions): this
-```
-
-`OwnedVolumeOptions` accepts `kind` (`"dir"` by default or `"disk"`), `quotaMib` for directory storage, and `sizeMib` for disk storage. Disk storage requires a positive capacity and uses raw ext4. Common flags such as `readonly()`, `noexec()`, `nosuid()`, and `nodev()` stay on `MountBuilder`; metadata policies and `owner()` apply only to directories. A built mount reports `kind: "owned"` and `ownedKind: "dir" | "disk"` without a host path or volume name. Mounting over an existing image directory hides its contents without copying them.
-
-Sandbox mount callbacks receive a fluent `MountBuilder`. For bind and directory-backed named-volume mounts, use `owner(uid, gid)` to choose the guest owner shown for host files that do not carry a per-file stat override.
-
-```typescript
-const sb = await Sandbox.builder("worker")
-  .image("python")
-  .volume("/workspace", (mount) => mount.bind("./workspace").owner(1000, 1000))
-  .create();
-```
-
-```typescript
-owner(uid: number, gid: number): this
-```
-
-Both values must be finite integers from `0` through `4294967295`. Existing per-file overrides still take precedence, and no host inode ownership is changed. The policy is rejected for tmpfs, host disk images, disk-backed named volumes, and mounts using `statVirtualization("off")`.
-
 ## Volume
 
 <p className="msb-member-group">Instance properties</p>
 
-#### <span className="msb-recv">volume.</span><span className="msb-hn">name</span>
-
-```typescript
-get name(): string
-```
-
-The volume's name.
-
-<p className="msb-label">Returns</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><span className="msb-type">string</span></div>
-    <div className="msb-param-desc">Volume name.</div>
-  </div>
-</div>
-
-#### <span className="msb-recv">volume.</span><span className="msb-hn">path</span>
-
-<Tooltip tip="Only local volumes expose a path on the computer running the SDK."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
-
-```typescript
-get path(): string
-```
-
-Absolute host path to the volume's directory. By default volumes live under `~/.microsandbox/volumes/<name>/`.
-
-<p className="msb-label">Returns</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><span className="msb-type">string</span></div>
-    <div className="msb-param-desc">Absolute host directory path.</div>
-  </div>
-</div>
+| Field | Type | Description |
+|---|---|---|
+| <span id="volume-name"></span>`name` | `string` | The volume's name. |
+| <span id="volume-path"></span>`path` | `string` | Absolute host path to the volume's directory. By default volumes live under `~/.microsandbox/volumes/<name>/`. <Tooltip tip="Only local volumes expose a path on the computer running the SDK."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip> |
 
 <p className="msb-member-group">Static methods</p>
 
@@ -91,11 +27,15 @@ static getDefault(): Promise<VolumeHandle>
 
 Get the Cloud account's always-present default volume. It has no user-assigned name, cannot be removed, and supports direct filesystem operations through `.fs()`. The local backend returns a typed `Unsupported` error; it never substitutes a directory from the caller's machine.
 
+<Accordion title="Example">
+
 ```typescript
 const volume = await Volume.getDefault();
 await volume.fs().write("customers/acme.json", JSON.stringify({ active: true }));
 console.log(await volume.fs().readToString("customers/acme.json"));
 ```
+
+</Accordion>
 
 #### <span className="msb-recv">Volume.</span><span className="msb-hn">builder()</span>
 
@@ -807,59 +747,17 @@ Check whether a path exists.
 
 A metadata and lifecycle handle for an existing volume.
 
-#### <span className="msb-recv">handle.</span><span className="msb-hn">name</span>
-
-`string`
-
-Volume name
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">kind</span>
-
-`string`
-
-Volume kind (`"dir"` or `"disk"`)
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">quotaMib</span>
-
-`number \| null`
-
-Recorded storage quota in MiB
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">usedBytes</span>
-
-`number`
-
-Current disk usage in bytes
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">capacityBytes</span>
-
-`number \| null`
-
-Disk capacity in bytes (disk volumes)
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">diskFormat</span>
-
-`string \| null`
-
-Disk image format (disk volumes)
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">diskFstype</span>
-
-`string \| null`
-
-Inner disk filesystem (disk volumes)
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">labels</span>
-
-`ReadonlyArray<readonly [string, string]>`
-
-Metadata labels
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">createdAt</span>
-
-`Date \| null`
-
-Creation timestamp
+| Field | Type | Description |
+|---|---|---|
+| <span id="handle-name"></span>`name` | `string` | Volume name |
+| <span id="handle-kind"></span>`kind` | `string` | Volume kind (`"dir"` or `"disk"`) |
+| <span id="handle-quotamib"></span>`quotaMib` | `number \| null` | Recorded storage quota in MiB |
+| <span id="handle-usedbytes"></span>`usedBytes` | `number` | Current disk usage in bytes |
+| <span id="handle-capacitybytes"></span>`capacityBytes` | `number \| null` | Disk capacity in bytes (disk volumes) |
+| <span id="handle-diskformat"></span>`diskFormat` | `string \| null` | Disk image format (disk volumes) |
+| <span id="handle-diskfstype"></span>`diskFstype` | `string \| null` | Inner disk filesystem (disk volumes) |
+| <span id="handle-labels"></span>`labels` | `ReadonlyArray<readonly [string, string]>` | Metadata labels |
+| <span id="handle-createdat"></span>`createdAt` | `Date \| null` | Creation timestamp |
 
 #### <span className="msb-recv">handle.</span><span className="msb-hn">fs()</span>
 
@@ -980,3 +878,23 @@ Close the sink (for `await using`)
 <p className="msb-label">Returns</p>
 
 `Promise<void>`
+
+## MountBuilder
+
+#### <span className="msb-recv">mount.</span><span className="msb-hn">owned()</span>
+
+```typescript
+owned(options?: OwnedVolumeOptions): this
+```
+
+Allocate local storage for this sandbox. The storage survives stop/start and is deleted with the sandbox. Cloud does not support owned mounts. See [Volumes](/sandboxes/volumes) for usage.
+
+`OwnedVolumeOptions` accepts `kind` (`"dir"` by default or `"disk"`), `quotaMib` for directories, and `sizeMib` for disks. Disks require a positive capacity and use raw ext4. Common mount flags remain on `MountBuilder`; `owner()` and metadata policies apply only to directories.
+
+#### <span className="msb-recv">mount.</span><span className="msb-hn">owner()</span>
+
+```typescript
+owner(uid: number, gid: number): this
+```
+
+Set the guest owner for bind and directory-backed named mounts when no per-file stat override exists. Both values must be integers from `0` through `4294967295`. Host inode ownership is unchanged. Unsupported for tmpfs, disk mounts, and `statVirtualization("off")`.

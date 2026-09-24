@@ -49,6 +49,18 @@ msb sbx run alpine -- echo hello
 
 Aliases such as `ls`, `rm`, `cp`, and `mod` also work inside `sandbox` and `sbx`.
 
+Saved-state operations are grouped under `msb snap`. The equivalent long form, `msb snapshot`, is also supported; this documentation uses `msb snap` consistently:
+
+```bash
+msb snap create ready --sandbox devbox --full
+msb snap restore devbox:ready --name worker
+msb snap ls --group devbox
+msb snap export devbox:ready --output ready.msb
+msb snap import ready.msb --group received
+```
+
+Omit `--full` to save disk state for a fresh boot. The group defaults to the source sandbox's name, so the first command creates `devbox:ready`. Full captures, live branches, groups, and archive operations are local-only. Use `msb branch devbox --names worker-a worker-b` to create children directly from the same live moment. See [Snapshots](/sandboxes/snapshots) for backend limits and resource bindings. Existing top-level `restore` and snapshot `save`/`load` commands remain supported.
+
 ## Quick reference
 
 | Commands | Purpose |
@@ -57,7 +69,7 @@ Aliases such as `ls`, `rm`, `cp`, and `mod` also work inside `sandbox` and `sbx`
 | [`exec`, `copy`, `logs`](/cli/sandbox-commands#msb-exec) | Run commands and access files or output |
 | [`ls`, `ps`, `inspect`, `metrics`](/cli/sandbox-commands#msb-ls) | Inspect sandboxes |
 | [`modify`, `pause`, `resume`, `branch`, `rm`](/cli/sandbox-commands#msb-modify) | Change, branch, or remove sandboxes |
-| [`snapshot`, `snapshots`, `restore`](/cli/snapshot-commands) | Save and restore state |
+| [`snap`](/cli/snapshot-commands) | Save and restore state |
 | [`ssh`](/cli/ssh-commands) | SSH sessions, keys, and listeners |
 | [`volume`, `volumes`](/cli/volume-commands) | Manage named storage |
 | [`pull`, `load`, `save`, `images`, `rmi`, `image`](/cli/image-commands) | Manage cached images |

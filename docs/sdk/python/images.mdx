@@ -419,53 +419,16 @@ await Image.save(["python:3.12", "app:local"], output_path="bundle.tar")
 
 A lightweight handle to a cached OCI image, returned by [`Image.get()`](#image-get), [`Image.list()`](#image-list), and [`Image.load()`](#image-load). Properties are read-only attributes; the two methods are async.
 
-#### <span className="msb-recv">handle.</span><span className="msb-hn">reference</span>
-
-`str`
-
-Image reference
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">size_bytes</span>
-
-`int \| None`
-
-Total size in bytes, or `None` when unknown
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">manifest_digest</span>
-
-`str \| None`
-
-Content-addressable manifest digest
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">architecture</span>
-
-`str \| None`
-
-Resolved architecture
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">os</span>
-
-`str \| None`
-
-Resolved operating system
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">layer_count</span>
-
-`int`
-
-Number of layers
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">last_used_at</span>
-
-`float \| None`
-
-Last referenced time, milliseconds since epoch
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">created_at</span>
-
-`float \| None`
-
-First-pulled time, milliseconds since epoch
+| Field | Type | Description |
+|---|---|---|
+| <span id="handle-reference"></span>`reference` | `str` | Image reference |
+| <span id="handle-size_bytes"></span>`size_bytes` | `int \| None` | Total size in bytes, or `None` when unknown |
+| <span id="handle-manifest_digest"></span>`manifest_digest` | `str \| None` | Content-addressable manifest digest |
+| <span id="handle-architecture"></span>`architecture` | `str \| None` | Resolved architecture |
+| <span id="handle-os"></span>`os` | `str \| None` | Resolved operating system |
+| <span id="handle-layer_count"></span>`layer_count` | `int` | Number of layers |
+| <span id="handle-last_used_at"></span>`last_used_at` | `float \| None` | Last referenced time, milliseconds since epoch |
+| <span id="handle-created_at"></span>`created_at` | `float \| None` | First-pulled time, milliseconds since epoch |
 
 #### <span className="msb-recv">handle.</span><span className="msb-hn">inspect()</span>
 

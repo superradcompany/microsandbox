@@ -7,6 +7,7 @@ use std::time::Instant;
 
 use clap::{Args, Subcommand, ValueEnum};
 use console::style;
+use microsandbox::config::RegistryOptions;
 use microsandbox::image::Image;
 use microsandbox_image::{ImageArchiveFormat, ImageLoadOptions, Registry};
 
@@ -225,11 +226,11 @@ async fn run_pull_inner(
     } = pull_overrides;
 
     let backend = crate::commands::common::resolve_local_backend()?;
-    let local = crate::commands::common::local_backend_ref(&backend)?;
-    let global = local.config();
-    let oci_defaults = &global.sandbox_defaults.oci;
+    let backend = crate::commands::common::local_backend_ref(&backend)?;
+    let backend_config = backend.config();
+    let oci_defaults = &backend_config.sandbox_defaults.oci;
     let materialization = resolve_pull_materialization(materialization, oci_defaults)?;
-    let cache = microsandbox_image::GlobalCache::new(&local.cache_dir())?;
+    let cache = microsandbox_image::GlobalCache::new(&backend.cache_dir())?;
     let platform = microsandbox_image::Platform::host_linux();
     let image_ref: microsandbox_image::Reference = reference
         .parse()
@@ -244,7 +245,7 @@ async fn run_pull_inner(
     if let Some((result, metadata)) =
         microsandbox_image::Registry::pull_cached(&cache, &image_ref, &options)?
     {
-        if let Err(e) = Image::persist(local, &reference, metadata).await {
+        if let Err(e) = Image::persist(backend, &reference, metadata).await {
             tracing::warn!(error = %e, "failed to persist image metadata to database");
         }
 
@@ -289,25 +290,19 @@ async fn run_pull_inner(
 
     let _ = display_ready_rx.recv();
 
-    let auth = match explicit_auth {
-        Some(auth) => auth,
-        None => global.resolve_registry_auth(image_ref.registry())?,
+    let registry_options = RegistryOptions {
+        ca_cert_files: cli_ca_certs.into_iter().map(Into::into).collect(),
+        auth: explicit_auth,
+        insecure,
+        ..Default::default()
     };
-    let mut ca_certs = global.resolve_ca_certs().await?;
-    if let Some(path) = &cli_ca_certs {
-        let data = tokio::fs::read(path)
-            .await
-            .map_err(|e| anyhow::anyhow!("failed to read CA certs from `{path}`: {e}"))?;
-        ca_certs.push(data);
-    }
-    let mut insecure_registries = global.insecure_registries();
-    if insecure {
-        insecure_registries.push(image_ref.registry().to_string());
-    }
+    let config = backend
+        .registry_config(image_ref.registry(), registry_options)
+        .await?;
     let registry = Registry::builder(platform, cache)
-        .auth(auth)
-        .extra_ca_certs(ca_certs)
-        .add_insecure_registries(insecure_registries)
+        .auth(config.auth)
+        .extra_ca_certs(config.ca_certs)
+        .add_insecure_registries(config.insecure_registries)
         .build()?;
 
     let task = registry.pull_with_sender(&image_ref, &options, sender);
@@ -337,10 +332,10 @@ async fn run_pull_inner(
     }
 
     // Persist to database.
-    let cache = microsandbox_image::GlobalCache::new(&local.cache_dir())?;
+    let cache = microsandbox_image::GlobalCache::new(&backend.cache_dir())?;
     match cache.read_image_metadata(&image_ref) {
         Ok(Some(metadata)) => {
-            if let Err(e) = Image::persist(local, &reference, metadata).await {
+            if let Err(e) = Image::persist(backend, &reference, metadata).await {
                 tracing::warn!(error = %e, "failed to persist image metadata to database");
             }
         }
