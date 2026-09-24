@@ -584,7 +584,7 @@ if err := ws.Close(ctx); err != nil {
 
 </Accordion>
 
-Open a streaming writer for a file. Use this for files too large to fit in memory. You must call `Close(ctx)` on the returned [`*FsWriteStream`](#fswritestream) to finalise the write.
+Open a streaming writer for a file. Use this for files too large to fit in memory. You must call `Close(ctx)` on the returned [`*FsWriteStream`](#fswritestream) to finalize the write.
 
 <p className="msb-label">Parameters</p>
 
@@ -604,7 +604,7 @@ Open a streaming writer for a file. Use this for files too large to fit in memor
 <div className="msb-params">
   <div className="msb-param">
     <div className="msb-param-key"><a className="msb-type" href="#fswritestream">*FsWriteStream</a></div>
-    <div className="msb-param-desc">Open write stream; <code>Close(ctx)</code> it to finalise.</div>
+    <div className="msb-param-desc">Open write stream; <code>Close(ctx)</code> it to finalize.</div>
   </div>
 </div>
 
@@ -646,7 +646,7 @@ Drain the stream into `w` using `context.Background()`; implements `io.WriterTo`
 CopyTo(ctx context.Context, w io.Writer)
 ```
 
-Drain into `w` honouring `ctx` for per-chunk cancellation
+Drain into `w` honoring `ctx` for per-chunk cancellation
 
 <p className="msb-label">Returns</p>
 
@@ -671,7 +671,7 @@ On a write error or partial write, `WriteTo` and `CopyTo` return the partial byt
 
 <p className="msb-backref">Returned by <a href="#fs-writestream">WriteStream()</a></p>
 
-An open streaming write to a guest file. Must be closed with `Close(ctx)` to finalise the write.
+An open streaming write to a guest file. Must be closed with `Close(ctx)` to finalize the write.
 
 
 #### <span className="msb-recv">writeStream.</span><span className="msb-hn">Write()</span>
