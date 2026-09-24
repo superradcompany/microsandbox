@@ -809,6 +809,7 @@ for event := range events {
 result := <-results
 if result.Err != nil { return result.Err }
 resumed := result.Sandbox
+defer resumed.Close()
 ```
 
 ```bash CLI
@@ -816,6 +817,8 @@ resumed := result.Sandbox
 msb snap restore worker:snap --name resumed
 ```
 </CodeGroup>
+
+In Go, always receive the result and close its sandbox handle when finished, even if you ignore progress events. Closing a restored handle does not stop the detached sandbox; call `Stop` or `Destroy` when needed. Cancel the context to cancel the operation.
 
 Some stages have no percentage. Memory preparation has no fixed timeout; activation has a separate timeout. Set an overall deadline or use SDK cancellation when needed.
 

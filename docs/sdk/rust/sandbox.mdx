@@ -799,6 +799,22 @@ async fn destroy_with(&self, options: DestroyOptions) -> MicrosandboxResult<()>
 
 Destroy with explicit shutdown controls. `DestroyOptions` defaults to graceful shutdown with a ten-second timeout; set `force` to kill immediately or `timeout` to change how long shutdown can take. Identity checks prevent this receiver from deleting a same-name replacement.
 
+#### <span className="msb-recv">sb.</span><span className="msb-hn">restore_warnings()</span>
+
+```rust
+async fn restore_warnings(&self) -> MicrosandboxResult<Vec<ExternalMountWarning>>
+```
+
+Return warnings for unavailable external filesystems and accepted restore mismatches. See [External mounts](/sandboxes/snapshots#external-mounts) for restore options.
+
+Each `ExternalMountWarning` contains:
+
+| Field | Type | Description |
+|---|---|---|
+| `guest_path` | `String` | Guest-visible mount path. |
+| `reason` | `String` | Why the resource could not be reconstructed. |
+| `stale_inodes` | `Vec<u64>` | Permanently invalid captured node IDs; empty when the whole export is unavailable. |
+
 ## SandboxBuilder
 
 Builder for configuring a sandbox before creation. Obtained via [`Sandbox::builder(name)`](#sandboxbuilder). Every setter returns `Self`, so calls chain. Examples are shown on the methods where usage is non-obvious.

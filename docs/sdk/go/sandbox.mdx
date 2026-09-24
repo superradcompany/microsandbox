@@ -1019,6 +1019,22 @@ Convenience wrapper around [`OwnsLifecycle`](#sb-ownslifecycle) that swallows th
   </div>
 </div>
 
+#### <span className="msb-recv">sb.</span><span className="msb-hn">RestoreWarnings()</span>
+
+```go
+func (s *Sandbox) RestoreWarnings(ctx context.Context) ([]ExternalMountWarning, error)
+```
+
+Return warnings for unavailable external filesystems and accepted restore mismatches. See [External mounts](/sandboxes/snapshots#external-mounts) for restore options.
+
+Each `ExternalMountWarning` contains:
+
+| Field | Type | Description |
+|---|---|---|
+| `GuestPath` | `string` | Guest-visible mount path. |
+| `Reason` | `string` | Why the resource could not be reconstructed. |
+| `StaleInodes` | `[]uint64` | Permanently invalid captured node IDs; empty when the whole export is unavailable. |
+
 ## Options
 
 Functional options for creating and listing sandboxes. Map and slice options merge across repeated calls; single-value setters like [`WithImage`](#withimage) replace.

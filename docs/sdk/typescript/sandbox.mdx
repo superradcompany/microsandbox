@@ -854,6 +854,22 @@ Block until the sandbox is observed in a terminal non-running state, without tri
 
 Implements `AsyncDisposable` so the sandbox can be used with `await using`. When the binding goes out of scope, the sandbox is stopped (best-effort) - but only if `ownsLifecycle` is `true`.
 
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">restoreWarnings()</span>
+
+```typescript
+restoreWarnings(): Promise<ExternalMountWarning[]>
+```
+
+Return warnings for unavailable external filesystems and accepted restore mismatches. See [External mounts](/sandboxes/snapshots#external-mounts) for restore options.
+
+Each `ExternalMountWarning` contains:
+
+| Field | Type | Description |
+|---|---|---|
+| `guestPath` | `string` | Guest-visible mount path. |
+| `reason` | `string` | Why the resource could not be reconstructed. |
+| `staleInodes` | `readonly bigint[]` | Permanently invalid captured node IDs; empty when the whole export is unavailable. |
+
 ## SandboxBuilder
 
 Fluent builder for configuring a sandbox before creation. Obtained via [`Sandbox.builder(name)`](#sandbox-builder). Every setter returns the same builder so calls chain. Examples are shown on the methods where usage is non-obvious.
