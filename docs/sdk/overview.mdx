@@ -50,10 +50,12 @@ console.log("Output:", output.stdout());
 ```
 
 ```rust Rust
+use std::error::Error;
+
 use microsandbox::Sandbox;
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<(), Box<dyn Error>> {
     let sb = Sandbox::builder("hello")
         .image("python")
         .create()

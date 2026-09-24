@@ -4,48 +4,9 @@ description: Rust SDK - Sandbox API reference
 keywords: ["Rust SDK", "Rust sandbox", "microsandbox sandbox"]
 ---
 
-Create and control a microVM sandbox: boot it from an image, run commands, stream logs and metrics, then shut it down. See [Overview](/sandboxes/overview) for configuration examples and [Lifecycle](/sandboxes/lifecycle) for state management.
-
-For local runtime installation and verification, see [Runtime setup](/sdk/setup#install-and-verify).
-
-## Reuse and restart sandboxes
-
-```rust
-SandboxBuilder::connect_or_create(self) -> MicrosandboxResult<Sandbox>
-SandboxHandle::connect_or_start(&self) -> MicrosandboxResult<Sandbox>
-SandboxHandle::wait_for_status(&self, status: SandboxStatus) -> MicrosandboxResult<SandboxHandle>
-SandboxHandle::restart(&self) -> MicrosandboxResult<Sandbox>
-SandboxHandle::destroy(&self) -> MicrosandboxResult<()>
-Sandbox::id(&self) -> SandboxId
-SandboxHandle::id(&self) -> SandboxId
-```
-
-Use `connect_or_create` when a named sandbox might already exist. It connects to a running sandbox, starts a stopped or crashed sandbox, and creates one only when the name is unused. Builder options apply only to a new sandbox.
-
-Lifecycle methods on a `Sandbox` or `SandboxHandle` stay attached to its opaque `SandboxId`. If the name is removed and reused, an old receiver returns `MicrosandboxError::SandboxReplaced` instead of acting on the replacement. Custom backends provide the same behavior by implementing the `*_identified` methods on `SandboxBackend`. See [Reuse or create a named sandbox](/sandboxes/lifecycle#reuse-or-create-a-named-sandbox) for examples.
+Create and control microVM sandboxes. See [Overview](/sandboxes/overview) for configuration and [Lifecycle](/sandboxes/lifecycle) for state management.
 
 ## Sandbox
-
-### External mount restore
-
-Full restore requires captured external filesystems and additional disks by default. Supply bindings or explicitly request validated source-local inheritance; `.allow_missing_resources()` instead accepts unavailable resources with warnings. `ExternalMountRestorePolicy::Strict` validates supplied objects; `.external_mount_policy(ExternalMountRestorePolicy::Relaxed)` accepts supported object mismatches without waiving required bindings. Direct branches retain their existing omission behavior. `sandbox.restore_warnings().await?` reports unavailable filesystems and accepted mismatches through `guest_path`, `reason`, and `stale_inodes`. See [Snapshot external mounts](/sandboxes/snapshots#external-mounts).
-
-### Creation and restore progress
-
-Use `create_with_progress()` for fresh creation and `restore_with_progress()` for snapshots. Progress covers image preparation, snapshot RAM backing preparation, and activation. Await the task for the result; ignoring or dropping progress does not cancel the operation.
-
-```rust
-let (mut progress, task) = Sandbox::restore("saved")
-    .name("child")
-    .forked()
-    .restore_with_progress()?;
-while let Some(event) = progress.recv().await {
-    eprintln!("{event:?}");
-}
-let sandbox = task.await??;
-```
-
-Local startup events distinguish waiting for backing, preparing it, reusing it, syncing, and activating. Byte totals cover required data slices, not reserved RAM. Lock waits and syncing have no percentage. Preparation has no fixed deadline; the activation timeout begins afterward. Abort the creation task to cancel, or wrap the operation in your own overall deadline. `create_detached_with_progress()` provides the same events for detached creation. Existing pull-only APIs remain available.
 
 #### <span className="msb-recv">Sandbox::</span><span className="msb-hn">builder()</span>
 
@@ -837,6 +798,22 @@ async fn destroy_with(&self, options: DestroyOptions) -> MicrosandboxResult<()>
 ```
 
 Destroy with explicit shutdown controls. `DestroyOptions` defaults to graceful shutdown with a ten-second timeout; set `force` to kill immediately or `timeout` to change how long shutdown can take. Identity checks prevent this receiver from deleting a same-name replacement.
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">restore_warnings()</span>
+
+```rust
+async fn restore_warnings(&self) -> MicrosandboxResult<Vec<ExternalMountWarning>>
+```
+
+Return warnings for unavailable external filesystems and accepted restore mismatches. See [External mounts](/sandboxes/snapshots#external-mounts) for restore options.
+
+Each `ExternalMountWarning` contains:
+
+| Field | Type | Description |
+|---|---|---|
+| `guest_path` | `String` | Guest-visible mount path. |
+| `reason` | `String` | Why the resource could not be reconstructed. |
+| `stale_inodes` | `Vec<u64>` | Permanently invalid captured node IDs; empty when the whole export is unavailable. |
 
 ## SandboxBuilder
 

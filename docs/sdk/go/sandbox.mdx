@@ -4,46 +4,9 @@ description: Go SDK - Sandbox API reference
 keywords: ["Go SDK", "Go sandbox", "microsandbox sandbox"]
 ---
 
-Create and control a microVM sandbox: boot it from an image, run commands, stream logs and metrics, then shut it down. See [Overview](/sandboxes/overview) for configuration examples and [Lifecycle](/sandboxes/lifecycle) for state management.
-
-## Reuse and restart sandboxes
-
-```go
-ConnectOrCreateSandbox(ctx, name, opts...) (*Sandbox, error)
-handle.ConnectOrStart(ctx, opts...) (*Sandbox, error)
-handle.WaitForStatus(ctx, status) (*SandboxHandle, error)
-handle.Restart(ctx, opts...) (*Sandbox, error)
-handle.Destroy(ctx, opts...) error
-sandbox.ID() string
-handle.ID() string
-```
-
-Use `ConnectOrCreateSandbox` when a named sandbox might already exist. It connects to a running sandbox, starts a stopped or crashed sandbox, and creates one only when the name is unused. Options apply only to a new sandbox.
-
-Lifecycle methods on a `Sandbox` or `SandboxHandle` stay attached to its opaque `ID`. If the name is removed and reused, an old receiver returns `ErrSandboxReplaced` instead of acting on the replacement. See [Reuse or create a named sandbox](/sandboxes/lifecycle#reuse-or-create-a-named-sandbox) for examples.
-
+Create and control microVM sandboxes. See [Overview](/sandboxes/overview) for configuration and [Lifecycle](/sandboxes/lifecycle) for state management.
 
 ## Functions
-
-### External mount restore
-
-Full restores use strict external-filesystem admission by default. Pass `WithExternalMountPolicy(ExternalMountRelaxed)` to accept supported mismatches, then inspect `sandbox.RestoreWarnings(ctx)`. Each `ExternalMountWarning` has `GuestPath`, `Reason`, and `StaleInodes []uint64`. `ExternalMountStrict` explicitly selects the default. Existing mount options select the destination paths. See [Snapshot external mounts](/sandboxes/snapshots#external-mounts).
-
-### Creation and restore progress
-
-`CreateSandboxWithProgress` and `RestoreSandboxWithProgress` return a bounded event channel and a single-result channel. Ignoring events does not delay the operation. Always receive the result and close the handle when finished; restored sandboxes are detached, so use `Stop` or `Destroy` to stop them. Cancel `ctx` to cancel the operation.
-
-```go
-events, result := m.RestoreSandboxWithProgress(ctx, "saved", "child", m.WithForked())
-for event := range events {
-    fmt.Println(event.Kind, event.Progress.Phase, event.Progress.CompletedBytes)
-}
-created := <-result
-if created.Err != nil { return created.Err }
-defer created.Sandbox.Close()
-```
-
-`Kind` is `"pull"` or `"startup"`. Startup phases distinguish backing preparation, waits, reuse, syncing, and activation. `TotalBytes == nil` means indeterminate work. Preparation has no fixed deadline and does not consume the activation timeout; an optional context deadline still bounds the entire operation.
 
 #### <span className="msb-recv">m.</span><span className="msb-hn">CreateSandbox()</span>
 
@@ -1055,6 +1018,22 @@ Convenience wrapper around [`OwnsLifecycle`](#sb-ownslifecycle) that swallows th
     <div className="msb-param-desc"><code>true</code> if attached, <code>false</code> on detach or error.</div>
   </div>
 </div>
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">RestoreWarnings()</span>
+
+```go
+func (s *Sandbox) RestoreWarnings(ctx context.Context) ([]ExternalMountWarning, error)
+```
+
+Return warnings for unavailable external filesystems and accepted restore mismatches. See [External mounts](/sandboxes/snapshots#external-mounts) for restore options.
+
+Each `ExternalMountWarning` contains:
+
+| Field | Type | Description |
+|---|---|---|
+| `GuestPath` | `string` | Guest-visible mount path. |
+| `Reason` | `string` | Why the resource could not be reconstructed. |
+| `StaleInodes` | `[]uint64` | Permanently invalid captured node IDs; empty when the whole export is unavailable. |
 
 ## Options
 
@@ -2679,36 +2658,13 @@ Stop the stream and release Rust-side resources
 
 A single captured log entry.
 
-#### <span className="msb-recv">entry.</span><span className="msb-hn">Source</span>
-
-[`LogSource`](#logsource)
-
-Origin of the captured data
-
-#### <span className="msb-recv">entry.</span><span className="msb-hn">SessionID</span>
-
-`*uint64`
-
-Relay-monotonic session id; nil for system entries
-
-#### <span className="msb-recv">entry.</span><span className="msb-hn">Timestamp</span>
-
-`time.Time`
-
-Wall-clock capture time on the host
-
-#### <span className="msb-recv">entry.</span><span className="msb-hn">Data</span>
-
-`[]byte`
-
-The captured bytes
-
-#### <span className="msb-recv">entry.</span><span className="msb-hn">Cursor</span>
-
-`string`
-
-Opaque resume token; pass to [`LogStreamOptions.FromCursor`](#logstreamoptions)
-
+| Field | Type | Description |
+|---|---|---|
+| <span id="entry-source"></span>`Source` | [`LogSource`](#logsource) | Origin of the captured data |
+| <span id="entry-sessionid"></span>`SessionID` | `*uint64` | Relay-monotonic session id; nil for system entries |
+| <span id="entry-timestamp"></span>`Timestamp` | `time.Time` | Wall-clock capture time on the host |
+| <span id="entry-data"></span>`Data` | `[]byte` | The captured bytes |
+| <span id="entry-cursor"></span>`Cursor` | `string` | Opaque resume token; pass to [`LogStreamOptions.FromCursor`](#logstreamoptions) |
 
 #### <span className="msb-recv">entry.</span><span className="msb-hn">Text()</span>
 

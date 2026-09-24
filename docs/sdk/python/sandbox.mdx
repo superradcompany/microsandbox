@@ -4,25 +4,7 @@ description: Python SDK - Sandbox API reference
 keywords: ["Python SDK", "Python sandbox", "microsandbox sandbox"]
 ---
 
-Create and control a microVM sandbox: boot it from an image, run commands, stream logs and metrics, then shut it down. See [Overview](/sandboxes/overview) for configuration examples and [Lifecycle](/sandboxes/lifecycle) for state management.
-
-For local runtime installation and verification, see [Runtime setup](/sdk/setup#install-and-verify).
-
-## Reuse and restart sandboxes
-
-```python
-await Sandbox.connect_or_create(name, **kwargs) -> Sandbox
-await handle.connect_or_start(detached=False) -> Sandbox
-await handle.wait_for_status(status) -> SandboxHandle
-await handle.restart(force=False, timeout=None, detached=False) -> Sandbox
-await handle.destroy(force=False, timeout=None) -> None
-await sandbox.id -> str
-handle.id -> str
-```
-
-Use `connect_or_create` when a named sandbox might already exist. It connects to a running sandbox, starts a stopped or crashed sandbox, and creates one only when the name is unused. Creation arguments apply only to a new sandbox.
-
-Lifecycle methods on a `Sandbox` or `SandboxHandle` stay attached to its opaque `id`. If the name is removed and reused, an old receiver raises `SandboxReplacedError` instead of acting on the replacement. See [Reuse or create a named sandbox](/sandboxes/lifecycle#reuse-or-create-a-named-sandbox) for examples.
+Create and control microVM sandboxes. See [Overview](/sandboxes/overview) for configuration and [Lifecycle](/sandboxes/lifecycle) for state management.
 
 ## Sandbox
 
@@ -1331,41 +1313,14 @@ Create a symlink at `link` pointing to `target`.
 
 A metadata and lifecycle handle for an existing sandbox.
 
-#### <span className="msb-recv">handle.</span><span className="msb-hn">name</span>
-
-`str`
-
-Sandbox name, up to 128 UTF-8 bytes
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">id</span>
-
-`str`
-
-Opaque stable identity captured by this metadata handle. Receiver lifecycle calls remain bound to this value and raise `SandboxReplacedError` when the reusable name now points to another sandbox.
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">status</span>
-
-[`SandboxStatus`](#sandboxstatus)
-
-Current status
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">config_json</span>
-
-`str`
-
-Raw JSON configuration
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">created_at</span>
-
-`float | None`
-
-Creation timestamp (ms since epoch)
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">updated_at</span>
-
-`float | None`
-
-Last update timestamp (ms since epoch)
+| Field | Type | Description |
+|---|---|---|
+| <span id="handle-name"></span>`name` | `str` | Sandbox name, up to 128 UTF-8 bytes |
+| <span id="handle-id"></span>`id` | `str` | Opaque stable identity captured by this metadata handle. Receiver lifecycle calls remain bound to this value and raise `SandboxReplacedError` when the reusable name now points to another sandbox. |
+| <span id="handle-status"></span>`status` | [`SandboxStatus`](#sandboxstatus) | Current status |
+| <span id="handle-config_json"></span>`config_json` | `str` | Raw JSON configuration |
+| <span id="handle-created_at"></span>`created_at` | `float \| None` | Creation timestamp (ms since epoch) |
+| <span id="handle-updated_at"></span>`updated_at` | `float \| None` | Last update timestamp (ms since epoch) |
 
 #### <span className="msb-recv">handle.</span><span className="msb-hn">config()</span>
 
@@ -1682,35 +1637,13 @@ Use with `async for`
 
 A single captured log entry returned by [`logs()`](#sb-logs) or iterated from a [`LogStream`](#logstream).
 
-#### <span className="msb-recv">entry.</span><span className="msb-hn">timestamp_ms</span>
-
-`float`
-
-Wall-clock capture time (ms since Unix epoch, UTC)
-
-#### <span className="msb-recv">entry.</span><span className="msb-hn">source</span>
-
-[`LogSource`](#logsource)
-
-Where the chunk came from
-
-#### <span className="msb-recv">entry.</span><span className="msb-hn">session_id</span>
-
-`int | None`
-
-Relay-monotonic session id; `None` for `"system"` entries
-
-#### <span className="msb-recv">entry.</span><span className="msb-hn">cursor</span>
-
-`str`
-
-Opaque resume token; pass back via `log_stream(from_cursor=...)`
-
-#### <span className="msb-recv">entry.</span><span className="msb-hn">data</span>
-
-`bytes`
-
-The chunk's raw bytes
+| Field | Type | Description |
+|---|---|---|
+| <span id="entry-timestamp_ms"></span>`timestamp_ms` | `float` | Wall-clock capture time (ms since Unix epoch, UTC) |
+| <span id="entry-source"></span>`source` | [`LogSource`](#logsource) | Where the chunk came from |
+| <span id="entry-session_id"></span>`session_id` | `int \| None` | Relay-monotonic session id; `None` for `"system"` entries |
+| <span id="entry-cursor"></span>`cursor` | `str` | Opaque resume token; pass back via `log_stream(from_cursor=...)` |
+| <span id="entry-data"></span>`data` | `bytes` | The chunk's raw bytes |
 
 #### <span className="msb-recv">entry.</span><span className="msb-hn">text()</span>
 
