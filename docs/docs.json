@@ -431,6 +431,14 @@
   },
   "redirects": [
     {
+      "source": "/networking/security-model",
+      "destination": "/security/network"
+    },
+    {
+      "source": "/getting-started/windows-troubleshooting",
+      "destination": "/troubleshooting/windows"
+    },
+    {
       "source": "/getting-started/backends",
       "destination": "/operations/backends"
     },
