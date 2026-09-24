@@ -240,8 +240,11 @@ mod tests {
     #[test]
     fn flat_network_round_trip_preserves_disabled_network() {
         let mut value = serde_json::to_value(LaunchConfig::default()).unwrap();
-        value["network"] =
-            serde_json::json!({"config": {"enabled": false}, "outbound_proxy": null});
+        // Flat legacy networks predate strict policy support.
+        value["network"] = serde_json::json!({
+            "config": {"enabled": false, "strict": false},
+            "outbound_proxy": null,
+        });
         let config: LaunchConfig = serde_json::from_value(value).unwrap();
         let bytes = LaunchProtocol::Legacy {
             file_mounts: false,
