@@ -536,7 +536,7 @@ _, err = rs.WriteTo(os.Stdout)
 
 </Accordion>
 
-Open a streaming reader for a file. Use this for files too large to fit in memory; data is delivered in chunks. The caller must `Close` the returned [`*FsReadStream`](#fsreadstream). [`Read`](#fs-read) falls back to this automatically when a file exceeds the single-shot buffer.
+Open a streaming reader for a file. Use this for files too large to fit in memory; data is delivered in chunks. You must `Close` the returned [`*FsReadStream`](#fsreadstream). [`Read`](#fs-read) falls back to this automatically when a file exceeds the single-shot buffer.
 
 <p className="msb-label">Parameters</p>
 
@@ -584,7 +584,7 @@ if err := ws.Close(ctx); err != nil {
 
 </Accordion>
 
-Open a streaming writer for a file. Use this for files too large to fit in memory. The caller must call `Close(ctx)` on the returned [`*FsWriteStream`](#fswritestream) to finalise the write.
+Open a streaming writer for a file. Use this for files too large to fit in memory. You must call `Close(ctx)` on the returned [`*FsWriteStream`](#fswritestream) to finalise the write.
 
 <p className="msb-label">Parameters</p>
 
@@ -664,7 +664,7 @@ Release the read stream handle
 
 `error`
 
-On a write error or partial write, `WriteTo` and `CopyTo` return the partial byte count and leave the stream open so the caller can recover; close it explicitly in either case.
+On a write error or partial write, `WriteTo` and `CopyTo` return the partial byte count and leave the stream open so you can recover; close it explicitly in either case.
 
 ## FsWriteStream
 
