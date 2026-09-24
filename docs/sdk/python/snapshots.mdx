@@ -52,7 +52,7 @@ Create a disk snapshot, or set `full=True` to include memory and execution state
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>from_sandbox</code><span className="msb-type">str</span></div>
-    <div className="msb-param-desc">Name of the source sandbox. Disk capture supports running, paused, stopped, and crashed sources. Required.</div>
+    <div className="msb-param-desc">Name of the source sandbox. Local disk capture supports running, paused, stopped, and crashed sources. Cloud requires a stopped persistent source. Required.</div>
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>dest_dir</code><span className="msb-type">str | os.PathLike[str] | None</span></div>
@@ -72,7 +72,7 @@ Create a disk snapshot, or set `full=True` to include memory and execution state
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>full</code><span className="msb-type">bool</span></div>
-    <div className="msb-param-desc">Capture disk, memory, execution, and device state from a running or paused sandbox. Default <code>False</code> captures disk state from running, paused, stopped, or crashed sources.</div>
+    <div className="msb-param-desc">Local-only when <code>True</code>: capture disk, memory, execution, and device state from a running or paused sandbox. Default <code>False</code> captures disk state; locally, the source can be running, paused, stopped, or crashed. Cloud requires <code>False</code> and a stopped persistent source.</div>
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>guest_flush</code><span className="msb-type">GuestFlush | None</span></div>
@@ -672,7 +672,7 @@ Cloud raises `UnsupportedError`.
 async def snapshot(self, name: str) -> Snapshot
 ```
 
-Snapshot this sandbox into its default group with the given member name. Live disk captures preserve the source's running or paused state. Use the returned artifact path or `sandbox:member` to open it later. Called on a [`SandboxHandle`](/sdk/python/sandbox#sandboxhandle), obtained from [`Sandbox.get()`](/sdk/python/sandbox#sandbox-get).
+Snapshot this sandbox into its default group with the given member name. Local live disk captures preserve the source's running or paused state. Cloud requires a stopped persistent source. Use the returned artifact path or `sandbox:member` to open it later. Called on a [`SandboxHandle`](/sdk/python/sandbox#sandboxhandle), obtained from [`Sandbox.get()`](/sdk/python/sandbox#sandbox-get).
 
 <p className="msb-label">Parameters</p>
 
