@@ -689,7 +689,17 @@ mod tests {
     fn script(dir: &Path, name: &str, body: &str) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
         let path = dir.join(name);
-        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        // Keep writable script descriptors out of the test process: concurrent
+        // forks can inherit them and make Linux exec fail with ETXTBSY.
+        let status = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg("printf '%s\\n' '#!/bin/sh' \"$1\" > \"$2\"")
+            .arg("write-launch-probe-fixture")
+            .arg(body)
+            .arg(&path)
+            .status()
+            .unwrap();
+        assert!(status.success());
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
         path
     }
