@@ -1002,17 +1002,21 @@ await Snapshot.loadWithOptions("experiment.msb", {
 ```
 
 ```rust Rust
+use std::path::Path;
+
+use microsandbox::{snapshot::LoadOpts, Snapshot};
+
 Snapshot::load_with_options(
-    std::path::Path::new("snap.msb"),
-    microsandbox::snapshot::LoadOpts {
+    Path::new("snap.msb"),
+    LoadOpts {
         group: Some("work".into()),
         ..Default::default()
     },
 ).await?;
 
 Snapshot::load_with_options(
-    std::path::Path::new("experiment.msb"),
-    microsandbox::snapshot::LoadOpts {
+    Path::new("experiment.msb"),
+    LoadOpts {
         group: Some("work".into()),
         set_head: true,
         ..Default::default()
@@ -1064,9 +1068,13 @@ await Snapshot.save("baseline:ready", "ready.msb", { withImage: true });
 ```
 
 ```rust Rust
+use std::path::Path;
+
+use microsandbox::{snapshot::SaveOpts, Snapshot};
+
 Snapshot::save("baseline:ready",
-    std::path::Path::new("ready.msb"),
-    microsandbox::snapshot::SaveOpts {
+    Path::new("ready.msb"),
+    SaveOpts {
         with_image: true,
         ..Default::default()
     },
@@ -1136,11 +1144,13 @@ const handles = await Snapshot.loadMany(
 ```
 
 ```rust Rust
+use microsandbox::{snapshot::LoadOpts, Snapshot};
+
 let archives = vec!["changes.msb".into(), "base.msb".into()];
 
 let handles = Snapshot::load_many(
     &archives,
-    microsandbox::snapshot::LoadOpts {
+    LoadOpts {
         group: Some("received".into()),
         dest: Some("/mnt/snapshots".into()),
         ..Default::default()
@@ -1190,6 +1200,10 @@ await Snapshot.save("worker:v2", "changes.msb", {
 ```
 
 ```rust Rust
+use std::path::Path;
+
+use microsandbox::{snapshot::SaveOpts, Snapshot};
+
 Snapshot::builder("v2")
     .from_sandbox("worker")
     .full()
@@ -1197,8 +1211,8 @@ Snapshot::builder("v2")
     .await?;
 
 Snapshot::save("worker:v2",
-    std::path::Path::new("changes.msb"),
-    microsandbox::snapshot::SaveOpts {
+    Path::new("changes.msb"),
+    SaveOpts {
         since: Some("worker:v1".into()),
         ..Default::default()
     },
@@ -1255,9 +1269,13 @@ const child = await Sandbox.restore("changes.msb")
 ```
 
 ```rust Rust
+use std::path::Path;
+
+use microsandbox::{snapshot::LoadOpts, Sandbox, Snapshot};
+
 Snapshot::load_with_options(
-    std::path::Path::new("changes.msb"),
-    microsandbox::snapshot::LoadOpts {
+    Path::new("changes.msb"),
+    LoadOpts {
         group: Some("imported".into()),
         base: Some("worker:v1".into()),
         ..Default::default()
