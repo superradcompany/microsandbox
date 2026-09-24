@@ -1805,7 +1805,7 @@ impl Default for NetworkSpec {
             policy: None,
             dns: None,
             tls: None,
-            strict: false,
+            strict: true,
             secrets: None,
             max_tcp_connections: None,
             max_udp_connections: None,

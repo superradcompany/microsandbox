@@ -231,7 +231,7 @@ Domain and domain-suffix rules start with the hostname microsandbox can observe.
 
 For plaintext HTTP, microsandbox can inspect the `Host` header and require it to match the hostname that policy allowed. For HTTPS without TLS interception, or for a host that is configured to bypass interception, the HTTP `Host` header and HTTP/2 `:authority` value are encrypted. In that case microsandbox cannot prove which application hostname the request is using after the TLS session starts.
 
-Set strict hostname policy mode when hostname allowlists should fail closed unless microsandbox can inspect the request authority. In strict mode, hostname-based allow rules still work for plaintext HTTP and TLS-intercepted HTTPS. Non-intercepted HTTPS is denied when it would otherwise be allowed only by a hostname rule. IP, CIDR, group, and default allow rules are not treated as hostname-based allows.
+Strict hostname policy mode is enabled by default: hostname allowlists fail closed unless microsandbox can inspect the request authority. In strict mode, hostname-based allow rules still work for plaintext HTTP and TLS-intercepted HTTPS. Non-intercepted HTTPS is denied when it would otherwise be allowed only by a hostname rule. IP, CIDR, group, and default allow rules are not treated as hostname-based allows. Set `--net-strict=false` or `network.strict: false` in sandbox configuration to opt out.
 
 ## Port mapping
 

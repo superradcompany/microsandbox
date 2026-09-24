@@ -61,8 +61,8 @@ pub struct NetworkConfig {
     #[serde(default)]
     pub tls: TlsConfig,
 
-    /// Require hostname-based policy allows to use inspectable application authority.
-    #[serde(default)]
+    /// Require hostname-based policy allows to use inspectable application authority. Enabled by default.
+    #[serde(default = "default_true")]
     pub strict: bool,
 
     /// Secret injection settings.
@@ -276,7 +276,7 @@ impl Default for NetworkConfig {
             policy: NetworkPolicy::default(),
             dns: DnsConfig::default(),
             tls: TlsConfig::default(),
-            strict: false,
+            strict: true,
             secrets: SecretsConfig::default(),
             max_tcp_connections: None,
             max_udp_connections: None,
@@ -320,9 +320,37 @@ fn default_query_timeout_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{InterfaceOverrides, NetworkConfig, PortProtocol};
+    use crate::config::NetworkBuilder;
     use crate::dns::Nameserver;
     use crate::policy::{Destination, NetworkPolicy, Rule};
     use crate::proxy::OutboundProxy;
+
+    #[test]
+    fn strict_defaults_and_explicit_opt_out_survive_wire_round_trips() {
+        assert!(NetworkConfig::default().strict);
+        assert!(NetworkBuilder::new().build().unwrap().strict);
+        for value in [
+            serde_json::json!({}),
+            serde_json::json!({"strict": true}),
+            serde_json::json!({"strict": false}),
+        ] {
+            let expected = value
+                .get("strict")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(true);
+            let config: NetworkConfig = serde_json::from_value(value.clone()).unwrap();
+            let domain: microsandbox_types::NetworkSpec =
+                serde_json::from_value(value.clone()).unwrap();
+            let cloud: microsandbox_types::CloudNetworkSpec =
+                serde_json::from_value(value).unwrap();
+            assert_eq!(config.strict, expected);
+            assert_eq!(domain.strict, expected);
+            assert_eq!(cloud.strict, expected);
+            let round_trip: NetworkConfig =
+                serde_json::from_value(serde_json::to_value(config).unwrap()).unwrap();
+            assert_eq!(round_trip.strict, expected);
+        }
+    }
 
     /// The engine's `policy`/`dns`/`interface` subdocuments must remain
     /// serde-compatible with the wire twins in `microsandbox_types` that the

@@ -139,7 +139,7 @@ fn create_request_defaults_fields_missing_from_older_clients() {
     .unwrap();
 
     assert!(request.sandbox_spec().network.enabled);
-    assert!(!request.sandbox_spec().network.strict);
+    assert!(request.sandbox_spec().network.strict);
     assert_eq!(request.sandbox_spec().network.max_tcp_connections, None);
     assert_eq!(request.sandbox_spec().runtime.workdir, None);
 }

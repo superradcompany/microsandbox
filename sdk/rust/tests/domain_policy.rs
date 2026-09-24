@@ -104,7 +104,7 @@ async fn setup_curl(name: &str, policy: NetworkPolicy, strict: bool) -> Sandbox 
         .user("0")
         .network(|n| {
             let n = n.policy(policy);
-            if strict { n.strict(true) } else { n }
+            n.strict(strict)
         })
         .replace()
         .create()
