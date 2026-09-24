@@ -15,7 +15,7 @@ This entry covers changes merged into `main` this week, including changes not ye
 
 **Explicit guest filesystem flush policies**
 
-Snapshots, branches, and pause now accept a single `--guest-flush` policy that controls whether the guest flushes its filesystem cache for root and captured block disks before capture. `auto` (the default) requires guest writeback for live disk-only snapshots and keeps dirty pages in RAM for full snapshots and branches. `required` also flushes captured persistent filesystems, so a full snapshot can later restore its disks without RAM. `skip` accepts crash-consistent disk state. Host-backed directories, owned-directory barriers, host I/O draining, and snapshot durability are unchanged.
+Snapshots, branches, and pause now accept a single `--guest-flush` policy that controls whether the guest flushes its filesystem cache for root and captured block disks before capture. `auto` (the default) requires guest writeback for live disk-only snapshots and keeps dirty pages in RAM for full snapshots, branches, and pause. `required` also flushes captured persistent filesystems, so a full snapshot can later restore its disks without RAM. `skip` accepts crash-consistent disk state. Host-backed directories, owned-directory barriers, host I/O draining, and snapshot durability are unchanged.
 
 This is a breaking change. Owned block disks no longer force a flush during plain pause, full capture, or branching; use `required` if you depended on that.
 
@@ -26,7 +26,7 @@ msb branch worker --name child --guest-flush skip
 msb pause worker --guest-flush required
 ```
 
-The same policy is available from the Rust, Python, TypeScript, and Go SDKs. See [Guest filesystem flush](/sandboxes/snapshots#guest-filesystem-flush).
+The same policy is available from the Rust, Python, TypeScript, and Go SDKs. See [Guest filesystem flush](/sandboxes/snapshots#guest-flushing).
 
 **Separate TCP and UDP connection limits**
 
@@ -46,7 +46,7 @@ Administrators can deploy a protected `managed.json` file to enforce settings ac
 
 ## Bug fixes
 
-- `--guest-flush skip` now actually skips guest writeback for root and owned block disks. Auto and Required continue to require the flush, and Required capture from a pause that did not acknowledge the flush is rejected instead of silently downgrading.
+- `--guest-flush skip` now actually skips guest writeback for root and owned block disks. `auto` requires writeback only for live disk-only snapshots; full snapshots, branches, and pause preserve dirty pages in RAM without that extra flush. `required` always requires acknowledged guest writeback. A Required capture from a pause that did not acknowledge the flush is rejected instead of silently downgrading.
 - Newer SDKs and the CLI can now upgrade the catalog while older sandbox runtimes are still running. Migration locking, exclusive install coordination, transactional rollback, and incomplete-downgrade checks remain in place.
 - Ordinary sandbox creation works again after upgrading from v0.6.18 to v0.7.0. Both the SDK and CLI apply their recognized catalog migrations when opening the catalog, regardless of the selected VM runtime. Selecting an older runtime does not preserve an older catalog format.
 - A TLS ClientHello whose SNI contains a multi-byte character no longer aborts the sandbox process when the network policy includes a domain-suffix rule.
