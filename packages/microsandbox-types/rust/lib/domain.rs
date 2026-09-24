@@ -1805,7 +1805,7 @@ impl Default for NetworkSpec {
             policy: None,
             dns: None,
             tls: None,
-            strict: false,
+            strict: true,
             secrets: None,
             max_tcp_connections: None,
             max_udp_connections: None,
@@ -2274,10 +2274,22 @@ pub const MAX_SECRET_PLACEHOLDER_BYTES: usize = 1024;
 /// engine substitutes the real `value` into outbound requests bound for an
 /// allowed host (and blocks/forwards per [`SecretViolationAction`] otherwise). Carried
 /// in [`NetworkSpec::secrets`](NetworkSpec).
+///
+/// When constructing directly, use `..Default::default()` for unspecified fields.
+/// The global `passthrough_hosts` field preserves historical defaults; its addition
+/// requires updating older exhaustive struct literals and patterns.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ConfigPatch)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct SecretsConfig {
+    /// Default hosts allowed to receive placeholders unchanged.
+    /// A per-secret violation action overrides this default.
+    #[doc(hidden)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(skip))]
+    #[cfg_attr(feature = "utoipa", schema(ignore))]
+    pub passthrough_hosts: Option<Vec<HostPattern>>,
+
     /// List of secrets to inject.
     #[serde(default)]
     #[config_patch(merge_with = merge_secret_entries)]
@@ -3187,7 +3199,7 @@ mod tests {
     fn secrets_config_queries_entries() {
         let mut config = SecretsConfig {
             secrets: vec![secret_entry("HTTP_TOKEN", false)],
-            violation_action: SecretViolationAction::default(),
+            ..Default::default()
         };
 
         assert!(!config.has_tls_identity_secrets());

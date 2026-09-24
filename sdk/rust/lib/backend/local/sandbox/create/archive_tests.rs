@@ -12,6 +12,8 @@ use microsandbox_image::snapshot::{
 };
 use sea_orm::EntityTrait;
 
+use crate::backend::local::database;
+
 use super::{LocalBackend, RootfsSource, SandboxConfig, SandboxStatus, SpawnMode, sandbox_entity};
 
 //--------------------------------------------------------------------------------------------------
@@ -118,7 +120,6 @@ async fn assert_rejection_preserves_target(
         pools.write(),
         &config,
         SandboxStatus::Stopped,
-        None,
     )
     .await
     .unwrap();
@@ -178,7 +179,7 @@ async fn archive_flat_layout_is_admitted_before_replacement() {
             assert_rejection_preserves_target(
                 backend(root.path(), patch).await,
                 &archive,
-                "root_disk.flat",
+                "newer runtime launch contract",
             )
             .await;
         }
@@ -186,13 +187,13 @@ async fn archive_flat_layout_is_admitted_before_replacement() {
 }
 
 #[tokio::test]
-async fn archive_metadata_is_admitted_before_replacement() {
+async fn archive_disk_chain_is_admitted_before_replacement() {
     let root = tempfile::tempdir_in("/tmp").unwrap();
     let archive = archive(root.path(), false, false).await;
     assert_rejection_preserves_target(
         backend(root.path(), 18).await,
         &archive,
-        "config.snapshot_parent",
+        "disk chains require a newer runtime launch contract",
     )
     .await;
 }
@@ -297,19 +298,13 @@ async fn current_catalog_persistence_is_separate_from_create_admission() {
     let root = tempfile::tempdir_in("/tmp").unwrap();
     let backend = backend(root.path(), 8).await;
     let pools = backend.db().await.unwrap();
-    assert!(
-        crate::db::admission::is_current(pools.read())
-            .await
-            .unwrap()
-    );
+    assert!(database::is_current(pools.read()).await.unwrap());
     let mut config = SandboxConfig::default();
     config.spec.image = RootfsSource::oci("alpine:3.21");
     crate::sandbox::apply_snapshot_root_layout(&mut config, &SnapshotRootDisk::Flat).unwrap();
     // Desired state can be saved, but cannot become a Starting sandbox through
     // a historical executable that does not understand the requested layout.
-    let encoded = crate::db::writing::encode_new(pools.read(), &config, Some(backend.config()))
-        .await
-        .unwrap();
+    let encoded = serde_json::to_string(&config).unwrap();
     assert!(encoded.contains("flat"));
     let error = LocalBackend::insert_starting_sandbox_record(
         pools.write(),
@@ -318,50 +313,16 @@ async fn current_catalog_persistence_is_separate_from_create_admission() {
     )
     .await
     .unwrap_err();
-    assert!(error.to_string().contains("root_disk.flat"), "{error}");
+    assert!(
+        error.to_string().contains("newer runtime launch contract"),
+        "{error}"
+    );
     assert!(
         sandbox_entity::Entity::find()
             .all(pools.read())
             .await
             .unwrap()
             .is_empty()
-    );
-}
-
-#[tokio::test]
-async fn current_catalog_configuration_writes_need_no_runtime_installation() {
-    let root = tempfile::tempdir_in("/tmp").unwrap();
-    let backend = crate::test_support::local_backend(crate::config::GlobalConfig {
-        home: Some(root.path().join("home")),
-        paths: crate::config::PathsConfig {
-            msb: Some(root.path().join("missing-msb")),
-            libkrunfw: Some(root.path().join("missing-firmware")),
-            ..Default::default()
-        },
-        ..Default::default()
-    });
-    let pools = backend.db().await.unwrap();
-    let mut config = SandboxConfig::default();
-    config.spec.name = "offline-edit".into();
-    let original = crate::db::writing::encode_new(pools.read(), &config, Some(backend.config()))
-        .await
-        .unwrap();
-    config.spec.labels.insert("edited".into(), "yes".into());
-    let updated = crate::db::writing::encode_existing(
-        pools.read(),
-        &config,
-        &original,
-        Some(backend.config()),
-    )
-    .await
-    .unwrap();
-    assert_ne!(original, updated);
-    assert_eq!(
-        serde_json::from_str::<SandboxConfig>(&updated)
-            .unwrap()
-            .spec
-            .labels["edited"],
-        "yes"
     );
 }
 

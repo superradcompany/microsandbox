@@ -311,7 +311,7 @@ jobs:
 
       # mold keeps uncached workspace links fast.
       - name: Set up mold
-        uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # 2.41.0
+        uses: rui314/setup-mold@10ca16bf91dc22e05ebdc935cad9c75ea248f621 # 2.41.0
 
       - name: Build msb
         run: |
@@ -359,7 +359,7 @@ jobs:
           path: build/
 
       - name: Set up mold
-        uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # 2.41.0
+        uses: rui314/setup-mold@10ca16bf91dc22e05ebdc935cad9c75ea248f621 # 2.41.0
 
       - name: Build Go FFI
         run: cargo build --profile ci -p microsandbox-go
@@ -391,12 +391,12 @@ jobs:
           cache-bin: false
           cache-targets: true
 
-      - uses: taiki-e/install-action@d438492cf8a250514fa2d34b30bc3c0dc37c65ff # v2
+      - uses: taiki-e/install-action@94c31af3204a9f15ab40b35ad084410b905bbc73 # v2
         with:
           tool: cargo-nextest@0.9.143
 
       - name: Set up mold
-        uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # 2.41.0
+        uses: rui314/setup-mold@10ca16bf91dc22e05ebdc935cad9c75ea248f621 # 2.41.0
 
       - name: Install build dependencies
         run: scripts/ci/install-apt-packages.sh libcap-ng-dev
@@ -784,7 +784,7 @@ jobs:
           cargo +stable clippy --manifest-path crates/agentd/Cargo.toml --target x86_64-unknown-linux-musl -- -D warnings
 
       - name: Set up mold
-        uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # 2.41.0
+        uses: rui314/setup-mold@10ca16bf91dc22e05ebdc935cad9c75ea248f621 # 2.41.0
 
       - name: Clippy
         run: cargo +stable clippy --workspace --exclude microsandbox-agentd -- -D warnings
@@ -826,7 +826,7 @@ jobs:
           cache-targets: true
 
       - name: Set up mold
-        uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # 2.41.0
+        uses: rui314/setup-mold@10ca16bf91dc22e05ebdc935cad9c75ea248f621 # 2.41.0
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -913,9 +913,9 @@ jobs:
           cache-targets: true
 
       - name: Set up mold
-        uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # 2.41.0
+        uses: rui314/setup-mold@10ca16bf91dc22e05ebdc935cad9c75ea248f621 # 2.41.0
 
-      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           enable-cache: true
           cache-dependency-glob: "sdk/python/uv.lock"
@@ -963,7 +963,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           enable-cache: true
           cache-dependency-glob: "sdk/python/uv.lock"
@@ -1005,7 +1005,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1
+      - uses: ruby/setup-ruby@e8944e80fb94b20106697132f8c20c665fab29e9 # v1
         with:
           ruby-version: ${{ matrix.ruby }}
 
@@ -1024,7 +1024,7 @@ jobs:
           cache-targets: true
 
       - name: Set up mold
-        uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # 2.41.0
+        uses: rui314/setup-mold@10ca16bf91dc22e05ebdc935cad9c75ea248f621 # 2.41.0
 
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev
@@ -1066,7 +1066,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1
+      - uses: ruby/setup-ruby@e8944e80fb94b20106697132f8c20c665fab29e9 # v1
         with:
           ruby-version: "4.0"
 
@@ -1083,7 +1083,7 @@ jobs:
           cache-targets: true
 
       - name: Set up mold
-        uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # 2.41.0
+        uses: rui314/setup-mold@10ca16bf91dc22e05ebdc935cad9c75ea248f621 # 2.41.0
 
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev
@@ -1171,12 +1171,12 @@ jobs:
           name: agentd-${{ matrix.agentd }}-linux-musl
           path: build/
 
-      - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1
+      - uses: ruby/setup-ruby@e8944e80fb94b20106697132f8c20c665fab29e9 # v1
         if: "!contains(matrix.platform, 'mingw')"
         with:
           ruby-version: "3.1"
 
-      - uses: oxidize-rb/actions/setup-ruby-and-rust@e5f9a49a7812a078584072f6e3f657ad247c8771 # v1.4.4
+      - uses: oxidize-rb/actions/setup-ruby-and-rust@ec90b4aa48795518d79be3f5cc478d1d7ccd02a8 # v1.5.0
         if: contains(matrix.platform, 'mingw')
         with:
           ruby-version: "3.1"
@@ -1192,12 +1192,12 @@ jobs:
         working-directory: sdk/ruby
         run: cargo tree --manifest-path ext/microsandbox/Cargo.toml --depth 1 | grep "sdk.rust)"
 
-      - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1
+      - uses: ruby/setup-ruby@e8944e80fb94b20106697132f8c20c665fab29e9 # v1
         if: "!contains(matrix.platform, 'mingw')"
         with:
           ruby-version: "3.2"
 
-      - uses: oxidize-rb/actions/setup-ruby-and-rust@e5f9a49a7812a078584072f6e3f657ad247c8771 # v1.4.4
+      - uses: oxidize-rb/actions/setup-ruby-and-rust@ec90b4aa48795518d79be3f5cc478d1d7ccd02a8 # v1.5.0
         if: contains(matrix.platform, 'mingw')
         with:
           ruby-version: "3.2"
@@ -1209,12 +1209,12 @@ jobs:
           gem install rake rake-compiler rb_sys --no-document
           rake gem:stage
 
-      - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1
+      - uses: ruby/setup-ruby@e8944e80fb94b20106697132f8c20c665fab29e9 # v1
         if: "!contains(matrix.platform, 'mingw')"
         with:
           ruby-version: "3.3"
 
-      - uses: oxidize-rb/actions/setup-ruby-and-rust@e5f9a49a7812a078584072f6e3f657ad247c8771 # v1.4.4
+      - uses: oxidize-rb/actions/setup-ruby-and-rust@ec90b4aa48795518d79be3f5cc478d1d7ccd02a8 # v1.5.0
         if: contains(matrix.platform, 'mingw')
         with:
           ruby-version: "3.3"
@@ -1226,12 +1226,12 @@ jobs:
           gem install rake rake-compiler rb_sys --no-document
           rake gem:stage
 
-      - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1
+      - uses: ruby/setup-ruby@e8944e80fb94b20106697132f8c20c665fab29e9 # v1
         if: "!contains(matrix.platform, 'mingw')"
         with:
           ruby-version: "3.4"
 
-      - uses: oxidize-rb/actions/setup-ruby-and-rust@e5f9a49a7812a078584072f6e3f657ad247c8771 # v1.4.4
+      - uses: oxidize-rb/actions/setup-ruby-and-rust@ec90b4aa48795518d79be3f5cc478d1d7ccd02a8 # v1.5.0
         if: contains(matrix.platform, 'mingw')
         with:
           ruby-version: "3.4"
@@ -1243,12 +1243,12 @@ jobs:
           gem install rake rake-compiler rb_sys --no-document
           rake gem:stage
 
-      - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1
+      - uses: ruby/setup-ruby@e8944e80fb94b20106697132f8c20c665fab29e9 # v1
         if: "!contains(matrix.platform, 'mingw')"
         with:
           ruby-version: "4.0"
 
-      - uses: oxidize-rb/actions/setup-ruby-and-rust@e5f9a49a7812a078584072f6e3f657ad247c8771 # v1.4.4
+      - uses: oxidize-rb/actions/setup-ruby-and-rust@ec90b4aa48795518d79be3f5cc478d1d7ccd02a8 # v1.5.0
         if: contains(matrix.platform, 'mingw')
         with:
           ruby-version: "4.0"
@@ -1337,7 +1337,7 @@ jobs:
           - platform: x64-mingw-ucrt
             runner: windows-latest
     steps:
-      - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1
+      - uses: ruby/setup-ruby@e8944e80fb94b20106697132f8c20c665fab29e9 # v1
         with:
           ruby-version: ${{ matrix.ruby }}
 
@@ -1545,7 +1545,7 @@ jobs:
       - name: Clean runner disk
         run: scripts/ci/clean-runner-disk.sh
 
-      - uses: taiki-e/install-action@d438492cf8a250514fa2d34b30bc3c0dc37c65ff # v2
+      - uses: taiki-e/install-action@94c31af3204a9f15ab40b35ad084410b905bbc73 # v2
         with:
           tool: cargo-nextest@0.9.143
 
@@ -1604,7 +1604,7 @@ jobs:
             --archive-file build/rust-integration-tests.tar.zst \
             --workspace-remap "${{ github.workspace }}" \
             --run-ignored=only \
-            -E 'not (binary(=creation_progress_live) or binary(=eager_lifecycle_live) or test(/^backend::local::control::.*::live_/) or test(/^runtime::launch_contract::tests::released_/) or test(/^backend::local::catalog::tests::live_sdk_upgrades_catalog_with_historical_runtime$/))' \
+            -E 'not (binary(=creation_progress_live) or binary(=eager_lifecycle_live) or test(/^backend::local::control::.*::live_/) or test(/^runtime::launch_contract::tests::released_/) or test(/^backend::local::database::tests::live_sdk_upgrades_catalog_with_previous_version_runtime$/))' \
             --test-threads 2
 
       # This fixture needs a released runtime, not the candidate installed above.
@@ -1823,7 +1823,7 @@ jobs:
       - name: Clean runner disk
         run: scripts/ci/clean-runner-disk.sh
 
-      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           # Persistent runners already retain a bounded local cache. Restoring a
           # multi-GB Actions cache here can exhaust the shared disk before tests.
@@ -1882,7 +1882,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           enable-cache: true
           cache-dependency-glob: "sdk/python/uv.lock"

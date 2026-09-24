@@ -527,10 +527,10 @@ pub struct SandboxOpts {
     #[arg(long)]
     pub max_udp_connections: Option<usize>,
 
-    /// Require hostname-based network allows to use inspectable request authority.
+    /// Require inspectable request authority for hostname allows (default: true).
     #[cfg(feature = "net")]
-    #[arg(long = "net-strict")]
-    pub net_strict: bool,
+    #[arg(long = "net-strict", num_args = 0..=1, require_equals = true, default_missing_value = "true")]
+    pub net_strict: Option<bool>,
 
     /// Ship the host's trusted root CAs into the guest. Opt in to make
     /// outbound TLS work behind corporate MITM proxies (Warp Zero
@@ -827,6 +827,7 @@ impl SandboxOpts {
             || self.max_connections.is_some()
             || self.max_tcp_connections.is_some()
             || self.max_udp_connections.is_some()
+            || self.net_strict.is_some()
             || self.trust_host_cas
             || self.tls_intercept
             || !self.tls_intercept_port.is_empty()
@@ -1076,7 +1077,7 @@ impl SandboxOpts {
             || self.max_connections.is_some()
             || self.max_tcp_connections.is_some()
             || self.max_udp_connections.is_some()
-            || self.net_strict
+            || self.net_strict.is_some()
             || self.trust_host_cas
             || self.proxy.is_some()
             || self.socks4_user_id.is_some()
@@ -2619,8 +2620,8 @@ fn apply_network_opts(
             if trust_host_cas {
                 n = n.trust_host_cas(true);
             }
-            if net_strict {
-                n = n.strict(true);
+            if let Some(enabled) = net_strict {
+                n = n.strict(enabled);
             }
             if egress_rate_limiter.is_some() || ingress_rate_limiter.is_some() {
                 n = n.rate_limiter(|mut r| {
@@ -3370,6 +3371,38 @@ mod tests {
     };
 
     use super::*;
+
+    #[cfg(feature = "net")]
+    #[tokio::test]
+    async fn net_strict_defaults_and_explicit_overrides() {
+        for (args, explicit) in [
+            (vec!["test"], None),
+            (vec!["test", "--net-strict"], Some(true)),
+            (vec!["test", "--net-strict=true"], Some(true)),
+            (vec!["test", "--net-strict=false"], Some(false)),
+        ] {
+            let matches = SandboxOpts::augment_args(Command::new("test"))
+                .try_get_matches_from(args)
+                .unwrap();
+            let opts = SandboxOpts::from_arg_matches(&matches).unwrap();
+            assert_eq!(opts.net_strict, explicit);
+            for initial in [None, Some(true), Some(false)] {
+                let mut builder = SandboxBuilder::new("test").image("alpine");
+                if let Some(enabled) = initial {
+                    builder = builder.network(|n| n.strict(enabled));
+                }
+                let config = apply_sandbox_opts(builder, &opts)
+                    .unwrap()
+                    .build()
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    config.spec.network.strict,
+                    explicit.or(initial).unwrap_or(true)
+                );
+            }
+        }
+    }
 
     #[cfg(feature = "net")]
     #[test]

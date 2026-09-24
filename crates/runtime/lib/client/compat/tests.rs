@@ -5,13 +5,13 @@ use microsandbox_protocol::bootstrap::*;
 use microsandbox_types::CpuPlacement;
 use serde_json::{Value, json};
 
-use super::LaunchConfig;
+use crate::client::launch::LaunchConfig;
 
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-fn historical(env: Vec<String>) -> Value {
+fn previous_launch(env: Vec<String>) -> Value {
     // Required fields from the v0.6.0 LaunchConfig contract. Keep this fixture
     // independent of current serialization so new required fields are detected.
     json!({"db_path":"/home/db/msb.db","db_connect_timeout_secs":5,
@@ -63,7 +63,7 @@ fn legacy_bootstrap_preserves_every_setting_and_derives_lease_paths() {
             URL_SAFE_NO_PAD.encode(serde_json::to_vec(&handoff_env).unwrap())
         ),
     ];
-    let config = decode(&historical(env.clone())).unwrap();
+    let config = decode(&previous_launch(env.clone())).unwrap();
     assert_eq!(config.cpu_placement, CpuPlacement::Inherit);
     assert_eq!(config.cpu_lease_dir, Path::new("/home/run/cpu-leases"));
     assert_eq!(
@@ -143,10 +143,10 @@ fn explicit_bootstrap_remains_authoritative_and_modern_fields_stay_required() {
 
 #[test]
 fn incomplete_lease_group_is_not_defaulted_and_legacy_root_is_required() {
-    let mut value = historical(vec![]);
+    let mut value = previous_launch(vec![]);
     value["cpu_placement"] = json!("inherit");
     assert!(decode(&value).is_err());
-    let mut value = historical(vec![]);
+    let mut value = previous_launch(vec![]);
     value["agent_sock"] = json!("endpoint");
     value["sandboxes_dir"] = json!("sandboxes");
     assert!(decode(&value).is_err());
@@ -179,14 +179,14 @@ fn invalid_legacy_input_fails_without_echoing_values() {
         "MSB_NET=iface=eth0,mac=secret-marker",
         "MSB_HANDOFF_INIT=secret-marker",
     ] {
-        let err = decode(&historical(vec![entry.into()])).unwrap_err();
+        let err = decode(&previous_launch(vec![entry.into()])).unwrap_err();
         assert!(!err.contains("secret-marker"), "{err}");
     }
 }
 
 #[test]
 fn repeated_environment_keys_and_empty_metadata_follow_legacy_behavior() {
-    let config = decode(&historical(vec![
+    let config = decode(&previous_launch(vec![
         "MSB_HOSTNAME=old".into(),
         "MSB_HOSTNAME= new ".into(),
         "MSB_USER=  ".into(),
@@ -222,13 +222,13 @@ fn duplicate_json_policy_keys_are_rejected() {
 
 #[cfg(feature = "net")]
 #[test]
-fn legacy_connection_limits_keep_historical_budgets_and_refuse_ambiguous_zero() {
+fn legacy_connection_limits_keep_previous_version_budgets_and_refuse_ambiguous_zero() {
     use microsandbox_network::config::ConnectionLimit;
 
     // Include real released producer records, not only current serializers. The
     // v0.6.0 fixture covers the older environment-based launch shape as well.
     let inputs = [
-        historical(vec![]),
+        previous_launch(vec![]),
         serde_json::from_slice(include_bytes!(
             "../../../tests/fixtures/launch-v0.6.10.json"
         ))
@@ -243,7 +243,7 @@ fn legacy_connection_limits_keep_historical_budgets_and_refuse_ambiguous_zero() 
             for requested in [None, Some(1), Some(256), Some(257), Some(4096)] {
                 let mut value = input.clone();
                 value["deployment_profile"] = json!(profile);
-                // Preserve each historical producer's flat/resolved shape.
+                // Preserve each previous producer's flat/resolved shape.
                 let resolved = value["network"].get("config").is_some();
                 let network = json!({"max_connections": requested});
                 value["network"] = if resolved {
@@ -309,7 +309,7 @@ fn current_launch_keeps_new_connection_limit_semantics() {
 #[cfg(feature = "net")]
 #[test]
 fn resolved_network_preserves_policy_and_refuses_unavailable_features() {
-    let mut value = historical(vec![]);
+    let mut value = previous_launch(vec![]);
     value["network"] =
         json!({"config":{"enabled":false,"max_connections":12},"outbound_proxy":null});
     let net = decode(&value).unwrap().network.unwrap();
@@ -324,7 +324,7 @@ fn resolved_network_preserves_policy_and_refuses_unavailable_features() {
 
 #[test]
 fn isolated_host_file_mounts_are_not_silently_discarded() {
-    let mut value = historical(vec![]);
+    let mut value = previous_launch(vec![]);
     value["file_mounts"] = json!([]);
     assert!(decode(&value).is_ok());
     value["file_mounts"] = json!([{"mount":"file:/private/input","filename":"input"}]);
@@ -333,13 +333,13 @@ fn isolated_host_file_mounts_are_not_silently_discarded() {
 
 #[cfg(feature = "net")]
 #[test]
-fn historical_secret_policies_survive_launch_decoding() {
-    let mut value = historical(vec![]);
+fn previous_version_secret_policies_survive_launch_decoding() {
+    let mut value = previous_launch(vec![]);
     value["network"] =
         serde_json::to_value(microsandbox_network::config::NetworkConfig::default()).unwrap();
     value["network"]["secrets"] = json!({"on_violation":"block-and-terminate", "secrets":[{
         "env_var":"API_KEY", "value":"test-secret", "placeholder":"$MSB_test",
-        "allowed_hosts":[], "injection":{"headers":false,"body":true},
+        "allowed_hosts":[{"exact":"example.com"}], "injection":{"headers":false,"body":true},
         "on_violation":"block-and-log"
     }]});
     let launch = decode(&value).unwrap();
@@ -358,4 +358,87 @@ fn historical_secret_policies_survive_launch_decoding() {
     );
     value["network"]["secrets"]["violation_action"] = json!("block-and-log");
     assert!(decode(&value).unwrap_err().contains("conflicting"));
+}
+
+#[cfg(test)]
+mod protocol {
+    use crate::client::compat::launch::decode_legacy;
+    use crate::client::launch::ExecutionIntent;
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn released_sdk_payload_preserves_deny_all_policy() {
+        for bytes in [
+            include_bytes!("../../../tests/fixtures/launch-v0.6.18.json").as_slice(),
+            include_bytes!("../../../tests/fixtures/launch-v0.6.10.json").as_slice(),
+        ] {
+            let config = decode_legacy(bytes).unwrap();
+            assert_eq!(config.execution, ExecutionIntent::Boot);
+            assert_eq!(
+                config.db_path,
+                std::path::PathBuf::from("/compat-home/db/msb.db")
+            );
+            let network = serde_json::to_value(config.network.unwrap()).unwrap();
+            assert_eq!(network["config"]["policy"]["default_egress"], "deny");
+            assert_eq!(network["config"]["policy"]["default_ingress"], "deny");
+        }
+    }
+}
+
+#[cfg(feature = "net")]
+#[test]
+fn typed_network_reader_never_falls_back_from_a_malformed_resolved_envelope() {
+    for network in [
+        json!({"config": null}),
+        json!({"config": {"strict": "invalid"}}),
+        json!({"config": {"secrets": {"on_violation": "invalid"}}}),
+        json!({"config": {}, "outbound_proxy": "invalid"}),
+    ] {
+        let mut value = previous_launch(vec![]);
+        value["network"] = network;
+        assert!(decode(&value).is_err());
+    }
+}
+
+#[test]
+fn typed_launch_reader_never_falls_back_from_explicit_modern_intent() {
+    for intent in [
+        Value::Null,
+        json!("boot"),
+        json!("restore"),
+        json!("invalid"),
+    ] {
+        let mut value = previous_launch(vec![]);
+        value["execution"] = intent;
+        assert!(decode(&value).is_err());
+    }
+}
+
+#[cfg(feature = "net")]
+#[test]
+fn all_disabled_secrets_are_rejected_in_current_and_previous_launches() {
+    let policy = json!({"secrets":[{"env_var":"KEY","placeholder":"$KEY",
+        "value":"private-marker", "allowed_hosts":[{"exact":"example.com"}],
+        "injection":{"headers":false,"basic_auth":false,"query_params":false,"body":false}}]});
+    let mut previous = previous_launch(vec![]);
+    previous["network"] = json!({"secrets":policy});
+    let error = decode(&previous).unwrap_err();
+    assert!(
+        error.contains("at least one substitution location"),
+        "{error}"
+    );
+    assert!(!error.contains("private-marker"));
+
+    let mut current = serde_json::to_value(LaunchConfig::default()).unwrap();
+    current["network"] = json!({"config":{"secrets":{"secrets":[{
+        "env_var":"KEY","placeholder":"$KEY","value":"private-marker",
+        "allowed_hosts":[{"exact":"example.com"}],
+        "substitution":{"headers":false,"query":false,"body":false}
+    }]}},"outbound_proxy":null});
+    let error = LaunchConfig::decode(&serde_json::to_vec(&current).unwrap()).unwrap_err();
+    assert!(
+        error.contains("at least one substitution location"),
+        "{error}"
+    );
+    assert!(!error.contains("private-marker"));
 }

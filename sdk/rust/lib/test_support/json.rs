@@ -1,4 +1,4 @@
-//! A persisted configuration document must not choose a policy by repeating a JSON key.
+//! A configuration document must not choose a policy by repeating a JSON key.
 
 use std::fmt;
 
@@ -12,7 +12,8 @@ use serde_json::{Map, Number, Value};
 // Types
 //--------------------------------------------------------------------------------------------------
 
-pub(super) struct UniqueValue(pub Value);
+/// JSON document that rejects repeated object keys without exposing their contents.
+pub struct UniqueValue(pub Value);
 struct UniqueVisitor;
 
 //--------------------------------------------------------------------------------------------------

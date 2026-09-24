@@ -23,7 +23,6 @@ use crate::domain::{
 };
 use crate::{TypesError, TypesResult};
 
-mod compat;
 mod secrets;
 mod snapshots;
 mod specs;

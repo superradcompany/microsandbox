@@ -690,6 +690,18 @@ impl SecretsHandler {
                 continue;
             }
 
+            // A per-secret blocking action overrides the global passthrough default.
+            // Per-secret passthrough falls back to the global policy off its hosts.
+            if secret.violation_action.is_none()
+                && config.passthrough_hosts.as_ref().is_some_and(|hosts| {
+                    hosts
+                        .iter()
+                        .any(|pattern| host_pattern_allowed(pattern, sni, identity.as_ref()))
+                })
+            {
+                continue;
+            }
+
             let substitution = if host_allowed && (!secret.require_tls_identity || tls_intercepted)
             {
                 secret.substitution.clone()
@@ -3482,12 +3494,129 @@ impl SecretViolationReport {
 mod tests {
     use super::*;
     use crate::netstack::shared::{ResolvedHostnameFamily, SharedState};
+    use microsandbox_types::compat;
 
     use std::net::{IpAddr, Ipv4Addr};
     use std::time::Duration;
 
+    #[test]
+    fn legacy_header_scopes_merge_for_http1_and_http2() {
+        for headers in [false, true] {
+            for basic_auth in [false, true] {
+                let mut wire = serde_json::json!({"on_violation":"block", "secrets":[{
+                    "env_var":"KEY", "value":"real-secret", "placeholder":"$KEY",
+                    "allowed_hosts":[{"exact":"api.example.com"}],
+                    "injection":{"headers":headers,"basic_auth":basic_auth,"query_params":true},
+                    "passthrough_hosts":[{"exact":"api.example.com"}],
+                    "require_tls_identity":false
+                }]});
+                compat::v0_5_0::local::secrets::to_current(wire.as_object_mut().unwrap()).unwrap();
+                let config: SecretsConfig = serde_json::from_value(wire).unwrap();
+                let headers = headers || basic_auth;
+                let basic = BASE64.encode("user:$KEY");
+                let input = format!(
+                    "GET /?key=$KEY HTTP/1.1\r\nHost: api.example.com\r\nAuthorization: Basic {basic}\r\nX-Key: $KEY\r\n\r\n"
+                );
+                for tls in [false, true] {
+                    let mut handler = SecretsHandler::new(&config, "api.example.com", tls);
+                    let output = handler.substitute(input.as_bytes()).unwrap();
+                    let output = String::from_utf8(output.into_owned()).unwrap();
+                    let expected_basic = BASE64.encode(if headers {
+                        "user:real-secret"
+                    } else {
+                        "user:$KEY"
+                    });
+                    assert!(
+                        output.contains(&format!("Authorization: Basic {expected_basic}")),
+                        "{output}"
+                    );
+                    assert!(
+                        output.contains(if headers {
+                            "X-Key: real-secret"
+                        } else {
+                            "X-Key: $KEY"
+                        }),
+                        "{output}"
+                    );
+                    assert!(output.contains("/?key=real-secret"), "{output}");
+                    let mut h2 = vec![
+                        (b":path".to_vec(), b"/?key=$KEY".to_vec()),
+                        (
+                            b"authorization".to_vec(),
+                            format!("Basic {basic}").into_bytes(),
+                        ),
+                        (b"x-key".to_vec(), b"$KEY".to_vec()),
+                    ];
+                    handler.substitute_http2_headers(&mut h2);
+                    assert_eq!(h2[1].1, format!("Basic {expected_basic}").as_bytes());
+                    assert_eq!(
+                        h2[2].1,
+                        if headers {
+                            b"real-secret".as_slice()
+                        } else {
+                            b"$KEY".as_slice()
+                        }
+                    );
+                }
+                let mut denied = SecretsHandler::new(&config, "denied.example", true);
+                assert!(denied.substitute(input.as_bytes()).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn decoded_v06_policy_uses_current_disabled_body_enforcement() {
+        let mut wire = serde_json::json!({"on_violation":"block", "secrets":[{
+            "env_var":"KEY", "value":"real-secret", "placeholder":"$KEY",
+            "allowed_hosts":[{"exact":"api.example.com"}],
+            "injection":{"headers":true,"basic_auth":true,"query_params":false,"body":false},
+            "require_tls_identity":false
+        }]});
+        compat::v0_5_0::local::secrets::to_current(wire.as_object_mut().unwrap()).unwrap();
+        let mut config: SecretsConfig = serde_json::from_value(wire).unwrap();
+        let request = b"POST / HTTP/1.1\r\nHost: api.example.com\r\nContent-Length: 4\r\n\r\n$KEY";
+        let mut handler = SecretsHandler::new(&config, "api.example.com", true);
+        assert!(handler.substitute(request).is_err());
+        config.secrets[0]
+            .passthrough_hosts
+            .push(HostPattern::Exact("api.example.com".into()));
+        let mut handler = SecretsHandler::new(&config, "api.example.com", true);
+        assert_eq!(handler.substitute(request).unwrap().as_ref(), request);
+    }
+
+    #[test]
+    fn global_passthrough_preserves_fallback_and_per_secret_overrides() {
+        let input = b"GET / HTTP/1.1\r\nX-Key: $KEY\r\n\r\n";
+        let mut secret = make_secret("$KEY", "real-secret", "allowed.example");
+        secret.passthrough_hosts = vec![HostPattern::Exact("entry.example".into())];
+        let mut config = make_config(vec![secret]);
+        config.passthrough_hosts = Some(vec![HostPattern::Exact("global.example".into())]);
+        config.violation_action = SecretViolationAction::BlockAndLog;
+        for host in ["entry.example", "global.example"] {
+            let mut handler = SecretsHandler::new(&config, host, true);
+            assert_eq!(handler.substitute(input).unwrap().as_ref(), input);
+        }
+        let mut denied = SecretsHandler::new(&config, "denied.example", true);
+        assert_eq!(
+            denied.substitute(input).unwrap_err(),
+            SecretViolationAction::BlockAndLog
+        );
+        config.secrets[0].passthrough_hosts.clear();
+        config.secrets[0].violation_action = Some(SecretViolationAction::BlockAndTerminate);
+        let mut overridden = SecretsHandler::new(&config, "global.example", true);
+        assert_eq!(
+            overridden.substitute(input).unwrap_err(),
+            SecretViolationAction::BlockAndTerminate
+        );
+        // The global default also applies to a secret added later without an override.
+        config.secrets[0].violation_action = None;
+        let mut inherited = SecretsHandler::new(&config, "global.example", true);
+        assert_eq!(inherited.substitute(input).unwrap().as_ref(), input);
+    }
+
     fn make_config(secrets: Vec<SecretEntry>) -> SecretsConfig {
         SecretsConfig {
+            passthrough_hosts: None,
             secrets,
             violation_action: SecretViolationAction::Block,
         }

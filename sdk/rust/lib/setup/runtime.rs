@@ -388,7 +388,7 @@ fn install_archive_bytes(
         let staged_msb = stage.path().join(microsandbox_utils::msb_binary_filename(
             std::env::consts::OS,
         ));
-        let staged_library = stage
+        let mut staged_library = stage
             .path()
             .join(microsandbox_utils::libkrunfw_filename(std::env::consts::OS));
 
@@ -423,13 +423,22 @@ fn install_archive_bytes(
                 }
                 found_msb = true;
                 &staged_msb
-            } else if filename == staged_library.file_name().expect("library filename") {
+            } else if filename == staged_library.file_name().expect("library filename")
+                || (cfg!(target_os = "linux")
+                    && matches!(
+                        filename.to_str(),
+                        Some("libkrunfw.so.5.2.1" | "libkrunfw.so.5.5.0" | "libkrunfw.so.5.6.0")
+                    ))
+            {
                 if found_library {
                     return Err(MicrosandboxError::Custom(
                         "runtime archive contains duplicate libkrunfw entries".into(),
                     ));
                 }
                 found_library = true;
+                // Keep the released basename for old SDKs that resolve the exact
+                // firmware filename. Publication also keeps our canonical path.
+                staged_library = stage.path().join(filename);
                 &staged_library
             } else {
                 return Err(MicrosandboxError::Custom(format!(
@@ -509,6 +518,7 @@ fn publish_pair(
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or_default(),
+        source_library.file_name().and_then(|name| name.to_str()),
     );
     if let Err(error) = links_result {
         let _ = fs::remove_file(&runtime.libkrunfw_path);
@@ -568,8 +578,12 @@ fn set_executable(_path: &Path) -> MicrosandboxResult<()> {
 }
 
 #[cfg(unix)]
-fn create_library_links(lib_dir: &Path, filename: &str) -> MicrosandboxResult<()> {
-    let links: Vec<(String, String)> = if cfg!(target_os = "macos") {
+fn create_library_links(
+    lib_dir: &Path,
+    filename: &str,
+    source_filename: Option<&str>,
+) -> MicrosandboxResult<()> {
+    let mut links: Vec<(String, String)> = if cfg!(target_os = "macos") {
         vec![("libkrunfw.dylib".into(), filename.into())]
     } else {
         let soname = format!("libkrunfw.so.{LIBKRUNFW_ABI}");
@@ -578,6 +592,11 @@ fn create_library_links(lib_dir: &Path, filename: &str) -> MicrosandboxResult<()
             ("libkrunfw.so".into(), soname),
         ]
     };
+    if cfg!(target_os = "linux")
+        && let Some(previous_name) = source_filename.filter(|name| *name != filename)
+    {
+        links.push((previous_name.into(), filename.into()));
+    }
     for (name, target) in links {
         let path = lib_dir.join(name);
         if path.exists() || path.is_symlink() {
@@ -589,7 +608,11 @@ fn create_library_links(lib_dir: &Path, filename: &str) -> MicrosandboxResult<()
 }
 
 #[cfg(not(unix))]
-fn create_library_links(_lib_dir: &Path, _filename: &str) -> MicrosandboxResult<()> {
+fn create_library_links(
+    _lib_dir: &Path,
+    _filename: &str,
+    _source_filename: Option<&str>,
+) -> MicrosandboxResult<()> {
     Ok(())
 }
 
@@ -1117,6 +1140,58 @@ mod tests {
         assert!(error.to_string().contains("unexpected entry"));
         assert!(!runtime_in_home(&config).msb_path.exists());
         assert!(!runtime_in_home(&config).libkrunfw_path.exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn previous_firmware_basenames_remain_resolvable_after_installation() {
+        for previous in [
+            "libkrunfw.so.5.2.1",
+            "libkrunfw.so.5.5.0",
+            "libkrunfw.so.5.6.0",
+        ] {
+            let home = tempfile::tempdir().unwrap();
+            let config = GlobalConfig {
+                home: Some(home.path().to_path_buf()),
+                ..Default::default()
+            };
+            let bytes = archive_bytes(&[
+                ("msb", tar::EntryType::Regular, b"previous-msb"),
+                (
+                    previous,
+                    tar::EntryType::Regular,
+                    b"matching-previous-firmware",
+                ),
+            ]);
+            install_archive_bytes(&config, &bytes, false).unwrap();
+            let current = runtime_in_home(&config);
+            assert_eq!(
+                fs::read(&current.libkrunfw_path).unwrap(),
+                b"matching-previous-firmware"
+            );
+            assert_eq!(
+                fs::read(home.path().join(LIB_SUBDIR).join(previous)).unwrap(),
+                b"matching-previous-firmware"
+            );
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn runtime_archive_rejects_multiple_firmware_versions_before_publication() {
+        let home = tempfile::tempdir().unwrap();
+        let config = GlobalConfig {
+            home: Some(home.path().to_path_buf()),
+            ..Default::default()
+        };
+        let archive = archive_bytes(&[
+            ("msb", tar::EntryType::Regular, b"msb"),
+            ("libkrunfw.so.5.2.1", tar::EntryType::Regular, b"first"),
+            ("libkrunfw.so.5.5.0", tar::EntryType::Regular, b"second"),
+        ]);
+        let error = install_archive_bytes(&config, &archive, false).unwrap_err();
+        assert!(error.to_string().contains("duplicate libkrunfw"));
+        assert!(!runtime_in_home(&config).msb_path.exists());
     }
 
     #[tokio::test]

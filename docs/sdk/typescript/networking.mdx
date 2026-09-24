@@ -581,7 +581,7 @@ Whether to ship the host's trusted root CAs into the guest at boot. Default: `fa
 strict(enabled: boolean): this
 ```
 
-Require hostname-based policy allows to use an inspectable request authority. Default: `false`. Plain HTTP exposes that authority in `Host`; HTTPS only exposes it when TLS interception is enabled and not bypassed. Without that visibility, strict mode denies HTTPS that would otherwise be allowed only by a hostname rule.
+Require hostname-based policy allows to use an inspectable request authority. Default: `true`. Plain HTTP exposes that authority in `Host`; HTTPS only exposes it when TLS interception is enabled and not bypassed. Without that visibility, strict mode denies HTTPS that would otherwise be allowed only by a hostname rule.
 
 <p className="msb-label">Parameters</p>
 
