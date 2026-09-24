@@ -5,7 +5,7 @@ description: Handle sandbox errors and clean up resources across the microsandbo
 icon: "triangle-exclamation"
 ---
 
-TypeScript, Rust, Python, and Go surface typed errors so you can match specific failure modes instead of parsing strings. TypeScript exposes a dedicated subclass per variant (use `instanceof`), Rust has an `Error` enum, Python provides dedicated exception classes, and Go provides an `*Error` value with an `ErrorKind` discriminator matched via `m.IsKind(err, kind)` or `errors.As`. Ruby currently exposes `Microsandbox::Error`; where no dedicated subclass exists, its reference documents the stable message contract explicitly.
+TypeScript, Rust, Python, and Go surface typed errors so you can match specific failure modes instead of parsing strings. TypeScript exposes a dedicated subclass per variant (use `instanceof`). Rust has an `Error` enum, and Python provides dedicated exception classes. Go provides an `*Error` value with an `ErrorKind` discriminator that you match via `m.IsKind(err, kind)` or `errors.As`. Ruby currently exposes `Microsandbox::Error`; where no dedicated subclass exists, its reference documents the stable message contract explicitly.
 
 ## Matching errors
 
@@ -216,7 +216,7 @@ The CLI maps these kinds to POSIX-style exit codes: `127` for `NotFound`, `126` 
 
 ## Name conflicts
 
-Creating a sandbox with a name that's already in use (and without `replace`) surfaces a typed error you can branch on to decide whether to recover (resume the existing one, regenerate the name, etc.).
+Creating a sandbox with a name that's already in use (and without `replace`) surfaces a typed error. Branch on it to decide how to recover, such as resuming the existing sandbox or regenerating the name.
 
 <CodeGroup>
 ```typescript TypeScript
