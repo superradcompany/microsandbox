@@ -344,6 +344,8 @@ Normal x86 boot now declares `krun.poweroff=i8042` in libkrun's default kernel c
 
 ## 13. Networking, DNS, Published Ports, and Secret Substitution
 
+Strict hostname policy is enabled by default. The v0.6.0–v0.6.17 launch gate rejects strict policies containing outbound hostname allow rules, including domain suffixes and rules applying in both directions. Policies without those rules retain their existing behavior on older runtimes because strict enforcement is unused. Explicit `strict: false` remains supported.
+
 Observable network behavior is an effective compatibility contract. It includes default MTU, sandbox-slot address derivation, IPv4 subnet sizing, guest and gateway offsets, IPv6 prefixes, deterministic MAC addresses, interface name `eth0`, `host.microsandbox.internal`, DNS UDP and TCP behavior, DNS-over-TLS, TLS interception and trust paths, published-port binding, TCP half-close, UDP peer lifetime, destination policy, and host-side secret placeholder substitution.
 
 Sources: [`crates/network/lib/lib.rs`](crates/network/lib/lib.rs), [`crates/network/lib/engine/network.rs`](crates/network/lib/engine/network.rs), and the remaining modules under [`crates/network/lib`](crates/network/lib).
