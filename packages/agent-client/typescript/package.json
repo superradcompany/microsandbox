@@ -5,7 +5,7 @@
     "url": "git+https://github.com/superradcompany/microsandbox.git",
     "directory": "packages/agent-client/typescript"
   },
-  "version": "0.7.2",
+  "version": "0.7.3",
   "type": "module",
   "license": "Apache-2.0",
   "engines": {
@@ -60,7 +60,7 @@
     "vitest": "^5.0"
   },
   "dependencies": {
-    "@microsandbox/protocol-client": "0.7.2",
+    "@microsandbox/protocol-client": "0.7.3",
     "cbor-x": "^1.6.0"
   }
 }
