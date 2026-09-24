@@ -4,7 +4,7 @@ description: Save files or running workloads and restore them into new sandboxes
 icon: "code-branch"
 ---
 
-<Tooltip tip="Cloud supports disk snapshots from stopped or crashed sandboxes and disk restore. Full snapshots, branching, groups, and local archives are not yet available on cloud."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Cloud supports disk snapshots from stopped persistent sandboxes and disk restore. Full snapshots, branching, groups, and local archives are not yet available on cloud."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 Save a prepared sandbox and reuse it as a starting point. Each restore creates a new sandbox and leaves the source unchanged.
 
@@ -19,7 +19,7 @@ Disk is the default. Full adds memory and execution state; there is no memory-on
 
 ## Disk snapshots
 
-Use disk snapshots for installed dependencies, prepared workspaces, and saved files. Cloud requires a stopped or crashed source. See [guest flushing](#guest-flushing) for how microsandbox handles pending writes.
+Use disk snapshots for installed dependencies, prepared workspaces, and saved files. Cloud requires a stopped persistent source. See [guest flushing](#guest-flushing) for how microsandbox handles pending writes.
 
 <Steps>
 <Step title="Prepare">
