@@ -659,6 +659,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn required_backing_probe_distinguishes_old_and_capable_runtimes() {
         let dir = tempfile::tempdir().unwrap();
