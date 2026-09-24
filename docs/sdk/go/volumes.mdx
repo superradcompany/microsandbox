@@ -660,7 +660,7 @@ sb, err := m.CreateSandbox(ctx, "worker",
 
 </Accordion>
 
-Mount a named persistent volume with explicit sandbox-time existence behavior. [`NamedVolumeOptions.Mode`](#namedvolumeoptions) accepts `"existing"` (default), `"create"`, or `"ensure-exists"`. `Mode: "create"` fails when the named volume already exists. `Mode: "ensure-exists"` creates the volume if it is missing and reuses a compatible existing volume; it errors when the existing volume has a different kind, quota, or capacity than requested, and never mutates existing volume metadata.
+Mount a named persistent volume with explicit sandbox-time existence behavior. [`NamedVolumeOptions.Mode`](#namedvolumeoptions) accepts `"existing"` (default), `"create"`, or `"ensure-exists"`. `Mode: "create"` fails when the named volume already exists. `Mode: "ensure-exists"` creates the volume if it is missing and reuses a compatible existing volume. It errors when the existing volume has a different kind, quota, or capacity than requested. It never mutates existing volume metadata.
 
 <p className="msb-label">Parameters</p>
 

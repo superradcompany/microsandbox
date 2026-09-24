@@ -2240,7 +2240,7 @@ let plan = sb.modify()
 
 </Accordion>
 
-Declare the desired state of one secret via a [`SecretPatchBuilder`](#secretpatchbuilder) closure. The spec mirrors the create-time [`SecretBuilder`](/sdk/rust/secrets#secretbuilder) vocabulary. The planner diffs it against the existing config to infer the change: a secret that does not exist yet is `added`, material on an existing secret `rotated`, and host or placeholder differences update those aspects. Declaring the same secret again replaces the earlier spec; removal is always explicit through [`remove_secret()`](#modification-remove_secret).
+Declare the desired state of one secret via a [`SecretPatchBuilder`](#secretpatchbuilder) closure. The spec mirrors the create-time [`SecretBuilder`](/sdk/rust/secrets#secretbuilder) vocabulary. The planner diffs it against the existing config to infer the change. A secret that does not exist yet is `added`, and material on an existing secret is `rotated`. Host or placeholder differences update those aspects. Declaring the same secret again replaces the earlier spec; removal is always explicit through [`remove_secret()`](#modification-remove_secret).
 
 <p className="msb-label">Parameters</p>
 
