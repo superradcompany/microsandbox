@@ -1,0 +1,39 @@
+# Used by both `gh release create --generate-notes` and the GitHub release UI.
+# Non-semantic PR titles can use release:<type> labels directly. Unclassified
+# changes remain visible in Other changes. Mintlify branch-sync PRs receive
+# release:skip from release-labels.yml; product docs remain in the notes.
+changelog:
+  exclude:
+    authors:
+      - "mintlify[bot]"
+    labels:
+      - "release:skip"
+  categories:
+    - title: Breaking changes
+      labels: ["Breaking Change", "release:breaking"]
+    - title: Security
+      labels: ["Security", "Vulnerability"]
+    - title: Features
+      labels: ["release:feat"]
+    - title: Fixes
+      labels: ["release:fix", "Regression"]
+    - title: Performance
+      labels: ["release:perf", "Performance"]
+    - title: Documentation
+      labels: ["release:docs", "Docs"]
+    - title: Refactoring
+      labels: ["release:refactor"]
+    - title: Dependencies
+      labels: ["release:deps", "Dependencies", "github_actions", "javascript"]
+    - title: Build
+      labels: ["release:build"]
+    - title: CI
+      labels: ["release:ci", "CI"]
+    - title: Tests
+      labels: ["release:test", "Tests"]
+    - title: Style
+      labels: ["release:style"]
+    - title: Maintenance
+      labels: ["release:chore"]
+    - title: Other changes
+      labels: ["*"]

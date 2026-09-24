@@ -1,0 +1,71 @@
+name: Label release changes
+
+# Use the final merged title, including PRs from forks. This workflow only
+# reads PR metadata: never check out or execute code from the pull request.
+on:
+  pull_request_target:
+    types: [closed]
+
+permissions:
+  issues: write
+  pull-requests: write
+
+jobs:
+  label:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const current = new Set(pr.labels.map(label => label.name));
+            const wanted = new Set();
+            const match = pr.title.match(/^(feat|fix|perf|docs|refactor|build|ci|test|style|chore|deps)(?:\(([^)]+)\))?(!)?:\s/i);
+
+            // Exclude only release-to-docs syncs, not fixes to the sync workflow
+            // or human-authored documentation that happens to mention Mintlify.
+            if (pr.user.login === 'mintlify[bot]' || (
+              pr.user.login === 'github-actions[bot]' &&
+              pr.base.ref === 'mintlify' &&
+              pr.head.ref.startsWith('mintlify-sync-') &&
+              /^sync mintlify to v\S+$/i.test(pr.title)
+            )) {
+              wanted.add('release:skip');
+            } else if (match) {
+              // Preserve explicitly chosen categories for nonstandard cases.
+              const hasCategory = [...current].some(label =>
+                /^release:(feat|fix|perf|docs|refactor|build|ci|test|style|chore|deps)$/.test(label)
+              );
+              if (!hasCategory) {
+                const type = /^deps(?:-dev)?$/i.test(match[2] || '')
+                  ? 'deps' : match[1].toLowerCase();
+                wanted.add(`release:${type}`);
+              }
+              if (match[3]) wanted.add('release:breaking');
+            }
+
+            for (const name of wanted) {
+              if (current.has(name)) continue;
+              try {
+                await github.rest.issues.getLabel({ ...context.repo, name });
+              } catch (error) {
+                if (error.status !== 404) throw error;
+                try {
+                  await github.rest.issues.createLabel({
+                    ...context.repo, name, color: 'c5def5',
+                    description: 'Category for generated release notes',
+                  });
+                } catch (error) {
+                  // Another merged PR may have created this label concurrently.
+                  if (error.status !== 422) throw error;
+                  await github.rest.issues.getLabel({ ...context.repo, name });
+                }
+              }
+            }
+            const labels = [...wanted].filter(name => !current.has(name));
+            if (labels.length) {
+              await github.rest.issues.addLabels({
+                ...context.repo, issue_number: pr.number, labels,
+              });
+            }
