@@ -29,3 +29,18 @@ def test_network_secret_violation_action_serializes() -> None:
     network = Network(secret_violation_action=ViolationAction.BLOCK)
 
     assert network._to_dict()["secret_violation_action"] == "block"
+
+
+def test_secret_substitution_header_fields_serialize() -> None:
+    secret = Secret.env(
+        "API_KEY",
+        value="sk-abc",
+        allow=("api.github.com",),
+        substitution=SecretSubstitution(
+            header_fields=("authorization", "x-api-key")
+        ),
+    )
+
+    assert secret._to_dict()["substitution"] == {
+        "header_fields": ["authorization", "x-api-key"]
+    }

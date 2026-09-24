@@ -534,6 +534,9 @@ func TestSecretEnvFactory(t *testing.T) {
 		Allow:              []string{"a.com", "b.com", "*.corp"},
 		Placeholder:        "$TOK",
 		RequireTLSIdentity: &rt,
+		Substitution: SecretSubstitution{
+			HeaderFields: []string{"authorization"},
+		},
 	})
 	if s.EnvVar != "TOK" || s.Value != "val" {
 		t.Errorf("EnvVar/Value: got %q/%q", s.EnvVar, s.Value)
@@ -549,6 +552,9 @@ func TestSecretEnvFactory(t *testing.T) {
 	}
 	if s.RequireTLSIdentity == nil || !*s.RequireTLSIdentity {
 		t.Error("RequireTLSIdentity should be true")
+	}
+	if len(s.Substitution.HeaderFields) != 1 || s.Substitution.HeaderFields[0] != "authorization" {
+		t.Errorf("Substitution.HeaderFields: got %v", s.Substitution.HeaderFields)
 	}
 }
 

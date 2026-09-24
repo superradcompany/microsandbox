@@ -93,6 +93,19 @@ impl LaunchContract {
         self.patch >= 17
     }
 
+    /// Whether this launch contract supports per-header secret substitution
+    /// scopes (`SecretSubstitution.header_fields`).
+    ///
+    /// The allowlist was added to the machine-protocol launch input, and only
+    /// the exact current build selects that protocol: `from_version` rejects
+    /// every other runtime (including 0.7.0/0.7.1) before encoding, so no
+    /// released 0.7.x contract reaches here without support. If a future
+    /// compatibility range ever admits an older machine-protocol runtime, this
+    /// capability must key off the runtime version instead of `machine`.
+    pub fn header_fields(self) -> bool {
+        self.machine
+    }
+
     fn from_version(version: &Version) -> MicrosandboxResult<Self> {
         if version.major == 0 && version.minor == 6 && version.patch <= 18 && version.pre.is_empty()
         {

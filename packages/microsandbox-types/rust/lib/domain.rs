@@ -2378,6 +2378,25 @@ pub struct SecretSubstitution {
     #[serde(default = "default_true")]
     pub headers: bool,
 
+    /// Restrict header substitution to these header field names.
+    ///
+    /// Only meaningful when [`headers`](Self::headers) is true. An empty list
+    /// (the default) allows every header field. When non-empty, the
+    /// placeholder is substituted only in the named fields (matched ASCII
+    /// case-insensitively); a placeholder found in any other header field is
+    /// treated as an unchanged placeholder and is subject to the violation
+    /// action.
+    ///
+    /// Prefer an allowlist containing only the intended credential header
+    /// (typically `Authorization`). Substituting in every header lets an
+    /// untrusted guest place the placeholder in a header the upstream host
+    /// reflects back in its response (or otherwise exposes), which would let
+    /// the guest read the real secret out of that response.
+    ///
+    /// Names must be valid HTTP field names (RFC 9110 `token`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub header_fields: Vec<String>,
+
     /// Substitute in URL query parameters (default: false).
     #[serde(default)]
     pub query: bool,
@@ -2447,6 +2466,15 @@ pub enum SecretConfigError {
     MissingSubstitutionLocation {
         /// Index of the invalid secret entry.
         secret_index: usize,
+    },
+
+    /// A configured header field name is not a valid HTTP token.
+    #[error("secret #{secret_index}: invalid header field name {field:?}")]
+    InvalidHeaderFieldName {
+        /// Index of the invalid secret entry.
+        secret_index: usize,
+        /// The rejected header field name.
+        field: String,
     },
 
     /// The placeholder is empty.
@@ -2519,6 +2547,10 @@ impl SecretEntry {
             return Err(SecretConfigError::MissingSubstitutionLocation { secret_index });
         }
 
+        for field in &self.substitution.header_fields {
+            validate_header_field_name(field, secret_index)?;
+        }
+
         validate_placeholder(&self.placeholder, secret_index)
     }
 }
@@ -2580,6 +2612,7 @@ impl Default for SecretSubstitution {
     fn default() -> Self {
         Self {
             headers: true,
+            header_fields: Vec::new(),
             query: false,
             body: false,
         }
@@ -2588,6 +2621,39 @@ impl Default for SecretSubstitution {
 
 fn default_true() -> bool {
     true
+}
+
+/// Validate an HTTP header field name (RFC 9110 `token`).
+fn validate_header_field_name(field: &str, secret_index: usize) -> Result<(), SecretConfigError> {
+    if field.is_empty() || !field.bytes().all(is_http_tchar) {
+        return Err(SecretConfigError::InvalidHeaderFieldName {
+            secret_index,
+            field: field.to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// `tchar` from RFC 9110, the character set allowed in a header field name.
+fn is_http_tchar(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric()
+        || matches!(
+            byte,
+            b'!' | b'#'
+                | b'$'
+                | b'%'
+                | b'&'
+                | b'\''
+                | b'*'
+                | b'+'
+                | b'-'
+                | b'.'
+                | b'^'
+                | b'_'
+                | b'`'
+                | b'|'
+                | b'~'
+        )
 }
 
 fn validate_env_var(env_var: &str, secret_index: usize) -> Result<(), SecretConfigError> {
@@ -3232,6 +3298,61 @@ mod tests {
         );
         assert_eq!(DiskImageFormat::from_extension("ext4"), None);
         assert_eq!(DiskImageFormat::from_extension(""), None);
+    }
+
+    fn secret_with_header_fields(fields: Vec<&str>) -> SecretEntry {
+        SecretEntry {
+            env_var: "API_KEY".into(),
+            value: Zeroizing::new("secret".into()),
+            source: None,
+            placeholder: "$MSB_API_KEY".into(),
+            allowed_hosts: vec![HostPattern::Exact("api.example.com".into())],
+            substitution: SecretSubstitution {
+                headers: true,
+                header_fields: fields.into_iter().map(ToString::to_string).collect(),
+                query: false,
+                body: false,
+            },
+            passthrough_hosts: Vec::new(),
+            violation_action: None,
+            require_tls_identity: true,
+        }
+    }
+
+    #[test]
+    fn secret_substitution_header_fields_round_trip_and_default() {
+        let entry = secret_with_header_fields(vec!["Authorization", "X-Api-Key"]);
+        entry.validate(0).expect("valid header fields");
+        let json = serde_json::to_value(&entry).unwrap();
+        assert_eq!(
+            json["substitution"]["header_fields"],
+            serde_json::json!(["Authorization", "X-Api-Key"])
+        );
+
+        let omitted: SecretSubstitution =
+            serde_json::from_value(serde_json::json!({ "headers": true })).unwrap();
+        assert!(omitted.header_fields.is_empty());
+
+        // An empty allowlist means "all headers" and is omitted on the wire.
+        let default = SecretSubstitution::default();
+        assert!(
+            serde_json::to_value(&default)
+                .unwrap()
+                .get("header_fields")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn secret_validation_rejects_invalid_header_fields() {
+        for field in ["", "bad header", "bad:name", "bad\0name"] {
+            let entry = secret_with_header_fields(vec![field]);
+            let error = entry.validate(0).unwrap_err();
+            assert!(
+                matches!(error, SecretConfigError::InvalidHeaderFieldName { .. }),
+                "{field:?} should be rejected, got {error}"
+            );
+        }
     }
 
     #[test]

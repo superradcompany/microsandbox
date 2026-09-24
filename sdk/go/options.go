@@ -1447,8 +1447,14 @@ type SecretEntry struct {
 // SecretSubstitution selects request locations where substitution is enabled.
 type SecretSubstitution struct {
 	Headers *bool
-	Query   bool
-	Body    bool
+	// HeaderFields restricts header substitution to these field names when
+	// non-empty (for example, []string{"authorization"}). Prefer this over
+	// substituting in every header: an untrusted guest can otherwise place the
+	// placeholder in a header the upstream host reflects back and read the
+	// real secret. An empty slice allows every header field.
+	HeaderFields []string
+	Query        bool
+	Body         bool
 }
 
 // SecretEnvOptions tunes Secret.Env beyond the required envVar and value.

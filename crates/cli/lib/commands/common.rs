@@ -643,6 +643,8 @@ pub(crate) struct ParsedSecret {
     pub(crate) allowed_hosts: Vec<String>,
     pub(crate) passthrough_hosts: Vec<String>,
     pub(crate) substitute_headers: bool,
+    /// When non-empty, restrict header substitution to these field names.
+    pub(crate) substitute_header_fields: Vec<String>,
     pub(crate) substitute_query: bool,
     pub(crate) substitute_body: bool,
 }
@@ -2496,6 +2498,14 @@ fn apply_network_opts(
                 extend_unique(&mut existing.allowed_hosts, parsed.allowed_hosts);
                 extend_unique(&mut existing.passthrough_hosts, parsed.passthrough_hosts);
                 existing.substitute_headers &= parsed.substitute_headers;
+                if existing.substitute_headers {
+                    existing.substitute_header_fields = intersect_header_fields(
+                        &existing.substitute_header_fields,
+                        &parsed.substitute_header_fields,
+                    );
+                } else {
+                    existing.substitute_header_fields.clear();
+                }
                 existing.substitute_query |= parsed.substitute_query;
                 existing.substitute_body |= parsed.substitute_body;
             }
@@ -2514,6 +2524,9 @@ fn apply_network_opts(
                 .substitute_in_headers(secret.substitute_headers)
                 .substitute_in_query(secret.substitute_query)
                 .substitute_in_body(secret.substitute_body);
+            if !secret.substitute_header_fields.is_empty() {
+                s = s.substitute_in_header_fields(secret.substitute_header_fields.clone());
+            }
             for host in secret.allowed_hosts {
                 s = allow_secret_host(s, &host);
             }
@@ -2891,6 +2904,7 @@ pub(crate) fn parse_secret(spec: &str, command: &str) -> anyhow::Result<ParsedSe
         allowed_hosts,
         passthrough_hosts: Vec::new(),
         substitute_headers: true,
+        substitute_header_fields: Vec::new(),
         substitute_query: false,
         substitute_body: false,
     };
@@ -2900,6 +2914,45 @@ pub(crate) fn parse_secret(spec: &str, command: &str) -> anyhow::Result<ParsedSe
                 "no-headers" => parsed.substitute_headers = false,
                 "query" => parsed.substitute_query = true,
                 "body" => parsed.substitute_body = true,
+                value if value.starts_with("headers=") => {
+                    let raw = value.trim_start_matches("headers=");
+                    let fields = raw
+                        .strip_prefix('[')
+                        .and_then(|value| value.strip_suffix(']'))
+                        .unwrap_or(raw);
+                    let mut parsed_fields: Vec<String> = Vec::new();
+                    let mut all_headers = false;
+                    for field in fields
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|field| !field.is_empty())
+                    {
+                        if field == "*" {
+                            // `headers=*` restores the default of all headers.
+                            all_headers = true;
+                            break;
+                        }
+                        if !parsed_fields
+                            .iter()
+                            .any(|existing| existing.eq_ignore_ascii_case(field))
+                        {
+                            parsed_fields.push(field.to_string());
+                        }
+                    }
+                    // An empty or effectively-empty list (`headers=`, `headers=[]`,
+                    // `headers=[,,]`) must not silently select the broadest scope.
+                    if !all_headers && parsed_fields.is_empty() {
+                        anyhow::bail!(
+                            "secret header scope requires at least one field name; use `headers=*` for all headers"
+                        );
+                    }
+                    parsed.substitute_headers = true;
+                    parsed.substitute_header_fields = if all_headers {
+                        Vec::new()
+                    } else {
+                        parsed_fields
+                    };
+                }
                 value if value.starts_with("passthrough=") => {
                     let hosts = value.trim_start_matches("passthrough=");
                     let hosts = hosts
@@ -2918,7 +2971,7 @@ pub(crate) fn parse_secret(spec: &str, command: &str) -> anyhow::Result<ParsedSe
                     extend_unique(&mut parsed.passthrough_hosts, parsed_hosts);
                 }
                 other => anyhow::bail!(
-                    "invalid secret option: {other} (expected: no-headers, query, body, passthrough=HOST, or passthrough=[HOST,...])"
+                    "invalid secret option: {other} (expected: no-headers, headers=[FIELD,...], query, body, passthrough=HOST, or passthrough=[HOST,...])"
                 ),
             }
         }
@@ -2954,6 +3007,20 @@ fn split_secret_options(options: &str) -> anyhow::Result<Vec<String>> {
         anyhow::bail!("secret options must not be empty");
     }
     Ok(result)
+}
+
+/// Intersect two header-field allowlists, where an empty list means "all".
+pub(crate) fn intersect_header_fields(left: &[String], right: &[String]) -> Vec<String> {
+    if left.is_empty() {
+        return right.to_vec();
+    }
+    if right.is_empty() {
+        return left.to_vec();
+    }
+    left.iter()
+        .filter(|field| right.iter().any(|other| other.eq_ignore_ascii_case(field)))
+        .cloned()
+        .collect()
 }
 
 fn extend_unique(target: &mut Vec<String>, values: impl IntoIterator<Item = String>) {
@@ -3540,6 +3607,40 @@ mod tests {
             vec!["api.anthropic.com", "example.com", "*.example.org"]
         );
         assert_eq!(secret.allowed_hosts, vec!["github.com", "api.github.com"]);
+    }
+
+    #[test]
+    fn parse_secret_supports_header_field_allowlist() {
+        let secret = parse_secret(
+            "API_KEY:headers=[authorization,x-api-key]@api.example.com",
+            "create",
+        )
+        .unwrap();
+        assert!(secret.substitute_headers);
+        assert_eq!(
+            secret.substitute_header_fields,
+            vec!["authorization", "x-api-key"]
+        );
+
+        // A single field does not require brackets.
+        let single =
+            parse_secret("API_KEY:headers=authorization@api.example.com", "create").unwrap();
+        assert_eq!(single.substitute_header_fields, vec!["authorization"]);
+
+        // `*` restores the default of every header.
+        let all = parse_secret("API_KEY:headers=*@api.example.com", "create").unwrap();
+        assert!(all.substitute_header_fields.is_empty());
+
+        // An empty or effectively empty list must not silently allow every header.
+        for spec in [
+            "API_KEY:headers=@api.example.com",
+            "API_KEY:headers=[]@api.example.com",
+            "API_KEY:headers=[,,]@api.example.com",
+            "API_KEY:headers=[ , ]@api.example.com",
+        ] {
+            let err = parse_secret(spec, "create").unwrap_err().to_string();
+            assert!(err.contains("at least one field name"), "{spec}: {err}");
+        }
     }
 
     #[test]

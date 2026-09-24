@@ -636,6 +636,26 @@ impl SecretBuilder {
         self
     }
 
+    /// Restrict header substitution to specific header field names.
+    ///
+    /// Enables header substitution and substitutes the placeholder only in the
+    /// named fields (matched ASCII case-insensitively). Passing an empty list
+    /// restores the default of substituting in every header field. Names must
+    /// be valid HTTP field names.
+    ///
+    /// Prefer restricting to the intended credential header (for example
+    /// `authorization`). Substituting in every header lets an untrusted guest
+    /// put the placeholder in a header the upstream host echoes back, which
+    /// can leak the real secret to the guest through that response.
+    pub fn substitute_in_header_fields(
+        mut self,
+        fields: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.substitution.headers = true;
+        self.substitution.header_fields = fields.into_iter().map(Into::into).collect();
+        self
+    }
+
     /// Configure query parameter substitution (default: false).
     pub fn substitute_in_query(mut self, enabled: bool) -> Self {
         self.substitution.query = enabled;

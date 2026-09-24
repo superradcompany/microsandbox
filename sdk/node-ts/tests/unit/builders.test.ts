@@ -738,6 +738,7 @@ describe("NetworkBuilder secret passthrough", () => {
       .allow("api.github.com")
       .allowPassthroughFor("api.anthropic.com")
       .allowPassthroughFor("*.anthropic.com")
+      .substituteInHeaderFields(["authorization"])
       .substituteInBody(true)
       .violationAction("block-and-log")
       .build();
@@ -747,6 +748,7 @@ describe("NetworkBuilder secret passthrough", () => {
       "api.anthropic.com",
       "*.anthropic.com",
     ]);
+    expect(secret.substitution.headerFields).toEqual(["authorization"]);
     expect(secret.substitution.body).toBe(true);
   });
 });

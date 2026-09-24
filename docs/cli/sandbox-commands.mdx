@@ -486,7 +486,7 @@ Resize can take time. The output and JSON `resize_status` report `applied`, `con
 
 Env and workdir changes on a running sandbox apply to future execs only; running processes keep their current environment. The plan reports this as a warning.
 
-`--secret` reads the same-named host environment variable; inline values are rejected. Options are `query`, `body`, `no-headers`, and `passthrough=HOST` or `passthrough=[HOST,...]`. Repeated declarations merge. See [secret updates](/sandboxes/secrets#update-secrets).
+`--secret` reads the same-named host environment variable; inline values are rejected. Options are `query`, `body`, `no-headers`, `headers=[FIELD,...]` (substitute only in those header fields; `headers=*` restores all headers), and `passthrough=HOST` or `passthrough=[HOST,...]`. Restrict `headers` to the credential header the API reads, since substituting in every header lets a reflecting endpoint return the secret to the guest. Repeated declarations merge. See [secret updates](/sandboxes/secrets#update-secrets).
 
 | Flag | Description |
 |------|-------------|

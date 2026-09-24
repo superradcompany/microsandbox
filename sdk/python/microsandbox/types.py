@@ -1158,9 +1158,16 @@ class Patch:
 
 @dataclass(frozen=True, slots=True)
 class SecretSubstitution:
-    """Where in the HTTP request the secret value can be substituted."""
+    """Where in the HTTP request the secret value can be substituted.
+
+    Set ``header_fields`` to restrict header substitution to specific fields
+    (for example ``("authorization",)``). Prefer that over substituting in
+    every header: an untrusted guest can otherwise place the placeholder in a
+    header the upstream host reflects back and read the real secret.
+    """
 
     headers: bool = True
+    header_fields: tuple[str, ...] = ()
     query: bool = False
     body: bool = False
 
@@ -1168,6 +1175,8 @@ class SecretSubstitution:
         d: dict = {}
         if not self.headers:
             d["headers"] = False
+        if self.header_fields:
+            d["header_fields"] = list(self.header_fields)
         if self.query:
             d["query"] = True
         if self.body:

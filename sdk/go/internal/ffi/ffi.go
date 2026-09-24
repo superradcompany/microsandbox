@@ -1944,9 +1944,10 @@ type SecretOptions struct {
 
 // SecretSubstitutionOptions selects request locations for substitution.
 type SecretSubstitutionOptions struct {
-	Headers *bool `json:"headers,omitempty"`
-	Query   bool  `json:"query,omitempty"`
-	Body    bool  `json:"body,omitempty"`
+	Headers      *bool    `json:"headers,omitempty"`
+	HeaderFields []string `json:"header_fields,omitempty"`
+	Query        bool     `json:"query,omitempty"`
+	Body         bool     `json:"body,omitempty"`
 }
 
 // PatchOptions is the JSON representation of a single rootfs patch.

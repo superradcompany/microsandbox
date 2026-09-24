@@ -38,6 +38,25 @@ const RESERVED: &[&str] = &[
 //--------------------------------------------------------------------------------------------------
 
 pub(super) fn encode(launch: &LaunchConfig, contract: LaunchContract) -> MicrosandboxResult<Value> {
+    // Check capabilities before the machine fast path so the gate is applied
+    // uniformly. `header_fields` is true only for the current build, which is
+    // the only contract that can carry the field; every historical contract
+    // drops it and would substitute in every header.
+    #[cfg(feature = "net")]
+    if !contract.header_fields()
+        && launch.network.as_ref().is_some_and(|network| {
+            network
+                .config()
+                .secrets
+                .secrets
+                .iter()
+                .any(|secret| !secret.substitution.header_fields.is_empty())
+        })
+    {
+        // Historical contracts drop the nested allowlist and would substitute
+        // in every header, silently losing the requested confidentiality scope.
+        return unsupported("per-header secret substitution scope");
+    }
     if contract.machine {
         return Ok(serde_json::to_value(launch)?);
     }
@@ -513,6 +532,76 @@ mod tests {
                     assert!(network.get("max_udp_connections").is_none());
                 }
             }
+        }
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn header_fields_require_current_launch_contract() {
+        let network: microsandbox_network::ResolvedNetworkConfig = serde_json::from_value(json!({
+            "config": {
+                "secrets": {
+                    "secrets": [{
+                        "env_var": "TOKEN",
+                        "value": "secret",
+                        "placeholder": "$KEY",
+                        "allowed_hosts": [{"exact": "api.example.com"}],
+                        "substitution": {"headers": true, "header_fields": ["authorization"]},
+                    }],
+                },
+            },
+            "outbound_proxy": null,
+        }))
+        .unwrap();
+        let launch = LaunchConfig {
+            network: Some(network),
+            ..Default::default()
+        };
+
+        // The current contract carries the allowlist as-is.
+        assert!(
+            LaunchContract {
+                patch: 18,
+                machine: true,
+            }
+            .header_fields()
+        );
+        let current = encode(
+            &launch,
+            LaunchContract {
+                patch: 18,
+                machine: true,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            current["network"]["config"]["secrets"]["secrets"][0]["substitution"]["header_fields"],
+            json!(["authorization"])
+        );
+
+        // Historical runtimes lack the nested allowlist and would fall back to
+        // substituting in every header; refuse instead of broadening the scope.
+        for patch in 0..=18 {
+            assert!(
+                !LaunchContract {
+                    patch,
+                    machine: false,
+                }
+                .header_fields()
+            );
+            let err = encode(
+                &launch,
+                LaunchContract {
+                    patch,
+                    machine: false,
+                },
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(
+                err.contains("per-header secret substitution scope"),
+                "{err}"
+            );
         }
     }
 

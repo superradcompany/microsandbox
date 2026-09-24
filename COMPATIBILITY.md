@@ -350,6 +350,8 @@ Sources: [`crates/network/lib/lib.rs`](crates/network/lib/lib.rs), [`crates/netw
 
 Address or MAC changes can create collisions or silently alter policy identity. Protocol changes should be tested with real TCP, UDP, DNS, TLS, HTTP CONNECT, published-port, and secret-substitution clients, including fragmentation, half-close, cancellation, and denied-destination cases.
 
+A secret's `substitution.header_fields` allowlist is launch-contract gated: a secret with a non-empty allowlist is refused when the selected runtime predates it, because a runtime that drops the field would substitute the placeholder in every header. Other runtime versions outside the tested range (anything but the v0.6.x contracts or the exact current build) are already rejected during launch-contract resolution, before encoding. See [`sdk/rust/lib/runtime/launch_input.rs`](sdk/rust/lib/runtime/launch_input.rs) and [`launch_contract.rs`](sdk/rust/lib/runtime/launch_contract.rs).
+
 ## 14. Vsock and SSH Protocol Adapters
 
 Vsock stream and datagram routes have different message-boundary and shutdown semantics, with platform-specific Unix socket and Windows named-pipe backends. SSH maps exec channels to agent exec, SFTP to agent filesystem messages, and direct TCP forwarding to agent TCP messages. These mappings inherit agent protocol generation requirements.

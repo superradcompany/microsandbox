@@ -1008,6 +1008,8 @@ struct SecretOpts {
 struct SecretSubstitutionOpts {
     headers: Option<bool>,
     #[serde(default)]
+    header_fields: Vec<String>,
+    #[serde(default)]
     query: bool,
     #[serde(default)]
     body: bool,
@@ -1895,6 +1897,9 @@ fn apply_secret(
         }
         if let Some(headers) = s.substitution.headers {
             sb = sb.substitute_in_headers(headers);
+        }
+        if !s.substitution.header_fields.is_empty() {
+            sb = sb.substitute_in_header_fields(s.substitution.header_fields.clone());
         }
         sb = sb
             .substitute_in_query(s.substitution.query)

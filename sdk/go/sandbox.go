@@ -252,9 +252,10 @@ func buildFFICreateOptions(o SandboxConfig) ffi.CreateOptions {
 			Placeholder:        s.Placeholder,
 			RequireTLSIdentity: s.RequireTLSIdentity,
 			Substitution: ffi.SecretSubstitutionOptions{
-				Headers: s.Substitution.Headers,
-				Query:   s.Substitution.Query,
-				Body:    s.Substitution.Body,
+				Headers:      s.Substitution.Headers,
+				HeaderFields: s.Substitution.HeaderFields,
+				Query:        s.Substitution.Query,
+				Body:         s.Substitution.Body,
 			},
 			ViolationAction: string(s.ViolationAction),
 		})

@@ -37,6 +37,9 @@ const HTTP2_PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
 /// Header name retained across opaque writes for Basic-auth violation scans.
 const AUTHORIZATION_HEADER_NAME: &[u8] = b"authorization:";
 
+/// Authorization header field name without the trailing colon.
+const AUTHORIZATION_FIELD_NAME: &[u8] = b"authorization";
+
 /// Maximum HTTP/2 frame payload the handler buffers at once.
 /// This is the largest value representable in the protocol's 24-bit
 /// frame-length field.
@@ -258,6 +261,8 @@ struct EligibleSecret {
     /// linger in freed memory.
     value: zeroize::Zeroizing<String>,
     substitute_headers: bool,
+    /// When non-empty, restrict header substitution to these field names.
+    header_fields: Vec<String>,
     substitute_query: bool,
     substitute_body: bool,
     require_tls_identity: bool,
@@ -342,6 +347,12 @@ impl EligibleSecret {
         self.substitute_headers || self.substitute_query
     }
 
+    /// Returns true when this secret may be substituted in a header with the
+    /// given field name.
+    fn header_field_allowed(&self, name: &[u8]) -> bool {
+        header_field_allowed(self.substitute_headers, &self.header_fields, name)
+    }
+
     /// Returns true when the current header bytes contain this secret's
     /// placeholder in a header-substitution scope.
     fn may_substitute_in_headers(&self, headers: &[u8]) -> bool {
@@ -392,16 +403,16 @@ impl EligibleSecret {
                 .flatten();
         }
 
-        if self.substitute_headers
-            && is_authorization_header(line)
+        if !self.header_field_allowed(header_field_name(line.as_bytes())) {
+            return None;
+        }
+
+        if is_authorization_header(line)
             && let Some(replaced) = self.substitute_basic_auth_header(line)
         {
             return Some(replaced);
         }
-        if self.substitute_headers {
-            return Some(line.replace(&self.placeholder, &self.value));
-        }
-        None
+        Some(line.replace(&self.placeholder, &self.value))
     }
 
     /// Decode `Basic <base64>` credentials, substitute the placeholder in the
@@ -424,11 +435,25 @@ impl EligibleSecret {
 }
 
 impl IneligibleSecret {
+    /// Returns true when this secret may be substituted in a header with the
+    /// given field name.
+    fn header_field_allowed(&self, name: &[u8]) -> bool {
+        header_field_allowed(
+            self.substitution.headers,
+            &self.substitution.header_fields,
+            name,
+        )
+    }
+
     /// Returns whether a match in this request location is substituted and
     /// therefore must not be treated as an unchanged-placeholder violation.
     fn substitution_allows(&self, location: RequestLocation) -> bool {
         match location {
-            RequestLocation::Header | RequestLocation::BasicAuth => self.substitution.headers,
+            // A restricted header-field allowlist is enforced per line by the
+            // detectors, so reaching them means the field was not allowed.
+            RequestLocation::Header | RequestLocation::BasicAuth => {
+                self.substitution.headers && self.substitution.header_fields.is_empty()
+            }
             RequestLocation::Query => self.substitution.query,
             RequestLocation::Body => self.substitution.body,
             // Chunk framing metadata and trailers are not substitution targets.
@@ -676,6 +701,7 @@ impl SecretsHandler {
                     placeholder: secret.placeholder.clone(),
                     value: secret.value.clone(),
                     substitute_headers: secret.substitution.headers,
+                    header_fields: secret.substitution.header_fields.clone(),
                     substitute_query: secret.substitution.query,
                     substitute_body: secret.substitution.body,
                     require_tls_identity: secret.require_tls_identity,
@@ -696,6 +722,7 @@ impl SecretsHandler {
             } else {
                 SecretSubstitution {
                     headers: false,
+                    header_fields: Vec::new(),
                     query: false,
                     body: false,
                 }
@@ -721,7 +748,11 @@ impl SecretsHandler {
                 if ineligible.placeholder == eligible.placeholder
                     && (!eligible.require_tls_identity || tls_intercepted)
                 {
-                    ineligible.substitution.headers |= eligible.substitute_headers;
+                    merge_eligible_header_scope(
+                        &mut ineligible.substitution,
+                        eligible.substitute_headers,
+                        &eligible.header_fields,
+                    );
                     ineligible.substitution.query |= eligible.substitute_query;
                     ineligible.substitution.body |= eligible.substitute_body;
                 }
@@ -1460,6 +1491,7 @@ impl SecretsHandler {
 
             for (name, value) in headers.iter_mut() {
                 let is_pseudo = name.starts_with(b":");
+                let header_allowed = !is_pseudo && secret.header_field_allowed(name);
 
                 if name.eq_ignore_ascii_case(b":path")
                     && secret.substitute_query
@@ -1470,9 +1502,8 @@ impl SecretsHandler {
                     *value = replaced.into_bytes();
                 }
 
-                if !is_pseudo
+                if header_allowed
                     && name.eq_ignore_ascii_case(b"authorization")
-                    && secret.substitute_headers
                     && let Ok(header_value) = std::str::from_utf8(value)
                     && let Some(replaced) = substitute_basic_auth_value(
                         header_value,
@@ -1483,10 +1514,7 @@ impl SecretsHandler {
                     *value = replaced.into_bytes();
                 }
 
-                if !is_pseudo
-                    && secret.substitute_headers
-                    && contains_bytes(value, secret.placeholder.as_bytes())
-                {
+                if header_allowed && contains_bytes(value, secret.placeholder.as_bytes()) {
                     let replaced =
                         String::from_utf8_lossy(value).replace(&secret.placeholder, &secret.value);
                     *value = replaced.into_bytes();
@@ -2074,6 +2102,68 @@ impl Http2State {
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
+
+/// Returns true when `name` is an allowed header field name.
+///
+/// `headers_enabled` gates all header substitution; an empty `header_fields`
+/// allowlist means every field name is allowed.
+fn header_field_allowed(headers_enabled: bool, header_fields: &[String], name: &[u8]) -> bool {
+    headers_enabled
+        && (header_fields.is_empty()
+            || header_fields
+                .iter()
+                .any(|field| name.eq_ignore_ascii_case(field.as_bytes())))
+}
+
+/// Returns the field-name portion of a header line.
+fn header_field_name(line: &[u8]) -> &[u8] {
+    match line.iter().position(|byte| *byte == b':') {
+        Some(end) => &line[..end],
+        None => line,
+    }
+}
+
+/// Extract the query portion of an HTTP/2 `:path` header line, if present.
+fn http2_path_query(header_lines: &[u8]) -> Option<&[u8]> {
+    let path = header_lines
+        .split(|byte| *byte == b'\n')
+        .map(|line| line.strip_suffix(b"\r").unwrap_or(line))
+        .find(|line| line.starts_with(b":path:"))?;
+    let value = path.get(b":path:".len()..)?;
+    let query_start = value.iter().position(|byte| *byte == b'?')?;
+    Some(&value[query_start + 1..])
+}
+
+/// Merge an eligible duplicate declaration's header scope into an ineligible
+/// one. The result is the union of allowed fields; an empty allowlist means
+/// "all fields".
+fn merge_eligible_header_scope(
+    target: &mut SecretSubstitution,
+    eligible_allows_headers: bool,
+    eligible_header_fields: &[String],
+) {
+    if !eligible_allows_headers {
+        return;
+    }
+    if !target.headers {
+        target.headers = true;
+        target.header_fields = eligible_header_fields.to_vec();
+        return;
+    }
+    if target.header_fields.is_empty() || eligible_header_fields.is_empty() {
+        target.header_fields.clear();
+        return;
+    }
+    for field in eligible_header_fields {
+        if !target
+            .header_fields
+            .iter()
+            .any(|existing| existing.eq_ignore_ascii_case(field))
+        {
+            target.header_fields.push(field.clone());
+        }
+    }
+}
 
 /// Returns true if `line` starts with the `Authorization:` header name
 /// (case-insensitive).
@@ -3131,6 +3221,27 @@ fn detect_blocking_action_with_tail(
     detected
 }
 
+/// Returns true when raw `needle` occurs in a header line whose field name the
+/// secret does not allow.
+fn contains_disallowed_header_placeholder(
+    secret: &IneligibleSecret,
+    header_lines: &[u8],
+    needle: &[u8],
+) -> bool {
+    if secret.substitution.headers && secret.substitution.header_fields.is_empty() {
+        return false;
+    }
+    header_lines
+        .split(|byte| *byte == b'\n')
+        .map(|line| line.strip_suffix(b"\r").unwrap_or(line))
+        .filter(|line| !line.is_empty())
+        .any(|line| {
+            !line.starts_with(b":path:")
+                && contains_bytes(line, needle)
+                && !secret.header_field_allowed(header_field_name(line))
+        })
+}
+
 /// Find a raw placeholder in each HTTP location independently so an allowed
 /// header occurrence cannot mask a disallowed occurrence in the body.
 fn detect_disallowed_raw_match(
@@ -3141,7 +3252,7 @@ fn detect_disallowed_raw_match(
     basic_auth_credentials: &[String],
 ) -> Option<(RequestLocation, PlaceholderMatchForm)> {
     let needle = secret.placeholder.as_bytes();
-    if !secret.substitution.headers
+    if !secret.header_field_allowed(AUTHORIZATION_FIELD_NAME)
         && basic_auth_credentials
             .iter()
             .any(|decoded| decoded.contains(&secret.placeholder))
@@ -3180,7 +3291,28 @@ fn detect_disallowed_raw_match(
     }
 
     let metadata_start = request_line_end.saturating_add(2).min(header_bytes.len());
-    if !secret.substitution.headers && contains_bytes(&header_bytes[metadata_start..], needle) {
+    // HTTP/2 encodes the request target as a `:path` header; check its query
+    // separately so an enabled query scope is not mistaken for a header field.
+    if !secret.substitution.query
+        && let Some(query) = http2_path_query(&header_bytes[metadata_start..])
+    {
+        if contains_bytes(query, needle) {
+            return Some((RequestLocation::Query, PlaceholderMatchForm::Raw));
+        }
+        // An encoded placeholder in the query must be blocked too, or
+        // `:path: /?token=%24KEY` would bypass the disabled query scope.
+        if query.contains(&b'%')
+            && contains_bytes(&percent_decode(query).collect::<Vec<u8>>(), needle)
+        {
+            return Some((RequestLocation::Query, PlaceholderMatchForm::PercentDecoded));
+        }
+        if query.windows(2).any(|window| window == b"\\u")
+            && contains_bytes(&json_unescape(query), needle)
+        {
+            return Some((RequestLocation::Query, PlaceholderMatchForm::JsonUnescaped));
+        }
+    }
+    if contains_disallowed_header_placeholder(secret, &header_bytes[metadata_start..], needle) {
         return Some((RequestLocation::Header, PlaceholderMatchForm::Raw));
     }
 
@@ -3201,9 +3333,10 @@ fn detect_secret_match(
     location_hint: RequestLocation,
 ) -> Option<(RequestLocation, PlaceholderMatchForm)> {
     let needle = secret.placeholder.as_bytes();
-    if basic_auth_credentials
-        .iter()
-        .any(|decoded| decoded.contains(&secret.placeholder))
+    if (headers.is_empty() || !secret.header_field_allowed(AUTHORIZATION_FIELD_NAME))
+        && basic_auth_credentials
+            .iter()
+            .any(|decoded| decoded.contains(&secret.placeholder))
     {
         return Some((
             if is_scoped_fragment_location(location_hint) {
@@ -3219,19 +3352,17 @@ fn detect_secret_match(
     // for encoded forms whose bytes may span adjacent reads.
     if let Some(decoded) = url_decoded
         && contains_bytes(decoded, needle)
+        && let Some(location) =
+            classify_decoded_match_for_secret(secret, headers, &secret.placeholder, location_hint)
     {
-        return Some((
-            classify_decoded_match_location(headers, &secret.placeholder, location_hint),
-            PlaceholderMatchForm::PercentDecoded,
-        ));
+        return Some((location, PlaceholderMatchForm::PercentDecoded));
     }
     if let Some(decoded) = json_decoded
         && contains_bytes(decoded, needle)
+        && let Some(location) =
+            classify_decoded_match_for_secret(secret, headers, &secret.placeholder, location_hint)
     {
-        return Some((
-            classify_decoded_match_location(headers, &secret.placeholder, location_hint),
-            PlaceholderMatchForm::JsonUnescaped,
-        ));
+        return Some((location, PlaceholderMatchForm::JsonUnescaped));
     }
     None
 }
@@ -3304,6 +3435,82 @@ fn classify_header_match_location(headers: &str, placeholder: &str) -> RequestLo
         return RequestLocation::Query;
     }
     RequestLocation::Header
+}
+
+/// Classify a decoded placeholder match, honoring the secret's header-field
+/// allowlist. Returns `None` when the match is in a location the secret is
+/// allowed to substitute.
+fn classify_decoded_match_for_secret(
+    secret: &IneligibleSecret,
+    headers: &str,
+    placeholder: &str,
+    location_hint: RequestLocation,
+) -> Option<RequestLocation> {
+    if is_scoped_fragment_location(location_hint) {
+        return (!secret.substitution_allows(location_hint)).then_some(location_hint);
+    }
+    if headers.is_empty() {
+        return (location_hint != RequestLocation::Unknown
+            && !secret.substitution_allows(location_hint))
+        .then_some(location_hint);
+    }
+
+    // Encoded matches inside header lines are scoped per field when the legacy
+    // whole-header classification below could not distinguish them.
+    if !secret.substitution.headers || !secret.substitution.header_fields.is_empty() {
+        for line in headers.split("\r\n").skip(1) {
+            if line.is_empty() || line.starts_with(":path:") {
+                continue;
+            }
+            if secret.header_field_allowed(header_field_name(line.as_bytes())) {
+                continue;
+            }
+            if decoded_header_value_contains(line, placeholder) {
+                return Some(RequestLocation::Header);
+            }
+        }
+    }
+
+    let location = classify_decoded_match_location(headers, placeholder, location_hint);
+    if location == RequestLocation::Header {
+        // The legacy classifier falls back to Header when the bytes carry no
+        // parseable HTTP request line (for example a body continuation) or
+        // when the match is in the request-target path. A non-request fragment
+        // is not a header block, so keep it as an unrecognized violation.
+        if !headers.starts_with(':')
+            && split_http_request_line(headers.split("\r\n").next().unwrap_or("")).is_none()
+        {
+            return Some(RequestLocation::Unknown);
+        }
+        return None;
+    }
+    (!secret.substitution_allows(location)).then_some(location)
+}
+
+/// True when a header line's value contains `placeholder` in raw,
+/// percent-decoded, or JSON-unescaped form.
+fn decoded_header_value_contains(line: &str, placeholder: &str) -> bool {
+    let Some((_, value)) = line.split_once(':') else {
+        return false;
+    };
+    if value.contains(placeholder) {
+        return true;
+    }
+    let value = value.as_bytes();
+    if value.contains(&b'%')
+        && contains_bytes(
+            &percent_decode(value).collect::<Vec<u8>>(),
+            placeholder.as_bytes(),
+        )
+    {
+        return true;
+    }
+    if value.windows(2).any(|window| window == b"\\u")
+        && contains_bytes(&json_unescape(value), placeholder.as_bytes())
+    {
+        return true;
+    }
+    false
 }
 
 fn update_tail_buffer(tail: &mut Vec<u8>, data: &[u8], tail_size: usize) {
@@ -3525,6 +3732,7 @@ mod tests {
     fn basic_auth_only() -> SecretSubstitution {
         SecretSubstitution {
             headers: true,
+            header_fields: Vec::new(),
             query: false,
             body: false,
         }
@@ -3783,6 +3991,7 @@ mod tests {
             placeholder: "$KEY".into(),
             substitution: SecretSubstitution {
                 headers: false,
+                header_fields: Vec::new(),
                 query: false,
                 body: false,
             },
@@ -3824,6 +4033,7 @@ mod tests {
             placeholder: "abc/key".into(),
             substitution: SecretSubstitution {
                 headers: false,
+                header_fields: Vec::new(),
                 query: false,
                 body: false,
             },
@@ -3864,6 +4074,156 @@ mod tests {
         assert_eq!(
             String::from_utf8(output.into_owned()).unwrap(),
             "GET / HTTP/1.1\r\nAuthorization: Bearer real-secret\r\n\r\n"
+        );
+    }
+
+    #[test]
+    fn header_field_allowlist_scopes_substitution() {
+        let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
+        secret.substitution.header_fields = vec!["authorization".into()];
+        let config = make_config(vec![secret]);
+        let mut handler = SecretsHandler::new(&config, "api.openai.com", true);
+
+        let input = b"GET / HTTP/1.1\r\nAuthorization: Bearer $KEY\r\nX-Trace: redacted\r\n\r\n";
+        let output = handler.substitute(input).unwrap();
+        assert_eq!(
+            String::from_utf8(output.into_owned()).unwrap(),
+            "GET / HTTP/1.1\r\nAuthorization: Bearer real-secret\r\nX-Trace: redacted\r\n\r\n"
+        );
+    }
+
+    #[test]
+    fn header_field_allowlist_blocks_placeholder_in_other_headers() {
+        let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
+        secret.substitution.header_fields = vec!["authorization".into()];
+        let config = make_config(vec![secret]);
+        let mut handler = SecretsHandler::new(&config, "api.openai.com", true);
+
+        let input = b"GET / HTTP/1.1\r\nX-Other: $KEY\r\nAuthorization: Bearer redacted\r\n\r\n";
+        assert_eq!(
+            handler.substitute(input).unwrap_err(),
+            SecretViolationAction::Block
+        );
+    }
+
+    #[test]
+    fn empty_header_field_allowlist_substitutes_every_header() {
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "api.openai.com")]);
+        let mut handler = SecretsHandler::new(&config, "api.openai.com", true);
+
+        let input = b"GET / HTTP/1.1\r\nX-Custom: $KEY\r\n\r\n";
+        let output = handler.substitute(input).unwrap();
+        assert_eq!(
+            String::from_utf8(output.into_owned()).unwrap(),
+            "GET / HTTP/1.1\r\nX-Custom: real-secret\r\n\r\n"
+        );
+    }
+
+    #[test]
+    fn header_field_allowlist_scopes_basic_auth() {
+        let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
+        secret.substitution.header_fields = vec!["authorization".into()];
+        let config = make_config(vec![secret]);
+        let mut handler = SecretsHandler::new(&config, "api.openai.com", true);
+
+        let encoded = BASE64.encode(b"user:$KEY");
+        let input = format!("GET / HTTP/1.1\r\nAuthorization: Basic {encoded}\r\n\r\n");
+        let output = handler.substitute(input.as_bytes()).unwrap();
+        let auth = String::from_utf8(output.into_owned())
+            .unwrap()
+            .split("Authorization: Basic ")
+            .nth(1)
+            .unwrap()
+            .trim()
+            .to_string();
+        assert_eq!(BASE64.decode(auth).unwrap(), b"user:real-secret");
+    }
+
+    #[test]
+    fn header_field_allowlist_blocks_basic_auth_when_authorization_excluded() {
+        let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
+        secret.substitution.header_fields = vec!["x-api-key".into()];
+        let config = make_config(vec![secret]);
+        let mut handler = SecretsHandler::new(&config, "api.openai.com", true);
+
+        let encoded = BASE64.encode(b"user:$KEY");
+        let input = format!("GET / HTTP/1.1\r\nAuthorization: Basic {encoded}\r\n\r\n");
+        assert_eq!(
+            handler.substitute(input.as_bytes()).unwrap_err(),
+            SecretViolationAction::Block
+        );
+    }
+
+    #[test]
+    fn header_field_allowlist_scopes_http2_substitution() {
+        let ip = Ipv4Addr::new(203, 0, 113, 60);
+        let shared = SharedState::new(16);
+        cache_host(&shared, "api.openai.com", ip);
+        let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
+        secret.substitution.header_fields = vec!["authorization".into()];
+        let config = make_config(vec![secret]);
+
+        let allowed = h2_request(
+            &[
+                (b":method", b"GET"),
+                (b":scheme", b"https"),
+                (b":authority", b"api.openai.com"),
+                (b":path", b"/"),
+                (b"authorization", b"Bearer $KEY"),
+            ],
+            true,
+        );
+        let mut handler =
+            SecretsHandler::new_tls_intercepted(&config, "api.openai.com", IpAddr::V4(ip), &shared);
+        let output = handler.substitute(&allowed).unwrap().into_owned();
+        let headers = decode_first_h2_headers(&output);
+        assert_eq!(
+            h2_header_value(&headers, b"authorization"),
+            "Bearer real-secret"
+        );
+
+        let blocked = h2_request(
+            &[
+                (b":method", b"GET"),
+                (b":scheme", b"https"),
+                (b":authority", b"api.openai.com"),
+                (b":path", b"/"),
+                (b"x-trace", b"$KEY"),
+            ],
+            true,
+        );
+        let mut handler =
+            SecretsHandler::new_tls_intercepted(&config, "api.openai.com", IpAddr::V4(ip), &shared);
+        assert_eq!(
+            handler.substitute(&blocked).unwrap_err(),
+            SecretViolationAction::Block
+        );
+    }
+
+    #[test]
+    fn tls_intercepted_http2_encoded_query_is_blocked_when_query_scope_disabled() {
+        let ip = Ipv4Addr::new(203, 0, 113, 61);
+        let shared = SharedState::new(16);
+        cache_host(&shared, "api.openai.com", ip);
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "api.openai.com")]);
+        let mut handler =
+            SecretsHandler::new_tls_intercepted(&config, "api.openai.com", IpAddr::V4(ip), &shared);
+
+        // Default substitution enables headers but not the query. A
+        // percent-encoded placeholder in the `:path` query must still be
+        // blocked rather than forwarded.
+        let request = h2_request(
+            &[
+                (b":method", b"GET"),
+                (b":scheme", b"https"),
+                (b":authority", b"api.openai.com"),
+                (b":path", b"/?token=%24KEY"),
+            ],
+            true,
+        );
+        assert_eq!(
+            handler.substitute(&request).unwrap_err(),
+            SecretViolationAction::Block
         );
     }
 
@@ -4904,6 +5264,7 @@ mod tests {
         let mut secret = make_secret("$MSB_PASSWORD", "s3cr3t", "api.openai.com");
         secret.substitution = SecretSubstitution {
             headers: false,
+            header_fields: Vec::new(),
             query: false,
             body: false,
         };
@@ -4923,6 +5284,7 @@ mod tests {
         let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
         secret.substitution = SecretSubstitution {
             headers: false,
+            header_fields: Vec::new(),
             query: true,
             body: false,
         };
@@ -4942,6 +5304,7 @@ mod tests {
         let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
         secret.substitution = SecretSubstitution {
             headers: false,
+            header_fields: Vec::new(),
             query: true,
             body: false,
         };
@@ -5787,6 +6150,7 @@ mod tests {
         let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
         secret.substitution = SecretSubstitution {
             headers: true,
+            header_fields: Vec::new(),
             query: true,
             body: false,
         };
