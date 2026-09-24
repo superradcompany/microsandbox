@@ -8,6 +8,7 @@ import hashlib
 import json
 import subprocess
 import time
+import tomllib
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -62,6 +63,31 @@ def publication_closure(metadata: dict[str, object], roots: tuple[str, ...]) -> 
     if missing:
         raise SystemExit(f"unknown release root crates: {', '.join(missing)}")
 
+    workspace = tomllib.loads((Path(metadata["workspace_root"]) / "Cargo.toml").read_text())
+    workspace_dependencies = workspace.get("workspace", {}).get("dependencies", {})
+    edges = {}
+    for name, raw in raw_packages.items():
+        manifest = tomllib.loads(Path(raw["manifest_path"]).read_text())
+        versioned_dev = set()
+        for table in [manifest, *manifest.get("target", {}).values()]:
+            for alias, declaration in table.get("dev-dependencies", {}).items():
+                if isinstance(declaration, dict) and declaration.get("workspace"):
+                    declaration = workspace_dependencies[alias]
+                if isinstance(declaration, str) or "version" in declaration:
+                    versioned_dev.add(alias)
+        # Cargo retains versioned dev dependencies in published manifests and
+        # resolves them even with --no-verify. Only path-only dev helpers vanish.
+        edges[name] = frozenset(
+            dependency["name"]
+            for dependency in raw["dependencies"]
+            if dependency.get("path") is not None
+            and dependency["name"] in raw_packages
+            and (
+                dependency.get("kind") != "dev"
+                or (dependency.get("rename") or dependency["name"]) in versioned_dev
+            )
+        )
+
     selected: set[str] = set()
     pending = list(roots)
     while pending:
@@ -72,27 +98,12 @@ def publication_closure(metadata: dict[str, object], roots: tuple[str, ...]) -> 
         if raw.get("publish") == []:
             raise SystemExit(f"release crate {name} has publish = false")
         selected.add(name)
-        # Optional normal/build dependencies must be publishable even when a
-        # feature is currently off. Dev-only workspace helpers never ship.
-        pending.extend(
-            dependency["name"]
-            for dependency in raw["dependencies"]
-            if dependency.get("kind") != "dev"
-            and dependency.get("path") is not None
-            and dependency["name"] in raw_packages
-        )
+        pending.extend(edges[name])
 
     packages = {}
     for name in selected:
         raw = raw_packages[name]
-        dependencies = frozenset(
-            dependency["name"]
-            for dependency in raw["dependencies"]
-            if dependency.get("kind") != "dev"
-            and dependency.get("path") is not None
-            and dependency["name"] in selected
-        )
-        packages[name] = Package(name, raw["version"], dependencies)
+        packages[name] = Package(name, raw["version"], edges[name])
     return packages
 
 

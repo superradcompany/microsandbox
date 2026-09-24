@@ -13,6 +13,7 @@ on:
       - .github/workflows/release-windows.yml
       - .github/actions/cache-libkrunfw-kernel/action.yml
       - scripts/ci/publish-crates.py
+      - scripts/ci/test_publish_crates.py
       - scripts/ci/validate-release-artifacts.py
       - scripts/ci/test_validate_release_artifacts.py
       - scripts/smoke/cli/runtime-discovery.py
@@ -972,7 +973,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
       - name: Validate crates.io publication graph and package manifests
-        run: python3 scripts/ci/publish-crates.py --validate-only
+        run: |
+          python3 -m unittest scripts.ci.test_publish_crates
+          python3 scripts/ci/publish-crates.py --validate-only
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
