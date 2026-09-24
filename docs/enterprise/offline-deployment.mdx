@@ -10,7 +10,7 @@ Prepare runtime files, SDK packages, and images on a connected machine, then tra
 
 Package matching `msb`, `libkrunfw`, and SDK dependencies for each target OS and architecture. Preserve the release's executable permissions and library links. Follow [runtime setup](/sdk/setup) and use [managed paths](/configuration#paths) if you install the runtime in a shared location.
 
-Install application dependencies before disconnecting. Setup helpers can download missing or mismatched runtime files; Go provides [`WithSkipDownload()`](/sdk/setup#go-with-skip-download) to require an existing installation.
+Install application dependencies before disconnecting. Setup helpers can download missing or mismatched runtime files; use [resolve](/sdk/setup#resolve-check-install-and-ensure) to require an existing installation without downloading.
 
 Use your device manager to distribute approved runtime packages and [managed settings](/enterprise/managed-configuration#choose-your-device-manager). Package runtime dependencies separately from the policy file and verify them in the employee's context.
 
