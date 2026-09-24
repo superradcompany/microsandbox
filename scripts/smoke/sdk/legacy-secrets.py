@@ -113,6 +113,7 @@ async def main():
                 name,
                 image="mirror.gcr.io/library/alpine:3.21",
                 memory=256,
+                max_duration=120,
                 network=network,
                 detached=True,
                 secrets=[

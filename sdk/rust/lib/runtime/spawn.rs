@@ -79,6 +79,7 @@ use crate::error::{Operation, UnsupportedReason};
 #[cfg(windows)]
 use crate::runtime::handle::WindowsJob;
 use crate::runtime::handle::{ProcessHandle, StartupProcess};
+use crate::runtime::launch_contract::{self, LaunchContract};
 use crate::timing;
 use crate::{
     MicrosandboxError, MicrosandboxResult,
@@ -326,25 +327,19 @@ pub async fn spawn_sandbox(
     #[cfg(not(feature = "embed-binaries"))]
     let resolved_runtime = crate::setup::resolve_runtime(global)?;
     ensure_sigchld_handler_uses_alt_stack_before_spawn().await?;
-    let launch_contract = super::launch_contract::resolve(&resolved_runtime.msb_path).await?;
+    let launch_contract = launch_contract::resolve(&resolved_runtime.msb_path).await?;
     // A stopped sandbox may have been edited without a runtime installed, or
     // the selected executable may have changed since creation. Validate its
     // effective configuration here for both initial launch and later starts.
-    crate::db::writing::validate_runtime_config(config, global).await?;
+    launch_contract.validate_launch_intent(config)?;
     if config.checkpoint_restore.as_ref().is_some_and(|restore| {
         restore
             .external_mounts
             .iter()
             .any(|binding| binding.require_backing)
     }) {
-        super::launch_contract::require_restore_backing(&resolved_runtime.msb_path).await?;
+        launch_contract::require_restore_backing(&resolved_runtime.msb_path).await?;
     }
-    launch_contract.validate_capacity(
-        config.spec.resources.cpus,
-        config.spec.resources.max_cpus,
-        config.spec.resources.memory_mib,
-        config.spec.resources.max_memory_mib,
-    )?;
     if launch_contract.patch < 9
         && !matches!(
             global.runtime.block_writeback,
@@ -632,7 +627,7 @@ pub async fn spawn_sandbox(
     if !launch_contract.machine {
         visible[0] = OsString::from("sandbox");
     }
-    let launch_value = match super::launch_input::encode(&launch, launch_contract) {
+    let launch_value = match launch_contract.encode(&launch) {
         Ok(launch) => launch,
         Err(error) => {
             release_metrics_reservation(config, metrics_reservation.as_ref());
@@ -2236,7 +2231,7 @@ fn sandbox_agent_socket_path_candidates_with_roots(
 fn launch_agent_socket_path(
     local: &LocalBackend,
     name: &str,
-    contract: super::launch_contract::LaunchContract,
+    contract: LaunchContract,
 ) -> MicrosandboxResult<PathBuf> {
     #[cfg(unix)]
     if contract.patch < 9 {
@@ -2880,52 +2875,7 @@ fn machine_cli_args(
         }),
         #[cfg(feature = "net")]
         deployment_profile: config.spec.deployment_profile,
-        bootstrap: GuestBootstrap {
-            hostname: Some(
-                config.spec.runtime.hostname.clone().unwrap_or_else(|| {
-                    crate::sandbox::hostname_from_sandbox_name(&config.spec.name)
-                }),
-            ),
-            rlimits: config
-                .spec
-                .rlimits
-                .iter()
-                .map(|rlimit| ExecRlimit {
-                    resource: rlimit.resource.as_str().to_string(),
-                    soft: rlimit.soft,
-                    hard: rlimit.hard,
-                })
-                .collect(),
-            user: config.spec.runtime.user.clone(),
-            default_cwd: config.spec.runtime.workdir.clone(),
-            default_env: config
-                .spec
-                .env
-                .iter()
-                .map(|var| BootstrapEnvVar {
-                    key: var.key.clone(),
-                    value: var.value.clone(),
-                })
-                .collect(),
-            security_profile: match config.spec.security_profile {
-                crate::sandbox::SecurityProfile::Default => BootstrapSecurityProfile::Default,
-                crate::sandbox::SecurityProfile::Restricted => BootstrapSecurityProfile::Restricted,
-            },
-            handoff_init: config.spec.init.as_ref().map(|init| BootstrapHandoffInit {
-                cmd: init.cmd.clone(),
-                args: init.args.clone(),
-                cwd: config.spec.runtime.workdir.clone(),
-                env: init
-                    .env
-                    .iter()
-                    .map(|(key, value)| BootstrapEnvVar {
-                        key: key.clone(),
-                        value: value.clone(),
-                    })
-                    .collect(),
-            }),
-            ..GuestBootstrap::default()
-        },
+        bootstrap: guest_bootstrap(config),
         ..Default::default()
     };
 
@@ -3262,6 +3212,59 @@ fn machine_cli_args(
     }
 
     (visible, launch)
+}
+
+/// Build guest settings shared by launch preflight and the final payload.
+pub(crate) fn guest_bootstrap(config: &SandboxConfig) -> GuestBootstrap {
+    GuestBootstrap {
+        hostname: Some(
+            config
+                .spec
+                .runtime
+                .hostname
+                .clone()
+                .unwrap_or_else(|| crate::sandbox::hostname_from_sandbox_name(&config.spec.name)),
+        ),
+        rlimits: config
+            .spec
+            .rlimits
+            .iter()
+            .map(|rlimit| ExecRlimit {
+                resource: rlimit.resource.as_str().to_string(),
+                soft: rlimit.soft,
+                hard: rlimit.hard,
+            })
+            .collect(),
+        user: config.spec.runtime.user.clone(),
+        default_cwd: config.spec.runtime.workdir.clone(),
+        default_env: config
+            .spec
+            .env
+            .iter()
+            .map(|var| BootstrapEnvVar {
+                key: var.key.clone(),
+                value: var.value.clone(),
+            })
+            .collect(),
+        security_profile: match config.spec.security_profile {
+            crate::sandbox::SecurityProfile::Default => BootstrapSecurityProfile::Default,
+            crate::sandbox::SecurityProfile::Restricted => BootstrapSecurityProfile::Restricted,
+        },
+        handoff_init: config.spec.init.as_ref().map(|init| BootstrapHandoffInit {
+            cmd: init.cmd.clone(),
+            args: init.args.clone(),
+            cwd: config.spec.runtime.workdir.clone(),
+            env: init
+                .env
+                .iter()
+                .map(|(key, value)| BootstrapEnvVar {
+                    key: key.clone(),
+                    value: value.clone(),
+                })
+                .collect(),
+        }),
+        ..GuestBootstrap::default()
+    }
 }
 
 fn startup_command(config: &SandboxConfig) -> Option<StartupCommand> {

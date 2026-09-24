@@ -785,11 +785,12 @@ pub(crate) fn sandbox_config_from_cloud_spec(
 
 #[cfg(test)]
 mod tests {
+    use crate::test_support;
     use std::sync::Arc;
 
     use microsandbox_types::{
-        HostPermissions, MountOptions, NamedVolumeCreate, NamedVolumeMode, StatVirtualization,
-        VolumeKind, VolumeMount,
+        CloudSecretsConfig, HostPermissions, MountOptions, NamedVolumeCreate, NamedVolumeMode,
+        SecretsConfig, StatVirtualization, VolumeKind, VolumeMount,
     };
 
     use super::*;
@@ -1392,7 +1393,7 @@ mod tests {
     }
 
     #[test]
-    fn cloud_create_translates_historical_secret_policies() {
+    fn cloud_create_translates_previous_version_secret_policies() {
         for raw in [
             include_str!("../../db/fixtures/config-0.6.18-secret-default.json"),
             include_str!("../../db/fixtures/config-0.6.18-global-passthrough.json"),
@@ -1400,16 +1401,15 @@ mod tests {
             include_str!("../../db/fixtures/config-0.6.18-global-passthrough-with-entries.json"),
             include_str!("../../db/fixtures/config-0.6.18-secret-passthrough.json"),
         ] {
-            let legacy = crate::db::config::decode(raw).unwrap();
+            let legacy = test_support::fixtures::decode(raw).unwrap();
             let mut config = base_cloud_config();
             let expected = serde_json::to_value(&legacy.spec.network.secrets).unwrap();
             config.spec.network.secrets = legacy.spec.network.secrets;
             let request = CloudCreateBody::try_from(config).unwrap();
             let secrets = &request.envelope.sandbox_spec().network.secrets;
             let wire = serde_json::to_value(secrets.as_ref().unwrap()).unwrap();
-            let decoded: microsandbox_types::CloudSecretsConfig =
-                serde_json::from_value(wire).unwrap();
-            let domain = microsandbox_types::SecretsConfig::from(decoded);
+            let decoded: CloudSecretsConfig = serde_json::from_value(wire).unwrap();
+            let domain = SecretsConfig::from(decoded);
             assert_eq!(serde_json::to_value(domain).unwrap(), expected);
         }
     }

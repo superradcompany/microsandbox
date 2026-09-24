@@ -32,6 +32,8 @@ pub struct Snapshot {
     pub(crate) reported_size_bytes: Option<u64>,
     pub(crate) labels: BTreeMap<String, String>,
     pub(crate) head_update: Option<HeadUpdate>,
+    #[cfg(feature = "local")]
+    pub(crate) previous_upper: Option<PathBuf>,
 }
 
 /// A backend-neutral reference used to open, remove, or restore a snapshot.
@@ -644,6 +646,8 @@ impl Snapshot {
         ));
         Ok(if canonical.exists() {
             canonical
+        } else if let Some(path) = &self.previous_upper {
+            path.clone()
         } else if self
             .manifest
             .state

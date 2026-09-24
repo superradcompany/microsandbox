@@ -29,6 +29,7 @@ async def main():
             name,
             image="mirror.gcr.io/library/alpine:3.21",
             memory=256,
+            max_duration=120,
             detached=True,
             network=Network.allow_all(),
             secrets=[Secret.env("REPRO_TOKEN", value="before-rotation",

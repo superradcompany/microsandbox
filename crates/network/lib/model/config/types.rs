@@ -212,10 +212,8 @@ impl ConnectionLimit {
 impl ResolvedNetworkConfig {
     /// Creates a runtime configuration from its declarative configuration and
     /// fully resolved outbound proxy.
-    pub(super) fn new(
-        config: NetworkConfig,
-        outbound_proxy: Option<ResolvedOutboundProxy>,
-    ) -> Self {
+    #[doc(hidden)]
+    pub fn new(config: NetworkConfig, outbound_proxy: Option<ResolvedOutboundProxy>) -> Self {
         Self {
             config,
             outbound_proxy,

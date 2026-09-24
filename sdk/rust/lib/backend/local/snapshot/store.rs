@@ -51,11 +51,14 @@ pub(super) async fn open_snapshot(
     let bytes = tokio::fs::read(&manifest_path).await.map_err(|e| {
         MicrosandboxError::SnapshotNotFound(format!("{}: {e}", manifest_path.display()))
     })?;
-    let (manifest, translated_labels) = match Manifest::from_bytes(&bytes) {
-        Ok(manifest) => (manifest, None),
+    let (manifest, translated_labels, previous_upper) = match Manifest::from_bytes(&bytes) {
+        Ok(manifest) => (manifest, None, None),
         Err(final_error) => {
             microsandbox_image::snapshot::migration::translate_released_flat_forward(&bytes)
-                .map(|translation| (translation.target, Some(translation.labels)))
+                .map(|translation| {
+                    let upper = dir.join(&translation.upper_file);
+                    (translation.target, Some(translation.labels), Some(upper))
+                })
                 .map_err(|legacy_error| {
                     MicrosandboxError::SnapshotIntegrity(format!(
                         "descriptor is neither final nor a supported released flat snapshot: {final_error}; {legacy_error}"
@@ -75,6 +78,8 @@ pub(super) async fn open_snapshot(
             let canonical_path = dir.join(file_state.layer_path(layer));
             let upper_path = if canonical_path.exists() {
                 canonical_path
+            } else if let Some(path) = &previous_upper {
+                path.clone()
             } else if file_state.layers.len() == 1 && dir.join(DEFAULT_UPPER_FILE).exists() {
                 dir.join(DEFAULT_UPPER_FILE)
             } else {
@@ -122,7 +127,8 @@ pub(super) async fn open_snapshot(
     }
 
     let labels = super::metadata::read(&dir, &manifest, translated_labels).await?;
-    let snap = Snapshot::from_parts(dir.clone(), digest.clone(), manifest, labels);
+    let mut snap = Snapshot::from_parts(dir.clone(), digest.clone(), manifest, labels);
+    snap.previous_upper = previous_upper;
 
     // Published managed members and explicitly opened flat artifacts remain discoverable for
     // parent traversal. Archive/capture staging must never replace durable index entries.

@@ -132,12 +132,13 @@ impl SnapshotBackend for LocalBackend {
         snapshot: &'a Snapshot,
     ) -> BoxFuture<'a, MicrosandboxResult<SnapshotVerifyReport>> {
         Box::pin(async move {
-            let artifact = artifact::Snapshot::from_parts(
+            let mut artifact = artifact::Snapshot::from_parts(
                 snapshot.path()?.to_path_buf(),
                 snapshot.digest().into(),
                 snapshot.manifest().clone(),
                 snapshot.labels().clone(),
             );
+            artifact.previous_upper = snapshot.previous_upper.clone();
             verify::verify_snapshot(&artifact).await
         })
     }
@@ -270,6 +271,7 @@ fn from_artifact(backend: Arc<dyn Backend>, artifact: artifact::Snapshot) -> Sna
         manifest: artifact.manifest,
         labels: artifact.labels,
         head_update: artifact.head_update,
+        previous_upper: artifact.previous_upper,
     }
 }
 

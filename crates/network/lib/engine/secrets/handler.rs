@@ -3494,6 +3494,7 @@ impl SecretViolationReport {
 mod tests {
     use super::*;
     use crate::netstack::shared::{ResolvedHostnameFamily, SharedState};
+    use microsandbox_types::compat;
 
     use std::net::{IpAddr, Ipv4Addr};
     use std::time::Duration;
@@ -3509,10 +3510,7 @@ mod tests {
                     "passthrough_hosts":[{"exact":"api.example.com"}],
                     "require_tls_identity":false
                 }]});
-                microsandbox_types::compatibility::v0_6::local::secrets::normalize(
-                    wire.as_object_mut().unwrap(),
-                )
-                .unwrap();
+                compat::v0_5_0::local::secrets::to_current(wire.as_object_mut().unwrap()).unwrap();
                 let config: SecretsConfig = serde_json::from_value(wire).unwrap();
                 let headers = headers || basic_auth;
                 let basic = BASE64.encode("user:$KEY");
@@ -3574,10 +3572,7 @@ mod tests {
             "injection":{"headers":true,"basic_auth":true,"query_params":false,"body":false},
             "require_tls_identity":false
         }]});
-        microsandbox_types::compatibility::v0_6::local::secrets::normalize(
-            wire.as_object_mut().unwrap(),
-        )
-        .unwrap();
+        compat::v0_5_0::local::secrets::to_current(wire.as_object_mut().unwrap()).unwrap();
         let mut config: SecretsConfig = serde_json::from_value(wire).unwrap();
         let request = b"POST / HTTP/1.1\r\nHost: api.example.com\r\nContent-Length: 4\r\n\r\n$KEY";
         let mut handler = SecretsHandler::new(&config, "api.example.com", true);

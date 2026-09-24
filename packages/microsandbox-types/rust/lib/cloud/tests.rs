@@ -1,6 +1,7 @@
 //! Tests for the cloud wire contract.
 
 use super::*;
+use crate::compat;
 use crate::domain::{
     DEFAULT_SANDBOX_CPUS, DEFAULT_SANDBOX_MEMORY_MIB, HostPattern, OciRootfsSource, RootDisk,
     RootfsSource, SecretSubstitution, SecretsConfig,
@@ -844,7 +845,7 @@ fn tcp_aliases_preserve_the_existing_cloud_wire_key() {
 }
 
 #[test]
-fn historical_cloud_secrets_translate_to_current_wire() {
+fn previous_version_cloud_secrets_translate_to_current_wire() {
     for headers in [false, true] {
         for basic_auth in [false, true] {
             let value = serde_json::json!({
@@ -923,7 +924,7 @@ fn cloud_global_passthrough_survives_roundtrip_and_later_secret_additions() {
             );
         }
         let domain = SecretsConfig::from(cloud);
-        let launch = crate::compatibility::v0_6::local::secrets::for_current_runtime(&domain);
+        let launch = compat::v0_7_0::local::secrets::to_previous_version(&domain);
         assert_eq!(
             launch.secrets[0].passthrough_hosts,
             vec![HostPattern::Exact("global.example".into())]
@@ -951,7 +952,7 @@ fn cloud_global_passthrough_preserves_absent_and_empty_defaults() {
 }
 
 #[test]
-fn cloud_historical_injection_defaults_and_current_scopes_stay_distinct() {
+fn cloud_previous_version_injection_defaults_and_current_scopes_stay_distinct() {
     for (scope, expected_headers) in [
         (serde_json::json!({"injection":{"headers":false}}), true),
         (serde_json::json!({"substitution":{"headers":false}}), false),
@@ -971,7 +972,7 @@ fn cloud_historical_injection_defaults_and_current_scopes_stay_distinct() {
 }
 
 #[test]
-fn cloud_typed_inputs_reject_conflicts_and_malformed_values_without_echoing_secrets() {
+fn cloud_compatibility_rejects_conflicts_and_malformed_values_without_echoing_secrets() {
     for policy in [
         serde_json::json!({"injection":null}),
         serde_json::json!({"substitution":null}),
@@ -1004,4 +1005,60 @@ fn cloud_typed_inputs_reject_conflicts_and_malformed_values_without_echoing_secr
     }))
     .unwrap();
     assert!(entry.violation_action.is_none());
+}
+
+#[test]
+fn cloud_compatibility_rejects_duplicate_json_keys_without_echoing_secrets() {
+    for raw in [
+        r#"{"env_var":"KEY","env_var":"private-token","placeholder":"$KEY"}"#,
+        r#"{"env_var":"KEY","placeholder":"$KEY","injection":{"basic_auth":true,"basic_auth":false}}"#,
+        r#"{"env_var":"KEY","placeholder":"$KEY","on_violation":{"type":"block","type":"passthrough","hosts":[]}}"#,
+    ] {
+        let error = serde_json::from_str::<CloudSecretEntry>(raw).unwrap_err();
+        assert!(!error.to_string().contains("private-token"));
+        let config = format!(r#"{{"entries":[{raw}]}}"#);
+        assert!(serde_json::from_str::<CloudSecretsConfig>(&config).is_err());
+    }
+}
+
+#[test]
+fn typed_cloud_create_rejects_duplicate_recognized_fields_before_conversion() {
+    for raw in [
+        r#"{"source":"oci","source":"oci","reference":"alpine"}"#,
+        r#"{"source":"oci","reference":"alpine","reference":"other"}"#,
+        r#"{"image":{"type":"oci","reference":"alpine"},"image":{"type":"bind","path":"/tmp"}}"#,
+        r#"{"source":"oci","reference":"alpine","name":"a","name":"b"}"#,
+        r#"{"source":"oci","reference":"alpine","network":{"enabled":true,"enabled":false}}"#,
+        r#"{"source":"oci","reference":"alpine","network":{"secrets":{"entries":[{"env_var":"KEY","placeholder":"$KEY","injection":{"headers":true,"headers":false}}]}}}"#,
+    ] {
+        assert!(serde_json::from_str::<CloudCreateSandboxRequest>(raw).is_err());
+    }
+}
+
+#[test]
+fn typed_cloud_secret_reader_preserves_current_query_spelling_inside_old_injection() {
+    let entry: CloudSecretEntry = serde_json::from_str(
+        r#"{"env_var":"KEY","placeholder":"$KEY","injection":{"query":true}}"#,
+    )
+    .unwrap();
+    assert!(entry.substitution.query);
+}
+
+#[test]
+fn typed_cloud_create_ignores_fields_from_inactive_sources_without_falling_back() {
+    let request: CloudCreateSandboxRequest = serde_json::from_value(serde_json::json!({
+        "source": "oci", "reference": "alpine", "path": 123,
+        "format": "future", "image": null, "disk_snapshot_ref": false,
+    }))
+    .unwrap();
+    assert_eq!(request.oci_reference(), Some("alpine"));
+    for source in [
+        serde_json::Value::Null,
+        serde_json::json!("oci"),
+        serde_json::json!("future"),
+    ] {
+        let raw =
+            serde_json::json!({"source": source, "image": {"type":"oci","reference":"alpine"}});
+        assert!(serde_json::from_value::<CloudCreateSandboxRequest>(raw).is_err());
+    }
 }

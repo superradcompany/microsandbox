@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
+use crate::compat;
 use crate::domain::{
     HostPattern, SecretEntry, SecretSubstitution, SecretViolationAction, SecretsConfig,
 };
@@ -122,13 +123,13 @@ pub enum CloudViolationAction {
 
 impl<'de> Deserialize<'de> for CloudSecretsConfig {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        crate::compatibility::v0_6::cloud::secrets::config(deserializer)
+        compat::cloud::deserialize_secrets_config(deserializer)
     }
 }
 
 impl<'de> Deserialize<'de> for CloudSecretEntry {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        crate::compatibility::v0_6::cloud::secrets::entry(deserializer)
+        compat::cloud::deserialize_secret_entry(deserializer)
     }
 }
 
