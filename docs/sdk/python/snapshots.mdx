@@ -63,7 +63,7 @@ Create a disk snapshot, or set `full=True` to include memory and execution state
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>force</code><span className="msb-type">bool</span></div>
-    <div className="msb-param-desc">Must remain <code>False</code> for installed group members, which are immutable. Direct archive capture supports overwriting its output file.</div>
+    <div className="msb-param-desc">Must remain <code>False</code> for installed group members. Since v0.7, <code>True</code> raises <code>InvalidConfigError</code> even when the name does not exist. Use a new or generated member name, or explicitly remove the existing member before recreating it. See <a href="/changelog/2026-09-25#upgrading-snapshot-code-from-v06">the v0.6 upgrade example</a>. Direct archive capture supports overwriting its output file.</div>
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>record_integrity</code><span className="msb-type">bool</span></div>
@@ -485,7 +485,7 @@ Read a group’s head, or select an exact member with `group:member`. Returns th
 
 ### Import options
 
-Options for `load() and load_many()`.
+Options for `load()` and `load_many()`.
 
 | Option | Purpose |
 | --- | --- |

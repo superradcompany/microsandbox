@@ -8,42 +8,12 @@ Create, manage, and mount named volumes. See [Volumes](/sandboxes/volumes) for u
 
 ## Volume
 
-Use `Volume.owned()` to configure local storage allocated for one sandbox. It starts empty, survives stop/start and reboot, and is deleted with the sandbox. Owned mounts do not appear in `Volume.list()` and cannot be shared or removed independently. Cloud rejects owned mounts.
-
-```python
-from microsandbox import Sandbox, Volume, VolumeKind
-
-sb = await Sandbox.create(
-    "worker",
-    image="python",
-    volumes={
-        "/cache": Volume.owned(quota_mib=2048),
-        "/data": Volume.owned(kind=VolumeKind.DISK, size_mib=10240),
-    },
-)
-```
-
-`Volume.owned()` returns a `MountConfig`. `kind` defaults to `VolumeKind.DIRECTORY`; `quota_mib` applies only to directories. `VolumeKind.DISK` creates raw ext4 and requires positive `size_mib`. Common flags are `readonly`, `noexec`, `nosuid`, and `nodev`. `stat_virtualization`, `host_permissions`, and paired `uid`/`gid` apply only to directories. No host path or volume name is accepted. Mounting over an existing image directory hides its contents without copying them.
-
 <p className="msb-member-group" id="instance-properties">Instance properties</p>
 
-#### <span className="msb-recv">volume.</span><span className="msb-hn">name</span>
-
-```python
-name: str
-```
-
-Volume name.
-
-#### <span className="msb-recv">volume.</span><span className="msb-hn">path</span>
-
-<Tooltip tip="Only local volumes expose a path on the computer running the SDK."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
-
-```python
-path: str
-```
-
-Host path to the volume's directory.
+| Field | Type | Description |
+|---|---|---|
+| <span id="volume-name"></span>`name` | `str` | Volume name. |
+| <span id="volume-path"></span>`path` | `str` | Host path to the volume's directory. <Tooltip tip="Only local volumes expose a path on the computer running the SDK."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip> |
 
 <p className="msb-member-group">Static methods</p>
 
@@ -57,11 +27,15 @@ async def get_default() -> VolumeHandle
 
 Get the Cloud account's always-present default volume. It has no user-assigned name, cannot be removed, and supports direct filesystem operations through `.fs()`. The local backend raises a typed unsupported error; it never substitutes a directory from the caller's machine.
 
+<Accordion title="Example">
+
 ```python
 volume = await Volume.get_default()
 await volume.fs().write("customers/acme.json", b'{"active": true}')
 print(await volume.fs().read_to_string("customers/acme.json"))
 ```
+
+</Accordion>
 
 #### <span className="msb-recv">Volume.</span><span className="msb-hn">create()</span>
 
@@ -550,65 +524,18 @@ Mount a host disk image as a virtio-blk device. `format` is the disk image forma
 
 A lightweight handle to a named volume, with its database metadata and a host-side filesystem accessor.
 
-#### <span className="msb-recv">handle.</span><span className="msb-hn">name</span>
-
-`str`
-
-Volume name
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">kind</span>
-
-[`VolumeKind`](#volumekind)
-
-Volume storage kind
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">quota_mib</span>
-
-`int \| None`
-
-Storage quota in MiB
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">used_bytes</span>
-
-`int`
-
-Current disk usage in bytes
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">capacity_bytes</span>
-
-`int \| None`
-
-Disk capacity in bytes
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">disk_format</span>
-
-[`DiskImageFormat`](#diskimageformat)` \| None`
-
-Disk image format
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">disk_fstype</span>
-
-`str \| None`
-
-Disk filesystem type
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">labels</span>
-
-`dict[str, str]`
-
-Metadata labels
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">created_at</span>
-
-`float \| None`
-
-Creation timestamp (ms since epoch)
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">fs</span>
-
-[`VolumeFs`](#volumefs)
-
-Host-side filesystem handle
+| Field | Type | Description |
+|---|---|---|
+| <span id="handle-name"></span>`name` | `str` | Volume name |
+| <span id="handle-kind"></span>`kind` | [`VolumeKind`](#volumekind) | Volume storage kind |
+| <span id="handle-quota_mib"></span>`quota_mib` | `int \| None` | Storage quota in MiB |
+| <span id="handle-used_bytes"></span>`used_bytes` | `int` | Current disk usage in bytes |
+| <span id="handle-capacity_bytes"></span>`capacity_bytes` | `int \| None` | Disk capacity in bytes |
+| <span id="handle-disk_format"></span>`disk_format` | [`DiskImageFormat \| None`](#diskimageformat) | Disk image format |
+| <span id="handle-disk_fstype"></span>`disk_fstype` | `str \| None` | Disk filesystem type |
+| <span id="handle-labels"></span>`labels` | `dict[str, str]` | Metadata labels |
+| <span id="handle-created_at"></span>`created_at` | `float \| None` | Creation timestamp (ms since epoch) |
+| <span id="handle-fs"></span>`fs` | [`VolumeFs`](#volumefs) | Host-side filesystem handle |
 
 #### <span className="msb-recv">handle.</span><span className="msb-hn">remove()</span>
 

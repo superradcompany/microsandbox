@@ -6,24 +6,6 @@ keywords: ["Go SDK", "Go volumes", "microsandbox volumes"]
 
 Create, manage, and mount named volumes. See [Volumes](/sandboxes/volumes) for usage examples.
 
-## Sandbox-owned mounts
-
-Use `Mount.Owned(OwnedVolumeOptions)` for local storage allocated for one sandbox. It starts empty, survives stop/start and reboot, and is deleted with the sandbox. Owned mounts do not appear in `ListVolumes()` and cannot be shared or removed independently. Cloud rejects owned mounts.
-
-```go
-sb, err := m.CreateSandbox(ctx, "worker",
-    m.WithImage("python"),
-    m.WithMounts(map[string]m.MountConfig{
-        "/cache": m.Mount.Owned(m.OwnedVolumeOptions{QuotaMiB: 2048}),
-        "/data": m.Mount.Owned(m.OwnedVolumeOptions{
-            Kind: m.VolumeKindDisk, SizeMiB: 10240,
-        }),
-    }),
-)
-```
-
-`OwnedVolumeOptions.Kind` defaults to `VolumeKindDir`; `QuotaMiB` applies only to directories. `VolumeKindDisk` creates raw ext4 and requires positive `SizeMiB`. Common flags are `Readonly`, `Noexec`, `Nosuid`, and `Nodev`. `StatVirtualization`, `HostPermissions`, and `Owner` apply only to directories. No host path or volume name is accepted. Mounting over an existing image directory hides its contents without copying them.
-
 ## Functions
 
 #### <span className="msb-recv"></span><span className="msb-hn">GetDefaultVolume()</span>
@@ -36,11 +18,15 @@ func GetDefaultVolume(ctx context.Context) (*VolumeHandle, error)
 
 Get the Cloud account's always-present default volume. It has no user-assigned name, cannot be removed, and supports direct filesystem operations through `FS()`. The local backend returns `ErrUnsupportedOperation`; it never substitutes a directory from the caller's machine.
 
+<Accordion title="Example">
+
 ```go
 volume, err := m.GetDefaultVolume(ctx)
 err = volume.FS().WriteString(ctx, "customers/acme.json", `{"active":true}`)
 contents, err := volume.FS().ReadString(ctx, "customers/acme.json")
 ```
+
+</Accordion>
 
 #### <span className="msb-recv"></span><span className="msb-hn">CreateVolume()</span>
 
@@ -674,7 +660,7 @@ sb, err := m.CreateSandbox(ctx, "worker",
 
 </Accordion>
 
-Mount a named persistent volume with explicit sandbox-time existence behavior. [`NamedVolumeOptions.Mode`](#namedvolumeoptions) accepts `"existing"` (default), `"create"`, or `"ensure-exists"`. `Mode: "create"` fails when the named volume already exists. `Mode: "ensure-exists"` creates the volume if it is missing and reuses a compatible existing volume; it errors when the existing volume has a different kind, quota, or capacity than requested, and never mutates existing volume metadata.
+Mount a named persistent volume with explicit sandbox-time existence behavior. [`NamedVolumeOptions.Mode`](#namedvolumeoptions) accepts `"existing"` (default), `"create"`, or `"ensure-exists"`. `Mode: "create"` fails when the named volume already exists. `Mode: "ensure-exists"` creates the volume if it is missing and reuses a compatible existing volume. It errors when the existing volume has a different kind, quota, or capacity than requested. It never mutates existing volume metadata.
 
 <p className="msb-label">Parameters</p>
 
@@ -759,108 +745,25 @@ Mount configuration produced by the [`Mount`](#options) factory.
 
 <p className="msb-backref">Returned by <a href="#mount-bind">Mount.Bind()</a> · <a href="#mount-named">Mount.Named()</a> · <a href="#mount-namedwith">Mount.NamedWith()</a> · <a href="#mount-tmpfs">Mount.Tmpfs()</a> · <a href="#mount-disk">Mount.Disk()</a></p>
 
-#### <span className="msb-recv">mount.</span><span className="msb-hn">Bind</span>
-
-`string`
-
-Host path for bind mounts
-
-#### <span className="msb-recv">mount.</span><span className="msb-hn">Named</span>
-
-`string`
-
-Volume name for named mounts
-
-#### <span className="msb-recv">mount.</span><span className="msb-hn">NamedMode</span>
-
-`string`
-
-Provisioning mode for named mounts (`"existing"`, `"create"`, `"ensure-exists"`)
-
-#### <span className="msb-recv">mount.</span><span className="msb-hn">NamedKind</span>
-
-`string`
-
-Kind for provisioned named mounts (`"dir"` or `"disk"`)
-
-#### <span className="msb-recv">mount.</span><span className="msb-hn">QuotaMiB</span>
-
-`uint32`
-
-Quota in MiB for provisioned directory volumes
-
-#### <span className="msb-recv">mount.</span><span className="msb-hn">Tmpfs</span>
-
-`bool`
-
-Set for tmpfs mounts
-
-#### <span className="msb-recv">mount.</span><span className="msb-hn">Disk</span>
-
-`string`
-
-Host path for disk images
-
-#### <span className="msb-recv">mount.</span><span className="msb-hn">Format</span>
-
-`string`
-
-Disk format
-
-#### <span className="msb-recv">mount.</span><span className="msb-hn">Fstype</span>
-
-`string`
-
-Inner filesystem type
-
-#### <span className="msb-recv">mount.</span><span className="msb-hn">Readonly</span>
-
-`bool`
-
-Whether the mount is read-only
-
-#### <span className="msb-recv">mount.</span><span className="msb-hn">Noexec</span>
-
-`bool`
-
-Whether direct execution from the mount is disabled
-
-#### <span className="msb-recv">mount.</span><span className="msb-hn">Nosuid</span>
-
-`bool`
-
-Whether setuid/setgid elevation from files on the mount is ignored
-
-#### <span className="msb-recv">mount.</span><span className="msb-hn">Nodev</span>
-
-`bool`
-
-Whether device files on the mount are ignored
-
-#### <span className="msb-recv">mount.</span><span className="msb-hn">SizeMiB</span>
-
-`uint32`
-
-Size limit for tmpfs / capacity for provisioned disk volumes
-
-#### <span className="msb-recv">mount.</span><span className="msb-hn">StatVirtualization</span>
-
-`StatVirtualization`
-
-Per-mount stat-virtualization policy (bind / named only)
-
-#### <span className="msb-recv">mount.</span><span className="msb-hn">HostPermissions</span>
-
-`HostPermissions`
-
-Per-mount host-permission propagation policy (bind / named only)
-
-#### <span className="msb-recv">mount.</span><span className="msb-hn">Owner</span>
-
-`*MountOwner`
-
-Guest owner fallback for host files without a per-file stat override (bind / directory-backed named only)
-
+| Field | Type | Description |
+|---|---|---|
+| <span id="mount-bind-2"></span>`Bind` | `string` | Host path for bind mounts |
+| <span id="mount-named-2"></span>`Named` | `string` | Volume name for named mounts |
+| <span id="mount-namedmode"></span>`NamedMode` | `string` | Provisioning mode for named mounts (`"existing"`, `"create"`, `"ensure-exists"`) |
+| <span id="mount-namedkind"></span>`NamedKind` | `string` | Kind for provisioned named mounts (`"dir"` or `"disk"`) |
+| <span id="mount-quotamib"></span>`QuotaMiB` | `uint32` | Quota in MiB for provisioned directory volumes |
+| <span id="mount-tmpfs-2"></span>`Tmpfs` | `bool` | Set for tmpfs mounts |
+| <span id="mount-disk-2"></span>`Disk` | `string` | Host path for disk images |
+| <span id="mount-format"></span>`Format` | `string` | Disk format |
+| <span id="mount-fstype"></span>`Fstype` | `string` | Inner filesystem type |
+| <span id="mount-readonly"></span>`Readonly` | `bool` | Whether the mount is read-only |
+| <span id="mount-noexec"></span>`Noexec` | `bool` | Whether direct execution from the mount is disabled |
+| <span id="mount-nosuid"></span>`Nosuid` | `bool` | Whether setuid/setgid elevation from files on the mount is ignored |
+| <span id="mount-nodev"></span>`Nodev` | `bool` | Whether device files on the mount are ignored |
+| <span id="mount-sizemib"></span>`SizeMiB` | `uint32` | Size limit for tmpfs / capacity for provisioned disk volumes |
+| <span id="mount-statvirtualization"></span>`StatVirtualization` | `StatVirtualization` | Per-mount stat-virtualization policy (bind / named only) |
+| <span id="mount-hostpermissions"></span>`HostPermissions` | `HostPermissions` | Per-mount host-permission propagation policy (bind / named only) |
+| <span id="mount-owner"></span>`Owner` | `*MountOwner` | Guest owner fallback for host files without a per-file stat override (bind / directory-backed named only) |
 
 #### <span className="msb-recv">mount.</span><span className="msb-hn">Kind()</span>
 

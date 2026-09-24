@@ -98,10 +98,12 @@ Having trouble with a local installation? Choose your platform for setup checks 
     ```
 
     ```rust Rust
+    use std::error::Error;
+
     use microsandbox::Sandbox;
 
     #[tokio::main]
-    async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    async fn main() -> Result<(), Box<dyn Error>> {
         let sb = Sandbox::builder("hello")
             .image("python")
             .memory(512)

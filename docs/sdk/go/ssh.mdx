@@ -224,7 +224,7 @@ fmt.Printf("shell exited with %d\n", code)
 
 </Accordion>
 
-Bridge the local terminal to an interactive SSH shell. Requests a PTY sized to the current terminal, puts the terminal into raw mode, forwards keystrokes, relays window-resize events, and returns when the shell exits or the detach key sequence is typed.
+Bridge the local terminal to an interactive SSH shell. Requests a PTY sized to the current terminal, puts the terminal into raw mode, forwards keystrokes, and relays window-resize events. Returns when the shell exits or you type the detach key sequence.
 
 <p className="msb-label">Parameters</p>
 
@@ -421,23 +421,11 @@ Release this prepared server endpoint. The handle is consumed; do not use it aft
 
 The output from an SSH exec request.
 
-#### <span className="msb-recv">o.</span><span className="msb-hn">Status</span>
-
-`int`
-
-Exit status code
-
-#### <span className="msb-recv">o.</span><span className="msb-hn">Stdout</span>
-
-`[]byte`
-
-Captured stdout bytes
-
-#### <span className="msb-recv">o.</span><span className="msb-hn">Stderr</span>
-
-`[]byte`
-
-Captured stderr bytes
+| Field | Type | Description |
+|---|---|---|
+| <span id="o-status"></span>`Status` | `int` | Exit status code |
+| <span id="o-stdout"></span>`Stdout` | `[]byte` | Captured stdout bytes |
+| <span id="o-stderr"></span>`Stderr` | `[]byte` | Captured stderr bytes |
 
 #### <span className="msb-recv">o.</span><span className="msb-hn">Success()</span>
 
