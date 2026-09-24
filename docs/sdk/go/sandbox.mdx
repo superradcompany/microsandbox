@@ -322,7 +322,7 @@ Return a point-in-time [`Metrics`](#metrics) snapshot for every running sandbox,
 <span id="m-sdkversion"></span>
 <span id="m-runtimeversion"></span>
 
-Runtime installation and verification helpers are documented under [Runtime setup](/sdk/setup#resolve-check-install-and-ensure). The Go-only version helpers are under [Inspect Go versions](/sdk/setup#inspect-go-versions).
+See [Runtime setup](/sdk/setup#resolve-check-install-and-ensure) for runtime installation and verification helpers. See [Inspect Go versions](/sdk/setup#inspect-go-versions) for the Go-only version helpers.
 
 ## Sandbox
 
@@ -2207,7 +2207,7 @@ m.WithInit(m.Init.Auto())
 
 </Accordion>
 
-Use a known init at the start of the image ENTRYPOINT when present, preserving attached init-entrypoint commands; otherwise delegate to agentd to probe common init paths (`/sbin/init`, `/lib/systemd/systemd`, ...) inside the guest.
+Use a known init at the start of the image ENTRYPOINT when present, preserving attached init-entrypoint commands. Otherwise, delegate to agentd to probe common init paths (`/sbin/init`, `/lib/systemd/systemd`, ...) inside the guest.
 
 <p className="msb-label">Returns</p>
 
@@ -3207,4 +3207,4 @@ Discriminator for [`PatchConfig`](#patchconfig). Prefer the [`Patch`](#patch) fa
 
 ### InstallOptions
 
-The setup-only `InstallOptions` type is documented under [Runtime setup](/sdk/setup#customize-installation).
+See [Runtime setup](/sdk/setup#customize-installation) for the setup-only `InstallOptions` type.

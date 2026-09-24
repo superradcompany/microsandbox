@@ -27,7 +27,7 @@ let policy = NetworkPolicy::builder()
 
 </Accordion>
 
-Create a [`NetworkPolicyBuilder`](#networkpolicybuilder) to configure rules and per-direction defaults. The first matching rule wins in each direction. String inputs (`.ip`, `.cidr`, `.domain`, `.domain_suffix`) are validated by [`build()`](#policy-build), which returns a [`BuildError`](#builderror) for invalid input.
+Create a [`NetworkPolicyBuilder`](#networkpolicybuilder) to configure rules and per-direction defaults. The first matching rule wins in each direction. [`build()`](#policy-build) validates string inputs (`.ip`, `.cidr`, `.domain`, `.domain_suffix`) and returns a [`BuildError`](#builderror) for invalid input.
 
 <p className="msb-label">Returns</p>
 
@@ -320,7 +320,7 @@ Open a multi-rule batch closure. Direction must be set inside via [`.egress()`](
 fn build(self) -> Result<NetworkPolicy, BuildError>
 ```
 
-Consume the builder and produce a [`NetworkPolicy`](#networkpolicy). Lazy-parses every `.ip()` / `.cidr()` / `.domain()` / `.domain_suffix()` input and validates the direction-set and ICMP-egress-only invariants. It also emits a `tracing::warn!` for each shadowed rule pair (a rule fully covered by an earlier one in the same direction; only `Ip` / `Cidr` / `Group` destinations are checked). Builds still succeed when a shadow is detected. Returns the first [`BuildError`](#builderror) encountered.
+Consume the builder and produce a [`NetworkPolicy`](#networkpolicy). Lazy-parses every `.ip()` / `.cidr()` / `.domain()` / `.domain_suffix()` input and validates the direction-set and ICMP-egress-only invariants. It also emits a `tracing::warn!` for each shadowed rule pair, meaning a rule fully covered by an earlier one in the same direction. The shadow check covers only `Ip` / `Cidr` / `Group` destinations. Builds still succeed when a shadow is detected. Returns the first [`BuildError`](#builderror) encountered.
 
 <p className="msb-label">Returns</p>
 
