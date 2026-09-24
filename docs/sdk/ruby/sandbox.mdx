@@ -1,11 +1,11 @@
 ---
 title: Sandbox
 "og:title": Ruby SDK Sandbox reference
-description: Create, connect to, restart, and stop microVM sandboxes with the Ruby SDK. Manage sandbox lifecycles on local and cloud backends.
+description: Create and manage microVM sandboxes with the Ruby SDK.
 keywords: ["Ruby SDK", "Ruby sandbox", "microsandbox sandbox"]
 ---
 
-Create and control a microVM sandbox from Ruby. The SDK supports local and cloud backends; blocking native calls release Ruby's global VM lock (GVL) so other Ruby threads can continue running. See [Lifecycle](/sandboxes/lifecycle) for the shared state model and [Error handling](/sdk/errors) for cross-SDK behavior.
+See [Overview](/sandboxes/overview) for configuration examples and [Lifecycle](/sandboxes/lifecycle) for state management. See [Error handling](/sdk/errors) for cross-SDK behavior.
 
 ## Installation
 
@@ -14,6 +14,8 @@ gem install microsandbox
 ```
 
 Ruby 3.1 and newer are supported. When a matching platform gem is available, it carries the native extension; otherwise the source gem requires Rust 1.85 or newer to build it locally.
+
+Blocking native calls release Ruby's global VM lock (GVL), allowing other Ruby threads to run.
 
 ```ruby
 require "microsandbox"
