@@ -1,0 +1,106 @@
+---
+title: Use microsandbox with JetBrains IDEs (ACP)
+sidebarTitle: JetBrains ACP
+description: Connect a host IDE to a coding agent inside a local sandbox
+icon: "code"
+---
+
+JetBrains AI Assistant can start a custom [ACP agent](https://www.jetbrains.com/help/ai-assistant/acp.html) through `msb exec --stream`. The IDE stays on the host; the agent runs in the sandbox. No microsandbox IDE plugin is required.
+
+<Note>
+  Verified with a scripted ACP client on macOS Apple Silicon using msb 0.7.3 and OpenCode 1.18.32. File edits, shell commands, repeated sessions, and concurrent sessions passed. The GoLand, PyCharm, and WebStorm interfaces still need a human check with the installed IDE and AI Assistant versions.
+</Note>
+
+## Create the sandbox
+
+Run on the host, using a small test repository first:
+
+```bash
+mkdir -p "$HOME/jetbrains-acp-demo"
+cd "$HOME/jetbrains-acp-demo"
+git init
+REPO_PATH="$(pwd -P)"
+
+msb create --name jetbrains-agent -c 2 -m 4G \
+  -v "$REPO_PATH:$REPO_PATH" \
+  -v jetbrains-agent-home:/root \
+  -w "$REPO_PATH" node:22-bookworm </dev/null
+
+msb exec jetbrains-agent --no-tty -- \
+  npm install -g opencode-ai@1.18.32 </dev/null
+```
+
+Open that exact absolute project path in the IDE. ACP supplies the host project path as `cwd`, so the mount destination must match it. Mount only the project you intend to expose. Writes to this mount also change the host files.
+
+## Register the agent
+
+Use **AI Chat > Add Custom Agent** to edit `~/.jetbrains/acp.json`. Merge this entry into any existing configuration. Replace `/absolute/path/to/msb` with the output of `command -v msb`.
+
+```json
+{
+  "default_mcp_settings": {
+    "use_idea_mcp": false,
+    "use_custom_mcp": false
+  },
+  "agent_servers": {
+    "OpenCode in microsandbox": {
+      "command": "/absolute/path/to/msb",
+      "args": [
+        "exec", "jetbrains-agent", "--stream",
+        "-e", "OPENCODE_CONFIG_CONTENT",
+        "--", "opencode", "acp"
+      ],
+      "env": {
+        "OPENCODE_CONFIG_CONTENT": "{\"model\":\"opencode/mimo-v2.5-free\"}"
+      }
+    }
+  }
+}
+```
+
+The model above was used for the synthetic test. Before using real project data, choose your organization's approved provider and model. Authenticate inside the sandbox with `msb exec jetbrains-agent -- opencode auth login`, then replace the model identifier. The named `/root` volume retains agent configuration and credentials; do not mount your host home or commit credentials.
+
+Select **OpenCode in microsandbox** in AI Chat and ask it to create `hello.txt`, run `ls` and `uname -s`, and read the file back. Confirm the file appears on the host and the shell reports `Linux`.
+
+<Warning>
+  Use `--stream`, not `--no-tty`, for ACP. In msb 0.7.3, ordinary piped exec buffers stdin until EOF and stalls initialization. With `--stream`, ACP turns complete, but the client must close stdin to finish shutting down the subprocess. See [issue #1549](https://github.com/superradcompany/microsandbox/issues/1549). Redirecting ACP stdin from `/dev/null` would break the protocol.
+</Warning>
+
+## Keep tools inside the sandbox
+
+ACP can let an agent request `fs/read_text_file`, `fs/write_text_file`, or `terminal/create` from its client. If a host IDE honors those requests, the work happens on the host. Starting the agent inside a VM alone does not prevent this delegation.
+
+In the scripted checks, OpenCode 1.18.32 performed file and shell operations inside the guest with client `fs` and `terminal` capabilities both enabled and disabled. It sent no host filesystem or terminal requests, and could not read an unmounted host-only file. This is observed behavior for that version, not an ACP-wide isolation guarantee. Recheck after changing agents or versions.
+
+Keep `use_idea_mcp` and `use_custom_mcp` set to `false`. IDE MCP tools can execute outside the sandbox, independently of ACP's file and terminal capabilities. These settings do not disable ACP capabilities themselves. Also review MCP servers configured directly in the agent. The IDE still sees the project and can send context to the model.
+
+## Claude Code adapter
+
+To install the adapter and login CLI in the same sandbox:
+
+```bash
+msb exec jetbrains-agent --no-tty -- npm install -g \
+  @agentclientprotocol/claude-agent-acp@0.81.2 \
+  @anthropic-ai/claude-code@2.1.282 </dev/null
+msb exec jetbrains-agent -- claude auth login
+```
+
+Add another agent entry using the same `command` and `"args": ["exec", "jetbrains-agent", "--stream", "--", "claude-agent-acp"]`. Keep the MCP settings above. Complete the browser login and paste the returned code into the guest terminal if prompted.
+
+The adapter initialized successfully in the scripted test, but `session/new` required authentication, so its prompt and isolation checks remain unverified. Its [changelog](https://github.com/agentclientprotocol/claude-agent-acp/blob/v0.81.2/CHANGELOG.md#0180) says version 0.18.0 switched to built-in Claude tools instead of client filesystem and terminal tools. Do not apply that claim to older adapters.
+
+For API-key authentication, `env` in `acp.json` sets the host subprocess environment. Explicitly forward the required variable with `"-e", "ANTHROPIC_API_KEY"` before `"--"`; msb does not forward arbitrary host variables automatically. Prefer the persisted guest login to storing a key in `acp.json`.
+
+## SSH fallback
+
+OpenSSH commands and SFTP were verified through this transport:
+
+```sshconfig
+Host jetbrains-agent.msb
+  User root
+  IdentityFile ~/.ssh/id_ed25519
+  IdentitiesOnly yes
+  ProxyCommand /absolute/path/to/msb ssh serve jetbrains-agent --stdio
+```
+
+First authorize the public key with `msb ssh authorize --file ~/.ssh/id_ed25519.pub`. Verify the host key on first connection. In JetBrains Gateway, enable parsing of `~/.ssh/config` and try this host. Gateway backend installation and IDE startup remain untested. See [SSH](/sandboxes/ssh#proxycommand) and [Gateway setup](https://www.jetbrains.com/help/idea/remote-development-a.html).
