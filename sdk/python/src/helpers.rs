@@ -1876,7 +1876,7 @@ fn apply_secret(
             };
         }
         for host in &passthrough {
-            s = s.allow_passthrough_for(host);
+            s = s.allow_placeholder_for(host);
         }
         if let Some(action) = violation_action {
             s = s.violation_action(action);

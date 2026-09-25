@@ -517,10 +517,16 @@ impl SecretPatchBuilder {
         self
     }
 
-    /// Add a host allowed to receive the placeholder unchanged.
-    pub fn allow_passthrough_for(mut self, host: impl Into<String>) -> Self {
+    /// Add a host allowed to receive the unchanged placeholder where substitution does not apply.
+    pub fn allow_placeholder_for(mut self, host: impl Into<String>) -> Self {
         self.spec.passthrough_hosts.push(host.into());
         self
+    }
+
+    /// Deprecated alias for [`allow_placeholder_for`](Self::allow_placeholder_for).
+    #[deprecated(note = "use allow_placeholder_for instead")]
+    pub fn allow_passthrough_for(self, host: impl Into<String>) -> Self {
+        self.allow_placeholder_for(host)
     }
 
     /// Set the per-secret blocking action.
@@ -5612,6 +5618,7 @@ mod tests {
 
     #[cfg(feature = "net")]
     #[test]
+    #[allow(deprecated)] // Both spellings must produce the existing modification contract.
     fn secret_patch_builder_builds_declarative_specs() {
         let spec = SecretPatchBuilder::new()
             .env("API_KEY")
@@ -5621,6 +5628,8 @@ mod tests {
             .placeholder("$REF")
             .allow("api.example.com")
             .allow("*.example.org")
+            .allow_placeholder_for("api.anthropic.com")
+            .allow_passthrough_for("*.anthropic.com")
             .build();
 
         assert_eq!(spec.name, "API_KEY");
@@ -5633,6 +5642,16 @@ mod tests {
         assert!(spec.value.is_empty());
         assert_eq!(spec.placeholder.as_deref(), Some("$REF"));
         assert_eq!(spec.allowed_hosts, vec!["api.example.com", "*.example.org"]);
+        assert_eq!(
+            spec.passthrough_hosts,
+            vec!["api.anthropic.com", "*.anthropic.com"]
+        );
+        let wire = serde_json::to_value(&spec).unwrap();
+        assert_eq!(
+            wire["passthrough_hosts"],
+            serde_json::json!(["api.anthropic.com", "*.anthropic.com"])
+        );
+        assert!(wire.get("allow_placeholder_for").is_none());
 
         let spec = SecretPatchBuilder::new()
             .env("API_KEY")

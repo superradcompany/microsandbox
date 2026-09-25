@@ -736,24 +736,26 @@ describe("NetworkBuilder secret passthrough", () => {
     expect(cfg.secrets.violationAction).toBe("block-and-terminate");
   });
 
-  it("builds independent per-secret policies", () => {
-    const secret = new SecretBuilder()
-      .env("API_KEY")
-      .value("sk-abc")
-      .allow("api.github.com")
-      .allowPassthroughFor("api.anthropic.com")
-      .allowPassthroughFor("*.anthropic.com")
-      .substituteInBody(true)
-      .violationAction("block-and-log")
-      .build();
+  it.each(["allowPlaceholderFor", "allowPassthroughFor"] as const)(
+    "builds independent per-secret policies through %s",
+    (method) => {
+      const secret = new SecretBuilder()
+        .env("API_KEY")
+        .value("sk-abc")
+        .allow("api.github.com")[method]("api.anthropic.com")
+        .allowPlaceholderFor("*.anthropic.com")
+        .substituteInBody(true)
+        .violationAction("block-and-log")
+        .build();
 
-    expect(secret.allowedHosts).toEqual(["api.github.com"]);
-    expect(secret.passthroughHosts).toEqual([
-      "api.anthropic.com",
-      "*.anthropic.com",
-    ]);
-    expect(secret.substitution.body).toBe(true);
-  });
+      expect(secret.allowedHosts).toEqual(["api.github.com"]);
+      expect(secret.passthroughHosts).toEqual([
+        "api.anthropic.com",
+        "*.anthropic.com",
+      ]);
+      expect(secret.substitution.body).toBe(true);
+    },
+  );
 });
 
 describe("NetworkBuilder ports", () => {

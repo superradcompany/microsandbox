@@ -4188,17 +4188,32 @@ mod tests {
     }
 
     #[test]
-    fn passthrough_allows_disabled_body_location_on_allowed_host() {
-        let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
-        secret.passthrough_hosts = vec![HostPattern::Exact("api.openai.com".into())];
-        let config = make_config(vec![secret]);
-        let mut handler = SecretsHandler::new(&config, "api.openai.com", true);
-
-        let input = b"POST / HTTP/1.1\r\nAuthorization: Bearer $KEY\r\nContent-Length: 15\r\n\r\n{\"key\": \"$KEY\"}";
-        let output = handler.substitute(input).unwrap();
-        let output = String::from_utf8(output.into_owned()).unwrap();
-        assert!(output.contains("Authorization: Bearer real-secret"));
-        assert!(output.contains("{\"key\": \"$KEY\"}"));
+    #[allow(deprecated)] // Both public names must enforce the same network policy.
+    fn placeholder_permission_keeps_substitution_and_blocking_independent() {
+        for legacy in [false, true] {
+            let secret = crate::config::builder::SecretBuilder::new()
+                .env("API_KEY")
+                .value("real-secret")
+                .placeholder("$KEY")
+                .allow("api.openai.com");
+            let secret = if legacy {
+                secret.allow_passthrough_for("api.openai.com")
+            } else {
+                secret.allow_placeholder_for("api.openai.com")
+            };
+            let config = make_config(vec![secret.build()]);
+            let input = b"POST / HTTP/1.1\r\nAuthorization: Bearer $KEY\r\nContent-Length: 15\r\n\r\n{\"key\": \"$KEY\"}";
+            let mut allowed = SecretsHandler::new(&config, "api.openai.com", true);
+            let output =
+                String::from_utf8(allowed.substitute(input).unwrap().into_owned()).unwrap();
+            assert!(output.contains("Authorization: Bearer real-secret"));
+            assert!(output.contains("{\"key\": \"$KEY\"}"));
+            let mut forbidden = SecretsHandler::new(&config, "evil.example.com", true);
+            assert_eq!(
+                forbidden.substitute(input).unwrap_err(),
+                SecretViolationAction::Block
+            );
+        }
     }
 
     #[test]

@@ -1885,7 +1885,7 @@ fn apply_secret(
             };
         }
         for host in &s.passthrough {
-            sb = sb.allow_passthrough_for(host);
+            sb = sb.allow_placeholder_for(host);
         }
         if let Some(ref ph) = placeholder {
             sb = sb.placeholder(ph);

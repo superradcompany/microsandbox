@@ -1219,17 +1219,30 @@ class Secret:
         *,
         value: str,
         allow: Sequence[str] = (),
+        allow_placeholder_for: Sequence[str] = (),
         passthrough: Sequence[str] = (),
         placeholder: str | None = None,
         require_tls_identity: bool = True,
         violation_action: ViolationAction | None = None,
         substitution: SecretSubstitution | None = None,
     ) -> SecretEntry:
+        """Create an environment secret with per-host permissions.
+
+        ``allow_placeholder_for`` permits unchanged placeholders where substitution
+        does not apply. ``passthrough`` is a deprecated alias for ``allow_placeholder_for``.
+        When both are supplied, their host lists are combined.
+        """
+        if passthrough:
+            warnings.warn(
+                "passthrough is deprecated; use allow_placeholder_for instead",
+                DeprecationWarning,
+                stacklevel=2,
+            )
         return SecretEntry(
             env_var=env_var,
             value=value,
             allow=tuple(allow),
-            passthrough=tuple(passthrough),
+            passthrough=tuple(allow_placeholder_for) + tuple(passthrough),
             placeholder=placeholder,
             require_tls_identity=require_tls_identity,
             violation_action=violation_action,
