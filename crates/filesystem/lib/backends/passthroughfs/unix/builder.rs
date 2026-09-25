@@ -188,8 +188,13 @@ impl PassthroughFsBuilder {
 
         super::probe_strict_xattr_support(&cfg_probe, root_fd.as_raw_fd())?;
 
-        // Create the init binary file.
-        let init_file = init_binary::create_init_file()?;
+        // Create the init binary file. Mounts that do not inject the virtual
+        // init binary use an empty file and never touch the Agentd payload.
+        let init_file = if cfg_probe.inject_init {
+            init_binary::create_init_file()?
+        } else {
+            init_binary::create_empty_init_file()?
+        };
 
         // Probe openat2 / RESOLVE_BENEATH availability (Linux 5.6+).
         #[cfg(target_os = "linux")]
