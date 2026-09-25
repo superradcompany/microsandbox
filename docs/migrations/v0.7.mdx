@@ -134,7 +134,7 @@ For replacements for the removed APIs, see [configuration](/operations/configura
 
 ## Recover from a migration error
 
-If v0.7.0–v0.7.2 reports `unsupported persisted sandbox configuration`, upgrade to v0.7.3 and retry first.
+If v0.7.0–v0.7.2 reports `unsupported persisted sandbox configuration`, upgrade to v0.7.3 and retry first. A v0.7.2 database can upgrade directly; no downgrade to v0.6 is needed.
 
 A malformed saved configuration aborts the whole migration before converted rows are written. The error names the sandbox and configuration column.
 
@@ -144,9 +144,9 @@ A malformed saved configuration aborts the whole migration before converted rows
 
 Do not delete the database, edit migration history, or skip the row. If previous tools cannot read it, report the error and SDK/runtime versions. Do not share unredacted secrets.
 
-## Downgrade deliberately
+## Downgrade to an older release
 
-Use the current CLI before reinstalling older SDKs:
+Run `msb self downgrade` from the **newer CLI** before replacing it, including through Homebrew, or reinstalling older SDKs. Only the newer CLI contains the rollback steps for its migrations.
 
 ```bash
 msb self downgrade 0.6.18
@@ -156,4 +156,93 @@ msb self downgrade 0.6.18
 - Schema rollbacks and v0.6 configuration rewrites require stopped sandboxes. If the command reports active sandboxes, stop them and retry.
 - Incompatible settings are rejected before changes. For example, v0.7.0–v0.7.2 cannot preserve global secret passthrough defaults, even empty lists. Force flags do not bypass these checks.
 
-Reinstalling an older SDK alone does not reverse migrations. A database downgrade also does not make every newer snapshot or feature usable by an older release. See [downgrade options](/cli/management#msb-self).
+A database downgrade does not make every newer snapshot or feature usable by an older release. See [downgrade options](/cli/management#msb-self).
+
+### Database schema is newer than this msb binary
+
+After replacing a v0.7 binary with v0.6, even `msb list` can report:
+
+```text
+database schema is newer than this msb binary
+```
+
+Attempting downgrade from the older CLI can instead report:
+
+```text
+local database was updated by a newer msb or does not contain a valid migration prefix
+```
+
+After a binary-only downgrade, these errors indicate newer database state, not necessarily corruption.
+
+If you already uninstalled the newer CLI:
+
+1. Reinstall the release that last migrated the home, or a later compatible release, with its matching `libkrunfw`. Keep the existing `MSB_HOME`.
+2. Check `msb --version` to confirm your shell is invoking the newer binary.
+3. Follow the stopped-sandbox and backup requirements above, then run `msb self downgrade 0.6.18` from that newer binary.
+4. After the command succeeds, verify `msb list` with the target release before returning SDK applications to that version.
+
+Do not delete the catalog or edit migration history to bypass the refusal. If the restored newer CLI also rejects the catalog, report the error and the versions involved.
+
+### Snapshot groups can block downgrade
+
+Downgrading to a release without group support is refused while groups, even empty ones, or duplicate snapshot identities remain. The error begins `snapshot groups prevent downgrade`.
+
+New v0.7 captures use a [group](/sandboxes/snapshots#snapshot-groups) by default, including disk snapshots. Existing v0.6 snapshots remain ungrouped when upgrading.
+
+To proceed, export the snapshots you need, verify the backup, then remove the blocking snapshots and empty groups before retrying the downgrade.
+
+Exports preserve snapshots for later use with v0.7. They do **not** convert snapshots for v0.6.
+
+<Accordion title="Back up snapshots before downgrading">
+
+Use the newer CLI and follow the backup requirements above. This example uses one snapshot, `app:ready`.
+
+1. Export outside `MSB_HOME`, including ancestors and the image:
+
+   ```bash
+   mkdir -p "$HOME/msb-snapshot-backups"
+   msb snap export app:ready \
+     --output "$HOME/msb-snapshot-backups/app-ready.msb" \
+     --with-parents --with-image
+   ```
+
+2. Import and verify with the newer CLI in a separate home:
+
+   ```bash
+   recovery_home=$(mktemp -d)
+   MSB_HOME="$recovery_home" msb snap import \
+     "$HOME/msb-snapshot-backups/app-ready.msb" --group recovered
+   MSB_HOME="$recovery_home" msb snap verify recovered
+   ```
+
+   Keep the recovery home and archive, and test a restore before removing the original. Import into a separate home to avoid creating another group that blocks downgrade.
+
+3. After confirming the backup, remove the original snapshot:
+
+   ```bash
+   msb snap rm app:ready
+   msb snap ls --group app
+   ```
+
+   For multiple members, export each snapshot you need. Remove children before parents, selecting another head with `msb snap head app:<member>` before removing the current head. Do not force past dependency errors.
+
+4. Once the group is empty, move its remaining directory outside the snapshot store. For the default location:
+
+   ```bash
+   mv "${MSB_HOME:-$HOME/.microsandbox}/snapshots/app" \
+     "$HOME/msb-snapshot-backups/app-empty-group"
+   msb self downgrade 0.6.18
+   ```
+
+   Adjust the path for a custom snapshot location. Repeat for other groups before downgrading; ungrouped duplicate instances may also need cleanup.
+
+#### Import after returning to v0.7
+
+With a compatible v0.7 CLI installed again:
+
+```bash
+msb snap import "$HOME/msb-snapshot-backups/app-ready.msb" --group app
+msb snap ls --group app
+```
+
+</Accordion>

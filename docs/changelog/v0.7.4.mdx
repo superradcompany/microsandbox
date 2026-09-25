@@ -1,0 +1,25 @@
+---
+title: "v0.7.4"
+sidebarTitle: "v0.7.4"
+description: "More reliable secret scanning, writable macOS hard links, and typed Ruby errors."
+icon: "bolt"
+---
+
+September 25, 2026 · [GitHub tag](https://github.com/superradcompany/microsandbox/tree/v0.7.4) · [All changes](https://github.com/superradcompany/microsandbox/compare/v0.7.3...v0.7.4)
+
+## Fixes
+
+- **Secret scanning respects request locations.** Valid requests with percent or Unicode escapes in their bodies no longer fail because of an allowed header placeholder. The fix covers HTTP/1 and HTTP/2 and retains checks for forbidden placeholders. Secrets are not substituted into trailers.
+- **macOS hard links remain writable.** Removing one filename no longer prevents writes through surviving hard links. Open handles retain permitted access after the final link is removed, with host permission checks preserved.
+- **Ruby standalone builds use the correct dependency pin.** Refreshed the standalone Cargo lockfile and added a registry-pin check.
+- **Rust publication respects development dependencies.** Versioned development dependencies are published before crates that require them.
+
+## SDK changes
+
+**Clearer placeholder permissions.** Prefer `allow_placeholder_for` in Rust and Python, `allowPlaceholderFor` in TypeScript, and `AllowPlaceholderFor` in Go. The previous passthrough-named APIs remain as deprecated aliases. Policy behavior, CLI options, and stored fields are unchanged.
+
+**Typed Ruby errors.** Core failures now raise specific subclasses of `Microsandbox::Error`, with stable `code` values. Existing `rescue Microsandbox::Error` handlers continue to work. Argument validation still raises `ArgumentError` or `TypeError`.
+
+## Upgrading from v0.6
+
+Follow the [v0.7 migration guide](/migrations/v0.7). This patch adds fixes to the compatibility work shipped in v0.7.3.
