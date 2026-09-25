@@ -8,6 +8,8 @@
 #[cfg(windows)]
 use std::fmt::Write as _;
 #[cfg(unix)]
+use std::fs::OpenOptions;
+#[cfg(unix)]
 use std::os::fd::AsRawFd;
 #[cfg(unix)]
 use std::os::fd::{FromRawFd, OwnedFd};
@@ -22,7 +24,7 @@ use std::os::windows::io::AsRawHandle;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     ffi::{OsStr, OsString},
-    fs::File,
+    fs::{self, File},
     future::Future,
     io::{Seek, SeekFrom, Write as IoWrite},
     path::{Path, PathBuf},
@@ -774,12 +776,24 @@ pub async fn spawn_sandbox(
         }
     }
 
+    let startup_stderr_path = startup_pipe
+        .is_some()
+        .then(|| log_dir.join("startup.stderr.log"));
+
     // Capture stdout for attached startup JSON. Detached mode uses a
-    // dedicated startup fd so stdio can be severed from the launcher.
+    // dedicated startup fd so stdout can be severed from the launcher; stderr
+    // is written to a small startup log so callers like Docker can surface
+    // pre-handoff failures.
     #[cfg(unix)]
     if startup_pipe.is_some() {
         cmd.stdout(Stdio::null());
-        cmd.stderr(Stdio::null());
+        let stderr_path = startup_stderr_path.as_ref().expect("path set above");
+        let stderr = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(stderr_path)?;
+        cmd.stderr(Stdio::from(stderr));
     } else {
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::inherit());
@@ -921,7 +935,11 @@ pub async fn spawn_sandbox(
                 .handle_mut()
                 .terminate_failed_startup()
                 .await;
-            return Err(startup_error_with_cleanup(error, cleanup));
+            let error = startup_error_with_cleanup(error, cleanup);
+            return Err(startup_error_with_stderr(
+                error,
+                startup_stderr_path.as_deref(),
+            ));
         }
     };
 
@@ -2477,6 +2495,27 @@ pub(crate) async fn acquire_sandbox_lifecycle_guard(
     }
 }
 
+fn startup_stderr_excerpt(path: Option<&Path>) -> Option<String> {
+    const MAX_STARTUP_STDERR_BYTES: usize = 8 * 1024;
+
+    let path = path?;
+    let bytes = fs::read(path).ok()?;
+    let bytes = if bytes.len() > MAX_STARTUP_STDERR_BYTES {
+        &bytes[bytes.len() - MAX_STARTUP_STDERR_BYTES..]
+    } else {
+        &bytes
+    };
+    let stderr = String::from_utf8_lossy(bytes).trim().to_string();
+    (!stderr.is_empty()).then_some(stderr)
+}
+
+fn startup_error_with_stderr(error: MicrosandboxError, path: Option<&Path>) -> MicrosandboxError {
+    match startup_stderr_excerpt(path) {
+        Some(stderr) => MicrosandboxError::Runtime(format!("{error}; stderr: {stderr}")),
+        None => error,
+    }
+}
+
 /// Resolve bind mounts whose host source is a regular file.
 ///
 /// The runtime opens the source directly through `SingleFileFs`; this map only
@@ -3320,6 +3359,7 @@ fn sandbox_log_level_cli_flag(level: SandboxLogLevel) -> &'static str {
 mod tests {
     use std::collections::HashMap;
     use std::ffi::{OsStr, OsString};
+    use std::fs;
     #[cfg(target_os = "linux")]
     use std::num::NonZero;
     use std::path::{Path, PathBuf};
@@ -4035,6 +4075,20 @@ mod tests {
                 "SIGCHLD handler should run on the alternate signal stack"
             );
         }
+    }
+
+    #[test]
+    fn test_startup_stderr_excerpt_returns_trimmed_tail() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("startup.stderr.log");
+        let prefix = "x".repeat(9 * 1024);
+        fs::write(&path, format!("{prefix}real startup error\n")).unwrap();
+
+        let excerpt = super::startup_stderr_excerpt(Some(&path)).unwrap();
+
+        assert!(excerpt.len() <= 8 * 1024 + "real startup error".len());
+        assert!(excerpt.ends_with("real startup error"));
+        assert!(!excerpt.ends_with('\n'));
     }
 
     //----------------------------------------------------------------------------------------------

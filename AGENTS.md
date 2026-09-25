@@ -7,7 +7,8 @@ Do not apply them to other repositories or to general agent behavior outside thi
 
 - Follow these guidelines when editing code, docs, tests, examples, CI, or release files for microsandbox.
 - Prefer repository conventions over generic agent habits. When unsure, inspect nearby files and match their style.
-- Do not create branches, commit, push, tag, publish, or open pull requests unless the human explicitly asks.
+- After completing and validating requested changes, create a signed commit and push it to `main` by default unless the human explicitly says not to push or names a different destination.
+- Do not create tags, publish releases or packages, or open pull requests unless the human explicitly asks.
 - Check `git status --short --branch` before making changes. Do not overwrite or revert user work unless explicitly asked.
 
 ## Project Map
@@ -314,7 +315,8 @@ pending guest traffic can make progress without waiting for another timer.
 
 ## Branches And Pull Requests
 
-- You may make local edits while on `main`, but do not commit directly to `main`. Start from the latest `main` when creating a contribution branch.
+- Use `main` as the default commit and push destination. Push completed work to `main` first unless the human explicitly requests another branch or says not to push.
+- Create a contribution branch only when the human requests one or when repository protections require it.
 - Use short, descriptive, kebab-case branch names. Avoid personal prefixes in shared documentation unless the maintainer asks for one.
 - Before opening a PR, compare against the intended base branch and inspect the actual diff:
 

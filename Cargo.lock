@@ -4236,6 +4236,7 @@ dependencies = [
  "msb_krun",
  "nix 0.31.3",
  "rand 0.10.3",
+ "oci-spec 0.10.0",
  "rustls",
  "sea-orm",
  "serde",

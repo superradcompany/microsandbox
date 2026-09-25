@@ -106,6 +106,38 @@ async fn stdin_bytes_waits_for_slow_reader() {
     assert_eq!(actual_sha, expected_sha);
 }
 
+/// Regression test for null stdin: `cat` should receive EOF immediately and
+/// exit instead of waiting forever for more input.
+#[msb_test]
+async fn stdin_null_lets_cat_finish() {
+    let name = "stdin-null-cat";
+
+    let sandbox = Sandbox::builder(name)
+        .image("mirror.gcr.io/library/alpine")
+        .cpus(1)
+        .memory(512)
+        .replace()
+        .create()
+        .await
+        .expect("create sandbox");
+
+    let output = sandbox
+        .exec_with("cat", |exec| exec.stdin_null())
+        .await
+        .expect("run cat with null stdin");
+
+    stop_and_remove(name).await;
+
+    assert!(
+        output.status().success,
+        "cat failed: stdout=`{}` stderr=`{}`",
+        output.stdout().unwrap_or_default(),
+        output.stderr().unwrap_or_default()
+    );
+    assert_eq!(output.stdout().unwrap_or_default(), "");
+    assert_eq!(output.stderr().unwrap_or_default(), "");
+}
+
 /// Streaming test: multiple sequential `ExecSink::write` calls, each
 /// exceeding typical pipe capacity. Verifies that repeated invocations
 /// of `write_stdin` (rather than a single bytes payload) all reach the
