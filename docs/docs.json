@@ -339,10 +339,24 @@
       },
       {
         "tab": "Enterprise",
-        "pages": [
-          "enterprise/managed-configuration",
-          "enterprise/corporate-networking",
-          "enterprise/offline-deployment"
+        "groups": [
+          {
+            "group": "Enterprise",
+            "pages": ["enterprise"]
+          },
+          {
+            "group": "Employee devices",
+            "pages": [
+              "enterprise/prepare-environment",
+              "enterprise/corporate-networking",
+              "enterprise/managed-configuration",
+              "enterprise/deploy-and-verify"
+            ]
+          },
+          {
+            "group": "Talk to us",
+            "pages": ["enterprise/contact"]
+          }
         ]
       },
       {
@@ -360,12 +374,30 @@
         "tab": "Changelog",
         "groups": [
           {
+            "group": "Migration guides",
+            "icon": "arrow-right-arrow-left",
+            "pages": [
+              "migrations/v0.7"
+            ]
+          },
+          {
             "group": "Releases",
+            "icon": "tag",
+            "pages": [
+              "changelog/v0.7.4",
+              "changelog/v0.7.3",
+              "changelog/v0.7.2",
+              "changelog/v0.7.1",
+              "changelog/v0.7.0"
+            ]
+          },
+          {
+            "group": "Past updates",
             "icon": "clock-rotate-left",
             "pages": [
               {
                 "group": "September 2026",
-                "expanded": true,
+                "expanded": false,
                 "pages": [
                   "changelog/2026-09-25",
                   "changelog/2026-09-11",
@@ -424,7 +456,8 @@
                   "changelog/2026-04-03"
                 ]
               }
-            ]
+            ],
+            "expanded": false
           }
         ]
       }
@@ -494,6 +527,10 @@
     {
       "source": "/cloud/compatibility",
       "destination": "/cloud/overview#compatibility"
+    },
+    {
+      "source": "/enterprise/offline-deployment",
+      "destination": "/enterprise/prepare-environment#prepare-offline-devices"
     }
   ],
   "integrations": {

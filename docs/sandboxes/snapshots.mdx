@@ -878,7 +878,7 @@ msb snap rm baseline:ready
 
 Since v0.7, installed snapshot members are immutable. Creating another snapshot cannot overwrite an existing member. In SDK calls, omit `force` or set it to `false` (`False` in Python): enabling it fails even when the requested name does not exist. Use a unique or generated member name for each capture. To reuse a name, explicitly remove the existing member first; removal still checks for dependent snapshots.
 
-See the [v0.6 snapshot upgrade example](/changelog/2026-09-25#upgrading-snapshot-code-from-v06).
+See the [v0.6 snapshot upgrade example](/migrations/v0.7#update-snapshot-code).
 
 Locally, `group` selects its head; `group:member` selects an exact snapshot:
 

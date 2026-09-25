@@ -1,0 +1,38 @@
+---
+title: "v0.7.1"
+sidebarTitle: "v0.7.1"
+description: "Choose how snapshots save pending disk writes, with fixes for upgrades and Node package installation."
+icon: "bolt"
+---
+
+September 17, 2026 · [GitHub release](https://github.com/superradcompany/microsandbox/releases/tag/v0.7.1) · [All changes](https://github.com/superradcompany/microsandbox/compare/v0.7.0...v0.7.1)
+
+## Control snapshot disk writes
+
+The new `--guest-flush` option controls whether pending filesystem writes reach disk before snapshots, branches, or pause. All four SDKs support it.
+
+- **`auto` (default):** Flushes running disk-only snapshots. Full snapshots, branches, and pause retain pending writes in memory without an extra flush.
+- **`required`:** Requires a flush, useful when restoring a full snapshot's disks without its memory.
+- **`skip`:** Skips the optional flush. Disk-only snapshots may miss recent writes and need filesystem recovery.
+
+```bash
+msb snapshot create full --from-sandbox worker --full --guest-flush required
+```
+
+This covers root and captured owned disks. Applications must still save their own buffered data. See [Guest flushing](/sandboxes/snapshots#guest-flushing).
+
+## Fixes
+
+- Fixed sandbox creation after upgrading from v0.6.18 to v0.7.0.
+- Fixed older runtime launch requests; unsupported settings are rejected before replacing a sandbox.
+- Included missing Node native type declarations.
+- Made npm publication resumable, ordered dependencies correctly, and added SDK provenance information.
+
+## Before upgrading
+
+Moving from v0.6? Follow the [v0.7 migration guide](/migrations/v0.7), targeting v0.7.3 or a later compatible patch release.
+
+- Owned disks no longer trigger automatic flushing for full snapshots, branches, or pause. Use `required` if you depend on it.
+- Paused sandboxes need a prior flush when capture requires one. `required` fails for stopped or crashed sandboxes.
+- Restart older runtimes before live disk capture. Go needs a policy-aware native library; Rust callers constructing `SnapshotSpec` must add `guest_flush`.
+- Catalog upgrades still require stopping running sandboxes in this version. [v0.7.2](/changelog/v0.7.2) removes that restriction.
