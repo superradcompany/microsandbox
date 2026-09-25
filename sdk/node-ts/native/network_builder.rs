@@ -257,11 +257,11 @@ impl JsNetworkBuilder {
 
     /// Set the accept-queue depth for published TCP port listeners, 1..=2147483647. Defaults to
     /// 1024; the host kernel clamps it to its own somaxconn.
-    #[napi(js_name = "tcpListenBacklog")]
-    pub fn tcp_listen_backlog(&mut self, backlog: f64) -> Result<&Self> {
-        let backlog = listen_backlog(backlog).map_err(napi::Error::from_reason)?;
+    #[napi(js_name = "tcpAcceptQueueSize")]
+    pub fn tcp_accept_queue_size(&mut self, size: f64) -> Result<&Self> {
+        let size = accept_queue_size(size).map_err(napi::Error::from_reason)?;
         let prev = self.take_inner();
-        self.inner = Some(prev.tcp_listen_backlog(backlog));
+        self.inner = Some(prev.tcp_accept_queue_size(size));
         Ok(self)
     }
 
@@ -381,12 +381,12 @@ fn parse_bind_addr(bind: &str) -> Result<IpAddr> {
 /// Accept only a whole JS number in `1..=i32::MAX`. N-API's `u32` conversion wraps and truncates,
 /// so `2 ** 32 + 1`, `-(2 ** 32) + 1` and `1.5` would otherwise all silently become 1.
 /// Kept free of N-API symbols so standalone Rust tests can call it.
-pub(crate) fn listen_backlog(value: f64) -> std::result::Result<u32, String> {
+pub(crate) fn accept_queue_size(value: f64) -> std::result::Result<u32, String> {
     if value.fract() == 0.0 && (1.0..=f64::from(i32::MAX)).contains(&value) {
         Ok(value as u32)
     } else {
         Err(format!(
-            "tcpListenBacklog must be an integer from 1 to {}, got {value}",
+            "tcpAcceptQueueSize must be an integer from 1 to {}, got {value}",
             i32::MAX
         ))
     }

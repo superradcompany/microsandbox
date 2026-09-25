@@ -37,12 +37,12 @@ pub enum ConnectionLimit {
 /// not an error; it simply has no further effect until that ceiling is raised.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "u32", into = "u32")]
-pub struct ListenBacklog(NonZeroU32);
+pub struct TcpAcceptQueueSize(NonZeroU32);
 
-/// A requested listen backlog outside `1..=i32::MAX`.
+/// A requested TCP accept queue size outside `1..=i32::MAX`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-#[error("TCP listen backlog must be between 1 and {max}, got {value}", max = ListenBacklog::MAX)]
-pub struct InvalidListenBacklog {
+#[error("TCP accept queue size must be between 1 and {max}, got {value}", max = TcpAcceptQueueSize::MAX)]
+pub struct InvalidTcpAcceptQueueSize {
     /// The rejected value.
     pub value: u32,
 }
@@ -97,10 +97,10 @@ pub struct NetworkConfig {
     #[serde(default)]
     pub max_udp_connections: Option<ConnectionLimit>,
 
-    /// Accept-queue depth for published TCP port listeners. `None` uses [`ListenBacklog::DEFAULT`].
+    /// Accept-queue depth for published TCP port listeners. `None` uses [`TcpAcceptQueueSize::DEFAULT`].
     // Omitted when unset so launches that do not ask for it stay byte-identical for older runtimes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tcp_listen_backlog: Option<ListenBacklog>,
+    pub tcp_accept_queue_size: Option<TcpAcceptQueueSize>,
 
     /// Egress and ingress rate limits. `None` means unlimited in both directions.
     #[serde(default)]
@@ -232,8 +232,8 @@ impl ConnectionLimit {
     }
 }
 
-impl ListenBacklog {
-    /// Backlog used when none is configured.
+impl TcpAcceptQueueSize {
+    /// Size used when none is configured.
     ///
     /// Deeper than the 128 that `TcpListener::bind` would inherit from mio, so the queue can
     /// absorb a burst of parallel connections -- such as a reverse proxy fanning out one page
@@ -243,7 +243,7 @@ impl ListenBacklog {
     /// Largest accepted value; `listen(2)` takes a signed `int`.
     pub const MAX: u32 = i32::MAX as u32;
 
-    /// Return the requested backlog.
+    /// Return the requested size.
     pub const fn get(self) -> u32 {
         self.0.get()
     }
@@ -318,7 +318,7 @@ impl Default for NetworkConfig {
             secrets: SecretsConfig::default(),
             max_tcp_connections: None,
             max_udp_connections: None,
-            tcp_listen_backlog: None,
+            tcp_accept_queue_size: None,
             rate_limiter: None,
             trust_host_cas: false,
             outbound_proxy: None,
@@ -326,26 +326,26 @@ impl Default for NetworkConfig {
     }
 }
 
-impl Default for ListenBacklog {
+impl Default for TcpAcceptQueueSize {
     fn default() -> Self {
         Self::DEFAULT
     }
 }
 
-impl TryFrom<u32> for ListenBacklog {
-    type Error = InvalidListenBacklog;
+impl TryFrom<u32> for TcpAcceptQueueSize {
+    type Error = InvalidTcpAcceptQueueSize;
 
     fn try_from(value: u32) -> Result<Self, Self::Error> {
         match NonZeroU32::new(value) {
-            Some(backlog) if value <= Self::MAX => Ok(Self(backlog)),
-            _ => Err(InvalidListenBacklog { value }),
+            Some(size) if value <= Self::MAX => Ok(Self(size)),
+            _ => Err(InvalidTcpAcceptQueueSize { value }),
         }
     }
 }
 
-impl From<ListenBacklog> for u32 {
-    fn from(backlog: ListenBacklog) -> Self {
-        backlog.get()
+impl From<TcpAcceptQueueSize> for u32 {
+    fn from(size: TcpAcceptQueueSize) -> Self {
+        size.get()
     }
 }
 
@@ -683,56 +683,56 @@ mod connection_limit_tests {
     }
 
     #[test]
-    fn listen_backlog_accepts_exactly_the_positive_c_int_range() {
-        for value in [1, 128, 1024, ListenBacklog::MAX] {
-            assert_eq!(ListenBacklog::try_from(value).unwrap().get(), value);
+    fn accept_queue_size_accepts_exactly_the_positive_c_int_range() {
+        for value in [1, 128, 1024, TcpAcceptQueueSize::MAX] {
+            assert_eq!(TcpAcceptQueueSize::try_from(value).unwrap().get(), value);
         }
-        for value in [0, ListenBacklog::MAX + 1, u32::MAX] {
+        for value in [0, TcpAcceptQueueSize::MAX + 1, u32::MAX] {
             assert_eq!(
-                ListenBacklog::try_from(value),
-                Err(InvalidListenBacklog { value })
+                TcpAcceptQueueSize::try_from(value),
+                Err(InvalidTcpAcceptQueueSize { value })
             );
         }
-        assert_eq!(ListenBacklog::default(), ListenBacklog::DEFAULT);
-        assert_eq!(ListenBacklog::DEFAULT.get(), 1024);
+        assert_eq!(TcpAcceptQueueSize::default(), TcpAcceptQueueSize::DEFAULT);
+        assert_eq!(TcpAcceptQueueSize::DEFAULT.get(), 1024);
     }
 
     #[test]
-    fn wire_tcp_listen_backlog_is_omitted_when_unset_and_validated_when_set() {
+    fn wire_tcp_accept_queue_size_is_omitted_when_unset_and_validated_when_set() {
         // Unset must not reach the wire at all: older runtimes then see the payload they know.
         let unset = serde_json::to_value(NetworkConfig::default()).unwrap();
-        assert!(unset.get("tcp_listen_backlog").is_none());
+        assert!(unset.get("tcp_accept_queue_size").is_none());
         let spec: microsandbox_types::NetworkSpec = serde_json::from_value(unset).unwrap();
-        assert_eq!(spec.tcp_listen_backlog, None);
+        assert_eq!(spec.tcp_accept_queue_size, None);
         assert!(
             serde_json::to_value(&spec)
                 .unwrap()
-                .get("tcp_listen_backlog")
+                .get("tcp_accept_queue_size")
                 .is_none()
         );
 
         let config: NetworkConfig =
-            serde_json::from_value(serde_json::json!({"tcp_listen_backlog": 4096})).unwrap();
+            serde_json::from_value(serde_json::json!({"tcp_accept_queue_size": 4096})).unwrap();
         assert_eq!(
-            config.tcp_listen_backlog.map(ListenBacklog::get),
+            config.tcp_accept_queue_size.map(TcpAcceptQueueSize::get),
             Some(4096)
         );
         let spec: microsandbox_types::NetworkSpec =
             serde_json::from_value(serde_json::to_value(&config).unwrap()).unwrap();
-        assert_eq!(spec.tcp_listen_backlog, Some(4096));
+        assert_eq!(spec.tcp_accept_queue_size, Some(4096));
         let back: NetworkConfig =
             serde_json::from_value(serde_json::to_value(spec).unwrap()).unwrap();
-        assert_eq!(back.tcp_listen_backlog, config.tcp_listen_backlog);
+        assert_eq!(back.tcp_accept_queue_size, config.tcp_accept_queue_size);
 
         // The wire type is a plain integer, so the engine type is what refuses a bad value.
-        for invalid in [0, ListenBacklog::MAX + 1] {
-            let wire = serde_json::json!({"tcp_listen_backlog": invalid});
+        for invalid in [0, TcpAcceptQueueSize::MAX + 1] {
+            let wire = serde_json::json!({"tcp_accept_queue_size": invalid});
             let spec: microsandbox_types::NetworkSpec =
                 serde_json::from_value(wire.clone()).unwrap();
-            assert_eq!(spec.tcp_listen_backlog, Some(invalid));
+            assert_eq!(spec.tcp_accept_queue_size, Some(invalid));
             let error = serde_json::from_value::<NetworkConfig>(wire).unwrap_err();
             assert!(
-                error.to_string().contains("TCP listen backlog"),
+                error.to_string().contains("TCP accept queue size"),
                 "{invalid}: {error}"
             );
         }

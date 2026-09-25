@@ -368,7 +368,7 @@ impl SmoltcpNetwork {
         let strict = config.strict;
         let max_tcp_connections = config.max_tcp_connections.and_then(ConnectionLimit::cap);
         let max_udp_connections = config.max_udp_connections;
-        let tcp_listen_backlog = config.tcp_listen_backlog.unwrap_or_default();
+        let tcp_accept_queue_size = config.tcp_accept_queue_size.unwrap_or_default();
         let secrets = self.secrets.clone();
         let activation_gate = self.activation_gate.take();
         let outbound_proxy = self.config.outbound_proxy().cloned().map(Arc::new);
@@ -391,7 +391,7 @@ impl SmoltcpNetwork {
                         strict,
                         max_tcp_connections,
                         max_udp_connections,
-                        tcp_listen_backlog,
+                        tcp_accept_queue_size,
                         tokio_handle,
                         secrets,
                         outbound_proxy,

@@ -853,15 +853,15 @@ fn strict(self, enabled: bool) -> Self
 
 Require hostname-based policy allows to use an inspectable request authority. Default: `true`. Plain HTTP exposes that authority in `Host`; HTTPS only exposes it when TLS interception is enabled and not bypassed. Without that visibility, strict mode denies HTTPS that would otherwise be allowed only by a hostname rule.
 
-#### <span className="msb-recv">network.</span><span className="msb-hn">tcp_listen_backlog()</span>
+#### <span className="msb-recv">network.</span><span className="msb-hn">tcp_accept_queue_size()</span>
 
 ```rust
-fn tcp_listen_backlog(self, backlog: u32) -> Self
+fn tcp_accept_queue_size(self, size: u32) -> Self
 ```
 
-Set how many not-yet-accepted connections each published TCP port's host listener queues. Default: `1024`. Accepts `1..=i32::MAX`; other values record [`BuildError::InvalidTcpListenBacklog`](#builderror). Connections arriving while the queue is full never reach the sandbox, so raise this when a burst of parallel connections — such as a reverse proxy fanning out one page load — exceeds it. The host kernel caps the effective depth at `net.core.somaxconn` on Linux (4,096 by default) or `kern.ipc.somaxconn` on macOS (128 by default). Runtimes that predate the setting are refused with an upgrade-required error rather than silently ignoring it.
+Set how many not-yet-accepted connections each published TCP port's host listener queues. Default: `1024`. Accepts `1..=i32::MAX`; other values record [`BuildError::InvalidTcpAcceptQueueSize`](#builderror). Connections arriving while the queue is full never reach the sandbox, so raise this when a burst of parallel connections — such as a reverse proxy fanning out one page load — exceeds it. The host kernel caps the effective depth at `net.core.somaxconn` on Linux (4,096 by default) or `kern.ipc.somaxconn` on macOS (128 by default). Runtimes that predate the setting are refused with an upgrade-required error rather than silently ignoring it.
 
-`RestoreBuilder`, `BranchBuilder`, and `BranchManyBuilder` expose the same `tcp_listen_backlog()` for the listeners a child publishes.
+`RestoreBuilder`, `BranchBuilder`, and `BranchManyBuilder` expose the same `tcp_accept_queue_size()` for the listeners a child publishes.
 
 #### <span className="msb-recv">network.</span><span className="msb-hn">max_udp_connections()</span>
 
@@ -1537,7 +1537,7 @@ Errors surfaced by the builders' `build()` methods. The same enum covers [`Netwo
 | `InvalidCidr { rule_index, raw }` | `.cidr(&str)` got an unparseable value |
 | `InvalidIpv4Pool { raw }` | `ipv4_pool()` got a pool that can't hold a `/30` sandbox subnet |
 | `InvalidIpv6Pool { raw }` | `ipv6_pool()` got a pool that can't hold a `/64` sandbox prefix |
-| `InvalidTcpListenBacklog { source }` | `tcp_listen_backlog()` got a value outside `1..=i32::MAX` |
+| `InvalidTcpAcceptQueueSize { source }` | `tcp_accept_queue_size()` got a value outside `1..=i32::MAX` |
 | `InvalidOutboundProxy { reason }` | [`SandboxBuilder::proxy()`](/sdk/rust/proxies#proxy) got an invalid proxy configuration |
 | `InvalidDomain { rule_index, raw, source }` | `.domain` / `.domain_suffix` got a value that failed `DomainName` parse |
 | `InvalidPortRange { rule_index, lo, hi }` | `.port_range(lo, hi)` had `lo > hi` |

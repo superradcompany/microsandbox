@@ -908,19 +908,19 @@ func TestFFIWireShape_NetworkConnectionLimits(t *testing.T) {
 	}
 }
 
-func TestFFIWireShape_TCPListenBacklog(t *testing.T) {
+func TestFFIWireShape_TCPAcceptQueueSize(t *testing.T) {
 	omitted := marshalCreateOptions(t, WithNetwork(&NetworkConfig{}))["network"].(map[string]any)
-	if value, present := omitted["tcp_listen_backlog"]; present {
-		t.Fatalf("unset backlog reached the wire as %#v", value)
+	if value, present := omitted["tcp_accept_queue_size"]; present {
+		t.Fatalf("unset accept queue size reached the wire as %#v", value)
 	}
 
-	backlog := uint32(4096)
+	size := uint32(4096)
 	got := marshalCreateOptions(t, WithNetwork(&NetworkConfig{
-		Ports:            map[uint16]uint16{8080: 80},
-		TCPListenBacklog: &backlog,
+		Ports:              map[uint16]uint16{8080: 80},
+		TCPAcceptQueueSize: &size,
 	}))["network"].(map[string]any)
-	if got["tcp_listen_backlog"] != float64(4096) {
-		t.Fatalf("tcp_listen_backlog = %#v, want 4096", got["tcp_listen_backlog"])
+	if got["tcp_accept_queue_size"] != float64(4096) {
+		t.Fatalf("tcp_accept_queue_size = %#v, want 4096", got["tcp_accept_queue_size"])
 	}
 }
 

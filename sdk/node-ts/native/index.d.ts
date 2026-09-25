@@ -521,7 +521,7 @@ export declare class NetworkBuilder {
    * Set the accept-queue depth for published TCP port listeners, 1..=2147483647. Defaults to
    * 1024; the host kernel clamps it to its own somaxconn.
    */
-  tcpListenBacklog(backlog: number): this
+  tcpAcceptQueueSize(size: number): this
   /** Require hostname-based policy allows to use inspectable application authority. */
   strict(enabled: boolean): this
   /** Set the IPv4 pool used for per-sandbox /30 guest subnets. */
@@ -795,7 +795,7 @@ export declare class RestoreBuilder {
   /** Publish a UDP port from host -> guest on a specific host bind address. */
   portUdpBind(bind: string, hostPort: number, guestPort: number): this
   /** Set the accept-queue depth for the child's published TCP listeners, 1..=2147483647. */
-  tcpListenBacklog(backlog: number): this
+  tcpAcceptQueueSize(size: number): this
   /** Expose a host Unix stream socket or local Windows named pipe on a guest-to-host vsock port. */
   vsock(hostPath: string, port: number): this
   /** Expose a host Unix datagram socket on a guest-to-host vsock port. */

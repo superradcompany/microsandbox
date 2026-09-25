@@ -105,11 +105,11 @@ def test_restore_rejects_negative_connection_limits(method, option):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("method", ["restore", "restore_with_progress"])
-async def test_restore_listen_backlog_reaches_artifact_validation(tmp_path, method):
+async def test_restore_accept_queue_size_reaches_artifact_validation(tmp_path, method):
     # A missing artifact proves the option is accepted and reaches restore.
     with pytest.raises(FileNotFoundError):
         result = getattr(Sandbox, method)(
-            tmp_path / "missing", name="restore-backlog", ports={8080: 80}, tcp_listen_backlog=4096,
+            tmp_path / "missing", name="restore-queue", ports={8080: 80}, tcp_accept_queue_size=4096,
         )
         if method == "restore":
             await result
@@ -121,10 +121,10 @@ async def test_restore_listen_backlog_reaches_artifact_validation(tmp_path, meth
 @pytest.mark.parametrize(("value", "error"), [
     (-1, OverflowError), (4_294_967_297, OverflowError), (1.5, TypeError),
 ])
-def test_restore_rejects_listen_backlog_it_cannot_represent(method, value, error):
-    # Never wrapped or truncated into a different backlog.
+def test_restore_rejects_accept_queue_size_it_cannot_represent(method, value, error):
+    # Never wrapped or truncated into a different size.
     with pytest.raises(error):
-        getattr(Sandbox, method)("missing", name="restore-backlog", tcp_listen_backlog=value)
+        getattr(Sandbox, method)("missing", name="restore-queue", tcp_accept_queue_size=value)
 
 
 def test_restore_policy_rejects_broad_network_configuration():

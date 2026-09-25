@@ -293,7 +293,7 @@ export interface NapiRestoreBuilderSetters {
   portUdp(host: number, guest: number): this;
   portUdpBind(bind: string, host: number, guest: number): this;
   /** 1..=2147483647; omission keeps the default, 1024. */
-  tcpListenBacklog(backlog: number): this;
+  tcpAcceptQueueSize(size: number): this;
   vsock(path: string, port: number): this;
   vsockDgram(path: string, port: number): this;
 }
@@ -1107,7 +1107,7 @@ export interface NapiNetworkBuilder {
   maxConnections(max: number): this;
   maxTcpConnections(max: number): this;
   maxUdpConnections(max: number): this;
-  tcpListenBacklog(backlog: number): this;
+  tcpAcceptQueueSize(size: number): this;
   strict(enabled: boolean): this;
   ipv4Pool(pool: string): this;
   ipv6Pool(pool: string): this;

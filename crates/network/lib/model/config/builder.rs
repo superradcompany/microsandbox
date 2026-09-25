@@ -15,8 +15,8 @@ use microsandbox_utils::size::Bytes;
 use zeroize::Zeroizing;
 
 use crate::config::{
-    ConnectionLimit, DnsConfig, InterfaceOverrides, ListenBacklog, NetworkConfig, PortProtocol,
-    PublishedPort,
+    ConnectionLimit, DnsConfig, InterfaceOverrides, NetworkConfig, PortProtocol, PublishedPort,
+    TcpAcceptQueueSize,
 };
 use crate::dns::Nameserver;
 use crate::policy::{BuildError, NetworkPolicy};
@@ -291,11 +291,11 @@ impl NetworkBuilder {
     /// Set the accept-queue depth for published TCP port listeners. Defaults to 1024.
     ///
     /// Valid values are `1..=i32::MAX`; anything else records
-    /// [`BuildError::InvalidTcpListenBacklog`]. The host kernel clamps the request to its own
+    /// [`BuildError::InvalidTcpAcceptQueueSize`]. The host kernel clamps the request to its own
     /// ceiling (`net.core.somaxconn` on Linux, `kern.ipc.somaxconn` on macOS).
-    pub fn tcp_listen_backlog(mut self, backlog: u32) -> Self {
-        match ListenBacklog::try_from(backlog) {
-            Ok(backlog) => self.config.tcp_listen_backlog = Some(backlog),
+    pub fn tcp_accept_queue_size(mut self, size: u32) -> Self {
+        match TcpAcceptQueueSize::try_from(size) {
+            Ok(size) => self.config.tcp_accept_queue_size = Some(size),
             Err(err) => self.errors.push(err.into()),
         }
         self
@@ -951,29 +951,29 @@ mod tests {
     }
 
     #[test]
-    fn tcp_listen_backlog_is_unset_by_default_and_rejects_out_of_range_values() {
+    fn tcp_accept_queue_size_is_unset_by_default_and_rejects_out_of_range_values() {
         assert_eq!(
-            NetworkBuilder::new().build().unwrap().tcp_listen_backlog,
+            NetworkBuilder::new().build().unwrap().tcp_accept_queue_size,
             None
         );
         let config = NetworkBuilder::new()
-            .tcp_listen_backlog(4096)
+            .tcp_accept_queue_size(4096)
             .build()
             .unwrap();
         assert_eq!(
-            config.tcp_listen_backlog.map(ListenBacklog::get),
+            config.tcp_accept_queue_size.map(TcpAcceptQueueSize::get),
             Some(4096)
         );
 
-        for invalid in [0, ListenBacklog::MAX + 1] {
+        for invalid in [0, TcpAcceptQueueSize::MAX + 1] {
             let err = NetworkBuilder::new()
-                .tcp_listen_backlog(invalid)
+                .tcp_accept_queue_size(invalid)
                 .build()
                 .unwrap_err();
             assert!(
                 matches!(
                     err,
-                    BuildError::InvalidTcpListenBacklog { source } if source.value == invalid
+                    BuildError::InvalidTcpAcceptQueueSize { source } if source.value == invalid
                 ),
                 "{invalid}: {err}"
             );

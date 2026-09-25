@@ -84,8 +84,8 @@ impl LaunchContract {
         msb_path: &Path,
         network: &microsandbox_network::config::NetworkConfig,
     ) -> MicrosandboxResult<()> {
-        if self.machine && network.tcp_listen_backlog.is_some() {
-            require_tcp_listen_backlog(msb_path).await?;
+        if self.machine && network.tcp_accept_queue_size.is_some() {
+            require_tcp_accept_queue_size(msb_path).await?;
         }
         Ok(())
     }
@@ -107,8 +107,8 @@ impl LaunchContract {
         if network.max_udp_connections.is_some() {
             return unsupported("UDP connection limits");
         }
-        if network.tcp_listen_backlog.is_some() {
-            return unsupported("TCP listen backlog");
+        if network.tcp_accept_queue_size.is_some() {
+            return unsupported("TCP accept queue size");
         }
         if let Some(limit) = network.max_tcp_connections {
             let Some(cap) = limit.cap() else {
@@ -257,11 +257,11 @@ impl LaunchContract {
             } else {
                 &mut value["network"]
             };
-            // Explicit UDP and backlog values were rejected above; omit the new optional
+            // Explicit UDP limits and accept queue sizes were rejected above; omit the new optional
             // keys entirely when encoding a previous producer's network object.
             if let Some(fields) = network.as_object_mut() {
                 fields.remove("max_udp_connections");
-                fields.remove("tcp_listen_backlog");
+                fields.remove("tcp_accept_queue_size");
             }
             // Pin the previous default at the boundary; omission on the current contract
             // intentionally has a different meaning and must not broaden an old launch.
@@ -571,14 +571,14 @@ pub(crate) async fn require_restore_backing(path: &Path) -> MicrosandboxResult<(
     .await
 }
 
-/// Probe only when a backlog is requested. `machine` runtimes that predate the field decode
+/// Probe only when an accept queue size is requested. `machine` runtimes that predate the field decode
 /// network JSON leniently and would drop it, leaving published ports on mio's 128.
 #[cfg(feature = "net")]
-async fn require_tcp_listen_backlog(path: &Path) -> MicrosandboxResult<()> {
+async fn require_tcp_accept_queue_size(path: &Path) -> MicrosandboxResult<()> {
     require_capability(
         path,
-        |capabilities| capabilities.tcp_listen_backlog,
-        "a configurable TCP listen backlog",
+        |capabilities| capabilities.tcp_accept_queue_size,
+        "a configurable TCP accept queue size",
     )
     .await
 }
@@ -741,39 +741,43 @@ mod tests {
 
     #[cfg(all(unix, feature = "net"))]
     #[tokio::test]
-    async fn tcp_listen_backlog_probe_refuses_machine_runtimes_that_would_drop_it() {
+    async fn tcp_accept_queue_size_probe_refuses_machine_runtimes_that_would_drop_it() {
         let dir = tempfile::tempdir().unwrap();
-        // v0.7.x: current `machine` entry point, but no backlog support to advertise.
+        // v0.7.x: current `machine` entry point, but no accept queue size support to advertise.
         let old = script(
             dir.path(),
             "old-capabilities",
             "printf '%s' '{\"protocols\":[2,1],\"required_restore_backing\":true}'",
         );
-        let error = require_tcp_listen_backlog(&old)
+        let error = require_tcp_accept_queue_size(&old)
             .await
             .unwrap_err()
             .to_string();
         assert!(error.contains("upgrade msb"));
-        assert!(error.contains("TCP listen backlog"));
+        assert!(error.contains("TCP accept queue size"));
         let new = script(
             dir.path(),
             "new-capabilities",
-            "printf '%s' '{\"protocols\":[2,1],\"required_restore_backing\":true,\"tcp_listen_backlog\":true}'",
+            "printf '%s' '{\"protocols\":[2,1],\"required_restore_backing\":true,\"tcp_accept_queue_size\":true}'",
         );
-        require_tcp_listen_backlog(&new).await.unwrap();
+        require_tcp_accept_queue_size(&new).await.unwrap();
         let protocol_1_only = script(
             dir.path(),
             "protocol-1-capabilities",
-            "printf '%s' '{\"protocols\":[1],\"tcp_listen_backlog\":true}'",
+            "printf '%s' '{\"protocols\":[1],\"tcp_accept_queue_size\":true}'",
         );
-        assert!(require_tcp_listen_backlog(&protocol_1_only).await.is_err());
+        assert!(
+            require_tcp_accept_queue_size(&protocol_1_only)
+                .await
+                .is_err()
+        );
     }
 
     /// The check create runs before `replace` touches its target: refuse a v0.7.x-shaped
     /// runtime, and do not probe at all when the key is unset or the contract predates `machine`.
     #[cfg(all(unix, feature = "net"))]
     #[tokio::test]
-    async fn network_capabilities_probe_only_machine_runtimes_asked_for_a_backlog() {
+    async fn network_capabilities_probe_only_machine_runtimes_asked_for_an_accept_queue_size() {
         use microsandbox_network::config::NetworkConfig;
 
         let dir = tempfile::tempdir().unwrap();
@@ -793,7 +797,7 @@ mod tests {
             machine: false,
         };
         let tuned: NetworkConfig =
-            serde_json::from_value(json!({ "tcp_listen_backlog": 4096 })).unwrap();
+            serde_json::from_value(json!({ "tcp_accept_queue_size": 4096 })).unwrap();
         let unset = NetworkConfig::default();
 
         let error = machine
@@ -801,7 +805,7 @@ mod tests {
             .await
             .unwrap_err()
             .to_string();
-        assert!(error.contains("TCP listen backlog"), "{error}");
+        assert!(error.contains("TCP accept queue size"), "{error}");
         machine
             .require_network_capabilities(&absent, &unset)
             .await
@@ -1202,12 +1206,12 @@ mod encoding {
 
     #[cfg(feature = "net")]
     #[test]
-    fn tcp_listen_backlog_requires_current_launch_contract() {
+    fn tcp_accept_queue_size_requires_current_launch_contract() {
         use microsandbox_network::config::{EnvNetworkSecretResolver, NetworkConfig};
 
         for requested in [None, Some(1), Some(4096)] {
             let network: NetworkConfig =
-                serde_json::from_value(json!({ "tcp_listen_backlog": requested })).unwrap();
+                serde_json::from_value(json!({ "tcp_accept_queue_size": requested })).unwrap();
             let launch = LaunchConfig {
                 network: Some(network.resolve(&EnvNetworkSecretResolver).unwrap()),
                 ..Default::default()
@@ -1220,11 +1224,11 @@ mod encoding {
             .unwrap();
             match requested {
                 Some(value) => {
-                    assert_eq!(current["network"]["config"]["tcp_listen_backlog"], value)
+                    assert_eq!(current["network"]["config"]["tcp_accept_queue_size"], value)
                 }
                 None => assert!(
                     current["network"]["config"]
-                        .get("tcp_listen_backlog")
+                        .get("tcp_accept_queue_size")
                         .is_none()
                 ),
             }
@@ -1239,7 +1243,7 @@ mod encoding {
                         result
                             .unwrap_err()
                             .to_string()
-                            .contains("TCP listen backlog")
+                            .contains("TCP accept queue size")
                     );
                 } else {
                     let value = result.unwrap();
@@ -1248,7 +1252,7 @@ mod encoding {
                     } else {
                         &value["network"]
                     };
-                    assert!(network.get("tcp_listen_backlog").is_none());
+                    assert!(network.get("tcp_accept_queue_size").is_none());
                 }
             }
         }

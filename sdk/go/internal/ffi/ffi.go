@@ -1818,7 +1818,7 @@ type NetworkOptions struct {
 	Strict                *bool                      `json:"strict,omitempty"`
 	Ports                 map[uint16]uint16          `json:"ports,omitempty"`
 	PortBindings          []PortBindingOptions       `json:"port_bindings,omitempty"`
-	TCPListenBacklog      *uint32                    `json:"tcp_listen_backlog,omitempty"`
+	TCPAcceptQueueSize    *uint32                    `json:"tcp_accept_queue_size,omitempty"`
 	IPv4Pool              string                     `json:"ipv4_pool,omitempty"`
 	IPv6Pool              string                     `json:"ipv6_pool,omitempty"`
 	MaxConnections        *uint                      `json:"max_connections,omitempty"`

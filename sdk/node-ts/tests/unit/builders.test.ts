@@ -986,22 +986,22 @@ describe("TCP connection limit aliases", () => {
   });
 });
 
-describe("TCP listen backlog", () => {
+describe("TCP accept queue size", () => {
   it("is absent unless set and survives into the sandbox configuration", async () => {
-    expect(new NetworkBuilder().build().tcpListenBacklog).toBeUndefined();
-    expect(new NetworkBuilder().tcpListenBacklog(4096).build().tcpListenBacklog).toBe(4096);
+    expect(new NetworkBuilder().build().tcpAcceptQueueSize).toBeUndefined();
+    expect(new NetworkBuilder().tcpAcceptQueueSize(4096).build().tcpAcceptQueueSize).toBe(4096);
     const config = await Sandbox.builder("x").image("alpine").port(8080, 80)
-      .network(n => n.tcpListenBacklog(4096)).build();
-    expect(config.network.tcpListenBacklog).toBe(4096);
+      .network(n => n.tcpAcceptQueueSize(4096)).build();
+    expect(config.network.tcpAcceptQueueSize).toBe(4096);
   });
 
   it("rejects values instead of wrapping or truncating them", () => {
     // N-API's u32 conversion would turn the last three into 1.
     for (const invalid of [0, 2_147_483_648, 4_294_967_297, -4_294_967_295, 1.5]) {
-      expect(() => new NetworkBuilder().tcpListenBacklog(invalid))
-        .toThrow(/tcpListenBacklog must be an integer/);
-      expect(() => Sandbox.restore("saved").tcpListenBacklog(invalid))
-        .toThrow(/tcpListenBacklog must be an integer/);
+      expect(() => new NetworkBuilder().tcpAcceptQueueSize(invalid))
+        .toThrow(/tcpAcceptQueueSize must be an integer/);
+      expect(() => Sandbox.restore("saved").tcpAcceptQueueSize(invalid))
+        .toThrow(/tcpAcceptQueueSize must be an integer/);
     }
   });
 });

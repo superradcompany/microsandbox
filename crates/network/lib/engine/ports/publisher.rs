@@ -22,7 +22,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpSocket, TcpStream, UdpSocket};
 use tokio::sync::mpsc;
 
-use crate::config::{ListenBacklog, PortProtocol, PublishedPort};
+use crate::config::{PortProtocol, PublishedPort, TcpAcceptQueueSize};
 use crate::netstack::shared::SharedState;
 use crate::policy::{NetworkPolicy, Protocol};
 use crate::udp::relay::{construct_udp_response, extract_udp_payload};
@@ -172,7 +172,7 @@ impl PortPublisher {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         ports: &[PublishedPort],
-        tcp_listen_backlog: ListenBacklog,
+        tcp_accept_queue_size: TcpAcceptQueueSize,
         guest_ipv4: Option<Ipv4Addr>,
         guest_ipv6: Option<Ipv6Addr>,
         gateway_ipv4: Option<Ipv4Addr>,
@@ -194,7 +194,7 @@ impl PortPublisher {
         if guest_ip.is_some() {
             Self::spawn_listeners(
                 ports,
-                tcp_listen_backlog,
+                tcp_accept_queue_size,
                 &inbound_tx,
                 udp_routes.clone(),
                 guest_ipv4,
@@ -408,7 +408,7 @@ impl PortPublisher {
     #[allow(clippy::too_many_arguments)]
     fn spawn_listeners(
         ports: &[PublishedPort],
-        tcp_listen_backlog: ListenBacklog,
+        tcp_accept_queue_size: TcpAcceptQueueSize,
         inbound_tx: &mpsc::Sender<InboundConnection>,
         udp_routes: PublishedUdpRoutes,
         guest_ipv4: Option<Ipv4Addr>,
@@ -434,7 +434,7 @@ impl PortPublisher {
                     tokio_handle.spawn(async move {
                         if let Err(e) = tcp_listener_task(
                             bind_addr,
-                            tcp_listen_backlog,
+                            tcp_accept_queue_size,
                             guest_port,
                             tx,
                             policy,
@@ -570,7 +570,10 @@ fn reject_with_rst(stream: &TcpStream) {
 /// `TcpListener::bind`. That includes `SO_REUSEADDR` on Unix, so a listener can be re-created
 /// without waiting out `TIME_WAIT`, and deliberately not on Windows, where the option would let
 /// another socket bind over a port that is still in use.
-fn bind_listener(bind_addr: SocketAddr, backlog: ListenBacklog) -> std::io::Result<TcpListener> {
+fn bind_listener(
+    bind_addr: SocketAddr,
+    backlog: TcpAcceptQueueSize,
+) -> std::io::Result<TcpListener> {
     let socket = if bind_addr.is_ipv4() {
         TcpSocket::new_v4()?
     } else {
@@ -589,7 +592,7 @@ fn bind_listener(bind_addr: SocketAddr, backlog: ListenBacklog) -> std::io::Resu
 /// sees `ECONNRESET` rather than a graceful close.
 async fn tcp_listener_task(
     bind_addr: SocketAddr,
-    backlog: ListenBacklog,
+    backlog: TcpAcceptQueueSize,
     guest_port: u16,
     inbound_tx: mpsc::Sender<InboundConnection>,
     policy: Arc<NetworkPolicy>,
@@ -965,7 +968,7 @@ mod tests {
     /// `min(requested, somaxconn)` read from the host rather than a fixed number: on a host left
     /// at 128, a 128-deep queue is the correct result. `TCP_INFO` on a listening socket reports
     /// that effective depth in `tcpi_sacked`, which pins the value given to `listen()` exactly,
-    /// including that `ListenBacklog::MAX` does not wrap negative on its way to the C `int`.
+    /// including that `TcpAcceptQueueSize::MAX` does not wrap negative on its way to the C `int`.
     /// Filling the queue without accepting then shows the kernel honours it.
     ///
     /// Linux only: `tcpi_sacked` has this meaning only there, and macOS clamps to
@@ -980,8 +983,13 @@ mod tests {
             .unwrap();
         let loopback = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
 
-        for requested in [1, 300, ListenBacklog::DEFAULT.get(), ListenBacklog::MAX] {
-            let backlog = ListenBacklog::try_from(requested).unwrap();
+        for requested in [
+            1,
+            300,
+            TcpAcceptQueueSize::DEFAULT.get(),
+            TcpAcceptQueueSize::MAX,
+        ] {
+            let backlog = TcpAcceptQueueSize::try_from(requested).unwrap();
             let listener = bind_listener(loopback, backlog).unwrap();
             assert_eq!(
                 effective_backlog(&listener),
@@ -990,7 +998,7 @@ mod tests {
             );
         }
 
-        let listener = bind_listener(loopback, ListenBacklog::try_from(300).unwrap()).unwrap();
+        let listener = bind_listener(loopback, TcpAcceptQueueSize::try_from(300).unwrap()).unwrap();
         let addr = listener.local_addr().unwrap();
         let depth = effective_backlog(&listener) as usize;
 

@@ -401,7 +401,7 @@ struct NetworkConfigInput {
     #[serde(alias = "max_connections")]
     max_tcp_connections: Option<usize>,
     max_udp_connections: Option<usize>,
-    tcp_listen_backlog: Option<u32>,
+    tcp_accept_queue_size: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, ConfigPatch)]
@@ -1739,10 +1739,10 @@ fn materialize_network_patch(
     if let Some(max) = input.max_udp_connections {
         patch = patch.max_udp_connections(max);
     }
-    if let Some(backlog) = input.tcp_listen_backlog {
+    if let Some(size) = input.tcp_accept_queue_size {
         // Refuse here rather than at launch, where the runtime would reject the whole network.
-        microsandbox_network::config::ListenBacklog::try_from(backlog)?;
-        patch = patch.tcp_listen_backlog(backlog);
+        microsandbox_network::config::TcpAcceptQueueSize::try_from(size)?;
+        patch = patch.tcp_accept_queue_size(size);
     }
     Ok(patch)
 }
@@ -1842,20 +1842,20 @@ mod tests {
 
     #[cfg(feature = "net")]
     #[test]
-    fn network_config_tcp_listen_backlog_is_validated_before_launch() {
+    fn network_config_tcp_accept_queue_size_is_validated_before_launch() {
         let input = |value: u32| -> NetworkInput {
-            serde_json::from_value(serde_json::json!({ "tcp_listen_backlog": value })).unwrap()
+            serde_json::from_value(serde_json::json!({ "tcp_accept_queue_size": value })).unwrap()
         };
         let mut network = microsandbox_types::NetworkSpec::default();
         materialize_network_patch(Some(&input(4096)), None, None)
             .unwrap()
             .apply_to(&mut network);
-        assert_eq!(network.tcp_listen_backlog, Some(4096));
+        assert_eq!(network.tcp_accept_queue_size, Some(4096));
 
         for invalid in [0, 2_147_483_648] {
             let error = materialize_network_patch(Some(&input(invalid)), None, None).unwrap_err();
             assert!(
-                error.to_string().contains("TCP listen backlog"),
+                error.to_string().contains("TCP accept queue size"),
                 "{invalid}: {error}"
             );
         }

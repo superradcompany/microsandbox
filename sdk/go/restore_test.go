@@ -95,9 +95,9 @@ func TestRestoreConnectionLimitsPreserveExplicitZero(t *testing.T) {
 	}
 }
 
-func TestRestoreTCPListenBacklogReachesFFI(t *testing.T) {
+func TestRestoreTCPAcceptQueueSizeReachesFFI(t *testing.T) {
 	var config RestoreConfig
-	WithRestoreTCPListenBacklog(4096)(&config)
+	WithRestoreTCPAcceptQueueSize(4096)(&config)
 	encoded, err := json.Marshal(buildFFIRestoreOptions("baseline", config))
 	if err != nil {
 		t.Fatal(err)
@@ -106,16 +106,16 @@ func TestRestoreTCPListenBacklogReachesFFI(t *testing.T) {
 	if err := json.Unmarshal(encoded, &got); err != nil {
 		t.Fatal(err)
 	}
-	if got["tcp_listen_backlog"] != float64(4096) {
-		t.Fatalf("tcp_listen_backlog lost: %s", encoded)
+	if got["tcp_accept_queue_size"] != float64(4096) {
+		t.Fatalf("tcp_accept_queue_size lost: %s", encoded)
 	}
 
 	encoded, err = json.Marshal(buildFFIRestoreOptions("baseline", RestoreConfig{}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(encoded), "tcp_listen_backlog") {
-		t.Fatalf("unset backlog reached the wire: %s", encoded)
+	if strings.Contains(string(encoded), "tcp_accept_queue_size") {
+		t.Fatalf("unset accept queue size reached the wire: %s", encoded)
 	}
 }
 
