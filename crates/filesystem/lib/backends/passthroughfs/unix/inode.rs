@@ -954,18 +954,26 @@ pub(crate) fn open_inode_fd(fs: &PassthroughFs, inode: u64, flags: i32) -> io::R
         let inodes = fs.inodes.read().unwrap();
         let data = inodes.get(&inode).ok_or_else(platform::ebadf)?;
 
-        // If the file was unlinked, dup the preserved fd instead of using /.vol/ path.
+        // Linked inodes must reopen with the requested flags, not duplicate the
+        // read-only unlink pin. Trying /.vol/ first also covers a host removing
+        // the last link between a link-count check and the open.
+        let path = vol_path(data.dev, data.ino);
+        let result = open_macos_inode_reopen(path.as_ptr(), flags);
         let ufd = data.unlinked_fd.load(Ordering::Acquire);
-        if ufd >= 0 {
+        if let Err(error) = &result
+            && error.raw_os_error() == platform::enoent().raw_os_error()
+            && ufd >= 0
+            && platform::fstat(ufd as i32)?.st_nlink == 0
+        {
+            // Only a vanished, unlinked inode may use the pin. In particular,
+            // do not turn a permission or symlink rejection into a successful open.
             let fd = unsafe { libc::fcntl(ufd as i32, libc::F_DUPFD_CLOEXEC, 0) };
             if fd >= 0 {
                 return Ok(fd);
             }
-            // Fall through to /.vol/ path if dup fails.
         }
 
-        let path = vol_path(data.dev, data.ino);
-        open_macos_inode_reopen(path.as_ptr(), flags)
+        result
     }
 }
 

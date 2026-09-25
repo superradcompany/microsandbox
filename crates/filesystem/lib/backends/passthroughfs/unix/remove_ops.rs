@@ -115,16 +115,14 @@ pub(crate) fn do_unlink(
         }
     }
 
-    // Retain the fd only when the inode no longer has a name. If a hard link
-    // remains, opens must still use /.vol/ with the requested access flags:
-    // duplicating this O_RDONLY fd would make later writes and truncation fail.
+    // Keep a fallback even if a hard link remains: the host can remove that
+    // name without another FUSE unlink. open_inode_fd still reopens linked
+    // inodes through /.vol/ with the requested access flags.
     #[cfg(target_os = "macos")]
     if let Some(fd) = pre_unlink_fd {
         // Look up the inode by stat identity from the pre-unlink fd.
         let st = platform::fstat(fd);
-        if let Ok(st) = st
-            && st.st_nlink == 0
-        {
+        if let Ok(st) = st {
             let alt_key = crate::backends::shared::inode_table::InodeAltKey::new(
                 st.st_ino,
                 platform::stat_dev(&st),

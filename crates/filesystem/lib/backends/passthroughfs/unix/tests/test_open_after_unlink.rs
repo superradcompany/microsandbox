@@ -89,6 +89,33 @@ fn test_read_via_handle_after_unlink() {
     );
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn test_reopen_after_host_removes_remaining_hard_link() {
+    let sb = TestSandbox::new();
+    let (entry, handle) = sb.fuse_create_root("original").unwrap();
+    sb.fuse_write(entry.inode, handle, b"still here", 0)
+        .unwrap();
+    sb.fs
+        .release(sb.ctx(), entry.inode, 0, handle, false, false, None)
+        .unwrap();
+    sb.fs
+        .link(sb.ctx(), entry.inode, ROOT_INODE, c"alias")
+        .unwrap();
+    sb.fs.unlink(sb.ctx(), ROOT_INODE, c"original").unwrap();
+
+    // The host bypasses FUSE, so the backend gets no final-unlink notification.
+    std::fs::remove_file(sb.root.join("alias")).unwrap();
+    let handle = sb.fuse_open(entry.inode, 0).unwrap();
+    assert_eq!(
+        sb.fuse_read(entry.inode, handle, 32, 0).unwrap(),
+        b"still here"
+    );
+    sb.fs
+        .release(sb.ctx(), entry.inode, 0, handle, false, false, None)
+        .unwrap();
+}
+
 #[test]
 fn test_write_via_handle_after_unlink() {
     let sb = TestSandbox::new();
