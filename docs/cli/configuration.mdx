@@ -263,12 +263,12 @@ network:
     bypass: ["*.internal.example"]
     verify_upstream: true
     block_quic: true
-  strict: false
+  strict: true
   trust_host_cas: false
   max_tcp_connections: 256
 ```
 
-A non-empty `allow` list implies deny-by-default egress. `strict: true` requires hostname-based allow rules to use an inspectable request authority. Plain HTTP exposes that authority in `Host`; HTTPS only exposes it when TLS interception is enabled and not bypassed. Without that visibility, strict mode denies HTTPS that would otherwise be allowed only by a hostname rule. Top-level `ports` is shorthand for `network.ports`; when both are present, the lists are combined and duplicate host ports are rejected.
+A non-empty `allow` list implies deny-by-default egress. `strict` defaults to `true` and requires hostname-based allow rules to use an inspectable request authority. Plain HTTP exposes that authority in `Host`; HTTPS only exposes it when TLS interception is enabled and not bypassed. Without that visibility, strict mode denies HTTPS that would otherwise be allowed only by a hostname rule. Set `strict: false` to opt out. Top-level `ports` is shorthand for `network.ports`; when both are present, the lists are combined and duplicate host ports are rejected.
 
 ### Secrets
 

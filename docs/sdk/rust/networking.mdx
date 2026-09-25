@@ -851,7 +851,7 @@ Whether to ship the host's trusted root CAs into the guest at boot. Default: `fa
 fn strict(self, enabled: bool) -> Self
 ```
 
-Require hostname-based policy allows to use an inspectable request authority. Default: `false`. Plain HTTP exposes that authority in `Host`; HTTPS only exposes it when TLS interception is enabled and not bypassed. Without that visibility, strict mode denies HTTPS that would otherwise be allowed only by a hostname rule.
+Require hostname-based policy allows to use an inspectable request authority. Default: `true`. Plain HTTP exposes that authority in `Host`; HTTPS only exposes it when TLS interception is enabled and not bypassed. Without that visibility, strict mode denies HTTPS that would otherwise be allowed only by a hostname rule.
 
 #### <span className="msb-recv">network.</span><span className="msb-hn">max_udp_connections()</span>
 

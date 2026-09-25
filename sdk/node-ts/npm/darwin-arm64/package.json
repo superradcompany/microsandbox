@@ -5,7 +5,7 @@
     "url": "git+https://github.com/superradcompany/microsandbox.git",
     "directory": "sdk/node-ts/npm/darwin-arm64"
   },
-  "version": "0.7.2",
+  "version": "0.7.3",
   "description": "Bundled msb + libkrunfw + napi binding for microsandbox on macOS arm64.",
   "os": ["darwin"],
   "cpu": ["arm64"],

@@ -663,6 +663,11 @@ export type CloudSecretsConfig = {
    */
   entries: Array<CloudSecretEntry>;
   /**
+   * Default placeholder passthrough hosts, including for secrets added later.
+   * A per-secret violation action overrides this default.
+   */
+  passthrough_hosts?: Array<CloudHostPattern> | null;
+  /**
    * Default action when a placeholder leaks to a disallowed host.
    */
   violation_action: CloudViolationAction;

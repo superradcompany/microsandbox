@@ -711,7 +711,7 @@ impl Default for CloudNetworkSpec {
             enabled: true,
             policy: None,
             secrets: None,
-            strict: false,
+            strict: true,
             max_tcp_connections: None,
             max_udp_connections: None,
         }

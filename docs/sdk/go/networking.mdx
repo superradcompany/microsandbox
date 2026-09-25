@@ -373,7 +373,7 @@ type NetworkConfig struct {
     DNS                     *DNSConfig
     DNSRebindProtection     *bool
     TLS                     *TLSConfig
-    Strict                  bool
+    DisableStrict           bool
     Ports                   map[uint16]uint16
     PortBindings            []PortBinding
     IPv4Pool                string
@@ -399,7 +399,7 @@ The full network stack configuration passed via [`WithNetwork`](#m-withnetwork).
 | DNS | [`*DNSConfig`](#dnsconfig) | In-VM DNS proxy settings |
 | DNSRebindProtection | `*bool` | Legacy convenience for `DNS.RebindProtection`. When `DNS` is also set, the nested value wins |
 | TLS | [`*TLSConfig`](#tlsconfig) | Transparent TLS interception proxy settings |
-| Strict | `bool` | Require hostname-based policy allows to use an inspectable request authority. Plain HTTP exposes `Host`; HTTPS requires TLS interception that is not bypassed |
+| DisableStrict | `bool` | Opt out of strict hostname policy enforcement. By default, hostname allows require inspectable request authority: plain HTTP exposes `Host`; HTTPS requires TLS interception that is not bypassed |
 | Ports | `map[uint16]uint16` | Host to guest TCP port mappings bound to `127.0.0.1` |
 | PortBindings | `[]`[`PortBinding`](#portbinding) | Host to guest mappings with explicit bind addresses |
 | IPv4Pool | `string` | Pool used to derive per-sandbox `/30` guest subnets. Defaults to `172.16.0.0/12` |

@@ -694,6 +694,11 @@ describe("InterfaceOverridesBuilder", () => {
     expect(cfg.interface.ipv6Pool).toBe("fd7a:115c:a1e0:100::/56");
   });
 
+  it("defaults to strict hostname policy and supports opting out", () => {
+    expect(new NetworkBuilder().build().strict).toBe(true);
+    expect(new NetworkBuilder().strict(false).build().strict).toBe(false);
+  });
+
   it("sets strict hostname policy mode", () => {
     const cfg = new NetworkBuilder().strict(true).build() as {
       strict: boolean;

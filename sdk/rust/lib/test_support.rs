@@ -1,6 +1,9 @@
-//! Isolated backend construction and synchronization helpers for crate unit tests.
+//! Fixture decoding, isolated backend construction, and synchronization for crate unit tests.
 
 use std::sync::{Mutex, MutexGuard};
+
+pub(crate) mod fixtures;
+mod json;
 
 //--------------------------------------------------------------------------------------------------
 // Constants

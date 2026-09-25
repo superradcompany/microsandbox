@@ -20,7 +20,7 @@ Network(
     deny_domain_suffixes: tuple[str, ...] = (),
     dns: DnsConfig | None = None,
     tls: TlsConfig | None = None,
-    strict: bool = False,
+    strict: bool = True,
     ipv4_pool: str | None = None,
     ipv6_pool: str | None = None,
     max_tcp_connections: int | None = None,
@@ -67,7 +67,7 @@ TLS interception configuration
 
 #### <span className="msb-recv">network.</span><span className="msb-hn">strict</span>
 
-`bool` · Default: `False`
+`bool` · Default: `True`
 
 Require hostname-based policy allows to use an inspectable request authority. Plain HTTP exposes that authority in `Host`; HTTPS only exposes it when TLS interception is enabled and not bypassed. Without that visibility, strict mode denies HTTPS that would otherwise be allowed only by a hostname rule.
 
