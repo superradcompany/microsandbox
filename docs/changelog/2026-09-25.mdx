@@ -36,6 +36,6 @@ from microsandbox import Snapshot
 snapshot = await Snapshot.create(from_sandbox="workbench")
 ```
 
-You can also supply a unique member name. If you need to reuse an existing name, explicitly remove that member first using [`Snapshot.remove()`](/sdk/python/snapshots#snapshotremove). Removal still checks for dependent snapshots, and deleting a member does not preserve it if the next capture fails.
+You can also supply a unique member name. If you need to reuse an existing name, explicitly remove that member first using [`Snapshot.remove()`](/sdk/python/snapshots#snapshot-remove). Removal still checks for dependent snapshots, and deleting a member does not preserve it if the next capture fails.
 
 This restriction applies to installed group members. Direct archive capture can overwrite its output file. See [snapshot groups](/sandboxes/snapshots#snapshot-groups) and the [Python snapshot reference](/sdk/python/snapshots).

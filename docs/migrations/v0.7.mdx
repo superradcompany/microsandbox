@@ -82,7 +82,7 @@ from microsandbox import Snapshot
 snapshot = await Snapshot.create(from_sandbox="workbench")
 ```
 
-To reuse a name, call [`Snapshot.remove()`](/sdk/python/snapshots#snapshotremove) first. Removal checks dependencies. **If the next capture fails, the removed checkpoint is lost.** Use a new name to keep the previous checkpoint.
+To reuse a name, call [`Snapshot.remove()`](/sdk/python/snapshots#snapshot-remove) first. Removal checks dependencies. **If the next capture fails, the removed checkpoint is lost.** Use a new name to keep the previous checkpoint.
 
 This applies to installed group members; direct archive output can still be overwritten. See [snapshot groups](/sandboxes/snapshots#snapshot-groups).
 
