@@ -3087,9 +3087,8 @@ fn detect_blocking_action_with_tail(
     }
 
     let scan;
-    let summary;
     let mut fragments = Vec::new();
-    if matches!(protocol, RequestProtocol::Http1)
+    let summary = if matches!(protocol, RequestProtocol::Http1)
         && !headers.is_empty()
         && !is_scoped_fragment_location(location_hint)
     {
@@ -3103,12 +3102,11 @@ fn detect_blocking_action_with_tail(
         }
 
         fragments.push((metadata.as_bytes(), RequestLocation::Header));
-        fragments.push((
-            data.get(headers.len()..).unwrap_or_default(),
-            RequestLocation::Body,
-        ));
+        // Lossy UTF-8 decoding can expand header bytes; locate the body in the raw request.
+        let body_start = find_header_boundary(data).unwrap_or(data.len());
+        fragments.push((&data[body_start..], RequestLocation::Body));
 
-        summary = request_summary(headers, protocol);
+        request_summary(headers, protocol)
     } else {
         scan = if prev_tail.is_empty() {
             Cow::Borrowed(data)
@@ -3120,8 +3118,8 @@ fn detect_blocking_action_with_tail(
         };
 
         fragments.push((scan.as_ref(), location_hint));
-        summary = RequestSummary::default();
-    }
+        RequestSummary::default()
+    };
 
     detect_blocking_action_in_fragments(
         ineligible_for_substitution,
@@ -4056,19 +4054,30 @@ mod tests {
     #[test]
     fn http1_allowed_header_cannot_mask_forbidden_encoded_locations() {
         let basic = format!("Authorization: Basic {}\r\n", BASE64.encode(b"user:$KEY"));
+        let mut notes = vec![
+            Vec::new(),
+            b"X-Note: %20\r\n".to_vec(),
+            b"X-Note: \\u0041\r\n".to_vec(),
+        ];
+        // HTTP header values permit obs-text bytes, which need not be valid UTF-8.
+        notes.extend(
+            (0x80..=u8::MAX).map(|byte| [b"X-Note: ".as_slice(), &[byte], b"\r\n"].concat()),
+        );
         for auth in ["Authorization: Bearer $KEY\r\n", basic.as_str()] {
             for body in ["$KEY", "%24KEY", r"\u0024KEY"] {
-                for note in ["", "X-Note: %20\r\n", "X-Note: \\u0041\r\n"] {
+                for note in &notes {
                     let config =
                         make_config(vec![make_secret("$KEY", "real-secret", "api.example.com")]);
-                    let request = format!(
-                        "POST / HTTP/1.1\r\nHost: api.example.com\r\n{auth}{note}Content-Length: {}\r\n\r\n{body}",
-                        body.len()
+                    let mut request =
+                        format!("POST / HTTP/1.1\r\nHost: api.example.com\r\n{auth}").into_bytes();
+                    request.extend_from_slice(note);
+                    request.extend_from_slice(
+                        format!("Content-Length: {}\r\n\r\n{body}", body.len()).as_bytes(),
                     );
                     for split in 0..=request.len() {
                         let mut handler = SecretsHandler::new(&config, "api.example.com", true);
                         let mut blocked = false;
-                        for bytes in [&request.as_bytes()[..split], &request.as_bytes()[split..]] {
+                        for bytes in [&request[..split], &request[split..]] {
                             if bytes.is_empty() {
                                 continue;
                             }
