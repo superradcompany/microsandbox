@@ -3989,10 +3989,12 @@ name = "microsandbox-filesystem"
 version = "0.7.3"
 dependencies = [
  "bincode",
+ "crossbeam-channel",
  "hex",
  "libc",
  "microsandbox-utils",
  "msb_krun",
+ "msb_krun_utils",
  "scopeguard",
  "serde",
  "sha2 0.11.0",

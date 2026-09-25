@@ -69,16 +69,28 @@ pub(crate) fn do_unlink(
         None => None,
     };
 
-    // On macOS, grab an fd before unlink to keep the file data alive.
+    // On macOS, grab an fd before unlink to keep the file data alive. Keep
+    // write access when the file permits it, so a writable DAX mapping of the
+    // still-open unlinked file can be established; fall back to read-only for
+    // files or mounts that do not allow writing.
     #[cfg(target_os = "macos")]
     let pre_unlink_fd = {
-        let fd = unsafe {
+        let mut fd = unsafe {
             libc::openat(
                 parent_fd.raw(),
                 name.as_ptr(),
-                libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+                libc::O_RDWR | libc::O_CLOEXEC | libc::O_NOFOLLOW,
             )
         };
+        if fd < 0 {
+            fd = unsafe {
+                libc::openat(
+                    parent_fd.raw(),
+                    name.as_ptr(),
+                    libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+                )
+            };
+        }
         if fd >= 0 { Some(fd) } else { None }
     };
 

@@ -6,6 +6,7 @@
 
 pub(crate) mod builder;
 mod create_ops;
+mod dax;
 mod dir_ops;
 mod file_ops;
 mod host_mode;
@@ -231,6 +232,10 @@ pub struct PassthroughFs {
 
     /// Optional guest-write byte budget for this mount's subtree.
     pub(crate) quota: Option<super::quota::DirQuota>,
+
+    /// Installed macOS DAX mappings, keyed by guest address.
+    #[cfg(target_os = "macos")]
+    pub(crate) map_windows: std::sync::Mutex<BTreeMap<u64, dax::WindowMapping>>,
 }
 
 /// Open directory handle with a lazy point-in-time snapshot.
@@ -344,8 +349,13 @@ impl PassthroughFs {
             .map_or_else(|| root_fd.as_raw_fd(), AsRawFd::as_raw_fd);
         probe_strict_xattr_support(&cfg, probe_fd)?;
 
-        // Create the init binary file.
-        let init_file = init_binary::create_init_file()?;
+        // Create the init binary file. Mounts that do not inject the virtual
+        // init binary use an empty file and never touch the Agentd payload.
+        let init_file = if cfg.inject_init {
+            init_binary::create_init_file()?
+        } else {
+            init_binary::create_empty_init_file()?
+        };
 
         // Probe openat2 / RESOLVE_BENEATH availability (Linux 5.6+).
         #[cfg(target_os = "linux")]
@@ -387,6 +397,8 @@ impl PassthroughFs {
             #[cfg(target_os = "linux")]
             proc_self_fd,
             quota,
+            #[cfg(target_os = "macos")]
+            map_windows: std::sync::Mutex::new(BTreeMap::new()),
         })
     }
 }
@@ -485,6 +497,22 @@ impl PassthroughFs {
     /// Whether the given inode refers to the synthetic init binary.
     pub(crate) fn is_virtual_init_inode(&self, inode: u64) -> bool {
         self.injects_init() && inode == init_binary::INIT_INODE
+    }
+
+    /// Ensure a writable DAX mapping is installed only for a read/write handle
+    /// of the same inode. The mapping exposes both read and write, so a
+    /// read-only or write-only handle (or a handle for another inode) must not
+    /// be widened by it.
+    fn require_writable_mapping_handle(&self, inode: u64, handle: u64) -> io::Result<()> {
+        let handles = self.handles.read().unwrap_or_else(|p| p.into_inner());
+        let data = handles.get(&handle).ok_or_else(platform::ebadf)?;
+        if data.inode != inode {
+            return Err(platform::ebadf());
+        }
+        if data.flags as i32 & libc::O_ACCMODE != libc::O_RDWR {
+            return Err(platform::eacces());
+        }
+        Ok(())
     }
 
     /// Charge the quota for growing an open file to `new_end` bytes.
@@ -971,6 +999,89 @@ impl DynFileSystem for PassthroughFs {
             self, ctx, inode_in, handle_in, offset_in, inode_out, handle_out, offset_out, len,
             flags,
         )
+    }
+
+    #[cfg(target_os = "linux")]
+    #[allow(clippy::too_many_arguments)]
+    fn setupmapping(
+        &self,
+        _ctx: Context,
+        inode: u64,
+        handle: u64,
+        foffset: u64,
+        len: u64,
+        flags: u64,
+        moffset: u64,
+        host_shm_base: u64,
+        shm_size: u64,
+    ) -> io::Result<()> {
+        dax::do_setupmapping(
+            self,
+            inode,
+            handle,
+            foffset,
+            len,
+            flags,
+            moffset,
+            host_shm_base,
+            shm_size,
+        )
+    }
+
+    #[cfg(target_os = "linux")]
+    fn removemapping(
+        &self,
+        _ctx: Context,
+        requests: Vec<crate::RemovemappingOne>,
+        host_shm_base: u64,
+        shm_size: u64,
+    ) -> io::Result<()> {
+        dax::do_removemapping(&requests, host_shm_base, shm_size)
+    }
+
+    #[cfg(target_os = "macos")]
+    #[allow(clippy::too_many_arguments)]
+    fn setupmapping(
+        &self,
+        _ctx: Context,
+        inode: u64,
+        handle: u64,
+        foffset: u64,
+        len: u64,
+        flags: u64,
+        moffset: u64,
+        host_shm_base: u64,
+        shm_size: u64,
+        map_sender: &Option<
+            crossbeam_channel::Sender<msb_krun_utils::worker_message::WorkerMessage>,
+        >,
+    ) -> io::Result<()> {
+        dax::do_setupmapping(
+            self,
+            inode,
+            handle,
+            foffset,
+            len,
+            flags,
+            moffset,
+            host_shm_base,
+            shm_size,
+            map_sender,
+        )
+    }
+
+    #[cfg(target_os = "macos")]
+    fn removemapping(
+        &self,
+        _ctx: Context,
+        requests: Vec<crate::RemovemappingOne>,
+        host_shm_base: u64,
+        shm_size: u64,
+        map_sender: &Option<
+            crossbeam_channel::Sender<msb_krun_utils::worker_message::WorkerMessage>,
+        >,
+    ) -> io::Result<()> {
+        dax::do_removemapping(self, &requests, host_shm_base, shm_size, map_sender)
     }
 }
 
