@@ -4,7 +4,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-#[cfg(feature = "local")]
+#[cfg(all(feature = "local", not(target_os = "linux")))]
 use microsandbox_control_client::CreateBranch;
 #[cfg(feature = "local")]
 use microsandbox_runtime::checkpoint::LocalBranchState;

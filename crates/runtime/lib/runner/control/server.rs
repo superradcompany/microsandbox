@@ -482,7 +482,7 @@ mod descriptor_tests {
     struct MemoryHandler(Arc<AtomicBool>);
 
     impl Handler for MemoryHandler {
-        fn handle(&self, _: ControlRequest) -> Response {
+        fn handle(&self, _: ControlOperation, _: u8) -> Response {
             panic!("expected JSON memory handoff")
         }
 
