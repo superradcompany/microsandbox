@@ -8,7 +8,7 @@ See [Host sockets](/networking/host-sockets) for guest connection details, platf
 
 <Note>VSock routes are local-only and unavailable with the multi-tenant deployment profile.</Note>
 
-## Typical flow
+<Accordion title="Example">
 
 ```ruby
 require "microsandbox"
@@ -18,6 +18,8 @@ sandbox = Microsandbox::Sandbox.builder("worker")
   .vsock("/run/host-api.sock", 5000)
   .create
 ```
+
+</Accordion>
 
 ## SandboxBuilder
 

@@ -1,0 +1,72 @@
+---
+title: Execution
+"og:title": Ruby SDK Execution reference
+description: Run commands and collect output with the Ruby SDK.
+---
+
+See [Commands](/sandboxes/commands) for usage examples. Ruby exposes collected output, not streaming execution handles.
+
+## Sandbox
+
+### exec()
+
+```ruby
+sandbox.exec(command, args = [], **options) # => ExecOutput
+```
+
+Run an executable with an array of arguments. Shell syntax is not interpreted.
+
+### shell()
+
+```ruby
+sandbox.shell(script, **options) # => ExecOutput
+```
+
+Run a script through the sandbox's configured shell. Both methods accept these options:
+
+| Option | Type | Description |
+| --- | --- | --- |
+| `cwd` | `String` | Guest working directory |
+| `user` | `String` | Guest user |
+| `env` | `Hash` | Environment variables |
+| `timeout` | `Numeric` | Finite, non-negative timeout in seconds |
+| `stdin` | `String`, `:null`, or `:pipe` | Input bytes or stdin mode; Ruby does not expose a writable streaming handle |
+| `tty` | `Boolean` | Allocate a pseudo-terminal |
+| `rlimits` | `Hash` | Resource names mapped to non-negative integer limits |
+
+<Accordion title="Example">
+```ruby
+require "microsandbox"
+
+Microsandbox::Sandbox.with("ruby-command", image: "alpine") do |sandbox|
+  output = sandbox.exec("printf", ["hello\n"], timeout: 10)
+  puts output.stdout
+  raise "Command failed" unless output.success?
+end
+```
+</Accordion>
+
+## ExecOutput
+
+| Member | Type | Description |
+| --- | --- | --- |
+| `stdout`, `stderr` | `String` | Collected output bytes |
+| `stdout_bytes`, `stderr_bytes` | `String` | Binary output aliases |
+| `exit_code` | `Integer` | Process exit code |
+| `success?` | `Boolean` | Whether execution succeeded |
+| `to_h` | `Hash` | String keys: `stdout`, `stderr`, `exit_code`, `success` |
+
+## Logs
+
+```ruby
+sandbox.logs(tail: 100, sources: [:stdout, :stderr]) # => Array<LogEntry>
+```
+
+Both options are optional. Sources accept symbols or strings: `stdout`, `stderr`, `output`, and `system`. This collects entries; it does not subscribe to a stream.
+
+| LogEntry member | Type | Description |
+| --- | --- | --- |
+| `timestamp` | `String` | RFC 3339 timestamp |
+| `source` | `String` | Log source |
+| `data` | `String` | Raw log bytes |
+| `to_h` | `Hash` | String keys matching the members above |

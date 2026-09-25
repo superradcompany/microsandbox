@@ -1,0 +1,84 @@
+---
+title: Snapshots
+"og:title": Ruby SDK Snapshots reference
+description: Capture and manage snapshots with the Ruby SDK.
+---
+
+See [Snapshots](/sandboxes/snapshots) for capture behavior and compatibility. Ruby does not expose sandbox restore, branching, or full-capture options.
+
+## SandboxHandle
+
+### snapshot()
+
+```ruby
+handle.snapshot(name) # => Hash
+```
+
+Capture a named snapshot using the selected backend's default capture behavior. The returned hash has string keys `digest`, `reference`, `reference_kind`, and `size_bytes`. Local group members are immutable; choose a new name for each checkpoint.
+
+<Accordion title="Example">
+```ruby
+handle = Microsandbox::Sandbox.get("worker")
+checkpoint = handle.snapshot("after-build")
+puts checkpoint["reference"]
+```
+</Accordion>
+
+## Snapshot
+
+```ruby
+Microsandbox::Snapshot.open(reference) # => Snapshot
+Microsandbox::Snapshot.get(name)       # => SnapshotHandle
+Microsandbox::Snapshot.list            # => Array<SnapshotHandle>
+Microsandbox::Snapshot.remove(name, force = false) # => nil
+Microsandbox::Snapshot.save(reference, output_path, **options) # => nil
+```
+
+`remove` takes `force` positionally. Capture, lookup, listing, open, and removal use the selected backend. Archive export is local-only.
+
+### save() and save_to()
+
+```ruby
+snapshot.save_to(output_path, **options) # => nil
+handle.save_to(output_path, **options)   # => nil
+```
+
+Instance methods retain the backend used to open the snapshot or obtain the handle.
+
+| Option | Type | Default | Availability |
+| --- | --- | --- | --- |
+| `with_parents` | `Boolean` | `false` | All save methods |
+| `with_image` | `Boolean` | `false` | All save methods |
+| `plain_tar` | `Boolean` | `false` | All save methods |
+| `since` | `String` | Omitted | Class method `Snapshot.save` only |
+| `last_layers` | `Integer` | Omitted | Class method `Snapshot.save` only |
+
+See [snapshot exports](/sandboxes/snapshots#move-snapshots) for parent chains, image inclusion, and incremental exports.
+
+<Accordion title="Example">
+```ruby
+snapshot = Microsandbox::Snapshot.open("after-build")
+snapshot.save_to("./after-build.tar.zst", with_image: true)
+```
+</Accordion>
+
+### Snapshot members
+
+| Member | Type | Description |
+| --- | --- | --- |
+| `digest` | `String` | Snapshot digest |
+| `size_bytes` | `Integer` or `nil` | Snapshot size |
+| `reference` | `String` | Backend-specific reference |
+| `reference_kind` | `String` | Kind of reference; preserve it with the value |
+
+## SnapshotHandle
+
+Includes the same metadata members as `Snapshot`, plus:
+
+| Member | Type | Description |
+| --- | --- | --- |
+| `name` | `String` or `nil` | Snapshot name |
+| `image_ref` | `String` | Source image reference |
+| `state_kind` | `String` | Captured state kind |
+| `open` | `Snapshot` | Open through the retained backend |
+| `remove(force)` | `nil` | Remove through the retained backend; Boolean argument required |

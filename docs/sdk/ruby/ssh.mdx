@@ -1,0 +1,31 @@
+---
+title: SSH
+"og:title": Ruby SDK SSH reference
+description: Run SSH commands with the Ruby SDK.
+---
+
+See [SSH](/sandboxes/ssh) for connection behavior.
+
+## Sandbox
+
+### ssh_exec()
+
+```ruby
+sandbox.ssh_exec(command, inactivity_timeout: seconds) # => Hash
+```
+
+Run a command over SSH and collect its output. Omit `inactivity_timeout` to inherit global configuration; use `0` to disable the inactivity timeout. Managed settings take precedence. Ruby does not expose interactive SSH or SFTP sessions.
+
+| Result key | Type | Description |
+| --- | --- | --- |
+| `"stdout"` | `String` | Standard output bytes |
+| `"stderr"` | `String` | Standard error bytes |
+| `"exit_code"` | `Integer` | Exit status |
+| `"success"` | `Boolean` | Whether the exit status is zero |
+
+<Accordion title="Example">
+```ruby
+result = sandbox.ssh_exec("uname -a", inactivity_timeout: 60)
+puts result["stdout"]
+```
+</Accordion>

@@ -1,0 +1,53 @@
+---
+title: Filesystem
+"og:title": Ruby SDK Filesystem reference
+description: Read, write, and transfer guest files with the Ruby SDK.
+---
+
+See [Filesystem](/sandboxes/filesystem) for usage examples.
+
+## Filesystem
+
+```ruby
+fs = sandbox.fs # => Microsandbox::Filesystem
+```
+
+| Method | Returns | Description |
+| --- | --- | --- |
+| `read(path)` | `String` | Read file bytes |
+| `write(path, data)` | `nil` | Write a Ruby string as bytes |
+| `mkdir(path)` | `nil` | Create a guest directory |
+| `list(path)` | `Array<Hash>` | List directory entries |
+| `stat(path)` | `Hash` | Read metadata |
+| `exists?(path)` | `Boolean` | Check whether a path exists |
+| `copy(from, to)` | `nil` | Copy within the guest |
+| `rename(from, to)` | `nil` | Rename within the guest |
+| `remove(path)` | `nil` | Remove a file |
+| `remove_dir(path)` | `nil` | Remove a directory |
+| `copy_from_host(host_path, guest_path)` | `nil` | Transfer from host to guest |
+| `copy_to_host(guest_path, host_path)` | `nil` | Transfer from guest to host |
+
+These are convenience wrappers around `sandbox.fs_read`, `fs_write`, and the corresponding `fs_*` methods. Ruby does not expose streaming filesystem handles.
+
+### Metadata
+
+Hashes use string keys. Optional timestamps are omitted when unavailable.
+
+| Key | Type | Description |
+| --- | --- | --- |
+| `"path"` | `String` | Entry path; returned by `list` |
+| `"kind"` | `String` | `file`, `directory`, `symlink`, or `other` |
+| `"size"` | `Integer` | Size in bytes |
+| `"mode"` | `Integer` | File mode |
+| `"uid"`, `"gid"` | `Integer` | Owner and group IDs |
+| `"modified"`, `"accessed"` | `String` | RFC 3339 timestamps, when available |
+| `"readonly"` | `Boolean` | Returned by `stat` |
+| `"created"` | `String` | Creation timestamp, when available from `stat` |
+
+<Accordion title="Example">
+```ruby
+sandbox.fs.write("/tmp/message.txt", "hello")
+puts sandbox.fs.read("/tmp/message.txt")
+sandbox.fs.copy_to_host("/tmp/message.txt", "./message.txt")
+```
+</Accordion>

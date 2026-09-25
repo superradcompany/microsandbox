@@ -1,0 +1,51 @@
+---
+title: Volumes
+"og:title": Ruby SDK Volumes reference
+description: Create and manage named volumes with the Ruby SDK.
+---
+
+See [Volumes](/sandboxes/volumes) for storage behavior. Ruby exposes named-volume management but not the complete mount builder available in Rust.
+
+## Volume
+
+```ruby
+Microsandbox::Volume.builder(name) # => VolumeBuilder
+Microsandbox::Volume.get(name)     # => VolumeHandle
+Microsandbox::Volume.list          # => Array<VolumeHandle>
+Microsandbox::Volume.remove(name)  # => nil
+```
+
+## VolumeBuilder
+
+| Method | Returns | Description |
+| --- | --- | --- |
+| `directory` | `VolumeBuilder` | Select a directory volume |
+| `disk` | `VolumeBuilder` | Select a disk volume |
+| `quota(mib)` | `VolumeBuilder` | Set quota in MiB |
+| `size(mib)` | `VolumeBuilder` | Set disk size in MiB |
+| `label(key, value)` | `VolumeBuilder` | Add a string label |
+| `create` | `VolumeHandle` | Create the volume; consumes the builder |
+
+<Accordion title="Example">
+```ruby
+volume = Microsandbox::Volume.builder("build-cache")
+  .disk
+  .size(4096)
+  .label("purpose", "build")
+  .create
+puts volume.name
+```
+</Accordion>
+
+## VolumeHandle
+
+| Member | Type | Description |
+| --- | --- | --- |
+| `name` | `String` | Volume name |
+| `kind` | `String` | `dir` or `disk` |
+| `quota_mib` | `Integer` or `nil` | Configured quota |
+| `used_bytes` | `Integer` | Used bytes |
+| `capacity_bytes` | `Integer` or `nil` | Capacity |
+| `labels` | `Hash` | String keys and values |
+| `created_at` | `String` or `nil` | RFC 3339 creation timestamp |
+| `remove` | `nil` | Remove this volume |

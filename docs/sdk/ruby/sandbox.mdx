@@ -17,11 +17,13 @@ Ruby 3.1 and newer are supported. When a matching platform gem is available, it 
 
 Blocking native calls release Ruby's global VM lock (GVL), allowing other Ruby threads to run.
 
+<Accordion title="Example">
 ```ruby
 require "microsandbox"
 
 Microsandbox.install unless Microsandbox.installed?
 ```
+</Accordion>
 
 ## Reuse or create a sandbox
 
@@ -33,6 +35,7 @@ Microsandbox::Sandbox.connect_or_create(name, **options) # => Sandbox
 
 Reuse or create the sandbox with this name. The method connects when it is running, waits while it is starting, starts it when it is created, stopped, or crashed, and creates it only when the name is unused. Options apply only to a new sandbox, and concurrent callers reuse the same sandbox. Replace options are rejected because they request a different sandbox.
 
+<Accordion title="Example">
 ```ruby
 sandbox = Microsandbox::Sandbox.connect_or_create(
   "worker",
@@ -41,6 +44,7 @@ sandbox = Microsandbox::Sandbox.connect_or_create(
   env: { "ROLE" => "worker" }
 )
 ```
+</Accordion>
 
 Use `Sandbox.create` when name conflicts must remain an error, or explicit replace options when the old identity should be discarded.
 
@@ -121,9 +125,11 @@ Stop and remove this exact sandbox. Defaults to graceful shutdown with the SDK's
 
 Obtain a metadata handle without opening the guest-agent connection:
 
+<Accordion title="Example">
 ```ruby
 handle = Microsandbox::Sandbox.get("worker")
 ```
+</Accordion>
 
 #### <span className="msb-recv">handle.</span><span className="msb-hn">id</span>
 
@@ -141,7 +147,7 @@ handle.stop(timeout: 30) # Existing optional bounded form
 handle.stop_with_timeout(30) # Explicit bounded form
 ```
 
-Request graceful shutdown for this exact sandbox run and wait for termination and local runtime ownership release. `stop` has no built-in timeout. Both bounded forms raise `Microsandbox::Error` on expiry without force-killing; zero expires before sending a request. A stale identity is refused rather than stopping a replacement.
+Request graceful shutdown for this exact sandbox run and wait for termination and local runtime ownership release. `stop` has no built-in timeout. Both bounded forms raise `Microsandbox::Error` on expiry without force-killing; zero expires before sending a request. A stale identity is refused rather than stopping a replacement. On cloud, a timeout limits the SDK wait; an accepted stop may continue server-side.
 
 #### <span className="msb-recv">handle.</span><span className="msb-hn">connect_or_start()</span>
 
@@ -158,16 +164,6 @@ handle.wait_for_status(status) # => SandboxHandle
 ```
 
 Wait until this exact sandbox reaches `status`, returning a refreshed handle. The method does not have a built-in timeout.
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">stop()</span>
-
-<Tooltip tip="On Cloud, the timeout only limits how long the SDK waits; the accepted stop may continue server-side."><span className="msb-badge-limited">Different on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
-
-```ruby
-handle.stop(timeout: nil) # => nil
-```
-
-Gracefully shut down with the same Local and Cloud timeout behavior as `Sandbox#stop`.
 
 #### <span className="msb-recv">handle.</span><span className="msb-hn">restart()</span>
 
@@ -189,6 +185,7 @@ Stop and remove this exact sandbox. A stale handle refuses to destroy a replacem
 
 Ruby currently surfaces stale identity protection through `Microsandbox::Error`. The message includes `was replaced`; unlike Rust, TypeScript, Python, and Go, the Ruby SDK does not yet expose a dedicated `SandboxReplacedError` subclass.
 
+<Accordion title="Example">
 ```ruby
 begin
   stale_handle.destroy
@@ -196,6 +193,7 @@ rescue Microsandbox::Error => error
   raise unless error.message.include?("was replaced")
 end
 ```
+</Accordion>
 
 See [When a sandbox object is stale](/sdk/errors#when-a-sandbox-object-is-stale) for the typed equivalents in the other SDKs and [Names, handles, and concurrent callers](/sandboxes/lifecycle#names-handles-and-concurrent-callers) for the race this prevents.
 

@@ -189,7 +189,13 @@
                 "expanded": false,
                 "pages": [
                   "sdk/ruby/sandbox",
-                  "sdk/ruby/vsock"
+                  "sdk/ruby/execution",
+                  "sdk/ruby/ssh",
+                  "sdk/ruby/filesystem",
+                  "sdk/ruby/volumes",
+                  "sdk/ruby/vsock",
+                  "sdk/ruby/snapshots",
+                  "sdk/ruby/images"
                 ]
               }
             ]

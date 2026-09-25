@@ -1,0 +1,39 @@
+---
+title: Images
+"og:title": Ruby SDK Images reference
+description: Inspect and manage cached images with the Ruby SDK.
+---
+
+See [Images](/images/overview) for image sources and caching behavior. These APIs manage the local image cache.
+
+## Image
+
+```ruby
+Microsandbox::Image.get(reference) # => ImageHandle
+Microsandbox::Image.list          # => Array<ImageHandle>
+Microsandbox::Image.remove(reference, force = false) # => nil
+Microsandbox::Image.prune          # => Hash
+```
+
+`force` is a positional argument. `prune` returns string keys: `image_refs_removed`, `manifests_removed`, `layers_removed`, and `bytes_reclaimed`.
+
+Ruby does not expose a standalone image pull method. Select an OCI reference using `image:` when creating a sandbox.
+
+## ImageHandle
+
+| Member | Type | Description |
+| --- | --- | --- |
+| `reference` | `String` | Image reference |
+| `size_bytes` | `Integer` or `nil` | Cached size |
+| `manifest_digest` | `String` or `nil` | Manifest digest |
+| `architecture`, `os` | `String` or `nil` | Image platform |
+| `layer_count` | `Integer` | Number of layers |
+| `created_at` | `String` or `nil` | RFC 3339 creation timestamp |
+
+<Accordion title="Example">
+```ruby
+Microsandbox::Image.list.each do |image|
+  puts "#{image.reference}: #{image.size_bytes} bytes"
+end
+```
+</Accordion>
