@@ -361,11 +361,21 @@
         "groups": [
           {
             "group": "Releases",
+            "icon": "tag",
+            "pages": [
+              "changelog/v0.7.3",
+              "changelog/v0.7.2",
+              "changelog/v0.7.1",
+              "changelog/v0.7.0"
+            ]
+          },
+          {
+            "group": "Weekly archive",
             "icon": "clock-rotate-left",
             "pages": [
               {
                 "group": "September 2026",
-                "expanded": true,
+                "expanded": false,
                 "pages": [
                   "changelog/2026-09-25",
                   "changelog/2026-09-11",

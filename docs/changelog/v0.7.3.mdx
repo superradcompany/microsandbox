@@ -1,0 +1,42 @@
+---
+title: "v0.7.3"
+sidebarTitle: "v0.7.3"
+description: "Enforce team settings, work with simpler snapshot commands, and wait for sandboxes in scripts."
+icon: "bolt"
+---
+
+Released September 24, 2026 · [GitHub release](https://github.com/superradcompany/microsandbox/releases/tag/v0.7.3) · [All changes](https://github.com/superradcompany/microsandbox/compare/v0.7.2...v0.7.3)
+
+## New features
+
+**Enforce team settings.** A protected `managed.json` takes priority over user configuration, CLI flags, and SDK options across local and cloud backends. Unix installs reject unsafe file or parent-directory permissions. [Managed deployment](/enterprise/managed-configuration)
+
+**Simpler snapshot commands.** Capture, restore, export, and import now fit under `msb snap`:
+
+```bash
+msb snap create ready --sandbox app
+msb snap restore app:ready --name worker
+msb snap export app:ready --output ready.msb
+msb snap import ready.msb
+```
+
+Older forms still work. You can also name snapshots with `--name` and filter with `msb snap ls --group GROUP`. [Snapshots](/sandboxes/snapshots)
+
+**Wait in scripts.** `msb wait worker --timeout 5m --format json` waits for a sandbox to stop or crash. It does not stop the sandbox or confirm workload success. [Command reference](/cli/sandbox-commands#msb-wait)
+
+## Before upgrading
+
+- **HTTPS hostname rules need inspection.** Strict hostname checking is now on by default. HTTPS allowed only by hostname needs TLS interception or is blocked. IP, CIDR, group, and default allow rules are unaffected. Opt out with `--net-strict=false` or `network.strict: false`; Go replaces `Strict` with `DisableStrict`. [Hostname rules](/networking/overview#hostname-rules-and-https)
+- **Rust configuration APIs changed.** `LocalBackend::lazy()` and `LocalBackendBuilder::build_lazy()` return `Result`. `SdkConfig` and `load_sdk_config()` are removed. [Migration details](https://github.com/superradcompany/microsandbox/blob/v0.7.3/COMPATIBILITY.md)
+- **Check shared database access.** Stop incompatible SDK processes sharing `MSB_HOME` before upgrading. Running VMs are handled separately. Cloud services need a separate update for older configuration formats.
+
+## Fixes
+
+- Preserved v0.6 secret passthrough settings and support for older snapshots and custom filenames. Unsupported settings and incompatible downgrades fail before changes are made.
+- Secret updates enable TLS interception when needed and, by default, report required restarts before saving.
+- Reduced delays for server-first protocols. Binary traffic avoids HTTP secret substitution while retaining blocked-placeholder checks.
+- Fixed firmware lookup through macOS command links, cleanup of unresponsive guests, musl detection, and Linux network builds.
+
+## New guides
+
+Added [corporate networking](/enterprise/corporate-networking), [offline deployment](/enterprise/offline-deployment), and dedicated CLI references for [snapshots](/cli/snapshot-commands), [registries](/cli/registry-commands), and [management](/cli/management).

@@ -1,0 +1,18 @@
+---
+title: "v0.7.2"
+sidebarTitle: "v0.7.2"
+description: "Upgrade your local sandbox database without stopping running sandboxes."
+icon: "bolt"
+---
+
+Released September 17, 2026 · [GitHub release](https://github.com/superradcompany/microsandbox/releases/tag/v0.7.2) · [All changes](https://github.com/superradcompany/microsandbox/compare/v0.7.1...v0.7.2)
+
+## Upgrade without stopping sandboxes
+
+The CLI and SDKs can now upgrade supported older local sandbox databases while existing sandboxes keep running. This removes v0.7.1's stop requirement while preserving database locking and rollback safeguards.
+
+The release also fixes loading older saved configurations, including v0.6.5 formats, and checks runtime compatibility before replacing a sandbox.
+
+## Before upgrading
+
+Running VMs can keep their existing runtime, but older SDKs and CLIs may refuse to open the upgraded database. Selecting an older runtime does not downgrade the database.
