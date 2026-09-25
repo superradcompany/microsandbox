@@ -1,4 +1,71 @@
+#[cfg(target_os = "macos")]
+use std::os::unix::fs::PermissionsExt;
+
 use super::*;
+
+#[test]
+fn test_remaining_hard_link_can_reopen_for_write_and_truncate() {
+    for (removed, remaining) in [("original", "alias"), ("alias", "original")] {
+        let sb = TestSandbox::new();
+        let (entry, handle) = sb.fuse_create_root("original").unwrap();
+        sb.fuse_write(entry.inode, handle, b"before", 0).unwrap();
+        sb.fs
+            .release(sb.ctx(), entry.inode, 0, handle, false, false, None)
+            .unwrap();
+        let alias = sb
+            .fs
+            .link(sb.ctx(), entry.inode, ROOT_INODE, c"alias")
+            .unwrap();
+        assert_eq!(alias.attr.st_nlink, 2);
+
+        sb.fs
+            .unlink(sb.ctx(), ROOT_INODE, &TestSandbox::cstr(removed))
+            .unwrap();
+        let remaining = sb.lookup_root(remaining).unwrap();
+        assert_eq!(remaining.inode, entry.inode);
+        assert_eq!(remaining.attr.st_nlink, 1);
+
+        // Reopen after unlink: an existing writable handle would hide the bug.
+        let handle = sb.fuse_open(remaining.inode, LINUX_O_RDWR).unwrap();
+        sb.fuse_write(remaining.inode, handle, b"!", 6).unwrap();
+        assert_eq!(
+            sb.fuse_read(remaining.inode, handle, 32, 0).unwrap(),
+            b"before!"
+        );
+        let mut attr: stat64 = unsafe { std::mem::zeroed() };
+        attr.st_size = 3;
+        let (st, _) = sb
+            .fs
+            .setattr(
+                sb.ctx(),
+                remaining.inode,
+                attr,
+                Some(handle),
+                SetattrValid::SIZE,
+            )
+            .unwrap();
+        assert_eq!(st.st_size, 3);
+        assert_eq!(
+            sb.fuse_read(remaining.inode, handle, 32, 0).unwrap(),
+            b"bef"
+        );
+        sb.fs
+            .release(sb.ctx(), remaining.inode, 0, handle, false, false, None)
+            .unwrap();
+
+        let handle = sb
+            .fuse_open(remaining.inode, LINUX_O_RDWR | LINUX_O_TRUNC)
+            .unwrap();
+        assert!(
+            sb.fuse_read(remaining.inode, handle, 32, 0)
+                .unwrap()
+                .is_empty()
+        );
+        sb.fs
+            .release(sb.ctx(), remaining.inode, 0, handle, false, false, None)
+            .unwrap();
+    }
+}
 
 #[test]
 fn test_read_via_handle_after_unlink() {
@@ -23,6 +90,142 @@ fn test_read_via_handle_after_unlink() {
         b"still here",
         "data should be readable after unlink via open handle"
     );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn test_reopen_after_host_removes_remaining_hard_link() {
+    let sb = TestSandbox::new();
+    let (entry, handle) = sb.fuse_create_root("original").unwrap();
+    sb.fuse_write(entry.inode, handle, b"still here", 0)
+        .unwrap();
+    sb.fs
+        .release(sb.ctx(), entry.inode, 0, handle, false, false, None)
+        .unwrap();
+    sb.fs
+        .link(sb.ctx(), entry.inode, ROOT_INODE, c"alias")
+        .unwrap();
+    sb.fs.unlink(sb.ctx(), ROOT_INODE, c"original").unwrap();
+
+    // The host bypasses FUSE, so the backend gets no final-unlink notification.
+    std::fs::remove_file(sb.root.join("alias")).unwrap();
+    let handle = sb.fuse_open(entry.inode, LINUX_O_RDWR).unwrap();
+    assert_eq!(
+        sb.fuse_read(entry.inode, handle, 32, 0).unwrap(),
+        b"still here"
+    );
+    sb.fuse_write(entry.inode, handle, b"!", 10).unwrap();
+    let mut attr: stat64 = unsafe { std::mem::zeroed() };
+    attr.st_size = 5;
+    sb.fs
+        .setattr(
+            sb.ctx(),
+            entry.inode,
+            attr,
+            Some(handle),
+            SetattrValid::SIZE,
+        )
+        .unwrap();
+    assert_eq!(sb.fuse_read(entry.inode, handle, 32, 0).unwrap(), b"still");
+    sb.fs
+        .release(sb.ctx(), entry.inode, 0, handle, false, false, None)
+        .unwrap();
+    // A writable retained descriptor must not widen a read-only guest handle.
+    let readonly = sb.fuse_open(entry.inode, 0).unwrap();
+    TestSandbox::assert_errno(sb.fuse_write(entry.inode, readonly, b"bad", 0), LINUX_EBADF);
+    TestSandbox::assert_errno(
+        sb.fs.setattr(
+            sb.ctx(),
+            entry.inode,
+            attr,
+            Some(readonly),
+            SetattrValid::SIZE,
+        ),
+        LINUX_EINVAL,
+    );
+    TestSandbox::assert_errno(
+        sb.fs.fallocate(sb.ctx(), entry.inode, readonly, 0, 0, 32),
+        LINUX_EBADF,
+    );
+    assert_eq!(
+        sb.fuse_read(entry.inode, readonly, 32, 0).unwrap(),
+        b"still"
+    );
+    sb.fs
+        .release(sb.ctx(), entry.inode, 0, readonly, false, false, None)
+        .unwrap();
+
+    // Linux O_WRONLY | O_APPEND; writes use the offset supplied by FUSE.
+    let append = sb.fuse_open(entry.inode, 1 | 0x400).unwrap();
+    sb.fuse_write(entry.inode, append, b"!", 5).unwrap();
+    TestSandbox::assert_errno(sb.fuse_read(entry.inode, append, 32, 0), LINUX_EBADF);
+    sb.fs
+        .release(sb.ctx(), entry.inode, 0, append, false, false, None)
+        .unwrap();
+    let handle = sb
+        .fuse_open(entry.inode, LINUX_O_RDWR | LINUX_O_TRUNC)
+        .unwrap();
+    assert!(sb.fuse_read(entry.inode, handle, 32, 0).unwrap().is_empty());
+    sb.fs
+        .release(sb.ctx(), entry.inode, 0, handle, false, false, None)
+        .unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn test_detached_readonly_host_file_rejects_writable_reopen() {
+    // Root can open host files for writing regardless of their mode bits.
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    for revoke_after_pin in [false, true] {
+        let sb = TestSandbox::new();
+        let (entry, existing_handle) = sb.fuse_create_root("readonly").unwrap();
+        sb.fuse_write(entry.inode, existing_handle, b"keep", 0)
+            .unwrap();
+        sb.fs
+            .link(sb.ctx(), entry.inode, ROOT_INODE, c"alias")
+            .unwrap();
+        if !revoke_after_pin {
+            std::fs::set_permissions(
+                sb.root.join("alias"),
+                std::fs::Permissions::from_mode(0o400),
+            )
+            .unwrap();
+        }
+        sb.fs.unlink(sb.ctx(), ROOT_INODE, c"readonly").unwrap();
+        if revoke_after_pin {
+            std::fs::set_permissions(
+                sb.root.join("alias"),
+                std::fs::Permissions::from_mode(0o400),
+            )
+            .unwrap();
+        }
+        std::fs::remove_file(sb.root.join("alias")).unwrap();
+
+        for flags in [1, LINUX_O_RDWR, LINUX_O_RDWR | LINUX_O_TRUNC, LINUX_O_TRUNC] {
+            TestSandbox::assert_errno(sb.fuse_open(entry.inode, flags), LINUX_EACCES);
+        }
+        // Permission changes gate new opens, not already-open writable handles.
+        sb.fuse_write(entry.inode, existing_handle, b"okay", 0)
+            .unwrap();
+        let handle = sb.fuse_open(entry.inode, 0).unwrap();
+        assert_eq!(sb.fuse_read(entry.inode, handle, 32, 0).unwrap(), b"okay");
+        sb.fs
+            .release(sb.ctx(), entry.inode, 0, handle, false, false, None)
+            .unwrap();
+        sb.fs
+            .release(
+                sb.ctx(),
+                entry.inode,
+                0,
+                existing_handle,
+                false,
+                false,
+                None,
+            )
+            .unwrap();
+    }
 }
 
 #[test]

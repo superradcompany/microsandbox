@@ -954,19 +954,71 @@ pub(crate) fn open_inode_fd(fs: &PassthroughFs, inode: u64, flags: i32) -> io::R
         let inodes = fs.inodes.read().unwrap();
         let data = inodes.get(&inode).ok_or_else(platform::ebadf)?;
 
-        // If the file was unlinked, dup the preserved fd instead of using /.vol/ path.
+        // Linked inodes must reopen with the requested flags, not duplicate the
+        // unlink pin. Trying /.vol/ first also covers a host removing
+        // the last link between a link-count check and the open.
+        let path = vol_path(data.dev, data.ino);
+        let result = open_macos_inode_reopen(path.as_ptr(), flags);
         let ufd = data.unlinked_fd.load(Ordering::Acquire);
-        if ufd >= 0 {
-            let fd = unsafe { libc::fcntl(ufd as i32, libc::F_DUPFD_CLOEXEC, 0) };
-            if fd >= 0 {
-                return Ok(fd);
-            }
-            // Fall through to /.vol/ path if dup fails.
+        if let Err(error) = &result
+            && error.raw_os_error() == platform::enoent().raw_os_error()
+            && ufd >= 0
+            && platform::fstat(ufd as i32)?.st_nlink == 0
+        {
+            // Only a vanished, unlinked inode may use the pin. In particular,
+            // do not turn a permission or symlink rejection into a successful open.
+            return open_unlinked_fd_macos(ufd as i32, flags);
         }
 
-        let path = vol_path(data.dev, data.ino);
-        open_macos_inode_reopen(path.as_ptr(), flags)
+        result
     }
+}
+
+/// Recheck permissions, duplicate retained access, and truncate a detached inode if requested.
+#[cfg(target_os = "macos")]
+fn open_unlinked_fd_macos(retained: i32, flags: i32) -> io::Result<i32> {
+    let retained_flags = unsafe { libc::fcntl(retained, libc::F_GETFL) };
+    if retained_flags < 0 {
+        return Err(platform::linux_error(io::Error::last_os_error()));
+    }
+    let access = flags & libc::O_ACCMODE;
+    if access == libc::O_ACCMODE {
+        return Err(platform::einval());
+    }
+    if flags & libc::O_DIRECTORY != 0 {
+        return Err(platform::enotdir());
+    }
+    if (access != libc::O_RDONLY || flags & libc::O_TRUNC != 0)
+        && retained_flags & libc::O_ACCMODE == libc::O_RDONLY
+    {
+        return Err(platform::eacces());
+    }
+    // The pin may predate a host chmod or ACL change. Check current permissions
+    // with effective credentials before granting a new open through that pin.
+    let mut mode = match access {
+        libc::O_RDONLY => libc::R_OK,
+        libc::O_WRONLY => libc::W_OK,
+        _ => libc::R_OK | libc::W_OK,
+    };
+    if flags & libc::O_TRUNC != 0 {
+        mode |= libc::W_OK;
+    }
+    let path = std::ffi::CString::new(format!("/dev/fd/{retained}")).unwrap();
+    if unsafe { libc::faccessat(libc::AT_FDCWD, path.as_ptr(), mode, libc::AT_EACCESS) } < 0 {
+        return Err(platform::linux_error(io::Error::last_os_error()));
+    }
+    let fd = unsafe { libc::fcntl(retained, libc::F_DUPFD_CLOEXEC, 0) };
+    if fd < 0 {
+        return Err(platform::linux_error(io::Error::last_os_error()));
+    }
+    // dup does not apply O_TRUNC. Do not change shared status flags such as
+    // O_APPEND: FUSE read/write requests already carry their explicit offsets.
+    if flags & libc::O_TRUNC != 0 && unsafe { libc::ftruncate(fd, 0) } < 0 {
+        let error = io::Error::last_os_error();
+        unsafe { libc::close(fd) };
+        return Err(platform::linux_error(error));
+    }
+    Ok(fd)
 }
 
 /// Format a file descriptor number as a null-terminated C string into a stack buffer.
