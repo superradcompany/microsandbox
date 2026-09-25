@@ -143,3 +143,11 @@ describe("native snapshot contract", () => {
     expect(typeof napi.SnapshotHandle.prototype.saveTo).toBe("function");
   });
 });
+
+
+describe("native storage contract", () => {
+  it("exports storage observation and runtime RAM pruning", () => {
+    expect(typeof napi.storageUsage).toBe("function");
+    expect(typeof napi.storagePrune).toBe("function");
+  });
+});

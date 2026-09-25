@@ -102,6 +102,7 @@ pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
         desired_config.as_ref(),
         active_config.as_ref(),
     );
+    let storage = handle.storage_usage().await;
 
     if args.format.as_deref() == Some("json") {
         let config: serde_json::Value =
@@ -120,6 +121,10 @@ pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
             .unwrap_or(serde_json::Value::Null);
         json["active_config"] = active_config_json;
         json["pending_changes"] = serde_json::to_value(&pending_changes)?;
+        json["storage"] = match &storage {
+            Ok(usage) => serde_json::to_value(usage)?,
+            Err(error) => serde_json::json!({ "unavailable_reason": error.to_string() }),
+        };
         println!("{}", serde_json::to_string_pretty(&json)?);
         return Ok(());
     }
@@ -365,6 +370,13 @@ pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
         }
     }
 
+    match storage {
+        Ok(usage) => super::storage::display_item(&usage),
+        Err(error) => {
+            ui::detail_header("Storage");
+            ui::detail_kv_indent("Unavailable", &error.to_string());
+        }
+    }
     Ok(())
 }
 

@@ -204,6 +204,27 @@ impl Snapshot {
         &self.manifest.state
     }
 
+    /// Observe regular files in this snapshot's directory through its captured backend.
+    ///
+    /// External linked payloads are excluded. Reader ownership and retention eligibility remain
+    /// unknown; the result is not the physical space deletion would free.
+    pub async fn storage_usage(&self) -> MicrosandboxResult<crate::StorageItemUsage> {
+        #[cfg(feature = "local")]
+        {
+            let local = self.backend.as_local().ok_or_else(|| {
+                crate::MicrosandboxError::local_only(crate::Operation::StorageUsage)
+            })?;
+            crate::Storage::directory_usage(
+                self.id().to_string(), self.path()?.to_path_buf(), local.snapshots_dir(),
+                "Durable snapshot; external linked payloads are excluded. Active readers and retention eligibility are unknown.",
+            ).await
+        }
+        #[cfg(not(feature = "local"))]
+        Err(crate::MicrosandboxError::local_only(
+            crate::Operation::StorageUsage,
+        ))
+    }
+
     /// Get a handle by the active backend's public snapshot identifier.
     pub async fn get(name_or_digest: &str) -> MicrosandboxResult<SnapshotHandle> {
         let backend = crate::backend::default_backend();
@@ -366,6 +387,24 @@ impl SnapshotReference {
 }
 
 impl SnapshotHandle {
+    /// Observe this indexed artifact's directory using the handle's captured backend.
+    pub async fn storage_usage(&self) -> MicrosandboxResult<crate::StorageItemUsage> {
+        #[cfg(feature = "local")]
+        {
+            let local = self.backend.as_local().ok_or_else(|| {
+                crate::MicrosandboxError::local_only(crate::Operation::StorageUsage)
+            })?;
+            crate::Storage::directory_usage(
+                self.id().to_string(), self.path()?.to_path_buf(), local.snapshots_dir(),
+                "Durable snapshot; external linked payloads are excluded. Active readers and retention eligibility are unknown.",
+            ).await
+        }
+        #[cfg(not(feature = "local"))]
+        Err(crate::MicrosandboxError::local_only(
+            crate::Operation::StorageUsage,
+        ))
+    }
+
     /// Digest of the source artifact descriptor (`sha256:hex`).
     pub fn digest(&self) -> &str {
         &self.digest

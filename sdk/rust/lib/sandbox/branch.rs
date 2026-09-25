@@ -3,6 +3,10 @@
 #[cfg(feature = "local")]
 use std::path::Path;
 use std::sync::Arc;
+#[cfg(feature = "local")]
+use std::sync::Mutex;
+#[cfg(feature = "local")]
+use std::time::{Duration, Instant};
 
 #[cfg(feature = "local")]
 use microsandbox_runtime::checkpoint::LocalBranchState;
@@ -20,6 +24,14 @@ use crate::{MicrosandboxError, MicrosandboxResult};
 use super::{Sandbox, SandboxBuilder, SandboxHandle};
 #[cfg(feature = "local")]
 use super::{SandboxConfig, SandboxStatus, modify};
+
+//--------------------------------------------------------------------------------------------------
+// Constants
+//--------------------------------------------------------------------------------------------------
+
+/// Bound recovery scans across batches and rapid checkpoint chains within this SDK process.
+#[cfg(feature = "local")]
+static LAST_MEMORY_SWEEP: Mutex<Option<Instant>> = Mutex::new(None);
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -401,6 +413,7 @@ pub(crate) async fn capture_child(
         capture.state.validate_files(&closure)?;
         return adopt_capture(config, child, closure, &capture.state, capture.pin.clone()).await;
     }
+    reclaim_abandoned_memory(&local.cache_dir().join("memory"));
     let record_integrity = source.record_integrity;
     // Child reservation precedes capture; source transition ownership now excludes restart or
     // replacement until the exact selected generation has handed off its state.
@@ -595,4 +608,30 @@ async fn adopt_capture(
     config.forked = true;
     config.suppress_launch_for_full_restore();
     Ok(pin)
+}
+
+/// Schedule crash recovery before source locking/freezing, with bounded work and scan frequency.
+#[cfg(feature = "local")]
+fn reclaim_abandoned_memory(root: &Path) {
+    let Ok(mut last) = LAST_MEMORY_SWEEP.try_lock() else {
+        return;
+    };
+    if last.is_some_and(|last| last.elapsed() < Duration::from_secs(30)) {
+        return;
+    }
+    *last = Some(Instant::now());
+    drop(last);
+    let root = root.to_owned();
+    // Filesystem metadata and unlink may stall on cold or remote storage. Recovery is
+    // best-effort and must not occupy the async worker that drives branch capture.
+    tokio::task::spawn_blocking(move || {
+        let options = microsandbox_runtime::checkpoint::MemoryPruneOptions {
+            branches_only: true,
+            max_entries: Some(256),
+            ..Default::default()
+        };
+        if let Err(error) = microsandbox_runtime::checkpoint::prune_memory_cache(&root, &options) {
+            tracing::debug!(%error, "deferred abandoned branch memory cleanup");
+        }
+    });
 }

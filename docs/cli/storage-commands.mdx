@@ -1,0 +1,107 @@
+---
+title: Storage accounting and cleanup
+sidebarTitle: Storage
+description: Inspect local storage and safely reclaim unused runtime memory backing
+---
+
+`msb df` reports aggregate storage for the selected local backend. Use `msb inspect NAME` or `msb snap inspect REF` for an individual object's managed files. Cloud accounting and pruning return an explicit unsupported-operation error.
+
+## msb df
+
+```bash
+msb df
+msb df --verbose
+msb df --format json
+```
+
+The table always includes images, durable snapshots, branch memory, snapshot memory, sandboxes, and volumes, even when their measured usage is zero. `--verbose` adds object paths, allocated-block observations, and reasons entries are retained or could not be measured. Unknown measurements appear as `-` in tables and `null` in JSON.
+
+| Column | Meaning |
+| --- | --- |
+| `TYPE` | Managed storage category |
+| `COUNT` | Indexed objects, or published backing files for memory caches |
+| `IN USE` | Observed owners where ownership can be checked; unknown for categories without reader leases |
+| `LOGICAL SIZE` | Regular-file lengths, with hard links counted once per category on Unix |
+| `RECLAIMABLE` | Logical bytes currently eligible for runtime-cache cleanup |
+
+Image references share layers, so image accounting scans the shared cache instead of summing each image's advertised size. Managed-directory totals include metadata and unindexed files. Indexed external snapshot directories are included; host bind mounts, external linked payloads, unindexed external snapshots, and anonymous Linux RAM are excluded. Concurrent filesystem activity can change measurements while a scan runs.
+
+Logical file lengths and allocated blocks do not measure unique physical storage on filesystems with shared copy-on-write extents. Removing 1 GiB of logical data may free less physical space. There is no combined total when categories may overlap.
+
+## msb prune
+
+```bash
+msb prune --dry-run
+msb prune --older-than 10m --dry-run
+msb prune --yes
+msb prune --yes --format json
+```
+
+Prune removes recognized, published runtime RAM files that have neither a live backing pin nor a pending branch handoff. It includes transient branch backing and rebuildable RAM realizations of saved snapshots. Saved snapshots and their portable objects, sandbox disks, named volumes, images, stable lock files, and capture staging directories are retained. Use the existing `msb image prune` command for image cleanup.
+
+`--older-than` accepts a nonnegative integer followed by `s`, `m`, `h`, or `d`. It filters backing modification times, which clones can inherit. Age is only an eligibility filter: ownership locks are checked independently on every removal.
+
+| Flag | Behavior |
+| --- | --- |
+| `--dry-run` | Inspect candidates without removing files or asking for confirmation |
+| `--yes` | Authorize removal without an interactive prompt |
+| `--older-than DURATION` | Require the backing modification time to be at least this old; default `0s` |
+| `--format json` | Emit the structured per-file report on stdout |
+| `-q`, `--quiet` | Suppress successful human output; cannot be combined with JSON |
+
+Without `--yes`, applying prune requires an interactive terminal and confirmation. Quiet output never bypasses confirmation. Ownership is rechecked after the prompt, so the applied result may differ from the preview.
+
+JSON includes `entries`, `files_removed`, `logical_bytes_removed`, and `physical_bytes_reclaimed`. The latter remains `null`: the command does not claim physical storage savings. Entries explain `in_use`, `pending_handoff`, `too_young`, `missing_handoff_lock`, `changed`, or `error` decisions. An error report retains successful removal counts and exits unsuccessfully; a caller can retry later. Dry-run entries use `reclaimable` and removal counters remain zero.
+
+## Automatic branch cleanup
+
+Branch backing is reclaimed best-effort after its last tracked SDK or baseline owner releases it, provided no other pin or handoff remains. Paused sandboxes retain their backing. Runtime process exit and abrupt termination release kernel pins; bounded background sweeps scheduled after stop or before a subsequent branch reclaim leftovers. The pre-branch sweep is limited to once every 30 seconds within one SDK process and examines at most 256 directory entries per pass, advancing its cursor across passes.
+
+Automatic cleanup targets branch memory. Unused snapshot RAM realizations remain available for warm restores until explicitly pruned. Neither path changes memory bytes, snapshot formats, or checkpoint sparsity.
+
+## SDK reporting
+
+The Rust SDK uses the same accounting and reclamation implementation as the CLI:
+
+```rust
+use microsandbox::{Sandbox, Snapshot, Storage};
+use microsandbox::storage::MemoryPruneOptions;
+use std::time::Duration;
+
+let usage = Storage::usage().await?;
+let sandbox_storage = Sandbox::get("worker").await?.storage_usage().await?;
+let snapshot_storage = Snapshot::open("worker:ready").await?.storage_usage().await?;
+let preview = Storage::prune(&MemoryPruneOptions {
+    dry_run: true,
+    older_than: Duration::from_secs(600),
+    ..Default::default()
+}).await?;
+```
+
+`Storage::usage_local` and `Storage::prune_local` accept an explicit `LocalBackend`. Object methods retain the backend captured by their handles. SDK pruning is an explicit operation and has no interactive confirmation; use `dry_run` to inspect first. Per-object storage measures managed files and describes exclusions. Exact attribution of shared RAM to individual sandboxes is not currently available; aggregate memory accounting reports whether pins or handoffs retain it.
+
+Python, Node, and Go expose the same aggregate reports and ownership checks:
+
+```python
+from microsandbox import Storage
+
+usage = await Storage.usage()
+preview = await Storage.prune(dry_run=True, older_than_seconds=600)
+```
+
+```typescript
+import { Storage } from "microsandbox";
+
+const usage = await Storage.usage();
+const preview = await Storage.prune({ dryRun: true, olderThanSeconds: 600 });
+```
+
+```go
+usage, err := microsandbox.StorageUsage(ctx)
+preview, err := microsandbox.PruneStorage(ctx, microsandbox.StoragePruneOptions{
+    DryRun: true,
+    OlderThanSeconds: 600,
+})
+```
+
+Node reports byte fields as `bigint` to preserve the complete unsigned 64-bit range; unknown values are `null`. Python uses integers and `None`, and Go uses unsigned integers with pointers for nullable measurements. Prune reports retain per-file errors alongside any successful removals, so SDK callers should inspect the report's entries.

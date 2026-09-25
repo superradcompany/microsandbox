@@ -35,6 +35,7 @@ import {
 import type { SandboxStatus } from "./sandbox-status.js";
 import type { SandboxMetrics } from "./metrics.js";
 import { Snapshot } from "./snapshot.js";
+import { storageUsageFromHandle, type StorageItemUsage } from "./storage.js";
 
 export interface SandboxStopResult {
   readonly name: string;
@@ -82,6 +83,11 @@ export class SandboxHandle {
   async refresh(): Promise<SandboxHandle> {
     const raw = await withMappedErrors(() => this.inner.refresh());
     return new SandboxHandle(raw);
+  }
+
+  /** Observe the managed sandbox directory using this handle's captured backend. */
+  async storageUsage(): Promise<StorageItemUsage> {
+    return storageUsageFromHandle(this.inner, "SandboxHandle.storageUsage()");
   }
 
   /** Get point-in-time metrics. */

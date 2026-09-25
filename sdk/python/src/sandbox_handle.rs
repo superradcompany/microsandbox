@@ -92,6 +92,15 @@ impl PySandboxHandle {
         })
     }
 
+    /// Observe managed storage through this handle's captured backend.
+    fn storage_usage<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let usage = inner.storage_usage().await.map_err(to_py_err)?;
+            Ok(crate::storage::PyStorageItemUsage::from_rust(usage))
+        })
+    }
+
     /// Creation timestamp as ms since epoch.
     #[getter]
     fn created_at(&self) -> PyResult<Option<f64>> {

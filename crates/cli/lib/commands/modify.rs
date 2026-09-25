@@ -353,20 +353,17 @@ fn print_human_plan(plan: &SandboxModificationPlan) {
 
     table.print();
     for warning in &plan.warnings {
-        eprintln!("{}", style(warning_line(warning)).dim());
+        ui::warn(&warning_line(warning));
     }
     if include_effect {
-        eprintln!("{}", style("   dry run · nothing applied").dim());
+        ui::notice("Dry run", "nothing applied");
     } else {
-        eprintln!(
-            "{}",
-            style("   dry run · applies on next start · nothing applied").dim()
-        );
+        ui::notice("Dry run", "applies on next start · nothing applied");
     }
 }
 
 fn warning_line(warning: &ModificationWarning) -> String {
-    format!("   ! {}: {}", warning.field, warning.message)
+    format!("{}: {}", warning.field, warning.message)
 }
 
 fn apply_blocker(args: &ModifyArgs, plan: &SandboxModificationPlan) -> Option<ApplyBlocker> {
@@ -950,7 +947,7 @@ mod tests {
 
         assert_eq!(
             warning_line(&warning),
-            "   ! env: applies to future execs only; running processes keep their current environment"
+            "env: applies to future execs only; running processes keep their current environment"
         );
     }
 }

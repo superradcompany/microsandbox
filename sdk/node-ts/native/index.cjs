@@ -696,3 +696,5 @@ module.exports.setDefaultBackend = nativeBinding.setDefaultBackend
 module.exports.setPackagedMsbPath = nativeBinding.setPackagedMsbPath
 module.exports.setRuntimeLibkrunfwPath = nativeBinding.setRuntimeLibkrunfwPath
 module.exports.setRuntimeMsbPath = nativeBinding.setRuntimeMsbPath
+module.exports.storagePrune = nativeBinding.storagePrune
+module.exports.storageUsage = nativeBinding.storageUsage
