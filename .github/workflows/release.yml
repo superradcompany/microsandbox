@@ -1439,6 +1439,9 @@ jobs:
           title: "chore: refresh lockfiles after ${{ github.ref_name }}"
           body: |
             Regenerates SDK lockfiles against the packages published for ${{ github.ref_name }}.
+
+            ${{ needs.npm-publish.result != 'success' && 'Node lockfile not refreshed: npm publication did not succeed.' || '' }}
+            ${{ needs.crates-publish.result != 'success' && 'Ruby lockfile not refreshed: crates.io publication did not succeed.' || '' }}
           branch: refresh-lockfile-${{ github.ref_name }}
           commit-message: "chore: refresh lockfiles after ${{ github.ref_name }}"
           base: main
