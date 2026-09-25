@@ -594,7 +594,7 @@ Require hostname-based policy allows to use an inspectable request authority. De
 
 #### tcpListenBacklog()
 
-`network.tcpListenBacklog(4096)` sets how many not-yet-accepted connections each published TCP port's host listener queues. The default is 1,024, and values from 1 to 2,147,483,647 are accepted; anything else makes `build()` throw. Connections arriving while the queue is full never reach the sandbox, so raise this when a burst of parallel connections, such as a reverse proxy fanning out one page load, exceeds it. The host kernel caps the effective depth at its own `somaxconn` (4,096 by default on Linux, 128 on macOS). `Sandbox.restore(...).tcpListenBacklog(n)` applies it to the listeners a restored child publishes.
+`network.tcpListenBacklog(4096)` sets how many not-yet-accepted connections each published TCP port's host listener queues. The default is 1,024, and values from 1 to 2,147,483,647 are accepted; any other number, including a fraction, makes the `tcpListenBacklog()` call itself throw. Connections arriving while the queue is full never reach the sandbox, so raise this when a burst of parallel connections, such as a reverse proxy fanning out one page load, exceeds it. The host kernel caps the effective depth at its own `somaxconn` (4,096 by default on Linux, 128 on macOS). `Sandbox.restore(...).tcpListenBacklog(n)` applies it to the listeners a restored child publishes.
 
 #### maxUdpConnections()
 

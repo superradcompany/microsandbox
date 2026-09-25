@@ -352,6 +352,27 @@ impl JsNetworkBuilder {
     }
 }
 
+impl JsNetworkBuilder {
+    fn take_inner(&mut self) -> RustNetworkBuilder {
+        self.inner
+            .take()
+            .expect("NetworkBuilder used after consumption")
+    }
+
+    /// Internal: extract the underlying Rust builder. Used by
+    /// `SandboxBuilder.network()` to route through the core SDK closure.
+    #[allow(dead_code)]
+    pub(crate) fn take_inner_builder(&mut self) -> Result<RustNetworkBuilder> {
+        self.inner
+            .take()
+            .ok_or_else(|| napi::Error::from_reason("NetworkBuilder already consumed"))
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Functions
+//--------------------------------------------------------------------------------------------------
+
 fn parse_bind_addr(bind: &str) -> Result<IpAddr> {
     bind.parse::<IpAddr>()
         .map_err(|_| napi::Error::from_reason(format!("invalid bind address: {bind}")))
@@ -390,21 +411,4 @@ fn apply_rate_limiter(
         r = r.ops_burst(burst);
     }
     r
-}
-
-impl JsNetworkBuilder {
-    fn take_inner(&mut self) -> RustNetworkBuilder {
-        self.inner
-            .take()
-            .expect("NetworkBuilder used after consumption")
-    }
-
-    /// Internal: extract the underlying Rust builder. Used by
-    /// `SandboxBuilder.network()` to route through the core SDK closure.
-    #[allow(dead_code)]
-    pub(crate) fn take_inner_builder(&mut self) -> Result<RustNetworkBuilder> {
-        self.inner
-            .take()
-            .ok_or_else(|| napi::Error::from_reason("NetworkBuilder already consumed"))
-    }
 }
