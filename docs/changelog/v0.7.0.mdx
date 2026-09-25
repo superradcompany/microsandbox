@@ -48,8 +48,10 @@ Full snapshots, branching, groups, and archives are local-only. See [Snapshots](
 
 ## Before upgrading
 
+Moving from v0.6? Follow the [v0.7 migration guide](/migrations/v0.7), targeting v0.7.3 or a later compatible patch release.
+
 - **Set up the runtime first.** Sandbox creation no longer downloads it automatically. SDK setup APIs and Rust build features have changed. [Runtime setup](/sdk/setup)
-- **Migrate secret policies.** Older injection and passthrough settings need updating. See the [v0.7.0 compatibility notes](https://github.com/superradcompany/microsandbox/blob/v0.7.0/COMPATIBILITY.md).
+- **Migrate secret policies.** v0.7.3 migrates saved policies automatically; application code and configuration files may need changes. See [secret policy migration](/migrations/v0.7#review-secret-policies).
 - **Reconnect external resources.** Restore and branch need explicit host mounts, published ports, and custom vsock routes. Snapshots do not copy host files or restore external connections. Use compatible runtime and firmware versions.
 - **Choose shutdown timeouts.** Graceful stop has no default deadline. A timeout does not force-kill the sandbox; killing requires an explicit request.
 - **Review network limits.** Defaults are unlimited for single-tenant sandboxes and 1,024 each for TCP and UDP in multi-tenant sandboxes. Zero means unlimited. `maxConnections` remains a deprecated TCP-only alias.

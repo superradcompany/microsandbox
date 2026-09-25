@@ -1,0 +1,65 @@
+---
+title: Prepare your environment
+sidebarTitle: Prepare environment
+description: Prepare and test one local installation before deploying to the team
+icon: "box-archive"
+---
+
+Start with one representative employee device. Confirm the runtime, application dependencies, and approved images work before adding company policy or deploying across the fleet.
+
+## Choose versions and platforms
+
+Choose compatible CLI and SDK releases for each target OS and architecture. Use releases that support managed configuration; older clients do not enforce it. Check the [installation requirements](/getting-started/quickstart) and [migration guide](/migrations/v0.7) when upgrading existing devices.
+
+## Establish a working installation
+
+Follow [runtime setup](/sdk/setup), install your application's SDK dependencies, and run `msb doctor` in the employee's session. Confirm a basic workload starts successfully with an approved image.
+
+Package the approved runtime and dependencies for each target platform, separately from `managed.json`. Install runtimes in the employee's home or a shared protected location, not root's or SYSTEM's home.
+
+The remaining steps cover devices that cannot download dependencies directly. For connected devices, continue to [company networking](/enterprise/corporate-networking).
+
+## Prepare offline devices
+
+Prepare runtime files, SDK packages, and images on a connected machine, then transfer them through your approved distribution system.
+
+### Provision the runtime
+
+Package matching `msb`, `libkrunfw`, and SDK dependencies for each target OS and architecture. Preserve the release's executable permissions and library links. Follow [runtime setup](/sdk/setup) and use [managed paths](/configuration#paths) if you install the runtime in a shared location.
+
+Install application dependencies before disconnecting. Setup helpers can download missing runtime files; use [resolve](/sdk/setup#resolve-check-install-and-ensure) to require an existing installation without downloading.
+
+Distribution steps are covered in [Deploy and verify](/enterprise/deploy-and-verify).
+
+### Transfer approved images
+
+On a connected machine with the same CPU architecture as the target, pull and export an image. This example uses Alpine; substitute your approved image:
+
+```bash
+msb pull alpine
+msb save --output alpine.tar alpine
+```
+
+Transfer the archive through your distribution system. On the employee device, confirm `msb context` selects the local backend, then import it as the employee who will run sandboxes:
+
+```bash
+msb load --input alpine.tar --tag offline-alpine:approved
+```
+
+Load into the same configured home and cache used by the application. Image export can change manifest and layer digests, so use the imported reference rather than assuming the original digest is preserved. See [image archives](/cli/image-commands#msb-save).
+
+### Verify without downloads
+
+Disconnect public network access, run `msb doctor`, and test the imported image:
+
+```bash
+msb run offline-alpine:approved --pull never --no-net -- /bin/sh -c 'echo offline-ready'
+```
+
+`--pull never` fails if the image is unavailable locally. `--no-net` disables guest networking; it does not control host installer downloads. This unnamed sandbox is removed when the command finishes.
+
+Repeat with your actual application and SDK. Include every image, package, and runtime dependency it needs. Fully disconnected workloads can continue directly to [Enforce team settings](/enterprise/managed-configuration).
+
+## Next step
+
+[Configure company networking](/enterprise/corporate-networking) for private services and registries.

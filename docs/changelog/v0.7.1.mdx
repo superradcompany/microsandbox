@@ -30,6 +30,8 @@ This covers root and captured owned disks. Applications must still save their ow
 
 ## Before upgrading
 
+Moving from v0.6? Follow the [v0.7 migration guide](/migrations/v0.7), targeting v0.7.3 or a later compatible patch release.
+
 - Owned disks no longer trigger automatic flushing for full snapshots, branches, or pause. Use `required` if you depend on it.
 - Paused sandboxes need a prior flush when capture requires one. `required` fails for stopped or crashed sandboxes.
 - Restart older runtimes before live disk capture. Go needs a policy-aware native library; Rust callers constructing `SnapshotSpec` must add `guest_flush`.

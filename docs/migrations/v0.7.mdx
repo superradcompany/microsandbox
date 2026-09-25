@@ -1,0 +1,159 @@
+---
+title: "Migrating from v0.6 to v0.7"
+sidebarTitle: "v0.6 to v0.7"
+description: "Upgrade existing sandboxes, update secret and snapshot code, and understand rollback limits."
+---
+
+v0.7 introduces more flexible secret policies and snapshot groups for saved checkpoints and branching. It also improves migration of older configurations and checks for incompatible settings before launch or downgrade.
+
+Use **v0.7.3 or a later compatible patch release**. Earlier v0.7 releases have compatibility gaps addressed in v0.7.3.
+
+## What changed and why
+
+- **Secrets have separate controls** for credential substitution, unchanged placeholders, and violation handling. This allows more precise policies, but changes how disabled substitution locations behave.
+- **Snapshot groups keep checkpoints immutable**, so overwriting a named member is no longer supported. Capture a new member instead.
+- **Compatibility checks catch unsupported state earlier.** Saved configurations migrate automatically; launch and downgrade checks reject settings the selected release cannot represent.
+
+## What the upgrade affects
+
+| Component | What to expect |
+| --- | --- |
+| Saved sandbox configurations | Migrated in place, including image, mount, CPU, and secret settings in saved and recorded active configurations. Valid sandboxes do not need recreating. |
+| Application code and configuration files | Not rewritten. Review the changes below. |
+| Older SDK applications and CLI jobs sharing `MSB_HOME` | Stop and upgrade them together. Older processes can write incompatible records or fail to read the upgraded database. |
+| Running sandbox VMs | Can remain running during migration. They keep their runtime and guest code until restarted. |
+
+Supported older runtimes remain usable for existing operations; newer features may require an upgrade. Selecting an older runtime does not restore older SDK access to an upgraded database.
+
+Cloud users do not run this local migration. Cloud compatibility is handled by the service and requires server support, not just an updated SDK.
+
+## Upgrade your installation
+
+1. **Stop older SDK applications and CLI jobs** sharing the home.
+2. **Back up the home.** Stop its sandboxes while copying their disks for a consistent backup.
+3. **Update SDK dependencies, lockfiles, and the installed runtime.** Keep `msb` and `libkrunfw` from the same bundle. A home-installed runtime takes precedence over Python and Node bundles; updating the SDK alone may still select it. See [runtime setup](/sdk/setup).
+4. **Apply the code and configuration changes below**, then verify sandbox startup, saved data, and authenticated requests before removing the backup.
+
+For Python:
+
+```bash
+python -m pip install --upgrade 'microsandbox>=0.7.3,<0.8'
+```
+
+Use your package manager for other SDKs. For an installed runtime, [`msb self update`](/cli/management#msb-self) installs the latest release; it cannot select a specific version.
+
+## Review secret policies
+
+Saved policies migrate automatically. Update code and configuration files using these previous settings:
+
+| v0.6 setting | v0.7 equivalent |
+| --- | --- |
+| `injection` | `substitution` |
+| `query_params` | `query` |
+| Separate `headers` and `basic_auth` | `headers`, enabled if either old switch was enabled |
+| Passthrough destinations in the violation policy | Separate passthrough destinations |
+
+Review these behavior changes when using a v0.7 runtime:
+
+- **Basic Auth shares the header switch.** An old Basic-Auth-only policy now also permits substitution in other headers.
+- **Disabled locations no longer imply passthrough.** A body placeholder is blocked when body substitution is disabled, unless its destination has explicit passthrough permission. Enable body substitution to send the credential; allow passthrough to send the placeholder unchanged. Passthrough applies to the destination, not only the body.
+- **At least one substitution location must be enabled.** All-disabled policies migrate, but cannot launch until you enable a location or remove the policy.
+- **Explicit global passthrough defaults are preserved**, including for future secrets. Per-secret blocking actions override them.
+
+See [SDK examples](/sandboxes/secrets) and [YAML configuration](/cli/configuration#secrets).
+
+## Update snapshot code
+
+Local snapshot group members are immutable. `force=True` fails even for a new name.
+
+```python Before: v0.6
+from microsandbox import Snapshot
+
+snapshot = await Snapshot.create(
+    "checkpoint", from_sandbox="workbench", force=True
+)
+```
+
+Use a generated or unique name and leave `force=False`:
+
+```python After: v0.7
+from microsandbox import Snapshot
+
+snapshot = await Snapshot.create(from_sandbox="workbench")
+```
+
+To reuse a name, call [`Snapshot.remove()`](/sdk/python/snapshots#snapshotremove) first. Removal checks dependencies. **If the next capture fails, the removed checkpoint is lost.** Use a new name to keep the previous checkpoint.
+
+This applies to installed group members; direct archive output can still be overwritten. See [snapshot groups](/sandboxes/snapshots#snapshot-groups).
+
+### Restore external resources
+
+For restore and branch, supply host mounts, published ports, and custom vsock routes explicitly. Snapshots do not copy host files or restore external connections. Full snapshots require compatible runtime and firmware versions.
+
+### Check flush behavior
+
+| Policy | Behavior |
+| --- | --- |
+| `auto` (default) | Flushes running disk-only snapshots. Full snapshots, branches, and pause retain pending writes in memory. |
+| `required` | Requires writes on disk, useful when restoring only a full snapshot's disks. Fails for stopped or crashed sandboxes. Paused sandboxes need a prior acknowledged flush. |
+
+Restart older runtimes before live capture requiring the new flush capability. Go also needs a policy-aware native library. See [Guest flushing](/sandboxes/snapshots#guest-flushing).
+
+## Review other application changes
+
+### Runtime setup
+
+Local creation no longer downloads missing runtimes. Call the explicit [setup helpers](/sdk/setup) first. Python, TypeScript, and Go setup APIs were also renamed in v0.7.0; see the [old-to-new API mapping](/sdk/setup#earlier-setup-apis).
+
+### HTTPS hostname rules
+
+Strict hostname checking is on by default in v0.7.3. Hostname-only HTTPS allow rules need TLS interception. IP, CIDR, group, and default allow rules are unaffected.
+
+To opt out, use `--net-strict=false` or `network.strict: false`. Go replaces `Strict` with `DisableStrict`. See [hostname rules and HTTPS](/networking/overview#hostname-rules-and-https).
+
+### Shutdown and connection limits
+
+- **Graceful stop:** no default deadline. Set a timeout where needed; expiry does not force-kill the sandbox.
+- **Connections:** unlimited by default for single-tenant sandboxes; 1,024 each for TCP and UDP in multi-tenant sandboxes. Zero means unlimited. `maxConnections` remains a deprecated TCP-only alias.
+
+### Rust API changes
+
+| API | Change |
+| --- | --- |
+| `LocalBackend::lazy()` | Now returns `Result`. |
+| `LocalBackendBuilder::build_lazy()` | Now returns `Result`. |
+| `SdkConfig` | Removed. |
+| `load_sdk_config()` | Removed. |
+| `SnapshotSpec` | New field: `guest_flush`. |
+| `SecretsConfig` | New field: `passthrough_hosts`. |
+| `CloudSecretsConfig` | New field: `passthrough_hosts`. |
+
+Handle the new `Result` returns. In struct literals, supply the new fields or use `..Default::default()` where supported. In exhaustive patterns, include the fields or `..`.
+
+For replacements for the removed APIs, see [configuration](/operations/configuration) and [runtime setup](/sdk/setup).
+
+## Recover from a migration error
+
+If v0.7.0–v0.7.2 reports `unsupported persisted sandbox configuration`, upgrade to v0.7.3 and retry first.
+
+A malformed saved configuration aborts the whole migration before converted rows are written. The error names the sandbox and configuration column.
+
+1. Stop SDK applications sharing the home and keep a consistent backup.
+2. Repair the named configuration using the previous SDK/CLI that can read it. Remove the sandbox only if its data is no longer needed.
+3. Retry the upgrade.
+
+Do not delete the database, edit migration history, or skip the row. If previous tools cannot read it, report the error and SDK/runtime versions. Do not share unredacted secrets.
+
+## Downgrade deliberately
+
+Use the current CLI before reinstalling older SDKs:
+
+```bash
+msb self downgrade 0.6.18
+```
+
+- Stop applications sharing the home and keep the default backup enabled.
+- Schema rollbacks and v0.6 configuration rewrites require stopped sandboxes. If the command reports active sandboxes, stop them and retry.
+- Incompatible settings are rejected before changes. For example, v0.7.0–v0.7.2 cannot preserve global secret passthrough defaults, even empty lists. Force flags do not bypass these checks.
+
+Reinstalling an older SDK alone does not reverse migrations. A database downgrade also does not make every newer snapshot or feature usable by an older release. See [downgrade options](/cli/management#msb-self).
