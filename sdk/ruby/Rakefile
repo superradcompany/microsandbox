@@ -37,17 +37,8 @@ task :version_check do
   abort "Ruby/published Rust SDK must use an exact version pin" unless core_requirement&.start_with?("=")
   abort "Ruby/published Rust SDK version mismatch" unless core_requirement.delete_prefix("=") == version
 
-  # The committed lockfile ships in the source gem, so it must resolve the same
-  # published crate the manifest pins; nothing else checks that, because every
-  # CI build of the extension swaps this lock for the workspace one and patches
-  # `microsandbox` to the in-tree SDK (scripts/ci/ruby-sdk-checkout.sh). That
-  # swapped-in lock, like the one cargo:patch_workspace re-resolves, records
-  # `microsandbox` as a path dependency with no `source` line, and a patched
-  # workspace may have no lock at all before its first build: neither says
-  # anything about the crates.io pin, so both are skipped rather than failed.
-  # A lock with no `microsandbox` entry at all is neither: it was not
-  # generated from this manifest, so it is rejected. Parsed with regexes on
-  # purpose: this must not need a cargo invocation.
+  # Workspace builds may have no lockfile or a path dependency without a source.
+  # Only registry entries need to match the published SDK pin.
   pin = core_requirement.delete_prefix("=")
   lock_path = "ext/microsandbox/Cargo.lock"
   if File.file?(lock_path)
