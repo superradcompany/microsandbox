@@ -837,7 +837,7 @@ pub(crate) async fn restore_requested_resources(
 }
 
 /// Bind the command to the selected process before sending any bytes on a reusable endpoint.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(super) async fn control_request_for_run(
     local: &crate::backend::LocalBackend,
     name: &str,
