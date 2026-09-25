@@ -80,7 +80,7 @@ Common flags:
 | `--deployment-profile` | Select `single-tenant` or `multi-tenant` host-runtime isolation; managed backends may override it |
 | `--net` | Add a high-level network profile (`public`, `private`, `host`, `all`, or `none`) |
 | `--net-rule` | Add a network policy rule |
-| `--net-strict` | Require hostname-based network allows to use inspectable request authority. Non-intercepted HTTPS fails closed when only a hostname rule allows it |
+| `--net-strict[=BOOL]` | Enabled by default; use `--net-strict=false` to opt out. Require hostname-based network allows to use inspectable request authority. Non-intercepted HTTPS fails closed when only a hostname rule allows it |
 | `--proxy` | Route eligible outbound traffic through a `socks4://IP:PORT` or `socks5://IP:PORT` proxy. Local-only. See [Proxies](#outbound-proxy) |
 | `--socks4-user-id` | Optional SOCKS4 user ID. Requires a `socks4://` proxy |
 | `--socks5-username`, `--socks5-password-env` | SOCKS5 username and the host environment variable containing its password. Both flags are required together |
@@ -387,6 +387,39 @@ msb restart -t 30 devbox
 | `-f`, `--force` | Force terminate immediately before starting again. Pending writes may be lost |
 | `-t`, `--timeout` | Total graceful-completion budget in seconds; expiry fails without killing. Defaults to 10 |
 | `-q`, `--quiet` | Suppress progress output |
+
+<span id="msb-sandbox-wait" />
+
+## msb wait
+
+Wait for an existing sandbox to reach `Stopped` or `Crashed`. Also available as
+`msb sandbox wait` and `msb sbx wait`.
+
+Use `msb run --name worker --detach …` to keep the sandbox available for a later
+`msb wait`; unnamed runs are removed when they finish.
+
+```bash
+msb wait worker
+msb wait worker --timeout 30s
+msb wait worker --timeout 5m --format json
+```
+
+| Flag | Description |
+|------|-------------|
+| `-t`, `--timeout` | Stop waiting after a duration such as `500ms`, `30s`, `5m`, or `1h`. Without this flag, wait indefinitely |
+| `--format json` | Emit the observed terminal state as JSON |
+
+The timeout covers lookup and waiting. It returns an error without stopping the
+sandbox. Missing sandboxes return an error; stopped or crashed sandboxes return
+immediately.
+
+A successful wait means the sandbox stopped or crashed, not that its workload
+succeeded.
+
+Text output shows the sandbox name and status. JSON includes `name`, `status`,
+`terminal`, `exit_code`, `signal`, `observed_at`, and `source`. Exit codes and
+signals are currently unavailable (`null`); `observed_at` records when the
+terminal state was observed.
 
 <span id="msb-sandbox-ping" />
 

@@ -4,6 +4,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::num::NonZero;
 use std::path::PathBuf;
 
+#[cfg(feature = "net")]
+use microsandbox_network::config::NetworkConfig;
 #[cfg(feature = "local")]
 use microsandbox_runtime::launch::{CheckpointRestoreConfig, RootfsUpperLayerConfig};
 use microsandbox_types::SandboxLogLevel as LogLevel;
@@ -20,6 +22,7 @@ use microsandbox_protocol::{HANDOFF_INIT_AUTO, HANDOFF_INIT_IMAGE_ENTRYPOINT_CAN
 use microsandbox_types::RegistryAuth;
 use typed_path::Utf8UnixPath;
 
+use crate::MicrosandboxResult;
 use crate::config::{
     GlobalConfigPatch, OciSandboxDefaultsPatch, SandboxDefaultsPatch,
     layers::{BackendConfig, ConfigLayers, Overlay},
@@ -835,7 +838,7 @@ impl SandboxConfig {
     pub(crate) fn apply_rootfs_defaults(
         &mut self,
         defaults: &crate::config::OciSandboxDefaults,
-    ) -> crate::MicrosandboxResult<()> {
+    ) -> MicrosandboxResult<()> {
         if defaults.upper_size_mib.is_some() && defaults.root_disk.is_some() {
             return Err(crate::MicrosandboxError::InvalidConfig(
                 "sandbox_defaults.oci.root_disk and deprecated sandbox_defaults.oci.upper_size_mib are mutually exclusive".into(),
@@ -906,6 +909,20 @@ impl SandboxConfig {
             size_mib: Some(default_oci_tmpfs_size_mib(self.spec.resources.memory_mib)),
             options: MountOptions::default(),
         });
+    }
+
+    #[cfg(feature = "net")]
+    pub(crate) fn local_network_config(&self) -> MicrosandboxResult<NetworkConfig> {
+        network_config_from_spec(&self.spec.network)
+    }
+
+    #[cfg(feature = "net")]
+    pub(crate) fn set_local_network_config(
+        &mut self,
+        config: NetworkConfig,
+    ) -> MicrosandboxResult<()> {
+        self.spec.network = network_spec_from_config(&config)?;
+        Ok(())
     }
 }
 
@@ -1011,33 +1028,32 @@ pub(crate) fn sandbox_log_level_from_runtime(level: LogLevel) -> SandboxLogLevel
 
 #[cfg(feature = "net")]
 pub(crate) fn network_spec_from_config(
-    config: &microsandbox_network::config::NetworkConfig,
-) -> crate::MicrosandboxResult<microsandbox_types::NetworkSpec> {
+    config: &NetworkConfig,
+) -> MicrosandboxResult<microsandbox_types::NetworkSpec> {
     Ok(serde_json::from_value(serde_json::to_value(config)?)?)
 }
 
 #[cfg(feature = "net")]
 pub(crate) fn network_config_from_spec(
     spec: &microsandbox_types::NetworkSpec,
-) -> crate::MicrosandboxResult<microsandbox_network::config::NetworkConfig> {
+) -> MicrosandboxResult<NetworkConfig> {
     Ok(serde_json::from_value(serde_json::to_value(spec)?)?)
 }
 
+/// Enable TLS interception for a non-empty secret set, returning whether
+/// `tls.enabled` had to be flipped.
+///
+/// This preserves the top-level sandbox builder's create-time policy, which
+/// enables interception for every secret entry. Lower-level network configs
+/// may intentionally keep interception off for plain-HTTP secrets that opt
+/// out of TLS identity checks.
 #[cfg(feature = "net")]
-impl SandboxConfig {
-    pub(crate) fn local_network_config(
-        &self,
-    ) -> crate::MicrosandboxResult<microsandbox_network::config::NetworkConfig> {
-        network_config_from_spec(&self.spec.network)
+pub(crate) fn ensure_tls_for_secrets(network: &mut NetworkConfig) -> bool {
+    if network.secrets.secrets.is_empty() || network.tls.enabled {
+        return false;
     }
-
-    pub(crate) fn set_local_network_config(
-        &mut self,
-        config: microsandbox_network::config::NetworkConfig,
-    ) -> crate::MicrosandboxResult<()> {
-        self.spec.network = network_spec_from_config(&config)?;
-        Ok(())
-    }
+    network.tls.enabled = true;
+    true
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -2336,6 +2352,43 @@ mod tests {
     //----------------------------------------------------------------------------------------------
     // Tests: Secret source references (create path + spawn resolution)
     //----------------------------------------------------------------------------------------------
+    #[cfg(feature = "net")]
+    #[test]
+    fn ensure_tls_for_secrets_enables_interception_for_a_non_empty_set() {
+        use microsandbox_network::secrets::config::{HostPattern, SecretEntry};
+
+        let mut network = microsandbox_network::config::NetworkConfig::default();
+        assert!(!network.tls.enabled);
+
+        network.secrets.secrets.push(SecretEntry {
+            env_var: "API_KEY".into(),
+            value: zeroize::Zeroizing::new(String::new()),
+            source: None,
+            placeholder: "$MSB_API_KEY".into(),
+            allowed_hosts: vec![HostPattern::Exact("api.example.com".into())],
+            substitution: Default::default(),
+            passthrough_hosts: Vec::new(),
+            violation_action: None,
+            require_tls_identity: false,
+        });
+        assert!(super::ensure_tls_for_secrets(&mut network));
+        assert!(network.tls.enabled);
+        assert!(!super::ensure_tls_for_secrets(&mut network));
+    }
+
+    /// One-way: an empty set never enables interception, and never disables
+    /// interception enabled for other reasons.
+    #[cfg(feature = "net")]
+    #[test]
+    fn ensure_tls_for_secrets_leaves_an_empty_set_alone() {
+        let mut network = microsandbox_network::config::NetworkConfig::default();
+        assert!(!super::ensure_tls_for_secrets(&mut network));
+        assert!(!network.tls.enabled);
+
+        network.tls.enabled = true;
+        assert!(!super::ensure_tls_for_secrets(&mut network));
+        assert!(network.tls.enabled);
+    }
 
     #[cfg(feature = "net")]
     const SECRET_SENTINEL: &str = "sentinel-secret-value";

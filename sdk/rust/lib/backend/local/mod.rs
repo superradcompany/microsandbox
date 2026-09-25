@@ -15,9 +15,9 @@
 //! the bulk of the old global config singleton plus the SQLite pool, so multiple
 //! backends can hold different configurations for tests / migrations.
 
-mod catalog;
 mod control;
 mod control_lookup;
+mod database;
 mod sandbox;
 pub(crate) mod snapshot;
 
@@ -613,14 +613,14 @@ async fn connect_catalog(
 
     // Durable downgrade recovery takes precedence over dead-owner reclamation.
     // The migration file lock above excludes another catalog opener doing this.
-    catalog::recover_abandoned_lease(&pools).await?;
+    database::recover_abandoned_lease(&pools).await?;
     microsandbox_runtime::maintenance::refuse_if_install_exclusive_held(pools.write())
         .await
         .map_err(|err| MicrosandboxError::Runtime(err.to_string()))?;
-    let initialize = crate::db::admission::requires_initialization(pools.write()).await?;
+    let initialize = database::requires_initialization(pools.write()).await?;
     if !initialize {
-        if !crate::db::admission::is_current(pools.write()).await? {
-            catalog::upgrade(&pools).await?;
+        if !database::is_current(pools.write()).await? {
+            database::upgrade(&pools).await?;
         }
     } else {
         // The SDK/CLI owns the catalog format, independently of the selected

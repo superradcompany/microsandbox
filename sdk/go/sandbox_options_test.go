@@ -801,7 +801,6 @@ func TestFFIWireShape_NetworkCustomRules(t *testing.T) {
 			DNS: &DNSConfig{
 				Nameservers: []string{"1.1.1.1:53"},
 			},
-			Strict:   true,
 			IPv4Pool: "172.31.240.0/24",
 			IPv6Pool: "fd7a:115c:a1e0:100::/56",
 		}),
@@ -1068,5 +1067,25 @@ func TestFFIWireShape_KitchenSinkDoesNotPanic(t *testing.T) {
 	body, _ := json.Marshal(got)
 	if !strings.Contains(string(body), "python:3.12") {
 		t.Fatalf("kitchen-sink payload missing image: %s", body)
+	}
+}
+
+func TestNetworkStrictDefaultsAndOptOut(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		config NetworkConfig
+		want   bool
+	}{
+		{"default", NetworkConfig{}, true},
+		{"explicit default", NetworkConfig{DisableStrict: false}, true},
+		{"opt out", NetworkConfig{DisableStrict: true}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := marshalCreateOptions(t, WithNetwork(&tc.config))
+			network := mustField(t, got, "network").(map[string]any)
+			if network["strict"] != tc.want {
+				t.Fatalf("strict = %v, want %v", network["strict"], tc.want)
+			}
+		})
 	}
 }

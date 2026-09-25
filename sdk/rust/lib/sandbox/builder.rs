@@ -912,9 +912,7 @@ impl SandboxBuilder {
         match self.local_network_config() {
             Ok(mut network) => {
                 network.secrets.secrets.push(entry);
-                if !network.tls.enabled {
-                    network.tls.enabled = true;
-                }
+                super::config::ensure_tls_for_secrets(&mut network);
                 if let Err(err) = self.set_local_network_config(network)
                     && self.build_error.is_none()
                 {
@@ -2369,6 +2367,31 @@ mod tests {
     use crate::sandbox::config::RestoreOverrideIntent;
     use crate::sandbox::{MAX_HOSTNAME_BYTES, MAX_SANDBOX_NAME_BYTES, RlimitResource};
     use std::collections::BTreeMap;
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn changing_violation_action_preserves_global_passthrough() {
+        let mut builder = SandboxBuilder::new("secrets");
+        let mut network = builder.local_network_config().unwrap();
+        network.secrets.passthrough_hosts = Some(vec![microsandbox_types::HostPattern::Exact(
+            "pass.example".into(),
+        )]);
+        builder.set_local_network_config(network).unwrap();
+        let builder =
+            builder.secret_violation_action(microsandbox_types::SecretViolationAction::Block);
+        let network = builder.local_network_config().unwrap();
+        assert_eq!(
+            network.secrets.passthrough_hosts,
+            Some(vec![microsandbox_types::HostPattern::Exact(
+                "pass.example".into()
+            )])
+        );
+        assert_eq!(
+            network.secrets.violation_action,
+            microsandbox_types::SecretViolationAction::Block
+        );
+    }
+
     #[cfg(feature = "net")]
     use std::net::{IpAddr, Ipv4Addr};
 

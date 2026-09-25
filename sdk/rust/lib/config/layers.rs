@@ -415,8 +415,16 @@ mod tests {
             administrator.join("msb")
         );
         assert_eq!(
-            enforced.resolved_config().resolve_libkrunfw_path().unwrap(),
-            administrator.join(microsandbox_utils::libkrunfw_filename(std::env::consts::OS))
+            enforced
+                .resolved_config()
+                .resolve_libkrunfw_path()
+                .unwrap()
+                .canonicalize()
+                .unwrap(),
+            administrator
+                .join(microsandbox_utils::libkrunfw_filename(std::env::consts::OS))
+                .canonicalize()
+                .unwrap()
         );
         assert_eq!(enforced.resolved_config().paths.libkrunfw, None);
         assert_eq!(

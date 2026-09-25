@@ -1,11 +1,14 @@
-//! Frozen v0.6.x environment transport, decoded without changing the host environment.
+//! Config-FD environment transport introduced in v0.5.9, reused through v0.6.9.
 
 use std::collections::BTreeMap;
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use microsandbox_protocol::{bootstrap::*, exec::ExecRlimit};
-use microsandbox_types::RlimitResource;
+use microsandbox_types::{RlimitResource, compat::field::Field};
 use serde::de::DeserializeOwned;
+
+use crate::client::compat::launch;
+use crate::client::launch::LaunchConfig;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -25,8 +28,19 @@ struct MountOptions {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
+/// Decode a launch using the environment-based bootstrap.
+pub(in crate::client::compat) fn decode(bytes: &[u8]) -> Result<LaunchConfig, String> {
+    let mut launch = launch::decode_previous(bytes)?;
+    let Field::Present(env) = std::mem::take(&mut launch.env) else {
+        return Err("missing bootstrap or legacy env".into());
+    };
+    let bootstrap = to_current(env, launch.workdir.take())
+        .map_err(|field| format!("invalid legacy launch field: {field}"))?;
+    launch.into_current(bootstrap, true)
+}
+
 /// Translate only the legacy representation. Typed bootstrap takes precedence at the caller.
-pub(super) fn decode(
+pub(in crate::client::compat) fn to_current(
     env: Vec<String>,
     workdir: Option<String>,
 ) -> Result<GuestBootstrap, &'static str> {

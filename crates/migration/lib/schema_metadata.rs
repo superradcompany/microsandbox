@@ -57,6 +57,9 @@ pub const SNAPSHOT_IDENTITY_MIGRATION_ID: &str = "m20260829_000001_split_snapsho
 /// Migration that separates local group membership from portable snapshot identity.
 pub const SNAPSHOT_GROUPS_MIGRATION_ID: &str = "m20260910_000001_snapshot_groups";
 
+/// Normalizes saved secret policies to the current representation.
+pub const SECRET_CONFIG_MIGRATION_ID: &str = "m20260922_000001_migrate_secret_config";
+
 /// Frozen migration baseline for the transitional 0.6.0 release.
 ///
 /// The released 0.6.0 binary predates `msb __schema-baseline --json`, so
@@ -275,6 +278,13 @@ pub const MIGRATION_METADATA: &[MigrationMetadata] = &[
         affects_user_data: true,
         summary: "restore the flat snapshot index only when no groups or duplicate identities remain",
     },
+    MigrationMetadata {
+        id: SECRET_CONFIG_MIGRATION_ID,
+        reversible: true,
+        affects_cache: false,
+        affects_user_data: false,
+        summary: "retain secret policies only when the target can represent them",
+    },
 ];
 
 //--------------------------------------------------------------------------------------------------
@@ -361,6 +371,7 @@ mod tests {
     #[test]
     fn canonical_applied_prefix_uses_metadata_order() {
         let applied = [
+            SECRET_CONFIG_MIGRATION_ID,
             SNAPSHOT_GROUPS_MIGRATION_ID,
             SNAPSHOT_IDENTITY_MIGRATION_ID,
             MOUNT_OWNER_CONFIG_MIGRATION_ID,
@@ -444,7 +455,11 @@ mod tests {
         assert!(current.starts_with(&released));
         assert_eq!(
             &current[released.len()..],
-            &[SNAPSHOT_IDENTITY_MIGRATION_ID, SNAPSHOT_GROUPS_MIGRATION_ID],
+            &[
+                SNAPSHOT_IDENTITY_MIGRATION_ID,
+                SNAPSHOT_GROUPS_MIGRATION_ID,
+                SECRET_CONFIG_MIGRATION_ID
+            ],
         );
         assert!(canonical_applied_prefix(released).is_some());
     }

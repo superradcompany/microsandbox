@@ -5,7 +5,7 @@ use microsandbox::LogLevel;
 
 use super::{
     branch, copy, create, exec, inspect, list, logs, metrics, modify, pause, ping, ps, remove,
-    restart, restore, run, start, stop, touch,
+    restart, restore, run, start, stop, touch, wait,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -54,6 +54,9 @@ pub enum SandboxCommands {
 
     /// Restart one or more sandboxes.
     Restart(restart::RestartArgs),
+
+    /// Wait for a sandbox to stop or crash.
+    Wait(wait::WaitArgs),
 
     /// Check whether one or more sandbox agents are reachable.
     Ping(ping::PingArgs),
@@ -128,6 +131,7 @@ pub async fn run(command: SandboxCommands, log_level: Option<LogLevel>) -> anyho
             .await
         }
         SandboxCommands::Restart(args) => restart::run(args).await,
+        SandboxCommands::Wait(args) => wait::run(args).await,
         SandboxCommands::Ping(args) => ping::run(args).await,
         SandboxCommands::Touch(args) => touch::run(args).await,
         SandboxCommands::List(args) => list::run(args).await,

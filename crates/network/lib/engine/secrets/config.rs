@@ -39,6 +39,11 @@ impl SecretsConfigExt for SecretsConfig {
                     .passthrough_hosts
                     .iter()
                     .any(|h| *h != HostPattern::Any)
+                || (secret.violation_action.is_none()
+                    && self
+                        .passthrough_hosts
+                        .as_ref()
+                        .is_some_and(|hosts| hosts.iter().any(|h| *h != HostPattern::Any)))
         })
     }
 }
@@ -72,12 +77,14 @@ mod tests {
     #[test]
     fn plain_http_candidates_require_tls_opt_out() {
         let tls_only = SecretsConfig {
+            passthrough_hosts: None,
             secrets: vec![secret(true, vec![HostPattern::Any])],
             violation_action: SecretViolationAction::default(),
         };
         assert!(!tls_only.has_plain_http_candidates());
 
         let plain = SecretsConfig {
+            passthrough_hosts: None,
             secrets: vec![secret(false, vec![HostPattern::Any])],
             violation_action: SecretViolationAction::default(),
         };
@@ -85,14 +92,32 @@ mod tests {
     }
 
     #[test]
+    fn unused_global_passthrough_does_not_change_host_classification() {
+        let mut entry = secret(true, vec![HostPattern::Any]);
+        entry.violation_action = Some(SecretViolationAction::Block);
+        let mut config = SecretsConfig {
+            secrets: vec![entry],
+            passthrough_hosts: Some(vec![HostPattern::Exact("ignored.example".into())]),
+            ..SecretsConfig::default()
+        };
+        assert!(!config.has_host_scoped_secrets());
+        config.secrets[0].violation_action = None;
+        assert!(config.has_host_scoped_secrets());
+        config.secrets.clear();
+        assert!(!config.has_host_scoped_secrets());
+    }
+
+    #[test]
     fn host_scoped_detects_non_any_pattern() {
         let any = SecretsConfig {
+            passthrough_hosts: None,
             secrets: vec![secret(true, vec![HostPattern::Any])],
             violation_action: SecretViolationAction::default(),
         };
         assert!(!any.has_host_scoped_secrets());
 
         let scoped = SecretsConfig {
+            passthrough_hosts: None,
             secrets: vec![secret(
                 true,
                 vec![HostPattern::Exact("api.example.com".into())],

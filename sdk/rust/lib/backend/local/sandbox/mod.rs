@@ -184,7 +184,7 @@ impl LocalBackend {
             }
         }
 
-        let mut config: SandboxConfig = crate::db::config::decode(&model.config)?;
+        let mut config: SandboxConfig = serde_json::from_str::<SandboxConfig>(&model.config)?;
         // Also cover starts after crashes or a stop performed by an older SDK. Lifecycle
         // ownership alone can become available during Linux's deferred disk/KVM teardown.
         // Observe only this sandbox's owned markers; actual shared-disk conflicts still fail
@@ -264,7 +264,6 @@ impl LocalBackend {
                     write_db,
                     model.id,
                     &sandbox.config().clone_for_persistence(),
-                    Some(self.config()),
                 )
                 .await
                 {
@@ -1058,24 +1057,12 @@ impl LocalBackend {
         db: &DbWriteConnection,
         sandbox_id: i32,
         config: &SandboxConfig,
-        runtime: Option<&crate::config::GlobalConfig>,
     ) -> MicrosandboxResult<()> {
         if !microsandbox_db::catalog::has_column(db, "sandbox", "active_config").await? {
             return Ok(());
         }
-        let original = microsandbox_db::catalog::sandbox_query(db)
-            .await?
-            .filter(sandbox_entity::Column::Id.eq(sandbox_id))
-            .one(db)
-            .await?
-            .ok_or_else(|| {
-                crate::MicrosandboxError::Runtime(
-                    "sandbox disappeared before recording its active configuration".into(),
-                )
-            })?;
-        let config_json =
-            crate::db::writing::encode_existing(db, config, &original.config, runtime).await?;
-        sandbox_entity::Entity::update_many()
+        let config_json = serde_json::to_string(config)?;
+        let result = sandbox_entity::Entity::update_many()
             .col_expr(
                 sandbox_entity::Column::ActiveConfig,
                 Expr::value(Some(config_json)),
@@ -1087,6 +1074,12 @@ impl LocalBackend {
             .filter(sandbox_entity::Column::Id.eq(sandbox_id))
             .exec(db)
             .await?;
+
+        if result.rows_affected == 0 {
+            return Err(crate::MicrosandboxError::Runtime(
+                "sandbox disappeared before recording its active configuration".into(),
+            ));
+        }
 
         Ok(())
     }

@@ -4,26 +4,19 @@ description: Create, start, stop, and manage sandbox state
 icon: "rotate"
 ---
 
-A sandbox has a simple lifecycle: create it, use it, stop it when it is idle, start it again when you need it, and remove it when you are finished. Stopping preserves the sandbox's configuration and filesystem, while removing deletes its sandbox-owned state.
+Create a sandbox, stop and restart it as needed, and remove it when you are finished. Stopping keeps its configuration and filesystem; removing deletes its saved state.
 
 ## Create a sandbox
 
 <Note>
-Locally, an attached SDK handle stops its sandbox when the client process exits. Cloud sandboxes are service-owned, so stop or remove them explicitly.
+By default, sandboxes created through a local SDK stop when your application exits. To keep one running, [detach it](#keep-a-sandbox-running). Cloud sandboxes keep running until stopped or removed, subject to their lifetime limits.
 </Note>
 
-Creating a sandbox starts the microVM and waits until it is ready to accept commands. Give each sandbox a name so you can find and manage it later. Names must be non-empty and no longer than 128 UTF-8 bytes.
+Creating a sandbox starts it and waits until it is ready for commands. Give it a name so you can find it later. Names must be non-empty and no longer than 128 UTF-8 bytes.
 
 <CodeGroup>
 ```typescript TypeScript
-// Local attached handle: sandbox stops when your process exits
 await using sb = await Sandbox.builder("worker").image("python").create();
-
-// Detached: sandbox survives after your process exits
-const detached = await Sandbox.builder("worker")
-  .image("python")
-  .detached(true)
-  .create();
 ```
 
 ```rust Rust
@@ -50,11 +43,12 @@ msb create python --name worker
 ```
 </CodeGroup>
 
-An attached local SDK handle normally stops its sandbox when the client process exits. See [Keep a sandbox running](#keep-a-sandbox-running) when the sandbox should outlive that process.
-
 ## Pause and resume
 
-Pause keeps the local VM and its RAM allocated without creating a snapshot. Resume continues the same processes and corrects guest wall clock before releasing prepared workloads. New guest commands fail while paused; host inspection and stop remain available. Network peers may time out during a long pause.
+Pause freezes a local sandbox in memory. Resume continues where it left off. New commands are rejected while paused, and network connections may time out. Pause and resume are not supported on cloud.
+
+Time spent paused does not count toward the [60-second limit for waiting input](#when-input-gets-stuck).
+If new connections were already blocked, they stay blocked until input starts flowing again.
 
 <CodeGroup>
 ```typescript TypeScript
@@ -84,20 +78,19 @@ if err := worker.Resume(ctx); err != nil { return err }
 
 ```bash CLI
 msb pause worker
-msb snap create paused-state --sandbox worker --full
 msb resume worker
 ```
 </CodeGroup>
 
-Pausing an already-paused VM and resuming an already-running VM are no-ops. Full snapshots taken while paused leave it paused. A stopped VM has no resident execution state: use `start` to boot it again. Pause/resume requires a matching runtime and guest kernel; cloud sandboxes are not supported.
+Use `resume` for a paused sandbox and `start` for a stopped one. Repeating `pause` or `resume` is safe. Pausing does not create a snapshot; taking a [full snapshot](/sandboxes/snapshots) while paused leaves it paused. Pause/resume requires a matching runtime and guest kernel.
 
 ## Stop and start again
 
-Stopping gracefully terminates guest processes and shuts down the VM. The sandbox moves to `Stopped`, but its configuration and filesystem remain available for the next start.
+Stopping shuts down the sandbox and its processes while keeping its configuration and filesystem. Starting it again boots a new VM; it does not resume the old processes.
 
-`stop()` has no built-in deadline and never escalates to force-kill. Use the explicit timeout option in your SDK to bound graceful completion. Expiry returns a stop-timeout error without killing; an already accepted shutdown request may still complete afterward. On local sandboxes, successful completion also waits for the targeted runtime to release ownership. Cloud shutdown may include creating a durable disk checkpoint.
+`stop()` waits for graceful shutdown with no default timeout. Use your SDK's stop-with-timeout method to limit the wait. A timeout returns an error without force-killing; the shutdown may still finish later. Resume a paused sandbox before stopping it.
 
-Use `request_stop` and `wait_until_stopped` separately when you want to submit the stop and manage observation yourself. Call `kill` explicitly when forced termination is intended; force termination is local-only.
+See the SDK references for timeout options and cancellation rules: [TypeScript](/sdk/typescript/sandbox), [Rust](/sdk/rust/sandbox), [Python](/sdk/python/sandbox), or [Go](/sdk/go/sandbox). Cancelling a wait does not disable automatic cleanup or [lifetime limits](#automatic-lifecycle-policies).
 
 <CodeGroup>
 ```typescript TypeScript
@@ -136,17 +129,17 @@ msb start worker
 ```
 </CodeGroup>
 
-Use `restart` when you want to stop and start the sandbox in one operation. If it is already stopped or crashed, restart starts it directly. SDK receiver methods preserve the sandbox's identity and configuration while replacing only the running VM instance.
+Use `restart` to stop and start in one operation. If the sandbox is already stopped or crashed, it starts directly.
 
 ```bash CLI
 msb restart worker
 ```
 
-Restart and destroy can request graceful shutdown; timeout expiry fails without force-killing or starting a replacement. Force controls are local-only, and detached-start controls affect only local process ownership.
+If graceful shutdown times out, restart fails without starting a new VM. For a sandbox that will not stop, see [Stop an unresponsive sandbox](#stop-an-unresponsive-sandbox).
 
 ## Reuse or create a named sandbox
 
-Use `connect_or_create` when your application wants a sandbox with a stable name but does not know whether it already exists. This is useful for workers, development environments, and services that reconnect after the client process restarts.
+Use `connect_or_create` to reuse a named sandbox or create it if it does not exist.
 
 The operation:
 
@@ -195,7 +188,7 @@ sb = Microsandbox::Sandbox.connect_or_create(
 </CodeGroup>
 
 <Warning>
-Creation options are used only when a new sandbox is created. If `worker` already exists, its saved image, resources, environment, mounts, and other configuration are kept. To apply new configuration, use the [local replacement workflow](/sandboxes/overview#naming-conflicts). On microsandbox cloud, where replacement is unavailable, remove the existing sandbox and then create it again.
+Creation options apply only to new sandboxes. An existing sandbox keeps its saved configuration. To recreate it with different settings, use [replacement locally](/sandboxes/overview#naming-conflicts), or remove and recreate it on cloud.
 </Warning>
 
 If you already have a `SandboxHandle`, use `connect_or_start` to connect to that exact sandbox or start it when needed.
@@ -249,7 +242,6 @@ let sb = Sandbox::builder("worker")
 
 ```python Python
 sb = await Sandbox.create("worker", image="python", detached=True)
-await sb.detach()
 ```
 
 ```go Go
@@ -261,7 +253,6 @@ sb, err := m.CreateSandbox(ctx, "worker",
 
 ```ruby Ruby
 sb = Microsandbox::Sandbox.create("worker", image: "python", detached: true)
-sb.detach
 ```
 
 ```bash CLI
@@ -269,7 +260,7 @@ msb run -d python --name worker
 ```
 </CodeGroup>
 
-You can also detach an existing SDK receiver with `detach()` (`Detach` in Go).
+To detach a sandbox you already created, call `detach()` (`Detach` in Go).
 
 ## List and inspect
 
@@ -318,7 +309,7 @@ msb ps worker
 
 ## Wait for a state
 
-Use `wait_until_stopped` when another part of your application is responsible for stopping the sandbox and you only need to wait for it to finish.
+Use `wait_until_stopped` to wait for a sandbox to stop without requesting a shutdown yourself. To request shutdown now and wait separately, use `request_stop` first; see your [SDK reference](#reference) for the method names.
 
 <CodeGroup>
 ```typescript TypeScript
@@ -434,43 +425,9 @@ err := sb.RequestDrain(ctx)
 ```
 </CodeGroup>
 
-## Stop an unresponsive sandbox
-
-`stop()` waits indefinitely for graceful completion. `stop_with_timeout(...)` in Rust, Python, and Ruby, `stopWithTimeout(...)` in TypeScript, `StopWithTimeout(ctx, ...)` in Go, and `msb stop --timeout ...` apply one total budget and report timeout without killing. A zero budget expires before dispatch. On local sandboxes, success means the targeted run is terminal and has released runtime ownership, so removal can follow immediately. Cancelling a cancellable wait never force-kills; an already-delivered request can still finish later. The request-only variants return after dispatch and do not prove completion.
-
-These methods do not disable separately selected lifetime policies. Retain the lifecycle-owning handle when cancelling only a wait: dropping its last owner, leaving a cleanup context, or reaching a configured idle or maximum-duration limit can still terminate the sandbox under that policy.
-
-<Note>
-Force kill is currently available only for local sandboxes. Use a graceful stop on microsandbox cloud.
-</Note>
-
-If a sandbox does not respond to a graceful stop, force-kill it. This ends the VM immediately without waiting for guest processes to shut down.
-
-<CodeGroup>
-```typescript TypeScript
-await sb.kill();
-```
-
-```rust Rust
-sb.kill().await?;
-```
-
-```python Python
-await sb.kill()
-```
-
-```go Go
-err := sb.Kill(ctx)
-```
-
-```bash CLI
-msb stop --force worker
-```
-</CodeGroup>
-
 ## Destroy or remove
 
-Use `destroy` when you have an SDK receiver and want to stop and remove that exact sandbox in one operation. It requests graceful shutdown by default, fails without killing or removing data if the configured budget expires, and refuses to act on a replacement that reused the name.
+Use `destroy` to stop and remove a sandbox in one operation. If graceful shutdown times out, it leaves the saved data intact. It will not remove a different sandbox that has reused the same name.
 
 <CodeGroup>
 ```typescript TypeScript
@@ -576,7 +533,7 @@ sb, err := m.CreateSandbox(ctx, "worker",
 
 ## Lifecycle states
 
-Most applications only need to distinguish between `Running` and `Stopped`. The complete set is useful for status displays and recovery logic.
+Use these states to display status or decide what to do next.
 
 | Status | Meaning |
 |--------|---------|
@@ -588,19 +545,57 @@ Most applications only need to distinguish between `Running` and `Stopped`. The 
 | **Stopped** | The VM is off. Configuration and sandbox state are preserved for a later start. |
 | **Crashed** | The VM exited unexpectedly and can be started again. |
 
-A paused sandbox is not stopped: use `resume`, not `start`, to continue it. Pause and resume are available through the local CLI and SDKs.
-
 ## Names, handles, and concurrent callers
 
-A sandbox name finds the current sandbox saved under that name. A `Sandbox` or `SandboxHandle` also carries an opaque stable ID (`ID()` in Go) for one exact saved sandbox. Treat the ID as an opaque value and use it for logging, correlation, and equality checks.
+A name identifies the sandbox currently saved under it. An SDK handle identifies one specific sandbox. If that sandbox is removed and its name is reused, the old handle will not act on the replacement.
 
-If `worker` is removed and a different sandbox is later created with the same name, an old receiver will not act on the replacement. Lifecycle methods return `SandboxReplaced` or the language's typed equivalent when they can detect this situation; an ID-addressed cloud request may instead report that the old resource no longer exists.
+Concurrent callers can safely use `connect_or_create` or `connect_or_start` to reuse a sandbox. If it is still starting, they wait rather than start another VM. See your [SDK reference](#reference) for identity checks and replacement errors.
 
-Concurrent callers are safe to use with the named lifecycle APIs. `create` remains strict, so only one same-name creation succeeds. `connect_or_create` may reuse the sandbox created by another caller, and `connect_or_start` remains attached to the exact identity held by its handle. Calls that encounter `Starting` wait for the sandbox to become ready instead of launching a second runtime.
+## Troubleshooting
 
-## Logs and diagnostics
+### Stop an unresponsive sandbox
 
-Use [`msb logs`](/cli/sandbox-commands#msb-logs) or the SDK `logs()` method to read captured output from running, stopped, or crashed sandboxes. For source semantics, boot errors, and diagnostic flows, see [Logs](/sandboxes/logs).
+<Note>
+Force kill is currently available only for local sandboxes. Use a graceful stop on microsandbox cloud.
+</Note>
+
+If [graceful stop](#stop-and-start-again) does not work, use `kill` to end the VM immediately. Running work is interrupted and unsaved data may be lost.
+
+<CodeGroup>
+```typescript TypeScript
+await sb.kill();
+```
+
+```rust Rust
+sb.kill().await?;
+```
+
+```python Python
+await sb.kill()
+```
+
+```go Go
+err := sb.Kill(ctx)
+```
+
+```bash CLI
+msb stop --force worker
+```
+</CodeGroup>
+
+### When input gets stuck
+
+If input has to wait because the sandbox’s input queue has been full for 60 seconds,
+Microsandbox stops accepting new connections. It keeps existing connections and pending requests open, and
+output and logs remain available. It does not stop the sandbox or its workloads.
+New connections are accepted again once input starts flowing.
+
+You can set request timeouts in your application. A timeout does not necessarily
+mean the request failed to run.
+
+### Logs and diagnostics
+
+Use [`msb logs`](/cli/sandbox-commands#msb-logs) or the SDK `logs()` method to read sandbox output, even after it stops or crashes. See [Logs](/sandboxes/logs) for troubleshooting startup and other failures.
 
 ## Reference
 

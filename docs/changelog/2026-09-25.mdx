@@ -1,0 +1,41 @@
+---
+title: "Week of September 25, 2026"
+sidebarTitle: "Week of the 25th"
+description: "v0.7.3 fixes for saved sandbox configuration and macOS runtime discovery, plus snapshot upgrade guidance."
+icon: "bolt"
+---
+
+<Tip>
+  **Released this week:** [v0.7.3](https://github.com/superradcompany/microsandbox/releases/tag/v0.7.3)
+</Tip>
+
+## Fixes
+
+- **Existing sandbox configuration.** v0.7.3 migrates saved v0.6 secret policies, including Basic Auth and query substitution settings, so existing sandboxes can load without being deleted and recreated.
+- **macOS runtime discovery.** Starting microsandbox through a symlink now finds the matching `libkrunfw` library in the installation directory.
+
+## Upgrading snapshot code from v0.6
+
+Local snapshot groups introduced in v0.7 have immutable members. This behavior also applies in v0.7.3. SDK calls with `force=True` fail even when no snapshot exists under the requested name.
+
+Code that previously overwrote a named snapshot must change:
+
+```python Before: v0.6
+from microsandbox import Snapshot
+
+snapshot = await Snapshot.create(
+    "checkpoint", from_sandbox="workbench", force=True
+)
+```
+
+Omit the name to generate a new member for each capture, and leave `force` at its default of `False`:
+
+```python After: v0.7
+from microsandbox import Snapshot
+
+snapshot = await Snapshot.create(from_sandbox="workbench")
+```
+
+You can also supply a unique member name. If you need to reuse an existing name, explicitly remove that member first using [`Snapshot.remove()`](/sdk/python/snapshots#snapshotremove). Removal still checks for dependent snapshots, and deleting a member does not preserve it if the next capture fails.
+
+This restriction applies to installed group members. Direct archive capture can overwrite its output file. See [snapshot groups](/sandboxes/snapshots#snapshot-groups) and the [Python snapshot reference](/sdk/python/snapshots).

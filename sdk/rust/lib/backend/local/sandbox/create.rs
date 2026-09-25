@@ -33,6 +33,7 @@ use crate::db::entity::{
     sandbox_rootfs as sandbox_rootfs_entity,
 };
 use crate::runtime::handle::StartupProcess;
+use crate::runtime::launch_contract;
 use crate::runtime::spawn::EnsuredNamedVolumes;
 use crate::runtime::{
     ProcessHandle, SpawnMode, ensure_named_volumes, rollback_created_named_volumes, spawn_sandbox,
@@ -242,7 +243,7 @@ impl LocalBackend {
         let db = self.db().await?;
         // Runtime compatibility is independent of the upgraded catalog. Keep
         // unsupported requests from deleting a replace target before launch.
-        crate::db::writing::validate_runtime_config(&config, self.config()).await?;
+        launch_contract::validate_runtime_config(&config, self.config()).await?;
         let sandbox_dir = self.sandboxes_dir().join(&config.spec.name);
         // Preserve only the installed-snapshot source that existed on entry. Direct archive
         // materialization below installs its checkpoint closure directly into child staging, so
@@ -334,7 +335,7 @@ impl LocalBackend {
             // before admitting it or touching the replacement target.
             config = SandboxBuilder::from(config).finish(Some(&self.config), None)?;
             // Keep launch-time restore intent in this check, not just cold-start state.
-            crate::db::writing::validate_runtime_config(&config, self.config()).await?;
+            launch_contract::validate_runtime_config(&config, self.config()).await?;
             archive_stage = Some(stage);
         }
 
@@ -900,7 +901,6 @@ impl LocalBackend {
             write_db,
             sandbox_id,
             &sandbox.config().clone_for_persistence(),
-            Some(self.config()),
         )
         .await
         {
@@ -1925,7 +1925,7 @@ impl LocalBackend {
         db: &DbWriteConnection,
         config: &SandboxConfig,
     ) -> MicrosandboxResult<i32> {
-        Self::insert_sandbox_record_with_status(db, config, SandboxStatus::Running, None).await
+        Self::insert_sandbox_record_with_status(db, config, SandboxStatus::Running).await
     }
 
     /// Insert a provisional local create record that remains non-connectable until ready.
@@ -1938,9 +1938,9 @@ impl LocalBackend {
         // Recheck at create admission, not in shared configuration persistence:
         // editing a stopped sandbox must not require an installed runtime.
         if let Some(runtime) = runtime {
-            crate::db::writing::validate_runtime_config(config, runtime).await?;
+            launch_contract::validate_runtime_config(config, runtime).await?;
         }
-        Self::insert_sandbox_record_with_status(db, config, SandboxStatus::Starting, runtime).await
+        Self::insert_sandbox_record_with_status(db, config, SandboxStatus::Starting).await
     }
 
     /// Insert the sandbox record with an explicit initial lifecycle status.
@@ -1948,9 +1948,8 @@ impl LocalBackend {
         db: &DbWriteConnection,
         config: &SandboxConfig,
         status: SandboxStatus,
-        runtime: Option<&crate::config::GlobalConfig>,
     ) -> MicrosandboxResult<i32> {
-        let config_json = crate::db::writing::encode_new(db, config, runtime).await?;
+        let config_json = serde_json::to_string(config)?;
         let labels = config.spec.labels.clone();
 
         db.transaction(|txn| {
@@ -2840,7 +2839,6 @@ mod tests {
             pools.write(),
             &config,
             SandboxStatus::Stopped,
-            None,
         )
         .await
         .unwrap();
@@ -3294,7 +3292,7 @@ mod tests {
         let sandbox_id = LocalBackend::insert_sandbox_record(pools.write(), &config)
             .await
             .unwrap();
-        LocalBackend::update_sandbox_active_config(pools.write(), sandbox_id, &config, None)
+        LocalBackend::update_sandbox_active_config(pools.write(), sandbox_id, &config)
             .await
             .unwrap();
 

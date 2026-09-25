@@ -151,7 +151,9 @@ Check each applicable compatibility direction:
 7. A newer SDK launching and operating an older `msb` binary.
 8. An older SDK launching and operating a newer `msb` binary.
 
-Treat stable strings, numeric constants, paths, hashes, serialized field details, ordering guarantees, timing, and error interpretations as compatibility-sensitive even when they are not part of the public API. Consult [COMPATIBILITY.md](COMPATIBILITY.md) for the detailed map, source-of-truth files, evolution rules, and expected tests.
+Treat stable strings, numeric constants, paths, hashes, serialized field details, ordering guarantees, timing, and error interpretations as compatibility-sensitive even when they are not part of the public API.
+
+For changes affecting persisted data or cross-version communication, read [COMPATIBILITY.md](COMPATIBILITY.md) before implementation. Follow its contract-version naming, module ownership, migration, and validation guidelines.
 
 ## Rust Layout And Style
 

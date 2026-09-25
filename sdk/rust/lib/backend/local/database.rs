@@ -1,9 +1,13 @@
 //! Transactional SDK/CLI catalog upgrades that preserve already-running VMs.
 
-use microsandbox_migration::{Migrator, MigratorTrait};
+use std::collections::BTreeSet;
+
+use microsandbox_db::catalog::has_table;
+use microsandbox_migration::{Migrator, MigratorTrait, schema_metadata};
 use microsandbox_runtime::maintenance;
 use sea_orm::{
-    ColumnTrait, ConnectionTrait, DatabaseTransaction, EntityTrait, QueryFilter, TransactionTrait,
+    ColumnTrait, ConnectionTrait, DatabaseTransaction, DbBackend, EntityTrait, QueryFilter,
+    Statement, TransactionTrait,
 };
 
 use super::LocalBackend;
@@ -29,6 +33,59 @@ impl LocalBackend {
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
+
+/// Compare identities, not counts: an unknown migration must never admit a current writer.
+pub(super) async fn is_current<C: ConnectionTrait>(db: &C) -> MicrosandboxResult<bool> {
+    let rows = db
+        .query_all_raw(Statement::from_string(
+            DbBackend::Sqlite,
+            "SELECT version FROM seaql_migrations",
+        ))
+        .await?;
+    let applied = rows
+        .into_iter()
+        .map(|row| row.try_get_by_index::<String>(0))
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    Ok(applied
+        == schema_metadata::migration_ids()
+            .map(str::to_owned)
+            .collect())
+}
+
+/// Returns true only for a new catalog or interrupted pre-floor initialization.
+/// Known complete prefixes use the normal upgrade path. Unknown or gapped
+/// histories are refused rather than guessed from their migration count.
+pub(super) async fn requires_initialization<C: ConnectionTrait>(
+    db: &C,
+) -> MicrosandboxResult<bool> {
+    if !has_table(db, "seaql_migrations").await? {
+        let tables = db.query_one_raw(Statement::from_string(DbBackend::Sqlite,
+            "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"))
+            .await?.expect("COUNT returns one row").try_get_by_index::<i64>(0)?;
+        if tables == 0 {
+            return Ok(true);
+        }
+        return Err(MicrosandboxError::Runtime("database has tables but no migration history; refusing to initialize an unrecognized catalog".into()));
+    }
+    let rows = db
+        .query_all_raw(Statement::from_string(
+            DbBackend::Sqlite,
+            "SELECT version FROM seaql_migrations",
+        ))
+        .await?;
+    let applied = rows
+        .into_iter()
+        .map(|row| row.try_get_by_index::<String>(0))
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    if let Some(prefix) =
+        schema_metadata::canonical_applied_prefix(applied.iter().map(String::as_str))
+    {
+        return Ok(prefix.len() < schema_metadata::BASELINE_0_6_0_MIGRATIONS.len());
+    }
+    Err(MicrosandboxError::Runtime(
+        "database schema is newer than this msb binary or has an unknown migration prefix; refusing to change an unrecognized catalog".into(),
+    ))
+}
 
 pub(super) async fn upgrade(pools: &microsandbox_db::pool::DbPools) -> MicrosandboxResult<()> {
     // The caller holds the migration file lock. Existing runtimes do not hold
@@ -125,17 +182,146 @@ pub(super) async fn recover_abandoned_lease(
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{sync::LazyLock, time::Duration};
 
     use microsandbox_db::pool::DbPools;
-    use sea_orm::ConnectionTrait;
+    use sea_orm::{ConnectionTrait, Database};
+    use serde::Deserialize;
 
     use super::*;
+    use crate::runtime::launch_contract;
+    use crate::{SandboxConfig, test_support};
+
+    //--------------------------------------------------------------------------------------------------
+    // Constants
+    //--------------------------------------------------------------------------------------------------
+
+    static RELEASED: LazyLock<Vec<ReleasedCatalog>> = LazyLock::new(|| {
+        serde_json::from_str(include_str!("../../db/fixtures/catalog-profiles.json"))
+            .expect("checked-in released catalog profiles must parse")
+    });
+
+    //--------------------------------------------------------------------------------------------------
+    // Types
+    //--------------------------------------------------------------------------------------------------
+
+    #[derive(Deserialize)]
+    struct ReleasedCatalog {
+        versions: Vec<String>,
+        migrations: BTreeSet<String>,
+    }
+
+    //--------------------------------------------------------------------------------------------------
+    // Functions
+    //--------------------------------------------------------------------------------------------------
+
+    fn v0_6_migration_count(patch: u64) -> MicrosandboxResult<u32> {
+        let version = format!("v0.6.{patch}");
+        RELEASED
+            .iter()
+            .find(|profile| profile.versions.contains(&version))
+            .map(|profile| profile.migrations.len() as u32)
+            .ok_or_else(|| {
+                MicrosandboxError::Runtime(format!("unrecognized catalog release {version}"))
+            })
+    }
+
+    #[tokio::test]
+    async fn every_released_profile_is_preserved_and_unknown_history_is_refused() {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        assert!(requires_initialization(&db).await.unwrap());
+        db.execute_unprepared(
+            "CREATE TABLE seaql_migrations (version TEXT PRIMARY KEY, applied_at BIGINT NOT NULL)",
+        )
+        .await
+        .unwrap();
+        for profile in RELEASED.iter() {
+            db.execute_unprepared("DELETE FROM seaql_migrations")
+                .await
+                .unwrap();
+            for version in &profile.migrations {
+                db.execute_raw(Statement::from_sql_and_values(
+                    DbBackend::Sqlite,
+                    "INSERT INTO seaql_migrations VALUES (?, 1)",
+                    [version.clone().into()],
+                ))
+                .await
+                .unwrap();
+            }
+            assert!(!requires_initialization(&db).await.unwrap());
+            let count = db
+                .query_one_raw(Statement::from_string(
+                    DbBackend::Sqlite,
+                    "SELECT COUNT(*) FROM seaql_migrations",
+                ))
+                .await
+                .unwrap()
+                .unwrap()
+                .try_get_by_index::<i64>(0)
+                .unwrap();
+            assert_eq!(count as usize, profile.migrations.len());
+        }
+        db.execute_unprepared(
+            "INSERT INTO seaql_migrations VALUES ('unknown_future_migration', 1)",
+        )
+        .await
+        .unwrap();
+        assert!(requires_initialization(&db).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn every_known_post_floor_prefix_can_upgrade() {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        db.execute_unprepared(
+            "CREATE TABLE seaql_migrations (version TEXT PRIMARY KEY, applied_at BIGINT NOT NULL)",
+        )
+        .await
+        .unwrap();
+        let floor = schema_metadata::BASELINE_0_6_0_MIGRATIONS.len();
+        for (index, version) in schema_metadata::migration_ids().enumerate() {
+            db.execute_raw(Statement::from_sql_and_values(
+                DbBackend::Sqlite,
+                "INSERT INTO seaql_migrations VALUES (?, 1)",
+                [version.into()],
+            ))
+            .await
+            .unwrap();
+            assert_eq!(
+                requires_initialization(&db).await.unwrap(),
+                index + 1 < floor
+            );
+        }
+        db.execute_unprepared("DELETE FROM seaql_migrations WHERE version = (SELECT version FROM seaql_migrations ORDER BY version LIMIT 1)").await.unwrap();
+        assert!(requires_initialization(&db).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn equal_migration_counts_do_not_admit_an_unknown_writer() {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        db.execute_unprepared(
+            "CREATE TABLE seaql_migrations (version TEXT PRIMARY KEY, applied_at BIGINT NOT NULL)",
+        )
+        .await
+        .unwrap();
+        for version in schema_metadata::migration_ids() {
+            db.execute_raw(Statement::from_sql_and_values(
+                DbBackend::Sqlite,
+                "INSERT INTO seaql_migrations VALUES (?, 1)",
+                [version.into()],
+            ))
+            .await
+            .unwrap();
+        }
+        assert!(is_current(&db).await.unwrap());
+        db.execute_unprepared("UPDATE seaql_migrations SET version = 'unknown_replacement' WHERE version = (SELECT version FROM seaql_migrations ORDER BY version LIMIT 1)").await.unwrap();
+        assert!(!is_current(&db).await.unwrap());
+        assert!(requires_initialization(&db).await.is_err());
+    }
 
     #[tokio::test]
     async fn abandoned_lease_recovery_preserves_live_owner() {
         let home = tempfile::tempdir().unwrap();
-        let pools = historical(home.path()).await;
+        let pools = previous_version_database(home.path()).await;
         let live = maintenance::acquire_install_exclusive_lease(pools.write())
             .await
             .unwrap();
@@ -154,7 +340,7 @@ mod tests {
     #[tokio::test]
     async fn abandoned_lease_recovers_but_never_bypasses_downgrade_journal() {
         let home = tempfile::tempdir().unwrap();
-        let pools = historical(home.path()).await;
+        let pools = previous_version_database(home.path()).await;
         #[cfg(unix)]
         let mut child = std::process::Command::new("true").spawn().unwrap();
         #[cfg(windows)]
@@ -223,11 +409,7 @@ mod tests {
         maintenance::refuse_if_install_exclusive_held(pools.write())
             .await
             .unwrap();
-        assert!(
-            crate::db::admission::is_current(pools.read())
-                .await
-                .unwrap()
-        );
+        assert!(is_current(pools.read()).await.unwrap());
         assert!(
             maintenance::clear_install_exclusive_lease(pools.write(), &lease)
                 .await
@@ -237,8 +419,8 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires isolated MSB_CATALOG_TEST_HOME plus actual historical MSB_PATH/MSB_LIBKRUNFW_PATH and host virtualization"]
-    async fn live_sdk_upgrades_catalog_with_historical_runtime() {
+    #[ignore = "requires isolated MSB_CATALOG_TEST_HOME plus actual previous MSB_PATH/MSB_LIBKRUNFW_PATH and host virtualization"]
+    async fn live_sdk_upgrades_catalog_with_previous_version_runtime() {
         use futures::FutureExt;
         use std::sync::Arc;
 
@@ -247,12 +429,12 @@ mod tests {
             crate::config::GlobalConfig {
                 home: Some(std::path::PathBuf::from(&home)),
                 // This isolated backend does not read environment paths. Supply the
-                // released runtime pair selected by the historical fixture explicitly.
+                // released runtime pair selected by the previous fixture explicitly.
                 paths: crate::config::PathsConfig {
-                    msb: Some(std::env::var_os("MSB_PATH").expect("historical msb").into()),
+                    msb: Some(std::env::var_os("MSB_PATH").expect("previous msb").into()),
                     libkrunfw: Some(
                         std::env::var_os("MSB_LIBKRUNFW_PATH")
-                            .expect("historical firmware")
+                            .expect("previous firmware")
                             .into(),
                     ),
                     ..Default::default()
@@ -260,10 +442,16 @@ mod tests {
                 ..Default::default()
             },
         ));
-        let expected = crate::runtime::launch_contract::catalog_patch(local.config())
-            .await
-            .unwrap()
-            .expect("historical runtime");
+
+        let expected = launch_contract::resolve(
+            &crate::setup::resolve_runtime(local.config())
+                .unwrap()
+                .msb_path,
+        )
+        .await
+        .unwrap()
+        .patch;
+
         // Start with the released CLI, before the candidate SDK ever opens
         // the catalog. This catches a blanket active-runtime upgrade refusal.
         let old = std::env::var_os("MSB_PATH").unwrap();
@@ -314,7 +502,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             before.len(),
-            crate::db::admission::historical_migration_count(expected).unwrap() as usize
+            v0_6_migration_count(expected).unwrap() as usize
         );
         let pid = released
             .read()
@@ -330,7 +518,7 @@ mod tests {
         let backend: Arc<dyn crate::backend::Backend> = local.clone();
         crate::backend::with_backend(backend, async {
             let pools = local.db().await.unwrap();
-            assert!(crate::db::admission::is_current(pools.read()).await.unwrap());
+            assert!(is_current(pools.read()).await.unwrap());
             let before = Migrator::get_applied_migrations(pools.write().inner()).await.unwrap();
             let active = crate::Sandbox::get("catalog-running").await.unwrap().connect().await.unwrap();
             let output = active.exec("cat", ["/dev/shm/catalog-marker"]).await.unwrap();
@@ -345,7 +533,7 @@ mod tests {
             #[cfg(feature = "net")]
             {
                 // A newer SDK must not silently omit a security/resource
-                // request that the selected historical runtime cannot honor.
+                // request that the selected previous runtime cannot honor.
                 let rejected = crate::Sandbox::builder("catalog-unsupported")
                     .image("alpine:3.21").cpus(1).memory(256u32).max_duration(120)
                     .network(|network| network.max_udp_connections(0))
@@ -354,7 +542,7 @@ mod tests {
                     Ok(unexpected) => {
                         unexpected.stop().await.unwrap();
                         crate::Sandbox::remove("catalog-unsupported").await.unwrap();
-                        panic!("historical runtime accepted an unsupported UDP limit");
+                        panic!("previous runtime accepted an unsupported UDP limit");
                     }
                     Err(error) => error.to_string(),
                 };
@@ -364,7 +552,7 @@ mod tests {
                 assert!(!local.config().sandboxes_dir().join("catalog-unsupported").exists());
                 let after = Migrator::get_applied_migrations(local.db().await.unwrap().write().inner()).await.unwrap();
                 assert_eq!(after.iter().map(|migration| migration.name()).collect::<Vec<_>>(), before.iter().map(|migration| migration.name()).collect::<Vec<_>>());
-                println!("historical runtime 0.6.{expected}: unsupported UDP request refused without a sandbox or schema change");
+                println!("previous runtime 0.6.{expected}: unsupported UDP request refused without a sandbox or schema change");
             }
             for count in [0, 1, 3] {
                 let name = format!("catalog-mounts-{count}");
@@ -373,14 +561,14 @@ mod tests {
                 for index in 0..count {
                     builder = builder.volume(format!("/catalog-{index}"), |mount| mount.tmpfs().size(16u32));
                 }
-                let sandbox = builder.create().await.expect("create through historical writer/runtime");
+                let sandbox = builder.create().await.expect("create through previous writer/runtime");
                 let result = std::panic::AssertUnwindSafe(async {
                     #[cfg(feature = "net")]
                     {
                         let error = crate::Sandbox::builder(&name).image("alpine:3.21")
                             .network(|network| network.max_udp_connections(0)).replace()
                             .create().await.err().expect("unsupported replacement must fail");
-                        assert!(error.to_string().contains("max_udp_connections"), "{error}");
+                        assert!(error.to_string().contains("UDP connection limits"), "{error}");
                     }
                     let output = sandbox.exec("sh", ["-c", "printf catalog-sdk-ok"]).await.unwrap();
                     assert!(output.status().success);
@@ -414,15 +602,34 @@ mod tests {
                     let after = Migrator::get_applied_migrations(local.db().await.unwrap().write().inner()).await.unwrap();
                     assert_eq!(after.iter().map(|migration| migration.name()).collect::<Vec<_>>(), before.iter().map(|migration| migration.name()).collect::<Vec<_>>());
                 }).catch_unwind().await;
-                sandbox.stop().await.expect("cleanup historical VM");
-                crate::Sandbox::remove(&name).await.expect("cleanup historical sandbox");
+                sandbox.stop().await.expect("cleanup previous VM");
+                crate::Sandbox::remove(&name).await.expect("cleanup previous sandbox");
                 result.unwrap();
-                println!("historical runtime 0.6.{expected}: {count} mounts, exec, old CLI refusal, modify/restart on current schema, cleanup: {:?}", started.elapsed());
+                println!("previous runtime 0.6.{expected}: {count} mounts, exec, old CLI refusal, modify/restart on current schema, cleanup: {:?}", started.elapsed());
             }
+            let host_file = tempfile::NamedTempFile::new().unwrap();
+            std::fs::write(host_file.path(), b"file-mount-compatible").unwrap();
+            let result = crate::Sandbox::builder("catalog-file-mount")
+                .image("alpine:3.21").cpus(1).memory(256u32).max_duration(120)
+                .volume("/compat-file", |mount| mount.bind(host_file.path()).readonly())
+                .create().await;
+            if expected < 16 {
+                let error = result.err().expect("old runtime must reject isolated file mounts");
+                assert!(error.to_string().contains("file mounts"), "{error}");
+            } else {
+                let sandbox = result.expect("runtime supports isolated file mounts");
+                let output = sandbox.exec("cat", ["/compat-file"]).await;
+                sandbox.stop().await.unwrap();
+                crate::Sandbox::remove("catalog-file-mount").await.unwrap();
+                let output = output.unwrap();
+                assert!(output.status().success);
+                assert_eq!(output.stdout().unwrap(), "file-mount-compatible");
+            }
+            println!("previous runtime 0.6.{expected}: isolated file-mount support checked");
         }).await;
     }
 
-    async fn historical(home: &std::path::Path) -> DbPools {
+    async fn previous_version_database(home: &std::path::Path) -> DbPools {
         std::fs::create_dir_all(home.join("db")).unwrap();
         let pools = DbPools::open(
             &home.join("db/msb.db"),
@@ -441,12 +648,12 @@ mod tests {
     async fn invalid_replacement_preserves_the_existing_sandbox_after_upgrade() {
         use std::sync::Arc;
 
-        // macOS's default temporary root can exceed historical socket limits.
+        // macOS's default temporary root can exceed previous socket limits.
         #[cfg(unix)]
         let home = tempfile::tempdir_in("/tmp").unwrap();
         #[cfg(not(unix))]
         let home = tempfile::tempdir().unwrap();
-        let pools = historical(home.path()).await;
+        let pools = previous_version_database(home.path()).await;
         let original = include_str!("../../db/fixtures/config-0.6.18.json")
             .replace("catalog-fixture", "preserved");
         pools.write().execute_raw(sea_orm::Statement::from_sql_and_values(
@@ -465,6 +672,23 @@ mod tests {
                 .build()
                 .await
                 .unwrap(),
+        );
+        local.db().await.unwrap();
+        let migrated = pools
+            .read()
+            .query_one_raw(sea_orm::Statement::from_string(
+                sea_orm::DbBackend::Sqlite,
+                "SELECT config FROM sandbox WHERE id = 1",
+            ))
+            .await
+            .unwrap()
+            .unwrap()
+            .try_get_by_index::<String>(0)
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(serde_json::from_str::<crate::SandboxConfig>(&migrated).unwrap())
+                .unwrap(),
+            serde_json::to_value(test_support::fixtures::decode(&original).unwrap()).unwrap()
         );
         let backend: Arc<dyn crate::backend::Backend> = local;
         let result = crate::backend::with_backend(backend, async {
@@ -488,18 +712,14 @@ mod tests {
         let row = pools.read().query_one_raw(sea_orm::Statement::from_string(
             sea_orm::DbBackend::Sqlite, "SELECT config FROM sandbox WHERE id = 1 AND name = 'preserved' AND status = 'Stopped'"
         )).await.unwrap().unwrap();
-        assert_eq!(row.try_get_by_index::<String>(0).unwrap(), original);
-        assert!(
-            crate::db::admission::is_current(pools.read())
-                .await
-                .unwrap()
-        );
+        assert_eq!(row.try_get_by_index::<String>(0).unwrap(), migrated);
+        assert!(is_current(pools.read()).await.unwrap());
     }
 
     #[tokio::test]
     async fn sdk_and_cli_both_upgrade_old_catalogs() {
         let home = tempfile::tempdir().unwrap();
-        drop(historical(home.path()).await);
+        drop(previous_version_database(home.path()).await);
         let sdk = LocalBackend::builder()
             .config_path(home.path().join("config.json"))
             .managed_config_path(home.path().join("managed.json"))
@@ -507,11 +727,7 @@ mod tests {
             .build()
             .await
             .unwrap();
-        assert!(
-            crate::db::admission::is_current(sdk.db().await.unwrap().read())
-                .await
-                .unwrap()
-        );
+        assert!(is_current(sdk.db().await.unwrap().read()).await.unwrap());
         sdk.prepare_cli_catalog().await.unwrap();
         drop(sdk);
         let cli = crate::test_support::local_backend(crate::config::GlobalConfig {
@@ -519,27 +735,19 @@ mod tests {
             ..Default::default()
         });
         cli.prepare_cli_catalog().await.unwrap();
-        assert!(
-            crate::db::admission::is_current(cli.db().await.unwrap().read())
-                .await
-                .unwrap()
-        );
+        assert!(is_current(cli.db().await.unwrap().read()).await.unwrap());
         cli.prepare_cli_catalog().await.unwrap();
     }
 
     #[tokio::test]
     async fn active_catalog_upgrade_releases_lease_and_preserves_lifecycle_state() {
         let home = tempfile::tempdir().unwrap();
-        let pools = historical(home.path()).await;
+        let pools = previous_version_database(home.path()).await;
         pools.write().inner().execute_unprepared(
             "INSERT INTO sandbox (name, config, status, ephemeral) VALUES ('active', '{}', 'Starting', 0)",
         ).await.unwrap();
         upgrade(&pools).await.unwrap();
-        assert!(
-            crate::db::admission::is_current(pools.read())
-                .await
-                .unwrap()
-        );
+        assert!(is_current(pools.read()).await.unwrap());
         maintenance::refuse_if_install_exclusive_held(pools.write())
             .await
             .unwrap();
@@ -560,18 +768,14 @@ mod tests {
             .await
             .unwrap();
         upgrade(&pools).await.unwrap();
-        assert!(
-            crate::db::admission::is_current(pools.read())
-                .await
-                .unwrap()
-        );
+        assert!(is_current(pools.read()).await.unwrap());
     }
 
     #[tokio::test]
     async fn catalog_upgrade_fences_preopened_lifecycle_writers_until_commit_or_rollback() {
         for commit in [false, true] {
             let home = tempfile::tempdir().unwrap();
-            let pools = historical(home.path()).await;
+            let pools = previous_version_database(home.path()).await;
             pools.write().inner().execute_unprepared(
                 "INSERT INTO sandbox (name, config, status, ephemeral) VALUES ('stopped', '{}', 'Stopped', 0)",
             ).await.unwrap();
@@ -618,14 +822,9 @@ mod tests {
             maintenance::clear_install_exclusive_lease(pools.write(), &lease)
                 .await
                 .unwrap();
-            assert_eq!(
-                crate::db::admission::is_current(old_sdk.read())
-                    .await
-                    .unwrap(),
-                commit
-            );
+            assert_eq!(is_current(old_sdk.read()).await.unwrap(), commit);
             // Both outcomes release the writer. This checks ordering, not
-            // whether a historical runtime supports the newly committed schema.
+            // whether a previous runtime supports the newly committed schema.
             for sql in lifecycle_writes {
                 old_sdk
                     .write()
@@ -640,7 +839,7 @@ mod tests {
     #[tokio::test]
     async fn failed_sql_migration_rolls_back_all_pending_steps() {
         let home = tempfile::tempdir().unwrap();
-        let pools = historical(home.path()).await;
+        let pools = previous_version_database(home.path()).await;
         // Force a deterministic SQL failure after the first pending migration
         // has added columns. Those columns and its history must roll back.
         pools
@@ -665,7 +864,7 @@ mod tests {
     #[tokio::test]
     async fn preopened_runtime_writer_waits_for_upgrade_then_records_exit() {
         let home = tempfile::tempdir().unwrap();
-        let pools = historical(home.path()).await;
+        let pools = previous_version_database(home.path()).await;
         pools.write().inner().execute_unprepared(
             "INSERT INTO sandbox (name, config, status, ephemeral) VALUES ('active', '{}', 'Running', 0)",
         ).await.unwrap();
@@ -714,7 +913,46 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn historical_active_config_survives_catalog_upgrade() {
+    async fn catalog_upgrade_migrates_saved_and_active_secret_policies() {
+        let home = tempfile::tempdir().unwrap();
+        let pools = previous_version_database(home.path()).await;
+        let raw =
+            include_str!("../../db/fixtures/config-0.6.18-global-passthrough-with-entries.json");
+
+        pools.write().execute_raw(sea_orm::Statement::from_sql_and_values(sea_orm::DbBackend::Sqlite,
+            "INSERT INTO sandbox (name, config, active_config, status, ephemeral) VALUES ('secret-migration', ?, ?, 'Running', 0)",
+            [raw.into(), raw.into()],
+        )).await.unwrap();
+
+        let expected = serde_json::to_value(test_support::fixtures::decode(raw).unwrap()).unwrap();
+        upgrade(&pools).await.unwrap();
+
+        for column in ["config", "active_config"] {
+            let row = pools
+                .read()
+                .query_one_raw(sea_orm::Statement::from_string(
+                    sea_orm::DbBackend::Sqlite,
+                    format!("SELECT {column} FROM sandbox WHERE name = 'secret-migration'"),
+                ))
+                .await
+                .unwrap()
+                .unwrap();
+            let stored: String = row.try_get_by_index(0).unwrap();
+            assert!(!stored.contains("\"injection\""));
+            assert!(stored.contains("\"substitution\""));
+            assert_eq!(
+                serde_json::to_value(
+                    serde_json::from_str::<crate::SandboxConfig>(&stored).unwrap()
+                )
+                .unwrap(),
+                expected
+            );
+        }
+        upgrade(&pools).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn previous_version_active_config_survives_catalog_upgrade() {
         for (patch, raw) in [
             (0, include_str!("../../db/fixtures/config-0.6.0.json")),
             (5, include_str!("../../db/fixtures/config-0.6.5.json")),
@@ -733,7 +971,7 @@ mod tests {
             .unwrap();
             Migrator::up(
                 pools.write().inner(),
-                Some(crate::db::admission::historical_migration_count(patch).unwrap()),
+                Some(v0_6_migration_count(patch).unwrap()),
             )
             .await
             .unwrap();
@@ -750,7 +988,8 @@ mod tests {
                     .await
                     .unwrap();
             }
-            let expected = serde_json::to_value(crate::db::config::decode(raw).unwrap()).unwrap();
+            let expected =
+                serde_json::to_value(test_support::fixtures::decode(raw).unwrap()).unwrap();
             upgrade(&pools).await.unwrap();
             let updated = pools
                 .read()
@@ -764,7 +1003,8 @@ mod tests {
                 .try_get_by_index::<String>(0)
                 .unwrap();
             assert_eq!(
-                serde_json::to_value(crate::db::config::decode(&updated).unwrap()).unwrap(),
+                serde_json::to_value(serde_json::from_str::<SandboxConfig>(&updated).unwrap())
+                    .unwrap(),
                 expected,
                 "patch {patch}"
             );
@@ -781,15 +1021,12 @@ mod tests {
                     .try_get_by_index::<String>(0)
                     .unwrap();
                 assert_eq!(
-                    serde_json::to_value(crate::db::config::decode(&active).unwrap()).unwrap(),
+                    serde_json::to_value(serde_json::from_str::<SandboxConfig>(&active).unwrap())
+                        .unwrap(),
                     expected
                 );
             }
-            assert!(
-                crate::db::admission::is_current(pools.read())
-                    .await
-                    .unwrap()
-            );
+            assert!(is_current(pools.read()).await.unwrap());
         }
     }
 }
