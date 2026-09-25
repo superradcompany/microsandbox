@@ -15,7 +15,7 @@ mod request;
 // Re-Exports
 //--------------------------------------------------------------------------------------------------
 
-pub use compat_message::{CheckedControlRequest, IntoControlMessage};
+pub use compat_message::{CheckedControlRequest, CompatibleControlRequest, IntoControlMessage};
 pub use connection::{ControlConnection, ControlMode, ControlReply};
 pub use dialer::VerifiedControlConnector;
 pub use error::{ControlClientError, ControlClientResult};
@@ -30,5 +30,7 @@ pub use microsandbox_protocol_client::{
 pub use microsandbox_utils::size;
 pub use protocol::{ControlClient, ControlProtocol, ControlReady};
 pub use request::{
-    GetCapabilities, GetCpuState, GetMemoryState, SetCpuTarget, SetMemoryTarget, UpdateSecrets,
+    CompactDisks, CreateBranch, CreateCheckpoint, CreateDiskCheckpoint, GetCapabilities,
+    GetCpuState, GetMemoryState, GetPauseState, GetRuntimeCapabilities, GrowRootDisk, PauseRuntime,
+    ResumeRuntime, SetCpuTarget, SetMemoryTarget, UpdateSecrets,
 };

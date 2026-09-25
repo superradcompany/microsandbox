@@ -17,7 +17,7 @@ pub struct ControlContext {
 }
 
 pub(crate) trait Handler: Send + Sync + 'static {
-    fn handle(&self, request: ControlRequest) -> Response;
+    fn handle(&self, request: ControlOperation, generation: u8) -> Response;
 
     fn handle_json_with_memory(
         &self,
@@ -32,7 +32,10 @@ pub(crate) trait Handler: Send + Sync + 'static {
 
     fn handle_json(&self, value: serde_json::Value) -> Vec<u8> {
         let response = match serde_json::from_value(value) {
-            Ok(request) => self.handle(request).json,
+            Ok(request) => {
+                self.handle(ControlOperation::GenerationOne(request), 1)
+                    .json
+            }
             Err(_) => JsonControlResponse {
                 ok: false,
                 error: Some("invalid control request".into()),
@@ -52,9 +55,16 @@ pub(crate) struct Response {
 
 pub(crate) enum Reply {
     Capabilities(Capabilities),
+    RuntimeCapabilities(RuntimeCapabilities),
     Memory(MemoryState),
     Cpu(CpuState),
     Secrets(SecretsResult),
+    Checkpoint(CheckpointResult),
+    DiskCheckpoint(DiskCheckpointState),
+    Branch(BranchResult),
+    Pause(PauseState),
+    RootDisk(RootDiskState),
+    DiskCompact(DiskCompactionResult),
     Error(ControlError),
 }
 
@@ -81,9 +91,24 @@ impl Reply {
             Self::Capabilities(value) => {
                 Envelope::new(generation, "control.capabilities.result", value)
             }
+            Self::RuntimeCapabilities(value) => {
+                Envelope::new(generation, "control.capabilities.result", value)
+            }
             Self::Memory(value) => Envelope::new(generation, "control.memory.state", value),
             Self::Cpu(value) => Envelope::new(generation, "control.cpu.state", value),
             Self::Secrets(value) => Envelope::new(generation, "control.secrets.result", value),
+            Self::Checkpoint(value) => {
+                Envelope::new(generation, "control.checkpoint.result", value)
+            }
+            Self::DiskCheckpoint(value) => {
+                Envelope::new(generation, "control.disk.checkpoint.result", value)
+            }
+            Self::Branch(value) => Envelope::new(generation, "control.branch.result", value),
+            Self::Pause(value) => Envelope::new(generation, "control.pause.state", value),
+            Self::RootDisk(value) => Envelope::new(generation, "control.root-disk.state", value),
+            Self::DiskCompact(value) => {
+                Envelope::new(generation, "control.disk.compact.result", value)
+            }
             Self::Error(value) => Envelope::new(generation, "control.error", value),
         }
     }
@@ -106,16 +131,22 @@ impl Handler for ControlContext {
         super::legacy::respond_to_line(&value.to_string(), self)
     }
 
-    fn handle(&self, request: ControlRequest) -> Response {
+    fn handle(&self, request: ControlOperation, generation: u8) -> Response {
         // Both transports enter the release's executor. Framed traffic cannot
         // bypass a checkpoint, resident pause, or revision ownership fence.
-        let wire = serde_json::to_value(&request).expect("control request serializes");
-        let command = serde_json::from_value(wire).expect("shared control operation");
+        let mutation = !matches!(
+            request,
+            ControlOperation::GenerationOne(
+                ControlRequest::Capabilities
+                    | ControlRequest::MemoryState
+                    | ControlRequest::CpuState
+            ) | ControlOperation::PauseState
+        );
+        let command = match operation_to_legacy(request) {
+            Ok(command) => command,
+            Err(error) => return Response::error(error, "invalid control request payload"),
+        };
         let result = self.executor.execute_legacy(command);
-        let json = serde_json::from_value(
-            serde_json::to_value(&result).expect("control response serializes"),
-        )
-        .expect("shared control response");
         let error = || ControlError {
             code: result
                 .error_code
@@ -125,26 +156,49 @@ impl Handler for ControlContext {
                 .error
                 .clone()
                 .unwrap_or_else(|| "control operation failed".into()),
-            effect: if matches!(
-                request,
-                ControlRequest::MemoryTarget { .. } | ControlRequest::CpuTarget { .. }
-            ) {
+            effect: if mutation {
                 ErrorEffect::Unknown
             } else {
                 ErrorEffect::None
             },
         };
-        let framed = if let Some(secrets) = result.secret_result {
+        let framed = if let Some(secrets) = result.secret_result.clone() {
             Reply::Secrets(secrets)
+        } else if let Some(checkpoint) = result.checkpoint.clone() {
+            Reply::Checkpoint(CheckpointResult {
+                checkpoint: Some(CheckpointState {
+                    checkpoint_id: checkpoint.checkpoint_id,
+                    checkpoint_root: checkpoint.checkpoint_root,
+                    path: checkpoint.path,
+                    memory_mode: checkpoint.memory_mode,
+                    memory_logical_bytes: checkpoint.memory_logical_bytes,
+                    memory_emitted_bytes: checkpoint.memory_emitted_bytes,
+                }),
+                recovery_error: (!result.ok).then(|| result.error.clone()).flatten(),
+            })
         } else if !result.ok {
             Reply::Error(error())
         } else if let Some(caps) = result.capabilities {
-            Reply::Capabilities(Capabilities {
+            let capabilities = RuntimeCapabilities {
                 root_disk_grow: caps.root_disk_grow,
+                guest_flush_policy: caps.guest_flush_policy,
+                optional_disk_integrity: caps.optional_disk_integrity,
+                branch_create: caps.branch_create,
+                branch_memfd: caps.branch_memfd,
+                pause_resume: caps.pause_resume,
+                disk_compact: caps.disk_compact,
+                disk_compact_owned: caps.disk_compact_owned,
                 cpu_resize: caps.cpu_resize,
                 memory_resize: caps.memory_resize,
                 secrets_update: caps.secrets_update,
-            })
+                checkpoint_create: caps.checkpoint_create,
+                disk_checkpoint_create: caps.disk_checkpoint_create,
+            };
+            if generation >= 2 {
+                Reply::RuntimeCapabilities(capabilities)
+            } else {
+                Reply::Capabilities(capabilities.generation_one())
+            }
         } else if let Some(state) = result.memory {
             Reply::Memory(MemoryState {
                 boot_mib: state.boot_mib,
@@ -159,19 +213,122 @@ impl Handler for ControlContext {
                 actual_online: state.actual_online,
                 enforced: state.enforced,
             })
+        } else if let Some(state) = result.disk_checkpoint {
+            Reply::DiskCheckpoint(DiskCheckpointState {
+                checkpoint_id: state.checkpoint_id,
+                path: state.path,
+                disk: state.disk,
+                owned_volumes: state.owned_volumes,
+            })
+        } else if let Some(path) = result.branch {
+            Reply::Branch(BranchResult { path })
+        } else if let Some(state) = result.pause {
+            Reply::Pause(PauseState {
+                paused: state.paused,
+                recovery_required: state.recovery_required,
+                capture_unavailable: state.capture_unavailable,
+            })
+        } else if let Some(state) = result.root_disk {
+            Reply::RootDisk(RootDiskState {
+                filesystem_bytes: state.filesystem_bytes,
+                device_bytes: state.device_bytes,
+                total_us: state.total_us,
+                pause_us: state.pause_us,
+                guest_us: state.guest_us,
+            })
+        } else if let Some(result) = result.compaction {
+            Reply::DiskCompact(result)
         } else {
             Reply::Error(ControlError::rejected(
                 "invalid_response",
                 "runtime omitted control result",
             ))
         };
-        Response { json, framed }
+        Response {
+            json: JsonControlResponse::default(),
+            framed,
+        }
     }
 }
 
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
+
+fn operation_to_legacy(
+    operation: ControlOperation,
+) -> Result<crate::control::ControlRequest, ControlError> {
+    use crate::control::{
+        CheckpointCaptureIntent as LegacyIntent, ControlRequest as Legacy,
+        SecretLiveChange as LegacySecret, SecretValue as LegacyValue,
+    };
+
+    Ok(match operation {
+        ControlOperation::GenerationOne(request) => match request {
+            ControlRequest::Capabilities => Legacy::Capabilities,
+            ControlRequest::MemoryTarget { total_mib } => Legacy::MemoryTarget { total_mib },
+            ControlRequest::MemoryState => Legacy::MemoryState,
+            ControlRequest::CpuTarget { online } => Legacy::CpuTarget { online },
+            ControlRequest::CpuState => Legacy::CpuState,
+            ControlRequest::SecretsUpdate { changes } => Legacy::SecretsUpdate {
+                changes: changes
+                    .into_iter()
+                    .map(|change| match change {
+                        SecretChange::Rotate { name, value } => LegacySecret::Rotate {
+                            name,
+                            value: LegacyValue(value.0.clone()),
+                        },
+                        SecretChange::Remove { name } => LegacySecret::Remove { name },
+                        SecretChange::SetAllowedHosts { name, hosts } => {
+                            LegacySecret::SetAllowedHosts { name, hosts }
+                        }
+                    })
+                    .collect(),
+            },
+        },
+        ControlOperation::CheckpointCreate(request) => Legacy::CheckpointCreate {
+            guest_flush: request.guest_flush,
+            record_integrity: request.record_integrity,
+            checkpoint_id: request.checkpoint_id,
+            intent: match request.intent {
+                CheckpointCaptureIntent::FullSnapshot => LegacyIntent::FullSnapshot,
+                CheckpointCaptureIntent::Park => LegacyIntent::Park,
+                CheckpointCaptureIntent::TransparentTransfer => LegacyIntent::TransparentTransfer,
+            },
+        },
+        ControlOperation::DiskCheckpointCreate(request) => Legacy::DiskCheckpointCreate {
+            guest_flush: request.guest_flush,
+            checkpoint_id: request.checkpoint_id,
+        },
+        ControlOperation::BranchCreate(request) => Legacy::BranchCreate {
+            guest_flush: request.guest_flush,
+            record_integrity: request.record_integrity,
+            branch_id: request.branch_id,
+            child_name: request.child_name,
+            memory_cache_dir: request.memory_cache_dir,
+        },
+        ControlOperation::Pause(request) => match request.guest_flush {
+            Some(guest_flush) => Legacy::PauseWithGuestFlush { guest_flush },
+            None => Legacy::Pause,
+        },
+        ControlOperation::Resume => Legacy::Resume,
+        ControlOperation::PauseState => Legacy::PauseState,
+        ControlOperation::RootDiskGrow(request) => Legacy::RootDiskGrow {
+            size_bytes: request.size_bytes,
+        },
+        ControlOperation::DiskCompact(request) => Legacy::DiskCompact {
+            target: request.target,
+            layers: request
+                .layers
+                .map(usize::try_from)
+                .transpose()
+                .map_err(|_| {
+                    ControlError::rejected("invalid_request", "layer count exceeds the host range")
+                })?,
+            dry_run: request.dry_run,
+        },
+    })
+}
 
 /// Shared execution path, also exercised against the actual host secret store.
 #[cfg(feature = "net")]

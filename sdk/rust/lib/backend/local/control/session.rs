@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use microsandbox_control_client::{
-    CheckedControlRequest, ControlClientError, ControlConnection, ErrorKind,
+    CompatibleControlRequest, ControlClientError, ControlConnection, ErrorKind,
 };
 
 use super::registry::{Entry, SharedError};
@@ -27,8 +27,15 @@ impl ControlSession {
         Self { entry, connection }
     }
 
-    pub fn capabilities(&self) -> microsandbox_control_client::Capabilities {
-        *self.connection.capabilities()
+    pub fn capabilities(&self) -> microsandbox_control_client::RuntimeCapabilities {
+        *self.connection.runtime_capabilities()
+    }
+
+    /// Whether this retained session belongs to the caller's already selected run generation.
+    pub(crate) fn matches_run(&self, run: crate::sandbox::identity::SandboxRunIdentity) -> bool {
+        self.entry.key.sandbox_id == run.sandbox_id
+            && self.entry.key.run_id == run.run_id
+            && self.entry.key.pid == run.pid
     }
 
     #[cfg(test)]
@@ -36,7 +43,7 @@ impl ControlSession {
         self.connection.mode()
     }
 
-    pub async fn request<R: CheckedControlRequest>(
+    pub async fn request<R: CompatibleControlRequest>(
         &self,
         request: &R,
     ) -> Result<R::Response, SharedError> {

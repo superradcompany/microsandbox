@@ -4,9 +4,10 @@ import {
   type SendMetadata, type RawFrame,
 } from "@microsandbox/protocol-client";
 import {
-  CONTROL_GENERATION, CONTROL_PROTOCOL, DEFAULT_MAX_IN_FLIGHT, DEFAULT_REQUEST_TIMEOUT_MS,
-  DEFAULT_SETUP_TIMEOUT_MS, MAX_HANDSHAKE_FRAME_SIZE, decodeControlError, decodeWelcome,
-  validateHello, type ControlHello, type ControlWelcome,
+  CONTROL_GENERATION, CONTROL_GENERATION_TWO_MESSAGES, CONTROL_HANDSHAKE_GENERATION,
+  CONTROL_PROTOCOL, DEFAULT_MAX_IN_FLIGHT, DEFAULT_REQUEST_TIMEOUT_MS, DEFAULT_SETUP_TIMEOUT_MS,
+  MAX_HANDSHAKE_FRAME_SIZE, MIN_CONTROL_GENERATION, decodeControlError, decodeWelcome, validateHello,
+  type ControlHello, type ControlWelcome,
 } from "./records.js";
 
 /** Setup metadata retains the original welcome envelope and all unknown fields. */
@@ -16,13 +17,13 @@ export type ControlReady = { welcome: ControlWelcome; frame: InboundFrame };
 export class ControlProtocol implements Protocol<ControlReady> {
   async establish(transport: ByteTransport, context: EstablishContext): Promise<Established<ControlReady>> {
     const hello: ControlHello = {
-      protocol: CONTROL_PROTOCOL, min_generation: CONTROL_GENERATION, max_generation: CONTROL_GENERATION,
+      protocol: CONTROL_PROTOCOL, min_generation: MIN_CONTROL_GENERATION, max_generation: CONTROL_GENERATION,
       max_frame_size: context.limits.maxFrameSize,
       max_in_flight: Math.min(context.limits.maxInFlight, DEFAULT_MAX_IN_FLIGHT),
     };
     try { validateHello(hello); } catch { throw new ClientError("invalid_options"); }
     await transport.write(encodeFrame({ id: 0, flags: 0, body: encodeEnvelope({
-      v: CONTROL_GENERATION, t: "control.hello", p: encodeRecord(hello),
+      v: CONTROL_HANDSHAKE_GENERATION, t: "control.hello", p: encodeRecord(hello),
     }) }));
     const prefix = await readExactly(transport, 4, context.signal);
     const length = new DataView(prefix.buffer, prefix.byteOffset, prefix.byteLength).getUint32(0);
@@ -43,6 +44,7 @@ export class ControlProtocol implements Protocol<ControlReady> {
   }
   prepare(ready: ControlReady, wireName: string): SendMetadata {
     if (wireName === "control.hello" || wireName === "control.welcome") throw new ClientError("unsupported_operation");
+    if (messageMinGeneration(wireName) > ready.welcome.generation) throw new ClientError("unsupported_operation");
     return { generation: ready.welcome.generation, flags: 0 };
   }
 }
@@ -50,7 +52,7 @@ export class ControlProtocol implements Protocol<ControlReady> {
 function decodeOpening(codec: CborEnvelopeCodec, raw: RawFrame, hello: ControlHello): ControlReady {
   try {
     const frame = codec.decode(raw);
-    if (frame.id !== 0 || frame.flags !== 1 || frame.protocolVersion !== CONTROL_GENERATION) throw new ClientError("invalid_data");
+    if (frame.id !== 0 || frame.flags !== 1 || frame.protocolVersion !== CONTROL_HANDSHAKE_GENERATION) throw new ClientError("invalid_data");
     if (frame.type === "control.error") {
       const refusal = decodeControlError(frame.payload);
       throw new ClientError(refusal.code === "unsupported_generation" ? "unsupported_operation" : "invalid_data");
@@ -63,4 +65,8 @@ function decodeOpening(codec: CborEnvelopeCodec, raw: RawFrame, hello: ControlHe
     if (error instanceof ClientError) throw error;
     throw new ClientError("invalid_data");
   }
+}
+
+function messageMinGeneration(name: string): number {
+  return CONTROL_GENERATION_TWO_MESSAGES.some(message => message === name) ? 2 : 1;
 }

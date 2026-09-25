@@ -24,6 +24,8 @@ pub(crate) const MAX_QUEUED: usize = 256;
 // Generation-one replies contain only fixed records and static diagnostics.
 // This reservation is acquired before dispatching even a resource mutation.
 pub(crate) const REPLY_BYTES: u32 = MAX_HANDSHAKE_FRAME_SIZE + 4;
+/// Ordinary generation-two state replies may contain several host paths and diagnostics.
+pub(crate) const EXTENDED_REPLY_BYTES: u32 = 64 * 1024;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -61,6 +63,7 @@ pub(crate) enum Input {
     Framed {
         frame: RawFrame,
         generation: u8,
+        reply_limit: u32,
         _budget: Budget,
     },
 }
@@ -162,14 +165,19 @@ impl Dispatcher {
                 let Input::Json(request) = job.input else {
                     unreachable!()
                 };
-                let response = self.handler.handle(request);
+                let response = self
+                    .handler
+                    .handle(ControlOperation::GenerationOne(request), 1);
                 let mut bytes = serde_json::to_vec(&response.json).unwrap_or_default();
                 bytes.push(b'\n');
                 Ok(bytes)
             }
             Input::Framed {
-                frame, generation, ..
-            } => self.framed(frame, *generation),
+                frame,
+                generation,
+                reply_limit,
+                ..
+            } => self.framed(frame, *generation, *reply_limit),
         };
         match bytes {
             Ok(bytes) => {
@@ -186,7 +194,7 @@ impl Dispatcher {
         }
     }
 
-    fn framed(&self, frame: &RawFrame, generation: u8) -> io::Result<Vec<u8>> {
+    fn framed(&self, frame: &RawFrame, generation: u8, reply_limit: u32) -> io::Result<Vec<u8>> {
         let envelope = Envelope::decode(&frame.body).map_err(|_| invalid())?;
         let reply = if envelope.v != generation || frame.flags != 0 {
             Reply::Error(ControlError::rejected(
@@ -196,23 +204,31 @@ impl Dispatcher {
         } else if matches!(envelope.t.as_str(), "control.hello" | "control.welcome") {
             // Repeated setup cannot reset the parser, IDs, or negotiated limits.
             return Err(invalid());
-        } else if !ControlMessageType::from_wire_str(&envelope.t)
-            .is_some_and(ControlMessageType::is_request)
-        {
-            Reply::Error(ControlError::rejected(
-                "unsupported_operation",
-                "unknown control operation",
-            ))
         } else {
-            match ControlRequest::from_envelope(&envelope) {
-                Ok(request) => self.handler.handle(request).framed,
+            match ControlOperation::from_envelope(&envelope, generation) {
+                Ok(request) => self.handler.handle(request, generation).framed,
+                Err(_)
+                    if control_message_min_generation(&envelope.t)
+                        .is_some_and(|minimum| minimum > generation) =>
+                {
+                    Reply::Error(ControlError::rejected(
+                        "unsupported_operation",
+                        "operation requires a newer negotiated control generation",
+                    ))
+                }
+                Err(_) if control_message_min_generation(&envelope.t).is_none() => {
+                    Reply::Error(ControlError::rejected(
+                        "unsupported_operation",
+                        "unknown or unavailable control operation",
+                    ))
+                }
                 Err(_) => Reply::Error(ControlError::rejected(
                     "invalid_request",
                     "invalid control request payload",
                 )),
             }
         };
-        framed_reply(&reply, generation, frame.id)
+        framed_reply(&reply, generation, frame.id, reply_limit)
     }
 }
 
@@ -239,12 +255,13 @@ impl Budget {
     pub fn reserve_reply(
         connection: &Arc<Semaphore>,
         runtime: &Arc<Semaphore>,
+        bytes: u32,
     ) -> io::Result<Self> {
         let local = Arc::clone(connection)
-            .try_acquire_many_owned(REPLY_BYTES)
+            .try_acquire_many_owned(bytes)
             .map_err(|_| invalid())?;
         let global = Arc::clone(runtime)
-            .try_acquire_many_owned(REPLY_BYTES)
+            .try_acquire_many_owned(bytes)
             .map_err(|_| invalid())?;
         Ok(Self {
             _connection: local,
@@ -299,17 +316,36 @@ impl Drop for Lease {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-pub(crate) fn framed_reply(reply: &Reply, generation: u8, id: u32) -> io::Result<Vec<u8>> {
+pub(crate) fn framed_reply(
+    reply: &Reply,
+    generation: u8,
+    id: u32,
+    reply_limit: u32,
+) -> io::Result<Vec<u8>> {
     let frame = reply
         .envelope(generation)
         .and_then(|envelope| envelope.frame(id, 1))
         .map_err(|_| invalid())?;
     let mut bytes = Vec::new();
     codec::encode_raw_to_buf(&frame, &mut bytes).map_err(|_| invalid())?;
-    if bytes.len() > REPLY_BYTES as usize {
+    if bytes.len() > reply_limit as usize {
         return Err(invalid());
     }
     Ok(bytes)
+}
+
+/// Reserve against the largest reply admitted by this operation before dispatch mutates state.
+pub(crate) fn reply_bytes(frame: &RawFrame, generation: u8) -> io::Result<u32> {
+    if generation < 2 {
+        return Ok(REPLY_BYTES);
+    }
+    let envelope = Envelope::decode(&frame.body).map_err(|_| invalid())?;
+    Ok(match envelope.t.as_str() {
+        // The result contains one entry per selected disk and can legitimately approach the
+        // negotiated frame ceiling. Reserving it here prevents mutation without reply capacity.
+        "control.disk.checkpoint.create" | "control.disk.compact" => codec::MAX_FRAME_SIZE + 4,
+        _ => EXTENDED_REPLY_BYTES,
+    })
 }
 
 pub(crate) fn invalid() -> io::Error {

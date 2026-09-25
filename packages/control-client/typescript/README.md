@@ -22,7 +22,7 @@ async function inspectAndResize(path: string) {
 }
 ```
 
-Checked helpers cover capabilities, memory state/target, CPU state/target, and ordered secret updates. They validate replies and retain the actual response on `ControlClientError`. Generic message requests return peer error frames directly. A target reply reports acceptance and observation; it does not establish guest convergence. Secret batches stop at the first failure and retain earlier completed changes.
+Generation-1 checked helpers cover capabilities, memory state/target, CPU state/target, and ordered secret updates. Generation 2 adds `GetRuntimeCapabilities`, `CreateCheckpoint`, `CreateDiskCheckpoint`, `CreateBranch`, `PauseRuntime`, `ResumeRuntime`, `GetPauseState`, `GrowRootDisk`, and `CompactDisks`. They validate replies and retain the actual response on `ControlClientError`. Generic message requests return peer error frames directly. A target reply reports acceptance and observation; it does not establish guest convergence. Secret batches stop at the first failure and retain earlier completed changes.
 
 Use `connectControl` for automatic discovery on the same endpoint. It sends the existing read-only JSON capabilities request, closes that exchange, and opens a fresh framed connection only after an affirmative CBOR advertisement. Setup has one total deadline across both connections. Malformed discovery, timeout, EOF without a reply, or a failed welcome never trigger fallback or replay.
 
@@ -53,7 +53,9 @@ async function compatibleResize(path: string) {
 }
 ```
 
-`ControlConnection.connectConnector` accepts a repeatable caller connector from the browser-safe root. The connection exposes the read-only `capabilities` discovery snapshot, `mode`, `clone()`, `isClosed()`, `close()`, `request()`, and `requestTyped()`. `framed()` returns the complete generic surface in CBOR mode and fails locally with `unsupported_mode` in JSON mode. Encoded messages likewise fail locally in JSON mode; the adapter translates only known, validated native operations.
+`ControlConnection.connectConnector` accepts a repeatable caller connector from the browser-safe root. The connection exposes the read-only generation-1 `capabilities` projection, the complete `runtimeCapabilities` discovery snapshot, `mode`, `clone()`, `isClosed()`, `close()`, `request()`, and `requestTyped()`. `framed()` returns the complete generic surface in CBOR mode and fails locally with `unsupported_mode` in JSON mode. Encoded messages likewise fail locally in JSON mode; the adapter translates only known, validated native operations.
+
+When a framed peer selects generation 1, `ControlConnection.requestTyped()` sends generation-2 checked operations through their historical JSON form before any mutation is admitted. An unverified connector rediscovers the endpoint format first. This path is never a retry after a CBOR failure. The explicit `ControlClient` rejects those operations locally against a generation-1 welcome. Linux descriptor-backed branch creation remains outside ordinary CBOR because it requires `SCM_RIGHTS`; generation 2 covers direct local branching without descriptor transfer.
 
 `JsonReply` contains the original response line, including its delimiter and whitespace, and a lossless `Map` of fields. `JsonNumber.token` retains each original numeric token; checked memory observations become `bigint` without passing through a JavaScript number. Ordinary requests return `ok:false` replies. Checked helpers raise `legacy_remote` with the original reply and unknown batch progress. Neither arbitrary diagnostic strings nor legacy errors are converted into structured CBOR errors.
 

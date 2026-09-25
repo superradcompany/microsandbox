@@ -75,9 +75,11 @@ first byte
 
 The inspected byte is retained. Opening framed messages are limited to 4,096 bytes, so the hello's four-byte length prefix starts with zero. Malformed input never switches parsers. Empty existence probes close without becoming application requests. This dispatch rule adds no agent or guest route for host-only control operations.
 
-Control uses its own `CONTROL_GENERATION`, initially 1. The opening `control.hello`, `control.welcome`, and handshake `control.error` envelopes use generation 1 and ID zero. Hello has flags zero; welcome and errors have terminal flags. Application requests use nonzero IDs, flags zero, and the selected control generation; replies use the same ID and terminal flags.
+Control uses its own generations, currently 1 through 2. The opening `control.hello`, `control.welcome`, and handshake `control.error` envelopes keep their generation-1 bootstrap encoding and ID zero. Hello has flags zero; welcome and errors have terminal flags. Application requests use nonzero IDs, flags zero, and the selected control generation; replies use the same ID and terminal flags.
 
-Hello identifies `msb.control`, offers a generation range, and supplies maximum frame size and in-flight limits. The current server selects generation 1 when it lies in the offered range and takes the smaller limits. The client rejects a welcome outside its offer before sending an operation. Future implementations select the highest common supported generation while preserving this opening format. The framed control client has the full nonzero u32 ID space and performs no agent relay range exchange.
+Hello identifies `msb.control`, offers generations 1 through 2, and supplies maximum frame size and in-flight limits. The server selects the highest common generation and takes the smaller limits. The client rejects a welcome outside its offer before sending an operation. The framed control client has the full nonzero u32 ID space and performs no agent relay range exchange.
+
+Generation 1 is frozen at capabilities, memory state/target, CPU state/target, and secret updates. Generation 2 adds full checkpoints, disk-only checkpoints, direct local branching, pause/resume/state, root-disk growth, disk compaction, their typed results, and the complete runtime capability record. The released generation-1 Rust enum and TypeScript legacy request union remain unchanged so downstream exhaustive matches continue compiling; additive dispatch types own generation-2 operations.
 
 Control records use unsigned integers of their declared widths, text keys, and independently encoded payloads. Generated encoders emit definite containers, shortest integers, and the declared field order. Checked decoders accept other map orders and unknown optional fields, but reject duplicate record keys, missing required fields, invalid types, out-of-range integers, and trailing input. Optional fields are omitted rather than encoded as null. Raw paths retain original bytes and unknown fields without imposing checked-record interpretation.
 
@@ -89,9 +91,13 @@ Resource replies distinguish accepted targets from current observations, without
 
 `ControlClient` is explicitly framed and never probes JSON. `ControlConnection` is the compatibility entry point. Its automatic setup sends the existing read-only JSON `capabilities` request and accepts framed control only after an explicit `control_protocols` advertisement containing `cbor`. It then opens a fresh connection for hello/welcome. Valid legacy capabilities without the additive field select JSON. Malformed replies, arbitrary negative replies, EOF, timeouts, and refused handshakes are errors, not evidence for a fallback. The known pre-capability-error allowlist is empty.
 
+When a current client negotiates generation 1 with a runtime that advertised framed control but predates generation 2, `ControlConnection` routes a checked generation-2 operation through its exact historical JSON spelling before sending any mutation bytes. An unverified connector performs a fresh read-only JSON discovery first; a verified SDK connector rechecks process and run identity. This is representation selection, not retry: failure after either framed or JSON admission is never replayed. The explicit `ControlClient` has no JSON route and rejects a generation-2 operation locally against a generation-1 welcome.
+
 The SDK backend shares one session setup among concurrent callers, reuses the framed connection, and opens fresh per-operation connections for JSON. JSON mode selection is reusable only with verified runtime identity continuity. A standalone connector without that verification rediscovers on subsequent JSON connections. Runtime replacement or transport failure invalidates the session; a later caller may establish a new one, but an admitted request is never moved or replayed onto it.
 
 Legacy JSON keeps its operation names, one-request/response behavior, whitespace and EOF handling, and absence of a default request-line size cap. The 64 KiB discovery-response limit is not a new general JSON operation limit. Ordinary compatibility requests retain the actual JSON reply, including errors and unknown fields; checked helpers may interpret it. They do not fabricate a framed ID or CBOR envelope.
+
+Linux descriptor-backed branch creation remains on the historical JSON plus `SCM_RIGHTS` path because the ordinary framed transport does not carry file descriptors. Generation 2 covers direct local branch creation without descriptor transfer. Removing the memfd exception requires a separately negotiated descriptor-bearing transport, not an opaque CBOR field.
 
 Retiring JSON operations requires a separate supported-version decision. Even after such a decision, supported CBOR SDKs may still need the read-only JSON discovery response. Keep that bootstrap until a separately compatible discovery migration is available. Likewise, new SDKs still need their JSON adapter for supported old runtimes. Neither retirement requires renaming the endpoint.
 
@@ -99,7 +105,7 @@ Retiring JSON operations requires a separate supported-version decision. Even af
 
 1. **One version number** (the generation), agreed once at the handshake.
 2. **The binary frame header never changes shape.** A negotiated generation may add a body format selected by an exclusive flag, but old peers are never sent that format.
-3. **New fields are always optional**, so old and new can ignore or default what they don't know.
+3. **New fields on an existing message are optional**, so old and new can ignore or default what they don't know. A message introduced in a new generation may define its own required fields.
 4. **New kinds of message and body format are only ever added, never removed or redefined**, and each records the generation it arrived in.
 5. **The host checks the agreed version before sending** anything new, so unsupported features
    fail cleanly and alone.
@@ -113,14 +119,14 @@ Retiring JSON operations requires a separate supported-version decision. Even af
 | Outer frame encoding | [codec.rs](lib/codec.rs) |
 | Agent relay setup, send gates, ready metadata | [Rust agent protocol](../../packages/agent-client/rust/lib/protocol.rs), [TypeScript agent protocol](../../packages/agent-client/typescript/src/protocol.ts) |
 | Control records and handshake | [control module](lib/control/mod.rs), [wire decoder](lib/wire.rs) |
-| Shared-socket dispatch and host handlers | [server.rs](../runtime/lib/control/server.rs), [handler.rs](../runtime/lib/control/handler.rs) |
+| Shared-socket dispatch and host handlers | [server.rs](../runtime/lib/runner/control/server.rs), [handler.rs](../runtime/lib/runner/control/handler.rs) |
 | Automatic discovery and JSON adaptation | [Rust connection](../../packages/control-client/rust/lib/connection.rs), [TypeScript connection](../../packages/control-client/typescript/src/connection.ts) |
 | Backend ownership and process identity | [control registry](../../sdk/rust/lib/backend/local/control/registry.rs), [identity checks](../../sdk/rust/lib/backend/local/control/identity.rs) |
 | Source migration and low-level examples | [Rust agent README](../../packages/agent-client/rust/README.md), [TypeScript agent README](../../packages/agent-client/typescript/README.md), [Rust control README](../../packages/control-client/rust/README.md), [TypeScript control README](../../packages/control-client/typescript/README.md) |
 
 The [schema snapshot test](tests/schema_snapshot.rs) freezes the agent generation, frame constants, flag bits, and message introduction inventory. Its append-only check protects prior message names and introduction generations. These snapshots do not describe every payload field or freeze every serialized payload; do not cite them as complete serialization compatibility evidence.
 
-The [control contract tests](tests/control_contract.rs) generate the 26 [generation-1 fixtures](../../packages/protocol-fixtures/control-v1.json) and compare exact bytes. Rust and TypeScript consume that corpus, including pinned unknown payload and envelope fields whose original frames survive raw forwarding. They also test strict records, maximum-width memory values, partial secret progress, and secret-safe diagnostics. The [legacy JSON tests](tests/legacy_json_contract.rs) use pinned historical source contracts from v0.6.4 through v0.6.18, and the [agent fixtures](../../packages/protocol-fixtures/agent-ts-v5/fixtures.json) preserve the previous TypeScript encoder. Source fixtures complement actual released artifacts; they do not substitute for them.
+The [control contract tests](tests/control_contract.rs) generate the 26 [generation-1 fixtures](../../packages/protocol-fixtures/control-v1.json) and compare exact bytes. Rust and TypeScript consume that corpus, including pinned unknown payload and envelope fields whose original frames survive raw forwarding. Additive tests pin the generation-2 message inventory, typed operation dispatch, generation gates, strict nested records, maximum-width values, partial secret progress, and secret-safe diagnostics. The [legacy JSON tests](tests/legacy_json_contract.rs) use pinned historical source contracts from v0.6.4 through v0.6.18, and the [agent fixtures](../../packages/protocol-fixtures/agent-ts-v5/fixtures.json) preserve the previous TypeScript encoder. Source fixtures complement actual released artifacts; they do not substitute for them.
 
 Focused checks, from the repository root:
 

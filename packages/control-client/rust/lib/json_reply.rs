@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use microsandbox_protocol::control::{Capabilities, CpuState, MemoryState};
+use microsandbox_protocol::control::{CpuState, MemoryState, RuntimeCapabilities};
 use microsandbox_protocol_client::{ClientError, ErrorKind};
 use zeroize::Zeroizing;
 
@@ -120,15 +120,27 @@ impl fmt::Debug for JsonReply {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-pub(crate) fn capabilities(value: &JsonValue) -> Option<Capabilities> {
-    Some(Capabilities {
-        root_disk_grow: value
-            .get("root_disk_grow")
-            .map(|v| v.as_bool())
-            .unwrap_or(Some(false))?,
+pub(crate) fn capabilities(value: &JsonValue) -> Option<RuntimeCapabilities> {
+    let optional = |name| {
+        value
+            .get(name)
+            .map(JsonValue::as_bool)
+            .unwrap_or(Some(false))
+    };
+    Some(RuntimeCapabilities {
+        root_disk_grow: optional("root_disk_grow")?,
+        guest_flush_policy: optional("guest_flush_policy")?,
+        optional_disk_integrity: optional("optional_disk_integrity")?,
+        branch_create: optional("branch_create")?,
+        branch_memfd: optional("branch_memfd")?,
+        pause_resume: optional("pause_resume")?,
+        disk_compact: optional("disk_compact")?,
+        disk_compact_owned: optional("disk_compact_owned")?,
         cpu_resize: value.get("cpu_resize")?.as_bool()?,
         memory_resize: value.get("memory_resize")?.as_bool()?,
         secrets_update: value.get("secrets_update")?.as_bool()?,
+        checkpoint_create: optional("checkpoint_create")?,
+        disk_checkpoint_create: optional("disk_checkpoint_create")?,
     })
 }
 

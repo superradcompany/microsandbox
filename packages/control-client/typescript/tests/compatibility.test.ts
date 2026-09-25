@@ -6,7 +6,8 @@ import {
 } from "@microsandbox/protocol-client";
 import {
   ControlClientError, ControlConnection, GetCapabilities, GetCpuState, GetMemoryState,
-  JsonControlClient, JsonNumber, JsonReply, MiB, SetCpuTarget, SetMemoryTarget, UpdateSecrets,
+  JsonControlClient, JsonNumber, JsonReply, MiB, PauseRuntime, SetCpuTarget, SetMemoryTarget,
+  UpdateSecrets,
   encodedMessage, typedMessage, type VerifiedControlConnector,
 } from "../src/index.js";
 
@@ -71,6 +72,34 @@ function framed(): Transport {
     } else transport.feed(packet(id, "control.capabilities.result", caps));
   });
 }
+
+it("routes generation-two mutations to JSON before writing to a generation-one framed peer", async () => {
+  const writes: string[] = [];
+  const dialer = new Dialer(index => new Transport((data, transport) => {
+    if (index === 0 || index === 2) {
+      writes.push(text(data));
+      transport.feed(bytes(cborCaps));
+      return;
+    }
+    if (index === 1) {
+      const envelope = decodeEnvelope(data.subarray(9));
+      expect(envelope.t).toBe("control.hello");
+      transport.feed(packet(0, "control.welcome", {
+        protocol: "msb.control", generation: 1, max_frame_size: 4096, max_in_flight: 4,
+      }));
+      return;
+    }
+    writes.push(text(data));
+    transport.feed(bytes('{"ok":true,"pause":{"paused":true,"recovery_required":false}}\n'));
+  }));
+  const client = await ControlConnection.connectConnector(dialer);
+  expect(await client.requestTyped(new PauseRuntime())).toMatchObject({ paused: true });
+  expect(dialer.transports[1]!.writes).toBe(1);
+  expect(writes).toEqual([
+    '{"op":"capabilities"}\n', '{"op":"capabilities"}\n', '{"op":"pause"}\n',
+  ]);
+  await client.close();
+});
 
 it("retains original JSON, unknown numeric tokens, strings, and prototype-like keys", () => {
   const raw = bytes(' \t{"ok":true,"future":9007199254740993000,"huge":1e9999,"__proto__":{"v":1},"escape":"𝄞\\n"} \r\n');
