@@ -25,8 +25,8 @@ const RENAME_EXCHANGE: u32 = 2;
 /// Remove a file.
 ///
 /// On macOS, opens an fd to the file before unlinking so that open handles
-/// can still access the data after the directory entry is removed (the
-/// `/.vol/<dev>/<ino>` path becomes invalid after unlink).
+/// can still access the data after the last directory entry is removed (the
+/// `/.vol/<dev>/<ino>` path becomes invalid after the final unlink).
 pub(crate) fn do_unlink(
     fs: &PassthroughFs,
     _ctx: Context,
@@ -115,12 +115,16 @@ pub(crate) fn do_unlink(
         }
     }
 
-    // Store the fd in InodeData so open_inode_fd can use it.
+    // Retain the fd only when the inode no longer has a name. If a hard link
+    // remains, opens must still use /.vol/ with the requested access flags:
+    // duplicating this O_RDONLY fd would make later writes and truncation fail.
     #[cfg(target_os = "macos")]
     if let Some(fd) = pre_unlink_fd {
         // Look up the inode by stat identity from the pre-unlink fd.
         let st = platform::fstat(fd);
-        if let Ok(st) = st {
+        if let Ok(st) = st
+            && st.st_nlink == 0
+        {
             let alt_key = crate::backends::shared::inode_table::InodeAltKey::new(
                 st.st_ino,
                 platform::stat_dev(&st),

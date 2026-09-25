@@ -1,6 +1,70 @@
 use super::*;
 
 #[test]
+fn test_remaining_hard_link_can_reopen_for_write_and_truncate() {
+    for (removed, remaining) in [("original", "alias"), ("alias", "original")] {
+        let sb = TestSandbox::new();
+        let (entry, handle) = sb.fuse_create_root("original").unwrap();
+        sb.fuse_write(entry.inode, handle, b"before", 0).unwrap();
+        sb.fs
+            .release(sb.ctx(), entry.inode, 0, handle, false, false, None)
+            .unwrap();
+        let alias = sb
+            .fs
+            .link(sb.ctx(), entry.inode, ROOT_INODE, c"alias")
+            .unwrap();
+        assert_eq!(alias.attr.st_nlink, 2);
+
+        sb.fs
+            .unlink(sb.ctx(), ROOT_INODE, &TestSandbox::cstr(removed))
+            .unwrap();
+        let remaining = sb.lookup_root(remaining).unwrap();
+        assert_eq!(remaining.inode, entry.inode);
+        assert_eq!(remaining.attr.st_nlink, 1);
+
+        // Reopen after unlink: an existing writable handle would hide the bug.
+        let handle = sb.fuse_open(remaining.inode, LINUX_O_RDWR).unwrap();
+        sb.fuse_write(remaining.inode, handle, b"!", 6).unwrap();
+        assert_eq!(
+            sb.fuse_read(remaining.inode, handle, 32, 0).unwrap(),
+            b"before!"
+        );
+        let mut attr: stat64 = unsafe { std::mem::zeroed() };
+        attr.st_size = 3;
+        let (st, _) = sb
+            .fs
+            .setattr(
+                sb.ctx(),
+                remaining.inode,
+                attr,
+                Some(handle),
+                SetattrValid::SIZE,
+            )
+            .unwrap();
+        assert_eq!(st.st_size, 3);
+        assert_eq!(
+            sb.fuse_read(remaining.inode, handle, 32, 0).unwrap(),
+            b"bef"
+        );
+        sb.fs
+            .release(sb.ctx(), remaining.inode, 0, handle, false, false, None)
+            .unwrap();
+
+        let handle = sb
+            .fuse_open(remaining.inode, LINUX_O_RDWR | LINUX_O_TRUNC)
+            .unwrap();
+        assert!(
+            sb.fuse_read(remaining.inode, handle, 32, 0)
+                .unwrap()
+                .is_empty()
+        );
+        sb.fs
+            .release(sb.ctx(), remaining.inode, 0, handle, false, false, None)
+            .unwrap();
+    }
+}
+
+#[test]
 fn test_read_via_handle_after_unlink() {
     let sb = TestSandbox::new();
     let (entry, handle) = sb.fuse_create_root("doomed.txt").unwrap();
