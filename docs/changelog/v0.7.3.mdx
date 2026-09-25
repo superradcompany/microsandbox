@@ -26,8 +26,10 @@ Older forms still work. You can also name snapshots with `--name` and filter wit
 
 ## Before upgrading
 
+Moving from v0.6? Follow the [v0.7 migration guide](/migrations/v0.7), targeting v0.7.3 or a later compatible patch release.
+
 - **HTTPS hostname rules need inspection.** Strict hostname checking is now on by default. HTTPS allowed only by hostname needs TLS interception or is blocked. IP, CIDR, group, and default allow rules are unaffected. Opt out with `--net-strict=false` or `network.strict: false`; Go replaces `Strict` with `DisableStrict`. [Hostname rules](/networking/overview#hostname-rules-and-https)
-- **Rust configuration APIs changed.** `LocalBackend::lazy()` and `LocalBackendBuilder::build_lazy()` return `Result`. `SdkConfig` and `load_sdk_config()` are removed. [Migration details](https://github.com/superradcompany/microsandbox/blob/v0.7.3/COMPATIBILITY.md)
+- **Rust configuration APIs changed.** `LocalBackend::lazy()` and `LocalBackendBuilder::build_lazy()` return `Result`. `SdkConfig` and `load_sdk_config()` are removed. [Migration details](/migrations/v0.7#review-other-application-changes)
 - **Check shared database access.** Stop incompatible SDK processes sharing `MSB_HOME` before upgrading. Running VMs are handled separately. Cloud services need a separate update for older configuration formats.
 
 ## Fixes
@@ -39,4 +41,4 @@ Older forms still work. You can also name snapshots with `--name` and filter wit
 
 ## New guides
 
-Added [corporate networking](/enterprise/corporate-networking), [offline deployment](/enterprise/offline-deployment), and dedicated CLI references for [snapshots](/cli/snapshot-commands), [registries](/cli/registry-commands), and [management](/cli/management).
+Added [corporate networking](/enterprise/corporate-networking), [offline deployment](/enterprise/prepare-environment#prepare-offline-devices), and dedicated CLI references for [snapshots](/cli/snapshot-commands), [registries](/cli/registry-commands), and [management](/cli/management).
