@@ -93,6 +93,20 @@ jobs:
       - name: Check TypeScript-first documentation
         run: python3 scripts/check-docs-language-order.py
 
+  release-notes:
+    name: Release note contracts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+      - name: Check release note contracts
+        run: |
+          python3 -m venv "$RUNNER_TEMP/release-note-checks"
+          "$RUNNER_TEMP/release-note-checks/bin/pip" install PyYAML==6.0.3
+          PYTHON="$RUNNER_TEMP/release-note-checks/bin/python" node --test scripts/ci/test-release-notes.cjs
+
   # ---------------------------------------------------------------------------
   # Build kernel.c on Linux for macOS libkrunfw linking
   # ---------------------------------------------------------------------------
