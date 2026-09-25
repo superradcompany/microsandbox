@@ -41,6 +41,7 @@ pub mod stop;
 pub mod touch;
 pub mod uninstall;
 pub mod volume;
+pub mod wait;
 
 //--------------------------------------------------------------------------------------------------
 // Functions

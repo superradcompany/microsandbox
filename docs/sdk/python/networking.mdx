@@ -1,10 +1,11 @@
 ---
 title: Networking
-description: Python SDK - Network API reference
+"og:title": Python SDK Networking reference
+description: Configure sandbox network policies with the Python SDK.
 keywords: ["Python SDK", "Python networking", "microsandbox networking"]
 ---
 
-Configure sandbox networking. See [Networking](/networking/overview) for usage and policy concepts.
+See [Networking](/networking/overview) for network policies, DNS, TLS, and port publishing.
 
 ## Network
 
@@ -20,7 +21,7 @@ Network(
     deny_domain_suffixes: tuple[str, ...] = (),
     dns: DnsConfig | None = None,
     tls: TlsConfig | None = None,
-    strict: bool = False,
+    strict: bool = True,
     ipv4_pool: str | None = None,
     ipv6_pool: str | None = None,
     max_tcp_connections: int | None = None,
@@ -37,7 +38,7 @@ Network(
 | <span id="network-deny_domain_suffixes"></span>`deny_domain_suffixes` | `tuple[str, ...]` | `()` | Deny egress to all subdomains of these suffixes. Adds `deny DomainSuffix("...")` rules; same enforcement layers as `deny_domains` |
 | <span id="network-dns"></span>`dns` | [`DnsConfig \| None`](#dnsconfig) | `None` | DNS interception configuration |
 | <span id="network-tls"></span>`tls` | [`TlsConfig \| None`](#tlsconfig) | `None` | TLS interception configuration |
-| <span id="network-strict"></span>`strict` | `bool` | `False` | Require hostname-based policy allows to use an inspectable request authority. Plain HTTP exposes that authority in `Host`; HTTPS only exposes it when TLS interception is enabled and not bypassed. Without that visibility, strict mode denies HTTPS that would otherwise be allowed only by a hostname rule. |
+| <span id="network-strict"></span>`strict` | `bool` | `True` | Require hostname-based policy allows to use an inspectable request authority. Plain HTTP exposes that authority in `Host`; HTTPS only exposes it when TLS interception is enabled and not bypassed. Without that visibility, strict mode denies HTTPS that would otherwise be allowed only by a hostname rule. |
 | <span id="network-ipv4_pool"></span>`ipv4_pool` | `str \| None` | `None` | IPv4 pool used for per-sandbox `/30` guest subnets. Defaults to `172.16.0.0/12` |
 | <span id="network-ipv6_pool"></span>`ipv6_pool` | `str \| None` | `None` | IPv6 pool used for per-sandbox `/64` guest prefixes. Defaults to `fd42:6d73:62::/48` |
 

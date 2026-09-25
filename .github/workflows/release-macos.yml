@@ -131,6 +131,11 @@ jobs:
       - name: Verify runtime binary
         run: build/msb --version
 
+      - name: Smoke test installed runtime discovery
+        run: |
+          python3 scripts/smoke/cli/runtime-discovery.py \
+            --msb build/msb --libkrunfw build/${{ inputs.libkrunfw_file }}
+
       - name: Upload runtime artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

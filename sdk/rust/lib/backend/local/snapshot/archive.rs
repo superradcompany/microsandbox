@@ -1306,16 +1306,25 @@ where
     // payload needs a preparatory content pass.
     for snapshot in snapshots {
         let snapshot_id = snapshot.id().as_str();
-        let descriptor = snapshot.path().join(DESCRIPTOR_FILENAME);
+        // The reader may project a previous descriptor without rewriting its
+        // source file. Export the same canonical representation the inventory hashes.
+        let descriptor = snapshot.manifest().to_canonical_bytes()?;
         let descriptor_name = format!("snapshots/{snapshot_id}/{DESCRIPTOR_FILENAME}");
-        let written = append_artifact_file(
-            builder,
-            &descriptor,
+        let size = descriptor.len() as u64;
+        let mut hasher =
+            archive_transport_hasher("snapshot-descriptor", &descriptor_name, size, size, &[]);
+        hasher.update(&descriptor);
+        append_bytes(builder, &descriptor_name, &descriptor).await?;
+        set_archive_transport(
+            &mut inventory,
             &descriptor_name,
-            "snapshot-descriptor",
-        )
-        .await?;
-        set_archive_transport(&mut inventory, &descriptor_name, written)?;
+            WrittenArchiveMember {
+                encoded_size: size,
+                apparent_size: size,
+                transport_integrity: finish_archive_transport(hasher),
+                sparse_ranges: Vec::new(),
+            },
+        )?;
         if !snapshot.labels().is_empty() {
             let metadata_name = format!(
                 "snapshots/{snapshot_id}/{}",
@@ -1474,9 +1483,7 @@ async fn build_archive_inventory(
     for snapshot in snapshots {
         let snapshot_id = snapshot.id().as_str();
         let descriptor_path = format!("snapshots/{snapshot_id}/{DESCRIPTOR_FILENAME}");
-        let descriptor_size = tokio::fs::metadata(snapshot.path().join(DESCRIPTOR_FILENAME))
-            .await?
-            .len();
+        let descriptor_size = snapshot.manifest().to_canonical_bytes()?.len() as u64;
         require_json_safe_size(descriptor_size, &descriptor_path)?;
         snapshot_members.push(ArchiveSnapshot {
             snapshot_id: snapshot_id.to_string(),
@@ -2327,7 +2334,7 @@ where
                 (snapshots_dir.join(digest).join(name), true, false)
             }
             ["files", digest, name]
-                if valid_archive_digest_hex(digest) && *name == "upper.ext4" =>
+                if valid_archive_digest_hex(digest) && valid_archive_filename(name) =>
             {
                 (snapshots_dir.join(digest).join(name), false, false)
             }
@@ -2559,7 +2566,12 @@ where
 {
     use tokio::io::AsyncWriteExt;
 
-    let mut file = tokio::fs::File::create(target).await?;
+    // Lexically distinct archive paths can alias on case-insensitive filesystems.
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(target)
+        .await?;
     let mut source = TransportHashingReader {
         inner: (&mut *reader).take(size),
         hasher: archive_transport_hasher(kind, archive_path, size, size, &[]),
@@ -2677,8 +2689,7 @@ where
     let std_file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
-        .create(true)
-        .truncate(true)
+        .create_new(true)
         .open(target)?;
     // Allocation-only optimizations: content is correct without them,
     // so a filesystem that rejects either just loads dense.
@@ -4147,6 +4158,88 @@ mod tests {
     };
 
     use super::*;
+
+    #[tokio::test]
+    async fn extraction_never_overwrites_an_existing_file() {
+        let temporary = tempfile::tempdir().unwrap();
+        let target = temporary.path().join("disk.ext4");
+        std::fs::write(&target, b"retained").unwrap();
+        let mut bytes = b"replaced".as_slice();
+        assert!(
+            unpack_dense_entry(
+                &mut bytes,
+                8,
+                &target,
+                "file-payload",
+                "files/digest/disk.ext4"
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(std::fs::read(target).unwrap(), b"retained");
+    }
+
+    #[tokio::test]
+    async fn released_archive_uses_the_descriptors_payload_filename() {
+        let temporary = tempfile::tempdir().unwrap();
+        let local = crate::test_support::local_backend_builder(temporary.path().join("home"))
+            .build()
+            .await
+            .unwrap();
+        let descriptor = serde_json::to_vec(&serde_json::json!({
+            "schema": 1, "artifact": "snapshot", "scope": "disk",
+            "created_at": "2026-05-01T12:00:00Z", "parent": null,
+            "image": {"ref": "alpine:3.21", "manifest_digest": format!("sha256:{}", "a".repeat(64))},
+            "source_sandbox": "previous", "labels": {},
+            "state": {"kind": "file", "format": "raw", "fstype": "ext4",
+                "upper": {"file": "disk.ext4", "size_bytes": 7, "integrity": null}},
+            "extensions": {}, "requires": []
+        })).unwrap();
+        let manifest =
+            microsandbox_types::snapshot::cloud_manifest::Manifest::from_bytes(&descriptor)
+                .unwrap();
+        let digest = manifest.digest().unwrap();
+        let digest = digest.strip_prefix("sha256:").unwrap();
+        for payload_name in ["disk.ext4", "upper.ext4"] {
+            let archive = temporary.path().join(format!("{payload_name}.tar"));
+            let mut builder = tar::Builder::new(std::fs::File::create(&archive).unwrap());
+            for (name, bytes) in [
+                (
+                    format!("snapshots/{digest}/snapshot.json"),
+                    descriptor.as_slice(),
+                ),
+                (
+                    format!("files/{digest}/{payload_name}"),
+                    b"payload".as_slice(),
+                ),
+            ] {
+                let mut header = tar::Header::new_gnu();
+                header.set_mode(0o600);
+                header.set_size(bytes.len() as u64);
+                header.set_cksum();
+                builder.append_data(&mut header, name, bytes).unwrap();
+            }
+            builder.finish().unwrap();
+            drop(builder);
+            let result = load_snapshot(&local, &archive, None).await;
+            if payload_name == "disk.ext4" {
+                let loaded = result.unwrap();
+                let snapshot = store::open_snapshot(&local, &loaded.path().to_string_lossy())
+                    .await
+                    .unwrap();
+                let layer = &snapshot.manifest().state.as_file().unwrap().layers[0];
+                assert_eq!(
+                    std::fs::read(snapshot.layer_path(layer)).unwrap(),
+                    b"payload"
+                );
+            } else {
+                assert!(
+                    result.is_err(),
+                    "a conventional filename must not replace the declared one"
+                );
+            }
+        }
+    }
 
     #[tokio::test]
     async fn direct_materialization_future_has_bounded_stack_footprint() {

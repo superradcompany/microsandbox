@@ -375,6 +375,8 @@ npm run typecheck
 npm test
 ```
 
+On a release branch whose native packages are not published yet, replace `npm ci` with `node ../../scripts/ci/build-unpublished-node-sdk.mjs`. This installs the locked build tools and builds TypeScript while restoring the package manifests afterward. Continue with `npm run build` to build the native addon locally. Standard `npm ci` works again after the post-release lockfile refresh.
+
 Run repository examples from the specific example directory:
 
 ```bash

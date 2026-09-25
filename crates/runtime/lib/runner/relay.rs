@@ -65,6 +65,7 @@ use tokio::net::UnixListener;
 use tokio::net::windows::named_pipe::{NamedPipeServer, PipeMode, ServerOptions};
 use tokio::sync::{Mutex, Semaphore, mpsc, oneshot, watch};
 
+use self::input_stall::{INPUT_STALL_TIMEOUT, InputStall};
 use super::workload_control::{WORKLOAD_CONTROL_ID, WorkloadControl};
 use crate::checkpoint::RestoredAgentState;
 use crate::clock::spawn_clock_sync_task;
@@ -74,6 +75,12 @@ use crate::{RuntimeError, RuntimeResult};
 
 #[path = "relay/envelope.rs"]
 mod envelope;
+#[path = "relay/input_stall.rs"]
+mod input_stall;
+#[cfg(test)]
+#[path = "relay/input_stall_tests.rs"]
+mod input_stall_tests;
+
 #[cfg(test)]
 #[path = "relay/namespace_tests.rs"]
 mod namespace_tests;
@@ -235,6 +242,13 @@ pub(crate) struct ControlWriter {
     data_frames: Arc<Semaphore>,
     control_bytes: Arc<Semaphore>,
     control_frames: Arc<Semaphore>,
+}
+
+/// Terminal outcome and the transport paths still available for failure cleanup.
+struct RelayExit {
+    failure: Option<RuntimeError>,
+    control_writer_usable: bool,
+    can_observe_failure_terminals: bool,
 }
 
 /// Every exit, including task abortion while waiting for ring capacity, wakes lifecycle waiters.
@@ -1848,14 +1862,22 @@ impl AgentRelay {
         ));
 
         // Accept loop.
-        let mut relay_failure = None;
-        let mut control_writer_usable = false;
-        let mut can_observe_failure_terminals = false;
-        loop {
+        let RelayExit {
+            failure: relay_failure,
+            control_writer_usable,
+            can_observe_failure_terminals,
+        } = loop {
             tokio::select! {
                 accept_result = listener.accept() => {
                     match accept_result {
                         Ok(stream) => {
+                            // Refuse new clients during physical input saturation without
+                            // disturbing existing requests, output, or lifecycle controls.
+                            if input_is_stalled(&self.shared, self.bulk_shared.as_deref()) {
+                                drop(stream);
+                                continue;
+                            }
+
                             // Allocate a client slot.
                             let slot = {
                                 let mut slots = used_slots.lock().await;
@@ -1913,13 +1935,14 @@ impl AgentRelay {
                             // Establish the dual-port range owner on the ordered control lane before
                             // the SDK sees its handshake and can submit work on either physical lane.
                             if let Some(incarnation) = incarnation
-                                && let Err(error) = send_relay_client_connected(
-                                    &agent_tx,
-                                    id_start,
-                                    id_end_exclusive,
-                                    incarnation,
-                                )
-                                .await
+                                && let Err(error) = tokio::select! {
+                                    result = send_relay_client_connected(
+                                        &agent_tx, id_start, id_end_exclusive, incarnation,
+                                    ) => result,
+                                    _ = wait_for_input_stall(&self.shared, self.bulk_shared.as_deref()) => {
+                                        Err(RuntimeError::Custom("agent relay: input stalled during client admission".into()))
+                                    }
+                                }
                             {
                                 tracing::error!(%error, "agent relay: failed to establish client incarnation");
                                 used_slots.lock().await.remove(&slot);
@@ -2058,50 +2081,16 @@ impl AgentRelay {
                         }
                     }
                 }
-                _ = shutdown.changed() => {
-                    if *shutdown.borrow() {
-                        tracing::info!("agent relay: shutdown signal received");
-                        break;
-                    }
-                }
-                reader_result = &mut ring_reader_handle => {
-                    control_writer_usable = true;
-                    relay_failure = Some(match reader_result {
-                        Ok(Ok(())) => RuntimeError::Custom(
-                            "agent relay: console reader stopped unexpectedly".into(),
-                        ),
-                        Ok(Err(error)) => error,
-                        Err(error) => RuntimeError::Custom(format!(
-                            "agent relay: console reader task failed: {error}"
-                        )),
-                    });
-                    break;
-                }
-                writer_result = &mut ring_writer_handle => {
-                    relay_failure = Some(match writer_result {
-                        Ok(Ok(())) => RuntimeError::Custom(
-                            "agent relay: control console writer stopped unexpectedly".into(),
-                        ),
-                        Ok(Err(error)) => error,
-                        Err(error) => RuntimeError::Custom(format!(
-                            "agent relay: control console writer task failed: {error}"
-                        )),
-                    });
-                    break;
-                }
-                Some(result) = bulk_failure_rx.recv() => {
-                    control_writer_usable = true;
-                    can_observe_failure_terminals = true;
-                    relay_failure = Some(match result {
-                        Ok(()) => RuntimeError::Custom(
-                            "agent relay: bulk console writer stopped unexpectedly".into(),
-                        ),
-                        Err(error) => error,
-                    });
-                    break;
+                exit = wait_relay_exit(
+                    &mut ring_reader_handle,
+                    &mut ring_writer_handle,
+                    &mut bulk_failure_rx,
+                    &mut shutdown,
+                ) => {
+                    break exit;
                 }
             }
-        }
+        };
 
         if relay_failure.is_some() && control_writer_usable {
             match tokio::time::timeout(
@@ -2729,6 +2718,86 @@ fn tap_frame_into_log(frame: &RawFrame, writer: &LogWriter, session_registry: &S
     }
 }
 
+/// Prefer completed tasks over simultaneous shutdown so genuine failures are retained.
+/// Keeping this selection together also makes each completion path independently testable.
+async fn wait_relay_exit(
+    reader: &mut tokio::task::JoinHandle<RuntimeResult<()>>,
+    writer: &mut tokio::task::JoinHandle<RuntimeResult<()>>,
+    bulk: &mut mpsc::Receiver<RuntimeResult<()>>,
+    shutdown: &mut watch::Receiver<bool>,
+) -> RelayExit {
+    loop {
+        let (result, name, control_writer_usable, can_observe_failure_terminals) = tokio::select! {
+            biased;
+            result = &mut *reader => (
+                result.unwrap_or_else(|error| Err(RuntimeError::Custom(
+                    format!("agent relay: console reader task failed: {error}")
+                ))),
+                "console reader", true, false,
+            ),
+            result = &mut *writer => (
+                result.unwrap_or_else(|error| Err(RuntimeError::Custom(
+                    format!("agent relay: control console writer task failed: {error}")
+                ))),
+                "control console writer", false, false,
+            ),
+            Some(result) = bulk.recv() => (result, "bulk console writer", true, true),
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    tracing::info!("agent relay: shutdown signal received");
+                    return RelayExit {
+                        failure: None,
+                        control_writer_usable: false,
+                        can_observe_failure_terminals: false,
+                    };
+                }
+                continue;
+            }
+        };
+
+        let failure = match result {
+            Ok(()) if relay_shutdown_requested(shutdown) => None,
+            Ok(()) => Some(RuntimeError::Custom(format!(
+                "agent relay: {name} stopped unexpectedly"
+            ))),
+            Err(error) => Some(error),
+        };
+
+        return RelayExit {
+            failure,
+            control_writer_usable,
+            can_observe_failure_terminals,
+        };
+    }
+}
+
+/// A signalled or dropped shutdown sender permits clean task completion.
+fn relay_shutdown_requested(shutdown: &watch::Receiver<bool>) -> bool {
+    *shutdown.borrow() || shutdown.has_changed().is_err()
+}
+
+/// Both physical lanes must be writable before admitting another SDK client.
+fn input_is_stalled(shared: &ConsoleSharedState, bulk: Option<&ConsoleSharedState>) -> bool {
+    *shared.input_stalled.borrow() || bulk.is_some_and(|lane| *lane.input_stalled.borrow())
+}
+
+/// Wake a pending client admission without cancelling an already-enqueued frame.
+async fn wait_for_input_stall(shared: &ConsoleSharedState, bulk: Option<&ConsoleSharedState>) {
+    let mut control = shared.input_stalled.subscribe();
+    let mut bulk = bulk.map(|lane| lane.input_stalled.subscribe());
+
+    tokio::select! {
+        _ = control.wait_for(|stalled| *stalled) => {}
+        _ = async {
+            if let Some(bulk) = &mut bulk {
+                let _ = bulk.wait_for(|stalled| *stalled).await;
+            } else {
+                std::future::pending::<()>().await;
+            }
+        } => {}
+    }
+}
+
 /// Background task that pushes client frames into the rx_ring for the guest.
 /// Retries on full ring with backoff to avoid dropping frames.
 async fn ring_writer_task(
@@ -2750,6 +2819,7 @@ async fn ring_writer_task(
     let mut private = workload.start();
     let mut pending = VecDeque::with_capacity(AGENT_WRITE_CHANNEL_CAPACITY);
     let mut ordinary_closed = false;
+    let mut input_stall = None;
     loop {
         let changed = workload.changed.notified();
         tokio::pin!(changed);
@@ -2779,6 +2849,16 @@ async fn ring_writer_task(
             wait_clock_capacity = wait_capacity;
             write
         };
+        if !wait_clock_capacity && write.is_none() && !workload.gated() {
+            input_stall = None;
+        } else if wait_clock_capacity && input_stall.is_none() {
+            input_stall = Some(InputStall::new(&shared.input_stalled, INPUT_STALL_TIMEOUT));
+        }
+
+        if let Some(stall) = &mut input_stall {
+            stall.set_paused(write.is_none() && workload.gated());
+        }
+
         if let Some(write) = write {
             let ControlWrite {
                 data,
@@ -2786,11 +2866,13 @@ async fn ring_writer_task(
                 admission,
                 ..
             } = write;
-            if !push_bulk_fragment(
+            if !push_bulk_fragment_with_stall(
                 &shared,
                 data,
                 #[cfg(unix)]
                 &capacity_fd,
+                INPUT_STALL_TIMEOUT,
+                &mut input_stall,
             )
             .await
             {
@@ -2811,12 +2893,26 @@ async fn ring_writer_task(
             biased;
             write = private.recv() => {
                 let Some(write) = write else { break; };
-                if !push_bulk_fragment(&shared, write.0, #[cfg(unix)] &capacity_fd).await {
+                if !push_bulk_fragment_with_stall(
+                    &shared,
+                    write.0,
+                    #[cfg(unix)]
+                    &capacity_fd,
+                    INPUT_STALL_TIMEOUT,
+                    &mut input_stall,
+                ).await {
                     workload.close();
                     return Err(RuntimeError::Custom("private agent console writer closed".into()));
                 }
             }
             _ = &mut changed => {}
+            _ = async {
+                if let Some(stall) = &input_stall {
+                    stall.watch().await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            } => {}
             available = wait_console_capacity(&shared, #[cfg(unix)] &capacity_fd), if wait_clock_capacity => {
                 if !available {
                     return Err(RuntimeError::Custom("agent console capacity watcher closed".into()));
@@ -2926,7 +3022,12 @@ async fn wait_console_capacity(
         // This select branch is cancelable. A blocking wake waiter would survive cancellation
         // and accumulate across other traffic; only a pending, ring-blocked maintenance clock
         // needs this bounded retry on platforms without the Unix readiness adapter.
-        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        let delay_ms = if *shared.input_stalled.borrow() {
+            100
+        } else {
+            1
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
         !shared.is_closed()
     }
 }
@@ -3244,13 +3345,56 @@ async fn push_bulk_write(
 
 async fn push_bulk_fragment(
     shared: &Arc<ConsoleSharedState>,
-    mut data: Bytes,
+    data: Bytes,
     #[cfg(unix)] capacity_fd: &AsyncFd<i32>,
 ) -> bool {
+    push_bulk_fragment_with_timeout(
+        shared,
+        data,
+        #[cfg(unix)]
+        capacity_fd,
+        INPUT_STALL_TIMEOUT,
+    )
+    .await
+}
+
+async fn push_bulk_fragment_with_timeout(
+    shared: &Arc<ConsoleSharedState>,
+    data: Bytes,
+    #[cfg(unix)] capacity_fd: &AsyncFd<i32>,
+    timeout: std::time::Duration,
+) -> bool {
+    let mut stall = None;
+    push_bulk_fragment_with_stall(
+        shared,
+        data,
+        #[cfg(unix)]
+        capacity_fd,
+        timeout,
+        &mut stall,
+    )
+    .await
+}
+
+/// Carry a scheduler capacity wait into delivery without resetting its deadline or health.
+async fn push_bulk_fragment_with_stall<'a>(
+    shared: &'a Arc<ConsoleSharedState>,
+    mut data: Bytes,
+    #[cfg(unix)] capacity_fd: &AsyncFd<i32>,
+    timeout: std::time::Duration,
+    stall: &mut Option<InputStall<'a>>,
+) -> bool {
+    // Private lifecycle traffic remains deliverable while ordinary input is gated.
+    // Once a write is selected, capacity waiting is real backpressure again.
+    if let Some(stall) = stall.as_mut() {
+        stall.set_paused(false);
+    }
+
     loop {
         match shared.rx_ring.push(data) {
             Ok(()) => {
                 shared.rx_wake.wake();
+                *stall = None;
                 return true;
             }
             Err(returned) => {
@@ -3263,22 +3407,27 @@ async fn push_bulk_fragment(
                     continue;
                 }
 
-                #[cfg(unix)]
-                {
-                    let Ok(mut guard) = capacity_fd.readable().await else {
-                        return false;
-                    };
-                    guard.clear_ready();
-                }
-                #[cfg(windows)]
-                {
-                    let shared = Arc::clone(shared);
-                    let _ = tokio::task::spawn_blocking(move || {
-                        shared
-                            .rx_capacity_wake
-                            .wait_timeout(std::time::Duration::from_secs(60))
-                    })
-                    .await;
+                let stall =
+                    stall.get_or_insert_with(|| InputStall::new(&shared.input_stalled, timeout));
+
+                tokio::select! {
+                    available = async {
+                        #[cfg(unix)]
+                        { wait_console_capacity(shared, capacity_fd).await }
+                        #[cfg(windows)]
+                        {
+                            let shared = Arc::clone(shared);
+                            tokio::task::spawn_blocking(move || {
+                                shared.rx_capacity_wake.wait_timeout(std::time::Duration::from_secs(60));
+                                !shared.is_closed()
+                            }).await.unwrap_or(false)
+                        }
+                    } => {
+                        if !available {
+                            return false;
+                        }
+                    }
+                    _ = stall.watch() => {}
                 }
             }
         }
@@ -5125,11 +5274,15 @@ mod tests {
         }
     }
 
-    fn encoded_message<T: serde::Serialize>(t: MessageType, payload: &T) -> Vec<u8> {
+    pub(super) fn encoded_message<T: serde::Serialize>(t: MessageType, payload: &T) -> Vec<u8> {
         encoded_message_id(t, 0, payload)
     }
 
-    fn encoded_message_id<T: serde::Serialize>(t: MessageType, id: u32, payload: &T) -> Vec<u8> {
+    pub(super) fn encoded_message_id<T: serde::Serialize>(
+        t: MessageType,
+        id: u32,
+        payload: &T,
+    ) -> Vec<u8> {
         let msg = Message::with_payload(t, id, payload).unwrap();
         let mut frame = Vec::new();
         codec::encode_to_buf(&msg, &mut frame).unwrap();

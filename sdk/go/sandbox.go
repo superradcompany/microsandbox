@@ -396,10 +396,8 @@ func buildFFINetwork(n *NetworkConfig) *ffi.NetworkOptions {
 		TrustHostCAs:          n.TrustHostCAs,
 	}
 
-	if n.Strict {
-		strict := true
-		out.Strict = &strict
-	}
+	strict := !n.DisableStrict
+	out.Strict = &strict
 
 	if len(n.Rules) > 0 || n.DefaultEgress != "" || n.DefaultIngress != "" {
 		cp := &ffi.CustomNetworkPolicy{

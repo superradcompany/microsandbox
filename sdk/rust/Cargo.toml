@@ -122,13 +122,14 @@ tar.workspace = true
 tempfile.workspace = true
 
 [dev-dependencies]
+microsandbox-db.workspace = true
 ipnetwork.workspace = true
 microsandbox-network.workspace = true
 rcgen.workspace = true
 rustls.workspace = true
 tempfile.workspace = true
 test-utils.workspace = true
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
 tokio-rustls.workspace = true
 tracing-subscriber.workspace = true
 

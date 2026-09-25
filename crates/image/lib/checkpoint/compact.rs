@@ -11,6 +11,7 @@ use imago::{
     DenyImplicitOpenGate, DynStorage, FormatAccess, FormatCreateBuilder, FormatDriverBuilder,
     Mapping,
 };
+use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -167,6 +168,60 @@ pub async fn materialize_compact_prefix(
     })
 }
 
+/// Materialize a complete explicit chain as a standalone sparse raw disk.
+///
+/// Used when a consumer needs the resolved disk rather than a layered artifact.
+/// The destination must not exist; callers own staging and cleanup on failure.
+/// Source layers must remain immutable, and embedded backing paths are never opened.
+pub async fn materialize_raw_prefix(
+    layers: &[CompactLayer],
+    destination: &Path,
+) -> io::Result<CompactMaterialization> {
+    let source = open_chain(layers).await?;
+    let virtual_size = source.size();
+    if virtual_size == 0 || !virtual_size.is_multiple_of(512) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid raw disk capacity",
+        ));
+    }
+    let mut target = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(destination)
+        .await?;
+    target.set_len(virtual_size).await?;
+    let mut buffer = vec![0u8; 1024 * 1024];
+    let mut offset = 0;
+    let mut materialized_bytes = 0;
+    while offset < virtual_size {
+        let (mapping, length) = source.get_mapping(offset, virtual_size - offset).await?;
+        if length == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "raw disk mapping made no progress",
+            ));
+        }
+        if matches!(mapping, Mapping::Zero { .. }) {
+            offset += length;
+            continue;
+        }
+        let count = length.min(buffer.len() as u64) as usize;
+        source.read(&mut buffer[..count], offset).await?;
+        if buffer[..count].iter().any(|byte| *byte != 0) {
+            target.seek(io::SeekFrom::Start(offset)).await?;
+            target.write_all(&buffer[..count]).await?;
+            materialized_bytes += count as u64;
+        }
+        offset += count as u64;
+    }
+    target.sync_all().await?;
+    Ok(CompactMaterialization {
+        virtual_size,
+        materialized_bytes,
+    })
+}
+
 /// Read a raw or qcow2 file's declared capacity without opening its backing filename.
 pub async fn compact_layer_capacity(layer: CompactLayer) -> io::Result<u64> {
     Ok(open_chain(&[layer]).await?.size())
@@ -270,6 +325,17 @@ mod tests {
         assert!(before == after, "compaction changed guest bytes");
         assert!(after[..65536].iter().all(|byte| *byte == 29));
         assert!(after[65536..].iter().all(|byte| *byte == 0));
+        let raw_destination = dir.path().join("flattened.raw");
+        let raw_result = materialize_raw_prefix(&layers, &raw_destination)
+            .await
+            .unwrap();
+        assert_eq!(raw_result.virtual_size, 262144);
+        assert_eq!(std::fs::read(&raw_destination).unwrap(), before);
+        assert!(
+            materialize_raw_prefix(&layers, &raw_destination)
+                .await
+                .is_err()
+        );
         assert_eq!(std::fs::read(overlay).unwrap(), original);
         assert!(
             materialize_compact_prefix(&layers, &destination)

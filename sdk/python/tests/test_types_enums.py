@@ -235,7 +235,8 @@ def test_native_config_boundaries_accept_concrete_types() -> None:
 
 def test_network_serializes_strict_mode() -> None:
     assert Network(strict=True)._to_dict()["strict"] is True
-    assert "strict" not in Network()._to_dict()
+    assert Network()._to_dict()["strict"] is True
+    assert Network(strict=False)._to_dict()["strict"] is False
 
 
 def test_sandbox_create_accepts_documented_container_protocols() -> None:

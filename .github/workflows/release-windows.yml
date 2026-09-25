@@ -135,6 +135,10 @@ jobs:
           Copy-Item target\${{ inputs.rust_target }}\release\msb.exe build\msb.exe -Force
           & build\msb.exe --version
 
+      - name: Smoke test installed runtime discovery
+        shell: pwsh
+        run: python scripts/smoke/cli/runtime-discovery.py --msb build/msb.exe --libkrunfw build/libkrunfw.dll
+
       - name: Upload runtime artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

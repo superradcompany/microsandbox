@@ -12,6 +12,9 @@ name = "microsandbox_db"
 path = "lib/lib.rs"
 
 [dependencies]
+semver.workspace = true
+microsandbox-types.workspace = true
+serde_json.workspace = true
 async-trait = "0.1"
 sea-orm.workspace = true
 sqlx.workspace = true

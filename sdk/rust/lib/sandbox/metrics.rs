@@ -456,7 +456,7 @@ fn model_effective_config(model: &sandbox_entity::Model) -> Option<SandboxConfig
         .active_config
         .as_deref()
         .and_then(|json| serde_json::from_str(json).ok())
-        .or_else(|| crate::db::config::decode(&model.config).ok())
+        .or_else(|| serde_json::from_str::<SandboxConfig>(&model.config).ok())
 }
 
 #[cfg(feature = "local")]

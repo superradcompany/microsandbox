@@ -120,6 +120,9 @@ pub struct ConsoleSharedState {
     /// Wakes a blocked host→guest producer after libkrun frees `rx_ring` capacity.
     pub rx_capacity_wake: WakePipe,
 
+    /// Whether a relay write has been blocked on this input lane for 60 seconds.
+    pub(crate) input_stalled: tokio::sync::watch::Sender<bool>,
+
     /// Stops blocked console producers during teardown.
     closed: AtomicBool,
 }
@@ -171,6 +174,7 @@ impl ConsoleSharedState {
             rx_wake: WakePipe::new(),
             tx_capacity_wake: WakePipe::new(),
             rx_capacity_wake: WakePipe::new(),
+            input_stalled: tokio::sync::watch::channel(false).0,
             closed: AtomicBool::new(false),
         }
     }

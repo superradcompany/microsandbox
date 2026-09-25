@@ -1,12 +1,13 @@
 ---
 title: Snapshots
-description: Rust SDK - Snapshot API reference
+"og:title": Rust SDK Snapshots reference
+description: Create and restore sandbox snapshots with the Rust SDK.
 keywords: ["Rust SDK", "Rust snapshots", "microsandbox snapshots"]
 ---
 
-<Tooltip tip="Cloud supports disk capture from stopped or crashed sandboxes, lookup, listing, removal, and restore. Live capture, full snapshots, groups, archives, verification, and compaction are local-only."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Cloud supports disk capture from stopped persistent sandboxes, lookup, listing, removal, and restore. Live capture, full snapshots, groups, archives, verification, and compaction are local-only."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
-Create and manage snapshots. See the [snapshot guide](/sandboxes/snapshots) for workflows and examples.
+See the [snapshot guide](/sandboxes/snapshots) for workflows and examples.
 
 Use snapshot objects or references on cloud. Local operations also accept a group head, `group:member`, or artifact path.
 
@@ -61,7 +62,7 @@ let snap = Snapshot::builder("baseline")
 async fn create(config: SnapshotConfig) -> MicrosandboxResult<Snapshot>
 ```
 
-Create an installed snapshot artifact atomically, then best-effort update the rebuildable local index. Disk mode supports running, paused, stopped, and crashed sources; full mode includes memory and execution state from a running or paused source. Most callers use the [builder](#snapshotbuilder)'s [`create()`](#create) instead of constructing a [`SnapshotConfig`](#snapshotconfig) by hand.
+Create an installed snapshot artifact atomically, then best-effort update the rebuildable local index. Locally, disk mode supports running, paused, stopped, and crashed sources; full mode includes memory and execution state from a running or paused source. Cloud supports only disk capture from a stopped persistent source. Most callers use the [builder](#snapshotbuilder)'s [`create()`](#create) instead of constructing a [`SnapshotConfig`](#snapshotconfig) by hand.
 
 <p className="msb-label">Parameters</p>
 
@@ -862,7 +863,7 @@ Set the sandbox to capture. Required; [`build()`](#build) and [`create()`](#crea
 <div className="msb-params">
   <div className="msb-param">
     <div className="msb-param-key"><code>source_sandbox</code><span className="msb-type">impl Into&lt;String&gt;</span></div>
-    <div className="msb-param-desc">Name of the OCI-rooted source sandbox. Disk capture also supports running and paused sources.</div>
+    <div className="msb-param-desc">Name of the OCI-rooted source sandbox. Local disk capture also supports running and paused sources. Cloud requires a stopped persistent source.</div>
   </div>
 </div>
 
@@ -940,7 +941,7 @@ Compute and record sparse-aware BLAKE3 Merkle integrity during creation. [`verif
 fn full(self) -> Self
 ```
 
-Capture disk, memory, and execution state. The source must be running or paused and returns to that state after capture.
+Local-only: capture disk, memory, and execution state. The source must be running or paused and returns to that state after capture.
 
 #### <span className="msb-recv">.</span><span className="msb-hn">guest_flush()</span>
 
@@ -1185,11 +1186,11 @@ Inputs to create a snapshot. A type alias for `SnapshotSpec`. Usually built via 
 | name | `String` | Member name within its group; generated when empty |
 | group | `Option<String>` | Destination group; defaults to the source sandbox's name |
 | dest_dir | `Option<PathBuf>` | Parent directory containing groups; `None` = the default snapshots directory |
-| source_sandbox | `String` | Name of the source sandbox; disk capture preserves running/paused state |
+| source_sandbox | `String` | Name of the source sandbox; local disk capture preserves running/paused state. Cloud requires a stopped persistent source |
 | labels | `Vec<(String, String)>` | User-supplied labels |
 | force | `bool` | Overwrite a direct archive output; rejected for installed group members |
 | record_integrity | `bool` | Compute and record upper-layer integrity at creation |
-| full | `bool` | Include memory and execution state from a running or paused source; `false` captures disk state from running, paused, stopped, or crashed sources |
+| full | `bool` | Local-only when `true`: include memory and execution state from a running or paused source. With `false`, local disk capture supports running, paused, stopped, or crashed sources. Cloud requires `false` and a stopped persistent source |
 | guest_flush | `GuestFlush` | Guest writeback policy; defaults to `GuestFlush::Auto`. See [guest writeback](#guest-writeback) |
 
 ### SnapshotFormat

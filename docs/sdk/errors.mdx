@@ -1,10 +1,11 @@
 ---
 title: Error handling
-description: Error matching and resource cleanup patterns
+"og:title": Microsandbox SDK errors and resource cleanup
+description: Handle sandbox errors and clean up resources across the microsandbox SDKs.
 icon: "triangle-exclamation"
 ---
 
-TypeScript, Rust, Python, and Go surface typed errors so you can match specific failure modes instead of parsing strings. TypeScript exposes a dedicated subclass per variant (use `instanceof`), Rust has an `Error` enum, Python provides dedicated exception classes, and Go provides an `*Error` value with an `ErrorKind` discriminator matched via `m.IsKind(err, kind)` or `errors.As`. Ruby currently exposes `Microsandbox::Error`; where no dedicated subclass exists, its reference documents the stable message contract explicitly.
+TypeScript, Rust, Python, and Go surface typed errors so you can match specific failure modes instead of parsing strings. TypeScript exposes a dedicated subclass per variant (use `instanceof`). Rust has an `Error` enum, and Python provides dedicated exception classes. Go provides an `*Error` value with an `ErrorKind` discriminator that you match via `m.IsKind(err, kind)` or `errors.As`. Ruby currently exposes `Microsandbox::Error`; where no dedicated subclass exists, its reference documents the stable message contract explicitly.
 
 ## Matching errors
 
@@ -215,7 +216,7 @@ The CLI maps these kinds to POSIX-style exit codes: `127` for `NotFound`, `126` 
 
 ## Name conflicts
 
-Creating a sandbox with a name that's already in use (and without `replace`) surfaces a typed error you can branch on to decide whether to recover (resume the existing one, regenerate the name, etc.).
+Creating a sandbox with a name that's already in use (and without `replace`) surfaces a typed error. Branch on it to decide how to recover, such as resuming the existing sandbox or regenerating the name.
 
 <CodeGroup>
 ```typescript TypeScript
@@ -328,7 +329,7 @@ Ruby does not yet expose a dedicated stale-identity subclass. Until it does, `Mi
 
 On Local, a graceful-stop timeout causes the SDK to force-kill the sandbox. On Cloud, the same timeout only limits how long the SDK waits: the accepted server-side stop is not cancelled and may still complete. Cloud reports this with `SandboxStopTimedOutError` in TypeScript and Python, `Error::SandboxStopTimedOut` in Rust, and `ErrSandboxStopTimedOut` in Go. Ruby currently raises `Microsandbox::Error` with a message explaining that the accepted stop may still complete.
 
-After a Cloud timeout, poll the sandbox status or call the wait-until-stopped method if the caller still needs confirmation. Calling `request_stop` first is useful when the application wants to submit the stop and control its own observation deadline.
+After a Cloud timeout, poll the sandbox status or call the wait-until-stopped method if you still need confirmation. Calling `request_stop` first is useful when the application wants to submit the stop and control its own observation deadline.
 
 ## Sandbox start failures
 

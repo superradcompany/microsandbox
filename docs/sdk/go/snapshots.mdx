@@ -1,12 +1,13 @@
 ---
 title: Snapshots
-description: Go SDK - Snapshot API reference
+"og:title": Go SDK Snapshots reference
+description: Create and restore sandbox snapshots with the Go SDK.
 keywords: ["Go SDK", "Go snapshots", "microsandbox snapshots"]
 ---
 
-<Tooltip tip="Cloud supports disk capture from stopped or crashed sandboxes, lookup, listing, removal, and restore. Live capture, full snapshots, groups, archives, verification, and compaction are local-only."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Cloud supports disk capture from stopped persistent sandboxes, lookup, listing, removal, and restore. Live capture, full snapshots, groups, archives, verification, and compaction are local-only."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
-Create and manage snapshots. See the [snapshot guide](/sandboxes/snapshots) for workflows and examples.
+See the [snapshot guide](/sandboxes/snapshots) for workflows and examples.
 
 Use snapshot objects or references on cloud. Local operations also accept a group head, `group:member`, or artifact path.
 
@@ -447,7 +448,7 @@ With divergent tips, the existing head stays selected; a new group has no head. 
 
 ## SandboxHandle methods
 
-Snapshots are taken from a metadata handle returned by [`GetSandbox`](/sdk/go/sandbox#m-getsandbox). Disk capture also supports a running or paused sandbox.
+Snapshots are taken from a metadata handle returned by [`GetSandbox`](/sdk/go/sandbox#m-getsandbox). Local disk capture also supports a running or paused sandbox. Cloud requires a stopped persistent source.
 
 ```go
 _ = sb.Stop(ctx)
@@ -466,7 +467,7 @@ snap, err := h.Snapshot(ctx, "deps")
 func (h *SandboxHandle) Snapshot(ctx context.Context, name string) (*SnapshotArtifact, error)
 ```
 
-Snapshot this sandbox into its default group with the given member name. Live disk captures preserve the source's running or paused state. Use the returned artifact path or `sandbox:member` to open it later.
+Snapshot this sandbox into its default group with the given member name. Local live disk captures preserve the source's running or paused state. Cloud requires a stopped persistent source. Use the returned artifact path or `sandbox:member` to open it later.
 
 <p className="msb-label">Parameters</p>
 
@@ -1003,12 +1004,12 @@ Configures [`Snapshot.Create`](#snapshot-create). `FromSandbox` is required. An 
 |-------|------|-------------|
 | Name | `string` | Member name within its group; generated when empty |
 | Group | `string` | Destination snapshot group; defaults to the source sandbox's name |
-| FromSandbox | `string` | Name of the source sandbox; disk capture supports running, paused, stopped, and crashed sources |
+| FromSandbox | `string` | Name of the source sandbox; local disk capture supports running, paused, stopped, and crashed sources. Cloud requires a stopped persistent source |
 | DestDir | `string` | Parent directory containing snapshot groups; empty = the default snapshots directory |
 | Labels | `map[string]string` | Arbitrary user labels recorded in the manifest |
 | Force | `bool` | Overwrite a direct archive output; rejected for installed group members |
 | RecordIntegrity | `bool` | Record content hashes so [`Verify`](#s-verify) can recompute them later |
-| Full | `bool` | Include memory and execution state from a running or paused source; `false` captures disk state from running, paused, stopped, or crashed sources |
+| Full | `bool` | Local-only when `true`: include memory and execution state from a running or paused source. With `false`, local disk capture supports running, paused, stopped, or crashed sources. Cloud requires `false` and a stopped persistent source |
 | GuestFlush | `GuestFlush` | Guest writeback policy; defaults to `GuestFlushAuto`. See [guest writeback](#guest-writeback) |
 
 ### SnapshotSaveOptions<span className="msb-tag is-type" style={{marginLeft: "8px"}}>struct</span>

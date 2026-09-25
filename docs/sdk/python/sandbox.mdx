@@ -1,10 +1,11 @@
 ---
 title: Sandbox
-description: Python SDK - Sandbox API reference
+"og:title": Python SDK Sandbox reference
+description: Create and manage microVM sandboxes with the Python SDK.
 keywords: ["Python SDK", "Python sandbox", "microsandbox sandbox"]
 ---
 
-Create and control microVM sandboxes. See [Overview](/sandboxes/overview) for configuration and [Lifecycle](/sandboxes/lifecycle) for state management.
+See [Overview](/sandboxes/overview) for configuration examples and [Lifecycle](/sandboxes/lifecycle) for state management.
 
 ## Sandbox
 
@@ -1586,7 +1587,7 @@ Stream captured log entries (works without starting)
 
 #### <span className="msb-recv">handle.</span><span className="msb-hn">snapshot()</span>
 
-<Tooltip tip="Cloud disk snapshots require a stopped or crashed source. Local snapshots also support running or paused sources."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Cloud disk snapshots require a stopped persistent source. Local snapshots also support running or paused sources."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```python
 snapshot(name)

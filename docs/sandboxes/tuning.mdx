@@ -372,7 +372,7 @@ plan, err := sb.Modify(ctx, m.ModifyOptions{
 ```
 </CodeGroup>
 
-Adding a new secret or changing its guest-visible placeholder requires a restart because existing processes cannot receive a new placeholder. Removing a secret does not require recreating the sandbox. See [Secrets](/sandboxes/secrets) for sources, host allow lists, and storage behavior.
+Adding a new secret or changing its guest-visible placeholder requires a restart because existing processes cannot receive a new placeholder. If the new secret requires TLS identity while interception is off, the plan also enables `tls`, which needs the same restart or next start. Existing secrets configured with `require_tls_identity(false)` continue to rotate live over plain HTTP without enabling interception. Removing a secret does not require recreating the sandbox, and removing every TLS-dependent secret leaves interception on. See [Secrets](/sandboxes/secrets) for sources, host allow lists, and storage behavior.
 
 <span id="root-disk-growth" />
 

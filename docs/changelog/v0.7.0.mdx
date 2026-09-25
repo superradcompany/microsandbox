@@ -1,0 +1,59 @@
+---
+title: "v0.7.0"
+sidebarTitle: "v0.7.0"
+description: "Save running sandboxes, branch them into independent copies, and resume work from a checkpoint."
+icon: "bolt"
+---
+
+Released September 16, 2026 · [GitHub release](https://github.com/superradcompany/microsandbox/releases/tag/v0.7.0) · [All changes](https://github.com/superradcompany/microsandbox/compare/v0.6.18...v0.7.0)
+
+<Note>
+  Release entries start here. Earlier updates remain in the weekly archive.
+</Note>
+
+## Snapshots and branching
+
+**Save running work.** Full snapshots capture a local sandbox's disk, memory, and running processes so you can resume from a checkpoint:
+
+```bash
+msb create alpine --name app --memory 512M
+msb exec app -- sh -c 'echo ready > /dev/shm/message'
+
+msb snapshot create ready --from-sandbox app --full
+msb restore app:ready --name restored
+msb exec restored -- cat /dev/shm/message
+# ready
+```
+
+**Try several paths from one starting point.** Branch a running or paused sandbox into independent copies, including several children at once. Copies share unchanged memory while keeping their writes private. You can also pause and resume a sandbox without saving a snapshot.
+
+**Organize and move checkpoints.** Snapshot groups, portable `.msb` archives, and incremental exports make saved work easier to manage. Disk-only snapshots now support running and paused local sandboxes; the SDK also adds cloud disk snapshots and restore through a compatible service.
+
+Full snapshots, branching, groups, and archives are local-only. See [Snapshots](/sandboxes/snapshots) for commands and requirements.
+
+## More features
+
+- **Storage that follows your sandbox.** Owned volumes survive restarts and become private copies in snapshots and branches. Root disks can grow without restarting, sealed layers can be compacted, and flat roots gain snapshot and pre-boot patch support. [Volumes](/sandboxes/volumes) · [Disk maintenance](/sandboxes/snapshots#export-changes-and-compact-a-disk-chain)
+- **More precise secret policies.** Control where credentials are substituted, where placeholders may pass unchanged, and how violations are handled. Real credentials stay on the host. [Secrets](/sandboxes/secrets)
+- **Network controls and diagnostics.** Set TCP and UDP connection limits independently, and trace startup and connection timings with optional profiling.
+
+## Improvements and fixes
+
+- New `msb sandbox` and `msb sbx` command groups retain familiar top-level commands.
+- Faster agent I/O through separate control and bulk-data paths, with shared-memory transport for supported local Unix SDK connections.
+- Disk-backed temporary storage and faster reclamation of completed TCP connections.
+- Stale handles can no longer reach a replacement sandbox with the same name.
+- Fixed macOS bind-mount truncation and TLS hostname panics; added standard stream paths and support for older metrics registries.
+- Cloud requests tolerate unknown network and runtime fields while validating known settings. New settings still require server support.
+
+## Before upgrading
+
+- **Set up the runtime first.** Sandbox creation no longer downloads it automatically. SDK setup APIs and Rust build features have changed. [Runtime setup](/sdk/setup)
+- **Migrate secret policies.** Older injection and passthrough settings need updating. See the [v0.7.0 compatibility notes](https://github.com/superradcompany/microsandbox/blob/v0.7.0/COMPATIBILITY.md).
+- **Reconnect external resources.** Restore and branch need explicit host mounts, published ports, and custom vsock routes. Snapshots do not copy host files or restore external connections. Use compatible runtime and firmware versions.
+- **Choose shutdown timeouts.** Graceful stop has no default deadline. A timeout does not force-kill the sandbox; killing requires an explicit request.
+- **Review network limits.** Defaults are unlimited for single-tenant sandboxes and 1,024 each for TCP and UDP in multi-tenant sandboxes. Zero means unlimited. `maxConnections` remains a deprecated TCP-only alias.
+
+## New guides
+
+Get started with [Browser Use](/examples/browser-automation/browser-use) or [VS Code](/examples/development/vscode). The API reference now also covers personal tokens.
