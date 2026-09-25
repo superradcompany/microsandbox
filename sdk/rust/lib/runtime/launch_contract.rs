@@ -76,6 +76,20 @@ struct CachedContract {
 //--------------------------------------------------------------------------------------------------
 
 impl LaunchContract {
+    /// Probe network features that `machine` runtimes advertise individually. Earlier contracts
+    /// are covered by [`Self::validate_network`]. Callers run this before any destructive step.
+    #[cfg(feature = "net")]
+    pub(crate) async fn require_network_capabilities(
+        self,
+        msb_path: &Path,
+        network: &microsandbox_network::config::NetworkConfig,
+    ) -> MicrosandboxResult<()> {
+        if self.machine && network.tcp_listen_backlog.is_some() {
+            require_tcp_listen_backlog(msb_path).await?;
+        }
+        Ok(())
+    }
+
     /// Check unresolved network intent against the selected launch contract.
     /// Source values are resolved only when building the final launch payload.
     #[cfg(feature = "net")]
@@ -456,21 +470,24 @@ pub(crate) async fn validate_runtime_config(
     global: &GlobalConfig,
 ) -> MicrosandboxResult<()> {
     #[cfg(feature = "net")]
-    config
-        .local_network_config()?
-        .secrets
-        .validate()
-        .map_err(|error| {
-            MicrosandboxError::InvalidConfig(format!("invalid secret configuration: {error}"))
-        })?;
+    let network = config.local_network_config()?;
+    #[cfg(feature = "net")]
+    network.secrets.validate().map_err(|error| {
+        MicrosandboxError::InvalidConfig(format!("invalid secret configuration: {error}"))
+    })?;
     let runtime = match crate::setup::resolve_runtime(global) {
         Ok(runtime) => runtime,
         Err(MicrosandboxError::RuntimeNotInstalled(_)) => return Ok(()),
         Err(error) => return Err(error),
     };
-    resolve(&runtime.msb_path)
-        .await?
-        .validate_launch_intent(config)
+    let contract = resolve(&runtime.msb_path).await?;
+    contract.validate_launch_intent(config)?;
+    // Probed here, not only at spawn, so `replace` cannot delete its target first.
+    #[cfg(feature = "net")]
+    contract
+        .require_network_capabilities(&runtime.msb_path, &network)
+        .await?;
+    Ok(())
 }
 
 pub(crate) async fn resolve(path: &Path) -> MicrosandboxResult<LaunchContract> {
@@ -557,7 +574,7 @@ pub(crate) async fn require_restore_backing(path: &Path) -> MicrosandboxResult<(
 /// Probe only when a backlog is requested. `machine` runtimes that predate the field decode
 /// network JSON leniently and would drop it, leaving published ports on mio's 128.
 #[cfg(feature = "net")]
-pub(crate) async fn require_tcp_listen_backlog(path: &Path) -> MicrosandboxResult<()> {
+async fn require_tcp_listen_backlog(path: &Path) -> MicrosandboxResult<()> {
     require_capability(
         path,
         |capabilities| capabilities.tcp_listen_backlog,
@@ -750,6 +767,49 @@ mod tests {
             "printf '%s' '{\"protocols\":[1],\"tcp_listen_backlog\":true}'",
         );
         assert!(require_tcp_listen_backlog(&protocol_1_only).await.is_err());
+    }
+
+    /// The check create runs before `replace` touches its target: refuse a v0.7.x-shaped
+    /// runtime, and do not probe at all when the key is unset or the contract predates `machine`.
+    #[cfg(all(unix, feature = "net"))]
+    #[tokio::test]
+    async fn network_capabilities_probe_only_machine_runtimes_asked_for_a_backlog() {
+        use microsandbox_network::config::NetworkConfig;
+
+        let dir = tempfile::tempdir().unwrap();
+        let old = script(
+            dir.path(),
+            "old-capabilities",
+            "printf '%s' '{\"protocols\":[2,1],\"required_restore_backing\":true}'",
+        );
+        // Probing this path fails, so an Ok below proves no probe ran.
+        let absent = dir.path().join("absent-msb");
+        let machine = LaunchContract {
+            patch: 18,
+            machine: true,
+        };
+        let legacy = LaunchContract {
+            patch: 18,
+            machine: false,
+        };
+        let tuned: NetworkConfig =
+            serde_json::from_value(json!({ "tcp_listen_backlog": 4096 })).unwrap();
+        let unset = NetworkConfig::default();
+
+        let error = machine
+            .require_network_capabilities(&old, &tuned)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("TCP listen backlog"), "{error}");
+        machine
+            .require_network_capabilities(&absent, &unset)
+            .await
+            .unwrap();
+        legacy
+            .require_network_capabilities(&absent, &tuned)
+            .await
+            .unwrap();
     }
 
     #[cfg(unix)]

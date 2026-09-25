@@ -5,6 +5,7 @@ use napi_derive::napi;
 
 use crate::error::to_napi_error;
 use crate::mount_builder::JsMountBuilder;
+use crate::network_builder::listen_backlog;
 use crate::network_policy_builder::JsNetworkPolicyBuilder;
 use crate::pull_progress::JsPullProgressStream;
 use crate::sandbox::Sandbox;
@@ -326,7 +327,8 @@ impl JsRestoreBuilder {
 
     /// Set the accept-queue depth for the child's published TCP listeners, 1..=2147483647.
     #[napi(js_name = "tcpListenBacklog")]
-    pub fn tcp_listen_backlog(&mut self, backlog: u32) -> Result<&Self> {
+    pub fn tcp_listen_backlog(&mut self, backlog: f64) -> Result<&Self> {
+        let backlog = listen_backlog(backlog).map_err(napi::Error::from_reason)?;
         self.inner = Some(self.take_inner()?.tcp_listen_backlog(backlog));
         Ok(self)
     }
@@ -406,6 +408,26 @@ fn duration_seconds(seconds: f64) -> std::result::Result<u64, &'static str> {
 #[cfg(test)]
 mod tests {
     use super::duration_seconds;
+    use crate::network_builder::listen_backlog;
+
+    #[test]
+    fn listen_backlog_rejects_values_n_api_would_wrap_or_truncate() {
+        for value in [1.0, 4096.0, 2_147_483_647.0] {
+            assert_eq!(listen_backlog(value).unwrap(), value as u32);
+        }
+        for value in [
+            0.0,
+            -1.0,
+            1.5,
+            4_294_967_297.0,
+            -4_294_967_295.0,
+            2_147_483_648.0,
+            f64::NAN,
+            f64::INFINITY,
+        ] {
+            assert!(listen_backlog(value).is_err(), "{value}");
+        }
+    }
 
     #[test]
     fn restore_duration_preserves_zero_and_rounds_positive_limits_up() {

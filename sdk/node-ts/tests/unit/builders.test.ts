@@ -995,10 +995,13 @@ describe("TCP listen backlog", () => {
     expect(config.network.tcpListenBacklog).toBe(4096);
   });
 
-  it("rejects values outside the positive C int range", () => {
-    for (const invalid of [0, 2_147_483_648]) {
-      expect(() => new NetworkBuilder().tcpListenBacklog(invalid).build())
-        .toThrow(/TCP listen backlog/);
+  it("rejects values instead of wrapping or truncating them", () => {
+    // N-API's u32 conversion would turn the last three into 1.
+    for (const invalid of [0, 2_147_483_648, 4_294_967_297, -4_294_967_295, 1.5]) {
+      expect(() => new NetworkBuilder().tcpListenBacklog(invalid))
+        .toThrow(/tcpListenBacklog must be an integer/);
+      expect(() => Sandbox.restore("saved").tcpListenBacklog(invalid))
+        .toThrow(/tcpListenBacklog must be an integer/);
     }
   });
 });

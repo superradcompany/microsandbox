@@ -118,9 +118,13 @@ async def test_restore_listen_backlog_reaches_artifact_validation(tmp_path, meth
 
 
 @pytest.mark.parametrize("method", ["restore", "restore_with_progress"])
-def test_restore_rejects_negative_listen_backlog(method):
-    with pytest.raises(OverflowError):
-        getattr(Sandbox, method)("missing", name="restore-backlog", tcp_listen_backlog=-1)
+@pytest.mark.parametrize(("value", "error"), [
+    (-1, OverflowError), (4_294_967_297, OverflowError), (1.5, TypeError),
+])
+def test_restore_rejects_listen_backlog_it_cannot_represent(method, value, error):
+    # Never wrapped or truncated into a different backlog.
+    with pytest.raises(error):
+        getattr(Sandbox, method)("missing", name="restore-backlog", tcp_listen_backlog=value)
 
 
 def test_restore_policy_rejects_broad_network_configuration():
