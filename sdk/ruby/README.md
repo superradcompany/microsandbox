@@ -85,8 +85,10 @@ it, so cloud-only users can omit it:
 gem install microsandbox-binaries
 ```
 
-With Bundler, also add `gem "microsandbox-binaries"` to your Gemfile and run
-`bundle install`; installing it globally does not make it available to a bundle.
+The companion must match this gem's version; pass `-v` to install a specific
+one. With Bundler, also add `gem "microsandbox-binaries"` to your Gemfile,
+pinned to the same version as `microsandbox`, and run `bundle install`;
+installing it globally does not make it available to a bundle.
 
 Alternatively, install the microsandbox runtime and firmware through the SDK:
 
@@ -100,9 +102,11 @@ The companion gem is the last place the SDK looks for a runtime, as with the
 Node and Python platform packages: `MSB_PATH` (with `MSB_LIBKRUNFW_PATH`), the
 `Microsandbox.set_runtime_*` setters, configured runtime paths, and a runtime
 installed in `MSB_HOME` (default `~/.microsandbox`) all take precedence. The SDK
-only uses a companion from its own minor series (for example `0.7.x` with
-`0.7.x`); a `microsandbox-binaries` from another series is skipped with a
-warning.
+only uses a companion of its own version (for example `microsandbox` 0.7.4 with
+`microsandbox-binaries` 0.7.4), since it launches a v0.7 runtime only when the
+versions match. It activates that version even when newer companions are
+installed; a companion of another version, including one locked by Bundler, is
+skipped with a warning.
 
 Local sandboxes require Apple Silicon virtualization on macOS or KVM on Linux. On Windows, use Windows 11 on x64 or ARM64 and enable WHP. Ruby CI currently covers Linux x86_64.
 

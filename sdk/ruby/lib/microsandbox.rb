@@ -20,33 +20,53 @@ end
 # The base Error is defined natively; the typed subclasses reopen it.
 require_relative "microsandbox/errors"
 
-begin
-  require "microsandbox/binaries"
-rescue LoadError => error
-  raise if defined?(Gem) && Gem.loaded_specs.key?("microsandbox-binaries")
-  raise unless error.path == "microsandbox/binaries"
-else
-  # Like the Node and Python platform packages, the companion is registered
-  # as the packaged fallback: it is used only when MSB_PATH, the explicit
-  # setters, config paths and the runtime home all leave the runtime
-  # unresolved. Core finds its libkrunfw beside the registered msb.
-  #
-  # The SDK and runtime are only guaranteed compatible within one minor
-  # series, and the companion is not a gemspec dependency, so an installed
-  # microsandbox-binaries from another series is skipped rather than used.
-  sdk_series = Microsandbox::VERSION.split(".").first(2)
-  companion_series = Microsandbox::Binaries::VERSION.split(".").first(2)
-  if sdk_series == companion_series
-    msb_path = Microsandbox::Binaries.msb_path
-    # Validates the bundled firmware, so a broken companion raises here
-    # instead of surfacing later as an incomplete runtime.
-    Microsandbox::Binaries.libkrunfw_path
-    Microsandbox.set_packaged_msb_path(msb_path)
+# Core launches a v0.7+ runtime only when it matches the SDK version exactly
+# (see its launch contracts), and the companion is not a gemspec dependency, so
+# the SDK activates the microsandbox-binaries of its own version and skips any
+# other.
+skip_companion = lambda do |versions|
+  warn "microsandbox #{Microsandbox::VERSION} is ignoring microsandbox-binaries " \
+       "#{versions.join(", ")}: the runtime companion must be version " \
+       "#{Microsandbox::VERSION}; install microsandbox-binaries #{Microsandbox::VERSION} " \
+       "or set MSB_PATH and MSB_LIBKRUNFW_PATH to a compatible runtime"
+end
+
+companion_available = true
+# A bare require would activate the newest installed companion, which need not
+# be this SDK's version. An already activated companion, such as Bundler's
+# locked one, is kept and checked below.
+if defined?(Gem) && !Gem.loaded_specs.key?("microsandbox-binaries")
+  begin
+    gem "microsandbox-binaries", Microsandbox::VERSION
+  rescue Gem::MissingSpecVersionError => error
+    companion_available = false
+    skip_companion.call(error.specs.map { |spec| spec.version.to_s }.uniq)
+  rescue Gem::LoadError
+    # Not installed as a gem, or outside the bundle: the require below still
+    # finds a companion on the load path, or fails and is ignored.
+  end
+end
+
+if companion_available
+  begin
+    require "microsandbox/binaries"
+  rescue LoadError => error
+    raise if defined?(Gem) && Gem.loaded_specs.key?("microsandbox-binaries")
+    raise unless error.path == "microsandbox/binaries"
   else
-    warn "microsandbox #{Microsandbox::VERSION} is ignoring microsandbox-binaries " \
-         "#{Microsandbox::Binaries::VERSION}: the runtime companion must come from the " \
-         "#{sdk_series.join(".")}.x series; install a matching microsandbox-binaries " \
-         "or set MSB_PATH and MSB_LIBKRUNFW_PATH to a compatible runtime"
+    if Microsandbox::Binaries::VERSION == Microsandbox::VERSION
+      # Like the Node and Python platform packages, the companion is registered
+      # as the packaged fallback: it is used only when MSB_PATH, the explicit
+      # setters, config paths and the runtime home all leave the runtime
+      # unresolved. Core finds its libkrunfw beside the registered msb.
+      msb_path = Microsandbox::Binaries.msb_path
+      # Validates the bundled firmware, so a broken companion raises here
+      # instead of surfacing later as an incomplete runtime.
+      Microsandbox::Binaries.libkrunfw_path
+      Microsandbox.set_packaged_msb_path(msb_path)
+    else
+      skip_companion.call([Microsandbox::Binaries::VERSION])
+    end
   end
 end
 

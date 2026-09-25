@@ -10,15 +10,17 @@ support is needed:
 gem install microsandbox-binaries
 ```
 
-For Bundler applications, add `gem "microsandbox-binaries"` to the Gemfile
-alongside `microsandbox`, then run `bundle install`.
+Install the version that matches `microsandbox` (for example with
+`-v 0.7.4`) when the two were not installed together. For Bundler applications,
+add `gem "microsandbox-binaries"` to the Gemfile alongside `microsandbox`,
+pinned to the same version, then run `bundle install`.
 
 The main gem discovers this gem opportunistically and has no dependency on it,
 so cloud-only installations do not download runtime binaries. The bundled
 files are a fallback: `MSB_PATH`, configured runtime paths, and a runtime
 already installed in `MSB_HOME` (default `~/.microsandbox`) take precedence.
-Keep this gem on the same minor series as
-`microsandbox`: the SDK warns and ignores a companion from another series.
+Keep this gem at the same version as
+`microsandbox`: the SDK warns and ignores a companion of another version.
 
 Runtime files are downloaded from the matching Microsandbox GitHub release and
 packaged as pure data for `arm64-darwin`, `x86_64-linux-gnu`, and
