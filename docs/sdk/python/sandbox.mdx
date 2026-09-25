@@ -587,6 +587,9 @@ for r in plan.get("resize_status", []):
     if r["state"] is ResourceConvergenceState.APPLIED:
         print(f'{r["resource"]}: {r["requested"]} -> {r["actual"]}')
 
+# Wait for the guest to converge
+settled = await sb.wait_until_resized(timeout=60)
+
 # Preview a change without applying it
 plan = await sb.modify(max_memory=16384, dry_run=True)
 for change in plan["changes"]:
@@ -635,7 +638,7 @@ The returned [`SandboxModificationPlan`](#sandboxmodificationplan) is a typed di
 | `warnings` | `list[dict]` | Non-fatal warnings (`field` + `message`), e.g. the future-execs-only env caveat |
 | `resize_status` | `list[ResourceResizeStatus]` | Live resize outcomes after apply, using [`ResourceKind`](#resourcekind) and [`ResourceConvergenceState`](#resourceconvergencestate). Omitted when no live resize ran |
 
-A live CPU or memory resize can take a moment to settle. The new limits are enforced immediately, and `resize_status` reports when the sandbox has finished adjusting.
+A live CPU or memory resize can take a moment to settle. The new limits are enforced immediately. `resize_status` is a single reading taken when the change was accepted; use [`wait_until_resized()`](#sb-wait_until_resized) to wait for the guest.
 
 <p className="msb-label">Parameters</p>
 
@@ -1048,6 +1051,35 @@ Block until the sandbox is observed in a terminal non-running state, without tri
   <div className="msb-param">
     <div className="msb-param-key"><a className="msb-type" href="#sandboxstopresult">SandboxStopResult</a></div>
     <div className="msb-param-desc">Terminal status and optional observed exit code.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">resize_status()</span>
+
+<Tooltip tip="Live resize is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+```python
+async def resize_status(self) -> list[ResourceResizeStatus]
+```
+
+Read the current live CPU and memory resize status without changing anything. Returns an empty list when the sandbox is not running.
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">wait_until_resized()</span>
+
+<Tooltip tip="Live resize is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+```python
+async def wait_until_resized(self, *, timeout: float | None = None) -> list[ResourceResizeStatus]
+```
+
+Wait until every resource is `APPLIED`, `GUEST_REFUSED`, or `FAILED`, and return the settled status. Returns an empty list when the sandbox is not running. Without a timeout a guest that never converges keeps this polling. On timeout, `ResizeTimeoutError.status` holds the last observed status, empty if no read completed before the deadline. The host still enforces the new limit if the wait times out.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>timeout</code><span className="msb-type">float | None</span></div>
+    <div className="msb-param-desc">Budget in seconds. <code>None</code> waits indefinitely and <code>0</code> checks once; expiry raises <code>ResizeTimeoutError</code>.</div>
   </div>
 </div>
 
@@ -1577,6 +1609,34 @@ Block until the sandbox reaches terminal state
 
 `Awaitable[`[`SandboxStopResult`](#sandboxstopresult)`]`
 
+#### <span className="msb-recv">handle.</span><span className="msb-hn">resize_status()</span>
+
+<Tooltip tip="Live resize is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+```python
+resize_status()
+```
+
+Current live CPU and memory resize status. Empty when not running.
+
+<p className="msb-label">Returns</p>
+
+`Awaitable[list[ResourceResizeStatus]]`
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">wait_until_resized()</span>
+
+<Tooltip tip="Live resize is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+```python
+wait_until_resized(*, timeout=None)
+```
+
+Wait until every live resize is terminal. Returns an empty list when the sandbox is not running. Without a timeout it keeps polling while a guest never converges; expiry raises `ResizeTimeoutError` with the last observed `status`.
+
+<p className="msb-label">Returns</p>
+
+`Awaitable[list[ResourceResizeStatus]]`
+
 #### <span className="msb-recv">handle.</span><span className="msb-hn">remove()</span>
 
 ```python
@@ -2080,9 +2140,11 @@ Observed convergence state for an accepted live resize.
 |--------|-------|-------------|
 | `ResourceConvergenceState.ACCEPTED` | `"accepted"` | Runtime accepted the request |
 | `ResourceConvergenceState.CONVERGING` | `"converging"` | Guest and VMM are still converging |
-| `ResourceConvergenceState.APPLIED` | `"applied"` | Desired, actual, and enforced values match |
+| `ResourceConvergenceState.APPLIED` | `"applied"` | Desired, actual, and enforced values match. A shrink is applied only after the guest releases the capacity |
 | `ResourceConvergenceState.GUEST_REFUSED` | `"guest-refused"` | Guest refused or failed to cooperate |
 | `ResourceConvergenceState.FAILED` | `"failed"` | Resize failed |
+
+`APPLIED`, `GUEST_REFUSED`, and `FAILED` are terminal.
 
 ### SandboxMetrics
 

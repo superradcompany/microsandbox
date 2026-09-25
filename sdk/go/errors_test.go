@@ -23,6 +23,7 @@ func TestErrorKindString(t *testing.T) {
 		{ErrVolumeAlreadyExists, "VolumeAlreadyExists"},
 		{ErrExecTimeout, "ExecTimeout"},
 		{ErrStopTimeout, "StopTimeout"},
+		{ErrResizeTimeout, "ResizeTimeout"},
 		{ErrInvalidConfig, "InvalidConfig"},
 		{ErrInvalidArgument, "InvalidArgument"},
 		{ErrInvalidHandle, "InvalidHandle"},
@@ -141,6 +142,43 @@ func TestSnapshotSourceRecoveryError(t *testing.T) {
 	}
 }
 
+func TestResizeTimeoutError(t *testing.T) {
+	for name, tc := range map[string]struct {
+		payload string
+		want    int
+	}{
+		"with status": {`{"kind":"resize_timeout","message":"timed out","resize_status":[{"resource":"cpus","requested":"4","actual":"2","enforced":"4","state":"converging"}]}`, 1},
+		"no read":     {`{"kind":"resize_timeout","message":"timed out","resize_status":[]}`, 0},
+		"older":       {`{"kind":"resize_timeout","message":"timed out"}`, 0},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var native ffi.Error
+			if err := json.Unmarshal([]byte(tc.payload), &native); err != nil {
+				t.Fatal(err)
+			}
+			err := wrapFFI(&native)
+			var timeout *ResizeTimeoutError
+			if !errors.As(err, &timeout) || !IsKind(err, ErrResizeTimeout) {
+				t.Fatalf("missing typed resize timeout: %v", err)
+			}
+			if err.Error() != "timed out" {
+				t.Fatalf("message changed: %s", err)
+			}
+			if timeout.Status == nil || len(timeout.Status) != tc.want {
+				t.Fatalf("status = %#v", timeout.Status)
+			}
+			if tc.want == 1 && (timeout.Status[0].Resource != "cpus" || timeout.Status[0].Actual != "2" || timeout.Status[0].State != "converging") {
+				t.Fatalf("status lost: %+v", timeout.Status[0])
+			}
+		})
+	}
+	err := wrapFFI(&ffi.Error{Kind: ffi.KindSandboxNotFound, Message: "missing"})
+	var timeout *ResizeTimeoutError
+	if errors.As(err, &timeout) || !IsKind(err, ErrSandboxNotFound) {
+		t.Fatalf("other errors must not be resize timeouts: %v", err)
+	}
+}
+
 func TestWrapFFIFfiError(t *testing.T) {
 	fe := &ffi.Error{Kind: ffi.KindSandboxNotFound, Message: "missing"}
 	err := wrapFFI(fe)
@@ -185,6 +223,7 @@ func TestKindFromFFIAllTags(t *testing.T) {
 		{ffi.KindVolumeAlreadyExists, ErrVolumeAlreadyExists},
 		{ffi.KindExecTimeout, ErrExecTimeout},
 		{ffi.KindStopTimeout, ErrStopTimeout},
+		{ffi.KindResizeTimeout, ErrResizeTimeout},
 		{ffi.KindNoDefaultCommand, ErrNoDefaultCommand},
 		{ffi.KindInvalidConfig, ErrInvalidConfig},
 		{ffi.KindInvalidArgument, ErrInvalidArgument},

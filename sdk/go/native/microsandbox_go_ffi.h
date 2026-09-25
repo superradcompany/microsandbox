@@ -151,6 +151,27 @@ char *msb_sandbox_handle_modify(uint64_t cancel_id,
                                 uintptr_t buf_len);
 
 /**
+ * Read live resize status for the sandbox `expected_id` names.
+ * Output: a `ResourceResizeStatus` JSON array.
+ */
+char *msb_sandbox_handle_resize_status(uint64_t cancel_id,
+                                       const char *name,
+                                       const char *expected_id,
+                                       unsigned char *buf,
+                                       uintptr_t buf_len);
+
+/**
+ * Wait for live resizes on the sandbox `expected_id` names to settle.
+ * `u64::MAX` waits without a deadline; 0 checks once.
+ */
+char *msb_sandbox_handle_wait_until_resized(uint64_t cancel_id,
+                                            const char *name,
+                                            const char *expected_id,
+                                            uint64_t timeout_ms,
+                                            unsigned char *buf,
+                                            uintptr_t buf_len);
+
+/**
  * Explicit compaction. A nonzero handle retains its backend; zero resolves the supplied name.
  */
 char *msb_sandbox_compact(uint64_t cancel_id,
@@ -297,6 +318,23 @@ char *msb_sandbox_modify(uint64_t cancel_id,
                          const char *opts_json,
                          unsigned char *buf,
                          uintptr_t buf_len);
+
+/**
+ * Read live resize status. Output: a `ResourceResizeStatus` JSON array.
+ */
+char *msb_sandbox_resize_status(uint64_t cancel_id,
+                                Handle handle,
+                                unsigned char *buf,
+                                uintptr_t buf_len);
+
+/**
+ * Wait for live resizes to settle. `u64::MAX` waits without a deadline; 0 checks once.
+ */
+char *msb_sandbox_wait_until_resized(uint64_t cancel_id,
+                                     Handle handle,
+                                     uint64_t timeout_ms,
+                                     unsigned char *buf,
+                                     uintptr_t buf_len);
 
 /**
  * Reports whether this handle owns the sandbox lifecycle (synchronous).

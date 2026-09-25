@@ -33,6 +33,8 @@ mod patch;
 pub(crate) mod pause;
 #[cfg(all(feature = "local", windows))]
 mod reap;
+#[cfg(feature = "local")]
+mod resize;
 mod restore_builder;
 pub(crate) mod restore_resources;
 #[cfg(feature = "ssh")]
@@ -672,6 +674,37 @@ impl Sandbox {
     #[cfg(feature = "local")]
     pub fn modify(&self) -> SandboxModificationBuilder {
         SandboxModificationBuilder::new(self.backend.clone(), self.name.clone())
+    }
+
+    /// Read the current live CPU and memory resize status.
+    ///
+    /// Returns an empty list when the sandbox is not running.
+    #[cfg(feature = "local")]
+    pub async fn resize_status(&self) -> MicrosandboxResult<Vec<ResourceResizeStatus>> {
+        resize::resize_status(&self.backend, &self.name, &self.identity()).await
+    }
+
+    /// Wait until every live resize reaches a terminal state.
+    ///
+    /// Returns an empty list when the sandbox is not running. Keeps polling
+    /// while a guest never converges; use `wait_until_resized_with_timeout` to
+    /// bound the wait.
+    #[cfg(feature = "local")]
+    pub async fn wait_until_resized(&self) -> MicrosandboxResult<Vec<ResourceResizeStatus>> {
+        resize::wait_until_resized(&self.backend, &self.name, &self.identity(), None).await
+    }
+
+    /// Wait until every live resize reaches a terminal state within `timeout`.
+    ///
+    /// Returns an empty list when the sandbox is not running. Expiry returns
+    /// [`crate::MicrosandboxError::ResizeTimeout`] with the last observed status, which is empty when no read
+    /// completed before the deadline.
+    #[cfg(feature = "local")]
+    pub async fn wait_until_resized_with_timeout(
+        &self,
+        timeout: std::time::Duration,
+    ) -> MicrosandboxResult<Vec<ResourceResizeStatus>> {
+        resize::wait_until_resized(&self.backend, &self.name, &self.identity(), Some(timeout)).await
     }
 
     /// Explicitly compact sealed backing layers of the root and sandbox-owned data disks.

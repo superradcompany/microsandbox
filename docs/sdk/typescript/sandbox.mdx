@@ -587,6 +587,9 @@ for (const r of plan.resizeStatus) {
   console.log(`${r.resource}: ${r.requested} -> ${r.actual} (${r.state})`);
 }
 
+// Wait for the guest to converge
+const settled = await sandbox.waitUntilResized(60_000);
+
 // Preview a change without applying it
 const preview = await sandbox.modify({ maxMemory: 16384, dryRun: true });
 for (const c of preview.changes) {
@@ -618,7 +621,7 @@ Plan or apply a configuration change. The returned plan labels each change `"liv
 
 Secret specs are keyed by stable secret name. Each `SecretModifySpec` selects at most one source (`env`, `value`, or `store`) and may also set `placeholder` and `allowedHosts`; omitting a source updates only the other supplied fields. Plans expose only safe references and metadata; raw secret values never appear in a plan. Removal is explicit through `secretsRemove`.
 
-A live CPU or memory resize can take a moment to settle. The new limits are enforced immediately, and the returned plan's `resizeStatus` reports when the sandbox has finished adjusting. See [`SandboxModificationPlan`](#sandboxmodificationplan).
+A live CPU or memory resize can take a moment to settle. The new limits are enforced immediately. The returned plan's `resizeStatus` is a single reading taken when the change was accepted; use [`waitUntilResized()`](#sandbox-waituntilresized) to wait for the guest. See [`SandboxModificationPlan`](#sandboxmodificationplan).
 
 <p className="msb-label">Parameters</p>
 
@@ -867,6 +870,35 @@ Block until the sandbox is observed in a terminal non-running state, without tri
   <div className="msb-param">
     <div className="msb-param-key"><a className="msb-type" href="#sandboxstopresult">Promise&lt;SandboxStopResult&gt;</a></div>
     <div className="msb-param-desc">Terminal status, exit code, and signal that were observed.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">resizeStatus()</span>
+
+<Tooltip tip="Live resize is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+```typescript
+resizeStatus(): Promise<ResourceResizeStatus[]>
+```
+
+Read the current live CPU and memory resize status without changing anything. Returns an empty array when the sandbox is not running.
+
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">waitUntilResized()</span>
+
+<Tooltip tip="Live resize is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+```typescript
+waitUntilResized(timeoutMs?: number): Promise<ResourceResizeStatus[]>
+```
+
+Wait until every resource is `"applied"`, `"guest-refused"`, or `"failed"`, and return the settled status. Returns an empty array when the sandbox is not running. Without a timeout a guest that never converges keeps this polling. On timeout, `ResizeTimeoutError.status` holds the last observed status, empty if no read completed before the deadline. The host still enforces the new limit if the wait times out.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>timeoutMs</code><span className="msb-type">number</span></div>
+    <div className="msb-param-desc">Budget in milliseconds. Omitted waits indefinitely and <code>0</code> checks once; expiry throws <code>ResizeTimeoutError</code>.</div>
   </div>
 </div>
 
@@ -2674,6 +2706,34 @@ Block until the sandbox reaches terminal state
 
 `Promise<`[`SandboxStopResult`](#sandboxstopresult)`>`
 
+#### <span className="msb-recv">handle.</span><span className="msb-hn">resizeStatus()</span>
+
+<Tooltip tip="Live resize is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+```typescript
+resizeStatus()
+```
+
+Current live CPU and memory resize status. Empty when not running.
+
+<p className="msb-label">Returns</p>
+
+`Promise<ResourceResizeStatus[]>`
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">waitUntilResized()</span>
+
+<Tooltip tip="Live resize is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+```typescript
+waitUntilResized(timeoutMs?)
+```
+
+Wait until every live resize is terminal. Returns an empty array when the sandbox is not running. Omitted waits indefinitely, even while a guest never converges, and `0` checks once; expiry throws `ResizeTimeoutError` with the last observed `status`.
+
+<p className="msb-label">Returns</p>
+
+`Promise<ResourceResizeStatus[]>`
+
 #### <span className="msb-recv">handle.</span><span className="msb-hn">remove()</span>
 
 ```typescript
@@ -3045,7 +3105,9 @@ Secret change in a modification plan. Values are omitted by construction; `befor
 | requested | `string` | Requested value |
 | actual | `string` | Actual value observed in the guest/runtime |
 | enforced | `string` | Host/VMM-enforced value |
-| state | `"accepted" \| "converging" \| "applied" \| "guest-refused" \| "failed"` | `"applied"` when requested, actual, and enforced match; `"converging"` while the guest is still onlining CPUs or plugging memory; `"guest-refused"` when the guest would not cooperate (the host enforces the new limit anyway) |
+| state | `"accepted" \| "converging" \| "applied" \| "guest-refused" \| "failed"` | `"applied"` when requested, actual, and enforced match; `"converging"` while the guest is still onlining or offlining CPUs or plugging or releasing memory; `"guest-refused"` when the guest would not cooperate (the host enforces the new limit anyway) |
+
+A shrink stays `"converging"` until the guest releases the capacity. `"applied"`, `"guest-refused"`, and `"failed"` are terminal.
 
 ### SandboxPingResult
 

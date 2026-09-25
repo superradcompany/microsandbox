@@ -2,8 +2,12 @@ package microsandbox
 
 import (
 	"encoding/json"
+	"math"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/superradcompany/microsandbox/sdk/go/internal/ffi"
 )
 
 func marshalModifyRequest(t *testing.T, opts ModifyOptions) map[string]any {
@@ -268,5 +272,43 @@ func TestParseModificationPlan(t *testing.T) {
 	}
 	if len(plan.ResizeStatus) != 0 {
 		t.Fatalf("resize status = %+v", plan.ResizeStatus)
+	}
+}
+
+func TestParseResizeStatus(t *testing.T) {
+	raw := `[{"resource":"cpus","requested":"4","actual":"2","enforced":"4","state":"converging"},` +
+		`{"resource":"memory","requested":"8 GiB","actual":"8 GiB","enforced":"8 GiB","state":"applied"}]`
+	status, err := parseResizeStatus(raw)
+	if err != nil {
+		t.Fatalf("parseResizeStatus: %v", err)
+	}
+	if len(status) != 2 || status[0].Resource != "cpus" || status[0].State != "converging" ||
+		status[1].Resource != "memory" || status[1].State != "applied" {
+		t.Fatalf("unexpected status: %+v", status)
+	}
+	empty, err := parseResizeStatus("[]")
+	if err != nil || len(empty) != 0 {
+		t.Fatalf("expected empty status, got %+v, %v", empty, err)
+	}
+	if _, err := parseResizeStatus(""); err == nil {
+		t.Fatal("expected parse error for an empty response")
+	}
+}
+
+func TestResizeTimeoutMillis(t *testing.T) {
+	if got := resizeTimeoutMillis(0); got != 0 {
+		t.Fatalf("zero timeout must check once, got %d", got)
+	}
+	if got := resizeTimeoutMillis(-time.Second); got != 0 {
+		t.Fatalf("negative timeout must check once, got %d", got)
+	}
+	if got := resizeTimeoutMillis(500 * time.Microsecond); got != 1 {
+		t.Fatalf("sub-millisecond timeout must round up to 1, got %d", got)
+	}
+	if got := resizeTimeoutMillis(1500 * time.Millisecond); got != 1500 {
+		t.Fatalf("got %d", got)
+	}
+	if got := resizeTimeoutMillis(time.Duration(math.MaxInt64)); got == ffi.ResizeWaitUnbounded {
+		t.Fatal("a finite timeout must not become unbounded")
 	}
 }

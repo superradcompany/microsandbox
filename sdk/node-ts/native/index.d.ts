@@ -1069,6 +1069,10 @@ export declare class Sandbox {
    * string; the TS wrapper parses it into a `SandboxModificationPlan`.
    */
   modify(options?: SandboxModifyOptions | undefined | null): Promise<string>
+  /** Read the current live resize status as a JSON array. */
+  resizeStatus(): Promise<string>
+  /** Wait for live resizes to settle. Omitted waits without a deadline; `0` checks once. */
+  waitUntilResized(timeoutMs?: number | undefined | null): Promise<string>
   /** Compact root and owned-data disk prefixes; the limit includes the base, not the writable head. */
   compact(layers?: number | undefined | null, dryRun?: boolean | undefined | null, disk?: string | undefined | null, rootDiskOnly?: boolean | undefined | null): Promise<string>
   /** Stream metrics snapshots at the requested interval (in milliseconds). */
@@ -1470,6 +1474,10 @@ export declare class SandboxHandle {
    * string; the TS wrapper parses it into a `SandboxModificationPlan`.
    */
   modify(options?: SandboxModifyOptions | undefined | null): Promise<string>
+  /** Read the current live resize status as a JSON array. */
+  resizeStatus(): Promise<string>
+  /** Wait for live resizes to settle. Omitted waits without a deadline; `0` checks once. */
+  waitUntilResized(timeoutMs?: number | undefined | null): Promise<string>
   /** Compact root and owned-data disk prefixes of a running or stopped sandbox. */
   compact(layers?: number | undefined | null, dryRun?: boolean | undefined | null, disk?: string | undefined | null, rootDiskOnly?: boolean | undefined | null): Promise<string>
   /** Start the sandbox (attached mode) — returns a live Sandbox handle. */

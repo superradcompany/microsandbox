@@ -14,6 +14,8 @@ use crate::size::Mebibytes;
 use crate::{MicrosandboxError, MicrosandboxResult};
 use microsandbox_control_client::{SecretsResult, SetCpuTarget, SetMemoryTarget, UpdateSecrets};
 
+use super::resize::{cpu_resize_status, format_mib, memory_resize_status};
+use super::status::running_status;
 use super::{SandboxConfig, SandboxStatus};
 
 pub use microsandbox_types::modify::{
@@ -286,6 +288,10 @@ impl SandboxModificationBuilder {
     /// `tls` change and, like every other restart-backed change, needs
     /// `restart` or `next_start` on a running sandbox. Existing secrets that
     /// opt out of TLS identity continue to support live plain-HTTP updates.
+    ///
+    /// Live CPU and memory changes return once the runtime accepts the target.
+    /// Use [`Sandbox::wait_until_resized`](super::Sandbox::wait_until_resized)
+    /// to wait for the guest to converge.
     pub async fn apply(self) -> MicrosandboxResult<SandboxModificationPlan> {
         let handle = self
             .backend
@@ -329,17 +335,8 @@ impl SandboxModificationBuilder {
                 .request(&SetCpuTarget::new(u32::from(target)))
                 .await
                 .map_err(crate::MicrosandboxError::ControlClient)?;
-            plan.resize_status.push(ResourceResizeStatus {
-                resource: ResourceKind::Cpus,
-                requested: target.to_string(),
-                actual: state.actual_online.to_string(),
-                enforced: state.enforced.to_string(),
-                state: if state.actual_online == u32::from(target) {
-                    ResourceConvergenceState::Applied
-                } else {
-                    ResourceConvergenceState::Converging
-                },
-            });
+            plan.resize_status
+                .push(cpu_resize_status(u32::from(target), state));
             // The running VM changed: refresh the active snapshot with the
             // enforced target so inspect does not report the already-live
             // change as pending. The guest driver converges asynchronously;
@@ -362,17 +359,8 @@ impl SandboxModificationBuilder {
                 })
                 .await
                 .map_err(crate::MicrosandboxError::ControlClient)?;
-            plan.resize_status.push(ResourceResizeStatus {
-                resource: ResourceKind::Memory,
-                requested: format_mib(target_mib),
-                actual: format_mib(state.current_mib as u32),
-                enforced: format_mib(state.target_mib as u32),
-                state: if state.current_mib >= state.target_mib {
-                    ResourceConvergenceState::Applied
-                } else {
-                    ResourceConvergenceState::Converging
-                },
-            });
+            plan.resize_status
+                .push(memory_resize_status(target_mib, state));
             // Refresh the active snapshot with the accepted target so inspect
             // does not report the already-live change as pending. Convergence
             // (plugging blocks) continues asynchronously in the guest.
@@ -2853,10 +2841,6 @@ fn stopped_status(status: SandboxStatus) -> bool {
     )
 }
 
-fn running_status(status: SandboxStatus) -> bool {
-    matches!(status, SandboxStatus::Running | SandboxStatus::Draining)
-}
-
 fn transitional_status(status: SandboxStatus) -> bool {
     matches!(status, SandboxStatus::Starting | SandboxStatus::Paused)
 }
@@ -2870,14 +2854,6 @@ fn status_name(status: SandboxStatus) -> &'static str {
         SandboxStatus::Paused => "paused",
         SandboxStatus::Stopped => "stopped",
         SandboxStatus::Crashed => "crashed",
-    }
-}
-
-fn format_mib(mib: u32) -> String {
-    if mib >= 1024 && mib.is_multiple_of(1024) {
-        format!("{} GiB", mib / 1024)
-    } else {
-        format!("{mib} MiB")
     }
 }
 

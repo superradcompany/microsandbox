@@ -1,16 +1,27 @@
 //! `msb modify` command — plan and apply sandbox configuration changes.
 
+use std::time::Duration;
+
 use clap::Args;
 use console::style;
+use microsandbox::MicrosandboxError;
 use microsandbox::sandbox::{
     ChangeKind, ConfigPlannedChange, ModificationDisposition, ModificationWarning, PlannedChange,
-    ResourceConvergenceState, ResourceKind, ResourceResizeStatus, Sandbox,
+    ResourceConvergenceState, ResourceKind, ResourceResizeStatus, Sandbox, SandboxHandle,
     SandboxModificationBuilder, SandboxModificationPlan, SecretChangeKind, SecretPlannedChange,
     SecretSource,
 };
+use microsandbox_protocol::control::DEFAULT_REQUEST_TIMEOUT;
+use tokio::time::Instant;
 
 use super::common;
 use crate::ui;
+
+//--------------------------------------------------------------------------------------------------
+// Constants
+//--------------------------------------------------------------------------------------------------
+
+const DEFAULT_RESIZE_WAIT_SECS: u64 = 60;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -114,6 +125,14 @@ pub struct ModifyArgs {
     #[arg(long)]
     pub restart: bool,
 
+    /// Wait for any pending live CPU and memory resize to converge in the guest.
+    #[arg(long, conflicts_with_all = ["dry_run", "next_start", "compact"])]
+    pub wait: bool,
+
+    /// Resize wait budget in seconds (default 60; 0 checks once).
+    #[arg(long, requires = "wait", value_name = "SECS")]
+    pub timeout: Option<u64>,
+
     /// Output format.
     #[arg(long, value_name = "FORMAT", value_parser = ["json"])]
     pub format: Option<String>,
@@ -195,14 +214,149 @@ pub async fn run(args: ModifyArgs) -> anyhow::Result<()> {
         return Err(ui::AlreadyRenderedError.into());
     }
 
-    let applied = builder.apply().await?;
+    let mut applied = builder.apply().await?;
+    let mut resized = false;
+    if args.wait {
+        let budget = resize_wait_budget(args.timeout);
+        let (result, confirmed) =
+            wait_for_resize(&handle, &args.name, &applied.resize_status, budget).await;
+        resized = confirmed;
+        match result {
+            Ok(status) => {
+                applied.resize_status = status;
+            }
+            Err(MicrosandboxError::ResizeTimeout {
+                timeout, status, ..
+            }) => {
+                applied.resize_status = timeout_resize_status(applied.resize_status, status);
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&applied)?);
+                } else {
+                    ui::success("Modified", &applied.sandbox);
+                    print_resize_status(&applied.resize_status);
+                    print_resize_timeout(&args.name, timeout);
+                }
+                return Err(ui::AlreadyRenderedError.into());
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
     if json {
         println!("{}", serde_json::to_string_pretty(&applied)?);
     } else {
-        print_apply_success(&applied);
+        print_apply_success(&applied, resized);
     }
 
     Ok(())
+}
+
+fn resize_wait_budget(timeout_secs: Option<u64>) -> Duration {
+    Duration::from_secs(timeout_secs.unwrap_or(DEFAULT_RESIZE_WAIT_SECS))
+}
+
+/// Wait for live resize convergence within one budget, returning whether to confirm a resize.
+///
+/// When apply reported no resize, a first read decides the confirmation and counts against the
+/// budget. A zero budget performs only that read.
+async fn wait_for_resize(
+    handle: &SandboxHandle,
+    name: &str,
+    applied: &[ResourceResizeStatus],
+    budget: Duration,
+) -> (Result<Vec<ResourceResizeStatus>, MicrosandboxError>, bool) {
+    if !applied.is_empty() {
+        let result = handle.wait_until_resized_with_timeout(budget).await;
+        return (result, true);
+    }
+
+    let started = Instant::now();
+    let first =
+        match tokio::time::timeout(first_read_deadline(budget), handle.resize_status()).await {
+            Ok(Ok(status)) => status,
+            Ok(Err(error)) => return (Err(error), false),
+            Err(_) => return (Err(resize_timeout(name, budget, Vec::new())), false),
+        };
+    let resized = confirm_resized(applied, &first);
+    if resize_settled(&first) {
+        return (Ok(first), resized);
+    }
+    let Some(remaining) = remaining_budget(budget, started.elapsed()) else {
+        return (Err(resize_timeout(name, budget, first)), resized);
+    };
+    let result = match handle.wait_until_resized_with_timeout(remaining).await {
+        Err(MicrosandboxError::ResizeTimeout { status, .. }) => Err(resize_timeout(
+            name,
+            budget,
+            timeout_resize_status(first, status),
+        )),
+        result => result,
+    };
+    (result, resized)
+}
+
+/// Deadline for the first read; a zero budget still gets one control request.
+fn first_read_deadline(budget: Duration) -> Duration {
+    if budget.is_zero() {
+        DEFAULT_REQUEST_TIMEOUT
+    } else {
+        budget
+    }
+}
+
+/// Budget left for the wait, or `None` when it is spent.
+fn remaining_budget(budget: Duration, elapsed: Duration) -> Option<Duration> {
+    budget
+        .checked_sub(elapsed)
+        .filter(|remaining| !remaining.is_zero())
+}
+
+fn resize_settled(status: &[ResourceResizeStatus]) -> bool {
+    status.iter().all(|entry| entry.state.is_terminal())
+}
+
+fn resize_timeout(
+    name: &str,
+    timeout: Duration,
+    status: Vec<ResourceResizeStatus>,
+) -> MicrosandboxError {
+    MicrosandboxError::ResizeTimeout {
+        name: name.to_string(),
+        timeout,
+        status,
+    }
+}
+
+/// Confirm a resize when this call changed CPU or memory, or one was still settling.
+fn confirm_resized(applied: &[ResourceResizeStatus], before_wait: &[ResourceResizeStatus]) -> bool {
+    !applied.is_empty() || before_wait.iter().any(|status| !status.state.is_terminal())
+}
+
+/// Prefer the wait's last read, falling back to the apply status when no read completed.
+fn timeout_resize_status(
+    applied: Vec<ResourceResizeStatus>,
+    observed: Vec<ResourceResizeStatus>,
+) -> Vec<ResourceResizeStatus> {
+    if observed.is_empty() {
+        applied
+    } else {
+        observed
+    }
+}
+
+fn print_resize_timeout(name: &str, timeout: Duration) {
+    let title = format!(
+        "resize did not converge within {}s",
+        timeout.as_secs_f64().round() as u64
+    );
+    let retry = format!("run `msb modify {name} --wait --timeout 600` to keep waiting");
+    ui::error_with_lines(
+        &title,
+        &[
+            ui::ErrorLine::Cause("the host already enforces the new limit"),
+            ui::ErrorLine::Hint("the guest may still converge"),
+            ui::ErrorLine::Hint(&retry),
+        ],
+    );
 }
 
 fn apply_resource_args(
@@ -406,16 +560,11 @@ fn apply_blocker(args: &ModifyArgs, plan: &SandboxModificationPlan) -> Option<Ap
         .into_iter()
         .map(BlockerLine::cause)
         .collect::<Vec<_>>();
+    let [restart, next_start] = restart_commands(args);
     lines.push(BlockerLine::hint("no changes were applied"));
+    lines.push(BlockerLine::hint(format!("run `{restart}` to apply now")));
     lines.push(BlockerLine::hint(format!(
-        "run `msb modify {} {}--restart` to apply now",
-        args.name,
-        replayed_args(args)
-    )));
-    lines.push(BlockerLine::hint(format!(
-        "run `msb modify {} {}--next-start` to save for the next start",
-        args.name,
-        replayed_args(args)
+        "run `{next_start}` to save for the next start"
     )));
 
     Some(ApplyBlocker {
@@ -485,7 +634,7 @@ fn print_apply_blocker(blocked: &ApplyBlocker) {
     ui::error_with_lines(&blocked.title, &lines);
 }
 
-fn print_apply_success(plan: &SandboxModificationPlan) {
+fn print_apply_success(plan: &SandboxModificationPlan, resized: bool) {
     if plan.policy == microsandbox::sandbox::ModificationPolicy::Restart
         && plan_has_restart_required(plan)
     {
@@ -501,6 +650,10 @@ fn print_apply_success(plan: &SandboxModificationPlan) {
         };
 
         ui::success("Modified", &target);
+    }
+
+    if resized && !plan.resize_status.is_empty() {
+        ui::success("Resized", &plan.sandbox);
     }
 
     if should_render_resize_status(&plan.resize_status) {
@@ -650,6 +803,14 @@ fn parse_key_value(entry: &str, flag: &str) -> anyhow::Result<(String, String)> 
         anyhow::bail!("{flag} key must not be empty");
     }
     Ok((key.to_string(), value.to_string()))
+}
+
+fn restart_commands(args: &ModifyArgs) -> [String; 2] {
+    let replayed = replayed_args(args);
+    [
+        format!("msb modify {} {replayed}--restart", args.name),
+        format!("msb modify {} {replayed}--next-start", args.name),
+    ]
 }
 
 fn replayed_args(args: &ModifyArgs) -> String {
@@ -806,6 +967,60 @@ mod tests {
     }
 
     #[test]
+    fn parses_wait_and_timeout() {
+        let args = parse_modify_args(&["api", "--cpus", "4", "--wait", "--timeout", "30"]);
+        assert!(args.wait);
+        assert_eq!(args.timeout, Some(30));
+        assert_eq!(resize_wait_budget(args.timeout), Duration::from_secs(30));
+        assert_eq!(
+            resize_wait_budget(None),
+            Duration::from_secs(DEFAULT_RESIZE_WAIT_SECS)
+        );
+        assert_eq!(resize_wait_budget(Some(0)), Duration::ZERO);
+    }
+
+    #[test]
+    fn restart_hints_parse() {
+        let args = parse_modify_args(&[
+            "api",
+            "--cpus",
+            "4",
+            "--memory",
+            "4G",
+            "--label",
+            "tier=web",
+            "--secret",
+            "API_KEY@api.example.com",
+            "--wait",
+            "--timeout",
+            "30",
+        ]);
+        for command in restart_commands(&args) {
+            assert!(!command.contains("--wait") && !command.contains("--timeout"));
+            let parsed = TestCli::try_parse_from(command.split_whitespace().skip(1))
+                .unwrap_or_else(|error| panic!("`{command}` does not parse: {error}"));
+            assert_eq!(parsed.args.cpus, Some(4));
+        }
+    }
+
+    #[test]
+    fn timeout_requires_wait() {
+        let flags = ["msb", "api", "--cpus", "4", "--timeout", "30"];
+        assert!(TestCli::try_parse_from(flags).is_err());
+    }
+
+    #[test]
+    fn wait_conflicts_with_dry_run() {
+        for flags in [
+            vec!["msb", "api", "--cpus", "4", "--wait", "--dry-run"],
+            vec!["msb", "api", "--cpus", "4", "--wait", "--next-start"],
+            vec!["msb", "api", "--compact", "--wait"],
+        ] {
+            assert!(TestCli::try_parse_from(flags).is_err());
+        }
+    }
+
+    #[test]
     fn parses_root_disk_flag() {
         let args = parse_modify_args(&["api", "--root-disk", "16G", "--dry-run"]);
 
@@ -892,6 +1107,73 @@ mod tests {
             enforced: "4".to_string(),
             state,
         }
+    }
+
+    #[test]
+    fn resize_timeout_keeps_apply_status_without_a_read() {
+        let applied = vec![resize_entry(
+            ResourceKind::Cpus,
+            ResourceConvergenceState::Accepted,
+        )];
+        let observed = vec![resize_entry(
+            ResourceKind::Cpus,
+            ResourceConvergenceState::Converging,
+        )];
+        assert_eq!(timeout_resize_status(applied.clone(), Vec::new()), applied);
+        assert_eq!(timeout_resize_status(applied, observed.clone()), observed);
+    }
+
+    #[test]
+    fn resize_wait_shares_one_budget() {
+        let budget = Duration::from_secs(5);
+        assert_eq!(
+            remaining_budget(budget, Duration::from_secs(2)),
+            Some(Duration::from_secs(3))
+        );
+        assert_eq!(remaining_budget(budget, budget), None);
+        assert_eq!(remaining_budget(budget, Duration::from_secs(6)), None);
+        assert_eq!(remaining_budget(Duration::ZERO, Duration::ZERO), None);
+        assert_eq!(first_read_deadline(budget), budget);
+        assert_eq!(first_read_deadline(Duration::ZERO), DEFAULT_REQUEST_TIMEOUT);
+    }
+
+    #[test]
+    fn first_read_settles_only_when_every_resource_is_terminal() {
+        let converging = resize_entry(ResourceKind::Cpus, ResourceConvergenceState::Converging);
+        let applied = resize_entry(ResourceKind::Memory, ResourceConvergenceState::Applied);
+        let refused = resize_entry(ResourceKind::Cpus, ResourceConvergenceState::GuestRefused);
+        assert!(resize_settled(&[]));
+        assert!(resize_settled(&[applied.clone(), refused]));
+        assert!(!resize_settled(&[applied, converging]));
+    }
+
+    #[test]
+    fn resize_timeout_reports_full_budget() {
+        let status = vec![resize_entry(
+            ResourceKind::Cpus,
+            ResourceConvergenceState::Converging,
+        )];
+        let MicrosandboxError::ResizeTimeout {
+            name,
+            timeout,
+            status: reported,
+        } = resize_timeout("api", Duration::ZERO, status.clone())
+        else {
+            panic!("expected a resize timeout");
+        };
+        assert_eq!(name, "api");
+        assert_eq!(timeout, Duration::ZERO);
+        assert_eq!(reported, status);
+    }
+
+    #[test]
+    fn resized_confirmation_tracks_changed_or_pending_resizes() {
+        let converging = resize_entry(ResourceKind::Cpus, ResourceConvergenceState::Converging);
+        let applied = resize_entry(ResourceKind::Memory, ResourceConvergenceState::Applied);
+        assert!(confirm_resized(std::slice::from_ref(&applied), &[]));
+        assert!(confirm_resized(&[], &[applied.clone(), converging]));
+        assert!(!confirm_resized(&[], &[applied]));
+        assert!(!confirm_resized(&[], &[]));
     }
 
     #[test]

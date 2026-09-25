@@ -476,13 +476,14 @@ msb modify api -c 4                         # Live when 4 <= max_cpus
 msb modify api -e MODE=prod --restart       # Restart to apply now
 msb modify api --max-memory 16G --next-start # Raise the ceiling on next start
 msb modify api --cpus 8 --dry-run           # Show the plan, apply nothing
+msb modify api -m 8G --wait                 # Return once the guest converges
 ```
 
 Like create/run, modify accepts `-c`/`--cpus`, `-m`/`--memory`, `-e`/`--env`, and `-w`/`--workdir`.
 
 Set `--max-cpus` and `--max-memory` at creation to leave room for live growth. They default to the initial CPU and memory allocation; increasing the ceilings requires a restart.
 
-Resize can take time. The output and JSON `resize_status` report `applied`, `converging`, `guest-refused`, or `failed`. With `guest-refused`, the host still enforces the new limit.
+Resize can take time. The output and JSON `resize_status` report `applied`, `converging`, `guest-refused`, or `failed`. Without `--wait` this is a single reading taken right after the change is accepted. With `--wait`, modify polls until every resource is `applied`, `guest-refused`, or `failed`. The default wait is 60 seconds; `--timeout 0` checks once. On timeout, modify prints the last status, or the status from apply if no later read completed, and exits non-zero. A shrink stays `converging` until the guest releases the CPUs or memory. In every state, the host already enforces the new limit. `--wait` also covers a resize that is still in progress from an earlier modify, so `msb modify api --wait` alone waits for it.
 
 Env and workdir changes on a running sandbox apply to future execs only; running processes keep their current environment. The plan reports this as a warning.
 
@@ -502,6 +503,8 @@ Env and workdir changes on a running sandbox apply to future execs only; running
 | `--dry-run` | Show the plan without applying anything |
 | `--next-start` | Save changes for the next start without mutating a running VM |
 | `--restart` | Restart if needed so restart-required changes become active now |
+| `--wait` | Wait for any pending live CPU and memory resize to converge |
+| `--timeout` | Seconds to wait with `--wait` (default 60, `0` checks once) |
 | `--format json` | Emit the plan/result as JSON |
 
 See [live changes](/sandboxes/tuning) for resize behavior. Use `msb modify --help` for the full flag list.

@@ -7,7 +7,10 @@ documented keyword arguments (for direct Python construction).
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
+
+if TYPE_CHECKING:
+    from .types import ResourceResizeStatus
 
 
 class MicrosandboxError(Exception):
@@ -78,6 +81,21 @@ class ExecTimeoutError(MicrosandboxError):
 class StopTimeoutError(MicrosandboxError, TimeoutError):
     """Graceful shutdown did not complete within its budget; no kill was requested."""
     code = "stop-timeout"
+
+
+class ResizeTimeoutError(MicrosandboxError, TimeoutError):
+    """A live resize did not converge within its budget; the host still enforces the target.
+
+    ``status`` is the last observed resize status, empty when no read completed
+    before the deadline.
+    """
+    code = "resize-timeout"
+
+    def __init__(
+        self, message: str, *, status: list[ResourceResizeStatus] | None = None
+    ) -> None:
+        super().__init__(message)
+        self.status: list[ResourceResizeStatus] = list(status) if status is not None else []
 
 
 class ExecFailedError(MicrosandboxError):

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   ExecTimeoutError,
   StopTimeoutError,
+  ResizeTimeoutError,
   ImageNotFoundError,
   MetricsDisabledError,
   MicrosandboxError,
@@ -21,6 +22,28 @@ describe("mapNapiError", () => {
     expect((mapped as StopTimeoutError).code).toBe("stopTimeout");
     expect(mapped.message).toContain("no kill was requested");
     expect(mapped.cause).toBe(raw);
+  });
+  it("maps resize timeout to its own error", () => {
+    const raw = new Error('[ResizeTimeout] timed out waiting for sandbox "api" live resize to converge');
+    const mapped = mapNapiError(raw);
+    expect(mapped).toBeInstanceOf(ResizeTimeoutError);
+    expect((mapped as ResizeTimeoutError).code).toBe("resizeTimeout");
+    expect((mapped as ResizeTimeoutError).status).toEqual([]);
+  });
+  it("retains the last resize status on timeout", () => {
+    const status = [{
+      resource: "memory", requested: "8 GiB", actual: "4 GiB", enforced: "8 GiB", state: "converging",
+    }];
+    const raw = new Error(`[ResizeTimeout] ${JSON.stringify({ message: "timed out", status })}`);
+    const mapped = mapNapiError(raw) as ResizeTimeoutError;
+    expect(mapped).toBeInstanceOf(ResizeTimeoutError);
+    expect(mapped.message).toBe("timed out");
+    expect(mapped.status).toEqual(status);
+    expect(mapped.cause).toBe(raw);
+    const empty = mapNapiError(
+      new Error(`[ResizeTimeout] ${JSON.stringify({ message: "timed out", status: [] })}`),
+    ) as ResizeTimeoutError;
+    expect(empty.status).toEqual([]);
   });
   for (const kind of ["installed", "archive", null]) {
     it(`retains source recovery metadata with ${kind ?? "unpublished"} artifact`, () => {

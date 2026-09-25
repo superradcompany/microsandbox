@@ -460,6 +460,7 @@ mod error_kind {
     pub const VOLUME_ALREADY_EXISTS: &str = "volume_already_exists";
     pub const EXEC_TIMEOUT: &str = "exec_timeout";
     pub const STOP_TIMEOUT: &str = "stop_timeout";
+    pub const RESIZE_TIMEOUT: &str = "resize_timeout";
     pub const NO_DEFAULT_COMMAND: &str = "no_default_command";
     pub const INVALID_CONFIG: &str = "invalid_config";
     pub const INVALID_ARGUMENT: &str = "invalid_argument";
@@ -488,6 +489,7 @@ struct FfiError {
     kind: &'static str,
     message: String,
     recovery: Option<Box<microsandbox::SnapshotSourceRecoveryError>>,
+    resize_status: Option<Vec<microsandbox::sandbox::ResourceResizeStatus>>,
 }
 
 #[derive(serde::Deserialize)]
@@ -504,6 +506,7 @@ impl FfiError {
             kind,
             message: message.into(),
             recovery: None,
+            resize_status: None,
         }
     }
 
@@ -524,17 +527,18 @@ impl FfiError {
 
     /// Serialize to the JSON payload returned by the error C string.
     fn to_json(&self) -> String {
-        // Message is escaped via serde_json so it's safe to embed arbitrary text.
-        let msg = serde_json::to_string(&self.message).unwrap_or_else(|_| "\"\"".into());
+        let mut payload = serde_json::json!({ "kind": self.kind, "message": self.message });
         if let Some(recovery) = &self.recovery
-            && let Ok(recovery) = serde_json::to_string(recovery)
+            && let Ok(recovery) = serde_json::to_value(recovery)
         {
-            return format!(
-                r#"{{"kind":"{}","message":{},"recovery":{}}}"#,
-                self.kind, msg, recovery
-            );
+            payload["recovery"] = recovery;
         }
-        format!(r#"{{"kind":"{}","message":{}}}"#, self.kind, msg)
+        if let Some(status) = &self.resize_status
+            && let Ok(status) = serde_json::to_value(status)
+        {
+            payload["resize_status"] = status;
+        }
+        payload.to_string()
     }
 }
 
@@ -551,6 +555,7 @@ impl From<MicrosandboxError> for FfiError {
             MicrosandboxError::VolumeAlreadyExists(_) => error_kind::VOLUME_ALREADY_EXISTS,
             MicrosandboxError::ExecTimeout(_) => error_kind::EXEC_TIMEOUT,
             MicrosandboxError::StopTimeout { .. } => error_kind::STOP_TIMEOUT,
+            MicrosandboxError::ResizeTimeout { .. } => error_kind::RESIZE_TIMEOUT,
             MicrosandboxError::NoDefaultCommand => error_kind::NO_DEFAULT_COMMAND,
             MicrosandboxError::InvalidConfig(_) => error_kind::INVALID_CONFIG,
             MicrosandboxError::SandboxFsOps(_) => error_kind::FILESYSTEM,
@@ -572,13 +577,17 @@ impl From<MicrosandboxError> for FfiError {
             MicrosandboxError::Io(_) => error_kind::IO,
             _ => error_kind::INTERNAL,
         };
+        let message = e.to_string();
+        let (recovery, resize_status) = match e {
+            MicrosandboxError::SnapshotSourceRecovery(recovery) => (Some(recovery), None),
+            MicrosandboxError::ResizeTimeout { status, .. } => (None, Some(status)),
+            _ => (None, None),
+        };
         Self {
             kind,
-            message: e.to_string(),
-            recovery: match e {
-                MicrosandboxError::SnapshotSourceRecovery(recovery) => Some(recovery),
-                _ => None,
-            },
+            message,
+            recovery,
+            resize_status,
         }
     }
 }
@@ -2721,6 +2730,17 @@ async fn run_modify(
         .map_err(|e| FfiError::internal(format!("serialize modification plan: {e}")))
 }
 
+fn resize_status_json(
+    status: Vec<microsandbox::sandbox::ResourceResizeStatus>,
+) -> Result<String, FfiError> {
+    serde_json::to_string(&status)
+        .map_err(|e| FfiError::internal(format!("serialize resize status: {e}")))
+}
+
+fn resize_wait_timeout(timeout_ms: u64) -> Option<Duration> {
+    (timeout_ms != u64::MAX).then(|| Duration::from_millis(timeout_ms))
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn msb_sandbox_lookup(
     cancel_id: u64,
@@ -2832,15 +2852,23 @@ async fn identified_sandbox_handle(
     expected_id: &str,
 ) -> Result<microsandbox::sandbox::SandboxHandle, FfiError> {
     let handle = Sandbox::get(name).await.map_err(FfiError::from)?;
-    let actual_id = handle.id().to_string();
-    if actual_id != expected_id {
-        return Err(FfiError::from(MicrosandboxError::SandboxReplaced {
-            name: name.to_string(),
-            expected: expected_id.to_string(),
-            actual: actual_id,
-        }));
-    }
+    ensure_expected_identity(name, expected_id, handle.id().to_string())?;
     Ok(handle)
+}
+
+fn ensure_expected_identity(
+    name: &str,
+    expected_id: &str,
+    actual_id: String,
+) -> Result<(), FfiError> {
+    if actual_id == expected_id {
+        return Ok(());
+    }
+    Err(FfiError::from(MicrosandboxError::SandboxReplaced {
+        name: name.to_string(),
+        expected: expected_id.to_string(),
+        actual: actual_id,
+    }))
 }
 
 /// Include catalog lookup in the same deadline as graceful completion. In particular, an
@@ -3224,6 +3252,52 @@ pub unsafe extern "C" fn msb_sandbox_handle_modify(
             let h = Sandbox::get(&name).await.map_err(FfiError::from)?;
             let builder = configure_modify(h.modify(), opts.patch, policy);
             run_modify(builder, opts.dry_run).await
+        }))
+    })
+}
+
+/// Read live resize status for the sandbox `expected_id` names.
+/// Output: a `ResourceResizeStatus` JSON array.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sandbox_handle_resize_status(
+    cancel_id: u64,
+    name: *const c_char,
+    expected_id: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let name = unsafe { cstr(name) }?;
+        let expected_id = unsafe { cstr(expected_id) }?;
+        Ok(Box::pin(async move {
+            let h = identified_sandbox_handle(&name, &expected_id).await?;
+            resize_status_json(h.resize_status().await.map_err(FfiError::from)?)
+        }))
+    })
+}
+
+/// Wait for live resizes on the sandbox `expected_id` names to settle.
+/// `u64::MAX` waits without a deadline; 0 checks once.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sandbox_handle_wait_until_resized(
+    cancel_id: u64,
+    name: *const c_char,
+    expected_id: *const c_char,
+    timeout_ms: u64,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let name = unsafe { cstr(name) }?;
+        let expected_id = unsafe { cstr(expected_id) }?;
+        Ok(Box::pin(async move {
+            let h = identified_sandbox_handle(&name, &expected_id).await?;
+            let status = match resize_wait_timeout(timeout_ms) {
+                Some(timeout) => h.wait_until_resized_with_timeout(timeout).await,
+                None => h.wait_until_resized().await,
+            }
+            .map_err(FfiError::from)?;
+            resize_status_json(status)
         }))
     })
 }
@@ -3810,6 +3884,44 @@ pub unsafe extern "C" fn msb_sandbox_modify(
         Ok(Box::pin(async move {
             let builder = configure_modify(sb.modify(), opts.patch, policy);
             run_modify(builder, opts.dry_run).await
+        }))
+    })
+}
+
+/// Read live resize status. Output: a `ResourceResizeStatus` JSON array.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sandbox_resize_status(
+    cancel_id: u64,
+    handle: Handle,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let sb = get(handle)?;
+        Ok(Box::pin(async move {
+            resize_status_json(sb.resize_status().await.map_err(FfiError::from)?)
+        }))
+    })
+}
+
+/// Wait for live resizes to settle. `u64::MAX` waits without a deadline; 0 checks once.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sandbox_wait_until_resized(
+    cancel_id: u64,
+    handle: Handle,
+    timeout_ms: u64,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let sb = get(handle)?;
+        Ok(Box::pin(async move {
+            let status = match resize_wait_timeout(timeout_ms) {
+                Some(timeout) => sb.wait_until_resized_with_timeout(timeout).await,
+                None => sb.wait_until_resized().await,
+            }
+            .map_err(FfiError::from)?;
+            resize_status_json(status)
         }))
     })
 }
@@ -7875,6 +7987,53 @@ mod tests {
         assert_eq!(timeout(1, 30_000), Some(Duration::from_secs(30)));
         assert_eq!(timeout(1, u64::MAX), Some(Duration::from_millis(u64::MAX)));
         assert!(graceful_stop_timeout(2, 0).is_err());
+    }
+
+    #[test]
+    fn resize_timeout_maps_to_stable_kind_and_max_is_unbounded() {
+        let error = FfiError::from(MicrosandboxError::ResizeTimeout {
+            name: "worker".into(),
+            timeout: Duration::from_secs(5),
+            status: Vec::new(),
+        });
+        assert_eq!(error.kind, error_kind::RESIZE_TIMEOUT);
+        assert!(error.message.contains("worker"));
+        let payload: serde_json::Value = serde_json::from_str(&error.to_json()).unwrap();
+        assert_eq!(payload["resize_status"], serde_json::json!([]));
+        assert_eq!(resize_wait_timeout(u64::MAX), None);
+        assert_eq!(resize_wait_timeout(0), Some(Duration::ZERO));
+        assert_eq!(resize_wait_timeout(1500), Some(Duration::from_millis(1500)));
+        assert_eq!(resize_status_json(Vec::new()).ok().as_deref(), Some("[]"));
+    }
+
+    #[test]
+    fn resize_timeout_error_carries_last_status() {
+        let status = microsandbox::sandbox::ResourceResizeStatus {
+            resource: microsandbox::sandbox::ResourceKind::Cpus,
+            requested: "4".into(),
+            actual: "2".into(),
+            enforced: "4".into(),
+            state: microsandbox::sandbox::ResourceConvergenceState::Converging,
+        };
+        let error = FfiError::from(MicrosandboxError::ResizeTimeout {
+            name: "worker".into(),
+            timeout: Duration::from_secs(5),
+            status: vec![status],
+        });
+        let payload: serde_json::Value = serde_json::from_str(&error.to_json()).unwrap();
+        assert_eq!(payload["kind"], "resize_timeout");
+        assert_eq!(payload["resize_status"][0]["resource"], "cpus");
+        assert_eq!(payload["resize_status"][0]["actual"], "2");
+        assert_eq!(payload["resize_status"][0]["state"], "converging");
+        assert!(payload.get("recovery").is_none());
+    }
+
+    #[test]
+    fn handle_identity_mismatch_reports_replacement() {
+        assert!(ensure_expected_identity("worker", "local:42", "local:42".into()).is_ok());
+        let error = ensure_expected_identity("worker", "local:42", "local:43".into()).unwrap_err();
+        assert_eq!(error.kind, error_kind::SANDBOX_REPLACED);
+        assert!(error.message.contains("worker"));
     }
 
     #[test]
