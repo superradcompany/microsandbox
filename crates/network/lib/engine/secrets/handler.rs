@@ -796,6 +796,24 @@ impl SecretsHandler {
             return self.substitute_http2(data);
         }
 
+        // Body bytes cannot start a new protocol, even when they resemble an
+        // HTTP/2 preface. Consume them according to the established framing.
+        match std::mem::replace(&mut self.http_state, HttpState::AwaitingHeaders) {
+            HttpState::BufferingBody { remaining } => {
+                return self.substitute_buffered_body(data, remaining);
+            }
+            HttpState::InBody { remaining } => {
+                return self.substitute_body_chunk(data, remaining);
+            }
+            HttpState::InChunkedBody { state } => {
+                return self.substitute_chunked_body_chunk(data, state);
+            }
+            HttpState::InChunkedRewriteBody { state } => {
+                return self.substitute_chunked_rewrite_body_chunk(data, state);
+            }
+            HttpState::AwaitingHeaders => {}
+        }
+
         if self.http_pending.is_empty() {
             if has_complete_http2_preface(data) {
                 self.http2_state = Some(Http2State::default());
@@ -818,22 +836,6 @@ impl SecretsHandler {
                 self.http_pending = pending_prefix;
                 return Ok(Cow::Owned(Vec::new()));
             }
-        }
-
-        match std::mem::replace(&mut self.http_state, HttpState::AwaitingHeaders) {
-            HttpState::BufferingBody { remaining } => {
-                return self.substitute_buffered_body(data, remaining);
-            }
-            HttpState::InBody { remaining } => {
-                return self.substitute_body_chunk(data, remaining);
-            }
-            HttpState::InChunkedBody { state } => {
-                return self.substitute_chunked_body_chunk(data, state);
-            }
-            HttpState::InChunkedRewriteBody { state } => {
-                return self.substitute_chunked_rewrite_body_chunk(data, state);
-            }
-            HttpState::AwaitingHeaders => {}
         }
 
         if !self.http_pending.is_empty() {
@@ -2005,17 +2007,30 @@ impl Http2State {
         let detection_bytes = http2_header_detection_bytes(&headers);
         let detection_text = String::from_utf8_lossy(&detection_bytes);
         let request_summary = http2_request_summary(detection_text.as_ref());
-        handler.apply_blocking_action(detect_blocking_action_with_tail(
-            &handler.ineligible_for_substitution,
-            &[],
-            &detection_bytes,
-            detection_text.as_ref(),
-            RequestProtocol::Http2,
-            RequestLocation::Header,
-            Some(block.stream_id),
-        ))?;
+        if is_initial_request {
+            handler.apply_blocking_action(detect_http2_header_blocking_action(
+                &handler.ineligible_for_substitution,
+                &headers,
+                &request_summary,
+                block.stream_id,
+            ))?;
+            handler.substitute_http2_headers(&mut headers);
+        } else {
+            // Trailers are never substitution targets, in either HTTP version.
+            let summary = self
+                .request_summaries
+                .get(&block.stream_id)
+                .unwrap_or(&request_summary);
 
-        handler.substitute_http2_headers(&mut headers);
+            handler.apply_blocking_action(detect_blocking_action_in_fragments(
+                &handler.ineligible_for_substitution,
+                &[(&detection_bytes, RequestLocation::Trailer)],
+                RequestProtocol::Http2,
+                summary,
+                Some(block.stream_id),
+            ))?;
+        }
+
         let encoded = self.encode_headers(&headers)?;
         append_http2_header_frames(output, block.stream_id, block.end_stream, &encoded)?;
         if block.end_stream {
@@ -3055,6 +3070,9 @@ fn append_chunk(output: &mut Vec<u8>, payload: &[u8]) {
     output.extend_from_slice(b"\r\n");
 }
 
+/// Split HTTP/1 metadata before decoding so matches cannot move between
+/// permitted headers and forbidden query/body locations. Continuation reads
+/// carry bytes only from the same body (or opaque stream).
 fn detect_blocking_action_with_tail(
     ineligible_for_substitution: &[IneligibleSecret],
     prev_tail: &[u8],
@@ -3068,254 +3086,198 @@ fn detect_blocking_action_with_tail(
         return None;
     }
 
-    let scan_buf: Cow<[u8]> = if prev_tail.is_empty() {
-        Cow::Borrowed(data)
-    } else {
-        let mut stitched = Vec::with_capacity(prev_tail.len() + data.len());
-        stitched.extend_from_slice(prev_tail);
-        stitched.extend_from_slice(data);
-        Cow::Owned(stitched)
-    };
-    let scan = scan_buf.as_ref();
-    let url_decoded = scan
-        .contains(&b'%')
-        .then(|| percent_decode(scan).collect::<Vec<u8>>());
-    let json_decoded = scan
-        .windows(2)
-        .any(|window| window == b"\\u")
-        .then(|| json_unescape(scan));
-    let opaque = matches!(protocol, RequestProtocol::Opaque);
-    let opaque_headers = opaque.then(|| String::from_utf8_lossy(scan));
-    let detection_headers = opaque_headers.as_deref().unwrap_or(headers);
-    let basic_auth_credentials = decoded_basic_auth_credentials(detection_headers);
-    let request = if is_scoped_fragment_location(location_hint) {
-        RequestSummary::default()
-    } else {
-        request_summary(headers, protocol)
-    };
-
-    let mut detected = None;
-    for secret in ineligible_for_substitution {
-        // Body-only scans use their location-scoped tail to catch a
-        // placeholder split across reads. Structured requests use the
-        // current request bytes so a previous location cannot taint them.
-        let raw_scan = if headers.is_empty() || is_scoped_fragment_location(location_hint) {
-            scan
+    let scan;
+    let summary;
+    let mut fragments = Vec::new();
+    if matches!(protocol, RequestProtocol::Http1)
+        && !headers.is_empty()
+        && !is_scoped_fragment_location(location_hint)
+    {
+        let (request_line, metadata) = headers.split_once("\r\n").unwrap_or((headers, ""));
+        if let Some((method, target, version)) = split_http_request_line(request_line) {
+            fragments.push((method.as_bytes(), RequestLocation::Unknown));
+            push_request_target_fragments(&mut fragments, target.as_bytes());
+            fragments.push((version.as_bytes(), RequestLocation::Unknown));
         } else {
-            data
+            fragments.push((request_line.as_bytes(), RequestLocation::Unknown));
+        }
+
+        fragments.push((metadata.as_bytes(), RequestLocation::Header));
+        fragments.push((
+            data.get(headers.len()..).unwrap_or_default(),
+            RequestLocation::Body,
+        ));
+
+        summary = request_summary(headers, protocol);
+    } else {
+        scan = if prev_tail.is_empty() {
+            Cow::Borrowed(data)
+        } else {
+            let mut stitched = Vec::with_capacity(prev_tail.len() + data.len());
+            stitched.extend_from_slice(prev_tail);
+            stitched.extend_from_slice(data);
+            Cow::Owned(stitched)
         };
-        if let Some((location, match_form)) = detect_disallowed_raw_match(
-            secret,
-            raw_scan,
-            headers,
-            location_hint,
-            &basic_auth_credentials,
-        )
-        .or_else(|| {
-            detect_secret_match(
-                secret,
-                url_decoded.as_deref(),
-                json_decoded.as_deref(),
-                &basic_auth_credentials,
-                headers,
-                location_hint,
-            )
-        }) {
+
+        fragments.push((scan.as_ref(), location_hint));
+        summary = RequestSummary::default();
+    }
+
+    detect_blocking_action_in_fragments(
+        ineligible_for_substitution,
+        &fragments,
+        protocol,
+        &summary,
+        http2_stream_id,
+    )
+}
+
+/// A URL path is never a substitution target. Split on the literal query
+/// delimiter before decoding; an encoded question mark remains part of the path.
+fn push_request_target_fragments<'a>(
+    fragments: &mut Vec<(&'a [u8], RequestLocation)>,
+    target: &'a [u8],
+) {
+    if let Some(query_start) = target.iter().position(|byte| *byte == b'?') {
+        fragments.push((&target[..query_start], RequestLocation::Unknown));
+        fragments.push((&target[query_start + 1..], RequestLocation::Query));
+    } else {
+        fragments.push((target, RequestLocation::Unknown));
+    }
+}
+
+/// HTTP/2 pseudo-headers are structured fields, not an HTTP/1 request line.
+fn detect_http2_header_blocking_action(
+    secrets: &[IneligibleSecret],
+    headers: &[(Vec<u8>, Vec<u8>)],
+    summary: &RequestSummary,
+    stream_id: u32,
+) -> Option<SecretViolationReport> {
+    let mut fragments = Vec::new();
+    // Preserve field names so only Authorization values are decoded as Basic auth.
+    let metadata: Vec<Vec<u8>> = headers
+        .iter()
+        .filter(|(name, _)| !name.starts_with(b":"))
+        .map(|(name, value)| [name.as_slice(), b": ", value.as_slice()].concat())
+        .collect();
+    for (name, value) in headers {
+        fragments.push((name.as_slice(), RequestLocation::Unknown));
+        if name.eq_ignore_ascii_case(b":path") {
+            push_request_target_fragments(&mut fragments, value);
+        } else if name.starts_with(b":") {
+            fragments.push((value.as_slice(), RequestLocation::Unknown));
+        }
+    }
+    for line in &metadata {
+        fragments.push((line.as_slice(), RequestLocation::Header));
+    }
+    detect_blocking_action_in_fragments(
+        secrets,
+        &fragments,
+        RequestProtocol::Http2,
+        summary,
+        Some(stream_id),
+    )
+}
+
+/// Check every forbidden location independently. An allowed match must never
+/// mask an encoded placeholder in a different, forbidden location.
+fn detect_blocking_action_in_fragments(
+    secrets: &[IneligibleSecret],
+    fragments: &[(&[u8], RequestLocation)],
+    protocol: RequestProtocol,
+    summary: &RequestSummary,
+    http2_stream_id: Option<u32>,
+) -> Option<SecretViolationReport> {
+    let opaque = matches!(protocol, RequestProtocol::Opaque);
+    let mut detected = None;
+
+    for &(data, location) in fragments {
+        if !opaque
+            && secrets
+                .iter()
+                .all(|secret| secret.substitution_allows(location))
+        {
+            continue;
+        }
+
+        let url_decoded = data
+            .contains(&b'%')
+            .then(|| percent_decode(data).collect::<Vec<u8>>());
+        let json_decoded = data
+            .windows(2)
+            .any(|window| window == b"\\u")
+            .then(|| json_unescape(data));
+        let basic_auth_credentials =
+            if opaque || matches!(location, RequestLocation::Header | RequestLocation::Trailer) {
+                decoded_basic_auth_credentials(&String::from_utf8_lossy(data))
+            } else {
+                Vec::new()
+            };
+
+        for secret in secrets {
             if !opaque && secret.substitution_allows(location) {
                 continue;
             }
-            let report = SecretViolationReport {
-                action: secret.action,
-                env_var: secret.env_var.clone(),
-                placeholder: secret.placeholder.clone(),
-                protocol,
-                location,
-                match_form,
-                method: request.method.clone(),
-                path: request.path.clone(),
-                host: request.host.clone(),
-                http2_stream_id,
+
+            let needle = secret.placeholder.as_bytes();
+            let matched = if basic_auth_credentials
+                .iter()
+                .any(|decoded| decoded.contains(&secret.placeholder))
+            {
+                Some((
+                    if location == RequestLocation::Trailer {
+                        location
+                    } else {
+                        RequestLocation::BasicAuth
+                    },
+                    PlaceholderMatchForm::BasicAuthDecoded,
+                ))
+            } else if contains_bytes(data, needle) {
+                Some((location, PlaceholderMatchForm::Raw))
+            } else if url_decoded
+                .as_deref()
+                .is_some_and(|decoded| contains_bytes(decoded, needle))
+            {
+                Some((location, PlaceholderMatchForm::PercentDecoded))
+            } else if json_decoded
+                .as_deref()
+                .is_some_and(|decoded| contains_bytes(decoded, needle))
+            {
+                Some((location, PlaceholderMatchForm::JsonUnescaped))
+            } else {
+                None
             };
-            detected = Some(strictest_violation_report(detected, report));
+
+            if let Some((location, match_form)) = matched {
+                let report = SecretViolationReport {
+                    action: secret.action,
+                    env_var: secret.env_var.clone(),
+                    placeholder: secret.placeholder.clone(),
+                    protocol,
+                    location,
+                    match_form,
+                    method: summary.method.clone(),
+                    path: summary.path.clone(),
+                    host: summary.host.clone(),
+                    http2_stream_id,
+                };
+
+                detected = Some(strictest_violation_report(detected, report));
+            }
         }
     }
 
     detected
 }
 
-/// Find a raw placeholder in each HTTP location independently so an allowed
-/// header occurrence cannot mask a disallowed occurrence in the body.
-fn detect_disallowed_raw_match(
-    secret: &IneligibleSecret,
-    scan: &[u8],
-    headers: &str,
-    location_hint: RequestLocation,
-    basic_auth_credentials: &[String],
-) -> Option<(RequestLocation, PlaceholderMatchForm)> {
-    let needle = secret.placeholder.as_bytes();
-    if !secret.substitution.headers
-        && basic_auth_credentials
-            .iter()
-            .any(|decoded| decoded.contains(&secret.placeholder))
-    {
-        return Some((
-            if is_scoped_fragment_location(location_hint) {
-                location_hint
-            } else {
-                RequestLocation::BasicAuth
-            },
-            PlaceholderMatchForm::BasicAuthDecoded,
-        ));
-    }
-
-    if headers.is_empty() || is_scoped_fragment_location(location_hint) {
-        return (!secret.substitution_allows(location_hint) && contains_bytes(scan, needle))
-            .then_some((location_hint, PlaceholderMatchForm::Raw));
-    }
-
-    let header_bytes = headers.as_bytes();
-    let request_line_end = header_bytes
-        .windows(2)
-        .position(|window| window == b"\r\n")
-        .unwrap_or(header_bytes.len());
-    let request_line = &header_bytes[..request_line_end];
-    let query_start = request_line.iter().position(|byte| *byte == b'?');
-    if !secret.substitution.query
-        && let Some(query_start) = query_start
-        && contains_bytes(&request_line[query_start + 1..], needle)
-    {
-        return Some((RequestLocation::Query, PlaceholderMatchForm::Raw));
-    }
-    let request_target = &request_line[..query_start.unwrap_or(request_line.len())];
-    if contains_bytes(request_target, needle) {
-        return Some((RequestLocation::Unknown, PlaceholderMatchForm::Raw));
-    }
-
-    let metadata_start = request_line_end.saturating_add(2).min(header_bytes.len());
-    if !secret.substitution.headers && contains_bytes(&header_bytes[metadata_start..], needle) {
-        return Some((RequestLocation::Header, PlaceholderMatchForm::Raw));
-    }
-
-    let body = scan.get(header_bytes.len()..).unwrap_or_default();
-    if !secret.substitution.body && contains_bytes(body, needle) {
-        return Some((RequestLocation::Body, PlaceholderMatchForm::Raw));
-    }
-
-    None
-}
-
-fn detect_secret_match(
-    secret: &IneligibleSecret,
-    url_decoded: Option<&[u8]>,
-    json_decoded: Option<&[u8]>,
-    basic_auth_credentials: &[String],
-    headers: &str,
-    location_hint: RequestLocation,
-) -> Option<(RequestLocation, PlaceholderMatchForm)> {
-    let needle = secret.placeholder.as_bytes();
-    if basic_auth_credentials
-        .iter()
-        .any(|decoded| decoded.contains(&secret.placeholder))
-    {
-        return Some((
-            if is_scoped_fragment_location(location_hint) {
-                location_hint
-            } else {
-                RequestLocation::BasicAuth
-            },
-            PlaceholderMatchForm::BasicAuthDecoded,
-        ));
-    }
-    // Raw matches are classified by `detect_disallowed_raw_match`, which
-    // checks each request location independently. This fallback is reserved
-    // for encoded forms whose bytes may span adjacent reads.
-    if let Some(decoded) = url_decoded
-        && contains_bytes(decoded, needle)
-    {
-        return Some((
-            classify_decoded_match_location(headers, &secret.placeholder, location_hint),
-            PlaceholderMatchForm::PercentDecoded,
-        ));
-    }
-    if let Some(decoded) = json_decoded
-        && contains_bytes(decoded, needle)
-    {
-        return Some((
-            classify_decoded_match_location(headers, &secret.placeholder, location_hint),
-            PlaceholderMatchForm::JsonUnescaped,
-        ));
-    }
-    None
-}
-
-fn classify_decoded_match_location(
-    headers: &str,
-    placeholder: &str,
-    location_hint: RequestLocation,
-) -> RequestLocation {
-    if is_scoped_fragment_location(location_hint) {
-        return location_hint;
-    }
-    if !headers.is_empty() {
-        let url_decoded_headers = headers
-            .as_bytes()
-            .contains(&b'%')
-            .then(|| percent_decode(headers.as_bytes()).collect::<Vec<u8>>());
-        if url_decoded_headers
-            .as_deref()
-            .is_some_and(|decoded| contains_bytes(decoded, placeholder.as_bytes()))
-        {
-            return classify_header_match_location(
-                String::from_utf8_lossy(url_decoded_headers.as_deref().unwrap()).as_ref(),
-                placeholder,
-            );
-        }
-
-        let json_decoded_headers = headers
-            .as_bytes()
-            .windows(2)
-            .any(|window| window == b"\\u")
-            .then(|| json_unescape(headers.as_bytes()));
-        if json_decoded_headers
-            .as_deref()
-            .is_some_and(|decoded| contains_bytes(decoded, placeholder.as_bytes()))
-        {
-            return classify_header_match_location(
-                String::from_utf8_lossy(json_decoded_headers.as_deref().unwrap()).as_ref(),
-                placeholder,
-            );
-        }
-
-        return RequestLocation::Body;
-    }
-    if location_hint != RequestLocation::Unknown {
-        return location_hint;
-    }
-    RequestLocation::Unknown
-}
-
 /// Locations whose bytes have already been separated from the request header
-/// block by a protocol parser. They must never be reclassified from adjacent
-/// bytes or from header-like syntax inside the fragment.
+/// block by a protocol parser. Never combine them with adjacent locations.
 fn is_scoped_fragment_location(location: RequestLocation) -> bool {
     matches!(
         location,
         RequestLocation::Body | RequestLocation::ChunkMetadata | RequestLocation::Trailer
     )
-}
-
-fn classify_header_match_location(headers: &str, placeholder: &str) -> RequestLocation {
-    let Some(request_line) = headers.split("\r\n").next() else {
-        return RequestLocation::Header;
-    };
-    if let Some((_method, target, _version)) = split_http_request_line(request_line)
-        && target
-            .split_once('?')
-            .is_some_and(|(_, query)| query.contains(placeholder))
-    {
-        return RequestLocation::Query;
-    }
-    RequestLocation::Header
 }
 
 fn update_tail_buffer(tail: &mut Vec<u8>, data: &[u8], tail_size: usize) {
@@ -3983,6 +3945,219 @@ mod tests {
         assert_eq!(report.host.as_deref(), Some("evil.example.com"));
     }
 
+    #[test]
+    fn http1_harmless_encoding_preserves_substitution_across_reads() {
+        for body in [
+            r#"{"x":"plain"}"#,
+            r#"{"x":"100%"}"#,
+            r#"{"x":"a%20b"}"#,
+            r#"{"x":"\u0041"}"#,
+            r#"{"x":"\\user"}"#,
+        ] {
+            for query in [false, true] {
+                let mut secret = make_secret("$KEY", "real-secret", "api.example.com");
+                secret.substitution.headers = !query;
+                secret.substitution.query = query;
+                let config = make_config(vec![secret]);
+                let target = if query { "/?key=$KEY" } else { "/" };
+                let auth = if query {
+                    ""
+                } else {
+                    "Authorization: Bearer $KEY\r\n"
+                };
+                let request = format!(
+                    "POST {target} HTTP/1.1\r\nHost: api.example.com\r\n{auth}Content-Length: {}\r\n\r\n{body}",
+                    body.len()
+                );
+                let expected = request.replace("$KEY", "real-secret");
+                for split in 0..=request.len() {
+                    let mut handler = SecretsHandler::new(&config, "api.example.com", true);
+                    let mut output = Vec::new();
+                    for bytes in [&request.as_bytes()[..split], &request.as_bytes()[split..]] {
+                        if bytes.is_empty() {
+                            continue;
+                        }
+                        output.extend_from_slice(&handler.substitute(bytes).unwrap_or_else(
+                            |action| {
+                                panic!("body={body:?}, query={query}, split={split}: {action:?}")
+                            },
+                        ));
+                    }
+                    assert_eq!(output, expected.as_bytes(), "body={body:?}, split={split}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn http1_every_body_byte_preserves_header_substitution() {
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "api.example.com")]);
+        for byte in 0..=u8::MAX {
+            // Every byte is legal in an HTTP body, including NUL and invalid UTF-8.
+            let bodies = [
+                vec![byte],
+                format!("%{byte:02X}").into_bytes(),
+                format!(r"\u{byte:04x}").into_bytes(),
+            ];
+            for body in bodies {
+                let headers = format!(
+                    "POST / HTTP/1.1\r\nHost: api.example.com\r\nAuthorization: Bearer $KEY\r\nContent-Length: {}\r\n\r\n",
+                    body.len()
+                );
+                let mut request = headers.as_bytes().to_vec();
+                request.extend_from_slice(&body);
+                let mut expected = headers.replace("$KEY", "real-secret").into_bytes();
+                expected.extend_from_slice(&body);
+                for split in 0..=request.len() {
+                    let mut handler = SecretsHandler::new(&config, "api.example.com", true);
+                    let mut output = Vec::new();
+                    for bytes in [&request[..split], &request[split..]] {
+                        if !bytes.is_empty() {
+                            output.extend_from_slice(&handler.substitute(bytes).unwrap_or_else(
+                                |action| {
+                                    panic!(
+                                        "byte={byte:02x}, body={body:?}, split={split}: {action:?}"
+                                    )
+                                },
+                            ));
+                        }
+                    }
+                    assert_eq!(
+                        output, expected,
+                        "byte={byte:02x}, body={body:?}, split={split}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn http1_unrelated_header_and_query_characters_preserve_substitution() {
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "api.example.com")]);
+        for byte in 0..=u8::MAX {
+            // Encode arbitrary query bytes; header values permit printable ASCII.
+            let note = if (b' '..=b'~').contains(&byte) {
+                char::from(byte).to_string()
+            } else {
+                format!(r"\u{byte:04x}")
+            };
+            let request = format!(
+                "GET /?note=%{byte:02X} HTTP/1.1\r\nHost: api.example.com\r\nAuthorization: Bearer $KEY\r\nX-Note: {note}\r\n\r\n"
+            );
+            let mut handler = SecretsHandler::new(&config, "api.example.com", true);
+            assert_eq!(
+                handler.substitute(request.as_bytes()).unwrap().as_ref(),
+                request.replace("$KEY", "real-secret").as_bytes(),
+                "byte={byte:02x}"
+            );
+        }
+    }
+
+    #[test]
+    fn http1_allowed_header_cannot_mask_forbidden_encoded_locations() {
+        let basic = format!("Authorization: Basic {}\r\n", BASE64.encode(b"user:$KEY"));
+        for auth in ["Authorization: Bearer $KEY\r\n", basic.as_str()] {
+            for body in ["$KEY", "%24KEY", r"\u0024KEY"] {
+                for note in ["", "X-Note: %20\r\n", "X-Note: \\u0041\r\n"] {
+                    let config =
+                        make_config(vec![make_secret("$KEY", "real-secret", "api.example.com")]);
+                    let request = format!(
+                        "POST / HTTP/1.1\r\nHost: api.example.com\r\n{auth}{note}Content-Length: {}\r\n\r\n{body}",
+                        body.len()
+                    );
+                    for split in 0..=request.len() {
+                        let mut handler = SecretsHandler::new(&config, "api.example.com", true);
+                        let mut blocked = false;
+                        for bytes in [&request.as_bytes()[..split], &request.as_bytes()[split..]] {
+                            if bytes.is_empty() {
+                                continue;
+                            }
+                            if let Err(action) = handler.substitute(bytes) {
+                                assert_eq!(action, SecretViolationAction::Block);
+                                blocked = true;
+                                break;
+                            }
+                        }
+                        assert!(
+                            blocked,
+                            "auth={auth:?}, note={note:?}, body={body:?}, split={split}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn http_request_locations_enforce_the_same_policy_in_both_protocols() {
+        for target in ["/", "/$KEY", "/%24KEY", "/?key=$KEY", "/?key=%24KEY"] {
+            for header_value in ["plain", "$KEY", "%24KEY"] {
+                for headers in [false, true] {
+                    for query in [false, true] {
+                        let mut secret = make_secret("$KEY", "real-secret", "api.example.com");
+                        secret.substitution.headers = headers;
+                        secret.substitution.query = query;
+                        let config = make_config(vec![secret]);
+                        let allowed = (!target.contains("KEY") || (target.contains('?') && query))
+                            && (header_value == "plain" || headers);
+                        for http2 in [false, true] {
+                            let mut handler = SecretsHandler::new(&config, "api.example.com", true);
+                            let request = if http2 {
+                                h2_request(
+                                    &[
+                                        (b":method", b"GET"),
+                                        (b":scheme", b"https"),
+                                        (b":authority", b"api.example.com"),
+                                        (b":path", target.as_bytes()),
+                                        (b"x-key", header_value.as_bytes()),
+                                    ],
+                                    true,
+                                )
+                            } else {
+                                format!("GET {target} HTTP/1.1\r\nHost: api.example.com\r\nX-Key: {header_value}\r\n\r\n").into_bytes()
+                            };
+                            let result = handler.substitute(&request);
+                            assert_eq!(
+                                result.is_ok(),
+                                allowed,
+                                "http2={http2}, target={target}, value={header_value}, headers={headers}, query={query}"
+                            );
+                            if allowed && http2 {
+                                let output = result.unwrap();
+                                let fields = decode_first_h2_headers(&output);
+                                assert_eq!(
+                                    h2_header_value(&fields, b":path"),
+                                    if query {
+                                        target.replace("$KEY", "real-secret")
+                                    } else {
+                                        target.to_string()
+                                    }
+                                );
+                                assert_eq!(
+                                    h2_header_value(&fields, b"x-key"),
+                                    if headers {
+                                        header_value.replace("$KEY", "real-secret")
+                                    } else {
+                                        header_value.to_string()
+                                    }
+                                );
+                            } else if allowed {
+                                assert_eq!(
+                                    result.unwrap().as_ref(),
+                                    String::from_utf8(request.clone())
+                                        .unwrap()
+                                        .replace("$KEY", "real-secret")
+                                        .as_bytes()
+                                );
+                            } else {
+                                assert_eq!(result.unwrap_err(), SecretViolationAction::Block);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
     #[test]
     fn substitute_in_headers() {
         let config = make_config(vec![make_secret("$KEY", "real-secret", "api.openai.com")]);
@@ -5851,6 +6026,41 @@ mod tests {
     }
 
     #[test]
+    fn http2_trailers_require_passthrough_and_are_never_substituted() {
+        for passthrough in [false, true] {
+            let mut secret = make_secret("$KEY", "real-secret", "api.example.com");
+            if passthrough {
+                secret.passthrough_hosts = vec![HostPattern::Exact("api.example.com".into())];
+            }
+            let config = make_config(vec![secret]);
+            let mut handler = SecretsHandler::new(&config, "api.example.com", true);
+            let initial = h2_request(
+                &[
+                    (b":method", b"POST"),
+                    (b":scheme", b"https"),
+                    (b":authority", b"api.example.com"),
+                    (b":path", b"/"),
+                ],
+                false,
+            );
+            assert!(handler.substitute(&initial).is_ok());
+            let mut trailers = Vec::new();
+            append_h2_headers(&mut trailers, 1, &[(b"x-key", b"$KEY")], true);
+            let result = handler.substitute(&trailers);
+            if passthrough {
+                let mut output = HTTP2_PREFACE.to_vec();
+                output.extend_from_slice(&result.unwrap());
+                assert_eq!(
+                    h2_header_value(&decode_first_h2_headers(&output), b"x-key"),
+                    "$KEY"
+                );
+            } else {
+                assert_eq!(result.unwrap_err(), SecretViolationAction::Block);
+            }
+        }
+    }
+
+    #[test]
     fn tls_intercepted_http2_substitutes_header_secret() {
         let ip = Ipv4Addr::new(203, 0, 113, 34);
         let shared = SharedState::new(16);
@@ -5929,7 +6139,7 @@ mod tests {
                 (b":method", b"GET"),
                 (b":scheme", b"https"),
                 (b":authority", b"api.openai.com"),
-                (b":path", b"/v1/$KEY?token=$KEY"),
+                (b":path", b"/v1/chat?token=$KEY"),
                 (b"authorization", auth.as_bytes()),
             ],
             true,
@@ -5939,7 +6149,7 @@ mod tests {
         let headers = decode_first_h2_headers(&output);
         assert_eq!(
             h2_header_value(&headers, b":path"),
-            "/v1/$KEY?token=real-secret"
+            "/v1/chat?token=real-secret"
         );
         let auth = h2_header_value(&headers, b"authorization");
         let decoded = split_auth_scheme(&auth)

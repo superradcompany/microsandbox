@@ -452,6 +452,78 @@ curl -k --http1.1 -m 30 -sS -o /tmp/response \
     teardown(sb, name).await;
 }
 
+/// The upstream must receive the real header credential and an unchanged body,
+/// regardless of body characters or how curl/TLS split the request into reads.
+#[msb_test]
+async fn tls_intercept_header_secret_preserves_every_byte_and_unicode_character() {
+    let mut server = HostHttps::start().await.expect("https fixture");
+    let port = server.port();
+    let name = "tls-intercept-secret-alphabet";
+    let sb = Sandbox::builder(name)
+        .image(CURL_IMAGE)
+        .cpus(1)
+        .memory(256)
+        .user("0")
+        .replace()
+        .secret(|s| {
+            s.env("API_KEY")
+                .value("real-secret")
+                .allow("host.microsandbox.internal")
+        })
+        .network(|n| {
+            n.policy(NetworkPolicy::allow_all())
+                .tls(|t| t.intercepted_ports(vec![port]).verify_upstream(false))
+        })
+        .create()
+        .await
+        .expect("create sandbox");
+
+    // Include encoding markers near the start to exercise a body coalesced
+    // with the Authorization header, then every byte and every Unicode scalar.
+    let mut body = br#"100% %20 \u0041 \\user"#.to_vec();
+    body.extend(0..=u8::MAX);
+    let alphabet: String = (0..=0x10ffff).filter_map(char::from_u32).collect();
+    body.extend_from_slice(alphabet.as_bytes());
+    sb.fs()
+        .write("/tmp/alphabet-body", &body)
+        .await
+        .expect("write body");
+
+    let out = sb
+        .shell(format!(
+            r#"set -eu
+curl -k --http1.1 -m 30 -sS -o /tmp/response -w 'code=%{{http_code}}' \
+  -H "Authorization: Bearer $API_KEY" -H 'Expect:' \
+  -H 'Content-Type: application/octet-stream' \
+  --data-binary @/tmp/alphabet-body \
+  https://host.microsandbox.internal:{port}/alphabet
+"#
+        ))
+        .await
+        .expect("curl alphabet fixture");
+    let received = tokio::time::timeout(Duration::from_secs(5), server.received_request()).await;
+    // Clean up even when a regression causes the assertions below to fail.
+    teardown(sb, name).await;
+
+    assert!(
+        out.stdout().unwrap_or_default().contains("code=200"),
+        "request failed: {}",
+        out.stderr().unwrap_or_default()
+    );
+    let received = received
+        .expect("upstream timeout")
+        .expect("upstream request");
+    let headers = String::from_utf8(received.headers).expect("UTF-8 headers");
+    let authorization = headers.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.eq_ignore_ascii_case("authorization")
+            .then(|| value.trim())
+    });
+    assert_eq!(authorization, Some("Bearer real-secret"));
+    assert_eq!(received.body.len(), body.len());
+    assert!(received.body == body, "upstream body bytes changed");
+}
+
 #[msb_test]
 async fn tls_intercept_substitutes_secret_in_chunked_body() {
     let mut server = HostHttps::start().await.expect("https fixture");
