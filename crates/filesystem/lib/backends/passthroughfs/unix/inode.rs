@@ -974,7 +974,7 @@ pub(crate) fn open_inode_fd(fs: &PassthroughFs, inode: u64, flags: i32) -> io::R
     }
 }
 
-/// Duplicate the retained access and apply open-time truncation for a detached inode.
+/// Recheck permissions, duplicate retained access, and truncate a detached inode if requested.
 #[cfg(target_os = "macos")]
 fn open_unlinked_fd_macos(retained: i32, flags: i32) -> io::Result<i32> {
     let retained_flags = unsafe { libc::fcntl(retained, libc::F_GETFL) };
@@ -992,6 +992,20 @@ fn open_unlinked_fd_macos(retained: i32, flags: i32) -> io::Result<i32> {
         && retained_flags & libc::O_ACCMODE == libc::O_RDONLY
     {
         return Err(platform::eacces());
+    }
+    // The pin may predate a host chmod or ACL change. Check current permissions
+    // with effective credentials before granting a new open through that pin.
+    let mut mode = match access {
+        libc::O_RDONLY => libc::R_OK,
+        libc::O_WRONLY => libc::W_OK,
+        _ => libc::R_OK | libc::W_OK,
+    };
+    if flags & libc::O_TRUNC != 0 {
+        mode |= libc::W_OK;
+    }
+    let path = std::ffi::CString::new(format!("/dev/fd/{retained}")).unwrap();
+    if unsafe { libc::faccessat(libc::AT_FDCWD, path.as_ptr(), mode, libc::AT_EACCESS) } < 0 {
+        return Err(platform::linux_error(io::Error::last_os_error()));
     }
     let fd = unsafe { libc::fcntl(retained, libc::F_DUPFD_CLOEXEC, 0) };
     if fd < 0 {

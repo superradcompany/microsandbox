@@ -178,26 +178,54 @@ fn test_detached_readonly_host_file_rejects_writable_reopen() {
     if unsafe { libc::geteuid() } == 0 {
         return;
     }
-    let sb = TestSandbox::new();
-    let (entry, handle) = sb.fuse_create_root("readonly").unwrap();
-    sb.fuse_write(entry.inode, handle, b"keep", 0).unwrap();
-    sb.fs
-        .release(sb.ctx(), entry.inode, 0, handle, false, false, None)
-        .unwrap();
-    std::fs::set_permissions(
-        sb.root.join("readonly"),
-        std::fs::Permissions::from_mode(0o400),
-    )
-    .unwrap();
-    sb.fs.unlink(sb.ctx(), ROOT_INODE, c"readonly").unwrap();
-    for flags in [1, LINUX_O_RDWR, LINUX_O_RDWR | LINUX_O_TRUNC, LINUX_O_TRUNC] {
-        TestSandbox::assert_errno(sb.fuse_open(entry.inode, flags), LINUX_EACCES);
+    for revoke_after_pin in [false, true] {
+        let sb = TestSandbox::new();
+        let (entry, existing_handle) = sb.fuse_create_root("readonly").unwrap();
+        sb.fuse_write(entry.inode, existing_handle, b"keep", 0)
+            .unwrap();
+        sb.fs
+            .link(sb.ctx(), entry.inode, ROOT_INODE, c"alias")
+            .unwrap();
+        if !revoke_after_pin {
+            std::fs::set_permissions(
+                sb.root.join("alias"),
+                std::fs::Permissions::from_mode(0o400),
+            )
+            .unwrap();
+        }
+        sb.fs.unlink(sb.ctx(), ROOT_INODE, c"readonly").unwrap();
+        if revoke_after_pin {
+            std::fs::set_permissions(
+                sb.root.join("alias"),
+                std::fs::Permissions::from_mode(0o400),
+            )
+            .unwrap();
+        }
+        std::fs::remove_file(sb.root.join("alias")).unwrap();
+
+        for flags in [1, LINUX_O_RDWR, LINUX_O_RDWR | LINUX_O_TRUNC, LINUX_O_TRUNC] {
+            TestSandbox::assert_errno(sb.fuse_open(entry.inode, flags), LINUX_EACCES);
+        }
+        // Permission changes gate new opens, not already-open writable handles.
+        sb.fuse_write(entry.inode, existing_handle, b"okay", 0)
+            .unwrap();
+        let handle = sb.fuse_open(entry.inode, 0).unwrap();
+        assert_eq!(sb.fuse_read(entry.inode, handle, 32, 0).unwrap(), b"okay");
+        sb.fs
+            .release(sb.ctx(), entry.inode, 0, handle, false, false, None)
+            .unwrap();
+        sb.fs
+            .release(
+                sb.ctx(),
+                entry.inode,
+                0,
+                existing_handle,
+                false,
+                false,
+                None,
+            )
+            .unwrap();
     }
-    let handle = sb.fuse_open(entry.inode, 0).unwrap();
-    assert_eq!(sb.fuse_read(entry.inode, handle, 32, 0).unwrap(), b"keep");
-    sb.fs
-        .release(sb.ctx(), entry.inode, 0, handle, false, false, None)
-        .unwrap();
 }
 
 #[test]
