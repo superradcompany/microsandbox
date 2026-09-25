@@ -955,7 +955,7 @@ pub(crate) fn open_inode_fd(fs: &PassthroughFs, inode: u64, flags: i32) -> io::R
         let data = inodes.get(&inode).ok_or_else(platform::ebadf)?;
 
         // Linked inodes must reopen with the requested flags, not duplicate the
-        // read-only unlink pin. Trying /.vol/ first also covers a host removing
+        // unlink pin. Trying /.vol/ first also covers a host removing
         // the last link between a link-count check and the open.
         let path = vol_path(data.dev, data.ino);
         let result = open_macos_inode_reopen(path.as_ptr(), flags);
@@ -967,14 +967,44 @@ pub(crate) fn open_inode_fd(fs: &PassthroughFs, inode: u64, flags: i32) -> io::R
         {
             // Only a vanished, unlinked inode may use the pin. In particular,
             // do not turn a permission or symlink rejection into a successful open.
-            let fd = unsafe { libc::fcntl(ufd as i32, libc::F_DUPFD_CLOEXEC, 0) };
-            if fd >= 0 {
-                return Ok(fd);
-            }
+            return open_unlinked_fd_macos(ufd as i32, flags);
         }
 
         result
     }
+}
+
+/// Duplicate the retained access and apply open-time truncation for a detached inode.
+#[cfg(target_os = "macos")]
+fn open_unlinked_fd_macos(retained: i32, flags: i32) -> io::Result<i32> {
+    let retained_flags = unsafe { libc::fcntl(retained, libc::F_GETFL) };
+    if retained_flags < 0 {
+        return Err(platform::linux_error(io::Error::last_os_error()));
+    }
+    let access = flags & libc::O_ACCMODE;
+    if access == libc::O_ACCMODE {
+        return Err(platform::einval());
+    }
+    if flags & libc::O_DIRECTORY != 0 {
+        return Err(platform::enotdir());
+    }
+    if (access != libc::O_RDONLY || flags & libc::O_TRUNC != 0)
+        && retained_flags & libc::O_ACCMODE == libc::O_RDONLY
+    {
+        return Err(platform::eacces());
+    }
+    let fd = unsafe { libc::fcntl(retained, libc::F_DUPFD_CLOEXEC, 0) };
+    if fd < 0 {
+        return Err(platform::linux_error(io::Error::last_os_error()));
+    }
+    // dup does not apply O_TRUNC. Do not change shared status flags such as
+    // O_APPEND: FUSE read/write requests already carry their explicit offsets.
+    if flags & libc::O_TRUNC != 0 && unsafe { libc::ftruncate(fd, 0) } < 0 {
+        let error = io::Error::last_os_error();
+        unsafe { libc::close(fd) };
+        return Err(platform::linux_error(error));
+    }
+    Ok(fd)
 }
 
 /// Format a file descriptor number as a null-terminated C string into a stack buffer.
