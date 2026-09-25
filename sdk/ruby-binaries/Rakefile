@@ -1,0 +1,51 @@
+# frozen_string_literal: true
+
+require "rake/clean"
+require "rake/testtask"
+
+require_relative "tasks/package"
+
+CLEAN.include("libexec")
+CLOBBER.include("downloads", "pkg")
+
+desc "Verify the companion, Ruby SDK, and workspace versions remain in lockstep"
+task :version_check do
+  {
+    "../ruby/lib/microsandbox/version.rb" => /^\s*VERSION = "([^"]+)"$/,
+    "../../Cargo.toml" => /^version = "([^"]+)"$/
+  }.each do |relative_path, pattern|
+    version = File.read(File.expand_path(relative_path, __dir__))[pattern, 1]
+    next if version == Microsandbox::Binaries::VERSION
+
+    abort "microsandbox-binaries version mismatch: #{Microsandbox::Binaries::VERSION} " \
+          "does not match #{relative_path} (#{version || "missing version"}); " \
+          "update the companion version with the release manifests"
+  end
+end
+
+Rake::TestTask.new do |test|
+  test.libs << "lib"
+  test.pattern = "test/**/*_test.rb"
+  test.verbose = true
+  test.deps << :version_check
+end
+
+desc "Download, verify, and build all platform gems for the lockstep runtime version"
+task :package, [:version] => :version_check do |_task, args|
+  Microsandbox::Binaries::Package.package_all!(args[:version] || Microsandbox::Binaries::VERSION)
+end
+
+namespace :package do
+  Microsandbox::Binaries::Package::PLATFORMS.each_key do |platform|
+    task_name = platform.tr("-", "_")
+    desc "Download, verify, and build the #{platform} platform gem"
+    task task_name, [:version] => :version_check do |_task, args|
+      Microsandbox::Binaries::Package.package_platform!(
+        platform,
+        args[:version] || Microsandbox::Binaries::VERSION
+      )
+    end
+  end
+end
+
+task default: :test

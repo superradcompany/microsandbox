@@ -77,13 +77,36 @@ extension versions and an exact Rust SDK pin, but skips the registry lockfile
 check. When finished, run `rake cargo:unpatch_workspace` to restore the lockfile
 and switch back to the published SDK.
 
-To use the local backend, install the microsandbox runtime and firmware once:
+To use the local backend without a separate runtime download, install the
+optional platform companion. The main gem deliberately has no dependency on
+it, so cloud-only users can omit it:
+
+```sh
+gem install microsandbox-binaries
+```
+
+The companion must match this gem's version; pass `-v` to install a specific
+one. With Bundler, also add `gem "microsandbox-binaries"` to your Gemfile,
+pinned to the same version as `microsandbox`, and run `bundle install`;
+installing it globally does not make it available to a bundle.
+
+Alternatively, install the microsandbox runtime and firmware through the SDK:
 
 ```ruby
 require "microsandbox"
 
 Microsandbox.install unless Microsandbox.installed?
 ```
+
+The companion gem is the last place the SDK looks for a runtime, as with the
+Node and Python platform packages: `MSB_PATH` (with `MSB_LIBKRUNFW_PATH`), the
+`Microsandbox.set_runtime_*` setters, configured runtime paths, and a runtime
+installed in `MSB_HOME` (default `~/.microsandbox`) all take precedence. The SDK
+only uses a companion of its own version (for example `microsandbox` 0.7.4 with
+`microsandbox-binaries` 0.7.4), since it launches a v0.7 runtime only when the
+versions match. It activates that version even when newer companions are
+installed; a companion of another version, including one locked by Bundler, is
+skipped with a warning.
 
 Local sandboxes require Apple Silicon virtualization on macOS or KVM on Linux. On Windows, use Windows 11 on x64 or ARM64 and enable WHP. Ruby CI currently covers Linux x86_64.
 
