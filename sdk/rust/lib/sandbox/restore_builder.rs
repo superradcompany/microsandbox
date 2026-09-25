@@ -335,6 +335,16 @@ macro_rules! resource_methods {
                 self.inner = self.inner.port_udp_bind(bind, host, guest);
                 self
             }
+
+            /// Set the accept-queue depth of this child's published TCP listeners, `1..=i32::MAX`.
+            /// Defaults to 1024; the host kernel clamps it to its own `somaxconn`.
+            #[cfg(feature = "net")]
+            pub fn tcp_listen_backlog(mut self, backlog: u32) -> Self {
+                self.inner = self
+                    .inner
+                    .network(|network| network.tcp_listen_backlog(backlog));
+                self
+            }
         }
     };
 }
@@ -474,6 +484,27 @@ mod tests {
         let legacy = Sandbox::restore("saved").max_connections(0);
         assert_eq!(config(&legacy).spec.network.max_tcp_connections, Some(0));
         assert_eq!(config(&legacy).spec.network.max_udp_connections, None);
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn destination_listen_backlog_is_omitted_unless_set_and_validated() {
+        let defaults = Sandbox::restore("saved").port(8080, 80);
+        assert_eq!(config(&defaults).spec.network.tcp_listen_backlog, None);
+        let tuned = Sandbox::restore("saved")
+            .port(8080, 80)
+            .tcp_listen_backlog(4096);
+        assert_eq!(config(&tuned).spec.network.tcp_listen_backlog, Some(4096));
+        assert_eq!(
+            config(&tuned)
+                .local_network_config()
+                .unwrap()
+                .tcp_listen_backlog
+                .map(microsandbox_network::config::ListenBacklog::get),
+            Some(4096)
+        );
+        let invalid = Sandbox::restore("saved").tcp_listen_backlog(0);
+        assert!(invalid.inner.build_error.is_some());
     }
 
     #[test]

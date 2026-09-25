@@ -492,6 +492,8 @@ impl CloudSandboxSpec {
             secrets: self.network.secrets.map(Into::into),
             max_tcp_connections: self.network.max_tcp_connections,
             max_udp_connections: self.network.max_udp_connections,
+            // Tunes published-port listeners, and the cloud spec publishes no ports.
+            tcp_listen_backlog: None,
             rate_limiter: None,
             trust_host_cas: false,
             outbound_proxy: None,

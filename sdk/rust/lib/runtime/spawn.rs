@@ -340,6 +340,10 @@ pub async fn spawn_sandbox(
     }) {
         launch_contract::require_restore_backing(&resolved_runtime.msb_path).await?;
     }
+    #[cfg(feature = "net")]
+    if launch_contract.machine && resolved_network.config().tcp_listen_backlog.is_some() {
+        launch_contract::require_tcp_listen_backlog(&resolved_runtime.msb_path).await?;
+    }
     if launch_contract.patch < 9
         && !matches!(
             global.runtime.block_writeback,

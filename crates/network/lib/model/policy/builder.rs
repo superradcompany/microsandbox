@@ -34,6 +34,7 @@ use std::str::FromStr;
 use ipnetwork::IpNetwork;
 use microsandbox_types::{NetworkRateLimitDirection, RateLimitConfigError};
 
+use crate::config::InvalidListenBacklog;
 use crate::secrets::config::SecretConfigError;
 
 use super::{
@@ -85,6 +86,14 @@ pub enum BuildError {
     /// The configured guest IPv6 pool cannot hold a `/64` sandbox prefix.
     #[error("invalid IPv6 pool `{raw}`: prefix must be /64 or shorter")]
     InvalidIpv6Pool { raw: String },
+
+    /// The published-port listen backlog is outside `1..=i32::MAX`.
+    #[error("{source}")]
+    InvalidTcpListenBacklog {
+        /// Underlying range error.
+        #[from]
+        source: InvalidListenBacklog,
+    },
 
     /// An outbound proxy builder received an invalid configuration.
     #[error("invalid outbound proxy: {reason}")]

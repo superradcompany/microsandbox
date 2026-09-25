@@ -376,6 +376,7 @@ type NetworkConfig struct {
     DisableStrict           bool
     Ports                   map[uint16]uint16
     PortBindings            []PortBinding
+    TCPListenBacklog        *uint32
     IPv4Pool                string
     IPv6Pool                string
     MaxConnections          *uint
@@ -402,6 +403,7 @@ The full network stack configuration passed via [`WithNetwork`](#m-withnetwork).
 | DisableStrict | `bool` | Opt out of strict hostname policy enforcement. By default, hostname allows require inspectable request authority: plain HTTP exposes `Host`; HTTPS requires TLS interception that is not bypassed |
 | Ports | `map[uint16]uint16` | Host to guest TCP port mappings bound to `127.0.0.1` |
 | PortBindings | `[]`[`PortBinding`](#portbinding) | Host to guest mappings with explicit bind addresses |
+| TCPListenBacklog | `*uint32` | Accept-queue depth for published TCP port listeners, 1 to 2147483647. `nil` keeps the default, 1,024; the host kernel caps it at its own `somaxconn` (4,096 by default on Linux, 128 on macOS) |
 | IPv4Pool | `string` | Pool used to derive per-sandbox `/30` guest subnets. Defaults to `172.16.0.0/12` |
 | IPv6Pool | `string` | Pool used to derive per-sandbox `/64` guest prefixes. Defaults to `fd42:6d73:62::/48` |
 | MaxTCPConnections | `*uint` | TCP connection cap; defaults to unlimited for single-tenant and 1,024 for multi-tenant; zero means unlimited |
@@ -413,7 +415,7 @@ The full network stack configuration passed via [`WithNetwork`](#m-withnetwork).
 
 Connection limits use pointers to distinguish an omitted value from explicit zero. `MaxConnections` and `MaxTCPConnections` cannot both be specified, even with the same value. Either TCP spelling can be combined with `MaxUDPConnections`.
 
-For dedicated snapshot restore, use `WithRestoreMaxTCPConnections` and `WithRestoreMaxUDPConnections`, or the corresponding fields in `RestoreConfig`. `WithRestoreMaxConnections` and `RestoreConfig.MaxConnections` remain deprecated TCP aliases with the same duplicate-alias restriction. These limits are destination resource overrides; `WithRestoreNetworkPolicy` accepts only policy rules and default actions.
+For dedicated snapshot restore, use `WithRestoreMaxTCPConnections` and `WithRestoreMaxUDPConnections`, or the corresponding fields in `RestoreConfig`. `WithRestoreMaxConnections` and `RestoreConfig.MaxConnections` remain deprecated TCP aliases with the same duplicate-alias restriction. These limits are destination resource overrides; `WithRestoreNetworkPolicy` accepts only policy rules and default actions. `WithRestoreTCPListenBacklog` (or `RestoreConfig.TCPListenBacklog`) sets the accept-queue depth for the listeners a restored child publishes.
 
 Historical runtime launch contracts reject explicit UDP limits, including zero, with an upgrade-required error. See [deployment profiles](/networking/overview#deployment-profiles) for historical TCP limits and defaults.
 

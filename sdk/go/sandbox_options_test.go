@@ -908,6 +908,22 @@ func TestFFIWireShape_NetworkConnectionLimits(t *testing.T) {
 	}
 }
 
+func TestFFIWireShape_TCPListenBacklog(t *testing.T) {
+	omitted := marshalCreateOptions(t, WithNetwork(&NetworkConfig{}))["network"].(map[string]any)
+	if value, present := omitted["tcp_listen_backlog"]; present {
+		t.Fatalf("unset backlog reached the wire as %#v", value)
+	}
+
+	backlog := uint32(4096)
+	got := marshalCreateOptions(t, WithNetwork(&NetworkConfig{
+		Ports:            map[uint16]uint16{8080: 80},
+		TCPListenBacklog: &backlog,
+	}))["network"].(map[string]any)
+	if got["tcp_listen_backlog"] != float64(4096) {
+		t.Fatalf("tcp_listen_backlog = %#v, want 4096", got["tcp_listen_backlog"])
+	}
+}
+
 func TestBuildFFINetworkRateLimiters(t *testing.T) {
 	out := buildFFINetwork(&NetworkConfig{
 		RateLimiter: &NetworkRateLimiterConfig{

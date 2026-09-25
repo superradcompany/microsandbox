@@ -58,6 +58,10 @@ pub struct LaunchCapabilities {
     /// Older probes omit this feature; ordinary protocol-2 launches are unchanged.
     #[serde(default)]
     pub required_restore_backing: bool,
+    /// Published-port listeners honor `network.tcp_listen_backlog`. Older runtimes omit this
+    /// feature and would silently ignore the field, so the SDK refuses to send it to them.
+    #[serde(default)]
+    pub tcp_listen_backlog: bool,
 }
 
 /// Hidden CLI handoff describing the metrics slot the host reserved for this sandbox.

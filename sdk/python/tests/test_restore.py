@@ -103,6 +103,26 @@ def test_restore_rejects_negative_connection_limits(method, option):
         getattr(Sandbox, method)("missing", name="restore-limits", **{option: -1})
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method", ["restore", "restore_with_progress"])
+async def test_restore_listen_backlog_reaches_artifact_validation(tmp_path, method):
+    # A missing artifact proves the option is accepted and reaches restore.
+    with pytest.raises(FileNotFoundError):
+        result = getattr(Sandbox, method)(
+            tmp_path / "missing", name="restore-backlog", ports={8080: 80}, tcp_listen_backlog=4096,
+        )
+        if method == "restore":
+            await result
+        else:
+            await result.result()
+
+
+@pytest.mark.parametrize("method", ["restore", "restore_with_progress"])
+def test_restore_rejects_negative_listen_backlog(method):
+    with pytest.raises(OverflowError):
+        getattr(Sandbox, method)("missing", name="restore-backlog", tcp_listen_backlog=-1)
+
+
 def test_restore_policy_rejects_broad_network_configuration():
     with pytest.raises(TypeError):
         Sandbox.restore("missing", name="restore-controls", network_policy=Network.none())

@@ -58,6 +58,10 @@ pub struct RestoreResourceArgs {
     #[cfg(feature = "net")]
     #[arg(short, long)]
     pub port: Vec<String>,
+    /// Accept-queue depth for the child's published TCP ports (default: 1024; clamped to somaxconn).
+    #[cfg(feature = "net")]
+    #[arg(long, value_name = "DEPTH", value_parser = clap::value_parser!(u32).range(1..=i64::from(i32::MAX)))]
+    pub tcp_listen_backlog: Option<u32>,
     /// Default user for new exec commands; captured processes keep their credentials.
     #[arg(short, long)]
     pub user: Option<String>,
@@ -266,6 +270,10 @@ macro_rules! apply_resources {
                         };
                     }
                 }
+                #[cfg(feature = "net")]
+                if let Some(backlog) = self.tcp_listen_backlog {
+                    builder = builder.tcp_listen_backlog(backlog);
+                }
                 Ok(builder)
             }
         }
@@ -413,6 +421,39 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn restore_parses_listen_backlog_for_child_listeners() {
+        let cli = TestCli::try_parse_from([
+            "restore",
+            "ready",
+            "--name",
+            "child",
+            "-p",
+            "8080:80",
+            "--tcp-listen-backlog",
+            "4096",
+        ])
+        .unwrap();
+        assert_eq!(cli.args.resources.tcp_listen_backlog, Some(4096));
+        let defaults = TestCli::try_parse_from(["restore", "ready", "--name", "child"]).unwrap();
+        assert_eq!(defaults.args.resources.tcp_listen_backlog, None);
+        for invalid in ["0", "2147483648"] {
+            assert!(
+                TestCli::try_parse_from([
+                    "restore",
+                    "ready",
+                    "--name",
+                    "child",
+                    "--tcp-listen-backlog",
+                    invalid,
+                ])
+                .is_err(),
+                "{invalid}"
+            );
+        }
     }
 
     #[cfg(feature = "net")]

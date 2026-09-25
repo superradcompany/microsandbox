@@ -71,7 +71,7 @@ Scoped files contain one group of settings without its wrapper key. Unrelated fi
 | Flag | Accepted fields |
 | --- | --- |
 | `--conf PATH` | Any sandbox configuration field |
-| `--net-conf PATH` | `policy`, `allow`, `deny`, `ports`, `dns`, `tls`, `strict`, `trust_host_cas`, `max_tcp_connections`, `max_udp_connections` |
+| `--net-conf PATH` | `policy`, `allow`, `deny`, `ports`, `dns`, `tls`, `strict`, `trust_host_cas`, `max_tcp_connections`, `max_udp_connections`, `tcp_listen_backlog` |
 | `--resource-conf PATH` | `cpus`, `memory`, `max_duration`, `idle_timeout`, `rlimits` |
 | `--runtime-conf PATH` | `workdir`, `shell`, `user`, `hostname`, `security`, `entrypoint`, `cmd`, `env`, `labels`, `init` |
 | `--fs-conf PATH` | `mounts`, `patch_files`, `patches` |
@@ -322,3 +322,7 @@ Project envelope fields such as `sandboxes`, `volumes`, and `layers`, plus per-p
 Set `max_udp_connections` in the network configuration, or pass `--max-udp-connections 512`. The default is unlimited in single-tenant mode and 1,024 relay sessions in multi-tenant mode; zero explicitly selects unlimited. At capacity, new sessions evict the least recently active session.
 
 `max_connections` and `--max-connections` remain deprecated TCP-only aliases for `max_tcp_connections` and `--max-tcp-connections`. Specifying both TCP names in one configuration or command is an error. The UDP limit is independent.
+
+### Published-port listen backlog
+
+Set `tcp_listen_backlog` in the network configuration, or pass `--tcp-listen-backlog 4096`, to change how many not-yet-accepted connections each published TCP port queues on the host. The default is 1,024, and values from 1 to 2,147,483,647 are accepted; the host kernel caps the effective depth at its own `somaxconn`. See [Published ports](/cli/sandbox-commands#published-ports).

@@ -1778,6 +1778,9 @@ class Network:
     max_udp_connections: int | None = field(default=None, kw_only=True)
     """UDP session limit. Defaults to unlimited for single-tenant and 1024 for
     multi-tenant; zero means unlimited."""
+    tcp_listen_backlog: int | None = field(default=None, kw_only=True)
+    """Accept-queue depth for published TCP port listeners, 1 to 2147483647.
+    Defaults to 1024; the host kernel clamps it to its own ``somaxconn``."""
     rate_limiter: NetworkRateLimiter | None = None
     """Local egress and ingress rate limits. ``None`` means unlimited."""
     secret_violation_action: ViolationAction = ViolationAction.BLOCK_AND_LOG
@@ -1845,6 +1848,8 @@ class Network:
             d["max_tcp_connections"] = self.max_tcp_connections
         if self.max_udp_connections is not None:
             d["max_udp_connections"] = self.max_udp_connections
+        if self.tcp_listen_backlog is not None:
+            d["tcp_listen_backlog"] = self.tcp_listen_backlog
         if self.rate_limiter is not None:
             if not isinstance(self.rate_limiter, NetworkRateLimiter):
                 raise TypeError("Network.rate_limiter must be NetworkRateLimiter or None")

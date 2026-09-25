@@ -4306,6 +4306,36 @@ mod tests {
 
     #[cfg(feature = "net")]
     #[tokio::test]
+    async fn test_builder_network_carries_tcp_listen_backlog_and_rejects_zero() {
+        let config = SandboxBuilder::new("test")
+            .image("alpine")
+            .port(8080, 80)
+            .network(|n| n.tcp_listen_backlog(4096))
+            .build()
+            .await
+            .unwrap();
+        assert_eq!(config.spec.network.tcp_listen_backlog, Some(4096));
+        assert_eq!(config.spec.network.ports.len(), 1);
+        assert_eq!(
+            config
+                .local_network_config()
+                .unwrap()
+                .tcp_listen_backlog
+                .map(microsandbox_network::config::ListenBacklog::get),
+            Some(4096)
+        );
+
+        let error = SandboxBuilder::new("test")
+            .image("alpine")
+            .network(|n| n.tcp_listen_backlog(0))
+            .build()
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("TCP listen backlog"), "{error}");
+    }
+
+    #[cfg(feature = "net")]
+    #[tokio::test]
     async fn test_builder_network_preserves_top_level_settings() {
         let config = SandboxBuilder::new("test")
             .image("alpine")

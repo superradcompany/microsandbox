@@ -351,6 +351,11 @@ pub struct SandboxOpts {
     #[arg(short, long)]
     pub port: Vec<String>,
 
+    /// Accept-queue depth for published TCP ports (default: 1024; the host clamps it to its somaxconn).
+    #[cfg(feature = "net")]
+    #[arg(long, value_name = "DEPTH", value_parser = clap::value_parser!(u32).range(1..=i64::from(i32::MAX)))]
+    pub tcp_listen_backlog: Option<u32>,
+
     /// Disable all network access by default. Sugar for `--net-default deny`.
     /// Combine with `--net-rule allow@<target>` entries to build an
     /// allowlist; without rules, the guest has no network reachability.
@@ -827,6 +832,7 @@ impl SandboxOpts {
             || self.max_connections.is_some()
             || self.max_tcp_connections.is_some()
             || self.max_udp_connections.is_some()
+            || self.tcp_listen_backlog.is_some()
             || self.net_strict.is_some()
             || self.trust_host_cas
             || self.tls_intercept
@@ -1077,6 +1083,7 @@ impl SandboxOpts {
             || self.max_connections.is_some()
             || self.max_tcp_connections.is_some()
             || self.max_udp_connections.is_some()
+            || self.tcp_listen_backlog.is_some()
             || self.net_strict.is_some()
             || self.trust_host_cas
             || self.proxy.is_some()
@@ -2555,6 +2562,7 @@ fn apply_network_opts(
         }
         let max_conn = opts.max_tcp_connections.or(opts.max_connections);
         let max_udp_conn = opts.max_udp_connections;
+        let tcp_listen_backlog = opts.tcp_listen_backlog;
         let ipv4_pool = opts
             .net_ipv4_pool
             .as_deref()
@@ -2610,6 +2618,9 @@ fn apply_network_opts(
             }
             if let Some(max) = max_udp_conn {
                 n = n.max_udp_connections(max);
+            }
+            if let Some(backlog) = tcp_listen_backlog {
+                n = n.tcp_listen_backlog(backlog);
             }
             if let Some(pool) = ipv4_pool {
                 n = n.ipv4_pool(pool);
@@ -3425,6 +3436,31 @@ mod tests {
             ])
             .unwrap_err();
         assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn tcp_listen_backlog_flag_accepts_only_the_positive_c_int_range() {
+        let parse = |value: &str| {
+            SandboxOpts::augment_args(Command::new("test")).try_get_matches_from([
+                "test",
+                "--tcp-listen-backlog",
+                value,
+            ])
+        };
+        for value in ["1", "4096", "2147483647"] {
+            let opts = SandboxOpts::from_arg_matches(&parse(value).unwrap()).unwrap();
+            assert_eq!(opts.tcp_listen_backlog, Some(value.parse().unwrap()));
+            assert!(opts.has_network_config());
+            assert!(opts.has_creation_flags());
+        }
+        for value in ["0", "2147483648"] {
+            assert_eq!(
+                parse(value).unwrap_err().kind(),
+                clap::error::ErrorKind::ValueValidation,
+                "{value}"
+            );
+        }
     }
 
     #[cfg(feature = "net")]

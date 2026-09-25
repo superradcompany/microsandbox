@@ -255,6 +255,15 @@ impl JsNetworkBuilder {
         self
     }
 
+    /// Set the accept-queue depth for published TCP port listeners, 1..=2147483647. Defaults to
+    /// 1024; the host kernel clamps it to its own somaxconn.
+    #[napi(js_name = "tcpListenBacklog")]
+    pub fn tcp_listen_backlog(&mut self, backlog: u32) -> &Self {
+        let prev = self.take_inner();
+        self.inner = Some(prev.tcp_listen_backlog(backlog));
+        self
+    }
+
     /// Require hostname-based policy allows to use inspectable application authority.
     #[napi]
     pub fn strict(&mut self, enabled: bool) -> &Self {

@@ -22,7 +22,7 @@ use smoltcp::wire::{
     Ipv6Repr, TcpPacket, UdpPacket,
 };
 
-use crate::config::{ConnectionLimit, DnsConfig, PublishedPort};
+use crate::config::{ConnectionLimit, DnsConfig, ListenBacklog, PublishedPort};
 use crate::engine::dns::common::ports::DnsPortType;
 use crate::engine::dns::{
     interceptor::DnsInterceptor,
@@ -222,6 +222,8 @@ pub fn create_interface(device: &mut SmoltcpDevice, config: &PollLoopConfig) -> 
 ///   connections on the host-bind address and forwards into the guest.
 /// * `max_tcp_connections` - Optional cap on concurrent guest connections tracked by
 ///   [`TcpConnectionTracker`]; `None` uses the default.
+/// * `max_udp_connections` - Optional cap on concurrent UDP relay sessions.
+/// * `tcp_listen_backlog` - Accept-queue depth requested for each published TCP port listener.
 /// * `tokio_handle` - Runtime handle used for proxy tasks, DNS forwarding, port publishing,
 ///   and ICMP relays.
 #[allow(clippy::too_many_arguments)]
@@ -236,6 +238,7 @@ pub fn smoltcp_poll_loop(
     strict: bool,
     max_tcp_connections: Option<NonZeroUsize>,
     max_udp_connections: Option<ConnectionLimit>,
+    tcp_listen_backlog: ListenBacklog,
     tokio_handle: tokio::runtime::Handle,
     secrets: SecretsHandle,
     outbound_proxy: Option<Arc<ResolvedOutboundProxy>>,
@@ -279,6 +282,7 @@ pub fn smoltcp_poll_loop(
     );
     let mut port_publisher = PortPublisher::new(
         &published_ports,
+        tcp_listen_backlog,
         config.guest_ipv4,
         config.guest_ipv6,
         config.gateway.ipv4,

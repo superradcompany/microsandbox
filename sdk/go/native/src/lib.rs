@@ -954,6 +954,8 @@ struct NetworkOpts {
     /// Ports nested inside network with explicit bind addresses.
     #[serde(default)]
     port_bindings: Vec<PortBindingOpts>,
+    /// Accept-queue depth for published TCP port listeners.
+    tcp_listen_backlog: Option<u32>,
     /// IPv4 pool used to derive per-sandbox /30 guest subnets.
     ipv4_pool: Option<String>,
     /// IPv6 pool used to derive per-sandbox /64 guest prefixes.
@@ -1490,6 +1492,9 @@ fn apply_network(
     }
     if let Some(max) = net.max_udp_connections {
         builder = builder.network(move |n| n.max_udp_connections(max));
+    }
+    if let Some(backlog) = net.tcp_listen_backlog {
+        builder = builder.network(move |n| n.tcp_listen_backlog(backlog));
     }
 
     // Strict hostname policy.
@@ -7794,6 +7799,23 @@ mod tests {
             }))
             .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn network_listen_backlog_reaches_the_sandbox_config() {
+        let omitted: super::NetworkOpts = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(omitted.tcp_listen_backlog, None);
+
+        let net: super::NetworkOpts = serde_json::from_value(serde_json::json!({
+            "ports": {"8080": 80}, "tcp_listen_backlog": 4096
+        }))
+        .unwrap();
+        let builder = microsandbox::Sandbox::builder("backlog").image("alpine");
+        let Ok(builder) = super::apply_network(builder, &net) else {
+            panic!("apply_network rejected a valid backlog");
+        };
+        let config = builder.build().await.unwrap();
+        assert_eq!(config.spec.network.tcp_listen_backlog, Some(4096));
     }
 
     use super::*;

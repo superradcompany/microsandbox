@@ -123,6 +123,8 @@ export interface NetworkConfig {
   readonly maxConnections: number | null;
   readonly maxTcpConnections: number | null;
   readonly maxUdpConnections?: number | null;
+  /** Accept-queue depth for published TCP port listeners. Absent means the default, 1024. */
+  readonly tcpListenBacklog?: number | null;
   readonly strict: boolean;
   readonly rateLimiter: NetworkRateLimiterConfig | null;
   readonly interface?: {

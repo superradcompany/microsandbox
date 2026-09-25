@@ -28,5 +28,6 @@ type RestoreOptions struct {
 	Volumes                     map[string]MountSpec `json:"volumes,omitempty"`
 	CapturedVolumes             []string             `json:"captured_volumes,omitempty"`
 	Ports                       []PortBindingOptions `json:"ports,omitempty"`
+	TCPListenBacklog            *uint32              `json:"tcp_listen_backlog,omitempty"`
 	Vsock                       []VsockRouteOptions  `json:"vsock,omitempty"`
 }

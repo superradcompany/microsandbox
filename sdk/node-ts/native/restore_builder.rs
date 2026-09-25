@@ -324,6 +324,13 @@ impl JsRestoreBuilder {
         Ok(self)
     }
 
+    /// Set the accept-queue depth for the child's published TCP listeners, 1..=2147483647.
+    #[napi(js_name = "tcpListenBacklog")]
+    pub fn tcp_listen_backlog(&mut self, backlog: u32) -> Result<&Self> {
+        self.inner = Some(self.take_inner()?.tcp_listen_backlog(backlog));
+        Ok(self)
+    }
+
     /// Expose a host Unix stream socket or local Windows named pipe on a guest-to-host vsock port.
     #[napi]
     pub fn vsock(&mut self, host_path: String, port: u32) -> Result<&Self> {

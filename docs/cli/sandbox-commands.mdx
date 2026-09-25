@@ -68,6 +68,7 @@ Common flags:
 | `--mount-disk` | Mount a disk image: `SOURCE:DEST[:OPTIONS]` |
 | `--mount-named` | Create or reuse a named volume: `NAME:DEST[:OPTIONS]`. See [kind, size, and quota options](/cli/volume-commands#using-volumes-with-sandboxes) |
 | `-p`, `--port` | Publish a port, such as `8000:8000` for loopback-only or `0.0.0.0:8000:8000` for all host interfaces |
+| `--tcp-listen-backlog` | Accept-queue depth for published TCP ports, `1` to `2147483647` (default: `1024`). See [Published ports](#published-ports) |
 | `--vsock` | Expose local host IPC at host CID 2 using `HOST_PATH:PORT[/stream\|/dgram]`; Unix sockets and local Windows named pipes are supported, the flag is repeatable, and stream is the default |
 | `-e`, `--env` | Set an environment variable |
 | `--label` | Attach a label for metric attribution (`KEY=VALUE`, or bare `KEY`). Repeatable |
@@ -114,6 +115,14 @@ Flat roots support pre-boot patches and local snapshots. Patches change only the
 <Tooltip tip="Published ports bind on the computer running the local backend and are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 Ports bind to `127.0.0.1` by default. Use an explicit address to expose them beyond localhost. Windows may prompt for firewall access.
+
+Each published TCP port's host listener queues up to 1,024 connections that the runtime has not yet accepted. Connections that arrive while the queue is full never reach the sandbox, so a burst larger than the queue — for example a reverse proxy opening one upstream connection per request for a page that loads many assets at once — can fail at the proxy. Set `--tcp-listen-backlog` to change the depth for every published TCP port of the sandbox:
+
+```bash
+msb create node --name web -p 127.0.0.1:3000:3000 --tcp-listen-backlog 4096
+```
+
+The host kernel caps the queue at its own limit: `net.core.somaxconn` on Linux (4,096 by default) and `kern.ipc.somaxconn` on macOS (128 by default). A larger value is accepted but has no further effect until that limit is raised. The setting requires a runtime that supports it; the SDK refuses to launch an older runtime rather than silently ignoring it.
 
 ### VSock
 
@@ -246,6 +255,7 @@ msb snap restore ./saved.msb --name disk-copy --disk-only
 | `--allow-missing-resources` | Resume with missing external filesystems or additional disks unavailable, with warnings; full restore otherwise requires their bindings |
 | `-v`, `--volume` | Bind `SOURCE:GUEST[:OPTIONS]`, or select a private captured disk with `GUEST` alone |
 | `-p`, `--port` | Publish `[BIND:]HOST:GUEST[/tcp\|udp]` |
+| `--tcp-listen-backlog` | Accept-queue depth for the child's published TCP ports (default: `1024`) |
 | `--vsock` | Bind `HOST_PATH:PORT[/stream\|/dgram]` |
 | `--external-mount-policy` | Validate supplied mappings: `strict` (default) or `relaxed` |
 | `--dangerously-inherit-resources` | Inherit unspecified host bindings; may share host resources |
@@ -358,7 +368,7 @@ msb branch devbox --names worker-{1..10} # Bash/Zsh expand the names
 
 Both branch forms accept `--guest-flush auto|required|skip`. Auto and skip preserve dirty memory without flushing root or owned block filesystems; required adds writeback. Host-backed directory synchronization and host disk barriers remain in effect.
 
-Volume, port, user, vsock, inheritance, and mount-policy flags match [`restore`](#msb-restore).
+Volume, port, TCP listen backlog, user, vsock, inheritance, and mount-policy flags match [`restore`](#msb-restore).
 
 Batch branching captures once. Results follow input order; failed children produce a nonzero exit status without removing successful ones.
 

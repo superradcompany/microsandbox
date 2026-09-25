@@ -95,6 +95,30 @@ func TestRestoreConnectionLimitsPreserveExplicitZero(t *testing.T) {
 	}
 }
 
+func TestRestoreTCPListenBacklogReachesFFI(t *testing.T) {
+	var config RestoreConfig
+	WithRestoreTCPListenBacklog(4096)(&config)
+	encoded, err := json.Marshal(buildFFIRestoreOptions("baseline", config))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(encoded, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["tcp_listen_backlog"] != float64(4096) {
+		t.Fatalf("tcp_listen_backlog lost: %s", encoded)
+	}
+
+	encoded, err = json.Marshal(buildFFIRestoreOptions("baseline", RestoreConfig{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "tcp_listen_backlog") {
+		t.Fatalf("unset backlog reached the wire: %s", encoded)
+	}
+}
+
 func TestRestoreRejectsDuplicateTCPAliasesBeforeFFI(t *testing.T) {
 	// Matching values are also ambiguous: reject both spellings instead of
 	// letting option order silently select which limit reaches the runtime.

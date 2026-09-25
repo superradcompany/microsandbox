@@ -623,6 +623,11 @@ pub struct NetworkSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_udp_connections: Option<usize>,
 
+    /// Accept-queue depth for published TCP port listeners, `1..=2147483647`. Omitted is 1024.
+    /// The host kernel clamps it to `net.core.somaxconn` (Linux) or `kern.ipc.somaxconn` (macOS).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tcp_listen_backlog: Option<u32>,
+
     /// Local network rate limits. Missing means unlimited in both directions.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[config_patch(nested)]
@@ -1809,6 +1814,7 @@ impl Default for NetworkSpec {
             secrets: None,
             max_tcp_connections: None,
             max_udp_connections: None,
+            tcp_listen_backlog: None,
             rate_limiter: None,
             trust_host_cas: false,
             outbound_proxy: None,

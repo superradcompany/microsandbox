@@ -595,6 +595,10 @@ fn reject_dropped_cloud_create_fields(config: &SandboxConfig) -> MicrosandboxRes
     if config.spec.network.outbound_proxy.is_some() {
         return Err(unsupported("network.outbound_proxy"));
     }
+    // Tunes published-port listeners, which the cloud create contract does not carry.
+    if config.spec.network.tcp_listen_backlog.is_some() {
+        return Err(unsupported("network.tcp_listen_backlog"));
+    }
 
     if config
         .spec
@@ -1649,6 +1653,14 @@ mod tests {
         });
 
         assert_unsupported_config_field(config, "network.outbound_proxy");
+    }
+
+    #[test]
+    fn cloud_create_request_rejects_tcp_listen_backlog() {
+        let mut config = base_cloud_config();
+        config.spec.network.tcp_listen_backlog = Some(4096);
+
+        assert_unsupported_config_field(config, "network.tcp_listen_backlog");
     }
 
     #[test]
