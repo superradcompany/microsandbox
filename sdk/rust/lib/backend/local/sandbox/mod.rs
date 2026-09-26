@@ -1655,20 +1655,22 @@ mod tests {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         let listener = tokio::net::UnixListener::bind(path).unwrap();
         let server = tokio::spawn(async move {
-            // The mutation arrives first. Ordinary observational APIs retain their projection.
-            for operation in ["pause", "pause_state", "pause_state"] {
+            // Capability discovery is read-only and precedes the mutation. Ordinary
+            // observational APIs retain their projection after the selected session is cached.
+            for operation in ["capabilities", "pause", "pause_state", "pause_state"] {
                 let (stream, _) = listener.accept().await.unwrap();
                 let mut stream = BufReader::new(stream);
                 let mut line = String::new();
                 stream.read_line(&mut line).await.unwrap();
                 assert_eq!(line, format!("{{\"op\":\"{operation}\"}}\n"));
-                stream
-                    .get_mut()
-                    .write_all(
-                        b"{\"ok\":true,\"pause\":{\"paused\":true,\"recovery_required\":false}}\n",
-                    )
-                    .await
-                    .unwrap();
+                let response = if operation == "capabilities" {
+                    b"{\"ok\":true,\"capabilities\":{\"root_disk_grow\":false,\"cpu_resize\":true,\"memory_resize\":true,\"secrets_update\":false}}\n"
+                        .as_slice()
+                } else {
+                    b"{\"ok\":true,\"pause\":{\"paused\":true,\"recovery_required\":false}}\n"
+                        .as_slice()
+                };
+                stream.get_mut().write_all(response).await.unwrap();
             }
         });
         let backend_dyn: Arc<dyn Backend> = backend;

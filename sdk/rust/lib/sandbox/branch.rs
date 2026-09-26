@@ -4,9 +4,11 @@
 use std::path::Path;
 use std::sync::Arc;
 
+#[cfg(all(feature = "local", not(target_os = "linux")))]
+use microsandbox_control_client::CreateBranch;
 #[cfg(feature = "local")]
 use microsandbox_runtime::checkpoint::LocalBranchState;
-#[cfg(feature = "local")]
+#[cfg(all(feature = "local", target_os = "linux"))]
 use microsandbox_runtime::control::ControlRequest;
 #[cfg(feature = "local")]
 use microsandbox_runtime::launch::{CheckpointRestoreConfig, RootfsUpperLayerConfig};
@@ -348,32 +350,28 @@ pub(super) async fn prepare_branch(
     }
     config.external_mount_policy = options.external_mount_policy;
     config.creation_progress = options.creation_progress;
-    let capabilities =
-        modify::control_request_for_run(local, source, run, "{\"op\":\"capabilities\"}\n".into())
-            .await?;
-    if !capabilities.capabilities.is_some_and(|c| c.branch_create) {
+    let session = modify::control_session_for_run(local, source, run).await?;
+    let capabilities = session.capabilities();
+    if !capabilities.branch_create {
         return Err(MicrosandboxError::Runtime(
             "source runtime does not support direct local branching".into(),
         ));
     }
-    if !capabilities
-        .capabilities
-        .is_some_and(|c| c.optional_disk_integrity)
-    {
+    if !capabilities.optional_disk_integrity {
         return Err(MicrosandboxError::Runtime(
             "source runtime lacks optional disk integrity; restart with the matching runtime"
                 .into(),
         ));
     }
     #[cfg(target_os = "linux")]
-    if !capabilities.capabilities.is_some_and(|c| c.branch_memfd) {
+    if !capabilities.branch_memfd {
         return Err(MicrosandboxError::Runtime("source runtime lacks the memory-descriptor branch handoff; restart with the matching runtime".into()));
     }
     config.spec.name = name;
     config.replace_existing = false;
     config.spec.patches.clear();
     config.branch_source = Some(super::identity::BranchSource {
-        guest_flush: modify::capture_flush_policy(capabilities.capabilities, guest_flush, false)?,
+        guest_flush: modify::capture_flush_policy(Some(capabilities), guest_flush, false)?,
         batch: None,
         record_integrity,
         name: source.into(),
@@ -420,7 +418,7 @@ pub(crate) async fn capture_child(
     )?;
     tokio::fs::write(child.join(".branch-reservation"), &id).await?;
     #[cfg(not(target_os = "linux"))]
-    let request = ControlRequest::BranchCreate {
+    let request = microsandbox_protocol::control::BranchCreate {
         guest_flush: source.guest_flush,
         record_integrity,
         branch_id: id.clone(),
@@ -440,6 +438,13 @@ pub(crate) async fn capture_child(
         memory_cache_dir: local.cache_dir().join("memory"),
         backing: None,
     };
+    #[cfg(not(target_os = "linux"))]
+    let response = modify::control_session_for_run(local, &source.name, source.run)
+        .await?
+        .request(&CreateBranch(request))
+        .await
+        .map_err(MicrosandboxError::ControlClient)?;
+    #[cfg(target_os = "linux")]
     let response = modify::control_request_for_run_with_memory(
         local,
         &source.name,
@@ -451,7 +456,11 @@ pub(crate) async fn capture_child(
     local.validate_control_run(&source.name, source.run).await?;
     lineage.validate_source(local, &source.name).await?;
     let closure = child.join(".branch-restore");
-    if response.branch.as_ref() != Some(&closure) {
+    #[cfg(target_os = "linux")]
+    let response_path = response.branch.as_ref();
+    #[cfg(not(target_os = "linux"))]
+    let response_path = Some(&response.path);
+    if response_path != Some(&closure) {
         return Err(MicrosandboxError::Runtime(
             "branch returned an unexpected handoff path".into(),
         ));

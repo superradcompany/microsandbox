@@ -1,5 +1,6 @@
 //! Resident pause/resume through the existing host control endpoint.
 
+use microsandbox_control_client::{GetPauseState, PauseRuntime, ResumeRuntime};
 use microsandbox_runtime::control::ControlRequest;
 
 use crate::backend::sandbox::SandboxIdentity;
@@ -154,16 +155,17 @@ pub(crate) async fn projected_status(
     }
     // Old runtimes have no pause endpoint. Bound observation so a busy or unavailable host
     // never makes ordinary list/get wait for an entire checkpoint operation.
-    let request = modify::control_request_for(local, name, "{\"op\":\"pause_state\"}\n".into());
+    let request = async {
+        let session = local.control_session(name).await?.ok_or_else(|| {
+            MicrosandboxError::Runtime("runtime control endpoint is unavailable".into())
+        })?;
+        session
+            .request(&GetPauseState)
+            .await
+            .map_err(MicrosandboxError::ControlClient)
+    };
     match tokio::time::timeout(std::time::Duration::from_millis(250), request).await {
-        Ok(Ok(response))
-            if response
-                .pause
-                .as_ref()
-                .is_some_and(|state| state.paused || state.recovery_required) =>
-        {
-            super::SandboxStatus::Paused
-        }
+        Ok(Ok(state)) if state.paused || state.recovery_required => super::SandboxStatus::Paused,
         _ => status,
     }
 }
@@ -188,26 +190,41 @@ async fn lifecycle(
     let _transition =
         LocalBackend::acquire_sandbox_transition_guard(&local.config().run_dir(), name).await?;
     let run = local.control_run_identity(name, expected_id).await?;
+    let session = modify::control_session_for_run(local, name, run).await?;
     if matches!(request, ControlRequest::PauseWithGuestFlush { .. }) {
-        let capabilities =
-            modify::control_request_for_run(local, name, run, "{\"op\":\"capabilities\"}\n".into())
-                .await?;
         // Even Auto is explicit on this new entry point; unknown runtimes must refuse.
-        if !capabilities
-            .capabilities
-            .is_some_and(|caps| caps.guest_flush_policy)
-        {
+        if !session.capabilities().guest_flush_policy {
             return Err(MicrosandboxError::unsupported(operation,
                 crate::UnsupportedReason::NotAvailable("source runtime does not support guest-flush pause; restart with an updated runtime".into())));
         }
     }
     // The mutation itself is authoritative. Unknown operations fail on older runtimes, and
     // successful replies must carry pause state; neither case can silently become a no-op.
-    let line = format!("{}\n", serde_json::to_string(&request)?);
-    let response = modify::control_request_for_run(local, name, run, line).await?;
-    let state = response
-        .pause
-        .ok_or_else(|| MicrosandboxError::Runtime("control response omitted pause state".into()))?;
+    let state = match request {
+        ControlRequest::Pause => session
+            .request(&PauseRuntime::default())
+            .await
+            .map_err(MicrosandboxError::ControlClient)?,
+        ControlRequest::PauseWithGuestFlush { guest_flush } => session
+            .request(&PauseRuntime(microsandbox_protocol::control::Pause {
+                guest_flush: Some(guest_flush),
+            }))
+            .await
+            .map_err(MicrosandboxError::ControlClient)?,
+        ControlRequest::Resume => session
+            .request(&ResumeRuntime)
+            .await
+            .map_err(MicrosandboxError::ControlClient)?,
+        ControlRequest::PauseState => session
+            .request(&GetPauseState)
+            .await
+            .map_err(MicrosandboxError::ControlClient)?,
+        _ => {
+            return Err(MicrosandboxError::Runtime(
+                "invalid resident lifecycle operation".into(),
+            ));
+        }
+    };
     // An acknowledgement must confirm the requested transition, not just contain some
     // observation. State inspection itself must still be able to report recovery required.
     let expected = match request {
@@ -220,7 +237,11 @@ async fn lifecycle(
             "control response did not confirm the requested pause transition".into(),
         ));
     }
-    Ok(state)
+    Ok(SandboxPauseState {
+        paused: state.paused,
+        recovery_required: state.recovery_required,
+        capture_unavailable: state.capture_unavailable,
+    })
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -285,7 +306,18 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let listener = tokio::net::UnixListener::bind(path).unwrap();
         let server = tokio::spawn(async move {
-            // Each observation is one exchange; it needs no capabilities preflight.
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut stream = BufReader::new(stream);
+            let mut line = String::new();
+            stream.read_line(&mut line).await.unwrap();
+            assert_eq!(line, "{\"op\":\"capabilities\"}\n");
+            stream
+                .get_mut()
+                .write_all(b"{\"ok\":true,\"capabilities\":{\"cpu_resize\":true,\"memory_resize\":true,\"secrets_update\":true,\"pause_resume\":true}}\n")
+                .await
+                .unwrap();
+            // The retained session reuses the read-only discovery result, while each JSON
+            // observation still gets its own authenticated unary connection.
             for _ in 0..2 {
                 let (stream, _) = listener.accept().await.unwrap();
                 let mut stream = BufReader::new(stream);
@@ -375,6 +407,16 @@ mod tests {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             let listener = tokio::net::UnixListener::bind(path).unwrap();
             let server = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut stream = BufReader::new(stream);
+                let mut line = String::new();
+                stream.read_line(&mut line).await.unwrap();
+                assert_eq!(line, "{\"op\":\"capabilities\"}\n");
+                stream
+                    .get_mut()
+                    .write_all(b"{\"ok\":true,\"capabilities\":{\"cpu_resize\":true,\"memory_resize\":true,\"secrets_update\":true,\"pause_resume\":true}}\n")
+                    .await
+                    .unwrap();
                 let (stream, _) = listener.accept().await.unwrap();
                 let mut stream = BufReader::new(stream);
                 let mut line = String::new();

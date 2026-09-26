@@ -8,7 +8,10 @@ export * from "./connection.js";
 export * from "./json-client.js";
 export { JsonReply, type ControlMode } from "./json-reply.js";
 export { JsonNumber, type JsonObject, type JsonValue } from "./json-value.js";
-export type { CheckedControlRequest, LegacyControlRequest } from "./legacy-request.js";
+export type {
+  AnyControlRequest, CheckedControlRequest, CompatibleControlRequest, ExtendedLegacyControlRequest,
+  LegacyControlRequest,
+} from "./legacy-request.js";
 export type { VerifiedControlConnector } from "./dialer.js";
 export * from "@microsandbox/types/size";
 export {

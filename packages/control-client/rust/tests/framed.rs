@@ -34,7 +34,11 @@ async fn welcome(server: &mut DuplexStream, max_in_flight: u32) {
 }
 
 fn message(name: &str, payload: &impl serde::Serialize) -> Message {
-    let frame = Envelope::new(1, name, payload)
+    message_at(1, name, payload)
+}
+
+fn message_at(generation: u8, name: &str, payload: &impl serde::Serialize) -> Message {
+    let frame = Envelope::new(generation, name, payload)
         .unwrap()
         .frame(17, 1)
         .unwrap();
@@ -125,6 +129,84 @@ async fn framed_setup_is_direct_and_multiple_operations_share_one_connection() {
 }
 
 #[tokio::test]
+async fn generation_two_is_negotiated_and_carries_typed_operations() {
+    let (stream, mut server) = tokio::io::duplex(8192);
+    let peer = tokio::spawn(async move {
+        welcome(&mut server, 64).await;
+        let request = codec::read_raw_frame(&mut server).await.unwrap();
+        let envelope = Envelope::decode(&request.body).unwrap();
+        assert_eq!((envelope.v, envelope.t.as_str()), (2, "control.pause"));
+        assert_eq!(envelope.payload::<Pause>().unwrap(), Pause::default());
+        codec::write_raw_frame(
+            &mut server,
+            &Envelope::new(
+                2,
+                "control.pause.state",
+                &PauseState {
+                    paused: true,
+                    recovery_required: false,
+                    capture_unavailable: None,
+                },
+            )
+            .unwrap()
+            .frame(request.id, 1)
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    });
+    let client = ControlClient::connect_stream(stream).await.unwrap();
+    assert_eq!(client.ready().welcome.generation, 2);
+    assert!(
+        client
+            .request_typed(&PauseRuntime::default())
+            .await
+            .unwrap()
+            .paused
+    );
+    client.close().await;
+    peer.await.unwrap();
+}
+
+#[tokio::test]
+async fn generation_one_rejects_generation_two_operations_before_writing() {
+    let (stream, mut server) = tokio::io::duplex(8192);
+    let peer = tokio::spawn(async move {
+        let offer = hello(&mut server).await;
+        let selected = ControlWelcome {
+            protocol: CONTROL_PROTOCOL.into(),
+            generation: 1,
+            max_frame_size: offer.max_frame_size,
+            max_in_flight: offer.max_in_flight,
+        };
+        codec::write_raw_frame(
+            &mut server,
+            &Envelope::new(1, "control.welcome", &selected)
+                .unwrap()
+                .frame(0, 1)
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        let mut byte = [0];
+        assert_eq!(server.read(&mut byte).await.unwrap(), 0);
+    });
+    let client = ControlClient::connect_stream(stream).await.unwrap();
+    let error = client
+        .request_typed(&PauseRuntime::default())
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        ControlClientError::Client(error)
+            if error.kind == ErrorKind::UnsupportedOperation
+                && error.delivery == Delivery::NotSent
+    ));
+    client.close().await;
+    peer.await.unwrap();
+}
+
+#[tokio::test]
 async fn invalid_welcome_never_admits_an_application_request() {
     for case in 0..8 {
         let (stream, mut server) = tokio::io::duplex(8192);
@@ -136,7 +218,7 @@ async fn invalid_welcome_never_admits_an_application_request() {
             let mut generation = 1;
             match case {
                 0 => selected.protocol = "other".into(),
-                1 => selected.generation = 2,
+                1 => selected.generation = 3,
                 2 => selected.max_frame_size = 4095,
                 3 => selected.max_frame_size = 4 * 1024 * 1024 + 1,
                 4 => selected.max_in_flight = 65,
@@ -289,6 +371,101 @@ fn all_checked_operations_use_shared_records_and_full_width_values() {
             .decode(message("control.memory.state", &memory()))
             .unwrap(),
         memory()
+    );
+}
+
+#[test]
+fn generation_two_checked_operations_use_stable_names_and_typed_results() {
+    let checkpoint = CreateCheckpoint(CheckpointCreate {
+        guest_flush: None,
+        record_integrity: true,
+        checkpoint_id: "full-1".into(),
+        intent: CheckpointCaptureIntent::FullSnapshot,
+    });
+    assert_eq!(
+        checkpoint.message().unwrap().message_type,
+        "control.checkpoint.create"
+    );
+    assert_eq!(
+        CreateDiskCheckpoint(DiskCheckpointCreate {
+            guest_flush: None,
+            checkpoint_id: "disk-1".into(),
+        })
+        .message()
+        .unwrap()
+        .message_type,
+        "control.disk.checkpoint.create"
+    );
+    assert_eq!(
+        CreateBranch(BranchCreate {
+            guest_flush: None,
+            record_integrity: false,
+            branch_id: "branch-1".into(),
+            child_name: "child".into(),
+            memory_cache_dir: "/cache".into(),
+        })
+        .message()
+        .unwrap()
+        .message_type,
+        "control.branch.create"
+    );
+    assert_eq!(
+        PauseRuntime::default().message().unwrap().message_type,
+        "control.pause"
+    );
+    assert_eq!(
+        ResumeRuntime.message().unwrap().message_type,
+        "control.resume"
+    );
+    assert_eq!(
+        GetPauseState.message().unwrap().message_type,
+        "control.pause.state"
+    );
+
+    let grow = GrowRootDisk(RootDiskGrow {
+        size_bytes: u64::MAX,
+    });
+    let encoded = grow.message().unwrap();
+    assert_eq!(encoded.message_type, "control.root-disk.grow");
+    assert_eq!(
+        wire::decode_record::<RootDiskGrow>(&encoded.payload)
+            .unwrap()
+            .size_bytes,
+        u64::MAX
+    );
+    let compact = CompactDisks(DiskCompact {
+        target: Default::default(),
+        layers: Some(u64::MAX),
+        dry_run: true,
+    });
+    assert_eq!(
+        compact.message().unwrap().message_type,
+        "control.disk.compact"
+    );
+
+    let pause = PauseState {
+        paused: true,
+        recovery_required: false,
+        capture_unavailable: None,
+    };
+    assert_eq!(
+        PauseRuntime::default()
+            .decode(message_at(2, "control.pause.state", &pause))
+            .unwrap(),
+        pause
+    );
+    let caps = RuntimeCapabilities {
+        pause_resume: true,
+        cpu_resize: true,
+        memory_resize: true,
+        secrets_update: true,
+        ..Default::default()
+    };
+    assert_eq!(
+        GetRuntimeCapabilities
+            .decode(message_at(2, "control.capabilities.result", &caps))
+            .unwrap(),
+        caps
     );
 }
 

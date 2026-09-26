@@ -132,6 +132,20 @@ async fn json_peer(mut stream: DuplexStream, expected: &str, reply: &[u8]) {
     stream.write_all(b"\n").await.unwrap();
 }
 
+async fn extended_json_peer(mut stream: DuplexStream, expected: serde_json::Value, reply: &[u8]) {
+    let mut line = Vec::new();
+    BufReader::new(&mut stream)
+        .read_until(b'\n', &mut line)
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&line).unwrap(),
+        expected
+    );
+    stream.write_all(reply).await.unwrap();
+    stream.write_all(b"\n").await.unwrap();
+}
+
 async fn welcome(peer: &mut DuplexStream) {
     let raw = codec::read_raw_frame(peer).await.unwrap();
     assert_eq!((raw.id, raw.flags), (0, 0));
@@ -139,6 +153,28 @@ async fn welcome(peer: &mut DuplexStream) {
     assert_eq!(envelope.t, "control.hello");
     let hello: ControlHello = envelope.payload().unwrap();
     let selected = ControlWelcome::negotiate(&hello, 64).unwrap();
+    codec::write_raw_frame(
+        peer,
+        &Envelope::new(1, "control.welcome", &selected)
+            .unwrap()
+            .frame(0, 1)
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+}
+
+async fn generation_one_welcome(peer: &mut DuplexStream) {
+    let raw = codec::read_raw_frame(peer).await.unwrap();
+    let envelope = Envelope::decode(&raw.body).unwrap();
+    let hello: ControlHello = envelope.payload().unwrap();
+    assert_eq!((hello.min_generation, hello.max_generation), (1, 2));
+    let selected = ControlWelcome {
+        protocol: CONTROL_PROTOCOL.into(),
+        generation: 1,
+        max_frame_size: hello.max_frame_size,
+        max_in_flight: hello.max_in_flight.min(64),
+    };
     codec::write_raw_frame(
         peer,
         &Envelope::new(1, "control.welcome", &selected)
@@ -160,6 +196,41 @@ fn assert_local(error: ControlClientError, kind: ErrorKind, delivery: Delivery) 
 //--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
+
+#[tokio::test]
+async fn generation_two_mutation_routes_to_json_before_sending_to_a_generation_one_peer() {
+    let (connector, mut peers) = QueueConnector::new(4);
+    let operation = peers.pop().unwrap();
+    let rediscovery = peers.pop().unwrap();
+    let mut framed = peers.pop().unwrap();
+    let discovery = peers.pop().unwrap();
+    let peer = tokio::spawn(async move {
+        json_peer(discovery, "capabilities", FRAMED_CAPS).await;
+        generation_one_welcome(&mut framed).await;
+        json_peer(rediscovery, "capabilities", FRAMED_CAPS).await;
+        extended_json_peer(
+            operation,
+            serde_json::json!({"op": "pause"}),
+            br#"{"ok":true,"pause":{"paused":true,"recovery_required":false}}"#,
+        )
+        .await;
+        let mut byte = [0];
+        assert_eq!(framed.read(&mut byte).await.unwrap(), 0);
+    });
+
+    let connection = ControlConnection::connect_connector(connector.clone())
+        .await
+        .unwrap();
+    assert_eq!(connection.mode(), ControlMode::Framed);
+    let state = connection
+        .request_typed(&PauseRuntime::default())
+        .await
+        .unwrap();
+    assert!(state.paused);
+    connection.close().await;
+    assert_eq!(connector.dials.load(Ordering::SeqCst), 4);
+    peer.await.unwrap();
+}
 
 #[test]
 fn json_numbers_unknown_fields_and_original_bytes_are_lossless() {

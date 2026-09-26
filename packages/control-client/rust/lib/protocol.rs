@@ -5,8 +5,9 @@ use std::sync::Arc;
 use microsandbox_protocol::{
     codec::{self, RawFrame},
     control::{
-        CONTROL_GENERATION, ControlError, ControlHello, ControlWelcome, DEFAULT_MAX_IN_FLIGHT,
-        DEFAULT_REQUEST_TIMEOUT, DEFAULT_SETUP_TIMEOUT, MAX_HANDSHAKE_FRAME_SIZE,
+        CONTROL_HANDSHAKE_GENERATION, ControlError, ControlHello, ControlWelcome,
+        DEFAULT_MAX_IN_FLIGHT, DEFAULT_REQUEST_TIMEOUT, DEFAULT_SETUP_TIMEOUT,
+        MAX_HANDSHAKE_FRAME_SIZE, control_message_min_generation,
     },
     wire::Envelope,
 };
@@ -58,8 +59,8 @@ impl Protocol for ControlProtocol {
             hello
                 .validate()
                 .map_err(|_| ClientError::new(ErrorKind::InvalidOptions))?;
-            let opening =
-                Envelope::new(CONTROL_GENERATION, "control.hello", &hello)?.frame(0, 0)?;
+            let opening = Envelope::new(CONTROL_HANDSHAKE_GENERATION, "control.hello", &hello)?
+                .frame(0, 0)?;
             codec::write_raw_frame(&mut stream, &opening)
                 .await
                 .map_err(|error| match error {
@@ -78,7 +79,7 @@ impl Protocol for ControlProtocol {
             stream.read_exact(&mut body).await?;
             let frame = RawFrame { id, flags, body };
             let envelope = Envelope::decode(&frame.body)?;
-            if frame.id != 0 || frame.flags != 1 || envelope.v != CONTROL_GENERATION {
+            if frame.id != 0 || frame.flags != 1 || envelope.v != CONTROL_HANDSHAKE_GENERATION {
                 return Err(ClientError::new(ErrorKind::InvalidData));
             }
             if envelope.t == "control.error" {
@@ -123,6 +124,11 @@ impl Protocol for ControlProtocol {
         // Setup messages cannot be sent as ordinary named operations. Unknown
         // extensions remain possible; raw callers can inspect any wire shape.
         if matches!(wire_name, "control.hello" | "control.welcome") {
+            return Err(ClientError::new(ErrorKind::UnsupportedOperation));
+        }
+        if control_message_min_generation(wire_name)
+            .is_some_and(|minimum| minimum > ready.welcome.generation)
+        {
             return Err(ClientError::new(ErrorKind::UnsupportedOperation));
         }
         Ok(SendMetadata {

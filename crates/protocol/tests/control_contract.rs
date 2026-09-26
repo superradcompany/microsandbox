@@ -43,7 +43,11 @@ fn raw_case(name: &str, raw: codec::RawFrame) -> JsonValue {
 }
 
 fn fixtures() -> JsonValue {
-    let hello = ControlHello::default();
+    let hello = ControlHello {
+        min_generation: 1,
+        max_generation: 1,
+        ..Default::default()
+    };
     let welcome = ControlWelcome::negotiate(&hello, DEFAULT_MAX_IN_FLIGHT).unwrap();
     let mut cases = vec![
         case(
@@ -446,7 +450,7 @@ fn handshake_limits_and_generation_are_validated_in_both_directions() {
             welcome.max_frame_size,
             welcome.max_in_flight
         ),
-        (1, 8192, 4)
+        (2, 8192, 4)
     );
     welcome.validate_for(&hello).unwrap();
     let mut bad = welcome.clone();
@@ -458,7 +462,7 @@ fn handshake_limits_and_generation_are_validated_in_both_directions() {
     bad = welcome;
     bad.generation = 8;
     assert!(bad.validate_for(&hello).is_err());
-    hello.min_generation = 2;
+    hello.min_generation = 3;
     assert_eq!(
         ControlWelcome::negotiate(&hello, 64).unwrap_err().code,
         "unsupported_generation"
@@ -566,4 +570,102 @@ fn envelope_requires_a_byte_string_and_preserves_unknown_names() {
     let decoded = Envelope::decode(&valid).unwrap();
     assert_eq!(decoded.t, "future.message");
     assert_eq!(decoded.p, vec![0xff, 0, 0x7f]);
+}
+
+#[test]
+fn generation_two_inventory_and_requests_are_additive() {
+    let mut names = CONTROL_GENERATION_TWO_MESSAGES.to_vec();
+    names.sort_unstable();
+    names.dedup();
+    assert_eq!(names.len(), CONTROL_GENERATION_TWO_MESSAGES.len());
+    assert!(
+        names
+            .iter()
+            .all(|name| control_message_min_generation(name) == Some(2))
+    );
+
+    let requests = [
+        Envelope::new(
+            2,
+            "control.checkpoint.create",
+            &CheckpointCreate {
+                guest_flush: None,
+                record_integrity: true,
+                checkpoint_id: "full-1".into(),
+                intent: CheckpointCaptureIntent::FullSnapshot,
+            },
+        )
+        .unwrap(),
+        Envelope::new(
+            2,
+            "control.disk.checkpoint.create",
+            &DiskCheckpointCreate {
+                guest_flush: None,
+                checkpoint_id: "disk-1".into(),
+            },
+        )
+        .unwrap(),
+        Envelope::new(
+            2,
+            "control.branch.create",
+            &BranchCreate {
+                guest_flush: None,
+                record_integrity: false,
+                branch_id: "branch-1".into(),
+                child_name: "child".into(),
+                memory_cache_dir: "/cache".into(),
+            },
+        )
+        .unwrap(),
+        Envelope::new(2, "control.pause", &Pause::default()).unwrap(),
+        Envelope::new(2, "control.resume", &Empty {}).unwrap(),
+        Envelope::new(2, "control.pause.state", &Empty {}).unwrap(),
+        Envelope::new(
+            2,
+            "control.root-disk.grow",
+            &RootDiskGrow {
+                size_bytes: u64::MAX,
+            },
+        )
+        .unwrap(),
+        Envelope::new(
+            2,
+            "control.disk.compact",
+            &DiskCompact {
+                target: microsandbox_types::DiskCompactionTarget::Disk {
+                    guest_path: "/data".into(),
+                },
+                layers: Some(u64::MAX),
+                dry_run: true,
+            },
+        )
+        .unwrap(),
+    ];
+    for request in requests {
+        assert!(ControlOperation::from_envelope(&request, 2).is_ok());
+        let mut generation_one = request;
+        generation_one.v = 1;
+        assert!(ControlOperation::from_envelope(&generation_one, 1).is_err());
+    }
+}
+
+#[test]
+fn generation_two_rejects_duplicate_nested_compaction_selectors() {
+    let target = Value::Map(vec![
+        field("kind", "disk".into()),
+        field("guest_path", "/first".into()),
+        field("guest_path", "/second".into()),
+    ]);
+    let envelope = Envelope {
+        v: 2,
+        t: "control.disk.compact".into(),
+        p: bytes(&Value::Map(vec![
+            field("target", target),
+            field("dry_run", true.into()),
+        ])),
+    };
+    assert_eq!(
+        ControlOperation::from_envelope(&envelope, 2).unwrap_err(),
+        WireError::DuplicateKey
+    );
 }

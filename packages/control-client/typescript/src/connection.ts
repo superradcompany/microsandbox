@@ -5,12 +5,19 @@ import type { ControlDialer, VerifiedControlConnector } from "./dialer.js";
 import { ControlClientError } from "./error.js";
 import { JsonSession } from "./json-session.js";
 import type { ControlMode, JsonReply } from "./json-reply.js";
-import { nativeJsonRequest, type CheckedControlRequest } from "./legacy-request.js";
-import { DEFAULT_REQUEST_TIMEOUT_MS, DEFAULT_SETUP_TIMEOUT_MS, type Capabilities } from "./records.js";
+import { nativeJsonRequest, requestMinGeneration, type AnyControlRequest } from "./legacy-request.js";
+import {
+  DEFAULT_REQUEST_TIMEOUT_MS, DEFAULT_SETUP_TIMEOUT_MS,
+  type Capabilities, type RuntimeCapabilities,
+} from "./records.js";
 import { ControlProtocol } from "./protocol.js";
 
 export type ControlReply = { kind: "cbor"; frame: InboundFrame } | { kind: "json"; reply: JsonReply };
-type Session = { dialer: ControlDialer; options: ConnectOptions; json: JsonSession; framed?: ControlClient; closed: AbortController; capabilities: Readonly<Capabilities> };
+type Session = {
+  dialer: ControlDialer; options: ConnectOptions; json: JsonSession; framed?: ControlClient;
+  closed: AbortController; capabilities: Readonly<Capabilities>;
+  runtimeCapabilities: Readonly<RuntimeCapabilities>;
+};
 
 /** Shared automatic discovery; JSON and CBOR keep their actual reply formats. */
 export class ControlConnection {
@@ -22,7 +29,7 @@ export class ControlConnection {
     return this.establish({ connector, verifier: connector }, options);
   }
   private static async establish(dialer: ControlDialer, options: ConnectOptions): Promise<ControlConnection> {
-    const json = new JsonSession(dialer, options, true);
+    const json = new JsonSession(dialer, options, "json");
     const attempt = new ControlAttempt(options.setupTimeoutMs ?? DEFAULT_SETUP_TIMEOUT_MS, [options.signal]);
     let framed: ControlClient | undefined;
     let transport: ByteTransport | undefined;
@@ -40,7 +47,14 @@ export class ControlConnection {
         transport = undefined; // The generic reader/writer now own the stream.
       }
       attempt.check();
-      return new ControlConnection({ dialer, options: json.options, json, framed, closed: new AbortController(), capabilities: Object.freeze(capabilities) });
+      const generationOne = {
+        root_disk_grow: capabilities.root_disk_grow, cpu_resize: capabilities.cpu_resize,
+        memory_resize: capabilities.memory_resize, secrets_update: capabilities.secrets_update,
+      };
+      return new ControlConnection({
+        dialer, options: json.options, json, framed, closed: new AbortController(),
+        capabilities: Object.freeze(generationOne), runtimeCapabilities: Object.freeze(capabilities),
+      });
     } catch (error) {
       if (transport) await closeTransport(transport);
       await framed?.close(); await json.close();
@@ -52,6 +66,8 @@ export class ControlConnection {
   get mode(): ControlMode { return this.session.framed ? "cbor" : "json"; }
   /** Validated discovery snapshot; GetCapabilities explicitly requests a fresh observation. */
   get capabilities(): Readonly<Capabilities> { return this.session.capabilities; }
+  /** Complete generation-two capability inventory obtained during discovery. */
+  get runtimeCapabilities(): Readonly<RuntimeCapabilities> { return this.session.runtimeCapabilities; }
   isClosed(): boolean { return this.session.json.isClosed() || (this.session.framed?.isClosed() ?? false); }
   framed(): ControlClient {
     if (!this.session.framed) throw new ControlClientError("unsupported_mode");
@@ -65,8 +81,12 @@ export class ControlConnection {
     if (!this.session.framed) return { kind: "json", reply: await this.session.json.operation(nativeJsonRequest(message), options) };
     return { kind: "cbor", frame: await this.framedOperation(options, remaining => this.session.framed!.request(message, remaining)) };
   }
-  async requestTyped<T>(request: CheckedControlRequest<T>, options: RequestOptions = {}): Promise<T> {
+  async requestTyped<T>(request: AnyControlRequest<T>, options: RequestOptions = {}): Promise<T> {
     if (!this.session.framed) return request.decodeJson(await this.session.json.operation(request.jsonRequest(), options));
+    if (requestMinGeneration(request) > this.session.framed.ready.welcome.generation) {
+      const json = new JsonSession(this.session.dialer, this.session.options, "cbor");
+      return request.decodeJson(await json.operation(request.jsonRequest(), options));
+    }
     return this.framedOperation(options, remaining => this.session.framed!.requestTyped(request, remaining));
   }
   private async framedOperation<T>(options: RequestOptions, operation: (options: RequestOptions) => Promise<T>): Promise<T> {
