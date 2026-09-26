@@ -8,33 +8,75 @@ See [Host sockets](/networking/host-sockets) for guest connection details, platf
 
 <Note>VSock routes are local-only and unavailable with the multi-tenant deployment profile.</Note>
 
-## Typical flow
+## SandboxBuilder
+
+#### <span className="msb-recv">builder.</span><span className="msb-hn">vsock()</span>
 
 ```ruby
-require "microsandbox"
+builder.vsock(host_path, port) # => SandboxBuilder
+```
 
+<Accordion title="Example">
+
+```ruby
 sandbox = Microsandbox::Sandbox.builder("worker")
   .image("alpine")
   .vsock("/run/host-api.sock", 5000)
   .create
 ```
 
-## SandboxBuilder
+</Accordion>
 
-### vsock()
+Expose a host Unix stream socket or local Windows named pipe on host CID `2`. Call repeatedly to add routes; each socket type and port pair must be unique.
 
-```ruby
-builder.vsock(host_path, port) # => SandboxBuilder
-```
+<p className="msb-label">Parameters</p>
 
-Expose a host Unix stream socket or local Windows named pipe on host CID `2` at `port`.
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>host_path</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Absolute path to the host socket or pipe.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>port</code><span className="msb-type">Integer</span></div>
+    <div className="msb-param-desc">Port exposed to the guest.</div>
+  </div>
+</div>
 
-### vsock_dgram()
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">SandboxBuilder</span></div>
+    <div className="msb-param-desc">The builder, for chaining.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">builder.</span><span className="msb-hn">vsock_dgram()</span>
 
 ```ruby
 builder.vsock_dgram(host_path, port) # => SandboxBuilder
 ```
 
-Expose a host Unix datagram socket while preserving datagram boundaries. Datagram routes are unavailable on Windows.
+Expose a host Unix datagram socket while preserving datagram boundaries. Datagram routes are unavailable on Windows. Call repeatedly to add routes; each socket type and port pair must be unique.
 
-Both methods can be called repeatedly to add routes. Host paths must be absolute, and each socket type and port pair must be unique.
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>host_path</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Absolute path to the host socket or pipe.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>port</code><span className="msb-type">Integer</span></div>
+    <div className="msb-param-desc">Port exposed to the guest.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">SandboxBuilder</span></div>
+    <div className="msb-param-desc">The builder, for chaining.</div>
+  </div>
+</div>

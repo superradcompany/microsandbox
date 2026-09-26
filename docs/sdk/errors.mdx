@@ -5,7 +5,7 @@ description: Handle sandbox errors and clean up resources across the microsandbo
 icon: "triangle-exclamation"
 ---
 
-TypeScript, Rust, Python, and Go surface typed errors so you can match specific failure modes instead of parsing strings. TypeScript exposes a dedicated subclass per variant (use `instanceof`). Rust has an `Error` enum, and Python provides dedicated exception classes. Go provides an `*Error` value with an `ErrorKind` discriminator that you match via `m.IsKind(err, kind)` or `errors.As`. Ruby currently exposes `Microsandbox::Error`; where no dedicated subclass exists, its reference documents the stable message contract explicitly.
+TypeScript, Rust, Python, and Go surface typed errors so you can match specific failure modes instead of parsing strings. TypeScript exposes a dedicated subclass per variant (use `instanceof`). Rust has an `Error` enum, and Python provides dedicated exception classes. Go provides an `*Error` value with an `ErrorKind` discriminator that you match via `m.IsKind(err, kind)` or `errors.As`. Ruby v0.7.4 adds typed subclasses of `Microsandbox::Error` with stable `code` strings; failures without a dedicated subclass still use the base class.
 
 ## Matching errors
 
@@ -108,11 +108,12 @@ sb = Microsandbox::Sandbox.connect_or_create("worker", image: "python")
 begin
   output = sb.exec("python", ["script.py"])
   warn "Exit #{output.exit_code}: #{output.stderr}" unless output.success?
+rescue Microsandbox::ExecTimeoutError => error
+  warn "Timed out: #{error.message}"
 rescue Microsandbox::Error => error
   warn error.message
 end
 ```
-
 </CodeGroup>
 
 ## Spawn-time exec failures
@@ -162,20 +163,9 @@ from microsandbox import MicrosandboxError
 
 try:
     output = await sb.exec("nonexistent")
-    # program ran, check output.success / output.exit_code
+    # If the program ran, check output.success and output.exit_code.
 except MicrosandboxError as e:
     print(f"Program could not be started: {e}")
-```
-
-```ruby Ruby
-require "microsandbox"
-
-begin
-  output = sandbox.exec("nonexistent")
-  # program ran, check output.success / output.exit_code
-rescue Microsandbox::Error => e
-  warn "Program could not be started: #{e.message}"
-end
 ```
 
 ```go Go
@@ -209,6 +199,17 @@ for {
         return nil
     }
 }
+```
+
+```ruby Ruby
+require "microsandbox"
+
+begin
+  output = sandbox.exec("nonexistent")
+  # If the program ran, check output.success? and output.exit_code.
+rescue Microsandbox::Error => e
+  warn "Program could not be started: #{e.message}"
+end
 ```
 </CodeGroup>
 
@@ -265,12 +266,10 @@ if m.IsKind(err, m.ErrSandboxAlreadyExists) {
 ```ruby Ruby
 begin
   sb = Microsandbox::Sandbox.create("worker", image: "alpine")
-rescue Microsandbox::Error => error
-  raise unless error.message.include?("already exists")
+rescue Microsandbox::SandboxAlreadyExistsError
   warn "sandbox already exists; use connect_or_create to reuse it or replace: true to recreate it"
 end
 ```
-
 </CodeGroup>
 
 Use `connect_or_create` and its language-specific equivalents to reuse the existing sandbox without changing its configuration. Pass `replace()` / `replace=True` / `replace: true` / `--replace` / `WithReplace()` only when you intend to stop the existing sandbox and create a new one. See [Naming conflicts](/sandboxes/overview#naming-conflicts) for the grace-period setting.
@@ -454,5 +453,4 @@ Microsandbox::Sandbox.with("temp", image: "python", replace: true) do |sandbox|
   puts output.stdout
 end
 ```
-
 </CodeGroup>

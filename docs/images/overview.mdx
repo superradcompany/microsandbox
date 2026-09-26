@@ -50,6 +50,10 @@ sb, err := m.CreateSandbox(ctx, "worker",
     m.WithPullPolicy(m.PullPolicyAlways),
 )
 ```
+
+```ruby Ruby
+sb = Microsandbox::Sandbox.create("worker", image: "python", pull_policy: "always")
+```
 </CodeGroup>
 
 <Tip>

@@ -1,0 +1,325 @@
+---
+title: Execution
+"og:title": Ruby SDK Execution reference
+description: Run commands and collect output with the Ruby SDK.
+---
+
+See [Commands](/sandboxes/commands) for usage examples.
+
+## Sandbox
+
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">exec()</span>
+
+```ruby
+sandbox.exec(command, args = [], **options) # => ExecOutput
+```
+
+<Accordion title="Example">
+
+```ruby
+output = sandbox.exec("printf", ["hello\n"], timeout: 10)
+puts output.stdout
+raise "Command failed" unless output.success?
+```
+
+</Accordion>
+
+Run an executable and collect its output. Shell syntax is not interpreted. Ruby does not expose streaming execution handles.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>command</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Executable to run.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>args</code><span className="msb-type">Array&lt;String&gt;</span></div>
+    <div className="msb-param-desc">Command arguments; defaults to an empty array.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>cwd</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Guest working directory.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>user</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Guest user.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>env</code><span className="msb-type">Hash</span></div>
+    <div className="msb-param-desc">Environment variables.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>timeout</code><span className="msb-type">Numeric</span></div>
+    <div className="msb-param-desc">Finite, non-negative timeout in seconds.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>stdin</code><span className="msb-type">String | :null | :pipe</span></div>
+    <div className="msb-param-desc">Input bytes or stdin mode. Ruby does not expose a writable streaming handle.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>tty</code><span className="msb-type">Boolean</span></div>
+    <div className="msb-param-desc">Allocate a pseudo-terminal.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>rlimits</code><span className="msb-type">Hash</span></div>
+    <div className="msb-param-desc">Resource names mapped to non-negative integer limits.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">ExecOutput</span></div>
+    <div className="msb-param-desc">Collected stdout, stderr, and exit status.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">shell()</span>
+
+```ruby
+sandbox.shell(script, **options) # => ExecOutput
+```
+
+<Accordion title="Example">
+
+```ruby
+output = sandbox.shell("ls /tmp && echo done")
+puts output.stdout
+```
+
+</Accordion>
+
+Run a script through the sandbox's configured shell. Accepts the same per-call options as `exec()`.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>script</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Shell script to execute.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>options</code><span className="msb-type">Hash</span></div>
+    <div className="msb-param-desc">The cwd, user, env, timeout, stdin, tty, and rlimits options documented above.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">ExecOutput</span></div>
+    <div className="msb-param-desc">Collected stdout, stderr, and exit status.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">logs()</span>
+
+```ruby
+sandbox.logs(**options) # => Array<LogEntry>
+```
+
+<Accordion title="Example">
+
+```ruby
+sandbox.logs(tail: 100, sources: [:stdout, :stderr]).each do |entry|
+  puts entry.data
+end
+```
+
+</Accordion>
+
+Collect log entries from the connected sandbox. This does not subscribe to a stream.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>tail</code><span className="msb-type">Integer</span></div>
+    <div className="msb-param-desc">Optional maximum number of recent entries.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>sources</code><span className="msb-type">Array&lt;Symbol | String&gt;</span></div>
+    <div className="msb-param-desc">Optional filter: stdout, stderr, output, or system.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">Array&lt;LogEntry&gt;</span></div>
+    <div className="msb-param-desc">Collected log entries.</div>
+  </div>
+</div>
+
+## ExecOutput
+
+#### <span className="msb-recv">output.</span><span className="msb-hn">stdout</span>
+
+```ruby
+output.stdout # => String
+```
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Collected output bytes.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">output.</span><span className="msb-hn">stderr</span>
+
+```ruby
+output.stderr # => String
+```
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Collected output bytes.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">output.</span><span className="msb-hn">stdout_bytes</span>
+
+```ruby
+output.stdout_bytes # => String
+```
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Binary output aliases.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">output.</span><span className="msb-hn">stderr_bytes</span>
+
+```ruby
+output.stderr_bytes # => String
+```
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Binary output aliases.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">output.</span><span className="msb-hn">exit_code</span>
+
+```ruby
+output.exit_code # => Integer
+```
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">Integer</span></div>
+    <div className="msb-param-desc">Process exit code.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">output.</span><span className="msb-hn">success?</span>
+
+```ruby
+output.success? # => Boolean
+```
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">Boolean</span></div>
+    <div className="msb-param-desc">Whether execution succeeded.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">output.</span><span className="msb-hn">to_h()</span>
+
+```ruby
+output.to_h # => Hash
+```
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">Hash</span></div>
+    <div className="msb-param-desc">String keys: stdout, stderr, exit_code, success.</div>
+  </div>
+</div>
+
+## LogEntry
+
+#### <span className="msb-recv">entry.</span><span className="msb-hn">timestamp</span>
+
+```ruby
+entry.timestamp # => String
+```
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">RFC 3339 timestamp</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">entry.</span><span className="msb-hn">source</span>
+
+```ruby
+entry.source # => String
+```
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Log source</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">entry.</span><span className="msb-hn">data</span>
+
+```ruby
+entry.data # => String
+```
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Raw log bytes</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">entry.</span><span className="msb-hn">to_h()</span>
+
+```ruby
+entry.to_h # => Hash
+```
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">Hash</span></div>
+    <div className="msb-param-desc">String keys matching the members above</div>
+  </div>
+</div>

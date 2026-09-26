@@ -346,8 +346,8 @@ git diff origin/main..HEAD --name-status
 - Do not prepend feature walkthroughs, lifecycle summaries, implementation details, or long examples to reference pages or type sections. Put API-specific details beside the relevant member and broader explanations in the usage guides; avoid duplicating those guides in the reference.
 - In SDK reference pages, wrap usage examples in a collapsed `<Accordion title="Example">`. Keep API signatures and type definitions visible outside the accordion.
 - When removing reference overviews, preserve unique signatures, constraints, result fields, and resource-cleanup requirements beside the relevant member or in the linked usage guide.
-- Omit field tables that only repeat documented builder options. Keep field references for returned data and properties not covered by the builder.
-- Group simple fields and properties into compact tables with field, type, and description columns; add a default column when needed. Omit repeated receiver prefixes, render each type as one code label, and preserve links and existing anchors. Reserve individual sections for methods and members that need longer explanations or examples.
+- Omit field lists that only repeat documented builder options. Keep field references for returned data and properties not covered by the builder.
+- Do not use tables in SDK references. Use individual method and property headings with visible signatures and the existing parameter/return blocks. Group returned hash or record fields in the existing field blocks, including types, descriptions, and defaults where needed. Preserve links and existing anchors, and avoid repeating the same description above and inside a return block.
 - In Rust documentation examples, import types at the top of each snippet and use their short names in the body instead of fully qualified paths. Group standard-library imports before external-crate imports.
 - Keep examples realistic and runnable. Do not invent APIs or flags.
 - Prefer editing existing examples over adding new example projects unless the new example is requested or clearly fills a missing user workflow.

@@ -118,6 +118,46 @@ let sb = Sandbox::builder("agent")
     .await?;
 ```
 
+```python Python
+from microsandbox import (
+    Network, Sandbox, ScopedUpstreamCACert, ScopedVerifyUpstream, TlsConfig,
+)
+
+sb = await Sandbox.create(
+    "agent",
+    image="python",
+    network=Network(tls=TlsConfig(
+        upstream_ca_certs=("/etc/ssl/corp-root.pem",),
+        scoped_upstream_ca_certs=(
+            ScopedUpstreamCACert("api.internal.example.com", "./certs/api-ca.pem"),
+        ),
+        scoped_verify_upstream=(
+            ScopedVerifyUpstream("*.preview.internal", False),
+        ),
+    )),
+)
+```
+
+```go Go
+sb, err := m.CreateSandbox(ctx, "agent",
+    m.WithImage("python"),
+    m.WithNetwork(&m.NetworkConfig{
+        TLS: &m.TLSConfig{
+            UpstreamCACerts: []string{"/etc/ssl/corp-root.pem"},
+            ScopedUpstreamCACerts: []m.ScopedUpstreamCACert{
+                {Pattern: "api.internal.example.com", Path: "./certs/api-ca.pem"},
+            },
+            ScopedVerifyUpstream: []m.ScopedVerifyUpstream{
+                {Pattern: "*.preview.internal", Verify: false},
+            },
+        },
+    }),
+)
+if err != nil {
+    return err
+}
+```
+
 ```bash CLI
 msb create python --name agent \
   --tls-intercept \
