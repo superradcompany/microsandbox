@@ -467,6 +467,22 @@ impl LocalBackend {
                 .root_disk
                 .clone()
                 .unwrap_or(RootDisk::Managed { size_mib: None });
+            // Reject incompatible snapshot + patch combinations before image resolution and
+            // before the sandbox directory exists. A rejected run must leave no on-disk state,
+            // because the leftover directory blocks retries under the same name (see #1550).
+            // Flat roots bake patches into a private tree and are compatible with both paths.
+            if !config.spec.patches.is_empty() && !matches!(root_disk, RootDisk::Flat { .. }) {
+                if config.snapshot_upper_source.is_some() {
+                    return Err(crate::MicrosandboxError::InvalidConfig(
+                        "patches cannot be combined with from_snapshot".into(),
+                    ));
+                }
+                if !config.snapshot_upper_layers.is_empty() {
+                    return Err(crate::MicrosandboxError::InvalidConfig(
+                        "patches cannot be combined with full snapshot restore".into(),
+                    ));
+                }
+            }
             let image_materialization = if matches!(root_disk, RootDisk::Flat { .. }) {
                 RootfsMaterialization::Flat
             } else {
@@ -640,6 +656,15 @@ impl LocalBackend {
                     None
                 };
 
+            // Reject incompatible snapshot + patch combinations before creating
+            // any on-disk state so a rejected run leaves no phantom directory that
+            // would block retries under the same sandbox name (see #1550).
+            if config.snapshot_upper_source.is_some() && upper_tree.is_some() {
+                return Err(crate::MicrosandboxError::InvalidConfig(
+                    "patches cannot be combined with from_snapshot".into(),
+                ));
+            }
+
             // Ensure sandbox storage exists before provisioning either a private flat rootfs or
             // the writable overlay upper image.
             let upper_path = sandbox_dir.join("upper.ext4");
@@ -684,21 +709,21 @@ impl LocalBackend {
                     *size_mib = Some(target_mib);
                 }
             } else if !config.snapshot_upper_layers.is_empty() {
-                if upper_tree.is_some() {
-                    return Err(crate::MicrosandboxError::InvalidConfig(
-                        "patches cannot be combined with full snapshot restore".into(),
-                    ));
-                }
+                // Restored upper layers are attached by the runtime, so there is no writable
+                // disk to provision here.
             } else if let Some(snap_upper) = config.snapshot_upper_source.take() {
                 // Booting from a snapshot: copy the captured upper into
                 // place, preserving sparseness. Patches are not
                 // compatible with this path because they'd need to be
                 // re-baked into the snapshot's upper, which we don't do.
-                if upper_tree.is_some() {
-                    return Err(crate::MicrosandboxError::InvalidConfig(
-                        "patches cannot be combined with from_snapshot".into(),
-                    ));
-                }
+<<<<<<< HEAD
+                // That combination is rejected before this directory exists.
+=======
+                //
+                // The incompatible-snapshot-plus-patches check is performed
+                // earlier (before directory creation) so a rejected run
+                // leaves no phantom sandbox name — see #1550.
+>>>>>>> 0efc35f2db2377380a92bf8039e69b2b502f8cbc
                 if snap_upper != writable_disk_path {
                     let dst = writable_disk_path.clone();
                     tokio::task::spawn_blocking(move || {
@@ -2910,6 +2935,47 @@ mod tests {
             "{error}"
         );
         assert!(!backend.sandboxes_dir().join("missing-snapshot").exists());
+    }
+
+    #[tokio::test]
+    async fn test_create_local_rejects_snapshot_patches_before_creating_directory() {
+        let temp = tempdir().unwrap();
+        let backend = Arc::new(
+            crate::test_support::local_backend_builder(temp.path().join("home"))
+                .build()
+                .await
+                .unwrap(),
+        );
+        let mut config = test_config_with_rootfs(
+            "patched-snapshot",
+            RootfsSource::oci("registry.invalid/review-never-pulled:missing"),
+        );
+        // A regression would either pull this uncached image or create the sandbox
+        // directory before rejecting the incompatible combination.
+        config.spec.pull_policy = PullPolicy::Never;
+        config.spec.patches = vec![microsandbox_types::Patch::Text {
+            path: "/etc/motd".to_string(),
+            content: "hello".to_string(),
+            mode: None,
+            replace: true,
+        }];
+        config.snapshot_upper_source = Some(temp.path().join("upper.ext4"));
+
+        let error = match backend
+            .create_sandbox(backend.clone(), config, SpawnMode::Attached, None)
+            .await
+        {
+            Ok(_) => panic!("patches must be rejected when combined with from_snapshot"),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "invalid config: patches cannot be combined with from_snapshot"
+        );
+        // A rejected create must leave no sandbox name behind, otherwise retries under
+        // the same name fail with "sandbox already exists" (see #1550).
+        assert!(!backend.sandboxes_dir().join("patched-snapshot").exists());
     }
 
     #[tokio::test]
