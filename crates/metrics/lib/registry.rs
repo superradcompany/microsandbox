@@ -17,9 +17,10 @@ use chrono::{DateTime, TimeZone, Utc};
 use crate::layout::{
     DEFAULT_CAPACITY, HEADER_SIZE, HEADER_STATE_INITIALIZING, HEADER_STATE_READY,
     HEADER_STATE_UNINIT, Header, NAME_BYTES, REGISTRY_MAGIC, REGISTRY_VERSION, SAMPLE_FLAG_CPU,
-    SAMPLE_FLAG_MEMORY_AVAILABLE, SAMPLE_FLAG_MEMORY_HOST_RESIDENT, SAMPLE_FLAG_MEMORY_USED,
-    SAMPLE_FLAG_UPPER_FREE, SAMPLE_FLAG_UPPER_HOST_ALLOCATED, SAMPLE_FLAG_UPPER_USED, SLOT_ACTIVE,
-    SLOT_FREE, SLOT_RESERVED, SLOT_SIZE, SLOT_STALE, Slot, registry_size,
+    SAMPLE_FLAG_MEMORY_AVAILABLE, SAMPLE_FLAG_MEMORY_HOST_RESIDENT, SAMPLE_FLAG_MEMORY_LIMIT_LIVE,
+    SAMPLE_FLAG_MEMORY_USED, SAMPLE_FLAG_UPPER_FREE, SAMPLE_FLAG_UPPER_HOST_ALLOCATED,
+    SAMPLE_FLAG_UPPER_USED, SLOT_ACTIVE, SLOT_FREE, SLOT_RESERVED, SLOT_SIZE, SLOT_STALE, Slot,
+    registry_size,
 };
 use crate::snapshot::{LiveMetric, LiveMetricState};
 use crate::{MetricsError, MetricsResult};
@@ -57,7 +58,7 @@ pub struct ReserveSlot<'a> {
     pub sandbox_id: i32,
     /// Sandbox name. Must fit in the slot's fixed inline name buffer.
     pub name: &'a str,
-    /// Configured guest memory limit in bytes.
+    /// Guest memory limit in bytes at boot; the runtime sampler may refresh it.
     pub memory_limit_bytes: u64,
 }
 
@@ -100,6 +101,8 @@ pub struct SampleWrite {
     pub memory_available_bytes: Option<u64>,
     /// Host-resident guest memory in bytes for capacity diagnostics.
     pub memory_host_resident_bytes: Option<u64>,
+    /// Effective guest memory limit in bytes; `None` keeps the value stamped at reservation.
+    pub memory_limit_bytes: Option<u64>,
     /// Cumulative disk bytes read.
     pub disk_read_bytes: u64,
     /// Cumulative disk bytes written.
@@ -755,6 +758,7 @@ impl MetricsRegistry {
                     memory_host_resident,
                 ),
                 memory_limit_bytes: memory_limit,
+                memory_limit_live: flag_set(sample_flags, SAMPLE_FLAG_MEMORY_LIMIT_LIVE),
                 disk_read_bytes: disk_r,
                 disk_write_bytes: disk_w,
                 net_rx_bytes: net_rx,
@@ -829,7 +833,13 @@ impl MetricsSlotWriter {
         if sample.upper_host_allocated_bytes.is_some() {
             sample_flags |= SAMPLE_FLAG_UPPER_HOST_ALLOCATED;
         }
+        if sample.memory_limit_bytes.is_some() {
+            sample_flags |= SAMPLE_FLAG_MEMORY_LIMIT_LIVE;
+        }
         slot.sample_flags.store(sample_flags, Ordering::Relaxed);
+        if let Some(limit) = sample.memory_limit_bytes {
+            slot.memory_limit_bytes.store(limit, Ordering::Relaxed);
+        }
         slot.vcpu_time_ns
             .store(sample.vcpu_time_ns.unwrap_or(0), Ordering::Relaxed);
         slot.cpu_percent_bits.store(
@@ -1535,6 +1545,7 @@ mod tests {
             memory_bytes: Some(1024 * 1024),
             memory_available_bytes: Some(255 * 1024 * 1024),
             memory_host_resident_bytes: Some(2 * 1024 * 1024),
+            memory_limit_bytes: None,
             disk_read_bytes: 4096,
             disk_write_bytes: 8192,
             net_rx_bytes: 100,
@@ -1578,6 +1589,76 @@ mod tests {
 
         writer.release(ReleaseMode::Free).unwrap();
         assert!(reg.snapshot().unwrap().is_empty());
+        cleanup(&name);
+    }
+
+    fn limit_sample(memory_limit_bytes: Option<u64>) -> SampleWrite {
+        SampleWrite {
+            sampled_at: Utc::now(),
+            cpu_percent: None,
+            vcpu_time_ns: None,
+            memory_bytes: Some(1024 * 1024),
+            memory_available_bytes: None,
+            memory_host_resident_bytes: None,
+            memory_limit_bytes,
+            disk_read_bytes: 0,
+            disk_write_bytes: 0,
+            net_rx_bytes: 0,
+            net_tx_bytes: 0,
+            upper_used_bytes: None,
+            upper_free_bytes: None,
+            upper_host_allocated_bytes: None,
+        }
+    }
+
+    fn reserve_limit_writer(reg: &MetricsRegistry, tag: &str) -> MetricsSlotWriter {
+        let res = reg
+            .reserve(ReserveSlot {
+                sandbox_id: 11,
+                name: tag,
+                memory_limit_bytes: 256 * 1024 * 1024,
+            })
+            .unwrap();
+        reg.activate_writer(ActivateSlot {
+            slot: res.slot,
+            generation: res.generation,
+            run_id: 12,
+            pid: alive_pid(),
+            started_at: Utc::now(),
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn write_sample_refreshes_memory_limit_when_provided() {
+        let name = unique_name("lim");
+        let reg = MetricsRegistry::open_or_create(&name, 4).unwrap();
+        let writer = reserve_limit_writer(&reg, "limit");
+
+        writer
+            .write_sample(limit_sample(Some(1024 * 1024 * 1024)))
+            .unwrap();
+        let live = &reg.snapshot().unwrap()[0];
+        assert_eq!(live.memory_limit_bytes, 1024 * 1024 * 1024);
+        assert!(live.memory_limit_live);
+
+        writer.write_sample(limit_sample(None)).unwrap();
+        let live = &reg.snapshot().unwrap()[0];
+        assert_eq!(live.memory_limit_bytes, 1024 * 1024 * 1024);
+        assert!(!live.memory_limit_live);
+        cleanup(&name);
+    }
+
+    #[test]
+    fn write_sample_keeps_reserved_limit_when_none() {
+        let name = unique_name("limn");
+        let reg = MetricsRegistry::open_or_create(&name, 4).unwrap();
+        let writer = reserve_limit_writer(&reg, "limit");
+
+        writer.write_sample(limit_sample(None)).unwrap();
+        let live = &reg.snapshot().unwrap()[0];
+        assert_eq!(live.memory_limit_bytes, 256 * 1024 * 1024);
+        assert!(!live.memory_limit_live);
         cleanup(&name);
     }
 
@@ -1630,6 +1711,7 @@ mod tests {
                 memory_bytes: Some(1024 * 1024),
                 memory_available_bytes: None,
                 memory_host_resident_bytes: None,
+                memory_limit_bytes: None,
                 disk_read_bytes: 4096,
                 disk_write_bytes: 8192,
                 net_rx_bytes: 100,
@@ -1684,6 +1766,7 @@ mod tests {
                     memory_bytes: Some(counter),
                     memory_available_bytes: Some(counter),
                     memory_host_resident_bytes: Some(counter),
+                    memory_limit_bytes: None,
                     disk_read_bytes: counter,
                     disk_write_bytes: counter,
                     net_rx_bytes: counter,
@@ -1766,6 +1849,7 @@ mod tests {
                             memory_bytes: Some(counter),
                             memory_available_bytes: Some(counter),
                             memory_host_resident_bytes: Some(counter),
+                            memory_limit_bytes: None,
                             disk_read_bytes: counter,
                             disk_write_bytes: counter,
                             net_rx_bytes: counter,
@@ -1890,6 +1974,7 @@ mod tests {
                 memory_bytes: Some(0),
                 memory_available_bytes: None,
                 memory_host_resident_bytes: None,
+                memory_limit_bytes: None,
                 disk_read_bytes: 0,
                 disk_write_bytes: 0,
                 net_rx_bytes: 0,
@@ -1931,6 +2016,7 @@ mod tests {
                 memory_bytes: Some(1),
                 memory_available_bytes: None,
                 memory_host_resident_bytes: None,
+                memory_limit_bytes: None,
                 disk_read_bytes: 0,
                 disk_write_bytes: 0,
                 net_rx_bytes: 0,
@@ -2006,6 +2092,7 @@ mod tests {
                 memory_bytes: Some(1),
                 memory_available_bytes: None,
                 memory_host_resident_bytes: None,
+                memory_limit_bytes: None,
                 disk_read_bytes: 0,
                 disk_write_bytes: 0,
                 net_rx_bytes: 0,
@@ -2077,6 +2164,7 @@ mod tests {
                 memory_bytes: Some(1),
                 memory_available_bytes: None,
                 memory_host_resident_bytes: None,
+                memory_limit_bytes: None,
                 disk_read_bytes: 0,
                 disk_write_bytes: 0,
                 net_rx_bytes: 0,
@@ -2105,6 +2193,7 @@ mod tests {
                 memory_bytes: Some(999),
                 memory_available_bytes: None,
                 memory_host_resident_bytes: None,
+                memory_limit_bytes: None,
                 disk_read_bytes: 0,
                 disk_write_bytes: 0,
                 net_rx_bytes: 0,
@@ -2176,6 +2265,7 @@ mod tests {
                 memory_bytes: None,
                 memory_available_bytes: Some(1),
                 memory_host_resident_bytes: Some(1),
+                memory_limit_bytes: None,
                 disk_read_bytes: 1,
                 disk_write_bytes: 1,
                 net_rx_bytes: 1,
@@ -2206,6 +2296,7 @@ mod tests {
                 memory_bytes: Some(0),
                 memory_available_bytes: Some(1),
                 memory_host_resident_bytes: Some(1),
+                memory_limit_bytes: None,
                 disk_read_bytes: 1,
                 disk_write_bytes: 1,
                 net_rx_bytes: 1,
@@ -2264,6 +2355,7 @@ mod tests {
                 memory_bytes: Some(999_999),
                 memory_available_bytes: None,
                 memory_host_resident_bytes: None,
+                memory_limit_bytes: None,
                 disk_read_bytes: 0,
                 disk_write_bytes: 0,
                 net_rx_bytes: 0,
@@ -2305,6 +2397,7 @@ mod tests {
                 memory_bytes: Some(1),
                 memory_available_bytes: None,
                 memory_host_resident_bytes: None,
+                memory_limit_bytes: None,
                 disk_read_bytes: 0,
                 disk_write_bytes: 0,
                 net_rx_bytes: 0,
@@ -2366,6 +2459,7 @@ mod tests {
                 memory_bytes: Some(1),
                 memory_available_bytes: None,
                 memory_host_resident_bytes: None,
+                memory_limit_bytes: None,
                 disk_read_bytes: 0,
                 disk_write_bytes: 0,
                 net_rx_bytes: 0,
@@ -2413,6 +2507,7 @@ mod tests {
                 memory_bytes: Some(999),
                 memory_available_bytes: None,
                 memory_host_resident_bytes: None,
+                memory_limit_bytes: None,
                 disk_read_bytes: 0,
                 disk_write_bytes: 0,
                 net_rx_bytes: 0,
@@ -2456,6 +2551,7 @@ mod tests {
                 memory_bytes: Some(42),
                 memory_available_bytes: None,
                 memory_host_resident_bytes: None,
+                memory_limit_bytes: None,
                 disk_read_bytes: 0,
                 disk_write_bytes: 0,
                 net_rx_bytes: 0,
@@ -2504,6 +2600,7 @@ mod tests {
                 memory_bytes: Some(0),
                 memory_available_bytes: None,
                 memory_host_resident_bytes: None,
+                memory_limit_bytes: None,
                 disk_read_bytes: 0,
                 disk_write_bytes: 0,
                 net_rx_bytes: 0,
@@ -2533,6 +2630,7 @@ mod tests {
                 memory_bytes: Some(memory_bytes),
                 memory_available_bytes: None,
                 memory_host_resident_bytes: None,
+                memory_limit_bytes: None,
                 disk_read_bytes: 0,
                 disk_write_bytes: 0,
                 net_rx_bytes: 0,

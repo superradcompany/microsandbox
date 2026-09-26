@@ -43,13 +43,14 @@ pub struct SandboxMetrics {
     pub cpu_percent: f32,
     /// Cumulative guest vCPU execution time across all vCPUs.
     pub vcpu_time_ns: u64,
-    /// Resident memory usage in bytes.
+    /// Guest memory in use in bytes.
     pub memory_bytes: u64,
     /// Guest-available memory in bytes when reported by the guest.
     pub memory_available_bytes: Option<u64>,
     /// Host-resident guest memory in bytes for capacity diagnostics.
     pub memory_host_resident_bytes: Option<u64>,
-    /// Configured guest memory limit in bytes.
+    /// Guest memory limit in bytes: the live guest memory size when the runtime reports it,
+    /// otherwise the configured size.
     pub memory_limit_bytes: u64,
     /// Cumulative disk bytes read by the sandbox process.
     pub disk_read_bytes: u64,
@@ -87,10 +88,9 @@ pub enum SandboxMetricsState {
 
 /// One sandbox's live metrics joined with catalog config context.
 ///
-/// Unlike a bare [`SandboxMetrics`], a report resolves the allocation
-/// denominators (`cpus`, `memory_limit_bytes`) from the catalog's *active*
-/// config, so live resizes are reflected without re-stamping the
-/// shared-memory slot.
+/// Unlike a bare [`SandboxMetrics`], a report resolves `cpus` from the
+/// catalog's *active* config. `memory_limit_bytes` comes from the live slot
+/// when the runtime reports live memory, else from the active config.
 #[derive(Clone, Debug)]
 #[cfg(feature = "local")]
 pub struct SandboxMetricsReport {
@@ -420,12 +420,7 @@ fn to_sandbox_metrics(live: &LiveMetric, config: Option<&SandboxConfig>) -> Sand
         memory_bytes: live.memory_bytes,
         memory_available_bytes: live.memory_available_bytes,
         memory_host_resident_bytes: live.memory_host_resident_bytes,
-        // The slot value is stamped once at reservation, so it goes stale
-        // after a live resize; the catalog config wins when resolvable.
-        memory_limit_bytes: match config.map(memory_limit_bytes).filter(|&limit| limit != 0) {
-            Some(limit) => limit,
-            None => live.memory_limit_bytes,
-        },
+        memory_limit_bytes: resolve_memory_limit_bytes(live, config),
         disk_read_bytes: live.disk_read_bytes,
         disk_write_bytes: live.disk_write_bytes,
         net_rx_bytes: live.net_rx_bytes,
@@ -436,6 +431,18 @@ fn to_sandbox_metrics(live: &LiveMetric, config: Option<&SandboxConfig>) -> Sand
         uptime: live.uptime,
         timestamp: live.timestamp,
     }
+}
+
+/// Older runtimes never refresh the slot limit, so the catalog config wins for them.
+#[cfg(feature = "local")]
+fn resolve_memory_limit_bytes(live: &LiveMetric, config: Option<&SandboxConfig>) -> u64 {
+    if live.memory_limit_live {
+        return live.memory_limit_bytes;
+    }
+    config
+        .map(memory_limit_bytes)
+        .filter(|&limit| limit != 0)
+        .unwrap_or(live.memory_limit_bytes)
 }
 
 #[cfg(feature = "local")]
@@ -509,7 +516,68 @@ fn classify_state(live: &LiveMetric, config: Option<&SandboxConfig>) -> SandboxM
 
 #[cfg(all(test, feature = "local"))]
 mod tests {
-    use super::is_missing_registry_io_error;
+    use std::time::Duration;
+
+    use microsandbox_metrics::{LiveMetric, LiveMetricState};
+
+    use super::{SandboxConfig, is_missing_registry_io_error, to_sandbox_metrics};
+
+    const MIB: u64 = 1024 * 1024;
+
+    fn live_metric(memory_limit_bytes: u64, memory_limit_live: bool) -> LiveMetric {
+        LiveMetric {
+            state: LiveMetricState::Active,
+            sandbox_id: 1,
+            run_id: 1,
+            pid: 1,
+            name: "metrics".to_string(),
+            timestamp: chrono::Utc::now(),
+            uptime: Duration::from_secs(1),
+            cpu_percent: 0.0,
+            vcpu_time_ns: 0,
+            memory_bytes: 128 * MIB,
+            memory_available_bytes: None,
+            memory_host_resident_bytes: None,
+            memory_limit_bytes,
+            memory_limit_live,
+            disk_read_bytes: 0,
+            disk_write_bytes: 0,
+            net_rx_bytes: 0,
+            net_tx_bytes: 0,
+            upper_used_bytes: None,
+            upper_free_bytes: None,
+            upper_host_allocated_bytes: None,
+        }
+    }
+
+    fn config_with_memory_mib(memory_mib: u32) -> SandboxConfig {
+        let mut config = SandboxConfig::default();
+        config.spec.resources.memory_mib = memory_mib;
+        config
+    }
+
+    #[test]
+    fn live_slot_limit_wins_over_catalog_config() {
+        let config = config_with_memory_mib(512);
+        let metrics = to_sandbox_metrics(&live_metric(1024 * MIB, true), Some(&config));
+
+        assert_eq!(metrics.memory_limit_bytes, 1024 * MIB);
+    }
+
+    #[test]
+    fn catalog_config_wins_when_slot_limit_is_not_live() {
+        let config = config_with_memory_mib(512);
+        let metrics = to_sandbox_metrics(&live_metric(1024 * MIB, false), Some(&config));
+
+        assert_eq!(metrics.memory_limit_bytes, 512 * MIB);
+    }
+
+    #[test]
+    fn slot_limit_is_used_without_catalog_config() {
+        let metrics = to_sandbox_metrics(&live_metric(1024 * MIB, false), None);
+
+        assert_eq!(metrics.memory_limit_bytes, 1024 * MIB);
+    }
 
     #[test]
     fn missing_registry_accepts_error_kind_not_found() {

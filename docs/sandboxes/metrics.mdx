@@ -116,9 +116,13 @@ all, err := m.AllSandboxMetrics(ctx)
 
 Fleet snapshots only include sandboxes whose runtime process is actually alive. A runtime that crashed without cleanup used to keep reporting its last sample as if the sandbox were running; readers now detect the dead owner and retire the entry on first read.
 
+Memory limits follow live memory resizes on current runtimes: per-sandbox metrics, metrics reports, `msb metrics`, fleet snapshots, and `msb-metrics` all report the guest's current memory size. For sandboxes started by an older runtime, per-sandbox metrics and reports fall back to the configured size, while fleet snapshots and `msb-metrics` report the boot allocation until the sandbox is restarted.
+
+Memory usage is the guest memory in use, measured against the live memory size when the runtime reports it. Right after a resize, usage can briefly be off or missing until the guest's memory statistics catch up.
+
 ## Metrics reports (Rust)
 
-The Rust SDK additionally exposes *reports*: metrics joined with catalog context for presentation. A report resolves the CPU and memory allocations from the sandbox's **active config**, so live resizes are reflected. It also carries a state field: `Running`, `Stalled` (runtime alive but no sample within three sampling intervals), or `Exited` (the preserved terminal sample of a stopped sandbox). This is what `msb metrics` renders.
+The Rust SDK additionally exposes *reports*: metrics joined with catalog context for presentation. A report resolves the CPU allocation from the sandbox's **active config** and the memory limit from the live sample, falling back to the active config on older runtimes, so live resizes are reflected. It also carries a state field: `Running`, `Stalled` (runtime alive but no sample within three sampling intervals), or `Exited` (the preserved terminal sample of a stopped sandbox). This is what `msb metrics` renders.
 
 ```rust Rust
 use microsandbox::{all_sandbox_metrics_reports_local, sandbox_metrics_report_local};

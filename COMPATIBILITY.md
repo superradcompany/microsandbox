@@ -370,6 +370,8 @@ Sources: [`crates/metrics/lib/layout.rs`](crates/metrics/lib/layout.rs), [`crate
 
 Do not reorder fields, change widths or alignment, weaken atomic ordering, or redefine slot states under the same ABI. Incompatible changes must bump the registry version or ABI so old and new processes do not map the same object. Prefer checked-in offset and binary-layout fixtures in addition to total-size assertions.
 
+The runtime sampler refreshes `memory_limit_bytes` in place inside the seqlock window so the slot follows live memory resizes, and sets the additive `SAMPLE_FLAG_MEMORY_LIMIT_LIVE` bit on those samples. Layout, offsets, existing flag bits, slot states, and `REGISTRY_VERSION` are unchanged. Existing readers test individual flag bits and ignore bits they do not know. Readers see live values from current runtimes and the boot allocation from older ones; the Rust SDK prefers the slot value only when the flag is set and otherwise falls back to the catalog config. The OTLP `microsandbox.memory.host_resident` gauge is additive.
+
 ## 16. Heartbeats, Boot Errors, Logs, and Runtime Diagnostics
 
 Operational artifacts are consumed across process boundaries and can influence lifecycle decisions. These include `/.msb/heartbeat.json`, `boot-error.json`, `exec.log`, runtime and kernel logs, temporary filenames, JSON field names, sequence numbers, timestamps, source labels, rotation suffixes, and atomic rename behavior.

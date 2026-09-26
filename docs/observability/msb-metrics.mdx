@@ -126,8 +126,9 @@ Metrics use the `microsandbox.*` namespace. The table shows only the suffix.
 | Suffix | Unit | Description |
 | --- | --- | --- |
 | `cpu.utilization` | `1` | vCPU-seconds per wall-second. A fully used 2-vCPU sandbox reports `2.0`. |
-| `memory.usage` | `By` | Resident memory. |
-| `memory.limit` | `By` | Configured guest memory limit. |
+| `memory.usage` | `By` | Guest memory in use, measured against the live memory size when the runtime reports it. |
+| `memory.limit` | `By` | Effective guest memory limit: boot memory plus plugged memory. Follows live memory resizes. |
+| `memory.host_resident` | `By` | Host-resident memory backing the guest, when the VMM can report it. |
 | `disk.bytes_read` | `By` | Cumulative bytes read by the sandbox process. |
 | `disk.bytes_written` | `By` | Cumulative bytes written. |
 | `network.bytes_received` | `By` | Cumulative bytes from runtime to guest. |
@@ -139,6 +140,12 @@ Metrics use the `microsandbox.*` namespace. The table shows only the suffix.
 
 Disk and network totals are gauges containing absolute cumulative values. Use
 `rate()` in PromQL for throughput.
+
+During a memory resize, `memory.limit` tracks plugged memory and converges to the
+accepted target as the guest plugs or releases memory. Right after a resize,
+`memory.usage` can briefly be off or missing until the guest's memory statistics
+catch up. Sandboxes started by an older runtime keep reporting their boot
+allocation until they are restarted.
 
 ### Attributes
 

@@ -726,7 +726,7 @@ msb metrics --format json   # One-shot JSON output
 | --- | --- |
 | `STATE` | `running`: fresh sample; `stalled`: no sample for three sampling intervals; `exited`: final sample |
 | `CPU` | Busy cores / allocated cores, such as `0.80 / 2c` |
-| `MEM` | Guest-used memory / configured limit |
+| `MEM` | Guest-used memory / current memory limit |
 | Disk and network rates | Per-second change; exited rows show cumulative totals |
 
 Limits reflect live resizes. One-shot output samples twice to calculate rates. JSON and follow output keep cumulative counters and include `state` and `cpus`.
