@@ -132,6 +132,19 @@ _, err = sb.Shell(ctx, "setup")
 output, err := sb.Shell(ctx, "start")
 ```
 
+```ruby Ruby
+sb = Microsandbox::Sandbox.create(
+  "worker",
+  image: "ubuntu",
+  scripts: {
+    "setup" => "#!/bin/bash\napt-get update && apt-get install -y python3 curl",
+    "start" => "#!/bin/bash\nexec python3 /app/main.py"
+  }
+)
+
+sb.shell("setup")
+output = sb.shell("start")
+```
 </CodeGroup>
 
 ## Patches
@@ -320,6 +333,16 @@ sb, err := m.CreateSandbox(ctx, "worker",
     m.WithMemory(1024),
     m.WithCPUs(2),
     m.WithInit(m.Init.Auto()),
+)
+```
+
+```ruby Ruby
+sb = Microsandbox::Sandbox.create(
+  "worker",
+  image: "ghcr.io/superradcompany/debian-systemd:12",
+  memory: 1024,
+  cpus: 2,
+  init: "auto"
 )
 ```
 

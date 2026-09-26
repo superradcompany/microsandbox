@@ -68,6 +68,15 @@ err = baseline.Stop(ctx)
 if err != nil { return err }
 ```
 
+```ruby Ruby
+baseline = Microsandbox::Sandbox.get("baseline")
+
+session = baseline.connect
+session.exec("pip", ["install", "requests"])
+
+baseline.stop
+```
+
 ```bash CLI
 msb exec baseline -- pip install requests
 msb stop baseline
@@ -114,6 +123,11 @@ snapshot, err := baseline.Snapshot(ctx, "ready")
 if err != nil {
     return err
 }
+```
+
+```ruby Ruby
+baseline = Microsandbox::Sandbox.get("baseline")
+snapshot = baseline.snapshot("ready")
 ```
 
 ```bash CLI
@@ -866,6 +880,15 @@ err = m.Snapshot.Remove(ctx, "baseline:ready", false)
 if err != nil { return err }
 ```
 
+```ruby Ruby
+snapshots = Microsandbox::Snapshot.list
+
+saved = Microsandbox::Snapshot.open("baseline:ready")
+puts saved.digest
+
+Microsandbox::Snapshot.remove("baseline:ready")
+```
+
 ```bash CLI
 msb snap ls
 msb snap ls --group baseline
@@ -1096,6 +1119,10 @@ err = m.Snapshot.Save(ctx, "baseline:ready", "ready.msb",
     m.SnapshotSaveOptions{WithImage: true},
 )
 if err != nil { return err }
+```
+
+```ruby Ruby
+Microsandbox::Snapshot.save("baseline:ready", "ready.msb", with_image: true)
 ```
 
 ```bash CLI

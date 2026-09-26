@@ -86,6 +86,15 @@ output, err := sb.Exec(ctx, "python", []string{"-c", "print('Hello from the clou
 fmt.Println(output.Stdout())
 ```
 
+```ruby Ruby
+require "microsandbox"
+
+Microsandbox::Sandbox.with("hello", image: "python", memory: 512) do |sb|
+  output = sb.exec("python", ["-c", "print('Hello from the cloud!')"])
+  puts output.stdout
+end
+```
+
 ```bash CLI
 msb run python -- python3 -c "print('Hello from the cloud!')"
 ```

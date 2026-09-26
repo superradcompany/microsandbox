@@ -11,10 +11,6 @@ The defaults are tuned for the common case: running untrusted code that needs th
 If a workload doesn't need the network, remove it. Nothing to filter is the strongest filter.
 
 <CodeGroup>
-```bash CLI
-msb create python --name isolated --no-net
-```
-
 ```typescript TypeScript
 await using sb = await Sandbox.builder("isolated")
     .image("python")
@@ -34,6 +30,24 @@ let sb = Sandbox::builder("isolated")
 from microsandbox import Network, Sandbox
 
 sb = await Sandbox.create("isolated", image="python", network=Network.none())
+```
+
+```go Go
+sb, err := m.CreateSandbox(ctx, "isolated",
+    m.WithImage("python"),
+    m.WithNetwork(m.NetworkPolicy.None()),
+)
+if err != nil {
+    return err
+}
+```
+
+```ruby Ruby
+sb = Microsandbox::Sandbox.create("isolated", image: "python", network: :none)
+```
+
+```bash CLI
+msb create python --name isolated --no-net
 ```
 </CodeGroup>
 

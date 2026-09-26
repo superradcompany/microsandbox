@@ -80,12 +80,6 @@ The result is a modification plan showing what changed and whether each change w
 Live growth needs capacity reserved when the VM boots. Set `max_cpus` and `max_memory` above the starting allocation when you create a sandbox that may need to scale:
 
 <CodeGroup>
-```bash CLI
-msb create python --name worker \
-  --cpus 2 --memory 1G \
-  --max-cpus 8 --max-memory 4G
-```
-
 ```typescript TypeScript
 await using sandbox = await Sandbox.builder("worker")
   .image("python")
@@ -126,6 +120,23 @@ sb, err := m.CreateSandbox(ctx, "worker",
     m.WithMaxCPUs(8),
     m.WithMaxMemory(4096),
 )
+```
+
+```ruby Ruby
+sb = Microsandbox::Sandbox.create(
+  "worker",
+  image: "python",
+  cpus: 2,
+  memory: 1024,
+  max_cpus: 8,
+  max_memory: 4096
+)
+```
+
+```bash CLI
+msb create python --name worker \
+  --cpus 2 --memory 1G \
+  --max-cpus 8 --max-memory 4G
 ```
 </CodeGroup>
 

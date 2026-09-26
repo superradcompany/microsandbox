@@ -60,6 +60,14 @@ sb, err := m.CreateSandbox(ctx, "proxied",
 )
 ```
 
+```ruby Ruby
+sb = Microsandbox::Sandbox.create(
+  "proxied",
+  image: "python",
+  proxy: Microsandbox::OutboundProxy.socks5("127.0.0.1:1080")
+)
+```
+
 ```bash CLI
 # Choose one:
 msb create python --name proxied --proxy socks4://127.0.0.1:1080
@@ -91,6 +99,10 @@ m.WithProxy(m.SOCKS4Proxy(
     "127.0.0.1:1080",
     m.SOCKS4ProxyOptions{UserID: "sandbox"},
 ))
+```
+
+```ruby Ruby
+proxy = Microsandbox::OutboundProxy.socks4("127.0.0.1:1080").user_id("sandbox")
 ```
 
 ```bash CLI
@@ -138,6 +150,13 @@ proxy := m.SOCKS5Proxy("127.0.0.1:1080").Credentials(
     m.SecretSourceEnv("SOCKS5_PASSWORD"),
 )
 m.WithProxy(proxy)
+```
+
+```ruby Ruby
+proxy = Microsandbox::OutboundProxy.socks5("127.0.0.1:1080").credentials(
+  "sandbox",
+  Microsandbox::SecretSource.env("SOCKS5_PASSWORD")
+)
 ```
 
 ```bash CLI
