@@ -58,6 +58,7 @@ embed-binaries = [
     "local",
 ]
 net = ["dep:microsandbox-network", "microsandbox-runtime?/net"]
+oci-runtime = ["local", "microsandbox-runtime/oci-runtime"]
 
 [dependencies]
 microsandbox-filesystem = { workspace = true, optional = true }

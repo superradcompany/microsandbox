@@ -17,6 +17,7 @@ pub mod metrics;
 pub mod policy;
 pub(crate) mod progress;
 pub mod relay;
+#[cfg_attr(feature = "oci-runtime", path = "startup_oci.rs")]
 pub(crate) mod startup;
 pub mod vm;
 pub(crate) mod workload_control;

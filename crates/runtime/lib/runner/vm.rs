@@ -50,6 +50,8 @@ use crate::heartbeat::{self, HeartbeatDecision, HeartbeatReader};
 use crate::launch::FileMountConfig;
 #[cfg(unix)]
 pub use crate::launch::LIFECYCLE_LOCK_FD;
+#[cfg(all(unix, feature = "oci-runtime"))]
+pub use crate::launch::OCI_CONSOLE_FD;
 pub use crate::launch::{
     BRANCH_MEMORY_FD, CONFIG_FD, MetricsSlotHandoff, PARENT_WATCH_DETACH, PARENT_WATCH_FD,
     STARTUP_FD, StartupCommand,
@@ -174,6 +176,10 @@ pub struct Config {
     /// detached launchers can detach stdout/stderr from birth.
     #[cfg(unix)]
     pub startup_fd: Option<OwnedFd>,
+
+    /// Terminal inherited for the startup workload.
+    #[cfg(all(unix, feature = "oci-runtime"))]
+    pub startup_console: Option<OwnedFd>,
 
     /// Dedicated Windows startup JSON pipe.
     ///
@@ -628,6 +634,12 @@ fn run(
     let startup_writer = startup_writer
         .map(|writer| failure_channel.retain(writer))
         .transpose()?;
+    #[cfg(feature = "oci-runtime")]
+    let startup_stdio = startup_stdio(&config)?;
+    #[cfg(all(unix, feature = "oci-runtime"))]
+    let startup_console = config.startup_console.take();
+    #[cfg(all(not(unix), feature = "oci-runtime"))]
+    let startup_console = None;
     setup_log_capture(&config.log_dir, config.forward_output)?;
 
     tracing::info!(sandbox = %config.sandbox_name, "sandbox starting");
@@ -1093,6 +1105,8 @@ fn run(
     }
     let krun_metrics_handle = vm.metrics_handle();
     let exit_handle = vm.exit_handle();
+    #[cfg(feature = "oci-runtime")]
+    let vm_exit_code = vm.exit_code();
     let upper_host_path = oci_upper_host_path(&config.vm);
 
     // Serve every host-side control operation through one runtime-owned executor and endpoint.
@@ -1268,6 +1282,14 @@ fn run(
     let restore_runtime_dir = config.runtime_dir.clone();
     let relay_boot_log_dir = config.log_dir.clone();
     let restore_startup_progress = startup_progress.clone();
+    let startup_command = config.startup_command.clone();
+    let startup_agent_sock_path = config.agent_sock_path.clone();
+    let startup_shared = Arc::clone(&shared);
+    let startup_exit_handle = exit_handle.clone();
+    let startup_reason = Arc::clone(&exit_reason);
+    let startup_shutdown_flush_timeout = shutdown_flush_timeout;
+    #[cfg(feature = "oci-runtime")]
+    let startup_vm_exit_code = Arc::clone(&vm_exit_code);
     tokio_rt.spawn(async move {
         let ready_result = tokio::task::spawn_blocking(move || {
             if let (Some(restored), Some(control)) =
@@ -1332,13 +1354,117 @@ fn run(
                         upper_host_path,
                     }));
                 }
-                if let Err(e) = relay.run(relay_shutdown_rx, relay_drain_tx).await {
-                    tracing::error!("agent relay error: {e}");
-                    relay_exit_reason.store(
-                        EXIT_REASON_AGENT_UNRESPONSIVE,
-                        std::sync::atomic::Ordering::SeqCst,
-                    );
-                    relay_exit_handle.trigger();
+                let relay_task =
+                    tokio::spawn(async move { relay.run(relay_shutdown_rx, relay_drain_tx).await });
+                tokio::task::yield_now().await;
+
+                // Startup workload: detached `msb run -- CMD` makes the sandbox process
+                // own the command lifecycle. Run it only after agentd has reported ready
+                // and after the relay accept loop has been scheduled, otherwise the startup
+                // exec can race the relay and fail before OCI `start`.
+                if let Some(startup_command) = startup_command {
+                    tokio::spawn(async move {
+                        tracing::info!(
+                            cmd = %startup_command.cmd,
+                            args = ?startup_command.args,
+                            "starting startup command"
+                        );
+
+                        #[cfg(feature = "oci-runtime")]
+                        let startup_result = crate::startup::run_startup_command(
+                            &startup_agent_sock_path,
+                            startup_command,
+                            startup_stdio,
+                            startup_console,
+                        )
+                        .await;
+                        #[cfg(not(feature = "oci-runtime"))]
+                        let startup_result = crate::startup::run_startup_command(
+                            &startup_agent_sock_path,
+                            startup_command,
+                        )
+                        .await;
+
+                        match startup_result {
+                            Ok(crate::startup::StartupCommandExit::Exited(0)) => {
+                                #[cfg(feature = "oci-runtime")]
+                                startup_vm_exit_code.store(0, std::sync::atomic::Ordering::SeqCst);
+                                tracing::info!("startup command exited successfully");
+                            }
+                            Ok(crate::startup::StartupCommandExit::Exited(code)) => {
+                                #[cfg(feature = "oci-runtime")]
+                                startup_vm_exit_code
+                                    .store(code, std::sync::atomic::Ordering::SeqCst);
+                                startup_reason.store(
+                                    EXIT_REASON_STARTUP_COMMAND_FAILED,
+                                    std::sync::atomic::Ordering::SeqCst,
+                                );
+                                tracing::warn!(code, "startup command exited with non-zero status");
+                            }
+                            Ok(crate::startup::StartupCommandExit::Failed(failed)) => {
+                                #[cfg(feature = "oci-runtime")]
+                                startup_vm_exit_code
+                                    .store(127, std::sync::atomic::Ordering::SeqCst);
+                                startup_reason.store(
+                                    EXIT_REASON_STARTUP_COMMAND_FAILED,
+                                    std::sync::atomic::Ordering::SeqCst,
+                                );
+                                tracing::warn!(
+                                    error = %failed.message,
+                                    "startup command failed to spawn"
+                                );
+                            }
+                            Err(err) => {
+                                #[cfg(feature = "oci-runtime")]
+                                startup_vm_exit_code.store(1, std::sync::atomic::Ordering::SeqCst);
+                                startup_reason.store(
+                                    EXIT_REASON_STARTUP_COMMAND_FAILED,
+                                    std::sync::atomic::Ordering::SeqCst,
+                                );
+                                tracing::warn!(error = %err, "startup command failed");
+                            }
+                        }
+
+                        if startup_shared
+                            .resident_paused
+                            .load(std::sync::atomic::Ordering::Acquire)
+                        {
+                            startup_exit_handle.trigger();
+                            return;
+                        }
+                        match request_guest_shutdown_async(&startup_shared).await {
+                            Ok(()) => {
+                                tokio::time::sleep(startup_shutdown_flush_timeout).await;
+                                tracing::info!("startup command shutdown flush window elapsed");
+                            }
+                            Err(err) => {
+                                tracing::warn!(
+                                    error = %err,
+                                    "startup command shutdown request failed, triggering host exit"
+                                );
+                            }
+                        }
+                        startup_exit_handle.trigger();
+                    });
+                }
+                match relay_task.await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => {
+                        tracing::error!(%error, "agent relay error");
+                        relay_exit_reason.store(
+                            EXIT_REASON_AGENT_UNRESPONSIVE,
+                            std::sync::atomic::Ordering::SeqCst,
+                        );
+                        relay_exit_handle.trigger();
+                    }
+                    Err(error) => {
+                        tracing::error!(%error, "agent relay task panicked");
+                        relay_exit_reason.store(
+                            EXIT_REASON_AGENT_UNRESPONSIVE,
+                            std::sync::atomic::Ordering::SeqCst,
+                        );
+                        relay_exit_handle.trigger();
+                    }
                 }
             }
             Ok(Err(e)) => {
@@ -1384,74 +1510,6 @@ fn run(
                 );
                 tracing::info!("graceful shutdown requested; waiting for guest poweroff");
             }
-        });
-    }
-
-    // Startup workload: detached `msb run -- CMD` makes the sandbox process
-    // own the command lifecycle. Once the command terminates, stop the VM so
-    // named sandboxes become stopped and ephemeral sandboxes can self-clean.
-    if let Some(startup_command) = config.startup_command.clone() {
-        let startup_agent_sock_path = config.agent_sock_path.clone();
-        let startup_shared = Arc::clone(&shared);
-        let startup_exit_handle = exit_handle.clone();
-        let startup_reason = Arc::clone(&exit_reason);
-        let startup_shutdown_flush_timeout = shutdown_flush_timeout;
-        tokio_rt.spawn(async move {
-            tracing::info!(
-                cmd = %startup_command.cmd,
-                args = ?startup_command.args,
-                "starting startup command"
-            );
-
-            match crate::startup::run_startup_command(&startup_agent_sock_path, startup_command)
-                .await
-            {
-                Ok(crate::startup::StartupCommandExit::Exited(0)) => {
-                    tracing::info!("startup command exited successfully");
-                }
-                Ok(crate::startup::StartupCommandExit::Exited(code)) => {
-                    startup_reason.store(
-                        EXIT_REASON_STARTUP_COMMAND_FAILED,
-                        std::sync::atomic::Ordering::SeqCst,
-                    );
-                    tracing::warn!(code, "startup command exited with non-zero status");
-                }
-                Ok(crate::startup::StartupCommandExit::Failed(failed)) => {
-                    startup_reason.store(
-                        EXIT_REASON_STARTUP_COMMAND_FAILED,
-                        std::sync::atomic::Ordering::SeqCst,
-                    );
-                    tracing::warn!(error = %failed.message, "startup command failed to spawn");
-                }
-                Err(err) => {
-                    startup_reason.store(
-                        EXIT_REASON_STARTUP_COMMAND_FAILED,
-                        std::sync::atomic::Ordering::SeqCst,
-                    );
-                    tracing::warn!(error = %err, "startup command failed");
-                }
-            }
-
-            if startup_shared
-                .resident_paused
-                .load(std::sync::atomic::Ordering::Acquire)
-            {
-                startup_exit_handle.trigger();
-                return;
-            }
-            match request_guest_shutdown_async(&startup_shared).await {
-                Ok(()) => {
-                    tokio::time::sleep(startup_shutdown_flush_timeout).await;
-                    tracing::info!("startup command shutdown flush window elapsed");
-                }
-                Err(err) => {
-                    tracing::warn!(
-                        error = %err,
-                        "startup command shutdown request failed, triggering host exit"
-                    );
-                }
-            }
-            startup_exit_handle.trigger();
         });
     }
 
@@ -3011,6 +3069,37 @@ fn release_reserved_metrics_slot(handoff: Option<&MetricsSlotHandoff>) {
     if let Ok(reg) = MetricsRegistry::open(&handoff.shm_name) {
         let _ = reg.release_reserved(handoff.slot, handoff.generation);
     }
+}
+
+#[cfg(all(unix, feature = "oci-runtime"))]
+fn startup_stdio(config: &Config) -> RuntimeResult<Option<crate::startup::StartupStdio>> {
+    if !config
+        .startup_command
+        .as_ref()
+        .is_some_and(|command| command.forward_stdio)
+    {
+        return Ok(None);
+    }
+
+    let stdout = unsafe { libc::dup(libc::STDOUT_FILENO) };
+    if stdout < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    let stderr = unsafe { libc::dup(libc::STDERR_FILENO) };
+    if stderr < 0 {
+        let _ = unsafe { libc::close(stdout) };
+        return Err(std::io::Error::last_os_error().into());
+    }
+
+    Ok(Some(crate::startup::StartupStdio {
+        stdout: unsafe { std::fs::File::from_raw_fd(stdout) },
+        stderr: unsafe { std::fs::File::from_raw_fd(stderr) },
+    }))
+}
+
+#[cfg(all(windows, feature = "oci-runtime"))]
+fn startup_stdio(_config: &Config) -> RuntimeResult<Option<crate::startup::StartupStdio>> {
+    Ok(None)
 }
 
 #[cfg(unix)]

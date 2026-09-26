@@ -42,6 +42,10 @@ pub const STARTUP_FD: i32 = 98;
 #[cfg(unix)]
 pub const LIFECYCLE_LOCK_FD: i32 = 99;
 
+/// Fixed fd holding an inherited terminal for the sandbox startup workload.
+#[cfg(all(unix, feature = "oci-runtime"))]
+pub const OCI_CONSOLE_FD: i32 = 100;
+
 /// Control byte sent by the owner to stop parent-watch monitoring without stopping the sandbox.
 pub const PARENT_WATCH_DETACH: u8 = 1;
 
@@ -88,6 +92,41 @@ pub struct StartupCommand {
 
     /// Guest user override for the command.
     pub user: Option<String>,
+
+    /// Whether the startup command should run under a guest PTY.
+    #[cfg(feature = "oci-runtime")]
+    #[serde(default)]
+    pub tty: bool,
+
+    /// Initial terminal row count for PTY-backed startup commands.
+    #[cfg(feature = "oci-runtime")]
+    #[serde(default)]
+    pub rows: u16,
+
+    /// Initial terminal column count for PTY-backed startup commands.
+    #[cfg(feature = "oci-runtime")]
+    #[serde(default)]
+    pub cols: u16,
+
+    /// Optional host path that must exist before the command is started.
+    #[cfg(feature = "oci-runtime")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_signal_path: Option<PathBuf>,
+
+    /// Optional host path receiving the agent exec session ID.
+    #[cfg(feature = "oci-runtime")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id_path: Option<PathBuf>,
+
+    /// Optional host path used to deliver signals to the startup command.
+    #[cfg(feature = "oci-runtime")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signal_path: Option<PathBuf>,
+
+    /// Whether command output should use the VMM's original stdout and stderr.
+    #[cfg(feature = "oci-runtime")]
+    #[serde(default)]
+    pub forward_stdio: bool,
 }
 
 /// The bulk `msb machine` configuration delivered over the config fd.

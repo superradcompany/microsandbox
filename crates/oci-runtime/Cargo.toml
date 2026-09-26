@@ -1,0 +1,55 @@
+[package]
+name = "runmsb"
+description = "OCI Runtime Specification-compatible runtime binary for Microsandbox."
+version.workspace = true
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "runmsb"
+path = "bin/main.rs"
+required-features = ["runmsb"]
+
+[lib]
+name = "runmsb"
+path = "lib/lib.rs"
+
+[features]
+default = []
+runmsb = [
+    "dep:anyhow",
+    "dep:chrono",
+    "dep:clap",
+    "dep:libc",
+    "dep:microsandbox",
+    "microsandbox/oci-runtime",
+    "dep:microsandbox-protocol",
+    "dep:microsandbox-runtime",
+    "microsandbox-runtime/oci-runtime",
+    "dep:nix",
+    "dep:oci-spec",
+    "dep:serde_json",
+    "dep:tokio",
+    "dep:tracing",
+    "dep:tracing-subscriber",
+]
+
+[dependencies]
+anyhow = { workspace = true, optional = true }
+chrono = { workspace = true, optional = true }
+clap = { workspace = true, optional = true }
+libc = { workspace = true, optional = true }
+microsandbox = { workspace = true, features = ["net"], optional = true }
+microsandbox-protocol = { workspace = true, optional = true }
+microsandbox-runtime = { workspace = true, features = ["net"], optional = true }
+nix = { workspace = true, features = ["fs", "signal", "socket", "term", "uio"], optional = true }
+oci-spec = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"], optional = true }
+
+[dev-dependencies]
+tempfile.workspace = true

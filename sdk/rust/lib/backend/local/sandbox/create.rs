@@ -1108,6 +1108,8 @@ impl LocalBackend {
         )
         .await?;
         let mut startup_process = StartupProcess::new(handle);
+        #[cfg(all(unix, feature = "oci-runtime"))]
+        config.clear_inherited_startup_console();
         let log_dir = self.sandboxes_dir().join(&config.spec.name).join("logs");
         if let Err(error) = startup_process
             .handle_mut()
