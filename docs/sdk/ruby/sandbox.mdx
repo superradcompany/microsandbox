@@ -7,25 +7,346 @@ keywords: ["Ruby SDK", "Ruby sandbox", "microsandbox sandbox"]
 
 See [Overview](/sandboxes/overview) for configuration examples and [Lifecycle](/sandboxes/lifecycle) for state management. See [Error handling](/sdk/errors) for cross-SDK behavior.
 
-## Installation
+## Sandbox
 
-```bash
-gem install microsandbox
+<p className="msb-member-group">Class methods</p>
+
+#### <span className="msb-recv">Microsandbox::Sandbox.</span><span className="msb-hn">create()</span>
+
+```ruby
+Microsandbox::Sandbox.create(name, **options) # => Sandbox
 ```
-
-Ruby 3.1 and newer are supported. When a matching platform gem is available, it carries the native extension; otherwise the source gem requires Rust 1.85 or newer to build it locally.
-
-Blocking native calls release Ruby's global VM lock (GVL), allowing other Ruby threads to run.
 
 <Accordion title="Example">
-```ruby
-require "microsandbox"
 
-Microsandbox.install unless Microsandbox.installed?
+```ruby
+sandbox = Microsandbox::Sandbox.create("worker", image: "alpine", memory: 512)
 ```
+
 </Accordion>
 
-## Reuse or create a sandbox
+Create and start a sandbox. An existing name is an error unless replacement is requested. See [Networking](/sdk/ruby/networking) for network, proxy, and secret options.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>name</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Sandbox name.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>image</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">OCI image reference.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>cpus</code><span className="msb-type">Integer</span></div>
+    <div className="msb-param-desc">Initial virtual CPU count.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>max_cpus</code><span className="msb-type">Integer</span></div>
+    <div className="msb-param-desc">Maximum virtual CPU count.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>memory</code><span className="msb-type">Integer</span></div>
+    <div className="msb-param-desc">Initial memory in MiB.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>max_memory</code><span className="msb-type">Integer</span></div>
+    <div className="msb-param-desc">Maximum memory in MiB.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>env</code><span className="msb-type">Hash</span></div>
+    <div className="msb-param-desc">Environment variables with string keys and values.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>labels</code><span className="msb-type">Hash</span></div>
+    <div className="msb-param-desc">Labels with string keys and values.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>workdir</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Guest working directory.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>shell</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Shell used for shell commands.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>hostname</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Guest hostname.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>user</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Guest user.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>detached</code><span className="msb-type">Boolean</span></div>
+    <div className="msb-param-desc">Start locally in the background.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ephemeral</code><span className="msb-type">Boolean</span></div>
+    <div className="msb-param-desc">Remove sandbox state when its lifecycle ends.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>max_duration</code><span className="msb-type">Integer</span></div>
+    <div className="msb-param-desc">Maximum lifetime in seconds.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>idle_timeout</code><span className="msb-type">Integer</span></div>
+    <div className="msb-param-desc">Idle timeout in seconds.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>replace</code><span className="msb-type">Boolean</span></div>
+    <div className="msb-param-desc">Replace an existing sandbox with this name.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>replace_timeout</code><span className="msb-type">Numeric</span></div>
+    <div className="msb-param-desc">Finite, non-negative replacement timeout in seconds.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>root_disk</code><span className="msb-type">Integer</span></div>
+    <div className="msb-param-desc">Managed root disk size in MiB.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>disable_network</code><span className="msb-type">Boolean</span></div>
+    <div className="msb-param-desc">Disable sandbox networking.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>network</code><span className="msb-type">Symbol | Hash</span></div>
+    <div className="msb-param-desc">Use :none or the allowlist hash documented in the Networking reference.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>proxy</code><span className="msb-type">OutboundProxy</span></div>
+    <div className="msb-param-desc">SOCKS proxy configuration; see the Networking reference.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>secrets</code><span className="msb-type">Array&lt;Hash&gt;</span></div>
+    <div className="msb-param-desc">Secret injection entries; see the Networking reference.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>quiet_logs</code><span className="msb-type">Boolean</span></div>
+    <div className="msb-param-desc">Suppress sandbox log output.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>entrypoint</code><span className="msb-type">Array&lt;String&gt;</span></div>
+    <div className="msb-param-desc">Override the image entrypoint; creation does not execute it.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>init</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Guest init program.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>pull_policy</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Image pull policy: if_missing (or if-missing), always, or never.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>scripts</code><span className="msb-type">Hash</span></div>
+    <div className="msb-param-desc">Named scripts with string keys and values.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>slug</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Human-readable sandbox slug.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">Sandbox</span></div>
+    <div className="msb-param-desc">Live sandbox connection.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">Microsandbox::Sandbox.</span><span className="msb-hn">builder()</span>
+
+```ruby
+Microsandbox::Sandbox.builder(name) # => SandboxBuilder
+```
+
+Create a chainable sandbox builder.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>name</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Sandbox name.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">SandboxBuilder</span></div>
+    <div className="msb-param-desc">Configuration builder.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">Microsandbox::Sandbox.</span><span className="msb-hn">start()</span>
+
+```ruby
+Microsandbox::Sandbox.start(name, detached: false) # => Sandbox
+```
+
+Start an existing sandbox.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>name</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Sandbox name.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>detached</code><span className="msb-type">Boolean</span></div>
+    <div className="msb-param-desc">Start locally in the background; defaults to false.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">Sandbox</span></div>
+    <div className="msb-param-desc">Live sandbox connection.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">Microsandbox::Sandbox.</span><span className="msb-hn">get()</span>
+
+```ruby
+Microsandbox::Sandbox.get(name) # => SandboxHandle
+```
+
+Obtain persisted metadata without connecting to the guest agent.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>name</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Sandbox name.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">SandboxHandle</span></div>
+    <div className="msb-param-desc">Metadata handle bound to this sandbox identity.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">Microsandbox::Sandbox.</span><span className="msb-hn">list()</span>
+
+```ruby
+Microsandbox::Sandbox.list(**options) # => Hash
+```
+
+<Accordion title="Example">
+
+```ruby
+page = Microsandbox::Sandbox.list(limit: 20)
+page["sandboxes"].each { |handle| puts handle.name }
+```
+
+</Accordion>
+
+List sandboxes with optional pagination and label filtering.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>cursor</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Optional cursor from the previous page.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>limit</code><span className="msb-type">Integer</span></div>
+    <div className="msb-param-desc">Optional maximum page size.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>labels</code><span className="msb-type">Hash</span></div>
+    <div className="msb-param-desc">Optional label filter with string keys and values.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">Hash</span></div>
+    <div className="msb-param-desc">String keys: sandboxes (Array&lt;SandboxHandle&gt;) and next_cursor (String or nil).</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">Microsandbox::Sandbox.</span><span className="msb-hn">remove()</span>
+
+```ruby
+Microsandbox::Sandbox.remove(name) # => nil
+```
+
+Remove a stopped sandbox and its local state. Use destroy to stop and remove a sandbox.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>name</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Sandbox name.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">nil</span></div>
+    <div className="msb-param-desc">No return value.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">Microsandbox::Sandbox.</span><span className="msb-hn">with()</span>
+
+```ruby
+Microsandbox::Sandbox.with(name, **options) { |sandbox| } # => Object
+```
+
+<Accordion title="Example">
+
+```ruby
+Microsandbox::Sandbox.with("worker", image: "alpine") do |sandbox|
+  puts sandbox.exec("echo", ["hello"]).stdout
+end
+```
+
+</Accordion>
+
+Create a sandbox and yield it to the block. Gracefully stop it when the block exits, including on an exception. This does not remove persisted sandbox state. Without a block, return the created sandbox.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>name</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Sandbox name.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>options</code><span className="msb-type">Hash</span></div>
+    <div className="msb-param-desc">The same creation options as create().</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">Object</span></div>
+    <div className="msb-param-desc">The block result, or a Sandbox when no block is supplied.</div>
+  </div>
+</div>
 
 #### <span className="msb-recv">Microsandbox::Sandbox.</span><span className="msb-hn">connect_or_create()</span>
 
@@ -36,6 +357,7 @@ Microsandbox::Sandbox.connect_or_create(name, **options) # => Sandbox
 Reuse or create the sandbox with this name. The method connects when it is running, waits while it is starting, starts it when it is created, stopped, or crashed, and creates it only when the name is unused. Options apply only to a new sandbox, and concurrent callers reuse the same sandbox. Replace options are rejected because they request a different sandbox.
 
 <Accordion title="Example">
+
 ```ruby
 sandbox = Microsandbox::Sandbox.connect_or_create(
   "worker",
@@ -44,23 +366,237 @@ sandbox = Microsandbox::Sandbox.connect_or_create(
   env: { "ROLE" => "worker" }
 )
 ```
+
 </Accordion>
 
 Use `Sandbox.create` when name conflicts must remain an error, or explicit replace options when the old identity should be discarded.
 
-## SandboxBuilder
+<p className="msb-label">Parameters</p>
 
-#### <span className="msb-recv">builder.</span><span className="msb-hn">connect_or_create()</span>
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>name</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Sandbox name.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>options</code><span className="msb-type">Hash</span></div>
+    <div className="msb-param-desc">Creation options, applied only when creating a new sandbox.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">Sandbox</span></div>
+    <div className="msb-param-desc">Live sandbox connection.</div>
+  </div>
+</div>
+
+<p className="msb-member-group">Instance methods</p>
+
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">name</span>
 
 ```ruby
-Microsandbox::Sandbox.builder(name).connect_or_create # => Sandbox
+sandbox.name # => String
 ```
 
-Builder terminal with the same reuse, creation-option, concurrency, and replace-option behavior as `Microsandbox::Sandbox.connect_or_create`.
+<p className="msb-label">Returns</p>
 
-## Sandbox
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Sandbox name.</div>
+  </div>
+</div>
 
-A live sandbox connection returned by `create`, `connect_or_create`, `start`, `connect_or_start`, or `restart`.
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">owns_lifecycle?</span>
+
+```ruby
+sandbox.owns_lifecycle? # => Boolean
+```
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">Boolean</span></div>
+    <div className="msb-param-desc">Whether this connection owns the sandbox lifecycle.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">backend</span>
+
+```ruby
+sandbox.backend # => String
+```
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Selected backend: local or cloud.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">status</span>
+
+```ruby
+sandbox.status # => String
+```
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Current lifecycle status, fetched from the backend.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">last_failure_message</span>
+
+```ruby
+sandbox.last_failure_message # => String | nil
+```
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">String | nil</span></div>
+    <div className="msb-param-desc">Most recent recorded failure, if available.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">kill()</span>
+
+```ruby
+sandbox.kill(timeout: nil) # => nil
+```
+
+Force termination and wait for shutdown. Omit timeout for an unbounded wait. Force termination is local-only.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>timeout</code><span className="msb-type">Numeric</span></div>
+    <div className="msb-param-desc">Optional finite, non-negative timeout in seconds. May also be passed positionally, but not both ways.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">nil</span></div>
+    <div className="msb-param-desc">No return value.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">wait_until_stopped()</span>
+
+```ruby
+sandbox.wait_until_stopped # => Hash
+```
+
+Wait for termination without a built-in timeout.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">Hash</span></div>
+    <div className="msb-param-desc">Stop result with string keys; see Stop result below.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">ping()</span>
+
+```ruby
+sandbox.ping # => Hash
+```
+
+Check sandbox responsiveness.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">Hash</span></div>
+    <div className="msb-param-desc">String keys: name (String) and latency_ms (Integer).</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">touch()</span>
+
+```ruby
+sandbox.touch # => Hash
+```
+
+Record activity to refresh the sandbox idle timer.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">Hash</span></div>
+    <div className="msb-param-desc">String keys: name (String) and activity_seq (Integer).</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">metrics()</span>
+
+```ruby
+sandbox.metrics # => SandboxMetrics
+```
+
+Read a metrics sample.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">SandboxMetrics</span></div>
+    <div className="msb-param-desc">Metrics sample; call to_h for its fields.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">request_kill()</span>
+
+```ruby
+sandbox.request_kill # => nil
+```
+
+Request forced termination without waiting for shutdown. Local-only.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">nil</span></div>
+    <div className="msb-param-desc">No return value.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">detach()</span>
+
+```ruby
+sandbox.detach # => nil
+```
+
+Detach from the local runtime. This consumes the live connection; subsequent operations on it fail.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">nil</span></div>
+    <div className="msb-param-desc">No return value.</div>
+  </div>
+</div>
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">stop()</span>
 
@@ -71,13 +607,49 @@ sandbox.stop(timeout: 30) # Existing optional bounded form
 
 Request graceful shutdown and wait for this exact sandbox run to finish, including local runtime ownership release. There is no built-in deadline or automatic force-kill. A supplied `timeout:` bounds the wait without changing graceful shutdown into forced termination. These semantics require the matching updated native extension and runtime.
 
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>timeout</code><span className="msb-type">Numeric</span></div>
+    <div className="msb-param-desc">Optional finite, non-negative deadline in seconds; no deadline when omitted.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">nil</span></div>
+    <div className="msb-param-desc">No return value.</div>
+  </div>
+</div>
+
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">stop_with_timeout()</span>
 
 ```ruby
-sandbox.stop_with_timeout(30) # Seconds; => nil after shutdown
+sandbox.stop_with_timeout(seconds) # => nil
 ```
 
 Bound graceful shutdown with an explicit finite, non-negative timeout. The deadline covers local transition ownership, request dispatch, and termination observation. Expiry raises `Microsandbox::Error` without force-killing; zero expires before sending a request. Call `kill` separately when forced termination is intended.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>seconds</code><span className="msb-type">Numeric</span></div>
+    <div className="msb-param-desc">Finite, non-negative timeout in seconds.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">nil</span></div>
+    <div className="msb-param-desc">No return value.</div>
+  </div>
+</div>
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">request_stop()</span>
 
@@ -87,6 +659,15 @@ sandbox.request_stop # => nil
 
 Send the graceful shutdown request without waiting for termination or scheduling a force-kill. Pair with `wait_until_stopped` to observe completion.
 
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">nil</span></div>
+    <div className="msb-param-desc">No return value.</div>
+  </div>
+</div>
+
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">id</span>
 
 ```ruby
@@ -95,13 +676,40 @@ sandbox.id # => String
 
 Opaque stable identity of the persisted sandbox. It remains unchanged across stop and restart and changes when a removed name is recreated. Use it for equality, logging, and correlation; do not parse it.
 
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Stable sandbox identity.</div>
+  </div>
+</div>
+
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">wait_for_status()</span>
 
 ```ruby
 sandbox.wait_for_status(status) # => SandboxHandle
 ```
 
-Wait without a built-in timeout until this exact sandbox reaches one of `created`, `starting`, `running`, `draining`, `paused`, `stopped`, or `crashed`. Returns a refreshed metadata handle. Use Ruby's `Timeout.timeout` or an application cancellation mechanism when a deadline is required.
+Wait without a built-in timeout until this exact sandbox reaches one of `created`, `starting`, `running`, `draining`, `paused`, `stopped`, or `crashed`. Returns a refreshed metadata handle. Ruby's `Timeout.timeout` does not reliably interrupt the native wait. Use an SDK operation with an explicit timeout when you need a bounded shutdown.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>status</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Target lifecycle status.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">SandboxHandle</span></div>
+    <div className="msb-param-desc">Refreshed metadata handle.</div>
+  </div>
+</div>
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">restart()</span>
 
@@ -113,6 +721,32 @@ Restart this exact sandbox. Defaults to graceful shutdown, the SDK's ten-second 
 
 On microsandbox cloud, graceful restart is supported, but timeout expiry cannot escalate to force kill. `force: true` is local-only, and `detached:` affects only local process ownership.
 
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>force</code><span className="msb-type">Boolean</span></div>
+    <div className="msb-param-desc">Use forced termination; defaults to false and is local-only.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>timeout</code><span className="msb-type">Numeric | nil</span></div>
+    <div className="msb-param-desc">Shutdown timeout in seconds; nil uses the SDK default of ten seconds.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>detached</code><span className="msb-type">Boolean</span></div>
+    <div className="msb-param-desc">Start locally in the background; defaults to false.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">Sandbox</span></div>
+    <div className="msb-param-desc">Live connection to the restarted sandbox.</div>
+  </div>
+</div>
+
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">destroy()</span>
 
 ```ruby
@@ -121,15 +755,903 @@ sandbox.destroy(force: false, timeout: nil) # => nil
 
 Stop and remove this exact sandbox. Defaults to graceful shutdown with the SDK's ten-second timeout. Identity checks refuse to delete a same-name replacement.
 
-## SandboxHandle
+<p className="msb-label">Parameters</p>
 
-Obtain a metadata handle without opening the guest-agent connection:
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>force</code><span className="msb-type">Boolean</span></div>
+    <div className="msb-param-desc">Use forced termination; defaults to false.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>timeout</code><span className="msb-type">Numeric | nil</span></div>
+    <div className="msb-param-desc">Shutdown timeout in seconds; nil uses the SDK default of ten seconds.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">nil</span></div>
+    <div className="msb-param-desc">No return value.</div>
+  </div>
+</div>
+
+## SandboxBuilder
+
+#### <span className="msb-recv">builder.</span><span className="msb-hn">image()</span>
+
+```ruby
+builder.image(value) # => SandboxBuilder
+```
+
+OCI image reference.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>value</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">OCI image reference.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">SandboxBuilder</span></div>
+    <div className="msb-param-desc">The builder, for chaining.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">builder.</span><span className="msb-hn">cpus()</span>
+
+```ruby
+builder.cpus(value) # => SandboxBuilder
+```
+
+Initial virtual CPU count.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>value</code><span className="msb-type">Integer</span></div>
+    <div className="msb-param-desc">Initial virtual CPU count.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">SandboxBuilder</span></div>
+    <div className="msb-param-desc">The builder, for chaining.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">builder.</span><span className="msb-hn">max_cpus()</span>
+
+```ruby
+builder.max_cpus(value) # => SandboxBuilder
+```
+
+Maximum virtual CPU count.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>value</code><span className="msb-type">Integer</span></div>
+    <div className="msb-param-desc">Maximum virtual CPU count.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">SandboxBuilder</span></div>
+    <div className="msb-param-desc">The builder, for chaining.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">builder.</span><span className="msb-hn">memory()</span>
+
+```ruby
+builder.memory(value) # => SandboxBuilder
+```
+
+Initial memory in MiB.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>value</code><span className="msb-type">Integer</span></div>
+    <div className="msb-param-desc">Initial memory in MiB.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">SandboxBuilder</span></div>
+    <div className="msb-param-desc">The builder, for chaining.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">builder.</span><span className="msb-hn">max_memory()</span>
+
+```ruby
+builder.max_memory(value) # => SandboxBuilder
+```
+
+Maximum memory in MiB.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>value</code><span className="msb-type">Integer</span></div>
+    <div className="msb-param-desc">Maximum memory in MiB.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">SandboxBuilder</span></div>
+    <div className="msb-param-desc">The builder, for chaining.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">builder.</span><span className="msb-hn">env()</span>
+
+```ruby
+builder.env(key, value) # => SandboxBuilder
+```
+
+Environment variables with string keys and values.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>key</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Environment variable name.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>value</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Environment variable value.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">SandboxBuilder</span></div>
+    <div className="msb-param-desc">The builder, for chaining.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">builder.</span><span className="msb-hn">workdir()</span>
+
+```ruby
+builder.workdir(value) # => SandboxBuilder
+```
+
+Guest working directory.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>value</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Guest working directory.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">SandboxBuilder</span></div>
+    <div className="msb-param-desc">The builder, for chaining.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">builder.</span><span className="msb-hn">shell()</span>
+
+```ruby
+builder.shell(value) # => SandboxBuilder
+```
+
+Shell used for shell commands.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>value</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Shell used for shell commands.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">SandboxBuilder</span></div>
+    <div className="msb-param-desc">The builder, for chaining.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">builder.</span><span className="msb-hn">hostname()</span>
+
+```ruby
+builder.hostname(value) # => SandboxBuilder
+```
+
+Guest hostname.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>value</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Guest hostname.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">SandboxBuilder</span></div>
+    <div className="msb-param-desc">The builder, for chaining.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">builder.</span><span className="msb-hn">user()</span>
+
+```ruby
+builder.user(value) # => SandboxBuilder
+```
+
+Guest user.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>value</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Guest user.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">SandboxBuilder</span></div>
+    <div className="msb-param-desc">The builder, for chaining.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">builder.</span><span className="msb-hn">detached()</span>
+
+```ruby
+builder.detached(value) # => SandboxBuilder
+```
+
+Start locally in the background.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>value</code><span className="msb-type">Boolean</span></div>
+    <div className="msb-param-desc">Start locally in the background.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">SandboxBuilder</span></div>
+    <div className="msb-param-desc">The builder, for chaining.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">builder.</span><span className="msb-hn">ephemeral()</span>
+
+```ruby
+builder.ephemeral(value) # => SandboxBuilder
+```
+
+Remove sandbox state when its lifecycle ends.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>value</code><span className="msb-type">Boolean</span></div>
+    <div className="msb-param-desc">Remove sandbox state when its lifecycle ends.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">SandboxBuilder</span></div>
+    <div className="msb-param-desc">The builder, for chaining.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">builder.</span><span className="msb-hn">max_duration()</span>
+
+```ruby
+builder.max_duration(value) # => SandboxBuilder
+```
+
+Maximum lifetime in seconds.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>value</code><span className="msb-type">Integer</span></div>
+    <div className="msb-param-desc">Maximum lifetime in seconds.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">SandboxBuilder</span></div>
+    <div className="msb-param-desc">The builder, for chaining.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">builder.</span><span className="msb-hn">idle_timeout()</span>
+
+```ruby
+builder.idle_timeout(value) # => SandboxBuilder
+```
+
+Idle timeout in seconds.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>value</code><span className="msb-type">Integer</span></div>
+    <div className="msb-param-desc">Idle timeout in seconds.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">SandboxBuilder</span></div>
+    <div className="msb-param-desc">The builder, for chaining.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">builder.</span><span className="msb-hn">replace()</span>
+
+```ruby
+builder.replace # => SandboxBuilder
+```
+
+Replace an existing sandbox with this name.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">SandboxBuilder</span></div>
+    <div className="msb-param-desc">The builder, for chaining.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">builder.</span><span className="msb-hn">root_disk()</span>
+
+```ruby
+builder.root_disk(value) # => SandboxBuilder
+```
+
+Managed root disk size in MiB.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>value</code><span className="msb-type">Integer</span></div>
+    <div className="msb-param-desc">Managed root disk size in MiB.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">SandboxBuilder</span></div>
+    <div className="msb-param-desc">The builder, for chaining.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">builder.</span><span className="msb-hn">disable_network()</span>
+
+```ruby
+builder.disable_network # => SandboxBuilder
+```
+
+Disable sandbox networking.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">SandboxBuilder</span></div>
+    <div className="msb-param-desc">The builder, for chaining.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">builder.</span><span className="msb-hn">proxy()</span>
+
+```ruby
+builder.proxy(value) # => SandboxBuilder
+```
+
+SOCKS proxy configuration; see the Networking reference.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>value</code><span className="msb-type">OutboundProxy</span></div>
+    <div className="msb-param-desc">SOCKS proxy configuration; see the Networking reference.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">SandboxBuilder</span></div>
+    <div className="msb-param-desc">The builder, for chaining.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">builder.</span><span className="msb-hn">quiet_logs()</span>
+
+```ruby
+builder.quiet_logs # => SandboxBuilder
+```
+
+Suppress sandbox log output.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">SandboxBuilder</span></div>
+    <div className="msb-param-desc">The builder, for chaining.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">builder.</span><span className="msb-hn">entrypoint()</span>
+
+```ruby
+builder.entrypoint(value) # => SandboxBuilder
+```
+
+Override the image entrypoint; creation does not execute it.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>value</code><span className="msb-type">Array&lt;String&gt;</span></div>
+    <div className="msb-param-desc">Override the image entrypoint; creation does not execute it.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">SandboxBuilder</span></div>
+    <div className="msb-param-desc">The builder, for chaining.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">builder.</span><span className="msb-hn">init()</span>
+
+```ruby
+builder.init(value) # => SandboxBuilder
+```
+
+Guest init program.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>value</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Guest init program.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">SandboxBuilder</span></div>
+    <div className="msb-param-desc">The builder, for chaining.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">builder.</span><span className="msb-hn">label()</span>
+
+```ruby
+builder.label(key, value) # => SandboxBuilder
+```
+
+Add a label.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>key</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Label key.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>value</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Label value.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">SandboxBuilder</span></div>
+    <div className="msb-param-desc">The builder, for chaining.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">builder.</span><span className="msb-hn">replace_with_timeout()</span>
+
+```ruby
+builder.replace_with_timeout(seconds) # => SandboxBuilder
+```
+
+Replace an existing sandbox with a bounded wait.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>seconds</code><span className="msb-type">Numeric</span></div>
+    <div className="msb-param-desc">Finite, non-negative timeout in seconds.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">SandboxBuilder</span></div>
+    <div className="msb-param-desc">The builder, for chaining.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">builder.</span><span className="msb-hn">create()</span>
+
+```ruby
+builder.create # => Sandbox
+```
 
 <Accordion title="Example">
+
 ```ruby
-handle = Microsandbox::Sandbox.get("worker")
+sandbox = Microsandbox::Sandbox.builder("worker")
+  .image("alpine")
+  .memory(512)
+  .create
 ```
+
 </Accordion>
+
+Create and start the configured sandbox. This consumes the builder; it cannot be reused.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">Sandbox</span></div>
+    <div className="msb-param-desc">Live sandbox connection.</div>
+  </div>
+</div>
+
+The chainable setters above also have bang forms, such as `image!`, which mutate the builder and return `nil`. See [VSock](/sdk/ruby/vsock) for `vsock` and `vsock_dgram`. Network allowlists, secret entries, pull policy, scripts, and slug are creation keywords, not Ruby builder methods.
+
+#### <span className="msb-recv">builder.</span><span className="msb-hn">connect_or_create()</span>
+
+```ruby
+Microsandbox::Sandbox.builder(name).connect_or_create # => Sandbox
+```
+
+Create or reuse the configured sandbox, with the same behavior as `Microsandbox::Sandbox.connect_or_create`. This consumes the builder.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">Sandbox</span></div>
+    <div className="msb-param-desc">Live sandbox connection.</div>
+  </div>
+</div>
+
+## SandboxHandle
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">name</span>
+
+```ruby
+handle.name # => String
+```
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Sandbox name.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">status</span>
+
+```ruby
+handle.status # => String
+```
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Status captured by this metadata handle. Call refresh for current metadata.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">config_json</span>
+
+```ruby
+handle.config_json # => String
+```
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Saved desired configuration as JSON.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">active_config_json</span>
+
+```ruby
+handle.active_config_json # => String | nil
+```
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">String | nil</span></div>
+    <div className="msb-param-desc">Configuration used for the active run, when available.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">last_failure_message</span>
+
+```ruby
+handle.last_failure_message # => String | nil
+```
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">String | nil</span></div>
+    <div className="msb-param-desc">Failure message captured by this handle, if available.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">kill()</span>
+
+```ruby
+handle.kill(timeout: nil) # => nil
+```
+
+Force termination and wait for shutdown. Omit timeout for an unbounded wait. Force termination is local-only.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>timeout</code><span className="msb-type">Numeric</span></div>
+    <div className="msb-param-desc">Optional finite, non-negative timeout in seconds. May also be passed positionally, but not both ways.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">nil</span></div>
+    <div className="msb-param-desc">No return value.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">wait_until_stopped()</span>
+
+```ruby
+handle.wait_until_stopped # => Hash
+```
+
+Wait for termination without a built-in timeout.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">Hash</span></div>
+    <div className="msb-param-desc">Stop result with string keys; see Stop result below.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">ping()</span>
+
+```ruby
+handle.ping # => Hash
+```
+
+Check sandbox responsiveness.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">Hash</span></div>
+    <div className="msb-param-desc">String keys: name (String) and latency_ms (Integer).</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">touch()</span>
+
+```ruby
+handle.touch # => Hash
+```
+
+Record activity to refresh the sandbox idle timer.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">Hash</span></div>
+    <div className="msb-param-desc">String keys: name (String) and activity_seq (Integer).</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">metrics()</span>
+
+```ruby
+handle.metrics # => SandboxMetrics
+```
+
+Read a metrics sample.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">SandboxMetrics</span></div>
+    <div className="msb-param-desc">Metrics sample; call to_h for its fields.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">refresh()</span>
+
+```ruby
+handle.refresh # => SandboxHandle
+```
+
+Fetch current metadata for this sandbox.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">SandboxHandle</span></div>
+    <div className="msb-param-desc">A refreshed handle; assign the returned value.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">connect()</span>
+
+```ruby
+handle.connect # => Sandbox
+```
+
+Connect to the running sandbox without starting it.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">Sandbox</span></div>
+    <div className="msb-param-desc">Live sandbox connection.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">start()</span>
+
+```ruby
+handle.start(detached: false) # => Sandbox
+```
+
+Start this existing sandbox.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>detached</code><span className="msb-type">Boolean</span></div>
+    <div className="msb-param-desc">Start locally in the background; defaults to false.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">Sandbox</span></div>
+    <div className="msb-param-desc">Live sandbox connection.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">remove()</span>
+
+```ruby
+handle.remove # => nil
+```
+
+Remove this stopped sandbox. The handle remains bound to its original identity.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">nil</span></div>
+    <div className="msb-param-desc">No return value.</div>
+  </div>
+</div>
 
 #### <span className="msb-recv">handle.</span><span className="msb-hn">id</span>
 
@@ -139,15 +1661,67 @@ handle.id # => String
 
 Opaque stable identity captured by this handle. Receiver lifecycle calls remain bound to this value.
 
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Stable sandbox identity.</div>
+  </div>
+</div>
+
 #### <span className="msb-recv">handle.</span><span className="msb-hn">stop()</span>
 
 ```ruby
 handle.stop # No built-in deadline
 handle.stop(timeout: 30) # Existing optional bounded form
-handle.stop_with_timeout(30) # Explicit bounded form
 ```
 
 Request graceful shutdown for this exact sandbox run and wait for termination and local runtime ownership release. `stop` has no built-in timeout. Both bounded forms raise `Microsandbox::Error` on expiry without force-killing; zero expires before sending a request. A stale identity is refused rather than stopping a replacement. On cloud, a timeout limits the SDK wait; an accepted stop may continue server-side.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>timeout</code><span className="msb-type">Numeric</span></div>
+    <div className="msb-param-desc">Optional finite, non-negative deadline in seconds; no deadline when omitted.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">nil</span></div>
+    <div className="msb-param-desc">No return value.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">stop_with_timeout()</span>
+
+```ruby
+handle.stop_with_timeout(seconds) # => nil
+```
+
+Request graceful shutdown and wait up to the supplied deadline. Timeout does not force-kill the sandbox; zero expires before sending a request.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>seconds</code><span className="msb-type">Numeric</span></div>
+    <div className="msb-param-desc">Finite, non-negative timeout in seconds.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">nil</span></div>
+    <div className="msb-param-desc">No return value.</div>
+  </div>
+</div>
 
 #### <span className="msb-recv">handle.</span><span className="msb-hn">connect_or_start()</span>
 
@@ -157,6 +1731,24 @@ handle.connect_or_start(detached: false) # => Sandbox
 
 Connect when this exact sandbox is running, wait through `starting`, or start it when it is `created`, `stopped`, or `crashed`. `draining` and `paused` are rejected. `detached: true` affects only a required local start; connecting to an already-running sandbox does not change ownership.
 
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>detached</code><span className="msb-type">Boolean</span></div>
+    <div className="msb-param-desc">Start locally in the background if needed; defaults to false.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">Sandbox</span></div>
+    <div className="msb-param-desc">Live sandbox connection.</div>
+  </div>
+</div>
+
 #### <span className="msb-recv">handle.</span><span className="msb-hn">wait_for_status()</span>
 
 ```ruby
@@ -164,6 +1756,24 @@ handle.wait_for_status(status) # => SandboxHandle
 ```
 
 Wait until this exact sandbox reaches `status`, returning a refreshed handle. The method does not have a built-in timeout.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>status</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Target lifecycle status.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">SandboxHandle</span></div>
+    <div className="msb-param-desc">Refreshed metadata handle.</div>
+  </div>
+</div>
 
 #### <span className="msb-recv">handle.</span><span className="msb-hn">restart()</span>
 
@@ -173,6 +1783,32 @@ handle.restart(force: false, timeout: nil, detached: false) # => Sandbox
 
 Restart this exact sandbox with the same state and option semantics as `Sandbox#restart`.
 
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>force</code><span className="msb-type">Boolean</span></div>
+    <div className="msb-param-desc">Use forced termination; defaults to false and is local-only.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>timeout</code><span className="msb-type">Numeric | nil</span></div>
+    <div className="msb-param-desc">Shutdown timeout in seconds; nil uses the SDK default of ten seconds.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>detached</code><span className="msb-type">Boolean</span></div>
+    <div className="msb-param-desc">Start locally in the background; defaults to false.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">Sandbox</span></div>
+    <div className="msb-param-desc">Live connection to the restarted sandbox.</div>
+  </div>
+</div>
+
 #### <span className="msb-recv">handle.</span><span className="msb-hn">destroy()</span>
 
 ```ruby
@@ -181,22 +1817,164 @@ handle.destroy(force: false, timeout: nil) # => nil
 
 Stop and remove this exact sandbox. A stale handle refuses to destroy a replacement that reused the name.
 
-## Identity errors
+<p className="msb-label">Parameters</p>
 
-Ruby currently surfaces stale identity protection through `Microsandbox::Error`. The message includes `was replaced`; unlike Rust, TypeScript, Python, and Go, the Ruby SDK does not yet expose a dedicated `SandboxReplacedError` subclass.
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>force</code><span className="msb-type">Boolean</span></div>
+    <div className="msb-param-desc">Use forced termination; defaults to false.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>timeout</code><span className="msb-type">Numeric | nil</span></div>
+    <div className="msb-param-desc">Shutdown timeout in seconds; nil uses the SDK default of ten seconds.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">nil</span></div>
+    <div className="msb-param-desc">No return value.</div>
+  </div>
+</div>
+
+## SandboxMetrics
+
+#### <span className="msb-recv">metrics.</span><span className="msb-hn">to_h()</span>
+
+```ruby
+metrics.to_h # => Hash
+```
 
 <Accordion title="Example">
+
+```ruby
+sample = sandbox.metrics.to_h
+puts sample["memory_bytes"]
+```
+
+</Accordion>
+
+Return the metrics sample as a hash with string keys.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">Hash</span></div>
+    <div className="msb-param-desc">Metrics fields below.</div>
+  </div>
+</div>
+
+<p className="msb-label">Fields</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>cpu_percent</code><span className="msb-type">Float</span></div>
+    <div className="msb-param-desc">CPU utilization percentage.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>vcpu_time_ns</code><span className="msb-type">Integer</span></div>
+    <div className="msb-param-desc">Accumulated virtual CPU time in nanoseconds.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>memory_bytes</code><span className="msb-type">Integer</span></div>
+    <div className="msb-param-desc">Memory usage in bytes.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>memory_limit_bytes</code><span className="msb-type">Integer</span></div>
+    <div className="msb-param-desc">Memory limit in bytes.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>disk_read_bytes</code><span className="msb-type">Integer</span></div>
+    <div className="msb-param-desc">Bytes read from disk.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>disk_write_bytes</code><span className="msb-type">Integer</span></div>
+    <div className="msb-param-desc">Bytes written to disk.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>net_rx_bytes</code><span className="msb-type">Integer</span></div>
+    <div className="msb-param-desc">Network bytes received.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>net_tx_bytes</code><span className="msb-type">Integer</span></div>
+    <div className="msb-param-desc">Network bytes sent.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>uptime_ms</code><span className="msb-type">Integer</span></div>
+    <div className="msb-param-desc">Uptime in milliseconds.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>timestamp</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">RFC 3339 sample timestamp.</div>
+  </div>
+</div>
+
+## Stop result
+
+<p className="msb-label">Fields</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>name</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Sandbox name.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>status</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Observed terminal status.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>exit_code</code><span className="msb-type">Integer | nil</span></div>
+    <div className="msb-param-desc">Exit code, if available.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>signal</code><span className="msb-type">Integer | nil</span></div>
+    <div className="msb-param-desc">Termination signal, if available.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>observed_at</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">RFC 3339 observation timestamp.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>source</code><span className="msb-type">String | nil</span></div>
+    <div className="msb-param-desc">Source of the termination observation.</div>
+  </div>
+</div>
+
+## Identity errors
+
+Stale handles raise `Microsandbox::SandboxReplacedError` rather than acting on a replacement with the same name. See [Error handling](/sdk/errors#when-a-sandbox-object-is-stale).
+
+<Accordion title="Example">
+
 ```ruby
 begin
   stale_handle.destroy
-rescue Microsandbox::Error => error
-  raise unless error.message.include?("was replaced")
+rescue Microsandbox::SandboxReplacedError => error
+  warn error.message
 end
 ```
+
 </Accordion>
 
-See [When a sandbox object is stale](/sdk/errors#when-a-sandbox-object-is-stale) for the typed equivalents in the other SDKs and [Names, handles, and concurrent callers](/sandboxes/lifecycle#names-handles-and-concurrent-callers) for the race this prevents.
+## Installation requirements
 
-## Live lifecycle example
+```bash
+gem install microsandbox
+```
 
-Run `ruby examples/lifecycle_convergence.rb` from `sdk/ruby` to exercise sandbox creation and reuse, stable identity, connect, wait, exec, restart, destroy, same-name replacement, and stale-handle rejection against a live microVM.
+Ruby 3.1 and newer are supported. When a matching platform gem is available, it carries the native extension; otherwise the source gem requires Rust 1.85 or newer to build it locally.
+
+Blocking native calls release Ruby's global VM lock (GVL), allowing other Ruby threads to run.
+
+<Accordion title="Example">
+
+```ruby
+require "microsandbox"
+
+Microsandbox.install unless Microsandbox.installed?
+```
+
+</Accordion>

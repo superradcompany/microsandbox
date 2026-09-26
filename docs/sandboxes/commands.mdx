@@ -82,10 +82,16 @@ fmt.Println(output.Success())  // true
 fmt.Println(output.ExitCode()) // 0
 ```
 
+```ruby Ruby
+output = sb.exec("python", ["-c", "print('hello')"])
+puts output.stdout     # "hello\n"
+puts output.success?   # true
+puts output.exit_code  # 0
+```
+
 ```bash CLI
 msb exec worker -- python -c "print('hello')"
 ```
-
 </CodeGroup>
 
 ## Execution options
@@ -134,6 +140,16 @@ output, err := sb.Exec(ctx, "python", []string{"compute.py"},
 )
 ```
 
+```ruby Ruby
+output = sb.exec(
+  "python", ["compute.py"],
+  cwd: "/app",
+  env: { "PYTHONPATH" => "/app/lib" },
+  timeout: 30.0,
+  rlimits: { nofile: 1024 }
+)
+```
+
 ```bash CLI
 msb exec worker \
   -w /app \
@@ -142,7 +158,6 @@ msb exec worker \
   --rlimit nofile=1024 \
   -- python compute.py
 ```
-
 </CodeGroup>
 
 ## Shell commands
@@ -166,13 +181,18 @@ output = await sb.shell("ls -la /app && echo done")
 output, err := sb.Shell(ctx, "ls -la /app && echo done")
 ```
 
+```ruby Ruby
+output = sb.shell("ls -la /app && echo done")
+```
+
 ```bash CLI
 msb exec worker -- sh -c "ls -la /app && echo done"
 ```
-
 </CodeGroup>
 
 ## Stream output
+
+<Note>Ruby currently collects command output with `exec` and `shell`. It does not expose streaming handles, interactive attach, or session IDs.</Note>
 
 For long-running processes or large output, streaming gives you stdout, stderr, and exit events as they happen instead of buffering everything until the command finishes.
 
@@ -310,6 +330,30 @@ msb exec -t worker -e DEBUG=1 -w /app -- python
 </Tip>
 
 ## Write stdin
+
+TypeScript, Rust, Python, and Ruby can pass input bytes with the command. Ruby does not expose a streaming stdin writer; Go uses the pipe API shown below.
+
+<CodeGroup>
+```typescript TypeScript
+const output = await sandbox.execWith("cat", (e) => e.stdinBytes(Buffer.from("hello\n")));
+console.log(output.stdout());
+```
+
+```rust Rust
+let output = sandbox.exec_with("cat", |e| e.stdin_bytes(b"hello\n".to_vec())).await?;
+println!("{}", output.stdout()?);
+```
+
+```python Python
+output = await sandbox.exec("cat", stdin=b"hello\n")
+print(output.stdout_text)
+```
+
+```ruby Ruby
+output = sandbox.exec("cat", stdin: "hello\n")
+puts output.stdout
+```
+</CodeGroup>
 
 Streaming handles can also accept stdin. Enable `stdin_pipe` and write bytes to it. Combined with `tty: true`, this lets you drive interactive processes programmatically.
 

@@ -6,48 +6,422 @@ description: Read, write, and transfer guest files with the Ruby SDK.
 
 See [Filesystem](/sandboxes/filesystem) for usage examples.
 
+## Sandbox
+
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">fs</span>
+
+```ruby
+sandbox.fs # => Microsandbox::Filesystem
+```
+
+Get the filesystem helper for this sandbox.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">Microsandbox::Filesystem</span></div>
+    <div className="msb-param-desc">Guest filesystem operations.</div>
+  </div>
+</div>
+
 ## Filesystem
 
+These helpers also have direct sandbox equivalents: `sandbox.fs_read`, `fs_write`, `fs_mkdir`, `fs_list`, `fs_stat`, `fs_exists?`, `fs_copy`, `fs_rename`, `fs_remove`, `fs_remove_dir`, `fs_copy_from_host`, and `fs_copy_to_host`, with the same arguments and return values.
+
+#### <span className="msb-recv">fs.</span><span className="msb-hn">read()</span>
+
 ```ruby
-fs = sandbox.fs # => Microsandbox::Filesystem
+fs.read(path) # => String
 ```
-
-| Method | Returns | Description |
-| --- | --- | --- |
-| `read(path)` | `String` | Read file bytes |
-| `write(path, data)` | `nil` | Write a Ruby string as bytes |
-| `mkdir(path)` | `nil` | Create a guest directory |
-| `list(path)` | `Array<Hash>` | List directory entries |
-| `stat(path)` | `Hash` | Read metadata |
-| `exists?(path)` | `Boolean` | Check whether a path exists |
-| `copy(from, to)` | `nil` | Copy within the guest |
-| `rename(from, to)` | `nil` | Rename within the guest |
-| `remove(path)` | `nil` | Remove a file |
-| `remove_dir(path)` | `nil` | Remove a directory |
-| `copy_from_host(host_path, guest_path)` | `nil` | Transfer from host to guest |
-| `copy_to_host(guest_path, host_path)` | `nil` | Transfer from guest to host |
-
-These are convenience wrappers around `sandbox.fs_read`, `fs_write`, and the corresponding `fs_*` methods. Ruby does not expose streaming filesystem handles.
-
-### Metadata
-
-Hashes use string keys. Optional timestamps are omitted when unavailable.
-
-| Key | Type | Description |
-| --- | --- | --- |
-| `"path"` | `String` | Entry path; returned by `list` |
-| `"kind"` | `String` | `file`, `directory`, `symlink`, or `other` |
-| `"size"` | `Integer` | Size in bytes |
-| `"mode"` | `Integer` | File mode |
-| `"uid"`, `"gid"` | `Integer` | Owner and group IDs |
-| `"modified"`, `"accessed"` | `String` | RFC 3339 timestamps, when available |
-| `"readonly"` | `Boolean` | Returned by `stat` |
-| `"created"` | `String` | Creation timestamp, when available from `stat` |
 
 <Accordion title="Example">
+
+```ruby
+puts sandbox.fs.read("/tmp/message.txt")
+```
+
+</Accordion>
+
+Read file bytes.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>path</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Guest path.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Read file bytes.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">fs.</span><span className="msb-hn">write()</span>
+
+```ruby
+fs.write(path, data) # => nil
+```
+
+<Accordion title="Example">
+
 ```ruby
 sandbox.fs.write("/tmp/message.txt", "hello")
-puts sandbox.fs.read("/tmp/message.txt")
+```
+
+</Accordion>
+
+Write a Ruby string as bytes.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>path</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Guest path.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>data</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">File contents as bytes.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">nil</span></div>
+    <div className="msb-param-desc">No return value.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">fs.</span><span className="msb-hn">mkdir()</span>
+
+```ruby
+fs.mkdir(path) # => nil
+```
+
+Create a guest directory.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>path</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Guest path.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">nil</span></div>
+    <div className="msb-param-desc">No return value.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">fs.</span><span className="msb-hn">list()</span>
+
+```ruby
+fs.list(path) # => Array<Hash>
+```
+
+List directory entries.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>path</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Guest path.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">Array&lt;Hash&gt;</span></div>
+    <div className="msb-param-desc">List directory entries.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">fs.</span><span className="msb-hn">stat()</span>
+
+```ruby
+fs.stat(path) # => Hash
+```
+
+Read metadata.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>path</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Guest path.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">Hash</span></div>
+    <div className="msb-param-desc">Read metadata.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">fs.</span><span className="msb-hn">exists?()</span>
+
+```ruby
+fs.exists?(path) # => Boolean
+```
+
+Check whether a path exists.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>path</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Guest path.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">Boolean</span></div>
+    <div className="msb-param-desc">Check whether a path exists.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">fs.</span><span className="msb-hn">copy()</span>
+
+```ruby
+fs.copy(from, to) # => nil
+```
+
+Copy within the guest.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>from</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Source guest path.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>to</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Destination guest path.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">nil</span></div>
+    <div className="msb-param-desc">No return value.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">fs.</span><span className="msb-hn">rename()</span>
+
+```ruby
+fs.rename(from, to) # => nil
+```
+
+Rename within the guest.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>from</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Source guest path.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>to</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Destination guest path.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">nil</span></div>
+    <div className="msb-param-desc">No return value.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">fs.</span><span className="msb-hn">remove()</span>
+
+```ruby
+fs.remove(path) # => nil
+```
+
+Remove a file.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>path</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Guest path.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">nil</span></div>
+    <div className="msb-param-desc">No return value.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">fs.</span><span className="msb-hn">remove_dir()</span>
+
+```ruby
+fs.remove_dir(path) # => nil
+```
+
+Remove a directory.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>path</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Guest path.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">nil</span></div>
+    <div className="msb-param-desc">No return value.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">fs.</span><span className="msb-hn">copy_from_host()</span>
+
+```ruby
+fs.copy_from_host(host_path, guest_path) # => nil
+```
+
+Transfer from host to guest.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>host_path</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Path on the host.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>guest_path</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Path inside the guest.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">nil</span></div>
+    <div className="msb-param-desc">No return value.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">fs.</span><span className="msb-hn">copy_to_host()</span>
+
+```ruby
+fs.copy_to_host(guest_path, host_path) # => nil
+```
+
+<Accordion title="Example">
+
+```ruby
 sandbox.fs.copy_to_host("/tmp/message.txt", "./message.txt")
 ```
+
 </Accordion>
+
+Transfer from guest to host.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>guest_path</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Path inside the guest.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>host_path</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Path on the host.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">nil</span></div>
+    <div className="msb-param-desc">No return value.</div>
+  </div>
+</div>
+
+## Metadata
+
+Hashes use string keys. Optional timestamps are omitted when unavailable. Ruby does not expose streaming filesystem handles.
+
+<p className="msb-label">Fields</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>&quot;path&quot;</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Entry path; returned by list</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>&quot;kind&quot;</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">file, directory, symlink, or other</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>&quot;size&quot;</code><span className="msb-type">Integer</span></div>
+    <div className="msb-param-desc">Size in bytes</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>&quot;mode&quot;</code><span className="msb-type">Integer</span></div>
+    <div className="msb-param-desc">File mode</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>&quot;uid&quot;, &quot;gid&quot;</code><span className="msb-type">Integer</span></div>
+    <div className="msb-param-desc">Owner and group IDs</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>&quot;modified&quot;, &quot;accessed&quot;</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">RFC 3339 timestamps, when available</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>&quot;readonly&quot;</code><span className="msb-type">Boolean</span></div>
+    <div className="msb-param-desc">Returned by stat</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>&quot;created&quot;</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Creation timestamp, when available from stat</div>
+  </div>
+</div>

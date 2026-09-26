@@ -8,44 +8,362 @@ See [Volumes](/sandboxes/volumes) for storage behavior. Ruby exposes named-volum
 
 ## Volume
 
+#### <span className="msb-recv">Microsandbox::Volume.</span><span className="msb-hn">builder()</span>
+
 ```ruby
 Microsandbox::Volume.builder(name) # => VolumeBuilder
-Microsandbox::Volume.get(name)     # => VolumeHandle
-Microsandbox::Volume.list          # => Array<VolumeHandle>
-Microsandbox::Volume.remove(name)  # => nil
 ```
+
+Configure a named volume.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>name</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Volume name.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">VolumeBuilder</span></div>
+    <div className="msb-param-desc">Configure a named volume.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">Microsandbox::Volume.</span><span className="msb-hn">get()</span>
+
+```ruby
+Microsandbox::Volume.get(name) # => VolumeHandle
+```
+
+Look up a named volume.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>name</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Volume name.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">VolumeHandle</span></div>
+    <div className="msb-param-desc">Look up a named volume.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">Microsandbox::Volume.</span><span className="msb-hn">list()</span>
+
+```ruby
+Microsandbox::Volume.list # => Array<VolumeHandle>
+```
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">Array&lt;VolumeHandle&gt;</span></div>
+    <div className="msb-param-desc">List named volumes.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">Microsandbox::Volume.</span><span className="msb-hn">remove()</span>
+
+```ruby
+Microsandbox::Volume.remove(name) # => nil
+```
+
+Remove a named volume.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>name</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Volume name.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">nil</span></div>
+    <div className="msb-param-desc">No return value.</div>
+  </div>
+</div>
 
 ## VolumeBuilder
 
-| Method | Returns | Description |
-| --- | --- | --- |
-| `directory` | `VolumeBuilder` | Select a directory volume |
-| `disk` | `VolumeBuilder` | Select a disk volume |
-| `quota(mib)` | `VolumeBuilder` | Set quota in MiB |
-| `size(mib)` | `VolumeBuilder` | Set disk size in MiB |
-| `label(key, value)` | `VolumeBuilder` | Add a string label |
-| `create` | `VolumeHandle` | Create the volume; consumes the builder |
+#### <span className="msb-recv">builder.</span><span className="msb-hn">directory()</span>
+
+```ruby
+builder.directory # => VolumeBuilder
+```
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">VolumeBuilder</span></div>
+    <div className="msb-param-desc">Select a directory volume.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">builder.</span><span className="msb-hn">disk()</span>
+
+```ruby
+builder.disk # => VolumeBuilder
+```
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">VolumeBuilder</span></div>
+    <div className="msb-param-desc">Select a disk volume (local only).</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">builder.</span><span className="msb-hn">quota()</span>
+
+```ruby
+builder.quota(mib) # => VolumeBuilder
+```
+
+Set quota in MiB.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>mib</code><span className="msb-type">Integer</span></div>
+    <div className="msb-param-desc">Capacity in MiB.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">VolumeBuilder</span></div>
+    <div className="msb-param-desc">Set quota in MiB.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">builder.</span><span className="msb-hn">size()</span>
+
+```ruby
+builder.size(mib) # => VolumeBuilder
+```
+
+Set disk size in MiB.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>mib</code><span className="msb-type">Integer</span></div>
+    <div className="msb-param-desc">Capacity in MiB.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">VolumeBuilder</span></div>
+    <div className="msb-param-desc">Set disk size in MiB.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">builder.</span><span className="msb-hn">label()</span>
+
+```ruby
+builder.label(key, value) # => VolumeBuilder
+```
+
+Add a string label.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>key</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Label key.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>value</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Label value.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">VolumeBuilder</span></div>
+    <div className="msb-param-desc">Add a string label.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">builder.</span><span className="msb-hn">create()</span>
+
+```ruby
+builder.create # => VolumeHandle
+```
 
 <Accordion title="Example">
+
 ```ruby
 volume = Microsandbox::Volume.builder("build-cache")
-  .disk
-  .size(4096)
+  .directory
   .label("purpose", "build")
   .create
 puts volume.name
 ```
+
 </Accordion>
+
+Create the volume; consumes the builder.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">VolumeHandle</span></div>
+    <div className="msb-param-desc">Create the volume; consumes the builder.</div>
+  </div>
+</div>
 
 ## VolumeHandle
 
-| Member | Type | Description |
-| --- | --- | --- |
-| `name` | `String` | Volume name |
-| `kind` | `String` | `dir` or `disk` |
-| `quota_mib` | `Integer` or `nil` | Configured quota |
-| `used_bytes` | `Integer` | Used bytes |
-| `capacity_bytes` | `Integer` or `nil` | Capacity |
-| `labels` | `Hash` | String keys and values |
-| `created_at` | `String` or `nil` | RFC 3339 creation timestamp |
-| `remove` | `nil` | Remove this volume |
+#### <span className="msb-recv">volume.</span><span className="msb-hn">name</span>
+
+```ruby
+volume.name # => String
+```
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Volume name.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">volume.</span><span className="msb-hn">kind</span>
+
+```ruby
+volume.kind # => String
+```
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">dir or disk.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">volume.</span><span className="msb-hn">quota_mib</span>
+
+```ruby
+volume.quota_mib # => Integer | nil
+```
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">Integer | nil</span></div>
+    <div className="msb-param-desc">Configured quota.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">volume.</span><span className="msb-hn">used_bytes</span>
+
+```ruby
+volume.used_bytes # => Integer
+```
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">Integer</span></div>
+    <div className="msb-param-desc">Used bytes.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">volume.</span><span className="msb-hn">capacity_bytes</span>
+
+```ruby
+volume.capacity_bytes # => Integer | nil
+```
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">Integer | nil</span></div>
+    <div className="msb-param-desc">Capacity.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">volume.</span><span className="msb-hn">labels</span>
+
+```ruby
+volume.labels # => Hash
+```
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">Hash</span></div>
+    <div className="msb-param-desc">String keys and values.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">volume.</span><span className="msb-hn">created_at</span>
+
+```ruby
+volume.created_at # => String | nil
+```
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">String | nil</span></div>
+    <div className="msb-param-desc">RFC 3339 creation timestamp.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">volume.</span><span className="msb-hn">remove()</span>
+
+```ruby
+volume.remove # => nil
+```
+
+Remove this volume.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">nil</span></div>
+    <div className="msb-param-desc">No return value.</div>
+  </div>
+</div>

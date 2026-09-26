@@ -39,6 +39,11 @@ metrics, err := sb.Metrics(ctx)
 fmt.Printf("CPU: %.1f%%, Mem: %d MB\n", metrics.CPUPercent, metrics.MemoryBytes/1024/1024)
 ```
 
+```ruby Ruby
+metrics = sb.metrics.to_h
+puts format("CPU: %.1f%%, Mem: %d MB",
+  metrics.fetch("cpu_percent"), metrics.fetch("memory_bytes") / 1024 / 1024)
+```
 </CodeGroup>
 
 ## Streaming

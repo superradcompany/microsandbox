@@ -8,24 +8,62 @@ See [SSH](/sandboxes/ssh) for connection behavior.
 
 ## Sandbox
 
-### ssh_exec()
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">ssh_exec()</span>
 
 ```ruby
-sandbox.ssh_exec(command, inactivity_timeout: seconds) # => Hash
+sandbox.ssh_exec(command, **options) # => Hash
 ```
 
-Run a command over SSH and collect its output. Omit `inactivity_timeout` to inherit global configuration; use `0` to disable the inactivity timeout. Managed settings take precedence. Ruby does not expose interactive SSH or SFTP sessions.
-
-| Result key | Type | Description |
-| --- | --- | --- |
-| `"stdout"` | `String` | Standard output bytes |
-| `"stderr"` | `String` | Standard error bytes |
-| `"exit_code"` | `Integer` | Exit status |
-| `"success"` | `Boolean` | Whether the exit status is zero |
-
 <Accordion title="Example">
+
 ```ruby
 result = sandbox.ssh_exec("uname -a", inactivity_timeout: 60)
 puts result["stdout"]
 ```
+
 </Accordion>
+
+Run a command over SSH and collect its output. Managed settings take precedence over the supplied timeout. Ruby does not expose interactive SSH or SFTP sessions.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>command</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Command to execute over SSH.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>inactivity_timeout</code><span className="msb-type">Numeric</span></div>
+    <div className="msb-param-desc">Optional timeout in seconds. Omit to inherit global configuration; use 0 to disable it.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">Hash</span></div>
+    <div className="msb-param-desc">Collected output and exit status, with string keys.</div>
+  </div>
+</div>
+
+<p className="msb-label">Result fields</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>&quot;stdout&quot;</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Standard output bytes</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>&quot;stderr&quot;</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Standard error bytes</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>&quot;exit_code&quot;</code><span className="msb-type">Integer</span></div>
+    <div className="msb-param-desc">Exit status</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>&quot;success&quot;</code><span className="msb-type">Boolean</span></div>
+    <div className="msb-param-desc">Whether the exit status is zero</div>
+  </div>
+</div>
