@@ -76,6 +76,20 @@ struct CachedContract {
 //--------------------------------------------------------------------------------------------------
 
 impl LaunchContract {
+    /// Probe network features that `machine` runtimes advertise individually. Earlier contracts
+    /// are covered by [`Self::validate_network`]. Callers run this before any destructive step.
+    #[cfg(feature = "net")]
+    pub(crate) async fn require_network_capabilities(
+        self,
+        msb_path: &Path,
+        network: &microsandbox_network::config::NetworkConfig,
+    ) -> MicrosandboxResult<()> {
+        if self.machine && network.tcp_accept_queue_size.is_some() {
+            require_tcp_accept_queue_size(msb_path).await?;
+        }
+        Ok(())
+    }
+
     /// Check unresolved network intent against the selected launch contract.
     /// Source values are resolved only when building the final launch payload.
     #[cfg(feature = "net")]
@@ -92,6 +106,9 @@ impl LaunchContract {
         }
         if network.max_udp_connections.is_some() {
             return unsupported("UDP connection limits");
+        }
+        if network.tcp_accept_queue_size.is_some() {
+            return unsupported("TCP accept queue size");
         }
         if let Some(limit) = network.max_tcp_connections {
             let Some(cap) = limit.cap() else {
@@ -240,10 +257,11 @@ impl LaunchContract {
             } else {
                 &mut value["network"]
             };
-            // Explicit UDP values were rejected above; omit the new optional key
-            // entirely when encoding a previous producer's network object.
+            // Explicit UDP limits and accept queue sizes were rejected above; omit the new optional
+            // keys entirely when encoding a previous producer's network object.
             if let Some(fields) = network.as_object_mut() {
                 fields.remove("max_udp_connections");
+                fields.remove("tcp_accept_queue_size");
             }
             // Pin the previous default at the boundary; omission on the current contract
             // intentionally has a different meaning and must not broaden an old launch.
@@ -452,21 +470,24 @@ pub(crate) async fn validate_runtime_config(
     global: &GlobalConfig,
 ) -> MicrosandboxResult<()> {
     #[cfg(feature = "net")]
-    config
-        .local_network_config()?
-        .secrets
-        .validate()
-        .map_err(|error| {
-            MicrosandboxError::InvalidConfig(format!("invalid secret configuration: {error}"))
-        })?;
+    let network = config.local_network_config()?;
+    #[cfg(feature = "net")]
+    network.secrets.validate().map_err(|error| {
+        MicrosandboxError::InvalidConfig(format!("invalid secret configuration: {error}"))
+    })?;
     let runtime = match crate::setup::resolve_runtime(global) {
         Ok(runtime) => runtime,
         Err(MicrosandboxError::RuntimeNotInstalled(_)) => return Ok(()),
         Err(error) => return Err(error),
     };
-    resolve(&runtime.msb_path)
-        .await?
-        .validate_launch_intent(config)
+    let contract = resolve(&runtime.msb_path).await?;
+    contract.validate_launch_intent(config)?;
+    // Probed here, not only at spawn, so `replace` cannot delete its target first.
+    #[cfg(feature = "net")]
+    contract
+        .require_network_capabilities(&runtime.msb_path, &network)
+        .await?;
+    Ok(())
 }
 
 pub(crate) async fn resolve(path: &Path) -> MicrosandboxResult<LaunchContract> {
@@ -542,15 +563,36 @@ pub(crate) async fn resolve(path: &Path) -> MicrosandboxResult<LaunchContract> {
 /// Probe only the new combination. Ordinary starts/restores keep their cached,
 /// process-free discovery path, and old runtimes still accept their existing wire.
 pub(crate) async fn require_restore_backing(path: &Path) -> MicrosandboxResult<()> {
+    require_capability(
+        path,
+        |capabilities| capabilities.required_restore_backing,
+        "relaxed external-object validation with required resource backing",
+    )
+    .await
+}
+
+/// Probe only when an accept queue size is requested. `machine` runtimes that predate the field decode
+/// network JSON leniently and would drop it, leaving published ports on mio's 128.
+#[cfg(feature = "net")]
+async fn require_tcp_accept_queue_size(path: &Path) -> MicrosandboxResult<()> {
+    require_capability(
+        path,
+        |capabilities| capabilities.tcp_accept_queue_size,
+        "a configurable TCP accept queue size",
+    )
+    .await
+}
+
+async fn require_capability(
+    path: &Path,
+    advertised: impl FnOnce(&LaunchCapabilities) -> bool,
+    feature: &str,
+) -> MicrosandboxResult<()> {
     let output = bounded_probe(path, "__launch-protocol").await?;
-    let supported =
-        serde_json::from_slice::<LaunchCapabilities>(&output).is_ok_and(|capabilities| {
-            capabilities.protocols.contains(&2) && capabilities.required_restore_backing
-        });
+    let supported = serde_json::from_slice::<LaunchCapabilities>(&output)
+        .is_ok_and(|capabilities| capabilities.protocols.contains(&2) && advertised(&capabilities));
     if !supported {
-        return Err(MicrosandboxError::Runtime(upgrade_required(
-            "relaxed external-object validation with required resource backing",
-        )));
+        return Err(MicrosandboxError::Runtime(upgrade_required(feature)));
     }
     Ok(())
 }
@@ -695,6 +737,83 @@ mod tests {
             "printf '%s' '{\"protocols\":[2],\"required_restore_backing\":\"true\"}'",
         );
         assert!(require_restore_backing(&malformed).await.is_err());
+    }
+
+    #[cfg(all(unix, feature = "net"))]
+    #[tokio::test]
+    async fn tcp_accept_queue_size_probe_refuses_machine_runtimes_that_would_drop_it() {
+        let dir = tempfile::tempdir().unwrap();
+        // v0.7.x: current `machine` entry point, but no accept queue size support to advertise.
+        let old = script(
+            dir.path(),
+            "old-capabilities",
+            "printf '%s' '{\"protocols\":[2,1],\"required_restore_backing\":true}'",
+        );
+        let error = require_tcp_accept_queue_size(&old)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("upgrade msb"));
+        assert!(error.contains("TCP accept queue size"));
+        let new = script(
+            dir.path(),
+            "new-capabilities",
+            "printf '%s' '{\"protocols\":[2,1],\"required_restore_backing\":true,\"tcp_accept_queue_size\":true}'",
+        );
+        require_tcp_accept_queue_size(&new).await.unwrap();
+        let protocol_1_only = script(
+            dir.path(),
+            "protocol-1-capabilities",
+            "printf '%s' '{\"protocols\":[1],\"tcp_accept_queue_size\":true}'",
+        );
+        assert!(
+            require_tcp_accept_queue_size(&protocol_1_only)
+                .await
+                .is_err()
+        );
+    }
+
+    /// The check create runs before `replace` touches its target: refuse a v0.7.x-shaped
+    /// runtime, and do not probe at all when the key is unset or the contract predates `machine`.
+    #[cfg(all(unix, feature = "net"))]
+    #[tokio::test]
+    async fn network_capabilities_probe_only_machine_runtimes_asked_for_an_accept_queue_size() {
+        use microsandbox_network::config::NetworkConfig;
+
+        let dir = tempfile::tempdir().unwrap();
+        let old = script(
+            dir.path(),
+            "old-capabilities",
+            "printf '%s' '{\"protocols\":[2,1],\"required_restore_backing\":true}'",
+        );
+        // Probing this path fails, so an Ok below proves no probe ran.
+        let absent = dir.path().join("absent-msb");
+        let machine = LaunchContract {
+            patch: 18,
+            machine: true,
+        };
+        let legacy = LaunchContract {
+            patch: 18,
+            machine: false,
+        };
+        let tuned: NetworkConfig =
+            serde_json::from_value(json!({ "tcp_accept_queue_size": 4096 })).unwrap();
+        let unset = NetworkConfig::default();
+
+        let error = machine
+            .require_network_capabilities(&old, &tuned)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("TCP accept queue size"), "{error}");
+        machine
+            .require_network_capabilities(&absent, &unset)
+            .await
+            .unwrap();
+        legacy
+            .require_network_capabilities(&absent, &tuned)
+            .await
+            .unwrap();
     }
 
     #[cfg(unix)]
@@ -1080,6 +1199,60 @@ mod encoding {
                     };
                     assert_eq!(network["max_connections"], 8);
                     assert!(network.get("max_udp_connections").is_none());
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn tcp_accept_queue_size_requires_current_launch_contract() {
+        use microsandbox_network::config::{EnvNetworkSecretResolver, NetworkConfig};
+
+        for requested in [None, Some(1), Some(4096)] {
+            let network: NetworkConfig =
+                serde_json::from_value(json!({ "tcp_accept_queue_size": requested })).unwrap();
+            let launch = LaunchConfig {
+                network: Some(network.resolve(&EnvNetworkSecretResolver).unwrap()),
+                ..Default::default()
+            };
+            let current = LaunchContract {
+                patch: 18,
+                machine: true,
+            }
+            .encode(&launch)
+            .unwrap();
+            match requested {
+                Some(value) => {
+                    assert_eq!(current["network"]["config"]["tcp_accept_queue_size"], value)
+                }
+                None => assert!(
+                    current["network"]["config"]
+                        .get("tcp_accept_queue_size")
+                        .is_none()
+                ),
+            }
+            for patch in 0..=18 {
+                let result = LaunchContract {
+                    patch,
+                    machine: false,
+                }
+                .encode(&launch);
+                if requested.is_some() {
+                    assert!(
+                        result
+                            .unwrap_err()
+                            .to_string()
+                            .contains("TCP accept queue size")
+                    );
+                } else {
+                    let value = result.unwrap();
+                    let network = if patch >= 17 {
+                        &value["network"]["config"]
+                    } else {
+                        &value["network"]
+                    };
+                    assert!(network.get("tcp_accept_queue_size").is_none());
                 }
             }
         }

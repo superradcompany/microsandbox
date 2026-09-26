@@ -5,6 +5,7 @@ use napi_derive::napi;
 
 use crate::error::to_napi_error;
 use crate::mount_builder::JsMountBuilder;
+use crate::network_builder::accept_queue_size;
 use crate::network_policy_builder::JsNetworkPolicyBuilder;
 use crate::pull_progress::JsPullProgressStream;
 use crate::sandbox::Sandbox;
@@ -324,6 +325,14 @@ impl JsRestoreBuilder {
         Ok(self)
     }
 
+    /// Set the accept-queue depth for the child's published TCP listeners, 1..=2147483647.
+    #[napi(js_name = "tcpAcceptQueueSize")]
+    pub fn tcp_accept_queue_size(&mut self, size: f64) -> Result<&Self> {
+        let size = accept_queue_size(size).map_err(napi::Error::from_reason)?;
+        self.inner = Some(self.take_inner()?.tcp_accept_queue_size(size));
+        Ok(self)
+    }
+
     /// Expose a host Unix stream socket or local Windows named pipe on a guest-to-host vsock port.
     #[napi]
     pub fn vsock(&mut self, host_path: String, port: u32) -> Result<&Self> {
@@ -399,6 +408,26 @@ fn duration_seconds(seconds: f64) -> std::result::Result<u64, &'static str> {
 #[cfg(test)]
 mod tests {
     use super::duration_seconds;
+    use crate::network_builder::accept_queue_size;
+
+    #[test]
+    fn accept_queue_size_rejects_values_n_api_would_wrap_or_truncate() {
+        for value in [1.0, 4096.0, 2_147_483_647.0] {
+            assert_eq!(accept_queue_size(value).unwrap(), value as u32);
+        }
+        for value in [
+            0.0,
+            -1.0,
+            1.5,
+            4_294_967_297.0,
+            -4_294_967_295.0,
+            2_147_483_648.0,
+            f64::NAN,
+            f64::INFINITY,
+        ] {
+            assert!(accept_queue_size(value).is_err(), "{value}");
+        }
+    }
 
     #[test]
     fn restore_duration_preserves_zero_and_rounds_positive_limits_up() {

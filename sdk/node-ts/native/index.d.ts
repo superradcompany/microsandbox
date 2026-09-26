@@ -517,6 +517,11 @@ export declare class NetworkBuilder {
   maxTcpConnections(max: number): this
   /** Set the UDP session cap; zero selects unlimited. Defaults to unlimited for single-tenant and 1024 for multi-tenant. */
   maxUdpConnections(max: number): this
+  /**
+   * Set the accept-queue depth for published TCP port listeners, 1..=2147483647. Defaults to
+   * 1024; the host kernel clamps it to its own somaxconn.
+   */
+  tcpAcceptQueueSize(size: number): this
   /** Require hostname-based policy allows to use inspectable application authority. */
   strict(enabled: boolean): this
   /** Set the IPv4 pool used for per-sandbox /30 guest subnets. */
@@ -789,6 +794,8 @@ export declare class RestoreBuilder {
   portUdp(hostPort: number, guestPort: number): this
   /** Publish a UDP port from host -> guest on a specific host bind address. */
   portUdpBind(bind: string, hostPort: number, guestPort: number): this
+  /** Set the accept-queue depth for the child's published TCP listeners, 1..=2147483647. */
+  tcpAcceptQueueSize(size: number): this
   /** Expose a host Unix stream socket or local Windows named pipe on a guest-to-host vsock port. */
   vsock(hostPath: string, port: number): this
   /** Expose a host Unix datagram socket on a guest-to-host vsock port. */

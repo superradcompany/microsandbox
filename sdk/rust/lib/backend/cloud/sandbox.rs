@@ -595,6 +595,10 @@ fn reject_dropped_cloud_create_fields(config: &SandboxConfig) -> MicrosandboxRes
     if config.spec.network.outbound_proxy.is_some() {
         return Err(unsupported("network.outbound_proxy"));
     }
+    // Tunes published-port listeners, which the cloud create contract does not carry.
+    if config.spec.network.tcp_accept_queue_size.is_some() {
+        return Err(unsupported("network.tcp_accept_queue_size"));
+    }
 
     if config
         .spec
@@ -1649,6 +1653,14 @@ mod tests {
         });
 
         assert_unsupported_config_field(config, "network.outbound_proxy");
+    }
+
+    #[test]
+    fn cloud_create_request_rejects_tcp_accept_queue_size() {
+        let mut config = base_cloud_config();
+        config.spec.network.tcp_accept_queue_size = Some(4096);
+
+        assert_unsupported_config_field(config, "network.tcp_accept_queue_size");
     }
 
     #[test]

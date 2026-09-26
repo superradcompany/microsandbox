@@ -16,6 +16,7 @@ use zeroize::Zeroizing;
 
 use crate::config::{
     ConnectionLimit, DnsConfig, InterfaceOverrides, NetworkConfig, PortProtocol, PublishedPort,
+    TcpAcceptQueueSize,
 };
 use crate::dns::Nameserver;
 use crate::policy::{BuildError, NetworkPolicy};
@@ -284,6 +285,19 @@ impl NetworkBuilder {
     /// Set the UDP relay session limit; zero selects unlimited. Defaults to unlimited for single-tenant and 1024 for multi-tenant.
     pub fn max_udp_connections(mut self, max: usize) -> Self {
         self.config.max_udp_connections = Some(ConnectionLimit::from(max));
+        self
+    }
+
+    /// Set the accept-queue depth for published TCP port listeners. Defaults to 1024.
+    ///
+    /// Valid values are `1..=i32::MAX`; anything else records
+    /// [`BuildError::InvalidTcpAcceptQueueSize`]. The host kernel clamps the request to its own
+    /// ceiling (`net.core.somaxconn` on Linux, `kern.ipc.somaxconn` on macOS).
+    pub fn tcp_accept_queue_size(mut self, size: u32) -> Self {
+        match TcpAcceptQueueSize::try_from(size) {
+            Ok(size) => self.config.tcp_accept_queue_size = Some(size),
+            Err(err) => self.errors.push(err.into()),
+        }
         self
     }
 
@@ -934,6 +948,36 @@ mod tests {
                 .build()
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn tcp_accept_queue_size_is_unset_by_default_and_rejects_out_of_range_values() {
+        assert_eq!(
+            NetworkBuilder::new().build().unwrap().tcp_accept_queue_size,
+            None
+        );
+        let config = NetworkBuilder::new()
+            .tcp_accept_queue_size(4096)
+            .build()
+            .unwrap();
+        assert_eq!(
+            config.tcp_accept_queue_size.map(TcpAcceptQueueSize::get),
+            Some(4096)
+        );
+
+        for invalid in [0, TcpAcceptQueueSize::MAX + 1] {
+            let err = NetworkBuilder::new()
+                .tcp_accept_queue_size(invalid)
+                .build()
+                .unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    BuildError::InvalidTcpAcceptQueueSize { source } if source.value == invalid
+                ),
+                "{invalid}: {err}"
+            );
+        }
     }
 
     /// Network builder happy path returns the config unchanged.

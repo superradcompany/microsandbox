@@ -1173,6 +1173,10 @@ type NetworkConfig struct {
 	// PortBindings makes sandbox services reachable on explicit host bind addresses.
 	PortBindings []PortBinding
 
+	// TCPAcceptQueueSize sets the accept-queue depth for published TCP port listeners,
+	// 1 to 2147483647. Nil keeps the default, 1024; the host kernel clamps it to its somaxconn.
+	TCPAcceptQueueSize *uint32
+
 	// IPv4Pool is used to derive per-sandbox /30 guest subnets.
 	// Defaults to "172.16.0.0/12".
 	IPv4Pool string

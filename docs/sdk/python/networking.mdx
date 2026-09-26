@@ -25,6 +25,7 @@ Network(
     ipv6_pool: str | None = None,
     max_tcp_connections: int | None = None,
     max_udp_connections: int | None = None,
+    tcp_accept_queue_size: int | None = None,
     secret_violation_action: ViolationAction = ViolationAction.BLOCK_AND_LOG,
 )
 ```
@@ -82,6 +83,12 @@ IPv4 pool used for per-sandbox `/30` guest subnets. Defaults to `172.16.0.0/12`
 `str \| None` · Default: `None`
 
 IPv6 pool used for per-sandbox `/64` guest prefixes. Defaults to `fd42:6d73:62::/48`
+
+#### <span className="msb-recv">network.</span><span className="msb-hn">tcp_accept_queue_size</span>
+
+`int \| None` · Default: `None` (1,024)
+
+How many not-yet-accepted connections each published TCP port's host listener queues, from 1 to 2,147,483,647. Connections arriving while the queue is full never reach the sandbox, so raise this when a burst of parallel connections, such as a reverse proxy fanning out one page load, exceeds it. The host kernel caps the effective depth at its own `somaxconn` (4,096 by default on Linux, 128 on macOS). `Sandbox.restore(..., tcp_accept_queue_size=n)` applies it to the listeners a restored child publishes.
 
 #### max_udp_connections
 

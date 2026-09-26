@@ -340,6 +340,11 @@ pub async fn spawn_sandbox(
     }) {
         launch_contract::require_restore_backing(&resolved_runtime.msb_path).await?;
     }
+    // Create already probed before replacing; a later start may use a different runtime.
+    #[cfg(feature = "net")]
+    launch_contract
+        .require_network_capabilities(&resolved_runtime.msb_path, resolved_network.config())
+        .await?;
     if launch_contract.patch < 9
         && !matches!(
             global.runtime.block_writeback,

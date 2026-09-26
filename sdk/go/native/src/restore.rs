@@ -52,6 +52,7 @@ struct RestoreOptions {
     captured_volumes: Vec<String>,
     #[serde(default)]
     ports: Vec<PortBindingOpts>,
+    tcp_accept_queue_size: Option<u32>,
     #[serde(default)]
     vsock: Vec<VsockRouteOpts>,
 }
@@ -162,6 +163,9 @@ fn builder(name: String, opts: &RestoreOptions) -> Result<RestoreBuilder, FfiErr
             "udp" => builder.port_udp_bind(bind, port.host_port, port.guest_port),
             _ => return Err(FfiError::invalid_argument("invalid restore port protocol")),
         };
+    }
+    if let Some(size) = opts.tcp_accept_queue_size {
+        builder = builder.tcp_accept_queue_size(size);
     }
     for route in &opts.vsock {
         builder = match route.socket_type.as_str() {
@@ -278,6 +282,22 @@ mod tests {
             });
             assert!(serde_json::from_value::<RestoreOptions>(value).is_err());
         }
+    }
+
+    #[test]
+    fn restore_accept_queue_size_is_optional_and_reaches_the_builder() {
+        let omitted: RestoreOptions =
+            serde_json::from_value(serde_json::json!({"snapshot": "saved"})).unwrap();
+        assert_eq!(omitted.tcp_accept_queue_size, None);
+
+        let options: RestoreOptions = serde_json::from_value(serde_json::json!({
+            "snapshot": "saved",
+            "ports": [{"host_port": 8080, "guest_port": 80, "protocol": "tcp", "bind": "127.0.0.1"}],
+            "tcp_accept_queue_size": 4096,
+        }))
+        .unwrap();
+        assert_eq!(options.tcp_accept_queue_size, Some(4096));
+        assert!(builder("destination".into(), &options).is_ok());
     }
 
     #[test]

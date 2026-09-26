@@ -58,6 +58,10 @@ pub struct RestoreResourceArgs {
     #[cfg(feature = "net")]
     #[arg(short, long)]
     pub port: Vec<String>,
+    /// Accept-queue depth for the child's published TCP ports (default: 1024; clamped to somaxconn).
+    #[cfg(feature = "net")]
+    #[arg(long, value_name = "DEPTH", value_parser = clap::value_parser!(u32).range(1..=i64::from(i32::MAX)))]
+    pub tcp_accept_queue_size: Option<u32>,
     /// Default user for new exec commands; captured processes keep their credentials.
     #[arg(short, long)]
     pub user: Option<String>,
@@ -266,6 +270,10 @@ macro_rules! apply_resources {
                         };
                     }
                 }
+                #[cfg(feature = "net")]
+                if let Some(size) = self.tcp_accept_queue_size {
+                    builder = builder.tcp_accept_queue_size(size);
+                }
                 Ok(builder)
             }
         }
@@ -413,6 +421,39 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn restore_parses_accept_queue_size_for_child_listeners() {
+        let cli = TestCli::try_parse_from([
+            "restore",
+            "ready",
+            "--name",
+            "child",
+            "-p",
+            "8080:80",
+            "--tcp-accept-queue-size",
+            "4096",
+        ])
+        .unwrap();
+        assert_eq!(cli.args.resources.tcp_accept_queue_size, Some(4096));
+        let defaults = TestCli::try_parse_from(["restore", "ready", "--name", "child"]).unwrap();
+        assert_eq!(defaults.args.resources.tcp_accept_queue_size, None);
+        for invalid in ["0", "2147483648"] {
+            assert!(
+                TestCli::try_parse_from([
+                    "restore",
+                    "ready",
+                    "--name",
+                    "child",
+                    "--tcp-accept-queue-size",
+                    invalid,
+                ])
+                .is_err(),
+                "{invalid}"
+            );
+        }
     }
 
     #[cfg(feature = "net")]

@@ -19,10 +19,10 @@ use smoltcp::iface::{Interface, SocketHandle, SocketSet};
 use smoltcp::socket::tcp;
 use smoltcp::wire::{EthernetAddress, IpEndpoint};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream, UdpSocket};
+use tokio::net::{TcpListener, TcpSocket, TcpStream, UdpSocket};
 use tokio::sync::mpsc;
 
-use crate::config::{PortProtocol, PublishedPort};
+use crate::config::{PortProtocol, PublishedPort, TcpAcceptQueueSize};
 use crate::netstack::shared::SharedState;
 use crate::policy::{NetworkPolicy, Protocol};
 use crate::udp::relay::{construct_udp_response, extract_udp_payload};
@@ -172,6 +172,7 @@ impl PortPublisher {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         ports: &[PublishedPort],
+        tcp_accept_queue_size: TcpAcceptQueueSize,
         guest_ipv4: Option<Ipv4Addr>,
         guest_ipv6: Option<Ipv6Addr>,
         gateway_ipv4: Option<Ipv4Addr>,
@@ -193,6 +194,7 @@ impl PortPublisher {
         if guest_ip.is_some() {
             Self::spawn_listeners(
                 ports,
+                tcp_accept_queue_size,
                 &inbound_tx,
                 udp_routes.clone(),
                 guest_ipv4,
@@ -406,6 +408,7 @@ impl PortPublisher {
     #[allow(clippy::too_many_arguments)]
     fn spawn_listeners(
         ports: &[PublishedPort],
+        tcp_accept_queue_size: TcpAcceptQueueSize,
         inbound_tx: &mpsc::Sender<InboundConnection>,
         udp_routes: PublishedUdpRoutes,
         guest_ipv4: Option<Ipv4Addr>,
@@ -429,8 +432,15 @@ impl PortPublisher {
                     let policy = policy.clone();
                     let shared = shared.clone();
                     tokio_handle.spawn(async move {
-                        if let Err(e) =
-                            tcp_listener_task(bind_addr, guest_port, tx, policy, shared).await
+                        if let Err(e) = tcp_listener_task(
+                            bind_addr,
+                            tcp_accept_queue_size,
+                            guest_port,
+                            tx,
+                            policy,
+                            shared,
+                        )
+                        .await
                         {
                             tracing::error!(
                                 bind = %bind_addr,
@@ -547,6 +557,34 @@ fn reject_with_rst(stream: &TcpStream) {
     let _ = socket2::SockRef::from(stream).set_linger(Some(Duration::ZERO));
 }
 
+/// Bind a published port's listener with an explicit accept-queue depth.
+///
+/// `TcpListener::bind` leaves the backlog to mio, which passes 128. Connections that arrive while
+/// the queue is full never reach the accept loop, so a burst larger than the queue -- for example
+/// a reverse proxy fanning out one browser's page load of a modern web app -- can surface as
+/// failed upstream connections and, behind the proxy, as 502s. That is one possible cause of such
+/// failures, not the only one: the publisher's own cap on tracked inbound connections
+/// (`max_inbound`) resets connections past it, independently of this queue.
+///
+/// Goes through `TcpSocket` only so the backlog can be stated; everything else matches
+/// `TcpListener::bind`. That includes `SO_REUSEADDR` on Unix, so a listener can be re-created
+/// without waiting out `TIME_WAIT`, and deliberately not on Windows, where the option would let
+/// another socket bind over a port that is still in use.
+fn bind_listener(
+    bind_addr: SocketAddr,
+    backlog: TcpAcceptQueueSize,
+) -> std::io::Result<TcpListener> {
+    let socket = if bind_addr.is_ipv4() {
+        TcpSocket::new_v4()?
+    } else {
+        TcpSocket::new_v6()?
+    };
+    #[cfg(not(windows))]
+    socket.set_reuseaddr(true)?;
+    socket.bind(bind_addr)?;
+    socket.listen(backlog.get())
+}
+
 /// Listener task: accepts TCP connections on the host, runs each
 /// through the network policy's ingress evaluator, and queues
 /// allowed connections for the publisher's accept loop. Denied
@@ -554,12 +592,13 @@ fn reject_with_rst(stream: &TcpStream) {
 /// sees `ECONNRESET` rather than a graceful close.
 async fn tcp_listener_task(
     bind_addr: SocketAddr,
+    backlog: TcpAcceptQueueSize,
     guest_port: u16,
     inbound_tx: mpsc::Sender<InboundConnection>,
     policy: Arc<NetworkPolicy>,
     shared: Arc<SharedState>,
 ) -> std::io::Result<()> {
-    let listener = TcpListener::bind(bind_addr).await?;
+    let listener = bind_listener(bind_addr, backlog)?;
     log_published_port_listener("TCP", bind_addr, guest_port);
 
     loop {
@@ -921,6 +960,81 @@ mod tests {
         assert!(queue_inbound_connection(&tx, (), &shared).await);
         assert!(rx.try_recv().is_ok());
         assert!(shared.proxy_wake.wait_timeout(Duration::ZERO));
+    }
+
+    /// The listener hands `listen()` the configured depth, and the queue holds that many.
+    ///
+    /// The kernel clamps the request to `net.core.somaxconn`, so the expectation is
+    /// `min(requested, somaxconn)` read from the host rather than a fixed number: on a host left
+    /// at 128, a 128-deep queue is the correct result. `TCP_INFO` on a listening socket reports
+    /// that effective depth in `tcpi_sacked`, which pins the value given to `listen()` exactly,
+    /// including that `TcpAcceptQueueSize::MAX` does not wrap negative on its way to the C `int`.
+    /// Filling the queue without accepting then shows the kernel honours it.
+    ///
+    /// Linux only: `tcpi_sacked` has this meaning only there, and macOS clamps to
+    /// `kern.ipc.somaxconn` with no equivalent way to read the result back.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn published_listener_queues_the_configured_backlog() {
+        let somaxconn: u32 = std::fs::read_to_string("/proc/sys/net/core/somaxconn")
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let loopback = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+
+        for requested in [
+            1,
+            300,
+            TcpAcceptQueueSize::DEFAULT.get(),
+            TcpAcceptQueueSize::MAX,
+        ] {
+            let backlog = TcpAcceptQueueSize::try_from(requested).unwrap();
+            let listener = bind_listener(loopback, backlog).unwrap();
+            assert_eq!(
+                effective_backlog(&listener),
+                requested.min(somaxconn),
+                "requested {requested} with somaxconn {somaxconn}",
+            );
+        }
+
+        let listener = bind_listener(loopback, TcpAcceptQueueSize::try_from(300).unwrap()).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let depth = effective_backlog(&listener) as usize;
+
+        // Deliberately never accept: what is under test is the queue, not the accept loop.
+        let mut held = Vec::with_capacity(depth);
+        for _ in 0..depth {
+            match tokio::time::timeout(Duration::from_secs(2), TcpStream::connect(addr)).await {
+                Ok(Ok(stream)) => held.push(stream),
+                Ok(Err(e)) => panic!("refused after {} of {depth} connections: {e}", held.len()),
+                Err(_) => panic!("timed out after {} of {depth} connections", held.len()),
+            }
+        }
+    }
+
+    /// Accept-queue depth the kernel actually applied to a listening socket.
+    #[cfg(target_os = "linux")]
+    fn effective_backlog(listener: &TcpListener) -> u32 {
+        use std::os::fd::AsRawFd;
+
+        // SAFETY: `tcp_info` is plain old data, so the all-zero pattern is a valid value.
+        let mut info: libc::tcp_info = unsafe { std::mem::zeroed() };
+        let mut len = std::mem::size_of::<libc::tcp_info>() as libc::socklen_t;
+        // SAFETY: the descriptor is open for the listener's lifetime, and `info`/`len` describe a
+        // writable buffer of exactly the size passed.
+        let rc = unsafe {
+            libc::getsockopt(
+                listener.as_raw_fd(),
+                libc::IPPROTO_TCP,
+                libc::TCP_INFO,
+                (&mut info as *mut libc::tcp_info).cast(),
+                &mut len,
+            )
+        };
+        assert_eq!(rc, 0, "TCP_INFO: {}", std::io::Error::last_os_error());
+        // For a socket in LISTEN, Linux reports `sk_max_ack_backlog` here.
+        info.tcpi_sacked
     }
 
     #[tokio::test]

@@ -43,7 +43,10 @@ type RestoreConfig struct {
 	Volumes                     map[string]MountConfig
 	CapturedVolumes             []string
 	Ports                       []PortBinding
-	Vsock                       []VsockRoute
+	// TCPAcceptQueueSize sets the accept-queue depth for the child's published TCP
+	// listeners, 1 to 2147483647. Nil keeps the default, 1024.
+	TCPAcceptQueueSize *uint32
+	Vsock              []VsockRoute
 }
 
 // RestoreSandbox restores an installed snapshot or archive into a detached sandbox.
@@ -98,6 +101,12 @@ func WithRestoreMaxTCPConnections(count uint) RestoreOption {
 // WithRestoreMaxUDPConnections caps destination UDP relay sessions. Zero means unlimited.
 func WithRestoreMaxUDPConnections(count uint) RestoreOption {
 	return func(o *RestoreConfig) { o.MaxUDPConnections = &count }
+}
+
+// WithRestoreTCPAcceptQueueSize sets the accept-queue depth for the child's published TCP
+// listeners, 1 to 2147483647. The host kernel clamps it to its somaxconn.
+func WithRestoreTCPAcceptQueueSize(size uint32) RestoreOption {
+	return func(o *RestoreConfig) { o.TCPAcceptQueueSize = &size }
 }
 
 // WithRestoreDisableNetwork disables networking; full restore rejects removing a captured NIC.
@@ -199,6 +208,7 @@ func buildFFIRestoreOptions[T SnapshotSeed](snapshot T, config RestoreConfig) ff
 		DangerouslyInheritResources: config.DangerouslyInheritResources,
 		AllowMissingResources:       config.AllowMissingResources,
 		Volumes:                     resources.Volumes, CapturedVolumes: config.CapturedVolumes,
-		Ports: buildFFIPortBindings(config.Ports), Vsock: buildFFIVsockRoutes(config.Vsock),
+		Ports: buildFFIPortBindings(config.Ports), TCPAcceptQueueSize: config.TCPAcceptQueueSize,
+		Vsock: buildFFIVsockRoutes(config.Vsock),
 	}
 }

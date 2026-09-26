@@ -216,6 +216,7 @@ pub(crate) fn restore_builder_from_args(
             "volumes",
             "captured_volumes",
             "ports",
+            "tcp_accept_queue_size",
             "vsock",
             "external_mount_policy",
             "dangerously_inherit_resources",
@@ -343,6 +344,9 @@ pub(crate) fn restore_builder_from_args(
     }
     if let Some(ports) = kwargs.get_item("ports")?.filter(|v| !v.is_none()) {
         builder = apply_ports(builder, &ports, PortBindingSource::PublicConfig)?;
+    }
+    if let Some(size) = extract_opt::<u32>(kwargs, "tcp_accept_queue_size")? {
+        builder = builder.tcp_accept_queue_size(size);
     }
     if let Some(vsock) = kwargs.get_item("vsock")?.filter(|v| !v.is_none()) {
         builder = apply_vsock_routes(builder, &vsock)?;
@@ -1550,6 +1554,9 @@ fn apply_network(
     }
     if let Some(max) = extract_opt::<usize>(net, "max_udp_connections")? {
         builder = builder.network(|n| n.max_udp_connections(max));
+    }
+    if let Some(size) = extract_opt::<u32>(net, "tcp_accept_queue_size")? {
+        builder = builder.network(|n| n.tcp_accept_queue_size(size));
     }
 
     // Strict hostname policy.
