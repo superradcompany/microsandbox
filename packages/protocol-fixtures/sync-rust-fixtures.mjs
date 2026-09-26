@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 const root = fileURLToPath(new URL("../../", import.meta.url));
 const copies = [
   ["packages/protocol-fixtures/control-v1.json", "crates/protocol/tests/fixtures/control-v1.json"],
+  ["packages/protocol-fixtures/supervisor-v1.json", "crates/protocol/tests/fixtures/supervisor-v1.json"],
   ...[
     "crates/protocol/tests/fixtures/legacy_control_records.rs",
     "crates/runtime/tests/fixtures/legacy_control_records.rs",

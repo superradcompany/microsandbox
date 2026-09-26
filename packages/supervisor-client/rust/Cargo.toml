@@ -1,0 +1,27 @@
+[package]
+name = "microsandbox-supervisor-client"
+description = "Typed client for the local microsandbox supervisor protocol."
+version.workspace = true
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+edition.workspace = true
+
+[lib]
+path = "lib/lib.rs"
+
+[features]
+default = []
+uds = ["microsandbox-protocol-client/uds"]
+named-pipe = ["microsandbox-protocol-client/named-pipe"]
+
+[dependencies]
+microsandbox-protocol.workspace = true
+microsandbox-protocol-client.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["io-util", "time"] }
+
+[dev-dependencies]
+ciborium.workspace = true
+tokio = { workspace = true, features = ["io-util", "macros", "rt-multi-thread", "time"] }

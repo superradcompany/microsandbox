@@ -119,6 +119,7 @@ Retiring JSON operations requires a separate supported-version decision. Even af
 | Outer frame encoding | [codec.rs](lib/codec.rs) |
 | Agent relay setup, send gates, ready metadata | [Rust agent protocol](../../packages/agent-client/rust/lib/protocol.rs), [TypeScript agent protocol](../../packages/agent-client/typescript/src/protocol.ts) |
 | Control records and handshake | [control module](lib/control/mod.rs), [wire decoder](lib/wire.rs) |
+| Supervisor records and handshake | [supervisor module](lib/supervisor/mod.rs), [Rust client](../../packages/supervisor-client/rust/README.md), [TypeScript client](../../packages/supervisor-client/typescript/README.md) |
 | Shared-socket dispatch and host handlers | [server.rs](../runtime/lib/runner/control/server.rs), [handler.rs](../runtime/lib/runner/control/handler.rs) |
 | Automatic discovery and JSON adaptation | [Rust connection](../../packages/control-client/rust/lib/connection.rs), [TypeScript connection](../../packages/control-client/typescript/src/connection.ts) |
 | Backend ownership and process identity | [control registry](../../sdk/rust/lib/backend/local/control/registry.rs), [identity checks](../../sdk/rust/lib/backend/local/control/identity.rs) |
@@ -132,7 +133,7 @@ Focused checks, from the repository root:
 
 ```sh
 cargo test -p microsandbox-protocol --locked --test schema_snapshot --test control_contract --test legacy_json_contract
-cargo test -p microsandbox-protocol-client -p microsandbox-agent-client -p microsandbox-control-client --all-features --locked
+cargo test -p microsandbox-protocol-client -p microsandbox-agent-client -p microsandbox-control-client -p microsandbox-supervisor-client --all-features --locked
 npm --prefix packages run build
 npm --prefix packages run typecheck
 npm --prefix packages test

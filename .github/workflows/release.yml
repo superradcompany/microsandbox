@@ -1325,19 +1325,21 @@ jobs:
           node scripts/ci/wait-for-npm-packages.mjs "$VERSION" \
             @microsandbox/types @microsandbox/protocol-client
 
-      - name: Publish agent and control clients
+      - name: Publish agent, control, and supervisor clients
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         working-directory: packages
         run: |
           node ../scripts/ci/publish-npm-package.mjs agent-client/typescript
           node ../scripts/ci/publish-npm-package.mjs control-client/typescript
+          node ../scripts/ci/publish-npm-package.mjs supervisor-client/typescript
 
       - name: Wait for shared clients to be indexed
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           node scripts/ci/wait-for-npm-packages.mjs "$VERSION" \
-            @microsandbox/agent-client @microsandbox/control-client
+            @microsandbox/agent-client @microsandbox/control-client \
+            @microsandbox/supervisor-client
 
       - name: Publish platform packages
         env:

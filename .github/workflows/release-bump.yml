@@ -92,6 +92,7 @@ jobs:
             - `packages/protocol-client/typescript/package.json`
             - `packages/agent-client/typescript/package.json`
             - `packages/control-client/typescript/package.json`
+            - `packages/supervisor-client/typescript/package.json`
             - `packages/microsandbox-types/typescript/package.json`
             - `sdk/node-ts/package.json` and per-platform sub-packages
             - `sdk/go/setup.go` `sdkVersion` (if present)
