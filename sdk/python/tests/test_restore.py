@@ -109,7 +109,8 @@ async def test_restore_accept_queue_size_reaches_artifact_validation(tmp_path, m
     # A missing artifact proves the option is accepted and reaches restore.
     with pytest.raises(FileNotFoundError):
         result = getattr(Sandbox, method)(
-            tmp_path / "missing", name="restore-queue", ports={8080: 80}, tcp_accept_queue_size=4096,
+            tmp_path / "missing", name="restore-queue", ports={8080: 80},
+            tcp_accept_queue_size=4096,
         )
         if method == "restore":
             await result
