@@ -20,7 +20,7 @@ if (process.argv[2] === "--evaluate") {
   for (const [name, value] of Object.entries(context.packageRoots)) {
     if (typeof value.Client !== "function") throw new Error(`Missing generic client export from ${name}`);
   }
-  console.log("All three packed package roots loaded and the external protocol ran without Node builtins or globals.");
+  console.log("All four packed package roots loaded and the external protocol ran without Node builtins or globals.");
 } else {
   const consumer = process.argv[2];
   if (!consumer) throw new Error("Usage: node check-browser-package-roots.mjs <compiled-consumer-directory>");
@@ -31,13 +31,15 @@ if (process.argv[2] === "--evaluate") {
 import * as generic from "@microsandbox/protocol-client";
 import * as agent from "@microsandbox/agent-client";
 import * as control from "@microsandbox/control-client";
+import * as supervisor from "@microsandbox/supervisor-client";
 import "./consumer.js";
-globalThis.packageRoots = { generic, agent, control };
+globalThis.packageRoots = { generic, agent, control, supervisor };
 const codec = new generic.CborEnvelopeCodec();
 const body = codec.encode(1, "custom.browser", codec.encodePayload({ value: 9007199254740993n }));
 const frame = codec.decode({id:1,flags:1,body});
 if (frame.decodePayload().value !== 9007199254740993n) throw new Error("Browser CBOR lost integer precision");
 if (new control.SetMemoryTarget(control.MiB(2048)).message().kind !== "encoded") throw new Error("Control request could not be constructed");
+if (new supervisor.GetSupervisorStatus().message().kind !== "encoded") throw new Error("Supervisor request could not be constructed");
 `);
   const require = createRequire(path.join(path.dirname(self), "../protocol-client/typescript/package.json"));
   const { rolldown } = await import(pathToFileURL(require.resolve("rolldown")).href);

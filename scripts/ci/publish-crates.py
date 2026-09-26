@@ -19,6 +19,7 @@ DEFAULT_ROOTS = (
     "microsandbox-agentd",
     "microsandbox-cli",
     "microsandbox-metrics-collector",
+    "microsandbox-supervisor-client",
 )
 USER_AGENT = "microsandbox-release-ci (https://github.com/superradcompany/microsandbox)"
 

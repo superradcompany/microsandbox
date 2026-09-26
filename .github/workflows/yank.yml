@@ -38,6 +38,7 @@ jobs:
           for crate in \
             microsandbox-utils microsandbox-types-macros microsandbox-types microsandbox-protocol \
             microsandbox-agent-client microsandbox-agentd microsandbox-db \
+            microsandbox-supervisor-client \
             microsandbox-migration microsandbox-image microsandbox-filesystem \
             microsandbox-network microsandbox-metrics microsandbox-metrics-collector \
             microsandbox-runtime microsandbox microsandbox-cli; do
@@ -63,6 +64,7 @@ jobs:
           for pkg in \
             microsandbox \
             "@microsandbox/agent-client" \
+            "@microsandbox/supervisor-client" \
             "@microsandbox/types" \
             "@superradcompany/microsandbox-darwin-arm64" \
             "@superradcompany/microsandbox-linux-arm64-gnu" \

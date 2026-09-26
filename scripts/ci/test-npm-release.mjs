@@ -90,10 +90,10 @@ test("unpublished build actually installs unrelated optional build dependencies"
   }
 });
 
-test("all ten packages published with provenance identify this repository", () => {
+test("all eleven packages published with provenance identify this repository", () => {
   const directories = ["sdk/node-ts",
     ...["darwin-arm64", "linux-arm64-gnu", "linux-x64-gnu", "win32-arm64-msvc", "win32-x64-msvc"].map((name) => `sdk/node-ts/npm/${name}`),
-    ...["microsandbox-types", "protocol-client", "agent-client", "control-client"].map((name) => `packages/${name}/typescript`)];
+    ...["microsandbox-types", "protocol-client", "agent-client", "control-client", "supervisor-client"].map((name) => `packages/${name}/typescript`)];
   for (const directory of directories) {
     const pkg = JSON.parse(readFileSync(join(root, directory, "package.json")));
     assert.deepEqual(pkg.repository, {

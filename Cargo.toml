@@ -11,6 +11,7 @@ members = [
     "crates/metrics-collector",
     "packages/agent-client/rust",
     "packages/control-client/rust",
+    "packages/supervisor-client/rust",
     "packages/protocol-client/rust",
     "packages/microsandbox-types/macros",
     "packages/microsandbox-types/rust",
@@ -82,6 +83,7 @@ strip = false
 microsandbox = { version = "=0.7.4", path = "sdk/rust", default-features = false }
 microsandbox-agent-client = { version = "=0.7.4", path = "packages/agent-client/rust" }
 microsandbox-control-client = { version = "=0.7.4", path = "packages/control-client/rust" }
+microsandbox-supervisor-client = { version = "=0.7.4", path = "packages/supervisor-client/rust" }
 microsandbox-protocol-client = { version = "=0.7.4", path = "packages/protocol-client/rust" }
 microsandbox-db = { version = "=0.7.4", path = "crates/db" }
 microsandbox-filesystem = { version = "=0.7.4", path = "crates/filesystem", default-features = false }

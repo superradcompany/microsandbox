@@ -4251,6 +4251,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "microsandbox-supervisor-client"
+version = "0.7.4"
+dependencies = [
+ "ciborium",
+ "microsandbox-protocol",
+ "microsandbox-protocol-client",
+ "serde",
+ "thiserror 2.0.20",
+ "tokio",
+]
+
+[[package]]
 name = "microsandbox-types"
 version = "0.7.4"
 dependencies = [

@@ -22,6 +22,7 @@
 #   - packages/protocol-client/typescript/package.json
 #   - packages/agent-client/typescript/package.json
 #   - packages/control-client/typescript/package.json
+#   - packages/supervisor-client/typescript/package.json
 #   - packages/microsandbox-types/typescript/package.json
 #   - sdk/node-ts/package.json (top-level + optionalDependencies versions)
 #   - sdk/node-ts/npm/*/package.json (per-platform npm sub-packages)
@@ -139,6 +140,7 @@ for f in \
   packages/protocol-client/typescript/package.json \
   packages/agent-client/typescript/package.json \
   packages/control-client/typescript/package.json \
+  packages/supervisor-client/typescript/package.json \
   packages/microsandbox-types/typescript/package.json \
   sdk/node-ts/package.json \
   sdk/node-ts/npm/*/package.json \
