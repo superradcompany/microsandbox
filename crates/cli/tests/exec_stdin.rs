@@ -10,6 +10,45 @@ use tokio::process::Command;
 use tokio::time::timeout;
 
 //--------------------------------------------------------------------------------------------------
+// Functions
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(unix)]
+fn host_input_pair(terminal: bool) -> (std::fs::File, std::fs::File) {
+    use std::fs::File;
+    use std::os::fd::{FromRawFd, OwnedFd};
+    use std::os::unix::net::UnixStream;
+
+    if !terminal {
+        let (reader, writer) = UnixStream::pair().expect("host input");
+        return (
+            File::from(OwnedFd::from(reader)),
+            File::from(OwnedFd::from(writer)),
+        );
+    }
+
+    let mut master = -1;
+    let mut slave = -1;
+    // SAFETY: openpty receives valid descriptor pointers and null optional settings.
+    // On success, each newly opened descriptor is transferred to exactly one File.
+    unsafe {
+        assert_eq!(
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            ),
+            0,
+            "host terminal: {}",
+            std::io::Error::last_os_error()
+        );
+        (File::from_raw_fd(slave), File::from_raw_fd(master))
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
 
@@ -237,12 +276,11 @@ async fn exec_accepts_delayed_nonblocking_stdin() {
 #[cfg(unix)]
 #[msb_test]
 async fn no_stdin_gives_guest_eof_without_consuming_host_input() {
-    use std::io::{Read, Write};
-    use std::os::fd::OwnedFd;
-    use std::os::unix::net::UnixStream;
+    use std::io::{IsTerminal, Read, Write};
+    use std::os::fd::AsRawFd;
 
     let name = "cli-no-stdin";
-    let new_name = "cli-run-no-stdin";
+    let new_names = ["cli-run-no-stdin", "cli-run-no-stdin-tty"];
     let image = "mirror.gcr.io/library/alpine";
     let sandbox = Sandbox::builder(name)
         .image(image)
@@ -253,63 +291,74 @@ async fn no_stdin_gives_guest_eof_without_consuming_host_input() {
         .await
         .expect("create sandbox");
     let mut results = Vec::new();
-    for args in [
-        vec!["exec", name],
-        vec!["exec", "--no-tty", name],
-        vec!["exec", "--stream", name],
-        vec!["run", "--name", name],
-        vec!["run", "--name", new_name, "-c", "1", "-m", "512M", image],
-    ] {
-        let (mut reader, mut writer) = UnixStream::pair().expect("host input");
-        reader
-            .set_read_timeout(Some(Duration::from_secs(1)))
-            .expect("read timeout");
-        let canary = b"input for the parent script\n";
-        writer.write_all(canary).expect("queue host input");
-        let child = Command::new(env!("CARGO_BIN_EXE_msb"))
-            .arg("--error")
-            .args(&args)
-            .args([
-                "--no-stdin",
-                "--quiet",
-                "--",
-                "sh",
-                "-c",
-                "if read -r line; then exit 33; fi; printf eof; exit 7",
-            ])
-            .stdin(Stdio::from(OwnedFd::from(
-                reader.try_clone().expect("child input"),
-            )))
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .expect("spawn CLI");
-        // The writer remains open, with input available, until after CLI exit.
-        let output = timeout(Duration::from_secs(15), child.wait_with_output()).await;
-        let mut remaining = vec![0; canary.len()];
-        let preserved = reader.read_exact(&mut remaining);
-        results.push((args, output, preserved, remaining));
+    for (terminal, new_name) in [false, true].into_iter().zip(new_names) {
+        for args in [
+            vec!["exec", name],
+            vec!["exec", "--no-tty", name],
+            vec!["exec", "--stream", name],
+            vec!["run", "--name", name],
+            vec!["run", "--name", new_name, "-c", "1", "-m", "512M", image],
+        ] {
+            let (mut reader, mut writer) = host_input_pair(terminal);
+            assert_eq!(reader.is_terminal(), terminal);
+            let canary = b"input for the parent script\n";
+            writer.write_all(canary).expect("queue host input");
+            let child = Command::new(env!("CARGO_BIN_EXE_msb"))
+                .arg("--error")
+                .args(&args)
+                .args([
+                    "--no-stdin",
+                    "--quiet",
+                    "--",
+                    "sh",
+                    "-c",
+                    "[ -t 0 ] && exit 34; if read -r line; then exit 33; fi; printf eof; exit 7",
+                ])
+                .stdin(Stdio::from(reader.try_clone().expect("child input")))
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .kill_on_drop(true)
+                .spawn()
+                .expect("spawn CLI");
+            // The writer remains open, with input available, until after CLI exit.
+            let output = timeout(Duration::from_secs(15), child.wait_with_output()).await;
+            // Do not hang if a regression consumed some or all of the canary.
+            // SAFETY: reader owns a valid descriptor; fcntl does not take ownership.
+            unsafe {
+                let flags = libc::fcntl(reader.as_raw_fd(), libc::F_GETFL);
+                assert_ne!(flags, -1);
+                assert_ne!(
+                    libc::fcntl(reader.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK),
+                    -1
+                );
+            }
+            let mut remaining = vec![0; canary.len()];
+            let preserved = reader.read_exact(&mut remaining);
+            results.push((terminal, args, output, preserved, remaining));
+        }
     }
     sandbox.stop().await.expect("stop sandbox");
     Sandbox::remove(name).await.expect("remove sandbox");
-    if let Ok(new_sandbox) = Sandbox::get(new_name).await {
-        new_sandbox.stop().await.expect("stop new sandbox");
-        Sandbox::remove(new_name).await.expect("remove new sandbox");
+    for new_name in new_names {
+        if let Ok(new_sandbox) = Sandbox::get(new_name).await {
+            new_sandbox.stop().await.expect("stop new sandbox");
+            Sandbox::remove(new_name).await.expect("remove new sandbox");
+        }
     }
-    for (args, output, preserved, remaining) in results {
+    for (terminal, args, output, preserved, remaining) in results {
+        let context = format!("{args:?}, terminal={terminal}");
         let output = output
-            .expect("CLI waited for host input")
+            .unwrap_or_else(|_| panic!("{context}: CLI waited for host input"))
             .expect("wait for CLI");
         assert_eq!(
             output.status.code(),
             Some(7),
-            "{args:?}: {:?}",
+            "{context}: {:?}",
             output.stderr
         );
-        assert_eq!(output.stdout, b"eof", "{args:?}");
-        assert!(output.stderr.is_empty(), "{args:?}: {:?}", output.stderr);
-        preserved.expect("host input was consumed");
-        assert_eq!(remaining, b"input for the parent script\n", "{args:?}");
+        assert_eq!(output.stdout, b"eof", "{context}");
+        assert!(output.stderr.is_empty(), "{context}: {:?}", output.stderr);
+        preserved.unwrap_or_else(|error| panic!("{context}: host input was consumed: {error}"));
+        assert_eq!(remaining, b"input for the parent script\n", "{context}");
     }
 }
