@@ -27,9 +27,10 @@ use windows_sys::Win32::{
 //--------------------------------------------------------------------------------------------------
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(super) struct ProcessStart(pub u64, pub u64);
+pub(crate) struct ProcessStart(pub u64, pub u64);
 
-pub(super) struct ProcessIdentity {
+/// One process instance: its PID plus the kernel birth token a recycled PID cannot reproduce.
+pub(crate) struct ProcessIdentity {
     pub pid: i32,
     pub start: ProcessStart,
     #[cfg(target_os = "linux")]
@@ -139,6 +140,83 @@ impl ProcessIdentity {
             return Err(ControlClientError::RuntimeChanged);
         }
         self.verify()
+    }
+
+    /// Whether signals reach this process instance through a kernel process handle, so a PID
+    /// that changes hands after the identity check can never receive them.
+    #[cfg(target_os = "linux")]
+    pub fn signals_through_handle(&self) -> bool {
+        self.handle.is_some()
+    }
+
+    /// Whether this process instance has exited. A recycled PID is an exit, never a survivor.
+    #[cfg(unix)]
+    pub fn has_exited(&self) -> std::io::Result<bool> {
+        match self.verify() {
+            Ok(()) => Ok(false),
+            Err(ControlClientError::RuntimeChanged) => Ok(true),
+            Err(error) => Err(std::io::Error::other(error.to_string())),
+        }
+    }
+
+    /// Wall-clock creation time in Unix microseconds, comparable with a run row's `started_at`.
+    #[cfg(unix)]
+    pub fn created_unix_micros(&self) -> std::io::Result<i64> {
+        #[cfg(target_os = "linux")]
+        {
+            // starttime counts clock ticks since boot on the boot-time clock. Anchor it to the
+            // wall clock now; the anchor moves if the wall clock is stepped after the process
+            // started, so callers keep generous slack around this value.
+            let ticks_per_second = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+            if ticks_per_second <= 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            let realtime = clock_unix_micros(libc::CLOCK_REALTIME)?;
+            let boottime = clock_unix_micros(libc::CLOCK_BOOTTIME)?;
+            let since_boot =
+                (i128::from(self.start.0) * 1_000_000 / i128::from(ticks_per_second)) as i64;
+            Ok(realtime - boottime + since_boot)
+        }
+        #[cfg(target_os = "macos")]
+        {
+            // libproc reports the absolute birth timeval; no boot anchor is involved.
+            Ok((self.start.0 as i64)
+                .saturating_mul(1_000_000)
+                .saturating_add(self.start.1 as i64))
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+        }
+    }
+
+    /// Deliver `signal` to this process instance.
+    ///
+    /// Linux signals through the pidfd captured with the identity, so there is no window
+    /// between the identity check and delivery. Without a pidfd (Darwin) the birth token is
+    /// re-verified immediately before `kill(2)`; the residual window is the gap between those
+    /// two syscalls. A process that already exited is not an error.
+    #[cfg(unix)]
+    pub fn signal(&self, signal: libc::c_int) -> std::io::Result<()> {
+        #[cfg(target_os = "linux")]
+        if let Some(handle) = &self.handle {
+            let result = unsafe {
+                libc::syscall(
+                    libc::SYS_pidfd_send_signal,
+                    handle.as_raw_fd(),
+                    signal,
+                    std::ptr::null::<libc::siginfo_t>(),
+                    0u32,
+                )
+            };
+            return signal_result(result == 0);
+        }
+        match self.verify() {
+            Ok(()) => {}
+            Err(ControlClientError::RuntimeChanged) => return Ok(()),
+            Err(error) => return Err(std::io::Error::other(error.to_string())),
+        }
+        signal_result(unsafe { libc::kill(self.pid, signal) } == 0)
     }
 }
 
@@ -286,6 +364,32 @@ fn file_id(file: &File) -> ControlClientResult<(u64, u64, u64)> {
 #[cfg(target_os = "linux")]
 fn invalid() -> ControlClientError {
     ClientError::new(ErrorKind::InvalidData).into()
+}
+
+#[cfg(target_os = "linux")]
+fn clock_unix_micros(clock: libc::clockid_t) -> std::io::Result<i64> {
+    let mut now = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    if unsafe { libc::clock_gettime(clock, &mut now) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // `time_t` and `c_long` widths differ across Linux targets; widen both before scaling.
+    Ok((i128::from(now.tv_sec) * 1_000_000 + i128::from(now.tv_nsec) / 1_000) as i64)
+}
+
+#[cfg(unix)]
+fn signal_result(delivered: bool) -> std::io::Result<()> {
+    if delivered {
+        return Ok(());
+    }
+    let error = std::io::Error::last_os_error();
+    // The process finished between the identity check and delivery: nothing left to signal.
+    if error.raw_os_error() == Some(libc::ESRCH) {
+        return Ok(());
+    }
+    Err(error)
 }
 
 //--------------------------------------------------------------------------------------------------
