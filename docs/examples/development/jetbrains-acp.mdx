@@ -8,7 +8,7 @@ icon: "code"
 JetBrains AI Assistant can start a custom [ACP agent](https://www.jetbrains.com/help/ai-assistant/acp.html) through `msb exec --stream`. The IDE stays on the host; the agent runs in the sandbox. No microsandbox IDE plugin is required.
 
 <Note>
-  Verified with a scripted ACP client on macOS Apple Silicon using msb 0.7.3 and OpenCode 1.18.32. File edits, shell commands, repeated sessions, and concurrent sessions passed. The GoLand, PyCharm, and WebStorm interfaces still need a human check with the installed IDE and AI Assistant versions.
+  Use an msb build containing the stdin fix for [issue #1549](https://github.com/superradcompany/microsandbox/issues/1549). Scripted ACP checks on macOS Apple Silicon with OpenCode 1.18.32 covered file edits, shell commands, repeated sessions, and concurrent sessions, including two concurrent sessions with the fix. The GoLand, PyCharm, and WebStorm interfaces still need a human check with the installed IDE and AI Assistant versions.
 </Note>
 
 ## Create the sandbox
@@ -63,7 +63,7 @@ The model above was used for the synthetic test. Before using real project data,
 Select **OpenCode in microsandbox** in AI Chat and ask it to create `hello.txt`, run `ls` and `uname -s`, and read the file back. Confirm the file appears on the host and the shell reports `Linux`.
 
 <Warning>
-  Use `--stream`, not `--no-tty`, for ACP. In msb 0.7.3, ordinary piped exec buffers stdin until EOF and stalls initialization. With `--stream`, ACP turns complete, but the client must close stdin to finish shutting down the subprocess. See [issue #1549](https://github.com/superradcompany/microsandbox/issues/1549). Redirecting ACP stdin from `/dev/null` would break the protocol.
+  Use `--stream` for ACP so replies arrive while the agent runs. `--no-tty` captures output until command completion and cannot support the conversation. With the stdin fix, the CLI can exit or time out while host stdin remains open. An agent waiting for more input still needs EOF or cancellation to stop. Redirecting ACP stdin from `/dev/null` would break the protocol.
 </Warning>
 
 ## Keep tools inside the sandbox
