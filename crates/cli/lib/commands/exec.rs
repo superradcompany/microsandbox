@@ -40,6 +40,10 @@ pub struct ExecArgs {
     #[arg(long = "no-tty", conflicts_with = "tty")]
     pub no_tty: bool,
 
+    /// Leave host stdin untouched and give the command EOF (disables automatic TTY).
+    #[arg(long, conflicts_with = "tty")]
+    pub no_stdin: bool,
+
     /// Kill the command after this duration (e.g. 30s, 5m, 1h).
     #[arg(long)]
     pub timeout: Option<String>,
@@ -78,9 +82,9 @@ pub async fn run(args: ExecArgs) -> anyhow::Result<()> {
     // buffering, Ctrl-C delivered to msb) — the opposite of the byte-faithful
     // stream this mode promises. Interactive users want the PTY path (`--tty`).
     let stdin_is_terminal = std::io::stdin().is_terminal();
-    if args.stream && stdin_is_terminal {
+    if args.stream && stdin_is_terminal && !args.no_stdin {
         anyhow::bail!(
-            "`--stream` requires piped (non-terminal) stdin; use `--tty` for an interactive terminal session"
+            "`--stream` requires piped stdin or `--no-stdin`; use `--tty` for an interactive terminal session"
         );
     }
 
@@ -90,7 +94,8 @@ pub async fn run(args: ExecArgs) -> anyhow::Result<()> {
         .map(|s| ui::parse_env(s).map_err(anyhow::Error::msg))
         .collect::<anyhow::Result<Vec<_>>>()?;
 
-    let interactive = super::common::use_interactive_tty(stdin_is_terminal, args.no_tty);
+    let interactive =
+        super::common::use_interactive_tty(stdin_is_terminal, args.no_tty || args.no_stdin);
 
     let rlimits = args
         .rlimit
@@ -165,6 +170,12 @@ async fn run_started(
             timeout,
             &rlimits,
         );
+        if args.no_stdin {
+            let mut handle = sandbox
+                .exec_stream_with(cmd, |_| options.stdin_bytes(Vec::new()))
+                .await?;
+            return drive_stream(&mut handle, timeout, args.stream).await;
+        }
         return run_piped(sandbox, cmd, options, timeout, args.stream).await;
     }
 
@@ -194,7 +205,7 @@ async fn run_started(
         let output: ExecOutput = sandbox
             .exec_with(cmd, |e| {
                 let mut e = apply_common_exec_opts(
-                    // Non-interactive execution from a terminal receives EOF.
+                    // No host input is forwarded on this noninteractive terminal path.
                     e.args(cmd_args).stdin_bytes(Vec::new()),
                     &env_pairs,
                     &workdir,
@@ -450,9 +461,10 @@ mod tests {
     }
 
     #[test]
-    fn no_tty_conflicts_with_tty() {
-        let err = TestCli::try_parse_from(["msb", "--tty", "--no-tty", "box"]).unwrap_err();
-
-        assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
+    fn noninteractive_flags_conflict_with_tty() {
+        for flag in ["--no-tty", "--no-stdin"] {
+            let err = TestCli::try_parse_from(["msb", "--tty", flag, "box"]).unwrap_err();
+            assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
+        }
     }
 }

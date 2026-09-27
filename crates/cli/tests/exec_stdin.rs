@@ -233,3 +233,83 @@ async fn exec_accepts_delayed_nonblocking_stdin() {
     assert_eq!(output.status.code(), Some(7));
     assert!(output.stderr.is_empty(), "{:?}", output.stderr);
 }
+
+#[cfg(unix)]
+#[msb_test]
+async fn no_stdin_gives_guest_eof_without_consuming_host_input() {
+    use std::io::{Read, Write};
+    use std::os::fd::OwnedFd;
+    use std::os::unix::net::UnixStream;
+
+    let name = "cli-no-stdin";
+    let new_name = "cli-run-no-stdin";
+    let image = "mirror.gcr.io/library/alpine";
+    let sandbox = Sandbox::builder(name)
+        .image(image)
+        .cpus(1)
+        .memory(512)
+        .replace()
+        .create()
+        .await
+        .expect("create sandbox");
+    let mut results = Vec::new();
+    for args in [
+        vec!["exec", name],
+        vec!["exec", "--no-tty", name],
+        vec!["exec", "--stream", name],
+        vec!["run", "--name", name],
+        vec!["run", "--name", new_name, "-c", "1", "-m", "512M", image],
+    ] {
+        let (mut reader, mut writer) = UnixStream::pair().expect("host input");
+        reader
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .expect("read timeout");
+        let canary = b"input for the parent script\n";
+        writer.write_all(canary).expect("queue host input");
+        let child = Command::new(env!("CARGO_BIN_EXE_msb"))
+            .arg("--error")
+            .args(&args)
+            .args([
+                "--no-stdin",
+                "--quiet",
+                "--",
+                "sh",
+                "-c",
+                "if read -r line; then exit 33; fi; printf eof; exit 7",
+            ])
+            .stdin(Stdio::from(OwnedFd::from(
+                reader.try_clone().expect("child input"),
+            )))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawn CLI");
+        // The writer remains open, with input available, until after CLI exit.
+        let output = timeout(Duration::from_secs(15), child.wait_with_output()).await;
+        let mut remaining = vec![0; canary.len()];
+        let preserved = reader.read_exact(&mut remaining);
+        results.push((args, output, preserved, remaining));
+    }
+    sandbox.stop().await.expect("stop sandbox");
+    Sandbox::remove(name).await.expect("remove sandbox");
+    if let Ok(new_sandbox) = Sandbox::get(new_name).await {
+        new_sandbox.stop().await.expect("stop new sandbox");
+        Sandbox::remove(new_name).await.expect("remove new sandbox");
+    }
+    for (args, output, preserved, remaining) in results {
+        let output = output
+            .expect("CLI waited for host input")
+            .expect("wait for CLI");
+        assert_eq!(
+            output.status.code(),
+            Some(7),
+            "{args:?}: {:?}",
+            output.stderr
+        );
+        assert_eq!(output.stdout, b"eof", "{args:?}");
+        assert!(output.stderr.is_empty(), "{args:?}: {:?}", output.stderr);
+        preserved.expect("host input was consumed");
+        assert_eq!(remaining, b"input for the parent script\n", "{args:?}");
+    }
+}
