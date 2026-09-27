@@ -1208,13 +1208,14 @@ async fn classify_first_flight(
     }
 }
 
-/// Buffer a denied plaintext first flight until HTTP classification is
-/// decisive, or until the shared peek budget/cap is exhausted.
+/// Buffer a denied plaintext first flight through its HTTP headers, or until
+/// the shared peek budget/cap is exhausted.
 ///
 /// Unlike [`peek_for_sni`], this does not return on the first non-TLS chunk:
 /// a request method may be split across chunks (`GE` then `T / ...`). It stops
-/// once a complete first line or a conclusively
-/// non-HTTP prefix is available. No upstream connection exists on this path.
+/// once the headers are complete so the denial can include the Host header,
+/// or immediately for a conclusively non-HTTP prefix. No upstream connection
+/// exists on this path.
 pub(crate) async fn peek_for_http_request(
     rx: &mut mpsc::Receiver<Bytes>,
     mut buf: Vec<u8>,
@@ -1225,7 +1226,20 @@ pub(crate) async fn peek_for_http_request(
     let timeout_fut = tokio::time::sleep(budget);
     tokio::pin!(timeout_fut);
 
-    while classify_http_request(&buf).is_none() && buf.len() < max {
+    while buf.len() < max {
+        match classify_http_request(&buf) {
+            Some(false) => break,
+            Some(true) => {
+                let mut request = buf.as_slice();
+                while let Some(rest) = request.strip_prefix(b"\r\n") {
+                    request = rest;
+                }
+                if request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            None => {}
+        }
         tokio::select! {
             biased;
             _ = &mut timeout_fut => break,
@@ -1637,9 +1651,11 @@ mod tests {
         let (to_tx, mut to_rx) = mpsc::channel(4);
         from_tx.send(Bytes::from_static(b"GE")).await.unwrap();
         from_tx
-            .send(Bytes::from_static(
-                b"T / HTTP/1.1\r\nHost: blocked.example\r\n\r\n",
-            ))
+            .send(Bytes::from_static(b"T / HTTP/1.1\r\n"))
+            .await
+            .unwrap();
+        from_tx
+            .send(Bytes::from_static(b"Host: blocked.example\r\n\r\n"))
             .await
             .unwrap();
         drop(from_tx);
