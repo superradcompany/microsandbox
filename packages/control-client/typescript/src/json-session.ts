@@ -2,16 +2,16 @@ import { ClientError, defaultLimits, type ByteTransport, type ConnectOptions, ty
 import { closeTransport, ControlAttempt, controlError, validateTimeout } from "./attempt.js";
 import type { ControlDialer } from "./dialer.js";
 import { ControlClientError } from "./error.js";
-import { JsonReply, jsonCapabilities, type ControlMode } from "./json-reply.js";
-import { encodeJsonRequest, type LegacyControlRequest } from "./legacy-request.js";
-import { DEFAULT_REQUEST_TIMEOUT_MS, DEFAULT_SETUP_TIMEOUT_MS, type Capabilities } from "./records.js";
+import { JsonReply, jsonRuntimeCapabilities, type ControlMode } from "./json-reply.js";
+import { encodeJsonRequest, type ExtendedLegacyControlRequest } from "./legacy-request.js";
+import { DEFAULT_REQUEST_TIMEOUT_MS, DEFAULT_SETUP_TIMEOUT_MS, type RuntimeCapabilities } from "./records.js";
 
 /** Shared internal owner used by the explicit adapter and automatic connection. */
 export class JsonSession {
   readonly #closed = new AbortController();
   readonly #transports = new Set<ByteTransport>();
   readonly options: ConnectOptions;
-  constructor(readonly dialer: ControlDialer, options: ConnectOptions, readonly rediscover: boolean) {
+  constructor(readonly dialer: ControlDialer, options: ConnectOptions, readonly expectedMode?: ControlMode) {
     this.options = { ...options, limits: defaultLimits(options.limits) };
     validateTimeout(options.setupTimeoutMs ?? DEFAULT_SETUP_TIMEOUT_MS);
   }
@@ -20,12 +20,12 @@ export class JsonSession {
     this.#closed.abort(new ClientError("closed"));
     await Promise.all([...this.#transports].map(closeTransport));
   }
-  async discover(attempt: ControlAttempt): Promise<{ mode: ControlMode; capabilities: Capabilities }> {
+  async discover(attempt: ControlAttempt): Promise<{ mode: ControlMode; capabilities: RuntimeCapabilities }> {
     const reply = await this.exchange(encodeJsonRequest({ op: "capabilities" }), attempt, attempt, 64 * 1024);
     const mode = reply.discoveryMode();
-    return { mode, capabilities: jsonCapabilities(reply.value.get("capabilities")) };
+    return { mode, capabilities: jsonRuntimeCapabilities(reply.value.get("capabilities")) };
   }
-  async operation(request: LegacyControlRequest, options: RequestOptions = {}): Promise<JsonReply> {
+  async operation(request: ExtendedLegacyControlRequest, options: RequestOptions = {}): Promise<JsonReply> {
     // Validate and serialize before discovery so unsupported/invalid native
     // requests cannot cause network I/O. Legacy batches have no framed-size cap.
     const line = encodeJsonRequest(request);
@@ -33,7 +33,7 @@ export class JsonSession {
     let setup: ControlAttempt | undefined;
     try {
       setup = new ControlAttempt(Math.min(attempt.remaining(), this.options.setupTimeoutMs ?? DEFAULT_SETUP_TIMEOUT_MS), [attempt.signal]);
-      if (this.rediscover && !this.dialer.verifier) {
+      if (this.expectedMode && !this.dialer.verifier) {
         let mode: ControlMode;
         try { mode = (await this.discover(setup)).mode; }
         catch (error) {
@@ -42,7 +42,7 @@ export class JsonSession {
           const failure = controlError(error);
           throw failure instanceof ClientError ? failure.withDelivery("not_sent") : failure;
         }
-        if (mode !== "json") throw new ControlClientError("runtime_changed");
+        if (mode !== this.expectedMode) throw new ControlClientError("runtime_changed");
       }
       return await this.exchange(line, attempt, setup);
     } catch (error) {

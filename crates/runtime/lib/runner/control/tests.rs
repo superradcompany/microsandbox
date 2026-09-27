@@ -20,7 +20,24 @@ struct FakeHost {
 }
 
 impl Handler for FakeHost {
-    fn handle(&self, request: ControlRequest) -> Response {
+    fn handle(&self, request: ControlOperation, _generation: u8) -> Response {
+        if matches!(&request, ControlOperation::Pause(_)) {
+            self.calls.lock().unwrap().push(u32::MAX);
+            return Response {
+                json: JsonControlResponse {
+                    ok: true,
+                    ..Default::default()
+                },
+                framed: Reply::Pause(PauseState {
+                    paused: true,
+                    recovery_required: false,
+                    capture_unavailable: None,
+                }),
+            };
+        }
+        let ControlOperation::GenerationOne(request) = request else {
+            panic!("unexpected generation-two fixture operation")
+        };
         let value = match request {
             ControlRequest::CpuTarget { online } => online,
             _ => 0,
@@ -99,7 +116,12 @@ fn connection(
 }
 
 async fn handshake(stream: &mut DuplexStream, capacity: u32) {
+    assert_eq!(handshake_generation(stream, capacity, 1).await, 1);
+}
+
+async fn handshake_generation(stream: &mut DuplexStream, capacity: u32, maximum: u8) -> u8 {
     let hello = ControlHello {
+        max_generation: maximum,
         max_in_flight: capacity,
         ..Default::default()
     };
@@ -116,6 +138,7 @@ async fn handshake(stream: &mut DuplexStream, capacity: u32) {
     let welcome: ControlWelcome = Envelope::decode(&response.body).unwrap().payload().unwrap();
     welcome.validate_for(&hello).unwrap();
     assert_eq!(welcome.max_in_flight, capacity.min(64));
+    welcome.generation
 }
 
 async fn request(
@@ -125,9 +148,20 @@ async fn request(
     name: &str,
     payload: &impl serde::Serialize,
 ) {
+    request_at(stream, 1, id, flags, name, payload).await;
+}
+
+async fn request_at(
+    stream: &mut DuplexStream,
+    generation: u8,
+    id: u32,
+    flags: u8,
+    name: &str,
+    payload: &impl serde::Serialize,
+) {
     codec::write_raw_frame(
         stream,
-        &Envelope::new(1, name, payload)
+        &Envelope::new(generation, name, payload)
             .unwrap()
             .frame(id, flags)
             .unwrap(),
@@ -340,6 +374,28 @@ async fn recoverable_bad_operations_return_structured_errors_before_dispatch() {
     drop(stream);
     server.await.unwrap().unwrap();
     assert_eq!(host.calls.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn generation_two_dispatches_typed_operations_and_generation_one_refuses_them() {
+    let (host, dispatcher) = dispatcher(true);
+    let (mut current, current_server) = connection(&dispatcher);
+    assert_eq!(handshake_generation(&mut current, 64, 2).await, 2);
+    request_at(&mut current, 2, 1, 0, "control.pause", &Pause::default()).await;
+    let pause: PauseState = response(&mut current).await.payload().unwrap();
+    assert!(pause.paused);
+    drop(current);
+    current_server.await.unwrap().unwrap();
+
+    let (mut old, old_server) = connection(&dispatcher);
+    handshake(&mut old, 64).await;
+    request_at(&mut old, 1, 1, 0, "control.pause", &Pause::default()).await;
+    let refusal: ControlError = response(&mut old).await.payload().unwrap();
+    assert_eq!(refusal.code, "unsupported_operation");
+    assert_eq!(refusal.effect, ErrorEffect::None);
+    drop(old);
+    old_server.await.unwrap().unwrap();
+    assert_eq!(*host.calls.lock().unwrap(), [u32::MAX]);
 }
 
 #[tokio::test]

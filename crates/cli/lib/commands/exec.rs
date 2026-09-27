@@ -1,12 +1,12 @@
 //! `msb exec` command — execute a command in a sandbox.
 
-use std::io::{IsTerminal, Write};
+use std::io::{IsTerminal, Read, Write};
 use std::time::Duration;
 
 use clap::Args;
-use microsandbox::sandbox::exec::{ExecEvent, ExecHandle};
+use microsandbox::sandbox::exec::{ExecEvent, ExecHandle, ExecSink};
 use microsandbox::sandbox::{ExecOptionsBuilder, ExecOutput, RlimitResource, Sandbox};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 
 use crate::ui;
 
@@ -147,20 +147,6 @@ async fn run_started(
 ) -> anyhow::Result<i32> {
     let workdir = args.workdir;
 
-    // Read piped stdin upfront so it can be forwarded into the sandbox.
-    // Skipped in `--stream` mode, where stdin is forwarded incrementally.
-    let piped_stdin = if should_read_buffered_stdin(stdin_is_terminal, interactive, args.stream) {
-        let mut buf = Vec::new();
-        tokio::io::stdin().read_to_end(&mut buf).await.ok();
-        Some(buf)
-    } else if !interactive && !args.stream {
-        // `--no-tty` with terminal stdin means "non-interactive", so give the
-        // guest EOF instead of blocking on the host terminal.
-        Some(Vec::new())
-    } else {
-        None
-    };
-
     // Resolve the command with exec semantics: an explicit command runs
     // directly, while omitted commands can still fall back to the sandbox's
     // configured image command/default shell.
@@ -170,11 +156,16 @@ async fn run_started(
             (None, _) => return Ok(0),
         };
 
-    if args.stream {
-        return run_stream(
-            sandbox, cmd, cmd_args, &env_pairs, &workdir, &args.user, timeout, &rlimits,
-        )
-        .await;
+    if args.stream || (!interactive && !stdin_is_terminal) {
+        let options = apply_common_exec_opts(
+            ExecOptionsBuilder::default().args(cmd_args).tty(args.tty),
+            &env_pairs,
+            &workdir,
+            &args.user,
+            timeout,
+            &rlimits,
+        );
+        return run_piped(sandbox, cmd, options, timeout, args.stream).await;
     }
 
     if interactive {
@@ -203,8 +194,8 @@ async fn run_started(
         let output: ExecOutput = sandbox
             .exec_with(cmd, |e| {
                 let mut e = apply_common_exec_opts(
-                    e.args(cmd_args)
-                        .stdin_bytes(piped_stdin.unwrap_or_default()),
+                    // Non-interactive execution from a terminal receives EOF.
+                    e.args(cmd_args).stdin_bytes(Vec::new()),
                     &env_pairs,
                     &workdir,
                     &args.user,
@@ -253,61 +244,77 @@ fn apply_common_exec_opts(
     e
 }
 
-/// Return whether buffered exec should consume host stdin before starting.
-fn should_read_buffered_stdin(stdin_is_terminal: bool, interactive: bool, stream: bool) -> bool {
-    !stdin_is_terminal && !interactive && !stream
-}
-
-/// Drive a non-PTY bidirectional streaming exec session (`--stream`).
-///
-/// Forwards host stdin into the guest incrementally and flushes guest
-/// stdout/stderr per chunk, so a host driver can run the guest turn by turn.
-#[allow(clippy::too_many_arguments)]
-async fn run_stream(
+/// Forward piped input while running the command, independently of output buffering.
+async fn run_piped(
     sandbox: &Sandbox,
     cmd: String,
-    cmd_args: Vec<String>,
-    env_pairs: &[(String, String)],
-    workdir: &Option<String>,
-    user: &Option<String>,
+    options: ExecOptionsBuilder,
     timeout: Option<Duration>,
-    rlimits: &[(RlimitResource, u64, u64)],
+    stream_output: bool,
 ) -> anyhow::Result<i32> {
     let mut handle = sandbox
-        .exec_stream_with(cmd, |e| {
-            apply_common_exec_opts(
-                e.args(cmd_args).stdin_pipe(),
-                env_pairs,
-                workdir,
-                user,
-                timeout,
-                rlimits,
-            )
-        })
+        .exec_stream_with(cmd, |_| options.stdin_pipe())
         .await?;
+    let sink = handle.take_stdin().expect("piped exec has a stdin sink");
+    let control = handle.control();
+    let output = drive_stream(&mut handle, timeout, stream_output);
+    tokio::pin!(output);
 
-    // Forward host stdin → guest incrementally in the background so it runs
-    // concurrently with draining output. EOF or any read/write error closes the
-    // guest's stdin exactly once, so a guest blocked on read always sees EOF.
-    if let Some(sink) = handle.take_stdin() {
-        tokio::spawn(async move {
-            let mut stdin = tokio::io::stdin();
-            let mut buf = [0u8; 8192];
+    tokio::select! {
+        // Preserve the guest's result if it exits while input forwarding fails.
+        biased;
+        result = &mut output => result,
+        result = forward_stdin(sink) => {
+            if let Err(error) = result {
+                let _ = control.kill().await;
+                return Err(error);
+            }
+            output.await
+        }
+    }
+}
+
+/// Read stdin outside Tokio's blocking pool so an open pipe cannot hold up CLI exit.
+async fn forward_stdin(sink: ExecSink) -> anyhow::Result<()> {
+    // Tokio's stdin uses an uncancellable blocking read; dropping its task still
+    // makes runtime shutdown wait for EOF. A dedicated detached thread does not
+    // hold up process exit. The bounded channel limits read-ahead, and dropping
+    // its receiver ends the reader on its next read/send. No stdin flags change.
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+    std::thread::Builder::new()
+        .name("msb-stdin".into())
+        .spawn(move || {
+            let mut stdin = std::io::stdin().lock();
+            let mut buffer = [0u8; 8192];
             loop {
-                match stdin.read(&mut buf).await {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        if sink.write(&buf[..n]).await.is_err() {
+                let chunk = match stdin.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(n) => Ok(buffer[..n].to_vec()),
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        // Launchers may supply a nonblocking stdin descriptor.
+                        // Wait for more input without changing its shared flags.
+                        if sender.is_closed() {
                             break;
                         }
+                        std::thread::sleep(Duration::from_millis(10));
+                        continue;
                     }
+                    Err(error) => Err(error),
+                };
+                let failed = chunk.is_err();
+                if sender.blocking_send(chunk).is_err() || failed {
+                    break;
                 }
             }
-            let _ = sink.close().await;
-        });
-    }
+        })?;
 
-    drive_stream(&mut handle, timeout).await
+    while let Some(chunk) = receiver.recv().await {
+        let chunk = chunk.map_err(|error| anyhow::anyhow!("failed to read stdin: {error}"))?;
+        sink.write(&chunk).await?;
+    }
+    sink.close().await?;
+    Ok(())
 }
 
 /// Pump events from a streaming exec session to the host's stdout/stderr until
@@ -316,10 +323,16 @@ async fn run_stream(
 /// Enforces `timeout` by killing the guest on expiry — the SDK leaves timeout
 /// enforcement to the stream driver, mirroring the buffered path's
 /// `tokio::time::timeout` + kill.
-async fn drive_stream(handle: &mut ExecHandle, timeout: Option<Duration>) -> anyhow::Result<i32> {
+async fn drive_stream(
+    handle: &mut ExecHandle,
+    timeout: Option<Duration>,
+    stream_output: bool,
+) -> anyhow::Result<i32> {
     let deadline = timeout.map(|d| tokio::time::Instant::now() + d);
     let mut stdout = tokio::io::stdout();
     let mut stderr = tokio::io::stderr();
+    let mut captured_stdout = Vec::new();
+    let mut captured_stderr = Vec::new();
 
     loop {
         let event = match deadline {
@@ -327,6 +340,7 @@ async fn drive_stream(handle: &mut ExecHandle, timeout: Option<Duration>) -> any
                 Ok(event) => event,
                 Err(_) => {
                     let _ = handle.kill().await;
+                    let _ = tokio::time::timeout(Duration::from_secs(5), handle.collect()).await;
                     let secs = timeout.unwrap_or_default().as_secs();
                     anyhow::bail!("exec timed out after {secs}s");
                 }
@@ -342,6 +356,10 @@ async fn drive_stream(handle: &mut ExecHandle, timeout: Option<Duration>) -> any
 
         match event {
             ExecEvent::Stdout(data) => {
+                if !stream_output {
+                    captured_stdout.extend_from_slice(&data);
+                    continue;
+                }
                 // A host write failure (e.g. a downstream `head` closed the
                 // pipe) must not bypass cleanup: stop the guest and return so
                 // the caller can stop the sandbox.
@@ -351,16 +369,31 @@ async fn drive_stream(handle: &mut ExecHandle, timeout: Option<Duration>) -> any
                 }
             }
             ExecEvent::Stderr(data) => {
+                if !stream_output {
+                    captured_stderr.extend_from_slice(&data);
+                    continue;
+                }
                 if write_chunk(&mut stderr, &data).await.is_err() {
                     let _ = handle.kill().await;
                     return Ok(0);
                 }
             }
-            ExecEvent::Exited { code } => return Ok(code),
-            ExecEvent::Failed(payload) => anyhow::bail!("exec failed to start: {payload:?}"),
+            ExecEvent::Exited { code } => {
+                if !stream_output {
+                    std::io::stdout().write_all(&captured_stdout)?;
+                    std::io::stderr().write_all(&captured_stderr)?;
+                }
+                return Ok(code);
+            }
+            ExecEvent::Failed(payload) => {
+                return Err(microsandbox::MicrosandboxError::ExecFailed(payload).into());
+            }
             ExecEvent::StdinError(err) => {
-                // Surface the failure instead of silently dropping host input.
-                eprintln!("msb: warning: failed to forward stdin to guest: {err:?}");
+                // Match buffered collect(): an early guest stdin close is not
+                // an error on the captured path. Keep streaming diagnostics.
+                if stream_output {
+                    eprintln!("msb: warning: failed to forward stdin to guest: {err:?}");
+                }
             }
             // Explicit (not `_`) so a new ExecEvent variant fails to compile here.
             ExecEvent::Started { .. } => {}
@@ -421,10 +454,5 @@ mod tests {
         let err = TestCli::try_parse_from(["msb", "--tty", "--no-tty", "box"]).unwrap_err();
 
         assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
-    }
-
-    #[test]
-    fn no_tty_with_terminal_stdin_does_not_buffer_stdin() {
-        assert!(!should_read_buffered_stdin(true, false, false));
     }
 }

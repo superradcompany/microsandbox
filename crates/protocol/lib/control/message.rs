@@ -3,8 +3,35 @@
 use ciborium::Value;
 use serde::{Deserialize, Serialize};
 
-use super::{ControlRequest, CpuTarget, Empty, MemoryTarget, SecretsResult, SecretsUpdate};
+use super::{
+    BranchCreate, CheckpointCreate, ControlRequest, CpuTarget, DiskCheckpointCreate, DiskCompact,
+    Empty, MemoryTarget, Pause, RootDiskGrow, SecretsResult, SecretsUpdate,
+};
 use crate::wire::{Envelope, WireError, decode_value, validate_record};
+
+//--------------------------------------------------------------------------------------------------
+// Constants
+//--------------------------------------------------------------------------------------------------
+
+/// Application messages introduced by framed control generation two.
+///
+/// The inventory is public so other language implementations can pin the same additive surface
+/// without expanding the released, exhaustively matchable [`ControlMessageType`] enum.
+pub const CONTROL_GENERATION_TWO_MESSAGES: &[&str] = &[
+    "control.checkpoint.create",
+    "control.checkpoint.result",
+    "control.disk.checkpoint.create",
+    "control.disk.checkpoint.result",
+    "control.branch.create",
+    "control.branch.result",
+    "control.pause",
+    "control.resume",
+    "control.pause.state",
+    "control.root-disk.grow",
+    "control.root-disk.state",
+    "control.disk.compact",
+    "control.disk.compact.result",
+];
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -58,6 +85,32 @@ pub enum ControlMessageType {
     Error,
 }
 
+/// One decoded application operation across all negotiated control generations.
+///
+/// Generation-one's public [`ControlRequest`] remains unchanged so downstream exhaustive matches
+/// keep compiling. Generation-two operations live in this additive dispatch type instead.
+#[derive(Debug, Clone)]
+pub enum ControlOperation {
+    /// A released generation-one operation.
+    GenerationOne(ControlRequest),
+    /// Create one full checkpoint.
+    CheckpointCreate(CheckpointCreate),
+    /// Create one disk-only checkpoint.
+    DiskCheckpointCreate(DiskCheckpointCreate),
+    /// Create one direct local branch without descriptor transfer.
+    BranchCreate(BranchCreate),
+    /// Pause, optionally with an explicit guest-writeback policy.
+    Pause(Pause),
+    /// Resume a resident pause.
+    Resume,
+    /// Inspect resident pause state.
+    PauseState,
+    /// Grow the root disk and filesystem.
+    RootDiskGrow(RootDiskGrow),
+    /// Compact selected owned disk chains.
+    DiskCompact(DiskCompact),
+}
+
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
@@ -85,6 +138,73 @@ impl ControlMessageType {
                 | Self::SecretsUpdate
         )
     }
+}
+
+impl ControlOperation {
+    /// Decode one request admitted by the negotiated generation.
+    pub fn from_envelope(envelope: &Envelope, generation: u8) -> Result<Self, WireError> {
+        if envelope.v != generation {
+            return Err(WireError::InvalidRecord);
+        }
+        let operation = match envelope.t.as_str() {
+            "control.checkpoint.create" if generation >= 2 => {
+                Self::CheckpointCreate(envelope.payload()?)
+            }
+            "control.disk.checkpoint.create" if generation >= 2 => {
+                Self::DiskCheckpointCreate(envelope.payload()?)
+            }
+            "control.branch.create" if generation >= 2 => Self::BranchCreate(envelope.payload()?),
+            "control.pause" if generation >= 2 => Self::Pause(envelope.payload()?),
+            "control.resume" if generation >= 2 => {
+                envelope.payload::<Empty>()?;
+                Self::Resume
+            }
+            "control.pause.state" if generation >= 2 => {
+                envelope.payload::<Empty>()?;
+                Self::PauseState
+            }
+            "control.root-disk.grow" if generation >= 2 => Self::RootDiskGrow(envelope.payload()?),
+            "control.disk.compact" if generation >= 2 => {
+                // The selector is itself a tagged record. Validate it before serde can collapse
+                // duplicate keys and choose a different mutation target than the wire expressed.
+                let value = decode_value(&envelope.p)?;
+                validate_record(&value)?;
+                let Value::Map(fields) = &value else {
+                    unreachable!()
+                };
+                if let Some((_, target)) = fields
+                    .iter()
+                    .find(|(key, _)| key.as_text() == Some("target"))
+                {
+                    validate_record(target)?;
+                }
+                Self::DiskCompact(value.deserialized().map_err(|_| WireError::InvalidRecord)?)
+            }
+            _ => Self::GenerationOne(ControlRequest::from_envelope(envelope)?),
+        };
+        Ok(operation)
+    }
+}
+
+/// Generation in which a known application message first became available.
+///
+/// Unknown extension names remain caller-owned and therefore return `None`.
+pub fn control_message_min_generation(name: &str) -> Option<u8> {
+    if CONTROL_GENERATION_TWO_MESSAGES.contains(&name) {
+        return Some(2);
+    }
+    Some(match name {
+        "control.capabilities"
+        | "control.capabilities.result"
+        | "control.memory.state"
+        | "control.memory.target"
+        | "control.cpu.state"
+        | "control.cpu.target"
+        | "control.secrets.update"
+        | "control.secrets.result"
+        | "control.error" => 1,
+        _ => return None,
+    })
 }
 
 impl ControlRequest {

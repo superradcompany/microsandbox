@@ -12,7 +12,10 @@ use crate::db::entity::{sandbox as sandbox_entity, sandbox_label as sandbox_labe
 use crate::error::{Operation, UnsupportedReason};
 use crate::size::Mebibytes;
 use crate::{MicrosandboxError, MicrosandboxResult};
-use microsandbox_control_client::{SecretsResult, SetCpuTarget, SetMemoryTarget, UpdateSecrets};
+use microsandbox_control_client::{
+    CompactDisks, CreateCheckpoint, CreateDiskCheckpoint, GetCpuState, GetMemoryState,
+    GrowRootDisk, SecretsResult, SetCpuTarget, SetMemoryTarget, UpdateSecrets,
+};
 
 use super::{SandboxConfig, SandboxStatus};
 
@@ -109,7 +112,7 @@ struct LiveControl {
 
 /// A published runtime checkpoint and the independent outcome of source recovery.
 pub(crate) struct CheckpointCaptureOutcome {
-    pub(crate) checkpoint: microsandbox_runtime::control::CheckpointControlState,
+    pub(crate) checkpoint: microsandbox_protocol::control::CheckpointState,
     pub(crate) recovery_error: Option<String>,
 }
 
@@ -412,13 +415,12 @@ impl SandboxModificationBuilder {
             && let Some(target_mib) = root_disk_grow_target(&plan, &self.patch, &config)
         {
             let size_bytes = u64::from(target_mib) * 1024 * 1024;
-            let request = serde_json::to_string(
-                &microsandbox_runtime::control::ControlRequest::RootDiskGrow { size_bytes },
-            )? + "\n";
-            let response = control_request(&self.name, request).await?;
-            let observed = response.root_disk.ok_or_else(|| {
-                crate::MicrosandboxError::Runtime("root growth reply missing capacity".into())
-            })?;
+            let observed = control_session(&session)?
+                .request(&GrowRootDisk(
+                    microsandbox_protocol::control::RootDiskGrow { size_bytes },
+                ))
+                .await
+                .map_err(crate::MicrosandboxError::ControlClient)?;
             if observed.filesystem_bytes != size_bytes || observed.device_bytes < size_bytes {
                 return Err(crate::MicrosandboxError::Runtime(
                     "root growth did not confirm usable capacity".into(),
@@ -721,29 +723,6 @@ async fn grow_root_disk_now(
     super::upper::grow_upper_to_mib(sandbox_dir.join("upper.ext4"), target_mib).await
 }
 
-/// Path of the sandbox's host-side runtime control socket.
-#[cfg(windows)]
-fn control_socket_path(name: &str) -> MicrosandboxResult<std::path::PathBuf> {
-    Ok(microsandbox_runtime::control::control_socket_path_for(
-        &crate::runtime::agent_socket_path(name)?,
-    ))
-}
-
-#[cfg(unix)]
-fn control_socket_path_candidates(name: &str) -> Vec<std::path::PathBuf> {
-    control_socket_paths(crate::runtime::sandbox_agent_socket_path_candidates(name))
-}
-
-#[cfg(unix)]
-fn control_socket_paths(
-    agent_candidates: impl IntoIterator<Item = std::path::PathBuf>,
-) -> Vec<std::path::PathBuf> {
-    agent_candidates
-        .into_iter()
-        .map(|path| microsandbox_runtime::control::control_socket_path_for(&path))
-        .collect()
-}
-
 /// Discover which live-control operations the running sandbox serves.
 async fn live_control(
     backend: &Arc<dyn Backend>,
@@ -786,51 +765,21 @@ fn control_session(session: &Option<ControlSession>) -> MicrosandboxResult<&Cont
     })
 }
 
-/// Open the runtime control pipe within its connection budget. Restore callers
-/// additionally bound this wait by their remaining startup deadline.
-#[cfg(windows)]
-async fn connect_control_pipe(
-    path: &std::path::Path,
-) -> MicrosandboxResult<tokio::net::windows::named_pipe::NamedPipeClient> {
-    super::control_pipe::connect(path).await.map_err(|error| {
-        crate::MicrosandboxError::Runtime(format!(
-            "failed to reach the runtime control pipe at {}: {error}",
-            path.display()
-        ))
-    })
-}
-
-/// Send one control request line and parse the reply.
-pub(super) async fn control_request(
-    name: &str,
-    request: String,
-) -> MicrosandboxResult<microsandbox_runtime::control::ControlResponse> {
-    let response = control_request_raw(name, request).await?;
-    if !response.ok {
-        return Err(crate::MicrosandboxError::Runtime(format!(
-            "live update refused: {}",
-            response
-                .error
-                .unwrap_or_else(|| "unknown error".to_string())
-        )));
-    }
-    Ok(response)
-}
-
-/// Use the handle's local backend, never an ambient backend with a matching sandbox name.
-pub(super) async fn control_request_for(
+/// Retain the protocol session only when it matches an earlier identity-bearing selection.
+pub(super) async fn control_session_for_run(
     local: &crate::backend::LocalBackend,
     name: &str,
-    request: String,
-) -> MicrosandboxResult<microsandbox_runtime::control::ControlResponse> {
-    let response = control_request_raw_for(local, name, request).await?;
-    if !response.ok {
-        return Err(crate::MicrosandboxError::Runtime(format!(
-            "runtime control refused: {}",
-            response.error.unwrap_or_else(|| "unknown error".into())
+    run: super::identity::SandboxRunIdentity,
+) -> MicrosandboxResult<ControlSession> {
+    let session = local.control_session(name).await?.ok_or_else(|| {
+        MicrosandboxError::Runtime("runtime control endpoint is unavailable".into())
+    })?;
+    if !session.matches_run(run) {
+        return Err(MicrosandboxError::ControlClient(Arc::new(
+            microsandbox_control_client::ControlClientError::RuntimeChanged,
         )));
     }
-    Ok(response)
+    Ok(session)
 }
 
 /// Project restored live targets into configuration after construction used original geometry.
@@ -839,18 +788,21 @@ pub(crate) async fn restore_requested_resources(
     config: &mut super::SandboxConfig,
 ) -> MicrosandboxResult<()> {
     let resources = &config.spec.resources;
+    let session =
+        if resources.max_cpus > resources.cpus || resources.max_memory_mib > resources.memory_mib {
+            local.control_session(&config.spec.name).await?
+        } else {
+            None
+        };
     let mut cpus = resources.cpus;
     let mut memory_mib = resources.memory_mib;
     // libkrun creates the CPU controller only when capacity exceeds boot CPUs.
     // A fixed multi-CPU VM has no controller; its captured boot count is already final.
     if resources.max_cpus > resources.cpus {
-        let state =
-            control_request_for(local, &config.spec.name, "{\"op\":\"cpu_state\"}\n".into())
-                .await?
-                .cpu
-                .ok_or_else(|| {
-                    crate::MicrosandboxError::Runtime("restored runtime omitted CPU state".into())
-                })?;
+        let state = control_session(&session)?
+            .request(&GetCpuState)
+            .await
+            .map_err(MicrosandboxError::ControlClient)?;
         if state.possible != u32::from(resources.max_cpus)
             || state.requested_online == 0
             || state.requested_online > state.possible
@@ -862,16 +814,10 @@ pub(crate) async fn restore_requested_resources(
         cpus = state.requested_online as u8;
     }
     if resources.max_memory_mib > resources.memory_mib {
-        let state = control_request_for(
-            local,
-            &config.spec.name,
-            "{\"op\":\"memory_state\"}\n".into(),
-        )
-        .await?
-        .memory
-        .ok_or_else(|| {
-            crate::MicrosandboxError::Runtime("restored runtime omitted memory state".into())
-        })?;
+        let state = control_session(&session)?
+            .request(&GetMemoryState)
+            .await
+            .map_err(MicrosandboxError::ControlClient)?;
         if state.boot_mib != u64::from(resources.memory_mib)
             || state.max_mib != u64::from(resources.max_memory_mib)
             || state.target_mib < state.boot_mib
@@ -891,6 +837,7 @@ pub(crate) async fn restore_requested_resources(
 }
 
 /// Bind the command to the selected process before sending any bytes on a reusable endpoint.
+#[cfg(all(test, unix))]
 pub(super) async fn control_request_for_run(
     local: &crate::backend::LocalBackend,
     name: &str,
@@ -901,6 +848,7 @@ pub(super) async fn control_request_for_run(
 }
 
 /// Optional descriptor travels with the first request byte on the already authenticated socket.
+#[cfg(any(target_os = "linux", all(test, unix)))]
 pub(super) async fn control_request_for_run_with_memory(
     local: &crate::backend::LocalBackend,
     name: &str,
@@ -913,14 +861,6 @@ pub(super) async fn control_request_for_run_with_memory(
         .map(|path| microsandbox_runtime::control::control_socket_path_for(&path));
     #[cfg(unix)]
     let stream = connect_control_socket(candidates).await?;
-    #[cfg(windows)]
-    let stream = connect_control_pipe(
-        &candidates
-            .into_iter()
-            .next()
-            .ok_or_else(|| MicrosandboxError::Runtime("no backend control endpoint".into()))?,
-    )
-    .await?;
     let peer_pid = control_peer_pid(&stream)?;
     if peer_pid != run.pid {
         return Err(MicrosandboxError::Runtime(format!(
@@ -967,7 +907,7 @@ fn control_peer_pid(stream: &tokio::net::UnixStream) -> std::io::Result<i32> {
     })
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(test, target_os = "macos"))]
 fn control_peer_pid(stream: &tokio::net::UnixStream) -> std::io::Result<i32> {
     use std::os::fd::AsRawFd;
     let mut pid: libc::pid_t = 0;
@@ -994,7 +934,7 @@ fn control_peer_pid(stream: &tokio::net::UnixStream) -> std::io::Result<i32> {
     Ok(pid)
 }
 
-#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+#[cfg(all(test, unix, not(any(target_os = "linux", target_os = "macos"))))]
 fn control_peer_pid(_stream: &tokio::net::UnixStream) -> std::io::Result<i32> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
@@ -1002,65 +942,7 @@ fn control_peer_pid(_stream: &tokio::net::UnixStream) -> std::io::Result<i32> {
     ))
 }
 
-#[cfg(windows)]
-fn control_peer_pid(
-    stream: &tokio::net::windows::named_pipe::NamedPipeClient,
-) -> std::io::Result<i32> {
-    use std::os::windows::io::AsRawHandle;
-    use windows_sys::Win32::{Foundation::HANDLE, System::Pipes::GetNamedPipeServerProcessId};
-    let mut pid = 0u32;
-    let result = unsafe { GetNamedPipeServerProcessId(stream.as_raw_handle() as HANDLE, &mut pid) };
-    if result == 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    i32::try_from(pid)
-        .map_err(|_| std::io::Error::other("control endpoint PID exceeds supported range"))
-}
-
-async fn control_request_raw_for(
-    local: &crate::backend::LocalBackend,
-    name: &str,
-    request: String,
-) -> MicrosandboxResult<microsandbox_runtime::control::ControlResponse> {
-    let candidates = crate::runtime::sandbox_agent_socket_path_candidates_for(local, name)
-        .into_iter()
-        .map(|path| microsandbox_runtime::control::control_socket_path_for(&path));
-    #[cfg(unix)]
-    let stream = connect_control_socket(candidates).await?;
-    #[cfg(windows)]
-    let stream =
-        connect_control_pipe(&candidates.into_iter().next().ok_or_else(|| {
-            crate::MicrosandboxError::Runtime("no backend control endpoint".into())
-        })?)
-        .await?;
-    control_request_over_stream(stream, &request).await
-}
-
-async fn control_request_raw(
-    name: &str,
-    request: String,
-) -> MicrosandboxResult<microsandbox_runtime::control::ControlResponse> {
-    #[cfg(unix)]
-    {
-        let stream = connect_control_socket(control_socket_path_candidates(name))
-            .await
-            .map_err(|error| {
-                crate::MicrosandboxError::Runtime(format!(
-                    "failed to reach a runtime control socket for sandbox {name:?}: {error}"
-                ))
-            })?;
-        return control_request_over_stream(stream, &request).await;
-    }
-
-    #[cfg(windows)]
-    {
-        let path = control_socket_path(name)?;
-        let stream = connect_control_pipe(&path).await?;
-        control_request_over_stream(stream, &request).await
-    }
-}
-
-#[cfg(unix)]
+#[cfg(any(target_os = "linux", all(test, unix)))]
 async fn connect_control_socket(
     candidates: impl IntoIterator<Item = std::path::PathBuf>,
 ) -> std::io::Result<tokio::net::UnixStream> {
@@ -1084,6 +966,7 @@ async fn connect_control_socket(
 }
 
 /// Send and receive one control exchange over an already-connected transport.
+#[cfg(any(target_os = "linux", all(test, unix)))]
 async fn control_request_over_stream<S>(
     mut stream: S,
     request: &str,
@@ -1118,28 +1001,23 @@ pub(crate) async fn control_disk_compact(
 ) -> MicrosandboxResult<super::DiskCompactionResult> {
     // Discovery and mutation must use the same retained backend as the selected sandbox.
     // An ambient backend may contain a different sandbox with this exact name.
-    let capabilities = control_request_for(local, name, "{\"op\":\"capabilities\"}\n".into())
-        .await?
-        .capabilities
-        .ok_or_else(|| {
-            crate::MicrosandboxError::Runtime("control response missing capabilities".into())
-        })?;
+    let session = local.control_session(name).await?.ok_or_else(|| {
+        crate::MicrosandboxError::Runtime("runtime control endpoint is unavailable".into())
+    })?;
+    let capabilities = session.capabilities();
     if !capabilities.disk_compact_owned {
         return Err(crate::MicrosandboxError::Runtime(
             "this running sandbox does not support disk compaction; restart with the updated runtime".into(),
         ));
     }
-    let request = microsandbox_runtime::control::ControlRequest::DiskCompact {
-        target,
-        layers,
-        dry_run,
-    };
-    let mut line = serde_json::to_string(&request)?;
-    line.push('\n');
-    let response = control_request_for(local, name, line).await?;
-    response.compaction.ok_or_else(|| {
-        crate::MicrosandboxError::Runtime("control response omitted compaction result".into())
-    })
+    session
+        .request(&CompactDisks(microsandbox_protocol::control::DiskCompact {
+            target,
+            layers: layers.map(|value| value as u64),
+            dry_run,
+        }))
+        .await
+        .map_err(crate::MicrosandboxError::ControlClient)
 }
 
 /// Capture one full checkpoint through the running sandbox's existing control endpoint.
@@ -1153,12 +1031,11 @@ pub(crate) async fn control_checkpoint_create(
     record_integrity: bool,
     guest_flush: microsandbox_types::GuestFlush,
 ) -> MicrosandboxResult<CheckpointCaptureOutcome> {
-    let capabilities =
-        control_request_for(local, name, "{\"op\":\"capabilities\"}\n".into()).await?;
-    if !capabilities
-        .capabilities
-        .is_some_and(|capabilities| capabilities.checkpoint_create)
-    {
+    let session = local.control_session(name).await?.ok_or_else(|| {
+        MicrosandboxError::Runtime("runtime control endpoint is unavailable".into())
+    })?;
+    let capabilities = session.capabilities();
+    if !capabilities.checkpoint_create {
         return Err(MicrosandboxError::unsupported(
             Operation::SnapshotOps,
             UnsupportedReason::NotAvailable(
@@ -1166,49 +1043,35 @@ pub(crate) async fn control_checkpoint_create(
             ),
         ));
     }
-    let request = microsandbox_runtime::control::ControlRequest::CheckpointCreate {
-        guest_flush: capture_flush_policy(capabilities.capabilities, guest_flush, false)?,
+    let request = microsandbox_protocol::control::CheckpointCreate {
+        guest_flush: capture_flush_policy(Some(capabilities), guest_flush, false)?,
         record_integrity,
         checkpoint_id,
-        intent: microsandbox_runtime::control::CheckpointCaptureIntent::FullSnapshot,
+        intent: microsandbox_protocol::control::CheckpointCaptureIntent::FullSnapshot,
     };
-    if !capabilities
-        .capabilities
-        .is_some_and(|c| c.optional_disk_integrity)
-    {
+    if !capabilities.optional_disk_integrity {
         return Err(MicrosandboxError::Runtime(
             "source runtime lacks optional disk integrity; restart with the matching runtime"
                 .into(),
         ));
     }
-    let response = control_request_raw_for(
-        local,
-        name,
-        format!("{}\n", serde_json::to_string(&request)?),
-    )
-    .await?;
+    let response = session
+        .request(&CreateCheckpoint(request))
+        .await
+        .map_err(crate::MicrosandboxError::ControlClient)?;
     checkpoint_response(response)
 }
 
 fn checkpoint_response(
-    response: microsandbox_runtime::control::ControlResponse,
+    response: microsandbox_protocol::control::CheckpointResult,
 ) -> MicrosandboxResult<CheckpointCaptureOutcome> {
-    if let Some(checkpoint) = response.checkpoint {
-        return Ok(CheckpointCaptureOutcome {
-            checkpoint,
-            recovery_error: (!response.ok).then(|| {
-                response
-                    .error
-                    .unwrap_or_else(|| "source recovery failed without a runtime diagnostic".into())
-            }),
-        });
-    }
-    Err(crate::MicrosandboxError::Runtime(format!(
-        "full checkpoint refused: {}",
-        response
-            .error
-            .unwrap_or_else(|| "control response omitted checkpoint state".into())
-    )))
+    let checkpoint = response.checkpoint.ok_or_else(|| {
+        MicrosandboxError::Runtime("control response omitted checkpoint state".into())
+    })?;
+    Ok(CheckpointCaptureOutcome {
+        checkpoint,
+        recovery_error: response.recovery_error,
+    })
 }
 
 /// Request disk-only capture without falling back to full-state capture or a stopped copy.
@@ -1218,31 +1081,34 @@ pub(crate) async fn control_disk_checkpoint_create(
     checkpoint_id: String,
     guest_flush: microsandbox_types::GuestFlush,
 ) -> MicrosandboxResult<microsandbox_runtime::control::DiskCheckpointControlState> {
-    let capabilities =
-        control_request_for(local, name, "{\"op\":\"capabilities\"}\n".into()).await?;
-    if !capabilities
-        .capabilities
-        .is_some_and(|c| c.disk_checkpoint_create)
-    {
+    let session = local.control_session(name).await?.ok_or_else(|| {
+        MicrosandboxError::Runtime("runtime control endpoint is unavailable".into())
+    })?;
+    let capabilities = session.capabilities();
+    if !capabilities.disk_checkpoint_create {
         return Err(MicrosandboxError::unsupported(Operation::SnapshotOps,
             UnsupportedReason::NotAvailable("this runtime does not support live disk-only snapshots; recreate the sandbox with the updated runtime".into())));
     }
-    let request = microsandbox_runtime::control::ControlRequest::DiskCheckpointCreate {
+    let request = microsandbox_protocol::control::DiskCheckpointCreate {
         checkpoint_id,
-        guest_flush: capture_flush_policy(capabilities.capabilities, guest_flush, true)?,
+        guest_flush: capture_flush_policy(Some(capabilities), guest_flush, true)?,
     };
-    let mut line = serde_json::to_string(&request)?;
-    line.push('\n');
-    let response = control_request_for(local, name, line).await?;
-    response.disk_checkpoint.ok_or_else(|| {
-        MicrosandboxError::Runtime("runtime omitted the disk-only capture result".into())
+    let response = session
+        .request(&CreateDiskCheckpoint(request))
+        .await
+        .map_err(crate::MicrosandboxError::ControlClient)?;
+    Ok(microsandbox_runtime::control::DiskCheckpointControlState {
+        checkpoint_id: response.checkpoint_id,
+        path: response.path,
+        disk: response.disk,
+        owned_volumes: response.owned_volumes,
     })
 }
 
 /// Never let an older runtime silently discard an explicit policy. Full Auto is the
 /// released behavior and can retain the old request shape; disk Auto is a new guarantee.
 pub(crate) fn capture_flush_policy(
-    capabilities: Option<microsandbox_runtime::control::ControlCapabilities>,
+    capabilities: Option<microsandbox_protocol::control::RuntimeCapabilities>,
     policy: microsandbox_types::GuestFlush,
     disk_only: bool,
 ) -> MicrosandboxResult<Option<microsandbox_types::GuestFlush>> {
@@ -1264,10 +1130,25 @@ async fn control_secrets_update(
     session: &ControlSession,
     changes: Vec<microsandbox_runtime::control::SecretLiveChange>,
 ) -> MicrosandboxResult<()> {
+    let changes = changes
+        .into_iter()
+        .map(|change| match change {
+            microsandbox_runtime::control::SecretLiveChange::Rotate { name, value } => {
+                microsandbox_protocol::control::SecretChange::Rotate {
+                    name,
+                    value: microsandbox_protocol::control::SecretValue(value.0.clone()),
+                }
+            }
+            microsandbox_runtime::control::SecretLiveChange::Remove { name } => {
+                microsandbox_protocol::control::SecretChange::Remove { name }
+            }
+            microsandbox_runtime::control::SecretLiveChange::SetAllowedHosts { name, hosts } => {
+                microsandbox_protocol::control::SecretChange::SetAllowedHosts { name, hosts }
+            }
+        })
+        .collect();
     match session
-        .request(&UpdateSecrets::new(serde_json::from_value(
-            serde_json::to_value(changes)?,
-        )?))
+        .request(&UpdateSecrets::new(changes))
         .await
         .map_err(crate::MicrosandboxError::ControlClient)?
     {
@@ -2897,8 +2778,8 @@ mod tests {
     #[test]
     fn guest_flush_capability_never_silently_weakens_capture() {
         use microsandbox_types::GuestFlush::{Auto, Required, Skip};
-        let old = microsandbox_runtime::control::ControlCapabilities::default();
-        let new = microsandbox_runtime::control::ControlCapabilities {
+        let old = microsandbox_protocol::control::RuntimeCapabilities::default();
+        let new = microsandbox_protocol::control::RuntimeCapabilities {
             guest_flush_policy: true,
             ..old
         };
@@ -2954,12 +2835,26 @@ mod tests {
             .build()
             .await
             .unwrap();
+        seed_control_run(&local, "api").await;
         let agent =
             crate::runtime::sandbox_agent_socket_path_candidates_for(&local, "api").remove(0);
         let path = microsandbox_runtime::control::control_socket_path_for(&agent);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let listener = tokio::net::UnixListener::bind(path).unwrap();
         let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut stream = BufReader::new(stream);
+            let mut line = String::new();
+            stream.read_line(&mut line).await.unwrap();
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&line).unwrap()["op"],
+                "capabilities"
+            );
+            stream
+                .get_mut()
+                .write_all(b"{\"ok\":true,\"capabilities\":{\"cpu_resize\":true,\"memory_resize\":true,\"secrets_update\":false}}\n")
+                .await
+                .unwrap();
             for (possible, requested) in [(3, 2), (4, 0), (4, 5)] {
                 let (stream, _) = listener.accept().await.unwrap();
                 let mut stream = BufReader::new(stream);
@@ -3005,12 +2900,26 @@ mod tests {
             .build()
             .await
             .unwrap();
+        seed_control_run(&local, "api").await;
         let agent =
             crate::runtime::sandbox_agent_socket_path_candidates_for(&local, "api").remove(0);
         let path = microsandbox_runtime::control::control_socket_path_for(&agent);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let listener = tokio::net::UnixListener::bind(path).unwrap();
         let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut stream = BufReader::new(stream);
+            let mut line = String::new();
+            stream.read_line(&mut line).await.unwrap();
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&line).unwrap()["op"],
+                "capabilities"
+            );
+            stream
+                .get_mut()
+                .write_all(b"{\"ok\":true,\"capabilities\":{\"cpu_resize\":true,\"memory_resize\":true,\"secrets_update\":false}}\n")
+                .await
+                .unwrap();
             for (op, response) in [
                 (
                     "cpu_state",
@@ -3068,6 +2977,8 @@ mod tests {
             .build()
             .await
             .unwrap();
+        seed_control_run(&first, "worker").await;
+        seed_control_run(&second, "worker").await;
         let mut servers = Vec::new();
         for (local, marker, target) in [
             (&first, 1, DiskCompactionTarget::All),
@@ -3149,6 +3060,8 @@ mod tests {
             .build()
             .await
             .unwrap();
+        seed_control_run(&first, "worker").await;
+        seed_control_run(&second, "worker").await;
         let mut servers = Vec::new();
         for (local, label, resume_ok) in [(&first, "first", true), (&second, "second", false)] {
             let agent =
@@ -3238,10 +3151,9 @@ mod tests {
         }
     }
 
-    fn checkpoint_reply(ok: bool) -> microsandbox_runtime::control::ControlResponse {
-        microsandbox_runtime::control::ControlResponse {
-            ok,
-            checkpoint: Some(microsandbox_runtime::control::CheckpointControlState {
+    fn checkpoint_reply(ok: bool) -> microsandbox_protocol::control::CheckpointResult {
+        microsandbox_protocol::control::CheckpointResult {
+            checkpoint: Some(microsandbox_protocol::control::CheckpointState {
                 checkpoint_id: "checkpoint_test".into(),
                 checkpoint_root: format!("sha256:{}", "a".repeat(64)),
                 path: "/runtime/checkpoint_test".into(),
@@ -3249,7 +3161,8 @@ mod tests {
                 memory_logical_bytes: 4096,
                 memory_emitted_bytes: 4096,
             }),
-            ..Default::default()
+            recovery_error: (!ok)
+                .then(|| "source recovery failed without a runtime diagnostic".into()),
         }
     }
 
@@ -3257,7 +3170,7 @@ mod tests {
     fn checkpoint_reply_preserves_publication_and_failed_source_recovery() {
         for detail in ["resume failed", "thaw timed out; re-pause failed"] {
             let mut response = checkpoint_reply(false);
-            response.error = Some(detail.into());
+            response.recovery_error = Some(detail.into());
             let outcome = checkpoint_response(response).unwrap();
             assert_eq!(outcome.checkpoint.checkpoint_id, "checkpoint_test");
             assert_eq!(outcome.recovery_error.as_deref(), Some(detail));
@@ -3297,6 +3210,32 @@ mod tests {
         config.spec.resources.max_cpus = cpus;
         config.spec.resources.max_memory_mib = memory_mib;
         config
+    }
+
+    async fn seed_control_run(local: &LocalBackend, name: &str) {
+        use crate::db::entity::{run, sandbox};
+
+        let db = local.db().await.unwrap();
+        let sandbox_id = sandbox::Entity::insert(sandbox::ActiveModel {
+            name: Set(name.into()),
+            config: Set("{}".into()),
+            status: Set(SandboxStatus::Running),
+            ephemeral: Set(false),
+            ..Default::default()
+        })
+        .exec(db.write())
+        .await
+        .unwrap()
+        .last_insert_id;
+        run::Entity::insert(run::ActiveModel {
+            sandbox_id: Set(sandbox_id),
+            pid: Set(Some(std::process::id() as i32)),
+            status: Set(run::RunStatus::Running),
+            ..Default::default()
+        })
+        .exec(db.write())
+        .await
+        .unwrap();
     }
 
     #[tokio::test]

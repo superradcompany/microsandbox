@@ -15,7 +15,7 @@ pub(crate) use builder::prepare_local_snapshot_restore;
 mod cloud;
 mod compact;
 pub(crate) mod config;
-#[cfg(any(windows, test))]
+#[cfg(test)]
 mod control_pipe;
 pub mod exec;
 #[cfg(feature = "local")]

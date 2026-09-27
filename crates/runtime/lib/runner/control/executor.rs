@@ -629,10 +629,23 @@ impl RuntimeControlExecutor {
 
     #[cfg(feature = "net")]
     fn handle_secrets_update(&self, changes: Vec<SecretLiveChange>) -> ControlResponse {
-        let changes = serde_json::from_value(
-            serde_json::to_value(changes).expect("secret changes serialize"),
-        )
-        .expect("shared secret change schema");
+        let changes = changes
+            .into_iter()
+            .map(|change| match change {
+                SecretLiveChange::Rotate { name, value } => {
+                    microsandbox_protocol::control::SecretChange::Rotate {
+                        name,
+                        value: microsandbox_protocol::control::SecretValue(value.0.clone()),
+                    }
+                }
+                SecretLiveChange::Remove { name } => {
+                    microsandbox_protocol::control::SecretChange::Remove { name }
+                }
+                SecretLiveChange::SetAllowedHosts { name, hosts } => {
+                    microsandbox_protocol::control::SecretChange::SetAllowedHosts { name, hosts }
+                }
+            })
+            .collect();
         let response = super::handler::apply_secret_changes(self.secrets.as_ref(), changes);
         ControlResponse {
             ok: response.json.ok,

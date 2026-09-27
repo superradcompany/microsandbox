@@ -12,8 +12,8 @@ use tokio::time::timeout_at;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    CheckedControlRequest, ControlClient, ControlClientError, ControlClientResult, ControlProtocol,
-    IntoControlMessage, JsonControlClient, JsonReply, VerifiedControlConnector,
+    CompatibleControlRequest, ControlClient, ControlClientError, ControlClientResult,
+    ControlProtocol, IntoControlMessage, JsonControlClient, JsonReply, VerifiedControlConnector,
     dialer::Dialer,
     json_client::{check_deadline, deadline},
 };
@@ -53,6 +53,7 @@ struct Inner {
     options: ConnectOptions,
     closed: CancellationToken,
     capabilities: crate::Capabilities,
+    runtime_capabilities: crate::RuntimeCapabilities,
 }
 
 enum Selected {
@@ -120,8 +121,13 @@ impl ControlConnection {
         options.limits.validate()?;
         let until = deadline(options.setup_timeout)?;
         timeout_at(until, async {
-            let json = JsonControlClient::configured(dialer.clone(), options.clone(), true);
-            let (mode, capabilities) = json.discover(until).await?;
+            let json = JsonControlClient::configured(
+                dialer.clone(),
+                options.clone(),
+                Some(ControlMode::Json),
+            );
+            let (mode, runtime_capabilities) = json.discover(until).await?;
+            let capabilities = runtime_capabilities.generation_one();
             let selected = match mode {
                 ControlMode::Json => Selected::Json(json),
                 ControlMode::Framed => {
@@ -143,6 +149,7 @@ impl ControlConnection {
                     options,
                     closed: CancellationToken::new(),
                     capabilities,
+                    runtime_capabilities,
                 }),
             })
         })
@@ -164,6 +171,11 @@ impl ControlConnection {
     /// I/O; use GetCapabilities to explicitly request a fresh observation.
     pub fn capabilities(&self) -> &crate::Capabilities {
         &self.inner.capabilities
+    }
+
+    /// Complete capability snapshot discovered through the compatibility endpoint.
+    pub fn runtime_capabilities(&self) -> &crate::RuntimeCapabilities {
+        &self.inner.runtime_capabilities
     }
 
     /// Inspect shared closure without dialing or rediscovery.
@@ -231,7 +243,7 @@ impl ControlConnection {
     }
 
     /// Normalize a checked request using the selected format's real decoder.
-    pub async fn request_typed<R: CheckedControlRequest>(
+    pub async fn request_typed<R: CompatibleControlRequest>(
         &self,
         request: &R,
     ) -> ControlClientResult<R::Response> {
@@ -239,22 +251,37 @@ impl ControlConnection {
     }
 
     /// Configure one checked operation's local wait.
-    pub async fn request_typed_with<R: CheckedControlRequest>(
+    pub async fn request_typed_with<R: CompatibleControlRequest>(
         &self,
         request: &R,
         configure: impl FnOnce(RequestOptions) -> RequestOptions,
     ) -> ControlClientResult<R::Response> {
         let options = configure(RequestOptions::default());
         match &self.inner.selected {
-            Selected::Json(client) => {
-                let reply = client.operation(request.json_request()?, options).await?;
-                request.decode_json(reply)
-            }
+            Selected::Json(client) => client.request_compatible(request, options).await,
             Selected::Framed(client) => {
+                if request.min_generation() > client.ready().welcome.generation {
+                    return self.inner_json(request, options).await;
+                }
                 let options = self.verify_before_request(options).await?;
                 client.request_typed_with(request, |_| options).await
             }
         }
+    }
+
+    async fn inner_json<R: CompatibleControlRequest>(
+        &self,
+        request: &R,
+        options: RequestOptions,
+    ) -> ControlClientResult<R::Response> {
+        // The operation is selected before any mutation bytes are sent. This is a generation-one
+        // compatibility route, never a retry after a framed failure.
+        let json = JsonControlClient::configured(
+            self.inner.dialer.clone(),
+            self.inner.options.clone(),
+            Some(ControlMode::Framed),
+        );
+        json.request_compatible(request, options).await
     }
 
     async fn verify_before_request(
