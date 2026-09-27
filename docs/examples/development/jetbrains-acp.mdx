@@ -7,6 +7,8 @@ icon: "code"
 
 JetBrains AI Assistant can start a custom [ACP agent](https://www.jetbrains.com/help/ai-assistant/acp.html) through `msb exec --stream`. The IDE stays on the host; the agent runs in the sandbox. No microsandbox IDE plugin is required.
 
+**Prerequisite:** Use a development build of msb that includes [commit 18f40e41](https://github.com/superradcompany/microsandbox/commit/18f40e41e7b6c62899d375fe936105d0699108fb). Released versions through v0.7.3 are not supported for this setup.
+
 ## Create the sandbox
 
 Run on the host, using a small test repository first:
@@ -31,6 +33,8 @@ Open that exact absolute project path in the IDE. ACP supplies the host project 
 ## Register the agent
 
 Use **AI Chat > Add Custom Agent** to edit `~/.jetbrains/acp.json`. Merge this entry into any existing configuration. Replace `/absolute/path/to/msb` with the output of `command -v msb`.
+
+The top-level `default_mcp_settings` apply to all local agents unless overridden by agent-specific settings. Merging the example also disables IDE and custom MCP tools for existing agents that inherit these defaults. Review any overrides and keep both settings `false` for sandbox agents.
 
 ```json
 {
