@@ -17,7 +17,7 @@ use tokio::sync::mpsc;
 
 use super::sni;
 use super::state::TlsState;
-use crate::http_deny::http_forbidden_response;
+use crate::engine::http_deny::{classify_http_request, http_forbidden_response};
 use crate::netstack::shared::SharedState;
 use crate::policy::{EgressEvaluation, HostnameSource, NetworkPolicy, Protocol};
 use crate::proxy::ResolvedOutboundProxy;
@@ -305,32 +305,46 @@ pub(crate) async fn serve_tls_deny(
     )
     .await?;
 
-    // Wait (briefly) for the request head so the 403 lands after the
-    // client has sent its request, then discard it.
-    let mut scratch = vec![0u8; RELAY_BUF_SIZE];
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+    // Only HTTP/1.x can receive our HTTP/1.1 response. Buffer across TLS
+    // records; EOF, malformed input, and timeout are not evidence of HTTP.
+    let is_http = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        let mut request = Vec::new();
+        let mut scratch = [0u8; RELAY_BUF_SIZE];
         loop {
             match guest_tls.reader().read(&mut scratch) {
-                Ok(0) => return,
-                Ok(n) if scratch[..n].windows(4).any(|w| w == b"\r\n\r\n") => return,
-                Ok(_) => {}
-                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {}
-                Err(_) => return,
+                Ok(0) => return false,
+                Ok(n) => {
+                    let remaining = RELAY_BUF_SIZE - request.len();
+                    request.extend_from_slice(&scratch[..n.min(remaining)]);
+                    if let Some(is_http) = classify_http_request(&request) {
+                        return is_http;
+                    }
+                    if request.len() == RELAY_BUF_SIZE {
+                        return false;
+                    }
+                    continue;
+                }
+                Err(ref error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                Err(_) => return false,
             }
             let Some(data) = from_smoltcp.recv().await else {
-                return;
+                return false;
             };
             let mut remaining = &data[..];
             while !remaining.is_empty() {
-                if guest_tls.read_tls(&mut remaining).is_err()
+                if !matches!(guest_tls.read_tls(&mut remaining), Ok(n) if n > 0)
                     || guest_tls.process_new_packets().is_err()
                 {
-                    return;
+                    return false;
                 }
             }
         }
     })
-    .await;
+    .await
+    .unwrap_or(false);
+    if !is_http {
+        return Ok(());
+    }
 
     let body = shared.http_deny_body(sni_name);
     guest_tls
@@ -704,4 +718,130 @@ async fn flush_to_guest(
         }
     }
     Ok(())
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::secrets::{config::SecretsConfig, handle::SecretsHandle};
+
+    async fn tls_denial_response(chunks: &[&[u8]], close_input: bool) -> Vec<u8> {
+        let state = TlsState::new(
+            microsandbox_types::TlsConfig::default(),
+            SecretsHandle::new(SecretsConfig::default()),
+        )
+        .unwrap();
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(state.intercept_ca.cert_der.clone()).unwrap();
+        let config = rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        let mut client = rustls::ClientConnection::new(
+            Arc::new(config),
+            ServerName::try_from("blocked.example").unwrap(),
+        )
+        .unwrap();
+        let mut hello = Vec::new();
+        client.write_tls(&mut hello).unwrap();
+        let (from_tx, mut from_rx) = mpsc::channel(16);
+        let (to_tx, mut to_rx) = mpsc::channel(16);
+        let server = tokio::spawn(async move {
+            let shared = SharedState::new(16);
+            serve_tls_deny(
+                "blocked.example",
+                hello,
+                &mut from_rx,
+                &to_tx,
+                &shared,
+                &state,
+            )
+            .await
+            .unwrap();
+        });
+        let mut sent = false;
+        let mut sender = Some(from_tx);
+        let mut response = Vec::new();
+        while let Some(data) = to_rx.recv().await {
+            let mut remaining = &data[..];
+            while !remaining.is_empty() {
+                client.read_tls(&mut remaining).unwrap();
+                client.process_new_packets().unwrap();
+            }
+            let mut wire = Vec::new();
+            client.write_tls(&mut wire).unwrap();
+            if !wire.is_empty() {
+                sender
+                    .as_ref()
+                    .unwrap()
+                    .send(Bytes::from(wire))
+                    .await
+                    .unwrap();
+            }
+            if !client.is_handshaking() && !sent {
+                for chunk in chunks {
+                    client.writer().write_all(chunk).unwrap();
+                    let mut wire = Vec::new();
+                    client.write_tls(&mut wire).unwrap();
+                    sender
+                        .as_ref()
+                        .unwrap()
+                        .send(Bytes::from(wire))
+                        .await
+                        .unwrap();
+                }
+                sent = true;
+                if close_input {
+                    sender.take();
+                }
+            }
+            let mut plain = [0; 4096];
+            loop {
+                match client.reader().read(&mut plain) {
+                    Ok(0) => break,
+                    Ok(n) => response.extend_from_slice(&plain[..n]),
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                    Err(error) => panic!("unexpected TLS read error: {error}"),
+                }
+            }
+        }
+        server.await.unwrap();
+        response
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tls_denial_answers_fragmented_http1() {
+        let response = tls_denial_response(
+            &[
+                b"\r",
+                b"\nGE",
+                b"T / HTTP/1.1\r",
+                b"\nHost: blocked.example\r\n\r\n",
+            ],
+            true,
+        )
+        .await;
+        assert!(response.starts_with(b"HTTP/1.1 403 Forbidden\r\n"));
+        assert!(String::from_utf8_lossy(&response).contains("blocked.example"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tls_denial_closes_non_http_and_incomplete_streams_silently() {
+        for chunks in [
+            vec![b"SSH-2.0-OpenSSH\r\n".as_slice()],
+            vec![b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n".as_slice()],
+            vec![b"GE".as_slice()],
+            vec![],
+        ] {
+            assert!(tls_denial_response(&chunks, true).await.is_empty());
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tls_denial_does_not_answer_after_timeout() {
+        assert!(tls_denial_response(&[b"GET /"], false).await.is_empty());
+    }
 }

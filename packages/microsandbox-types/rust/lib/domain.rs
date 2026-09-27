@@ -636,6 +636,7 @@ pub struct NetworkSpec {
     /// engine default.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub http_deny_message: Option<String>,
+
     /// Proxy used for outbound sandbox connections and supported datagram flows.
     ///
     /// In Rust SDK creation from a concrete `SandboxConfig`, `None` inherits defaults; use a sparse patch to clear.

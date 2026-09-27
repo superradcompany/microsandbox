@@ -34,7 +34,10 @@ use crate::policy::{EgressEvaluation, HostnameSource, NetworkPolicy, Protocol};
 use crate::ports::PortPublisher;
 use crate::proxy::ResolvedOutboundProxy;
 use crate::secrets::handle::SecretsHandle;
-use crate::tcp::{connection::TcpConnectionTracker, deny as tcp_deny, proxy::TcpProxy, upstream::UpstreamTcpTarget};
+use crate::tcp::{
+    connection::TcpConnectionTracker, deny as tcp_deny, proxy::TcpProxy,
+    upstream::UpstreamTcpTarget,
+};
 use crate::udp::fragments::{
     Ipv4UdpFragmentReassembler, Ipv6UdpFragmentReassembler, ReassembledUdpDatagram,
     is_ipv4_udp_fragment, is_ipv6_fragment, is_ipv6_udp_fragment,

@@ -985,3 +985,12 @@ describe("TCP connection limit aliases", () => {
     expect(config.network.maxUdpConnections).toBe(7);
   });
 });
+
+describe("NetworkBuilder HTTP denial messages", () => {
+  it("preserves a custom message through the native builder", () => {
+    expect(new NetworkBuilder().httpDenyMessage("blocked {host}").build().httpDenyMessage)
+      .toBe("blocked {host}");
+    expect(new NetworkBuilder().httpDenyMessage("").build().httpDenyMessage).toBe("");
+    expect(new NetworkBuilder().build().httpDenyMessage).toBeUndefined();
+  });
+});

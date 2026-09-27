@@ -51,6 +51,33 @@ Microsandbox::Sandbox.builder(name).connect_or_create # => Sandbox
 
 Builder terminal with the same reuse, creation-option, concurrency, and replace-option behavior as `Microsandbox::Sandbox.connect_or_create`.
 
+#### <span className="msb-recv">builder.</span><span className="msb-hn">http_deny_message()</span>
+
+```ruby
+builder.http_deny_message(message) # => SandboxBuilder
+```
+
+Set the response body for denied HTTP requests on a local runtime that supports HTTP denial responses. `{host}` expands to the blocked hostname. Cloud rejects this option. See [HTTP denial responses](/networking/overview#what-a-denied-http-request-sees) for which requests receive a response.
+
+<Accordion title="Example">
+```ruby
+builder = Microsandbox::Sandbox.builder("agent")
+  .image("python")
+  .http_deny_message("{host} is blocked. Ask the user to allow it.")
+```
+
+The same option is available when creating a sandbox:
+
+```ruby
+Microsandbox::Sandbox.create(
+  "agent",
+  image: "python",
+  network: { allowed_hosts: ["example.com"], allowed_ports: [80, 443] },
+  http_deny_message: "{host} is blocked. Ask the user to allow it."
+)
+```
+</Accordion>
+
 ## Sandbox
 
 A live sandbox connection returned by `create`, `connect_or_create`, `start`, `connect_or_start`, or `restart`.

@@ -17,7 +17,7 @@ pub use microsandbox_utils::wake_pipe::WakePipe;
 use parking_lot::RwLock;
 
 use crate::addr::normalize_ip_addr;
-use crate::http_deny::{self, DEFAULT_HTTP_DENY_MESSAGE};
+use crate::engine::http_deny::{self, DEFAULT_HTTP_DENY_MESSAGE};
 
 //--------------------------------------------------------------------------------------------------
 // Constants

@@ -21,6 +21,39 @@ Note to agent: `{host}` is not in the allowed-host list. Ask the user to add it 
 // Functions
 //--------------------------------------------------------------------------------------------------
 
+/// Classify a denied first flight as HTTP/1.x, another protocol, or incomplete.
+/// A method prefix alone is not enough to choose a response protocol.
+pub(crate) fn classify_http_request(buf: &[u8]) -> Option<bool> {
+    let mut line = buf;
+
+    while let Some(rest) = line.strip_prefix(b"\r\n") {
+        line = rest;
+    }
+    if line.is_empty() || line == b"\r" {
+        return None;
+    }
+    if !line[0].is_ascii_alphabetic() {
+        return Some(false);
+    }
+
+    let Some(end) = line.windows(2).position(|pair| pair == b"\r\n") else {
+        return line
+            .iter()
+            .any(|byte| !byte.is_ascii() || (*byte < b' ' && *byte != b'\r'))
+            .then_some(false);
+    };
+
+    let mut headers = [];
+    let mut request = httparse::Request::new(&mut headers);
+    let parsed = request.parse(&line[..end + 2]);
+    let is_http1 = parsed.is_ok()
+        && matches!(request.version, Some(0 | 1))
+        && request.method.is_some()
+        && request.path.is_some();
+
+    Some(is_http1)
+}
+
 /// Render a deny-message template, substituting [`HOST_PLACEHOLDER`].
 pub fn render_http_deny_message(template: &str, host: &str) -> String {
     let host = host.trim();
@@ -47,7 +80,44 @@ pub fn http_forbidden_response(body: &str) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::{DEFAULT_HTTP_DENY_MESSAGE, http_forbidden_response, render_http_deny_message};
+    use super::{
+        DEFAULT_HTTP_DENY_MESSAGE, classify_http_request, http_forbidden_response,
+        render_http_deny_message,
+    };
+
+    #[test]
+    fn classification_requires_a_complete_http1_request_line() {
+        for request in [
+            b"GET / HTTP/1.1\r\n".as_slice(),
+            b"QUERY / HTTP/1.0\r\n",
+            b"\r\nGET / HTTP/1.1\r\n",
+        ] {
+            for end in 0..request.len() {
+                assert_eq!(
+                    classify_http_request(&request[..end]),
+                    None,
+                    "prefix: {:?}",
+                    &request[..end]
+                );
+            }
+            assert_eq!(classify_http_request(request), Some(true));
+        }
+        for request in [
+            b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n".as_slice(),
+            b"SSH-2.0-OpenSSH\r\n",
+            b"EHLO mail.example\r\n",
+            b"GET file\r\n",
+            b"GET / HTTP/3.0\r\n",
+            b"\x16\x03\x01",
+            b"\x00binary",
+        ] {
+            assert_eq!(
+                classify_http_request(request),
+                Some(false),
+                "request: {request:?}"
+            );
+        }
+    }
 
     #[test]
     fn default_message_names_the_blocked_host() {
