@@ -92,10 +92,9 @@ pub struct NetworkConfig {
     #[serde(default)]
     pub trust_host_cas: bool,
 
-    /// Body template returned to HTTP/HTTPS clients when egress is denied.
-    /// `{host}` is replaced with the blocked hostname. Omission uses the default.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub http_deny_message: Option<String>,
+    /// HTTP denial response settings. Serialized as the existing flat fields.
+    #[serde(flatten)]
+    pub http: HttpConfig,
 
     /// Proxy that all outbound sandbox connections are dialed through.
     ///
@@ -103,6 +102,19 @@ pub struct NetworkConfig {
     /// relays non-DNS UDP; SOCKS4 blocks it because that protocol has no UDP command.
     #[serde(default)]
     pub outbound_proxy: Option<OutboundProxy>,
+}
+
+/// HTTP responses returned when network policy denies a request.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct HttpConfig {
+    /// Denial response body. `{host}` names the blocked host.
+    /// Omission uses the default; an empty string produces an empty body.
+    #[serde(
+        default,
+        rename = "http_deny_message",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub deny_message: Option<String>,
 }
 
 /// Network configuration whose runtime-only values have been resolved.
@@ -285,7 +297,7 @@ impl Default for NetworkConfig {
             max_udp_connections: None,
             rate_limiter: None,
             trust_host_cas: false,
-            http_deny_message: None,
+            http: HttpConfig::default(),
             outbound_proxy: None,
         }
     }
@@ -429,6 +441,33 @@ mod tests {
             legacy_group,
             microsandbox_types::DestinationGroup::LinkLocal
         );
+    }
+
+    #[test]
+    fn http_config_preserves_flat_wire_contract() {
+        for (raw, expected) in [
+            (r#"{}"#, None),
+            (r#"{"http_deny_message":null}"#, None),
+            (r#"{"http_deny_message":""}"#, Some("")),
+            (
+                r#"{"http_deny_message":"blocked {host}"}"#,
+                Some("blocked {host}"),
+            ),
+        ] {
+            let config: NetworkConfig = serde_json::from_str(raw).unwrap();
+            assert_eq!(config.http.deny_message.as_deref(), expected);
+            let wire = serde_json::to_value(&config).unwrap();
+            assert!(wire.get("http").is_none());
+            assert_eq!(
+                wire.get("http_deny_message"),
+                expected.map(serde_json::Value::from).as_ref()
+            );
+            let spec: microsandbox_types::NetworkSpec = serde_json::from_value(wire).unwrap();
+            assert_eq!(spec.http_deny_message.as_deref(), expected);
+            let restored: NetworkConfig =
+                serde_json::from_value(serde_json::to_value(spec).unwrap()).unwrap();
+            assert_eq!(restored.http.deny_message.as_deref(), expected);
+        }
     }
 
     /// `outbound_proxy` round-trips whole-config through the wire type the

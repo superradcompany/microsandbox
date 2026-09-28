@@ -856,6 +856,16 @@ fn deny_message(self, message: impl Into<String>) -> Self
 
 Body returned to HTTP clients (and HTTPS clients on intercepted ports) when a domain rule denies the connection. The gateway answers `403 Forbidden` with this plain-text body instead of resetting the connection. `{host}` is replaced with the blocked hostname. Omit to use the default, which tells an agent the host is not on the allow list. See [What a denied HTTP request sees](/networking/overview#what-a-denied-http-request-sees).
 
+`HttpBuilder::build()` returns `HttpConfig`, stored in `NetworkConfig.http`:
+
+```rust
+pub struct HttpConfig {
+    pub deny_message: Option<String>,
+}
+```
+
+`None` uses the default response; `Some(String::new())` sends an empty body.
+
 #### <span className="msb-recv">network.</span><span className="msb-hn">strict()</span>
 
 ```rust

@@ -15,7 +15,8 @@ use microsandbox_utils::size::Bytes;
 use zeroize::Zeroizing;
 
 use crate::config::{
-    ConnectionLimit, DnsConfig, InterfaceOverrides, NetworkConfig, PortProtocol, PublishedPort,
+    ConnectionLimit, DnsConfig, HttpConfig, InterfaceOverrides, NetworkConfig, PortProtocol,
+    PublishedPort,
 };
 use crate::dns::Nameserver;
 use crate::policy::{BuildError, NetworkPolicy};
@@ -37,7 +38,7 @@ pub struct NetworkBuilder {
 /// Fluent builder for HTTP denial responses.
 #[derive(Default)]
 pub struct HttpBuilder {
-    deny_message: Option<String>,
+    config: HttpConfig,
 }
 
 /// Fluent builder for [`DnsConfig`].
@@ -125,8 +126,13 @@ impl HttpBuilder {
     /// Set the denied HTTP/HTTPS response body. `{host}` names the blocked host.
     /// An empty message produces an empty body; omission uses the default.
     pub fn deny_message(mut self, message: impl Into<String>) -> Self {
-        self.deny_message = Some(message.into());
+        self.config.deny_message = Some(message.into());
         self
+    }
+
+    /// Return the HTTP configuration.
+    pub fn build(self) -> HttpConfig {
+        self.config
     }
 }
 
@@ -353,10 +359,10 @@ impl NetworkBuilder {
 
     /// Configure HTTP responses to denied requests.
     pub fn http(mut self, configure: impl FnOnce(HttpBuilder) -> HttpBuilder) -> Self {
-        let http = configure(HttpBuilder {
-            deny_message: self.config.http_deny_message.take(),
-        });
-        self.config.http_deny_message = http.deny_message;
+        self.config.http = configure(HttpBuilder {
+            config: self.config.http,
+        })
+        .build();
         self
     }
 
