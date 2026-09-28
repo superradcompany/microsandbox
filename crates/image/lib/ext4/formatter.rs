@@ -1089,16 +1089,19 @@ fn planned_metadata(
     encoding_mode: TreeEncodingMode,
 ) -> InodeMetadata {
     match encoding_mode {
+        // Ownership and mtime come from the tree: patch-created entries carry
+        // root:root and mtime 0, while directories copied up from a lower
+        // layer keep the lower directory's values.
         TreeEncodingMode::Upper => InodeMetadata {
-            uid: 0,
-            gid: 0,
+            uid: metadata.uid,
+            gid: metadata.gid,
             mode: if directory {
                 normalize_dir_permissions(metadata.mode)
             } else {
                 normalize_file_permissions(metadata.mode)
             },
-            mtime: 0,
-            mtime_nsec: 0,
+            mtime: metadata.mtime,
+            mtime_nsec: metadata.mtime_nsec,
         },
         TreeEncodingMode::Rootfs => InodeMetadata {
             uid: metadata.uid,
@@ -2650,6 +2653,44 @@ mod tests {
         let expected = crc32c::crc32c_raw(0xFFFF_FFFF, &sb[..0x3FC]);
 
         assert_eq!(stored, expected);
+    }
+
+    #[test]
+    fn test_upper_metadata_keeps_tree_ownership_and_normalizes_empty_permissions() {
+        let copied_up = InodeMetadata {
+            uid: 0x12345,
+            gid: 1000,
+            mode: 0o2755,
+            mtime: 1_800_000_000,
+            mtime_nsec: 123,
+        };
+        let planned = planned_metadata(&copied_up, true, TreeEncodingMode::Upper);
+        assert_eq!(
+            (
+                planned.uid,
+                planned.gid,
+                planned.mode,
+                planned.mtime,
+                planned.mtime_nsec
+            ),
+            (0x12345, 1000, 0o2755, 1_800_000_000, 123)
+        );
+
+        let empty = InodeMetadata {
+            uid: 0,
+            gid: 0,
+            mode: 0,
+            mtime: 0,
+            mtime_nsec: 0,
+        };
+        assert_eq!(
+            planned_metadata(&empty, true, TreeEncodingMode::Upper).mode,
+            0o755
+        );
+        assert_eq!(
+            planned_metadata(&empty, false, TreeEncodingMode::Upper).mode,
+            0o644
+        );
     }
 
     #[test]

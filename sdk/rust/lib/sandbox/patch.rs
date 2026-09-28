@@ -22,13 +22,20 @@ use cap_std::fs::{DirBuilder, DirBuilderExt, OpenOptionsExt};
 use microsandbox_image::erofs::{ErofsEntryInfo, ErofsEntryKind, ErofsReader};
 use microsandbox_image::tree::{
     DeviceNode, DirectoryNode, FileData, FileTree, FileTreeError, InodeMetadata, RegularFileId,
-    RegularFileNode, SymlinkNode, TreeNode,
+    RegularFileNode, SymlinkNode, TreeNode, Xattr,
 };
 use tokio::fs;
 use tokio::io::AsyncReadExt;
 
 use super::types::{Patch, RootfsSource};
 use crate::MicrosandboxResult;
+
+//--------------------------------------------------------------------------------------------------
+// Constants
+//--------------------------------------------------------------------------------------------------
+
+/// Namespace of overlayfs-private xattrs, which are never copied up.
+const OVERLAY_XATTR_PREFIX: &[u8] = b"trusted.overlay.";
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -109,6 +116,20 @@ impl LowerLayers {
                 "failed to inspect lower layer '{guest_path}': {err}",
             ))),
         }
+    }
+
+    fn entry_metadata(
+        &mut self,
+        layer_idx: usize,
+        guest_path: &str,
+    ) -> MicrosandboxResult<(InodeMetadata, Vec<Xattr>)> {
+        self.readers[layer_idx]
+            .entry_metadata(guest_path)
+            .map_err(|err| {
+                crate::MicrosandboxError::PatchFailed(format!(
+                    "failed to read lower layer metadata '{guest_path}': {err}",
+                ))
+            })
     }
 
     fn read_file(&mut self, layer_idx: usize, guest_path: &str) -> MicrosandboxResult<Vec<u8>> {
@@ -1076,11 +1097,16 @@ fn check_replace_tree(
 /// Ensure all parent directories exist in the upper tree for a given path.
 ///
 /// Walks each path component (excluding the final one) and creates missing
-/// intermediate directories with default metadata (root:root, 0755).
+/// intermediate directories. A directory that exists in the lower layers keeps
+/// the owner, group, mode, mtime and xattrs of its topmost lower copy, as
+/// overlayfs copy-up does; otherwise the upper directory would replace them in
+/// the merged view. Overlay-private `trusted.overlay.*` xattrs are not copied:
+/// an opaque marker, for example, would hide the lower directory's contents.
+/// Directories that don't exist below get root:root, 0755.
 ///
 /// If a parent slot is occupied by a whiteout (from a Remove patch), the
 /// whiteout is replaced with a real directory — the patch is explicitly
-/// re-creating content at that path.
+/// re-creating content at that path, so it gets the defaults.
 fn ensure_tree_parents(
     tree: &mut FileTree,
     lowers: &mut LowerLayers,
@@ -1119,19 +1145,27 @@ fn ensure_tree_parents(
             None => {
                 // Verify the lower layers don't have a non-directory at this path.
                 let guest_path = guest_path_from_relative(&prefix);
-                if let Some(kind) = lower_entry_kind(lowers, &guest_path)?
-                    && kind != ErofsEntryKind::Directory
-                {
-                    return Err(crate::MicrosandboxError::PatchFailed(format!(
-                        "patch path parent is not a directory: '{guest_path}' ({})",
-                        lower_kind_name(kind)
-                    )));
-                }
-                insert_tree_node(
-                    tree,
-                    &prefix,
-                    TreeNode::Directory(DirectoryNode::new(metadata_with_mode(0o755))),
-                )?;
+                let directory = match resolve_lower_entry(lowers, &guest_path)? {
+                    Some(entry) if entry.kind != ErofsEntryKind::Directory => {
+                        return Err(crate::MicrosandboxError::PatchFailed(format!(
+                            "patch path parent is not a directory: '{guest_path}' ({})",
+                            lower_kind_name(entry.kind)
+                        )));
+                    }
+                    Some(entry) if !needs_recreate => {
+                        let (mut metadata, xattrs) =
+                            lowers.entry_metadata(entry.layer_idx, &guest_path)?;
+                        metadata.mode &= 0o7777;
+                        let mut directory = DirectoryNode::new(metadata);
+                        directory.xattrs = xattrs
+                            .into_iter()
+                            .filter(|xattr| !xattr.name.starts_with(OVERLAY_XATTR_PREFIX))
+                            .collect();
+                        directory
+                    }
+                    _ => DirectoryNode::new(metadata_with_mode(0o755)),
+                };
+                insert_tree_node(tree, &prefix, TreeNode::Directory(directory))?;
             }
         }
     }
@@ -2103,7 +2137,6 @@ mod tests {
     use super::*;
 
     use microsandbox_image::erofs::write_erofs;
-    use microsandbox_image::tree::Xattr;
 
     fn bind_root(path: PathBuf, follow_root_symlinks: bool) -> RootfsSource {
         RootfsSource::Bind {
@@ -3254,6 +3287,149 @@ mod tests {
             TreeNode::RegularFile(file) => assert_eq!(file.data.read_all().unwrap(), b"hello"),
             _ => panic!("expected regular file"),
         }
+    }
+
+    fn directory_with(uid: u32, gid: u32, mode: u16, mtime: u64) -> TreeNode {
+        TreeNode::Directory(DirectoryNode::new(InodeMetadata {
+            uid,
+            gid,
+            mode,
+            mtime,
+            mtime_nsec: 0,
+        }))
+    }
+
+    fn directory_metadata(tree: &FileTree, path: &[u8]) -> (u32, u32, u16, u64) {
+        match tree.get(path) {
+            Some(TreeNode::Directory(dir)) => (
+                dir.metadata.uid,
+                dir.metadata.gid,
+                dir.metadata.mode,
+                dir.metadata.mtime,
+            ),
+            _ => panic!("expected directory at {}", String::from_utf8_lossy(path)),
+        }
+    }
+
+    #[tokio::test]
+    async fn build_upper_tree_parent_keeps_lower_directory_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let lower_path = dir.path().join("lower.erofs");
+        let mut lower = FileTree::new();
+        lower
+            .insert(b"home", directory_with(0, 0, 0o755, 1_700_000_000))
+            .unwrap();
+        lower
+            .insert(
+                b"home/node",
+                directory_with(1000, 1000, 0o2755, 1_700_000_100),
+            )
+            .unwrap();
+        write_erofs(&lower, &lower_path).unwrap();
+
+        let patches = vec![
+            text_patch("/home/node/hello.txt", "hello"),
+            text_patch("/home/node/new/deeper.txt", "new"),
+        ];
+
+        let tree = build_upper_tree(&patches, &[lower_path]).await.unwrap();
+        assert_eq!(
+            directory_metadata(&tree, b"home"),
+            (0, 0, 0o755, 1_700_000_000)
+        );
+        assert_eq!(
+            directory_metadata(&tree, b"home/node"),
+            (1000, 1000, 0o2755, 1_700_000_100)
+        );
+        // A parent that doesn't exist below gets the defaults.
+        assert_eq!(
+            directory_metadata(&tree, b"home/node/new"),
+            (0, 0, 0o755, 0)
+        );
+    }
+
+    #[tokio::test]
+    async fn build_upper_tree_parent_uses_topmost_lower_directory_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let base_path = dir.path().join("base.erofs");
+        let top_path = dir.path().join("top.erofs");
+
+        let mut base = FileTree::new();
+        base.insert(b"srv", directory_with(1000, 1000, 0o755, 1))
+            .unwrap();
+        base.insert(b"srv/base.txt", make_regular_file(b"base"))
+            .unwrap();
+        write_erofs(&base, &base_path).unwrap();
+
+        let mut top = FileTree::new();
+        top.insert(b"srv", directory_with(2000, 3000, 0o750, 2))
+            .unwrap();
+        write_erofs(&top, &top_path).unwrap();
+
+        let patches = vec![text_patch("/srv/app.conf", "hello")];
+
+        let tree = build_upper_tree(&patches, &[base_path, top_path])
+            .await
+            .unwrap();
+        assert_eq!(directory_metadata(&tree, b"srv"), (2000, 3000, 0o750, 2));
+    }
+
+    #[tokio::test]
+    async fn build_upper_tree_parent_keeps_lower_xattrs_except_overlay_private() {
+        let dir = tempfile::tempdir().unwrap();
+        let lower_path = dir.path().join("lower.erofs");
+        let mut srv = DirectoryNode::new(InodeMetadata::default());
+        srv.xattrs = vec![
+            Xattr {
+                name: b"user.kept".to_vec(),
+                value: b"yes".to_vec(),
+            },
+            Xattr {
+                name: b"security.label".to_vec(),
+                value: b"system_u".to_vec(),
+            },
+            Xattr {
+                name: b"trusted.overlay.opaque".to_vec(),
+                value: b"y".to_vec(),
+            },
+        ];
+        let mut lower = FileTree::new();
+        lower.insert(b"srv", TreeNode::Directory(srv)).unwrap();
+        write_erofs(&lower, &lower_path).unwrap();
+
+        let patches = vec![text_patch("/srv/app.conf", "hello")];
+
+        let tree = build_upper_tree(&patches, &[lower_path]).await.unwrap();
+        let Some(TreeNode::Directory(srv)) = tree.get(b"srv") else {
+            panic!("expected directory at srv");
+        };
+        let mut names: Vec<&[u8]> = srv.xattrs.iter().map(|x| x.name.as_slice()).collect();
+        names.sort();
+        assert_eq!(names, [&b"security.label"[..], &b"user.kept"[..]]);
+    }
+
+    #[tokio::test]
+    async fn build_upper_tree_recreated_parent_after_remove_gets_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let lower_path = dir.path().join("lower.erofs");
+        let mut lower = FileTree::new();
+        lower
+            .insert(b"data", directory_with(1000, 1000, 0o700, 1))
+            .unwrap();
+        lower
+            .insert(b"data/old.txt", make_regular_file(b"old"))
+            .unwrap();
+        write_erofs(&lower, &lower_path).unwrap();
+
+        let patches = vec![
+            Patch::Remove {
+                path: "/data".into(),
+            },
+            text_patch("/data/new.txt", "new"),
+        ];
+
+        let tree = build_upper_tree(&patches, &[lower_path]).await.unwrap();
+        assert_eq!(directory_metadata(&tree, b"data"), (0, 0, 0o755, 0));
     }
 
     #[cfg(windows)]
