@@ -74,6 +74,7 @@ Common flags:
 | `-w`, `--workdir` | Set the working directory |
 | `-d`, `--detach` | Run the resolved image command in the background and print the sandbox name |
 | `--no-tty` | Disable PTY allocation and run non-interactively |
+| `--no-stdin` | Leave host input untouched and give the command EOF; disables automatic terminal mode and conflicts with `--tty` |
 | `--replace` | Replace an existing sandbox with the same name |
 | `--no-net` | Disable network access |
 | `--deployment-profile` | Select `single-tenant` or `multi-tenant` host-runtime isolation; managed backends may override it |
@@ -542,6 +543,8 @@ msb exec devbox -- ls -la /app
 |------|-------------|
 | `-t`, `--tty` | Allocate a pseudo-terminal (enables colors, line editing) |
 | `--no-tty` | Disable PTY allocation and run non-interactively |
+| `--no-stdin` | Leave host input untouched and give the command EOF; disables automatic terminal mode and conflicts with `--tty` |
+| `--stream` | Forward stdin and flush output incrementally without a PTY; requires piped stdin or `--no-stdin` |
 | `-e`, `--env` | Set an environment variable (`KEY=VALUE`) |
 | `-w`, `--workdir` | Override working directory |
 | `-u`, `--user` | Run the command as the specified guest user |
@@ -550,8 +553,20 @@ msb exec devbox -- ls -la /app
 | `-q`, `--quiet` | Suppress progress output |
 
 <Tip>
-  The CLI auto-detects whether stdin is a terminal. When interactive, `msb exec` uses `attach` mode (TTY, line editing). When piped, it captures output. Use `--no-tty` to force captured, non-interactive execution even from a terminal.
+  The CLI auto-detects whether stdin is a terminal. When interactive, `msb exec` uses `attach` mode (TTY, line editing). When piped, it forwards input while the command runs and captures output until the command exits. Use `--no-tty` to force captured, non-interactive execution even from a terminal; terminal input is not forwarded in that mode.
 </Tip>
+
+Use `--stream` for an ongoing conversation with a guest process, such as an ACP agent. It returns output as it arrives instead of waiting for command completion. Piped commands can exit or time out while the host input pipe is still open. Commands that read until EOF, such as `cat`, still need their input closed to finish normally.
+
+Use `--no-stdin` to leave input available to the calling script and give the guest immediate EOF:
+
+```bash
+while IFS= read -r sandbox; do
+  msb exec --no-stdin "$sandbox" -- echo ready
+done < sandboxes.txt
+```
+
+Combine `--no-stdin` with `--stream` when you want live output without forwarding input. Omit `--no-stdin` for ACP agents, which need input from the IDE.
 
 <span id="msb-sandbox-copy" />
 
