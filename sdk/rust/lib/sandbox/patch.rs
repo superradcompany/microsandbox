@@ -47,6 +47,9 @@ const OVERLAY_XATTR_PREFIX: &[u8] = b"trusted.overlay.";
 /// `.erofs` file on every path lookup during patch resolution.
 struct LowerLayers {
     readers: Vec<ErofsReader>,
+    /// Guest-relative paths hidden by earlier Remove patches in this batch.
+    /// Directories recreated at or below them must not inherit lower metadata.
+    removed: Vec<Vec<u8>>,
 }
 
 /// Capability-scoped view of a host-directory rootfs.
@@ -97,7 +100,22 @@ impl LowerLayers {
             })?;
             readers.push(reader);
         }
-        Ok(Self { readers })
+        Ok(Self {
+            readers,
+            removed: Vec::new(),
+        })
+    }
+
+    fn record_removed(&mut self, relative: &[u8]) {
+        self.removed.push(relative.to_vec());
+    }
+
+    /// True if `relative` is a removed path or lies beneath one.
+    fn is_removed(&self, relative: &[u8]) -> bool {
+        self.removed.iter().any(|removed| {
+            relative.starts_with(removed)
+                && (relative.len() == removed.len() || relative[removed.len()] == b'/')
+        })
     }
 
     fn len(&self) -> usize {
@@ -746,6 +764,7 @@ pub(crate) async fn build_flat_tree(
     let mut tree = microsandbox_image::merge_erofs_layers(lower_erofs, spool_path)?;
     let mut no_lowers = LowerLayers {
         readers: Vec::new(),
+        removed: Vec::new(),
     };
     for patch in patches {
         apply_one_to_tree(&mut tree, &mut no_lowers, patch).await?;
@@ -897,6 +916,7 @@ async fn apply_one_to_tree(
             if (removed_upper || lower_kind.is_some()) && lower_kind.is_some() {
                 ensure_tree_parents(tree, lowers, &rel)?;
                 insert_tree_node(tree, &rel, make_whiteout())?;
+                lowers.record_removed(&rel);
             }
         }
         Patch::Append { path, content } => {
@@ -1106,7 +1126,9 @@ fn check_replace_tree(
 ///
 /// If a parent slot is occupied by a whiteout (from a Remove patch), the
 /// whiteout is replaced with a real directory — the patch is explicitly
-/// re-creating content at that path, so it gets the defaults.
+/// re-creating content at that path. A parent at or below any path removed
+/// earlier in the batch gets the defaults rather than metadata from the
+/// removed lower subtree, however it was recreated.
 fn ensure_tree_parents(
     tree: &mut FileTree,
     lowers: &mut LowerLayers,
@@ -1129,8 +1151,7 @@ fn ensure_tree_parents(
 
         // If this parent was previously whiteout'd, remove the whiteout so we
         // can recreate it as a real directory.
-        let needs_recreate = matches!(tree.get(&prefix), Some(node) if is_whiteout(node));
-        if needs_recreate {
+        if matches!(tree.get(&prefix), Some(node) if is_whiteout(node)) {
             tree.remove(&prefix);
         }
 
@@ -1152,7 +1173,7 @@ fn ensure_tree_parents(
                             lower_kind_name(entry.kind)
                         )));
                     }
-                    Some(entry) if !needs_recreate => {
+                    Some(entry) if !lowers.is_removed(&prefix) => {
                         let (mut metadata, xattrs) =
                             lowers.entry_metadata(entry.layer_idx, &guest_path)?;
                         metadata.mode &= 0o7777;
@@ -3406,6 +3427,157 @@ mod tests {
         let mut names: Vec<&[u8]> = srv.xattrs.iter().map(|x| x.name.as_slice()).collect();
         names.sort();
         assert_eq!(names, [&b"security.label"[..], &b"user.kept"[..]]);
+    }
+
+    #[tokio::test]
+    async fn build_upper_tree_parent_keeps_zero_lower_directory_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let lower_path = dir.path().join("lower.erofs");
+        let mut lower = FileTree::new();
+        lower
+            .insert(b"locked", directory_with(1000, 1000, 0, 1))
+            .unwrap();
+        write_erofs(&lower, &lower_path).unwrap();
+
+        let patches = vec![text_patch("/locked/app.conf", "hello")];
+
+        let tree = build_upper_tree(&patches, &[lower_path]).await.unwrap();
+        assert_eq!(directory_metadata(&tree, b"locked"), (1000, 1000, 0, 1));
+    }
+
+    #[tokio::test]
+    async fn build_upper_tree_parents_below_removed_directory_get_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let lower_path = dir.path().join("lower.erofs");
+        let mut lower = FileTree::new();
+        lower
+            .insert(b"data", directory_with(1000, 1000, 0o700, 1))
+            .unwrap();
+        lower
+            .insert(b"data/sub", directory_with(1000, 1000, 0o700, 1))
+            .unwrap();
+        write_erofs(&lower, &lower_path).unwrap();
+
+        let patches = vec![
+            Patch::Remove {
+                path: "/data".into(),
+            },
+            text_patch("/data/sub/new.txt", "new"),
+        ];
+
+        let tree = build_upper_tree(&patches, &[lower_path]).await.unwrap();
+        assert_eq!(directory_metadata(&tree, b"data"), (0, 0, 0o755, 0));
+        assert_eq!(directory_metadata(&tree, b"data/sub"), (0, 0, 0o755, 0));
+    }
+
+    fn lower_with_data_sub(dir: &Path) -> PathBuf {
+        let lower_path = dir.join("lower.erofs");
+        let mut sub = DirectoryNode::new(InodeMetadata {
+            uid: 1000,
+            gid: 1000,
+            mode: 0o700,
+            mtime: 1,
+            mtime_nsec: 0,
+        });
+        sub.xattrs = vec![Xattr {
+            name: b"user.kept".to_vec(),
+            value: b"yes".to_vec(),
+        }];
+        let mut lower = FileTree::new();
+        lower
+            .insert(b"data", directory_with(1000, 1000, 0o700, 1))
+            .unwrap();
+        lower.insert(b"data/sub", TreeNode::Directory(sub)).unwrap();
+        lower
+            .insert(b"data/sub/old.txt", make_regular_file(b"old"))
+            .unwrap();
+        lower
+            .insert(b"database", directory_with(2000, 2000, 0o750, 2))
+            .unwrap();
+        write_erofs(&lower, &lower_path).unwrap();
+        lower_path
+    }
+
+    fn assert_default_directory(tree: &FileTree, path: &[u8]) {
+        assert_eq!(directory_metadata(tree, path), (0, 0, 0o755, 0));
+        let Some(TreeNode::Directory(dir)) = tree.get(path) else {
+            unreachable!();
+        };
+        assert!(dir.xattrs.is_empty(), "no xattrs may be inherited");
+    }
+
+    #[tokio::test]
+    async fn build_upper_tree_removed_subtree_stays_default_across_patches() {
+        let dir = tempfile::tempdir().unwrap();
+        let lower_path = lower_with_data_sub(dir.path());
+
+        // The second patch consumes /data's whiteout; the third must still
+        // know /data was removed.
+        let patches = vec![
+            Patch::Remove {
+                path: "/data".into(),
+            },
+            text_patch("/data/first.txt", "first"),
+            text_patch("/data/sub/second.txt", "second"),
+        ];
+
+        let tree = build_upper_tree(&patches, &[lower_path]).await.unwrap();
+        assert_default_directory(&tree, b"data");
+        assert_default_directory(&tree, b"data/sub");
+    }
+
+    #[tokio::test]
+    async fn build_upper_tree_removed_subtree_stays_default_after_mkdir() {
+        let dir = tempfile::tempdir().unwrap();
+        let lower_path = lower_with_data_sub(dir.path());
+
+        let patches = vec![
+            Patch::Remove {
+                path: "/data".into(),
+            },
+            Patch::Mkdir {
+                path: "/data".into(),
+                mode: None,
+            },
+            text_patch("/data/sub/new.txt", "new"),
+        ];
+
+        let tree = build_upper_tree(&patches, &[lower_path]).await.unwrap();
+        assert_default_directory(&tree, b"data/sub");
+    }
+
+    #[tokio::test]
+    async fn build_upper_tree_removing_a_file_keeps_parent_inheritance() {
+        let dir = tempfile::tempdir().unwrap();
+        let lower_path = lower_with_data_sub(dir.path());
+
+        // Removing /data/sub/old.txt, or /data itself, must not affect
+        // /data/sub's parent inheritance or the unrelated /database.
+        let patches = vec![
+            Patch::Remove {
+                path: "/data/sub/old.txt".into(),
+            },
+            text_patch("/data/sub/new.txt", "new"),
+        ];
+        let tree = build_upper_tree(&patches, &[lower_path.clone()])
+            .await
+            .unwrap();
+        assert_eq!(
+            directory_metadata(&tree, b"data/sub"),
+            (1000, 1000, 0o700, 1)
+        );
+
+        let patches = vec![
+            Patch::Remove {
+                path: "/data".into(),
+            },
+            text_patch("/database/app.conf", "app"),
+        ];
+        let tree = build_upper_tree(&patches, &[lower_path]).await.unwrap();
+        assert_eq!(
+            directory_metadata(&tree, b"database"),
+            (2000, 2000, 0o750, 2)
+        );
     }
 
     #[tokio::test]
