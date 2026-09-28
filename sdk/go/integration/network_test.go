@@ -156,7 +156,7 @@ func TestCustomPolicyAllowSpecificEgress(t *testing.T) {
 }
 
 // TestCustomPolicyPortRange verifies that a port-range rule serialises as
-// "8000-9000" and the runtime evaluates it correctly. We test by allowing
+// "443-443" and the runtime evaluates it correctly. We test by allowing
 // only a narrow range and confirming that an in-range port survives while
 // an out-of-range port is blocked.
 func TestCustomPolicyPortRange(t *testing.T) {
@@ -189,10 +189,11 @@ func TestCustomPolicyPortRange(t *testing.T) {
 		_ = sb.Close()
 	})
 
-	// 443 inside the range — should succeed; 80 outside — should be blocked.
+	// The allowed port connects upstream. The denied port accepts the guest
+	// connection only to return the gateway's HTTP denial response.
 	out, err := sb.Shell(ctx,
 		"nc -zv -w 5 1.1.1.1 443 2>&1 || echo p443-failed; "+
-			"nc -zv -w 5 1.1.1.1 80 2>&1 || echo p80-failed",
+			"printf 'GET / HTTP/1.1\\r\\nHost: 1.1.1.1\\r\\n\\r\\n' | nc -w 5 1.1.1.1 80",
 		microsandbox.WithExecTimeout(20*time.Second))
 	if err != nil {
 		t.Fatalf("Shell: %v", err)
@@ -201,8 +202,9 @@ func TestCustomPolicyPortRange(t *testing.T) {
 	if strings.Contains(combined, "p443-failed") {
 		t.Errorf("expected 443 in range to be allowed; got %q", combined)
 	}
-	if !strings.Contains(combined, "p80-failed") {
-		t.Errorf("expected 80 out of range to be blocked; got %q", combined)
+	if !strings.Contains(combined, "HTTP/1.1 403 Forbidden") ||
+		!strings.Contains(combined, "not allowed by the sandbox network policy") {
+		t.Errorf("expected gateway policy denial for port 80 outside the range; got %q", combined)
 	}
 }
 

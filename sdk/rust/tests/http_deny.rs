@@ -8,7 +8,6 @@
 //!     cargo nextest run -p microsandbox --tests --run-ignored=only
 
 use microsandbox::{NetworkPolicy, Sandbox};
-use microsandbox_network::http_deny::DEFAULT_HTTP_DENY_MESSAGE;
 use microsandbox_network::policy::Rule;
 use test_utils::msb_test;
 
@@ -123,11 +122,11 @@ async fn denied_https_gets_403_inside_intercepted_tls() {
         body.contains(&format!("`{DENIED_HOST}`")),
         "body must name the blocked host: {body}"
     );
-    let expected = DEFAULT_HTTP_DENY_MESSAGE.replace("{host}", DENIED_HOST);
     assert!(
-        body.contains(expected.trim()),
-        "body must be the default message: {body}"
+        body.contains("not allowed by the sandbox network policy"),
+        "body must explain the policy denial: {body}"
     );
+    assert!(body.contains("Note to agent:"), "body: {body}");
 
     teardown(sb, name).await;
 }
