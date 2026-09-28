@@ -2770,10 +2770,7 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
         "disable_network!",
         method!(RubySandboxBuilder::disable_network, 0),
     )?;
-    builder.define_method(
-        "http!",
-        method!(RubySandboxBuilder::http, 1),
-    )?;
+    builder.define_method("http!", method!(RubySandboxBuilder::http, 1))?;
     builder.define_method("quiet_logs!", method!(RubySandboxBuilder::quiet_logs, 0))?;
     builder.define_method("entrypoint!", method!(RubySandboxBuilder::entrypoint, 1))?;
     builder.define_method("init!", method!(RubySandboxBuilder::init, 1))?;
