@@ -12,6 +12,7 @@ mod error;
 mod exec;
 mod exec_options_builder;
 mod fs;
+mod http_builder;
 mod image;
 mod image_builder;
 mod init_options_builder;

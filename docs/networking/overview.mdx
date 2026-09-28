@@ -363,7 +363,7 @@ Note to agent: `example.com` is not in the allowed-host list. Ask the user to ad
 
 Custom messages require a local runtime that supports HTTP denial responses. The SDK rejects this option on older runtimes and on cloud. Leaving it unset does not require the new capability.
 
-Set `http_deny_message` to replace the body; `{host}` is substituted with the blocked hostname. Use it to name the tool or workflow your agent should use to request access.
+Configure HTTP’s `deny_message` (`denyMessage` in TypeScript) to replace the body; `{host}` is substituted with the blocked hostname. Use it to name the tool or workflow your agent should use to request access.
 
 <CodeGroup>
 ```typescript TypeScript
@@ -372,7 +372,7 @@ await using sb = await Sandbox.builder("agent")
     .network((n) => n
         .policy(policy)
         .tls((t) => t)
-        .httpDenyMessage("{host} is blocked. Call the `RequestHostAccess` tool to ask the user for it."))
+        .http((h) => h.denyMessage("{host} is blocked. Call the `RequestHostAccess` tool to ask the user for it.")))
     .create();
 ```
 
@@ -382,13 +382,13 @@ let sb = Sandbox::builder("agent")
     .network(|n| n
         .policy(policy)
         .tls(|t| t.enabled(true))
-        .http_deny_message("{host} is blocked. Call the `RequestHostAccess` tool to ask the user for it."))
+        .http(|h| h.deny_message("{host} is blocked. Call the `RequestHostAccess` tool to ask the user for it.")))
     .create()
     .await?;
 ```
 
 ```python Python
-from microsandbox import Network, Sandbox, TlsConfig
+from microsandbox import HttpConfig, Network, Sandbox, TlsConfig
 
 sb = await Sandbox.create(
     "agent",
@@ -396,7 +396,7 @@ sb = await Sandbox.create(
     network=Network(
         policy=policy,
         tls=TlsConfig(),
-        http_deny_message="{host} is blocked. Call the `RequestHostAccess` tool to ask the user for it.",
+        http=HttpConfig(deny_message="{host} is blocked. Call the `RequestHostAccess` tool to ask the user for it."),
     ),
 )
 ```
@@ -407,7 +407,7 @@ sb, err := m.CreateSandbox(ctx, "agent",
     m.WithNetwork(&m.NetworkConfig{
         Rules:           rules,
         TLS:             &m.TLSConfig{},
-        HTTPDenyMessage: "{host} is blocked. Call the `RequestHostAccess` tool to ask the user for it.",
+        HTTP: &m.HTTPConfig{DenyMessage: "{host} is blocked. Call the `RequestHostAccess` tool to ask the user for it."},
     }),
 )
 ```
@@ -417,7 +417,7 @@ sb = Microsandbox::Sandbox.create(
   "agent",
   image: "python",
   network: { allowed_hosts: ["example.com"], allowed_ports: [80, 443] },
-  http_deny_message: "{host} is blocked. Ask the user to allow it."
+  http: { deny_message: "{host} is blocked. Ask the user to allow it." }
 )
 ```
 

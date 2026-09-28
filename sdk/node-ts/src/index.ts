@@ -393,6 +393,7 @@ hideMethod(napi.SandboxBuilder, "attachWithBuilder");
 }
 
 export const DnsBuilder = napi.DnsBuilder;
+export const HttpBuilder = napi.HttpBuilder;
 export const TlsBuilder = napi.TlsBuilder;
 export const SecretBuilder = napi.SecretBuilder;
 export const NetworkBuilder = napi.NetworkBuilder;

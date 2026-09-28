@@ -223,8 +223,8 @@ class MicrosandboxTest < Test::Unit::TestCase
       require "microsandbox"
       Microsandbox.use_cloud_backend!("test-key", url: "http://127.0.0.1:9")
       operations = [
-        -> { Microsandbox::Sandbox.create("ruby-test", image: "alpine", http_deny_message: "blocked {host}") },
-        -> { Microsandbox::Sandbox.builder("ruby-test").image("alpine").http_deny_message("blocked {host}").create }
+        -> { Microsandbox::Sandbox.create("ruby-test", image: "alpine", http: { deny_message: "blocked {host}" }) },
+        -> { Microsandbox::Sandbox.builder("ruby-test").image("alpine").http { |h| h.deny_message("blocked {host}") }.create }
       ]
       operations.each do |operation|
         begin

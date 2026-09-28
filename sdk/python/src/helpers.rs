@@ -1598,7 +1598,7 @@ fn apply_network(
 
     // Body returned to HTTP/HTTPS clients when egress is denied.
     if let Some(message) = extract_opt::<String>(net, "http_deny_message")? {
-        builder = builder.network(move |n| n.http_deny_message(message));
+        builder = builder.network(move |n| n.http(|h| h.deny_message(message)));
     }
 
     // Secret violation action (sandbox-level, not per-secret).

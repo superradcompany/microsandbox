@@ -1199,11 +1199,15 @@ type NetworkConfig struct {
 	// TrustHostCAs ships the host's extra CA bundles into the guest.
 	TrustHostCAs *bool
 
-	// HTTPDenyMessage is the body returned to HTTP/HTTPS clients when egress
-	// is denied by policy. "{host}" is replaced with the blocked hostname.
-	// Empty uses the engine default, which tells an agent the host is not on
-	// the allow list.
-	HTTPDenyMessage string
+	// HTTP configures HTTP denial responses.
+	HTTP *HTTPConfig
+}
+
+// HTTPConfig configures HTTP denial responses.
+type HTTPConfig struct {
+	// DenyMessage replaces the body for denied HTTP/HTTPS requests.
+	// "{host}" names the blocked host. Empty uses the default message.
+	DenyMessage string
 }
 
 // DNSConfig configures the in-VM DNS proxy.

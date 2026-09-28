@@ -34,6 +34,12 @@ pub struct NetworkBuilder {
     errors: Vec<BuildError>,
 }
 
+/// Fluent builder for HTTP denial responses.
+#[derive(Default)]
+pub struct HttpBuilder {
+    deny_message: Option<String>,
+}
+
 /// Fluent builder for [`DnsConfig`].
 pub struct DnsBuilder {
     config: DnsConfig,
@@ -109,6 +115,20 @@ enum RefillTimeError {
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
+
+impl HttpBuilder {
+    /// Create HTTP settings with the default denial response.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the denied HTTP/HTTPS response body. `{host}` names the blocked host.
+    /// An empty message produces an empty body; omission uses the default.
+    pub fn deny_message(mut self, message: impl Into<String>) -> Self {
+        self.deny_message = Some(message.into());
+        self
+    }
+}
 
 impl NetworkBuilder {
     /// Start building a network configuration with defaults.
@@ -331,13 +351,12 @@ impl NetworkBuilder {
         self
     }
 
-    /// Body template returned to HTTP/HTTPS clients when egress is denied.
-    ///
-    /// `{host}` is replaced with the blocked hostname. Omit this to use
-    /// the default agent-facing message. Non-HTTP TCP is still closed
-    /// without a response.
-    pub fn http_deny_message(mut self, message: impl Into<String>) -> Self {
-        self.config.http_deny_message = Some(message.into());
+    /// Configure HTTP responses to denied requests.
+    pub fn http(mut self, configure: impl FnOnce(HttpBuilder) -> HttpBuilder) -> Self {
+        let http = configure(HttpBuilder {
+            deny_message: self.config.http_deny_message.take(),
+        });
+        self.config.http_deny_message = http.deny_message;
         self
     }
 

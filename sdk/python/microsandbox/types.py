@@ -1747,6 +1747,14 @@ class VsockRoute:
 
 
 @dataclass(frozen=True, slots=True)
+class HttpConfig:
+    """HTTP denial response settings. ``{host}`` names the blocked host."""
+
+    deny_message: str | None = None
+    """Custom body; ``None`` uses the default and an empty string sends no body."""
+
+
+@dataclass(frozen=True, slots=True)
 class Network:
     """Network configuration for a sandbox."""
 
@@ -1781,11 +1789,8 @@ class Network:
     rate_limiter: NetworkRateLimiter | None = None
     """Local egress and ingress rate limits. ``None`` means unlimited."""
     secret_violation_action: ViolationAction = ViolationAction.BLOCK_AND_LOG
-    http_deny_message: str | None = None
-    """Body returned to HTTP/HTTPS clients when egress is denied by
-    policy. ``{host}`` is replaced with the blocked hostname. ``None``
-    uses the engine default, which tells an agent the host is not on the
-    allow list."""
+    http: HttpConfig | None = None
+    """HTTP denial response settings."""
 
     @classmethod
     def none(cls) -> Network:
@@ -1861,10 +1866,13 @@ class Network:
         )
         if violation != str(ViolationAction.BLOCK_AND_LOG):
             d["secret_violation_action"] = violation
-        if self.http_deny_message is not None:
-            if not isinstance(self.http_deny_message, str):
-                raise TypeError("Network.http_deny_message must be a str or None")
-            d["http_deny_message"] = self.http_deny_message
+        if self.http is not None:
+            if not isinstance(self.http, HttpConfig):
+                raise TypeError("Network.http must be HttpConfig or None")
+            if self.http.deny_message is not None:
+                if not isinstance(self.http.deny_message, str):
+                    raise TypeError("HttpConfig.deny_message must be a str or None")
+                d["http_deny_message"] = self.http.deny_message
         return d
 
 

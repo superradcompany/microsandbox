@@ -21,11 +21,29 @@ end
 require_relative "microsandbox/errors"
 
 module Microsandbox
+  class HttpBuilder
+    attr_reader :message
+
+    def deny_message(value)
+      raise TypeError, "deny_message must be a String" unless value.is_a?(String)
+
+      @message = value
+      self
+    end
+  end
+
   class SandboxBuilder
+    def http
+      settings = HttpBuilder.new
+      yield settings
+      http!(settings.message)
+      self
+    end
+
     %i[
       image cpus max_cpus memory max_memory workdir shell hostname user
       detached ephemeral max_duration idle_timeout replace root_disk
-      disable_network http_deny_message quiet_logs entrypoint init proxy vsock vsock_dgram
+      disable_network quiet_logs entrypoint init proxy vsock vsock_dgram
     ].each do |name|
       define_method(name) do |*args|
         public_send(:"#{name}!", *args)

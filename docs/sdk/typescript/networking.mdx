@@ -575,22 +575,19 @@ Whether to ship the host's trusted root CAs into the guest at boot. Default: `fa
   </div>
 </div>
 
-#### <span className="msb-recv">network.</span><span className="msb-hn">httpDenyMessage()</span>
+#### <span className="msb-recv">network.</span><span className="msb-hn">http()</span>
 
 ```typescript
-httpDenyMessage(message: string): this
+http(configure: (h: HttpBuilder) => HttpBuilder): this
 ```
 
-Body returned to HTTP clients (and HTTPS clients on intercepted ports) when a domain rule denies the connection. The gateway answers `403 Forbidden` with this plain-text body instead of resetting the connection. `{host}` is replaced with the blocked hostname. Omit to use the default, which tells an agent the host is not on the allow list. See [What a denied HTTP request sees](/networking/overview#what-a-denied-http-request-sees).
+Configure HTTP denial responses. Use `h.denyMessage(message)` to set the plain-text body; `{host}` is replaced with the blocked hostname. Omit it for the default response, or pass an empty string for no body. Requires a supporting local runtime; cloud rejects custom messages.
 
-<p className="msb-label">Parameters</p>
+```typescript
+network.http((h) => h.denyMessage("Blocked: {host}"))
+```
 
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><code>message</code><span className="msb-type">string</span></div>
-    <div className="msb-param-desc">Plain-text body template; <code>{"{host}"}</code> is substituted.</div>
-  </div>
-</div>
+See [HTTP denial responses](/networking/overview#what-a-denied-http-request-sees).
 
 #### <span className="msb-recv">network.</span><span className="msb-hn">strict()</span>
 

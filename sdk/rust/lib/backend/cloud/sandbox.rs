@@ -963,7 +963,7 @@ mod tests {
         let error = crate::backend::with_backend(backend, async {
             SandboxBuilder::new("http-deny-cloud")
                 .image("alpine")
-                .network(|network| network.http_deny_message("blocked {host}"))
+                .network(|network| network.http(|h| h.deny_message("blocked {host}")))
                 .create()
                 .await
                 .err()

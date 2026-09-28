@@ -48,7 +48,7 @@ async fn spawn(name: &str, tls: bool, message: Option<&str>) -> Sandbox {
                 n = n.tls(|t| t.enabled(true));
             }
             if let Some(message) = message {
-                n = n.http_deny_message(message);
+                n = n.http(|h| h.deny_message(message));
             }
             n
         })

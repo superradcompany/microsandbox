@@ -226,6 +226,15 @@ export declare class FsWriteSink {
 }
 export type JsFsWriteSink = FsWriteSink
 
+/** Fluent builder for HTTP denial responses. */
+export declare class HttpBuilder {
+  /** Create default HTTP settings. */
+  constructor()
+  /** Set the denial response body, substituting `{host}`. */
+  denyMessage(message: string): this
+}
+export type JsHttpBuilder = HttpBuilder
+
 /**
  * Fluent builder for an explicit rootfs image source.
  *
@@ -525,11 +534,8 @@ export declare class NetworkBuilder {
   ipv6Pool(pool: string): this
   /** Trust the host's root CAs inside the guest. Default: false. */
   trustHostCAs(enabled: boolean): this
-  /**
-   * Body returned to HTTP/HTTPS clients when egress is denied by
-   * policy. `{host}` is replaced with the blocked hostname.
-   */
-  httpDenyMessage(message: string): this
+  /** Configure HTTP denial responses via a callback. */
+  http(configure: (arg: HttpBuilder) => HttpBuilder): this
   /**
    * Configure local egress and ingress rate limits. Applies on the next
    * sandbox start.
