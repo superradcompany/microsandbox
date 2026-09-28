@@ -1872,7 +1872,7 @@ class Network:
             if self.http.deny_message is not None:
                 if not isinstance(self.http.deny_message, str):
                     raise TypeError("HttpConfig.deny_message must be a str or None")
-                d["http_deny_message"] = self.http.deny_message
+                d["http"] = {"deny_message": self.http.deny_message}
         return d
 
 

@@ -1116,7 +1116,7 @@ func TestNetworkStrictDefaultsAndOptOut(t *testing.T) {
 
 func TestHTTPDenyMessageSurvivesFFIConversion(t *testing.T) {
 	config := buildFFINetwork(&NetworkConfig{HTTP: &HTTPConfig{DenyMessage: "blocked {host}"}})
-	if config.HTTPDenyMessage != "blocked {host}" {
-		t.Fatalf("HTTP denial message lost: %q", config.HTTPDenyMessage)
+	if config.HTTP.DenyMessage != "blocked {host}" {
+		t.Fatalf("HTTP denial message lost: %q", config.HTTP.DenyMessage)
 	}
 }

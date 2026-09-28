@@ -494,7 +494,7 @@ impl CloudSandboxSpec {
             max_udp_connections: self.network.max_udp_connections,
             rate_limiter: None,
             trust_host_cas: false,
-            http_deny_message: None,
+            http: Default::default(),
             outbound_proxy: None,
         };
         let runtime = SandboxRuntimeOptions {

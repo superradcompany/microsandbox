@@ -548,7 +548,7 @@ pub(crate) async fn validate_http_deny_message(
     path: &Path,
     config: &SandboxConfig,
 ) -> MicrosandboxResult<()> {
-    if config.spec.network.http_deny_message.is_none() {
+    if config.spec.network.http.deny_message.is_none() {
         return Ok(());
     }
     let supported = bounded_probe(path, "__launch-protocol")
@@ -560,7 +560,7 @@ pub(crate) async fn validate_http_deny_message(
         return Err(MicrosandboxError::unsupported(
             crate::error::Operation::SandboxStart,
             crate::error::UnsupportedReason::NotAvailable(upgrade_required(
-                "network.http_deny_message",
+                "network.http.deny_message",
             )),
         ));
     }
@@ -745,12 +745,12 @@ mod tests {
         ] {
             let path = script(dir.path(), "unsupported-denial", response);
             for message in ["", "blocked {host}"] {
-                config.spec.network.http_deny_message = Some(message.into());
+                config.spec.network.http.deny_message = Some(message.into());
                 let error = validate_http_deny_message(&path, &config)
                     .await
                     .unwrap_err();
                 assert!(matches!(error, MicrosandboxError::Unsupported { .. }));
-                assert!(error.to_string().contains("network.http_deny_message"));
+                assert!(error.to_string().contains("network.http.deny_message"));
             }
         }
         let path = script(

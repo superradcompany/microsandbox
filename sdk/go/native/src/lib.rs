@@ -969,7 +969,7 @@ struct NetworkOpts {
     /// Trust the host's extra CA certificates inside the guest.
     trust_host_cas: Option<bool>,
     /// Body returned to HTTP/HTTPS clients when egress is denied.
-    http_deny_message: Option<String>,
+    http: Option<microsandbox_network::config::HttpConfig>,
 }
 
 #[derive(serde::Deserialize)]
@@ -1522,7 +1522,11 @@ fn apply_network(
     }
 
     // Body returned to HTTP/HTTPS clients when egress is denied.
-    if let Some(ref message) = net.http_deny_message {
+    if let Some(message) = net
+        .http
+        .as_ref()
+        .and_then(|http| http.deny_message.as_ref())
+    {
         let message = message.clone();
         builder = builder.network(move |n| n.http(|h| h.deny_message(message)));
     }

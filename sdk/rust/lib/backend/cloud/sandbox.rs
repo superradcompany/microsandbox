@@ -592,8 +592,8 @@ fn reject_dropped_cloud_create_fields(config: &SandboxConfig) -> MicrosandboxRes
     if config.spec.network.rate_limiter.is_some() {
         return Err(unsupported("network.rate_limiter"));
     }
-    if config.spec.network.http_deny_message.is_some() {
-        return Err(unsupported("network.http_deny_message (local-only)"));
+    if config.spec.network.http.deny_message.is_some() {
+        return Err(unsupported("network.http.deny_message (local-only)"));
     }
     if config.spec.network.outbound_proxy.is_some() {
         return Err(unsupported("network.outbound_proxy"));
@@ -976,7 +976,7 @@ mod tests {
                 error,
                 MicrosandboxError::Unsupported {
                     reason: UnsupportedReason::ConfigField(
-                        "network.http_deny_message (local-only)"
+                        "network.http.deny_message (local-only)"
                     ),
                     ..
                 }
@@ -990,8 +990,8 @@ mod tests {
         );
         for message in ["", "blocked {host}"] {
             let mut config = base_cloud_config();
-            config.spec.network.http_deny_message = Some(message.to_owned());
-            assert_unsupported_config_field(config, "network.http_deny_message (local-only)");
+            config.spec.network.http.deny_message = Some(message.to_owned());
+            assert_unsupported_config_field(config, "network.http.deny_message (local-only)");
         }
     }
 

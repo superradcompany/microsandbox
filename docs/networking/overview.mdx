@@ -425,7 +425,8 @@ sb = Microsandbox::Sandbox.create(
 network:
   policy: none
   allow: [github.com]
-  http_deny_message: "{host} is blocked. Call the `RequestHostAccess` tool to ask the user for it."
+  http:
+    deny_message: "{host} is blocked. Call the `RequestHostAccess` tool to ask the user for it."
 ```
 </CodeGroup>
 

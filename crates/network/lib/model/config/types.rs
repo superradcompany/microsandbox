@@ -7,7 +7,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::num::NonZeroUsize;
 
 use ipnetwork::{Ipv4Network, Ipv6Network};
-use microsandbox_types::{NetworkRateLimiterConfig, TlsConfig};
+use microsandbox_types::{HttpConfig, NetworkRateLimiterConfig, TlsConfig};
 use serde::{Deserialize, Serialize};
 
 use crate::dns::Nameserver;
@@ -92,8 +92,8 @@ pub struct NetworkConfig {
     #[serde(default)]
     pub trust_host_cas: bool,
 
-    /// HTTP denial response settings. Serialized as the existing flat fields.
-    #[serde(flatten)]
+    /// HTTP denial response settings.
+    #[serde(default)]
     pub http: HttpConfig,
 
     /// Proxy that all outbound sandbox connections are dialed through.
@@ -102,19 +102,6 @@ pub struct NetworkConfig {
     /// relays non-DNS UDP; SOCKS4 blocks it because that protocol has no UDP command.
     #[serde(default)]
     pub outbound_proxy: Option<OutboundProxy>,
-}
-
-/// HTTP responses returned when network policy denies a request.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct HttpConfig {
-    /// Denial response body. `{host}` names the blocked host.
-    /// Omission uses the default; an empty string produces an empty body.
-    #[serde(
-        default,
-        rename = "http_deny_message",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub deny_message: Option<String>,
 }
 
 /// Network configuration whose runtime-only values have been resolved.
@@ -444,26 +431,27 @@ mod tests {
     }
 
     #[test]
-    fn http_config_preserves_flat_wire_contract() {
+    fn http_config_uses_nested_wire_contract() {
         for (raw, expected) in [
             (r#"{}"#, None),
-            (r#"{"http_deny_message":null}"#, None),
-            (r#"{"http_deny_message":""}"#, Some("")),
+            (r#"{"http":{}}"#, None),
+            (r#"{"http":{"deny_message":null}}"#, None),
+            (r#"{"http":{"deny_message":""}}"#, Some("")),
             (
-                r#"{"http_deny_message":"blocked {host}"}"#,
+                r#"{"http":{"deny_message":"blocked {host}"}}"#,
                 Some("blocked {host}"),
             ),
         ] {
             let config: NetworkConfig = serde_json::from_str(raw).unwrap();
             assert_eq!(config.http.deny_message.as_deref(), expected);
             let wire = serde_json::to_value(&config).unwrap();
-            assert!(wire.get("http").is_none());
+            assert!(wire.get("http_deny_message").is_none());
             assert_eq!(
-                wire.get("http_deny_message"),
+                wire["http"].get("deny_message"),
                 expected.map(serde_json::Value::from).as_ref()
             );
             let spec: microsandbox_types::NetworkSpec = serde_json::from_value(wire).unwrap();
-            assert_eq!(spec.http_deny_message.as_deref(), expected);
+            assert_eq!(spec.http.deny_message.as_deref(), expected);
             let restored: NetworkConfig =
                 serde_json::from_value(serde_json::to_value(spec).unwrap()).unwrap();
             assert_eq!(restored.http.deny_message.as_deref(), expected);

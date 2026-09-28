@@ -1807,6 +1807,11 @@ type MountSpec struct {
 	OverrideGid        *uint32 `json:"override_gid,omitempty"`
 }
 
+// HTTPConfig carries HTTP denial settings to the native SDK.
+type HTTPConfig struct {
+	DenyMessage string `json:"deny_message,omitempty"`
+}
+
 // NetworkOptions is the JSON representation of the network config block.
 type NetworkOptions struct {
 	CustomPolicy          *CustomNetworkPolicy       `json:"custom_policy,omitempty"`
@@ -1826,7 +1831,7 @@ type NetworkOptions struct {
 	RateLimiter           *NetworkRateLimiterOptions `json:"rate_limiter,omitempty"`
 	SecretViolationAction string                     `json:"secret_violation_action,omitempty"`
 	TrustHostCAs          *bool                      `json:"trust_host_cas,omitempty"`
-	HTTPDenyMessage       string                     `json:"http_deny_message,omitempty"`
+	HTTP                  *HTTPConfig                `json:"http,omitempty"`
 }
 
 // RateLimiterOptions limits one traffic direction; a nil bucket leaves that

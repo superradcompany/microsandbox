@@ -231,7 +231,7 @@ class MicrosandboxTest < Test::Unit::TestCase
           operation.call
           abort "expected cloud to reject the local-only option"
         rescue Microsandbox::UnsupportedError => error
-          abort error.message unless error.message.include?("network.http_deny_message")
+          abort error.message unless error.message.include?("network.http.deny_message")
           puts "rejected"
         end
       end

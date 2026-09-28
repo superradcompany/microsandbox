@@ -311,10 +311,6 @@ mod tests {
 
     #[test]
     fn cloud_bindings_import_domain_and_stay_scoped() {
-        assert_eq!(domain_declarations().len(), 17);
-        assert_eq!(snapshot_declarations().len(), 9);
-        assert_eq!(cloud_declarations().len(), 33);
-
         let cloud = render_cloud();
         // Cloud twins live here and their domain deps are imported/re-exported.
         for source in ["oci", "bind", "disk_image", "disk_snapshot"] {

@@ -131,7 +131,7 @@ async fn denied_https_gets_403_inside_intercepted_tls() {
     teardown(sb, name).await;
 }
 
-/// `http_deny_message` replaces the body and still renders `{host}`.
+/// `http.deny_message` replaces the body and still renders `{host}`.
 #[msb_test]
 async fn custom_http_deny_message_is_rendered() {
     let name = "http-deny-custom";

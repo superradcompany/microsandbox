@@ -141,5 +141,5 @@ export interface NetworkConfig {
    * `{host}` is replaced with the blocked hostname. `null` uses the
    * engine default.
    */
-  readonly httpDenyMessage?: string | null;
+  readonly http: { readonly denyMessage?: string | null };
 }
