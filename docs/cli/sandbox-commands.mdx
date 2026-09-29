@@ -26,6 +26,9 @@ msb run python -- python -c "print('hello')"
 # Named: persists after exit
 msb run --name devbox ubuntu -- bash
 
+# Override the entrypoint executable and pass its arguments after `--`
+msb run --entrypoint /bin/sh alpine -- -c 'echo foo; exec sleep 30'
+
 # With volumes, ports, and environment
 msb run --name api \
   -v ./src:/app \
@@ -50,6 +53,11 @@ msb run --name public-api -p 0.0.0.0:8000:8000 python
 
 </Accordion>
 
+`--entrypoint` accepts one executable, not a shell command string. Put each
+argument after the image and `--`; microsandbox preserves those argument
+boundaries. Invoke a shell explicitly, as above, when the command uses shell
+syntax such as `;`, pipes, or redirects.
+
 Common flags:
 
 | Flag | Description |
@@ -72,6 +80,7 @@ Common flags:
 | `-e`, `--env` | Set an environment variable |
 | `--label` | Attach a label for metric attribution (`KEY=VALUE`, or bare `KEY`). Repeatable |
 | `-w`, `--workdir` | Set the working directory |
+| `--entrypoint` | Override the image entrypoint executable. Pass its arguments after the image and `--` |
 | `-d`, `--detach` | Run the resolved image command in the background and print the sandbox name |
 | `--no-tty` | Disable PTY allocation and run non-interactively |
 | `--no-stdin` | Leave host input untouched and give the command EOF; disables automatic terminal mode and conflicts with `--tty` |

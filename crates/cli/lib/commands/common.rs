@@ -268,8 +268,9 @@ pub struct SandboxOpts {
     pub rm: Vec<String>,
 
     // --- Image/Runtime overrides ---
-    /// Override the image's default entrypoint command.
-    #[arg(long)]
+    /// Override the image's entrypoint executable. With `msb run`, pass its
+    /// arguments after the image and `--`.
+    #[arg(long, value_name = "EXECUTABLE")]
     pub entrypoint: Option<String>,
 
     /// Hand off PID 1 to this init binary inside the guest after agentd

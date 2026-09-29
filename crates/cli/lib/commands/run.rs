@@ -491,6 +491,30 @@ mod tests {
     }
 
     #[test]
+    fn entrypoint_executable_and_arguments_parse_separately() {
+        let args = parse_run_args(&[
+            "--entrypoint",
+            "/bin/sh",
+            "alpine",
+            "--",
+            "-c",
+            "echo foo; exec something",
+            "-",
+        ]);
+
+        assert_eq!(args.sandbox.entrypoint.as_deref(), Some("/bin/sh"));
+        assert_eq!(args.image.as_deref(), Some("alpine"));
+        assert_eq!(
+            args.command,
+            vec![
+                "-c".to_string(),
+                "echo foo; exec something".to_string(),
+                "-".to_string()
+            ]
+        );
+    }
+
+    #[test]
     fn noninteractive_flags_conflict_with_tty() {
         for flag in ["--no-tty", "--no-stdin"] {
             let err =
