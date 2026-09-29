@@ -4,10 +4,12 @@ import contextlib
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import textwrap
 import unittest
 from unittest.mock import patch
 
@@ -24,40 +26,56 @@ class PublicationOrderTests(unittest.TestCase):
         dependency = publisher.Package("microsandbox-image", "0.7.4", frozenset())
         consumer = publisher.Package("microsandbox-runtime", "0.7.4", frozenset({dependency.name}))
         missing = 'error: failed to select a version for the requirement `microsandbox-image = "=0.7.4"`'
+        missing_package = 'error: no matching package named `microsandbox-image` found'
         cases = [
             ("package", missing, 1, True),
             ("publish", missing, 1, True),
+            ("package", missing_package, 1, True),
+            ("publish", missing_package, 1, True),
             ("publish", missing, 100, False),
+            ("publish", missing_package, 100, False),
             ("publish", "error: token rejected", 1, False),
             ("package", missing.replace("0.7.4", "0.7.5"), 1, False),
             ("package", missing.replace("microsandbox-image", "unrelated-crate"), 1, False),
+            ("package", missing_package.replace("microsandbox-image", "unrelated-crate"), 1, False),
         ]
         for stage, failure, failures, succeeds in cases:
-            with self.subTest(stage=stage, failure=failure, failures=failures):
-                attempts = 0
-                uploaded = []
+            with (
+                self.subTest(stage=stage, failure=failure, failures=failures),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                root = Path(directory)
+                state_path = root / "state.json"
+                state_path.write_text(json.dumps({"attempts": 0, "uploaded": []}))
+                cargo = root / "cargo"
+                cargo.write_text(f"#!{sys.executable}\n" + textwrap.dedent(f"""\
+                    import json
+                    from pathlib import Path
+                    import sys
+
+                    state_path = Path({str(state_path)!r})
+                    state = json.loads(state_path.read_text())
+                    package = sys.argv[sys.argv.index('-p') + 1]
+                    failed = False
+                    if package == {consumer.name!r} and sys.argv[1] == {stage!r}:
+                        state['attempts'] += 1
+                        failed = state['attempts'] <= {failures}
+                    if sys.argv[1] == 'publish' and not failed:
+                        state['uploaded'].append(package)
+                    state_path.write_text(json.dumps(state))
+                    if failed:
+                        print({failure!r}, file=sys.stderr)
+                        sys.exit(101)
+                    """))
+                cargo.chmod(0o755)
                 now = 0
 
                 def sleep(delay):
                     nonlocal now
                     now += delay
 
-                def cargo(command, **kwargs):
-                    nonlocal attempts
-                    package = command[command.index("-p") + 1]
-                    if package == consumer.name and command[1] == stage:
-                        attempts += 1
-                        if attempts <= failures:
-                            result = subprocess.CompletedProcess(command, 101, failure)
-                            if kwargs.get("check"):
-                                result.check_returncode()
-                            return result
-                    if command[1] == "publish":
-                        uploaded.append(package)
-                    return subprocess.CompletedProcess(command, 0, "")
-
                 with (
-                    patch.object(publisher.subprocess, "run", side_effect=cargo),
+                    patch.dict(os.environ, {"PATH": str(root) + os.pathsep + os.environ["PATH"]}),
                     patch.object(publisher, "registry_checksum", return_value=None),
                     patch.object(publisher, "wait_until_indexed"),
                     patch.object(publisher.time, "monotonic", side_effect=lambda: now),
@@ -66,13 +84,41 @@ class PublicationOrderTests(unittest.TestCase):
                 ):
                     if succeeds:
                         publisher.publish([[dependency], [consumer]], timeout=3)
-                        self.assertEqual(uploaded, [dependency.name, consumer.name])
-                        self.assertEqual(attempts, 2)
                     else:
                         with self.assertRaises(subprocess.CalledProcessError):
                             publisher.publish([[dependency], [consumer]], timeout=3)
-                        self.assertEqual(uploaded, [dependency.name])
-                        self.assertEqual(attempts, 3 if failures == 100 else 1)
+                state = json.loads(state_path.read_text())
+                self.assertEqual(
+                    state["uploaded"], [dependency.name, consumer.name] if succeeds else [dependency.name]
+                )
+                self.assertEqual(state["attempts"], 2 if succeeds else 3 if failures == 100 else 1)
+
+    def test_cargo_progress_is_visible_before_process_exits(self):
+        with tempfile.TemporaryDirectory() as directory:
+            acknowledged = Path(directory) / "acknowledged"
+
+            class ProgressOutput(io.StringIO):
+                def write(self, message):
+                    if "Packaging microsandbox-runtime" in message:
+                        acknowledged.touch()
+                    return super().write(message)
+
+            # The child cannot finish successfully until its progress reaches
+            # the caller. A buffered implementation times out instead.
+            script = textwrap.dedent(f"""\
+                from pathlib import Path
+                import sys
+                import time
+
+                print('Packaging microsandbox-runtime', file=sys.stderr, flush=True)
+                deadline = time.monotonic() + 5
+                while not Path({str(acknowledged)!r}).exists():
+                    if time.monotonic() >= deadline:
+                        sys.exit(1)
+                    time.sleep(0.01)
+                """)
+            with contextlib.redirect_stdout(ProgressOutput()):
+                publisher.run_with_index_retry([sys.executable, "-c", script], [], timeout=10)
 
     def test_versioned_dev_dependencies_precede_consumers(self):
         with tempfile.TemporaryDirectory() as directory:
