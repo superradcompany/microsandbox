@@ -4,11 +4,23 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
+use bytes::Bytes;
 use microsandbox_network::config::builder::SecretBuilder;
+use microsandbox_network::conn::ProxyConnectState;
+use microsandbox_network::policy::NetworkPolicy;
 use microsandbox_network::secrets::config::{SecretViolationAction, SecretsConfig};
+use microsandbox_network::secrets::handle::SecretsHandle;
 use microsandbox_network::secrets::handler::SecretsHandler;
+use microsandbox_network::shared::{ResolvedHostnameFamily, SharedState};
+use microsandbox_network::tcp::proxy::spawn_tcp_proxy;
+use microsandbox_network::tls::state::TlsState;
+use tokio::io::AsyncReadExt;
+use tokio::net::TcpListener;
+use tokio::sync::mpsc;
 use tracing::field::{Field, Visit};
 use tracing::span::{Attributes, Id, Record};
 use tracing::{Event, Level, Metadata, Subscriber};
@@ -60,6 +72,134 @@ impl Subscriber for CapturedLogs {
         };
         event.record(&mut captured);
         self.0.lock().unwrap().push(captured);
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Functions
+//--------------------------------------------------------------------------------------------------
+
+async fn assert_proxy_violation_logs(logs: &CapturedLogs) {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    for action in [
+        SecretViolationAction::Block,
+        SecretViolationAction::BlockAndLog,
+        SecretViolationAction::BlockAndTerminate,
+    ] {
+        for path in ["first flight", "body relay", "CONNECT"] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let config = SecretsConfig {
+                secrets: vec![
+                    SecretBuilder::new()
+                        .env("API_KEY")
+                        .value("real-secret")
+                        .placeholder("$KEY")
+                        .allow("api.example.com")
+                        .build(),
+                ],
+                violation_action: action.clone(),
+                ..Default::default()
+            };
+            let tls_state = (path == "CONNECT").then(|| {
+                Arc::new(
+                    TlsState::new(Default::default(), SecretsHandle::new(config.clone())).unwrap(),
+                )
+            });
+            let shared = Arc::new(SharedState::new(4));
+            shared.cache_resolved_hostname(
+                "api.example.com",
+                ResolvedHostnameFamily::Ipv4,
+                [addr.ip()],
+                Duration::from_secs(60),
+            );
+            let terminated = Arc::new(AtomicBool::new(false));
+            let termination_flag = terminated.clone();
+            shared.set_termination_hook(Arc::new(move || {
+                termination_flag.store(true, Ordering::SeqCst);
+            }));
+            let (from_tx, from_rx) = mpsc::channel(8);
+            let (to_tx, mut to_rx) = mpsc::channel(8);
+            let request = match path {
+                "first flight" => {
+                    "GET / HTTP/1.1\r\nHost: api.example.com\r\nAuthorization: Bearer $KEY\r\n\r\n"
+                }
+                "body relay" => {
+                    "POST / HTTP/1.1\r\nHost: api.example.com\r\nContent-Length: 4\r\n\r\n"
+                }
+                "CONNECT" => {
+                    "CONNECT api.example.com:443 HTTP/1.1\r\nHost: api.example.com:443\r\nProxy-Authorization: Bearer $KEY\r\n\r\n"
+                }
+                _ => unreachable!(),
+            };
+            from_tx
+                .send(Bytes::from_static(request.as_bytes()))
+                .await
+                .unwrap();
+            logs.0.lock().unwrap().clear();
+            spawn_tcp_proxy(
+                &tokio::runtime::Handle::current(),
+                addr,
+                addr,
+                from_rx,
+                to_tx,
+                shared,
+                Arc::new(NetworkPolicy::default()),
+                Arc::new(config),
+                tls_state,
+                false,
+                Arc::new(ProxyConnectState::new()),
+                None,
+            );
+            let (mut server, _) = listener.accept().await.unwrap();
+            if path == "body relay" {
+                // Observing the headers upstream proves the placeholder arrives
+                // in the relay loop, after first-flight inspection has finished.
+                let mut headers = vec![0; request.len()];
+                server.read_exact(&mut headers).await.unwrap();
+                assert_eq!(headers, request.as_bytes());
+                from_tx.send(Bytes::from_static(b"$KEY")).await.unwrap();
+            }
+            drop(from_tx);
+            let mut blocked_bytes = Vec::new();
+            server.read_to_end(&mut blocked_bytes).await.unwrap();
+            assert!(
+                blocked_bytes.is_empty(),
+                "{path}: blocked data reached upstream"
+            );
+            assert!(to_rx.recv().await.is_none(), "{path}: proxy must close");
+            assert_eq!(
+                terminated.load(Ordering::SeqCst),
+                action == SecretViolationAction::BlockAndTerminate
+            );
+
+            let events = logs.0.lock().unwrap();
+            let violations: Vec<_> = events
+                .iter()
+                .filter(|event| {
+                    event
+                        .fields
+                        .get("message")
+                        .is_some_and(|message| message.contains("secret violation"))
+                })
+                .collect();
+            if action == SecretViolationAction::Block {
+                assert!(
+                    violations.is_empty(),
+                    "{path}: silent blocking logged a violation"
+                );
+            } else {
+                assert_eq!(violations.len(), 1, "{path}: log each violation once");
+                assert_eq!(
+                    violations[0].level,
+                    if action == SecretViolationAction::BlockAndLog {
+                        Level::WARN
+                    } else {
+                        Level::ERROR
+                    }
+                );
+            }
+        }
     }
 }
 
@@ -156,4 +296,16 @@ fn secret_violation_logs_distinguish_blocking_from_allowed_placeholders() {
             }
         }
     }
+
+    // Use the same isolated process and subscriber to cover the real proxy's
+    // logging and termination, not just the handler's returned action.
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            tokio::time::timeout(Duration::from_secs(10), assert_proxy_violation_logs(&logs))
+                .await
+                .expect("proxy violation checks timed out");
+        });
 }
