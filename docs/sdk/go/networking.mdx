@@ -385,6 +385,7 @@ type NetworkConfig struct {
     RateLimiter             *NetworkRateLimiterConfig
     SecretViolationAction   ViolationAction
     TrustHostCAs            *bool
+    HTTP                     *HTTPConfig
 }
 ```
 
@@ -406,12 +407,14 @@ The full network stack configuration passed via [`WithNetwork`](#m-withnetwork).
 | TCPAcceptQueueSize | `*uint32` | Accept-queue depth for published TCP port listeners, 1 to 2147483647. `nil` keeps the default, 1,024; the host kernel caps it at its own `somaxconn` (4,096 by default on Linux, 128 on macOS) |
 | IPv4Pool | `string` | Pool used to derive per-sandbox `/30` guest subnets. Defaults to `172.16.0.0/12` |
 | IPv6Pool | `string` | Pool used to derive per-sandbox `/64` guest prefixes. Defaults to `fd42:6d73:62::/48` |
+| NAT64Prefixes | `[]string` | NAT64 `/96` prefixes for policy classification. Defaults to `64:ff9b::/96` |
 | MaxTCPConnections | `*uint` | TCP connection cap; defaults to unlimited for single-tenant and 1,024 for multi-tenant; zero means unlimited |
 | MaxConnections | `*uint` | Deprecated TCP alias; cannot be combined with MaxTCPConnections |
 | MaxUDPConnections | `*uint` | UDP relay session cap; defaults to unlimited for single-tenant and 1,024 for multi-tenant; zero means unlimited. At capacity, the least recently active session is evicted. |
 | RateLimiter | [`*NetworkRateLimiterConfig`](#networkratelimiterconfig) | Rate limits grouped by direction. `nil` means unlimited |
 | SecretViolationAction | [`ViolationAction`](/sdk/go/secrets#violationactionstring-enum) | Sandbox-wide action when a secret is sent to a disallowed host. Per-secret overrides via `SecretEntry.ViolationAction` |
 | TrustHostCAs | `*bool` | Ship the host's extra CA bundles into the guest. Opt-in for corporate MITM proxies whose gateway CA is unknown to the guest's stock bundle |
+| HTTP | `*HTTPConfig` | <Tooltip tip="Custom HTTP denial messages are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip> Use `&HTTPConfig{DenyMessage: "Blocked: {host}"}` to set the denial response body. `{host}` is substituted. Nil or an empty message uses the default. See [denied HTTP requests](/networking/overview#what-a-denied-http-request-sees). |
 
 Connection limits use pointers to distinguish an omitted value from explicit zero. `MaxConnections` and `MaxTCPConnections` cannot both be specified, even with the same value. Either TCP spelling can be combined with `MaxUDPConnections`.
 

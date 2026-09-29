@@ -8,6 +8,7 @@ use microsandbox_network::builder::NetworkBuilder as RustNetworkBuilder;
 use microsandbox_network::policy::NetworkPolicy as RustNetworkPolicy;
 
 use crate::dns_builder::JsDnsBuilder;
+use crate::http_builder::JsHttpBuilder;
 use crate::interface_overrides_builder::JsInterfaceOverridesBuilder;
 use crate::network_policy_builder::JsNetworkPolicyBuilder;
 use crate::rate_limiter_builder::{JsNetworkRateLimiterBuilder, RateLimiterValues};
@@ -293,12 +294,39 @@ impl JsNetworkBuilder {
         Ok(self)
     }
 
+    /// Add a NAT64 /96 prefix for policy classification.
+    #[napi(js_name = "nat64Prefix")]
+    pub fn nat64_prefix(&mut self, prefix: String) -> Result<&Self> {
+        let parsed = ipnetwork::Ipv6Network::from_str(&prefix).map_err(|e| {
+            napi::Error::from_reason(format!("invalid NAT64 prefix `{prefix}`: {e}"))
+        })?;
+        let prev = self.take_inner();
+        self.inner = Some(prev.nat64_prefix(parsed));
+        Ok(self)
+    }
+
     /// Trust the host's root CAs inside the guest. Default: false.
     #[napi(js_name = "trustHostCAs")]
     pub fn trust_host_cas(&mut self, enabled: bool) -> &Self {
         let prev = self.take_inner();
         self.inner = Some(prev.trust_host_cas(enabled));
         self
+    }
+
+    /// Configure HTTP denial responses via a callback.
+    #[napi]
+    pub fn http(
+        &mut self,
+        env: &Env,
+        configure: Function<ClassInstance<JsHttpBuilder>, ClassInstance<JsHttpBuilder>>,
+    ) -> Result<&Self> {
+        let initial = JsHttpBuilder::new().into_instance(env)?;
+        let returned = configure.call(initial)?;
+        if let Some(message) = returned.message.clone() {
+            let prev = self.take_inner();
+            self.inner = Some(prev.http(|h| h.deny_message(message)));
+        }
+        Ok(self)
     }
 
     /// Configure local egress and ingress rate limits. Applies on the next

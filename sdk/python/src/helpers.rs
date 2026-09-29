@@ -1597,10 +1597,28 @@ fn apply_network(
         })?;
         builder = builder.network(|n| n.ipv6_pool(pool));
     }
+    for raw in extract_opt::<Vec<String>>(net, "nat64_prefixes")?.unwrap_or_default() {
+        let prefix: ipnetwork::Ipv6Network = raw.parse().map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(format!(
+                "invalid nat64_prefixes entry {raw:?}: {e}"
+            ))
+        })?;
+        builder = builder.network(|n| n.nat64_prefix(prefix));
+    }
 
     // Host-CA trust (ship host's extra CAs into the guest at boot).
     if let Some(trust) = extract_opt::<bool>(net, "trust_host_cas")? {
         builder = builder.network(move |n| n.trust_host_cas(trust));
+    }
+
+    // Body returned to HTTP/HTTPS clients when egress is denied.
+    if let Some(http) = net.get_item("http")?
+        && !http.is_none()
+    {
+        let http = http.downcast::<PyDict>()?;
+        if let Some(message) = extract_opt::<String>(http, "deny_message")? {
+            builder = builder.network(move |n| n.http(|h| h.deny_message(message)));
+        }
     }
 
     // Secret violation action (sandbox-level, not per-secret).

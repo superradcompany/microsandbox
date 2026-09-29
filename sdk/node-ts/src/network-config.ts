@@ -135,7 +135,14 @@ export interface NetworkConfig {
     readonly mac?: readonly number[] | null;
     readonly mtu?: number | null;
   };
+  readonly nat64Prefixes: readonly string[];
   readonly trustHostCAs: boolean;
   /** Canonical proxy configuration for outbound connections. */
   readonly outboundProxy: OutboundProxy | null;
+  /**
+   * Body returned to HTTP/HTTPS clients when egress is denied by policy;
+   * `{host}` is replaced with the blocked hostname. `null` uses the
+   * engine default.
+   */
+  readonly http: { readonly denyMessage?: string | null };
 }

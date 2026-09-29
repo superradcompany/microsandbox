@@ -482,6 +482,8 @@ pub(crate) async fn validate_runtime_config(
     };
     let contract = resolve(&runtime.msb_path).await?;
     contract.validate_launch_intent(config)?;
+    #[cfg(feature = "net")]
+    validate_http_deny_message(&runtime.msb_path, config).await?;
     // Probed here, not only at spawn, so `replace` cannot delete its target first.
     #[cfg(feature = "net")]
     contract
@@ -558,6 +560,31 @@ pub(crate) async fn resolve(path: &Path) -> MicrosandboxResult<LaunchContract> {
         },
     );
     Ok(contract)
+}
+
+/// Probe custom denial support only when the caller explicitly requests it.
+#[cfg(feature = "net")]
+pub(crate) async fn validate_http_deny_message(
+    path: &Path,
+    config: &SandboxConfig,
+) -> MicrosandboxResult<()> {
+    if config.spec.network.http.deny_message.is_none() {
+        return Ok(());
+    }
+    let supported = bounded_probe(path, "__launch-protocol")
+        .await
+        .ok()
+        .and_then(|output| serde_json::from_slice::<LaunchCapabilities>(&output).ok())
+        .is_some_and(|capabilities| capabilities.http_deny_message);
+    if !supported {
+        return Err(MicrosandboxError::unsupported(
+            crate::error::Operation::SandboxStart,
+            crate::error::UnsupportedReason::NotAvailable(upgrade_required(
+                "network.http.deny_message",
+            )),
+        ));
+    }
+    Ok(())
 }
 
 /// Probe only the new combination. Ordinary starts/restores keep their cached,
@@ -814,6 +841,42 @@ mod tests {
             .require_network_capabilities(&absent, &tuned)
             .await
             .unwrap();
+    }
+
+    #[cfg(all(unix, feature = "net"))]
+    #[tokio::test]
+    async fn http_deny_message_requires_an_explicit_runtime_capability() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = crate::test_support::fixtures::decode(include_str!(
+            "../db/fixtures/config-0.6.18.json"
+        ))
+        .unwrap();
+        // No custom message must avoid probing, including on an old runtime.
+        validate_http_deny_message(&dir.path().join("no-probe"), &config)
+            .await
+            .unwrap();
+        for response in [
+            "exit 1",
+            r#"printf '%s' '{"protocols":[2,1]}'"#,
+            r#"printf '%s' '{"protocols":[2,1],"http_deny_message":false}'"#,
+            r#"printf '%s' '{"protocols":[2,1],"http_deny_message":"true"}'"#,
+        ] {
+            let path = script(dir.path(), "unsupported-denial", response);
+            for message in ["", "blocked {host}"] {
+                config.spec.network.http.deny_message = Some(message.into());
+                let error = validate_http_deny_message(&path, &config)
+                    .await
+                    .unwrap_err();
+                assert!(matches!(error, MicrosandboxError::Unsupported { .. }));
+                assert!(error.to_string().contains("network.http.deny_message"));
+            }
+        }
+        let path = script(
+            dir.path(),
+            "supports-denial",
+            r#"printf '%s' '{"protocols":[2,1],"http_deny_message":true}'"#,
+        );
+        validate_http_deny_message(&path, &config).await.unwrap();
     }
 
     #[cfg(unix)]

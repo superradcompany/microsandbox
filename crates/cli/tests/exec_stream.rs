@@ -1,8 +1,8 @@
 //! Integration test for `msb exec --stream`.
 //!
 //! Drives a long-lived guest turn by turn over a non-PTY stream: send a line,
-//! read the reply, then send the next. The buffered `exec` path reads stdin to
-//! EOF before producing any output, so it would deadlock here — completing
+//! read the reply, then send the next. The buffered `exec` path waits for the
+//! command to exit before producing output, so it would deadlock here. Completing
 //! within the timeout is itself the proof that `--stream` streams both ways.
 
 use std::process::Stdio;

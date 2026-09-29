@@ -15,8 +15,8 @@ use microsandbox_utils::size::Bytes;
 use zeroize::Zeroizing;
 
 use crate::config::{
-    ConnectionLimit, DnsConfig, InterfaceOverrides, NetworkConfig, PortProtocol, PublishedPort,
-    TcpAcceptQueueSize,
+    ConnectionLimit, DnsConfig, HttpConfig, InterfaceOverrides, NetworkConfig, PortProtocol,
+    PublishedPort, TcpAcceptQueueSize,
 };
 use crate::dns::Nameserver;
 use crate::policy::{BuildError, NetworkPolicy};
@@ -33,6 +33,12 @@ use crate::secrets::config::{
 pub struct NetworkBuilder {
     config: NetworkConfig,
     errors: Vec<BuildError>,
+}
+
+/// Fluent builder for HTTP denial responses.
+#[derive(Default)]
+pub struct HttpBuilder {
+    config: HttpConfig,
 }
 
 /// Fluent builder for [`DnsConfig`].
@@ -110,6 +116,25 @@ enum RefillTimeError {
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
+
+impl HttpBuilder {
+    /// Create HTTP settings with the default denial response.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the denied HTTP/HTTPS response body. `{host}` names the blocked host.
+    /// An empty message produces an empty body; omission uses the default.
+    pub fn deny_message(mut self, message: impl Into<String>) -> Self {
+        self.config.deny_message = Some(message.into());
+        self
+    }
+
+    /// Return the HTTP configuration.
+    pub fn build(self) -> HttpConfig {
+        self.config
+    }
+}
 
 impl NetworkBuilder {
     /// Start building a network configuration with defaults.
@@ -335,6 +360,23 @@ impl NetworkBuilder {
         self
     }
 
+    /// Add a NAT64 `/96` prefix.
+    ///
+    /// Destinations inside NAT64 prefixes are evaluated against both
+    /// their IPv6 address and the embedded IPv4 address. The well-known
+    /// `64:ff9b::/96` prefix is configured by default.
+    pub fn nat64_prefix(mut self, prefix: Ipv6Network) -> Self {
+        if prefix.prefix() != 96 {
+            self.errors.push(BuildError::InvalidNat64Prefix {
+                raw: prefix.to_string(),
+            });
+        } else if !self.config.nat64_prefixes.contains(&prefix) {
+            self.config.nat64_prefixes.push(prefix);
+        }
+
+        self
+    }
+
     /// Whether to ship the host's trusted root CAs into the guest at
     /// boot. Default: false. Opt in when running behind a corporate
     /// TLS-inspecting proxy (Cloudflare Warp Zero Trust, Zscaler,
@@ -342,6 +384,15 @@ impl NetworkBuilder {
     /// unknown to the guest's stock Mozilla bundle.
     pub fn trust_host_cas(mut self, enabled: bool) -> Self {
         self.config.trust_host_cas = enabled;
+        self
+    }
+
+    /// Configure HTTP responses to denied requests.
+    pub fn http(mut self, configure: impl FnOnce(HttpBuilder) -> HttpBuilder) -> Self {
+        self.config.http = configure(HttpBuilder {
+            config: self.config.http,
+        })
+        .build();
         self
     }
 
@@ -374,6 +425,16 @@ impl NetworkBuilder {
     pub fn build(mut self) -> Result<NetworkConfig, BuildError> {
         if let Some(err) = self.errors.drain(..).next() {
             return Err(err);
+        }
+        if let Some(prefix) = self
+            .config
+            .nat64_prefixes
+            .iter()
+            .find(|prefix| prefix.prefix() != 96)
+        {
+            return Err(BuildError::InvalidNat64Prefix {
+                raw: prefix.to_string(),
+            });
         }
         if self.config.tls.enabled
             && (self.config.tls.intercept_ca.cert_path.is_some()
@@ -1012,6 +1073,16 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(err, BuildError::IncompleteInterceptCaConfig));
+    }
+
+    #[test]
+    fn network_builder_rejects_non_96_nat64_prefix() {
+        let err = NetworkBuilder::new()
+            .nat64_prefix("64:ff9b::/64".parse().unwrap())
+            .build()
+            .unwrap_err();
+
+        assert!(matches!(err, BuildError::InvalidNat64Prefix { .. }));
     }
 
     #[test]

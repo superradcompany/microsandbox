@@ -845,6 +845,27 @@ fn trust_host_cas(self, enabled: bool) -> Self
 
 Whether to ship the host's trusted root CAs into the guest at boot. Default: `false`. Opt in when egress HTTPS inside the sandbox needs to work behind corporate MITM proxies (Cloudflare Warp Zero Trust, Zscaler, Netskope, etc.). Those proxies install a gateway CA on the host that's unknown to the guest's stock Mozilla bundle.
 
+#### <span className="msb-recv">network.</span><span className="msb-hn">http()</span>
+
+```rust
+fn http(self, configure: impl FnOnce(HttpBuilder) -> HttpBuilder) -> Self
+
+// Within the callback:
+fn deny_message(self, message: impl Into<String>) -> Self
+```
+
+Body returned to HTTP clients (and HTTPS clients on intercepted ports) when a domain rule denies the connection. The gateway answers `403 Forbidden` with this plain-text body instead of resetting the connection. `{host}` is replaced with the blocked hostname. Omit to use the default, which tells an agent the host is not on the allow list. See [What a denied HTTP request sees](/networking/overview#what-a-denied-http-request-sees).
+
+`HttpBuilder::build()` returns `HttpConfig`, stored in `NetworkConfig.http`:
+
+```rust
+pub struct HttpConfig {
+    pub deny_message: Option<String>,
+}
+```
+
+`None` uses the default response; `Some(String::new())` sends an empty body.
+
 #### <span className="msb-recv">network.</span><span className="msb-hn">strict()</span>
 
 ```rust
@@ -862,6 +883,23 @@ fn tcp_accept_queue_size(self, size: u32) -> Self
 Set how many not-yet-accepted connections each published TCP port's host listener queues. Default: `1024`. Accepts `1..=i32::MAX`; other values record [`BuildError::InvalidTcpAcceptQueueSize`](#builderror). Connections arriving while the queue is full never reach the sandbox, so raise this when a burst of parallel connections — such as a reverse proxy fanning out one page load — exceeds it. The host kernel caps the effective depth at `net.core.somaxconn` on Linux (4,096 by default) or `kern.ipc.somaxconn` on macOS (128 by default). Runtimes that predate the setting are refused with an upgrade-required error rather than silently ignoring it.
 
 `RestoreBuilder`, `BranchBuilder`, and `BranchManyBuilder` expose the same `tcp_accept_queue_size()` for the listeners a child publishes.
+
+#### <span className="msb-recv">network.</span><span className="msb-hn">nat64_prefix()</span>
+
+```rust
+fn nat64_prefix(self, prefix: Ipv6Network) -> Self
+```
+
+Add a NAT64 `/96` prefix for policy classification. Destinations inside NAT64 prefixes are evaluated against both their IPv6 address and the embedded IPv4 address, so translated private, loopback, link-local, and metadata IPv4 addresses retain their normal policy groups. The well-known `64:ff9b::/96` prefix is configured by default.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>prefix</code><span className="msb-type">Ipv6Network</span></div>
+    <div className="msb-param-desc">NAT64 prefix. Must be an IPv6 <code>/96</code>.</div>
+  </div>
+</div>
 
 #### <span className="msb-recv">network.</span><span className="msb-hn">max_udp_connections()</span>
 
@@ -1538,6 +1576,7 @@ Errors surfaced by the builders' `build()` methods. The same enum covers [`Netwo
 | `InvalidIpv4Pool { raw }` | `ipv4_pool()` got a pool that can't hold a `/30` sandbox subnet |
 | `InvalidIpv6Pool { raw }` | `ipv6_pool()` got a pool that can't hold a `/64` sandbox prefix |
 | `InvalidTcpAcceptQueueSize { source }` | `tcp_accept_queue_size()` got a value outside `1..=i32::MAX` |
+| `InvalidNat64Prefix { raw }` | `nat64_prefix()` got a prefix that is not an IPv6 `/96` |
 | `InvalidOutboundProxy { reason }` | [`SandboxBuilder::proxy()`](/sdk/rust/proxies#proxy) got an invalid proxy configuration |
 | `InvalidDomain { rule_index, raw, source }` | `.domain` / `.domain_suffix` got a value that failed `DomainName` parse |
 | `InvalidPortRange { rule_index, lo, hi }` | `.port_range(lo, hi)` had `lo > hi` |

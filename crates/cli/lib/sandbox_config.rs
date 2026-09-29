@@ -13,8 +13,8 @@ use microsandbox::sandbox::{
 };
 #[cfg(feature = "net")]
 use microsandbox::sandbox::{
-    DnsConfigPatch, NetworkPolicy, NetworkProfile, NetworkSpecPatch, SecretsConfigPatch,
-    TlsConfigPatch,
+    DnsConfigPatch, HttpConfigPatch, NetworkPolicy, NetworkProfile, NetworkSpecPatch,
+    SecretsConfigPatch, TlsConfigPatch,
 };
 use microsandbox_image::RegistryAuth;
 use microsandbox_types_macros::ConfigPatch;
@@ -402,6 +402,14 @@ struct NetworkConfigInput {
     max_tcp_connections: Option<usize>,
     max_udp_connections: Option<usize>,
     tcp_accept_queue_size: Option<u32>,
+    #[config_patch(nested)]
+    http: Option<HttpInput>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, ConfigPatch)]
+#[serde(default, deny_unknown_fields)]
+struct HttpInput {
+    deny_message: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, ConfigPatch)]
@@ -1744,6 +1752,13 @@ fn materialize_network_patch(
         microsandbox_network::config::TcpAcceptQueueSize::try_from(size)?;
         patch = patch.tcp_accept_queue_size(size);
     }
+    if let Some(http) = input.http {
+        let mut value = HttpConfigPatch::new();
+        if let Some(message) = http.deny_message {
+            value = value.deny_message(message);
+        }
+        patch = patch.http(value);
+    }
     Ok(patch)
 }
 
@@ -2622,6 +2637,8 @@ network:
   allow: ["api.openai.com"]
   strict: true
   max_tcp_connections: 64
+  http:
+    deny_message: "Blocked: {host}"
 secrets:
   TOKEN:
     value: "literal-test-value"
@@ -2654,6 +2671,10 @@ secrets:
             "#!/bin/bash\npython app.py\n"
         );
         assert_eq!(config.spec.network.max_tcp_connections, Some(64));
+        assert_eq!(
+            config.spec.network.http.deny_message.as_deref(),
+            Some("Blocked: {host}")
+        );
         assert!(config.spec.network.strict);
         assert_eq!(config.spec.network.ports.len(), 0);
         assert!(config.spec.network.tls.as_ref().unwrap().enabled);

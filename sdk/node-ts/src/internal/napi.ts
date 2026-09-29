@@ -50,6 +50,7 @@ export interface NativeBindings {
   readonly InitOptionsBuilder: NapiInitOptionsBuilderCtor;
   readonly AttachOptionsBuilder: NapiAttachOptionsBuilderCtor;
   readonly DnsBuilder: NapiBuilderCtor<NapiDnsBuilder>;
+  readonly HttpBuilder: NapiBuilderCtor<NapiHttpBuilder>;
   readonly TlsBuilder: NapiBuilderCtor<NapiTlsBuilder>;
   readonly SecretBuilder: NapiBuilderCtor<NapiSecretBuilder>;
   readonly NetworkBuilder: NapiBuilderCtor<NapiNetworkBuilder>;
@@ -1014,6 +1015,10 @@ export interface NapiDnsConfig {
   readonly queryTimeoutMs: number;
 }
 
+export interface NapiHttpBuilder {
+  denyMessage(message: string): this;
+}
+
 export interface NapiTlsBuilder {
   bypass(pattern: string): this;
   verifyUpstream(verify: boolean): this;
@@ -1111,7 +1116,9 @@ export interface NapiNetworkBuilder {
   strict(enabled: boolean): this;
   ipv4Pool(pool: string): this;
   ipv6Pool(pool: string): this;
+  nat64Prefix(prefix: string): this;
   trustHostCAs(enabled: boolean): this;
+  http(configure: (h: NapiHttpBuilder) => NapiHttpBuilder): this;
   rateLimiter(
     configure: (b: NapiNetworkRateLimiterBuilder) => NapiNetworkRateLimiterBuilder,
   ): this;

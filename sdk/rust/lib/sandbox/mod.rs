@@ -174,8 +174,9 @@ pub use microsandbox_types::SandboxLogLevel as LogLevel;
 pub use microsandbox_types::{CpuPlacement, PullPolicy};
 #[cfg(feature = "net")]
 pub use microsandbox_types::{
-    DnsConfigPatch, HostPattern, InterfaceOverridesPatch, NetworkRateLimiterConfigPatch,
-    SecretSubstitution, SecretViolationAction, SecretsConfigPatch, TlsConfigPatch,
+    DnsConfigPatch, HostPattern, HttpConfig, HttpConfigPatch, InterfaceOverridesPatch,
+    NetworkRateLimiterConfigPatch, SecretSubstitution, SecretViolationAction, SecretsConfigPatch,
+    TlsConfigPatch,
 };
 pub use microsandbox_types::{
     EnvVar, MAX_HOSTNAME_BYTES, MAX_SANDBOX_NAME_BYTES, NetworkSpec, NetworkSpecPatch,

@@ -960,6 +960,9 @@ struct NetworkOpts {
     ipv4_pool: Option<String>,
     /// IPv6 pool used to derive per-sandbox /64 guest prefixes.
     ipv6_pool: Option<String>,
+    /// NAT64 /96 prefixes for policy classification.
+    #[serde(default)]
+    nat64_prefixes: Vec<String>,
     #[serde(alias = "max_connections")]
     max_tcp_connections: Option<usize>,
     max_udp_connections: Option<usize>,
@@ -970,6 +973,8 @@ struct NetworkOpts {
     secret_violation_action: Option<String>,
     /// Trust the host's extra CA certificates inside the guest.
     trust_host_cas: Option<bool>,
+    /// Body returned to HTTP/HTTPS clients when egress is denied.
+    http: Option<microsandbox_network::config::HttpConfig>,
 }
 
 #[derive(serde::Deserialize)]
@@ -1403,6 +1408,12 @@ fn apply_network(
             .map_err(|e| FfiError::invalid_argument(format!("ipv6_pool {raw:?}: {e}")))?;
         builder = builder.network(|n| n.ipv6_pool(pool));
     }
+    for raw in &net.nat64_prefixes {
+        let prefix: ipnetwork::Ipv6Network = raw.parse().map_err(|e| {
+            FfiError::invalid_argument(format!("nat64_prefixes entry {raw:?}: {e}"))
+        })?;
+        builder = builder.network(|n| n.nat64_prefix(prefix));
+    }
 
     // DNS configuration. Either nested `dns: {...}` or the legacy flat
     // `dns_rebind_protection` field. The nested form wins.
@@ -1522,6 +1533,16 @@ fn apply_network(
     // Trust host CA bundles inside the guest.
     if let Some(trust) = net.trust_host_cas {
         builder = builder.network(move |n| n.trust_host_cas(trust));
+    }
+
+    // Body returned to HTTP/HTTPS clients when egress is denied.
+    if let Some(message) = net
+        .http
+        .as_ref()
+        .and_then(|http| http.deny_message.as_ref())
+    {
+        let message = message.clone();
+        builder = builder.network(move |n| n.http(|h| h.deny_message(message)));
     }
 
     // Sandbox-wide secret violation action.

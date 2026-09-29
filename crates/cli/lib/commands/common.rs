@@ -416,6 +416,11 @@ pub struct SandboxOpts {
     #[arg(long = "net-ipv6-pool", value_name = "CIDR")]
     pub net_ipv6_pool: Option<String>,
 
+    /// NAT64 /96 prefix for policy classification. Repeatable.
+    #[cfg(feature = "net")]
+    #[arg(long = "net-nat64-prefix", value_name = "CIDR")]
+    pub net_nat64_prefix: Vec<String>,
+
     /// Network rule. Repeatable; each value is a comma-separated list of
     /// rule tokens. Token grammar:
     /// `<action>[:<direction>]@<target>[:<proto>[:<ports>]]`.
@@ -821,6 +826,7 @@ impl SandboxOpts {
             || self.net_default_ingress.is_some()
             || self.net_ipv4_pool.is_some()
             || self.net_ipv6_pool.is_some()
+            || !self.net_nat64_prefix.is_empty()
             || self.net_egress_bandwidth.is_some()
             || self.net_egress_bandwidth_burst.is_some()
             || self.net_egress_ops.is_some()
@@ -1072,6 +1078,9 @@ impl SandboxOpts {
             || self.net_default.is_some()
             || self.net_default_egress.is_some()
             || self.net_default_ingress.is_some()
+            || self.net_ipv4_pool.is_some()
+            || self.net_ipv6_pool.is_some()
+            || !self.net_nat64_prefix.is_empty()
             || self.net_egress_bandwidth.is_some()
             || self.net_egress_bandwidth_burst.is_some()
             || self.net_egress_ops.is_some()
@@ -2579,6 +2588,14 @@ fn apply_network_opts(
                     .map_err(anyhow::Error::from)
             })
             .transpose()?;
+        let nat64_prefixes = opts
+            .net_nat64_prefix
+            .iter()
+            .map(|s| {
+                s.parse::<ipnetwork::Ipv6Network>()
+                    .map_err(anyhow::Error::from)
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
         let trust_host_cas = opts.trust_host_cas;
         let net_strict = opts.net_strict;
         let tls_intercept = opts.tls_intercept;
@@ -2627,6 +2644,9 @@ fn apply_network_opts(
             }
             if let Some(pool) = ipv6_pool {
                 n = n.ipv6_pool(pool);
+            }
+            for prefix in nat64_prefixes {
+                n = n.nat64_prefix(prefix);
             }
             if trust_host_cas {
                 n = n.trust_host_cas(true);
@@ -3250,7 +3270,7 @@ pub fn resolve_command(
     }
 
     // Non-interactive with nothing to run.
-    ui::warn("no command provided and stdin is not a terminal");
+    ui::warn("no command provided or configured; pass a command after -- in non-interactive mode");
     Ok((None, vec![]))
 }
 

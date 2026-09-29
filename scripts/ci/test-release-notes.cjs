@@ -129,6 +129,8 @@ test('release workflow backfills included PRs before generating and publishing i
   const directory = mkdtempSync(join(tmpdir(), 'msb-release-publish-'));
   try {
     const release = workflow(process.env.RELEASE_WORKFLOW_PATH || join(root, '.github/workflows/release.yml'));
+    assert.equal(release.jobs.assemble.permissions['pull-requests'], 'write',
+      'release backfilling needs permission to label pull requests');
     const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
     let published = false;
     for (const step of release.jobs.assemble.steps) {

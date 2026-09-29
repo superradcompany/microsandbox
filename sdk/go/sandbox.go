@@ -389,12 +389,17 @@ func buildFFINetwork(n *NetworkConfig) *ffi.NetworkOptions {
 		TCPAcceptQueueSize:    n.TCPAcceptQueueSize,
 		IPv4Pool:              n.IPv4Pool,
 		IPv6Pool:              n.IPv6Pool,
+		NAT64Prefixes:         n.NAT64Prefixes,
 		MaxConnections:        n.MaxConnections,
 		MaxTCPConnections:     n.MaxTCPConnections,
 		MaxUDPConnections:     n.MaxUDPConnections,
 		RateLimiter:           buildFFINetworkRateLimiter(n.RateLimiter),
 		SecretViolationAction: string(n.SecretViolationAction),
 		TrustHostCAs:          n.TrustHostCAs,
+	}
+
+	if n.HTTP != nil {
+		out.HTTP = &ffi.HTTPConfig{DenyMessage: n.HTTP.DenyMessage}
 	}
 
 	strict := !n.DisableStrict

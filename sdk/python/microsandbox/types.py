@@ -1747,6 +1747,14 @@ class VsockRoute:
 
 
 @dataclass(frozen=True, slots=True)
+class HttpConfig:
+    """HTTP denial response settings. ``{host}`` names the blocked host."""
+
+    deny_message: str | None = None
+    """Custom body; ``None`` uses the default and an empty string sends no body."""
+
+
+@dataclass(frozen=True, slots=True)
 class Network:
     """Network configuration for a sandbox."""
 
@@ -1772,6 +1780,8 @@ class Network:
     ipv6_pool: str | None = None
     """IPv6 pool used to derive per-sandbox /64 guest prefixes. Defaults
     to ``fd42:6d73:62::/48``."""
+    nat64_prefixes: tuple[str, ...] = ("64:ff9b::/96",)
+    """NAT64 /96 prefixes used for policy classification."""
     max_connections: int | None = None
     """Deprecated: use ``max_tcp_connections`` instead."""
     max_tcp_connections: int | None = field(default=None, kw_only=True)
@@ -1784,6 +1794,8 @@ class Network:
     rate_limiter: NetworkRateLimiter | None = None
     """Local egress and ingress rate limits. ``None`` means unlimited."""
     secret_violation_action: ViolationAction = ViolationAction.BLOCK_AND_LOG
+    http: HttpConfig | None = None
+    """HTTP denial response settings."""
 
     @classmethod
     def none(cls) -> Network:
@@ -1837,6 +1849,8 @@ class Network:
             d["ipv6_pool"] = self.ipv6_pool
         if self.max_connections is not None and self.max_tcp_connections is not None:
             raise ValueError("max_connections and max_tcp_connections are mutually exclusive")
+        if self.nat64_prefixes:
+            d["nat64_prefixes"] = list(self.nat64_prefixes)
         if self.max_connections is not None:
             warnings.warn(
                 "max_connections is deprecated; use max_tcp_connections",
@@ -1861,6 +1875,13 @@ class Network:
         )
         if violation != str(ViolationAction.BLOCK_AND_LOG):
             d["secret_violation_action"] = violation
+        if self.http is not None:
+            if not isinstance(self.http, HttpConfig):
+                raise TypeError("Network.http must be HttpConfig or None")
+            if self.http.deny_message is not None:
+                if not isinstance(self.http.deny_message, str):
+                    raise TypeError("HttpConfig.deny_message must be a str or None")
+                d["http"] = {"deny_message": self.http.deny_message}
         return d
 
 

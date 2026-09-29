@@ -780,6 +780,7 @@ fn apply_builder_options(
         "replace_timeout",
         "root_disk",
         "disable_network",
+        "http",
         "network",
         "proxy",
         "secrets",
@@ -858,6 +859,12 @@ fn apply_builder_options(
         } else {
             let policy = restricted_network_policy(ruby, net)?;
             builder = builder.network(|n| n.policy(policy));
+        }
+    }
+    if let Some(http) = keyword::<RHash>(kwargs, "http")? {
+        reject_unknown_keywords(ruby, http, &["deny_message"])?;
+        if let Some(message) = keyword::<String>(http, "deny_message")? {
+            builder = builder.network(|network| network.http(|h| h.deny_message(message)));
         }
     }
     if let Some(proxy) = keyword::<typed_data::Obj<RubyOutboundProxy>>(kwargs, "proxy")? {
@@ -1124,6 +1131,12 @@ impl RubySandboxBuilder {
     }
     fn disable_network(this: typed_data::Obj<Self>) -> Result<(), Error> {
         put_builder(&this, SandboxBuilder::disable_network)
+    }
+    fn http(this: typed_data::Obj<Self>, message: Option<String>) -> Result<(), Error> {
+        put_builder(&this, |builder| match message {
+            Some(message) => builder.network(|network| network.http(|h| h.deny_message(message))),
+            None => builder,
+        })
     }
     fn quiet_logs(this: typed_data::Obj<Self>) -> Result<(), Error> {
         put_builder(&this, SandboxBuilder::quiet_logs)
@@ -2757,6 +2770,7 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
         "disable_network!",
         method!(RubySandboxBuilder::disable_network, 0),
     )?;
+    builder.define_method("http!", method!(RubySandboxBuilder::http, 1))?;
     builder.define_method("quiet_logs!", method!(RubySandboxBuilder::quiet_logs, 0))?;
     builder.define_method("entrypoint!", method!(RubySandboxBuilder::entrypoint, 1))?;
     builder.define_method("init!", method!(RubySandboxBuilder::init, 1))?;

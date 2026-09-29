@@ -825,8 +825,9 @@ func TestFFIWireShape_NetworkCustomRules(t *testing.T) {
 			DNS: &DNSConfig{
 				Nameservers: []string{"1.1.1.1:53"},
 			},
-			IPv4Pool: "172.31.240.0/24",
-			IPv6Pool: "fd7a:115c:a1e0:100::/56",
+			IPv4Pool:      "172.31.240.0/24",
+			IPv6Pool:      "fd7a:115c:a1e0:100::/56",
+			NAT64Prefixes: []string{"2001:db8:64::/96"},
 		}),
 		WithProxy(SOCKS5Proxy("127.0.0.1:1080")),
 	)
@@ -858,6 +859,10 @@ func TestFFIWireShape_NetworkCustomRules(t *testing.T) {
 	}
 	if net["ipv6_pool"] != "fd7a:115c:a1e0:100::/56" {
 		t.Fatalf("ipv6_pool = %v", net["ipv6_pool"])
+	}
+	nat64 := net["nat64_prefixes"].([]any)
+	if len(nat64) != 1 || nat64[0] != "2001:db8:64::/96" {
+		t.Fatalf("nat64_prefixes = %v", nat64)
 	}
 	dns := net["dns"].(map[string]any)
 	ns := dns["nameservers"].([]any)
@@ -1127,5 +1132,12 @@ func TestNetworkStrictDefaultsAndOptOut(t *testing.T) {
 				t.Fatalf("strict = %v, want %v", network["strict"], tc.want)
 			}
 		})
+	}
+}
+
+func TestHTTPDenyMessageSurvivesFFIConversion(t *testing.T) {
+	config := buildFFINetwork(&NetworkConfig{HTTP: &HTTPConfig{DenyMessage: "blocked {host}"}})
+	if config.HTTP.DenyMessage != "blocked {host}" {
+		t.Fatalf("HTTP denial message lost: %q", config.HTTP.DenyMessage)
 	}
 }

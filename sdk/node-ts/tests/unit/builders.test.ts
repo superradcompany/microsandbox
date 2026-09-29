@@ -1005,3 +1005,13 @@ describe("TCP accept queue size", () => {
     }
   });
 });
+
+describe("NetworkBuilder HTTP denial messages", () => {
+  it("preserves a custom message through the native builder", () => {
+    expect(new NetworkBuilder().http((h) => h.denyMessage("blocked {host}")).build().http.denyMessage)
+      .toBe("blocked {host}");
+    expect(new NetworkBuilder().http((h) => h.denyMessage("")).build().http.denyMessage).toBe("");
+    expect(new NetworkBuilder().http((h) => h).build().http.denyMessage).toBeUndefined();
+    expect(new NetworkBuilder().http((h) => h.denyMessage("keep")).http((h) => h).build().http.denyMessage).toBe("keep");
+  });
+});

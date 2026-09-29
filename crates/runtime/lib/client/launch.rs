@@ -62,6 +62,11 @@ pub struct LaunchCapabilities {
     /// feature and would silently ignore the field, so the SDK refuses to send it to them.
     #[serde(default)]
     pub tcp_accept_queue_size: bool,
+
+    /// Custom HTTP denial response bodies are honored by the runtime.
+    /// Older runtimes omit this capability.
+    #[serde(default)]
+    pub http_deny_message: bool,
 }
 
 /// Hidden CLI handoff describing the metrics slot the host reserved for this sandbox.

@@ -332,6 +332,8 @@ pub async fn spawn_sandbox(
     // the selected executable may have changed since creation. Validate its
     // effective configuration here for both initial launch and later starts.
     launch_contract.validate_launch_intent(config)?;
+    #[cfg(feature = "net")]
+    launch_contract::validate_http_deny_message(&resolved_runtime.msb_path, config).await?;
     if config.checkpoint_restore.as_ref().is_some_and(|restore| {
         restore
             .external_mounts

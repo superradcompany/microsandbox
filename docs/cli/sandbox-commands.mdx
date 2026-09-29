@@ -75,11 +75,13 @@ Common flags:
 | `-w`, `--workdir` | Set the working directory |
 | `-d`, `--detach` | Run the resolved image command in the background and print the sandbox name |
 | `--no-tty` | Disable PTY allocation and run non-interactively |
+| `--no-stdin` | Leave host input untouched and give the command EOF; disables automatic terminal mode and conflicts with `--tty` |
 | `--replace` | Replace an existing sandbox with the same name |
 | `--no-net` | Disable network access |
 | `--deployment-profile` | Select `single-tenant` or `multi-tenant` host-runtime isolation; managed backends may override it |
 | `--net` | Add a high-level network profile (`public`, `private`, `host`, `all`, or `none`) |
 | `--net-rule` | Add a network policy rule |
+| `--net-nat64-prefix` | Add a NAT64 `/96` prefix for network policy classification |
 | `--net-strict[=BOOL]` | Enabled by default; use `--net-strict=false` to opt out. Require hostname-based network allows to use inspectable request authority. Non-intercepted HTTPS fails closed when only a hostname rule allows it |
 | `--proxy` | Route eligible outbound traffic through a `socks4://IP:PORT` or `socks5://IP:PORT` proxy. Local-only. See [Proxies](#outbound-proxy) |
 | `--socks4-user-id` | Optional SOCKS4 user ID. Requires a `socks4://` proxy |
@@ -146,6 +148,8 @@ msb run alpine --net host --net-rule "deny@host:tcp:22"
 ```
 
 Explicit `--net-rule` entries are evaluated before profile-generated rules, so they can narrow or deny part of a profile. `--net` conflicts with `--no-net` and the `--net-default*` flags because those select a different policy baseline.
+
+NAT64 destinations inside the well-known `64:ff9b::/96` prefix are classified by their embedded IPv4 address, so a public-only policy still blocks translated private, loopback, link-local, and metadata addresses. If your environment uses another routed NAT64 prefix, add it with repeatable `--net-nat64-prefix <ipv6-cidr>` entries. Only IPv6 `/96` prefixes are accepted.
 
 ### Outbound proxy
 
@@ -552,6 +556,8 @@ msb exec devbox -- ls -la /app
 |------|-------------|
 | `-t`, `--tty` | Allocate a pseudo-terminal (enables colors, line editing) |
 | `--no-tty` | Disable PTY allocation and run non-interactively |
+| `--no-stdin` | Leave host input untouched and give the command EOF; disables automatic terminal mode and conflicts with `--tty` |
+| `--stream` | Forward stdin and flush output incrementally without a PTY; requires piped stdin or `--no-stdin` |
 | `-e`, `--env` | Set an environment variable (`KEY=VALUE`) |
 | `-w`, `--workdir` | Override working directory |
 | `-u`, `--user` | Run the command as the specified guest user |
@@ -560,8 +566,20 @@ msb exec devbox -- ls -la /app
 | `-q`, `--quiet` | Suppress progress output |
 
 <Tip>
-  The CLI auto-detects whether stdin is a terminal. When interactive, `msb exec` uses `attach` mode (TTY, line editing). When piped, it captures output. Use `--no-tty` to force captured, non-interactive execution even from a terminal.
+  The CLI auto-detects whether stdin is a terminal. When interactive, `msb exec` uses `attach` mode (TTY, line editing). When piped, it forwards input while the command runs and captures output until the command exits. Use `--no-tty` to force captured, non-interactive execution even from a terminal; terminal input is not forwarded in that mode.
 </Tip>
+
+Use `--stream` for an ongoing conversation with a guest process, such as an ACP agent. It returns output as it arrives instead of waiting for command completion. Piped commands can exit or time out while the host input pipe is still open. Commands that read until EOF, such as `cat`, still need their input closed to finish normally.
+
+Use `--no-stdin` to leave input available to the calling script and give the guest immediate EOF:
+
+```bash
+while IFS= read -r sandbox; do
+  msb exec --no-stdin "$sandbox" -- echo ready
+done < sandboxes.txt
+```
+
+Combine `--no-stdin` with `--stream` when you want live output without forwarding input. Omit `--no-stdin` for ACP agents, which need input from the IDE.
 
 <span id="msb-sandbox-copy" />
 

@@ -43,17 +43,22 @@ async fn exec_stream_timeout_kills_guest() {
             "sleep",
             "30",
         ])
-        .stdin(Stdio::null())
+        .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
+        .kill_on_drop(true)
         .spawn()
         .expect("spawn msb exec --stream --timeout");
+
+    // Keep the writer alive while waiting: EOF must not be needed to exit.
+    let stdin = child.stdin.take().expect("child stdin");
 
     let status = timeout(Duration::from_secs(20), child.wait())
         .await
         .expect("msb exec --stream --timeout never exited (timeout not enforced)")
         .expect("wait for msb");
     let elapsed = start.elapsed();
+    drop(stdin);
 
     sandbox.stop().await.ok();
     Sandbox::remove(name).await.ok();
@@ -93,11 +98,14 @@ async fn exec_stream_broken_pipe_exits() {
             "-c",
             "while true; do echo spam; done",
         ])
-        .stdin(Stdio::null())
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
+        .kill_on_drop(true)
         .spawn()
         .expect("spawn msb exec --stream");
+
+    let stdin = child.stdin.take().expect("child stdin");
 
     // Read a little, then drop the read end so the next guest write breaks.
     let mut lines = BufReader::new(child.stdout.take().expect("child stdout")).lines();
@@ -108,6 +116,7 @@ async fn exec_stream_broken_pipe_exits() {
         .await
         .expect("msb did not exit after host closed stdout (broken pipe hung)")
         .expect("wait for msb");
+    drop(stdin);
 
     sandbox.stop().await.ok();
     Sandbox::remove(name).await.ok();

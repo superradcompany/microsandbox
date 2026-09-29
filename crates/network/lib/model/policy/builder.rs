@@ -95,6 +95,13 @@ pub enum BuildError {
         source: InvalidTcpAcceptQueueSize,
     },
 
+    /// A NAT64 prefix must be an IPv6 `/96` network.
+    #[error("invalid NAT64 prefix `{raw}`: prefix must be IPv6 /96")]
+    InvalidNat64Prefix {
+        /// Invalid raw prefix.
+        raw: String,
+    },
+
     /// An outbound proxy builder received an invalid configuration.
     #[error("invalid outbound proxy: {reason}")]
     InvalidOutboundProxy {
