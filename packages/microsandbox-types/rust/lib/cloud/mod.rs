@@ -23,10 +23,17 @@ use crate::domain::{
 };
 use crate::{TypesError, TypesResult};
 
+mod modify;
 mod secrets;
 mod snapshots;
 mod specs;
 
+pub use modify::{
+    CloudIdempotencyKeyError, CloudModificationOperationStatus, CloudModificationRejection,
+    CloudSandboxModificationApplyRequest, CloudSandboxModificationOperation,
+    CloudSandboxModificationPlanRequest, CloudSecretMaterial, CloudSecretModificationApply,
+    CloudSecretModificationIntent, CloudSecretValue, MAX_IDEMPOTENCY_KEY_BYTES,
+};
 pub use secrets::{
     CloudHostPattern, CloudSecretEntry, CloudSecretSource, CloudSecretsConfig, CloudViolationAction,
 };

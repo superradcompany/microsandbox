@@ -5,6 +5,7 @@ import {
   ImageNotFoundError,
   MetricsDisabledError,
   MicrosandboxError,
+  ModificationIncompleteError,
   NoDefaultCommandError,
   SandboxNotFoundError,
   SandboxReplacedError,
@@ -55,6 +56,30 @@ describe("mapNapiError", () => {
   for (const payload of ["not json", "null", "{}", '{"message":"failed","recovery":{}}']) {
     it(`preserves malformed recovery envelopes: ${payload}`, () => {
       const raw = new Error(`[SnapshotSourceRecovery] ${payload}`);
+      expect(mapNapiError(raw)).toBe(raw);
+    });
+  }
+
+  for (const committed of [true, false, null]) {
+    it(`keeps the operation id of an incomplete modification (committed: ${committed})`, () => {
+      const message = 'sandbox modification operation "op-1" did not finish within 60s';
+      const raw = new Error(`[ModificationIncomplete] ${JSON.stringify({
+        message, operation: { operation_id: "op-1", budget_ms: 60_000, committed },
+      })}`);
+      const mapped = mapNapiError(raw) as ModificationIncompleteError;
+      expect(mapped).toBeInstanceOf(ModificationIncompleteError);
+      expect(mapped.code).toBe("modificationIncomplete");
+      expect(mapped.message).toBe(message);
+      expect(mapped.cause).toBe(raw);
+      expect(mapped.operationId).toBe("op-1");
+      expect(mapped.budgetMs).toBe(60_000);
+      expect(mapped.committed).toBe(committed);
+    });
+  }
+
+  for (const payload of ["not json", "null", "{}", '{"message":"failed","operation":{"operation_id":1}}']) {
+    it(`preserves malformed incomplete-modification envelopes: ${payload}`, () => {
+      const raw = new Error(`[ModificationIncomplete] ${payload}`);
       expect(mapNapiError(raw)).toBe(raw);
     });
   }

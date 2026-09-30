@@ -29,13 +29,16 @@ pub use microsandbox_types_macros::ConfigPatch;
 pub use cloud::{
     CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudCreateSnapshotRequest,
     CloudDiskImageFormat, CloudErrorBody, CloudErrorDetails, CloudHostPattern,
-    CloudMessageResponse, CloudNetworkSpec, CloudPaginated, CloudPatch, CloudPullPolicy,
+    CloudIdempotencyKeyError, CloudMessageResponse, CloudModificationOperationStatus,
+    CloudModificationRejection, CloudNetworkSpec, CloudPaginated, CloudPatch, CloudPullPolicy,
     CloudRlimit, CloudRlimitResource, CloudRootfsSource, CloudSandboxComputeResources,
-    CloudSandboxResources, CloudSandboxRuntimeOptions, CloudSandboxSpec, CloudSandboxStatus,
-    CloudSandboxStatusReason, CloudSecretEntry, CloudSecretSource, CloudSecretsConfig,
-    CloudSnapshot, CloudSnapshotDetails, CloudSnapshotKind, CloudSnapshotLocation,
-    CloudSnapshotOperation, CloudSnapshotOperationStatus, CloudSnapshotSpec, CloudViolationAction,
-    CloudVolumeMount,
+    CloudSandboxModificationApplyRequest, CloudSandboxModificationOperation,
+    CloudSandboxModificationPlanRequest, CloudSandboxResources, CloudSandboxRuntimeOptions,
+    CloudSandboxSpec, CloudSandboxStatus, CloudSandboxStatusReason, CloudSecretEntry,
+    CloudSecretMaterial, CloudSecretModificationApply, CloudSecretModificationIntent,
+    CloudSecretSource, CloudSecretValue, CloudSecretsConfig, CloudSnapshot, CloudSnapshotDetails,
+    CloudSnapshotKind, CloudSnapshotLocation, CloudSnapshotOperation, CloudSnapshotOperationStatus,
+    CloudSnapshotSpec, CloudViolationAction, CloudVolumeMount, MAX_IDEMPOTENCY_KEY_BYTES,
 };
 #[doc(hidden)]
 pub use command::{CommandResolutionError, ResolvedCommand, resolve_default_command};

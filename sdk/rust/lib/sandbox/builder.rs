@@ -4364,6 +4364,23 @@ mod tests {
 
     #[cfg(feature = "net")]
     #[tokio::test]
+    async fn test_builder_secret_env_materializes_the_default_placeholder() {
+        let config = SandboxBuilder::new("test")
+            .image("alpine")
+            .secret_env("OPENAI_API_KEY", "secret", "api.openai.com")
+            .build()
+            .await
+            .unwrap();
+
+        let network = config.local_network_config().unwrap();
+        assert_eq!(
+            network.secrets.secrets[0].placeholder,
+            "$MSB_OPENAI_API_KEY"
+        );
+    }
+
+    #[cfg(feature = "net")]
+    #[tokio::test]
     async fn global_outbound_proxy_survives_network_options_and_accepts_sdk_override() {
         let global = serde_json::from_str(
             r#"{"sandbox_defaults":{"outbound_proxy":{"protocol":"socks5","address":"127.0.0.1:1080"}}}"#,

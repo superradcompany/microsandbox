@@ -3866,6 +3866,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "typed-path",
+ "uuid",
  "windows-sys 0.61.2",
  "zeroize",
 ]
@@ -8473,6 +8474,7 @@ version = "1.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bf3923a6f5c4c6382e0b653c4117f48d631ea17f38ed86e2a828e6f7412f5239"
 dependencies = [
+ "getrandom 0.4.2",
  "js-sys",
  "serde_core",
  "wasm-bindgen",

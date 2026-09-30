@@ -437,6 +437,14 @@ impl Sandbox {
         run_modify(builder, modify_dry_run(options.as_ref())).await
     }
 
+    /// Keep waiting for a modification that did not settle within `modify()`'s
+    /// budget. Returns the plan as a JSON string.
+    #[napi]
+    pub async fn resume_modification(&self, operation_id: String) -> Result<String> {
+        let sb = self.inner.get().await.ok_or_else(consumed_error)?;
+        modification_plan_json(sb.resume_modification(operation_id).await)
+    }
+
     /// Compact root and owned-data disk prefixes; the limit includes the base, not the writable head.
     #[napi]
     pub async fn compact(
@@ -1290,8 +1298,14 @@ pub(crate) async fn run_modify(
         builder.dry_run().await
     } else {
         builder.apply().await
-    }
-    .map_err(to_napi_error)?;
+    };
+    modification_plan_json(plan)
+}
+
+pub(crate) fn modification_plan_json(
+    plan: microsandbox::MicrosandboxResult<microsandbox::sandbox::SandboxModificationPlan>,
+) -> Result<String> {
+    let plan = plan.map_err(to_napi_error)?;
     serde_json::to_string(&plan).map_err(|e| Error::from_reason(e.to_string()))
 }
 

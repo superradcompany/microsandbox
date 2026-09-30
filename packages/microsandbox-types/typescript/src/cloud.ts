@@ -4,10 +4,12 @@ import type {
   EnvVar,
   HandoffInit,
   HostPermissions,
+  ModificationPolicy,
   MountOptions,
   NetworkPolicy,
   OwnedVolumeStorage,
   SandboxLogLevel,
+  SandboxModificationPlan,
   SandboxPolicy,
   SecretSubstitution,
   SecurityProfile,
@@ -687,7 +689,11 @@ export type CloudSecretEntry = {
    */
   source?: CloudSecretSource | null;
   /**
-   * Placeholder the sandbox sees instead of the real value.
+   * Explicit placeholder the sandbox sees instead of the real value.
+   *
+   * The field must be present on the wire. SDK builders may materialize a
+   * concrete default before serialization. Validation rejects empty,
+   * oversized, or line-breaking values.
    */
   placeholder: string;
   /**
@@ -992,6 +998,135 @@ export type CloudSnapshotOperationStatus =
   | "failed";
 
 export type CloudSnapshotKind = "disk";
+
+export type CloudSandboxModificationPlanRequest = {
+  /**
+   * Policy the plan is classified under.
+   */
+  policy: ModificationPolicy;
+  /**
+   * The one secret change requested.
+   */
+  secret: CloudSecretModificationIntent;
+};
+
+export type CloudSecretModificationIntent = {
+  /**
+   * Name of the existing secret, the env var it is exposed as.
+   */
+  name: string;
+  /**
+   * Whether the change supplies new secret material.
+   */
+  material: CloudSecretMaterial;
+  /**
+   * New guest-visible placeholder.
+   */
+  placeholder?: string | null;
+  /**
+   * New hosts allowed to receive the secret.
+   */
+  allowed_hosts?: Array<CloudHostPattern> | null;
+  /**
+   * New substitution locations.
+   */
+  substitution?: SecretSubstitution | null;
+  /**
+   * New hosts allowed to receive the placeholder unchanged.
+   */
+  passthrough_hosts?: Array<CloudHostPattern> | null;
+  /**
+   * New per-secret violation action.
+   */
+  violation_action?: CloudViolationAction | null;
+  /**
+   * New verified-TLS-identity requirement.
+   */
+  require_tls_identity?: boolean | null;
+};
+
+export type CloudSecretMaterial = { "kind": "provided" } | { "kind": "absent" };
+
+export type CloudSandboxModificationApplyRequest = {
+  /**
+   * Client-generated opaque key. The server binds it to [`intent`], which
+   * carries no secret value: a retry cannot apply twice, and reusing the key
+   * with a different value returns the original operation, so use a new key
+   * for every change. It is distinct from the server-minted operation id.
+   *
+   * [`intent`]: Self::intent
+   */
+  idempotency_key: string;
+  /**
+   * Policy the change is applied under.
+   */
+  policy: ModificationPolicy;
+  /**
+   * The one secret change requested.
+   */
+  secret: CloudSecretModificationApply;
+};
+
+export type CloudSecretModificationApply = {
+  /**
+   * Name of the existing secret, the env var it is exposed as.
+   */
+  name: string;
+  /**
+   * New secret value. Present exactly when the secret is rotated.
+   */
+  value?: CloudSecretValue | null;
+  /**
+   * New guest-visible placeholder.
+   */
+  placeholder?: string | null;
+  /**
+   * New hosts allowed to receive the secret.
+   */
+  allowed_hosts?: Array<CloudHostPattern> | null;
+  /**
+   * New substitution locations.
+   */
+  substitution?: SecretSubstitution | null;
+  /**
+   * New hosts allowed to receive the placeholder unchanged.
+   */
+  passthrough_hosts?: Array<CloudHostPattern> | null;
+  /**
+   * New per-secret violation action.
+   */
+  violation_action?: CloudViolationAction | null;
+  /**
+   * New verified-TLS-identity requirement.
+   */
+  require_tls_identity?: boolean | null;
+};
+
+export type CloudSecretValue = string;
+
+export type CloudSandboxModificationOperation = {
+  /**
+   * Server-minted operation id, distinct from the caller's idempotency key.
+   */
+  id: string;
+  /**
+   * Current operation status.
+   */
+  status: CloudModificationOperationStatus;
+  /**
+   * The applied plan. Present only when `status` is `succeeded`.
+   */
+  plan: SandboxModificationPlan | null;
+  /**
+   * Sanitized failure detail. Present only when `status` is `failed`.
+   */
+  error: CloudErrorDetails | null;
+};
+
+export type CloudModificationOperationStatus =
+  | "in_progress"
+  | "succeeded"
+  | "failed";
 
 export type CloudPaginated<T> = {
   /**

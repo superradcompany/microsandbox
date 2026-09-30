@@ -893,7 +893,7 @@ async fn capture_full_snapshot(
     let root_disk = snapshot_root_disk(sandbox_config.spec.image.oci_root_disk(), source_sandbox)?;
 
     let checkpoint_id = format!("checkpoint_{:032x}", rand::random::<u128>());
-    let outcome = crate::sandbox::control_checkpoint_create(
+    let outcome = super::control::control_checkpoint_create(
         local,
         source_sandbox,
         checkpoint_id.clone(),
@@ -1386,7 +1386,7 @@ async fn capture_disk_source(
     }
     let id = format!("disk_{:032x}", rand::random::<u128>());
     let captured =
-        crate::sandbox::control_disk_checkpoint_create(local, source, id.clone(), guest_flush)
+        super::control::control_disk_checkpoint_create(local, source, id.clone(), guest_flush)
             .await?;
     let expected_path = sandbox_dir.join("runtime").join("checkpoints").join(&id);
     let expected_device = match root_disk {

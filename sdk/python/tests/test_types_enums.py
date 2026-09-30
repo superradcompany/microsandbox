@@ -125,6 +125,21 @@ def test_python_config_types_reject_raw_enum_strings(operation: Callable[[], obj
         operation()
 
 
+def test_unknown_modification_disposition_is_preserved() -> None:
+    future = ModificationDisposition("future")
+    assert isinstance(future, ModificationDisposition)
+    assert future == "future"
+    assert future.value == "future"
+    assert str(future) == "future"
+    assert ModificationDisposition(future) is future
+    assert ModificationDisposition("future") is future
+    assert future not in list(ModificationDisposition)
+    assert future != ModificationDisposition.LIVE
+    assert ModificationDisposition("live") is ModificationDisposition.LIVE
+    with pytest.raises(ValueError):
+        ModificationDisposition(1)
+
+
 def test_new_enum_domains_have_canonical_values() -> None:
     assert DeploymentProfile.SINGLE_TENANT.value == "single-tenant"
     assert ImageArchiveFormat.DOCKER.value == "docker"
@@ -139,6 +154,7 @@ def test_new_enum_domains_have_canonical_values() -> None:
     assert ChangeKind.UPDATED.value == "updated"
     assert SecretChangeKind.HOSTS_UPDATED.value == "hosts updated"
     assert ModificationDisposition.REQUIRES_RESTART.value == "requires restart"
+    assert ModificationDisposition("unconfirmed") is ModificationDisposition.UNCONFIRMED
     assert ResourceKind.CPUS.value == "cpus"
     assert ResourceConvergenceState.GUEST_REFUSED.value == "guest-refused"
 

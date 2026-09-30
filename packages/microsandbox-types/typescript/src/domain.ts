@@ -199,3 +199,178 @@ export type PortRange = {
    */
   end: number;
 };
+
+export type ModificationPolicy = "no_restart" | "next_start" | "restart";
+
+export type SandboxModificationPlan = {
+  /**
+   * Sandbox being modified.
+   */
+  sandbox: string;
+  /**
+   * Sandbox status used for classification.
+   */
+  status: string;
+  /**
+   * Whether the changes were applied.
+   */
+  applied: boolean;
+  /**
+   * Modification policy used to produce the plan.
+   */
+  policy: ModificationPolicy;
+  /**
+   * Planned changes.
+   */
+  changes: Array<PlannedChange>;
+  /**
+   * Conflicts that must be resolved before the patch can apply.
+   */
+  conflicts: Array<ModificationConflict>;
+  /**
+   * Non-fatal warnings about the patch or current runtime capabilities.
+   */
+  warnings: Array<ModificationWarning>;
+  /**
+   * Live resource resize outcomes, populated by apply when a live change ran.
+   */
+  resize_status?: Array<ResourceResizeStatus>;
+};
+
+export type PlannedChange =
+  | { "kind": "config" } & ConfigPlannedChange
+  | { "kind": "secret" } & SecretPlannedChange;
+
+export type ConfigPlannedChange = {
+  /**
+   * Config field being changed.
+   */
+  field: string;
+  /**
+   * Natural change type for table rendering.
+   */
+  change: ChangeKind;
+  /**
+   * Previous safe visible state.
+   */
+  before: string | null;
+  /**
+   * New safe visible state.
+   */
+  after: string | null;
+  /**
+   * When or whether the change can take effect.
+   */
+  disposition: ModificationDisposition;
+  /**
+   * Human-readable reason for this classification, when useful.
+   */
+  reason: string | null;
+};
+
+export type SecretPlannedChange = {
+  /**
+   * Table field name. This is always `secret`.
+   */
+  field: string;
+  /**
+   * Stable secret identity, usually the environment variable name.
+   */
+  name: string;
+  /**
+   * Natural change type for table rendering.
+   */
+  change: SecretChangeKind;
+  /**
+   * Previous guest-visible reference or placeholder.
+   */
+  before_ref: string | null;
+  /**
+   * New guest-visible reference or placeholder.
+   */
+  after_ref: string | null;
+  /**
+   * When or whether the change can take effect.
+   */
+  disposition: ModificationDisposition;
+  /**
+   * Allowed hosts after the requested change.
+   */
+  allow_hosts?: Array<string>;
+  /**
+   * Human-readable reason for this classification, when useful.
+   */
+  reason: string | null;
+};
+
+export type ChangeKind = "added" | "updated" | "removed";
+
+export type SecretChangeKind =
+  | "added"
+  | "rotated"
+  | "removed"
+  | "renamed"
+  | "hosts updated"
+  | "placeholder updated";
+
+export type ModificationDisposition =
+  | "live"
+  | "next start"
+  | "requires restart"
+  | "unsupported"
+  | "unconfirmed"
+  | string & {};
+
+export type ModificationConflict = {
+  /**
+   * Field with the conflict.
+   */
+  field: string;
+  /**
+   * Human-readable conflict description.
+   */
+  message: string;
+};
+
+export type ModificationWarning = {
+  /**
+   * Field associated with the warning.
+   */
+  field: string;
+  /**
+   * Human-readable warning description.
+   */
+  message: string;
+};
+
+export type ResourceResizeStatus = {
+  /**
+   * Resource being resized.
+   */
+  resource: ResourceKind;
+  /**
+   * Requested value.
+   */
+  requested: string;
+  /**
+   * Actual value observed in the guest/runtime.
+   */
+  actual: string;
+  /**
+   * Host/VMM-enforced value.
+   */
+  enforced: string;
+  /**
+   * Convergence state.
+   */
+  state: ResourceConvergenceState;
+};
+
+export type ResourceKind = "cpus" | "memory";
+
+export type ResourceConvergenceState =
+  | "accepted"
+  | "converging"
+  | "applied"
+  | "guest-refused"
+  | "failed";

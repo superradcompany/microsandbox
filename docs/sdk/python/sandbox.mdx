@@ -576,7 +576,7 @@ Explicitly refresh the running sandbox's idle activity. This sends `core.touch`,
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">modify()</span>
 
-<Tooltip tip="modify is not available on microsandbox cloud; recreate the sandbox with the new configuration."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On microsandbox cloud, modify only supports changing the value of an existing secret."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```python
 async def modify(
@@ -664,6 +664,8 @@ The returned [`SandboxModificationPlan`](#sandboxmodificationplan) is a typed di
 
 A live CPU or memory resize can take a moment to settle. The new limits are enforced immediately, and `resize_status` reports when the sandbox has finished adjusting.
 
+A backend that applies modifications as asynchronous operations may report a change `UNCONFIRMED` when it was saved but the running sandbox did not confirm it. If the operation does not settle within the backend's budget, `modify()` raises `ModificationIncompleteError` with `operation_id`, `budget` (seconds), and `committed` (`None` when unknown); the change may still commit. Pass `operation_id` to [`resume_modification()`](#sb-resume_modification) to keep waiting.
+
 <p className="msb-label">Parameters</p>
 
 <div className="msb-params">
@@ -731,6 +733,45 @@ A live CPU or memory resize can take a moment to settle. The new limits are enfo
   <div className="msb-param">
     <div className="msb-param-key"><a className="msb-type" href="#sandboxmodificationplan">SandboxModificationPlan</a></div>
     <div className="msb-param-desc">The modification plan, applied unless <code>dry_run=True</code>.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">resume_modification()</span>
+
+```python
+async def resume_modification(self, operation_id: str) -> SandboxModificationPlan
+```
+
+<Accordion title="Example">
+
+```python
+from microsandbox import ModificationIncompleteError
+
+try:
+    plan = await sb.modify(secrets={"API_KEY": {"value": token}})
+except ModificationIncompleteError as error:
+    plan = await sb.resume_modification(error.operation_id)
+```
+
+</Accordion>
+
+Keep waiting for a modification that raised `ModificationIncompleteError`. The operation is checked against this sandbox, and waiting uses the backend's settle budget again: the result is the settled plan, the operation's failure, or another `ModificationIncompleteError`. The local backend applies modifications synchronously and raises `UnsupportedError`.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>operation_id</code><span className="msb-type">str</span></div>
+    <div className="msb-param-desc">The <code>operation_id</code> of <code>ModificationIncompleteError</code>.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#sandboxmodificationplan">SandboxModificationPlan</a></div>
+    <div className="msb-param-desc">The settled plan, with <code>applied</code> set to <code>True</code>.</div>
   </div>
 </div>
 
@@ -1450,13 +1491,25 @@ Explicitly refresh idle activity; does not start stopped sandboxes
 
 #### <span className="msb-recv">handle.</span><span className="msb-hn">modify()</span>
 
-<Tooltip tip="Modify is not available on microsandbox cloud; recreate the sandbox with the new configuration."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On microsandbox cloud, modify only supports changing the value of an existing secret."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```python
 modify(...)
 ```
 
 Plan or apply a configuration change; same kwargs as [`modify()`](#sb-modify). Does not start stopped sandboxes; changes persist for the next boot
+
+<p className="msb-label">Returns</p>
+
+`Awaitable[`[`SandboxModificationPlan`](#sandboxmodificationplan)`]`
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">resume_modification()</span>
+
+```python
+resume_modification(operation_id)
+```
+
+Keep waiting for an unfinished modification by its `ModificationIncompleteError.operation_id`; see [`resume_modification()`](#sb-resume_modification)
 
 <p className="msb-label">Returns</p>
 
@@ -2081,7 +2134,7 @@ Natural operation for a secret change.
 
 ### ModificationDisposition
 
-When or whether a planned change can take effect.
+When or whether a planned change can take effect. A disposition added by a newer backend converts to a member that keeps its raw value instead of raising, so treat unrecognized members as unknown.
 
 | Member | Value | Description |
 |--------|-------|-------------|
@@ -2089,6 +2142,7 @@ When or whether a planned change can take effect.
 | `ModificationDisposition.NEXT_START` | `"next start"` | Applies the next time the sandbox starts |
 | `ModificationDisposition.REQUIRES_RESTART` | `"requires restart"` | Requires a restart before taking effect |
 | `ModificationDisposition.UNSUPPORTED` | `"unsupported"` | Cannot be changed through `modify()` |
+| `ModificationDisposition.UNCONFIRMED` | `"unconfirmed"` | Applied plans only: the change was saved, but the running sandbox did not confirm it. The local backend does not report it |
 
 ### ResourceKind
 

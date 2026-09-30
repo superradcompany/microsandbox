@@ -16,6 +16,7 @@ import {
   MetricsDisabledError,
   MetricsUnavailableError,
   MicrosandboxError,
+  ModificationIncompleteError,
   NixError,
   PatchFailedError,
   ProtocolError,
@@ -37,7 +38,8 @@ import {
   VolumeNotFoundError,
 } from "../errors.js";
 
-// The recovery variant carries a JSON envelope after the usual tag; all others carry text.
+// The recovery and incomplete-modification variants carry a JSON envelope after the usual tag;
+// all others carry text.
 const PATTERN = /^\[(\w+)\] ([\s\S]*)$/;
 
 const CTORS = new Map<string, (msg: string, raw: Error) => MicrosandboxError>([
@@ -98,6 +100,9 @@ export function mapNapiError(err: unknown): unknown {
   if (m[1] === "SnapshotSourceRecovery") {
     return mapRecoveryError(m[2]!, err);
   }
+  if (m[1] === "ModificationIncomplete") {
+    return mapModificationIncompleteError(m[2]!, err);
+  }
   const ctor = CTORS.get(m[1]!);
   if (!ctor) return err;
   return ctor(m[2]!, err);
@@ -127,6 +132,21 @@ function mapRecoveryError(payload: string, raw: Error): unknown {
     }, { cause: raw });
   } catch {
     // Preserve the original refusal if a mismatched native binary sends an unknown envelope.
+    return raw;
+  }
+}
+
+function mapModificationIncompleteError(payload: string, raw: Error): unknown {
+  try {
+    const envelope = JSON.parse(payload);
+    const o = envelope.operation;
+    if (typeof envelope.message !== "string" || !o || typeof o.operation_id !== "string" ||
+        typeof o.budget_ms !== "number" ||
+        !(o.committed === null || typeof o.committed === "boolean")) return raw;
+    return new ModificationIncompleteError(envelope.message, {
+      operationId: o.operation_id, budgetMs: o.budget_ms, committed: o.committed,
+    }, { cause: raw });
+  } catch {
     return raw;
   }
 }

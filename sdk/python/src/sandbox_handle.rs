@@ -236,6 +236,21 @@ impl PySandboxHandle {
         })
     }
 
+    /// Keep waiting for a modification that did not settle within `modify()`'s budget,
+    /// using the `operation_id` of `ModificationIncompleteError`. Backends without
+    /// resumable operations, such as local, raise `UnsupportedError`.
+    fn resume_modification<'py>(
+        &self,
+        py: Python<'py>,
+        operation_id: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let plan = inner.resume_modification(operation_id).await;
+            crate::sandbox::modification_result_to_py(plan)
+        })
+    }
+
     /// Read captured output from `exec.log`.
     ///
     /// Works without starting the sandbox. Defaults to `stdout +

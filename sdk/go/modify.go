@@ -33,6 +33,29 @@ const (
 	ModificationPolicyRestart ModificationPolicy = "restart"
 )
 
+// ModificationDisposition reports when or whether a planned change takes
+// effect. Backends may report values added after this release, so switches
+// should include a default case.
+type ModificationDisposition string
+
+const (
+	// ModificationDispositionLive applies to the running sandbox now.
+	ModificationDispositionLive ModificationDisposition = "live"
+
+	// ModificationDispositionNextStart persists for the next start.
+	ModificationDispositionNextStart ModificationDisposition = "next start"
+
+	// ModificationDispositionRequiresRestart needs a restart to take effect.
+	ModificationDispositionRequiresRestart ModificationDisposition = "requires restart"
+
+	// ModificationDispositionUnsupported cannot be changed by Modify.
+	ModificationDispositionUnsupported ModificationDisposition = "unsupported"
+
+	// ModificationDispositionUnconfirmed is reported only by an apply: the
+	// change is saved, but the running sandbox did not confirm it.
+	ModificationDispositionUnconfirmed ModificationDisposition = "unconfirmed"
+)
+
 // ModifyOptions describes a requested sandbox modification. Zero-valued
 // fields are left unchanged (0 is not a valid CPU, memory, or disk size).
 type ModifyOptions struct {
@@ -136,17 +159,17 @@ type SandboxModificationPlan struct {
 // "secret"; secret entries carry Name/BeforeRef/AfterRef/AllowHosts while
 // config entries carry Before/After.
 type PlannedChange struct {
-	Kind        string   `json:"kind"`
-	Field       string   `json:"field"`
-	Name        string   `json:"name,omitempty"`
-	Change      string   `json:"change"`
-	Before      *string  `json:"before,omitempty"`
-	After       *string  `json:"after,omitempty"`
-	BeforeRef   *string  `json:"before_ref,omitempty"`
-	AfterRef    *string  `json:"after_ref,omitempty"`
-	Disposition string   `json:"disposition"`
-	AllowHosts  []string `json:"allow_hosts,omitempty"`
-	Reason      *string  `json:"reason,omitempty"`
+	Kind        string                  `json:"kind"`
+	Field       string                  `json:"field"`
+	Name        string                  `json:"name,omitempty"`
+	Change      string                  `json:"change"`
+	Before      *string                 `json:"before,omitempty"`
+	After       *string                 `json:"after,omitempty"`
+	BeforeRef   *string                 `json:"before_ref,omitempty"`
+	AfterRef    *string                 `json:"after_ref,omitempty"`
+	Disposition ModificationDisposition `json:"disposition"`
+	AllowHosts  []string                `json:"allow_hosts,omitempty"`
+	Reason      *string                 `json:"reason,omitempty"`
 }
 
 // ModificationConflict blocks applying a modification.
@@ -185,13 +208,35 @@ func (s *Sandbox) Modify(ctx context.Context, opts ModifyOptions) (*SandboxModif
 }
 
 // Modify plans or applies a sandbox modification by name. It does not start
-// stopped sandboxes; next-start changes persist for the next boot.
+// stopped sandboxes; next-start changes persist for the next boot. It returns
+// ErrSandboxReplaced when the name now belongs to a different sandbox.
 func (h *SandboxHandle) Modify(ctx context.Context, opts ModifyOptions) (*SandboxModificationPlan, error) {
 	payload, err := buildModifyRequestJSON(opts)
 	if err != nil {
 		return nil, err
 	}
-	out, err := ffi.ModifySandboxByName(ctx, h.name, payload)
+	out, err := ffi.ModifySandboxHandle(ctx, h.name, h.id, payload)
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	return parseModificationPlan(out)
+}
+
+// ResumeModification keeps waiting for a modification that did not settle
+// within Modify's budget, using the OperationID of *ModificationIncompleteError.
+// Backends without resumable operations, such as local, return ErrUnsupportedOperation.
+func (s *Sandbox) ResumeModification(ctx context.Context, operationID string) (*SandboxModificationPlan, error) {
+	out, err := s.inner.ResumeModification(ctx, operationID)
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	return parseModificationPlan(out)
+}
+
+// ResumeModification is Sandbox.ResumeModification for a sandbox addressed by name.
+// It returns ErrSandboxReplaced when the name now belongs to a different sandbox.
+func (h *SandboxHandle) ResumeModification(ctx context.Context, operationID string) (*SandboxModificationPlan, error) {
+	out, err := ffi.ResumeModificationByName(ctx, h.name, h.id, operationID)
 	if err != nil {
 		return nil, wrapFFI(err)
 	}

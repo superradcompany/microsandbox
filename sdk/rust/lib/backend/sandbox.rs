@@ -20,6 +20,7 @@ use futures::future::BoxFuture;
 use super::Backend;
 use crate::MicrosandboxResult;
 use crate::agent::AgentClient;
+use crate::error::{Operation, UnsupportedReason};
 use crate::logs::{BootError, LogEntry, LogOptions, LogStreamOptions};
 #[cfg(feature = "local")]
 use crate::runtime::ProcessHandle;
@@ -27,7 +28,8 @@ use crate::sandbox::exec::{ExecHandle, ExecOptions, ExecOutput};
 use crate::sandbox::fs::{FsEntry, FsMetadata, FsReadStream, FsWriteSink};
 use crate::sandbox::metrics::SandboxMetrics;
 use crate::sandbox::{
-    DEFAULT_STOP_TIMEOUT, Sandbox, SandboxConfig, SandboxHandle, SandboxListBuilder, SandboxPage,
+    DEFAULT_STOP_TIMEOUT, ModificationPolicy, Sandbox, SandboxConfig, SandboxHandle,
+    SandboxListBuilder, SandboxModificationPatch, SandboxModificationPlan, SandboxPage,
     SandboxStatus,
 };
 
@@ -37,6 +39,14 @@ use crate::sandbox::{
 pub(crate) use super::cloud::sandbox::{
     cloud_status_to_sandbox_status, sandbox_config_from_cloud_spec,
 };
+
+//--------------------------------------------------------------------------------------------------
+// Constants
+//--------------------------------------------------------------------------------------------------
+
+const MODIFICATION_NOT_IMPLEMENTED: &str = "this backend does not implement sandbox modification";
+const MODIFICATION_RESUME_NOT_IMPLEMENTED: &str =
+    "this backend has no resumable sandbox modification operations";
 
 //--------------------------------------------------------------------------------------------------
 // Type Aliases
@@ -325,6 +335,58 @@ pub trait SandboxBackend: Send + Sync {
         self.drain(backend, name)
     }
 
+    /// Plan a modification of the exact persisted sandbox identified by `identity`.
+    ///
+    /// The default returns [`MicrosandboxError::Unsupported`](crate::MicrosandboxError::Unsupported)
+    /// so existing backend implementations stay source compatible. Backends
+    /// that support modification must refuse to plan against a different
+    /// sandbox that reused `name`.
+    fn plan_modification_identified<'a>(
+        &'a self,
+        _backend: Arc<dyn Backend>,
+        _name: &'a str,
+        _identity: SandboxIdentity,
+        _patch: SandboxModificationPatch,
+        _policy: ModificationPolicy,
+    ) -> BoxFuture<'a, MicrosandboxResult<SandboxModificationPlan>> {
+        Box::pin(async { Err(modification_unsupported(MODIFICATION_NOT_IMPLEMENTED)) })
+    }
+
+    /// Apply a modification to the exact persisted sandbox identified by `identity`.
+    ///
+    /// The default returns [`MicrosandboxError::Unsupported`](crate::MicrosandboxError::Unsupported).
+    /// Backends that support modification must never apply it to a different
+    /// sandbox that reused `name`.
+    fn apply_modification_identified<'a>(
+        &'a self,
+        _backend: Arc<dyn Backend>,
+        _name: &'a str,
+        _identity: SandboxIdentity,
+        _patch: SandboxModificationPatch,
+        _policy: ModificationPolicy,
+    ) -> BoxFuture<'a, MicrosandboxResult<SandboxModificationPlan>> {
+        Box::pin(async { Err(modification_unsupported(MODIFICATION_NOT_IMPLEMENTED)) })
+    }
+
+    /// Resume a previously accepted modification operation, identified by an
+    /// opaque backend-issued `operation_id`, on the exact persisted sandbox.
+    ///
+    /// The default returns [`MicrosandboxError::Unsupported`](crate::MicrosandboxError::Unsupported)
+    /// for backends whose modifications are not tracked as resumable operations.
+    fn resume_modification_identified<'a>(
+        &'a self,
+        _backend: Arc<dyn Backend>,
+        _name: &'a str,
+        _identity: SandboxIdentity,
+        _operation_id: String,
+    ) -> BoxFuture<'a, MicrosandboxResult<SandboxModificationPlan>> {
+        Box::pin(async {
+            Err(modification_unsupported(
+                MODIFICATION_RESUME_NOT_IMPLEMENTED,
+            ))
+        })
+    }
+
     // ============================================================
     // Exec
     // ============================================================
@@ -591,5 +653,185 @@ pub trait SandboxBackend: Send + Sync {
         Box::pin(async move {
             crate::sandbox::fs::agent::copy_to_host(backend.as_ref(), name, guest, host).await
         })
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Functions
+//--------------------------------------------------------------------------------------------------
+
+fn modification_unsupported(reason: &str) -> crate::MicrosandboxError {
+    crate::MicrosandboxError::unsupported(
+        Operation::SandboxModify,
+        UnsupportedReason::NotAvailable(reason.to_string()),
+    )
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::MicrosandboxError;
+    use crate::backend::misconfigured::ConfigurationErrorBackend;
+
+    /// Out-of-tree style backend that implements only the required methods.
+    struct RequiredOnly;
+
+    fn refuse<'a, T: Send + 'a>() -> BoxFuture<'a, MicrosandboxResult<T>> {
+        Box::pin(async { Err(MicrosandboxError::Custom("required-only fake".into())) })
+    }
+
+    impl SandboxBackend for RequiredOnly {
+        fn create<'a>(
+            &'a self,
+            _backend: Arc<dyn Backend>,
+            _config: SandboxConfig,
+            _start: bool,
+        ) -> BoxFuture<'a, MicrosandboxResult<Sandbox>> {
+            refuse()
+        }
+
+        fn create_detached<'a>(
+            &'a self,
+            _backend: Arc<dyn Backend>,
+            _config: SandboxConfig,
+        ) -> BoxFuture<'a, MicrosandboxResult<Sandbox>> {
+            refuse()
+        }
+
+        fn start<'a>(
+            &'a self,
+            _backend: Arc<dyn Backend>,
+            _name: &'a str,
+        ) -> BoxFuture<'a, MicrosandboxResult<Sandbox>> {
+            refuse()
+        }
+
+        fn start_detached<'a>(
+            &'a self,
+            _backend: Arc<dyn Backend>,
+            _name: &'a str,
+        ) -> BoxFuture<'a, MicrosandboxResult<Sandbox>> {
+            refuse()
+        }
+
+        fn get<'a>(
+            &'a self,
+            _backend: Arc<dyn Backend>,
+            _name: &'a str,
+        ) -> BoxFuture<'a, MicrosandboxResult<SandboxHandle>> {
+            refuse()
+        }
+
+        fn list<'a>(
+            &'a self,
+            _backend: Arc<dyn Backend>,
+            _query: SandboxListBuilder,
+        ) -> BoxFuture<'a, MicrosandboxResult<SandboxPage>> {
+            refuse()
+        }
+
+        fn remove<'a>(
+            &'a self,
+            _backend: Arc<dyn Backend>,
+            _name: &'a str,
+        ) -> BoxFuture<'a, MicrosandboxResult<()>> {
+            refuse()
+        }
+
+        fn stop<'a>(
+            &'a self,
+            _backend: Arc<dyn Backend>,
+            _name: &'a str,
+        ) -> BoxFuture<'a, MicrosandboxResult<()>> {
+            refuse()
+        }
+
+        fn kill<'a>(
+            &'a self,
+            _backend: Arc<dyn Backend>,
+            _name: &'a str,
+        ) -> BoxFuture<'a, MicrosandboxResult<()>> {
+            refuse()
+        }
+
+        fn drain<'a>(
+            &'a self,
+            _backend: Arc<dyn Backend>,
+            _name: &'a str,
+        ) -> BoxFuture<'a, MicrosandboxResult<()>> {
+            refuse()
+        }
+
+        fn boot_error<'a>(
+            &'a self,
+            _backend: Arc<dyn Backend>,
+            _name: &'a str,
+        ) -> BoxFuture<'a, MicrosandboxResult<Option<BootError>>> {
+            refuse()
+        }
+
+        fn logs<'a>(
+            &'a self,
+            _backend: Arc<dyn Backend>,
+            _name: &'a str,
+            _opts: &'a LogOptions,
+        ) -> BoxFuture<'a, MicrosandboxResult<Vec<LogEntry>>> {
+            refuse()
+        }
+
+        fn log_stream<'a>(
+            &'a self,
+            _backend: Arc<dyn Backend>,
+            _name: &'a str,
+            _opts: &'a LogStreamOptions,
+        ) -> BoxFuture<'a, MicrosandboxResult<LogStream>> {
+            refuse()
+        }
+
+        fn follow_logs<'a>(
+            &'a self,
+            _backend: Arc<dyn Backend>,
+            _name: &'a str,
+            _opts: &'a LogOptions,
+        ) -> BoxFuture<'a, MicrosandboxResult<LogStream>> {
+            refuse()
+        }
+
+        fn metrics<'a>(
+            &'a self,
+            _backend: Arc<dyn Backend>,
+            _name: &'a str,
+            _config: &'a SandboxConfig,
+        ) -> BoxFuture<'a, MicrosandboxResult<SandboxMetrics>> {
+            refuse()
+        }
+
+        fn metrics_stream(
+            &self,
+            _backend: Arc<dyn Backend>,
+            _name: String,
+            _config: SandboxConfig,
+            _interval: Duration,
+        ) -> MetricsStream {
+            Box::pin(futures::stream::empty())
+        }
+    }
+
+    #[tokio::test]
+    async fn required_only_backend_refuses_modification_with_typed_default() {
+        let backend: Arc<dyn Backend> = Arc::new(ConfigurationErrorBackend::new(
+            MicrosandboxError::InvalidConfig("unused".into()),
+        ));
+
+        crate::test_support::assert_modification_unsupported(
+            &RequiredOnly,
+            backend,
+            SandboxIdentity::Cloud("sandbox-id".into()),
+        )
+        .await;
     }
 }

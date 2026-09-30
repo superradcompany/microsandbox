@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   modificationPlanFromJson,
   modifyOptionsToNapi,
+  type ModificationDisposition,
 } from "../../dist/modify.js";
 
 describe("modifyOptionsToNapi", () => {
@@ -135,5 +136,59 @@ describe("modificationPlanFromJson", () => {
     expect(plan.warnings).toEqual([{ field: "cpus", message: "warning" }]);
     // `resize_status` is omitted from the wire format when empty.
     expect(plan.resizeStatus).toEqual([]);
+  });
+
+  it("passes through a disposition added after this release", () => {
+    const plan = modificationPlanFromJson(
+      JSON.stringify({
+        sandbox: "api",
+        status: "running",
+        applied: true,
+        policy: "no_restart",
+        changes: [
+          {
+            kind: "config",
+            field: "cpus",
+            change: "updated",
+            before: "2",
+            after: "4",
+            disposition: "future",
+          },
+        ],
+        conflicts: [],
+        warnings: [],
+      }),
+    );
+
+    const disposition: ModificationDisposition = plan.changes[0]!.disposition;
+    expect(disposition).toBe("future");
+  });
+
+  it("preserves an unconfirmed apply outcome", () => {
+    const raw = JSON.stringify({
+      sandbox: "api",
+      status: "running",
+      applied: true,
+      policy: "no_restart",
+      changes: [
+        {
+          kind: "secret",
+          field: "secret",
+          name: "API_KEY",
+          change: "rotated",
+          before_ref: "$API_KEY",
+          after_ref: "$API_KEY",
+          disposition: "unconfirmed",
+          allow_hosts: ["api.example.com"],
+        },
+      ],
+      conflicts: [],
+      warnings: [],
+    });
+    const plan = modificationPlanFromJson(raw);
+
+    expect(plan.applied).toBe(true);
+    const disposition: ModificationDisposition = plan.changes[0]!.disposition;
+    expect(disposition).toBe("unconfirmed");
   });
 });

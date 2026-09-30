@@ -1184,7 +1184,7 @@ impl LocalBackend {
             // Resource reporting is part of readiness, not an unbounded wait after it.
             let restored = tokio::time::timeout_at(
                 startup_deadline,
-                crate::sandbox::restore_requested_resources(self, &mut config),
+                super::restore::restore_requested_resources(self, &mut config),
             )
             .await
             .unwrap_or_else(|_| {

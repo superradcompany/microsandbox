@@ -1192,6 +1192,29 @@ mod tests {
     }
 
     #[test]
+    fn secret_builder_materializes_the_default_placeholder() {
+        let secret = SecretBuilder::new()
+            .env("API_KEY")
+            .value("secret-value")
+            .allow("api.example.com")
+            .build();
+
+        assert_eq!(secret.placeholder, "$MSB_API_KEY");
+    }
+
+    #[test]
+    fn secret_builder_keeps_an_explicit_placeholder() {
+        let secret = SecretBuilder::new()
+            .env("API_KEY")
+            .value("secret-value")
+            .placeholder("$API_KEY")
+            .allow("api.example.com")
+            .build();
+
+        assert_eq!(secret.placeholder, "$API_KEY");
+    }
+
+    #[test]
     fn secret_builder_source_yields_reference_and_empty_value() {
         let secret = SecretBuilder::new()
             .env("API_KEY")

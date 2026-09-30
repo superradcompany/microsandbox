@@ -101,6 +101,15 @@ func TestSmokeGetSandboxNotFound(t *testing.T) {
 	}
 }
 
+func TestSmokeResumeModificationNotFound(t *testing.T) {
+	ctx := smokeSetup(t)
+	handle := &SandboxHandle{name: "smoke-this-sandbox-never-existed"}
+	_, err := handle.ResumeModification(ctx, "op-1")
+	if !IsKind(err, ErrSandboxNotFound) {
+		t.Fatalf("wanted ErrSandboxNotFound, got %v", err)
+	}
+}
+
 func TestSmokeGetVolumeNotFound(t *testing.T) {
 	ctx := smokeSetup(t)
 	_, err := GetVolume(ctx, "smoke-this-volume-never-existed")

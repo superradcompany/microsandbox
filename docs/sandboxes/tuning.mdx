@@ -4,7 +4,7 @@ description: Resize a running sandbox and update its configuration without repla
 icon: "pen-to-square"
 ---
 
-<Tooltip tip="modify and live resize are not yet available on microsandbox cloud; create a replacement sandbox with the new configuration."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On microsandbox cloud, modify only supports changing the value of an existing secret."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 You do not need to replace a running sandbox just because its workload changes. `modify` can resize the VM, update host-side metadata, rotate existing secrets, and change the defaults used by future commands while the sandbox stays up.
 
@@ -178,6 +178,56 @@ The planner classifies every requested field before it changes anything:
 | `next start` | Is saved and applies the next time the sandbox starts |
 | `requires restart` | Cannot affect the running VM under the default policy |
 | `unsupported` | Is invalid for this sandbox or backing type |
+| `unconfirmed` | Microsandbox cloud, after apply: was saved, but the running sandbox did not confirm it; it applies at the next start at the latest |
+
+Newer backends may add dispositions, so treat a value you do not recognize as unknown rather than failing.
+
+On microsandbox cloud, a change can take longer than the SDK waits. The SDK then reports an incomplete-modification error that carries the operation ID, and the change may still commit. Pass that ID to the SDK's resume method to keep waiting for the result. The local backend applies changes synchronously and never returns this error.
+
+<CodeGroup>
+```typescript TypeScript
+import { ModificationIncompleteError } from "microsandbox";
+
+let plan;
+try {
+  plan = await sandbox.modify({ secrets: { API_KEY: { value: token } } });
+} catch (e) {
+  if (!(e instanceof ModificationIncompleteError)) throw e;
+  plan = await sandbox.resumeModification(e.operationId);
+}
+```
+
+```rust Rust
+let plan = match sb.modify().secret(|s| s.env("API_KEY").value(token)).apply().await {
+    Err(MicrosandboxError::ModificationIncomplete { operation_id, .. }) => {
+        sb.resume_modification(operation_id).await?
+    }
+    result => result?,
+};
+```
+
+```python Python
+from microsandbox import ModificationIncompleteError
+
+try:
+    plan = await sb.modify(secrets={"API_KEY": {"value": token}})
+except ModificationIncompleteError as error:
+    plan = await sb.resume_modification(error.operation_id)
+```
+
+```go Go
+plan, err := sb.Modify(ctx, m.ModifyOptions{
+    Secrets: map[string]m.SecretModifySpec{"API_KEY": {Value: token}},
+})
+var incomplete *m.ModificationIncompleteError
+if errors.As(err, &incomplete) {
+    plan, err = sb.ResumeModification(ctx, incomplete.OperationID)
+}
+if err != nil {
+    return err
+}
+```
+</CodeGroup>
 
 <span id="live-paths-in-detail" />
 

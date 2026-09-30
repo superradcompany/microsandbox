@@ -27,15 +27,22 @@ impl ControlSession {
         Self { entry, connection }
     }
 
+    /// Runtime generation (row, run, and process) this session is bound to.
+    pub fn run_identity(&self) -> crate::sandbox::identity::SandboxRunIdentity {
+        crate::sandbox::identity::SandboxRunIdentity {
+            sandbox_id: self.entry.key.sandbox_id,
+            run_id: self.entry.key.run_id,
+            pid: self.entry.key.pid,
+        }
+    }
+
     pub fn capabilities(&self) -> microsandbox_control_client::RuntimeCapabilities {
         *self.connection.runtime_capabilities()
     }
 
     /// Whether this retained session belongs to the caller's already selected run generation.
     pub(crate) fn matches_run(&self, run: crate::sandbox::identity::SandboxRunIdentity) -> bool {
-        self.entry.key.sandbox_id == run.sandbox_id
-            && self.entry.key.run_id == run.run_id
-            && self.entry.key.pid == run.pid
+        self.run_identity() == run
     }
 
     #[cfg(test)]

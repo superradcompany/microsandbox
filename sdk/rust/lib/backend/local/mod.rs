@@ -28,6 +28,11 @@ pub use snapshot::archive::fuzz_unpack_local_snapshot_archive;
 pub use snapshot::downgrade as snapshot_downgrade;
 
 pub(crate) use control::ControlSession;
+#[cfg(all(test, unix))]
+pub(crate) use control::request::control_request_for_run;
+#[cfg(target_os = "linux")]
+pub(crate) use control::request::control_request_for_run_with_memory;
+pub(crate) use control::request::{control_disk_compact, control_session_for_run};
 
 use std::{
     collections::{HashMap, HashSet},

@@ -73,14 +73,12 @@ pub use sandbox::ssh::{
     SshClient, SshClientOptionsBuilder, SshExecOptionsBuilder, SshOutput, SshServer,
     SshServerOptionsBuilder, SshStdioStream,
 };
-#[cfg(feature = "local")]
 pub use sandbox::{
     ChangeKind, ConfigPlannedChange, ModificationConflict, ModificationDisposition,
     ModificationPolicy, ModificationWarning, PlannedChange, ResourceConvergenceState, ResourceKind,
-    ResourceResizeStatus, SandboxMetricsReport, SandboxMetricsState, SandboxModificationBuilder,
-    SandboxModificationPatch, SandboxModificationPlan, SecretChangeKind, SecretModificationPatch,
-    SecretPatchBuilder, SecretPlannedChange, SecretSource, all_sandbox_metrics,
-    all_sandbox_metrics_local, all_sandbox_metrics_reports_local, sandbox_metrics_report_local,
+    ResourceResizeStatus, SandboxModificationBuilder, SandboxModificationPatch,
+    SandboxModificationPlan, SecretChangeKind, SecretModificationPatch, SecretPatchBuilder,
+    SecretPlannedChange, SecretSource,
 };
 #[cfg(feature = "net")]
 pub use sandbox::{
@@ -95,6 +93,11 @@ pub use sandbox::{
     SandboxListBuilder, SandboxMetrics, SandboxPage, SandboxPingResult, SandboxPolicyPatch,
     SandboxResourcesPatch, SandboxRuntimeOptionsPatch, SandboxSpecPatch, SandboxTouchResult,
     VsockSpecPatch, validate_sandbox_name,
+};
+#[cfg(feature = "local")]
+pub use sandbox::{
+    SandboxMetricsReport, SandboxMetricsState, all_sandbox_metrics, all_sandbox_metrics_local,
+    all_sandbox_metrics_reports_local, sandbox_metrics_report_local,
 };
 pub use snapshot::{
     CheckpointSnapshotState, FileSnapshotState, HeadUpdate, HeadUpdateReason, LoadOpts, SaveOpts,

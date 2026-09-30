@@ -477,6 +477,7 @@ mod error_kind {
     pub const SNAPSHOT_INTEGRITY: &str = "snapshot_integrity";
     pub const SNAPSHOT_MIGRATION: &str = "snapshot_migration";
     pub const SNAPSHOT_SOURCE_RECOVERY: &str = "snapshot_source_recovery";
+    pub const MODIFICATION_INCOMPLETE: &str = "modification_incomplete";
     pub const PATCH_FAILED: &str = "patch_failed";
     pub const METRICS_DISABLED: &str = "metrics_disabled";
     pub const METRICS_UNAVAILABLE: &str = "metrics_unavailable";
@@ -488,6 +489,15 @@ struct FfiError {
     kind: &'static str,
     message: String,
     recovery: Option<Box<microsandbox::SnapshotSourceRecoveryError>>,
+    operation: Option<IncompleteModification>,
+}
+
+/// Where an unsettled modification stood, so Go callers can resume it.
+#[derive(serde::Serialize)]
+struct IncompleteModification {
+    operation_id: String,
+    budget_ms: u64,
+    committed: Option<bool>,
 }
 
 #[derive(serde::Deserialize)]
@@ -504,6 +514,7 @@ impl FfiError {
             kind,
             message: message.into(),
             recovery: None,
+            operation: None,
         }
     }
 
@@ -532,6 +543,14 @@ impl FfiError {
             return format!(
                 r#"{{"kind":"{}","message":{},"recovery":{}}}"#,
                 self.kind, msg, recovery
+            );
+        }
+        if let Some(operation) = &self.operation
+            && let Ok(operation) = serde_json::to_string(operation)
+        {
+            return format!(
+                r#"{{"kind":"{}","message":{},"operation":{}}}"#,
+                self.kind, msg, operation
             );
         }
         format!(r#"{{"kind":"{}","message":{}}}"#, self.kind, msg)
@@ -563,6 +582,7 @@ impl From<MicrosandboxError> for FfiError {
             MicrosandboxError::SnapshotIntegrity(_) => error_kind::SNAPSHOT_INTEGRITY,
             MicrosandboxError::SnapshotMigration { .. } => error_kind::SNAPSHOT_MIGRATION,
             MicrosandboxError::SnapshotSourceRecovery(_) => error_kind::SNAPSHOT_SOURCE_RECOVERY,
+            MicrosandboxError::ModificationIncomplete { .. } => error_kind::MODIFICATION_INCOMPLETE,
             MicrosandboxError::PatchFailed(_) => error_kind::PATCH_FAILED,
             MicrosandboxError::MetricsDisabled(_) => error_kind::METRICS_DISABLED,
             MicrosandboxError::MetricsUnavailable(_) => error_kind::METRICS_UNAVAILABLE,
@@ -572,6 +592,18 @@ impl From<MicrosandboxError> for FfiError {
             MicrosandboxError::Io(_) => error_kind::IO,
             _ => error_kind::INTERNAL,
         };
+        let operation = match &e {
+            MicrosandboxError::ModificationIncomplete {
+                operation_id,
+                budget,
+                committed,
+            } => Some(IncompleteModification {
+                operation_id: operation_id.clone(),
+                budget_ms: u64::try_from(budget.as_millis()).unwrap_or(u64::MAX),
+                committed: *committed,
+            }),
+            _ => None,
+        };
         Self {
             kind,
             message: e.to_string(),
@@ -579,6 +611,7 @@ impl From<MicrosandboxError> for FfiError {
                 MicrosandboxError::SnapshotSourceRecovery(recovery) => Some(recovery),
                 _ => None,
             },
+            operation,
         }
     }
 }
@@ -2740,8 +2773,14 @@ async fn run_modify(
         builder.dry_run().await
     } else {
         builder.apply().await
-    }
-    .map_err(FfiError::from)?;
+    };
+    modification_plan_json(plan)
+}
+
+fn modification_plan_json(
+    plan: microsandbox::MicrosandboxResult<microsandbox::sandbox::SandboxModificationPlan>,
+) -> Result<String, FfiError> {
+    let plan = plan.map_err(FfiError::from)?;
     serde_json::to_string(&plan)
         .map_err(|e| FfiError::internal(format!("serialize modification plan: {e}")))
 }
@@ -3249,6 +3288,57 @@ pub unsafe extern "C" fn msb_sandbox_handle_modify(
             let h = Sandbox::get(&name).await.map_err(FfiError::from)?;
             let builder = configure_modify(h.modify(), opts.patch, policy);
             run_modify(builder, opts.dry_run).await
+        }))
+    })
+}
+
+/// Plan or apply a sandbox modification by name, bound to the handle's
+/// captured identity. `expected_id` is that identity; a sandbox that now holds
+/// the name under another identity is refused as replaced.
+/// Input: `{"patch":{...},"policy":"no_restart|next_start|restart","dry_run":bool}`
+/// Output: the serialized `SandboxModificationPlan`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sandbox_handle_modify_identified(
+    cancel_id: u64,
+    name: *const c_char,
+    expected_id: *const c_char,
+    opts_json: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let name = unsafe { cstr(name) }?;
+        let expected_id = unsafe { cstr(expected_id) }?;
+        let opts = parse_sandbox_modify_opts(&unsafe { cstr(opts_json) }?)?;
+        let policy = parse_modify_policy(opts.policy.as_deref())?;
+        Ok(Box::pin(async move {
+            let h = identified_sandbox_handle(&name, &expected_id).await?;
+            let builder = configure_modify(h.modify(), opts.patch, policy);
+            run_modify(builder, opts.dry_run).await
+        }))
+    })
+}
+
+/// Keep waiting for a modification by name that did not settle within its
+/// apply budget. `expected_id` is the handle's captured identity; a sandbox
+/// that now holds the name under another identity is refused as replaced.
+/// Output: the serialized `SandboxModificationPlan`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sandbox_handle_resume_modification(
+    cancel_id: u64,
+    name: *const c_char,
+    expected_id: *const c_char,
+    operation_id: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let name = unsafe { cstr(name) }?;
+        let expected_id = unsafe { cstr(expected_id) }?;
+        let operation_id = unsafe { cstr(operation_id) }?;
+        Ok(Box::pin(async move {
+            let h = identified_sandbox_handle(&name, &expected_id).await?;
+            modification_plan_json(h.resume_modification(operation_id).await)
         }))
     })
 }
@@ -3835,6 +3925,26 @@ pub unsafe extern "C" fn msb_sandbox_modify(
         Ok(Box::pin(async move {
             let builder = configure_modify(sb.modify(), opts.patch, policy);
             run_modify(builder, opts.dry_run).await
+        }))
+    })
+}
+
+/// Keep waiting for a modification on a live sandbox handle that did not
+/// settle within its apply budget.
+/// Output: the serialized `SandboxModificationPlan`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sandbox_resume_modification(
+    cancel_id: u64,
+    handle: Handle,
+    operation_id: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let operation_id = unsafe { cstr(operation_id) }?;
+        let sb = get(handle)?;
+        Ok(Box::pin(async move {
+            modification_plan_json(sb.resume_modification(operation_id).await)
         }))
     })
 }
@@ -7946,6 +8056,53 @@ mod tests {
         assert_eq!(payload["recovery"]["artifact"]["kind"], "archive");
         assert_eq!(payload["recovery"]["artifact"]["path"], "/saved.msb");
         assert!(payload["recovery"]["publication_error"].is_null());
+    }
+
+    #[test]
+    fn modification_plan_json_keeps_unknown_dispositions() {
+        let plan = serde_json::from_value(serde_json::json!({
+            "sandbox": "api",
+            "status": "running",
+            "applied": true,
+            "policy": "no_restart",
+            "changes": [{
+                "kind": "secret",
+                "field": "secret",
+                "name": "API_KEY",
+                "change": "rotated",
+                "disposition": "after migration",
+            }],
+            "conflicts": [],
+            "warnings": [],
+        }))
+        .unwrap();
+        let out =
+            modification_plan_json(Ok(plan)).unwrap_or_else(|error| panic!("{}", error.message));
+        let json: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(json["changes"][0]["disposition"], "after migration");
+    }
+
+    #[test]
+    fn modification_incomplete_error_preserves_ffi_payload() {
+        for committed in [Some(true), Some(false), None] {
+            let error = MicrosandboxError::ModificationIncomplete {
+                operation_id: "op-1".into(),
+                budget: Duration::from_secs(60),
+                committed,
+            };
+            let message = error.to_string();
+            let payload: serde_json::Value =
+                serde_json::from_str(&FfiError::from(error).to_json()).unwrap();
+            assert_eq!(payload["kind"], "modification_incomplete");
+            assert_eq!(payload["message"], message);
+            assert_eq!(payload["operation"]["operation_id"], "op-1");
+            assert_eq!(payload["operation"]["budget_ms"], 60_000);
+            assert_eq!(
+                payload["operation"]["committed"],
+                serde_json::json!(committed)
+            );
+            assert!(payload.get("recovery").is_none());
+        }
     }
 
     #[test]

@@ -16,12 +16,18 @@ use microsandbox_runtime::launch::{CheckpointRestoreConfig, RootfsUpperLayerConf
 use crate::backend::Backend;
 #[cfg(feature = "local")]
 use crate::backend::LocalBackend;
+#[cfg(all(feature = "local", target_os = "linux"))]
+use crate::backend::local::control_request_for_run_with_memory;
+#[cfg(feature = "local")]
+use crate::backend::local::control_session_for_run;
+#[cfg(feature = "local")]
+use crate::backend::local::snapshot::capture_flush_policy;
 use crate::backend::sandbox::SandboxIdentity;
 use crate::{MicrosandboxError, MicrosandboxResult};
 
 use super::{Sandbox, SandboxBuilder, SandboxHandle};
 #[cfg(feature = "local")]
-use super::{SandboxConfig, SandboxStatus, modify};
+use super::{SandboxConfig, SandboxStatus};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -410,7 +416,7 @@ pub(super) async fn prepare_branch(
     }
     config.external_mount_policy = options.external_mount_policy;
     config.creation_progress = options.creation_progress;
-    let session = modify::control_session_for_run(local, source, run).await?;
+    let session = control_session_for_run(local, source, run).await?;
     let capabilities = session.capabilities();
     if !capabilities.branch_create {
         return Err(MicrosandboxError::Runtime(
@@ -431,7 +437,7 @@ pub(super) async fn prepare_branch(
     config.replace_existing = false;
     config.spec.patches.clear();
     config.branch_source = Some(super::identity::BranchSource {
-        guest_flush: modify::capture_flush_policy(Some(capabilities), guest_flush, false)?,
+        guest_flush: capture_flush_policy(Some(capabilities), guest_flush, false)?,
         batch: None,
         record_integrity,
         name: source.into(),
@@ -499,13 +505,13 @@ pub(crate) async fn capture_child(
         backing: None,
     };
     #[cfg(not(target_os = "linux"))]
-    let response = modify::control_session_for_run(local, &source.name, source.run)
+    let response = control_session_for_run(local, &source.name, source.run)
         .await?
         .request(&CreateBranch(request))
         .await
         .map_err(MicrosandboxError::ControlClient)?;
     #[cfg(target_os = "linux")]
-    let response = modify::control_request_for_run_with_memory(
+    let response = control_request_for_run_with_memory(
         local,
         &source.name,
         source.run,

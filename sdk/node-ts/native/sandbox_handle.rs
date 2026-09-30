@@ -129,6 +129,13 @@ impl JsSandboxHandle {
         crate::sandbox::run_modify(builder, crate::sandbox::modify_dry_run(options.as_ref())).await
     }
 
+    /// Keep waiting for a modification that did not settle within `modify()`'s
+    /// budget. Returns the plan as a JSON string.
+    #[napi]
+    pub async fn resume_modification(&self, operation_id: String) -> Result<String> {
+        crate::sandbox::modification_plan_json(self.inner.resume_modification(operation_id).await)
+    }
+
     /// Compact root and owned-data disk prefixes of a running or stopped sandbox.
     #[napi]
     pub async fn compact(

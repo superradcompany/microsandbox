@@ -483,6 +483,7 @@ export {
   MetricsDisabledError,
   MetricsUnavailableError,
   MicrosandboxError,
+  ModificationIncompleteError,
   NixError,
   PatchFailedError,
   ProtocolError,
@@ -505,6 +506,7 @@ export {
 } from "./errors.js";
 export type {
   MicrosandboxErrorCode,
+  ModificationIncompleteDetails,
   PublishedSnapshotArtifact,
   SnapshotSourceRecoveryDetails,
 } from "./errors.js";

@@ -8,7 +8,9 @@ use napi::Status;
 /// Convert a `MicrosandboxError` into a `napi::Error` with a typed code string.
 pub fn to_napi_error(err: MicrosandboxError) -> napi::Error {
     let code = error_type_str(&err);
-    if let Some(payload) = source_recovery_payload(&err) {
+    if let Some(payload) =
+        source_recovery_payload(&err).or_else(|| modification_incomplete_payload(&err))
+    {
         return napi::Error::new(Status::GenericFailure, format!("[{code}] {payload}"));
     }
     napi::Error::new(Status::GenericFailure, format!("[{code}] {err}"))
@@ -21,6 +23,23 @@ fn source_recovery_payload(err: &MicrosandboxError) -> Option<String> {
     // Only this error carries recovery metadata; ordinary errors retain their existing wire form.
     let recovery = serde_json::to_value(recovery).ok()?;
     Some(serde_json::json!({ "message": err.to_string(), "recovery": recovery }).to_string())
+}
+
+fn modification_incomplete_payload(err: &MicrosandboxError) -> Option<String> {
+    let MicrosandboxError::ModificationIncomplete {
+        operation_id,
+        budget,
+        committed,
+    } = err
+    else {
+        return None;
+    };
+    let operation = serde_json::json!({
+        "operation_id": operation_id,
+        "budget_ms": u64::try_from(budget.as_millis()).unwrap_or(u64::MAX),
+        "committed": committed,
+    });
+    Some(serde_json::json!({ "message": err.to_string(), "operation": operation }).to_string())
 }
 
 /// Return a string tag for the error variant, used as the JS error `code` field.
@@ -58,6 +77,7 @@ fn error_type_str(err: &MicrosandboxError) -> &'static str {
         MicrosandboxError::WindowsHostSetup(_) => "WindowsHostSetup",
         MicrosandboxError::ExecTimeout(_) => "ExecTimeout",
         MicrosandboxError::StopTimeout { .. } => "StopTimeout",
+        MicrosandboxError::ModificationIncomplete { .. } => "ModificationIncomplete",
         MicrosandboxError::ExecFailed(_) => "ExecFailed",
         MicrosandboxError::Terminal(_) => "Terminal",
         MicrosandboxError::SandboxFsOps(_) => "SandboxFsOps",
@@ -117,5 +137,27 @@ mod tests {
         );
         assert!(payload["recovery"]["artifact"].is_null());
         assert_eq!(payload["recovery"]["publication_error"], "disk full");
+    }
+
+    #[test]
+    fn modification_incomplete_error_preserves_the_operation() {
+        for committed in [Some(true), Some(false), None] {
+            let error = MicrosandboxError::ModificationIncomplete {
+                operation_id: "op-1".into(),
+                budget: std::time::Duration::from_secs(60),
+                committed,
+            };
+            assert_eq!(error_type_str(&error), "ModificationIncomplete");
+            let payload: serde_json::Value =
+                serde_json::from_str(&modification_incomplete_payload(&error).unwrap()).unwrap();
+            let message = error.to_string();
+            assert_eq!(payload["message"], message);
+            assert_eq!(payload["operation"]["operation_id"], "op-1");
+            assert_eq!(payload["operation"]["budget_ms"], 60_000);
+            assert_eq!(
+                payload["operation"]["committed"],
+                serde_json::json!(committed)
+            );
+        }
     }
 }

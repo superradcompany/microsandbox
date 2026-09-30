@@ -597,7 +597,7 @@ Explicitly refresh the running sandbox's idle activity. This sends `core.touch`,
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">modify()</span>
 
-<Tooltip tip="modify is not available on microsandbox cloud; recreate the sandbox with the new configuration."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On microsandbox cloud, modify only supports changing the value of an existing secret."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 modify(opts?: ModifyOptions): Promise<SandboxModificationPlan>
@@ -637,13 +637,15 @@ await sandbox.modify({ secretsRemove: ["OLD_API_KEY"] });
 
 </Accordion>
 
-Plan or apply a configuration change. The returned plan labels each change `"live"`, `"next start"`, `"requires restart"`, or `"unsupported"`.
+Plan or apply a configuration change. The returned plan labels each change `"live"`, `"next start"`, `"requires restart"`, or `"unsupported"`; an applied plan can also report `"unconfirmed"`. The `ModificationDisposition` type also admits other strings, so handle dispositions added by newer backends as unknown.
 
 `cpus` and `memory` resize live within the [`maxCpus`](#sandboxbuilder-maxcpus) / [`maxMemory`](#sandboxbuilder-maxmemory) ceilings; raising a ceiling requires a restart. `rootDiskSize` grows owned managed and flat ext4 roots live, including checkpoint-backed roots, tmpfs root disks can change in either direction on the next boot, and user-supplied disk images are rejected. Env and workdir changes affect future execs only. Stopped roots grow before the new size is saved. Explicit restart and next-start policies remain available.
 
 Secret specs are keyed by stable secret name. Each `SecretModifySpec` selects at most one source (`env`, `value`, or `store`) and may also set `placeholder` and `allowedHosts`; omitting a source updates only the other supplied fields. Plans expose only safe references and metadata; raw secret values never appear in a plan. Removal is explicit through `secretsRemove`.
 
 A live CPU or memory resize can take a moment to settle. The new limits are enforced immediately, and the returned plan's `resizeStatus` reports when the sandbox has finished adjusting. See [`SandboxModificationPlan`](#sandboxmodificationplan).
+
+A backend that applies modifications as asynchronous operations may report a change `"unconfirmed"` when it was saved but the running sandbox did not confirm it. If the operation does not settle within the backend's budget, `modify()` rejects with `ModificationIncompleteError` carrying `operationId`, `budgetMs`, and `committed` (`null` when unknown); the change may still commit. Pass `operationId` to [`resumeModification()`](#sandbox-resumemodification) to keep waiting.
 
 <p className="msb-label">Parameters</p>
 
@@ -660,6 +662,48 @@ A live CPU or memory resize can take a moment to settle. The new limits are enfo
   <div className="msb-param">
     <div className="msb-param-key"><a className="msb-type" href="#sandboxmodificationplan">Promise&lt;SandboxModificationPlan&gt;</a></div>
     <div className="msb-param-desc">The modification plan, applied unless <code>dryRun: true</code>.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">resumeModification()</span>
+
+```typescript
+resumeModification(operationId: string): Promise<SandboxModificationPlan>
+```
+
+<Accordion title="Example">
+
+```typescript
+import { ModificationIncompleteError } from "microsandbox";
+
+let plan;
+try {
+  plan = await sandbox.modify({ secrets: { API_KEY: { value: token } } });
+} catch (e) {
+  if (!(e instanceof ModificationIncompleteError)) throw e;
+  plan = await sandbox.resumeModification(e.operationId);
+}
+```
+
+</Accordion>
+
+Keep waiting for a modification that rejected with `ModificationIncompleteError`. The operation is checked against this sandbox, and waiting uses the backend's settle budget again: the result is the settled plan, the operation's failure, or another `ModificationIncompleteError`. The local backend applies modifications synchronously and rejects with `UnsupportedError`.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>operationId</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">The <code>operationId</code> of <code>ModificationIncompleteError</code>.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#sandboxmodificationplan">Promise&lt;SandboxModificationPlan&gt;</a></div>
+    <div className="msb-param-desc">The settled plan, with <code>applied: true</code>.</div>
   </div>
 </div>
 
@@ -2459,13 +2503,25 @@ Explicitly refresh idle activity; does not start stopped sandboxes
 
 #### <span className="msb-recv">handle.</span><span className="msb-hn">modify()</span>
 
-<Tooltip tip="Modify is not available on microsandbox cloud; recreate the sandbox with the new configuration."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On microsandbox cloud, modify only supports changing the value of an existing secret."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 modify(opts?)
 ```
 
 Plan or apply a configuration change; same options as [`modify()`](#sandbox-modify). Does not start stopped sandboxes; changes persist for the next boot
+
+<p className="msb-label">Returns</p>
+
+`Promise<`[`SandboxModificationPlan`](#sandboxmodificationplan)`>`
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">resumeModification()</span>
+
+```typescript
+resumeModification(operationId)
+```
+
+Keep waiting for an unfinished modification by its `ModificationIncompleteError.operationId`; see [`resumeModification()`](#sandbox-resumemodification)
 
 <p className="msb-label">Returns</p>
 
@@ -3042,7 +3098,7 @@ Ordinary configuration change in a modification plan.
 | change | `"added" \| "updated" \| "removed"` | Natural change type for table rendering |
 | before | `string \| null` | Previous safe visible state |
 | after | `string \| null` | New safe visible state |
-| disposition | `"live" \| "next start" \| "requires restart" \| "unsupported"` | When or whether the change can take effect |
+| disposition | `"live" \| "next start" \| "requires restart" \| "unsupported" \| "unconfirmed" \| (string & {})` | When or whether the change can take effect; `"unconfirmed"` appears only in applied plans |
 | reason | `string \| null` | Human-readable reason for the classification, when useful |
 
 ### SecretPlannedChange
@@ -3058,7 +3114,7 @@ Secret change in a modification plan. Values are omitted by construction; `befor
 | change | `"added" \| "rotated" \| "removed" \| "renamed" \| "hosts updated" \| "placeholder updated"` | Natural change type for table rendering |
 | beforeRef | `string \| null` | Previous guest-visible reference or placeholder |
 | afterRef | `string \| null` | New guest-visible reference or placeholder |
-| disposition | `"live" \| "next start" \| "requires restart" \| "unsupported"` | When or whether the change can take effect |
+| disposition | `"live" \| "next start" \| "requires restart" \| "unsupported" \| "unconfirmed" \| (string & {})` | When or whether the change can take effect; `"unconfirmed"` appears only in applied plans |
 | allowHosts | `string[]` | Allowed hosts after the requested change |
 | reason | `string \| null` | Human-readable reason for the classification, when useful |
 

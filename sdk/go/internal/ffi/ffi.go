@@ -119,6 +119,8 @@ typedef char *(*msb_sandbox_handle_wait_until_stopped_fn)(uint64_t cancel_id, co
 typedef char *(*msb_sandbox_handle_ping_fn)(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_handle_touch_fn)(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_handle_modify_fn)(uint64_t cancel_id, const char *name, const char *opts_json, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_sandbox_handle_modify_identified_fn)(uint64_t cancel_id, const char *name, const char *expected_id, const char *opts_json, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_sandbox_handle_resume_modification_fn)(uint64_t cancel_id, const char *name, const char *expected_id, const char *operation_id, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_close_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_detach_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_stop_fn)(uint64_t cancel_id, uint64_t handle, uint64_t timeout_ms, uint8_t *buf, size_t buf_len);
@@ -196,6 +198,7 @@ typedef char *(*msb_sandbox_owns_lifecycle_fn)(uint64_t handle, uint8_t *buf, si
 typedef char *(*msb_sandbox_ping_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_touch_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_modify_fn)(uint64_t cancel_id, uint64_t handle, const char *opts_json, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_sandbox_resume_modification_fn)(uint64_t cancel_id, uint64_t handle, const char *operation_id, uint8_t *buf, size_t buf_len);
 
 typedef char *(*msb_sandbox_attach_fn)(uint64_t cancel_id, uint64_t handle, const char *cmd, const char *opts_json, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_attach_default_fn)(uint64_t cancel_id, uint64_t handle, const char *opts_json, uint8_t *buf, size_t buf_len);
@@ -295,6 +298,8 @@ static msb_sandbox_handle_wait_until_stopped_fn ptr_msb_sandbox_handle_wait_unti
 static msb_sandbox_handle_ping_fn ptr_msb_sandbox_handle_ping = NULL;
 static msb_sandbox_handle_touch_fn ptr_msb_sandbox_handle_touch = NULL;
 static msb_sandbox_handle_modify_fn ptr_msb_sandbox_handle_modify = NULL;
+static msb_sandbox_handle_modify_identified_fn ptr_msb_sandbox_handle_modify_identified = NULL;
+static msb_sandbox_handle_resume_modification_fn ptr_msb_sandbox_handle_resume_modification = NULL;
 static msb_sandbox_close_fn      ptr_msb_sandbox_close      = NULL;
 static msb_sandbox_detach_fn     ptr_msb_sandbox_detach     = NULL;
 static msb_sandbox_stop_fn       ptr_msb_sandbox_stop       = NULL;
@@ -363,6 +368,7 @@ static msb_sandbox_owns_lifecycle_fn ptr_msb_sandbox_owns_lifecycle = NULL;
 static msb_sandbox_ping_fn       ptr_msb_sandbox_ping       = NULL;
 static msb_sandbox_touch_fn      ptr_msb_sandbox_touch      = NULL;
 static msb_sandbox_modify_fn     ptr_msb_sandbox_modify     = NULL;
+static msb_sandbox_resume_modification_fn ptr_msb_sandbox_resume_modification = NULL;
 static msb_exec_collect_fn         ptr_msb_exec_collect         = NULL;
 static msb_exec_wait_fn            ptr_msb_exec_wait            = NULL;
 static msb_exec_kill_fn            ptr_msb_exec_kill            = NULL;
@@ -493,6 +499,8 @@ const char *load_microsandbox(const char *path) {
 	RESOLVE(msb_sandbox_handle_ping);
 	RESOLVE(msb_sandbox_handle_touch);
 	RESOLVE(msb_sandbox_handle_modify);
+	RESOLVE_OPTIONAL(msb_sandbox_handle_modify_identified);
+	RESOLVE_OPTIONAL(msb_sandbox_handle_resume_modification);
 	RESOLVE(msb_sandbox_close);
 	RESOLVE(msb_sandbox_detach);
 	RESOLVE(msb_sandbox_stop);
@@ -561,6 +569,7 @@ const char *load_microsandbox(const char *path) {
 	RESOLVE(msb_sandbox_ping);
 	RESOLVE(msb_sandbox_touch);
 	RESOLVE(msb_sandbox_modify);
+	RESOLVE_OPTIONAL(msb_sandbox_resume_modification);
 	RESOLVE(msb_exec_collect);
 	RESOLVE(msb_exec_wait);
 	RESOLVE(msb_exec_kill);
@@ -709,8 +718,15 @@ char *call_msb_sandbox_handle_ping(uint64_t cancel_id, const char *name, uint8_t
 char *call_msb_sandbox_handle_touch(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_sandbox_handle_touch ? ptr_msb_sandbox_handle_touch(cancel_id, name, buf, buf_len) : NULL;
 }
-char *call_msb_sandbox_handle_modify(uint64_t cancel_id, const char *name, const char *opts_json, uint8_t *buf, size_t buf_len) {
-	return ptr_msb_sandbox_handle_modify ? ptr_msb_sandbox_handle_modify(cancel_id, name, opts_json, buf, buf_len) : NULL;
+bool has_identified_handle_modify(void) { return ptr_msb_sandbox_handle_modify_identified != NULL; }
+char *call_msb_sandbox_handle_modify_identified(uint64_t cancel_id, const char *name, const char *expected_id, const char *opts_json, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_sandbox_handle_modify_identified ? ptr_msb_sandbox_handle_modify_identified(cancel_id, name, expected_id, opts_json, buf, buf_len) : NULL;
+}
+bool has_modification_resume(void) {
+	return ptr_msb_sandbox_handle_resume_modification != NULL && ptr_msb_sandbox_resume_modification != NULL;
+}
+char *call_msb_sandbox_handle_resume_modification(uint64_t cancel_id, const char *name, const char *expected_id, const char *operation_id, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_sandbox_handle_resume_modification ? ptr_msb_sandbox_handle_resume_modification(cancel_id, name, expected_id, operation_id, buf, buf_len) : NULL;
 }
 char *call_msb_sandbox_close(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_sandbox_close ? ptr_msb_sandbox_close(cancel_id, handle, buf, buf_len) : NULL;
@@ -920,6 +936,9 @@ char *call_msb_sandbox_touch(uint64_t cancel_id, uint64_t handle, uint8_t *buf, 
 }
 char *call_msb_sandbox_modify(uint64_t cancel_id, uint64_t handle, const char *opts_json, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_sandbox_modify ? ptr_msb_sandbox_modify(cancel_id, handle, opts_json, buf, buf_len) : NULL;
+}
+char *call_msb_sandbox_resume_modification(uint64_t cancel_id, uint64_t handle, const char *operation_id, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_sandbox_resume_modification ? ptr_msb_sandbox_resume_modification(cancel_id, handle, operation_id, buf, buf_len) : NULL;
 }
 char *call_msb_exec_collect(uint64_t cancel_id, uint64_t exec_handle, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_exec_collect ? ptr_msb_exec_collect(cancel_id, exec_handle, buf, buf_len) : NULL;
@@ -1232,12 +1251,20 @@ const fsStreamBufSize = 6 << 20
 const logsBufSize = 48 << 20
 
 // Error is the typed error surfaced across the FFI boundary. The Rust side
-// serialises {kind, message} JSON with optional recovery metadata; this type unmarshals it. The public SDK
+// serialises {kind, message} JSON with optional recovery or operation metadata; this type unmarshals it. The public SDK
 // maps Kind back into microsandbox.ErrorKind.
 type Error struct {
-	Kind     string                         `json:"kind"`
-	Message  string                         `json:"message"`
-	Recovery *SnapshotSourceRecoveryDetails `json:"recovery,omitempty"`
+	Kind      string                         `json:"kind"`
+	Message   string                         `json:"message"`
+	Recovery  *SnapshotSourceRecoveryDetails `json:"recovery,omitempty"`
+	Operation *IncompleteModification        `json:"operation,omitempty"`
+}
+
+// IncompleteModification locates an unsettled modification operation.
+type IncompleteModification struct {
+	OperationID string `json:"operation_id"`
+	BudgetMs    uint64 `json:"budget_ms"`
+	Committed   *bool  `json:"committed"`
 }
 
 // SnapshotSourceRecoveryDetails preserves native recovery metadata across the FFI.
@@ -1289,6 +1316,7 @@ const (
 	KindSnapshotIntegrity      = "snapshot_integrity"
 	KindSnapshotMigration      = "snapshot_migration"
 	KindSnapshotSourceRecovery = "snapshot_source_recovery"
+	KindModificationIncomplete = "modification_incomplete"
 	KindPatchFailed            = "patch_failed"
 	KindMetricsDisabled        = "metrics_disabled"
 	KindMetricsUnavailable     = "metrics_unavailable"
@@ -2613,21 +2641,53 @@ func TouchSandboxByName(ctx context.Context, name string) (*SandboxTouchResult, 
 	return &result, nil
 }
 
-// ModifySandboxByName plans or applies a sandbox modification by name.
-// optsJSON carries the canonical patch/policy/dry_run request; the raw
-// modification plan JSON is returned for the public package to decode.
-func ModifySandboxByName(ctx context.Context, name, optsJSON string) (string, error) {
+// ModifySandboxHandle plans or applies a sandbox modification by name,
+// refusing a sandbox whose identity is no longer expectedID. optsJSON carries
+// the canonical patch/policy/dry_run request; the raw modification plan JSON
+// is returned for the public package to decode.
+func ModifySandboxHandle(ctx context.Context, name, expectedID, optsJSON string) (string, error) {
 	if err := ensureLoaded(); err != nil {
 		return "", err
 	}
+	// The name-only symbol would modify whichever sandbox holds the name now.
+	if !bool(C.has_identified_handle_modify()) {
+		return "", errIdentifiedHandleModifyUnavailable
+	}
 	cName := C.CString(name)
 	defer C.free(unsafe.Pointer(cName))
+	cExpectedID := C.CString(expectedID)
+	defer C.free(unsafe.Pointer(cExpectedID))
 	cOpts := C.CString(optsJSON)
 	defer C.free(unsafe.Pointer(cOpts))
 	return call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
-		return C.call_msb_sandbox_handle_modify(cancelID, cName, cOpts, buf, bufLen)
+		return C.call_msb_sandbox_handle_modify_identified(cancelID, cName, cExpectedID, cOpts, buf, bufLen)
 	})
 }
+
+var errIdentifiedHandleModifyUnavailable = &Error{Kind: KindUnsupportedOperation, Message: "native SDK does not support modifying a sandbox handle by identity; update the native SDK"}
+
+// ResumeModificationByName keeps waiting for an unsettled modification by
+// sandbox name, refusing a sandbox whose identity is no longer expectedID.
+// Returns the plan JSON.
+func ResumeModificationByName(ctx context.Context, name, expectedID, operationID string) (string, error) {
+	if err := ensureLoaded(); err != nil {
+		return "", err
+	}
+	if !bool(C.has_modification_resume()) {
+		return "", errModificationResumeUnavailable
+	}
+	cName := C.CString(name)
+	defer C.free(unsafe.Pointer(cName))
+	cExpectedID := C.CString(expectedID)
+	defer C.free(unsafe.Pointer(cExpectedID))
+	cOperation := C.CString(operationID)
+	defer C.free(unsafe.Pointer(cOperation))
+	return call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_sandbox_handle_resume_modification(cancelID, cName, cExpectedID, cOperation, buf, bufLen)
+	})
+}
+
+var errModificationResumeUnavailable = &Error{Kind: KindUnsupportedOperation, Message: "native SDK does not support resuming modifications; update the native SDK"}
 
 // OwnsLifecycle reports whether this handle owns the sandbox VM lifecycle.
 // When true, closing or stopping the handle terminates the sandbox.
@@ -3068,6 +3128,22 @@ func (s *Sandbox) Modify(ctx context.Context, optsJSON string) (string, error) {
 	defer C.free(unsafe.Pointer(cOpts))
 	return call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
 		return C.call_msb_sandbox_modify(cancelID, s.h(), cOpts, buf, bufLen)
+	})
+}
+
+// ResumeModification keeps waiting for an unsettled modification on this
+// live sandbox. Returns the plan JSON.
+func (s *Sandbox) ResumeModification(ctx context.Context, operationID string) (string, error) {
+	if err := ensureLoaded(); err != nil {
+		return "", err
+	}
+	if !bool(C.has_modification_resume()) {
+		return "", errModificationResumeUnavailable
+	}
+	cOperation := C.CString(operationID)
+	defer C.free(unsafe.Pointer(cOperation))
+	return call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_sandbox_resume_modification(cancelID, s.h(), cOperation, buf, bufLen)
 	})
 }
 

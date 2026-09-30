@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/superradcompany/microsandbox/sdk/go/internal/ffi"
 )
@@ -33,6 +34,7 @@ func TestErrorKindString(t *testing.T) {
 		{ErrUnsupportedOperation, "UnsupportedOperation"},
 		{ErrInternal, "Internal"},
 		{ErrNoDefaultCommand, "NoDefaultCommand"},
+		{ErrModificationIncomplete, "ModificationIncomplete"},
 		{ErrorKind(9999), "Unknown"},
 	}
 	for _, c := range cases {
@@ -141,6 +143,42 @@ func TestSnapshotSourceRecoveryError(t *testing.T) {
 	}
 }
 
+func TestModificationIncompleteError(t *testing.T) {
+	for _, committed := range []string{"true", "false", "null"} {
+		t.Run(committed, func(t *testing.T) {
+			payload := fmt.Sprintf(`{"kind":"modification_incomplete","message":"sandbox modification operation \"op-1\" did not finish within 60s","operation":{"operation_id":"op-1","budget_ms":60000,"committed":%s}}`, committed)
+			var native ffi.Error
+			if err := json.Unmarshal([]byte(payload), &native); err != nil {
+				t.Fatal(err)
+			}
+			err := fmt.Errorf("modify: %w", wrapFFI(&native))
+			var incomplete *ModificationIncompleteError
+			if !errors.As(err, &incomplete) {
+				t.Fatalf("missing typed incomplete error: %v", err)
+			}
+			if !IsKind(err, ErrModificationIncomplete) {
+				t.Fatal("kind lost through wrapping")
+			}
+			if incomplete.Error() != native.Message {
+				t.Fatalf("message changed: %s", incomplete)
+			}
+			if incomplete.OperationID != "op-1" || incomplete.Budget != 60*time.Second {
+				t.Fatalf("operation lost: %+v", incomplete)
+			}
+			switch committed {
+			case "null":
+				if incomplete.Committed != nil {
+					t.Fatalf("unknown commit state reported as %v", *incomplete.Committed)
+				}
+			default:
+				if incomplete.Committed == nil || *incomplete.Committed != (committed == "true") {
+					t.Fatalf("commit state lost: %v", incomplete.Committed)
+				}
+			}
+		})
+	}
+}
+
 func TestWrapFFIFfiError(t *testing.T) {
 	fe := &ffi.Error{Kind: ffi.KindSandboxNotFound, Message: "missing"}
 	err := wrapFFI(fe)
@@ -194,6 +232,7 @@ func TestKindFromFFIAllTags(t *testing.T) {
 		{ffi.KindMetricsDisabled, ErrMetricsDisabled},
 		{ffi.KindMetricsUnavailable, ErrMetricsUnavailable},
 		{ffi.KindUnsupportedOperation, ErrUnsupportedOperation},
+		{ffi.KindModificationIncomplete, ErrModificationIncomplete},
 		{"unrecognized_tag", ErrInternal},
 	}
 	for _, c := range cases {

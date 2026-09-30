@@ -181,6 +181,67 @@ func TestSandboxModifyDryRun(t *testing.T) {
 	}
 }
 
+// TestSandboxHandleModifyRefusesReplacement verifies that a handle captured
+// before its sandbox was removed never modifies a new sandbox that reuses the name.
+func TestSandboxHandleModifyRefusesReplacement(t *testing.T) {
+	ctx := integrationCtx(t)
+	name := "go-sdk-modify-replaced-" + t.Name()
+
+	original, err := createSandbox(t, ctx, name, microsandbox.WithImage(goIntegrationImage))
+	if err != nil {
+		t.Fatalf("CreateSandbox: %v", err)
+	}
+	if err := original.Stop(ctx); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if err := original.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	stale, err := microsandbox.GetSandbox(ctx, name)
+	if err != nil {
+		t.Fatalf("GetSandbox: %v", err)
+	}
+	if err := microsandbox.RemoveSandbox(ctx, name); err != nil {
+		t.Fatalf("RemoveSandbox: %v", err)
+	}
+
+	replacement, err := createSandbox(t, ctx, name, microsandbox.WithImage(goIntegrationImage))
+	if err != nil {
+		t.Fatalf("CreateSandbox replacement: %v", err)
+	}
+	t.Cleanup(func() {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_ = replacement.Stop(stopCtx)
+		_ = replacement.Close()
+		_ = microsandbox.RemoveSandbox(context.Background(), name)
+	})
+	if replacement.ID() == stale.ID() {
+		t.Fatalf("replacement reused identity %q", stale.ID())
+	}
+
+	for _, dryRun := range []bool{true, false} {
+		_, err := stale.Modify(ctx, microsandbox.ModifyOptions{
+			Labels: map[string]string{"replaced": "1"},
+			DryRun: dryRun,
+		})
+		if !microsandbox.IsKind(err, microsandbox.ErrSandboxReplaced) {
+			t.Fatalf("SandboxHandle.Modify(DryRun=%v) on replaced sandbox: %v", dryRun, err)
+		}
+	}
+	if _, err := stale.ResumeModification(ctx, "op-replaced"); !microsandbox.IsKind(err, microsandbox.ErrSandboxReplaced) {
+		t.Fatalf("SandboxHandle.ResumeModification on replaced sandbox: %v", err)
+	}
+
+	current, err := microsandbox.GetSandbox(ctx, name)
+	if err != nil {
+		t.Fatalf("GetSandbox replacement: %v", err)
+	}
+	if strings.Contains(current.ConfigJSON(), `"replaced"`) {
+		t.Fatalf("replacement was modified through the stale handle: %s", current.ConfigJSON())
+	}
+}
+
 // TestSandboxRemove removes the persisted state of a stopped sandbox.
 func TestSandboxRemove(t *testing.T) {
 	ctx := integrationCtx(t)
