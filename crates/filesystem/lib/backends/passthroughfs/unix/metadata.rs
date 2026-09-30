@@ -97,7 +97,7 @@ pub(crate) fn do_setattr(
         // A supplied FUSE handle is the authoritative object. In particular,
         // it remains valid after an atomic host replacement detaches the inode
         // from the namespace, when reopening by inode can no longer succeed.
-        Some(handle) => clone_handle_file(fs, handle)?,
+        Some(handle) => clone_handle_file(fs, handle, valid.contains(SetattrValid::SIZE))?,
         None => {
             #[cfg(target_os = "linux")]
             let fd = inode::open_inode_fd(fs, ino, open_flags)?;
@@ -329,9 +329,12 @@ fn stat_handle(fs: &PassthroughFs, handle: u64) -> io::Result<stat64> {
     )
 }
 
-fn clone_handle_file(fs: &PassthroughFs, handle: u64) -> io::Result<File> {
+fn clone_handle_file(fs: &PassthroughFs, handle: u64, writable: bool) -> io::Result<File> {
     let handles = fs.handles.read().unwrap();
     let data = handles.get(&handle).ok_or_else(platform::ebadf)?;
+    if writable && data.flags as i32 & libc::O_ACCMODE == libc::O_RDONLY {
+        return Err(platform::einval());
+    }
     let file = data.file.read().unwrap();
     file.try_clone().map_err(platform::linux_error)
 }

@@ -1,0 +1,29 @@
+name: Label release changes
+
+# Read PR metadata and execute only the trusted default-branch helper.
+# Never check out the pull request's head, including for forks.
+on:
+  pull_request_target:
+    types: [closed]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  label:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            const { labelPullRequest } = require('./scripts/ci/release-notes.cjs');
+            await labelPullRequest({
+              github, repo: context.repo, number: context.payload.pull_request.number,
+            });

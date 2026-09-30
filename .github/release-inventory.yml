@@ -1,0 +1,6 @@
+# Unfiltered discovery only. Never publish this draft as the release body.
+# Keep PR selection consistent with GitHub's native release-note range.
+changelog:
+  categories:
+    - title: Included pull requests
+      labels: ["*"]

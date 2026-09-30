@@ -18,6 +18,7 @@ package microsandbox
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -27,27 +28,33 @@ import (
 	"github.com/superradcompany/microsandbox/sdk/go/internal/bundle"
 )
 
+func TestMain(m *testing.M) {
+	// The native SDK caches its backend and database pools for the process.
+	// Keep their home alive until every test has finished using them.
+	// Anchor under /tmp so sandbox socket paths fit under sun_path (108 bytes).
+	dir, err := os.MkdirTemp("/tmp", "msb")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "smoke home: %v\n", err)
+		os.Exit(1)
+	}
+	if err := os.Setenv("MSB_HOME", dir); err != nil {
+		_ = os.RemoveAll(dir)
+		fmt.Fprintf(os.Stderr, "set smoke home: %v\n", err)
+		os.Exit(1)
+	}
+	code := m.Run()
+	if err := os.RemoveAll(dir); err != nil {
+		fmt.Fprintf(os.Stderr, "remove smoke home: %v\n", err)
+		code = 1
+	}
+	os.Exit(code)
+}
+
 func smokeSetup(t *testing.T) context.Context {
 	t.Helper()
 	if os.Getenv(bundle.FFIPathEnv) == "" {
 		t.Skipf("%s not set; skipping FFI smoke test", bundle.FFIPathEnv)
 	}
-
-	// Anchor under /tmp so sandbox socket paths fit under sun_path (108 bytes).
-	dir, err := os.MkdirTemp("/tmp", "msb")
-	if err != nil {
-		t.Fatalf("mkdtemp: %v", err)
-	}
-	prev := os.Getenv("MSB_HOME")
-	t.Setenv("MSB_HOME", dir)
-	t.Cleanup(func() {
-		_ = os.RemoveAll(dir)
-		if prev == "" {
-			_ = os.Unsetenv("MSB_HOME")
-		} else {
-			_ = os.Setenv("MSB_HOME", prev)
-		}
-	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	t.Cleanup(cancel)

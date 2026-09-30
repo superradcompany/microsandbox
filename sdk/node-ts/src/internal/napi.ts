@@ -1054,6 +1054,8 @@ export interface NapiSecretBuilder {
   placeholder(placeholder: string): this;
   allow(host: string): this;
   allowAnyHostDangerous(iUnderstand: boolean): this;
+  allowPlaceholderFor(host: string): this;
+  /** @deprecated Use allowPlaceholderFor instead. */
   allowPassthroughFor(host: string): this;
   requireTlsIdentity(enabled: boolean): this;
   substituteInHeaders(enabled: boolean): this;

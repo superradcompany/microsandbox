@@ -2519,7 +2519,7 @@ fn apply_network_opts(
                 s = allow_secret_host(s, &host);
             }
             for host in secret.passthrough_hosts {
-                s = s.allow_passthrough_for(host);
+                s = s.allow_placeholder_for(host);
             }
             s
         });

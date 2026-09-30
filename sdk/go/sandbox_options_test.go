@@ -744,28 +744,52 @@ func TestFFIWireShape_DeploymentProfile(t *testing.T) {
 }
 
 func TestFFIWireShape_Secrets(t *testing.T) {
-	got := marshalCreateOptions(t,
-		WithImage("alpine"),
-		WithSecrets(Secret.Env("OPENAI_API_KEY", "sk-xxx", SecretEnvOptions{
-			Allow:           []string{"api.openai.com", "*.openai.com"},
-			Passthrough:     []string{"api.anthropic.com"},
-			ViolationAction: ViolationActionBlockAndTerminate,
-		})),
-	)
-	secs := mustField(t, got, "secrets").([]any)
-	if len(secs) != 1 {
-		t.Fatalf("secrets length = %d", len(secs))
-	}
-	s := secs[0].(map[string]any)
-	if s["env_var"] != "OPENAI_API_KEY" || s["value"] != "sk-xxx" {
-		t.Fatalf("secret = %v", s)
-	}
-	if s["violation_action"] != "block-and-terminate" {
-		t.Fatalf("violation_action = %v", s["violation_action"])
-	}
-	hosts := s["allow"].([]any)
-	if len(hosts) != 2 || hosts[0] != "api.openai.com" || hosts[1] != "*.openai.com" {
-		t.Fatalf("allow = %v", hosts)
+	for _, test := range []struct {
+		name                    string
+		preferred, legacy, want []string
+	}{
+		{"preferred", []string{"api.anthropic.com"}, nil, []string{"api.anthropic.com"}},
+		{"legacy", nil, []string{"api.anthropic.com"}, []string{"api.anthropic.com"}},
+		{"combined", []string{"api.anthropic.com"}, []string{"*.anthropic.com"}, []string{"api.anthropic.com", "*.anthropic.com"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got := marshalCreateOptions(t,
+				WithImage("alpine"),
+				WithSecrets(Secret.Env("OPENAI_API_KEY", "sk-xxx", SecretEnvOptions{
+					Allow:               []string{"api.openai.com", "*.openai.com"},
+					AllowPlaceholderFor: test.preferred,
+					Passthrough:         test.legacy,
+					ViolationAction:     ViolationActionBlockAndTerminate,
+				})),
+			)
+			secs := mustField(t, got, "secrets").([]any)
+			if len(secs) != 1 {
+				t.Fatalf("secrets length = %d", len(secs))
+			}
+			s := secs[0].(map[string]any)
+			if s["env_var"] != "OPENAI_API_KEY" || s["value"] != "sk-xxx" {
+				t.Fatalf("secret = %v", s)
+			}
+			if s["violation_action"] != "block-and-terminate" {
+				t.Fatalf("violation_action = %v", s["violation_action"])
+			}
+			hosts := s["allow"].([]any)
+			if len(hosts) != 2 || hosts[0] != "api.openai.com" || hosts[1] != "*.openai.com" {
+				t.Fatalf("allow = %v", hosts)
+			}
+			placeholders := s["passthrough"].([]any)
+			if len(placeholders) != len(test.want) {
+				t.Fatalf("passthrough = %v, want %v", placeholders, test.want)
+			}
+			for i, host := range test.want {
+				if placeholders[i] != host {
+					t.Fatalf("passthrough = %v, want %v", placeholders, test.want)
+				}
+			}
+			if _, ok := s["allow_placeholder_for"]; ok {
+				t.Fatal("new API name leaked into wire format")
+			}
+		})
 	}
 }
 

@@ -1570,7 +1570,12 @@ export declare class SecretBuilder {
   allowAnyHostDangerous(iUnderstand: boolean): this
   /** Require verified TLS identity before substituting (default: true). */
   requireTlsIdentity(enabled: boolean): this
-  /** Allow a host to receive the unchanged placeholder. */
+  /**
+   * Allow a host to receive the unchanged placeholder where substitution does not apply.
+   * Enabled substitution locations still receive the real secret on allowed hosts.
+   */
+  allowPlaceholderFor(host: string): this
+  /** @deprecated Use allowPlaceholderFor instead. */
   allowPassthroughFor(host: string): this
   /** Configure header substitution (default: true). */
   substituteInHeaders(enabled: boolean): this

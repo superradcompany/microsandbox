@@ -609,13 +609,20 @@ impl SecretBuilder {
         self
     }
 
-    /// Allow a destination to receive this placeholder without substitution.
+    /// Allow a host to receive the unchanged placeholder where substitution does not apply.
     ///
     /// Exact hosts, `*.example.com`, and `*` are accepted. Repeated calls are additive.
-    pub fn allow_passthrough_for(mut self, host: impl AsRef<str>) -> Self {
+    /// Enabled substitution locations still receive the real secret on allowed hosts.
+    pub fn allow_placeholder_for(mut self, host: impl AsRef<str>) -> Self {
         self.passthrough_hosts
             .push(HostPattern::parse(host.as_ref()));
         self
+    }
+
+    /// Deprecated alias for [`allow_placeholder_for`](Self::allow_placeholder_for).
+    #[deprecated(note = "use allow_placeholder_for instead")]
+    pub fn allow_passthrough_for(self, host: impl AsRef<str>) -> Self {
+        self.allow_placeholder_for(host)
     }
 
     /// Set the blocking action for this secret.
@@ -1026,12 +1033,13 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)] // Exercise the retained alias alongside the preferred name.
     fn secret_builder_sets_passthrough_and_violation_policies() {
         let secret = SecretBuilder::new()
             .env("TOKEN")
             .value("secret-value")
             .allow("api.github.com")
-            .allow_passthrough_for("api.anthropic.com")
+            .allow_placeholder_for("api.anthropic.com")
             .allow_passthrough_for("*.anthropic.com")
             .violation_action(SecretViolationAction::BlockAndTerminate)
             .build();

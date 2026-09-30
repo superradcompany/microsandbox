@@ -104,6 +104,10 @@ pub(crate) fn do_fallocate(
 
     let handles = fs.handles.read().unwrap();
     let data = handles.get(&handle).ok_or_else(platform::ebadf)?;
+    #[cfg(target_os = "macos")]
+    if data.flags as i32 & libc::O_ACCMODE == libc::O_RDONLY {
+        return Err(platform::ebadf());
+    }
     // Write lock: fallocate modifies file state.
     #[allow(clippy::readonly_write_lock)]
     let f = data.file.write().unwrap();

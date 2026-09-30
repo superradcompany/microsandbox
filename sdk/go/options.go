@@ -1453,7 +1453,11 @@ type SecretSubstitution struct {
 
 // SecretEnvOptions tunes Secret.Env beyond the required envVar and value.
 type SecretEnvOptions struct {
-	Allow              []string
+	Allow []string
+	// AllowPlaceholderFor lists hosts that may receive the unchanged placeholder
+	// where substitution does not apply. Combined with Passthrough when both are set.
+	AllowPlaceholderFor []string
+	// Deprecated: use AllowPlaceholderFor instead.
 	Passthrough        []string
 	Placeholder        string
 	RequireTLSIdentity *bool
@@ -1476,11 +1480,13 @@ var Secret secretFactory
 // Env returns a SecretEntry bound to an environment variable. Pass an empty
 // SecretEnvOptions{} if no additional tuning is needed.
 func (secretFactory) Env(envVar, value string, opts SecretEnvOptions) SecretEntry {
+	placeholderHosts := append([]string(nil), opts.AllowPlaceholderFor...)
+	placeholderHosts = append(placeholderHosts, opts.Passthrough...)
 	return SecretEntry{
 		EnvVar:             envVar,
 		Value:              value,
 		Allow:              opts.Allow,
-		Passthrough:        opts.Passthrough,
+		Passthrough:        placeholderHosts,
 		Placeholder:        opts.Placeholder,
 		RequireTLSIdentity: opts.RequireTLSIdentity,
 		Substitution:       opts.Substitution,
