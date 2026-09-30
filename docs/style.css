@@ -585,15 +585,15 @@ details.accordion > [data-component-part="accordion-content"] {
  * inset. Scoped to standalone accordions that hold a code block so prose and
  * grouped accordions are left alone.
  * -------------------------------------------------------------------------- */
-details.accordion:has(.code-block):not(.msb-accordion-group *) > *:not(summary) { margin: 0.75rem !important; }
-details.accordion:has(.code-block):not(.msb-accordion-group *) .code-block { margin: 0 !important; }
+details.accordion:has(.code-block):not(.msb-accordion-group *, .accordion-group *) > *:not(summary) { margin: 0.75rem !important; }
+details.accordion:has(.code-block):not(.msb-accordion-group *, .accordion-group *) .code-block { margin: 0 !important; }
 
 /* The example now sits directly under the signature. The signature code
  * block's 2rem bottom margin and the accordion's top margin stacked into a
  * wide gap; collapse them to one even, tight inset so the example reads as
  * attached to the signature it documents. */
-.code-block:has(+ details.accordion:not(.msb-accordion-group *)) { margin-bottom: 0 !important; }
-details.accordion:has(.code-block):not(.msb-accordion-group *) { margin-top: 0.5rem !important; }
+.code-block:has(+ details.accordion:not(.msb-accordion-group *, .accordion-group *)) { margin-bottom: 0 !important; }
+details.accordion:has(.code-block):not(.msb-accordion-group *, .accordion-group *) { margin-top: 0.5rem !important; }
 
 @media (max-width: 640px) {
   .msb-params { grid-template-columns: 1fr; }
@@ -604,7 +604,8 @@ details.accordion:has(.code-block):not(.msb-accordion-group *) { margin-top: 0.5
  * Availability badges: small pills for local-only, limited-on-cloud, and
  * cloud-only features. Features that work everywhere do not need a badge.
  * -------------------------------------------------------------------------- */
-.msb-badge-local {
+.msb-badge-local,
+.msb-badge-version {
   display: inline-block;
   margin-top: -0.35rem;
   padding: 0.1rem 0.5rem;
@@ -617,10 +618,26 @@ details.accordion:has(.code-block):not(.msb-accordion-group *) { margin-top: 0.5
   border: 1px solid rgba(109, 75, 196, 0.25);
 }
 
-.dark .msb-badge-local {
+.dark .msb-badge-local,
+.dark .msb-badge-version {
   color: #c9b1ff;
   background: rgba(191, 132, 254, 0.12);
   border-color: rgba(191, 132, 254, 0.3);
+}
+
+.msb-badge-version {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.msb-badge-version:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
+}
+
+span:has(> .msb-badge-version) {
+  text-decoration: none !important;
 }
 
 .msb-badge-local svg,
