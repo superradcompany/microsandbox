@@ -68,7 +68,7 @@ def benchmark(source):
             child = prefix + f"-{mode}-{i}"
             names.append(child)
             run(f"{mode}-restore-{i}", "create", "--name", child, "--from-snapshot", saved_path,
-                *(["--forked"] if mode == "forked" else []))
+                *(["--cow-mem"] if mode == "forked" else []))
             assert exec_guest(child, "cat /dev/shm/branch-marker", f"{mode}-ready-{i}") == "source"
             run(f"stop-{mode}-{i}", "stop", child)
     for i in range(5):
@@ -78,7 +78,7 @@ def benchmark(source):
         child = prefix + f"-durable-{i}"
         names.append(child)
         saved_path = capture(source, saved, f"pipeline-capture-{i}")
-        run(f"pipeline-restore-{i}", "create", "--name", child, "--from-snapshot", saved_path, "--forked")
+        run(f"pipeline-restore-{i}", "create", "--name", child, "--from-snapshot", saved_path, "--cow-mem")
         assert exec_guest(child, "cat /dev/shm/branch-marker", f"pipeline-ready-{i}") == "source"
         run(f"stop-pipeline-{i}", "stop", child)
 
@@ -126,7 +126,7 @@ try:
         snap_path = capture(source, snap, f"full-capture-{i}")
         name = prefix + f"-restored-{i}"
         names.append(name)
-        run(f"forked-restore-{i}", "create", "--name", name, "--from-snapshot", snap_path, "--forked")
+        run(f"forked-restore-{i}", "create", "--name", name, "--from-snapshot", snap_path, "--cow-mem")
         assert exec_guest(name, "cat /dev/shm/branch-marker", f"restore-ready-{i}") == "source"
     if os.environ.get("STACK8_MAINTENANCE") == "1" and not layout.startswith("tmpfs"):
         run("grow-source", "modify", source, "--root-disk", "768M", "--format", "json")

@@ -53,7 +53,7 @@ def restore(label, snapshot, expected, base=None, forked=False):
     if base:
         args += ["--snapshot-base", str(base)]
     if forked:
-        args += ["--forked"]
+        args += ["--cow-mem"]
     run(label, dest_home, *args)
     actual = guest(label + "-read", dest_home, name, "cat /dev/shm/marker; cat /disk-marker; sha256sum /dev/shm/blob | cut -d' ' -f1")
     assert actual == f"{expected}\n{expected}\n{blob_hash}", actual

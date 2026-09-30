@@ -60,9 +60,9 @@ async fn spawn(name: &str, tls: bool, enabled: bool, message: Option<&str>) -> S
 }
 
 async fn teardown(sb: Sandbox, name: &str) {
+    // Keep the owner alive until explicit shutdown finishes.
+    sb.stop().await.expect("stop");
     drop(sb);
-    let handle = Sandbox::get(name).await.expect("get");
-    handle.stop().await.expect("stop");
     let _ = Sandbox::remove(name).await;
 }
 

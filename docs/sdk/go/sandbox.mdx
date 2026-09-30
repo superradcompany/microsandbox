@@ -23,6 +23,33 @@ Use `ConnectOrCreateSandbox` when a named sandbox might already exist. It connec
 Lifecycle methods on a `Sandbox` or `SandboxHandle` stay attached to its opaque `ID`. If the name is removed and reused, an old receiver returns `ErrSandboxReplaced` instead of acting on the replacement. See [Reuse or create a named sandbox](/sandboxes/lifecycle#reuse-or-create-a-named-sandbox) for examples.
 
 
+## Forking
+
+Forking duplicates a running or paused local sandbox without saving a reusable snapshot. It shares memory through copy-on-write, keeps child writes private, and returns the source to its previous state. These methods are available on both `Sandbox` and `SandboxHandle`. Each child requires an unused name. See [forking](/sandboxes/snapshots#forking) for examples, resource bindings, and backend limits.
+
+### Fork and ForkMany
+
+```go
+Fork(ctx context.Context, name string, opts ...ForkOption) (*Sandbox, error)
+ForkMany(ctx context.Context, names []string, opts ...ForkOption) ([]ForkOutcome, error)
+```
+
+`WithForkIntegrity()` records disk hashes. `WithForkGuestFlush(GuestFlushRequired)` requests guest writeback; `GuestFlushAuto` is the default, and `GuestFlushSkip` skips optional writeback. `ForkOption` configures `ForkOptions`.
+
+### ForkOutcome
+
+| Field | Meaning |
+| --- | --- |
+| `Name` | Requested child name |
+| `Sandbox` | Started `*Sandbox`, or `nil` on failure |
+| `Error` | Child startup error, or `nil` on success |
+
+Close each successful child’s handle with `Close()` after stopping it.
+
+`Branch`, `BranchMany`, `BranchOption`, `BranchOptions`, `BranchOutcome`, `WithBranchIntegrity`, and `WithBranchGuestFlush` remain deprecated aliases.
+
+Batch results follow input order. Validation or capture failures fail the whole call; an individual startup failure appears in that child's outcome, and successful siblings remain available. Stop successful children explicitly when finished.
+
 ## Functions
 
 ### External mount restore
@@ -34,7 +61,7 @@ Full restores use strict external-filesystem admission by default. Pass `WithExt
 `CreateSandboxWithProgress` and `RestoreSandboxWithProgress` return a bounded event channel and a single-result channel. Ignoring events does not delay the operation. Always receive the result and close the handle when finished; restored sandboxes are detached, so use `Stop` or `Destroy` to stop them. Cancel `ctx` to cancel the operation.
 
 ```go
-events, result := m.RestoreSandboxWithProgress(ctx, "saved", "child", m.WithForked())
+events, result := m.RestoreSandboxWithProgress(ctx, "saved", "child", m.WithCowMemory())
 for event := range events {
     fmt.Println(event.Kind, event.Progress.Phase, event.Progress.CompletedBytes)
 }

@@ -678,13 +678,13 @@ async fn forward_plaintext(
                 }
             }
             Err(action) => {
-                // Violation: placeholder going to disallowed host. Drop the connection.
+                // Secret policy rejected the request. Drop the connection.
                 if matches!(action, SecretViolationAction::BlockAndTerminate) {
                     shared.trigger_termination();
                 }
                 return Err(io::Error::new(
                     io::ErrorKind::PermissionDenied,
-                    "secret violation: placeholder sent to disallowed host",
+                    "secret violation: request blocked by secret policy",
                 ));
             }
         }

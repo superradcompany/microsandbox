@@ -134,7 +134,9 @@ pub(crate) use types::validate_volume_mounts;
 
 pub use crate::logs::{LogEntry, LogOptions, LogSource, LogStreamOptions};
 pub use attach::AttachOptionsBuilder;
+#[allow(deprecated)]
 pub use branch::{BranchBuilder, BranchManyBuilder, BranchOutcome};
+pub use branch::{ForkBuilder, ForkManyBuilder, ForkOutcome};
 pub use builder::{RegistryConfigBuilder, SandboxBuilder};
 pub use compact::{DiskCompactionBuilder, DiskCompactionDiskResult, DiskCompactionResult};
 pub use config::{SandboxConfig, SandboxConfigPatch};

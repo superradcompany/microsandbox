@@ -236,7 +236,7 @@ class Smoke:
         self.stop("eager")
 
         before = set((self.home / "snapshots").rglob("snapshot.json"))
-        self.restore("forked", full_archive, "--forked")
+        self.restore("forked", full_archive, "--cow-mem")
         if before != set((self.home / "snapshots").rglob("snapshot.json")):
             raise RuntimeError("direct archive restore installed an intermediate snapshot")
         # Unlink only archives created by this test, after the child is ready.

@@ -73,7 +73,7 @@ func TestGuestFlushLive(t *testing.T) {
 		}
 	}
 	for i, branch := range []func(context.Context, string, ...BranchOption) (*Sandbox, error){source.Branch, handle.Branch} {
-		child, err := branch(ctx, fmt.Sprintf("%s-branch-%d", name, i), WithBranchGuestFlush(GuestFlushRequired))
+		child, err := branch(ctx, fmt.Sprintf("%s-branch-%d", name, i), WithForkGuestFlush(GuestFlushRequired))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -153,7 +153,7 @@ func TestOwnedDiskGuestFlushLive(t *testing.T) {
 						err = source.Resume(ctx)
 					}
 				case "branch":
-					child, err = source.Branch(ctx, name+"-child", WithBranchGuestFlush(policy))
+					child, err = source.Fork(ctx, name+"-child", WithForkGuestFlush(policy))
 				default:
 					snapshot, err = Snapshot.Create(ctx, SnapshotCreateOptions{
 						Name: "dirty", FromSandbox: name, Full: operation == "full", GuestFlush: policy,

@@ -491,6 +491,30 @@ mod tests {
     }
 
     #[test]
+    fn entrypoint_executable_and_arguments_parse_separately() {
+        let args = parse_run_args(&[
+            "--entrypoint",
+            "/bin/sh",
+            "alpine",
+            "--",
+            "-c",
+            "echo foo; exec something",
+            "-",
+        ]);
+
+        assert_eq!(args.sandbox.entrypoint.as_deref(), Some("/bin/sh"));
+        assert_eq!(args.image.as_deref(), Some("alpine"));
+        assert_eq!(
+            args.command,
+            vec![
+                "-c".to_string(),
+                "echo foo; exec something".to_string(),
+                "-".to_string()
+            ]
+        );
+    }
+
+    #[test]
     fn noninteractive_flags_conflict_with_tty() {
         for flag in ["--no-tty", "--no-stdin"] {
             let err =
@@ -732,7 +756,7 @@ mod tests {
 
     #[test]
     fn restore_only_flags_are_rejected_by_run() {
-        for flag in ["--disk-only", "--forked"] {
+        for flag in ["--disk-only", "--cow-mem", "--forked"] {
             assert!(TestCli::try_parse_from(["msb", "alpine", flag]).is_err());
         }
     }

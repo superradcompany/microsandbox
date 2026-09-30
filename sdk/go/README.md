@@ -129,6 +129,21 @@ err = restarted.Destroy(ctx)
 
 These snippets assume you already have a live `sb *microsandbox.Sandbox` and `ctx context.Context`. See [sdk/go/examples](./examples) for complete runnable programs.
 
+### Fork a Live Sandbox
+
+Forking copies a running or paused local sandbox's disk and execution state into an independent child. Memory uses copy-on-write automatically. The source keeps its previous running or paused state. Host resources require explicit bindings; see [forking and resource bindings](https://docs.microsandbox.dev/sandboxes/snapshots#forking).
+
+```go
+child, err := sb.Fork(ctx, "experiment")
+if err != nil { return err }
+defer child.Close()
+if err := child.Stop(ctx); err != nil { return err }
+```
+
+Use `ForkMany(ctx, []string{"alice", "bob"})` to capture once for several children. Inspect every returned outcome: one child's startup failure does not remove successful siblings. See the [fork API reference](https://docs.microsandbox.dev/sdk/go/sandbox#forking).
+
+Restoring starts from a saved snapshot instead. Use `WithCowMemory()` to request copy-on-write memory for a full-snapshot restore. A generation describes snapshot-history progression; a branch describes a distinct path through that history. The former live branch APIs and old CoW restore names remain deprecated aliases. See [restore migration notes](https://docs.microsandbox.dev/sandboxes/snapshots#migrating-restore-options) for the old-to-new names and language-specific deprecation notices.
+
 ### Command Execution
 
 ```go
@@ -378,10 +393,12 @@ go run ./examples/snapshot-fork
 | `patches` | Pre-boot rootfs patches |
 | `ports` | Guest TCP port publishing |
 | `secrets` | Secret placeholder injection |
-| `snapshot-fork` | Snapshot a stopped sandbox and boot a fork |
+| `snapshot-fork` | Snapshot a stopped sandbox and restore a fresh sandbox |
 | `streaming` | Streaming exec, signals, and cancellation |
 | `tls` | TLS interception configuration |
 | `volumes` | Named volume lifecycle |
+
+The `snapshot-fork` example keeps its historical directory name; it demonstrates restoring a saved disk snapshot. Live forking uses the `Fork` API.
 
 ## More Documentation
 

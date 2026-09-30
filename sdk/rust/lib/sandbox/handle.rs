@@ -1044,6 +1044,20 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
+    fn fork_builders_keep_legacy_branch_aliases() {
+        let source = cloud_handle(CloudSandboxStatus::Running);
+        let canonical: crate::sandbox::ForkBuilder = source.fork("child");
+        let legacy: crate::sandbox::BranchBuilder = source.branch("child");
+        assert_eq!(
+            serde_json::to_value(canonical.inner.config.into_config()).unwrap(),
+            serde_json::to_value(legacy.inner.config.into_config()).unwrap(),
+        );
+        let _: crate::sandbox::ForkManyBuilder = source.branch_many(["a", "b"]);
+        let _: crate::sandbox::BranchManyBuilder = source.fork_many(["a", "b"]);
+    }
+
+    #[test]
     fn sandbox_id_is_stable_and_backend_qualified() {
         let handle = cloud_handle(CloudSandboxStatus::Running);
 

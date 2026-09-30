@@ -30,8 +30,12 @@ type RestoreConfig struct {
 	// Explicit guest security requires disk scope or SnapshotDiskOnly.
 	SecurityProfile SecurityProfile
 	// Nil omits a lifetime override; explicit zero requests immediate expiry.
-	MaxDuration                 *time.Duration
-	IdleTimeout                 *time.Duration
+	MaxDuration *time.Duration
+	IdleTimeout *time.Duration
+	CowMemory   bool
+	// Forked enables copy-on-write restore memory.
+	//
+	// Deprecated: use CowMemory instead.
 	Forked                      bool
 	SnapshotDiskOnly            bool
 	SnapshotBase                string
@@ -43,7 +47,10 @@ type RestoreConfig struct {
 	Volumes                     map[string]MountConfig
 	CapturedVolumes             []string
 	Ports                       []PortBinding
-	Vsock                       []VsockRoute
+	// TCPAcceptQueueSize sets the accept-queue depth for the child's published TCP
+	// listeners, 1 to 2147483647. Nil keeps the default, 1024.
+	TCPAcceptQueueSize *uint32
+	Vsock              []VsockRoute
 }
 
 // RestoreSandbox restores an installed snapshot or archive into a detached sandbox.
@@ -98,6 +105,12 @@ func WithRestoreMaxTCPConnections(count uint) RestoreOption {
 // WithRestoreMaxUDPConnections caps destination UDP relay sessions. Zero means unlimited.
 func WithRestoreMaxUDPConnections(count uint) RestoreOption {
 	return func(o *RestoreConfig) { o.MaxUDPConnections = &count }
+}
+
+// WithRestoreTCPAcceptQueueSize sets the accept-queue depth for the child's published TCP
+// listeners, 1 to 2147483647. The host kernel clamps it to its somaxconn.
+func WithRestoreTCPAcceptQueueSize(size uint32) RestoreOption {
+	return func(o *RestoreConfig) { o.TCPAcceptQueueSize = &size }
 }
 
 // WithRestoreDisableNetwork disables networking; full restore rejects removing a captured NIC.
@@ -193,12 +206,14 @@ func buildFFIRestoreOptions[T SnapshotSeed](snapshot T, config RestoreConfig) ff
 		MaxUDPConnections: config.MaxUDPConnections, DisableNetwork: config.DisableNetwork,
 		SecurityProfile: string(config.SecurityProfile),
 		MaxDurationSecs: seconds(config.MaxDuration), IdleTimeoutSecs: seconds(config.IdleTimeout),
-		Forked: config.Forked, DiskOnly: config.SnapshotDiskOnly,
+		// Keep the native wire spelling stable across SDK/runtime versions.
+		Forked: config.CowMemory || config.Forked, DiskOnly: config.SnapshotDiskOnly,
 		SnapshotBase: config.SnapshotBase, User: config.User, LogLevel: string(config.LogLevel),
 		ExternalMountPolicy:         string(config.ExternalMountPolicy),
 		DangerouslyInheritResources: config.DangerouslyInheritResources,
 		AllowMissingResources:       config.AllowMissingResources,
 		Volumes:                     resources.Volumes, CapturedVolumes: config.CapturedVolumes,
-		Ports: buildFFIPortBindings(config.Ports), Vsock: buildFFIVsockRoutes(config.Vsock),
+		Ports: buildFFIPortBindings(config.Ports), TCPAcceptQueueSize: config.TCPAcceptQueueSize,
+		Vsock: buildFFIVsockRoutes(config.Vsock),
 	}
 }

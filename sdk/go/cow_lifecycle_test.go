@@ -77,10 +77,10 @@ func TestBranchMany(t *testing.T) {
 			}
 		}
 	}
-	if _, err := source.BranchMany(ctx, nil); err == nil {
+	if _, err := source.ForkMany(ctx, nil); err == nil {
 		t.Fatal("empty batch accepted")
 	}
-	if _, err := source.BranchMany(ctx, []string{"duplicate", "duplicate"}); err == nil {
+	if _, err := source.ForkMany(ctx, []string{"duplicate", "duplicate"}); err == nil {
 		t.Fatal("duplicate names accepted")
 	}
 	if _, err := children[0].Exec(ctx, "sh", []string{"-c", "echo private > /dev/shm/batch-marker"}); err != nil {
@@ -124,7 +124,7 @@ func TestCowResidentCapture(t *testing.T) {
 	if paused.Status() != SandboxStatusPaused {
 		t.Fatalf("got status %s", paused.Status())
 	}
-	branched, err := paused.Branch(ctx, name+"-paused-branch")
+	branched, err := paused.Fork(ctx, name+"-paused-branch")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,7 +152,7 @@ func TestCowResidentCapture(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The returned artifact path selects the exact member in its snapshot group.
-	child, err := RestoreSandbox(ctx, snapshot.Path(), name+"-child", WithForked())
+	child, err := RestoreSandbox(ctx, snapshot.Path(), name+"-child", WithCowMemory())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,7 +181,7 @@ func TestCowResidentCapture(t *testing.T) {
 	if err := child.Pause(ctx); err != nil {
 		t.Fatal(err)
 	}
-	descendant, err := child.Branch(ctx, name+"-branch")
+	descendant, err := child.Fork(ctx, name+"-branch")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -401,6 +401,7 @@ struct NetworkConfigInput {
     #[serde(alias = "max_connections")]
     max_tcp_connections: Option<usize>,
     max_udp_connections: Option<usize>,
+    tcp_accept_queue_size: Option<u32>,
     #[config_patch(nested)]
     http: Option<HttpInput>,
 }
@@ -1747,6 +1748,11 @@ fn materialize_network_patch(
     if let Some(max) = input.max_udp_connections {
         patch = patch.max_udp_connections(max);
     }
+    if let Some(size) = input.tcp_accept_queue_size {
+        // Refuse here rather than at launch, where the runtime would reject the whole network.
+        microsandbox_network::config::TcpAcceptQueueSize::try_from(size)?;
+        patch = patch.tcp_accept_queue_size(size);
+    }
     if let Some(http) = input.http {
         let mut value = HttpConfigPatch::new();
         if let Some(enabled) = http.deny_response {
@@ -1851,6 +1857,27 @@ mod tests {
             }))
             .is_err()
         );
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn network_config_tcp_accept_queue_size_is_validated_before_launch() {
+        let input = |value: u32| -> NetworkInput {
+            serde_json::from_value(serde_json::json!({ "tcp_accept_queue_size": value })).unwrap()
+        };
+        let mut network = microsandbox_types::NetworkSpec::default();
+        materialize_network_patch(Some(&input(4096)), None, None)
+            .unwrap()
+            .apply_to(&mut network);
+        assert_eq!(network.tcp_accept_queue_size, Some(4096));
+
+        for invalid in [0, 2_147_483_648] {
+            let error = materialize_network_patch(Some(&input(invalid)), None, None).unwrap_err();
+            assert!(
+                error.to_string().contains("TCP accept queue size"),
+                "{invalid}: {error}"
+            );
+        }
     }
 
     fn write_config(dir: &Path, name: &str, contents: &str) -> PathBuf {

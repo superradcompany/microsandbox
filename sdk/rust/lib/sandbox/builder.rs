@@ -1721,7 +1721,7 @@ impl SandboxBuilder {
                     && sandbox.snapshot_archive_source.is_none()))
         {
             return Err(crate::MicrosandboxError::InvalidConfig(
-                "forked requires a full snapshot restore and cannot be combined with disk_only"
+                "copy-on-write memory requires a full snapshot restore and cannot be combined with disk_only"
                     .into(),
             ));
         }
@@ -4306,6 +4306,39 @@ mod tests {
 
     #[cfg(feature = "net")]
     #[tokio::test]
+    async fn test_builder_network_carries_tcp_accept_queue_size_and_rejects_zero() {
+        let config = SandboxBuilder::new("test")
+            .image("alpine")
+            .port(8080, 80)
+            .network(|n| n.tcp_accept_queue_size(4096))
+            .build()
+            .await
+            .unwrap();
+        assert_eq!(config.spec.network.tcp_accept_queue_size, Some(4096));
+        assert_eq!(config.spec.network.ports.len(), 1);
+        assert_eq!(
+            config
+                .local_network_config()
+                .unwrap()
+                .tcp_accept_queue_size
+                .map(microsandbox_network::config::TcpAcceptQueueSize::get),
+            Some(4096)
+        );
+
+        let error = SandboxBuilder::new("test")
+            .image("alpine")
+            .network(|n| n.tcp_accept_queue_size(0))
+            .build()
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("TCP accept queue size"),
+            "{error}"
+        );
+    }
+
+    #[cfg(feature = "net")]
+    #[tokio::test]
     async fn test_builder_network_preserves_top_level_settings() {
         let config = SandboxBuilder::new("test")
             .image("alpine")
@@ -4873,7 +4906,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("forked requires a full snapshot")
+                .contains("copy-on-write memory requires a full snapshot")
         );
     }
 
@@ -4911,7 +4944,7 @@ mod tests {
                 .await
                 .unwrap_err()
                 .to_string()
-                .contains("forked")
+                .contains("copy-on-write memory")
         );
     }
 }

@@ -642,6 +642,11 @@ pub struct NetworkSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_udp_connections: Option<usize>,
 
+    /// Accept-queue depth for published TCP port listeners, `1..=2147483647`. Omitted is 1024.
+    /// The host kernel clamps it to `net.core.somaxconn` (Linux) or `kern.ipc.somaxconn` (macOS).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tcp_accept_queue_size: Option<u32>,
+
     /// Local network rate limits. Missing means unlimited in both directions.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[config_patch(nested)]
@@ -649,7 +654,7 @@ pub struct NetworkSpec {
 
     /// NAT64 `/96` prefixes for policy classification.
     #[serde(default = "default_nat64_prefixes")]
-    #[cfg_attr(feature = "ts", ts(type = "string[]"))]
+    #[cfg_attr(feature = "ts", ts(type = "Array<string>"))]
     pub nat64_prefixes: Vec<Ipv6Network>,
 
     /// Whether to copy trusted host CAs into the guest at boot.
@@ -1837,6 +1842,7 @@ impl Default for NetworkSpec {
             secrets: None,
             max_tcp_connections: None,
             max_udp_connections: None,
+            tcp_accept_queue_size: None,
             rate_limiter: None,
             nat64_prefixes: default_nat64_prefixes(),
             trust_host_cas: false,

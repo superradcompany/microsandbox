@@ -423,7 +423,6 @@ impl TcpProxy {
                     // that actually carries a placeholder is reallocated.
                     Ok(cow) => cow,
                     Err(action) => {
-                        tracing::warn!(dst = %connect_dst, violation = ?action, "secret violation in first flight");
                         if matches!(action, SecretViolationAction::BlockAndTerminate) {
                             shared.trigger_termination();
                         }
@@ -489,7 +488,6 @@ impl TcpProxy {
                                 Some(h) => match h.substitute(&bytes) {
                                     Ok(cow) => cow,
                                     Err(action) => {
-                                        tracing::warn!(dst = %connect_dst, violation = ?action, "secret violation");
                                         if matches!(action, SecretViolationAction::BlockAndTerminate)
                                         {
                                             shared.trigger_termination();
@@ -640,23 +638,19 @@ async fn handle_connect_tunnel(
     outbound_proxy: Option<Arc<ResolvedOutboundProxy>>,
     preconnected_proxy: Option<TcpStream>,
 ) -> io::Result<()> {
-    let proxy_dst = proxy_target.primary();
     let connect_req =
         parse_connect_request(buffer_connect_request(initial_buf, &mut from_smoltcp).await?)?;
 
-    let connect_headers = match sanitize_connect_headers(
-        connect_req.header_bytes(),
-        &tls_state.secrets.load(),
-    ) {
-        Ok(headers) => headers,
-        Err(action) => {
-            tracing::warn!(dst = %proxy_dst, violation = ?action, "secret violation in CONNECT headers");
-            if matches!(action, SecretViolationAction::BlockAndTerminate) {
-                shared.trigger_termination();
+    let connect_headers =
+        match sanitize_connect_headers(connect_req.header_bytes(), &tls_state.secrets.load()) {
+            Ok(headers) => headers,
+            Err(action) => {
+                if matches!(action, SecretViolationAction::BlockAndTerminate) {
+                    shared.trigger_termination();
+                }
+                return Ok(());
             }
-            return Ok(());
-        }
-    };
+        };
 
     // Dial the proxy and forward the CONNECT request so it opens the tunnel.
     let mut proxy_stream = match preconnected_proxy {

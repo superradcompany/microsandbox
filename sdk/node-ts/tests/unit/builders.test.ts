@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   GiB,
   ImageBuilder,
@@ -986,6 +986,26 @@ describe("TCP connection limit aliases", () => {
   });
 });
 
+describe("TCP accept queue size", () => {
+  it("is absent unless set and survives into the sandbox configuration", async () => {
+    expect(new NetworkBuilder().build().tcpAcceptQueueSize).toBeUndefined();
+    expect(new NetworkBuilder().tcpAcceptQueueSize(4096).build().tcpAcceptQueueSize).toBe(4096);
+    const config = await Sandbox.builder("x").image("alpine").port(8080, 80)
+      .network(n => n.tcpAcceptQueueSize(4096)).build();
+    expect(config.network.tcpAcceptQueueSize).toBe(4096);
+  });
+
+  it("rejects values instead of wrapping or truncating them", () => {
+    // N-API's u32 conversion would turn the last three into 1.
+    for (const invalid of [0, 2_147_483_648, 4_294_967_297, -4_294_967_295, 1.5]) {
+      expect(() => new NetworkBuilder().tcpAcceptQueueSize(invalid))
+        .toThrow(/tcpAcceptQueueSize must be an integer/);
+      expect(() => Sandbox.restore("saved").tcpAcceptQueueSize(invalid))
+        .toThrow(/tcpAcceptQueueSize must be an integer/);
+    }
+  });
+});
+
 describe("NetworkBuilder HTTP denial messages", () => {
   it("requires an explicit opt-in and preserves settings across callbacks", () => {
     expect(new NetworkBuilder().build().http.denyResponse).toBe(false);
@@ -1001,5 +1021,25 @@ describe("NetworkBuilder HTTP denial messages", () => {
     expect(new NetworkBuilder().http((h) => h.denyMessage("")).build().http.denyMessage).toBe("");
     expect(new NetworkBuilder().http((h) => h).build().http.denyMessage).toBeUndefined();
     expect(new NetworkBuilder().http((h) => h.denyMessage("keep")).http((h) => h).build().http.denyMessage).toBe("keep");
+  });
+});
+
+
+describe("restore copy-on-write memory naming", () => {
+  it("keeps forked as a fluent alias and warns only for the deprecated spelling", async () => {
+    const warning = vi.spyOn(process, "emitWarning").mockImplementation(() => {});
+    try {
+      const builder = Sandbox.restore("saved").name("child");
+      expect(builder.cowMemory()).toBe(builder);
+      expect(warning).not.toHaveBeenCalled();
+      expect(builder.forked()).toBe(builder);
+      expect(builder.forked()).toBe(builder);
+      await new Promise<void>(resolve => setImmediate(resolve));
+      expect(warning).toHaveBeenCalledTimes(1);
+      expect(warning.mock.calls[0][0]).toContain("use cowMemory()");
+      expect(warning.mock.calls[0][1]).toBe("DeprecationWarning");
+    } finally {
+      warning.mockRestore();
+    }
   });
 });
