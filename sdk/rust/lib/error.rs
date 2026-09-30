@@ -170,6 +170,19 @@ pub enum MicrosandboxError {
         timeout: std::time::Duration,
     },
 
+    /// A live resize did not converge before the caller's deadline.
+    #[error(
+        "timed out after {timeout:?} waiting for sandbox {name:?} live resize to converge; the host still enforces the accepted target"
+    )]
+    ResizeTimeout {
+        /// Sandbox name.
+        name: String,
+        /// Wait budget.
+        timeout: std::time::Duration,
+        /// Last observed resize status; empty when no read completed before the deadline.
+        status: Vec<microsandbox_types::modify::ResourceResizeStatus>,
+    },
+
     /// The sandbox process exited before the agent relay became
     /// available. Carries the sandbox name and the structured
     /// `boot-error.json` record so the CLI can render a useful inline

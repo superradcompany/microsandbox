@@ -129,6 +129,22 @@ impl JsSandboxHandle {
         crate::sandbox::run_modify(builder, crate::sandbox::modify_dry_run(options.as_ref())).await
     }
 
+    /// Read the current live resize status as a JSON array.
+    #[napi]
+    pub async fn resize_status(&self) -> Result<String> {
+        crate::sandbox::resize_status_json(self.inner.resize_status().await)
+    }
+
+    /// Wait for live resizes to settle. Omitted waits without a deadline; `0` checks once.
+    #[napi]
+    pub async fn wait_until_resized(&self, timeout_ms: Option<f64>) -> Result<String> {
+        let timeout = crate::sandbox::resize_wait_timeout(timeout_ms)?;
+        crate::sandbox::resize_status_json(match timeout {
+            Some(timeout) => self.inner.wait_until_resized_with_timeout(timeout).await,
+            None => self.inner.wait_until_resized().await,
+        })
+    }
+
     /// Compact root and owned-data disk prefixes of a running or stopped sandbox.
     #[napi]
     pub async fn compact(

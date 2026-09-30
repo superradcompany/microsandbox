@@ -236,6 +236,35 @@ impl PySandboxHandle {
         })
     }
 
+    /// Read the current live CPU and memory resize status.
+    fn resize_status<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            crate::sandbox::resize_status_result_to_py(inner.resize_status().await)
+        })
+    }
+
+    /// Wait until every live resize reaches a terminal state.
+    ///
+    /// Returns an empty list when the sandbox is not running. Without a timeout
+    /// it keeps polling while a guest never converges. Expiry raises
+    /// `ResizeTimeoutError` whose `status` is empty if no read completed.
+    #[pyo3(signature = (*, timeout = None))]
+    fn wait_until_resized<'py>(
+        &self,
+        py: Python<'py>,
+        timeout: Option<f64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let timeout = crate::sandbox::optional_duration(timeout)?;
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            crate::sandbox::resize_status_result_to_py(match timeout {
+                Some(timeout) => inner.wait_until_resized_with_timeout(timeout).await,
+                None => inner.wait_until_resized().await,
+            })
+        })
+    }
+
     /// Read captured output from `exec.log`.
     ///
     /// Works without starting the sandbox. Defaults to `stdout +

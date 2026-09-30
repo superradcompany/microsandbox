@@ -465,6 +465,7 @@ export {
   DatabaseError,
   ExecTimeoutError,
   StopTimeoutError,
+  ResizeTimeoutError,
   HttpError,
   ImageError,
   ImageInUseError,

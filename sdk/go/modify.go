@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/superradcompany/microsandbox/sdk/go/internal/ffi"
 )
@@ -198,6 +199,78 @@ func (h *SandboxHandle) Modify(ctx context.Context, opts ModifyOptions) (*Sandbo
 	return parseModificationPlan(out)
 }
 
+// ResizeStatus reads the current live CPU and memory resize status. It is
+// empty when the sandbox is not running.
+func (s *Sandbox) ResizeStatus(ctx context.Context) ([]ResourceResizeStatus, error) {
+	out, err := s.inner.ResizeStatus(ctx)
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	return parseResizeStatus(out)
+}
+
+// WaitUntilResized waits until every live resize reaches a terminal state.
+// It returns an empty list when the sandbox is not running. There is no
+// built-in deadline and it keeps polling while a guest never converges;
+// cancel ctx or use WaitUntilResizedWithTimeout to bound it.
+func (s *Sandbox) WaitUntilResized(ctx context.Context) ([]ResourceResizeStatus, error) {
+	out, err := s.inner.WaitUntilResized(ctx, ffi.ResizeWaitUnbounded)
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	return parseResizeStatus(out)
+}
+
+// WaitUntilResizedWithTimeout waits for live resizes to settle within
+// timeout. A zero or negative timeout checks once. It returns an empty list
+// when the sandbox is not running. Expiry returns a nil list and a
+// *ResizeTimeoutError of kind ErrResizeTimeout whose Status holds the last
+// observed status, empty when no read completed before the deadline.
+func (s *Sandbox) WaitUntilResizedWithTimeout(ctx context.Context, timeout time.Duration) ([]ResourceResizeStatus, error) {
+	out, err := s.inner.WaitUntilResized(ctx, resizeTimeoutMillis(timeout))
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	return parseResizeStatus(out)
+}
+
+// ResizeStatus reads the current live CPU and memory resize status of this
+// exact sandbox. A same-name replacement is rejected.
+func (h *SandboxHandle) ResizeStatus(ctx context.Context) ([]ResourceResizeStatus, error) {
+	out, err := ffi.ResizeStatusSandboxByName(ctx, h.name, h.id)
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	return parseResizeStatus(out)
+}
+
+// WaitUntilResized waits until every live resize on this exact sandbox
+// reaches a terminal state. It returns an empty list when the sandbox is not
+// running and keeps polling while a guest never converges; cancel ctx or use
+// WaitUntilResizedWithTimeout to bound it. A same-name replacement is
+// rejected.
+func (h *SandboxHandle) WaitUntilResized(ctx context.Context) ([]ResourceResizeStatus, error) {
+	out, err := ffi.WaitUntilResizedSandboxByName(ctx, h.name, h.id, ffi.ResizeWaitUnbounded)
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	return parseResizeStatus(out)
+}
+
+// WaitUntilResizedWithTimeout waits for live resizes on this exact sandbox to
+// settle within timeout. A zero or negative timeout checks once. It returns an
+// empty list when the sandbox is not running. Expiry returns a nil list and a
+// *ResizeTimeoutError of kind ErrResizeTimeout whose Status holds the last
+// observed status, empty when no read completed before the deadline. A
+// same-name replacement is rejected.
+func (h *SandboxHandle) WaitUntilResizedWithTimeout(ctx context.Context, timeout time.Duration) ([]ResourceResizeStatus, error) {
+	out, err := ffi.WaitUntilResizedSandboxByName(ctx, h.name, h.id, resizeTimeoutMillis(timeout))
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	return parseResizeStatus(out)
+}
+
 // modifyEnvVar mirrors the core EnvVar serde shape.
 type modifyEnvVar struct {
 	Key   string `json:"key"`
@@ -338,6 +411,26 @@ func parseModificationPlan(raw string) (*SandboxModificationPlan, error) {
 		return nil, fmt.Errorf("parse modification plan: %w", err)
 	}
 	return &plan, nil
+}
+
+func parseResizeStatus(raw string) ([]ResourceResizeStatus, error) {
+	var status []ResourceResizeStatus
+	if err := json.Unmarshal([]byte(raw), &status); err != nil {
+		return nil, fmt.Errorf("parse resize status: %w", err)
+	}
+	return status, nil
+}
+
+// resizeTimeoutMillis maps zero or negative budgets to one check and rounds
+// positive sub-millisecond budgets up.
+func resizeTimeoutMillis(timeout time.Duration) uint64 {
+	if timeout <= 0 {
+		return 0
+	}
+	if timeout < time.Millisecond {
+		return 1
+	}
+	return uint64(timeout / time.Millisecond)
 }
 
 func sortedKeys[V any](m map[string]V) []string {

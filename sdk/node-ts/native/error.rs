@@ -8,7 +8,7 @@ use napi::Status;
 /// Convert a `MicrosandboxError` into a `napi::Error` with a typed code string.
 pub fn to_napi_error(err: MicrosandboxError) -> napi::Error {
     let code = error_type_str(&err);
-    if let Some(payload) = source_recovery_payload(&err) {
+    if let Some(payload) = source_recovery_payload(&err).or_else(|| resize_timeout_payload(&err)) {
         return napi::Error::new(Status::GenericFailure, format!("[{code}] {payload}"));
     }
     napi::Error::new(Status::GenericFailure, format!("[{code}] {err}"))
@@ -21,6 +21,14 @@ fn source_recovery_payload(err: &MicrosandboxError) -> Option<String> {
     // Only this error carries recovery metadata; ordinary errors retain their existing wire form.
     let recovery = serde_json::to_value(recovery).ok()?;
     Some(serde_json::json!({ "message": err.to_string(), "recovery": recovery }).to_string())
+}
+
+fn resize_timeout_payload(err: &MicrosandboxError) -> Option<String> {
+    let MicrosandboxError::ResizeTimeout { status, .. } = err else {
+        return None;
+    };
+    let status = serde_json::to_value(status).ok()?;
+    Some(serde_json::json!({ "message": err.to_string(), "status": status }).to_string())
 }
 
 /// Return a string tag for the error variant, used as the JS error `code` field.
@@ -58,6 +66,7 @@ fn error_type_str(err: &MicrosandboxError) -> &'static str {
         MicrosandboxError::WindowsHostSetup(_) => "WindowsHostSetup",
         MicrosandboxError::ExecTimeout(_) => "ExecTimeout",
         MicrosandboxError::StopTimeout { .. } => "StopTimeout",
+        MicrosandboxError::ResizeTimeout { .. } => "ResizeTimeout",
         MicrosandboxError::ExecFailed(_) => "ExecFailed",
         MicrosandboxError::Terminal(_) => "Terminal",
         MicrosandboxError::SandboxFsOps(_) => "SandboxFsOps",
@@ -117,5 +126,28 @@ mod tests {
         );
         assert!(payload["recovery"]["artifact"].is_null());
         assert_eq!(payload["recovery"]["publication_error"], "disk full");
+    }
+
+    #[test]
+    fn resize_timeout_error_carries_last_status() {
+        let error = MicrosandboxError::ResizeTimeout {
+            name: "api".into(),
+            timeout: std::time::Duration::from_secs(2),
+            status: vec![microsandbox::sandbox::ResourceResizeStatus {
+                resource: microsandbox::sandbox::ResourceKind::Memory,
+                requested: "8 GiB".into(),
+                actual: "4 GiB".into(),
+                enforced: "8 GiB".into(),
+                state: microsandbox::sandbox::ResourceConvergenceState::Converging,
+            }],
+        };
+        let message = error.to_string();
+        assert_eq!(error_type_str(&error), "ResizeTimeout");
+        let payload: serde_json::Value =
+            serde_json::from_str(&resize_timeout_payload(&error).unwrap()).unwrap();
+        assert_eq!(payload["message"], message);
+        assert_eq!(payload["status"][0]["resource"], "memory");
+        assert_eq!(payload["status"][0]["actual"], "4 GiB");
+        assert_eq!(payload["status"][0]["state"], "converging");
     }
 }

@@ -63,6 +63,22 @@ pub fn to_py_err(err: microsandbox::MicrosandboxError) -> PyErr {
             };
         }
 
+        if let ResizeTimeout { status, .. } = &err {
+            let instance = (|| -> PyResult<Bound<'_, PyAny>> {
+                let status = serde_json::to_value(status).map_err(|error| {
+                    pyo3::exceptions::PyRuntimeError::new_err(error.to_string())
+                })?;
+                let kwargs = pyo3::types::PyDict::new(py);
+                kwargs.set_item("status", crate::sandbox::resize_statuses_to_py(py, status)?)?;
+                errors_mod
+                    .getattr("ResizeTimeoutError")?
+                    .call((err.to_string(),), Some(&kwargs))
+            })();
+            if let Ok(instance) = instance {
+                return PyErr::from_value(instance);
+            }
+        }
+
         // Unsupported gets a Python-idiom message (`sandbox.kill()` instead of
         // `Sandbox::kill`) plus structured `operation` / `hint` attributes.
         if let Unsupported { op, reason } = &err {
@@ -106,6 +122,7 @@ pub fn to_py_err(err: microsandbox::MicrosandboxError) -> PyErr {
             SandboxStopTimedOut { .. } => ("SandboxStopTimedOutError", err.to_string()),
             ExecTimeout(_) => ("ExecTimeoutError", err.to_string()),
             StopTimeout { .. } => ("StopTimeoutError", err.to_string()),
+            ResizeTimeout { .. } => ("ResizeTimeoutError", err.to_string()),
             SandboxFsOps(_) => ("FilesystemError", err.to_string()),
             ImageNotFound(_) => ("ImageNotFoundError", err.to_string()),
             ImageInUse(_) => ("ImageInUseError", err.to_string()),

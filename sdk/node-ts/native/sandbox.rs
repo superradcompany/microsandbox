@@ -437,6 +437,24 @@ impl Sandbox {
         run_modify(builder, modify_dry_run(options.as_ref())).await
     }
 
+    /// Read the current live resize status as a JSON array.
+    #[napi]
+    pub async fn resize_status(&self) -> Result<String> {
+        let sb = self.inner.get().await.ok_or_else(consumed_error)?;
+        resize_status_json(sb.resize_status().await)
+    }
+
+    /// Wait for live resizes to settle. Omitted waits without a deadline; `0` checks once.
+    #[napi]
+    pub async fn wait_until_resized(&self, timeout_ms: Option<f64>) -> Result<String> {
+        let timeout = resize_wait_timeout(timeout_ms)?;
+        let sb = self.inner.get().await.ok_or_else(consumed_error)?;
+        resize_status_json(match timeout {
+            Some(timeout) => sb.wait_until_resized_with_timeout(timeout).await,
+            None => sb.wait_until_resized().await,
+        })
+    }
+
     /// Compact root and owned-data disk prefixes; the limit includes the base, not the writable head.
     #[napi]
     pub async fn compact(
@@ -1271,6 +1289,25 @@ pub(crate) async fn run_modify(
     }
     .map_err(to_napi_error)?;
     serde_json::to_string(&plan).map_err(|e| Error::from_reason(e.to_string()))
+}
+
+pub(crate) fn resize_status_json(
+    status: microsandbox::MicrosandboxResult<Vec<microsandbox::sandbox::ResourceResizeStatus>>,
+) -> Result<String> {
+    let status = status.map_err(to_napi_error)?;
+    serde_json::to_string(&status).map_err(|e| Error::from_reason(e.to_string()))
+}
+
+pub(crate) fn resize_wait_timeout(timeout_ms: Option<f64>) -> Result<Option<Duration>> {
+    match timeout_ms {
+        Some(ms) if !ms.is_finite() || ms < 0.0 => Err(Error::from_reason(format!(
+            "resize wait timeout must be a non-negative finite number of milliseconds, got {ms}"
+        ))),
+        Some(ms) => Duration::try_from_secs_f64(ms / 1000.0)
+            .map(Some)
+            .map_err(|_| Error::from_reason("resize wait timeout is out of range")),
+        None => Ok(None),
+    }
 }
 
 fn cpu_count_u8(cpus: u32) -> Result<u8> {

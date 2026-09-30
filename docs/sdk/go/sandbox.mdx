@@ -610,6 +610,15 @@ for _, r := range plan.ResizeStatus {
     fmt.Printf("%s: %s -> %s (%s)\n", r.Resource, r.Requested, r.Actual, r.State)
 }
 
+// Wait for the guest to converge
+settled, err := sb.WaitUntilResizedWithTimeout(ctx, time.Minute)
+var timeout *m.ResizeTimeoutError
+if errors.As(err, &timeout) {
+    settled = timeout.Status // last observed status
+} else if err != nil {
+    return err
+}
+
 // Preview a change without applying it
 preview, err := sb.Modify(ctx, m.ModifyOptions{MaxMemoryMiB: 16384, DryRun: true})
 if err != nil {
@@ -654,7 +663,7 @@ Plan or apply a configuration change. The returned plan labels each change `"liv
 
 Secret specs are keyed by stable secret name. Each `SecretModifySpec` selects at most one source (`Env`, `Value`, or `Store`) and may also set `Placeholder` and `AllowedHosts`; omitting a source updates only the other supplied fields. Plans expose only safe references and metadata; raw secret values never appear in a plan. Removal is explicit through `SecretsRemove`.
 
-A live CPU or memory resize can take a moment to settle. The new limits are enforced immediately, and the returned plan's `ResizeStatus` reports when the sandbox has finished adjusting. See [`SandboxModificationPlan`](#sandboxmodificationplan).
+A live CPU or memory resize can take a moment to settle. The new limits are enforced immediately. The returned plan's `ResizeStatus` is a single reading taken when the change was accepted; use [`WaitUntilResized`](#sb-waituntilresized) to wait for the guest. See [`SandboxModificationPlan`](#sandboxmodificationplan).
 
 <p className="msb-label">Parameters</p>
 
@@ -963,6 +972,36 @@ Block until the sandbox is observed in a terminal state, then return how it ende
     <div className="msb-param-desc">Terminal status, exit code, and signal.</div>
   </div>
 </div>
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">ResizeStatus()</span>
+
+<Tooltip tip="Live resize is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+```go
+func (s *Sandbox) ResizeStatus(ctx context.Context) ([]ResourceResizeStatus, error)
+```
+
+Read the current live CPU and memory resize status without changing anything. Returns an empty slice when the sandbox is not running.
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">WaitUntilResized()</span>
+
+<Tooltip tip="Live resize is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+```go
+func (s *Sandbox) WaitUntilResized(ctx context.Context) ([]ResourceResizeStatus, error)
+```
+
+Wait until every resource is `"applied"`, `"guest-refused"`, or `"failed"`. Returns an empty slice when the sandbox is not running. There is no built-in deadline and a guest that never converges keeps this polling; cancel `ctx` or use [`WaitUntilResizedWithTimeout`](#sb-waituntilresizedwithtimeout) to bound it.
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">WaitUntilResizedWithTimeout()</span>
+
+<Tooltip tip="Live resize is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+```go
+func (s *Sandbox) WaitUntilResizedWithTimeout(ctx context.Context, timeout time.Duration) ([]ResourceResizeStatus, error)
+```
+
+Same as [`WaitUntilResized`](#sb-waituntilresized) within `timeout`. A zero or negative timeout checks once. Expiry returns a nil slice and a `*ResizeTimeoutError` of kind `ErrResizeTimeout`; use `errors.As` to read the last observed status from its `Status` field. The status is empty if no read completed before the deadline. The host still enforces the new limit. These methods need a matching native SDK; an older native library returns an unsupported-operation error.
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">WaitForStatus()</span>
 
@@ -2614,6 +2653,35 @@ Block until terminal state
 
 `(*`[`SandboxStopResult`](#sandboxstopresult)`, error)`
 
+#### <span className="msb-recv">h.</span><span className="msb-hn">ResizeStatus()</span>
+
+<Tooltip tip="Live resize is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+```go
+ResizeStatus(ctx)
+```
+
+Current live CPU and memory resize status of this exact sandbox. Empty when not running. Returns `ErrSandboxReplaced` if the name now refers to another sandbox.
+
+<p className="msb-label">Returns</p>
+
+`([]ResourceResizeStatus, error)`
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">WaitUntilResized()</span>
+
+<Tooltip tip="Live resize is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+```go
+WaitUntilResized(ctx)
+WaitUntilResizedWithTimeout(ctx, timeout)
+```
+
+Wait until every live resize on this exact sandbox is terminal. Returns an empty slice when the sandbox is not running, and `ErrSandboxReplaced` if the name now refers to another sandbox. The untimed variant keeps polling while a guest never converges; the timed variant returns a `*ResizeTimeoutError` on expiry, with the last observed status in its `Status` field.
+
+<p className="msb-label">Returns</p>
+
+`([]ResourceResizeStatus, error)`
+
 #### <span className="msb-recv">h.</span><span className="msb-hn">Remove()</span>
 
 ```go
@@ -2854,7 +2922,9 @@ Dry-run or apply plan for a sandbox modification. Values never appear in a plan:
 | Requested | `string` | Requested value |
 | Actual | `string` | Actual value observed in the guest/runtime |
 | Enforced | `string` | Host/VMM-enforced value |
-| State | `string` | `"applied"` when requested, actual, and enforced match; `"converging"` while the guest is still onlining CPUs or plugging memory; `"guest-refused"` when the guest would not cooperate (the host enforces the new limit anyway); `"accepted"` or `"failed"` otherwise |
+| State | `string` | `"applied"` when requested, actual, and enforced match; `"converging"` while the guest is still onlining or offlining CPUs or plugging or releasing memory; `"guest-refused"` when the guest would not cooperate (the host enforces the new limit anyway); `"accepted"` or `"failed"` otherwise |
+
+A shrink stays `"converging"` until the guest releases the capacity. `"applied"`, `"guest-refused"`, and `"failed"` are terminal.
 
 ### SandboxPage
 

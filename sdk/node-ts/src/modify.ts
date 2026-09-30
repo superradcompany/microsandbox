@@ -150,6 +150,18 @@ export interface ResourceResizeStatus {
   state: ResourceConvergenceState;
 }
 
+/** Parse the resize status JSON array emitted by the native layer. */
+export function resizeStatusFromJson(raw: string): ResourceResizeStatus[] {
+  return JSON.parse(raw) as ResourceResizeStatus[];
+}
+
+/** Reject budgets N-API cannot represent; omitted waits without a deadline, `0` checks once. */
+export function validateResizeTimeout(timeoutMs?: number): void {
+  if (timeoutMs !== undefined && (!Number.isFinite(timeoutMs) || timeoutMs < 0)) {
+    throw new RangeError("resize wait timeout must be a non-negative finite number of milliseconds");
+  }
+}
+
 /** Dry-run or apply plan returned by `modify()`. */
 export interface SandboxModificationPlan {
   sandbox: string;
