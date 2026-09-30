@@ -23,7 +23,9 @@ go run ./examples/basic
 | `patches` | Pre-boot rootfs patches |
 | `ports` | Publish guest TCP ports on host ports |
 | `secrets` | Secret placeholder injection |
-| `snapshot-fork` | Create a stopped-sandbox snapshot and boot a fork from it |
+| `snapshot-fork` | Create a stopped-sandbox snapshot and restore a fresh sandbox from it |
 | `streaming` | Streaming exec, signals, and cancellation |
 | `tls` | TLS interception configuration |
 | `volumes` | Named volume lifecycle |
+
+The `snapshot-fork` example keeps its historical directory name; it demonstrates restoring a saved disk snapshot. Live forking uses the `Fork` API.

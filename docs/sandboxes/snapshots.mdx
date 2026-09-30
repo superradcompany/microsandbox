@@ -451,7 +451,7 @@ Flushing does not save data still buffered by your application or commit databas
 
 A **generation** describes how snapshot history progresses. A **branch** describes a distinct path through that history. Taking successive snapshots advances a lineage; restoring an earlier snapshot and capturing new state creates a divergent path. A snapshot group is a namespace that can contain multiple paths, with a selected head. Branches here describe ancestry, not a separate live sandbox operation or a named branch-management API.
 
-**Forking** duplicates live execution. **Restoring** starts a sandbox from a saved snapshot. For copy-on-write memory during full restore, use `--cow-mem` in the CLI, `.cowMemory()` in TypeScript, `.cow_memory()` in Rust, `cow_memory=True` in Python, or `WithCowMemory()` in Go. The former `--forked` flag and corresponding SDK restore options have been removed.
+**Forking** duplicates live execution. **Restoring** starts a sandbox from a saved snapshot. For copy-on-write memory during full restore, use `--cow-mem` in the CLI, `.cowMemory()` in TypeScript, `.cow_memory()` in Rust, `cow_memory=True` in Python, or `WithCowMemory()` in Go. The former `--forked` flag and corresponding SDK restore options have been removed. The MCP `sandbox_restore` tool retains its `forked` input for compatibility; it selects copy-on-write restore memory, not live forking.
 
 <span id="branching" />
 
@@ -505,27 +505,64 @@ Capture once for several children:
 ```typescript TypeScript
 const source = await Sandbox.get("worker");
 
-const children = await source.forkMany(["alice", "bob"]);
+const outcomes = await source.forkMany(["alice", "bob"]);
+for (const outcome of outcomes) {
+  if (outcome.error !== undefined) {
+    console.error(`${outcome.name}: ${outcome.error.message}`);
+  } else {
+    console.log(`${outcome.name} started`);
+    // Use the child, then stop it when finished.
+    await outcome.sandbox.stop();
+  }
+}
 ```
 
 ```rust Rust
 let source = Sandbox::get("worker").await?;
 
-let children = source.fork_many(["alice", "bob"]).fork().await?;
+let outcomes = source.fork_many(["alice", "bob"]).fork().await?;
+for outcome in outcomes {
+    match outcome.result {
+        Ok(child) => {
+            println!("{} started", outcome.name);
+            // Use the child, then stop it when finished.
+            child.stop().await?;
+        }
+        Err(error) => eprintln!("{}: {error}", outcome.name),
+    }
+}
 ```
 
 ```python Python
 source = await Sandbox.get("worker")
 
-children = await source.fork_many(["alice", "bob"])
+outcomes = await source.fork_many(["alice", "bob"])
+for outcome in outcomes:
+    if outcome.error is not None:
+        print(f"{outcome.name}: {outcome.error}")
+    else:
+        print(f"{outcome.name} started")
+        # Use the child, then stop it when finished.
+        await outcome.sandbox.stop()
 ```
 
 ```go Go
 source, err := m.GetSandbox(ctx, "worker")
 if err != nil { return err }
 
-children, err := source.ForkMany(ctx, []string{"alice", "bob"})
+outcomes, err := source.ForkMany(ctx, []string{"alice", "bob"})
 if err != nil { return err }
+for _, outcome := range outcomes {
+    if outcome.Error != nil {
+        fmt.Printf("%s: %v\n", outcome.Name, outcome.Error)
+        continue
+    }
+    fmt.Printf("%s started\n", outcome.Name)
+    // Use the child, then stop it and close its handle when finished.
+    stopErr := outcome.Sandbox.Stop(ctx)
+    outcome.Sandbox.Close()
+    if stopErr != nil { return stopErr }
+}
 ```
 
 ```bash CLI
