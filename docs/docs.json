@@ -189,7 +189,15 @@
                 "expanded": false,
                 "pages": [
                   "sdk/ruby/sandbox",
-                  "sdk/ruby/vsock"
+                  "sdk/ruby/configuration",
+                  "sdk/ruby/execution",
+                  "sdk/ruby/ssh",
+                  "sdk/ruby/filesystem",
+                  "sdk/ruby/volumes",
+                  "sdk/ruby/networking",
+                  "sdk/ruby/vsock",
+                  "sdk/ruby/snapshots",
+                  "sdk/ruby/images"
                 ]
               }
             ]
@@ -340,10 +348,24 @@
       },
       {
         "tab": "Enterprise",
-        "pages": [
-          "enterprise/managed-configuration",
-          "enterprise/corporate-networking",
-          "enterprise/offline-deployment"
+        "groups": [
+          {
+            "group": "Enterprise",
+            "pages": ["enterprise"]
+          },
+          {
+            "group": "Employee devices",
+            "pages": [
+              "enterprise/prepare-environment",
+              "enterprise/corporate-networking",
+              "enterprise/managed-configuration",
+              "enterprise/deploy-and-verify"
+            ]
+          },
+          {
+            "group": "Talk to us",
+            "pages": ["enterprise/contact"]
+          }
         ]
       },
       {
@@ -361,13 +383,32 @@
         "tab": "Changelog",
         "groups": [
           {
+            "group": "Migration guides",
+            "icon": "arrow-right-arrow-left",
+            "pages": [
+              "migrations/v0.7"
+            ]
+          },
+          {
             "group": "Releases",
+            "icon": "tag",
+            "pages": [
+              "changelog/v0.7.4",
+              "changelog/v0.7.3",
+              "changelog/v0.7.2",
+              "changelog/v0.7.1",
+              "changelog/v0.7.0"
+            ]
+          },
+          {
+            "group": "Past updates",
             "icon": "clock-rotate-left",
             "pages": [
               {
                 "group": "September 2026",
-                "expanded": true,
+                "expanded": false,
                 "pages": [
+                  "changelog/2026-09-25",
                   "changelog/2026-09-11",
                   "changelog/2026-09-04"
                 ]
@@ -424,13 +465,22 @@
                   "changelog/2026-04-03"
                 ]
               }
-            ]
+            ],
+            "expanded": false
           }
         ]
       }
     ]
   },
   "redirects": [
+    {
+      "source": "/networking/security-model",
+      "destination": "/security/network"
+    },
+    {
+      "source": "/getting-started/windows-troubleshooting",
+      "destination": "/troubleshooting/windows"
+    },
     {
       "source": "/getting-started/backends",
       "destination": "/operations/backends"
@@ -486,6 +536,10 @@
     {
       "source": "/cloud/compatibility",
       "destination": "/cloud/overview#compatibility"
+    },
+    {
+      "source": "/enterprise/offline-deployment",
+      "destination": "/enterprise/prepare-environment#prepare-offline-devices"
     }
   ],
   "integrations": {

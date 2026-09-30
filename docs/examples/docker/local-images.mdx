@@ -139,6 +139,26 @@ let sb = Sandbox::builder("worker")
     .create()
     .await?;
 ```
+
+```python Python
+from microsandbox import Sandbox
+
+sb = await Sandbox.create(
+    "worker",
+    image="localhost:5050/my-image:latest",
+    registry_insecure=True,
+)
+```
+
+```go Go
+sb, err := m.CreateSandbox(ctx, "worker",
+    m.WithImage("localhost:5050/my-image:latest"),
+    m.WithRegistryInsecure(),
+)
+if err != nil {
+    return err
+}
+```
 </CodeGroup>
 
 <Tip>

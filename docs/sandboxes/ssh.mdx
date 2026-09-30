@@ -93,6 +93,12 @@ if err != nil {
 }
 fmt.Print(string(output.Stdout))
 ```
+
+```ruby Ruby
+sb = Microsandbox::Sandbox.start("devbox")
+output = sb.ssh_exec("uname -a")
+puts output.fetch("stdout")
+```
 </CodeGroup>
 
 ### Interactive attach
@@ -289,6 +295,12 @@ persistent = await sb.ssh().open_client(inactivity_timeout=0)
 ```go Go
 ssh, err := sb.SSH().OpenClient(ctx, m.WithSSHClientInactivityTimeout(30*time.Minute))
 persistent, err := sb.SSH().OpenClient(ctx, m.WithSSHClientInactivityTimeout(0))
+```
+
+```ruby Ruby
+# Ruby sets the timeout per SSH command.
+output = sb.ssh_exec("uname -a", inactivity_timeout: 1800)
+output = sb.ssh_exec("uname -a", inactivity_timeout: 0)
 ```
 </CodeGroup>
 

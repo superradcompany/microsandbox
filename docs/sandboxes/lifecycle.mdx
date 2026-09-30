@@ -301,6 +301,15 @@ handle, err := m.GetSandbox(ctx, "worker")
 fmt.Println(handle.Status())
 ```
 
+```ruby Ruby
+Microsandbox::Sandbox.list.fetch("sandboxes").each do |handle|
+  puts "#{handle.name}: #{handle.status}"
+end
+
+handle = Microsandbox::Sandbox.get("worker")
+puts handle.status
+```
+
 ```bash CLI
 msb ls
 msb ps worker
@@ -388,6 +397,32 @@ let ping = sb.ping().await?;
 println!("agent reachable in {:?}", ping.latency);
 
 sb.touch().await?;
+```
+
+```python Python
+ping = await sb.ping()
+print(f"agent reachable in {ping.latency_ms:.1f} ms")
+
+await sb.touch()
+```
+
+```go Go
+ping, err := sb.Ping(ctx)
+if err != nil {
+    return err
+}
+fmt.Printf("agent reachable in %s\n", ping.Latency)
+
+if _, err := sb.Touch(ctx); err != nil {
+    return err
+}
+```
+
+```ruby Ruby
+ping = sb.ping
+puts "agent reachable in #{ping.fetch("latency_ms")} ms"
+
+sb.touch
 ```
 
 ```bash CLI
@@ -529,6 +564,15 @@ sb, err := m.CreateSandbox(ctx, "worker",
     m.WithIdleTimeout(5*time.Minute),
 )
 ```
+
+```ruby Ruby
+sb = Microsandbox::Sandbox.create(
+  "worker",
+  image: "python",
+  max_duration: 3600,
+  idle_timeout: 300
+)
+```
 </CodeGroup>
 
 ## Lifecycle states
@@ -576,6 +620,10 @@ await sb.kill()
 
 ```go Go
 err := sb.Kill(ctx)
+```
+
+```ruby Ruby
+sb.kill
 ```
 
 ```bash CLI

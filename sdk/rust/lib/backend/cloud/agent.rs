@@ -225,7 +225,11 @@ mod tests {
                 // Both timeout and caller cancellation must close this socket.
                 stream.read(&mut [0u8; 1]).await.unwrap()
             });
-            let mut dial = backend.dial_agent("sandbox", Duration::from_millis(500));
+            // Allow real socket setup to complete on a loaded CI runner. Once
+            // the server receives the upgrade request, advance virtual time
+            // instead of waiting for a short wall-clock deadline to race setup.
+            let timeout = Duration::from_secs(30);
+            let mut dial = backend.dial_agent("sandbox", timeout);
             tokio::select! {
                 result = &mut dial => panic!("dial ended before upgrade stall: {:?}", result.err()),
                 result = ready => result.unwrap(),
@@ -233,7 +237,10 @@ mod tests {
             if cancel {
                 drop(dial);
             } else {
+                tokio::time::pause();
+                tokio::time::advance(timeout).await;
                 let error = dial.await.err().expect("stalled upgrade must time out");
+                tokio::time::resume();
                 assert!(
                     error
                         .to_string()

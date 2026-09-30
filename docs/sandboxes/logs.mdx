@@ -47,6 +47,12 @@ entries = await handle.logs()
 handle, err := m.GetSandbox(ctx, "web")
 entries, err := handle.Logs(ctx, m.LogOptions{})
 ```
+
+```ruby Ruby
+# Ruby reads logs through a connection to a running local sandbox.
+sb = Microsandbox::Sandbox.get("web").connect
+entries = sb.logs
+```
 </CodeGroup>
 
 Use log options to filter at read time:
@@ -81,6 +87,10 @@ recent, err := handle.Logs(ctx, m.LogOptions{
     Tail: 50,
     Sources: []m.LogSource{m.LogSourceStdout, m.LogSourceStderr},
 })
+```
+
+```ruby Ruby
+recent = sb.logs(tail: 50, sources: [:stdout, :stderr])
 ```
 </CodeGroup>
 

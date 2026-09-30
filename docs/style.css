@@ -585,15 +585,15 @@ details.accordion > [data-component-part="accordion-content"] {
  * inset. Scoped to standalone accordions that hold a code block so prose and
  * grouped accordions are left alone.
  * -------------------------------------------------------------------------- */
-details.accordion:has(.code-block):not(.msb-accordion-group *) > *:not(summary) { margin: 0.75rem !important; }
-details.accordion:has(.code-block):not(.msb-accordion-group *) .code-block { margin: 0 !important; }
+details.accordion:has(.code-block):not(.msb-accordion-group *, .accordion-group *) > *:not(summary) { margin: 0.75rem !important; }
+details.accordion:has(.code-block):not(.msb-accordion-group *, .accordion-group *) .code-block { margin: 0 !important; }
 
 /* The example now sits directly under the signature. The signature code
  * block's 2rem bottom margin and the accordion's top margin stacked into a
  * wide gap; collapse them to one even, tight inset so the example reads as
  * attached to the signature it documents. */
-.code-block:has(+ details.accordion:not(.msb-accordion-group *)) { margin-bottom: 0 !important; }
-details.accordion:has(.code-block):not(.msb-accordion-group *) { margin-top: 0.5rem !important; }
+.code-block:has(+ details.accordion:not(.msb-accordion-group *, .accordion-group *)) { margin-bottom: 0 !important; }
+details.accordion:has(.code-block):not(.msb-accordion-group *, .accordion-group *) { margin-top: 0.5rem !important; }
 
 @media (max-width: 640px) {
   .msb-params { grid-template-columns: 1fr; }
@@ -702,4 +702,23 @@ span:has(> .msb-badge-limited) {
 
 span:has(> .msb-badge-cloud) {
   text-decoration: none !important;
+}
+
+/* Tally's embedded form has its own light theme. Keep this text-only form
+   readable in both documentation themes without reloading entered answers. */
+.enterprise-contact-form {
+  color-scheme: light;
+  background: #fff;
+  border-radius: 12px;
+}
+
+.dark .enterprise-contact-form {
+  filter: invert(1) hue-rotate(180deg);
+  /* Blend the inverted white background into the actual page color. */
+  mix-blend-mode: screen;
+}
+
+.dark .enterprise-contact-surface {
+  background: rgb(var(--background-dark));
+  isolation: isolate;
 }

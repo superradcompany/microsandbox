@@ -1,11 +1,10 @@
 ---
 title: Proxies
-description: Python SDK - Proxy API reference
+"og:title": Python SDK Proxies reference
+description: Route outbound sandbox connections through a SOCKS4 or SOCKS5 proxy with the Python SDK.
 ---
 
-Configure one SOCKS4 or SOCKS5 proxy for outbound sandbox connections with the `proxy=` argument to [`Sandbox.create()`](/sdk/python/sandbox#sandbox-create). Proxy protocols are mutually exclusive.
-
-See [Proxies](/networking/outbound-proxy) for routing behavior, security considerations, and limits.
+Set `proxy=` on [`Sandbox.create()`](/sdk/python/sandbox#sandbox-create). SOCKS4 and SOCKS5 are mutually exclusive. See [Outbound proxies](/networking/outbound-proxy) for setup examples.
 
 <Note>Outbound proxies are local-only. Cloud sandbox creation rejects this setting.</Note>
 
