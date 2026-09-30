@@ -218,6 +218,36 @@ class MicrosandboxTest < Test::Unit::TestCase
     assert_equal backend_kind, Microsandbox.default_backend_kind
   end
 
+  def test_http_deny_message_reaches_cloud_validation
+    script = <<~RUBY
+      require "microsandbox"
+      Microsandbox.use_cloud_backend!("test-key", url: "http://127.0.0.1:9")
+      settings = Microsandbox::HttpBuilder.new
+      settings.deny_message("dormant")
+      abort "message enabled responses" unless settings.response.nil?
+      settings.deny_response(true).deny_response(false)
+      abort "disable ignored" unless settings.response == false
+      operations = [
+        -> { Microsandbox::Sandbox.create("ruby-test", image: "alpine", http: { deny_response: true }) },
+        -> { Microsandbox::Sandbox.builder("ruby-test").image("alpine").http { |h| h.deny_response(true).deny_message("blocked {host}") }.create }
+      ]
+      operations.each do |operation|
+        begin
+          operation.call
+          abort "expected cloud to reject the local-only option"
+        rescue Microsandbox::UnsupportedError => error
+          abort error.message unless error.message.include?("network.http.deny_response")
+          puts "rejected"
+        end
+      end
+    RUBY
+    lib = File.expand_path("../lib", __dir__)
+    output = IO.popen([RbConfig.ruby, "-I", lib, "-e", script], &:read)
+
+    assert_true $?.success?
+    assert_equal ["rejected", "rejected"], output.lines(chomp: true)
+  end
+
   def test_with_is_available
     assert_respond_to Microsandbox::Sandbox, :with
   end

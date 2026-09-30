@@ -1,12 +1,14 @@
-//! Direct local execution branching through the existing control and restore paths.
+//! Direct local execution forking through the existing control and restore paths.
 
 #[cfg(feature = "local")]
 use std::path::Path;
 use std::sync::Arc;
 
+#[cfg(all(feature = "local", not(target_os = "linux")))]
+use microsandbox_control_client::CreateBranch;
 #[cfg(feature = "local")]
 use microsandbox_runtime::checkpoint::LocalBranchState;
-#[cfg(feature = "local")]
+#[cfg(all(feature = "local", target_os = "linux"))]
 use microsandbox_runtime::control::ControlRequest;
 #[cfg(feature = "local")]
 use microsandbox_runtime::launch::{CheckpointRestoreConfig, RootfsUpperLayerConfig};
@@ -25,8 +27,8 @@ use super::{SandboxConfig, SandboxStatus, modify};
 // Types
 //--------------------------------------------------------------------------------------------------
 
-/// Prepare a direct local branch with explicit child resource bindings.
-pub struct BranchBuilder {
+/// Prepare a direct local fork with explicit child resource bindings.
+pub struct ForkBuilder {
     guest_flush: microsandbox_types::GuestFlush,
     backend: Arc<dyn Backend>,
     source: String,
@@ -36,7 +38,7 @@ pub struct BranchBuilder {
 }
 
 /// Capture once and create independently owned children concurrently, returning input-order results.
-pub struct BranchManyBuilder {
+pub struct ForkManyBuilder {
     guest_flush: microsandbox_types::GuestFlush,
     backend: Arc<dyn Backend>,
     source: String,
@@ -47,30 +49,54 @@ pub struct BranchManyBuilder {
 }
 
 /// Result for one requested child. Other children are not rolled back on startup failure.
-pub struct BranchOutcome {
+pub struct ForkOutcome {
     /// Requested child name.
     pub name: String,
     /// Started child, or its individual startup error.
     pub result: MicrosandboxResult<Sandbox>,
 }
 
+/// Deprecated spelling for a live fork builder.
+#[deprecated(note = "use ForkBuilder instead")]
+pub type BranchBuilder = ForkBuilder;
+
+/// Deprecated spelling for a capture-once live fork builder.
+#[deprecated(note = "use ForkManyBuilder instead")]
+pub type BranchManyBuilder = ForkManyBuilder;
+
+/// Deprecated spelling for a live fork outcome.
+#[deprecated(note = "use ForkOutcome instead")]
+pub type BranchOutcome = ForkOutcome;
+
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
 
 impl Sandbox {
-    /// Capture one point in time for all names; no durable snapshot is published.
+    /// Deprecated spelling for live execution forking.
+    #[deprecated(note = "use fork instead")]
+    pub fn branch(&self, name: impl Into<String>) -> ForkBuilder {
+        self.fork(name)
+    }
+
+    /// Deprecated spelling for capture-once live forking.
+    #[deprecated(note = "use fork_many instead")]
     pub fn branch_many(
         &self,
         names: impl IntoIterator<Item = impl Into<String>>,
-    ) -> BranchManyBuilder {
-        BranchManyBuilder::new(self.branch(""), names)
+    ) -> ForkManyBuilder {
+        self.fork_many(names)
     }
 
-    /// Branch current execution into an independent local child using private CoW RAM.
+    /// Capture one point in time for all names; no durable snapshot is published.
+    pub fn fork_many(&self, names: impl IntoIterator<Item = impl Into<String>>) -> ForkManyBuilder {
+        ForkManyBuilder::new(self.fork(""), names)
+    }
+
+    /// Fork current execution into an independent local child using private CoW RAM.
     /// The source keeps its running/paused state; no durable full snapshot is created.
-    pub fn branch(&self, name: impl Into<String>) -> BranchBuilder {
-        BranchBuilder::new(
+    pub fn fork(&self, name: impl Into<String>) -> ForkBuilder {
+        ForkBuilder::new(
             self.backend().clone(),
             self.name(),
             self.identity(),
@@ -80,17 +106,29 @@ impl Sandbox {
 }
 
 impl SandboxHandle {
-    /// Capture one point in time for all names without connecting to the source guest.
+    /// Deprecated spelling for live execution forking.
+    #[deprecated(note = "use fork instead")]
+    pub fn branch(&self, name: impl Into<String>) -> ForkBuilder {
+        self.fork(name)
+    }
+
+    /// Deprecated spelling for capture-once live forking.
+    #[deprecated(note = "use fork_many instead")]
     pub fn branch_many(
         &self,
         names: impl IntoIterator<Item = impl Into<String>>,
-    ) -> BranchManyBuilder {
-        BranchManyBuilder::new(self.branch(""), names)
+    ) -> ForkManyBuilder {
+        self.fork_many(names)
     }
 
-    /// Branch a running or user-paused local sandbox without connecting to its guest.
-    pub fn branch(&self, name: impl Into<String>) -> BranchBuilder {
-        BranchBuilder::new(
+    /// Capture one point in time for all names without connecting to the source guest.
+    pub fn fork_many(&self, names: impl IntoIterator<Item = impl Into<String>>) -> ForkManyBuilder {
+        ForkManyBuilder::new(self.fork(""), names)
+    }
+
+    /// Fork a running or user-paused local sandbox without connecting to its guest.
+    pub fn fork(&self, name: impl Into<String>) -> ForkBuilder {
+        ForkBuilder::new(
             self.backend.clone(),
             self.name(),
             self.identity(),
@@ -99,9 +137,15 @@ impl SandboxHandle {
     }
 }
 
-impl BranchManyBuilder {
-    fn new(inner: BranchBuilder, names: impl IntoIterator<Item = impl Into<String>>) -> Self {
-        let BranchBuilder {
+impl ForkManyBuilder {
+    /// Deprecated spelling for starting live forks.
+    #[deprecated(note = "use fork instead")]
+    pub async fn branch(self) -> MicrosandboxResult<Vec<ForkOutcome>> {
+        self.fork().await
+    }
+
+    fn new(inner: ForkBuilder, names: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        let ForkBuilder {
             guest_flush,
             backend,
             source,
@@ -134,7 +178,7 @@ impl BranchManyBuilder {
 
     /// Validate the batch, capture once, and return one startup outcome per name.
     /// Validation/capture failures fail the batch; later child failures do not recapture.
-    pub async fn branch(mut self) -> MicrosandboxResult<Vec<BranchOutcome>> {
+    pub async fn fork(mut self) -> MicrosandboxResult<Vec<ForkOutcome>> {
         let options = self.inner.config.into_config();
         SandboxBuilder::validate_vsock_routes(&options)?;
         if let Some(error) = self.inner.build_error.take() {
@@ -153,7 +197,25 @@ impl BranchManyBuilder {
     }
 }
 
-impl BranchBuilder {
+impl ForkBuilder {
+    /// Deprecated spelling for starting live forks.
+    #[deprecated(note = "use fork instead")]
+    pub async fn branch(self) -> MicrosandboxResult<Sandbox> {
+        self.fork().await
+    }
+
+    /// Deprecated spelling for live forking with startup progress.
+    #[cfg(feature = "local")]
+    #[deprecated(note = "use fork_with_progress instead")]
+    pub fn branch_with_progress(
+        self,
+    ) -> MicrosandboxResult<(
+        crate::CreationProgressHandle,
+        tokio::task::JoinHandle<MicrosandboxResult<Sandbox>>,
+    )> {
+        self.fork_with_progress()
+    }
+
     fn new(
         backend: Arc<dyn Backend>,
         source: &str,
@@ -188,7 +250,7 @@ impl BranchBuilder {
     }
 
     /// Capture source execution and start an independent child; preserve source running/paused state.
-    pub async fn branch(mut self) -> MicrosandboxResult<Sandbox> {
+    pub async fn fork(mut self) -> MicrosandboxResult<Sandbox> {
         let options = self.inner.config.into_config();
         SandboxBuilder::validate_vsock_routes(&options)?;
         if let Some(error) = self.inner.build_error.take() {
@@ -205,9 +267,9 @@ impl BranchBuilder {
         .await
     }
 
-    /// Branch with the shared startup progress and task cancellation contract.
+    /// Fork with the shared startup progress and task cancellation contract.
     #[cfg(feature = "local")]
-    pub fn branch_with_progress(
+    pub fn fork_with_progress(
         mut self,
     ) -> MicrosandboxResult<(
         crate::CreationProgressHandle,
@@ -216,7 +278,7 @@ impl BranchBuilder {
         let (handle, sender) = crate::progress::channel();
         self.inner.config.creation_progress = Some(sender.downgrade());
         let task = tokio::spawn(async move {
-            let result = self.branch().await;
+            let result = self.fork().await;
             drop(sender);
             result
         });
@@ -238,7 +300,7 @@ async fn branch(
     _guest_flush: microsandbox_types::GuestFlush,
 ) -> MicrosandboxResult<Sandbox> {
     Err(MicrosandboxError::InvalidConfig(
-        "direct branching requires a local backend".into(),
+        "direct forking requires a local backend".into(),
     ))
 }
 
@@ -279,11 +341,11 @@ pub(super) async fn prepare_branch(
     let name = options.spec.name.clone();
     super::validate_sandbox_name(&name)?;
     let local = backend.as_local().ok_or_else(|| {
-        MicrosandboxError::InvalidConfig("direct branching requires a local backend".into())
+        MicrosandboxError::InvalidConfig("direct forking requires a local backend".into())
     })?;
     let SandboxIdentity::Local(expected_id) = identity else {
         return Err(MicrosandboxError::InvalidConfig(
-            "direct branching requires a local source".into(),
+            "direct forking requires a local source".into(),
         ));
     };
     let run = {
@@ -348,32 +410,28 @@ pub(super) async fn prepare_branch(
     }
     config.external_mount_policy = options.external_mount_policy;
     config.creation_progress = options.creation_progress;
-    let capabilities =
-        modify::control_request_for_run(local, source, run, "{\"op\":\"capabilities\"}\n".into())
-            .await?;
-    if !capabilities.capabilities.is_some_and(|c| c.branch_create) {
+    let session = modify::control_session_for_run(local, source, run).await?;
+    let capabilities = session.capabilities();
+    if !capabilities.branch_create {
         return Err(MicrosandboxError::Runtime(
             "source runtime does not support direct local branching".into(),
         ));
     }
-    if !capabilities
-        .capabilities
-        .is_some_and(|c| c.optional_disk_integrity)
-    {
+    if !capabilities.optional_disk_integrity {
         return Err(MicrosandboxError::Runtime(
             "source runtime lacks optional disk integrity; restart with the matching runtime"
                 .into(),
         ));
     }
     #[cfg(target_os = "linux")]
-    if !capabilities.capabilities.is_some_and(|c| c.branch_memfd) {
+    if !capabilities.branch_memfd {
         return Err(MicrosandboxError::Runtime("source runtime lacks the memory-descriptor branch handoff; restart with the matching runtime".into()));
     }
     config.spec.name = name;
     config.replace_existing = false;
     config.spec.patches.clear();
     config.branch_source = Some(super::identity::BranchSource {
-        guest_flush: modify::capture_flush_policy(capabilities.capabilities, guest_flush, false)?,
+        guest_flush: modify::capture_flush_policy(Some(capabilities), guest_flush, false)?,
         batch: None,
         record_integrity,
         name: source.into(),
@@ -420,7 +478,7 @@ pub(crate) async fn capture_child(
     )?;
     tokio::fs::write(child.join(".branch-reservation"), &id).await?;
     #[cfg(not(target_os = "linux"))]
-    let request = ControlRequest::BranchCreate {
+    let request = microsandbox_protocol::control::BranchCreate {
         guest_flush: source.guest_flush,
         record_integrity,
         branch_id: id.clone(),
@@ -440,6 +498,13 @@ pub(crate) async fn capture_child(
         memory_cache_dir: local.cache_dir().join("memory"),
         backing: None,
     };
+    #[cfg(not(target_os = "linux"))]
+    let response = modify::control_session_for_run(local, &source.name, source.run)
+        .await?
+        .request(&CreateBranch(request))
+        .await
+        .map_err(MicrosandboxError::ControlClient)?;
+    #[cfg(target_os = "linux")]
     let response = modify::control_request_for_run_with_memory(
         local,
         &source.name,
@@ -451,7 +516,11 @@ pub(crate) async fn capture_child(
     local.validate_control_run(&source.name, source.run).await?;
     lineage.validate_source(local, &source.name).await?;
     let closure = child.join(".branch-restore");
-    if response.branch.as_ref() != Some(&closure) {
+    #[cfg(target_os = "linux")]
+    let response_path = response.branch.as_ref();
+    #[cfg(not(target_os = "linux"))]
+    let response_path = Some(&response.path);
+    if response_path != Some(&closure) {
         return Err(MicrosandboxError::Runtime(
             "branch returned an unexpected handoff path".into(),
         ));

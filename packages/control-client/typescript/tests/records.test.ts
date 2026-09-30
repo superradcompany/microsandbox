@@ -4,9 +4,11 @@ import {
   CborEnvelopeCodec, WireError, decodeEnvelope, decodeFrame, encodeEnvelope, encodeRecord,
 } from "@microsandbox/protocol-client";
 import {
-  ControlClientError, GetCapabilities, GetCpuState, GetMemoryState, SetCpuTarget, SetMemoryTarget,
-  UpdateSecrets, MiB, GiB, KiB, decodeCapabilities, decodeControlError, decodeCpuState,
-  decodeHello, decodeMemoryState, decodeSecretsResult, decodeSecretsUpdate, decodeWelcome,
+  CompactDisks, ControlClientError, CreateBranch, CreateCheckpoint, CreateDiskCheckpoint,
+  GetCapabilities, GetCpuState, GetMemoryState, GetPauseState, GetRuntimeCapabilities,
+  GrowRootDisk, PauseRuntime, ResumeRuntime, SetCpuTarget, SetMemoryTarget, UpdateSecrets,
+  MiB, GiB, KiB, decodeCapabilities, decodeControlError, decodeCpuState, decodeHello,
+  decodeMemoryState, decodeSecretsResult, decodeSecretsUpdate, decodeWelcome,
 } from "../src/index.js";
 
 const fixtures = JSON.parse(readFileSync(new URL("../../../protocol-fixtures/control-v1.json", import.meta.url), "utf8")) as {
@@ -72,8 +74,8 @@ it("rejects required-field, duplicate-key and integer-type errors without exposi
   expect(() => decodeControlError(encodeRecord({ code: "future", message: "private", effect: "probably" }))).toThrow(WireError);
 });
 
-const frame = (type: string, payload: unknown, flags = 1) => new CborEnvelopeCodec().decode({
-  id: 7, flags, body: encodeEnvelope({ v: 1, t: type, p: encodeRecord(payload) }),
+const frame = (type: string, payload: unknown, flags = 1, generation = 1) => new CborEnvelopeCodec().decode({
+  id: 7, flags, body: encodeEnvelope({ v: generation, t: type, p: encodeRecord(payload) }),
 });
 
 it("native peer errors stay inspectable and checked errors retain unknown codes and actual frames", () => {
@@ -109,4 +111,76 @@ it("snapshots secret batches and preserves ordered partial progress without infe
   const prefix = encodeRecord({ outcome: "failed", applied_count: 0, failed_index: 0 });
   const payload = Uint8Array.from([0xa4, ...prefix.subarray(1), 0x65, ...new TextEncoder().encode("error"), ...duplicate]);
   expect(() => decodeSecretsResult(payload)).toThrow(WireError);
+});
+
+it("covers every generation-two operation with stable names and typed results", () => {
+  const checkpoint = new CreateCheckpoint({
+    checkpoint_id: "full-1", intent: "full_snapshot", record_integrity: true,
+  });
+  expect(checkpoint.message().type).toBe("control.checkpoint.create");
+  expect(checkpoint.decode(frame("control.checkpoint.result", {
+    checkpoint: {
+      checkpoint_id: "full-1", checkpoint_root: "root", path: "/capture",
+      memory_mode: "full", memory_logical_bytes: 10, memory_emitted_bytes: 8,
+    },
+  }, 1, 2))).toMatchObject({ checkpoint: { memory_logical_bytes: 10n, memory_emitted_bytes: 8n } });
+
+  const disk = new CreateDiskCheckpoint({ checkpoint_id: "disk-1" });
+  expect(disk.message().type).toBe("control.disk.checkpoint.create");
+  expect(disk.decode(frame("control.disk.checkpoint.result", {
+    checkpoint_id: "disk-1", path: "/capture", disk: { generation: 1 }, owned_volumes: [],
+  }, 1, 2))).toMatchObject({ checkpoint_id: "disk-1", path: "/capture", owned_volumes: [] });
+
+  const branch = new CreateBranch({
+    branch_id: "branch-1", child_name: "child", memory_cache_dir: "/cache",
+    record_integrity: false,
+  });
+  expect(branch.message().type).toBe("control.branch.create");
+  expect(branch.decode(frame("control.branch.result", { path: "/branch" }, 1, 2))).toEqual({ path: "/branch" });
+
+  const paused = { paused: true, recovery_required: false };
+  for (const [request, name] of [
+    [new PauseRuntime(), "control.pause"],
+    [new ResumeRuntime(), "control.resume"],
+    [new GetPauseState(), "control.pause.state"],
+  ] as const) {
+    expect(request.message().type).toBe(name);
+    expect(request.decode(frame("control.pause.state", paused, 1, 2))).toEqual(paused);
+  }
+
+  const grow = new GrowRootDisk(0xffffffffffffffffn);
+  expect(grow.message().type).toBe("control.root-disk.grow");
+  expect(grow.decode(frame("control.root-disk.state", {
+    filesystem_bytes: 1, device_bytes: 2, total_us: 3, pause_us: 4, guest_us: 5,
+  }, 1, 2))).toEqual({
+    filesystem_bytes: 1n, device_bytes: 2n, total_us: 3n, pause_us: 4n, guest_us: 5n,
+  });
+
+  const compact = new CompactDisks({ target: { kind: "root" }, layers: 0xffffffffffffffffn, dry_run: true });
+  expect(compact.message().type).toBe("control.disk.compact");
+  expect(compact.decode(frame("control.disk.compact.result", {
+    dry_run: true, input_layers: 3, selected_layers: 2, output_layers: 2,
+    materialized_bytes: 9, total_us: 10, pause_us: 0, disks: [],
+  }, 1, 2))).toMatchObject({ input_layers: 3n, selected_layers: 2n, materialized_bytes: 9n });
+
+  const capabilities = {
+    cpu_resize: true, memory_resize: true, secrets_update: true, pause_resume: true,
+  };
+  expect(new GetRuntimeCapabilities().decode(
+    frame("control.capabilities.result", capabilities, 1, 2),
+  )).toMatchObject(capabilities);
+});
+
+it("rejects malformed generation-two requests before transport admission", () => {
+  expect(() => new PauseRuntime({ guest_flush: "later" as never })).toThrow(WireError);
+  expect(() => new CreateCheckpoint({
+    checkpoint_id: "bad\ud800", intent: "full_snapshot", record_integrity: true,
+  })).toThrow(WireError);
+  expect(() => new CreateBranch({
+    branch_id: "branch", child_name: "child", memory_cache_dir: "/cache",
+    record_integrity: 1 as never,
+  })).toThrow(WireError);
+  expect(() => new CompactDisks({
+    target: { kind: "disk", guest_path: "bad\ud800" }, dry_run: false,
+  })).toThrow(WireError);
 });

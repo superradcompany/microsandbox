@@ -9,8 +9,12 @@ use crate::codec::MAX_FRAME_SIZE;
 // Constants
 //--------------------------------------------------------------------------------------------------
 
+/// Oldest framed host-control generation retained for released 0.7.x peers.
+pub const MIN_CONTROL_GENERATION: u8 = 1;
 /// Current framed host-control generation.
-pub const CONTROL_GENERATION: u8 = 1;
+pub const CONTROL_GENERATION: u8 = 2;
+/// Stable generation of hello, welcome, and setup errors.
+pub const CONTROL_HANDSHAKE_GENERATION: u8 = 1;
 /// Stable protocol discriminator; it does not authenticate a peer.
 pub const CONTROL_PROTOCOL: &str = "msb.control";
 /// The opening frame stays small and zero-prefixed across future generations.
@@ -79,7 +83,7 @@ impl ControlHello {
 }
 
 impl ControlWelcome {
-    /// Select generation one and the smaller limits for the initial server.
+    /// Select the highest generation shared by this server and the client.
     pub fn negotiate(hello: &ControlHello, max_in_flight: u32) -> Result<Self, ControlError> {
         hello.validate()?;
         if max_in_flight == 0 {
@@ -88,7 +92,8 @@ impl ControlWelcome {
                 "invalid server admission limit",
             ));
         }
-        if hello.min_generation > CONTROL_GENERATION {
+        let generation = hello.max_generation.min(CONTROL_GENERATION);
+        if generation < hello.min_generation {
             return Err(ControlError::rejected(
                 "unsupported_generation",
                 "no shared control generation",
@@ -96,7 +101,7 @@ impl ControlWelcome {
         }
         Ok(Self {
             protocol: CONTROL_PROTOCOL.into(),
-            generation: CONTROL_GENERATION,
+            generation,
             max_frame_size: hello.max_frame_size.min(MAX_FRAME_SIZE),
             max_in_flight: hello.max_in_flight.min(max_in_flight),
         })
@@ -128,7 +133,7 @@ impl Default for ControlHello {
     fn default() -> Self {
         Self {
             protocol: CONTROL_PROTOCOL.into(),
-            min_generation: CONTROL_GENERATION,
+            min_generation: MIN_CONTROL_GENERATION,
             max_generation: CONTROL_GENERATION,
             max_frame_size: MAX_FRAME_SIZE,
             max_in_flight: DEFAULT_MAX_IN_FLIGHT,

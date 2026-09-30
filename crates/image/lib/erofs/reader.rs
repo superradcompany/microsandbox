@@ -242,6 +242,18 @@ impl ErofsReader {
         Ok((inode.metadata(), xattrs))
     }
 
+    /// Return the inode metadata and xattrs for a path. The mode includes the
+    /// file type bits.
+    pub fn entry_metadata(&mut self, path: &str) -> io::Result<(InodeMetadata, Vec<Xattr>)> {
+        let inode = self.lookup_path(path)?;
+        let xattrs = self
+            .read_inode_xattrs(&inode)?
+            .into_iter()
+            .map(|(name, value)| Xattr { name, value })
+            .collect();
+        Ok((inode.metadata(), xattrs))
+    }
+
     /// Read a symlink target by NID.
     pub fn read_link_by_nid(&mut self, nid: u32) -> io::Result<Vec<u8>> {
         let inode = self.read_inode(nid)?;

@@ -31,6 +31,20 @@ pub trait CheckedControlRequest: Request<ControlProtocol, Error = ControlClientE
     fn decode_json(&self, reply: JsonReply) -> ControlClientResult<Self::Response>;
 }
 
+/// A checked request that can select framed CBOR or the historical JSON representation.
+///
+/// Existing [`CheckedControlRequest`] implementations receive this behavior through a blanket
+/// implementation. Generation-two requests implement it directly without expanding the released
+/// generation-one [`ControlRequest`] enum.
+pub trait CompatibleControlRequest: Request<ControlProtocol, Error = ControlClientError> {
+    /// First framed-control generation that defines this operation.
+    fn min_generation(&self) -> u8;
+    /// Encode the exact historical JSON request without a trailing newline.
+    fn compatibility_json_bytes(&self) -> ControlClientResult<Zeroizing<Vec<u8>>>;
+    /// Decode the actual historical JSON response.
+    fn decode_compatibility_json(&self, reply: JsonReply) -> ControlClientResult<Self::Response>;
+}
+
 //--------------------------------------------------------------------------------------------------
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
@@ -79,6 +93,23 @@ impl<T: Serialize> IntoControlMessage for TypedMessage<T> {
     }
 }
 
+impl<T: CheckedControlRequest> CompatibleControlRequest for T {
+    fn min_generation(&self) -> u8 {
+        1
+    }
+
+    fn compatibility_json_bytes(&self) -> ControlClientResult<Zeroizing<Vec<u8>>> {
+        Ok(Zeroizing::new(
+            serde_json::to_vec(&self.json_request()?)
+                .map_err(|_| ClientError::new(ErrorKind::Encode))?,
+        ))
+    }
+
+    fn decode_compatibility_json(&self, reply: JsonReply) -> ControlClientResult<Self::Response> {
+        CheckedControlRequest::decode_json(self, reply)
+    }
+}
+
 impl IntoControlMessage for EncodedMessage {
     fn into_json(self) -> ControlClientResult<ControlRequest> {
         Err(ControlClientError::UnsupportedMode)
@@ -90,7 +121,10 @@ impl CheckedControlRequest for GetCapabilities {
         Ok(ControlRequest::Capabilities)
     }
     fn decode_json(&self, reply: JsonReply) -> ControlClientResult<Self::Response> {
-        reply.checked(|value| json_reply::capabilities(value.get("capabilities")?))
+        reply.checked(|value| {
+            json_reply::capabilities(value.get("capabilities")?)
+                .map(microsandbox_protocol::control::RuntimeCapabilities::generation_one)
+        })
     }
 }
 
@@ -110,7 +144,7 @@ impl CheckedControlRequest for SetMemoryTarget {
         })
     }
     fn decode_json(&self, reply: JsonReply) -> ControlClientResult<Self::Response> {
-        GetMemoryState.decode_json(reply)
+        CheckedControlRequest::decode_json(&GetMemoryState, reply)
     }
 }
 
@@ -130,7 +164,7 @@ impl CheckedControlRequest for SetCpuTarget {
         })
     }
     fn decode_json(&self, reply: JsonReply) -> ControlClientResult<Self::Response> {
-        GetCpuState.decode_json(reply)
+        CheckedControlRequest::decode_json(&GetCpuState, reply)
     }
 }
 

@@ -268,8 +268,9 @@ pub struct SandboxOpts {
     pub rm: Vec<String>,
 
     // --- Image/Runtime overrides ---
-    /// Override the image's default entrypoint command.
-    #[arg(long)]
+    /// Override the image's entrypoint executable. With `msb run`, pass its
+    /// arguments after the image and `--`.
+    #[arg(long, value_name = "EXECUTABLE")]
     pub entrypoint: Option<String>,
 
     /// Hand off PID 1 to this init binary inside the guest after agentd
@@ -351,6 +352,11 @@ pub struct SandboxOpts {
     #[arg(short, long)]
     pub port: Vec<String>,
 
+    /// Accept-queue depth for published TCP ports (default: 1024; the host clamps it to its somaxconn).
+    #[cfg(feature = "net")]
+    #[arg(long, value_name = "DEPTH", value_parser = clap::value_parser!(u32).range(1..=i64::from(i32::MAX)))]
+    pub tcp_accept_queue_size: Option<u32>,
+
     /// Disable all network access by default. Sugar for `--net-default deny`.
     /// Combine with `--net-rule allow@<target>` entries to build an
     /// allowlist; without rules, the guest has no network reachability.
@@ -410,6 +416,11 @@ pub struct SandboxOpts {
     #[cfg(feature = "net")]
     #[arg(long = "net-ipv6-pool", value_name = "CIDR")]
     pub net_ipv6_pool: Option<String>,
+
+    /// NAT64 /96 prefix for policy classification. Repeatable.
+    #[cfg(feature = "net")]
+    #[arg(long = "net-nat64-prefix", value_name = "CIDR")]
+    pub net_nat64_prefix: Vec<String>,
 
     /// Network rule. Repeatable; each value is a comma-separated list of
     /// rule tokens. Token grammar:
@@ -816,6 +827,7 @@ impl SandboxOpts {
             || self.net_default_ingress.is_some()
             || self.net_ipv4_pool.is_some()
             || self.net_ipv6_pool.is_some()
+            || !self.net_nat64_prefix.is_empty()
             || self.net_egress_bandwidth.is_some()
             || self.net_egress_bandwidth_burst.is_some()
             || self.net_egress_ops.is_some()
@@ -827,6 +839,7 @@ impl SandboxOpts {
             || self.max_connections.is_some()
             || self.max_tcp_connections.is_some()
             || self.max_udp_connections.is_some()
+            || self.tcp_accept_queue_size.is_some()
             || self.net_strict.is_some()
             || self.trust_host_cas
             || self.tls_intercept
@@ -1066,6 +1079,9 @@ impl SandboxOpts {
             || self.net_default.is_some()
             || self.net_default_egress.is_some()
             || self.net_default_ingress.is_some()
+            || self.net_ipv4_pool.is_some()
+            || self.net_ipv6_pool.is_some()
+            || !self.net_nat64_prefix.is_empty()
             || self.net_egress_bandwidth.is_some()
             || self.net_egress_bandwidth_burst.is_some()
             || self.net_egress_ops.is_some()
@@ -1077,6 +1093,7 @@ impl SandboxOpts {
             || self.max_connections.is_some()
             || self.max_tcp_connections.is_some()
             || self.max_udp_connections.is_some()
+            || self.tcp_accept_queue_size.is_some()
             || self.net_strict.is_some()
             || self.trust_host_cas
             || self.proxy.is_some()
@@ -2555,6 +2572,7 @@ fn apply_network_opts(
         }
         let max_conn = opts.max_tcp_connections.or(opts.max_connections);
         let max_udp_conn = opts.max_udp_connections;
+        let tcp_accept_queue_size = opts.tcp_accept_queue_size;
         let ipv4_pool = opts
             .net_ipv4_pool
             .as_deref()
@@ -2571,6 +2589,14 @@ fn apply_network_opts(
                     .map_err(anyhow::Error::from)
             })
             .transpose()?;
+        let nat64_prefixes = opts
+            .net_nat64_prefix
+            .iter()
+            .map(|s| {
+                s.parse::<ipnetwork::Ipv6Network>()
+                    .map_err(anyhow::Error::from)
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
         let trust_host_cas = opts.trust_host_cas;
         let net_strict = opts.net_strict;
         let tls_intercept = opts.tls_intercept;
@@ -2611,11 +2637,17 @@ fn apply_network_opts(
             if let Some(max) = max_udp_conn {
                 n = n.max_udp_connections(max);
             }
+            if let Some(size) = tcp_accept_queue_size {
+                n = n.tcp_accept_queue_size(size);
+            }
             if let Some(pool) = ipv4_pool {
                 n = n.ipv4_pool(pool);
             }
             if let Some(pool) = ipv6_pool {
                 n = n.ipv6_pool(pool);
+            }
+            for prefix in nat64_prefixes {
+                n = n.nat64_prefix(prefix);
             }
             if trust_host_cas {
                 n = n.trust_host_cas(true);
@@ -3239,7 +3271,7 @@ pub fn resolve_command(
     }
 
     // Non-interactive with nothing to run.
-    ui::warn("no command provided and stdin is not a terminal");
+    ui::warn("no command provided or configured; pass a command after -- in non-interactive mode");
     Ok((None, vec![]))
 }
 
@@ -3425,6 +3457,31 @@ mod tests {
             ])
             .unwrap_err();
         assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn tcp_accept_queue_size_flag_accepts_only_the_positive_c_int_range() {
+        let parse = |value: &str| {
+            SandboxOpts::augment_args(Command::new("test")).try_get_matches_from([
+                "test",
+                "--tcp-accept-queue-size",
+                value,
+            ])
+        };
+        for value in ["1", "4096", "2147483647"] {
+            let opts = SandboxOpts::from_arg_matches(&parse(value).unwrap()).unwrap();
+            assert_eq!(opts.tcp_accept_queue_size, Some(value.parse().unwrap()));
+            assert!(opts.has_network_config());
+            assert!(opts.has_creation_flags());
+        }
+        for value in ["0", "2147483648"] {
+            assert_eq!(
+                parse(value).unwrap_err().kind(),
+                clap::error::ErrorKind::ValueValidation,
+                "{value}"
+            );
+        }
     }
 
     #[cfg(feature = "net")]

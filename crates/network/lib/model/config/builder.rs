@@ -15,7 +15,8 @@ use microsandbox_utils::size::Bytes;
 use zeroize::Zeroizing;
 
 use crate::config::{
-    ConnectionLimit, DnsConfig, InterfaceOverrides, NetworkConfig, PortProtocol, PublishedPort,
+    ConnectionLimit, DnsConfig, HttpConfig, InterfaceOverrides, NetworkConfig, PortProtocol,
+    PublishedPort, TcpAcceptQueueSize,
 };
 use crate::dns::Nameserver;
 use crate::policy::{BuildError, NetworkPolicy};
@@ -32,6 +33,12 @@ use crate::secrets::config::{
 pub struct NetworkBuilder {
     config: NetworkConfig,
     errors: Vec<BuildError>,
+}
+
+/// Fluent builder for HTTP denial responses.
+#[derive(Default)]
+pub struct HttpBuilder {
+    config: HttpConfig,
 }
 
 /// Fluent builder for [`DnsConfig`].
@@ -109,6 +116,32 @@ enum RefillTimeError {
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
+
+impl HttpBuilder {
+    /// Create HTTP settings with denial responses disabled.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Enable readable HTTP denial responses. Disabled by default.
+    pub fn deny_response(mut self, enabled: bool) -> Self {
+        self.config.deny_response = enabled;
+        self
+    }
+
+    /// Set the denied HTTP/HTTPS response body. `{host}` names the blocked host.
+    /// Requires `deny_response(true)`. An empty message produces an empty body;
+    /// omission uses the default.
+    pub fn deny_message(mut self, message: impl Into<String>) -> Self {
+        self.config.deny_message = Some(message.into());
+        self
+    }
+
+    /// Return the HTTP configuration.
+    pub fn build(self) -> HttpConfig {
+        self.config
+    }
+}
 
 impl NetworkBuilder {
     /// Start building a network configuration with defaults.
@@ -287,6 +320,19 @@ impl NetworkBuilder {
         self
     }
 
+    /// Set the accept-queue depth for published TCP port listeners. Defaults to 1024.
+    ///
+    /// Valid values are `1..=i32::MAX`; anything else records
+    /// [`BuildError::InvalidTcpAcceptQueueSize`]. The host kernel clamps the request to its own
+    /// ceiling (`net.core.somaxconn` on Linux, `kern.ipc.somaxconn` on macOS).
+    pub fn tcp_accept_queue_size(mut self, size: u32) -> Self {
+        match TcpAcceptQueueSize::try_from(size) {
+            Ok(size) => self.config.tcp_accept_queue_size = Some(size),
+            Err(err) => self.errors.push(err.into()),
+        }
+        self
+    }
+
     /// Set guest interface overrides.
     pub fn interface(mut self, overrides: InterfaceOverrides) -> Self {
         self.config.interface = overrides;
@@ -321,6 +367,23 @@ impl NetworkBuilder {
         self
     }
 
+    /// Add a NAT64 `/96` prefix.
+    ///
+    /// Destinations inside NAT64 prefixes are evaluated against both
+    /// their IPv6 address and the embedded IPv4 address. The well-known
+    /// `64:ff9b::/96` prefix is configured by default.
+    pub fn nat64_prefix(mut self, prefix: Ipv6Network) -> Self {
+        if prefix.prefix() != 96 {
+            self.errors.push(BuildError::InvalidNat64Prefix {
+                raw: prefix.to_string(),
+            });
+        } else if !self.config.nat64_prefixes.contains(&prefix) {
+            self.config.nat64_prefixes.push(prefix);
+        }
+
+        self
+    }
+
     /// Whether to ship the host's trusted root CAs into the guest at
     /// boot. Default: false. Opt in when running behind a corporate
     /// TLS-inspecting proxy (Cloudflare Warp Zero Trust, Zscaler,
@@ -328,6 +391,15 @@ impl NetworkBuilder {
     /// unknown to the guest's stock Mozilla bundle.
     pub fn trust_host_cas(mut self, enabled: bool) -> Self {
         self.config.trust_host_cas = enabled;
+        self
+    }
+
+    /// Configure HTTP responses to denied requests.
+    pub fn http(mut self, configure: impl FnOnce(HttpBuilder) -> HttpBuilder) -> Self {
+        self.config.http = configure(HttpBuilder {
+            config: self.config.http,
+        })
+        .build();
         self
     }
 
@@ -360,6 +432,16 @@ impl NetworkBuilder {
     pub fn build(mut self) -> Result<NetworkConfig, BuildError> {
         if let Some(err) = self.errors.drain(..).next() {
             return Err(err);
+        }
+        if let Some(prefix) = self
+            .config
+            .nat64_prefixes
+            .iter()
+            .find(|prefix| prefix.prefix() != 96)
+        {
+            return Err(BuildError::InvalidNat64Prefix {
+                raw: prefix.to_string(),
+            });
         }
         if self.config.tls.enabled
             && (self.config.tls.intercept_ca.cert_path.is_some()
@@ -587,6 +669,9 @@ impl SecretBuilder {
     }
 
     /// Add a host allowed to receive the substituted secret value.
+    ///
+    /// Once the secret's host and TLS identity checks pass, this host may also
+    /// receive unchanged placeholders outside enabled substitution locations.
     ///
     /// `*.example.com` matches the domain and its subdomains. Use
     /// [`allow_any_host_dangerous`](Self::allow_any_host_dangerous) for `*`.
@@ -936,6 +1021,36 @@ mod tests {
         );
     }
 
+    #[test]
+    fn tcp_accept_queue_size_is_unset_by_default_and_rejects_out_of_range_values() {
+        assert_eq!(
+            NetworkBuilder::new().build().unwrap().tcp_accept_queue_size,
+            None
+        );
+        let config = NetworkBuilder::new()
+            .tcp_accept_queue_size(4096)
+            .build()
+            .unwrap();
+        assert_eq!(
+            config.tcp_accept_queue_size.map(TcpAcceptQueueSize::get),
+            Some(4096)
+        );
+
+        for invalid in [0, TcpAcceptQueueSize::MAX + 1] {
+            let err = NetworkBuilder::new()
+                .tcp_accept_queue_size(invalid)
+                .build()
+                .unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    BuildError::InvalidTcpAcceptQueueSize { source } if source.value == invalid
+                ),
+                "{invalid}: {err}"
+            );
+        }
+    }
+
     /// Network builder happy path returns the config unchanged.
     #[test]
     fn network_builder_happy_path_returns_config() {
@@ -968,6 +1083,16 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(err, BuildError::IncompleteInterceptCaConfig));
+    }
+
+    #[test]
+    fn network_builder_rejects_non_96_nat64_prefix() {
+        let err = NetworkBuilder::new()
+            .nat64_prefix("64:ff9b::/64".parse().unwrap())
+            .build()
+            .unwrap_err();
+
+        assert!(matches!(err, BuildError::InvalidNat64Prefix { .. }));
     }
 
     #[test]

@@ -118,6 +118,9 @@ struct Connection {
     read_buf: Option<Bytes>,
     /// Counter for deferred close attempts (prevents stalling forever).
     close_attempts: u16,
+    /// Egress policy already denied this flow at SYN time; the connection
+    /// was accepted only so an HTTP/HTTPS client can be answered with 403.
+    policy_denied: bool,
 }
 
 /// Proxy-side channel ends, created at socket creation time and taken when
@@ -142,6 +145,9 @@ pub struct NewConnection {
     pub to_smoltcp: mpsc::Sender<Bytes>,
     /// Status the proxy task updates before it exits.
     pub proxy_connect: Arc<ProxyConnectState>,
+    /// Egress policy already denied this flow at SYN time. The dispatcher
+    /// must answer it (HTTP 403) and never dial upstream.
+    pub policy_denied: bool,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -234,6 +240,29 @@ impl TcpConnectionTracker {
         dst: SocketAddr,
         sockets: &mut SocketSet<'_>,
     ) -> bool {
+        self.insert_tcp_socket(src, dst, sockets, false)
+    }
+
+    /// Like [`Self::create_tcp_socket`], for a flow egress policy has
+    /// already denied. The handshake completes so the guest's HTTP/HTTPS
+    /// client can be answered with `403 Forbidden`; the dispatcher never
+    /// dials upstream for it.
+    pub fn create_policy_denied_tcp_socket(
+        &mut self,
+        src: SocketAddr,
+        dst: SocketAddr,
+        sockets: &mut SocketSet<'_>,
+    ) -> bool {
+        self.insert_tcp_socket(src, dst, sockets, true)
+    }
+
+    fn insert_tcp_socket(
+        &mut self,
+        src: SocketAddr,
+        dst: SocketAddr,
+        sockets: &mut SocketSet<'_>,
+        policy_denied: bool,
+    ) -> bool {
         if self
             .max_tcp_connections
             .is_some_and(|max| self.connections.len() >= max.get())
@@ -293,6 +322,7 @@ impl TcpConnectionTracker {
                 write_buf: None,
                 read_buf: None,
                 close_attempts: 0,
+                policy_denied,
             },
         );
 
@@ -428,6 +458,7 @@ impl TcpConnectionTracker {
                         from_smoltcp: channels.from_smoltcp,
                         to_smoltcp: channels.to_smoltcp,
                         proxy_connect: conn.proxy_connect.clone(),
+                        policy_denied: conn.policy_denied,
                     });
                 }
             }

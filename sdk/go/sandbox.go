@@ -28,7 +28,7 @@ type Sandbox struct {
 type GuestFlush string
 
 const (
-	// GuestFlushAuto flushes live disk-only captures, but not full captures or branches.
+	// GuestFlushAuto flushes live disk-only captures, but not full captures or forks.
 	GuestFlushAuto GuestFlush = "auto"
 	// GuestFlushRequired requires successful writeback of captured persistent filesystems.
 	GuestFlushRequired GuestFlush = "required"
@@ -36,30 +36,55 @@ const (
 	GuestFlushSkip GuestFlush = "skip"
 )
 
-// BranchOptions controls optional integrity and guest writeback for a local branch.
-type BranchOptions struct {
+// ForkOptions controls optional integrity and guest writeback for a local fork.
+type ForkOptions struct {
 	RecordIntegrity bool
 	GuestFlush      GuestFlush
 }
 
-// BranchOutcome contains either a running child or its startup error.
-type BranchOutcome struct {
+// ForkOutcome contains either a running child or its startup error.
+type ForkOutcome struct {
 	Name    string
 	Sandbox *Sandbox
 	Error   error
 }
 
-// BranchOption configures a local branch.
-type BranchOption func(*BranchOptions)
+// ForkOption configures a local fork.
+type ForkOption func(*ForkOptions)
 
-// WithBranchIntegrity records disk content hashes; RAM backing remains unhashed.
-func WithBranchIntegrity() BranchOption {
-	return func(options *BranchOptions) { options.RecordIntegrity = true }
+// BranchOptions configures a live fork.
+//
+// Deprecated: use ForkOptions.
+type BranchOptions = ForkOptions
+
+// BranchOption configures a live fork.
+//
+// Deprecated: use ForkOption.
+type BranchOption = ForkOption
+
+// BranchOutcome is a live fork result.
+//
+// Deprecated: use ForkOutcome.
+type BranchOutcome = ForkOutcome
+
+// WithBranchIntegrity enables disk integrity recording.
+//
+// Deprecated: use WithForkIntegrity.
+func WithBranchIntegrity() ForkOption { return WithForkIntegrity() }
+
+// WithBranchGuestFlush selects guest writeback for live forking.
+//
+// Deprecated: use WithForkGuestFlush.
+func WithBranchGuestFlush(policy GuestFlush) ForkOption { return WithForkGuestFlush(policy) }
+
+// WithForkIntegrity records disk content hashes; RAM backing remains unhashed.
+func WithForkIntegrity() ForkOption {
+	return func(options *ForkOptions) { options.RecordIntegrity = true }
 }
 
-// WithBranchGuestFlush selects guest writeback before capturing a branch generation.
-func WithBranchGuestFlush(policy GuestFlush) BranchOption {
-	return func(options *BranchOptions) { options.GuestFlush = policy }
+// WithForkGuestFlush selects guest writeback before capturing a live fork.
+func WithForkGuestFlush(policy GuestFlush) ForkOption {
+	return func(options *ForkOptions) { options.GuestFlush = policy }
 }
 
 // BackendKind returns the backend retained by this sandbox.
@@ -386,14 +411,20 @@ func buildFFINetwork(n *NetworkConfig) *ffi.NetworkOptions {
 		DenyDomainSuffixes:    n.DenyDomainSuffixes,
 		Ports:                 n.Ports,
 		PortBindings:          buildFFIPortBindings(n.PortBindings),
+		TCPAcceptQueueSize:    n.TCPAcceptQueueSize,
 		IPv4Pool:              n.IPv4Pool,
 		IPv6Pool:              n.IPv6Pool,
+		NAT64Prefixes:         n.NAT64Prefixes,
 		MaxConnections:        n.MaxConnections,
 		MaxTCPConnections:     n.MaxTCPConnections,
 		MaxUDPConnections:     n.MaxUDPConnections,
 		RateLimiter:           buildFFINetworkRateLimiter(n.RateLimiter),
 		SecretViolationAction: string(n.SecretViolationAction),
 		TrustHostCAs:          n.TrustHostCAs,
+	}
+
+	if n.HTTP != nil {
+		out.HTTP = &ffi.HTTPConfig{DenyResponse: n.HTTP.DenyResponse, DenyMessage: n.HTTP.DenyMessage}
 	}
 
 	strict := !n.DisableStrict
@@ -983,9 +1014,9 @@ func (h *SandboxHandle) RequestStop(ctx context.Context) error {
 	return wrapFFI(ffi.SandboxHandleVoidLifecycle(ctx, h.name, h.id, "request_stop", ffi.SandboxHandleLifecycleOptions{}))
 }
 
-// BranchMany captures once and returns each named child's startup outcome in input order.
-func (h *SandboxHandle) BranchMany(ctx context.Context, names []string, opts ...BranchOption) ([]BranchOutcome, error) {
-	options := BranchOptions{}
+// ForkMany captures once and returns each named child's startup outcome in input order.
+func (h *SandboxHandle) ForkMany(ctx context.Context, names []string, opts ...ForkOption) ([]ForkOutcome, error) {
+	options := ForkOptions{}
 	for _, opt := range opts {
 		opt(&options)
 	}
@@ -993,9 +1024,23 @@ func (h *SandboxHandle) BranchMany(ctx context.Context, names []string, opts ...
 	return wrapBranchOutcomes(rows, err)
 }
 
-// Branch creates an independent local CoW child without publishing a durable full snapshot.
-func (h *SandboxHandle) Branch(ctx context.Context, name string, opts ...BranchOption) (*Sandbox, error) {
-	options := BranchOptions{}
+// Branch creates a live fork.
+//
+// Deprecated: use Fork.
+func (h *SandboxHandle) Branch(ctx context.Context, name string, opts ...ForkOption) (*Sandbox, error) {
+	return h.Fork(ctx, name, opts...)
+}
+
+// BranchMany creates live forks from one capture.
+//
+// Deprecated: use ForkMany.
+func (h *SandboxHandle) BranchMany(ctx context.Context, names []string, opts ...ForkOption) ([]ForkOutcome, error) {
+	return h.ForkMany(ctx, names, opts...)
+}
+
+// Fork creates an independent local CoW child without publishing a durable full snapshot.
+func (h *SandboxHandle) Fork(ctx context.Context, name string, opts ...ForkOption) (*Sandbox, error) {
+	options := ForkOptions{}
 	for _, opt := range opts {
 		opt(&options)
 	}
@@ -1164,9 +1209,23 @@ func (s *Sandbox) PauseWithGuestFlush(ctx context.Context, policy GuestFlush) er
 	return wrapFFI(s.inner.PauseWithGuestFlush(ctx, string(policy)))
 }
 
-// Branch creates an independent local CoW child without publishing a durable full snapshot.
-func (s *Sandbox) Branch(ctx context.Context, name string, opts ...BranchOption) (*Sandbox, error) {
-	options := BranchOptions{}
+// Branch creates a live fork.
+//
+// Deprecated: use Fork.
+func (s *Sandbox) Branch(ctx context.Context, name string, opts ...ForkOption) (*Sandbox, error) {
+	return s.Fork(ctx, name, opts...)
+}
+
+// BranchMany creates live forks from one capture.
+//
+// Deprecated: use ForkMany.
+func (s *Sandbox) BranchMany(ctx context.Context, names []string, opts ...ForkOption) ([]ForkOutcome, error) {
+	return s.ForkMany(ctx, names, opts...)
+}
+
+// Fork creates an independent local CoW child without publishing a durable full snapshot.
+func (s *Sandbox) Fork(ctx context.Context, name string, opts ...ForkOption) (*Sandbox, error) {
+	options := ForkOptions{}
 	for _, opt := range opts {
 		opt(&options)
 	}
@@ -1182,10 +1241,10 @@ func (s *Sandbox) Resume(ctx context.Context) error {
 	return wrapFFI(s.inner.Resume(ctx))
 }
 
-// BranchMany captures once and returns each child's outcome in input order.
+// ForkMany captures once and returns each child's outcome in input order.
 // Validation/capture errors fail the call; individual startup failures are returned in Error.
-func (s *Sandbox) BranchMany(ctx context.Context, names []string, opts ...BranchOption) ([]BranchOutcome, error) {
-	options := BranchOptions{}
+func (s *Sandbox) ForkMany(ctx context.Context, names []string, opts ...ForkOption) ([]ForkOutcome, error) {
+	options := ForkOptions{}
 	for _, opt := range opts {
 		opt(&options)
 	}
@@ -1193,13 +1252,13 @@ func (s *Sandbox) BranchMany(ctx context.Context, names []string, opts ...Branch
 	return wrapBranchOutcomes(rows, err)
 }
 
-func wrapBranchOutcomes(rows []ffi.BranchOutcome, err error) ([]BranchOutcome, error) {
+func wrapBranchOutcomes(rows []ffi.BranchOutcome, err error) ([]ForkOutcome, error) {
 	if err != nil {
 		return nil, wrapFFI(err)
 	}
-	results := make([]BranchOutcome, 0, len(rows))
+	results := make([]ForkOutcome, 0, len(rows))
 	for _, row := range rows {
-		item := BranchOutcome{Name: row.Name, Error: wrapFFI(row.Error)}
+		item := ForkOutcome{Name: row.Name, Error: wrapFFI(row.Error)}
 		if row.Sandbox != nil {
 			item.Sandbox = &Sandbox{inner: row.Sandbox}
 		}

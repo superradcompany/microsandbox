@@ -48,7 +48,7 @@ try:
     run("snapshot", "create", "grown", "--group", "checks", "--from-sandbox", "source", "--full")
     for child, forked in [("eager", False), ("forked", True)]:
         names.append(child)
-        run("create", "--name", child, "--from-snapshot", "checks:grown", *(["--forked"] if forked else []))
+        run("create", "--name", child, "--from-snapshot", "checks:grown", *(["--cow-mem"] if forked else []))
         run("exec", child, "--", "sh", "-ec", "sha256sum -c /work/hash; grep MemTotal /proc/meminfo; cat /sys/devices/system/cpu/online")
         run("modify", child, "--memory", "1G", "--cpus", "1", "--format", "json")
         run("exec", child, "--", "sh", "-ec", "sha256sum -c /work/hash; grep MemTotal /proc/meminfo; for i in 1 2 3 4 5; do test \"$(cat /sys/devices/system/cpu/online)\" = 0 && exit 0; sleep 1; done; cat /sys/devices/system/cpu/online; exit 1")

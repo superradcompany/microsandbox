@@ -8,6 +8,7 @@ use microsandbox_network::builder::NetworkBuilder as RustNetworkBuilder;
 use microsandbox_network::policy::NetworkPolicy as RustNetworkPolicy;
 
 use crate::dns_builder::JsDnsBuilder;
+use crate::http_builder::JsHttpBuilder;
 use crate::interface_overrides_builder::JsInterfaceOverridesBuilder;
 use crate::network_policy_builder::JsNetworkPolicyBuilder;
 use crate::rate_limiter_builder::{JsNetworkRateLimiterBuilder, RateLimiterValues};
@@ -255,6 +256,16 @@ impl JsNetworkBuilder {
         self
     }
 
+    /// Set the accept-queue depth for published TCP port listeners, 1..=2147483647. Defaults to
+    /// 1024; the host kernel clamps it to its own somaxconn.
+    #[napi(js_name = "tcpAcceptQueueSize")]
+    pub fn tcp_accept_queue_size(&mut self, size: f64) -> Result<&Self> {
+        let size = accept_queue_size(size).map_err(napi::Error::from_reason)?;
+        let prev = self.take_inner();
+        self.inner = Some(prev.tcp_accept_queue_size(size));
+        Ok(self)
+    }
+
     /// Require hostname-based policy allows to use inspectable application authority.
     #[napi]
     pub fn strict(&mut self, enabled: bool) -> &Self {
@@ -283,12 +294,43 @@ impl JsNetworkBuilder {
         Ok(self)
     }
 
+    /// Add a NAT64 /96 prefix for policy classification.
+    #[napi(js_name = "nat64Prefix")]
+    pub fn nat64_prefix(&mut self, prefix: String) -> Result<&Self> {
+        let parsed = ipnetwork::Ipv6Network::from_str(&prefix).map_err(|e| {
+            napi::Error::from_reason(format!("invalid NAT64 prefix `{prefix}`: {e}"))
+        })?;
+        let prev = self.take_inner();
+        self.inner = Some(prev.nat64_prefix(parsed));
+        Ok(self)
+    }
+
     /// Trust the host's root CAs inside the guest. Default: false.
     #[napi(js_name = "trustHostCAs")]
     pub fn trust_host_cas(&mut self, enabled: bool) -> &Self {
         let prev = self.take_inner();
         self.inner = Some(prev.trust_host_cas(enabled));
         self
+    }
+
+    /// Configure HTTP denial responses via a callback.
+    #[napi]
+    pub fn http(
+        &mut self,
+        env: &Env,
+        configure: Function<ClassInstance<JsHttpBuilder>, ClassInstance<JsHttpBuilder>>,
+    ) -> Result<&Self> {
+        let initial = JsHttpBuilder::new().into_instance(env)?;
+        let returned = configure.call(initial)?;
+        if let Some(enabled) = returned.response {
+            let prev = self.take_inner();
+            self.inner = Some(prev.http(|h| h.deny_response(enabled)));
+        }
+        if let Some(message) = returned.message.clone() {
+            let prev = self.take_inner();
+            self.inner = Some(prev.http(|h| h.deny_message(message)));
+        }
+        Ok(self)
     }
 
     /// Configure local egress and ingress rate limits. Applies on the next
@@ -342,9 +384,44 @@ impl JsNetworkBuilder {
     }
 }
 
+impl JsNetworkBuilder {
+    fn take_inner(&mut self) -> RustNetworkBuilder {
+        self.inner
+            .take()
+            .expect("NetworkBuilder used after consumption")
+    }
+
+    /// Internal: extract the underlying Rust builder. Used by
+    /// `SandboxBuilder.network()` to route through the core SDK closure.
+    #[allow(dead_code)]
+    pub(crate) fn take_inner_builder(&mut self) -> Result<RustNetworkBuilder> {
+        self.inner
+            .take()
+            .ok_or_else(|| napi::Error::from_reason("NetworkBuilder already consumed"))
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Functions
+//--------------------------------------------------------------------------------------------------
+
 fn parse_bind_addr(bind: &str) -> Result<IpAddr> {
     bind.parse::<IpAddr>()
         .map_err(|_| napi::Error::from_reason(format!("invalid bind address: {bind}")))
+}
+
+/// Accept only a whole JS number in `1..=i32::MAX`. N-API's `u32` conversion wraps and truncates,
+/// so `2 ** 32 + 1`, `-(2 ** 32) + 1` and `1.5` would otherwise all silently become 1.
+/// Kept free of N-API symbols so standalone Rust tests can call it.
+pub(crate) fn accept_queue_size(value: f64) -> std::result::Result<u32, String> {
+    if value.fract() == 0.0 && (1.0..=f64::from(i32::MAX)).contains(&value) {
+        Ok(value as u32)
+    } else {
+        Err(format!(
+            "tcpAcceptQueueSize must be an integer from 1 to {}, got {value}",
+            i32::MAX
+        ))
+    }
 }
 
 /// Apply the values a JS callback accumulated on a `RateLimiterBuilder`
@@ -366,21 +443,4 @@ fn apply_rate_limiter(
         r = r.ops_burst(burst);
     }
     r
-}
-
-impl JsNetworkBuilder {
-    fn take_inner(&mut self) -> RustNetworkBuilder {
-        self.inner
-            .take()
-            .expect("NetworkBuilder used after consumption")
-    }
-
-    /// Internal: extract the underlying Rust builder. Used by
-    /// `SandboxBuilder.network()` to route through the core SDK closure.
-    #[allow(dead_code)]
-    pub(crate) fn take_inner_builder(&mut self) -> Result<RustNetworkBuilder> {
-        self.inner
-            .take()
-            .ok_or_else(|| napi::Error::from_reason("NetworkBuilder already consumed"))
-    }
 }

@@ -13,8 +13,8 @@ use microsandbox::sandbox::{
 };
 #[cfg(feature = "net")]
 use microsandbox::sandbox::{
-    DnsConfigPatch, NetworkPolicy, NetworkProfile, NetworkSpecPatch, SecretsConfigPatch,
-    TlsConfigPatch,
+    DnsConfigPatch, HttpConfigPatch, NetworkPolicy, NetworkProfile, NetworkSpecPatch,
+    SecretsConfigPatch, TlsConfigPatch,
 };
 use microsandbox_image::RegistryAuth;
 use microsandbox_types_macros::ConfigPatch;
@@ -374,7 +374,7 @@ struct AppendPatchInput {
 #[serde(untagged)]
 enum NetworkInput {
     Preset(NetworkPreset),
-    Object(NetworkConfigInput),
+    Object(Box<NetworkConfigInput>),
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -401,6 +401,16 @@ struct NetworkConfigInput {
     #[serde(alias = "max_connections")]
     max_tcp_connections: Option<usize>,
     max_udp_connections: Option<usize>,
+    tcp_accept_queue_size: Option<u32>,
+    #[config_patch(nested)]
+    http: Option<HttpInput>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, ConfigPatch)]
+#[serde(default, deny_unknown_fields)]
+struct HttpInput {
+    deny_response: Option<bool>,
+    deny_message: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, ConfigPatch)]
@@ -467,7 +477,7 @@ impl SandboxConfigInput {
         if let Some(ports) = self.ports.take() {
             let network = self
                 .network
-                .get_or_insert_with(|| NetworkInput::Object(NetworkConfigInput::default()));
+                .get_or_insert_with(|| NetworkInput::Object(Box::default()));
             network.object_mut().ports = Some(match network.object_mut().ports.take() {
                 Some(mut nested) => {
                     nested.extend(ports);
@@ -486,16 +496,16 @@ impl NetworkInput {
                 policy: Some(policy),
                 ..NetworkConfigInput::default()
             },
-            Self::Object(input) => input,
+            Self::Object(input) => *input,
         }
     }
 
     fn object_mut(&mut self) -> &mut NetworkConfigInput {
         if let Self::Preset(policy) = self {
-            *self = Self::Object(NetworkConfigInput {
+            *self = Self::Object(Box::new(NetworkConfigInput {
                 policy: Some(*policy),
                 ..NetworkConfigInput::default()
-            });
+            }));
         }
         let Self::Object(input) = self else {
             unreachable!("preset was normalized to an object")
@@ -671,7 +681,7 @@ pub fn resolve(sources: &SandboxConfigSources) -> anyhow::Result<ResolvedSandbox
                 reject_scoped_wrapper(&source.path, "network", "--net-conf")?;
                 let network = load_typed::<NetworkConfigInput>(&source.path, "network config")?;
                 SandboxConfigInput {
-                    network: Some(NetworkInput::Object(network)),
+                    network: Some(NetworkInput::Object(Box::new(network))),
                     ..SandboxConfigInput::default()
                 }
             }
@@ -1738,6 +1748,21 @@ fn materialize_network_patch(
     if let Some(max) = input.max_udp_connections {
         patch = patch.max_udp_connections(max);
     }
+    if let Some(size) = input.tcp_accept_queue_size {
+        // Refuse here rather than at launch, where the runtime would reject the whole network.
+        microsandbox_network::config::TcpAcceptQueueSize::try_from(size)?;
+        patch = patch.tcp_accept_queue_size(size);
+    }
+    if let Some(http) = input.http {
+        let mut value = HttpConfigPatch::new();
+        if let Some(enabled) = http.deny_response {
+            value = value.deny_response(enabled);
+        }
+        if let Some(message) = http.deny_message {
+            value = value.deny_message(message);
+        }
+        patch = patch.http(value);
+    }
     Ok(patch)
 }
 
@@ -1832,6 +1857,27 @@ mod tests {
             }))
             .is_err()
         );
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn network_config_tcp_accept_queue_size_is_validated_before_launch() {
+        let input = |value: u32| -> NetworkInput {
+            serde_json::from_value(serde_json::json!({ "tcp_accept_queue_size": value })).unwrap()
+        };
+        let mut network = microsandbox_types::NetworkSpec::default();
+        materialize_network_patch(Some(&input(4096)), None, None)
+            .unwrap()
+            .apply_to(&mut network);
+        assert_eq!(network.tcp_accept_queue_size, Some(4096));
+
+        for invalid in [0, 2_147_483_648] {
+            let error = materialize_network_patch(Some(&input(invalid)), None, None).unwrap_err();
+            assert!(
+                error.to_string().contains("TCP accept queue size"),
+                "{invalid}: {error}"
+            );
+        }
     }
 
     fn write_config(dir: &Path, name: &str, contents: &str) -> PathBuf {
@@ -2595,6 +2641,9 @@ network:
   allow: ["api.openai.com"]
   strict: true
   max_tcp_connections: 64
+  http:
+    deny_response: true
+    deny_message: "Blocked: {host}"
 secrets:
   TOKEN:
     value: "literal-test-value"
@@ -2627,6 +2676,11 @@ secrets:
             "#!/bin/bash\npython app.py\n"
         );
         assert_eq!(config.spec.network.max_tcp_connections, Some(64));
+        assert!(config.spec.network.http.deny_response);
+        assert_eq!(
+            config.spec.network.http.deny_message.as_deref(),
+            Some("Blocked: {host}")
+        );
         assert!(config.spec.network.strict);
         assert_eq!(config.spec.network.ports.len(), 0);
         assert!(config.spec.network.tls.as_ref().unwrap().enabled);

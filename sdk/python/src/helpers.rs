@@ -208,6 +208,7 @@ pub(crate) fn restore_builder_from_args(
             "security",
             "max_duration",
             "idle_timeout",
+            "cow_memory",
             "forked",
             "disk_only",
             "snapshot_base",
@@ -216,6 +217,7 @@ pub(crate) fn restore_builder_from_args(
             "volumes",
             "captured_volumes",
             "ports",
+            "tcp_accept_queue_size",
             "vsock",
             "external_mount_policy",
             "dangerously_inherit_resources",
@@ -290,8 +292,22 @@ pub(crate) fn restore_builder_from_args(
     if let Some(seconds) = restore_duration(kwargs, "idle_timeout")? {
         builder = builder.idle_timeout(seconds);
     }
-    if extract_opt::<bool>(kwargs, "forked")?.unwrap_or(false) {
-        builder = builder.forked();
+    let legacy_cow = extract_opt::<bool>(kwargs, "forked")?;
+    if legacy_cow.is_some() {
+        PyModule::import(kwargs.py(), "warnings")?.call_method1(
+            "warn",
+            (
+                "forked is deprecated; use cow_memory instead",
+                kwargs
+                    .py()
+                    .get_type::<pyo3::exceptions::PyDeprecationWarning>(),
+                2,
+            ),
+        )?;
+    }
+    // Both spellings enable the same opt-in policy, like the CLI flags.
+    if extract_opt::<bool>(kwargs, "cow_memory")?.unwrap_or(false) || legacy_cow.unwrap_or(false) {
+        builder = builder.cow_memory();
     }
     if extract_opt::<bool>(kwargs, "disk_only")?.unwrap_or(false) {
         builder = builder.disk_only();
@@ -343,6 +359,9 @@ pub(crate) fn restore_builder_from_args(
     }
     if let Some(ports) = kwargs.get_item("ports")?.filter(|v| !v.is_none()) {
         builder = apply_ports(builder, &ports, PortBindingSource::PublicConfig)?;
+    }
+    if let Some(size) = extract_opt::<u32>(kwargs, "tcp_accept_queue_size")? {
+        builder = builder.tcp_accept_queue_size(size);
     }
     if let Some(vsock) = kwargs.get_item("vsock")?.filter(|v| !v.is_none()) {
         builder = apply_vsock_routes(builder, &vsock)?;
@@ -1551,6 +1570,9 @@ fn apply_network(
     if let Some(max) = extract_opt::<usize>(net, "max_udp_connections")? {
         builder = builder.network(|n| n.max_udp_connections(max));
     }
+    if let Some(size) = extract_opt::<u32>(net, "tcp_accept_queue_size")? {
+        builder = builder.network(|n| n.tcp_accept_queue_size(size));
+    }
 
     // Strict hostname policy.
     if let Some(strict) = extract_opt::<bool>(net, "strict")? {
@@ -1590,10 +1612,31 @@ fn apply_network(
         })?;
         builder = builder.network(|n| n.ipv6_pool(pool));
     }
+    for raw in extract_opt::<Vec<String>>(net, "nat64_prefixes")?.unwrap_or_default() {
+        let prefix: ipnetwork::Ipv6Network = raw.parse().map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(format!(
+                "invalid nat64_prefixes entry {raw:?}: {e}"
+            ))
+        })?;
+        builder = builder.network(|n| n.nat64_prefix(prefix));
+    }
 
     // Host-CA trust (ship host's extra CAs into the guest at boot).
     if let Some(trust) = extract_opt::<bool>(net, "trust_host_cas")? {
         builder = builder.network(move |n| n.trust_host_cas(trust));
+    }
+
+    // Body returned to HTTP/HTTPS clients when egress is denied.
+    if let Some(http) = net.get_item("http")?
+        && !http.is_none()
+    {
+        let http = http.downcast::<PyDict>()?;
+        if let Some(enabled) = extract_opt::<bool>(http, "deny_response")? {
+            builder = builder.network(move |n| n.http(|h| h.deny_response(enabled)));
+        }
+        if let Some(message) = extract_opt::<String>(http, "deny_message")? {
+            builder = builder.network(move |n| n.http(|h| h.deny_message(message)));
+        }
     }
 
     // Secret violation action (sandbox-level, not per-secret).

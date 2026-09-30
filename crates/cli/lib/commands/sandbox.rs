@@ -46,8 +46,9 @@ pub enum SandboxCommands {
     /// Suspend a resident sandbox without creating a snapshot.
     Pause(pause::PauseArgs),
 
-    /// Branch running execution into a new local CoW child without a durable full snapshot.
-    Branch(branch::BranchArgs),
+    /// Fork running execution into a new local CoW child without a durable full snapshot.
+    #[command(name = "fork", alias = "branch")]
+    Fork(branch::BranchArgs),
 
     /// Resume a user-paused resident sandbox.
     Resume(pause::ResumeArgs),
@@ -118,7 +119,7 @@ pub async fn run(command: SandboxCommands, log_level: Option<LogLevel>) -> anyho
         SandboxCommands::Start(args) => start::run(args).await,
         SandboxCommands::Stop(args) => stop::run(args).await,
         SandboxCommands::Pause(args) => pause::run(args, false).await,
-        SandboxCommands::Branch(args) => branch::run(args).await,
+        SandboxCommands::Fork(args) => branch::run(args).await,
         SandboxCommands::Resume(args) => {
             pause::run(
                 pause::PauseArgs {

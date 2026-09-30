@@ -29,6 +29,9 @@ pub const DEFAULT_SANDBOX_MEMORY_MIB: u32 = 512;
 /// Default metrics sampling interval in milliseconds.
 pub const DEFAULT_METRICS_SAMPLE_INTERVAL_MS: u64 = 1000;
 
+/// The well-known NAT64 prefix from RFC 6052.
+pub const WELL_KNOWN_NAT64_PREFIX: &str = "64:ff9b::/96";
+
 //--------------------------------------------------------------------------------------------------
 // Types: Root Filesystems
 //--------------------------------------------------------------------------------------------------
@@ -573,6 +576,22 @@ pub enum Patch {
 // Types: Networking
 //--------------------------------------------------------------------------------------------------
 
+/// HTTP responses returned when network policy denies a request.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ConfigPatch)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(default)]
+pub struct HttpConfig {
+    /// Return readable HTTP 403 responses for supported denied requests. Default: false.
+    pub deny_response: bool,
+
+    /// Denial response body. `{host}` names the blocked host.
+    /// Used only when `deny_response` is enabled. Omission uses the default;
+    /// an empty string produces an empty body.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deny_message: Option<String>,
+}
+
 /// Complete network specification for a sandbox.
 ///
 /// Common, backend-visible fields are typed directly. Rich local-engine subdocuments such as policy, DNS, TLS, secrets, and interface overrides are carried as JSON so the shared contract can preserve them without depending on the local networking engine crate.
@@ -623,13 +642,27 @@ pub struct NetworkSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_udp_connections: Option<usize>,
 
+    /// Accept-queue depth for published TCP port listeners, `1..=2147483647`. Omitted is 1024.
+    /// The host kernel clamps it to `net.core.somaxconn` (Linux) or `kern.ipc.somaxconn` (macOS).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tcp_accept_queue_size: Option<u32>,
+
     /// Local network rate limits. Missing means unlimited in both directions.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[config_patch(nested)]
     pub rate_limiter: Option<NetworkRateLimiterConfig>,
 
+    /// NAT64 `/96` prefixes for policy classification.
+    #[serde(default = "default_nat64_prefixes")]
+    #[cfg_attr(feature = "ts", ts(type = "Array<string>"))]
+    pub nat64_prefixes: Vec<Ipv6Network>,
+
     /// Whether to copy trusted host CAs into the guest at boot.
     pub trust_host_cas: bool,
+
+    /// HTTP denial response settings.
+    #[config_patch(nested)]
+    pub http: HttpConfig,
 
     /// Proxy used for outbound sandbox connections and supported datagram flows.
     ///
@@ -1809,11 +1842,22 @@ impl Default for NetworkSpec {
             secrets: None,
             max_tcp_connections: None,
             max_udp_connections: None,
+            tcp_accept_queue_size: None,
             rate_limiter: None,
+            nat64_prefixes: default_nat64_prefixes(),
             trust_host_cas: false,
             outbound_proxy: None,
+            http: HttpConfig::default(),
         }
     }
+}
+
+pub(crate) fn default_nat64_prefixes() -> Vec<Ipv6Network> {
+    vec![
+        WELL_KNOWN_NAT64_PREFIX
+            .parse()
+            .expect("well-known NAT64 prefix must be valid"),
+    ]
 }
 
 impl Default for PublishedPortSpec {

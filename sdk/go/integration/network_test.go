@@ -156,7 +156,7 @@ func TestCustomPolicyAllowSpecificEgress(t *testing.T) {
 }
 
 // TestCustomPolicyPortRange verifies that a port-range rule serialises as
-// "8000-9000" and the runtime evaluates it correctly. We test by allowing
+// "443-443" and the runtime evaluates it correctly. We test by allowing
 // only a narrow range and confirming that an in-range port survives while
 // an out-of-range port is blocked.
 func TestCustomPolicyPortRange(t *testing.T) {
@@ -189,7 +189,7 @@ func TestCustomPolicyPortRange(t *testing.T) {
 		_ = sb.Close()
 	})
 
-	// 443 inside the range — should succeed; 80 outside — should be blocked.
+	// A denied port must still fail to connect unless HTTP responses are enabled.
 	out, err := sb.Shell(ctx,
 		"nc -zv -w 5 1.1.1.1 443 2>&1 || echo p443-failed; "+
 			"nc -zv -w 5 1.1.1.1 80 2>&1 || echo p80-failed",
@@ -199,11 +199,12 @@ func TestCustomPolicyPortRange(t *testing.T) {
 	}
 	combined := out.Stdout() + out.Stderr()
 	if strings.Contains(combined, "p443-failed") {
-		t.Errorf("expected 443 in range to be allowed; got %q", combined)
+		t.Errorf("expected port 443 to be allowed; got %q", combined)
 	}
 	if !strings.Contains(combined, "p80-failed") {
-		t.Errorf("expected 80 out of range to be blocked; got %q", combined)
+		t.Errorf("expected port 80 to be blocked; got %q", combined)
 	}
+
 }
 
 // TestCustomPolicyMultiProtocol exercises the Vec<Protocol> wire shape via

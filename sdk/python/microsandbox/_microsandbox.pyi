@@ -49,13 +49,16 @@ from microsandbox.types import (
     VsockRoute,
 )
 
-class BranchOutcome:
+class ForkOutcome:
     @property
     def name(self) -> str: ...
     @property
     def sandbox(self) -> Sandbox | None: ...
     @property
     def error(self) -> Exception | None: ...
+
+# Deprecated: use ForkOutcome.
+BranchOutcome = ForkOutcome
 
 class PyAgentClient:
     """Raw agent client.
@@ -112,7 +115,8 @@ class Sandbox:
         security: SecurityProfile | None = None,
         max_duration: float | None = None,
         idle_timeout: float | None = None,
-        forked: bool = False,
+        cow_memory: bool = False,
+        forked: bool = False,  # Deprecated: use cow_memory.
         disk_only: bool = False,
         snapshot_base: str | None = None,
         user: str | None = None,
@@ -120,6 +124,7 @@ class Sandbox:
         volumes: Mapping[str, MountConfig] | None = None,
         captured_volumes: Sequence[str] | None = None,
         ports: Mapping[int, int] | Sequence[PortBinding] | None = None,
+        tcp_accept_queue_size: int | None = None,
         vsock: Mapping[str, int] | Sequence[VsockRoute] | None = None,
         external_mount_policy: Literal["strict", "relaxed"] = "strict",
         dangerously_inherit_resources: bool = False,
@@ -140,7 +145,8 @@ class Sandbox:
         security: SecurityProfile | None = None,
         max_duration: float | None = None,
         idle_timeout: float | None = None,
-        forked: bool = False,
+        cow_memory: bool = False,
+        forked: bool = False,  # Deprecated: use cow_memory.
         disk_only: bool = False,
         snapshot_base: str | None = None,
         user: str | None = None,
@@ -148,6 +154,7 @@ class Sandbox:
         volumes: Mapping[str, MountConfig] | None = None,
         captured_volumes: Sequence[str] | None = None,
         ports: Mapping[int, int] | Sequence[PortBinding] | None = None,
+        tcp_accept_queue_size: int | None = None,
         vsock: Mapping[str, int] | Sequence[VsockRoute] | None = None,
         external_mount_policy: Literal["strict", "relaxed"] = "strict",
         dangerously_inherit_resources: bool = False,
@@ -431,14 +438,24 @@ class Sandbox:
     async def restore_warnings(self) -> list[ExternalMountWarning]: ...
     async def stop(self, timeout: float | None = None) -> None: ...
     async def stop_with_timeout(self, timeout: float) -> None: ...
+    async def fork(
+        self, name: str, *, record_integrity: bool = False,
+        guest_flush: GuestFlush | None = None,
+    ) -> Sandbox: ...
+    # Deprecated: use fork.
     async def branch(
         self, name: str, *, record_integrity: bool = False,
         guest_flush: GuestFlush | None = None,
     ) -> Sandbox: ...
+    async def fork_many(
+        self, names: list[str], *, record_integrity: bool = False,
+        guest_flush: GuestFlush | None = None,
+    ) -> list[ForkOutcome]: ...
+    # Deprecated: use fork_many.
     async def branch_many(
         self, names: list[str], *, record_integrity: bool = False,
         guest_flush: GuestFlush | None = None,
-    ) -> list[BranchOutcome]: ...
+    ) -> list[ForkOutcome]: ...
     async def pause(self, *, guest_flush: GuestFlush | None = None) -> None: ...
     async def resume(self) -> None: ...
     async def request_stop(self) -> None: ...
@@ -556,14 +573,24 @@ class SandboxHandle:
     async def connect_or_start(self, *, detached: bool = False) -> Sandbox: ...
     async def stop(self, timeout: float | None = None) -> None: ...
     async def stop_with_timeout(self, timeout: float) -> None: ...
+    async def fork(
+        self, name: str, *, record_integrity: bool = False,
+        guest_flush: GuestFlush | None = None,
+    ) -> Sandbox: ...
+    # Deprecated: use fork.
     async def branch(
         self, name: str, *, record_integrity: bool = False,
         guest_flush: GuestFlush | None = None,
     ) -> Sandbox: ...
+    async def fork_many(
+        self, names: list[str], *, record_integrity: bool = False,
+        guest_flush: GuestFlush | None = None,
+    ) -> list[ForkOutcome]: ...
+    # Deprecated: use fork_many.
     async def branch_many(
         self, names: list[str], *, record_integrity: bool = False,
         guest_flush: GuestFlush | None = None,
-    ) -> list[BranchOutcome]: ...
+    ) -> list[ForkOutcome]: ...
     async def pause(self, *, guest_flush: GuestFlush | None = None) -> None: ...
     async def resume(self) -> None: ...
     async def request_stop(self) -> None: ...

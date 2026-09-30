@@ -1,6 +1,7 @@
 package microsandbox
 
 import (
+	"context"
 	"encoding/json"
 	"reflect"
 	"testing"
@@ -20,7 +21,7 @@ func TestBranchIntegrityOption(t *testing.T) {
 	if options.RecordIntegrity {
 		t.Fatal("branch integrity must be opt-in")
 	}
-	WithBranchIntegrity()(&options)
+	WithForkIntegrity()(&options)
 	if !options.RecordIntegrity {
 		t.Fatal("explicit branch integrity option was lost")
 	}
@@ -28,7 +29,7 @@ func TestBranchIntegrityOption(t *testing.T) {
 
 func TestDedicatedRestoreOptions(t *testing.T) {
 	var config RestoreConfig
-	WithForked()(&config)
+	WithCowMemory()(&config)
 	WithExternalMountPolicy(ExternalMountRelaxed)(&config)
 	WithAllowMissingResources()(&config)
 	wire := buildFFIRestoreOptions("saved", config)
@@ -40,6 +41,32 @@ func TestDedicatedRestoreOptions(t *testing.T) {
 		if _, ok := typ.FieldByName(name); ok {
 			t.Fatalf("creation still exposes %s", name)
 		}
+	}
+}
+
+func TestRestoreCowMemoryAliases(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		config RestoreConfig
+		option RestoreOption
+		want   bool
+	}{
+		{"default", RestoreConfig{}, nil, false},
+		{"canonical option", RestoreConfig{}, WithCowMemory(), true},
+		{"legacy option", RestoreConfig{}, WithForked(), true},
+		{"canonical field", RestoreConfig{CowMemory: true}, nil, true},
+		{"legacy field", RestoreConfig{Forked: true}, nil, true},
+		{"both fields", RestoreConfig{CowMemory: true, Forked: true}, nil, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			config := tc.config
+			if tc.option != nil {
+				tc.option(&config)
+			}
+			if got := buildFFIRestoreOptions("saved", config).Forked; got != tc.want {
+				t.Fatalf("wire CoW memory = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -1081,5 +1108,23 @@ func TestSandboxConfigCompose(t *testing.T) {
 	}
 	if o.Env["DEBUG"] != "true" {
 		t.Errorf("Env[DEBUG]: got %q", o.Env["DEBUG"])
+	}
+}
+
+func TestForkOptionsKeepBranchAliases(t *testing.T) {
+	var canonical ForkOptions
+	var legacy BranchOptions
+	WithForkIntegrity()(&canonical)
+	WithForkGuestFlush(GuestFlushRequired)(&canonical)
+	WithBranchIntegrity()(&legacy)
+	WithBranchGuestFlush(GuestFlushRequired)(&legacy)
+	if canonical != legacy {
+		t.Fatalf("legacy options differ: %#v versus %#v", canonical, legacy)
+	}
+	// Old variadic method types remain assignable after the type aliases change.
+	var _ func(*Sandbox, context.Context, string, ...BranchOption) (*Sandbox, error) = (*Sandbox).Fork
+	var _ func(*SandboxHandle, context.Context, []string, ...BranchOption) ([]BranchOutcome, error) = (*SandboxHandle).ForkMany
+	if _, ok := reflect.TypeOf(RestoreConfig{}).FieldByName("Forked"); !ok {
+		t.Fatal("restore lost the deprecated Forked field")
 	}
 }

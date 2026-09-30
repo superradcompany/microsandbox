@@ -117,16 +117,16 @@ try:
     installed = prefix+'-loaded:capture'
     missing = ('disk /data', 'filesystem /work', '--allow-missing-resources')
     record('archive-default-missing', lambda: restore('default', archive, required=missing, rejected=True))
-    record('archive-forked-missing', lambda: restore('forkmiss', archive, ['--forked'], missing, True))
+    record('archive-forked-missing', lambda: restore('forkmiss', archive, ['--cow-mem'], missing, True))
     record('relaxed-is-not-opt-out', lambda: restore('relaxed', archive, ['--external-mount-policy', 'relaxed'], missing, True))
     record('installed-default-missing', lambda: restore('installed', installed, required=missing, rejected=True))
     record('partial-directory-mapping', lambda: restore('partialdir', archive, ['-v', directory+':/work'], ['disk /data'], True))
     record('partial-captured-disk', lambda: restore('partialdisk', archive, ['-v', '/data'], ['filesystem /work'], True))
     record('allow-missing-eager', lambda: restore('allowed', archive, ['--allow-missing-resources'], ['warn:', 'EIO']))
-    record('allow-missing-forked-quiet', lambda: restore('allowfork', installed, ['--forked', '--quiet', '--allow-missing-resources'], ['warn:', 'EIO']))
+    record('allow-missing-forked-quiet', lambda: restore('allowfork', installed, ['--cow-mem', '--quiet', '--allow-missing-resources'], ['warn:', 'EIO']))
     mapping = ['-v', directory+':/work', '-v', '/data']
     record('complete-eager', lambda: restore('complete', archive, mapping))
-    record('complete-forked', lambda: restore('completefork', installed, mapping+['--forked']))
+    record('complete-forked', lambda: restore('completefork', installed, mapping+['--cow-mem']))
     record('complete-relaxed', lambda: restore('completerel', archive, mapping+['--external-mount-policy', 'relaxed']))
     record('source-local-inheritance', lambda: restore('inherit', archive, ['--dangerously-inherit-resources']))
     absent = prefix+'-absent'

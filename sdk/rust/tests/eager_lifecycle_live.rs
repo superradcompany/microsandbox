@@ -128,7 +128,7 @@ async fn eager_preparation_boundary_live() {
         armed: true,
     };
     let started = Instant::now();
-    // Deliberately no .forked(): the stall must occur inside eager VMM reconstruction.
+    // Deliberately no .cow_memory(): the stall must occur inside eager VMM reconstruction.
     let (mut progress, mut task) = Sandbox::restore(&snapshot)
         .name(&name)
         .restore_with_progress()
@@ -254,7 +254,11 @@ async fn portable_eager_forked_progress_and_stop_completion() {
         };
         let started = Instant::now();
         let builder = Sandbox::restore(&snapshot).name(&name);
-        let builder = if forked { builder.forked() } else { builder };
+        let builder = if forked {
+            builder.cow_memory()
+        } else {
+            builder
+        };
         let (mut progress, task) = builder.restore_with_progress().unwrap();
         let mut activating = false;
         while let Some(event) = progress.recv().await {

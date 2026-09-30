@@ -493,9 +493,16 @@ const (
 type THPPolicy string
 
 // WithForked restores a full snapshot with private copy-on-write memory.
-// It cannot be combined with a fresh boot or disk-only restore.
+//
+// Deprecated: use WithCowMemory instead.
 func WithForked() RestoreOption {
 	return func(o *RestoreConfig) { o.Forked = true }
+}
+
+// WithCowMemory restores a full snapshot with private copy-on-write memory.
+// It cannot be combined with a fresh boot or disk-only restore.
+func WithCowMemory() RestoreOption {
+	return func(o *RestoreConfig) { o.CowMemory = true }
 }
 
 // WithExternalMountPolicy selects strict (default) or relaxed validation of mapped filesystems.
@@ -1173,6 +1180,10 @@ type NetworkConfig struct {
 	// PortBindings makes sandbox services reachable on explicit host bind addresses.
 	PortBindings []PortBinding
 
+	// TCPAcceptQueueSize sets the accept-queue depth for published TCP port listeners,
+	// 1 to 2147483647. Nil keeps the default, 1024; the host kernel clamps it to its somaxconn.
+	TCPAcceptQueueSize *uint32
+
 	// IPv4Pool is used to derive per-sandbox /30 guest subnets.
 	// Defaults to "172.16.0.0/12".
 	IPv4Pool string
@@ -1180,6 +1191,10 @@ type NetworkConfig struct {
 	// IPv6Pool is used to derive per-sandbox /64 guest prefixes.
 	// Defaults to "fd42:6d73:62::/48".
 	IPv6Pool string
+
+	// NAT64Prefixes are NAT64 /96 prefixes used for policy classification.
+	// Defaults to "64:ff9b::/96".
+	NAT64Prefixes []string
 
 	// MaxConnections caps TCP connections.
 	// Deprecated: use MaxTCPConnections instead; specifying both is an error.
@@ -1198,6 +1213,18 @@ type NetworkConfig struct {
 
 	// TrustHostCAs ships the host's extra CA bundles into the guest.
 	TrustHostCAs *bool
+
+	// HTTP configures HTTP denial responses.
+	HTTP *HTTPConfig
+}
+
+// HTTPConfig configures HTTP denial responses.
+type HTTPConfig struct {
+	// DenyResponse enables readable HTTP denial responses. Default: false.
+	DenyResponse bool
+	// DenyMessage replaces the body when DenyResponse is enabled.
+	// "{host}" names the blocked host. Empty uses the default message.
+	DenyMessage string
 }
 
 // DNSConfig configures the in-VM DNS proxy.

@@ -27,6 +27,9 @@ msb run python -- python -c "print('hello')"
 # Named: persists after exit
 msb run --name devbox ubuntu -- bash
 
+# Override the entrypoint executable and pass its arguments after `--`
+msb run --entrypoint /bin/sh alpine -- -c 'echo foo; exec sleep 30'
+
 # With volumes, ports, and environment
 msb run --name api \
   -v ./src:/app \
@@ -51,6 +54,11 @@ msb run --name public-api -p 0.0.0.0:8000:8000 python
 
 </Accordion>
 
+`--entrypoint` accepts one executable, not a shell command string. Put each
+argument after the image and `--`; microsandbox preserves those argument
+boundaries. Invoke a shell explicitly, as above, when the command uses shell
+syntax such as `;`, pipes, or redirects.
+
 Common flags:
 
 | Flag | Description |
@@ -69,17 +77,21 @@ Common flags:
 | `--mount-disk` | Mount a disk image: `SOURCE:DEST[:OPTIONS]` |
 | `--mount-named` | Create or reuse a named volume: `NAME:DEST[:OPTIONS]`. See [kind, size, and quota options](/cli/volume-commands#using-volumes-with-sandboxes) |
 | `-p`, `--port` | Publish a port, such as `8000:8000` for loopback-only or `0.0.0.0:8000:8000` for all host interfaces |
+| `--tcp-accept-queue-size` | Accept-queue depth for published TCP ports, `1` to `2147483647` (default: `1024`). See [Published ports](#published-ports) |
 | `--vsock` | Expose local host IPC at host CID 2 using `HOST_PATH:PORT[/stream\|/dgram]`; Unix sockets and local Windows named pipes are supported, the flag is repeatable, and stream is the default |
 | `-e`, `--env` | Set an environment variable |
 | `--label` | Attach a label for metric attribution (`KEY=VALUE`, or bare `KEY`). Repeatable |
 | `-w`, `--workdir` | Set the working directory |
+| `--entrypoint` | Override the image entrypoint executable. Pass its arguments after the image and `--` |
 | `-d`, `--detach` | Run the resolved image command in the background and print the sandbox name |
 | `--no-tty` | Disable PTY allocation and run non-interactively |
+| `--no-stdin` | Leave host input untouched and give the command EOF; disables automatic terminal mode and conflicts with `--tty` |
 | `--replace` | Replace an existing sandbox with the same name |
 | `--no-net` | Disable network access |
 | `--deployment-profile` | Select `single-tenant` or `multi-tenant` host-runtime isolation; managed backends may override it |
 | `--net` | Add a high-level network profile (`public`, `private`, `host`, `all`, or `none`) |
 | `--net-rule` | Add a network policy rule |
+| `--net-nat64-prefix` | Add a NAT64 `/96` prefix for network policy classification |
 | `--net-strict[=BOOL]` | Enabled by default; use `--net-strict=false` to opt out. Require hostname-based network allows to use inspectable request authority. Non-intercepted HTTPS fails closed when only a hostname rule allows it |
 | `--proxy` | Route eligible outbound traffic through a `socks4://IP:PORT` or `socks5://IP:PORT` proxy. Local-only. See [Proxies](#outbound-proxy) |
 | `--socks4-user-id` | Optional SOCKS4 user ID. Requires a `socks4://` proxy |
@@ -116,6 +128,14 @@ Flat roots support pre-boot patches and local snapshots. Patches change only the
 
 Ports bind to `127.0.0.1` by default. Use an explicit address to expose them beyond localhost. Windows may prompt for firewall access.
 
+Each published TCP port's host listener queues up to 1,024 connections that the runtime has not yet accepted. Connections that arrive while the queue is full never reach the sandbox, so a burst larger than the queue — for example a reverse proxy opening one upstream connection per request for a page that loads many assets at once — can fail at the proxy. Set `--tcp-accept-queue-size` to change the depth for every published TCP port of the sandbox:
+
+```bash
+msb create node --name web -p 127.0.0.1:3000:3000 --tcp-accept-queue-size 4096
+```
+
+The host kernel caps the queue at its own limit: `net.core.somaxconn` on Linux (4,096 by default) and `kern.ipc.somaxconn` on macOS (128 by default). A larger value is accepted but has no further effect until that limit is raised. The setting requires a runtime that supports it; the SDK refuses to launch an older runtime rather than silently ignoring it.
+
 ### VSock
 
 <Tooltip tip="VSock routes connect to IPC on the computer running the local backend and are unavailable on microsandbox cloud or multi-tenant deployments."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
@@ -138,6 +158,8 @@ msb run alpine --net host --net-rule "deny@host:tcp:22"
 ```
 
 Explicit `--net-rule` entries are evaluated before profile-generated rules, so they can narrow or deny part of a profile. `--net` conflicts with `--no-net` and the `--net-default*` flags because those select a different policy baseline.
+
+NAT64 destinations inside the well-known `64:ff9b::/96` prefix are classified by their embedded IPv4 address, so a public-only policy still blocks translated private, loopback, link-local, and metadata addresses. If your environment uses another routed NAT64 prefix, add it with repeatable `--net-nat64-prefix <ipv6-cidr>` entries. Only IPv6 `/96` prefixes are accepted.
 
 ### Outbound proxy
 
@@ -233,7 +255,7 @@ msb create --replace-with-timeout 0 python --name worker    # SIGKILL immediatel
 Restore into a new sandbox. Disk snapshots boot fresh; full snapshots resume execution. Cloud supports disk restore. Use `msb exec` to run new commands. The existing `msb restore`, `msb sandbox restore`, and `msb sbx restore` forms accept the same flags.
 
 ```bash
-msb snap restore devbox:ready --name worker --forked
+msb snap restore devbox:ready --name worker --cow-mem
 msb exec worker -- echo hello
 msb snap restore ./saved.msb --name disk-copy --disk-only
 ```
@@ -241,12 +263,14 @@ msb snap restore ./saved.msb --name disk-copy --disk-only
 | Flag | Description |
 |------|-------------|
 | `-n`, `--name` | Required destination sandbox name |
-| `--forked` | Restore full snapshots using private CoW memory |
-| `--disk-only` | Restore only the disk from a full snapshot; conflicts with `--forked` |
+| `--cow-mem` | Restore full snapshots using private CoW memory; off by default |
+| `--forked` | Deprecated alias for `--cow-mem`; emits a warning |
+| `--disk-only` | Restore only the disk from a full snapshot; conflicts with `--cow-mem` and `--forked` |
 | `--snapshot-base` | Exact base snapshot or archive for a dependent export |
 | `--allow-missing-resources` | Resume with missing external filesystems or additional disks unavailable, with warnings; full restore otherwise requires their bindings |
 | `-v`, `--volume` | Bind `SOURCE:GUEST[:OPTIONS]`, or select a private captured disk with `GUEST` alone |
 | `-p`, `--port` | Publish `[BIND:]HOST:GUEST[/tcp\|udp]` |
+| `--tcp-accept-queue-size` | Accept-queue depth for the child's published TCP ports (default: `1024`) |
 | `--vsock` | Bind `HOST_PATH:PORT[/stream\|/dgram]` |
 | `--external-mount-policy` | Validate supplied mappings: `strict` (default) or `relaxed` |
 | `--dangerously-inherit-resources` | Inherit unspecified host bindings; may share host resources |
@@ -270,7 +294,7 @@ Full restore must keep captured CPU and memory settings and cannot apply a guest
 
 Network flags replace the destination policy. `--net-rule` requires `--net-default` or `--no-net`; omitting all policy flags keeps configured defaults. Restore requires a new name and does not accept a startup command.
 
-Restore and branch do not reuse host resources by default. Map directories with `-v /host/path:/guest/path`, select a private captured disk with `-v /guest/path`, and publish new listeners with `-p HOST:GUEST`. Full restore refuses missing external filesystems and additional disks unless `--allow-missing-resources` is explicit. Opting out leaves those devices unavailable: backend I/O returns errors, although data cached in guest RAM may remain readable. Disk errors can abort a guest filesystem journal or make it read-only. Warnings remain visible with `--quiet`. `--external-mount-policy relaxed` permits supported stale-object mismatches; it does not waive missing backing. `--dangerously-inherit-resources` authorizes validated source-local bindings, not missing ones. Direct branching retains its existing unavailable-resource behavior. Root and owned storage are always reconstructed; the opt-out cannot waive corrupt or missing snapshot data. Custom vsock routes are not inherited; use `--vsock HOST_PATH:PORT` to authorize a service for clients to reconnect to.
+Restore and fork do not reuse host resources by default. Map directories with `-v /host/path:/guest/path`, select a private captured disk with `-v /guest/path`, and publish new listeners with `-p HOST:GUEST`. Full restore refuses missing external filesystems and additional disks unless `--allow-missing-resources` is explicit. Opting out leaves those devices unavailable: backend I/O returns errors, although data cached in guest RAM may remain readable. Disk errors can abort a guest filesystem journal or make it read-only. Warnings remain visible with `--quiet`. `--external-mount-policy relaxed` permits supported stale-object mismatches; it does not waive missing backing. `--dangerously-inherit-resources` authorizes validated source-local bindings, not missing ones. Direct forking retains its existing unavailable-resource behavior. Root and owned storage are always reconstructed; the opt-out cannot waive corrupt or missing snapshot data. Custom vsock routes are not inherited; use `--vsock HOST_PATH:PORT` to authorize a service for clients to reconnect to.
 
 ```bash
 msb snap restore saved.msb --name worker -v /srv/project:/work -v /data
@@ -331,22 +355,26 @@ msb resume devbox
 `pause --guest-flush required` flushes captured persistent filesystems before pausing, so a later disk snapshot can reuse that boundary without resuming. The default `auto` and explicit `skip` omit optional writeback; mandatory storage barriers remain. An already-paused VM without the required flush fails rather than resuming implicitly. `resume` has no flush option. See [guest filesystem flush](/sandboxes/snapshots#guest-flushing).
 
 <span id="msb-sandbox-branch" />
+<span id="msb-branch" />
+<span id="msb-sandbox-fork" />
 
-## msb branch
+## msb fork
 
-<Tooltip tip="Branching is not yet available on cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+`msb branch` remains a deprecated alias. Use `fork` in new scripts.
+
+<Tooltip tip="Forking is not yet available on cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 Create a local child from running or paused execution without saving a snapshot. Memory is shared through copy-on-write; each child’s writes stay private.
 
 ```bash
-msb branch devbox -n experiment
+msb fork devbox -n experiment
 ```
 
 Use `--names` to capture once and start several independent children from the same state:
 
 ```bash
-msb branch devbox --names alice bob charlie
-msb branch devbox --names worker-{1..10} # Bash/Zsh expand the names
+msb fork devbox --names alice bob charlie
+msb fork devbox --names worker-{1..10} # Bash/Zsh expand the names
 ```
 
 | Flag | Description |
@@ -357,11 +385,11 @@ msb branch devbox --names worker-{1..10} # Bash/Zsh expand the names
 | `--integrity` | Record disk content hashes |
 | `-q`, `--quiet` | Suppress progress |
 
-Both branch forms accept `--guest-flush auto|required|skip`. Auto and skip preserve dirty memory without flushing root or owned block filesystems; required adds writeback. Host-backed directory synchronization and host disk barriers remain in effect.
+Both fork forms accept `--guest-flush auto|required|skip`. Auto and skip preserve dirty memory without flushing root or owned block filesystems; required adds writeback. Host-backed directory synchronization and host disk barriers remain in effect.
 
-Volume, port, user, vsock, inheritance, and mount-policy flags match [`restore`](#msb-restore).
+Volume, port, TCP accept queue size, user, vsock, inheritance, and mount-policy flags match [`restore`](#msb-restore).
 
-Batch branching captures once. Results follow input order; failed children produce a nonzero exit status without removing successful ones.
+Batch forking captures once. Results follow input order; failed children produce a nonzero exit status without removing successful ones.
 
 <span id="msb-sandbox-restart" />
 
@@ -543,6 +571,8 @@ msb exec devbox -- ls -la /app
 |------|-------------|
 | `-t`, `--tty` | Allocate a pseudo-terminal (enables colors, line editing) |
 | `--no-tty` | Disable PTY allocation and run non-interactively |
+| `--no-stdin` | Leave host input untouched and give the command EOF; disables automatic terminal mode and conflicts with `--tty` |
+| `--stream` | Forward stdin and flush output incrementally without a PTY; requires piped stdin or `--no-stdin` |
 | `-e`, `--env` | Set an environment variable (`KEY=VALUE`) |
 | `-w`, `--workdir` | Override working directory |
 | `-u`, `--user` | Run the command as the specified guest user |
@@ -551,8 +581,20 @@ msb exec devbox -- ls -la /app
 | `-q`, `--quiet` | Suppress progress output |
 
 <Tip>
-  The CLI auto-detects whether stdin is a terminal. When interactive, `msb exec` uses `attach` mode (TTY, line editing). When piped, it captures output. Use `--no-tty` to force captured, non-interactive execution even from a terminal.
+  The CLI auto-detects whether stdin is a terminal. When interactive, `msb exec` uses `attach` mode (TTY, line editing). When piped, it forwards input while the command runs and captures output until the command exits. Use `--no-tty` to force captured, non-interactive execution even from a terminal; terminal input is not forwarded in that mode.
 </Tip>
+
+Use `--stream` for an ongoing conversation with a guest process, such as an ACP agent. It returns output as it arrives instead of waiting for command completion. Piped commands can exit or time out while the host input pipe is still open. Commands that read until EOF, such as `cat`, still need their input closed to finish normally.
+
+Use `--no-stdin` to leave input available to the calling script and give the guest immediate EOF:
+
+```bash
+while IFS= read -r sandbox; do
+  msb exec --no-stdin "$sandbox" -- echo ready
+done < sandboxes.txt
+```
+
+Combine `--no-stdin` with `--stream` when you want live output without forwarding input. Omit `--no-stdin` for ACP agents, which need input from the IDE.
 
 <span id="msb-sandbox-copy" />
 

@@ -7,6 +7,32 @@ keywords: ["Rust SDK", "Rust sandbox", "microsandbox sandbox"]
 
 See [Overview](/sandboxes/overview) for configuration examples and [Lifecycle](/sandboxes/lifecycle) for state management.
 
+## Forking
+
+Forking duplicates a running or paused local sandbox without saving a reusable snapshot. It shares memory through copy-on-write, keeps child writes private, and returns the source to its previous state. These methods are available on both `Sandbox` and `SandboxHandle`. Each child requires an unused name. See [forking](/sandboxes/snapshots#forking) for examples, resource bindings, and backend limits.
+
+### fork() and fork_many()
+
+```rust
+let child = source.fork("experiment").fork().await?;
+let outcomes = source.fork_many(["alice", "bob"]).fork().await?;
+```
+
+`fork(name)` returns a `ForkBuilder`; `fork_many(names)` returns a `ForkManyBuilder`. Call `.fork().await` to start the operation. Both builders accept `.record_integrity()`, `.guest_flush(GuestFlush::Required)`, and explicit resource bindings. Import `GuestFlush` from `microsandbox::snapshot`; `Auto` is the default, and `Skip` skips optional guest writeback. The single-child builder also exposes `.fork_with_progress()` with the `local` feature.
+
+### ForkOutcome
+
+| Field | Meaning |
+| --- | --- |
+| `name` | Requested child name as a `String` |
+| `result` | `MicrosandboxResult<Sandbox>` for that child |
+
+The outer result of `ForkManyBuilder::fork()` reports batch validation or capture failure. Match each outcome's `result` to handle individual child failures.
+
+`branch()`, `branch_many()`, the builder `.branch()` terminal, `.branch_with_progress()`, and the `BranchBuilder`, `BranchManyBuilder`, and `BranchOutcome` types remain deprecated aliases.
+
+Batch results follow input order. Validation or capture failures fail the whole call; an individual startup failure appears in that child's outcome, and successful siblings remain available. Stop successful children explicitly when finished.
+
 ## Sandbox
 
 #### <span className="msb-recv">Sandbox::</span><span className="msb-hn">builder()</span>

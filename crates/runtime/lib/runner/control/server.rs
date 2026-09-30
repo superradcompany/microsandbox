@@ -15,7 +15,8 @@ use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
 use super::dispatch::{
-    Budget, CONNECTION_BYTES, Dispatcher, Input, Job, Lease, Outgoing, framed_reply, invalid,
+    Budget, CONNECTION_BYTES, Dispatcher, Input, Job, Lease, Outgoing, REPLY_BYTES, framed_reply,
+    invalid, reply_bytes,
 };
 use super::handler::{ControlContext, Reply};
 
@@ -266,9 +267,9 @@ async fn serve_opened<S: AsyncRead + AsyncWrite + Unpin>(
     let selected = match negotiated {
         Ok(value) => value,
         Err(error) => {
-            let _reserved = Budget::reserve_reply(&bytes, &dispatcher.bytes)?;
+            let _reserved = Budget::reserve_reply(&bytes, &dispatcher.bytes, REPLY_BYTES)?;
             writer
-                .write_all(&framed_reply(&Reply::Error(error), 1, 0)?)
+                .write_all(&framed_reply(&Reply::Error(error), 1, 0, REPLY_BYTES)?)
                 .await?;
             writer.flush().await?;
             return Ok(());
@@ -279,7 +280,7 @@ async fn serve_opened<S: AsyncRead + AsyncWrite + Unpin>(
         .frame(0, 1)
         .map_err(|_| invalid())?;
     {
-        let _reserved = Budget::reserve_reply(&bytes, &dispatcher.bytes)?;
+        let _reserved = Budget::reserve_reply(&bytes, &dispatcher.bytes, REPLY_BYTES)?;
         microsandbox_protocol::codec::write_raw_frame(&mut writer, &welcome)
             .await
             .map_err(|_| invalid())?;
@@ -395,11 +396,13 @@ async fn framed_requests<R: AsyncRead + Unpin>(
         .await
         .map_err(|_| expired())??;
         let lease = Lease::acquire(frame.id, &ids, &capacity)?;
-        let output_budget = Budget::reserve_reply(&bytes, &dispatcher.bytes)?;
+        let reply_limit = reply_bytes(&frame, selected.generation)?;
+        let output_budget = Budget::reserve_reply(&bytes, &dispatcher.bytes, reply_limit)?;
         let job = Job {
             input: Input::Framed {
                 frame,
                 generation: selected.generation,
+                reply_limit,
                 _budget: budget,
             },
             reply: reply.clone(),
@@ -415,6 +418,7 @@ async fn framed_requests<R: AsyncRead + Unpin>(
                 &Reply::Error(ControlError::rejected("busy", "control runtime is busy")),
                 selected.generation,
                 frame.id,
+                reply_limit,
             )?;
             reply
                 .try_send(Outgoing {
@@ -478,7 +482,7 @@ mod descriptor_tests {
     struct MemoryHandler(Arc<AtomicBool>);
 
     impl Handler for MemoryHandler {
-        fn handle(&self, _: ControlRequest) -> Response {
+        fn handle(&self, _: ControlOperation, _: u8) -> Response {
             panic!("expected JSON memory handoff")
         }
 

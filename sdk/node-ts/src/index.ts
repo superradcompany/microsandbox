@@ -1,3 +1,4 @@
+import { deprecate } from "node:util";
 import { mapNapiError } from "./internal/error-mapping.js";
 import { napi } from "./internal/napi.js";
 
@@ -46,6 +47,7 @@ export type {
   SandboxPingResult,
   SandboxTouchResult,
   ExternalMountWarning,
+  ForkOutcome,
   BranchOutcome,
 } from "./sandbox.js";
 export type {
@@ -380,6 +382,10 @@ hideMethod(napi.SandboxBuilder, "attachWithBuilder");
   }
   // Restore shares policy conversion, but never exposes the broad NetworkBuilder callback.
   const restoreProto = napi.RestoreBuilder.prototype;
+  // Keep old fluent calls working, with Node's standard once-per-process warning.
+  restoreProto.forked = deprecate(function (this: import("./internal/napi.js").NapiRestoreBuilder) {
+    return this.cowMemory();
+  }, "RestoreBuilder.forked() is deprecated; use cowMemory() instead", "MSB_RESTORE_FORKED");
   if (!restoreProto.networkPolicy) {
     restoreProto.networkPolicy = function (p: unknown) {
       if (p instanceof napi.NetworkPolicyBuilder) {
@@ -393,6 +399,7 @@ hideMethod(napi.SandboxBuilder, "attachWithBuilder");
 }
 
 export const DnsBuilder = napi.DnsBuilder;
+export const HttpBuilder = napi.HttpBuilder;
 export const TlsBuilder = napi.TlsBuilder;
 export const SecretBuilder = napi.SecretBuilder;
 export const NetworkBuilder = napi.NetworkBuilder;

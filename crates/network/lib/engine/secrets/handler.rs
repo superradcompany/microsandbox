@@ -17,8 +17,7 @@ use super::config::SecretsConfigExt;
 use crate::netstack::shared::SharedState;
 use crate::policy::{EgressEvaluation, HostnameSource, NetworkPolicy, Protocol};
 use crate::secrets::config::{
-    HostPattern, MAX_SECRET_PLACEHOLDER_BYTES, SecretEntry, SecretSubstitution,
-    SecretViolationAction, SecretsConfig,
+    HostPattern, MAX_SECRET_PLACEHOLDER_BYTES, SecretEntry, SecretViolationAction, SecretsConfig,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -263,11 +262,10 @@ struct EligibleSecret {
     require_tls_identity: bool,
 }
 
-/// A secret that did not pass substitution or passthrough host matching.
+/// A secret whose placeholder is not permitted on this connection.
 struct IneligibleSecret {
     env_var: String,
     placeholder: String,
-    substitution: SecretSubstitution,
     action: BlockingAction,
 }
 
@@ -420,25 +418,6 @@ impl EligibleSecret {
             "{name}: Basic {}",
             BASE64.encode(replaced.as_bytes())
         ))
-    }
-}
-
-impl IneligibleSecret {
-    /// Returns whether a match in this request location is substituted and
-    /// therefore must not be treated as an unchanged-placeholder violation.
-    fn substitution_allows(&self, location: RequestLocation) -> bool {
-        match location {
-            RequestLocation::Header | RequestLocation::BasicAuth => self.substitution.headers,
-            RequestLocation::Query => self.substitution.query,
-            RequestLocation::Body => self.substitution.body,
-            // Chunk framing metadata and trailers are not substitution targets.
-            // They therefore remain protected even when another substitution
-            // scope is enabled; only explicit placeholder passthrough may allow
-            // an unchanged placeholder there.
-            RequestLocation::ChunkMetadata
-            | RequestLocation::Trailer
-            | RequestLocation::Unknown => false,
-        }
     }
 }
 
@@ -664,9 +643,8 @@ impl SecretsHandler {
             let host_allowed =
                 !force_ineligible && secret_host_allowed(secret, sni, identity.as_ref());
 
-            // Substitution and placeholder passthrough are independent policies. An
-            // allowed host can substitute enabled locations while disabled locations
-            // remain protected by the violation detector below.
+            // A verified destination trusted with the credential may also receive
+            // its placeholder unchanged outside enabled substitution locations.
             if host_allowed {
                 if secret.substitution.body {
                     max_body_placeholder_len = max_body_placeholder_len
@@ -680,6 +658,9 @@ impl SecretsHandler {
                     substitute_body: secret.substitution.body,
                     require_tls_identity: secret.require_tls_identity,
                 });
+                if !secret.require_tls_identity || tls_intercepted {
+                    continue;
+                }
             }
 
             if secret
@@ -702,16 +683,6 @@ impl SecretsHandler {
                 continue;
             }
 
-            let substitution = if host_allowed && (!secret.require_tls_identity || tls_intercepted)
-            {
-                secret.substitution.clone()
-            } else {
-                SecretSubstitution {
-                    headers: false,
-                    query: false,
-                    body: false,
-                }
-            };
             let action = secret
                 .violation_action
                 .as_ref()
@@ -719,26 +690,18 @@ impl SecretsHandler {
             ineligible_for_substitution.push(IneligibleSecret {
                 env_var: secret.env_var.clone(),
                 placeholder: secret.placeholder.clone(),
-                substitution,
                 action: BlockingAction::from_violation_action(action).unwrap_or_default(),
             });
         }
 
-        // A placeholder can be declared more than once (for example, with
-        // different host patterns). If any declaration is eligible for this
-        // connection, its enabled locations are safe to substitute and must
-        // not be rejected by an otherwise-ineligible duplicate declaration.
-        for ineligible in &mut ineligible_for_substitution {
-            for eligible in &eligible_for_substitution {
-                if ineligible.placeholder == eligible.placeholder
+        // Duplicate declarations must not revoke the placeholder permission
+        // granted by a declaration eligible on this verified connection.
+        ineligible_for_substitution.retain(|ineligible| {
+            !eligible_for_substitution.iter().any(|eligible| {
+                ineligible.placeholder == eligible.placeholder
                     && (!eligible.require_tls_identity || tls_intercepted)
-                {
-                    ineligible.substitution.headers |= eligible.substitute_headers;
-                    ineligible.substitution.query |= eligible.substitute_query;
-                    ineligible.substitution.body |= eligible.substitute_body;
-                }
-            }
-        }
+            })
+        });
 
         Self {
             eligible_for_substitution,
@@ -886,7 +849,7 @@ impl SecretsHandler {
     fn scan_opaque<'a>(&mut self, data: &'a [u8]) -> Result<Cow<'a, [u8]>, SecretViolationAction> {
         // Fail closed when invalid bytes still resemble an HTTP request that
         // requires authority validation. Conclusively opaque streams rely on
-        // the proxy's connection-level policy and still block placeholders.
+        // the proxy's connection-level placeholder policy.
         if !self.opaque && self.http_authority.is_some() && opaque_prefix_might_be_http(data) {
             return Err(SecretViolationAction::Block);
         }
@@ -1711,7 +1674,7 @@ impl SecretsHandler {
                 match_form = %report.match_form,
                 guest_dst = %guest_dst,
                 http2_stream_id = %http2_stream_id,
-                "secret violation: placeholder detected for disallowed host"
+                "secret violation: placeholder detected where substitution or passthrough is not permitted"
             ),
             BlockingAction::BlockAndTerminate => tracing::error!(
                 action = %report.action,
@@ -1726,7 +1689,7 @@ impl SecretsHandler {
                 match_form = %report.match_form,
                 guest_dst = %guest_dst,
                 http2_stream_id = %http2_stream_id,
-                "secret violation: placeholder detected for disallowed host - terminating"
+                "secret violation: placeholder detected where substitution or passthrough is not permitted - terminating"
             ),
         }
     }
@@ -2593,7 +2556,7 @@ pub(crate) fn first_line_is_not_http_request(data: &[u8]) -> bool {
     http_request_version(line.as_ref()).is_none()
 }
 
-fn skip_leading_empty_http_lines(mut data: &[u8]) -> &[u8] {
+pub(crate) fn skip_leading_empty_http_lines(mut data: &[u8]) -> &[u8] {
     while data.starts_with(b"\r\n") {
         data = &data[2..];
     }
@@ -3178,8 +3141,8 @@ fn detect_http2_header_blocking_action(
     )
 }
 
-/// Check every forbidden location independently. An allowed match must never
-/// mask an encoded placeholder in a different, forbidden location.
+/// Check each location for placeholders not permitted on this connection.
+/// A permitted secret must not mask another secret's encoded placeholder.
 fn detect_blocking_action_in_fragments(
     secrets: &[IneligibleSecret],
     fragments: &[(&[u8], RequestLocation)],
@@ -3187,18 +3150,13 @@ fn detect_blocking_action_in_fragments(
     summary: &RequestSummary,
     http2_stream_id: Option<u32>,
 ) -> Option<SecretViolationReport> {
+    if secrets.is_empty() {
+        return None;
+    }
     let opaque = matches!(protocol, RequestProtocol::Opaque);
     let mut detected = None;
 
     for &(data, location) in fragments {
-        if !opaque
-            && secrets
-                .iter()
-                .all(|secret| secret.substitution_allows(location))
-        {
-            continue;
-        }
-
         let url_decoded = data
             .contains(&b'%')
             .then(|| percent_decode(data).collect::<Vec<u8>>());
@@ -3214,10 +3172,6 @@ fn detect_blocking_action_in_fragments(
             };
 
         for secret in secrets {
-            if !opaque && secret.substitution_allows(location) {
-                continue;
-            }
-
             let needle = secret.placeholder.as_bytes();
             let matched = if basic_auth_credentials
                 .iter()
@@ -3454,6 +3408,7 @@ impl SecretViolationReport {
 mod tests {
     use super::*;
     use crate::netstack::shared::{ResolvedHostnameFamily, SharedState};
+    use crate::secrets::config::SecretSubstitution;
     use microsandbox_types::compat;
 
     use std::net::{IpAddr, Ipv4Addr};
@@ -3533,15 +3488,15 @@ mod tests {
             "require_tls_identity":false
         }]});
         compat::v0_5_0::local::secrets::to_current(wire.as_object_mut().unwrap()).unwrap();
-        let mut config: SecretsConfig = serde_json::from_value(wire).unwrap();
+        let config: SecretsConfig = serde_json::from_value(wire).unwrap();
         let request = b"POST / HTTP/1.1\r\nHost: api.example.com\r\nContent-Length: 4\r\n\r\n$KEY";
         let mut handler = SecretsHandler::new(&config, "api.example.com", true);
-        assert!(handler.substitute(request).is_err());
-        config.secrets[0]
-            .passthrough_hosts
-            .push(HostPattern::Exact("api.example.com".into()));
-        let mut handler = SecretsHandler::new(&config, "api.example.com", true);
         assert_eq!(handler.substitute(request).unwrap().as_ref(), request);
+        let mut denied = SecretsHandler::new(&config, "denied.example", true);
+        assert_eq!(
+            denied.substitute(request).unwrap_err(),
+            SecretViolationAction::Block
+        );
     }
 
     #[test]
@@ -3870,11 +3825,6 @@ mod tests {
         let secret = IneligibleSecret {
             env_var: "OPENAI_API_KEY".into(),
             placeholder: "$KEY".into(),
-            substitution: SecretSubstitution {
-                headers: false,
-                query: false,
-                body: false,
-            },
             action: BlockingAction::BlockAndLog,
         };
         let encoded = BASE64.encode(b"user:$KEY");
@@ -3911,11 +3861,6 @@ mod tests {
         let secret = IneligibleSecret {
             env_var: "SERVICE_TOKEN".into(),
             placeholder: "abc/key".into(),
-            substitution: SecretSubstitution {
-                headers: false,
-                query: false,
-                body: false,
-            },
             action: BlockingAction::BlockAndLog,
         };
         let headers =
@@ -4064,10 +4009,12 @@ mod tests {
             (0x80..=u8::MAX).map(|byte| [b"X-Note: ".as_slice(), &[byte], b"\r\n"].concat()),
         );
         for auth in ["Authorization: Bearer $KEY\r\n", basic.as_str()] {
-            for body in ["$KEY", "%24KEY", r"\u0024KEY"] {
+            for body in ["$BLOCKED", "%24BLOCKED", r"\u0024BLOCKED"] {
                 for note in &notes {
-                    let config =
-                        make_config(vec![make_secret("$KEY", "real-secret", "api.example.com")]);
+                    let config = make_config(vec![
+                        make_secret("$KEY", "real-secret", "api.example.com"),
+                        make_secret("$BLOCKED", "other-secret", "other.example"),
+                    ]);
                     let mut request =
                         format!("POST / HTTP/1.1\r\nHost: api.example.com\r\n{auth}").into_bytes();
                     request.extend_from_slice(note);
@@ -4106,9 +4053,19 @@ mod tests {
                         let mut secret = make_secret("$KEY", "real-secret", "api.example.com");
                         secret.substitution.headers = headers;
                         secret.substitution.query = query;
+                        secret.substitution.body = true;
                         let config = make_config(vec![secret]);
-                        let allowed = (!target.contains("KEY") || (target.contains('?') && query))
-                            && (header_value == "plain" || headers);
+                        let expected_target = match target.split_once('?') {
+                            Some((path, value)) if query => {
+                                format!("{path}?{}", value.replace("$KEY", "real-secret"))
+                            }
+                            _ => target.to_string(),
+                        };
+                        let expected_header = if headers {
+                            header_value.replace("$KEY", "real-secret")
+                        } else {
+                            header_value.to_string()
+                        };
                         for http2 in [false, true] {
                             let mut handler = SecretsHandler::new(&config, "api.example.com", true);
                             let request = if http2 {
@@ -4125,41 +4082,13 @@ mod tests {
                             } else {
                                 format!("GET {target} HTTP/1.1\r\nHost: api.example.com\r\nX-Key: {header_value}\r\n\r\n").into_bytes()
                             };
-                            let result = handler.substitute(&request);
-                            assert_eq!(
-                                result.is_ok(),
-                                allowed,
-                                "http2={http2}, target={target}, value={header_value}, headers={headers}, query={query}"
-                            );
-                            if allowed && http2 {
-                                let output = result.unwrap();
+                            let output = handler.substitute(&request).unwrap();
+                            if http2 {
                                 let fields = decode_first_h2_headers(&output);
-                                assert_eq!(
-                                    h2_header_value(&fields, b":path"),
-                                    if query {
-                                        target.replace("$KEY", "real-secret")
-                                    } else {
-                                        target.to_string()
-                                    }
-                                );
-                                assert_eq!(
-                                    h2_header_value(&fields, b"x-key"),
-                                    if headers {
-                                        header_value.replace("$KEY", "real-secret")
-                                    } else {
-                                        header_value.to_string()
-                                    }
-                                );
-                            } else if allowed {
-                                assert_eq!(
-                                    result.unwrap().as_ref(),
-                                    String::from_utf8(request.clone())
-                                        .unwrap()
-                                        .replace("$KEY", "real-secret")
-                                        .as_bytes()
-                                );
+                                assert_eq!(h2_header_value(&fields, b":path"), expected_target);
+                                assert_eq!(h2_header_value(&fields, b"x-key"), expected_header);
                             } else {
-                                assert_eq!(result.unwrap_err(), SecretViolationAction::Block);
+                                assert_eq!(output.as_ref(), format!("GET {expected_target} HTTP/1.1\r\nHost: api.example.com\r\nX-Key: {expected_header}\r\n\r\n").as_bytes());
                             }
                         }
                     }
@@ -4233,12 +4162,13 @@ mod tests {
         let config = make_config(vec![allowed, duplicate_host]);
         let mut handler = SecretsHandler::new(&config, "api.github.com", true);
 
-        let input = b"GET /user HTTP/1.1\r\nAuthorization: Bearer $KEY\r\n\r\n";
+        let input =
+            b"POST /user HTTP/1.1\r\nAuthorization: Bearer $KEY\r\nContent-Length: 4\r\n\r\n$KEY";
         let output = handler.substitute(input).unwrap();
 
         assert_eq!(
             String::from_utf8(output.into_owned()).unwrap(),
-            "GET /user HTTP/1.1\r\nAuthorization: Bearer real-secret\r\n\r\n"
+            "POST /user HTTP/1.1\r\nAuthorization: Bearer real-secret\r\nContent-Length: 4\r\n\r\n$KEY"
         );
     }
 
@@ -4360,30 +4290,93 @@ mod tests {
     }
 
     #[test]
-    fn disabled_body_substitution_blocks_placeholder_on_allowed_host() {
-        let config = make_config(vec![make_secret("$KEY", "real-secret", "api.openai.com")]);
-        let mut handler = SecretsHandler::new(&config, "api.openai.com", true);
-
-        let input = b"POST / HTTP/1.1\r\nContent-Length: 15\r\n\r\n{\"key\": \"$KEY\"}";
-        assert_eq!(
-            handler.substitute(input).unwrap_err(),
-            SecretViolationAction::Block
-        );
+    fn disabled_body_substitution_preserves_placeholder_only_for_verified_allowed_host() {
+        let body = b"{\"key\":\"$KEY\"}";
+        for action in [
+            SecretViolationAction::Block,
+            SecretViolationAction::BlockAndLog,
+            SecretViolationAction::BlockAndTerminate,
+        ] {
+            for host in ["api.example.com", "denied.example"] {
+                for pinned in [false, true] {
+                    for framing in ["fixed", "chunked", "http2"] {
+                        let ip = Ipv4Addr::new(203, 0, 113, 10);
+                        let shared = SharedState::new(16);
+                        if pinned {
+                            cache_host(&shared, host, ip);
+                        }
+                        let mut secret = make_secret("$KEY", "real-secret", "api.example.com");
+                        secret.violation_action = Some(action.clone());
+                        let config = make_config(vec![secret]);
+                        let mut handler = SecretsHandler::new_tls_intercepted(
+                            &config,
+                            host,
+                            IpAddr::V4(ip),
+                            &shared,
+                        );
+                        let request = if framing == "http2" {
+                            h2_request_with_data(
+                                &[
+                                    (b":method", b"POST"),
+                                    (b":scheme", b"https"),
+                                    (b":authority", host.as_bytes()),
+                                    (b":path", b"/"),
+                                ],
+                                body,
+                            )
+                        } else if framing == "chunked" {
+                            [
+                                format!(
+                                    "POST / HTTP/1.1\r\nHost: {host}\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n",
+                                    body.len()
+                                )
+                                .as_bytes(),
+                                body,
+                                b"\r\n0\r\n\r\n",
+                            ]
+                            .concat()
+                        } else {
+                            [
+                                format!(
+                                    "POST / HTTP/1.1\r\nHost: {host}\r\nContent-Length: {}\r\n\r\n",
+                                    body.len()
+                                )
+                                .as_bytes(),
+                                body,
+                            ]
+                            .concat()
+                        };
+                        let result = handler.substitute(&request);
+                        if pinned && host == "api.example.com" {
+                            let output = result.unwrap();
+                            if framing == "http2" {
+                                assert!(output.ends_with(body));
+                                assert!(!contains_bytes(&output, b"real-secret"));
+                            } else {
+                                assert_eq!(output.as_ref(), request);
+                            }
+                        } else {
+                            assert_eq!(result.unwrap_err(), action);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]
     #[allow(deprecated)] // Both public names must enforce the same network policy.
     fn placeholder_permission_keeps_substitution_and_blocking_independent() {
-        for legacy in [false, true] {
+        for legacy in [None, Some(false), Some(true)] {
             let secret = crate::config::builder::SecretBuilder::new()
                 .env("API_KEY")
                 .value("real-secret")
                 .placeholder("$KEY")
                 .allow("api.openai.com");
-            let secret = if legacy {
-                secret.allow_passthrough_for("api.openai.com")
-            } else {
-                secret.allow_placeholder_for("api.openai.com")
+            let secret = match legacy {
+                Some(true) => secret.allow_passthrough_for("placeholder.example"),
+                Some(false) => secret.allow_placeholder_for("placeholder.example"),
+                None => secret,
             };
             let config = make_config(vec![secret.build()]);
             let input = b"POST / HTTP/1.1\r\nAuthorization: Bearer $KEY\r\nContent-Length: 15\r\n\r\n{\"key\": \"$KEY\"}";
@@ -4392,6 +4385,15 @@ mod tests {
                 String::from_utf8(allowed.substitute(input).unwrap().into_owned()).unwrap();
             assert!(output.contains("Authorization: Bearer real-secret"));
             assert!(output.contains("{\"key\": \"$KEY\"}"));
+            let mut placeholder_host = SecretsHandler::new(&config, "placeholder.example", true);
+            if legacy.is_some() {
+                assert_eq!(placeholder_host.substitute(input).unwrap().as_ref(), input);
+            } else {
+                assert_eq!(
+                    placeholder_host.substitute(input).unwrap_err(),
+                    SecretViolationAction::Block
+                );
+            }
             let mut forbidden = SecretsHandler::new(&config, "evil.example.com", true);
             assert_eq!(
                 forbidden.substitute(input).unwrap_err(),
@@ -4658,21 +4660,21 @@ mod tests {
     }
 
     #[test]
-    fn split_chunked_trailer_blocks_when_header_substitution_is_enabled() {
+    fn split_chunked_trailer_preserves_placeholder_on_allowed_host() {
         let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
         secret.substitution.body = true;
         let config = make_config(vec![secret]);
         let mut handler = SecretsHandler::new(&config, "api.openai.com", true);
 
         // Trailers are not part of the substitutable header section. The
-        // rewrite path buffers this partial line, then blocks it unless the
-        // destination has explicit placeholder passthrough permission.
+        // rewrite path buffers this partial line, then forwards the placeholder
+        // unchanged because this destination is allowed to receive the credential.
         let first = b"POST / HTTP/1.1\r\nHost: api.openai.com\r\nTransfer-Encoding: chunked\r\n\r\n1\r\nx\r\n0\r\nX-Token: $K";
         let output = handler.substitute(first).unwrap();
         assert!(!output.as_ref().ends_with(b"$K"));
         assert_eq!(
-            handler.substitute(b"EY\r\n\r\n").unwrap_err(),
-            SecretViolationAction::Block
+            handler.substitute(b"EY\r\n\r\n").unwrap().as_ref(),
+            b"X-Token: $KEY\r\n\r\n"
         );
     }
 
@@ -4694,14 +4696,17 @@ mod tests {
     fn split_chunk_extension_blocks_during_body_rewrite() {
         let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
         secret.substitution.body = true;
-        let config = make_config(vec![secret]);
+        let config = make_config(vec![
+            secret,
+            make_secret("$BLOCKED", "other-secret", "other.example"),
+        ]);
         let mut handler = SecretsHandler::new(&config, "api.openai.com", true);
 
-        let first = b"POST / HTTP/1.1\r\nHost: api.openai.com\r\nTransfer-Encoding: chunked\r\n\r\n1;token=$K";
+        let first = b"POST / HTTP/1.1\r\nHost: api.openai.com\r\nTransfer-Encoding: chunked\r\n\r\n1;token=$B";
         let output = handler.substitute(first).unwrap();
-        assert!(!output.as_ref().ends_with(b"$K"));
+        assert!(!output.as_ref().ends_with(b"$B"));
         assert_eq!(
-            handler.substitute(b"EY\r\nx\r\n0\r\n\r\n").unwrap_err(),
+            handler.substitute(b"LOCKED\r\nx\r\n0\r\n\r\n").unwrap_err(),
             SecretViolationAction::Block
         );
     }
@@ -4950,7 +4955,7 @@ mod tests {
         let mut handler =
             SecretsHandler::new_plain_http(&config, "api.openai.com", IpAddr::V4(ip), &shared);
 
-        let input = b"GET / HTTP/1.1\r\nAuthorization: Bearer $KEY\r\nHost: api.openai.com\r\n\r\n";
+        let input = b"POST / HTTP/1.1\r\nHost: api.openai.com\r\nContent-Length: 4\r\n\r\n$KEY";
         assert_eq!(
             handler.substitute(input).unwrap_err(),
             SecretViolationAction::Block
@@ -4969,13 +4974,9 @@ mod tests {
         let mut handler =
             SecretsHandler::new_plain_http(&config, "api.openai.com", IpAddr::V4(ip), &shared);
 
-        let input = b"GET / HTTP/1.1\r\nAuthorization: Bearer $KEY\r\nHost: api.openai.com\r\n\r\n";
+        let input = b"POST / HTTP/1.1\r\nAuthorization: Bearer $KEY\r\nHost: api.openai.com\r\nContent-Length: 4\r\n\r\n$KEY";
         let output = handler.substitute(input).unwrap();
-        assert!(
-            String::from_utf8(output.into_owned())
-                .unwrap()
-                .contains("real-secret")
-        );
+        assert_eq!(output.as_ref(), b"POST / HTTP/1.1\r\nAuthorization: Bearer real-secret\r\nHost: api.openai.com\r\nContent-Length: 4\r\n\r\n$KEY");
     }
 
     #[test]
@@ -5037,14 +5038,13 @@ mod tests {
         let mut handler = SecretsHandler::new_plain_http_invalid_host(&config);
         let input = b"BINARY3 v1\0opaque\r\nAuthorization: $KEY\r\n\r\n";
 
-        assert_eq!(handler.substitute(input), Err(SecretViolationAction::Block));
+        assert_eq!(handler.substitute(input).unwrap().as_ref(), input);
     }
 
     #[test]
     fn opaque_prefix_blocks_basic_auth_encoded_placeholder() {
         let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
         secret.require_tls_identity = false;
-        secret.allowed_hosts = vec![HostPattern::Any];
         let config = make_config(vec![secret]);
         let mut handler = SecretsHandler::new_plain_http_invalid_host(&config);
         let input = b"BINARY3 v1\0\r\nAuthorization: Basic dXNlcjokS0VZ\r\n\r\n";
@@ -5056,7 +5056,6 @@ mod tests {
     fn opaque_prefix_blocks_basic_auth_split_after_long_prefix() {
         let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
         secret.require_tls_identity = false;
-        secret.allowed_hosts = vec![HostPattern::Any];
         let config = make_config(vec![secret]);
         let mut handler = SecretsHandler::new_plain_http_invalid_host(&config);
         let decoded_prefix = format!("user:{}", "x".repeat(97));
@@ -5233,7 +5232,7 @@ mod tests {
         secret.substitution = SecretSubstitution {
             headers: false,
             query: false,
-            body: false,
+            body: true,
         };
         let config = make_config(vec![secret]);
         let mut handler = SecretsHandler::new(&config, "api.openai.com", true);
@@ -5241,8 +5240,8 @@ mod tests {
         let encoded = BASE64.encode(b"user:$MSB_PASSWORD");
         let input = format!("GET / HTTP/1.1\r\nAuthorization: Basic {encoded}\r\n\r\n");
         assert_eq!(
-            handler.substitute(input.as_bytes()).unwrap_err(),
-            SecretViolationAction::Block
+            handler.substitute(input.as_bytes()).unwrap().as_ref(),
+            input.as_bytes()
         );
     }
 
@@ -5273,7 +5272,6 @@ mod tests {
             query: true,
             body: false,
         };
-        secret.passthrough_hosts = vec![HostPattern::Exact("api.openai.com".into())];
         let config = make_config(vec![secret]);
         let mut handler = SecretsHandler::new(&config, "api.openai.com", true);
 
@@ -5290,10 +5288,7 @@ mod tests {
         let mut handler = SecretsHandler::new(&config, "api.openai.com", true);
 
         let input = b"GET /api?key=$KEY HTTP/1.1\r\nHost: api.openai.com\r\n\r\n";
-        assert_eq!(
-            handler.substitute(input).unwrap_err(),
-            SecretViolationAction::Block
-        );
+        assert_eq!(handler.substitute(input).unwrap().as_ref(), input);
     }
 
     #[test]
@@ -5536,7 +5531,7 @@ mod tests {
     }
 
     #[test]
-    fn header_only_secret_blocks_placeholder_in_body_continuation_chunk() {
+    fn header_only_secret_preserves_placeholder_in_body_continuation_chunk() {
         // Security regression: a secret with the default substitution scopes
         // (substitute_headers=true, substitute_body=false) must NOT substitute its
         // placeholder when the placeholder appears in body bytes. Without
@@ -5552,13 +5547,10 @@ mod tests {
         handler.substitute(chunk1).unwrap();
 
         // Chunk 2: ASCII body containing a literal `$KEY` token. The
-        // placeholder must be blocked, never replaced with the secret value.
+        // placeholder must remain unchanged, never replaced with the secret value.
         let body = b"prefix:$KEY:more-padding";
         assert_eq!(body.len(), 24);
-        assert_eq!(
-            handler.substitute(body).unwrap_err(),
-            SecretViolationAction::Block
-        );
+        assert_eq!(handler.substitute(body).unwrap().as_ref(), body);
     }
 
     #[test]
@@ -6050,9 +6042,12 @@ mod tests {
     }
 
     #[test]
-    fn http2_trailers_require_passthrough_and_are_never_substituted() {
-        for passthrough in [false, true] {
+    fn http2_trailers_preserve_permitted_placeholders_and_block_other_hosts() {
+        for (allowed, passthrough) in [(true, false), (false, true), (false, false)] {
             let mut secret = make_secret("$KEY", "real-secret", "api.example.com");
+            if !allowed {
+                secret.allowed_hosts = vec![HostPattern::Exact("other.example".into())];
+            }
             if passthrough {
                 secret.passthrough_hosts = vec![HostPattern::Exact("api.example.com".into())];
             }
@@ -6071,7 +6066,7 @@ mod tests {
             let mut trailers = Vec::new();
             append_h2_headers(&mut trailers, 1, &[(b"x-key", b"$KEY")], true);
             let result = handler.substitute(&trailers);
-            if passthrough {
+            if allowed || passthrough {
                 let mut output = HTTP2_PREFACE.to_vec();
                 output.extend_from_slice(&result.unwrap());
                 assert_eq!(

@@ -492,8 +492,12 @@ impl CloudSandboxSpec {
             secrets: self.network.secrets.map(Into::into),
             max_tcp_connections: self.network.max_tcp_connections,
             max_udp_connections: self.network.max_udp_connections,
+            // Tunes published-port listeners, and the cloud spec publishes no ports.
+            tcp_accept_queue_size: None,
             rate_limiter: None,
+            nat64_prefixes: NetworkSpec::default().nat64_prefixes,
             trust_host_cas: false,
+            http: Default::default(),
             outbound_proxy: None,
         };
         let runtime = SandboxRuntimeOptions {

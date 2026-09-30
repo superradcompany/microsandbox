@@ -57,7 +57,7 @@ class BatchSmoke(smoke.Smoke):
     @staticmethod
     def verify_output_order(output, names):
         # Completion order may vary; the CLI publishes successful outcomes in input order.
-        reported = re.findall(r"Branched\s+(\S+)", output)
+        reported = re.findall(r"Forked\s+(\S+)", output)
         assert reported == names, f"batch outcome order differs: {reported!r}, expected {names!r}"
 
     @contextmanager

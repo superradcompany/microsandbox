@@ -22,8 +22,8 @@ use crate::sandbox::{
 use crate::{MicrosandboxError, MicrosandboxResult};
 use microsandbox_types::RegistryAuth;
 use microsandbox_types::{
-    CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudSandboxStatus, RootDisk,
-    SandboxRuntimeOptions, TlsConfig,
+    CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudSandboxStatus, NetworkSpec,
+    RootDisk, SandboxRuntimeOptions, TlsConfig,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -592,8 +592,18 @@ fn reject_dropped_cloud_create_fields(config: &SandboxConfig) -> MicrosandboxRes
     if config.spec.network.rate_limiter.is_some() {
         return Err(unsupported("network.rate_limiter"));
     }
+    if config.spec.network.nat64_prefixes != NetworkSpec::default().nat64_prefixes {
+        return Err(unsupported("network.nat64_prefixes"));
+    }
+    if config.spec.network.http.deny_response {
+        return Err(unsupported("network.http.deny_response (local-only)"));
+    }
     if config.spec.network.outbound_proxy.is_some() {
         return Err(unsupported("network.outbound_proxy"));
+    }
+    // Tunes published-port listeners, which the cloud create contract does not carry.
+    if config.spec.network.tcp_accept_queue_size.is_some() {
+        return Err(unsupported("network.tcp_accept_queue_size"));
     }
 
     if config
@@ -946,6 +956,52 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[cfg(feature = "net")]
+    #[tokio::test]
+    async fn http_deny_response_is_rejected_before_cloud_http() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let backend = CloudBackend::builder()
+            .url(format!("http://{}", listener.local_addr().unwrap()))
+            .api_key("test-key")
+            .build()
+            .unwrap();
+        let error = crate::backend::with_backend(backend, async {
+            SandboxBuilder::new("http-deny-cloud")
+                .image("alpine")
+                .network(|network| network.http(|h| h.deny_response(true)))
+                .create()
+                .await
+                .err()
+                .expect("cloud must reject the local-only option")
+        })
+        .await;
+
+        assert!(
+            matches!(
+                error,
+                MicrosandboxError::Unsupported {
+                    reason: UnsupportedReason::ConfigField(
+                        "network.http.deny_response (local-only)"
+                    ),
+                    ..
+                }
+            ),
+            "{error}"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), listener.accept())
+                .await
+                .is_err()
+        );
+        for message in [None, Some(""), Some("blocked {host}")] {
+            let mut config = base_cloud_config();
+            config.spec.network.http.deny_message = message.map(str::to_owned);
+            reject_dropped_cloud_create_fields(&config).unwrap();
+            config.spec.network.http.deny_response = true;
+            assert_unsupported_config_field(config, "network.http.deny_response (local-only)");
+        }
     }
 
     #[tokio::test]
@@ -1416,7 +1472,7 @@ mod tests {
 
     #[test]
     fn cloud_create_request_rejects_fields_missing_from_the_wire() {
-        let cases: [(&str, ConfigMutation); 9] = [
+        let cases: [(&str, ConfigMutation); 11] = [
             ("max_cpus", |config| config.spec.resources.max_cpus = 2),
             ("max_memory", |config| {
                 config.spec.resources.max_memory_mib = 1024
@@ -1435,6 +1491,12 @@ mod tests {
                     mtu: Some(1400),
                     ..Default::default()
                 })
+            }),
+            ("network.nat64_prefixes", |config| {
+                config.spec.network.nat64_prefixes = vec!["2001:db8::/96".parse().unwrap()];
+            }),
+            ("network.nat64_prefixes", |config| {
+                config.spec.network.nat64_prefixes.clear();
             }),
             ("network.tls", |config| {
                 let mut tls = TlsConfig::default();
@@ -1649,6 +1711,14 @@ mod tests {
         });
 
         assert_unsupported_config_field(config, "network.outbound_proxy");
+    }
+
+    #[test]
+    fn cloud_create_request_rejects_tcp_accept_queue_size() {
+        let mut config = base_cloud_config();
+        config.spec.network.tcp_accept_queue_size = Some(4096);
+
+        assert_unsupported_config_field(config, "network.tcp_accept_queue_size");
     }
 
     #[test]
