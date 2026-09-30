@@ -756,7 +756,7 @@ mod tests {
 
     #[test]
     fn restore_only_flags_are_rejected_by_run() {
-        for flag in ["--disk-only", "--forked"] {
+        for flag in ["--disk-only", "--cow-mem", "--forked"] {
             assert!(TestCli::try_parse_from(["msb", "alpine", flag]).is_err());
         }
     }

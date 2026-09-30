@@ -492,10 +492,10 @@ const (
 // THPPolicy selects the guest transparent huge-page policy at boot.
 type THPPolicy string
 
-// WithForked restores a full snapshot with private copy-on-write memory.
+// WithCowMemory restores a full snapshot with private copy-on-write memory.
 // It cannot be combined with a fresh boot or disk-only restore.
-func WithForked() RestoreOption {
-	return func(o *RestoreConfig) { o.Forked = true }
+func WithCowMemory() RestoreOption {
+	return func(o *RestoreConfig) { o.CowMemory = true }
 }
 
 // WithExternalMountPolicy selects strict (default) or relaxed validation of mapped filesystems.

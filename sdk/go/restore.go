@@ -32,7 +32,7 @@ type RestoreConfig struct {
 	// Nil omits a lifetime override; explicit zero requests immediate expiry.
 	MaxDuration                 *time.Duration
 	IdleTimeout                 *time.Duration
-	Forked                      bool
+	CowMemory                   bool
 	SnapshotDiskOnly            bool
 	SnapshotBase                string
 	User                        string
@@ -202,7 +202,8 @@ func buildFFIRestoreOptions[T SnapshotSeed](snapshot T, config RestoreConfig) ff
 		MaxUDPConnections: config.MaxUDPConnections, DisableNetwork: config.DisableNetwork,
 		SecurityProfile: string(config.SecurityProfile),
 		MaxDurationSecs: seconds(config.MaxDuration), IdleTimeoutSecs: seconds(config.IdleTimeout),
-		Forked: config.Forked, DiskOnly: config.SnapshotDiskOnly,
+		// Keep the native wire spelling stable across SDK/runtime versions.
+		Forked: config.CowMemory, DiskOnly: config.SnapshotDiskOnly,
 		SnapshotBase: config.SnapshotBase, User: config.User, LogLevel: string(config.LogLevel),
 		ExternalMountPolicy:         string(config.ExternalMountPolicy),
 		DangerouslyInheritResources: config.DangerouslyInheritResources,

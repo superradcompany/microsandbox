@@ -419,7 +419,7 @@ impl LocalBackend {
         // Do not let a disk archive turn an explicit CoW restore into a fresh boot.
         if config.forked && config.checkpoint_restore.is_none() {
             return Err(crate::MicrosandboxError::InvalidConfig(
-                "forked requires a full snapshot restore".into(),
+                "copy-on-write memory requires a full snapshot restore".into(),
             ));
         }
         if !installed_file_sources.is_empty() {

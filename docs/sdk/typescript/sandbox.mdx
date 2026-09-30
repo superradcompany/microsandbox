@@ -47,7 +47,7 @@ Use `createWithProgress()` for fresh creation and `restoreWithProgress()` for sn
 ```typescript
 const creation = await Sandbox.restore("saved")
   .name("child")
-  .forked()
+  .cowMemory()
   .restoreWithProgress();
 for await (const event of creation) {
   if (event.kind === "startup") console.log(event.phase, event.completedBytes, event.totalBytes);

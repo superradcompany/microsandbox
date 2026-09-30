@@ -379,9 +379,49 @@ impl PySandboxHandle {
         self.stop(py, Some(timeout))
     }
 
-    /// Create an independent local CoW child without a durable full snapshot.
+    /// Deprecated: use fork for live execution duplication.
     #[pyo3(signature = (name, *, record_integrity = false, guest_flush = None))]
     fn branch<'py>(
+        &self,
+        py: Python<'py>,
+        name: String,
+        record_integrity: bool,
+        guest_flush: Option<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        PyModule::import(py, "warnings")?.call_method1(
+            "warn",
+            (
+                "branch is deprecated; use fork",
+                py.get_type::<pyo3::exceptions::PyDeprecationWarning>(),
+                2,
+            ),
+        )?;
+        self.fork(py, name, record_integrity, guest_flush)
+    }
+
+    /// Deprecated: use fork_many for live execution duplication.
+    #[pyo3(signature = (names, *, record_integrity = false, guest_flush = None))]
+    fn branch_many<'py>(
+        &self,
+        py: Python<'py>,
+        names: Vec<String>,
+        record_integrity: bool,
+        guest_flush: Option<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        PyModule::import(py, "warnings")?.call_method1(
+            "warn",
+            (
+                "branch_many is deprecated; use fork_many",
+                py.get_type::<pyo3::exceptions::PyDeprecationWarning>(),
+                2,
+            ),
+        )?;
+        self.fork_many(py, names, record_integrity, guest_flush)
+    }
+
+    /// Create an independent local CoW child without a durable full snapshot.
+    #[pyo3(signature = (name, *, record_integrity = false, guest_flush = None))]
+    fn fork<'py>(
         &self,
         py: Python<'py>,
         name: String,
@@ -392,20 +432,20 @@ impl PySandboxHandle {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let guard = inner.clone();
             let mut builder = guard
-                .branch(name)
+                .fork(name)
                 .guest_flush(crate::snapshot::guest_flush_policy(guest_flush)?);
             if record_integrity {
                 builder = builder.record_integrity();
             }
             Ok(PySandbox::from_rust(
-                builder.branch().await.map_err(to_py_err)?,
+                builder.fork().await.map_err(to_py_err)?,
             ))
         })
     }
 
     /// Capture once for all names; return individual child outcomes in input order.
     #[pyo3(signature = (names, *, record_integrity = false, guest_flush = None))]
-    fn branch_many<'py>(
+    fn fork_many<'py>(
         &self,
         py: Python<'py>,
         names: Vec<String>,
@@ -415,12 +455,12 @@ impl PySandboxHandle {
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let mut builder = inner
-                .branch_many(names)
+                .fork_many(names)
                 .guest_flush(crate::snapshot::guest_flush_policy(guest_flush)?);
             if record_integrity {
                 builder = builder.record_integrity();
             }
-            crate::sandbox::branch_outcomes(builder.branch().await.map_err(to_py_err)?)
+            crate::sandbox::branch_outcomes(builder.fork().await.map_err(to_py_err)?)
         })
     }
 

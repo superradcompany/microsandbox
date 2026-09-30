@@ -1015,3 +1015,12 @@ describe("NetworkBuilder HTTP denial messages", () => {
     expect(new NetworkBuilder().http((h) => h.denyMessage("keep")).http((h) => h).build().http.denyMessage).toBe("keep");
   });
 });
+
+
+describe("restore copy-on-write memory naming", () => {
+  it("exposes cowMemory and removes forked", () => {
+    const builder = Sandbox.restore("saved").name("child");
+    expect(builder.cowMemory()).toBe(builder);
+    expect("forked" in builder).toBe(false);
+  });
+});

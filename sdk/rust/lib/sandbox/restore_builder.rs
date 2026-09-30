@@ -198,7 +198,7 @@ impl RestoreBuilder {
     }
 
     /// Restore captured RAM with private copy-on-write mappings.
-    pub fn forked(mut self) -> Self {
+    pub fn cow_memory(mut self) -> Self {
         self.inner = self.inner.forked();
         self
     }
@@ -350,8 +350,8 @@ macro_rules! resource_methods {
 }
 
 resource_methods!(RestoreBuilder);
-resource_methods!(super::branch::BranchBuilder);
-resource_methods!(super::branch::BranchManyBuilder);
+resource_methods!(super::branch::ForkBuilder);
+resource_methods!(super::branch::ForkManyBuilder);
 
 //--------------------------------------------------------------------------------------------------
 // Tests
@@ -363,6 +363,15 @@ mod tests {
 
     fn config(builder: &RestoreBuilder) -> crate::SandboxConfig {
         builder.inner.config.clone().into_config()
+    }
+
+    #[test]
+    fn cow_memory_preserves_the_existing_transient_launch_flag() {
+        let ordinary = Sandbox::restore("saved").name("child");
+        assert!(!config(&ordinary).forked);
+        let cow = ordinary.cow_memory();
+        assert!(config(&cow).forked);
+        assert!(!config(&cow).clone_for_persistence().forked);
     }
 
     #[test]

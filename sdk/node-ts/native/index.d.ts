@@ -775,16 +775,16 @@ export declare class RestoreBuilder {
   maxDuration(secs: number): this
   /** Apply the destination host's idle timeout in seconds; zero expires immediately. */
   idleTimeout(secs: number): this
-  /** Explicitly reuse locally validated source resource bindings. */
-  dangerouslyInheritResources(): this
   /** Accept missing restore resources without inheriting host resources. */
   allowMissingResources(): this
+  /** Explicitly reuse locally validated source resource bindings. */
+  dangerouslyInheritResources(): this
   /** Supply the base for omitted disk layers and RAM objects in a snapshot archive. */
   snapshotBase(base: string): this
   /** Cold-boot only the disk state carried by a full snapshot. */
   diskOnly(): this
   /** Restore a full snapshot with private copy-on-write memory. */
-  forked(): this
+  cowMemory(): this
   /**
    * Validate authorized filesystem mappings strictly (default) or allow supported mismatches.
    * Neither policy inherits resources; unmapped filesystems remain unavailable.
@@ -1114,10 +1114,14 @@ export declare class Sandbox {
   stop(): Promise<void>
   /** Warnings for unmapped external filesystems and accepted restore mismatches. */
   restoreWarnings(): Promise<Array<ExternalMountWarning>>
-  /** Create an independent local CoW child without a durable full snapshot. */
+  /** @deprecated Use fork for live execution duplication. */
   branch(name: string, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null): Promise<Sandbox>
-  /** Capture once and return individual child startup outcomes. */
+  /** @deprecated Use forkMany for live execution duplication. */
   branchMany(names: Array<string>, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null): Promise<Array<JsBranchOutcome>>
+  /** Create an independent local CoW child without a durable full snapshot. */
+  fork(name: string, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null): Promise<Sandbox>
+  /** Capture once and return individual child startup outcomes. */
+  forkMany(names: Array<string>, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null): Promise<Array<JsBranchOutcome>>
   /** Explicit resident pause through host control. */
   pause(guestFlush?: string | undefined | null): Promise<void>
   /** Explicit resident resume through host control. */
@@ -1515,10 +1519,14 @@ export declare class SandboxHandle {
    * ownership. No implicit kill; use `stopWithTimeout` for a bounded wait.
    */
   stop(): Promise<void>
-  /** Create an independent local CoW child without a durable full snapshot. */
+  /** @deprecated Use fork for live execution duplication. */
   branch(name: string, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null): Promise<Sandbox>
-  /** Capture once and return individual child startup outcomes. */
+  /** @deprecated Use forkMany for live execution duplication. */
   branchMany(names: Array<string>, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null): Promise<Array<JsBranchOutcome>>
+  /** Create an independent local CoW child without a durable full snapshot. */
+  fork(name: string, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null): Promise<Sandbox>
+  /** Capture once and return individual child startup outcomes. */
+  forkMany(names: Array<string>, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null): Promise<Array<JsBranchOutcome>>
   /** Explicit resident pause through host control. */
   pause(guestFlush?: string | undefined | null): Promise<void>
   /** Explicit resident resume through host control. */

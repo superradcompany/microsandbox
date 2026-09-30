@@ -21,7 +21,7 @@ use crate::{
     msb snap restore app:ready --name worker\n  msb snap ls --group app\n  \
     msb snap export app:ready --output ready.msb\n  \
     msb snap import ready.msb --group received\n\n\
-    'snap' and 'snapshot' are equivalent. Live branching uses 'msb branch'."
+    'snap' and 'snapshot' are equivalent. Live forking uses 'msb fork'."
 )]
 pub struct SnapshotArgs {
     /// Snapshot subcommand.

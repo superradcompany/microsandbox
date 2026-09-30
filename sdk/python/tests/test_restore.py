@@ -5,13 +5,17 @@ import pytest
 from microsandbox import Network, NetworkPolicy, Sandbox, SecurityProfile
 
 
-@pytest.mark.parametrize("option", ["image", "network", "cmd", "replace", "detached", "entrypoint"])
+@pytest.mark.parametrize(
+    "option", ["image", "network", "cmd", "replace", "detached", "entrypoint", "forked"],
+)
 def test_restore_rejects_create_options(option):
     with pytest.raises(TypeError, match="unexpected restore option"):
         Sandbox.restore("missing", name="restore-validation", **{option: None})
 
 
-@pytest.mark.parametrize("option", ["from_snapshot", "forked", "disk_only", "snapshot_base"])
+@pytest.mark.parametrize(
+    "option", ["from_snapshot", "forked", "cow_memory", "disk_only", "snapshot_base"],
+)
 def test_create_rejects_restore_options(option):
     with pytest.raises(TypeError):
         Sandbox.create("restore-validation", image="alpine", **{option: None})
@@ -20,7 +24,7 @@ def test_create_rejects_restore_options(option):
 @pytest.mark.asyncio
 async def test_restore_missing_artifact_does_not_boot(tmp_path):
     with pytest.raises(FileNotFoundError):
-        await Sandbox.restore(tmp_path / "missing", name="restore-validation", forked=True)
+        await Sandbox.restore(tmp_path / "missing", name="restore-validation", cow_memory=True)
 
 
 @pytest.mark.asyncio
@@ -138,3 +142,18 @@ def test_restore_policy_rejects_broad_network_configuration():
 def test_restore_duration_rejects_invalid_values(option, value):
     with pytest.raises(ValueError):
         Sandbox.restore("missing", name="restore-controls", **{option: value})
+
+
+@pytest.mark.parametrize("method", ["restore", "restore_with_progress"])
+def test_restore_rejects_removed_forked_option(method):
+    with pytest.raises(TypeError, match=r"unexpected restore option.*forked"):
+        getattr(Sandbox, method)("missing", name="restore-validation", forked=True)
+
+
+def test_fork_public_surface_and_outcome_alias():
+    from microsandbox import BranchOutcome, ForkOutcome, SandboxHandle
+
+    assert BranchOutcome is ForkOutcome
+    for cls in (Sandbox, SandboxHandle):
+        for method in ("fork", "fork_many", "branch", "branch_many"):
+            assert callable(getattr(cls, method))

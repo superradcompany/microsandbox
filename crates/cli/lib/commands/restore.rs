@@ -2,7 +2,7 @@
 
 use clap::Args;
 use microsandbox::sandbox::{
-    BranchBuilder, BranchManyBuilder, RestoreBuilder, Sandbox, SecurityProfile,
+    ForkBuilder, ForkManyBuilder, RestoreBuilder, Sandbox, SecurityProfile,
 };
 
 #[cfg(feature = "net")]
@@ -195,7 +195,7 @@ pub async fn run(
         builder = builder.log_level(level);
     }
     if args.cow_mem {
-        builder = builder.forked();
+        builder = builder.cow_memory();
     }
     if args.disk_only {
         builder = builder.disk_only();
@@ -281,8 +281,8 @@ macro_rules! apply_resources {
 }
 
 apply_resources!(apply_restore, RestoreBuilder);
-apply_resources!(apply_branch, BranchBuilder);
-apply_resources!(apply_branch_many, BranchManyBuilder);
+apply_resources!(apply_branch, ForkBuilder);
+apply_resources!(apply_branch_many, ForkManyBuilder);
 
 //--------------------------------------------------------------------------------------------------
 // Tests

@@ -34,7 +34,7 @@ Full restores use strict external-filesystem admission by default. Pass `WithExt
 `CreateSandboxWithProgress` and `RestoreSandboxWithProgress` return a bounded event channel and a single-result channel. Ignoring events does not delay the operation. Always receive the result and close the handle when finished; restored sandboxes are detached, so use `Stop` or `Destroy` to stop them. Cancel `ctx` to cancel the operation.
 
 ```go
-events, result := m.RestoreSandboxWithProgress(ctx, "saved", "child", m.WithForked())
+events, result := m.RestoreSandboxWithProgress(ctx, "saved", "child", m.WithCowMemory())
 for event := range events {
     fmt.Println(event.Kind, event.Progress.Phase, event.Progress.CompletedBytes)
 }

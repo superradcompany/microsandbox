@@ -208,7 +208,7 @@ pub(crate) fn restore_builder_from_args(
             "security",
             "max_duration",
             "idle_timeout",
-            "forked",
+            "cow_memory",
             "disk_only",
             "snapshot_base",
             "log_level",
@@ -291,8 +291,8 @@ pub(crate) fn restore_builder_from_args(
     if let Some(seconds) = restore_duration(kwargs, "idle_timeout")? {
         builder = builder.idle_timeout(seconds);
     }
-    if extract_opt::<bool>(kwargs, "forked")?.unwrap_or(false) {
-        builder = builder.forked();
+    if extract_opt::<bool>(kwargs, "cow_memory")?.unwrap_or(false) {
+        builder = builder.cow_memory();
     }
     if extract_opt::<bool>(kwargs, "disk_only")?.unwrap_or(false) {
         builder = builder.disk_only();

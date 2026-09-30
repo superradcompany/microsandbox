@@ -3538,7 +3538,7 @@ pub unsafe extern "C" fn msb_sandbox_branch_many(
         };
         Ok(Box::pin(async move {
             let mut builder = if let Some(live) = live {
-                live.branch_many(request.names)
+                live.fork_many(request.names)
             } else {
                 let source = Sandbox::get(&source).await.map_err(FfiError::from)?;
                 if let Some(expected) = request.source_identity.filter(|id| !id.is_empty())
@@ -3550,13 +3550,13 @@ pub unsafe extern "C" fn msb_sandbox_branch_many(
                         actual: source.id().to_string(),
                     }));
                 }
-                source.branch_many(request.names)
+                source.fork_many(request.names)
             };
             builder = builder.guest_flush(request.guest_flush);
             if record_integrity {
                 builder = builder.record_integrity();
             }
-            let outcomes = builder.branch().await.map_err(FfiError::from)?;
+            let outcomes = builder.fork().await.map_err(FfiError::from)?;
             let mut rows = Vec::with_capacity(outcomes.len());
             for outcome in outcomes {
                 let row = match outcome.result {
@@ -3605,17 +3605,17 @@ pub unsafe extern "C" fn msb_sandbox_branch_with_options(
         };
         Ok(Box::pin(async move {
             let mut builder = if let Some(live) = live {
-                live.branch(child)
+                live.fork(child)
             } else {
                 Sandbox::get(&source)
                     .await
                     .map_err(FfiError::from)?
-                    .branch(child)
+                    .fork(child)
             };
             if record_integrity {
                 builder = builder.record_integrity();
             }
-            let sb = builder.branch().await.map_err(FfiError::from)?;
+            let sb = builder.fork().await.map_err(FfiError::from)?;
             let backend_kind = sb.backend_kind().as_str();
             let handle = register(sb)?;
             Ok(serde_json::json!({ "handle": handle, "backend_kind": backend_kind }).to_string())
