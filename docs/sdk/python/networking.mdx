@@ -91,6 +91,8 @@ IPv6 pool used for per-sandbox `/64` guest prefixes. Defaults to `fd42:6d73:62::
 
 NAT64 `/96` prefixes for policy classification. Destinations inside these prefixes are also evaluated by their embedded IPv4 address.
 
+Pass this field by keyword. Custom or empty prefix lists are supported only for local sandboxes; cloud creation rejects them.
+
 #### max_udp_connections
 
 `Network(max_udp_connections=512)` sets the runtime UDP relay session limit. Omission is unlimited in single-tenant mode and defaults to 1,024 in multi-tenant mode; zero explicitly selects unlimited. At a finite limit, a new session evicts the least recently active session. Sessions expire after 60 seconds of inactivity.

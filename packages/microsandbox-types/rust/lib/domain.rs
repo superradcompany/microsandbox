@@ -649,6 +649,7 @@ pub struct NetworkSpec {
 
     /// NAT64 `/96` prefixes for policy classification.
     #[serde(default = "default_nat64_prefixes")]
+    #[cfg_attr(feature = "ts", ts(type = "string[]"))]
     pub nat64_prefixes: Vec<Ipv6Network>,
 
     /// Whether to copy trusted host CAs into the guest at boot.

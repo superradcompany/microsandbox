@@ -153,3 +153,9 @@ def test_unrelated_string_enum_is_not_a_destination_shorthand() -> None:
 
     with pytest.raises(TypeError, match=r"Rule\.destination"):
         policy._to_dict()
+
+
+def test_network_preserves_positional_connection_limit() -> None:
+    network = Network(None, {}, (), (), None, None, True, None, None, 25)
+    with pytest.warns(DeprecationWarning, match="max_connections"):
+        assert network._to_dict()["max_tcp_connections"] == 25

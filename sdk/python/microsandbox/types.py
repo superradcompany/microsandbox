@@ -1786,7 +1786,7 @@ class Network:
     ipv6_pool: str | None = None
     """IPv6 pool used to derive per-sandbox /64 guest prefixes. Defaults
     to ``fd42:6d73:62::/48``."""
-    nat64_prefixes: tuple[str, ...] = ("64:ff9b::/96",)
+    nat64_prefixes: tuple[str, ...] = field(default=("64:ff9b::/96",), kw_only=True)
     """NAT64 /96 prefixes used for policy classification."""
     max_connections: int | None = None
     """Deprecated: use ``max_tcp_connections`` instead."""

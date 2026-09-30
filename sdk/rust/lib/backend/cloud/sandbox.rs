@@ -22,8 +22,8 @@ use crate::sandbox::{
 use crate::{MicrosandboxError, MicrosandboxResult};
 use microsandbox_types::RegistryAuth;
 use microsandbox_types::{
-    CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudSandboxStatus, RootDisk,
-    SandboxRuntimeOptions, TlsConfig,
+    CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudSandboxStatus, NetworkSpec,
+    RootDisk, SandboxRuntimeOptions, TlsConfig,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -591,6 +591,9 @@ fn reject_dropped_cloud_create_fields(config: &SandboxConfig) -> MicrosandboxRes
     }
     if config.spec.network.rate_limiter.is_some() {
         return Err(unsupported("network.rate_limiter"));
+    }
+    if config.spec.network.nat64_prefixes != NetworkSpec::default().nat64_prefixes {
+        return Err(unsupported("network.nat64_prefixes"));
     }
     if config.spec.network.http.deny_response {
         return Err(unsupported("network.http.deny_response (local-only)"));
@@ -1465,7 +1468,7 @@ mod tests {
 
     #[test]
     fn cloud_create_request_rejects_fields_missing_from_the_wire() {
-        let cases: [(&str, ConfigMutation); 9] = [
+        let cases: [(&str, ConfigMutation); 11] = [
             ("max_cpus", |config| config.spec.resources.max_cpus = 2),
             ("max_memory", |config| {
                 config.spec.resources.max_memory_mib = 1024
@@ -1484,6 +1487,12 @@ mod tests {
                     mtu: Some(1400),
                     ..Default::default()
                 })
+            }),
+            ("network.nat64_prefixes", |config| {
+                config.spec.network.nat64_prefixes = vec!["2001:db8::/96".parse().unwrap()];
+            }),
+            ("network.nat64_prefixes", |config| {
+                config.spec.network.nat64_prefixes.clear();
             }),
             ("network.tls", |config| {
                 let mut tls = TlsConfig::default();
