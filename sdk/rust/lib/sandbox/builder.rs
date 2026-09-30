@@ -1721,7 +1721,7 @@ impl SandboxBuilder {
                     && sandbox.snapshot_archive_source.is_none()))
         {
             return Err(crate::MicrosandboxError::InvalidConfig(
-                "forked requires a full snapshot restore and cannot be combined with disk_only"
+                "copy-on-write memory requires a full snapshot restore and cannot be combined with disk_only"
                     .into(),
             ));
         }
@@ -4906,7 +4906,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("forked requires a full snapshot")
+                .contains("copy-on-write memory requires a full snapshot")
         );
     }
 
@@ -4944,7 +4944,7 @@ mod tests {
                 .await
                 .unwrap_err()
                 .to_string()
-                .contains("forked")
+                .contains("copy-on-write memory")
         );
     }
 }

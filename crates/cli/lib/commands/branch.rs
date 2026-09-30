@@ -1,4 +1,4 @@
-//! Direct local execution branching without a durable full snapshot.
+//! Direct local execution forking without a durable full snapshot.
 
 use clap::Args;
 use microsandbox::Sandbox;
@@ -43,24 +43,24 @@ pub struct BranchArgs {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-/// Branch source execution. The child's CoW memory is inherent to this operation.
+/// Fork source execution. The child's CoW memory is inherent to this operation.
 pub async fn run(args: BranchArgs) -> anyhow::Result<()> {
     let source = Sandbox::get(&args.source).await?;
     if !args.names.is_empty() {
         let mut builder = args
             .resources
-            .apply_branch_many(source.branch_many(args.names).guest_flush(args.guest_flush))?;
+            .apply_branch_many(source.fork_many(args.names).guest_flush(args.guest_flush))?;
         if args.integrity {
             builder = builder.record_integrity();
         }
-        let outcomes = builder.branch().await?;
+        let outcomes = builder.fork().await?;
         let mut failed = 0;
         for outcome in outcomes {
             match outcome.result {
                 Ok(child) => {
                     super::common::display_restore_warnings(&child).await;
                     if !args.quiet {
-                        ui::success("Branched", child.name());
+                        ui::success("Forked", child.name());
                     }
                     child.detach().await;
                 }
@@ -78,13 +78,13 @@ pub async fn run(args: BranchArgs) -> anyhow::Result<()> {
     }
     let mut builder = args.resources.apply_branch(
         source
-            .branch(args.name.expect("clap requires a child name"))
+            .fork(args.name.expect("clap requires a child name"))
             .guest_flush(args.guest_flush),
     )?;
     if args.integrity {
         builder = builder.record_integrity();
     }
-    let (mut progress, task) = builder.branch_with_progress()?;
+    let (mut progress, task) = builder.fork_with_progress()?;
     let mut display = if args.quiet {
         ui::PullProgressDisplay::quiet(&args.source)
     } else {
@@ -95,10 +95,10 @@ pub async fn run(args: BranchArgs) -> anyhow::Result<()> {
     }
     let result = task.await;
     display.finish();
-    let child = result.map_err(|error| anyhow::anyhow!("branch task failed: {error}"))??;
+    let child = result.map_err(|error| anyhow::anyhow!("fork task failed: {error}"))??;
     super::common::display_restore_warnings(&child).await;
     if !args.quiet {
-        ui::success("Branched", child.name());
+        ui::success("Forked", child.name());
     }
     child.detach().await;
     Ok(())

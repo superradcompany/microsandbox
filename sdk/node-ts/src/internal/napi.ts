@@ -280,6 +280,8 @@ export interface NapiRestoreBuilderSetters {
   security(profile: "default" | "restricted"): this;
   maxDuration(secs: number): this;
   idleTimeout(secs: number): this;
+  cowMemory(): this;
+  /** @deprecated Use cowMemory() instead. */
   forked(): this;
   diskOnly(): this;
   snapshotBase(base: string): this;
@@ -348,7 +350,11 @@ export interface NapiSandbox {
   attachShell(): Promise<number>;
   restoreWarnings(): Promise<Array<{ guestPath: string; reason: string; staleInodes: bigint[] }>>;
   stop(): Promise<void>;
+  fork(name: string, recordIntegrity?: boolean, guestFlush?: string): Promise<NapiSandbox>;
+  /** @deprecated Use fork() instead. */
   branch(name: string, recordIntegrity?: boolean, guestFlush?: string): Promise<NapiSandbox>;
+  forkMany(names: string[], recordIntegrity?: boolean, guestFlush?: string): Promise<{name: string; sandbox?: NapiSandbox; error?: string}[]>;
+  /** @deprecated Use forkMany() instead. */
   branchMany(names: string[], recordIntegrity?: boolean, guestFlush?: string): Promise<{name: string; sandbox?: NapiSandbox; error?: string}[]>;
   pause(guestFlush?: string): Promise<void>;
   resume(): Promise<void>;
@@ -387,7 +393,11 @@ export interface NapiSandboxHandle {
   connectWithTimeout(timeoutMs: number): Promise<NapiSandbox>;
   connectOrStart(detached?: boolean): Promise<NapiSandbox>;
   stop(): Promise<void>;
+  fork(name: string, recordIntegrity?: boolean, guestFlush?: string): Promise<NapiSandbox>;
+  /** @deprecated Use fork() instead. */
   branch(name: string, recordIntegrity?: boolean, guestFlush?: string): Promise<NapiSandbox>;
+  forkMany(names: string[], recordIntegrity?: boolean, guestFlush?: string): Promise<{name: string; sandbox?: NapiSandbox; error?: string}[]>;
+  /** @deprecated Use forkMany() instead. */
   branchMany(names: string[], recordIntegrity?: boolean, guestFlush?: string): Promise<{name: string; sandbox?: NapiSandbox; error?: string}[]>;
   pause(guestFlush?: string): Promise<void>;
   resume(): Promise<void>;

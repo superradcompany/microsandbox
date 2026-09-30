@@ -14,7 +14,7 @@ async fn restored_creation_progress_and_ignored_observer() {
         let started = std::time::Instant::now();
         let (mut progress, task) = Sandbox::restore(&snapshot)
             .name(&name)
-            .forked()
+            .cow_memory()
             .restore_with_progress()
             .unwrap();
         if observed {
@@ -106,7 +106,7 @@ async fn cancelled_backing_preparation_reaps_and_reconciles() {
     let name = format!("cancel-progress-{}", std::process::id());
     let (mut progress, task) = Sandbox::restore(&snapshot)
         .name(&name)
-        .forked()
+        .cow_memory()
         .restore_with_progress()
         .unwrap();
     let waiting = tokio::time::timeout(Duration::from_secs(30), async {

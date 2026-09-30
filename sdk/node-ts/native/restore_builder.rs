@@ -192,14 +192,20 @@ impl JsRestoreBuilder {
         Ok(self)
     }
 
-    /// Restore a full snapshot with private copy-on-write memory.
+    /// @deprecated Use cowMemory() instead.
     #[napi]
     pub fn forked(&mut self) -> Result<&Self> {
+        self.cow_memory()
+    }
+
+    /// Restore a full snapshot with private copy-on-write memory.
+    #[napi]
+    pub fn cow_memory(&mut self) -> Result<&Self> {
         let prev = self
             .inner
             .take()
             .ok_or_else(|| napi::Error::from_reason("builder already consumed"))?;
-        self.inner = Some(prev.forked());
+        self.inner = Some(prev.cow_memory());
         Ok(self)
     }
 

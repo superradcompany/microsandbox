@@ -30,8 +30,12 @@ type RestoreConfig struct {
 	// Explicit guest security requires disk scope or SnapshotDiskOnly.
 	SecurityProfile SecurityProfile
 	// Nil omits a lifetime override; explicit zero requests immediate expiry.
-	MaxDuration                 *time.Duration
-	IdleTimeout                 *time.Duration
+	MaxDuration *time.Duration
+	IdleTimeout *time.Duration
+	CowMemory   bool
+	// Forked enables copy-on-write restore memory.
+	//
+	// Deprecated: use CowMemory instead.
 	Forked                      bool
 	SnapshotDiskOnly            bool
 	SnapshotBase                string
@@ -202,7 +206,8 @@ func buildFFIRestoreOptions[T SnapshotSeed](snapshot T, config RestoreConfig) ff
 		MaxUDPConnections: config.MaxUDPConnections, DisableNetwork: config.DisableNetwork,
 		SecurityProfile: string(config.SecurityProfile),
 		MaxDurationSecs: seconds(config.MaxDuration), IdleTimeoutSecs: seconds(config.IdleTimeout),
-		Forked: config.Forked, DiskOnly: config.SnapshotDiskOnly,
+		// Keep the native wire spelling stable across SDK/runtime versions.
+		Forked: config.CowMemory || config.Forked, DiskOnly: config.SnapshotDiskOnly,
 		SnapshotBase: config.SnapshotBase, User: config.User, LogLevel: string(config.LogLevel),
 		ExternalMountPolicy:         string(config.ExternalMountPolicy),
 		DangerouslyInheritResources: config.DangerouslyInheritResources,

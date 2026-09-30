@@ -254,7 +254,7 @@ msb create --replace-with-timeout 0 python --name worker    # SIGKILL immediatel
 Restore into a new sandbox. Disk snapshots boot fresh; full snapshots resume execution. Cloud supports disk restore. Use `msb exec` to run new commands. The existing `msb restore`, `msb sandbox restore`, and `msb sbx restore` forms accept the same flags.
 
 ```bash
-msb snap restore devbox:ready --name worker --forked
+msb snap restore devbox:ready --name worker --cow-mem
 msb exec worker -- echo hello
 msb snap restore ./saved.msb --name disk-copy --disk-only
 ```
@@ -262,8 +262,9 @@ msb snap restore ./saved.msb --name disk-copy --disk-only
 | Flag | Description |
 |------|-------------|
 | `-n`, `--name` | Required destination sandbox name |
-| `--forked` | Restore full snapshots using private CoW memory |
-| `--disk-only` | Restore only the disk from a full snapshot; conflicts with `--forked` |
+| `--cow-mem` | Restore full snapshots using private CoW memory; off by default |
+| `--forked` | Deprecated alias for `--cow-mem`; emits a warning |
+| `--disk-only` | Restore only the disk from a full snapshot; conflicts with `--cow-mem` and `--forked` |
 | `--snapshot-base` | Exact base snapshot or archive for a dependent export |
 | `--allow-missing-resources` | Resume with missing external filesystems or additional disks unavailable, with warnings; full restore otherwise requires their bindings |
 | `-v`, `--volume` | Bind `SOURCE:GUEST[:OPTIONS]`, or select a private captured disk with `GUEST` alone |
@@ -292,7 +293,7 @@ Full restore must keep captured CPU and memory settings and cannot apply a guest
 
 Network flags replace the destination policy. `--net-rule` requires `--net-default` or `--no-net`; omitting all policy flags keeps configured defaults. Restore requires a new name and does not accept a startup command.
 
-Restore and branch do not reuse host resources by default. Map directories with `-v /host/path:/guest/path`, select a private captured disk with `-v /guest/path`, and publish new listeners with `-p HOST:GUEST`. Full restore refuses missing external filesystems and additional disks unless `--allow-missing-resources` is explicit. Opting out leaves those devices unavailable: backend I/O returns errors, although data cached in guest RAM may remain readable. Disk errors can abort a guest filesystem journal or make it read-only. Warnings remain visible with `--quiet`. `--external-mount-policy relaxed` permits supported stale-object mismatches; it does not waive missing backing. `--dangerously-inherit-resources` authorizes validated source-local bindings, not missing ones. Direct branching retains its existing unavailable-resource behavior. Root and owned storage are always reconstructed; the opt-out cannot waive corrupt or missing snapshot data. Custom vsock routes are not inherited; use `--vsock HOST_PATH:PORT` to authorize a service for clients to reconnect to.
+Restore and fork do not reuse host resources by default. Map directories with `-v /host/path:/guest/path`, select a private captured disk with `-v /guest/path`, and publish new listeners with `-p HOST:GUEST`. Full restore refuses missing external filesystems and additional disks unless `--allow-missing-resources` is explicit. Opting out leaves those devices unavailable: backend I/O returns errors, although data cached in guest RAM may remain readable. Disk errors can abort a guest filesystem journal or make it read-only. Warnings remain visible with `--quiet`. `--external-mount-policy relaxed` permits supported stale-object mismatches; it does not waive missing backing. `--dangerously-inherit-resources` authorizes validated source-local bindings, not missing ones. Direct forking retains its existing unavailable-resource behavior. Root and owned storage are always reconstructed; the opt-out cannot waive corrupt or missing snapshot data. Custom vsock routes are not inherited; use `--vsock HOST_PATH:PORT` to authorize a service for clients to reconnect to.
 
 ```bash
 msb snap restore saved.msb --name worker -v /srv/project:/work -v /data
@@ -353,22 +354,26 @@ msb resume devbox
 `pause --guest-flush required` flushes captured persistent filesystems before pausing, so a later disk snapshot can reuse that boundary without resuming. The default `auto` and explicit `skip` omit optional writeback; mandatory storage barriers remain. An already-paused VM without the required flush fails rather than resuming implicitly. `resume` has no flush option. See [guest filesystem flush](/sandboxes/snapshots#guest-flushing).
 
 <span id="msb-sandbox-branch" />
+<span id="msb-branch" />
+<span id="msb-sandbox-fork" />
 
-## msb branch
+## msb fork
 
-<Tooltip tip="Branching is not yet available on cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+`msb branch` remains a deprecated alias. Use `fork` in new scripts.
+
+<Tooltip tip="Forking is not yet available on cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 Create a local child from running or paused execution without saving a snapshot. Memory is shared through copy-on-write; each child’s writes stay private.
 
 ```bash
-msb branch devbox -n experiment
+msb fork devbox -n experiment
 ```
 
 Use `--names` to capture once and start several independent children from the same state:
 
 ```bash
-msb branch devbox --names alice bob charlie
-msb branch devbox --names worker-{1..10} # Bash/Zsh expand the names
+msb fork devbox --names alice bob charlie
+msb fork devbox --names worker-{1..10} # Bash/Zsh expand the names
 ```
 
 | Flag | Description |
@@ -379,11 +384,11 @@ msb branch devbox --names worker-{1..10} # Bash/Zsh expand the names
 | `--integrity` | Record disk content hashes |
 | `-q`, `--quiet` | Suppress progress |
 
-Both branch forms accept `--guest-flush auto|required|skip`. Auto and skip preserve dirty memory without flushing root or owned block filesystems; required adds writeback. Host-backed directory synchronization and host disk barriers remain in effect.
+Both fork forms accept `--guest-flush auto|required|skip`. Auto and skip preserve dirty memory without flushing root or owned block filesystems; required adds writeback. Host-backed directory synchronization and host disk barriers remain in effect.
 
 Volume, port, TCP accept queue size, user, vsock, inheritance, and mount-policy flags match [`restore`](#msb-restore).
 
-Batch branching captures once. Results follow input order; failed children produce a nonzero exit status without removing successful ones.
+Batch forking captures once. Results follow input order; failed children produce a nonzero exit status without removing successful ones.
 
 <span id="msb-sandbox-restart" />
 

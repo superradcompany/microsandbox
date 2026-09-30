@@ -134,11 +134,11 @@ const DEFERRED_CLOSE_LIMIT: u16 = 64;
 /// A single inbound connection relay (host socket ↔ smoltcp socket).
 struct InboundRelay {
     handle: SocketHandle,
-    /// Send data from smoltcp socket to host relay task.
-    to_host: mpsc::Sender<Bytes>,
+    /// Sends guest data to the host. Dropped after guest FIN and buffered data drain.
+    to_host: Option<mpsc::Sender<Bytes>>,
     /// Data removed from smoltcp while the host relay channel was full.
     read_buf: Option<Bytes>,
-    /// Receive data from host relay task to write to smoltcp socket.
+    /// Receives host data. Sender closure signals host EOF or relay task exit.
     from_host: mpsc::Receiver<Bytes>,
     /// Partial data that couldn't be fully written to smoltcp socket.
     write_buf: Option<(Bytes, usize)>,
@@ -284,7 +284,7 @@ impl PortPublisher {
 
             self.connections.push(InboundRelay {
                 handle,
-                to_host: to_host_tx,
+                to_host: Some(to_host_tx),
                 read_buf: None,
                 from_host: from_host_rx,
                 write_buf: None,
@@ -301,7 +301,12 @@ impl PortPublisher {
             let socket = sockets.get_mut::<tcp::Socket>(relay.handle);
 
             // Detect relay task exit — close the smoltcp socket.
-            if relay.to_host.is_closed() {
+            let relay_exited = match &relay.to_host {
+                Some(to_host) => to_host.is_closed(),
+                // After guest FIN, use the remaining channel to detect host EOF or task exit.
+                None => relay.from_host.is_closed(),
+            };
+            if relay_exited {
                 write_host_data(socket, relay);
                 if relay.write_buf.is_none() {
                     socket.close();
@@ -317,29 +322,55 @@ impl PortPublisher {
             }
 
             // smoltcp → host: flush read_buf first, then read from socket.
-            if let Some(pending) = relay.read_buf.take()
-                && let Err(unsent) = try_send_to_host_relay(&relay.to_host, pending)
-            {
-                relay.read_buf = Some(unsent);
-            }
+            if let Some(to_host) = &relay.to_host {
+                if let Some(pending) = relay.read_buf.take()
+                    && let Err(unsent) = try_send_to_host_relay(to_host, pending)
+                {
+                    relay.read_buf = Some(unsent);
+                }
 
-            if relay.read_buf.is_none() {
-                while socket.can_recv() {
-                    match socket.recv_slice(&mut relay_buf) {
-                        Ok(n) if n > 0 => {
-                            let data = Bytes::copy_from_slice(&relay_buf[..n]);
-                            if let Err(unsent) = try_send_to_host_relay(&relay.to_host, data) {
-                                relay.read_buf = Some(unsent);
-                                break;
+                if relay.read_buf.is_none() {
+                    while socket.can_recv() {
+                        match socket.recv_slice(&mut relay_buf) {
+                            Ok(n) if n > 0 => {
+                                let data = Bytes::copy_from_slice(&relay_buf[..n]);
+                                if let Err(unsent) = try_send_to_host_relay(to_host, data) {
+                                    relay.read_buf = Some(unsent);
+                                    break;
+                                }
                             }
+                            _ => break,
                         }
-                        _ => break,
                     }
+                }
+
+                // CLOSE-WAIT covers guest-first FIN; the other states cover FIN
+                // after the host half-closes. Forward EOF only after draining guest data.
+                if matches!(
+                    socket.state(),
+                    tcp::State::CloseWait
+                        | tcp::State::LastAck
+                        | tcp::State::Closing
+                        | tcp::State::TimeWait
+                ) && relay.read_buf.is_none()
+                    && !socket.can_recv()
+                {
+                    relay.to_host = None;
                 }
             }
 
             // host → smoltcp: write pending data, then drain channel.
             write_host_data(socket, relay);
+
+            // Forward host EOF after draining its data and completing the handshake.
+            // Closing in SYN-SENT would drop the connection instead of sending FIN.
+            if relay.from_host.is_closed()
+                && relay.from_host.is_empty()
+                && relay.write_buf.is_none()
+                && socket.may_send()
+            {
+                socket.close();
+            }
         }
     }
 
@@ -848,7 +879,7 @@ fn try_send_to_host_relay(to_host: &mpsc::Sender<Bytes>, data: Bytes) -> Result<
     to_host.try_send(data).map_err(|err| err.into_inner())
 }
 
-/// Relay task: bridges a host TcpStream to channels connected to smoltcp.
+/// Bridges a host TCP stream to smoltcp channels, closing each direction independently.
 async fn inbound_relay_task(
     stream: TcpStream,
     mut to_host_rx: mpsc::Receiver<Bytes>,
@@ -857,11 +888,13 @@ async fn inbound_relay_task(
 ) -> std::io::Result<()> {
     let (mut rx, mut tx) = stream.into_split();
     let mut buf = vec![0u8; RELAY_BUF_SIZE];
+    let mut from_host_tx = Some(from_host_tx);
+    let mut guest_eof = false;
 
     loop {
         tokio::select! {
             // smoltcp → host: data from guest arrives via channel.
-            data = to_host_rx.recv() => {
+            data = to_host_rx.recv(), if !guest_eof => {
                 match data {
                     Some(bytes) => {
                         // Wake as soon as recv frees channel capacity. Waiting
@@ -873,16 +906,30 @@ async fn inbound_relay_task(
                             break;
                         }
                     }
-                    None => break,
+                    None => {
+                        guest_eof = true;
+                        if tx.shutdown().await.is_err() || from_host_tx.is_none() {
+                            break;
+                        }
+                    }
                 }
             }
 
             // host → smoltcp: data from host client to write to guest.
-            result = rx.read(&mut buf) => {
+            result = rx.read(&mut buf), if from_host_tx.is_some() => {
                 match result {
-                    Ok(0) => break,
+                    Ok(0) => {
+                        from_host_tx = None;
+                        shared.proxy_wake.wake();
+                        if guest_eof {
+                            break;
+                        }
+                    }
                     Ok(n) => {
                         let data = Bytes::copy_from_slice(&buf[..n]);
+                        let Some(from_host_tx) = &from_host_tx else {
+                            break;
+                        };
                         if from_host_tx.send(data).await.is_err() {
                             break;
                         }
@@ -893,6 +940,12 @@ async fn inbound_relay_task(
                         break;
                     }
                 }
+            }
+
+            // The poll loop dropped the relay (e.g. guest reset), so the
+            // guest connection is gone. Stop waiting on an idle host.
+            _ = async { from_host_tx.as_ref().unwrap().closed().await }, if from_host_tx.is_some() => {
+                break;
             }
         }
     }
@@ -948,7 +1001,335 @@ fn write_host_data(socket: &mut tcp::Socket<'_>, relay: &mut InboundRelay) {
 
 #[cfg(test)]
 mod tests {
+    use smoltcp::iface::Config;
+    use smoltcp::phy::{Loopback, Medium};
+    use smoltcp::time::{Duration as SmolDuration, Instant as SmolInstant};
+    use smoltcp::wire::{IpAddress, IpCidr};
+
     use super::*;
+
+    const TEST_GUEST_PORT: u16 = 8080;
+
+    /// Simulated time each harness step advances the smoltcp clock.
+    const STEP_MILLIS: u64 = 50;
+
+    /// Step budget for data and EOF to cross the relay: 5 s of simulated
+    /// time, below smoltcp's 10 s TIME-WAIT. A FIN that only reaches the
+    /// host once TIME-WAIT expires and the relay is dropped must fail.
+    const PROMPT_STEPS: usize = 100;
+
+    /// Step budget for relay cleanup, which may wait out TIME-WAIT.
+    const CLEANUP_STEPS: usize = 2000;
+
+    /// Exercises the real relay with a loopback smoltcp guest and a host TCP client.
+    struct Harness {
+        device: Loopback,
+        iface: Interface,
+        sockets: SocketSet<'static>,
+        publisher: PortPublisher,
+        guest: SocketHandle,
+        shared: Arc<SharedState>,
+        now: SmolInstant,
+    }
+
+    impl Harness {
+        fn new() -> Self {
+            let mut device = Loopback::new(Medium::Ethernet);
+            let config = Config::new(EthernetAddress([0x02, 0, 0, 0, 0, 1]).into());
+            let mut iface = Interface::new(config, &mut device, SmolInstant::from_millis(0));
+            iface.update_ip_addrs(|addrs| {
+                addrs
+                    .push(IpCidr::new(IpAddress::v4(127, 0, 0, 1), 8))
+                    .unwrap();
+            });
+
+            let mut sockets = SocketSet::new(vec![]);
+            let mut guest = tcp::Socket::new(
+                tcp::SocketBuffer::new(vec![0u8; TCP_RX_BUF_SIZE]),
+                tcp::SocketBuffer::new(vec![0u8; TCP_TX_BUF_SIZE]),
+            );
+            guest.listen(TEST_GUEST_PORT).unwrap();
+            let guest = sockets.add(guest);
+
+            let (inbound_tx, inbound_rx) = mpsc::channel(1);
+            let publisher = PortPublisher {
+                inbound_rx,
+                _inbound_tx: inbound_tx,
+                connections: Vec::new(),
+                guest_ip: Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+                guest_ipv4: Some(Ipv4Addr::LOCALHOST),
+                guest_ipv6: None,
+                ephemeral_port: Arc::new(AtomicU16::new(UDP_EPHEMERAL_PORT_START)),
+                max_inbound: 256,
+                udp_routes: Arc::new(Mutex::new(HashMap::new())),
+            };
+
+            Self {
+                device,
+                iface,
+                sockets,
+                publisher,
+                guest,
+                shared: Arc::new(SharedState::new(4)),
+                now: SmolInstant::from_millis(0),
+            }
+        }
+
+        /// Queues a connection for the publisher and returns the host client end.
+        async fn connect_host(&mut self) -> TcpStream {
+            let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
+                .await
+                .unwrap();
+            let client = TcpStream::connect(listener.local_addr().unwrap())
+                .await
+                .unwrap();
+            let (stream, _) = listener.accept().await.unwrap();
+            self.publisher
+                ._inbound_tx
+                .try_send(InboundConnection {
+                    stream,
+                    guest_port: TEST_GUEST_PORT,
+                })
+                .unwrap();
+            client
+        }
+
+        /// One poll-loop pass, then give the relay tasks time to run.
+        async fn step(&mut self) {
+            self.now += SmolDuration::from_millis(STEP_MILLIS);
+            self.iface
+                .poll(self.now, &mut self.device, &mut self.sockets);
+            self.publisher.accept_inbound(
+                &mut self.iface,
+                &mut self.sockets,
+                &self.shared,
+                &tokio::runtime::Handle::current(),
+            );
+            self.publisher.relay_data(&mut self.sockets);
+            self.iface
+                .poll(self.now, &mut self.device, &mut self.sockets);
+            self.publisher.cleanup_closed(&mut self.sockets);
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+
+        async fn run_until(
+            &mut self,
+            what: &str,
+            max_steps: usize,
+            mut done: impl FnMut(&mut Self) -> bool,
+        ) {
+            for _ in 0..max_steps {
+                if done(self) {
+                    return;
+                }
+                self.step().await;
+            }
+            panic!("timed out waiting for {what}");
+        }
+
+        fn guest(&mut self) -> &mut tcp::Socket<'static> {
+            self.sockets.get_mut::<tcp::Socket>(self.guest)
+        }
+
+        fn guest_recv(&mut self, buf: &mut Vec<u8>) {
+            let guest = self.guest();
+            while guest.can_recv() {
+                guest
+                    .recv(|data| {
+                        buf.extend_from_slice(data);
+                        (data.len(), ())
+                    })
+                    .unwrap();
+            }
+        }
+
+        async fn wait_for_guest_accept(&mut self) {
+            self.run_until("guest to accept the connection", PROMPT_STEPS, |h| {
+                !matches!(
+                    h.guest().state(),
+                    tcp::State::Listen | tcp::State::SynReceived
+                )
+            })
+            .await;
+        }
+
+        async fn guest_recv_to_eof(&mut self) -> Vec<u8> {
+            let mut buf = Vec::new();
+            self.run_until("guest to receive EOF", PROMPT_STEPS, |h| {
+                h.guest_recv(&mut buf);
+                !h.guest().may_recv()
+            })
+            .await;
+            buf
+        }
+
+        async fn assert_relays_cleaned_up(&mut self) {
+            self.run_until("publisher to drop the relay", CLEANUP_STEPS, |h| {
+                h.publisher.connections.is_empty()
+            })
+            .await;
+            assert_eq!(
+                self.sockets.iter().count(),
+                1,
+                "only the guest socket should remain"
+            );
+            // Each relay task holds a clone of the shared state; the count
+            // drops back to one only once the task has returned.
+            self.run_until("relay task to exit", PROMPT_STEPS, |h| {
+                Arc::strong_count(&h.shared) == 1
+            })
+            .await;
+        }
+    }
+
+    fn spawn_read_to_end(mut client: TcpStream) -> tokio::task::JoinHandle<Vec<u8>> {
+        tokio::spawn(async move {
+            let mut body = Vec::new();
+            client.read_to_end(&mut body).await.unwrap();
+            body
+        })
+    }
+
+    /// Regression for #1705: close-delimited HTTP must deliver EOF.
+    #[tokio::test]
+    async fn guest_close_delivers_eof_to_host_client() {
+        let mut h = Harness::new();
+        let client = h.connect_host().await;
+        h.wait_for_guest_accept().await;
+
+        let response = b"HTTP/1.0 200 OK\r\n\r\nhi";
+        h.guest().send_slice(response).unwrap();
+        h.guest().close();
+
+        let reader = spawn_read_to_end(client);
+        h.run_until("host client to see EOF", PROMPT_STEPS, |_| {
+            reader.is_finished()
+        })
+        .await;
+        assert_eq!(reader.await.unwrap(), response);
+
+        h.assert_relays_cleaned_up().await;
+    }
+
+    #[tokio::test]
+    async fn guest_close_keeps_host_to_guest_direction_open() {
+        let mut h = Harness::new();
+        let mut client = h.connect_host().await;
+        h.wait_for_guest_accept().await;
+
+        h.guest().send_slice(b"bye").unwrap();
+        h.guest().close();
+
+        let mut body = Vec::new();
+        let mut eof = false;
+        h.run_until(
+            "host client to see guest data and EOF",
+            PROMPT_STEPS,
+            |_| {
+                let mut chunk = [0u8; 64];
+                loop {
+                    match client.try_read(&mut chunk) {
+                        Ok(0) => {
+                            eof = true;
+                            break;
+                        }
+                        Ok(n) => body.extend_from_slice(&chunk[..n]),
+                        Err(_) => break,
+                    }
+                }
+                eof
+            },
+        )
+        .await;
+        assert_eq!(body, b"bye");
+
+        // The host can still send after the guest's FIN.
+        client.write_all(b"late request").await.unwrap();
+        client.shutdown().await.unwrap();
+        assert_eq!(h.guest_recv_to_eof().await, b"late request");
+
+        drop(client);
+        h.assert_relays_cleaned_up().await;
+    }
+
+    #[tokio::test]
+    async fn host_half_close_keeps_guest_to_host_direction_open() {
+        let mut h = Harness::new();
+        let mut client = h.connect_host().await;
+        client.write_all(b"request").await.unwrap();
+        client.shutdown().await.unwrap();
+
+        h.wait_for_guest_accept().await;
+        assert_eq!(h.guest_recv_to_eof().await, b"request");
+        assert_eq!(h.guest().state(), tcp::State::CloseWait);
+
+        let reader = spawn_read_to_end(client);
+        h.guest().send_slice(b"response").unwrap();
+        h.guest().close();
+        h.run_until("host client to see EOF", PROMPT_STEPS, |_| {
+            reader.is_finished()
+        })
+        .await;
+        assert_eq!(reader.await.unwrap(), b"response");
+
+        h.assert_relays_cleaned_up().await;
+    }
+
+    #[tokio::test]
+    async fn host_close_before_guest_accept_still_reaches_guest() {
+        let mut h = Harness::new();
+        let mut client = h.connect_host().await;
+        // The relay task sees host EOF while the guest handshake is pending.
+        client.shutdown().await.unwrap();
+
+        h.wait_for_guest_accept().await;
+        assert!(h.guest_recv_to_eof().await.is_empty());
+
+        let reader = spawn_read_to_end(client);
+        h.guest().send_slice(b"response").unwrap();
+        h.guest().close();
+        h.run_until("host client to see EOF", PROMPT_STEPS, |_| {
+            reader.is_finished()
+        })
+        .await;
+        assert_eq!(reader.await.unwrap(), b"response");
+
+        h.assert_relays_cleaned_up().await;
+    }
+
+    #[tokio::test]
+    async fn simultaneous_close_relays_both_directions() {
+        let mut h = Harness::new();
+        let mut client = h.connect_host().await;
+        h.wait_for_guest_accept().await;
+
+        // Both sides send and close before either has seen the other's FIN.
+        client.write_all(b"request").await.unwrap();
+        client.shutdown().await.unwrap();
+        h.guest().send_slice(b"response").unwrap();
+        h.guest().close();
+
+        let reader = spawn_read_to_end(client);
+        assert_eq!(h.guest_recv_to_eof().await, b"request");
+        h.run_until("host client to see EOF", PROMPT_STEPS, |_| {
+            reader.is_finished()
+        })
+        .await;
+        assert_eq!(reader.await.unwrap(), b"response");
+
+        h.assert_relays_cleaned_up().await;
+    }
+
+    #[tokio::test]
+    async fn guest_reset_ends_relay_while_host_idle() {
+        let mut h = Harness::new();
+        let client = h.connect_host().await;
+        h.wait_for_guest_accept().await;
+
+        h.guest().abort();
+        h.assert_relays_cleaned_up().await;
+        drop(client);
+    }
 
     #[tokio::test]
     async fn queue_inbound_connection_wakes_poll_loop() {

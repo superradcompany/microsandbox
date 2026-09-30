@@ -484,7 +484,7 @@ impl MountBuilder {
     }
 
     /// Select the snapshot's disk contents at this guest path for a private child disk.
-    /// Only restore and branch builders accept this operation-local choice.
+    /// Only restore and fork builders accept this operation-local choice.
     pub fn captured(mut self) -> Self {
         self.mount = MountKind::Captured;
         self

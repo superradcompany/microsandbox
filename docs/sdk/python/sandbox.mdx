@@ -24,6 +24,33 @@ Use `connect_or_create` when a named sandbox might already exist. It connects to
 
 Lifecycle methods on a `Sandbox` or `SandboxHandle` stay attached to its opaque `id`. If the name is removed and reused, an old receiver raises `SandboxReplacedError` instead of acting on the replacement. See [Reuse or create a named sandbox](/sandboxes/lifecycle#reuse-or-create-a-named-sandbox) for examples.
 
+## Forking
+
+Forking duplicates a running or paused local sandbox without saving a reusable snapshot. It shares memory through copy-on-write, keeps child writes private, and returns the source to its previous state. These methods are available on both `Sandbox` and `SandboxHandle`. Each child requires an unused name. See [forking](/sandboxes/snapshots#forking) for examples, resource bindings, and backend limits.
+
+### fork() and fork_many()
+
+```python
+async def fork(self, name: str, *, record_integrity: bool = False,
+               guest_flush: GuestFlush | None = None) -> Sandbox: ...
+async def fork_many(self, names: list[str], *, record_integrity: bool = False,
+                    guest_flush: GuestFlush | None = None) -> list[ForkOutcome]: ...
+```
+
+`record_integrity` records disk hashes. `guest_flush` accepts `GuestFlush.AUTO`, `REQUIRED`, or `SKIP`; omitting it uses `AUTO`. Import `GuestFlush` from `microsandbox`.
+
+### ForkOutcome
+
+| Property | Meaning |
+| --- | --- |
+| `name` | Requested child name |
+| `sandbox` | Started `Sandbox`, or `None` on failure |
+| `error` | Exception on failure, or `None` on success |
+
+`branch()` and `branch_many()` remain deprecated aliases and emit `DeprecationWarning`. `BranchOutcome` aliases `ForkOutcome`.
+
+Batch results follow input order. Validation or capture failures fail the whole call; an individual startup failure appears in that child's outcome, and successful siblings remain available. Stop successful children explicitly when finished.
+
 ## Sandbox
 
 <p className="msb-member-group">Instance properties</p>

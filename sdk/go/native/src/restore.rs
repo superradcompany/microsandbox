@@ -123,7 +123,7 @@ fn builder(name: String, opts: &RestoreOptions) -> Result<RestoreBuilder, FfiErr
         builder = builder.idle_timeout(seconds);
     }
     if opts.forked {
-        builder = builder.forked();
+        builder = builder.cow_memory();
     }
     if opts.disk_only {
         builder = builder.disk_only();

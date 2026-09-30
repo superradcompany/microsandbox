@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   GiB,
   ImageBuilder,
@@ -1013,5 +1013,25 @@ describe("NetworkBuilder HTTP denial messages", () => {
     expect(new NetworkBuilder().http((h) => h.denyMessage("")).build().http.denyMessage).toBe("");
     expect(new NetworkBuilder().http((h) => h).build().http.denyMessage).toBeUndefined();
     expect(new NetworkBuilder().http((h) => h.denyMessage("keep")).http((h) => h).build().http.denyMessage).toBe("keep");
+  });
+});
+
+
+describe("restore copy-on-write memory naming", () => {
+  it("keeps forked as a fluent alias and warns only for the deprecated spelling", async () => {
+    const warning = vi.spyOn(process, "emitWarning").mockImplementation(() => {});
+    try {
+      const builder = Sandbox.restore("saved").name("child");
+      expect(builder.cowMemory()).toBe(builder);
+      expect(warning).not.toHaveBeenCalled();
+      expect(builder.forked()).toBe(builder);
+      expect(builder.forked()).toBe(builder);
+      await new Promise<void>(resolve => setImmediate(resolve));
+      expect(warning).toHaveBeenCalledTimes(1);
+      expect(warning.mock.calls[0][0]).toContain("use cowMemory()");
+      expect(warning.mock.calls[0][1]).toBe("DeprecationWarning");
+    } finally {
+      warning.mockRestore();
+    }
   });
 });

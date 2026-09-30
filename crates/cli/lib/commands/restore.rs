@@ -2,7 +2,7 @@
 
 use clap::Args;
 use microsandbox::sandbox::{
-    BranchBuilder, BranchManyBuilder, RestoreBuilder, Sandbox, SecurityProfile,
+    ForkBuilder, ForkManyBuilder, RestoreBuilder, Sandbox, SecurityProfile,
 };
 
 #[cfg(feature = "net")]
@@ -24,6 +24,9 @@ pub struct RestoreArgs {
     pub name: String,
     /// Restore captured RAM using private copy-on-write mappings.
     #[arg(long, conflicts_with = "disk_only")]
+    pub cow_mem: bool,
+    /// Deprecated alias for --cow-mem.
+    #[arg(long, hide = true, conflicts_with = "disk_only")]
     pub forked: bool,
     /// Cold-boot only the captured disk, without restoring processes or RAM.
     #[arg(long)]
@@ -195,7 +198,10 @@ pub async fn run(
         builder = builder.log_level(level);
     }
     if args.forked {
-        builder = builder.forked();
+        ui::warn("--forked is deprecated; use --cow-mem instead");
+    }
+    if args.cow_mem || args.forked {
+        builder = builder.cow_memory();
     }
     if args.disk_only {
         builder = builder.disk_only();
@@ -281,8 +287,8 @@ macro_rules! apply_resources {
 }
 
 apply_resources!(apply_restore, RestoreBuilder);
-apply_resources!(apply_branch, BranchBuilder);
-apply_resources!(apply_branch_many, BranchManyBuilder);
+apply_resources!(apply_branch, ForkBuilder);
+apply_resources!(apply_branch_many, ForkManyBuilder);
 
 //--------------------------------------------------------------------------------------------------
 // Tests
