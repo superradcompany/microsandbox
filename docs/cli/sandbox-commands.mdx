@@ -262,8 +262,9 @@ msb snap restore ./saved.msb --name disk-copy --disk-only
 | Flag | Description |
 |------|-------------|
 | `-n`, `--name` | Required destination sandbox name |
-| `--cow-mem` | Restore full snapshots using private CoW memory |
-| `--disk-only` | Restore only the disk from a full snapshot; conflicts with `--cow-mem` |
+| `--cow-mem` | Restore full snapshots using private CoW memory; off by default |
+| `--forked` | Deprecated alias for `--cow-mem`; emits a warning |
+| `--disk-only` | Restore only the disk from a full snapshot; conflicts with `--cow-mem` and `--forked` |
 | `--snapshot-base` | Exact base snapshot or archive for a dependent export |
 | `--allow-missing-resources` | Resume with missing external filesystems or additional disks unavailable, with warnings; full restore otherwise requires their bindings |
 | `-v`, `--volume` | Bind `SOURCE:GUEST[:OPTIONS]`, or select a private captured disk with `GUEST` alone |

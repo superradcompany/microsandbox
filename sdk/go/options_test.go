@@ -44,6 +44,32 @@ func TestDedicatedRestoreOptions(t *testing.T) {
 	}
 }
 
+func TestRestoreCowMemoryAliases(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		config RestoreConfig
+		option RestoreOption
+		want   bool
+	}{
+		{"default", RestoreConfig{}, nil, false},
+		{"canonical option", RestoreConfig{}, WithCowMemory(), true},
+		{"legacy option", RestoreConfig{}, WithForked(), true},
+		{"canonical field", RestoreConfig{CowMemory: true}, nil, true},
+		{"legacy field", RestoreConfig{Forked: true}, nil, true},
+		{"both fields", RestoreConfig{CowMemory: true, Forked: true}, nil, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			config := tc.config
+			if tc.option != nil {
+				tc.option(&config)
+			}
+			if got := buildFFIRestoreOptions("saved", config).Forked; got != tc.want {
+				t.Fatalf("wire CoW memory = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestWithRootDiskManaged(t *testing.T) {
 	o := SandboxConfig{}
 	WithRootDisk(RootDisk.Managed(8192))(&o)
@@ -1098,7 +1124,7 @@ func TestForkOptionsKeepBranchAliases(t *testing.T) {
 	// Old variadic method types remain assignable after the type aliases change.
 	var _ func(*Sandbox, context.Context, string, ...BranchOption) (*Sandbox, error) = (*Sandbox).Fork
 	var _ func(*SandboxHandle, context.Context, []string, ...BranchOption) ([]BranchOutcome, error) = (*SandboxHandle).ForkMany
-	if _, ok := reflect.TypeOf(RestoreConfig{}).FieldByName("Forked"); ok {
-		t.Fatal("restore still exposes the removed Forked field")
+	if _, ok := reflect.TypeOf(RestoreConfig{}).FieldByName("Forked"); !ok {
+		t.Fatal("restore lost the deprecated Forked field")
 	}
 }

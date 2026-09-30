@@ -25,6 +25,9 @@ pub struct RestoreArgs {
     /// Restore captured RAM using private copy-on-write mappings.
     #[arg(long, conflicts_with = "disk_only")]
     pub cow_mem: bool,
+    /// Deprecated alias for --cow-mem.
+    #[arg(long, hide = true, conflicts_with = "disk_only")]
+    pub forked: bool,
     /// Cold-boot only the captured disk, without restoring processes or RAM.
     #[arg(long)]
     pub disk_only: bool,
@@ -194,7 +197,10 @@ pub async fn run(
     if let Some(level) = log_level {
         builder = builder.log_level(level);
     }
-    if args.cow_mem {
+    if args.forked {
+        ui::warn("--forked is deprecated; use --cow-mem instead");
+    }
+    if args.cow_mem || args.forked {
         builder = builder.cow_memory();
     }
     if args.disk_only {

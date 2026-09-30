@@ -492,6 +492,13 @@ const (
 // THPPolicy selects the guest transparent huge-page policy at boot.
 type THPPolicy string
 
+// WithForked restores a full snapshot with private copy-on-write memory.
+//
+// Deprecated: use WithCowMemory instead.
+func WithForked() RestoreOption {
+	return func(o *RestoreConfig) { o.Forked = true }
+}
+
 // WithCowMemory restores a full snapshot with private copy-on-write memory.
 // It cannot be combined with a fresh boot or disk-only restore.
 func WithCowMemory() RestoreOption {

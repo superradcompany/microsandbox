@@ -6,7 +6,7 @@ from microsandbox import Network, NetworkPolicy, Sandbox, SecurityProfile
 
 
 @pytest.mark.parametrize(
-    "option", ["image", "network", "cmd", "replace", "detached", "entrypoint", "forked"],
+    "option", ["image", "network", "cmd", "replace", "detached", "entrypoint"],
 )
 def test_restore_rejects_create_options(option):
     with pytest.raises(TypeError, match="unexpected restore option"):
@@ -22,6 +22,28 @@ def test_create_rejects_restore_options(option):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("method", ["restore", "restore_with_progress"])
+@pytest.mark.parametrize("options", [
+    {"forked": True},
+    {"forked": False},
+    {"forked": True, "cow_memory": True},
+])
+async def test_legacy_cow_memory_alias_warns(tmp_path, method, options):
+    with (
+        pytest.warns(DeprecationWarning, match="forked is deprecated; use cow_memory"),
+        pytest.raises(FileNotFoundError),
+    ):
+        result = getattr(Sandbox, method)(
+            tmp_path / "missing", name="restore-alias", **options,
+        )
+        if method == "restore":
+            await result
+        else:
+            await result.result()
+
+
+@pytest.mark.asyncio
+@pytest.mark.filterwarnings("error::DeprecationWarning")
 async def test_restore_missing_artifact_does_not_boot(tmp_path):
     with pytest.raises(FileNotFoundError):
         await Sandbox.restore(tmp_path / "missing", name="restore-validation", cow_memory=True)
@@ -142,12 +164,6 @@ def test_restore_policy_rejects_broad_network_configuration():
 def test_restore_duration_rejects_invalid_values(option, value):
     with pytest.raises(ValueError):
         Sandbox.restore("missing", name="restore-controls", **{option: value})
-
-
-@pytest.mark.parametrize("method", ["restore", "restore_with_progress"])
-def test_restore_rejects_removed_forked_option(method):
-    with pytest.raises(TypeError, match=r"unexpected restore option.*forked"):
-        getattr(Sandbox, method)("missing", name="restore-validation", forked=True)
 
 
 def test_fork_public_surface_and_outcome_alias():

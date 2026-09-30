@@ -281,6 +281,8 @@ export interface NapiRestoreBuilderSetters {
   maxDuration(secs: number): this;
   idleTimeout(secs: number): this;
   cowMemory(): this;
+  /** @deprecated Use cowMemory() instead. */
+  forked(): this;
   diskOnly(): this;
   snapshotBase(base: string): this;
   logLevel(level: string): this;

@@ -721,6 +721,7 @@ child = await Sandbox.restore("api:baseline", name="api-restored", cow_memory=Tr
 | Control | Purpose |
 | --- | --- |
 | `cow_memory=True` | Share unchanged full-snapshot memory. |
+| `forked=True` | Deprecated alias for the same CoW memory policy; see [migration notes](/sandboxes/snapshots#migrating-restore-options). |
 | `disk_only=True` | Boot only the saved disk. |
 | `snapshot_base` | Supply an archive dependency. |
 | `Sandbox.restore()` | Return the restored sandbox. |

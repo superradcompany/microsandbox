@@ -209,6 +209,7 @@ pub(crate) fn restore_builder_from_args(
             "max_duration",
             "idle_timeout",
             "cow_memory",
+            "forked",
             "disk_only",
             "snapshot_base",
             "log_level",
@@ -291,7 +292,21 @@ pub(crate) fn restore_builder_from_args(
     if let Some(seconds) = restore_duration(kwargs, "idle_timeout")? {
         builder = builder.idle_timeout(seconds);
     }
-    if extract_opt::<bool>(kwargs, "cow_memory")?.unwrap_or(false) {
+    let legacy_cow = extract_opt::<bool>(kwargs, "forked")?;
+    if legacy_cow.is_some() {
+        PyModule::import(kwargs.py(), "warnings")?.call_method1(
+            "warn",
+            (
+                "forked is deprecated; use cow_memory instead",
+                kwargs
+                    .py()
+                    .get_type::<pyo3::exceptions::PyDeprecationWarning>(),
+                2,
+            ),
+        )?;
+    }
+    // Both spellings enable the same opt-in policy, like the CLI flags.
+    if extract_opt::<bool>(kwargs, "cow_memory")?.unwrap_or(false) || legacy_cow.unwrap_or(false) {
         builder = builder.cow_memory();
     }
     if extract_opt::<bool>(kwargs, "disk_only")?.unwrap_or(false) {

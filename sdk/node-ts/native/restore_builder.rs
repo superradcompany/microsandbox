@@ -192,6 +192,12 @@ impl JsRestoreBuilder {
         Ok(self)
     }
 
+    /// @deprecated Use cowMemory() instead.
+    #[napi]
+    pub fn forked(&mut self) -> Result<&Self> {
+        self.cow_memory()
+    }
+
     /// Restore a full snapshot with private copy-on-write memory.
     #[napi]
     pub fn cow_memory(&mut self) -> Result<&Self> {

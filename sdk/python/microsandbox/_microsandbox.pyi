@@ -116,6 +116,7 @@ class Sandbox:
         max_duration: float | None = None,
         idle_timeout: float | None = None,
         cow_memory: bool = False,
+        forked: bool = False,  # Deprecated: use cow_memory.
         disk_only: bool = False,
         snapshot_base: str | None = None,
         user: str | None = None,
@@ -145,6 +146,7 @@ class Sandbox:
         max_duration: float | None = None,
         idle_timeout: float | None = None,
         cow_memory: bool = False,
+        forked: bool = False,  # Deprecated: use cow_memory.
         disk_only: bool = False,
         snapshot_base: str | None = None,
         user: str | None = None,

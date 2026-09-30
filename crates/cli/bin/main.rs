@@ -1338,24 +1338,26 @@ mod sandbox_command_tests {
     }
 
     #[test]
-    fn fork_keeps_branch_alias_and_restore_rejects_forked() {
+    fn fork_and_restore_keep_deprecated_aliases() {
         for prefix in [&[][..], &["sandbox"][..], &["sbx"][..]] {
             for verb in ["fork", "branch"] {
                 let command = parse_sandbox(prefix, &[verb, "source", "--name", "child"]);
                 assert!(matches!(command, SandboxCommands::Fork(_)));
             }
-            let argv = ["msb"]
-                .into_iter()
-                .chain(prefix.iter().copied())
-                .chain(["restore", "saved", "--name", "child", "--forked"]);
-            assert!(Cli::try_parse_from(argv).is_err());
+            let command =
+                parse_sandbox(prefix, &["restore", "saved", "--name", "child", "--forked"]);
+            let SandboxCommands::Restore(args) = command else {
+                panic!("expected restore")
+            };
+            assert!(args.forked);
+            assert!(!args.cow_mem);
         }
         for prefix in ["snap", "snapshot"] {
             assert!(
                 Cli::try_parse_from([
                     "msb", prefix, "restore", "saved", "--name", "child", "--forked",
                 ])
-                .is_err()
+                .is_ok()
             );
         }
     }
@@ -1368,6 +1370,7 @@ mod sandbox_command_tests {
             assert!(!restored.is_resident_control());
             for extra in [
                 &["--cow-mem", "--disk-only"][..],
+                &["--forked", "--disk-only"][..],
                 &["--conf", "sandbox.yaml"][..],
                 &["--entrypoint", "sh"][..],
                 &["--", "sh"][..],

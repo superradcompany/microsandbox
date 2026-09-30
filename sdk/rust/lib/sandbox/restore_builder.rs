@@ -203,6 +203,12 @@ impl RestoreBuilder {
         self
     }
 
+    /// Deprecated spelling for copy-on-write memory during full-snapshot restore.
+    #[deprecated(note = "use cow_memory instead")]
+    pub fn forked(self) -> Self {
+        self.cow_memory()
+    }
+
     /// Cold-boot the captured disk instead of resuming captured execution.
     pub fn disk_only(mut self) -> Self {
         self.inner = self.inner.disk_only();
@@ -372,6 +378,10 @@ mod tests {
         let cow = ordinary.cow_memory();
         assert!(config(&cow).forked);
         assert!(!config(&cow).clone_for_persistence().forked);
+        #[allow(deprecated)]
+        let legacy = Sandbox::restore("saved").name("child").forked();
+        assert_eq!(config(&legacy).forked, config(&cow).forked);
+        assert!(!config(&legacy).clone_for_persistence().forked);
     }
 
     #[test]

@@ -857,6 +857,7 @@ child, err := m.RestoreSandbox(ctx, "api:baseline", "api-restored", m.WithCowMem
 | Control | Purpose |
 | --- | --- |
 | `WithCowMemory()` | Share unchanged full-snapshot memory. |
+| `WithForked() / RestoreConfig.Forked` | Deprecated alias for the same CoW memory policy; see [migration notes](/sandboxes/snapshots#migrating-restore-options). |
 | `WithSnapshotDiskOnly()` | Boot only the saved disk. |
 | `WithSnapshotBase(base)` | Supply an archive dependency. |
 | `RestoreSandbox` | Return the restored sandbox. |

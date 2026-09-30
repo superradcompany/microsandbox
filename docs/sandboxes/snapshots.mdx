@@ -451,7 +451,19 @@ Flushing does not save data still buffered by your application or commit databas
 
 A **generation** describes how snapshot history progresses. A **branch** describes a distinct path through that history. Taking successive snapshots advances a lineage; restoring an earlier snapshot and capturing new state creates a divergent path. A snapshot group is a namespace that can contain multiple paths, with a selected head. Branches here describe ancestry, not a separate live sandbox operation or a named branch-management API.
 
-**Forking** duplicates live execution. **Restoring** starts a sandbox from a saved snapshot. For copy-on-write memory during full restore, use `--cow-mem` in the CLI, `.cowMemory()` in TypeScript, `.cow_memory()` in Rust, `cow_memory=True` in Python, or `WithCowMemory()` in Go. The former `--forked` flag and corresponding SDK restore options have been removed. The MCP `sandbox_restore` tool retains its `forked` input for compatibility; it selects copy-on-write restore memory, not live forking.
+**Forking** duplicates live execution. **Restoring** starts a sandbox from a saved snapshot. For copy-on-write memory during full restore, use `--cow-mem` in the CLI, `.cowMemory()` in TypeScript, `.cow_memory()` in Rust, `cow_memory=True` in Python, or `WithCowMemory()` in Go. The former `--forked` flag and corresponding SDK restore options remain deprecated aliases with the same behavior. CoW restore memory is off by default; live forks always use it. The MCP `sandbox_restore` tool retains its `forked` input for compatibility; it selects copy-on-write restore memory, not live forking.
+
+### Migrating restore options
+
+Existing callers can migrate gradually. Keep using the old name until you update the caller; both spellings enable the same memory policy and retain the same restore validation.
+
+| Deprecated name | Preferred name | Deprecation notice |
+| --- | --- | --- |
+| CLI `--forked` | `--cow-mem` | Warning on stderr, including with `--quiet` |
+| TypeScript `.forked()` | `.cowMemory()` | `@deprecated` annotation and a Node `DeprecationWarning` once per process through the SDK |
+| Rust `.forked()` | `.cow_memory()` | Compiler deprecation warning |
+| Python `forked=True` | `cow_memory=True` | `DeprecationWarning`, subject to Python's warning filters |
+| Go `WithForked()` / `RestoreConfig.Forked` | `WithCowMemory()` / `RestoreConfig.CowMemory` | `Deprecated:` annotations for documentation and tooling |
 
 <span id="branching" />
 
