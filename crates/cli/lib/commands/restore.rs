@@ -24,7 +24,7 @@ pub struct RestoreArgs {
     pub name: String,
     /// Restore captured RAM using private copy-on-write mappings.
     #[arg(long, conflicts_with = "disk_only")]
-    pub forked: bool,
+    pub cow_mem: bool,
     /// Cold-boot only the captured disk, without restoring processes or RAM.
     #[arg(long)]
     pub disk_only: bool,
@@ -194,7 +194,7 @@ pub async fn run(
     if let Some(level) = log_level {
         builder = builder.log_level(level);
     }
-    if args.forked {
+    if args.cow_mem {
         builder = builder.forked();
     }
     if args.disk_only {

@@ -60,7 +60,7 @@ pub async fn run(args: BranchArgs) -> anyhow::Result<()> {
                 Ok(child) => {
                     super::common::display_restore_warnings(&child).await;
                     if !args.quiet {
-                        ui::success("Branched", child.name());
+                        ui::success("Forked", child.name());
                     }
                     child.detach().await;
                 }
@@ -95,10 +95,10 @@ pub async fn run(args: BranchArgs) -> anyhow::Result<()> {
     }
     let result = task.await;
     display.finish();
-    let child = result.map_err(|error| anyhow::anyhow!("branch task failed: {error}"))??;
+    let child = result.map_err(|error| anyhow::anyhow!("fork task failed: {error}"))??;
     super::common::display_restore_warnings(&child).await;
     if !args.quiet {
-        ui::success("Branched", child.name());
+        ui::success("Forked", child.name());
     }
     child.detach().await;
     Ok(())

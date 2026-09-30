@@ -26,7 +26,7 @@ const TOP_LEVEL_COMMAND_GROUPS: &[CommandGroup] = &[
     CommandGroup {
         heading: "Sandboxes",
         commands: &[
-            "run", "create", "restore", "modify", "start", "stop", "pause", "resume", "branch",
+            "run", "create", "restore", "modify", "start", "stop", "pause", "resume", "fork",
             "restart", "wait", "ping", "touch", "list", "status", "metrics", "remove", "exec",
             "copy", "logs", "ssh", "inspect", "sandbox",
         ],
@@ -733,7 +733,7 @@ fn requires_current_catalog(command: &Commands) -> bool {
                 | sandbox::SandboxCommands::Restore(_)
                 | sandbox::SandboxCommands::Start(_)
                 | sandbox::SandboxCommands::Restart(_)
-                | sandbox::SandboxCommands::Branch(_)
+                | sandbox::SandboxCommands::Fork(_)
         ),
         Commands::Snapshot(_) | Commands::Snapshots(_) | Commands::Volume(_) => true,
         _ => false,
@@ -874,7 +874,7 @@ mod command_tests {
 
     #[test]
     fn snapshot_restore_aliases_share_sandbox_routing_and_controls() {
-        let flags = ["app:ready", "--name", "worker", "--forked", "--disk-only"];
+        let flags = ["app:ready", "--name", "worker", "--cow-mem", "--disk-only"];
         let mut expected = None;
         for prefix in [
             vec!["restore"],
@@ -1027,7 +1027,7 @@ mod sandbox_command_tests {
     fn short_flag_additions_parse_like_their_long_forms() {
         let cases: &[&[&str]] = &[
             &["restore", "saved"],
-            &["branch", "source"],
+            &["fork", "source"],
             &["volume", "create"],
             #[cfg(feature = "ssh")]
             &["ssh"],
@@ -1089,7 +1089,7 @@ mod sandbox_command_tests {
                 ],
             );
             assert_eq!(format!("{short:?}"), format!("{long:?}"));
-            for verb in ["restore", "branch"] {
+            for verb in ["restore", "fork"] {
                 assert_eq!(
                     format!(
                         "{:?}",
@@ -1145,7 +1145,7 @@ mod sandbox_command_tests {
                 "./saved.msb",
                 "--name",
                 "child",
-                "--forked",
+                "--cow-mem",
                 "--snapshot-base",
                 "source:base",
                 "-v",
@@ -1174,10 +1174,10 @@ mod sandbox_command_tests {
             &["stop", "demo", "--timeout", "3"],
             &["pause", "demo"],
             &["resume", "demo"],
-            &["branch", "demo", "--name", "child"],
+            &["fork", "demo", "--name", "child"],
             #[cfg(feature = "net")]
             &[
-                "branch", "demo", "--name", "child", "-v", "/data", "-p", "8081:80",
+                "fork", "demo", "--name", "child", "-v", "/data", "-p", "8081:80",
             ],
             &["restart", "demo"],
             &["wait", "demo", "--timeout", "30s", "--format", "json"],
@@ -1307,7 +1307,7 @@ mod sandbox_command_tests {
     #[test]
     fn restore_preserves_geometry_controls_through_all_public_forms() {
         for prefix in [&[][..], &["sandbox"][..], &["sbx"][..]] {
-            for mode in [&[][..], &["--forked"][..], &["--disk-only"][..]] {
+            for mode in [&[][..], &["--cow-mem"][..], &["--disk-only"][..]] {
                 for (controls, cpus, memory) in [
                     (&[][..], None, None),
                     (&["--cpus", "2"][..], Some(2), None),
@@ -1330,10 +1330,33 @@ mod sandbox_command_tests {
                     // checks these values against captured geometry after resolving the snapshot.
                     assert_eq!(restored.controls.cpus, cpus);
                     assert_eq!(restored.controls.memory.as_deref(), memory);
-                    assert_eq!(restored.forked, mode.contains(&"--forked"));
+                    assert_eq!(restored.cow_mem, mode.contains(&"--cow-mem"));
                     assert_eq!(restored.disk_only, mode.contains(&"--disk-only"));
                 }
             }
+        }
+    }
+
+    #[test]
+    fn fork_keeps_branch_alias_and_restore_rejects_forked() {
+        for prefix in [&[][..], &["sandbox"][..], &["sbx"][..]] {
+            for verb in ["fork", "branch"] {
+                let command = parse_sandbox(prefix, &[verb, "source", "--name", "child"]);
+                assert!(matches!(command, SandboxCommands::Fork(_)));
+            }
+            let argv = ["msb"]
+                .into_iter()
+                .chain(prefix.iter().copied())
+                .chain(["restore", "saved", "--name", "child", "--forked"]);
+            assert!(Cli::try_parse_from(argv).is_err());
+        }
+        for prefix in ["snap", "snapshot"] {
+            assert!(
+                Cli::try_parse_from([
+                    "msb", prefix, "restore", "saved", "--name", "child", "--forked",
+                ])
+                .is_err()
+            );
         }
     }
 
@@ -1344,7 +1367,7 @@ mod sandbox_command_tests {
             assert!(matches!(restored, sandbox::SandboxCommands::Restore(_)));
             assert!(!restored.is_resident_control());
             for extra in [
-                &["--forked", "--disk-only"][..],
+                &["--cow-mem", "--disk-only"][..],
                 &["--conf", "sandbox.yaml"][..],
                 &["--entrypoint", "sh"][..],
                 &["--", "sh"][..],
@@ -1414,7 +1437,7 @@ mod sandbox_command_tests {
         let help = render_grouped_commands(&command, &HelpStyles::detect());
         assert!(help.contains("sandbox"));
         assert!(help.contains("sbx"));
-        assert!(help.contains("branch"));
+        assert!(help.contains("fork"));
         assert!(help.contains("restore"));
         assert!(group.find_subcommand("restore").is_some());
         assert!(!help.contains("machine"));
