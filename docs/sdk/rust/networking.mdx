@@ -991,7 +991,7 @@ Override the guest interface settings wholesale: MAC, MTU, IPv4/IPv6 addresses, 
 fn enabled(self, enabled: bool) -> Self
 ```
 
-Enable or disable networking. Default: `true`. To fully turn networking off, prefer [`SandboxBuilder::disable_network()`](/sdk/rust/sandbox#sandbox-disable_network), which also sets the policy to [`NetworkPolicy::none()`](#networkpolicy-none).
+Enable or disable networking. Default: `true`. To fully turn networking off, prefer [`SandboxBuilder::disable_network()`](/sdk/rust/sandbox#sandbox-disable_network), which also sets the policy to [`NetworkPolicy::none()`](#networkpolicynone).
 
 #### <span className="msb-recv">network.</span><span className="msb-hn">secret_violation_action()</span>
 
@@ -1380,7 +1380,7 @@ Validate for use as a `DomainSuffix`; single-label names (e.g. `com`) are reject
 
 ### NetworkProfile
 
-Composable high-level access category accepted by [`NetworkPolicy::from_profiles()`](#networkpolicy-from_profiles).
+Composable high-level access category accepted by [`NetworkPolicy::from_profiles()`](#networkpolicyfrom_profiles).
 
 | Variant | Access |
 |---------|--------|

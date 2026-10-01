@@ -295,7 +295,7 @@ sb.detach().await; // keeps running in the background
 
 </Accordion>
 
-Release the handle without stopping the sandbox. The sandbox continues running as a background process. Reconnect later with [`Sandbox::get()`](#sandbox-get).
+Release the handle without stopping the sandbox. The sandbox continues running as a background process. Reconnect later with [`Sandbox::get()`](#sandboxget).
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">drain()</span>
 
@@ -676,7 +676,7 @@ sb.remove_persisted().await?;
 
 </Accordion>
 
-Delete this stopped sandbox's persisted state. This receiver-based form is useful when you still hold the `Sandbox` instance; it has exactly the same deletion scope as [`Sandbox::remove(name)`](#sandbox-remove). It does **not** perform additional cleanup. See [Destroy or remove](/sandboxes/lifecycle#destroy-or-remove) for what is deleted and which external resources are preserved.
+Delete this stopped sandbox's persisted state. This receiver-based form is useful when you still hold the `Sandbox` instance; it has exactly the same deletion scope as [`Sandbox::remove(name)`](#sandboxremove). It does **not** perform additional cleanup. See [Destroy or remove](/sandboxes/lifecycle#destroy-or-remove) for what is deleted and which external resources are preserved.
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">request_stop()</span>
 
@@ -2347,7 +2347,7 @@ Trust additional PEM-encoded CA certificates
 ## SandboxListBuilder
 
 
-Fluent configuration passed to [`Sandbox::list_with()`](#sandbox-list_with). Keep the labels and limit unchanged when continuing with a cursor.
+Fluent configuration passed to [`Sandbox::list_with()`](#sandboxlist_with). Keep the labels and limit unchanged when continuing with a cursor.
 
 
 #### <span className="msb-recv">list.</span><span className="msb-hn">limit()</span>
@@ -2385,7 +2385,7 @@ Add several AND-matched labels
 ## SandboxHandle
 
 
-<p className="msb-backref">Returned by <a href="#sandbox-get">Sandbox::get()</a> · <a href="#sandbox-list">Sandbox::list()</a></p>
+<p className="msb-backref">Returned by <a href="#sandboxget">Sandbox::get()</a> · <a href="#sandboxlist">Sandbox::list()</a></p>
 
 A sandbox metadata and lifecycle handle that does not require an active guest-agent connection.
 
@@ -3015,7 +3015,7 @@ The full configuration of a sandbox. Obtained via [`config()`](#sb-config) or bu
 
 ### SandboxPage
 
-One stable, newest-first page returned by [`Sandbox::list()`](#sandbox-list) or [`Sandbox::list_with()`](#sandbox-list_with).
+One stable, newest-first page returned by [`Sandbox::list()`](#sandboxlist) or [`Sandbox::list_with()`](#sandboxlist_with).
 
 | Field | Type | Description |
 |-------|------|-------------|
