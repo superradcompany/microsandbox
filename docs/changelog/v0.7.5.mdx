@@ -1,0 +1,41 @@
+---
+title: "v0.7.5"
+sidebarTitle: "v0.7.5"
+description: "Fork running sandboxes with clearer commands, run scripted commands without stdin, and opt in to readable network denials."
+icon: "bolt"
+---
+
+September 30, 2026 · [GitHub release](https://github.com/superradcompany/microsandbox/releases/tag/v0.7.5) · [All changes](https://github.com/superradcompany/microsandbox/compare/v0.7.4...v0.7.5)
+
+## New features
+
+**Fork running sandboxes.** Live duplication is now called forking, and branching refers only to paths through snapshot history. Full restores use explicit copy-on-write memory names:
+
+```bash
+msb fork worker --name experiment
+msb fork worker --names alice bob
+msb snap restore worker:ready --name restored --cow-mem
+```
+
+The SDKs add `fork` and `forkMany` in TypeScript, `fork` and `fork_many` in Rust and Python, and `Fork` and `ForkMany` in Go. Forking remains local-only. [Forking](/sandboxes/snapshots#forking)
+
+**Leave host input alone.** `msb exec --no-stdin` and `msb run --no-stdin` give the guest command immediate EOF without consuming the calling script's input. Combine it with `--stream` for live output. It conflicts with `--tty`. [Command reference](/cli/sandbox-commands#msb-exec)
+
+**Readable network denials.** Set `http.deny_response: true` to answer default-denied HTTP and intercepted HTTPS requests with a `403 Forbidden` instead of a dropped connection. `deny_message` customizes the body, so you can tell an agent how to request access. [Denied requests](/networking/overview#what-a-denied-http-request-sees)
+
+**Tune published-port queues.** `--tcp-accept-queue-size` sets how many pending connections each published TCP port can hold, from `1` to `2147483647`. [Published ports](/cli/sandbox-commands#published-ports)
+
+## Before upgrading
+
+- **Rename branch and forked calls.** `msb branch`, the branch SDK methods, `--forked`, `.forked()`, `forked=`, and `WithForked` remain as deprecated aliases. Prefer `msb fork`, the fork methods, `--cow-mem`, `.cowMemory()`, `cow_memory=`, and `WithCowMemory`. The CLI, Node, and Python report deprecation at runtime. [Migrating restore options](/sandboxes/snapshots#migrating-restore-options)
+- **Published ports queue more connections.** The default accept queue is now 1,024 instead of 128. Setting a custom size requires a supporting local runtime, and cloud rejects it.
+- **Denial responses are opt-in.** Connection failures remain the default. Enabling `deny_response` requires a supporting local runtime, and cloud rejects it. A custom message alone does not enable responses.
+
+## Fixes
+
+- Piped `msb exec` no longer hangs while the host keeps stdin open.
+- Hosts allowed to receive a secret may now carry its placeholder unchanged outside substitution locations. Requests that previously blocked or terminated the sandbox now succeed.
+- Published ports now forward guest connection closes, so host clients see EOF instead of waiting for a timeout.
+- Public-only policies now classify destinations in NAT64 prefixes by their embedded IPv4 address. Add routed prefixes with `--net-nat64-prefix`. [Security model](/security/network)
+- Patch parent directories keep the image's owner, mode, and extended attributes. Directories removed by a patch stay removed when a later patch recreates them.
+- Rejected snapshot and patch combinations no longer leave a directory that blocks retries under the same name.
