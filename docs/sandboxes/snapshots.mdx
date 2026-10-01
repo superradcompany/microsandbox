@@ -344,6 +344,24 @@ msb snap restore worker:snap --name worker_b --cow-mem
 
 The first restore prepares a local memory cache; later restores reuse it. No special source setup is needed. CoW requires a full snapshot and cannot be combined with disk-only restore.
 
+<span id="migrating-restore-options" />
+
+<Accordion title="Older restore option names">
+
+The old `forked` options still enable copy-on-write memory during restore. Use these names in new code:
+
+| Deprecated name | Preferred name |
+| --- | --- |
+| CLI `--forked` | `--cow-mem` |
+| TypeScript `.forked()` | `.cowMemory()` |
+| Rust `.forked()` | `.cow_memory()` |
+| Python `forked=True` | `cow_memory=True` |
+| Go `WithForked()` / `RestoreConfig.Forked` | `WithCowMemory()` / `RestoreConfig.CowMemory` |
+
+The MCP `sandbox_restore` tool retains its `forked` input for the same memory option.
+
+</Accordion>
+
 ### Restore disk only
 
 Boot a fresh VM from a full snapshot’s saved disk without resuming its processes. You can choose different CPU and memory settings.
@@ -461,33 +479,15 @@ Flushing does not save data still buffered by your application or commit databas
 
 </Accordion>
 
-## Snapshot history and branching
-
-A **generation** describes how snapshot history progresses. A **branch** describes a distinct path through that history. Taking successive snapshots advances a lineage; restoring an earlier snapshot and capturing new state creates a divergent path. A snapshot group is a namespace that can contain multiple paths, with a selected head. Branches here describe ancestry, not a separate live sandbox operation or a named branch-management API.
-
-**Forking** duplicates live execution. **Restoring** starts a sandbox from a saved snapshot. For copy-on-write memory during full restore, use `--cow-mem` in the CLI, `.cowMemory()` in TypeScript, `.cow_memory()` in Rust, `cow_memory=True` in Python, or `WithCowMemory()` in Go. The former `--forked` flag and corresponding SDK restore options remain deprecated aliases with the same behavior. CoW restore memory is off by default; live forks always use it. The MCP `sandbox_restore` tool retains its `forked` input for compatibility; it selects copy-on-write restore memory, not live forking.
-
-### Migrating restore options
-
-Existing callers can migrate gradually. Keep using the old name until you update the caller; both spellings enable the same memory policy and retain the same restore validation.
-
-| Deprecated name | Preferred name | Deprecation notice |
-| --- | --- | --- |
-| CLI `--forked` | `--cow-mem` | Warning on stderr, including with `--quiet` |
-| TypeScript `.forked()` | `.cowMemory()` | `@deprecated` annotation and a Node `DeprecationWarning` once per process through the SDK |
-| Rust `.forked()` | `.cow_memory()` | Compiler deprecation warning |
-| Python `forked=True` | `cow_memory=True` | `DeprecationWarning`, subject to Python's warning filters |
-| Go `WithForked()` / `RestoreConfig.Forked` | `WithCowMemory()` / `RestoreConfig.CowMemory` | `Deprecated:` annotations for documentation and tooling |
-
 <span id="branching" />
 
 ## Forking
 
 <Tooltip tip="Forking is not yet available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
-`fork` is the live operation; the former `branch` SDK methods remain deprecated aliases.
+Create a child directly from a running or paused sandbox, without saving a reusable snapshot. Forking preserves disk and execution state. Memory sharing is built in; each child’s writes stay private. To start from a saved snapshot, use [restore](#full-snapshots).
 
-Create a child directly from a running or paused sandbox, without saving a reusable snapshot. Like full restore, forking preserves disk and execution state. Memory sharing is built in; each child’s writes stay private.
+The former `branch` SDK methods remain deprecated aliases for `fork`.
 
 <CodeGroup>
 ```typescript TypeScript
@@ -956,7 +956,11 @@ msb snap rm baseline:ready
 ```
 </CodeGroup>
 
+<span id="snapshot-history-and-branching" />
+
 ### Snapshot groups
+
+A group keeps related snapshots together. Restore an earlier snapshot and save new changes to explore a different path while keeping the original snapshots. Choose the original group when capturing to keep the new snapshots in that group; otherwise, the group defaults to the restored sandbox’s name.
 
 Since v0.7, installed snapshot members are immutable. Creating another snapshot cannot overwrite an existing member. In SDK calls, omit `force` or set it to `false` (`False` in Python): enabling it fails even when the requested name does not exist. Use a unique or generated member name for each capture. To reuse a name, explicitly remove the existing member first; removal still checks for dependent snapshots.
 
@@ -1333,6 +1337,15 @@ err = m.Snapshot.Save(ctx, "worker:v2", "changes.msb",
     m.SnapshotSaveOptions{Since: "worker:v1"},
 )
 if err != nil { return err }
+```
+
+```ruby Ruby
+# Export an existing snapshot against its saved base.
+Microsandbox::Snapshot.save(
+  "worker:v2",
+  "changes.msb",
+  since: "worker:v1"
+)
 ```
 
 ```bash CLI
