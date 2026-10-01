@@ -35,6 +35,10 @@ sb = await Sandbox.create("worker", image="python")
 sb, err := m.CreateSandbox(ctx, "worker", m.WithImage("python"))
 ```
 
+```ruby Ruby
+sb = Microsandbox::Sandbox.create("worker", image: "python")
+```
+
 ```bash CLI
 msb create python --name worker
 ```

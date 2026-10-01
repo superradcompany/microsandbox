@@ -4,7 +4,7 @@ description: Save files or running workloads and restore them into new sandboxes
 icon: "code-branch"
 ---
 
-<Tooltip tip="Cloud supports disk snapshots from stopped or crashed sandboxes and disk restore. Full snapshots, forking, groups, and local archives are not yet available on cloud."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Cloud supports disk snapshots from stopped persistent sandboxes and disk restore. Full snapshots, forking, groups, and local archives are not yet available on cloud."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 Save a prepared sandbox and reuse it as a starting point. Each restore creates a new sandbox and leaves the source unchanged.
 
@@ -19,7 +19,7 @@ Disk is the default. Full adds memory and execution state; there is no memory-on
 
 ## Disk snapshots
 
-Use disk snapshots for installed dependencies, prepared workspaces, and saved files. Cloud requires a stopped or crashed source. See [guest flushing](#guest-flushing) for how pending writes are handled.
+Use disk snapshots for installed dependencies, prepared workspaces, and saved files. Cloud requires a stopped persistent source. See [guest flushing](#guest-flushing) for how microsandbox handles pending writes.
 
 <Steps>
 <Step title="Prepare">
@@ -68,6 +68,15 @@ err = baseline.Stop(ctx)
 if err != nil { return err }
 ```
 
+```ruby Ruby
+baseline = Microsandbox::Sandbox.get("baseline")
+
+session = baseline.connect
+session.exec("pip", ["install", "requests"])
+
+baseline.stop
+```
+
 ```bash CLI
 msb exec baseline -- pip install requests
 msb stop baseline
@@ -114,6 +123,11 @@ snapshot, err := baseline.Snapshot(ctx, "ready")
 if err != nil {
     return err
 }
+```
+
+```ruby Ruby
+baseline = Microsandbox::Sandbox.get("baseline")
+snapshot = baseline.snapshot("ready")
 ```
 
 ```bash CLI
@@ -254,7 +268,7 @@ msb snap restore worker:snap --name resumed
 </Steps>
 
 - **Compatibility:** Use a compatible runtime and guest kernel. CPU and memory settings, including maximums, must match the capture.
-- **Connections:** Reconnect clients and application connections. Host-side connections and transfers are not captured; buffered process output is not replayed.
+- **Connections:** Reconnect clients and application connections. Microsandbox does not capture host-side connections or transfers, and does not replay buffered process output.
 - **Mounts:** Owned volumes are private to each child. Host bindings need explicit authorization; see [mount behavior](#mount-behavior).
 
 <Accordion title="Capture or restore fails">
@@ -598,7 +612,7 @@ Owned directory snapshots cannot move between Unix and Windows. Owned disks do n
 
 ### External mounts
 
-Host-mounted files are not included in snapshots. Supply their host paths when restoring; owned volumes restore automatically. Full restore requires all captured external filesystems and additional disks to be available.
+Snapshots do not include host-mounted files. Supply their host paths when restoring. Owned volumes restore automatically. Full restore requires every captured external filesystem and additional disk to be available.
 
 For either a disk or full snapshot, mount a host directory like this:
 
@@ -868,6 +882,7 @@ for event := range events {
 result := <-results
 if result.Err != nil { return result.Err }
 resumed := result.Sandbox
+defer resumed.Close()
 ```
 
 ```bash CLI
@@ -875,6 +890,8 @@ resumed := result.Sandbox
 msb snap restore worker:snap --name resumed
 ```
 </CodeGroup>
+
+In Go, always receive the result and close its sandbox handle when finished, even if you ignore progress events. Closing a restored handle does not stop the detached sandbox; call `Stop` or `Destroy` when needed. Cancel the context to cancel the operation.
 
 Some stages have no percentage. Memory preparation has no fixed timeout; activation has a separate timeout. Set an overall deadline or use SDK cancellation when needed.
 
@@ -922,6 +939,15 @@ err = m.Snapshot.Remove(ctx, "baseline:ready", false)
 if err != nil { return err }
 ```
 
+```ruby Ruby
+snapshots = Microsandbox::Snapshot.list
+
+saved = Microsandbox::Snapshot.open("baseline:ready")
+puts saved.digest
+
+Microsandbox::Snapshot.remove("baseline:ready")
+```
+
 ```bash CLI
 msb snap ls
 msb snap ls --group baseline
@@ -931,6 +957,10 @@ msb snap rm baseline:ready
 </CodeGroup>
 
 ### Snapshot groups
+
+Since v0.7, installed snapshot members are immutable. Creating another snapshot cannot overwrite an existing member. In SDK calls, omit `force` or set it to `false` (`False` in Python): enabling it fails even when the requested name does not exist. Use a unique or generated member name for each capture. To reuse a name, explicitly remove the existing member first; removal still checks for dependent snapshots.
+
+See the [v0.6 snapshot upgrade example](/migrations/v0.7#update-snapshot-code).
 
 Locally, `group` selects its head; `group:member` selects an exact snapshot:
 
@@ -1058,17 +1088,21 @@ await Snapshot.loadWithOptions("experiment.msb", {
 ```
 
 ```rust Rust
+use std::path::Path;
+
+use microsandbox::{snapshot::LoadOpts, Snapshot};
+
 Snapshot::load_with_options(
-    std::path::Path::new("snap.msb"),
-    microsandbox::snapshot::LoadOpts {
+    Path::new("snap.msb"),
+    LoadOpts {
         group: Some("work".into()),
         ..Default::default()
     },
 ).await?;
 
 Snapshot::load_with_options(
-    std::path::Path::new("experiment.msb"),
-    microsandbox::snapshot::LoadOpts {
+    Path::new("experiment.msb"),
+    LoadOpts {
         group: Some("work".into()),
         set_head: true,
         ..Default::default()
@@ -1120,9 +1154,13 @@ await Snapshot.save("baseline:ready", "ready.msb", { withImage: true });
 ```
 
 ```rust Rust
+use std::path::Path;
+
+use microsandbox::{snapshot::SaveOpts, Snapshot};
+
 Snapshot::save("baseline:ready",
-    std::path::Path::new("ready.msb"),
-    microsandbox::snapshot::SaveOpts {
+    Path::new("ready.msb"),
+    SaveOpts {
         with_image: true,
         ..Default::default()
     },
@@ -1140,6 +1178,10 @@ err = m.Snapshot.Save(ctx, "baseline:ready", "ready.msb",
     m.SnapshotSaveOptions{WithImage: true},
 )
 if err != nil { return err }
+```
+
+```ruby Ruby
+Microsandbox::Snapshot.save("baseline:ready", "ready.msb", with_image: true)
 ```
 
 ```bash CLI
@@ -1192,11 +1234,13 @@ const handles = await Snapshot.loadMany(
 ```
 
 ```rust Rust
+use microsandbox::{snapshot::LoadOpts, Snapshot};
+
 let archives = vec!["changes.msb".into(), "base.msb".into()];
 
 let handles = Snapshot::load_many(
     &archives,
-    microsandbox::snapshot::LoadOpts {
+    LoadOpts {
         group: Some("received".into()),
         dest: Some("/mnt/snapshots".into()),
         ..Default::default()
@@ -1246,6 +1290,10 @@ await Snapshot.save("worker:v2", "changes.msb", {
 ```
 
 ```rust Rust
+use std::path::Path;
+
+use microsandbox::{snapshot::SaveOpts, Snapshot};
+
 Snapshot::builder("v2")
     .from_sandbox("worker")
     .full()
@@ -1253,8 +1301,8 @@ Snapshot::builder("v2")
     .await?;
 
 Snapshot::save("worker:v2",
-    std::path::Path::new("changes.msb"),
-    microsandbox::snapshot::SaveOpts {
+    Path::new("changes.msb"),
+    SaveOpts {
         since: Some("worker:v1".into()),
         ..Default::default()
     },
@@ -1311,9 +1359,13 @@ const child = await Sandbox.restore("changes.msb")
 ```
 
 ```rust Rust
+use std::path::Path;
+
+use microsandbox::{snapshot::LoadOpts, Sandbox, Snapshot};
+
 Snapshot::load_with_options(
-    std::path::Path::new("changes.msb"),
-    microsandbox::snapshot::LoadOpts {
+    Path::new("changes.msb"),
+    LoadOpts {
         group: Some("imported".into()),
         base: Some("worker:v1".into()),
         ..Default::default()

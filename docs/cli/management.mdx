@@ -1,11 +1,12 @@
 ---
 title: CLI management
+"og:title": Microsandbox CLI setup and management commands
 sidebarTitle: "Management"
-description: Inspect the active backend, diagnose setup, and manage the CLI
+description: Inspect the active backend, diagnose runtime setup, and manage the microsandbox CLI installation.
 icon: "wrench"
 ---
 
-Inspect your CLI setup and manage the local installation.
+For first-time installation, see the [CLI overview](/cli/overview#install).
 
 ## msb context
 
@@ -87,6 +88,8 @@ msb self uninstall --yes      # Skip confirmation
 | `uninstall` | Remove msb, libkrunfw, and command links |
 
 `msb self update` always targets the latest release; it does not accept a version argument. Use `msb self downgrade <version>` to move to a supported older release.
+
+Run downgrade from the newer CLI before replacing it: the older binary does not contain rollback steps for newer migrations. If you already installed an older binary and see `database schema is newer than this msb binary`, follow the [catalog recovery steps](/migrations/v0.7#database-schema-is-newer-than-this-msb-binary). [Snapshot groups can also block downgrade](/migrations/v0.7#snapshot-groups-can-block-downgrade).
 
 Only one downgrade can run per installation. A second command fails immediately; wait for the first to finish or cancel it before retrying.
 

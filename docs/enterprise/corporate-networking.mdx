@@ -1,14 +1,15 @@
 ---
-title: Corporate networking
+title: Configure company networking
+sidebarTitle: Configure networking
 description: Use company routing, DNS, certificates, and registries with local sandboxes
 icon: "network-wired"
 ---
 
-Connect local sandboxes to your company's existing network. Configure routing, private DNS, and certificate trust, then verify access from the CLI and SDKs.
+With a [working local installation](/enterprise/prepare-environment), connect a pilot sandbox to your company's services. Work through routing, DNS, destination access, certificates, and registries, then verify the complete path.
 
 <Frame>
-  <img className="block dark:hidden" src="/images/enterprise/corporate-networking-light.svg" alt="Guest connections cross the microVM boundary into the host runtime, then use host routing directly or through an optional local SOCKS proxy. DNS and host image downloads follow separate paths that can also be covered by host VPN or traffic steering policy." />
-  <img className="hidden dark:block" src="/images/enterprise/corporate-networking-dark.svg" alt="Guest connections cross the microVM boundary into the host runtime, then use host routing directly or through an optional local SOCKS proxy. DNS and host image downloads follow separate paths that can also be covered by host VPN or traffic steering policy." />
+  <img className="block dark:hidden" src="/images/enterprise/corporate-networking-light.svg" alt="Three separate paths: guest workload through host runtime policy and routing, guest DNS through the host DNS forwarder, and image downloads from the host CLI or SDK. Only workload traffic uses the optional sandbox SOCKS proxy." />
+  <img className="hidden dark:block" src="/images/enterprise/corporate-networking-dark.svg" alt="Three separate paths: guest workload through host runtime policy and routing, guest DNS through the host DNS forwarder, and image downloads from the host CLI or SDK. Only workload traffic uses the optional sandbox SOCKS proxy." />
 </Frame>
 
 <Note>
@@ -186,3 +187,19 @@ Provider examples assume an enrolled host client and are not validated integrati
 | Connect to a published development port | Reachable only on the intended host interface |
 
 Repeat with the employees' SDKs and after a VPN reconnect. Recreate test sandboxes when checking changed resolver settings.
+
+## Troubleshoot by connection
+
+| Symptom | Check first | Team to involve |
+| --- | --- | --- |
+| Policy fails to load or has no effect | Reported file path and permissions, CLI/SDK version, and whether the backend predates the update | Device management |
+| Image pull fails | Host registry access, credentials, and registry CA settings | Registry or network administrators |
+| Private name does not resolve | Configured resolver, VPN state, and returned addresses | DNS or VPN administrators |
+| Name resolves but connection fails | Sandbox destination rules, private-address exceptions, host routes, and proxy logs | Application and network teams |
+| TLS verification fails | Certificate issuer and trust store for the failing connection | Certificate or network administrators |
+
+For a support report, include the CLI/SDK versions, OS, exact error, failing hostname, and whether the same request works on the host. Include `msb doctor` output for local runtime problems. Remove credentials and sensitive company details before sharing logs.
+
+## Next step
+
+[Enforce team settings](/enterprise/managed-configuration) to turn supported choices into administrator policy. Keep per-sandbox settings in your application or sandbox configuration.

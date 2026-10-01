@@ -1,10 +1,11 @@
 ---
 title: Execution
-description: TypeScript SDK - Command execution API reference
+"og:title": TypeScript SDK Execution reference
+description: Run sandbox commands and stream their output with the TypeScript SDK.
 keywords: ["TypeScript SDK", "TypeScript execution", "microsandbox execution"]
 ---
 
-Run commands inside a running sandbox. See [Commands](/sandboxes/commands) for usage examples.
+See [Commands](/sandboxes/commands) for usage examples.
 
 ## Sandbox
 
@@ -370,23 +371,11 @@ Interactive PTY attach with options for arguments, environment variables, workin
 
 Collected output and exit status.
 
-#### <span className="msb-recv">output.</span><span className="msb-hn">code</span>
-
-`number` (getter)
-
-Process exit code
-
-#### <span className="msb-recv">output.</span><span className="msb-hn">success</span>
-
-`boolean` (getter)
-
-`true` when `code === 0`
-
-#### <span className="msb-recv">output.</span><span className="msb-hn">status</span>
-
-[`ExitStatus`](#exitstatus) (getter)
-
-Exit status object
+| Field | Type | Description |
+|---|---|---|
+| <span id="output-code"></span>`code` | `number` | Getter. Process exit code |
+| <span id="output-success"></span>`success` | `boolean` | Getter. `true` when `code === 0` |
+| <span id="output-status"></span>`status` | [`ExitStatus`](#exitstatus) | Getter. Exit status object |
 
 #### <span className="msb-recv">output.</span><span className="msb-hn">stdout()</span>
 

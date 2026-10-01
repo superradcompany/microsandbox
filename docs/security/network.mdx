@@ -45,12 +45,6 @@ Override the default with allow-all egress only when a workload genuinely needs 
 On AWS, GCP, Azure, and similar platforms, `169.254.169.254` is the instance metadata service. It's a classic SSRF target because it hands temporary credentials to anything that can connect. The default policy blocks it. For custom policies that flip egress to allow-by-default, deny it explicitly:
 
 <CodeGroup>
-```bash CLI
-msb create python --name worker \
-    --net-default-egress allow \
-    --net-rule "deny@meta"
-```
-
 ```typescript TypeScript
 NetworkPolicy.builder()
   .defaultAllow()
@@ -63,6 +57,36 @@ NetworkPolicy::builder()
     .default_allow()
     .rule(|r| r.egress().deny_meta())
     .build()?
+```
+
+```python Python
+from microsandbox import Action, Destination, DestGroup, NetworkPolicy, Rule
+
+policy = NetworkPolicy(
+    default_egress=Action.ALLOW,
+    default_ingress=Action.ALLOW,
+    rules=(Rule.deny(destination=Destination.group(DestGroup.METADATA)),),
+)
+```
+
+```go Go
+network := &m.NetworkConfig{
+    DefaultEgress: m.PolicyActionAllow,
+    DefaultIngress: m.PolicyActionAllow,
+    Rules: []m.PolicyRule{
+        {
+            Action: m.PolicyActionDeny,
+            Direction: m.PolicyDirectionEgress,
+            Destination: "metadata",
+        },
+    },
+}
+```
+
+```bash CLI
+msb create python --name worker \
+    --net-default-egress allow \
+    --net-rule "deny@meta"
 ```
 </CodeGroup>
 

@@ -1,0 +1,227 @@
+---
+title: Networking
+"og:title": Ruby SDK Networking reference
+description: Configure network access, proxies, and secret injection with the Ruby SDK.
+---
+
+See [Networking](/networking/overview), [Outbound proxies](/networking/outbound-proxy), and [Secrets](/sandboxes/secrets) for usage guides.
+
+## Creation options
+
+Use these keywords with `Sandbox.create`, `Sandbox.connect_or_create`, or `Sandbox.with`. They are not separate Ruby builder methods.
+
+### network
+
+Use `:none` to disable networking, or a hash containing both `allowed_hosts` and `allowed_ports`.
+
+<p className="msb-label">Fields</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>allowed_hosts</code><span className="msb-type">Array&lt;String&gt;</span></div>
+    <div className="msb-param-desc">Allowed destination hosts.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>allowed_ports</code><span className="msb-type">Array&lt;Integer&gt;</span></div>
+    <div className="msb-param-desc">Allowed destination ports. Both host and port restrictions must match.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```ruby
+sandbox = Microsandbox::Sandbox.create(
+  "worker",
+  image: "alpine",
+  network: { allowed_hosts: ["api.example.com"], allowed_ports: [443] }
+)
+```
+
+</Accordion>
+
+### secrets
+
+An array of hashes. Each entry requires all three string fields below. Ruby does not expose per-location substitution, violation-action, or passthrough-policy configuration.
+
+<p className="msb-label">Fields</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>env</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Guest environment variable receiving the secret placeholder.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>value</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Secret value to substitute into permitted requests.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>allowed_host</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Destination host allowed to receive the secret.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```ruby
+sandbox = Microsandbox::Sandbox.create(
+  "worker",
+  image: "alpine",
+  secrets: [{ env: "API_TOKEN", value: ENV.fetch("API_TOKEN"), allowed_host: "api.example.com" }]
+)
+```
+
+</Accordion>
+
+### proxy
+
+Accepts an `OutboundProxy`. The same object can be passed to `builder.proxy(proxy)`.
+
+## OutboundProxy
+
+#### <span className="msb-recv">Microsandbox::OutboundProxy.</span><span className="msb-hn">socks4()</span>
+
+```ruby
+Microsandbox::OutboundProxy.socks4(address) # => OutboundProxy
+```
+
+Configure a SOCKS4 proxy.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>address</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Proxy host and port, such as 127.0.0.1:1080.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">OutboundProxy</span></div>
+    <div className="msb-param-desc">Proxy configuration.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">Microsandbox::OutboundProxy.</span><span className="msb-hn">socks5()</span>
+
+```ruby
+Microsandbox::OutboundProxy.socks5(address) # => OutboundProxy
+```
+
+Configure a SOCKS5 proxy.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>address</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Proxy host and port, such as 127.0.0.1:1080.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">OutboundProxy</span></div>
+    <div className="msb-param-desc">Proxy configuration.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">proxy.</span><span className="msb-hn">user_id()</span>
+
+```ruby
+proxy.user_id(value) # => OutboundProxy
+```
+
+Set the SOCKS4 user ID. Raises ArgumentError for a SOCKS5 proxy.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>value</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">SOCKS4 user ID.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">OutboundProxy</span></div>
+    <div className="msb-param-desc">The proxy, for chaining.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">proxy.</span><span className="msb-hn">credentials()</span>
+
+```ruby
+proxy.credentials(username, password) # => OutboundProxy
+```
+
+<Accordion title="Example">
+
+```ruby
+proxy = Microsandbox::OutboundProxy.socks5("127.0.0.1:1080")
+  .credentials("worker", Microsandbox::SecretSource.env("PROXY_PASSWORD"))
+sandbox = Microsandbox::Sandbox.create("worker", image: "alpine", proxy: proxy)
+```
+
+</Accordion>
+
+Set SOCKS5 credentials. Raises ArgumentError for a SOCKS4 proxy.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>username</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Proxy username.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>password</code><span className="msb-type">SecretSource</span></div>
+    <div className="msb-param-desc">Proxy password source.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">OutboundProxy</span></div>
+    <div className="msb-param-desc">The proxy, for chaining.</div>
+  </div>
+</div>
+
+The bang forms `user_id!` and `credentials!` mutate the proxy and return `nil`.
+
+## SecretSource
+
+#### <span className="msb-recv">Microsandbox::SecretSource.</span><span className="msb-hn">env()</span>
+
+```ruby
+Microsandbox::SecretSource.env(name) # => SecretSource
+```
+
+Read a secret from a host environment variable. Ruby exposes this source for proxy authentication.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>name</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Non-empty environment variable name.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">SecretSource</span></div>
+    <div className="msb-param-desc">Environment-backed secret source.</div>
+  </div>
+</div>

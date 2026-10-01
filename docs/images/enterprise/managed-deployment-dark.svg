@@ -1,26 +1,22 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 286" width="720" role="img" aria-labelledby="title description" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif">
-  <title id="title">Administrator policy takes precedence on the employee device</title>
-  <desc id="description">Jamf or Intune installs a protected managed.json file on the host. Managed overrides and employee settings are layered into the effective configuration used by the CLI and SDKs. Managed fields win; built-in defaults fill unspecified values.</desc>
-  <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#71717a" /></marker></defs>
-  <rect x="196" y="16" width="510" height="254" rx="10" fill="#19171e" stroke="#52525b" stroke-width="1.2" stroke-dasharray="5 4" />
-  <text x="214" y="42" text-anchor="start" font-size="12" font-weight="600" fill="#a1a1aa">EMPLOYEE DEVICE</text>
-  <rect x="14" y="76" width="146" height="96" rx="10" fill="#2b203c" stroke="#c49aff" stroke-width="1.2" />
-  <text x="87" y="101" text-anchor="middle" font-size="14" font-weight="600" fill="#c49aff">Administrator</text>
-  <text x="87" y="125" text-anchor="middle" font-size="14" font-weight="400" fill="#e5e7eb">Jamf / Intune</text>
-  <text x="87" y="148" text-anchor="middle" font-size="12" font-weight="400" fill="#a1a1aa">Deploy policy</text>
-  <rect x="220" y="68" width="202" height="77" rx="10" fill="#2b203c" stroke="#c49aff" stroke-width="1.2" />
-  <text x="321" y="92" text-anchor="middle" font-size="16" font-weight="600" fill="#c49aff">managed.json</text>
-  <text x="321" y="114" text-anchor="middle" font-size="13" font-weight="400" fill="#a1a1aa">Protected host file</text>
-  <text x="321" y="133" text-anchor="middle" font-size="12" font-weight="600" fill="#c49aff">Highest precedence</text>
-  <rect x="220" y="174" width="202" height="68" rx="10" fill="#24212b" stroke="#52525b" stroke-width="1.2" />
-  <text x="321" y="200" text-anchor="middle" font-size="15" font-weight="600" fill="#e5e7eb">Employee settings</text>
-  <text x="321" y="221" text-anchor="middle" font-size="12" font-weight="400" fill="#a1a1aa">User config + CLI / SDK</text>
-  <rect x="490" y="113" width="194" height="79" rx="10" fill="#24212b" stroke="#52525b" stroke-width="1.2" />
-  <text x="587" y="139" text-anchor="middle" font-size="16" font-weight="600" fill="#e5e7eb">Effective settings</text>
-  <text x="587" y="162" text-anchor="middle" font-size="12" font-weight="400" fill="#a1a1aa">Used by the CLI and SDKs</text>
-  <text x="587" y="180" text-anchor="middle" font-size="12" font-weight="600" fill="#c49aff">Managed fields win</text>
-  <path d="M 160 106 H 219" fill="none" stroke="#71717a" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#arrow)" />
-  <path d="M 422 106 H 456 V 137 H 489" fill="none" stroke="#71717a" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#arrow)" />
-  <path d="M 422 208 H 456 V 169 H 489" fill="none" stroke="#71717a" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#arrow)" />
-  <text x="220" y="259" text-anchor="start" font-size="12" font-weight="400" fill="#a1a1aa">Built-in defaults fill unspecified values.</text>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 180" width="800" role="img" aria-labelledby="title description" font-family="ui-sans-serif, system-ui, sans-serif">
+<title id="title">Managed settings have the highest precedence</title>
+<desc id="description">Configuration layers are applied from built-in defaults through user configuration and CLI or SDK options to managed overrides. Later layers override supplied fields; omitted fields keep earlier values.</desc>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0 L10 5 L0 10Z" fill="#71717a"/></marker></defs>
+<text x="400" y="30" text-anchor="middle" font-size="15" font-weight="400" fill="#a1a1aa">Increasing precedence</text>
+<rect x="16" y="56" width="171" height="66" rx="9" fill="#24212b" stroke="#71717a"/>
+<text x="101.5" y="83" text-anchor="middle" font-size="16" font-weight="600" fill="#e5e7eb">Built-in defaults</text>
+<text x="101.5" y="106" text-anchor="middle" font-size="13" font-weight="400" fill="#a1a1aa">Starting values</text>
+<path d="M190 89 L210 89" fill="none" stroke="#71717a" stroke-width="1.5" marker-end="url(#arrow)"/>
+<rect x="215" y="56" width="171" height="66" rx="9" fill="#24212b" stroke="#71717a"/>
+<text x="300.5" y="83" text-anchor="middle" font-size="16" font-weight="600" fill="#e5e7eb">User configuration</text>
+<text x="300.5" y="106" text-anchor="middle" font-size="13" font-weight="400" fill="#a1a1aa">Employee choices</text>
+<path d="M389 89 L409 89" fill="none" stroke="#71717a" stroke-width="1.5" marker-end="url(#arrow)"/>
+<rect x="414" y="56" width="171" height="66" rx="9" fill="#24212b" stroke="#71717a"/>
+<text x="499.5" y="83" text-anchor="middle" font-size="16" font-weight="600" fill="#e5e7eb">CLI / SDK options</text>
+<text x="499.5" y="106" text-anchor="middle" font-size="13" font-weight="400" fill="#a1a1aa">Per-call choices</text>
+<path d="M588 89 L608 89" fill="none" stroke="#71717a" stroke-width="1.5" marker-end="url(#arrow)"/>
+<rect x="613" y="56" width="171" height="66" rx="9" fill="#2b203c" stroke="#c49aff"/>
+<text x="698.5" y="83" text-anchor="middle" font-size="16" font-weight="600" fill="#c49aff">Managed overrides</text>
+<text x="698.5" y="106" text-anchor="middle" font-size="13" font-weight="400" fill="#a1a1aa">Administrator policy</text>
+<text x="400" y="158" text-anchor="middle" font-size="15" font-weight="400" fill="#a1a1aa">Later layers override supplied fields. Omitted fields keep earlier values.</text>
 </svg>

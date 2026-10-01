@@ -42,6 +42,10 @@ sb, err := m.CreateSandbox(ctx, "isolated",
 )
 ```
 
+```ruby Ruby
+sb = Microsandbox::Sandbox.create("isolated", image: "python", network: :none)
+```
+
 ```bash CLI
 msb create python --name isolated --no-net
 ```
