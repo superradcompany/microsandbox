@@ -1339,6 +1339,15 @@ err = m.Snapshot.Save(ctx, "worker:v2", "changes.msb",
 if err != nil { return err }
 ```
 
+```ruby Ruby
+# Export an existing snapshot against its saved base.
+Microsandbox::Snapshot.save(
+  "worker:v2",
+  "changes.msb",
+  since: "worker:v1"
+)
+```
+
 ```bash CLI
 msb snap create v2 --sandbox worker --full
 msb snap export worker:v2 --output changes.msb --since worker:v1
