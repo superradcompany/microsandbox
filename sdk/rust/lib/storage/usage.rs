@@ -122,13 +122,14 @@ mod local_usage {
         let volumes = volume::Entity::find().all(db).await?;
         let cache_root = local.cache_dir();
         let snapshot_root = local.snapshots_dir();
+        let snapshot_journals = crate::backend::local::snapshot::deletion::recovery_parents(local)?;
         let sandbox_root = local.sandboxes_dir();
         let volume_root = local.volumes_dir();
 
         tokio::task::spawn_blocking(move || {
             // Image references share materialized layers. Scan each cache component once instead
             // of summing per-reference sizes, which counts shared layers repeatedly.
-            let image_roots: Vec<_> = ["layers", "fsmeta", "vmdk", "flat", "manifests", "tmp"]
+            let image_roots: Vec<_> = ["layers", "fsmeta", "vmdk", "flat", "manifests", "tmp", ".image-deletions"]
                 .into_iter()
                 .map(|component| cache_root.join(component))
                 .collect();
@@ -142,6 +143,7 @@ mod local_usage {
                 ))
                 .collect();
             let mut snapshot_roots = vec![snapshot_root.clone()];
+            snapshot_roots.extend(snapshot_journals.into_iter().map(|parent| parent.join(".snapshot-deletions")));
             // The index explicitly identifies external installed artifacts. Include those paths,
             // without discovering arbitrary host directories or following linked payloads.
             snapshot_roots.extend(snapshots.iter().map(|row| PathBuf::from(&row.artifact_path)));
@@ -169,9 +171,9 @@ mod local_usage {
             )).collect();
             let mut usage = StorageUsage {
                 images: category(images.len(), image_roots, image_items, Some(&cache_root)),
-                snapshots: category(snapshots.len(), snapshot_roots, snapshot_items, Some(&snapshot_root)),
-                sandboxes: category(sandboxes.len(), vec![sandbox_root.clone()], sandbox_items, Some(&sandbox_root)),
-                volumes: category(volumes.len(), vec![volume_root.clone()], volume_items, Some(&volume_root)),
+                snapshots: object_category(snapshots.len(), snapshot_roots, snapshot_items, Some(&snapshot_root)),
+                sandboxes: object_category(sandboxes.len(), vec![sandbox_root.clone()], sandbox_items, Some(&sandbox_root)),
+                volumes: object_category(volumes.len(), vec![volume_root.clone()], volume_items, Some(&volume_root)),
                 notes: vec![
                     "Logical bytes sum regular-file lengths. Allocated bytes are per-file block observations, not unique physical usage or space deletion will free.".into(),
                     "Counts describe indexed objects; managed-directory totals also include unindexed files and metadata. Object sizes overlap shared data and are not additive.".into(),
@@ -238,6 +240,26 @@ mod local_usage {
                 .push(format!("Storage observation incomplete: {error}")),
         }
         item
+    }
+
+    fn object_category(
+        count: usize,
+        roots: Vec<PathBuf>,
+        items: Vec<StorageItemUsage>,
+        managed_root: Option<&Path>,
+    ) -> StorageCategoryUsage {
+        let mut report = category(count, roots, items, managed_root);
+        // A missing optional cache root is empty, but an indexed object that cannot be
+        // measured makes the whole object category incomplete, even below a scanned root.
+        if report.items.iter().any(|item| item.logical_bytes.is_none()) {
+            report.logical_bytes = None;
+            report.allocated_bytes = None;
+            report.notes.push(
+                "One or more indexed artifacts could not be measured; category bytes are unknown."
+                    .into(),
+            );
+        }
+        report
     }
 
     fn category(
@@ -472,6 +494,28 @@ mod local_usage {
     mod tests {
         use super::*;
 
+        #[tokio::test]
+        async fn image_journal_bytes_remain_visible_without_double_counting_hardlinks() {
+            let home = tempfile::tempdir().unwrap();
+            let local = crate::test_support::local_backend_builder(home.path())
+                .build()
+                .await
+                .unwrap();
+            let cache = microsandbox_image::GlobalCache::new(&local.cache_dir()).unwrap();
+            let journal = local.cache_dir().join(".image-deletions/delete-test");
+            std::fs::create_dir_all(&journal).unwrap();
+            let retained = journal.join("0");
+            std::fs::write(&retained, vec![42; 1024 * 1024]).unwrap();
+            let only_journal = usage(&local).await.unwrap();
+            assert_eq!(only_journal.images.logical_bytes, Some(1024 * 1024));
+            let source = cache.layers_dir().join("shared.erofs");
+            std::fs::hard_link(&retained, source).unwrap();
+            assert_eq!(
+                usage(&local).await.unwrap().images.logical_bytes,
+                Some(1024 * 1024)
+            );
+        }
+
         #[test]
         fn regular_files_and_overlapping_roots_are_counted_once() {
             let temporary = tempfile::tempdir().unwrap();
@@ -524,6 +568,17 @@ mod local_usage {
                     .any(|reason| reason.contains("missing"))
             );
             assert!(!path.exists());
+            for managed in [None, Some(temporary.path())] {
+                let aggregate = object_category(
+                    1,
+                    vec![temporary.path().to_path_buf(), path.clone()],
+                    vec![missing.clone()],
+                    managed,
+                );
+                assert_eq!(aggregate.logical_bytes, None);
+                assert_eq!(aggregate.allocated_bytes, None);
+                assert!(aggregate.notes.iter().any(|note| note.contains("unknown")));
+            }
         }
 
         #[cfg(unix)]

@@ -48,7 +48,9 @@ pub(crate) async fn materialize_owned_volumes(
                 let generation = generation.clone();
                 let mount_id = volume.mount_id.clone();
                 let readonly = volume.mount.options.readonly;
+                let pin = super::super::lease::pin_source(&source)?;
                 let staging = tokio::task::spawn_blocking(move || {
+                    let _lease = pin;
                     stage_owned_disk(&source, &parent, &mount_id, &generation, readonly)
                 })
                 .await
@@ -75,8 +77,10 @@ pub(crate) async fn materialize_owned_volumes(
                 let parent = staging_parent.to_path_buf();
                 let descriptor = descriptor.clone();
                 let files = files.clone();
+                let pin = super::super::lease::pin_source(&source)?;
                 let staging = tokio::task::spawn_blocking(
                     move || -> MicrosandboxResult<tempfile::TempDir> {
+                        let _lease = pin;
                         let snapshot =
                             microsandbox_filesystem::OwnedDirectorySnapshot::open_expected(
                                 &source,

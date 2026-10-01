@@ -63,6 +63,7 @@ const AGENT_RELAY_READY_TIMEOUT: std::time::Duration = std::time::Duration::from
 /// when found directly by digest, the cache metadata that may not be indexed by
 /// that immutable reference yet.
 struct ResolvedOciImage {
+    cache_operation: GlobalCache,
     pull_result: PullResult,
     metadata_reference: String,
     cached_metadata: Option<CachedImageMetadata>,
@@ -166,6 +167,7 @@ impl LocalBackend {
             options.spec.deployment_profile.unwrap_or_default(),
         );
         let mut resolved_image = None;
+        let mut image_operations = Vec::new();
         if !restoring && let RootfsSource::Oci(oci) = &image {
             let name = options.spec.name.as_deref().unwrap_or_default();
             if !options.replace_existing.unwrap_or_default() {
@@ -285,6 +287,7 @@ impl LocalBackend {
                 &mut config,
                 &materialized.manifest.root_disk,
             )?;
+            image_operations.push(materialized.cache_operation);
             if let Some(restore) = materialized.checkpoint_restore {
                 let state = match &materialized.manifest.state {
                     crate::snapshot::SnapshotState::Checkpoint(state) => state,
@@ -448,6 +451,8 @@ impl LocalBackend {
             .await?;
             crate::snapshot::apply_additional_disks(&mut config, mounts);
         }
+        // All source payloads are now child-owned; runtime handles must not retain the source.
+        config.snapshot_lease = None;
         // Archive descriptors are intentionally inspected only while streaming into child
         // staging, after outer builder dispatch has selected its provisional mode. Re-evaluate
         // ownership here, before process creation, so a discovered full restore never receives an
@@ -478,6 +483,7 @@ impl LocalBackend {
                 ..Default::default()
             };
             let ResolvedOciImage {
+                cache_operation,
                 pull_result,
                 metadata_reference,
                 cached_metadata,
@@ -499,6 +505,8 @@ impl LocalBackend {
                 .await?
             };
 
+            // Retain file ownership through insertion of the sandbox/rootfs catalog rows.
+            image_operations.push(cache_operation);
             tracing::trace!(
                 target: timing::TARGET,
                 sandbox_name = %timing_name,
@@ -744,33 +752,23 @@ impl LocalBackend {
 
             // Persist snapshot restores under their immutable digest-pinned
             // reference, even when the cache match came from an older tag.
-            if let Some(metadata) = cached_metadata {
-                if let Err(e) =
-                    crate::image::Image::persist(self, &metadata_reference, metadata).await
-                {
-                    tracing::warn!(
-                        error = %e,
-                        "failed to persist image metadata to database"
-                    );
+            let metadata = match cached_metadata {
+                Some(metadata) => metadata,
+                None => {
+                    let image_ref = metadata_reference.parse::<Reference>().map_err(|error| {
+                        crate::MicrosandboxError::InvalidConfig(error.to_string())
+                    })?;
+                    cache
+                        .read_image_metadata_async(&image_ref)
+                        .await?
+                        .ok_or_else(|| {
+                            crate::MicrosandboxError::ImageNotFound(metadata_reference.clone())
+                        })?
                 }
-            } else if let Ok(image_ref) = metadata_reference.parse::<Reference>() {
-                match cache.read_image_metadata_async(&image_ref).await {
-                    Ok(Some(metadata)) => {
-                        if let Err(e) =
-                            crate::image::Image::persist(self, &metadata_reference, metadata).await
-                        {
-                            tracing::warn!(
-                                error = %e,
-                                "failed to persist image metadata to database"
-                            );
-                        }
-                    }
-                    Ok(None) => {}
-                    Err(e) => {
-                        tracing::warn!(error = %e, "failed to read cached image metadata");
-                    }
-                }
-            }
+            };
+            // Releasing operation leases is safe only after durable ownership is recorded.
+            // A catalog failure must not produce a live sandbox with untracked image backing.
+            crate::image::Image::persist(self, &metadata_reference, metadata).await?;
         }
 
         // Apply rootfs patches before VM start. OCI patches were baked into their managed upper or
@@ -1376,8 +1374,10 @@ impl LocalBackend {
         progress: Option<PullProgressSender>,
     ) -> MicrosandboxResult<ResolvedOciImage> {
         let Some(pinned_digest) = expected_snapshot_manifest_digest else {
+            let cache = GlobalCache::new(&self.cache_dir())?.operation();
             let pull_result = self
                 .pull_oci_image(
+                    &cache,
                     reference,
                     pull_policy,
                     registry_overrides,
@@ -1386,6 +1386,7 @@ impl LocalBackend {
                 )
                 .await?;
             return Ok(ResolvedOciImage {
+                cache_operation: cache,
                 pull_result,
                 metadata_reference: reference.to_string(),
                 cached_metadata: None,
@@ -1419,7 +1420,10 @@ impl LocalBackend {
             ))
         })?;
         let pinned_reference = Self::digest_pinned_reference(reference, pinned_digest)?;
-        let cache = GlobalCache::new_async(&self.cache_dir()).await?;
+        let cache = GlobalCache::new_async(&self.cache_dir()).await?.operation();
+        cache
+            .lease_paths_async(vec![cache.fsmeta_erofs_path(&manifest_digest)])
+            .await?;
 
         let pinned_ref: Reference = pinned_reference.parse().map_err(|e| {
             crate::MicrosandboxError::InvalidConfig(format!("invalid pinned reference: {e}"))
@@ -1437,6 +1441,7 @@ impl LocalBackend {
         {
             Self::emit_cached_pull_progress(progress.as_ref(), reference, &metadata);
             return Ok(ResolvedOciImage {
+                cache_operation: cache,
                 pull_result,
                 metadata_reference: pinned_reference,
                 cached_metadata: Some(metadata),
@@ -1464,13 +1469,15 @@ impl LocalBackend {
             if registry_overrides.insecure {
                 insecure.push(pinned_ref.registry().to_string());
             }
-            let registry = Registry::builder(microsandbox_image::Platform::host_linux(), cache)
-                .auth(auth)
-                .extra_ca_certs(ca_certs)
-                .add_insecure_registries(insecure)
-                .build()?;
+            let registry =
+                Registry::builder(microsandbox_image::Platform::host_linux(), cache.clone())
+                    .auth(auth)
+                    .extra_ca_certs(ca_certs)
+                    .add_insecure_registries(insecure)
+                    .build()?;
             let pull_result = registry.pull_snapshot_metadata(&pinned_ref).await?;
             return Ok(ResolvedOciImage {
+                cache_operation: cache,
                 pull_result,
                 metadata_reference: pinned_reference,
                 cached_metadata: None,
@@ -1481,6 +1488,7 @@ impl LocalBackend {
         // snapshot base is absent from the local cache.
         let pull_result = match self
             .pull_oci_image(
+                &cache,
                 &pinned_reference,
                 pull_policy,
                 registry_overrides,
@@ -1500,6 +1508,7 @@ impl LocalBackend {
         };
 
         Ok(ResolvedOciImage {
+            cache_operation: cache,
             pull_result,
             metadata_reference: pinned_reference,
             cached_metadata: None,
@@ -1563,13 +1572,13 @@ impl LocalBackend {
     /// progress events. The caller must consume the corresponding `PullProgressHandle`.
     async fn pull_oci_image(
         &self,
+        cache: &GlobalCache,
         reference: &str,
         pull_policy: PullPolicy,
         registry_overrides: RegistryOptions,
         materialization: RootfsMaterialization,
         progress: Option<PullProgressSender>,
     ) -> MicrosandboxResult<PullResult> {
-        let cache = GlobalCache::new(&self.cache_dir())?;
         let platform = microsandbox_image::Platform::host_linux();
         let image_ref: Reference = reference.parse().map_err(|e| {
             crate::MicrosandboxError::InvalidConfig(format!("invalid image reference: {e}"))
@@ -1583,7 +1592,9 @@ impl LocalBackend {
         // Warm runs spend most of their time outside the guest, so avoid
         // constructing the registry client when the image is already complete
         // in the local cache.
-        if let Some((result, metadata)) = Registry::pull_cached(&cache, &image_ref, &options)? {
+        if let Some((result, metadata)) =
+            Registry::pull_cached_async(cache, &image_ref, &options).await?
+        {
             Self::emit_cached_pull_progress(progress.as_ref(), reference, &metadata);
             return Ok(result);
         }
@@ -1591,7 +1602,7 @@ impl LocalBackend {
         let config = self
             .registry_config(image_ref.registry(), registry_overrides)
             .await?;
-        let registry = Registry::builder(platform, cache)
+        let registry = Registry::builder(platform, cache.clone())
             .auth(config.auth)
             .extra_ca_certs(config.ca_certs)
             .add_insecure_registries(config.insecure_registries)
@@ -1969,6 +1980,14 @@ impl LocalBackend {
                 };
                 let result = sandbox_entity::Entity::insert(model).exec(&txn).await?;
                 let sandbox_id = result.last_insert_id;
+                // Starting already owns backing: cancellation or a crash during VM launch
+                // must not release operation leases before a durable root protects it.
+                if status == SandboxStatus::Starting
+                    && matches!(config.spec.image, RootfsSource::Oci(_))
+                    && let Some(digest) = &config.manifest_digest
+                {
+                    Self::replace_oci_manifest_pin(&txn, sandbox_id, digest).await?;
+                }
                 if !labels.is_empty() {
                     sandbox_label_entity::Entity::insert_many(labels.into_iter().map(
                         |(key, value)| sandbox_label_entity::ActiveModel {
@@ -2242,6 +2261,54 @@ mod tests {
         RootfsSource, SandboxConfig, SandboxStatus, StatVirtualization, VolumeMount,
     };
     use crate::snapshot::SnapshotReference;
+
+    #[tokio::test]
+    async fn starting_sandbox_owns_image_before_runtime_launch() {
+        let home = tempfile::tempdir().unwrap();
+        let local = crate::test_support::local_backend_builder(home.path())
+            .build()
+            .await
+            .unwrap();
+        let reference = "example.com/starting:latest";
+        let digest = format!("sha256:{}", "a".repeat(64));
+        crate::Image::persist(
+            &local,
+            reference,
+            microsandbox_image::CachedImageMetadata {
+                manifest_digest: digest.clone(),
+                config_digest: format!("sha256:{}", "b".repeat(64)),
+                raw_manifest_json: "{}".into(),
+                raw_config_json: "{}".into(),
+                config: Default::default(),
+                layers: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+        let mut config = crate::SandboxConfig::default();
+        config.spec.name = "starting".into();
+        config.spec.image = RootfsSource::oci(reference);
+        config.manifest_digest = Some(digest);
+        let db = local.db().await.unwrap().write();
+        let id = LocalBackend::insert_starting_sandbox_record(db, &config, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            crate::Image::prune_local(&local)
+                .await
+                .unwrap()
+                .image_refs_removed,
+            0
+        );
+        LocalBackend::delete_sandbox_record(db, id).await.unwrap();
+        assert_eq!(
+            crate::Image::prune_local(&local)
+                .await
+                .unwrap()
+                .image_refs_removed,
+            1
+        );
+    }
 
     /// Open both pools at `db_path` for tests, with migrations applied.
     async fn open_test_pools(db_path: &std::path::Path) -> DbPools {

@@ -63,6 +63,14 @@ const EROFS_ALIGNMENT_BYTES: u64 = 4096;
 /// ```
 #[derive(Clone)]
 pub struct GlobalCache {
+    /// An explicitly scoped operation retains all admitted entries through catalog publication.
+    pub(super) operation: Option<
+        std::sync::Arc<
+            std::sync::Mutex<
+                std::collections::BTreeMap<PathBuf, crate::storage_lease::StorageLease>,
+            >,
+        >,
+    >,
     /// Root of the layer EROFS cache (`~/.microsandbox/cache/layers/`).
     layers_dir: PathBuf,
 
@@ -177,6 +185,7 @@ impl GlobalCache {
         }
 
         Ok(Self {
+            operation: None,
             layers_dir,
             fsmeta_dir,
             vmdk_dir,
@@ -219,6 +228,7 @@ impl GlobalCache {
         }
 
         Ok(Self {
+            operation: None,
             layers_dir,
             fsmeta_dir,
             vmdk_dir,
@@ -480,78 +490,122 @@ impl GlobalCache {
         &self,
         reference: &Reference,
     ) -> ImageResult<Option<CachedImageMetadata>> {
-        let path = self.image_metadata_path(reference);
-
-        let data = match std::fs::read_to_string(&path) {
-            Ok(data) => data,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(ImageError::Cache { path, source: e }),
-        };
-
-        parse_cached_image_metadata(&path, &data)
+        self.read_image_metadata_path(&self.image_metadata_path(reference))
     }
 
-    /// Read cached metadata for an image reference using async filesystem I/O.
+    /// Resolve one mutable metadata entry and admit its exact dependencies under the
+    /// publication gate. Operation scopes retain those pins after this method returns.
+    pub(crate) fn read_image_metadata_path(
+        &self,
+        path: &Path,
+    ) -> ImageResult<Option<CachedImageMetadata>> {
+        self.read_image_metadata_matching(path, None)
+    }
+
+    fn read_image_metadata_matching(
+        &self,
+        path: &Path,
+        manifest_digest: Option<&str>,
+    ) -> ImageResult<Option<CachedImageMetadata>> {
+        // Scanning by digest must release each nonmatching entry immediately. Retaining
+        // every scanned image in the caller's operation can exhaust its descriptor limit.
+        let _entry = crate::storage_lease::StorageLease::shared(path)?;
+        let _gate =
+            crate::storage_lease::StorageLease::shared(&path.with_extension("publication"))?;
+        let data = match std::fs::read_to_string(path) {
+            Ok(data) => data,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(source) => {
+                return Err(ImageError::Cache {
+                    path: path.to_path_buf(),
+                    source,
+                });
+            }
+        };
+        let metadata = parse_cached_image_metadata(path, &data)?;
+        if let Some(metadata) = &metadata {
+            if manifest_digest.is_some_and(|digest| digest != metadata.manifest_digest) {
+                return Ok(None);
+            }
+            let Ok(mut paths) = self.metadata_paths(metadata) else {
+                return Ok(None);
+            };
+            paths.push(path.to_path_buf());
+            let _dependencies = self.lease_paths(paths)?;
+        }
+        Ok(metadata)
+    }
+
+    /// Read and admit metadata without blocking the async executor on locks.
     pub async fn read_image_metadata_async(
         &self,
         reference: &Reference,
     ) -> ImageResult<Option<CachedImageMetadata>> {
-        let path = self.image_metadata_path(reference);
-
-        let data = match tokio::fs::read_to_string(&path).await {
-            Ok(data) => data,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(ImageError::Cache { path, source: e }),
-        };
-
-        parse_cached_image_metadata(&path, &data)
+        self.read_image_metadata_path_async(self.image_metadata_path(reference))
+            .await
     }
 
-    /// Write cached metadata for an image reference.
-    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) async fn read_image_metadata_path_async(
+        &self,
+        path: PathBuf,
+    ) -> ImageResult<Option<CachedImageMetadata>> {
+        let cache = self.clone();
+        tokio::task::spawn_blocking(move || cache.read_image_metadata_path(&path))
+            .await
+            .map_err(std::io::Error::other)?
+    }
+
+    pub(crate) async fn read_image_metadata_matching_async(
+        &self,
+        path: PathBuf,
+        manifest_digest: String,
+    ) -> ImageResult<Option<CachedImageMetadata>> {
+        let cache = self.clone();
+        tokio::task::spawn_blocking(move || {
+            cache.read_image_metadata_matching(&path, Some(&manifest_digest))
+        })
+        .await
+        .map_err(std::io::Error::other)?
+    }
+
+    /// Publish complete metadata under a short exclusive gate. Lifetime pins use a
+    /// different lock, allowing existing readers to finish using an older generation.
     pub(crate) fn write_image_metadata(
         &self,
         reference: &Reference,
         metadata: &CachedImageMetadata,
     ) -> ImageResult<()> {
+        use std::io::Write;
         let path = self.image_metadata_path(reference);
-        let temp_path = path.with_extension("json.part");
-        let payload = serde_json::to_vec(metadata).map_err(|e| {
-            ImageError::ConfigParse(format!("failed to serialize cached image metadata: {e}"))
-        })?;
-
-        std::fs::write(&temp_path, payload).map_err(|e| ImageError::Cache {
-            path: temp_path.clone(),
-            source: e,
-        })?;
-        std::fs::rename(&temp_path, &path).map_err(|e| ImageError::Cache { path, source: e })?;
-
+        let mut paths = self.metadata_paths(metadata)?;
+        paths.push(path.clone());
+        let _leases = self.lease_paths(paths)?;
+        let _gate =
+            crate::storage_lease::StorageLease::exclusive(&path.with_extension("publication"))?;
+        let temporary_path = path.with_extension("json.part");
+        let mut temporary = std::fs::File::create(&temporary_path)?;
+        serde_json::to_writer(&mut temporary, metadata)
+            .map_err(|error| ImageError::ConfigParse(error.to_string()))?;
+        temporary.flush()?;
+        temporary.sync_all()?;
+        std::fs::rename(&temporary_path, &path)?;
+        sync_directory(&self.manifests_dir)?;
         Ok(())
     }
 
-    /// Write cached metadata for an image reference using async filesystem I/O.
+    /// Publish metadata from an owned worker so cancellation cannot release its gate
+    /// while the filesystem replacement is still in flight.
     pub async fn write_image_metadata_async(
         &self,
         reference: &Reference,
         metadata: &CachedImageMetadata,
     ) -> ImageResult<()> {
-        let path = self.image_metadata_path(reference);
-        let temp_path = path.with_extension("json.part");
-        let payload = serde_json::to_vec(metadata).map_err(|e| {
-            ImageError::ConfigParse(format!("failed to serialize cached image metadata: {e}"))
-        })?;
-
-        tokio::fs::write(&temp_path, payload)
+        let cache = self.clone();
+        let reference = reference.clone();
+        let metadata = metadata.clone();
+        tokio::task::spawn_blocking(move || cache.write_image_metadata(&reference, &metadata))
             .await
-            .map_err(|e| ImageError::Cache {
-                path: temp_path.clone(),
-                source: e,
-            })?;
-        tokio::fs::rename(&temp_path, &path)
-            .await
-            .map_err(|e| ImageError::Cache { path, source: e })?;
-
-        Ok(())
+            .map_err(std::io::Error::other)?
     }
 
     /// Delete cached metadata for an image reference.

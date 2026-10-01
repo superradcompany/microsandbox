@@ -193,6 +193,7 @@ struct CheckpointArchiveMember {
 
 /// Child construction state streamed from one archive without installing a snapshot artifact.
 pub(crate) struct ArchiveChildMaterialization {
+    pub(crate) cache_operation: microsandbox_image::GlobalCache,
     pub(crate) manifest: microsandbox_image::snapshot::Manifest,
     pub(crate) checkpoint_restore: Option<microsandbox_runtime::launch::CheckpointRestoreConfig>,
     pub(crate) upper_layers: Vec<microsandbox_runtime::launch::RootfsUpperLayerConfig>,
@@ -268,11 +269,26 @@ pub(super) async fn save_snapshot(
     out: &Path,
     opts: SaveOpts,
 ) -> MicrosandboxResult<()> {
+    save_snapshot_expected(local, name_or_path, out, opts, None).await
+}
+
+pub(crate) async fn save_snapshot_expected(
+    local: &LocalBackend,
+    name_or_path: &str,
+    out: &Path,
+    opts: SaveOpts,
+    expected: Option<&str>,
+) -> MicrosandboxResult<()> {
     let total_started = Instant::now();
     let resolve_started = Instant::now();
     // Collect the artifact dirs we need to ship: the head snapshot
     // and (optionally) all ancestors via their stable snapshot IDs.
-    let head = store::open_snapshot(local, name_or_path).await?;
+    let head = store::open_snapshot_leased(local, name_or_path).await?;
+    if expected.is_some_and(|expected| expected != head.digest()) {
+        return Err(MicrosandboxError::SnapshotIntegrity(
+            "snapshot handle refers to a replaced artifact".into(),
+        ));
+    }
     let dependencies = delta::selection(local, &head, &opts).await?;
     let mut parents: Vec<Snapshot> = Vec::new();
 
@@ -287,7 +303,7 @@ pub(super) async fn save_snapshot(
             }
             let parent_path = resolve_parent_artifact(local, &current, parent_id.as_str()).await?;
             let parent =
-                store::open_snapshot(local, parent_path.to_string_lossy().as_ref()).await?;
+                store::open_snapshot_leased(local, parent_path.to_string_lossy().as_ref()).await?;
             if parent.id() != &parent_id {
                 return Err(MicrosandboxError::SnapshotIntegrity(format!(
                     "snapshot parent path contains {}, expected {parent_id}",
@@ -305,13 +321,16 @@ pub(super) async fn save_snapshot(
 
     // Optional image cache bundling.
     let mut cache_files: Vec<(PathBuf, String)> = Vec::new();
+    let mut admitted_metadata = None;
+    let cache_operation = microsandbox_image::GlobalCache::new_async(&local.cache_dir())
+        .await?
+        .operation();
     if opts.with_image {
-        let cache_dir = local.cache_dir();
         let img_digest_str = head.manifest().image.manifest_digest.clone();
         let img_digest: microsandbox_image::Digest = img_digest_str
             .parse()
             .map_err(|e| MicrosandboxError::Custom(format!("invalid image digest: {e}")))?;
-        let cache = microsandbox_image::GlobalCache::new_async(&cache_dir).await?;
+        let cache = cache_operation.clone();
 
         let image_ref: microsandbox_image::Reference =
             head.manifest().image.reference.parse().map_err(|e| {
@@ -326,6 +345,9 @@ pub(super) async fn save_snapshot(
                     head.manifest().image.reference
                 ))
             })?;
+        cache
+            .lease_paths_async(cache.metadata_paths(&metadata)?)
+            .await?;
         if metadata.manifest_digest != img_digest_str {
             return Err(MicrosandboxError::Custom(format!(
                 "cached image metadata digest mismatch: snapshot={}, cache={}",
@@ -333,7 +355,14 @@ pub(super) async fn save_snapshot(
             )));
         }
 
-        let metadata_path = cache.image_metadata_path(&image_ref);
+        // The tag can change after admission. Bundle the metadata we actually validated,
+        // not a later reopen of that mutable pathname alongside the old generation's layers.
+        let staging = tempfile::tempdir_in(cache.tmp_dir())?;
+        let metadata_path = staging
+            .path()
+            .join(cache.image_metadata_path(&image_ref).file_name().unwrap());
+        std::fs::write(&metadata_path, serde_json::to_vec(&metadata)?)?;
+        admitted_metadata = Some(staging);
         push_required_cache_file(&mut cache_files, &metadata_path, "manifests")?;
 
         // Flat snapshots already own a complete root disk. Their offline dependency is
@@ -360,6 +389,7 @@ pub(super) async fn save_snapshot(
             }
         }
     }
+    let _admitted_metadata = admitted_metadata;
     let resolve_us = resolve_started.elapsed().as_micros();
 
     // Write the archive.
@@ -1114,13 +1144,15 @@ pub(crate) async fn materialize_archive_for_child_with_overrides(
             MicrosandboxError::SnapshotIntegrity(format!("invalid legacy archive closure: {error}"))
         })?;
         tokio::fs::rename(head.layer_path(layer), child_stage.join(DEFAULT_UPPER_FILE)).await?;
-        install_staged_cache(cache_stage.path(), &cache_dir, &manifest).await?;
+        let cache_operation =
+            install_staged_cache(cache_stage.path(), &cache_dir, &manifest).await?;
         for directory in unpacked.manifest_dirs {
             if directory.exists() {
                 tokio::fs::remove_dir_all(directory).await?;
             }
         }
         return Ok(ArchiveChildMaterialization {
+            cache_operation,
             manifest,
             checkpoint_restore: None,
             upper_layers: Vec::new(),
@@ -1172,7 +1204,8 @@ pub(crate) async fn materialize_archive_for_child_with_overrides(
                 choices,
             )
             .await?;
-            install_staged_cache(cache_stage.path(), &cache_dir, &manifest).await?;
+            let cache_operation =
+                install_staged_cache(cache_stage.path(), &cache_dir, &manifest).await?;
             for member in &inventory.members {
                 let member_dir = child_stage.join(&member.snapshot_id);
                 if member_dir.exists() {
@@ -1180,6 +1213,7 @@ pub(crate) async fn materialize_archive_for_child_with_overrides(
                 }
             }
             return Ok(ArchiveChildMaterialization {
+                cache_operation,
                 manifest,
                 checkpoint_restore: None,
                 upper_layers: materialized.upper_layers,
@@ -1197,7 +1231,8 @@ pub(crate) async fn materialize_archive_for_child_with_overrides(
             choices,
         )
         .await?;
-        install_staged_cache(cache_stage.path(), &cache_dir, &manifest).await?;
+        let cache_operation =
+            install_staged_cache(cache_stage.path(), &cache_dir, &manifest).await?;
         for member in &inventory.members {
             let member_dir = child_stage.join(&member.snapshot_id);
             if member_dir.exists() {
@@ -1205,6 +1240,7 @@ pub(crate) async fn materialize_archive_for_child_with_overrides(
             }
         }
         return Ok(ArchiveChildMaterialization {
+            cache_operation,
             manifest,
             checkpoint_restore: Some(materialized.restore),
             upper_layers: materialized.upper_layers,
@@ -1262,7 +1298,7 @@ pub(crate) async fn materialize_archive_for_child_with_overrides(
         tokio::fs::remove_dir_all(&archive_layers).await?;
     }
 
-    install_staged_cache(cache_stage.path(), &cache_dir, &manifest).await?;
+    let cache_operation = install_staged_cache(cache_stage.path(), &cache_dir, &manifest).await?;
     for member in &inventory.members {
         let member_dir = child_stage.join(&member.snapshot_id);
         if member_dir.exists() {
@@ -1270,6 +1306,7 @@ pub(crate) async fn materialize_archive_for_child_with_overrides(
         }
     }
     Ok(ArchiveChildMaterialization {
+        cache_operation,
         manifest,
         checkpoint_restore: None,
         upper_layers: materialized.upper_layers,
@@ -3656,7 +3693,7 @@ async fn verify_imported_snapshots(
         if !seen.insert(dir.clone()) {
             continue;
         }
-        snapshots.push(store::open_snapshot(local, dir.to_string_lossy().as_ref()).await?);
+        snapshots.push(store::open_snapshot_leased(local, dir.to_string_lossy().as_ref()).await?);
     }
 
     if snapshots.is_empty() {
@@ -3701,9 +3738,12 @@ async fn install_staged_cache(
     cache_stage: &Path,
     cache_dir: &Path,
     manifest: &microsandbox_image::snapshot::Manifest,
-) -> MicrosandboxResult<()> {
+) -> MicrosandboxResult<microsandbox_image::GlobalCache> {
+    let cache = microsandbox_image::GlobalCache::new_async(cache_dir)
+        .await?
+        .operation();
     if !contains_files(cache_stage)? {
-        return Ok(());
+        return Ok(cache);
     }
 
     let image_ref: microsandbox_image::Reference =
@@ -3715,7 +3755,6 @@ async fn install_staged_cache(
             MicrosandboxError::Custom(format!("invalid snapshot image digest: {e}"))
         })?;
     let staged_cache = microsandbox_image::GlobalCache::new_async(cache_stage).await?;
-    let _real_cache = microsandbox_image::GlobalCache::new_async(cache_dir).await?;
     let metadata = staged_cache
         .read_image_metadata_async(&image_ref)
         .await?
@@ -3726,6 +3765,9 @@ async fn install_staged_cache(
             ))
         })?;
     validate_cached_metadata(manifest, &metadata)?;
+    let mut leased_paths = cache.metadata_paths(&metadata)?;
+    leased_paths.push(cache.image_metadata_path(&image_ref));
+    cache.lease_paths_async(leased_paths).await?;
 
     let expected_files = expected_cache_files(
         &staged_cache,
@@ -3741,9 +3783,11 @@ async fn install_staged_cache(
     for source in expected_files.iter().filter(|path| **path != metadata_path) {
         install_cache_file(source, cache_stage, cache_dir).await?;
     }
-    install_cache_file(&metadata_path, cache_stage, cache_dir).await?;
+    cache
+        .write_image_metadata_async(&image_ref, &metadata)
+        .await?;
 
-    Ok(())
+    Ok(cache)
 }
 
 fn validate_cached_metadata(
@@ -3997,6 +4041,9 @@ fn collect_files_inner(path: &Path, files: &mut Vec<PathBuf>) -> MicrosandboxRes
     for entry in std::fs::read_dir(path)? {
         let entry = entry?;
         let file_type = entry.file_type()?;
+        if file_type.is_dir() && entry.file_name() == ".msb-leases" {
+            continue;
+        }
         if file_type.is_dir() {
             collect_files_inner(&entry.path(), files)?;
         } else if file_type.is_file() {
@@ -4147,6 +4194,74 @@ mod tests {
     };
 
     use super::*;
+
+    #[tokio::test]
+    async fn import_requires_durable_ownership_and_recovers_failed_completion() {
+        use sea_orm::{ConnectionTrait, EntityTrait};
+        let root = tempfile::tempdir().unwrap();
+        let source = crate::test_support::local_backend_builder(root.path().join("source"))
+            .build()
+            .await
+            .unwrap();
+        let data = grouped_archive_manifest(991, None);
+        let artifact = root.path().join("artifact");
+        write_grouped_archive_fixture(&artifact, &data);
+        let archive = root.path().join("archive.msb");
+        save_snapshot(
+            &source,
+            artifact.to_str().unwrap(),
+            &archive,
+            SaveOpts::default(),
+        )
+        .await
+        .unwrap();
+        for block_prepare in [true, false] {
+            let destination = crate::test_support::local_backend_builder(
+                root.path().join(format!("destination-{block_prepare}")),
+            )
+            .build()
+            .await
+            .unwrap();
+            let db = destination.db().await.unwrap();
+            let condition = if block_prepare {
+                "1"
+            } else {
+                "NEW.availability = 'ready'"
+            };
+            db.write().execute_unprepared(&format!("CREATE TRIGGER fail_publication BEFORE INSERT ON snapshot_index WHEN {condition} BEGIN SELECT RAISE(FAIL, 'injected catalog failure'); END")).await.unwrap();
+            let error = load_snapshot(&destination, &archive, None)
+                .await
+                .unwrap_err();
+            assert!(
+                error.to_string().contains("injected catalog failure"),
+                "{error}"
+            );
+            let rows = crate::db::entity::snapshot::Entity::find()
+                .all(db.read())
+                .await
+                .unwrap();
+            if block_prepare {
+                assert!(rows.is_empty());
+            } else {
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0].availability, "publishing");
+                assert!(
+                    Path::new(&rows[0].artifact_path)
+                        .join(DESCRIPTOR_FILENAME)
+                        .exists()
+                );
+            }
+            db.write()
+                .execute_unprepared("DROP TRIGGER fail_publication")
+                .await
+                .unwrap();
+            let repaired = store::list_indexed(&destination).await.unwrap();
+            assert_eq!(repaired.len(), usize::from(!block_prepare));
+            if let Some(snapshot) = repaired.first() {
+                assert_eq!(snapshot.availability, "ready");
+            }
+        }
+    }
 
     #[tokio::test]
     async fn direct_materialization_future_has_bounded_stack_footprint() {
@@ -4429,7 +4544,7 @@ mod tests {
         .unwrap();
         let loaded = load_snapshot(&destination, &archive, None).await.unwrap();
         assert_eq!(
-            store::open_snapshot(&destination, loaded.path().to_str().unwrap())
+            store::open_snapshot_leased(&destination, loaded.path().to_str().unwrap())
                 .await
                 .unwrap()
                 .manifest()

@@ -284,6 +284,17 @@ impl Snapshot {
     /// or created. This artifact-file operation is currently local-only; other
     /// backends return [`crate::MicrosandboxError::Unsupported`].
     pub async fn save_to(&self, out: &Path, opts: SaveOpts) -> MicrosandboxResult<()> {
+        #[cfg(feature = "local")]
+        if let Some(local) = self.backend.as_local() {
+            return crate::backend::local::snapshot::save_snapshot_expected(
+                local,
+                self.reference().value(),
+                out,
+                opts,
+                Some(&self.digest),
+            )
+            .await;
+        }
         self.backend
             .snapshots()
             .save(self.reference(), out, opts)
@@ -504,6 +515,16 @@ impl SnapshotHandle {
 
     /// Remove this snapshot. See [`Snapshot::remove`].
     pub async fn remove(&self, force: bool) -> MicrosandboxResult<()> {
+        #[cfg(feature = "local")]
+        if let Some(local) = self.backend.as_local() {
+            return crate::backend::local::snapshot::remove_snapshot_expected(
+                local,
+                self.reference().value(),
+                force,
+                Some(&self.digest),
+            )
+            .await;
+        }
         self.backend
             .snapshots()
             .remove(self.backend.clone(), self.reference(), force)
@@ -516,6 +537,17 @@ impl SnapshotHandle {
     /// artifact-file operation is currently local-only; other backends return
     /// [`crate::MicrosandboxError::Unsupported`].
     pub async fn save_to(&self, out: &Path, opts: SaveOpts) -> MicrosandboxResult<()> {
+        #[cfg(feature = "local")]
+        if let Some(local) = self.backend.as_local() {
+            return crate::backend::local::snapshot::save_snapshot_expected(
+                local,
+                self.reference().value(),
+                out,
+                opts,
+                Some(&self.digest),
+            )
+            .await;
+        }
         self.backend
             .snapshots()
             .save(self.reference(), out, opts)

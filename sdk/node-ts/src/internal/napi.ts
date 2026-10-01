@@ -850,6 +850,7 @@ export interface NapiImageDetail extends NapiImageInfo {
 }
 
 export interface NapiImagePruneReport {
+  readonly skippedInUse?: number;
   readonly imageRefsRemoved: number;
   readonly manifestsRemoved: number;
   readonly layersRemoved: number;

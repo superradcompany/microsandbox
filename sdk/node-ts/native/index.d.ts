@@ -2101,6 +2101,7 @@ export declare function imagePrune(): Promise<ImagePruneReportJs>
 
 /** Summary of artifacts removed by `imagePrune`. */
 export interface ImagePruneReportJs {
+  skippedInUse: number
   imageRefsRemoved: number
   manifestsRemoved: number
   layersRemoved: number
@@ -2110,8 +2111,8 @@ export interface ImagePruneReportJs {
 }
 
 /**
- * Remove a cached image. Pass `force = true` to delete even when a
- * sandbox references it.
+ * Remove an image reference. Force permits untagging dependencies while retaining
+ * their backing; active storage operations are never bypassed.
  */
 export declare function imageRemove(reference: string, force?: boolean | undefined | null): Promise<void>
 

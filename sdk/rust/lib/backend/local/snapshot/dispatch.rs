@@ -110,7 +110,9 @@ impl SnapshotBackend for LocalBackend {
             if may_be_archive && Path::new(&selector).is_file() {
                 config.snapshot_archive_source = Some(PathBuf::from(selector));
             } else {
-                let snapshot = from_artifact(backend, store::open_snapshot(self, &selector).await?);
+                let artifact = store::open_snapshot_leased(self, &selector).await?;
+                config.snapshot_lease = artifact.lease.clone();
+                let snapshot = from_artifact(backend, artifact);
                 crate::sandbox::prepare_local_snapshot_restore(config, &snapshot)?;
             }
             // The create path also admits deferred references; successful preparation
@@ -132,12 +134,14 @@ impl SnapshotBackend for LocalBackend {
         snapshot: &'a Snapshot,
     ) -> BoxFuture<'a, MicrosandboxResult<SnapshotVerifyReport>> {
         Box::pin(async move {
-            let artifact = artifact::Snapshot::from_parts(
-                snapshot.path()?.to_path_buf(),
-                snapshot.digest().into(),
-                snapshot.manifest().clone(),
-                snapshot.labels().clone(),
-            );
+            let artifact =
+                store::open_snapshot_leased(self, snapshot.path()?.to_string_lossy().as_ref())
+                    .await?;
+            if artifact.digest() != snapshot.digest() {
+                return Err(MicrosandboxError::SnapshotIntegrity(
+                    "snapshot was replaced since this handle was opened".into(),
+                ));
+            }
             verify::verify_snapshot(&artifact).await
         })
     }
@@ -149,12 +153,17 @@ impl SnapshotBackend for LocalBackend {
         labels: BTreeMap<String, String>,
         record_integrity: bool,
     ) -> BoxFuture<'a, MicrosandboxResult<Manifest>> {
-        Box::pin(copy::copy_snapshot_archive(
-            snapshot,
-            out,
-            labels,
-            record_integrity,
-        ))
+        Box::pin(async move {
+            let artifact =
+                store::open_snapshot_leased(self, snapshot.path()?.to_string_lossy().as_ref())
+                    .await?;
+            if artifact.digest() != snapshot.digest() {
+                return Err(MicrosandboxError::SnapshotIntegrity(
+                    "snapshot was replaced since this handle was opened".into(),
+                ));
+            }
+            copy::copy_snapshot_archive(snapshot, out, labels, record_integrity).await
+        })
     }
 
     fn list_dir(

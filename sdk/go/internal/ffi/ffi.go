@@ -5165,6 +5165,7 @@ type ImageDetailInfo struct {
 
 // ImagePruneReportInfo is the JSON shape returned by image prune.
 type ImagePruneReportInfo struct {
+	SkippedInUse     uint32  `json:"skipped_in_use"`
 	ImageRefsRemoved uint32  `json:"image_refs_removed"`
 	ManifestsRemoved uint32  `json:"manifests_removed"`
 	LayersRemoved    uint32  `json:"layers_removed"`

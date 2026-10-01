@@ -122,7 +122,7 @@ struct PreparedLoadedImage {
 #[derive(Debug)]
 struct PreparedArchiveLoad {
     images: Vec<PreparedLoadedImage>,
-    staged_layers: HashMap<String, PathBuf>,
+    staged_layers: Arc<StagedLayerGuard>,
 }
 
 #[derive(Debug)]
@@ -137,7 +137,7 @@ struct OciManifestCandidate {
 }
 
 #[derive(Debug)]
-struct StagedLayerGuard {
+pub(crate) struct StagedLayerGuard {
     paths: HashMap<String, PathBuf>,
     cleanup_on_drop: bool,
 }
@@ -258,11 +258,6 @@ impl StagedLayerGuard {
         self.paths.insert(digest, path.clone());
         path
     }
-
-    fn into_inner(mut self) -> HashMap<String, PathBuf> {
-        self.cleanup_on_drop = false;
-        std::mem::take(&mut self.paths)
-    }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -279,6 +274,13 @@ impl<W: Write> Write for DigestingWriter<W> {
 
     fn flush(&mut self) -> io::Result<()> {
         self.inner.flush()
+    }
+}
+
+impl std::ops::Deref for StagedLayerGuard {
+    type Target = HashMap<String, PathBuf>;
+    fn deref(&self) -> &Self::Target {
+        &self.paths
     }
 }
 
@@ -322,62 +324,117 @@ pub async fn load_archive(
     input: &Path,
     options: ImageLoadOptions,
 ) -> ImageResult<Vec<LoadedImage>> {
-    let cache_dir_for_blocking = cache_dir.to_path_buf();
+    let cache = GlobalCache::new_async(cache_dir).await?;
+    load_archive_into(&cache, input, options).await
+}
+
+/// Import using a caller-owned operation scope, retained through catalog publication.
+pub async fn load_archive_into(
+    cache: &GlobalCache,
+    input: &Path,
+    options: ImageLoadOptions,
+) -> ImageResult<Vec<LoadedImage>> {
+    let operation = cache.operation_or_new();
+    load_archive_with(&operation, input, options, |_| async { Ok(()) }).await
+}
+
+/// Import one reference at a time and await durable publication before releasing its pins.
+/// Completed references remain installed if a later reference fails. A caller-supplied
+/// operation scope still retains all pins when a larger ownership handoff requires it.
+pub async fn load_archive_with<F, Fut>(
+    cache: &GlobalCache,
+    input: &Path,
+    options: ImageLoadOptions,
+    mut publish: F,
+) -> ImageResult<Vec<LoadedImage>>
+where
+    F: FnMut(LoadedImage) -> Fut,
+    Fut: std::future::Future<Output = ImageResult<()>>,
+{
+    let cache_dir = cache
+        .layers_dir()
+        .parent()
+        .expect("cache layers have a parent")
+        .to_path_buf();
     let input = input.to_path_buf();
     let progress = options.progress.clone();
+    let worker_dir = cache_dir.clone();
+    let worker_input = input.clone();
+    let worker_options = options.clone();
     let prepared = tokio::task::spawn_blocking(move || {
-        load_archive_blocking(&cache_dir_for_blocking, &input, options)
+        load_archive_blocking(&worker_dir, &worker_input, worker_options)
     })
     .await
-    .map_err(|e| ImageError::Io(io::Error::other(e)))??;
-
-    let cache = GlobalCache::new_async(cache_dir).await?;
-    let registry = Registry::new(Platform::host_linux(), cache)?;
+    .map_err(std::io::Error::other)??;
     let PreparedArchiveLoad {
         images,
-        staged_layers,
+        mut staged_layers,
     } = prepared;
-    let cleanup_paths = staged_layers.values().cloned().collect::<Vec<_>>();
-    let staged_layers = Arc::new(staged_layers);
-    let cache = GlobalCache::new_async(cache_dir).await?;
+    let mut refreshed = HashMap::new();
     let mut loaded = Vec::with_capacity(images.len());
-
-    let result = async {
-        for image in images {
-            let reference: Reference = image
-                .reference
-                .parse()
-                .map_err(|e| ImageError::ManifestParse(format!("invalid image reference: {e}")))?;
-
-            registry
-                .materialize_cached_layers_from_paths(
-                    &reference,
-                    &image.metadata,
-                    false,
-                    Arc::clone(&staged_layers),
-                    progress.clone(),
-                )
-                .await?;
-
-            cache
-                .write_image_metadata_async(&reference, &image.metadata)
-                .await?;
-
-            loaded.push(LoadedImage {
-                reference: image.reference,
-                metadata: image.metadata,
-            });
+    for mut image in images {
+        let operation = cache.operation_or_new();
+        if let Some(metadata) = refreshed.remove(&image.reference) {
+            image.metadata = metadata;
         }
-
-        Ok(loaded)
+        let reference: Reference = image.reference.parse().map_err(|error| {
+            ImageError::ManifestParse(format!("invalid image reference: {error}"))
+        })?;
+        let mut paths = operation.metadata_paths(&image.metadata)?;
+        paths.push(operation.image_metadata_path(&reference));
+        operation.lease_paths_async(paths).await?;
+        // Warm preparation is optimistic. Once admitted, a cache miss must restage the
+        // supplied archive, never turn an offline import into a registry download.
+        let missing = image.metadata.layers.iter().any(|layer| {
+            !staged_layers.contains_key(&layer.digest)
+                && layer
+                    .diff_id
+                    .parse()
+                    .is_ok_and(|id| !operation.is_layer_materialized(&id))
+        });
+        if missing {
+            let directory = cache_dir.clone();
+            let source = input.clone();
+            let retry_options = options.clone();
+            let prepared = tokio::task::spawn_blocking(move || {
+                prepare_archive(&directory, &source, retry_options, false)
+            })
+            .await
+            .map_err(std::io::Error::other)??;
+            staged_layers = prepared.staged_layers;
+            refreshed = prepared
+                .images
+                .into_iter()
+                .map(|image| (image.reference, image.metadata))
+                .collect();
+            image.metadata = refreshed
+                .remove(&image.reference)
+                .ok_or_else(|| ImageError::ManifestParse("archive changed during import".into()))?;
+            operation
+                .lease_paths_async(operation.metadata_paths(&image.metadata)?)
+                .await?;
+        }
+        let registry = Registry::new(Platform::host_linux(), operation.clone())?;
+        registry
+            .materialize_cached_layers_from_paths(
+                &reference,
+                &image.metadata,
+                false,
+                staged_layers.clone(),
+                progress.clone(),
+            )
+            .await?;
+        operation
+            .write_image_metadata_async(&reference, &image.metadata)
+            .await?;
+        let image = LoadedImage {
+            reference: image.reference,
+            metadata: image.metadata,
+        };
+        publish(image.clone()).await?;
+        loaded.push(image);
     }
-    .await;
-
-    for path in cleanup_paths {
-        let _ = tokio::fs::remove_file(path).await;
-    }
-
-    result
+    Ok(loaded)
 }
 
 /// Save images as a Docker-compatible image archive.
@@ -396,6 +453,21 @@ pub fn save_archive(
     images: &[ImageSaveRequest],
     format: ImageArchiveFormat,
 ) -> ImageResult<()> {
+    let mut paths = Vec::new();
+    for image in images {
+        paths.push(
+            cache.image_metadata_path(
+                &image
+                    .reference
+                    .parse::<Reference>()
+                    .map_err(|error| ImageError::ManifestParse(error.to_string()))?,
+            ),
+        );
+        for layer in &image.layers {
+            paths.push(cache.layer_erofs_path(&layer.diff_id.parse()?));
+        }
+    }
+    let _leases = cache.lease_paths(paths)?;
     match format {
         ImageArchiveFormat::Docker => save_docker_archive_inner(cache, output, images),
         ImageArchiveFormat::Oci => save_oci_archive_inner(cache, output, images),
@@ -614,16 +686,25 @@ fn load_archive_blocking(
     input: &Path,
     options: ImageLoadOptions,
 ) -> ImageResult<PreparedArchiveLoad> {
+    prepare_archive(cache_dir, input, options, true)
+}
+
+fn prepare_archive(
+    cache_dir: &Path,
+    input: &Path,
+    options: ImageLoadOptions,
+    use_cache: bool,
+) -> ImageResult<PreparedArchiveLoad> {
     // A `docker save` archive carries a `manifest.json` (and often an `oci-layout` compat shim). Prefer the Docker path when `manifest.json` is present: it derives the image
     // name from `RepoTags` and handles the layer layout that `docker save` actually writes. The OCI path is for archives that ship only an OCI layout.
     if let Some(manifest_json) = read_archive_entry(input, "manifest.json")? {
         let manifest: Vec<DockerManifestEntry> = serde_json::from_slice(&manifest_json)
             .map_err(|e| ImageError::ManifestParse(format!("docker manifest.json: {e}")))?;
-        return load_docker_archive_blocking(cache_dir, input, options, manifest);
+        return prepare_docker_archive(cache_dir, input, options, manifest, use_cache);
     }
 
     if read_archive_entry(input, "oci-layout")?.is_some() {
-        return load_oci_archive_blocking(cache_dir, input, options);
+        return prepare_oci_archive(cache_dir, input, options, use_cache);
     }
 
     Err(ImageError::ManifestParse(
@@ -631,11 +712,12 @@ fn load_archive_blocking(
     ))
 }
 
-fn load_docker_archive_blocking(
+fn prepare_docker_archive(
     cache_dir: &Path,
     input: &Path,
     options: ImageLoadOptions,
     manifest: Vec<DockerManifestEntry>,
+    use_cache: bool,
 ) -> ImageResult<PreparedArchiveLoad> {
     let cache = GlobalCache::new(cache_dir)?;
     if manifest.is_empty() {
@@ -658,6 +740,9 @@ fn load_docker_archive_blocking(
     // artifacts survive. On a hit the cached metadata is reused verbatim, which also keys fsmeta/VMDK by the manifest digest recorded at materialization time -- so a `pull`
     // followed by a `load` of the same image still hits. Only the small config blob is read (seekably, via `read_archive_entries`); layer bytes are never touched.
     'early_gate: {
+        if !use_cache {
+            break 'early_gate;
+        }
         let config_blobs = read_archive_entries(input, &required_configs)?;
         let mut early_images = Vec::new();
         for (image_index, image) in manifest.iter().enumerate() {
@@ -743,7 +828,7 @@ fn load_docker_archive_blocking(
         }
         return Ok(PreparedArchiveLoad {
             images: early_images,
-            staged_layers: HashMap::new(),
+            staged_layers: Arc::new(StagedLayerGuard::new()),
         });
     }
 
@@ -872,14 +957,24 @@ fn load_docker_archive_blocking(
 
     Ok(PreparedArchiveLoad {
         images: loaded,
-        staged_layers: staged_layers.into_inner(),
+        staged_layers: Arc::new(staged_layers),
     })
 }
 
+#[cfg(test)]
 fn load_oci_archive_blocking(
     cache_dir: &Path,
     input: &Path,
     options: ImageLoadOptions,
+) -> ImageResult<PreparedArchiveLoad> {
+    prepare_oci_archive(cache_dir, input, options, true)
+}
+
+fn prepare_oci_archive(
+    cache_dir: &Path,
+    input: &Path,
+    options: ImageLoadOptions,
+    use_cache: bool,
 ) -> ImageResult<PreparedArchiveLoad> {
     let cache = GlobalCache::new(cache_dir)?;
     let layout_json = read_archive_entry(input, "oci-layout")?
@@ -934,6 +1029,9 @@ fn load_oci_archive_blocking(
     // Only the small config/manifest blobs are read, seekably (`read_archive_entries` uses `entries_with_seek`), so a hit skips both the ~16 s of layer hashing and the
     // streaming of layer bytes -- it is truly sub-second.
     'early_gate: {
+        if !use_cache {
+            break 'early_gate;
+        }
         let config_blobs = read_archive_entries(input, &required_configs)?;
         let mut early_images = Vec::new();
         for (image_index, (candidate, manifest, manifest_bytes)) in manifests.iter().enumerate() {
@@ -1006,7 +1104,7 @@ fn load_oci_archive_blocking(
         }
         return Ok(PreparedArchiveLoad {
             images: early_images,
-            staged_layers: HashMap::new(),
+            staged_layers: Arc::new(StagedLayerGuard::new()),
         });
     }
 
@@ -1113,7 +1211,7 @@ fn load_oci_archive_blocking(
 
     Ok(PreparedArchiveLoad {
         images: loaded,
-        staged_layers: staged_layers.into_inner(),
+        staged_layers: Arc::new(staged_layers),
     })
 }
 
@@ -1906,6 +2004,71 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+
+    #[tokio::test]
+    async fn warm_import_restages_evicted_layers_from_the_archive() {
+        let temp = tempdir().unwrap();
+        let cache = GlobalCache::new(&temp.path().join("cache")).unwrap();
+        let first = temp.path().join("first.tar");
+        let second = temp.path().join("second.tar");
+        write_test_docker_archive_from_layer(
+            &first,
+            "example.invalid/first:latest",
+            simple_layer_tar(),
+        );
+        write_test_docker_archive_from_layer(
+            &second,
+            "example.invalid/second:latest",
+            complex_layer_tar(),
+        );
+        let mut images = load_archive_into(&cache, &first, ImageLoadOptions::default())
+            .await
+            .unwrap();
+        images.extend(
+            load_archive_into(&cache, &second, ImageLoadOptions::default())
+                .await
+                .unwrap(),
+        );
+        let archive = temp.path().join("both.tar");
+        let requests = images
+            .iter()
+            .map(save_request_from_loaded)
+            .collect::<Vec<_>>();
+        save_docker_archive(&cache, &archive, &requests).unwrap();
+        let warmed = load_archive_into(&cache, &archive, ImageLoadOptions::default())
+            .await
+            .unwrap();
+        let evicted = cache.metadata_paths(&warmed[1].metadata).unwrap();
+        assert!(
+            load_archive_blocking(
+                cache.layers_dir().parent().unwrap(),
+                &archive,
+                ImageLoadOptions::default()
+            )
+            .unwrap()
+            .staged_layers
+            .is_empty()
+        );
+        // The callback runs after archive preparation and the first image's admission,
+        // exactly where prune used to invalidate an unprotected warm hit for image two.
+        let imported = load_archive_with(&cache, &archive, ImageLoadOptions::default(), |image| {
+            let evicted = evicted.clone();
+            async move {
+                if image.reference == "example.invalid/first:latest" {
+                    for path in evicted {
+                        std::fs::remove_file(path)?;
+                    }
+                }
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(imported.len(), 2);
+        for layer in &imported[1].metadata.layers {
+            assert!(cache.is_layer_materialized(&layer.diff_id.parse().unwrap()));
+        }
+    }
 
     #[test]
     fn docker_archive_load_save_load_roundtrip() {
