@@ -1940,6 +1940,151 @@ mod tests {
         frame
     }
 
+    /// Run the real OS-thread loop in a subprocess because it has no shutdown API.
+    #[test]
+    fn stalled_drain_wakes_poll_loop_without_network_events() {
+        const CHILD_ENV: &str = "MSB_TEST_STALLED_DRAIN_WAKE_CHILD";
+        if std::env::var_os(CHILD_ENV).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "engine::netstack::poll::tests::stalled_drain_wakes_poll_loop_without_network_events",
+                    "--nocapture",
+                ])
+                .env(CHILD_ENV, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "poll-loop child failed:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            );
+            return;
+        }
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            tokio::time::timeout(std::time::Duration::from_secs(65), async {
+                check_stalled_drain_wakeup().await;
+            })
+            .await
+            .expect("poll-loop regression timed out");
+        });
+    }
+
+    async fn check_stalled_drain_wakeup() {
+        use std::time::Duration;
+
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (sent_tx, sent_rx) = tokio::sync::oneshot::channel();
+        let host = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0; 6];
+            stream.read_exact(&mut request).await.unwrap();
+            assert_eq!(&request, b"hello\n");
+            stream.write_all(&vec![b'x'; 131072]).await.unwrap();
+            sent_tx.send(()).unwrap();
+
+            // Let zero-window retransmission backoff grow before host EOF starts
+            // the drain timer. The next TCP timer alone would wake too late.
+            tokio::time::sleep(Duration::from_secs(10)).await;
+        });
+
+        let shared = Arc::new(SharedState::new(256));
+        let loop_shared = shared.clone();
+        let handle = tokio::runtime::Handle::current();
+        std::thread::spawn(move || {
+            smoltcp_poll_loop(
+                loop_shared,
+                leak_poll_config(),
+                NetworkPolicy::allow_all(),
+                None,
+                DnsConfig::default(),
+                None,
+                vec![],
+                false,
+                None,
+                None,
+                TcpAcceptQueueSize::DEFAULT,
+                handle,
+                SecretsHandle::new(Default::default()),
+                None,
+            );
+        });
+
+        let send = |control, seq, ack, payload: &[u8]| {
+            let mut frame = build_tcp_frame(54321, port, control, seq, ack, payload);
+            let guest = IpAddress::Ipv4(Ipv4Addr::from(GUEST_IP));
+            let gateway = IpAddress::Ipv4(Ipv4Addr::from(GATEWAY_IP));
+            let mut ip = Ipv4Packet::new_unchecked(&mut frame[14..34]);
+            ip.set_dst_addr(Ipv4Addr::from(GATEWAY_IP));
+            ip.fill_checksum();
+            let mut tcp = TcpPacket::new_unchecked(&mut frame[34..]);
+            tcp.set_window_len(0);
+            tcp.fill_checksum(&guest, &gateway);
+            shared.tx_ring.push(frame).unwrap();
+            shared.tx_wake.wake();
+        };
+        shared
+            .tx_ring
+            .push(build_arp_request_frame(GUEST_MAC, GUEST_IP, GATEWAY_IP))
+            .unwrap();
+        send(TcpControl::Syn, 1000, None, &[]);
+        let server_isn = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some((seq, _, syn, _, rst)) = last_tcp_reply(&shared) {
+                    assert!(!rst, "unexpected reset during handshake");
+                    if syn {
+                        break seq;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("guest handshake timed out");
+        send(
+            TcpControl::None,
+            1001,
+            Some(server_isn.wrapping_add(1)),
+            b"hello\n",
+        );
+        tokio::time::timeout(Duration::from_secs(5), sent_rx)
+            .await
+            .expect("host did not receive request")
+            .unwrap();
+        let started = std::time::Instant::now();
+
+        // From here on, never send guest packets or wake the network thread.
+        // Reading its output ring does not signal either of its wake sources.
+        tokio::time::timeout(Duration::from_secs(55), async {
+            loop {
+                if let Some((_, _, _, fin, rst)) = last_tcp_reply(&shared) {
+                    assert!(!fin, "queued response must not be discarded with FIN");
+                    if rst {
+                        break;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("drain deadline did not wake the idle poll loop");
+        assert!(
+            started.elapsed() >= Duration::from_secs(30),
+            "premature reset"
+        );
+        host.await.unwrap();
+    }
+
     /// Push one guest frame, run a single ingress pass, then drain egress.
     fn ingress(
         frame: Vec<u8>,
