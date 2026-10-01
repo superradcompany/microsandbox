@@ -960,7 +960,7 @@ msb snap rm baseline:ready
 
 ### Snapshot groups
 
-A group keeps related snapshots together. Restore an earlier snapshot and save new changes to explore a different path while keeping the original snapshots.
+A group keeps related snapshots together. Restore an earlier snapshot and save new changes to explore a different path while keeping the original snapshots. Choose the original group when capturing to keep the new snapshots in that group; otherwise, the group defaults to the restored sandbox’s name.
 
 Since v0.7, installed snapshot members are immutable. Creating another snapshot cannot overwrite an existing member. In SDK calls, omit `force` or set it to `false` (`False` in Python): enabling it fails even when the requested name does not exist. Use a unique or generated member name for each capture. To reuse a name, explicitly remove the existing member first; removal still checks for dependent snapshots.
 
