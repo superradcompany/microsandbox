@@ -1115,7 +1115,9 @@ pub(super) async fn open_base(
     input: &str,
 ) -> MicrosandboxResult<BaseSnapshot> {
     let path = Path::new(input);
-    if !path.is_file() {
+    // Admission has already anchored archive filenames. A remaining bare selector
+    // belongs to the snapshot store and must not be reclassified after a cwd change.
+    if !store::looks_like_path(input) || !path.is_file() {
         let snapshot = store::open_snapshot(local, input).await?;
         if matches!(snapshot.manifest().state, SnapshotState::File(_)) {
             Box::pin(snapshot.verify()).await?;
@@ -1191,6 +1193,108 @@ mod tests {
         DiskLayerId, FileSnapshotState, ImageRef, LayerFileKind, LayerPayload, SnapshotCapture,
         SnapshotConsistency, SnapshotFormat, SnapshotId, SnapshotRootDisk, SnapshotScope,
     };
+
+    #[test]
+    fn admitted_archive_and_group_bases_survive_cwd_changes() {
+        const CHILD: &str = "MSB_TEST_ARCHIVE_BASE_CWD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .arg("--exact")
+                .arg("backend::local::snapshot::archive::delta::tests::admitted_archive_and_group_bases_survive_cwd_changes")
+                .arg("--nocapture")
+                .env(CHILD, "1")
+                .output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                String::from_utf8_lossy(&output.stdout).contains("archive base lifetime checked")
+            );
+            return;
+        }
+        // The test owns the process-wide cwd; no other SDK tests run in this child.
+        let original_cwd = std::env::current_dir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let first = root.path().canonicalize().unwrap().join("first");
+        let second = root.path().canonicalize().unwrap().join("second");
+        let source = first.join("source");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir(&second).unwrap();
+        let wire = microsandbox_types::snapshot::cloud_manifest::Manifest::from_bytes(
+            br#"{"schema":1,"artifact":"snapshot","scope":"disk","created_at":"2026-05-01T12:00:00Z","parent":null,"image":{"ref":"docker.io/library/python:3.12","manifest_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"source_sandbox":"source","state":{"kind":"file","format":"raw","fstype":"ext4","upper":{"file":"upper.ext4","size_bytes":512,"integrity":null}},"labels":{},"extensions":{},"requires":[]}"#
+        ).unwrap();
+        let manifest = microsandbox_types::snapshot::legacy::project_cloud_descriptor(
+            &wire,
+            &wire.digest().unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            source.join(DESCRIPTOR_FILENAME),
+            manifest.to_canonical_bytes().unwrap(),
+        )
+        .unwrap();
+        std::fs::write(source.join("upper.ext4"), [42; 512]).unwrap();
+        std::fs::write(second.join("base.tar"), b"unrelated archive shadow").unwrap();
+        std::fs::write(second.join("group"), b"unrelated group shadow").unwrap();
+        unsafe {
+            std::env::set_var("MSB_CONFIG_PATH", root.path().join("missing-config.json"));
+        }
+        std::env::set_current_dir(&first).unwrap();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let local = LocalBackend::builder()
+                    .home(root.path().join("home"))
+                    .build()
+                    .await
+                    .unwrap();
+                let archive = first.join("base.tar");
+                save_snapshot(
+                    &local,
+                    source.to_str().unwrap(),
+                    &archive,
+                    SaveOpts {
+                        plain_tar: true,
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+                super::super::load_snapshot_with_options(
+                    &local,
+                    &archive,
+                    LoadOpts {
+                        group: Some("group".into()),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+                let archive_selector =
+                    super::super::super::dispatch::anchor_archive_selector("base.tar".into())
+                        .unwrap();
+                let group_selector =
+                    super::super::super::dispatch::anchor_archive_selector("group".into()).unwrap();
+                assert_eq!(Path::new(&archive_selector), archive);
+                assert_eq!(group_selector, "group");
+                std::env::set_current_dir(&second).unwrap();
+                for selector in [&archive_selector, &group_selector] {
+                    let base = open_base(&local, selector).await.unwrap();
+                    assert_eq!(base.snapshot.id(), &manifest.snapshot_id);
+                }
+                assert_eq!(
+                    std::fs::read(second.join("group")).unwrap(),
+                    b"unrelated group shadow"
+                );
+            });
+        std::env::set_current_dir(original_cwd).unwrap();
+        println!("archive base lifetime checked");
+    }
 
     #[tokio::test]
     async fn batch_rejects_corrupt_borrowed_file_layer_before_publication() {

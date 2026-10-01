@@ -138,6 +138,8 @@ println!("{}", snap.manifest().image.reference);
 
 Open an existing artifact by group head, `group:member`, or path. This is a fast metadata operation: it verifies the manifest structure, recomputes the manifest digest, and checks that the upper file exists with the recorded size. It does **not** read the full upper contents; use [`verify()`](#snap-verify) for that.
 
+For the local backend, relative artifact paths are resolved when the operation begins, and the returned snapshot retains that absolute location. Changing the process working directory later does not retarget an opened or listed snapshot. Local import, export, copy, and capture destinations are also resolved before asynchronous work starts. Group names and snapshot IDs continue to resolve through the snapshot store.
+
 <p className="msb-label">Parameters</p>
 
 <div className="msb-params">

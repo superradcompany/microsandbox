@@ -15,7 +15,7 @@ use futures::stream;
 #[cfg(feature = "local")]
 use microsandbox_db::DbReadConnection;
 #[cfg(feature = "local")]
-use microsandbox_metrics::{LiveMetric, LiveMetricState, MetricsRegistry};
+use microsandbox_metrics::{LiveMetric, LiveMetricState};
 #[cfg(feature = "local")]
 use sea_orm::{ColumnTrait, QueryFilter};
 
@@ -245,11 +245,9 @@ pub async fn all_sandbox_metrics() -> MicrosandboxResult<HashMap<String, Sandbox
 pub async fn all_sandbox_metrics_local(
     local: &LocalBackend,
 ) -> MicrosandboxResult<HashMap<String, SandboxMetrics>> {
-    let Some(registry) = open_registry(local)? else {
-        return Ok(HashMap::new());
-    };
-
-    let snapshot = registry.active_snapshot().map_err(metrics_error)?;
+    let mut snapshot = local.verified_metrics(None, false).await?;
+    // If a restart briefly leaves two active samples, the latest wins by name.
+    snapshot.sort_by_key(|live| live.timestamp);
     Ok(snapshot
         .into_iter()
         .map(|live| {
@@ -270,15 +268,7 @@ pub async fn all_sandbox_metrics_reports_local(
     local: &LocalBackend,
     include_exited: bool,
 ) -> MicrosandboxResult<Vec<SandboxMetricsReport>> {
-    let Some(registry) = open_registry(local)? else {
-        return Ok(Vec::new());
-    };
-    let snapshot = if include_exited {
-        registry.snapshot()
-    } else {
-        registry.active_snapshot()
-    }
-    .map_err(metrics_error)?;
+    let snapshot = local.verified_metrics(None, include_exited).await?;
 
     // A sandbox restarted since its last run can own two slots: the stale
     // one from the previous run and the active one. Keep the active row, or
@@ -350,15 +340,13 @@ pub async fn sandbox_metrics_report_local(
         .await?
         .ok_or_else(|| MicrosandboxError::SandboxNotFound(name.to_string()))?;
 
-    let Some(registry) = open_registry(local)? else {
-        return Ok(None);
-    };
-    // Match on name as well as id: catalog row ids are recycled after
-    // removal, so a ghost slot from a deleted sandbox can share the id.
-    let Some(live) = registry
-        .get_by_sandbox_identity(model.id, Some(&model.name))
-        .map_err(metrics_error)?
-    else {
+    let live = local
+        .verified_metrics(None, true)
+        .await?
+        .into_iter()
+        .filter(|live| live.sandbox_id == model.id && live.name == model.name)
+        .max_by_key(|live| (slot_rank(live), live.timestamp));
+    let Some(live) = live else {
         return Ok(None);
     };
     let config = model_effective_config(&model);
@@ -380,36 +368,18 @@ pub(super) async fn metrics_for_sandbox(
             ))
         })?;
 
-    let registry = open_registry(local)?.ok_or_else(|| {
-        MicrosandboxError::Custom(format!(
-            "sandbox {sandbox_id} has no live metrics slot (registry unavailable)"
-        ))
-    })?;
-
-    let Some(live) = registry.get_by_run_id(run.id).map_err(metrics_error)? else {
-        return Err(MicrosandboxError::Custom(format!(
-            "sandbox {sandbox_id} has no live metrics slot"
-        )));
-    };
+    let live = local
+        .verified_metrics(Some(run.id), true)
+        .await?
+        .into_iter()
+        .next()
+        .ok_or_else(|| {
+            MicrosandboxError::Custom(format!(
+                "sandbox {sandbox_id} has no verified live metrics slot"
+            ))
+        })?;
 
     Ok(to_sandbox_metrics(&live, Some(config)))
-}
-
-#[cfg(feature = "local")]
-fn open_registry(local: &LocalBackend) -> MicrosandboxResult<Option<MetricsRegistry>> {
-    let name = local.config().metrics_registry_shm_name();
-    match MetricsRegistry::open(&name) {
-        Ok(reg) => Ok(Some(reg)),
-        Err(microsandbox_metrics::MetricsError::Io(ref e)) if is_missing_registry_io_error(e) => {
-            Ok(None)
-        }
-        Err(err) => Err(metrics_error(err)),
-    }
-}
-
-#[cfg(feature = "local")]
-fn is_missing_registry_io_error(err: &std::io::Error) -> bool {
-    err.kind() == std::io::ErrorKind::NotFound || err.raw_os_error() == Some(libc::ENOENT)
 }
 
 #[cfg(feature = "local")]
@@ -436,11 +406,6 @@ fn to_sandbox_metrics(live: &LiveMetric, config: Option<&SandboxConfig>) -> Sand
         uptime: live.uptime,
         timestamp: live.timestamp,
     }
-}
-
-#[cfg(feature = "local")]
-fn metrics_error(err: microsandbox_metrics::MetricsError) -> MicrosandboxError {
-    MicrosandboxError::Custom(format!("metrics registry: {err}"))
 }
 
 #[cfg(feature = "local")]
@@ -505,6 +470,11 @@ fn classify_state(live: &LiveMetric, config: Option<&SandboxConfig>) -> SandboxM
             }
         }
     }
+}
+
+#[cfg(feature = "local")]
+pub(crate) fn is_missing_registry_io_error(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::NotFound || error.raw_os_error() == Some(libc::ENOENT)
 }
 
 #[cfg(all(test, feature = "local"))]

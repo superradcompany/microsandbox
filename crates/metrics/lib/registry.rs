@@ -125,6 +125,22 @@ pub struct MetricsRegistry {
     inner: Arc<RegistryInner>,
 }
 
+/// A coherent sample with allocation identity for reader-side cache validation.
+/// This exposes existing header/slot fields; it does not change the shared-memory ABI.
+#[derive(Clone, Debug)]
+pub struct IdentifiedMetric {
+    /// Latest coherent metric.
+    pub metric: LiveMetric,
+    /// Slot containing this sample.
+    pub slot: u32,
+    /// Allocation generation observed with the sample.
+    pub generation: u64,
+    /// Registry creation timestamp, read from its immutable header.
+    pub registry_created_at_ms: i64,
+    /// Runtime metrics activation timestamp, read under the slot seqlock.
+    pub started_at_ms: i64,
+}
+
 /// Reservation token returned by [`MetricsRegistry::reserve`].
 #[derive(Clone, Copy, Debug)]
 pub struct SlotReservation {
@@ -508,7 +524,7 @@ impl MetricsRegistry {
     /// generation-checked: if the slot was reused between the read and the
     /// release, the release fails and the (now unrelated) slot is skipped.
     fn read_slot_demoting(&self, idx: u32, include_stale: bool) -> Option<LiveMetric> {
-        let (mut metric, generation) = self.read_slot(idx, true)?;
+        let (mut metric, generation, _) = self.read_slot(idx, true)?;
         if metric.state == LiveMetricState::Active && metric.pid > 0 && !pid_is_alive(metric.pid) {
             if self
                 .release_inner(idx, generation, ReleaseMode::Stale, true)
@@ -522,6 +538,30 @@ impl MetricsRegistry {
             return None;
         }
         Some(metric)
+    }
+
+    /// Read one slot with its allocation identity, preserving existing dead-owner handling.
+    pub fn identified_at(&self, slot: u32, include_stale: bool) -> Option<IdentifiedMetric> {
+        if slot >= self.capacity() {
+            return None;
+        }
+        self.read_slot_demoting(slot, include_stale)?;
+        // Demotion can change generation. Read the final identity coherently again.
+        let (metric, generation, started_at_ms) = self.read_slot(slot, include_stale)?;
+        Some(IdentifiedMetric {
+            metric,
+            slot,
+            generation,
+            started_at_ms,
+            registry_created_at_ms: self.header().created_at_unix_ms,
+        })
+    }
+
+    /// Snapshot slots together with their allocation identities.
+    pub fn identified_snapshot(&self, include_stale: bool) -> Vec<IdentifiedMetric> {
+        (0..self.capacity())
+            .filter_map(|slot| self.identified_at(slot, include_stale))
+            .collect()
     }
 
     /// Lookup the active or stale slot for a sandbox id, if any.
@@ -659,7 +699,7 @@ impl MetricsRegistry {
     /// Read one coherent (metric, generation) pair from a slot. The
     /// generation is the value observed stable across the seqlock window,
     /// letting callers perform generation-checked follow-up transitions.
-    fn read_slot(&self, idx: u32, include_stale: bool) -> Option<(LiveMetric, u64)> {
+    fn read_slot(&self, idx: u32, include_stale: bool) -> Option<(LiveMetric, u64, i64)> {
         let slot = self.slot(idx);
         // Try many times to obtain a coherent snapshot. A tight-loop writer
         // can complete a full cycle in <100 ns, so we need a generous budget
@@ -767,7 +807,7 @@ impl MetricsRegistry {
                     upper_host_allocated,
                 ),
             };
-            return Some((metric, gen_after));
+            return Some((metric, gen_after, started_at_ms));
         }
         None
     }

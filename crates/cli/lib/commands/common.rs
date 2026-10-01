@@ -4814,7 +4814,7 @@ mod tests {
     async fn apply_volume_dot_source_is_bind_mount() {
         match build_volume(".:/mnt").await {
             VolumeMount::Bind { host, guest, .. } => {
-                assert_eq!(host, PathBuf::from("."));
+                assert_eq!(host, std::path::absolute(".").unwrap());
                 assert_eq!(guest, "/mnt");
             }
             other => panic!("expected bind mount, got {other:?}"),
@@ -4825,7 +4825,7 @@ mod tests {
     async fn apply_volume_dot_dot_source_is_bind_mount() {
         match build_volume("..:/mnt").await {
             VolumeMount::Bind { host, guest, .. } => {
-                assert_eq!(host, PathBuf::from(".."));
+                assert_eq!(host, std::path::absolute("..").unwrap());
                 assert_eq!(guest, "/mnt");
             }
             other => panic!("expected bind mount, got {other:?}"),

@@ -596,6 +596,20 @@ jobs:
           Set-MsvcEnvironment -Architecture ${{ matrix.vs_arch }} -HostArchitecture ${{ matrix.vs_host_arch }}
           cargo +stable test --no-default-features --features local,net -p microsandbox --lib --target ${{ matrix.rust_target }} sandbox::patch::tests::bind_patch_
 
+      - name: Test host paths, metrics registries, and confined volumes
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          . "$env:GITHUB_WORKSPACE\vendor\libkrunfw\scripts\msvc-env.ps1"
+          Set-MsvcEnvironment -Architecture ${{ matrix.vs_arch }} -HostArchitecture ${{ matrix.vs_host_arch }}
+          cargo +stable test --no-default-features --features local,net -p microsandbox --lib --target ${{ matrix.rust_target }} host_paths
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo +stable test --no-default-features --features local,net -p microsandbox --lib --target ${{ matrix.rust_target }} config_paths
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo +stable test --no-default-features --features local,net -p microsandbox --lib --target ${{ matrix.rust_target }} metrics_lookup
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo +stable test --no-default-features --features local,net -p microsandbox --lib --target ${{ matrix.rust_target }} volume::fs
+
       - name: Test Windows lifecycle handoff and stdio cleanup
         shell: pwsh
         run: |
@@ -756,6 +770,9 @@ jobs:
           Set-MsvcEnvironment -Architecture ${{ matrix.vs_arch }} -HostArchitecture ${{ matrix.vs_host_arch }}
           go build ./...
           go test -count=1 .
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:MICROSANDBOX_FFI_PATH = "$env:GITHUB_WORKSPACE\target\${{ matrix.rust_target }}\ci\microsandbox_go_ffi.dll"
+          go test -tags microsandbox_ffi_path -run TestVolumeFs -count=1 .
 
   # ---------------------------------------------------------------------------
   # Platform-independent quality lanes. These run once on Linux instead of

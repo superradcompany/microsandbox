@@ -99,6 +99,14 @@ Repository layout:
 - For public APIs, keep the Rust SDK, CLI, Python SDK, Node SDK, Go SDK, docs, and examples consistent when they describe the same capability.
 - Prefer explicit errors with useful context over silent fallbacks.
 
+## Host Path Handling
+
+- For every path input, identify whether it belongs to the local host, a remote backend, or the guest before resolving it. Never resolve cloud or guest paths against the SDK client's working directory.
+- Resolve local host paths against their documented base once, before deferred use or persistence. Retained handles and asynchronous operations must reuse that resolved path, including their final writes. Sandbox and SDK configuration-file inputs use the contributing file's directory, including managed SDK settings.
+- Making a path absolute must preserve its symlink policy. Do not substitute filesystem canonicalization or collapse parent components across symlinks without reviewing the behavior change.
+- Preserve existing persisted relative paths and their legacy startup/resource-inheritance behavior. They have no reliable original base unless it was saved: do not reject, migrate, prompt about, or rewrite them during restart. Capture absolute host inputs only for new sandboxes, including new restore/branch children, without modifying their source sandbox.
+- Path changes need regression coverage with different creation and consumption directories, plus missing targets and symlinks where applicable. Change process cwd only inside an isolated test subprocess. Review sandbox mounts, rootfs paths, TLS files, backend storage roots, snapshots, transfers, and generated commands when adding a new path input.
+
 ## Backward Compatibility Review
 
 Backward-compatibility detection is a required part of working on this project. Surface potential compatibility breaks before making or continuing the affected change.
@@ -154,6 +162,21 @@ Check each applicable compatibility direction:
 Treat stable strings, numeric constants, paths, hashes, serialized field details, ordering guarantees, timing, and error interpretations as compatibility-sensitive even when they are not part of the public API.
 
 For changes affecting persisted data or cross-version communication, read [COMPATIBILITY.md](COMPATIBILITY.md) before implementation. Follow its contract-version naming, module ownership, migration, and validation guidelines.
+
+## Path Handling
+
+- Every relative path must have an explicit base directory. Never rely on the working directory at the time of eventual use.
+- Resolve CLI paths against the invocation directory, config-file paths against the config file’s directory, and SDK paths against a documented base.
+- Capture that base and resolve host paths before spawning asynchronous work or passing them to another process.
+- Persist absolute host paths when they reference a fixed local resource that must remain the same across restarts.
+- Distinguish host paths, guest paths, volume-relative paths, and resource identifiers. Do not apply host-path normalization to all strings.
+- Making a path absolute, collapsing `..`, and resolving symlinks are different operations. Choose deliberately; they can select different destinations.
+- Use structured path fields internally. Avoid concatenating paths into delimiter-separated strings that become ambiguous with valid filenames.
+- Return explicit errors when resolution fails. Never silently substitute another directory or panic.
+- Enforce filesystem containment during the operation, accounting for symlinks and concurrent changes. String-prefix checks alone are insufficient.
+- Centralize path-resolution rules so CLI, SDK, and background execution cannot drift.
+
+For path-related changes, test creation in directory A followed by use from directory B, plus relevant symlink, `..`, missing-path, and platform-specific cases. Assert the exact file or directory accessed—not just whether the operation succeeded.
 
 ## Rust Layout And Style
 

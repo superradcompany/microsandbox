@@ -15,9 +15,13 @@
 //! the bulk of the old global config singleton plus the SQLite pool, so multiple
 //! backends can hold different configurations for tests / migrations.
 
+#[cfg(test)]
+mod config_paths;
 mod control;
 mod control_lookup;
 mod database;
+pub(crate) mod host_paths;
+mod metrics_lookup;
 mod sandbox;
 pub(crate) mod snapshot;
 
@@ -72,6 +76,8 @@ pub struct LocalBackend {
     selection_source: BackendSelectionSource,
     profile: Option<String>,
     control_sessions: control::ControlSessions,
+    metrics_lookup: metrics_lookup::MetricsLookup,
+    pub(crate) metrics_registry_names: Vec<String>,
 }
 
 /// Fluent builder for [`LocalBackend`]. Construct via [`LocalBackend::builder`].
@@ -122,12 +128,20 @@ impl LocalBackend {
         selection_source: BackendSelectionSource,
         profile: Option<String>,
     ) -> Self {
+        let mut metrics_registry_names = vec![config.resolved_config().metrics_registry_shm_name()];
+        if let Some(legacy) = &config.legacy_metrics_registry
+            && !metrics_registry_names.contains(legacy)
+        {
+            metrics_registry_names.push(legacy.clone());
+        }
         Self {
             config,
             db: OnceCell::new(),
             selection_source,
             profile,
             control_sessions: control::ControlSessions::default(),
+            metrics_lookup: metrics_lookup::MetricsLookup::default(),
+            metrics_registry_names,
         }
     }
 
@@ -159,6 +173,8 @@ impl LocalBackend {
                 self.control_sessions
                     .bind_database(&db_dir.join(microsandbox_utils::DB_FILENAME))
                     .map_err(MicrosandboxError::ControlClient)?;
+                self.metrics_lookup
+                    .bind_database(&db_dir.join(microsandbox_utils::DB_FILENAME))?;
                 Ok(pools)
             })
             .await

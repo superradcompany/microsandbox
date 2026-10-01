@@ -1648,7 +1648,7 @@ fn set_dir_mode(dir: &Dir, mode: u32) -> MicrosandboxResult<()> {
 /// Open one child relative to a pinned Windows directory without processing
 /// a reparse point in the child's final component.
 #[cfg(windows)]
-fn windows_open_relative_for_removal(
+pub(crate) fn windows_open_relative_for_removal(
     parent: &std::fs::File,
     name: &OsStr,
 ) -> std::io::Result<std::fs::File> {
@@ -1733,7 +1733,7 @@ fn windows_open_relative_for_removal(
 /// are enumerated from the open handle, and every child is opened relative to
 /// that same handle, so no ambient pathname is reconstructed during removal.
 #[cfg(windows)]
-fn windows_remove_open_entry(entry: std::fs::File) -> std::io::Result<()> {
+pub(crate) fn windows_remove_open_entry(entry: std::fs::File) -> std::io::Result<()> {
     use std::os::windows::fs::MetadataExt;
 
     use windows_sys::Win32::Storage::FileSystem::{
@@ -1865,7 +1865,7 @@ fn windows_read_directory_names(directory: &std::fs::File) -> std::io::Result<Ve
 
 /// Mark an opened Windows file, directory, or reparse point for deletion.
 #[cfg(windows)]
-fn windows_mark_delete(entry: &std::fs::File) -> std::io::Result<()> {
+pub(crate) fn windows_mark_delete(entry: &std::fs::File) -> std::io::Result<()> {
     use windows_sys::Win32::Foundation::HANDLE;
     use windows_sys::Win32::Storage::FileSystem::{
         FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_READONLY, FILE_BASIC_INFO, FILE_DISPOSITION_INFO,

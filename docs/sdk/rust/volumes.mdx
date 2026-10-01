@@ -683,6 +683,8 @@ Returns `Some` for cloud-backed handles and `None` otherwise.
 
 ## VolumeFs
 
+Local operations remain confined to the opened volume directory, including symlink traversal, missing parents, streams, copy, rename, and recursive deletion. Paths that leave the volume return an error. A leading `/` denotes the volume root; valid in-volume parent components and symlinks keep their meaning. Removing or renaming the volume root is refused.
+
 <p className="msb-backref">Returned by <a href="#vol-fs">Volume::fs()</a> · <a href="#h-fs">VolumeHandle::fs()</a></p>
 
 Host-side filesystem operations for a named volume.

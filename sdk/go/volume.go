@@ -5,10 +5,10 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/superradcompany/microsandbox/sdk/go/internal/ffi"
@@ -218,28 +218,17 @@ func (fs *VolumeFs) Root() string { return fs.root }
 
 // Read reads the contents of a file relative to the volume root.
 func (fs *VolumeFs) Read(ctx context.Context, relPath string) ([]byte, error) {
-	if fs.root == "" {
-		var result struct {
-			Data string `json:"data_b64"`
-		}
-		err := ffi.VolumeFsOp(ctx, fs.target, "read", map[string]any{"path": relPath}, &result)
-		if err != nil {
-			return nil, wrapFFI(err)
-		}
-		data, err := base64.StdEncoding.DecodeString(result.Data)
-		if err != nil {
-			return nil, fmt.Errorf("microsandbox: decode volume data: %w", err)
-		}
-		return data, nil
+	var result struct {
+		Data string `json:"data_b64"`
 	}
-	abs, err := fs.abs(relPath)
+	if err := fs.call(ctx, "read", relPath, nil, &result); err != nil {
+		return nil, err
+	}
+	data, err := base64.StdEncoding.DecodeString(result.Data)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("microsandbox: decode volume data: %w", err)
 	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	return os.ReadFile(abs)
+	return data, nil
 }
 
 // ReadString reads a file and returns its contents as a string.
@@ -253,21 +242,9 @@ func (fs *VolumeFs) ReadString(ctx context.Context, relPath string) (string, err
 
 // Write writes data to a file, creating or truncating it.
 func (fs *VolumeFs) Write(ctx context.Context, relPath string, data []byte) error {
-	if fs.root == "" {
-		args := map[string]any{
-			"path":     relPath,
-			"data_b64": base64.StdEncoding.EncodeToString(data),
-		}
-		return wrapFFI(ffi.VolumeFsOp(ctx, fs.target, "write", args, nil))
-	}
-	abs, err := fs.abs(relPath)
-	if err != nil {
-		return err
-	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	return os.WriteFile(abs, data, 0o644)
+	return fs.call(ctx, "write", relPath, map[string]any{
+		"data_b64": base64.StdEncoding.EncodeToString(data),
+	}, nil)
 }
 
 // WriteString writes a string to a file.
@@ -277,96 +254,100 @@ func (fs *VolumeFs) WriteString(ctx context.Context, relPath, content string) er
 
 // Mkdir creates a directory and all missing parents.
 func (fs *VolumeFs) Mkdir(ctx context.Context, relPath string) error {
-	if fs.root == "" {
-		return wrapFFI(ffi.VolumeFsOp(ctx, fs.target, "mkdir", map[string]any{"path": relPath}, nil))
-	}
-	abs, err := fs.abs(relPath)
-	if err != nil {
-		return err
-	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	return os.MkdirAll(abs, 0o755)
+	return fs.call(ctx, "mkdir", relPath, nil, nil)
 }
 
 // Remove deletes a file or empty directory.
 func (fs *VolumeFs) Remove(ctx context.Context, relPath string) error {
-	if fs.root == "" {
-		args := map[string]any{"path": relPath, "recursive": false}
-		return wrapFFI(ffi.VolumeFsOp(ctx, fs.target, "remove", args, nil))
-	}
-	abs, err := fs.abs(relPath)
-	if err != nil {
-		return err
-	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	return os.Remove(abs)
+	return fs.call(ctx, "remove", relPath, map[string]any{"recursive": false}, nil)
 }
 
-// RemoveAll deletes a path and any children it contains.
+// RemoveAll deletes a path and any children it contains. For local volumes,
+// "" and "." delete the volume directory itself, matching os.RemoveAll.
 func (fs *VolumeFs) RemoveAll(ctx context.Context, relPath string) error {
-	if fs.root == "" {
-		args := map[string]any{"path": relPath, "recursive": true}
-		return wrapFFI(ffi.VolumeFsOp(ctx, fs.target, "remove", args, nil))
-	}
-	abs, err := fs.abs(relPath)
-	if err != nil {
-		return err
-	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	return os.RemoveAll(abs)
+	return fs.call(ctx, "remove", relPath, map[string]any{"recursive": true}, nil)
 }
 
 // Exists reports whether a file or directory exists at the given path.
 func (fs *VolumeFs) Exists(ctx context.Context, relPath string) (bool, error) {
-	if fs.root == "" {
-		var result struct {
-			Exists bool `json:"exists"`
-		}
-		err := ffi.VolumeFsOp(ctx, fs.target, "exists", map[string]any{"path": relPath}, &result)
-		return result.Exists, wrapFFI(err)
+	var result struct {
+		Exists bool `json:"exists"`
 	}
-	abs, err := fs.abs(relPath)
-	if err != nil {
-		return false, err
-	}
+	err := fs.call(ctx, "exists", relPath, nil, &result)
+	return result.Exists, err
+}
+
+// call uses the native capability-based implementation for local volumes too.
+// Passing the retained root avoids looking up the volume through a different
+// default backend after environment or backend selection changes.
+func (fs *VolumeFs) call(ctx context.Context, op, relPath string, args map[string]any, result any) error {
 	if err := ctx.Err(); err != nil {
-		return false, err
+		return err
 	}
-	if _, err := os.Stat(abs); err == nil {
-		return true, nil
-	} else if errors.Is(err, os.ErrNotExist) {
-		return false, nil
-	} else {
-		return false, err
+	target := fs.target
+	if fs.root != "" {
+		if err := validateVolumePath(relPath); err != nil {
+			return err
+		}
+		target = fs.root
+		op = "local_" + op
 	}
+	if args == nil {
+		args = make(map[string]any)
+	}
+	args["path"] = relPath
+	if fs.root != "" {
+		// Preserve the old lexical destination, but reject ambiguous symlink/.. paths.
+		args["clean_path"] = filepath.Clean(relPath)
+	}
+	err := ffi.VolumeFsOp(ctx, target, op, args, result)
+	if fs.root != "" {
+		return wrapLocalVolumeError(err, strings.TrimPrefix(op, "local_"), relPath)
+	}
+	return wrapFFI(err)
 }
 
-// abs joins relPath under fs.root and verifies the result stays under root.
-// Both fs.root and the joined path are cleaned before comparison so embedded
-// "../" segments cannot escape. We do NOT follow symlinks here — symlinked
-// targets outside the volume are still readable but at least the path the
-// caller asked for is constrained.
-func (fs *VolumeFs) abs(relPath string) (string, error) {
-	if fs.root == "" {
-		return "", fmt.Errorf("microsandbox: volume root is empty (use GetVolume to obtain a path)")
+// This early lexical rejection preserves the Go API's relative-path contract.
+// Send both spellings to the native layer so it can detect symlink/.. ambiguity
+// against the pinned root before touching either destination.
+func validateVolumePath(path string) error {
+	if filepath.IsAbs(path) || filepath.VolumeName(path) != "" || strings.HasPrefix(path, "/") || strings.HasPrefix(path, string(filepath.Separator)) {
+		return fmt.Errorf("%w: absolute path %q", ErrPathEscape, path)
 	}
-	if filepath.IsAbs(relPath) {
-		return "", fmt.Errorf("%w: absolute path %q", ErrPathEscape, relPath)
+	clean := filepath.Clean(path)
+	if clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("%w: %q", ErrPathEscape, path)
 	}
-	root := filepath.Clean(fs.root)
-	full := filepath.Clean(filepath.Join(root, relPath))
-	rootWithSep := root + string(filepath.Separator)
-	if full != root && !strings.HasPrefix(full, rootWithSep) {
-		return "", fmt.Errorf("%w: %q resolves outside %q", ErrPathEscape, relPath, fs.root)
-	}
-	return full, nil
+	return nil
 }
 
-// _ keeps the io import alive for future helpers (Open / Create).
-var _ = io.Discard
+func wrapLocalVolumeError(err error, op, path string) error {
+	var native *ffi.Error
+	if errors.As(err, &native) {
+		// Older native libraries reject the new local operation names before
+		// touching a filesystem. Never fall back to unconfined host operations.
+		if native.Kind == ffi.KindInvalidArgument && native.Message == "unknown volume fs operation" {
+			return &Error{Kind: ErrUnsupportedOperation, Message: "native SDK does not support confined local volume operations; update the native SDK"}
+		}
+		if native.Kind != "volume_path_escape" && native.OSError != nil {
+			// The native library shares our host OS. Windows codes occupy 32 bits,
+			// even when Rust's signed raw_os_error representation is negative.
+			return &os.PathError{Op: op, Path: path, Err: syscall.Errno(uint32(*native.OSError))}
+		}
+		switch native.Kind {
+		case "volume_path_escape":
+			return fmt.Errorf("%w: %s", ErrPathEscape, native.Message)
+		case "volume_path_not_found":
+			return &os.PathError{Op: op, Path: path, Err: os.ErrNotExist}
+		case "volume_path_exists":
+			return &os.PathError{Op: op, Path: path, Err: os.ErrExist}
+		case "volume_path_permission":
+			return &os.PathError{Op: op, Path: path, Err: os.ErrPermission}
+		case "volume_path_not_directory":
+			return &os.PathError{Op: op, Path: path, Err: syscall.ENOTDIR}
+		case "volume_path_is_directory":
+			return &os.PathError{Op: op, Path: path, Err: syscall.EISDIR}
+		}
+	}
+	return wrapFFI(err)
+}

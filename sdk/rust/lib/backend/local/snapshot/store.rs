@@ -275,7 +275,7 @@ pub(super) async fn index_upsert(
 //--------------------------------------------------------------------------------------------------
 
 /// Heuristic split between a bare snapshot name and a filesystem path.
-pub(super) fn looks_like_path(s: &str) -> bool {
+pub(crate) fn looks_like_path(s: &str) -> bool {
     if s.contains('/') || s.starts_with('.') || s.starts_with('~') {
         return true;
     }
@@ -308,11 +308,13 @@ pub(super) async fn list_dir(
     local: &LocalBackend,
     dir: &Path,
 ) -> MicrosandboxResult<Vec<Snapshot>> {
+    // Directory entries and retained snapshots must keep the same host base across awaits.
+    let dir = std::path::absolute(dir)?;
     if !dir.exists() {
         return Ok(Vec::new());
     }
     let mut candidates = Vec::new();
-    let mut entries = tokio::fs::read_dir(dir).await?;
+    let mut entries = tokio::fs::read_dir(&dir).await?;
     while let Some(entry) = entries.next_entry().await? {
         let path = entry.path();
         if !entry.file_type().await?.is_dir() {
@@ -492,7 +494,7 @@ pub(super) async fn lookup_by_digest(
 
 async fn resolve_path(local: &LocalBackend, selector: &str) -> MicrosandboxResult<PathBuf> {
     if looks_like_path(selector) {
-        return Ok(PathBuf::from(selector));
+        return Ok(std::path::absolute(selector)?);
     }
     if microsandbox_image::snapshot::SnapshotId::new(selector).is_ok()
         || selector.starts_with("sha256:")
@@ -662,6 +664,99 @@ mod tests {
         .await
         .unwrap();
         directory.join(manifest.snapshot_id.as_str())
+    }
+
+    #[test]
+    fn snapshot_paths_stay_bound_after_open_and_list() {
+        const CHILD: &str = "MSB_TEST_SNAPSHOT_PATH_CWD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .arg("--exact")
+                .arg("backend::local::snapshot::store::tests::snapshot_paths_stay_bound_after_open_and_list")
+                .arg("--nocapture")
+                .env(CHILD, "1")
+                .output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                String::from_utf8_lossy(&output.stdout).contains("snapshot path lifetime checked")
+            );
+            return;
+        }
+        let original_cwd = std::env::current_dir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let first = root.path().canonicalize().unwrap().join("first");
+        let second = root.path().canonicalize().unwrap().join("second");
+        for (base, id) in [(&first, 901), (&second, 902)] {
+            let directory = base.join("artifacts/saved");
+            std::fs::create_dir_all(&directory).unwrap();
+            std::fs::write(
+                directory.join(DESCRIPTOR_FILENAME),
+                manifest(id, None).to_canonical_bytes().unwrap(),
+            )
+            .unwrap();
+        }
+        unsafe {
+            std::env::set_var("MSB_CONFIG_PATH", root.path().join("missing-config.json"));
+        }
+        std::env::set_current_dir(&first).unwrap();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                use crate::backend::SnapshotBackend;
+                use crate::snapshot::SnapshotReference;
+                let local = std::sync::Arc::new(
+                    LocalBackend::builder()
+                        .home(root.path().join("home"))
+                        .build_lazy()
+                        .unwrap(),
+                );
+                let snapshot = SnapshotBackend::open(
+                    local.as_ref(),
+                    local.clone(),
+                    SnapshotReference::Auto("./artifacts/saved".into()),
+                )
+                .await
+                .unwrap();
+                let listed = SnapshotBackend::list_dir(
+                    local.as_ref(),
+                    local.clone(),
+                    PathBuf::from("./artifacts"),
+                )
+                .await
+                .unwrap();
+                assert_eq!(listed.len(), 1);
+                std::env::set_current_dir(&second).unwrap();
+                for retained in [&snapshot, &listed[0]] {
+                    assert_eq!(retained.path().unwrap(), first.join("artifacts/saved"));
+                    let reopened = SnapshotBackend::open(
+                        local.as_ref(),
+                        local.clone(),
+                        retained.reference.clone(),
+                    )
+                    .await
+                    .unwrap();
+                    assert_eq!(reopened.id(), &manifest(901, None).snapshot_id);
+                }
+                SnapshotBackend::remove(
+                    local.as_ref(),
+                    local.clone(),
+                    snapshot.reference.clone(),
+                    false,
+                )
+                .await
+                .unwrap();
+                assert!(!first.join("artifacts/saved").exists());
+                assert!(second.join("artifacts/saved").exists());
+            });
+        std::env::set_current_dir(original_cwd).unwrap();
+        println!("snapshot path lifetime checked");
     }
 
     #[tokio::test]

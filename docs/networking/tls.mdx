@@ -20,6 +20,8 @@ When interception is enabled, microsandbox:
 
 microsandbox stores the default CA at `~/.microsandbox/tls/ca.{crt,key}` and reuses it across local sandboxes. Delete both files to generate a new CA. Use the intercept CA certificate and key settings when sandboxes should use a CA that you provide.
 
+For new local sandboxes, relative paths to upstream CA certificates and interception CA certificate/key files are resolved when the sandbox is created and saved as absolute paths. Starting the same sandbox from another working directory does not select different TLS files. Existing saved sandboxes with relative TLS paths retain their previous resolution behavior. They remain usable without recreation, and restart does not rewrite their saved paths.
+
 ## Enabling interception
 
 <CodeGroup>

@@ -133,7 +133,7 @@ pub fn resolve_runtime(config: &GlobalConfig) -> MicrosandboxResult<ResolvedRunt
     resolve_runtime_candidates(
         config,
         RuntimeCandidates {
-            packaged_msb: crate::config::sdk_packaged_msb_path(),
+            packaged_msb: crate::config::sdk_packaged_msb_path()?,
             ..Default::default()
         },
     )

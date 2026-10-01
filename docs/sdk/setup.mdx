@@ -117,6 +117,8 @@ The SDK checks these locations in order:
 2. **Runtime home:** configured `home`, then `MSB_HOME`, then `~/.microsandbox`.
 3. **SDK package:** bundled binaries, when available.
 
+A local backend captures its effective home, relative directory overrides, configured runtime paths, and registry CA certificate path when it is constructed. Later changes to the working directory or `MSB_HOME` do not move that backend's files. Construct a new backend to select another home. Relative host paths in global `config.json` and managed configuration resolve against the contributing file’s directory. Programmatic paths and environment defaults use the caller’s working directory. Process-level SDK runtime setters capture relative paths when registered; environment runtime overrides are captured during backend construction, below managed policy. Existing saved sandbox records retain their legacy relative-path interpretation without rewriting.
+
 A complete home installation wins over bundled Python and Node runtimes, even if its version differs from the SDK. Updating an SDK does not replace that installation. Go also reuses a complete home installation. [Managed runtime paths](/enterprise/deploy-and-verify#apply-configuration-updates) override user choices.
 
 To use a custom installation, set both `MSB_PATH` and `MSB_LIBKRUNFW_PATH` before constructing a backend. See [path overrides](/sdk/setup#override-runtime-paths) for SDK setters and precedence details.

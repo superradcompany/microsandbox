@@ -2,7 +2,7 @@
 
 #[cfg(all(test, unix))]
 mod delivery_tests;
-mod identity;
+pub(super) mod identity;
 #[cfg(all(test, unix))]
 mod lifecycle_tests;
 mod owner;

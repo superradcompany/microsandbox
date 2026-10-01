@@ -23,9 +23,10 @@ impl SnapshotBackend for LocalBackend {
     fn create<'a>(
         &'a self,
         backend: Arc<dyn Backend>,
-        config: SnapshotConfig,
+        mut config: SnapshotConfig,
     ) -> BoxFuture<'a, MicrosandboxResult<Snapshot>> {
         Box::pin(async move {
+            config.dest_dir = config.dest_dir.map(std::path::absolute).transpose()?;
             Ok(from_artifact(
                 backend,
                 create::create_snapshot(self, config).await?,
@@ -39,9 +40,10 @@ impl SnapshotBackend for LocalBackend {
         out: &'a Path,
         plain_tar: bool,
     ) -> BoxFuture<'a, MicrosandboxResult<SnapshotArchive>> {
-        Box::pin(create::create_snapshot_archive(
-            self, config, out, plain_tar,
-        ))
+        Box::pin(async move {
+            let out = std::path::absolute(out)?;
+            create::create_snapshot_archive(self, config, &out, plain_tar).await
+        })
     }
 
     fn open<'a>(
@@ -100,12 +102,20 @@ impl SnapshotBackend for LocalBackend {
         &'a self,
         backend: Arc<dyn Backend>,
         config: &'a mut SandboxConfig,
-        reference: SnapshotReference,
+        mut reference: SnapshotReference,
     ) -> BoxFuture<'a, MicrosandboxResult<()>> {
         Box::pin(async move {
-            // Only path-shaped inputs can denote an archive. IDs always resolve through
-            // the index, never through a same-named file in the caller's directory.
-            let may_be_archive = !matches!(reference, SnapshotReference::Id(_));
+            if !config.local_restore_paths_resolved {
+                super::super::host_paths::resolve_snapshot_reference(&mut reference)?;
+                super::super::host_paths::resolve_host_paths(config)?;
+            }
+            // Existing bare archive names were promoted to absolute paths at admission.
+            // Remaining bare names must not be shadowed by a file in a later cwd.
+            let may_be_archive = match &reference {
+                SnapshotReference::Path(_) => true,
+                SnapshotReference::Auto(value) => store::looks_like_path(value),
+                SnapshotReference::Id(_) => false,
+            };
             let selector = local_selector(self, reference).await?;
             if may_be_archive && Path::new(&selector).is_file() {
                 config.snapshot_archive_source = Some(PathBuf::from(selector));
@@ -150,12 +160,10 @@ impl SnapshotBackend for LocalBackend {
         labels: BTreeMap<String, String>,
         record_integrity: bool,
     ) -> BoxFuture<'a, MicrosandboxResult<Manifest>> {
-        Box::pin(copy::copy_snapshot_archive(
-            snapshot,
-            out,
-            labels,
-            record_integrity,
-        ))
+        Box::pin(async move {
+            let out = std::path::absolute(out)?;
+            copy::copy_snapshot_archive(snapshot, &out, labels, record_integrity).await
+        })
     }
 
     fn list_dir(
@@ -182,11 +190,13 @@ impl SnapshotBackend for LocalBackend {
         &'a self,
         reference: SnapshotReference,
         out: &'a Path,
-        opts: SaveOpts,
+        mut opts: SaveOpts,
     ) -> BoxFuture<'a, MicrosandboxResult<()>> {
         Box::pin(async move {
+            let out = std::path::absolute(out)?;
+            opts.since = opts.since.map(anchor_archive_selector).transpose()?;
             let selector = local_selector(self, reference).await?;
-            archive::save_snapshot(self, &selector, out, opts).await
+            archive::save_snapshot(self, &selector, &out, opts).await
         })
     }
 
@@ -197,9 +207,11 @@ impl SnapshotBackend for LocalBackend {
         dest: Option<&'a Path>,
     ) -> BoxFuture<'a, MicrosandboxResult<SnapshotHandle>> {
         Box::pin(async move {
+            let path = std::path::absolute(path)?;
+            let dest = dest.map(std::path::absolute).transpose()?;
             Ok(from_handle(
                 backend,
-                archive::load_snapshot(self, path, dest).await?,
+                archive::load_snapshot(self, &path, dest.as_deref()).await?,
             ))
         })
     }
@@ -208,10 +220,16 @@ impl SnapshotBackend for LocalBackend {
         &'a self,
         backend: Arc<dyn Backend>,
         paths: &'a [PathBuf],
-        opts: LoadOpts,
+        mut opts: LoadOpts,
     ) -> BoxFuture<'a, MicrosandboxResult<Vec<SnapshotHandle>>> {
         Box::pin(async move {
-            Ok(archive::load_snapshots(self, paths, opts)
+            let paths = paths
+                .iter()
+                .map(std::path::absolute)
+                .collect::<std::io::Result<Vec<_>>>()?;
+            opts.dest = opts.dest.map(std::path::absolute).transpose()?;
+            opts.base = opts.base.map(anchor_archive_selector).transpose()?;
+            Ok(archive::load_snapshots(self, &paths, opts)
                 .await?
                 .into_iter()
                 .map(|handle| from_handle(backend.clone(), handle))
@@ -240,7 +258,7 @@ async fn local_selector(
             .await?
             .map(|handle| handle.artifact_path.to_string_lossy().into_owned())
             .ok_or(MicrosandboxError::SnapshotNotFound(id)),
-        SnapshotReference::Auto(value) => Ok(value),
+        SnapshotReference::Auto(value) => anchor_auto_selector(value),
         SnapshotReference::Path(value) => {
             // Do not turn missing input into the current directory; callers can use
             // an explicit "." when they intend to operate on that artifact.
@@ -249,16 +267,29 @@ async fn local_selector(
                     "snapshot path or name must not be empty".into(),
                 ));
             }
-            let path = PathBuf::from(value);
             // Preserve an explicit relative path as a path, even if it is a bare name.
-            Ok(if path.is_absolute() {
-                path
-            } else {
-                std::env::current_dir()?.join(path)
-            }
-            .to_string_lossy()
-            .into_owned())
+            Ok(std::path::absolute(value)?.to_string_lossy().into_owned())
         }
+    }
+}
+
+// Names and portable IDs belong to the snapshot store, whereas path-shaped selectors
+// belong to the caller's current directory. Capture only the latter before awaiting I/O.
+fn anchor_auto_selector(value: String) -> MicrosandboxResult<String> {
+    if store::looks_like_path(&value) {
+        Ok(std::path::absolute(value)?.to_string_lossy().into_owned())
+    } else {
+        Ok(value)
+    }
+}
+
+/// Base selectors also accept bare archive filenames. Capture that interpretation once,
+/// before deferred work can mistake a same-named file in another directory for the base.
+pub(super) fn anchor_archive_selector(value: String) -> MicrosandboxResult<String> {
+    if store::looks_like_path(&value) || Path::new(&value).is_file() {
+        Ok(std::path::absolute(value)?.to_string_lossy().into_owned())
+    } else {
+        Ok(value)
     }
 }
 
@@ -308,6 +339,130 @@ fn from_handle(backend: Arc<dyn Backend>, handle: artifact::SnapshotHandle) -> S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn archive_paths_stay_bound_during_async_io() {
+        const CHILD: &str = "MSB_TEST_ARCHIVE_PATH_CWD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .arg("--exact")
+                .arg("backend::local::snapshot::dispatch::tests::archive_paths_stay_bound_during_async_io")
+                .arg("--nocapture")
+                .env(CHILD, "1")
+                .output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                String::from_utf8_lossy(&output.stdout).contains("archive path lifetime checked")
+            );
+            return;
+        }
+        let original_cwd = std::env::current_dir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let first = root.path().canonicalize().unwrap().join("first");
+        let second = root.path().canonicalize().unwrap().join("second");
+        let source = first.join("saved");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir(&second).unwrap();
+        let wire = microsandbox_types::snapshot::cloud_manifest::Manifest::from_bytes(
+            br#"{"schema":1,"artifact":"snapshot","scope":"disk","created_at":"2026-05-01T12:00:00Z","parent":null,"image":{"ref":"docker.io/library/python:3.12","manifest_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"source_sandbox":"source","state":{"kind":"file","format":"raw","fstype":"ext4","upper":{"file":"upper.ext4","size_bytes":512,"integrity":null}},"labels":{},"extensions":{},"requires":[]}"#
+        ).unwrap();
+        let manifest = microsandbox_types::snapshot::legacy::project_cloud_descriptor(
+            &wire,
+            &wire.digest().unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            source.join(crate::snapshot::DESCRIPTOR_FILENAME),
+            manifest.to_canonical_bytes().unwrap(),
+        )
+        .unwrap();
+        std::fs::write(source.join("upper.ext4"), [42; 512]).unwrap();
+        unsafe {
+            std::env::set_var("MSB_CONFIG_PATH", root.path().join("missing-config.json"));
+        }
+        std::env::set_current_dir(&first).unwrap();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap()
+            .block_on(async {
+                let local = Arc::new(
+                    LocalBackend::builder()
+                        .home(root.path().join("home"))
+                        .build_lazy()
+                        .unwrap(),
+                );
+                // Open the database before occupying the filesystem worker. Each operation
+                // below is then paused at its first file access, after input admission.
+                local.db().await.unwrap();
+                let save = SnapshotBackend::save(
+                    local.as_ref(),
+                    SnapshotReference::Auto("./saved".into()),
+                    Path::new("./saved.tar"),
+                    SaveOpts {
+                        plain_tar: true,
+                        ..Default::default()
+                    },
+                );
+                switch_cwd_at_first_io(&second, save).await.unwrap();
+                assert!(first.join("saved.tar").is_file());
+                assert!(!second.join("saved.tar").exists());
+                std::env::set_current_dir(&first).unwrap();
+                let load = SnapshotBackend::load(
+                    local.as_ref(),
+                    local.clone(),
+                    Path::new("./saved.tar"),
+                    Some(Path::new("./imported")),
+                );
+                let loaded = switch_cwd_at_first_io(&second, load).await.unwrap();
+                assert!(loaded.path().unwrap().starts_with(first.join("imported")));
+                assert!(!second.join("imported").exists());
+            });
+        std::env::set_current_dir(original_cwd).unwrap();
+        println!("archive path lifetime checked");
+    }
+
+    async fn switch_cwd_at_first_io<F: std::future::Future>(cwd: &Path, operation: F) -> F::Output {
+        let (entered, ready) = tokio::sync::oneshot::channel();
+        let (release, wait) = std::sync::mpsc::channel();
+        let worker = tokio::task::spawn_blocking(move || {
+            entered.send(()).unwrap();
+            wait.recv().unwrap();
+        });
+        ready.await.unwrap();
+        tokio::pin!(operation);
+        // The runtime has exactly one blocking worker, currently held above, so the
+        // first Tokio filesystem operation is guaranteed to yield before touching disk.
+        assert!(futures::poll!(&mut operation).is_pending());
+        std::env::set_current_dir(cwd).unwrap();
+        release.send(()).unwrap();
+        worker.await.unwrap();
+        operation.await
+    }
+
+    #[test]
+    fn auto_selectors_anchor_only_host_paths() {
+        for selector in [
+            "group",
+            "group:member",
+            "snap_00000000000000000000000000000001",
+            "sha256:abc",
+        ] {
+            assert_eq!(anchor_auto_selector(selector.into()).unwrap(), selector);
+        }
+        for selector in ["./saved", "../saved", "artifacts/saved"] {
+            assert_eq!(
+                PathBuf::from(anchor_auto_selector(selector.into()).unwrap()),
+                std::path::absolute(selector).unwrap()
+            );
+        }
+    }
 
     #[tokio::test]
     async fn typed_path_selector_rejects_empty_but_preserves_explicit_dot() {

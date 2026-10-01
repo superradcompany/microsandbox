@@ -209,7 +209,7 @@ impl ManagedConfig {
         Ok(())
     }
 
-    fn path() -> MicrosandboxResult<PathBuf> {
+    pub(super) fn path() -> MicrosandboxResult<PathBuf> {
         #[cfg(target_os = "macos")]
         {
             Ok(PathBuf::from(

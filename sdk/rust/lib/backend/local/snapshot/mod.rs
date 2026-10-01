@@ -34,3 +34,5 @@ pub(crate) use restore::{
     materialize_checkpoint_disk_for_child, materialize_checkpoint_for_child,
     materialize_file_snapshot_for_child, materialize_owned_volumes, root_device,
 };
+
+pub(super) use store::looks_like_path;

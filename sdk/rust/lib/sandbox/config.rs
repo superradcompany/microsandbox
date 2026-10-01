@@ -219,6 +219,11 @@ pub struct SandboxConfig {
     #[serde(skip)]
     pub(crate) snapshot_reference: Option<SnapshotReference>,
 
+    /// Local restore inputs have been classified and anchored for this operation.
+    /// Keep an admitted store name from becoming a file lookup after cwd changes.
+    #[serde(skip)]
+    pub(crate) local_restore_paths_resolved: bool,
+
     /// Immutable installed-snapshot layers to materialize into child-owned root storage.
     ///
     /// Transient: paths remain read-only sources until local create copies or links them and adds
@@ -599,6 +604,7 @@ impl SandboxConfig {
     /// transient launch markers and any workload argv routed through an inherited init are removed.
     pub(crate) fn clone_for_persistence(&self) -> Self {
         let mut config = self.clone();
+        config.local_restore_paths_resolved = false;
         #[cfg(feature = "local")]
         {
             config.checkpoint_restore = None;
@@ -1115,6 +1121,7 @@ impl Default for SandboxConfig {
             slug: None,
             manifest_digest: None,
             snapshot_reference: None,
+            local_restore_paths_resolved: false,
             snapshot_upper_source: None,
             #[cfg(feature = "local")]
             snapshot_root_layer_sources: Vec::new(),

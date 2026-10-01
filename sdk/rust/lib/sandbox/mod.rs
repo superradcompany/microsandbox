@@ -29,6 +29,10 @@ pub(crate) mod metrics;
 mod modify;
 #[cfg(feature = "local")]
 mod patch;
+#[cfg(all(feature = "local", windows))]
+pub(crate) use patch::{
+    windows_mark_delete, windows_open_relative_for_removal, windows_remove_open_entry,
+};
 #[cfg(feature = "local")]
 pub(crate) mod pause;
 #[cfg(all(feature = "local", windows))]
@@ -389,18 +393,25 @@ impl Sandbox {
 
     #[cfg(feature = "local")]
     fn create_with_pull_progress_and_mode(
-        config: SandboxConfig,
+        mut config: SandboxConfig,
         requested_mode: SpawnMode,
     ) -> (
         PullProgressHandle,
         tokio::task::JoinHandle<MicrosandboxResult<Self>>,
     ) {
+        let backend = crate::backend::default_backend();
+        // Resolve before spawning: the task may first run after the caller changes cwd.
+        let paths = if backend.as_local().is_some() {
+            crate::backend::local::host_paths::resolve_host_paths(&mut config)
+        } else {
+            Ok(())
+        };
         let (handle, sender) = progress_channel();
         let task = tokio::spawn(async move {
+            paths?;
             let mode = create_spawn_mode(&config, requested_mode);
             // Pull progress is local-only; ignore the channel on non-local
             // backends and dispatch through the trait without progress events.
-            let backend = crate::backend::default_backend();
             match backend.kind() {
                 crate::backend::BackendKind::Local => {
                     let local = backend.as_local().ok_or_else(|| {

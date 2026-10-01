@@ -208,6 +208,7 @@ impl LocalBackend {
                 .map(|image| crate::SandboxConfigPatch::from_image(&image.pull_result.config)),
         )?;
         config.apply_rootfs_defaults(&self.config().sandbox_defaults.oci)?;
+        super::super::host_paths::resolve_host_paths(&mut config)?;
         // Compatibility callers can supply a snapshot reference alongside an image.
         // Resolve it with this backend before replacement or child reservation can mutate state.
         if let Some(reference) = config.snapshot_reference.take() {
@@ -414,6 +415,9 @@ impl LocalBackend {
             }
         }
         crate::sandbox::resolve_external_mounts(self, &mut config).await?;
+        // Resource inheritance may add legacy relative bindings after initial admission.
+        // This is a new child: pin its launch inputs without rewriting the saved source.
+        super::super::host_paths::resolve_host_paths(&mut config)?;
 
         // Archive descriptors are resolved here, after the builder's initial validation.
         // Do not let a disk archive turn an explicit CoW restore into a fresh boot.
@@ -1930,7 +1934,7 @@ impl LocalBackend {
 
     /// Insert the sandbox record in the database and return its ID.
     #[cfg(test)]
-    pub(super) async fn insert_sandbox_record(
+    pub(in crate::backend::local) async fn insert_sandbox_record(
         db: &DbWriteConnection,
         config: &SandboxConfig,
     ) -> MicrosandboxResult<i32> {

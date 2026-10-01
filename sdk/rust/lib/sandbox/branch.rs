@@ -179,6 +179,8 @@ impl ForkManyBuilder {
     /// Validate the batch, capture once, and return one startup outcome per name.
     /// Validation/capture failures fail the batch; later child failures do not recapture.
     pub async fn fork(mut self) -> MicrosandboxResult<Vec<ForkOutcome>> {
+        #[cfg(feature = "local")]
+        self.inner.capture_host_paths(self.backend.as_ref())?;
         let options = self.inner.config.into_config();
         SandboxBuilder::validate_vsock_routes(&options)?;
         if let Some(error) = self.inner.build_error.take() {
@@ -251,6 +253,8 @@ impl ForkBuilder {
 
     /// Capture source execution and start an independent child; preserve source running/paused state.
     pub async fn fork(mut self) -> MicrosandboxResult<Sandbox> {
+        #[cfg(feature = "local")]
+        self.inner.capture_host_paths(self.backend.as_ref())?;
         let options = self.inner.config.into_config();
         SandboxBuilder::validate_vsock_routes(&options)?;
         if let Some(error) = self.inner.build_error.take() {
@@ -275,6 +279,7 @@ impl ForkBuilder {
         crate::CreationProgressHandle,
         tokio::task::JoinHandle<MicrosandboxResult<Sandbox>>,
     )> {
+        self.inner.capture_host_paths(self.backend.as_ref())?;
         let (handle, sender) = crate::progress::channel();
         self.inner.config.creation_progress = Some(sender.downgrade());
         let task = tokio::spawn(async move {

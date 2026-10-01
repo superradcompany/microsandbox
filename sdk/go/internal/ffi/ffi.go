@@ -1121,6 +1121,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -1238,6 +1239,8 @@ type Error struct {
 	Kind     string                         `json:"kind"`
 	Message  string                         `json:"message"`
 	Recovery *SnapshotSourceRecoveryDetails `json:"recovery,omitempty"`
+	// Local volume errors retain host errno/Win32 identity. Older libraries omit it.
+	OSError *int32 `json:"os_error,omitempty"`
 }
 
 // SnapshotSourceRecoveryDetails preserves native recovery metadata across the FFI.
@@ -5091,9 +5094,27 @@ func VolumeFsOp(ctx context.Context, name, op string, args any, result any) erro
 	defer C.free(unsafe.Pointer(cName))
 	defer C.free(unsafe.Pointer(cOp))
 	defer C.free(unsafe.Pointer(cArgs))
-	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+	invoke := func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
 		return C.call_msb_volume_fs_op(cancelID, cName, cOp, cArgs, buf, bufLen)
-	})
+	}
+	out, err := call(ctx, invoke)
+	// Local reads historically used os.ReadFile and had no fixed response-size
+	// limit. Only retry this read-only operation; never replay a mutation.
+	for size := defaultBufSize; op == "local_read" && err != nil; {
+		var native *Error
+		if !errors.As(err, &native) || native.Kind != KindBufferTooSmall {
+			break
+		}
+		var needed, available int
+		if _, parseErr := fmt.Sscanf(native.Message, "output buffer too small: need %d, have %d", &needed, &available); parseErr != nil || needed <= size {
+			break
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+		size = needed
+		out, err = callBuf(ctx, size, invoke)
+	}
 	if err != nil {
 		return err
 	}
