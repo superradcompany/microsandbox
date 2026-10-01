@@ -12,11 +12,16 @@ use crate::config::{GlobalConfig, PathsConfig, RegistriesConfig};
 fn backend_paths_stay_bound_to_construction_directory() {
     const CHILD: &str = "MSB_TEST_BACKEND_PATH_CWD";
     if std::env::var_os(CHILD).is_none() {
+        // Runtime overrides take precedence over the fixture's configured paths.
+        // Clear them only in the child so CI settings cannot change its assertions.
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .arg("--exact")
             .arg("backend::local::config_paths::tests::backend_paths_stay_bound_to_construction_directory")
             .arg("--nocapture")
             .env(CHILD, "1")
+            .env_remove("MSB_PATH")
+            .env_remove("MSB_LIBKRUNFW_PATH")
+            .env_remove("MSB_AGENTD_PATH")
             .output()
             .unwrap();
         assert!(
