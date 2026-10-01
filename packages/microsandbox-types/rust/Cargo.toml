@@ -43,7 +43,7 @@ sha2.workspace = true
 thiserror.workspace = true
 ts-rs = { workspace = true, optional = true }
 typed-path.workspace = true
-utoipa = { version = "5", optional = true, features = ["chrono"] }
+utoipa = { version = "6", optional = true, features = ["chrono"] }
 zeroize.workspace = true
 
 [dev-dependencies]
