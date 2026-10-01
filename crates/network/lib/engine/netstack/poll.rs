@@ -694,10 +694,20 @@ pub fn smoltcp_poll_loop(
             shared.rx_wake.wake();
         }
 
-        let timeout_ms = iface
+        let stack_delay = iface
             .poll_delay(now, &sockets)
-            .map(|d| d.total_millis().min(i32::MAX as u64) as i32)
-            .unwrap_or(100); // 100ms fallback when no timers pending.
+            .map(|delay| std::time::Duration::from_millis(delay.total_millis()));
+
+        let timeout_ms = [
+            stack_delay,
+            conn_tracker.deferred_close_delay(),
+            port_publisher.deferred_close_delay(),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
+        .map(|delay| delay.as_millis().min(i32::MAX as u128) as i32)
+        .unwrap_or(100); // 100ms fallback when no timers pending.
 
         #[cfg(unix)]
         sleep_until_stack_wake(&shared, timeout_ms, &mut poll_fds);

@@ -25,6 +25,7 @@ use tokio::sync::mpsc;
 use crate::config::{PortProtocol, PublishedPort, TcpAcceptQueueSize};
 use crate::netstack::shared::SharedState;
 use crate::policy::{NetworkPolicy, Protocol};
+use crate::tcp::deferred_close::DeferredClose;
 use crate::udp::relay::{construct_udp_response, extract_udp_payload};
 
 //--------------------------------------------------------------------------------------------------
@@ -127,10 +128,6 @@ struct PublishedUdpPeer {
     last_seen: Instant,
 }
 
-/// Maximum number of poll iterations to attempt flushing remaining data
-/// after the relay task has exited before force-aborting the socket.
-const DEFERRED_CLOSE_LIMIT: u16 = 64;
-
 /// A single inbound connection relay (host socket ↔ smoltcp socket).
 struct InboundRelay {
     handle: SocketHandle,
@@ -142,8 +139,8 @@ struct InboundRelay {
     from_host: mpsc::Receiver<Bytes>,
     /// Partial data that couldn't be fully written to smoltcp socket.
     write_buf: Option<(Bytes, usize)>,
-    /// Counter for deferred close attempts (prevents stalling forever).
-    close_attempts: u16,
+    /// Progress deadline while draining after the host task exits.
+    deferred_close: DeferredClose,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -288,9 +285,17 @@ impl PortPublisher {
                 read_buf: None,
                 from_host: from_host_rx,
                 write_buf: None,
-                close_attempts: 0,
+                deferred_close: DeferredClose::default(),
             });
         }
+    }
+
+    /// Earliest pending drain deadline for the network poll loop.
+    pub(crate) fn deferred_close_delay(&self) -> Option<std::time::Duration> {
+        self.connections
+            .iter()
+            .filter_map(|relay| relay.deferred_close.poll_delay())
+            .min()
     }
 
     /// Relay data between smoltcp sockets and host relay tasks.
@@ -300,6 +305,11 @@ impl PortPublisher {
         for relay in &mut self.connections {
             let socket = sockets.get_mut::<tcp::Socket>(relay.handle);
 
+            if matches!(socket.state(), tcp::State::Closed) {
+                relay.deferred_close = DeferredClose::default();
+                continue;
+            }
+
             // Detect relay task exit — close the smoltcp socket.
             let relay_exited = match &relay.to_host {
                 Some(to_host) => to_host.is_closed(),
@@ -307,17 +317,13 @@ impl PortPublisher {
                 None => relay.from_host.is_closed(),
             };
             if relay_exited {
+                let queued_before = socket.send_queue();
                 write_host_data(socket, relay);
-                if relay.write_buf.is_none() {
-                    socket.close();
-                } else {
-                    // Abort if we've been trying to flush for too long
-                    // (guest stopped reading, socket send buffer full).
-                    relay.close_attempts += 1;
-                    if relay.close_attempts >= DEFERRED_CLOSE_LIMIT {
-                        socket.abort();
-                    }
-                }
+                let written = socket.send_queue() - queued_before;
+                relay
+                    .deferred_close
+                    .finish(socket, relay.write_buf.is_some(), written);
+
                 continue;
             }
 
@@ -1188,6 +1194,65 @@ mod tests {
             client.read_to_end(&mut body).await.unwrap();
             body
         })
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn exited_host_relay_drains_slow_guest_and_times_out_only_when_stalled() {
+        use crate::tcp::test_support::TestNetwork;
+
+        for stalled in [false, true] {
+            let mut network = TestNetwork::new(false);
+            let mut publisher = PortPublisher::new(
+                &[],
+                TcpAcceptQueueSize::DEFAULT,
+                Some(Ipv4Addr::new(10, 0, 0, 1)),
+                None,
+                Some(Ipv4Addr::new(10, 0, 0, 2)),
+                None,
+                [2, 0, 0, 0, 0, 1],
+                [2, 0, 0, 0, 0, 2],
+                Arc::new(NetworkPolicy::default()),
+                Arc::new(SharedState::new(4)),
+                &tokio::runtime::Handle::current(),
+            );
+            let mut socket = tcp::Socket::new(
+                tcp::SocketBuffer::new(vec![0; TCP_RX_BUF_SIZE]),
+                tcp::SocketBuffer::new(vec![0; TCP_TX_BUF_SIZE]),
+            );
+            socket
+                .connect(
+                    network.iface.context(),
+                    (smoltcp::wire::IpAddress::v4(10, 0, 0, 1), 12345),
+                    (smoltcp::wire::IpAddress::v4(10, 0, 0, 2), 8099),
+                )
+                .unwrap();
+            let handle = network.sockets.add(socket);
+            let (to_host, from_guest) = mpsc::channel(CHANNEL_CAPACITY);
+            let (from_host, to_guest) = mpsc::channel(CHANNEL_CAPACITY);
+            publisher.connections.push(InboundRelay {
+                handle,
+                to_host: Some(to_host),
+                read_buf: None,
+                from_host: to_guest,
+                write_buf: None,
+                deferred_close: DeferredClose::default(),
+            });
+            for _ in 0..16 {
+                network.poll();
+            }
+            assert_eq!(network.guest_state(), tcp::State::Established);
+
+            let payload: Vec<u8> = (0..262144).map(|i| (i % 251) as u8).collect();
+            for chunk in payload.chunks(16384) {
+                from_host.try_send(Bytes::copy_from_slice(chunk)).unwrap();
+            }
+            drop(from_host);
+            drop(from_guest);
+
+            network
+                .check_drain(|sockets| publisher.relay_data(sockets), &payload, stalled)
+                .await;
+        }
     }
 
     /// Regression for #1705: close-delimited HTTP must deliver EOF.
