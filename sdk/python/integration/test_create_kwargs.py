@@ -8,7 +8,7 @@ from contextlib import suppress
 import pytest
 
 from integration.helpers import IMAGE, remove_sandbox, stop_and_remove_sandbox
-from microsandbox import LogLevel, PullPolicy, Sandbox
+from microsandbox import LogLevel, PullPolicy, Sandbox, SandboxNotFoundError
 
 
 def _config_env(config: dict) -> dict[str, str]:
@@ -124,31 +124,40 @@ async def test_create_kwargs_round_trip_through_config_json(sandbox_name):
         assert out.success is True
         assert out.stdout_text == "detached-create\n"
     finally:
-        if connected is not None:
-            with suppress(Exception):
-                await connected.detach()
-        with suppress(Exception):
-            if sandbox is not None:
-                await sandbox.stop()
-        if handle is None:
-            with suppress(Exception):
+        # This test covers init configuration, not graceful guest shutdown. The
+        # image's auto-selected init may not power off, so explicitly kill the
+        # detached VM and wait for completion before releasing our connection.
+        try:
+            if handle is None:
                 handle = await Sandbox.get(name)
-        if handle is not None:
-            with suppress(Exception):
-                await handle.stop(timeout=10.0)
-        await remove_sandbox(name)
+            await handle.kill(timeout=30.0)
+        finally:
+            if connected is not None:
+                await connected.detach()
+            if sandbox is not None:
+                await sandbox.detach()
+            with suppress(SandboxNotFoundError):
+                await Sandbox.remove(name)
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("kwargs", "error_type", "message"),
     [
-        ({"max_duration": -1.0}, ValueError, "max_duration must be non-negative"),
-        ({"idle_timeout": -1.0}, ValueError, "idle_timeout must be non-negative"),
+        (
+            {"max_duration": -1.0},
+            ValueError,
+            "max_duration must be finite, non-negative, and fit in seconds",
+        ),
+        (
+            {"idle_timeout": -1.0},
+            ValueError,
+            "idle_timeout must be finite, non-negative, and fit in seconds",
+        ),
         (
             {"replace_with_timeout": -1.0},
             ValueError,
-            "replace_with_timeout must be non-negative",
+            "replace_with_timeout must be finite, non-negative, and fit in a duration",
         ),
         ({"pull_policy": "sometimes"}, TypeError, "PullPolicy"),
         ({"log_level": "verbose"}, TypeError, "LogLevel"),

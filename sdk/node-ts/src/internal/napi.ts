@@ -1098,6 +1098,7 @@ export interface NapiSecretEntry {
   readonly allowedHostPatterns: string[];
   readonly allowAnyHost: boolean;
   readonly passthroughHosts: string[];
+  readonly violationAction?: string;
   readonly requireTlsIdentity: boolean;
   readonly substitution: NapiSecretSubstitution;
 }

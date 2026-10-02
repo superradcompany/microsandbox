@@ -286,10 +286,10 @@ pub(crate) fn restore_builder_from_args(
             }
         });
     }
-    if let Some(seconds) = restore_duration(kwargs, "max_duration")? {
+    if let Some(seconds) = lifetime_duration(kwargs, "max_duration")? {
         builder = builder.max_duration(seconds);
     }
-    if let Some(seconds) = restore_duration(kwargs, "idle_timeout")? {
+    if let Some(seconds) = lifetime_duration(kwargs, "idle_timeout")? {
         builder = builder.idle_timeout(seconds);
     }
     let legacy_cow = extract_opt::<bool>(kwargs, "forked")?;
@@ -370,7 +370,7 @@ pub(crate) fn restore_builder_from_args(
 }
 
 /// Keep explicit zero, and reject non-finite or negative durations before native conversion.
-fn restore_duration(kwargs: &Bound<'_, PyDict>, name: &str) -> PyResult<Option<u64>> {
+fn lifetime_duration(kwargs: &Bound<'_, PyDict>, name: &str) -> PyResult<Option<u64>> {
     extract_opt::<f64>(kwargs, name)?
         .map(|seconds| {
             if !seconds.is_finite() || seconds < 0.0 || seconds >= u64::MAX as f64 {
@@ -567,28 +567,18 @@ pub fn sandbox_builder_from_args(
         builder = builder.replace();
     }
     if let Some(timeout) = extract_opt::<f64>(kwargs, "replace_with_timeout")? {
-        if timeout < 0.0 {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "replace_with_timeout must be non-negative",
-            ));
-        }
-        builder = builder.replace_with_timeout(std::time::Duration::from_secs_f64(timeout));
+        let duration = std::time::Duration::try_from_secs_f64(timeout).map_err(|_| {
+            pyo3::exceptions::PyValueError::new_err(
+                "replace_with_timeout must be finite, non-negative, and fit in a duration",
+            )
+        })?;
+        builder = builder.replace_with_timeout(duration);
     }
-    if let Some(max_duration) = extract_opt::<f64>(kwargs, "max_duration")? {
-        if max_duration < 0.0 {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "max_duration must be non-negative",
-            ));
-        }
-        builder = builder.max_duration(max_duration as u64);
+    if let Some(seconds) = lifetime_duration(kwargs, "max_duration")? {
+        builder = builder.max_duration(seconds);
     }
-    if let Some(idle_timeout) = extract_opt::<f64>(kwargs, "idle_timeout")? {
-        if idle_timeout < 0.0 {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "idle_timeout must be non-negative",
-            ));
-        }
-        builder = builder.idle_timeout(idle_timeout as u64);
+    if let Some(seconds) = lifetime_duration(kwargs, "idle_timeout")? {
+        builder = builder.idle_timeout(seconds);
     }
     if let Some(ephemeral) = extract_opt::<bool>(kwargs, "ephemeral")? {
         builder = builder.ephemeral(ephemeral);
@@ -1474,11 +1464,7 @@ fn parse_network_policy(net: &Bound<'_, PyDict>) -> PyResult<Option<NetworkPolic
                     Vec::new()
                 };
                 let ports = if let Some(port_val) = extract_opt::<String>(&rd, "port")? {
-                    if let Ok(p) = port_val.parse::<u16>() {
-                        vec![microsandbox_network::policy::PortRange { start: p, end: p }]
-                    } else {
-                        Vec::new()
-                    }
+                    vec![parse_policy_port(&port_val)?]
                 } else {
                     Vec::new()
                 };
@@ -1515,6 +1501,19 @@ fn parse_network_policy(net: &Bound<'_, PyDict>) -> PyResult<Option<NetworkPolic
         return Ok(Some(policy));
     }
     Ok(None)
+}
+
+/// Reject malformed filters instead of turning them into unrestricted ports.
+fn parse_policy_port(value: &str) -> PyResult<microsandbox_network::policy::PortRange> {
+    let invalid =
+        || pyo3::exceptions::PyValueError::new_err(format!("invalid port or port range: {value}"));
+    let (start, end) = value.split_once('-').unwrap_or((value, value));
+    let start = start.trim().parse::<u16>().map_err(|_| invalid())?;
+    let end = end.trim().parse::<u16>().map_err(|_| invalid())?;
+    if start > end {
+        return Err(invalid());
+    }
+    Ok(microsandbox_network::policy::PortRange { start, end })
 }
 
 fn apply_network(
@@ -2331,3 +2330,80 @@ macro_rules! resource_builder {
 }
 resource_builder!(SandboxBuilder);
 resource_builder!(microsandbox::sandbox::RestoreBuilder);
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn policy_ports_preserve_ranges_and_reject_invalid_filters() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            for (value, start, end) in [
+                ("443", 443, 443),
+                ("8000-9000", 8000, 9000),
+                ("0-65535", 0, 65535),
+            ] {
+                let network = PyDict::new(py);
+                let policy = PyDict::new(py);
+                let rule = PyDict::new(py);
+                rule.set_item("action", "allow").unwrap();
+                rule.set_item("port", value).unwrap();
+                policy.set_item("rules", vec![rule]).unwrap();
+                network.set_item("custom_policy", policy).unwrap();
+                let parsed = parse_network_policy(&network).unwrap().unwrap();
+                assert_eq!(parsed.rules[0].ports[0].start, start);
+                assert_eq!(parsed.rules[0].ports[0].end, end);
+            }
+            for value in ["", "typo", "65536", "-1", "1.5", "9000-8000", "1-2-3"] {
+                assert!(parse_policy_port(value).is_err(), "{value}");
+            }
+        });
+    }
+
+    #[test]
+    fn creation_rejects_invalid_time_limits_before_startup() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            for name in ["replace_with_timeout", "max_duration", "idle_timeout"] {
+                for value in [f64::NAN, f64::INFINITY, -1.0, f64::MAX] {
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("image", "alpine").unwrap();
+                    kwargs.set_item(name, value).unwrap();
+                    assert!(
+                        sandbox_builder_from_args("invalid-duration".into(), Some(&kwargs))
+                            .is_err()
+                    );
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn creation_and_restore_lifetime_validation_rounds_up() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let kwargs = PyDict::new(py);
+            for name in ["max_duration", "idle_timeout"] {
+                for (value, expected) in [(0.0, 0), (0.5, 1), (1.1, 2), (2.0, 2)] {
+                    kwargs.set_item(name, value).unwrap();
+                    assert_eq!(lifetime_duration(&kwargs, name).unwrap(), Some(expected));
+                }
+                for value in [
+                    f64::NAN,
+                    f64::INFINITY,
+                    f64::NEG_INFINITY,
+                    -1.0,
+                    u64::MAX as f64,
+                ] {
+                    kwargs.set_item(name, value).unwrap();
+                    assert!(lifetime_duration(&kwargs, name).is_err());
+                }
+            }
+        });
+    }
+}

@@ -37,6 +37,9 @@ describe.skipIf(!msbPath())("end-to-end smoke", () => {
       .image("mirror.gcr.io/library/alpine")
       .cpus(1)
       .memory(512)
+      .label("setup_db", "one").label("setupDb", "two")
+      .script("setup_db", "echo one").script("setupDb", "echo two")
+      .network(n => n.secretEnvSimple("SDK_SECRET_TOKEN", "dummy-private-value", "example.com"))
       .replace()
       .create();
   });
@@ -44,6 +47,18 @@ describe.skipIf(!msbPath())("end-to-end smoke", () => {
   afterAll(async () => {
     await sb?.stop().catch(() => undefined);
     await Sandbox.remove(SANDBOX_NAME).catch(() => undefined);
+  });
+
+  it("exposes only the generated secret placeholder to guest code", async () => {
+    const out = await sb.exec("sh", ["-c", 'printf "%s" "$SDK_SECRET_TOKEN"']);
+    expect(out.success).toBe(true);
+    expect(out.stdout()).toBe("$MSB_SDK_SECRET_TOKEN");
+    expect(out.stdout()).not.toContain("dummy-private-value");
+    const handle = await Sandbox.get(SANDBOX_NAME);
+    for (const config of [await sb.config(), handle.config()]) {
+      expect(config.labels).toEqual({ setup_db: "one", setupDb: "two" });
+      expect(config.runtime.scripts).toEqual({ setup_db: "echo one", setupDb: "echo two" });
+    }
   });
 
   it("exposes name synchronously", () => {

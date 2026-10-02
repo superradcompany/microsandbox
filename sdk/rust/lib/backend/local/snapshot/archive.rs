@@ -4092,12 +4092,41 @@ async fn ensure_cache_target_compatible(source: &Path, target: &Path) -> Microsa
     if metadata.len() != tokio::fs::metadata(source).await?.len()
         || file_sha256(target).await? != file_sha256(source).await?
     {
+        // Image metadata JSON embeds a parsed image config whose labels come from a `HashMap`, so
+        // two processes serialize identical metadata with different key order. Accept a JSON
+        // target that parses to the same value as the archive copy.
+        if target.extension().is_some_and(|ext| ext == "json")
+            && json_files_equivalent(source, target).await
+        {
+            return Ok(());
+        }
         return Err(MicrosandboxError::Custom(format!(
             "cache target already exists with different content: {}",
             target.display()
         )));
     }
     Ok(())
+}
+
+/// Whether both files parse as JSON documents with equal values, ignoring object key order.
+async fn json_files_equivalent(source: &Path, target: &Path) -> bool {
+    let (Ok(source), Ok(target)) = (tokio::fs::read(source).await, tokio::fs::read(target).await)
+    else {
+        return false;
+    };
+    // `Value` keeps only the last of duplicate keys, which the typed cache reader rejects.
+    if microsandbox_image::snapshot::manifest::reject_duplicate_json_keys(&source).is_err()
+        || microsandbox_image::snapshot::manifest::reject_duplicate_json_keys(&target).is_err()
+    {
+        return false;
+    }
+    match (
+        serde_json::from_slice::<serde_json::Value>(&source),
+        serde_json::from_slice::<serde_json::Value>(&target),
+    ) {
+        (Ok(source), Ok(target)) => source == target,
+        _ => false,
+    }
 }
 
 async fn file_sha256(path: &Path) -> MicrosandboxResult<[u8; 32]> {
@@ -4603,6 +4632,92 @@ mod tests {
         let loaded = load_snapshot(&local, &archive, None).await.unwrap();
         assert_eq!(loaded.id(), manifest.snapshot_id.as_str());
         assert!(loaded.group().is_some());
+    }
+
+    #[tokio::test]
+    async fn cache_target_accepts_json_with_reordered_keys() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source.json");
+        let target = directory.path().join("target.json");
+        tokio::fs::write(
+            &source,
+            r#"{"config":{"labels":{"a":"1","b":"2","c":"3"}},"layers":[]}"#,
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(
+            &target,
+            r#"{"layers":[],"config":{"labels":{"c":"3","a":"1","b":"2"}}}"#,
+        )
+        .await
+        .unwrap();
+
+        ensure_cache_target_compatible(&source, &target)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn cache_target_rejects_json_with_duplicate_keys() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source.json");
+        let target = directory.path().join("target.json");
+        tokio::fs::write(&source, r#"{"manifest_digest":"expected"}"#)
+            .await
+            .unwrap();
+        tokio::fs::write(
+            &target,
+            r#"{"manifest_digest":"wrong","manifest_digest":"expected"}"#,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            ensure_cache_target_compatible(&source, &target)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn cache_target_rejects_json_with_different_values() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source.json");
+        let target = directory.path().join("target.json");
+        tokio::fs::write(&source, r#"{"labels":{"a":"1","b":"2"}}"#)
+            .await
+            .unwrap();
+        tokio::fs::write(&target, r#"{"labels":{"b":"2","a":"changed"}}"#)
+            .await
+            .unwrap();
+
+        let error = ensure_cache_target_compatible(&source, &target)
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("cache target already exists with different content")
+        );
+    }
+
+    #[tokio::test]
+    async fn cache_target_rejects_non_json_with_different_bytes() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source.erofs");
+        let target = directory.path().join("target.erofs");
+        tokio::fs::write(&source, br#"{"a":1,"b":2}"#)
+            .await
+            .unwrap();
+        tokio::fs::write(&target, br#"{"b":2,"a":1}"#)
+            .await
+            .unwrap();
+
+        assert!(
+            ensure_cache_target_compatible(&source, &target)
+                .await
+                .is_err()
+        );
     }
 
     #[test]

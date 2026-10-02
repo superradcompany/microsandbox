@@ -977,7 +977,10 @@ impl PySandbox {
     #[pyo3(signature = (interval = 1.0))]
     fn metrics_stream<'py>(&self, py: Python<'py>, interval: f64) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        let interval_dur = std::time::Duration::from_secs_f64(interval);
+        let interval_dur = optional_duration(Some(interval))?.unwrap();
+        if interval_dur.is_zero() {
+            return Err(PyValueError::new_err("metrics interval must be positive"));
+        }
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let sandbox = Self::clone_sandbox(&inner).await?;
             let stream = sandbox.metrics_stream(interval_dur);
@@ -2056,10 +2059,7 @@ fn validate_rlimit_resource(resource: &str) -> PyResult<()> {
 }
 
 fn validate_timeout(timeout_secs: Option<f64>) -> PyResult<()> {
-    if timeout_secs.is_some_and(|timeout| timeout < 0.0) {
-        return Err(PyValueError::new_err("timeout must be non-negative"));
-    }
-    Ok(())
+    optional_duration(timeout_secs).map(|_| ())
 }
 
 fn required_from_dict<'py, T: FromPyObject<'py>>(
@@ -2522,6 +2522,16 @@ mod tests {
     use microsandbox::sandbox::{SecretModificationPatch, SecretSource};
 
     use super::*;
+
+    #[test]
+    fn execution_timeouts_reject_non_finite_and_overflowing_values() {
+        pyo3::prepare_freethreaded_python();
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0, f64::MAX] {
+            assert!(validate_timeout(Some(value)).is_err());
+        }
+        assert!(validate_timeout(Some(0.5)).is_ok());
+        assert!(validate_timeout(Some(0.0)).is_ok());
+    }
 
     #[test]
     fn explicit_stop_duration_preserves_zero_and_fractional_seconds() {

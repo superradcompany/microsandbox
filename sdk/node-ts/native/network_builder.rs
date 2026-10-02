@@ -48,7 +48,9 @@ impl JsNetworkBuilder {
 
     /// Publish a TCP port.
     #[napi]
-    pub fn port(&mut self, host_port: u32, guest_port: u32) -> Result<&Self> {
+    pub fn port(&mut self, host_port: f64, guest_port: f64) -> Result<&Self> {
+        let host_port = crate::numeric::uint32(host_port, "host_port")?;
+        let guest_port = crate::numeric::uint32(guest_port, "guest_port")?;
         let h = u16::try_from(host_port)
             .map_err(|_| napi::Error::from_reason("host port out of range"))?;
         let g = u16::try_from(guest_port)
@@ -60,7 +62,9 @@ impl JsNetworkBuilder {
 
     /// Publish a TCP port on a specific host bind address.
     #[napi(js_name = "portBind")]
-    pub fn port_bind(&mut self, bind: String, host_port: u32, guest_port: u32) -> Result<&Self> {
+    pub fn port_bind(&mut self, bind: String, host_port: f64, guest_port: f64) -> Result<&Self> {
+        let host_port = crate::numeric::uint32(host_port, "host_port")?;
+        let guest_port = crate::numeric::uint32(guest_port, "guest_port")?;
         let bind = parse_bind_addr(&bind)?;
         let h = u16::try_from(host_port)
             .map_err(|_| napi::Error::from_reason("host port out of range"))?;
@@ -73,7 +77,9 @@ impl JsNetworkBuilder {
 
     /// Publish a UDP port.
     #[napi(js_name = "portUdp")]
-    pub fn port_udp(&mut self, host_port: u32, guest_port: u32) -> Result<&Self> {
+    pub fn port_udp(&mut self, host_port: f64, guest_port: f64) -> Result<&Self> {
+        let host_port = crate::numeric::uint32(host_port, "host_port")?;
+        let guest_port = crate::numeric::uint32(guest_port, "guest_port")?;
         let h = u16::try_from(host_port)
             .map_err(|_| napi::Error::from_reason("host port out of range"))?;
         let g = u16::try_from(guest_port)
@@ -88,9 +94,11 @@ impl JsNetworkBuilder {
     pub fn port_udp_bind(
         &mut self,
         bind: String,
-        host_port: u32,
-        guest_port: u32,
+        host_port: f64,
+        guest_port: f64,
     ) -> Result<&Self> {
+        let host_port = crate::numeric::uint32(host_port, "host_port")?;
+        let guest_port = crate::numeric::uint32(guest_port, "guest_port")?;
         let bind = parse_bind_addr(&bind)?;
         let h = u16::try_from(host_port)
             .map_err(|_| napi::Error::from_reason("host port out of range"))?;
@@ -168,7 +176,10 @@ impl JsNetworkBuilder {
         let mut returned = configure.call(initial)?;
         let entry = returned.take_built()?;
         let prev = self.take_inner();
-        self.inner = Some(prev.secret_entry(entry));
+        self.inner = Some(
+            prev.secret_entry(entry)
+                .tls_overlay(|tls| tls.enabled(true)),
+        );
         Ok(self)
     }
 
@@ -182,14 +193,15 @@ impl JsNetworkBuilder {
         allowed_host: String,
     ) -> &Self {
         let prev = self.take_inner();
-        self.inner = Some(prev.secret_env(env_var, value, placeholder, allowed_host));
+        self.inner = Some(
+            prev.secret_env(env_var, value, placeholder, allowed_host)
+                .tls_overlay(|tls| tls.enabled(true)),
+        );
         self
     }
 
-    /// 3-arg shorthand matching the Rust core's `secret_env(env_var,
-    /// value, allowed_host)`. The placeholder defaults to the original
-    /// value (env-var injection only — header injection is disabled
-    /// without an explicit placeholder).
+    /// Add a secret using the same generated placeholder as SandboxBuilder.
+    /// Enables TLS interception while preserving existing TLS settings.
     #[napi(js_name = "secretEnvSimple")]
     pub fn secret_env_simple(
         &mut self,
@@ -197,9 +209,12 @@ impl JsNetworkBuilder {
         value: String,
         allowed_host: String,
     ) -> &Self {
-        let placeholder = value.clone();
         let prev = self.take_inner();
-        self.inner = Some(prev.secret_env(env_var, value, placeholder, allowed_host));
+        // SecretBuilder owns placeholder generation; never use the secret as guest data.
+        self.inner = Some(
+            prev.secret(|secret| secret.env(env_var).value(value).allow(allowed_host))
+                .tls_overlay(|tls| tls.enabled(true)),
+        );
         self
     }
 
@@ -234,26 +249,29 @@ impl JsNetworkBuilder {
     /// @deprecated Use maxTcpConnections instead.
     #[allow(deprecated)]
     #[napi(js_name = "maxConnections")]
-    pub fn max_connections(&mut self, max: u32) -> &Self {
+    pub fn max_connections(&mut self, max: f64) -> Result<&Self> {
+        let max = crate::numeric::safe_integer(max, "max")?;
         let prev = self.take_inner();
         self.inner = Some(prev.max_connections(max as usize));
-        self
+        Ok(self)
     }
 
     /// Set the TCP connection cap; zero selects unlimited.
     #[napi(js_name = "maxTcpConnections")]
-    pub fn max_tcp_connections(&mut self, max: u32) -> &Self {
+    pub fn max_tcp_connections(&mut self, max: f64) -> Result<&Self> {
+        let max = crate::numeric::safe_integer(max, "max")?;
         let prev = self.take_inner();
         self.inner = Some(prev.max_tcp_connections(max as usize));
-        self
+        Ok(self)
     }
 
     /// Set the UDP session cap; zero selects unlimited. Defaults to unlimited for single-tenant and 1024 for multi-tenant.
     #[napi(js_name = "maxUdpConnections")]
-    pub fn max_udp_connections(&mut self, max: u32) -> &Self {
+    pub fn max_udp_connections(&mut self, max: f64) -> Result<&Self> {
+        let max = crate::numeric::safe_integer(max, "max")?;
         let prev = self.take_inner();
         self.inner = Some(prev.max_udp_connections(max as usize));
-        self
+        Ok(self)
     }
 
     /// Set the accept-queue depth for published TCP port listeners, 1..=2147483647. Defaults to
@@ -385,6 +403,10 @@ impl JsNetworkBuilder {
 }
 
 impl JsNetworkBuilder {
+    pub(crate) fn from_inner(inner: RustNetworkBuilder) -> Self {
+        Self { inner: Some(inner) }
+    }
+
     fn take_inner(&mut self) -> RustNetworkBuilder {
         self.inner
             .take()

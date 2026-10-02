@@ -718,8 +718,8 @@ describe("NetworkBuilder.secretEnvSimple (3-arg shorthand)", () => {
     };
     expect(cfg.secrets.secrets).toHaveLength(1);
     expect(cfg.secrets.secrets[0].envVar).toBe("API_KEY");
-    // Placeholder defaults to the value when omitted.
-    expect(cfg.secrets.secrets[0].placeholder).toBe("sk-abc");
+    // The guest must receive a token rather than the credential.
+    expect(cfg.secrets.secrets[0].placeholder).toBe("$MSB_API_KEY");
   });
 });
 

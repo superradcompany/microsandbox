@@ -48,7 +48,8 @@ impl JsInterfaceOverridesBuilder {
 
     /// Set the interface MTU. Default: 1500.
     #[napi]
-    pub fn mtu(&mut self, mtu: u32) -> Result<&Self> {
+    pub fn mtu(&mut self, mtu: f64) -> Result<&Self> {
+        let mtu = crate::numeric::uint32(mtu, "mtu")?;
         let mtu = u16::try_from(mtu)
             .map_err(|_| napi::Error::from_reason("mtu out of range (0..=65535)"))?;
         self.inner.mtu = Some(mtu);

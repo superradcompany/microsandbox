@@ -379,7 +379,7 @@ Create a rule that blocks matching traffic. Same keyword-only filters as [`allow
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>port</code><span className="msb-type">int | str | None</span></div>
-    <div className="msb-param-desc">Single port or port range.</div>
+    <div className="msb-param-desc">Single port (0–65535) or inclusive port range such as <code>8000-9000</code>. Invalid values and reversed ranges raise <code>ValueError</code>; omit the filter to match any port.</div>
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>destination</code><a className="msb-type" href="#networkdestination">str | NetworkDestination | None</a></div>
