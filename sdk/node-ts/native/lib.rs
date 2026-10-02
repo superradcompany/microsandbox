@@ -21,6 +21,7 @@ mod metrics;
 mod mount_builder;
 mod network_builder;
 mod network_policy_builder;
+mod numeric;
 mod outbound_proxy_builder;
 mod patch_builder;
 mod pull_progress;

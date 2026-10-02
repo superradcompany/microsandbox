@@ -509,10 +509,8 @@ export declare class NetworkBuilder {
   /** 4-arg shorthand: add a secret with explicit placeholder. */
   secretEnv(envVar: string, value: string, placeholder: string, allowedHost: string): this
   /**
-   * 3-arg shorthand matching the Rust core's `secret_env(env_var,
-   * value, allowed_host)`. The placeholder defaults to the original
-   * value (env-var injection only — header injection is disabled
-   * without an explicit placeholder).
+   * Add a secret using the same generated placeholder as SandboxBuilder.
+   * Enables TLS interception while preserving existing TLS settings.
    */
   secretEnvSimple(envVar: string, value: string, allowedHost: string): this
   /**
@@ -2568,6 +2566,8 @@ export interface SecretEntry {
   passthroughHosts: Array<string>
   /** Require verified TLS identity before substituting (default: true). */
   requireTlsIdentity: boolean
+  /** Per-secret override of the network violation action. */
+  violationAction?: string
   /** Where the secret may be injected into requests. */
   substitution: SecretSubstitution
 }

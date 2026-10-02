@@ -199,6 +199,7 @@ typedef char *(*msb_sandbox_modify_fn)(uint64_t cancel_id, uint64_t handle, cons
 
 typedef char *(*msb_sandbox_attach_fn)(uint64_t cancel_id, uint64_t handle, const char *cmd, const char *opts_json, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_attach_default_fn)(uint64_t cancel_id, uint64_t handle, const char *opts_json, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_sandbox_shell_path_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_attach_shell_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_all_sandbox_metrics_fn)(uint64_t cancel_id, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_handle_metrics_fn)(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len);
@@ -370,6 +371,7 @@ static msb_exec_id_fn              ptr_msb_exec_id              = NULL;
 static msb_sandbox_attach_fn      ptr_msb_sandbox_attach      = NULL;
 static msb_sandbox_attach_default_fn ptr_msb_sandbox_attach_default = NULL;
 static msb_sandbox_attach_shell_fn ptr_msb_sandbox_attach_shell = NULL;
+static msb_sandbox_shell_path_fn ptr_msb_sandbox_shell_path = NULL;
 static msb_all_sandbox_metrics_fn  ptr_msb_all_sandbox_metrics  = NULL;
 static msb_sandbox_handle_metrics_fn ptr_msb_sandbox_handle_metrics = NULL;
 static msb_sandbox_logs_fn          ptr_msb_sandbox_logs          = NULL;
@@ -568,6 +570,7 @@ const char *load_microsandbox(const char *path) {
 	RESOLVE(msb_sandbox_attach);
 	RESOLVE(msb_sandbox_attach_default);
 	RESOLVE(msb_sandbox_attach_shell);
+	RESOLVE_OPTIONAL(msb_sandbox_shell_path);
 	RESOLVE(msb_all_sandbox_metrics);
 	RESOLVE(msb_sandbox_handle_metrics);
 	RESOLVE(msb_sandbox_logs);
@@ -652,6 +655,10 @@ void call_msb_cancel_trigger(uint64_t id) {
 }
 void call_msb_cancel_unregister(uint64_t id) {
 	if (ptr_msb_cancel_unregister) ptr_msb_cancel_unregister(id);
+}
+bool has_sandbox_shell_path(void) { return ptr_msb_sandbox_shell_path != NULL; }
+char *call_msb_sandbox_shell_path(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len) {
+    return ptr_msb_sandbox_shell_path ? ptr_msb_sandbox_shell_path(cancel_id, handle, buf, buf_len) : NULL;
 }
 bool has_sandbox_restore(void) { return ptr_msb_sandbox_restore != NULL; }
 char *call_msb_sandbox_restore(uint64_t cancel_id, const char *name, const char *opts_json, uint8_t *buf, size_t buf_len) {
@@ -3151,6 +3158,29 @@ type ExecResult struct {
 	ExitCode int // -1 if the guest did not report a code
 }
 
+// ShellPath reads from the native handle, avoiding a lookup through a changed default backend.
+func (s *Sandbox) ShellPath(ctx context.Context) (string, error) {
+	if err := ensureLoaded(); err != nil {
+		return "", err
+	}
+	if !bool(C.has_sandbox_shell_path()) {
+		return "", &Error{Kind: KindUnsupportedOperation, Message: "configured shell execution requires an updated microsandbox native library"}
+	}
+	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_sandbox_shell_path(cancelID, s.h(), buf, bufLen)
+	})
+	if err != nil {
+		return "", err
+	}
+	var response struct {
+		Shell string `json:"shell"`
+	}
+	if err := json.Unmarshal([]byte(out), &response); err != nil {
+		return "", fmt.Errorf("parse shell path: %w", err)
+	}
+	return response.Shell, nil
+}
+
 // Exec runs cmd in the sandbox and collects its output.
 func (s *Sandbox) Exec(ctx context.Context, cmd string, opts ExecOptions) (*ExecResult, error) {
 	if err := ensureLoaded(); err != nil {
@@ -3171,19 +3201,7 @@ func (s *Sandbox) Exec(ctx context.Context, cmd string, opts ExecOptions) (*Exec
 	if err != nil {
 		return nil, err
 	}
-	var raw struct {
-		Stdout   string `json:"stdout"`
-		Stderr   string `json:"stderr"`
-		ExitCode *int   `json:"exit_code"`
-	}
-	if err := json.Unmarshal([]byte(out), &raw); err != nil {
-		return nil, fmt.Errorf("parse exec response: %w", err)
-	}
-	code := -1
-	if raw.ExitCode != nil {
-		code = *raw.ExitCode
-	}
-	return &ExecResult{Stdout: raw.Stdout, Stderr: raw.Stderr, ExitCode: code}, nil
+	return decodeCollectedOutput(out)
 }
 
 // ExecDefault runs the sandbox's effective OCI entrypoint and CMD and collects its output.
@@ -3204,19 +3222,7 @@ func (s *Sandbox) ExecDefault(ctx context.Context, opts ExecOptions) (*ExecResul
 	if err != nil {
 		return nil, err
 	}
-	var raw struct {
-		Stdout   string `json:"stdout"`
-		Stderr   string `json:"stderr"`
-		ExitCode *int   `json:"exit_code"`
-	}
-	if err := json.Unmarshal([]byte(out), &raw); err != nil {
-		return nil, fmt.Errorf("parse exec_default response: %w", err)
-	}
-	code := -1
-	if raw.ExitCode != nil {
-		code = *raw.ExitCode
-	}
-	return &ExecResult{Stdout: raw.Stdout, Stderr: raw.Stderr, ExitCode: code}, nil
+	return decodeCollectedOutput(out)
 }
 
 // =============================================================================

@@ -740,7 +740,7 @@ Allocate a pseudo-terminal
 rlimit(resource, limit)
 ```
 
-Set both soft and hard rlimit
+Set both soft and hard rlimit. Numeric limits must be non-negative safe integers (at most `Number.MAX_SAFE_INTEGER`). Values above 32 bits are preserved; negative, fractional, non-finite, and unsafe integers are rejected
 
 <p className="msb-label">Returns</p>
 
@@ -856,7 +856,7 @@ Detach key sequence (e.g. `"ctrl-]"` or `"ctrl-p,ctrl-q"`)
 rlimit(resource, limit)
 ```
 
-Set both soft and hard rlimit
+Set both soft and hard rlimit. Numeric limits must be non-negative safe integers (at most `Number.MAX_SAFE_INTEGER`). Values above 32 bits are preserved; negative, fractional, non-finite, and unsafe integers are rejected
 
 <p className="msb-label">Returns</p>
 
