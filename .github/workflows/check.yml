@@ -1536,6 +1536,7 @@ jobs:
           ln -sf libkrunfw.so.${{ env.LIBKRUNFW_ABI }} build/libkrunfw.so
           scripts/smoke/cli/image-archive.sh
           scripts/smoke/cli/split-irqchip-bind-net.sh
+          python3 scripts/smoke/cli/hpack-secret-guard.py
 
       - name: CI helper and snapshot runner unit tests
         run: |
