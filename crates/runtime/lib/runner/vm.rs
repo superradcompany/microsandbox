@@ -1098,6 +1098,7 @@ fn run(
         let _ = bind_identity_map;
     }
     let krun_metrics_handle = vm.metrics_handle();
+    let metrics_memory_control = vm.control_handle();
     let exit_handle = vm.exit_handle();
     let upper_host_path = oci_upper_host_path(&config.vm);
 
@@ -1233,6 +1234,7 @@ fn run(
             network_metrics_handle
                 .map(|handle| Box::new(handle) as Box<dyn crate::metrics::NetworkMetrics>),
             upper_host_path,
+            metrics_memory_control,
         )),
     };
     let metrics_sandbox_id = config.sandbox_id;
@@ -1320,6 +1322,7 @@ fn run(
                     krun_metrics_handle,
                     network_metrics_handle,
                     upper_host_path,
+                    metrics_memory_control,
                 )) = metrics_sampler
                 {
                     tracing::debug!(
@@ -1336,6 +1339,7 @@ fn run(
                         krun_metrics: krun_metrics_handle,
                         network_metrics: network_metrics_handle,
                         upper_host_path,
+                        memory_control: Some(metrics_memory_control),
                     }));
                 }
                 if let Err(e) = relay.run(relay_shutdown_rx, relay_drain_tx).await {

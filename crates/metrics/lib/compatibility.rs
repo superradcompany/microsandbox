@@ -211,6 +211,7 @@ impl LegacyRegistryV2 {
                     memory_host_resident,
                 ),
                 memory_limit_bytes: memory_limit,
+                memory_limit_live: false,
                 disk_read_bytes: disk_read,
                 disk_write_bytes: disk_write,
                 net_rx_bytes: net_rx,

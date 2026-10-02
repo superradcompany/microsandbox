@@ -36,6 +36,8 @@ const MIN_UPPER_FILESYSTEM_STALE_AFTER: Duration = Duration::from_secs(3);
 /// sampler was descheduled mid-read and the window's ratio is unusable.
 const MAX_PAIRING_SKEW_RATIO: f64 = 0.05;
 
+const BYTES_PER_MIB: u64 = 1024 * 1024;
+
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
@@ -88,6 +90,8 @@ pub struct MetricsSamplerSpec {
     pub network_metrics: Option<Box<dyn NetworkMetrics>>,
     /// Host path of the writable upper image, when one exists.
     pub upper_host_path: Option<std::path::PathBuf>,
+    /// Live VM control used to read the current guest memory size.
+    pub memory_control: Option<msb_krun::VmControl>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -106,6 +110,7 @@ pub async fn run_metrics_sampler(spec: MetricsSamplerSpec) {
         krun_metrics,
         network_metrics,
         upper_host_path,
+        memory_control,
     } = spec;
     let interval = Duration::from_millis(interval_ms.get());
     let upper_stale_after = upper_filesystem_stale_after(interval);
@@ -117,6 +122,7 @@ pub async fn run_metrics_sampler(spec: MetricsSamplerSpec) {
         &writer,
         None,
         &previous.metrics,
+        memory_state(memory_control.as_ref()),
         network_metrics.as_deref(),
         upper_host_path,
         upper_stale_after,
@@ -178,6 +184,7 @@ pub async fn run_metrics_sampler(spec: MetricsSamplerSpec) {
             &writer,
             cpu_percent,
             &current.metrics,
+            memory_state(memory_control.as_ref()),
             network_metrics.as_deref(),
             upper_host_path,
             upper_stale_after,
@@ -239,6 +246,7 @@ fn write_sample(
     writer: &MetricsSlotWriter,
     cpu_percent: Option<f32>,
     krun: &msb_krun::VmMetrics,
+    memory_state: Option<msb_krun::VmMemoryState>,
     network_metrics: Option<&dyn NetworkMetrics>,
     upper_host_path: Option<&Path>,
     upper_stale_after: Duration,
@@ -249,13 +257,15 @@ fn write_sample(
     };
     let (upper_used_bytes, upper_free_bytes) =
         upper_filesystem_metrics(krun, upper_stale_after, chrono::Utc::now());
+    let memory_limit_bytes = live_memory_limit_bytes(memory_state.as_ref());
     let sample = SampleWrite {
         sampled_at: chrono::Utc::now(),
         cpu_percent,
         vcpu_time_ns: krun.cpu.vcpu_time_ns,
-        memory_bytes: krun.memory.used_bytes,
+        memory_bytes: live_memory_used_bytes(krun, memory_limit_bytes),
         memory_available_bytes: krun.memory.available_bytes,
         memory_host_resident_bytes: krun.memory.host_resident_bytes,
+        memory_limit_bytes,
         disk_read_bytes: krun.block.read_bytes,
         disk_write_bytes: krun.block.write_bytes,
         net_rx_bytes: rx,
@@ -268,6 +278,24 @@ fn write_sample(
         Ok(()) => Ok(()),
         Err(MetricsError::GenerationMismatch { .. }) => Err(SampleWriteError::Generation),
         Err(other) => Err(SampleWriteError::Other(other)),
+    }
+}
+
+fn memory_state(control: Option<&msb_krun::VmControl>) -> Option<msb_krun::VmMemoryState> {
+    control.and_then(|control| control.memory_state())
+}
+
+/// Guest memory currently usable by the VM, boot plus plugged.
+fn live_memory_limit_bytes(state: Option<&msb_krun::VmMemoryState>) -> Option<u64> {
+    state.map(|state| state.current_mib.saturating_mul(BYTES_PER_MIB))
+}
+
+/// Guest memory in use against the live limit. Unavailable while the guest's
+/// available-memory statistic still exceeds a limit that just shrank.
+fn live_memory_used_bytes(krun: &msb_krun::VmMetrics, limit_bytes: Option<u64>) -> Option<u64> {
+    match (limit_bytes, krun.memory.available_bytes) {
+        (Some(limit), Some(available)) => limit.checked_sub(available),
+        _ => krun.memory.used_bytes,
     }
 }
 
@@ -499,7 +527,18 @@ mod tests {
             .unwrap();
         let krun = msb_krun::VmMetrics::default();
 
-        assert!(write_sample(&writer, None, &krun, None, None, Duration::from_secs(3)).is_ok());
+        assert!(
+            write_sample(
+                &writer,
+                None,
+                &krun,
+                None,
+                None,
+                None,
+                Duration::from_secs(3)
+            )
+            .is_ok()
+        );
 
         let snapshot = registry.snapshot().unwrap();
         assert_eq!(snapshot.len(), 1);
@@ -538,12 +577,120 @@ mod tests {
             ..Default::default()
         };
 
-        assert!(write_sample(&writer, None, &krun, None, None, Duration::from_secs(3)).is_ok());
+        assert!(
+            write_sample(
+                &writer,
+                None,
+                &krun,
+                None,
+                None,
+                None,
+                Duration::from_secs(3)
+            )
+            .is_ok()
+        );
 
         let snapshot = registry.snapshot().unwrap();
         assert_eq!(snapshot.len(), 1);
         assert_eq!(snapshot[0].upper_used_bytes, Some(53_248));
         assert_eq!(snapshot[0].upper_free_bytes, Some(450_527_232));
+        cleanup_shm(&name);
+    }
+
+    fn memory_state_mib(boot: u64, target: u64, current: u64) -> msb_krun::VmMemoryState {
+        msb_krun::VmMemoryState {
+            boot_mib: boot,
+            target_mib: target,
+            current_mib: current,
+            max_mib: 32_768,
+        }
+    }
+
+    fn krun_memory(used: Option<u64>, available: Option<u64>) -> msb_krun::VmMetrics {
+        msb_krun::VmMetrics {
+            memory: msb_krun::MemoryMetrics {
+                used_bytes: used,
+                available_bytes: available,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn live_memory_limit_follows_plugged_memory() {
+        const GIB: u64 = 1024 * 1024 * 1024;
+
+        assert_eq!(live_memory_limit_bytes(None), None);
+        assert_eq!(
+            live_memory_limit_bytes(Some(&memory_state_mib(8_192, 32_768, 16_384))),
+            Some(16 * GIB)
+        );
+        assert_eq!(
+            live_memory_limit_bytes(Some(&memory_state_mib(8_192, 8_192, 16_384))),
+            Some(16 * GIB)
+        );
+        assert_eq!(
+            live_memory_limit_bytes(Some(&memory_state_mib(8_192, 32_768, 32_768))),
+            Some(32 * GIB)
+        );
+    }
+
+    #[test]
+    fn live_memory_used_bytes_uses_live_total() {
+        const GIB: u64 = 1024 * 1024 * 1024;
+
+        let krun = krun_memory(Some(6 * GIB), Some(2 * GIB));
+        assert_eq!(
+            live_memory_used_bytes(&krun, Some(32 * GIB)),
+            Some(30 * GIB)
+        );
+        assert_eq!(live_memory_used_bytes(&krun, None), Some(6 * GIB));
+
+        let krun = krun_memory(Some(0), Some(4 * GIB));
+        assert_eq!(live_memory_used_bytes(&krun, Some(2 * GIB)), None);
+    }
+
+    #[test]
+    fn write_sample_publishes_live_memory_limit() {
+        let name = unique_shm_name("memlim");
+        let registry = MetricsRegistry::open_or_create(&name, 1).unwrap();
+        let reserved = registry
+            .reserve(ReserveSlot {
+                sandbox_id: 9,
+                name: "memlim",
+                memory_limit_bytes: 512 * 1024 * 1024,
+            })
+            .unwrap();
+        let writer = registry
+            .activate_writer(ActivateSlot {
+                slot: reserved.slot,
+                generation: reserved.generation,
+                run_id: 11,
+                pid: std::process::id() as i32,
+                started_at: chrono::Utc::now(),
+            })
+            .unwrap();
+        let krun = krun_memory(Some(256 * 1024 * 1024), Some(256 * 1024 * 1024));
+
+        assert!(
+            write_sample(
+                &writer,
+                None,
+                &krun,
+                Some(memory_state_mib(512, 1_024, 1_024)),
+                None,
+                None,
+                Duration::from_secs(3),
+            )
+            .is_ok()
+        );
+
+        let snapshot = registry.snapshot().unwrap();
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].memory_limit_bytes, 1_024 * 1024 * 1024);
+        assert!(snapshot[0].memory_limit_live);
+        assert_eq!(snapshot[0].memory_bytes, 768 * 1024 * 1024);
         cleanup_shm(&name);
     }
 

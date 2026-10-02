@@ -41,7 +41,7 @@
 //! |  0x30  sampled_at_ms    AI64  0 until first sample              |
 //! |  0x38  sample_flags     AU32  source bits for optional fields    |
 //! |  0x3c  -- padding --                                            |
-//! |  0x40  memory_limit     AU64  bytes                             |
+//! |  0x40  memory_limit     AU64  effective guest limit, bytes      |
 //! |  0x48  vcpu_time_ns     AU64  cumulative guest vCPU time        |
 //! |  0x50  cpu_percent_bits AU32  f32 bits, 0 until CPU rate exists  |
 //! |  0x54  -- padding --                                            |
@@ -162,6 +162,8 @@ pub const SAMPLE_FLAG_UPPER_USED: u32 = 1 << 4;
 pub const SAMPLE_FLAG_UPPER_FREE: u32 = 1 << 5;
 /// Sample flag: `upper_host_allocated_bytes` contains a valid host diagnostic.
 pub const SAMPLE_FLAG_UPPER_HOST_ALLOCATED: u32 = 1 << 6;
+/// Sample flag: `memory_limit_bytes` was refreshed from live VM memory state.
+pub const SAMPLE_FLAG_MEMORY_LIMIT_LIVE: u32 = 1 << 7;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -217,7 +219,8 @@ pub struct Slot {
     pub sampled_at_unix_ms: AtomicI64,
     /// Validity/source flags for optional sample fields.
     pub sample_flags: AtomicU32,
-    /// Configured memory limit in bytes.
+    /// Effective guest memory limit in bytes: the boot allocation at reservation, or the live
+    /// guest memory size when `SAMPLE_FLAG_MEMORY_LIMIT_LIVE` is set.
     pub memory_limit_bytes: AtomicU64,
     /// Cumulative guest vCPU execution time across all vCPUs.
     pub vcpu_time_ns: AtomicU64,

@@ -48,8 +48,11 @@ pub struct LiveMetric {
     pub memory_available_bytes: Option<u64>,
     /// Host-resident guest memory in bytes for capacity diagnostics.
     pub memory_host_resident_bytes: Option<u64>,
-    /// Configured memory limit in bytes.
+    /// Effective guest memory limit in bytes: the boot allocation at reservation, refreshed by
+    /// runtimes that observe live memory state.
     pub memory_limit_bytes: u64,
+    /// Whether `memory_limit_bytes` came from live VM memory state rather than the reservation.
+    pub memory_limit_live: bool,
     /// Cumulative guest logical storage bytes read.
     pub disk_read_bytes: u64,
     /// Cumulative guest logical storage bytes written.
@@ -79,7 +82,8 @@ pub struct SandboxMetrics {
     pub memory_available_bytes: Option<u64>,
     /// Host-resident guest memory in bytes for capacity diagnostics.
     pub memory_host_resident_bytes: Option<u64>,
-    /// Configured guest memory limit in bytes.
+    /// Effective guest memory limit in bytes: the boot allocation at reservation, refreshed by
+    /// runtimes that observe live memory state.
     pub memory_limit_bytes: u64,
     /// Cumulative guest logical storage bytes read.
     pub disk_read_bytes: u64,
