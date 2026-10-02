@@ -41,14 +41,29 @@ pub(super) fn quarantine(source: &Path) -> MicrosandboxResult<()> {
         &record,
         serde_json::to_vec(&PathBuf::from(source.file_name().unwrap()))?,
     )?;
-    File::open(record)?.sync_all()?;
+    // FlushFileBuffers on Windows requires write access even after the write has closed.
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&record)?
+        .sync_all()?;
     sync_dir(&path)?;
     sync_dir(&root)?;
-    std::fs::rename(source, path.join("payload"))?;
+    std::fs::rename(source, path.join("payload")).map_err(|error| {
+        std::io::Error::new(
+            error.kind(),
+            format!("move snapshot into deletion quarantine: {error}"),
+        )
+    })?;
     sync_dir(parent)?;
     sync_dir(&path)?;
     drop(coordination);
-    std::fs::remove_dir_all(path.join("payload"))?;
+    std::fs::remove_dir_all(path.join("payload")).map_err(|error| {
+        std::io::Error::new(
+            error.kind(),
+            format!("remove quarantined snapshot: {error}"),
+        )
+    })?;
     // Keep the intent until catalog deletion has committed. Recovery may finish the row
     // removal if the process dies between retiring the directory and updating the index.
     drop(lock);

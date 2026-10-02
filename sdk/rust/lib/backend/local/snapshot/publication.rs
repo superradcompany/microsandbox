@@ -69,6 +69,10 @@ pub(crate) async fn recover(local: &LocalBackend) -> MicrosandboxResult<()> {
         };
         match tokio::fs::symlink_metadata(&path).await {
             Ok(metadata) if metadata.file_type().is_dir() => {
+                // On Windows the reader uses this same out-of-directory lock. The
+                // exclusive recovery lease already pins the entry, and reacquiring
+                // it shared here would deadlock this process.
+                #[cfg(unix)]
                 let _reader = super::lease::reader_async(path.clone()).await?;
                 let bytes =
                     tokio::fs::read(path.join(microsandbox_image::snapshot::DESCRIPTOR_FILENAME))

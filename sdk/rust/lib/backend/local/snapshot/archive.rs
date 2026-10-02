@@ -1152,6 +1152,11 @@ pub(crate) async fn materialize_archive_for_child_with_overrides(
                 tokio::fs::remove_dir_all(directory).await?;
             }
         }
+        #[cfg(windows)]
+        {
+            drop(imported);
+            remove_private_stage_leases(child_stage).await?;
+        }
         return Ok(ArchiveChildMaterialization {
             cache_operation,
             manifest,
@@ -1223,6 +1228,8 @@ pub(crate) async fn materialize_archive_for_child_with_overrides(
                     tokio::fs::remove_dir_all(member_dir).await?;
                 }
             }
+            #[cfg(windows)]
+            remove_private_stage_leases(child_stage).await?;
             return Ok(ArchiveChildMaterialization {
                 cache_operation,
                 manifest,
@@ -1250,6 +1257,8 @@ pub(crate) async fn materialize_archive_for_child_with_overrides(
                 tokio::fs::remove_dir_all(member_dir).await?;
             }
         }
+        #[cfg(windows)]
+        remove_private_stage_leases(child_stage).await?;
         return Ok(ArchiveChildMaterialization {
             cache_operation,
             manifest,
@@ -1316,6 +1325,8 @@ pub(crate) async fn materialize_archive_for_child_with_overrides(
             tokio::fs::remove_dir_all(member_dir).await?;
         }
     }
+    #[cfg(windows)]
+    remove_private_stage_leases(child_stage).await?;
     Ok(ArchiveChildMaterialization {
         cache_operation,
         manifest,
@@ -1328,6 +1339,26 @@ pub(crate) async fn materialize_archive_for_child_with_overrides(
 //--------------------------------------------------------------------------------------------------
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
+
+#[cfg(windows)]
+async fn remove_private_stage_leases(child_stage: &Path) -> MicrosandboxResult<()> {
+    let path = child_stage.join(".msb-leases");
+    match tokio::fs::symlink_metadata(&path).await {
+        Ok(metadata) if metadata.file_type().is_dir() => {
+            // This unique archive stage has no external readers. Its transient locks must
+            // not become permanent files when the stage becomes a sandbox directory.
+            tokio::fs::remove_dir_all(path).await?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Ok(_) => {
+            return Err(MicrosandboxError::SnapshotIntegrity(
+                "private archive lease path is not a directory".into(),
+            ));
+        }
+        Err(error) => return Err(error.into()),
+    }
+    Ok(())
+}
 
 async fn write_archive_entries<W>(
     builder: &mut Builder<W>,
@@ -1515,7 +1546,14 @@ async fn normalize_imported_descriptor(snapshot: &Snapshot) -> MicrosandboxResul
         }
     }
     tokio::fs::write(&path, canonical).await?;
-    tokio::fs::File::open(path).await?.sync_all().await?;
+    // Windows requires write access for FlushFileBuffers after normalization.
+    tokio::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .await?
+        .sync_all()
+        .await?;
     Ok(())
 }
 
@@ -4842,6 +4880,8 @@ mod tests {
                     payload
                 );
                 assert!(!child_stage.join(snapshot_id.as_str()).exists());
+                #[cfg(windows)]
+                assert!(!child_stage.join(".msb-leases").exists());
                 assert!(!home.join("snapshots").join(snapshot_id.as_str()).exists());
             }
         }
