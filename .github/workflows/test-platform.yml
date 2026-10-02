@@ -71,7 +71,7 @@ jobs:
         run: |
           cargo +stable test --manifest-path crates/agentd/Cargo.toml \
             --target ${{ inputs.agentd_target }} \
-            --config 'target.${{ inputs.agentd_target }}.runner = ["sudo", "prlimit", "--memlock=8388608:8388608", "--"]' \
+            --config 'target.${{ inputs.agentd_target }}.runner = ["bash", "${{ github.workspace }}/scripts/ci/run-agentd-privileged-tests.sh"]' \
             --lib nonroot_rlimits -- --ignored
 
       - name: Set up mold (Linux host link)
