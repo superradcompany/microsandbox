@@ -61,41 +61,34 @@ fn stage_label(stage: BootErrorStage) -> &'static str {
 /// `error_with_lines` rendering will then show only the cause line and
 /// the always-on log pointer.
 fn stage_hint(err: &BootError) -> Option<String> {
-    match err.reason {
-        Some(InitFailureReason::UserNotFound) => {
-            return Some(
-                "user selects an existing account; remove the user \
-                override to use the image default, or create that account \
-                in the image"
-                    .into(),
-            );
-        }
-        Some(InitFailureReason::GroupNotFound) => {
-            return Some(
-                "the requested group must exist in the image; correct the group \
+    match (err.reason, err.stage, err.errno) {
+        (Some(InitFailureReason::UserNotFound), _, _) => Some(
+            "user selects an existing account; remove the user \
+            override to use the image default, or create that account \
+            in the image"
+                .into(),
+        ),
+        (Some(InitFailureReason::GroupNotFound), _, _) => Some(
+            "the requested group must exist in the image; correct the group \
             override or create that group in the image"
-                    .into(),
-            );
-        }
-        _ => {}
-    }
+                .into(),
+        ),
 
-    match (err.stage, err.errno) {
         // Mount + ENOENT → host path doesn't exist.
-        (BootErrorStage::Mount, Some(2)) => Some(extract_mount_hint(&err.message)),
+        (_, BootErrorStage::Mount, Some(2)) => Some(extract_mount_hint(&err.message)),
 
         // Mount + EACCES → permissions on host path.
-        (BootErrorStage::Mount, Some(13)) => {
+        (_, BootErrorStage::Mount, Some(13)) => {
             Some("the host path is not readable by msb (check permissions)".into())
         }
 
         // Image + ENOENT → image not pulled / rootfs missing.
-        (BootErrorStage::Image, Some(2)) => {
+        (_, BootErrorStage::Image, Some(2)) => {
             Some("rootfs not found — try `msb pull <image>` first".into())
         }
 
         // Network + EADDRINUSE → port collision.
-        (BootErrorStage::Network, Some(48)) | (BootErrorStage::Network, Some(98)) => Some(
+        (_, BootErrorStage::Network, Some(48)) | (_, BootErrorStage::Network, Some(98)) => Some(
             "a port is already bound — try a different host port or stop the other process".into(),
         ),
 
