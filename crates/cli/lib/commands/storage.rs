@@ -45,7 +45,7 @@ pub struct PruneArgs {
     pub dry_run: bool,
 
     /// Skip the interactive confirmation.
-    #[arg(long)]
+    #[arg(short = 'y', long)]
     pub yes: bool,
 
     /// Suppress successful human-readable output; errors remain visible.
