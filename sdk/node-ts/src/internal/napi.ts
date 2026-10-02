@@ -1144,6 +1144,7 @@ export interface NapiOutboundProxyBuilder {
 }
 
 export interface NapiHttpConnectProxyBuilder {
+  resolveDnsViaProxy(): this;
   readonly __httpConnectProxy?: never;
 }
 

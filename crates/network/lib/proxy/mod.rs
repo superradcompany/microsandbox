@@ -11,6 +11,8 @@ mod types;
 #[cfg(feature = "engine")]
 pub use crate::tcp::proxy::*;
 
+#[cfg(feature = "engine")]
+pub(crate) use http_connect::HttpConnectProtocol;
 pub use http_connect::HttpConnectProxyBuilder;
 #[doc(hidden)]
 pub use socks::ResolvedSocks5Credentials;

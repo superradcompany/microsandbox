@@ -736,6 +736,9 @@ pub fn sandbox_builder_from_args(
         let address = extract_required::<String>(&proxy, "address")?;
         builder = match protocol.as_str() {
             "http_connect" => builder.proxy(move |p| p.http_connect(address)),
+            "http_connect_proxy_dns" => {
+                builder.proxy(move |p| p.http_connect(address).resolve_dns_via_proxy())
+            }
             "socks4" => {
                 let user_id = extract_opt::<String>(&proxy, "user_id")?;
                 builder.proxy(move |p| {

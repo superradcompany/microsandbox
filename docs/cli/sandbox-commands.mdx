@@ -93,7 +93,7 @@ Common flags:
 | `--net-rule` | Add a network policy rule |
 | `--net-nat64-prefix` | Add a NAT64 `/96` prefix for network policy classification |
 | `--net-strict[=BOOL]` | Enabled by default; use `--net-strict=false` to opt out. Require hostname-based network allows to use inspectable request authority. Non-intercepted HTTPS fails closed when only a hostname rule allows it |
-| `--proxy` | Route eligible outbound traffic through a `socks4://IP:PORT` or `socks5://IP:PORT` proxy. Local-only. See [Proxies](#outbound-proxy) |
+| `--proxy` | Route eligible outbound traffic through HTTP CONNECT, proxy-DNS HTTP CONNECT, SOCKS4, or SOCKS5. Local-only. See [Proxies](#outbound-proxy) |
 | `--socks4-user-id` | Optional SOCKS4 user ID. Requires a `socks4://` proxy |
 | `--socks5-username`, `--socks5-password-env` | SOCKS5 username and the host environment variable containing its password. Both flags are required together |
 | `--secret` | Configure `NAME[:OPTIONS]@HOST[,HOST...]`; options control substitution and placeholder passthrough |
@@ -165,10 +165,11 @@ NAT64 destinations inside the well-known `64:ff9b::/96` prefix are classified by
 
 <Tooltip tip="User-configured outbound proxies are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
-Use `--proxy` with `msb run` or `msb create` to configure one HTTP CONNECT, SOCKS4, or SOCKS5 proxy:
+Use `--proxy` with `msb run` or `msb create` to configure one HTTP CONNECT, proxy-DNS HTTP CONNECT, SOCKS4, or SOCKS5 proxy:
 
 ```bash
 msb run alpine --proxy http://127.0.0.1:3128
+msb run alpine --proxy http+proxy-dns://127.0.0.1:3128
 msb run alpine --proxy socks4://127.0.0.1:1080
 msb run alpine --proxy socks4://127.0.0.1:1080 \
   --socks4-user-id sandbox
@@ -179,7 +180,7 @@ msb run alpine --proxy socks5://127.0.0.1:1080 \
   --socks5-password-env SOCKS5_PASSWORD
 ```
 
-HTTP CONNECT and SOCKS4 support TCP; SOCKS5 also supports non-DNS UDP. HTTP CONNECT does not support authentication. SOCKS5 authentication requires both flags and reads the password from the host environment at startup. Proxy URLs cannot contain credentials, paths, queries, or fragments. See [Proxies](/networking/outbound-proxy).
+HTTP CONNECT and SOCKS4 support TCP; SOCKS5 also supports non-DNS UDP. HTTP CONNECT does not support authentication. The `http+proxy-dns://` form lets HTTP clients use a local policy proxy while the upstream resolves requested hostnames; IP-group and CIDR checks cannot apply to those upstream results. SOCKS5 authentication requires both flags and reads the password from the host environment at startup. Proxy URLs cannot contain credentials, paths, queries, or fragments. See [Proxies](/networking/outbound-proxy).
 
 ### Network rule syntax
 

@@ -298,6 +298,7 @@ fn main() {
                     tcp_accept_queue_size: true,
                     http_deny_message: cfg!(feature = "net"),
                     http_connect_proxy: cfg!(feature = "net"),
+                    http_connect_proxy_dns: cfg!(feature = "net"),
                     guest_clock: true,
                 })
                 .expect("serialize capabilities")

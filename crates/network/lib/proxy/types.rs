@@ -26,6 +26,16 @@ pub enum OutboundProxy {
         address: SocketAddr,
     },
 
+    /// An HTTP CONNECT proxy that resolves destination hostnames itself.
+    ///
+    /// This opt-in mode is serialized with a distinct protocol tag so older
+    /// runtimes reject it instead of silently falling back to local DNS.
+    #[serde(rename = "http_connect_proxy_dns")]
+    HttpConnectProxyDns {
+        /// Proxy socket address.
+        address: SocketAddr,
+    },
+
     /// A SOCKS4 proxy at the given address.
     Socks4 {
         /// Proxy socket address.
@@ -56,6 +66,13 @@ pub enum ResolvedOutboundProxy {
         address: SocketAddr,
     },
 
+    /// An HTTP CONNECT proxy that resolves destination hostnames itself.
+    #[serde(rename = "http_connect_proxy_dns")]
+    HttpConnectProxyDns {
+        /// Proxy socket address.
+        address: SocketAddr,
+    },
+
     /// A SOCKS4 proxy ready for TCP connections.
     Socks4 {
         /// Proxy socket address.
@@ -81,6 +98,10 @@ pub enum OutboundProxyProtocol {
     /// HTTP CONNECT.
     #[serde(rename = "http_connect")]
     HttpConnect,
+
+    /// HTTP CONNECT with hostname resolution performed by the proxy.
+    #[serde(rename = "http_connect_proxy_dns")]
+    HttpConnectProxyDns,
 
     /// SOCKS version 4.
     Socks4,
@@ -134,7 +155,7 @@ pub enum OutboundProxyParseError {
 
     /// The URI uses a proxy protocol that is not supported yet.
     #[error(
-        "unsupported outbound proxy protocol {protocol:?}; supported protocols are http://, socks4://, and socks5://"
+        "unsupported outbound proxy protocol {protocol:?}; supported protocols are http://, http+proxy-dns://, socks4://, and socks5://"
     )]
     UnsupportedProtocol {
         /// Unsupported URI scheme.
@@ -177,6 +198,15 @@ impl ResolvedOutboundProxy {
         guest_dst: SocketAddr,
         host_dst: SocketAddr,
     ) -> Option<Arc<Self>> {
+        if configured
+            .as_deref()
+            .is_some_and(|proxy| matches!(proxy, Self::HttpConnectProxyDns { .. }))
+        {
+            // Proxy-side DNS is only used by the guest's explicit HTTP_PROXY
+            // connection to the local HTTP forward proxy. Raw IP traffic keeps
+            // the ordinary network-policy and routing path.
+            return None;
+        }
         if guest_dst == host_dst {
             configured.clone()
         } else {
@@ -193,6 +223,9 @@ impl fmt::Display for OutboundProxy {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::HttpConnect { address } => write!(f, "http://{address}"),
+            Self::HttpConnectProxyDns { address } => {
+                write!(f, "http://{address} (proxy DNS)")
+            }
             Self::Socks4 { address, .. } => write!(f, "socks4://{address}"),
             Self::Socks5 { address, .. } => write!(f, "socks5://{address}"),
         }
@@ -203,6 +236,7 @@ impl fmt::Display for OutboundProxyProtocol {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::HttpConnect => f.write_str("HTTP CONNECT"),
+            Self::HttpConnectProxyDns => f.write_str("HTTP CONNECT with proxy-side DNS"),
             Self::Socks4 => f.write_str("SOCKS4"),
             Self::Socks5 => f.write_str("SOCKS5"),
         }
@@ -218,6 +252,7 @@ impl FromStr for OutboundProxy {
             .ok_or(OutboundProxyParseError::MissingProtocol)?;
         let protocol = match protocol {
             "http" => OutboundProxyProtocol::HttpConnect,
+            "http+proxy-dns" => OutboundProxyProtocol::HttpConnectProxyDns,
             "socks4" => OutboundProxyProtocol::Socks4,
             "socks5" => OutboundProxyProtocol::Socks5,
             protocol => {
@@ -236,6 +271,10 @@ impl FromStr for OutboundProxy {
             OutboundProxyProtocol::HttpConnect => {
                 Ok(OutboundProxyBuilder::new().http_connect(address).build()?)
             }
+            OutboundProxyProtocol::HttpConnectProxyDns => Ok(OutboundProxyBuilder::new()
+                .http_connect(address)
+                .resolve_dns_via_proxy()
+                .build()?),
             OutboundProxyProtocol::Socks4 => {
                 Ok(OutboundProxyBuilder::new().socks4(address).build()?)
             }

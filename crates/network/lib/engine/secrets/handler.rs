@@ -211,6 +211,8 @@ enum HttpAuthorityValidator {
         guest_dst: SocketAddr,
         network_policy: Arc<NetworkPolicy>,
         shared: Arc<SharedState>,
+        /// Resolve authority policy by hostname without a local DNS pin.
+        proxy_dns_hostname: bool,
         /// Secret eligibility and passthrough are connection-scoped. Keep their
         /// proven host identity even when network policy also permits another host.
         secret_host: Option<String>,
@@ -590,6 +592,34 @@ impl SecretsHandler {
                 guest_dst,
                 network_policy,
                 shared: shared.clone(),
+                proxy_dns_hostname: false,
+                secret_host: config.has_host_scoped_secrets().then(|| host.to_string()),
+            }),
+            false,
+        )
+    }
+
+    /// Create a plain-HTTP handler for a proxy that resolves destination DNS.
+    ///
+    /// The CONNECT/absolute-form authority is the destination identity, so
+    /// hostname-scoped secrets do not require a local DNS cache binding.
+    pub(crate) fn new_plain_http_proxy_dns(
+        config: &SecretsConfig,
+        host: &str,
+        port: u16,
+        network_policy: Arc<NetworkPolicy>,
+        shared: Arc<SharedState>,
+    ) -> Self {
+        Self::new_inner(
+            config,
+            host,
+            false,
+            None,
+            Some(HttpAuthorityValidator::Policy {
+                guest_dst: SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), port),
+                network_policy,
+                shared,
+                proxy_dns_hostname: true,
                 secret_host: config.has_host_scoped_secrets().then(|| host.to_string()),
             }),
             false,
@@ -2259,6 +2289,7 @@ fn validate_authority(
             guest_dst,
             network_policy,
             shared,
+            proxy_dns_hostname,
             secret_host,
         } => {
             // A network allow does not authorize using a secret selected for a
@@ -2273,17 +2304,35 @@ fn validate_authority(
                 return Err(SecretViolationAction::Block);
             };
             let hostname = hostname.to_ascii_lowercase();
-            let authority_dst = SocketAddr::new(guest_dst.ip(), guest_dst.port());
-            match network_policy.evaluate_egress_with_source(
-                authority_dst,
-                Protocol::Tcp,
-                shared,
-                HostnameSource::Sni(&hostname),
-            ) {
-                EgressEvaluation::Allow => Ok(()),
-                EgressEvaluation::Deny | EgressEvaluation::DeferUntilHostname => {
-                    Err(SecretViolationAction::Block)
+            let allowed = if *proxy_dns_hostname {
+                if let Ok(address) = hostname.parse::<IpAddr>() {
+                    network_policy
+                        .evaluate_egress(
+                            SocketAddr::new(address, guest_dst.port()),
+                            Protocol::Tcp,
+                            shared,
+                        )
+                        .is_allow()
+                } else {
+                    network_policy
+                        .evaluate_proxy_hostname(&hostname, Protocol::Tcp, guest_dst.port())
+                        .is_allow()
                 }
+            } else {
+                matches!(
+                    network_policy.evaluate_egress_with_source(
+                        SocketAddr::new(guest_dst.ip(), guest_dst.port()),
+                        Protocol::Tcp,
+                        shared,
+                        HostnameSource::Sni(&hostname),
+                    ),
+                    EgressEvaluation::Allow
+                )
+            };
+            if allowed {
+                Ok(())
+            } else {
+                Err(SecretViolationAction::Block)
             }
         }
     }

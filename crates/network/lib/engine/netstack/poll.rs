@@ -35,7 +35,7 @@ use crate::ports::PortPublisher;
 use crate::proxy::ResolvedOutboundProxy;
 use crate::secrets::handle::SecretsHandle;
 use crate::tcp::{
-    connection::TcpConnectionTracker, deny as tcp_deny, proxy::TcpProxy,
+    connection::TcpConnectionTracker, deny as tcp_deny, http, proxy::TcpProxy,
     upstream::UpstreamTcpTarget,
 };
 use crate::udp::fragments::{
@@ -270,6 +270,10 @@ pub fn smoltcp_poll_loop(
     shared.set_gateway_ips(config.gateway.ipv4, config.gateway.ipv6);
     let network_policy = Arc::new(network_policy);
     let platform_policy = platform_policy.map(Arc::new);
+    let proxy_dns_upstream = outbound_proxy.as_deref().and_then(|proxy| match proxy {
+        ResolvedOutboundProxy::HttpConnectProxyDns { address } => Some(*address),
+        _ => None,
+    });
 
     let (mut dns_interceptor, dns_forwarder_handle) = DnsInterceptor::new(
         &mut sockets,
@@ -406,24 +410,38 @@ pub fn smoltcp_poll_loop(
                         // Other: regular outbound — defer Domain rules to first-flight;
                         // accept unless an IP-layer rule denies.
                         DnsPortType::Other => {
-                            let platform_allows = platform_policy.as_deref().is_none_or(|policy| {
-                                policy
-                                    .evaluate_egress(dst, Protocol::Tcp, &shared)
-                                    .is_allow()
-                            });
-                            let tenant_allows = platform_allows
-                                && matches!(
-                                    network_policy.evaluate_egress_with_source(
-                                        dst,
-                                        Protocol::Tcp,
-                                        &shared,
-                                        HostnameSource::Deferred,
-                                    ),
-                                    EgressEvaluation::Allow | EgressEvaluation::DeferUntilHostname
-                                );
+                            let is_guest_proxy = proxy_dns_upstream.is_some()
+                                && dst.port() == http::GUEST_HTTP_PROXY_PORT
+                                && ((config
+                                    .gateway
+                                    .ipv4
+                                    .is_some_and(|address| dst.ip() == IpAddr::V4(address)))
+                                    || (config
+                                        .gateway
+                                        .ipv6
+                                        .is_some_and(|address| dst.ip() == IpAddr::V6(address))));
+                            let platform_allows = is_guest_proxy
+                                || platform_policy.as_deref().is_none_or(|policy| {
+                                    policy
+                                        .evaluate_egress(dst, Protocol::Tcp, &shared)
+                                        .is_allow()
+                                });
+                            let tenant_allows = is_guest_proxy
+                                || (platform_allows
+                                    && matches!(
+                                        network_policy.evaluate_egress_with_source(
+                                            dst,
+                                            Protocol::Tcp,
+                                            &shared,
+                                            HostnameSource::Deferred,
+                                        ),
+                                        EgressEvaluation::Allow
+                                            | EgressEvaluation::DeferUntilHostname
+                                    ));
                             // Platform denies and explicit deny rules stay a
                             // reset; only "not on the allow list" is answered.
-                            answer_deny = shared.http_deny_response_enabled()
+                            answer_deny = !is_guest_proxy
+                                && shared.http_deny_response_enabled()
                                 && platform_allows
                                 && !tenant_allows
                                 && tcp_deny::answers_denied_http(dst.port(), tls_state.as_deref())
@@ -561,6 +579,32 @@ pub fn smoltcp_poll_loop(
                     shared.clone(),
                     tls_state.clone(),
                     conn.proxy_connect,
+                );
+                continue;
+            }
+            let is_guest_proxy = proxy_dns_upstream.is_some()
+                && conn.dst.port() == http::GUEST_HTTP_PROXY_PORT
+                && (config
+                    .gateway
+                    .ipv4
+                    .is_some_and(|address| conn.dst.ip() == IpAddr::V4(address))
+                    || config
+                        .gateway
+                        .ipv6
+                        .is_some_and(|address| conn.dst.ip() == IpAddr::V6(address)));
+            if is_guest_proxy {
+                conn.proxy_connect.mark_connected();
+                http::spawn_connection(
+                    conn.from_smoltcp,
+                    conn.to_smoltcp,
+                    proxy_dns_upstream.expect("guest proxy requires an upstream proxy"),
+                    network_policy.clone(),
+                    platform_policy.clone(),
+                    tls_state.clone(),
+                    secrets.load(),
+                    strict,
+                    shared.clone(),
+                    &tokio_handle,
                 );
                 continue;
             }

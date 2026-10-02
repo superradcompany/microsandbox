@@ -40,6 +40,7 @@ engine = [
     "dep:tokio",
     "dep:tokio-rustls",
     "dep:tokio-socks",
+    "dep:url",
     "dep:windows-sys",
 ]
 
@@ -92,6 +93,7 @@ time = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
 tokio-rustls = { workspace = true, optional = true }
 tokio-socks = { workspace = true, optional = true }
+url = { workspace = true, optional = true }
 tracing.workspace = true
 zeroize = { workspace = true }
 

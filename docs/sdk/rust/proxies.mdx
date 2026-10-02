@@ -47,6 +47,14 @@ fn http_connect(self, address: impl Into<String>) -> HttpConnectProxyBuilder
 
 Select an HTTP CONNECT proxy at `IP:port`. It supports TCP only and does not support proxy authentication.
 
+#### resolve_dns_via_proxy()
+
+```rust
+fn resolve_dns_via_proxy(self) -> Self
+```
+
+Ask the upstream proxy to resolve HTTP destinations. HTTP clients use an injected local policy proxy, which checks hostnames and forwards HTTP requests in absolute form or HTTPS tunnels with the hostname in CONNECT. The upstream DNS result is trusted, so IP-group and CIDR checks cannot apply to it.
+
 ### <span id="socks4">socks4()</span>
 
 ```rust
@@ -106,5 +114,6 @@ Declarative outbound proxy configuration stored in the sandbox's durable network
 | Variant | Fields | Description |
 |---------|--------|-------------|
 | `HttpConnect` | `address: SocketAddr` | HTTP proxy address used for TCP CONNECT tunnels |
+| `HttpConnectProxyDns` | `address: SocketAddr` | HTTP proxy that resolves hostname CONNECT targets |
 | `Socks4` | `address: SocketAddr`, `user_id: Option<String>` | SOCKS4 proxy address and optional user ID |
 | `Socks5` | `address: SocketAddr`, `credentials: Option<Socks5Credentials>` | SOCKS5 proxy address and optional username/password credentials |

@@ -107,6 +107,14 @@ impl ResolvedOutboundProxy {
                 }
                 Ok(Some(Self::HttpConnect { address: *address }))
             }
+            OutboundProxy::HttpConnectProxyDns { address } => {
+                if resolved.is_some() {
+                    return Err(OutboundProxyBuildError::InvalidSocks5Credentials {
+                        reason: "launch credentials require a configured SOCKS5 proxy",
+                    });
+                }
+                Ok(Some(Self::HttpConnectProxyDns { address: *address }))
+            }
             OutboundProxy::Socks4 { address, user_id } => {
                 if resolved.is_some() {
                     return Err(OutboundProxyBuildError::InvalidSocks5Credentials {
@@ -157,6 +165,9 @@ impl ResolvedOutboundProxy {
     pub(crate) async fn connect(&self, destination: SocketAddr) -> io::Result<TcpStream> {
         match self {
             Self::HttpConnect { address } => {
+                HttpConnectProtocol::connect(*address, destination).await
+            }
+            Self::HttpConnectProxyDns { address } => {
                 HttpConnectProtocol::connect(*address, destination).await
             }
             Self::Socks4 { address, user_id } => match user_id {
@@ -221,7 +232,7 @@ impl ResolvedOutboundProxy {
 impl OutboundProxy {
     fn validate(&self) -> Result<(), OutboundProxyBuildError> {
         match self {
-            Self::HttpConnect { .. } => Ok(()),
+            Self::HttpConnect { .. } | Self::HttpConnectProxyDns { .. } => Ok(()),
             Self::Socks4 { user_id, .. } => Self::validate_socks4_user_id(user_id.as_deref()),
             Self::Socks5 { credentials, .. } => credentials
                 .as_ref()

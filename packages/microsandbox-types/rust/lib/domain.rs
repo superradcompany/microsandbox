@@ -687,6 +687,14 @@ pub enum OutboundProxy {
         address: String,
     },
 
+    /// An HTTP CONNECT proxy that resolves destination hostnames itself.
+    /// The sandbox routes HTTP clients through a local policy-enforcing proxy.
+    #[serde(rename = "http_connect_proxy_dns")]
+    HttpConnectProxyDns {
+        /// Proxy socket address.
+        address: String,
+    },
+
     /// A SOCKS4 proxy at the given `IP:port` address.
     Socks4 {
         /// Proxy socket address.

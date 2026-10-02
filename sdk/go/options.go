@@ -1133,6 +1133,13 @@ func HTTPConnectProxy(address string) *OutboundProxy {
 	return &OutboundProxy{protocol: "http_connect", address: address}
 }
 
+// HTTPConnectProxyWithProxyDNS configures an HTTP CONNECT upstream proxy to
+// resolve destination hostnames. Guest HTTP clients use the sandbox's local
+// policy-enforcing proxy, which forwards CONNECT requests with the hostname.
+func HTTPConnectProxyWithProxyDNS(address string) *OutboundProxy {
+	return &OutboundProxy{protocol: "http_connect_proxy_dns", address: address}
+}
+
 // Credentials returns a copy configured with SOCKS5 username authentication
 // and a host-side password source.
 func (p *OutboundProxy) Credentials(username string, password SecretSource) *OutboundProxy {

@@ -659,6 +659,69 @@ impl NetworkPolicy {
         self.evaluate_dns_query_inner(None, protocol, port)
     }
 
+    /// Evaluate a TCP hostname selected by an HTTP proxy that resolves DNS remotely.
+    ///
+    /// Domain rules, `Any`, protocol, port, and the default action still apply.
+    /// CIDR and destination-group rules cannot be evaluated for a hostname
+    /// because the upstream proxy's resolved IP is unavailable here.
+    pub fn evaluate_proxy_hostname(&self, hostname: &str, protocol: Protocol, port: u16) -> Action {
+        let hostname = hostname.trim_end_matches('.').to_ascii_lowercase();
+        for rule in &self.rules {
+            if !matches!(rule.direction, Direction::Egress | Direction::Any) {
+                continue;
+            }
+            let matched = match &rule.destination {
+                Destination::Any => rule_matches_protocol_and_port(rule, protocol, port),
+                Destination::Domain(domain) => {
+                    hostname == domain.as_str()
+                        && rule_matches_protocol_and_port(rule, protocol, port)
+                }
+                Destination::DomainSuffix(suffix) => {
+                    matches_suffix(&hostname, suffix.as_str())
+                        && rule_matches_protocol_and_port(rule, protocol, port)
+                }
+                Destination::Cidr(_) | Destination::Group(_) => false,
+            };
+            if matched {
+                return rule.action;
+            }
+        }
+        self.default_egress
+    }
+
+    /// Return whether a matching hostname-specific allow rule decides this proxy request.
+    ///
+    /// Strict TLS mode uses this to deny bypass when the policy depends on an
+    /// inspectable hostname. Address groups and the default action do not count.
+    pub fn allows_proxy_hostname_via_domain(
+        &self,
+        hostname: &str,
+        protocol: Protocol,
+        port: u16,
+    ) -> bool {
+        let hostname = hostname.trim_end_matches('.').to_ascii_lowercase();
+        for rule in &self.rules {
+            if !matches!(rule.direction, Direction::Egress | Direction::Any)
+                || (!rule.protocols.is_empty() && !rule.protocols.contains(&protocol))
+                || (!rule.ports.is_empty() && !rule.ports.iter().any(|range| range.contains(port)))
+            {
+                continue;
+            }
+            let (matched, hostname_rule) = match &rule.destination {
+                Destination::Any => (true, false),
+                Destination::Domain(domain) => (hostname == domain.as_str(), true),
+                Destination::DomainSuffix(suffix) => {
+                    (matches_suffix(&hostname, suffix.as_str()), true)
+                }
+                Destination::Cidr(_) | Destination::Group(_) => (false, false),
+            };
+            if matched {
+                return rule.action.is_allow() && hostname_rule;
+            }
+        }
+        false
+    }
+
     fn evaluate_dns_query_inner(
         &self,
         name: Option<&DomainName>,

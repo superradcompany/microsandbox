@@ -15,6 +15,7 @@ Set `sandbox_defaults.outbound_proxy` in [global configuration](/configuration#s
 | Proxy | Authentication | Traffic | Availability |
 |-------|----------------|---------|--------------|
 | HTTP CONNECT | None | TCP | SDKs and CLI |
+| HTTP CONNECT with proxy-side DNS | None | HTTP and HTTPS clients using proxy environment variables | SDKs and CLI |
 | SOCKS4 | None | TCP | SDKs and CLI |
 | SOCKS4 | Optional user ID | TCP | SDKs and CLI |
 | SOCKS5 | None | TCP and non-DNS UDP | SDKs and CLI |
@@ -69,7 +70,7 @@ msb create python --name proxied --proxy socks5://127.0.0.1:1080
 ```
 </CodeGroup>
 
-SDK addresses use `IP:port`. The `msb run` and `msb create` commands accept `--proxy http://IP:port`, `socks4://IP:port`, or `socks5://IP:port`. Proxy URIs reject user information, paths, query parameters, and fragments; SOCKS authentication uses separate CLI flags.
+SDK addresses use `IP:port`. The `msb run` and `msb create` commands accept `--proxy http://IP:port`, `http+proxy-dns://IP:port`, `socks4://IP:port`, or `socks5://IP:port`. Proxy URIs reject user information, paths, query parameters, and fragments; SOCKS authentication uses separate CLI flags.
 
 ## HTTP CONNECT
 
@@ -98,6 +99,46 @@ m.WithProxy(m.HTTPConnectProxy("127.0.0.1:3128"))
 msb run alpine --proxy http://127.0.0.1:3128
 ```
 </CodeGroup>
+
+## Proxy-side DNS resolution
+
+Enable proxy-side DNS on an HTTP CONNECT proxy when HTTP clients must use the upstream proxy's resolver. The sandbox starts a local HTTP forward proxy and supplies it through `HTTP_PROXY`, `HTTPS_PROXY`, and their lowercase equivalents. The local proxy checks each requested hostname against the sandbox and platform domain policy, then forwards HTTP requests in absolute form with a `Host` header matching the checked URL authority; HTTPS tunnels use `CONNECT hostname:port`. The guest does not need to send network traffic directly to the upstream proxy.
+
+HTTP Upgrade requests, including WebSocket handshakes, preserve their upgrade headers. The local proxy starts a bidirectional tunnel through the policy-checked upstream connection only after the upstream accepts the upgrade with `101 Switching Protocols`. A rejected upgrade returns the upstream response and closes the connection. Refusal bodies use HTTP response framing, including connection-close framing for a final non-chunked transfer coding such as `gzip`.
+
+When any secrets are configured, the local HTTP proxy rejects Upgrade requests with `403 Forbidden` before connecting upstream. Upgraded payloads, such as masked WebSocket frames, cannot be checked reliably by the HTTP secret handler. The response explains this restriction; ordinary HTTP secret substitution continues to work.
+
+With secrets configured, CONNECT requires TLS interception. Tunnels with interception disabled, on ports outside the interception list, or to a hostname configured for TLS bypass receive an explanatory `403 Forbidden` before connecting upstream, including secret-allowed hosts. If an IP-literal CONNECT selects a TLS bypass through its SNI, the tunnel closes before forwarding the TLS payload. Intercepted CONNECT tunnels continue through the existing TLS secret handler.
+
+The local proxy handles one ordinary HTTP request per TCP connection. It detects additional request data after the request body, including chunked bodies and requests split across network reads. If detected before the response starts, the proxy returns `400 Bad Request`; if the response has already started, it closes the connection. Use a new connection for another request.
+
+This mode is unavailable with the multi-tenant deployment profile, which disables user-configured outbound proxies.
+
+```typescript
+.proxy((p) => p.httpConnect("127.0.0.1:3128").resolveDnsViaProxy())
+```
+
+```rust
+.proxy(|p| p.http_connect("127.0.0.1:3128").resolve_dns_via_proxy())
+```
+
+```python
+proxy=OutboundProxy.http_connect("127.0.0.1:3128", resolve_dns_via_proxy=True)
+```
+
+```go
+m.WithProxy(m.HTTPConnectProxyWithProxyDNS("127.0.0.1:3128"))
+```
+
+```bash
+msb run alpine --proxy http+proxy-dns://127.0.0.1:3128
+```
+
+Domain rules, ports, protocols, and default egress policy still apply. Because the upstream proxy resolves the hostname, microsandbox cannot apply CIDR or destination-group rules, including `Public`, to that DNS result. A policy that allows only an IP group does not allow proxy-resolved hostnames; use hostname rules or an applicable `Any` rule. The upstream proxy's DNS answer and destination selection are trusted, so the DNS blocklist and DNS rebinding checks do not see these requests. IP literals still receive normal address-based policy checks; TLS interception also applies hostname deny rules to their SNI.
+
+TLS interception and secret injection continue to work for HTTPS clients that use the injected proxy and connect with a hostname matching the TLS SNI. Raw TCP and UDP packets do not use this local HTTP proxy and retain the existing direct network-policy path. Raw DNS continues through the existing DNS forwarder. The proxy variables are baseline defaults; workload-supplied proxy variables can override them, and HTTP requests that bypass the local proxy do not receive its hostname checks.
+
+The selected `msb` runtime must advertise HTTP CONNECT proxy-side DNS support. Older runtimes are refused before sandbox creation or replacement.
 
 ## SOCKS4 user ID
 
@@ -188,12 +229,12 @@ msb run alpine \
 
 ## Behavior and limits
 
-- Network policy is evaluated against the sandbox's actual destination before the proxy connection is opened.
-- HTTP CONNECT and SOCKS4 support TCP only. Non-DNS UDP is blocked while either is configured; SOCKS4 also cannot reach IPv6 destinations.
+- For ordinary HTTP CONNECT, network policy is evaluated against the resolved destination before the proxy connection is opened. With proxy-side DNS, policy is evaluated against the hostname because the upstream proxy's resolved IP is unavailable.
+- Ordinary HTTP CONNECT and SOCKS4 support TCP only. Non-DNS UDP is blocked while either is configured; SOCKS4 also cannot reach IPv6 destinations. Proxy-side DNS mode leaves raw UDP on the normal policy path.
 - SOCKS5 uses `CONNECT` for TCP and `UDP ASSOCIATE` for non-DNS UDP.
-- DNS uses microsandbox's DNS forwarder instead of the configured proxy. This includes plain DNS, DNS-over-TCP, and DNS-over-TLS.
+- Raw DNS uses microsandbox's DNS forwarder instead of the configured proxy. This includes plain DNS, DNS-over-TCP, and DNS-over-TLS. Proxy-side DNS applies only to HTTP clients using `HTTP_PROXY` or `HTTPS_PROXY`.
 - Connections to `host.microsandbox.internal` bypass the proxy and continue to target the microsandbox host.
-- Each TCP connection opens its own proxy connection and handshake. Each UDP flow opens its own SOCKS5 control connection and UDP association.
+- Ordinary proxy-routed TCP connections open one upstream connection each. Proxy-side DNS uses one upstream connection per plain HTTP request or HTTPS tunnel. Each UDP flow opens its own SOCKS5 control connection and UDP association.
 - TLS interception and secret injection continue to work as configured.
 
 ## Reference

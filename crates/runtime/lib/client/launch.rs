@@ -72,6 +72,10 @@ pub struct LaunchCapabilities {
     #[serde(default)]
     pub http_connect_proxy: bool,
 
+    /// The guest-facing policy proxy can preserve hostnames for upstream DNS resolution.
+    #[serde(default)]
+    pub http_connect_proxy_dns: bool,
+
     /// The launch field `guest_clock` is honored by the runtime.
     /// Older runtimes omit this capability.
     #[serde(default)]

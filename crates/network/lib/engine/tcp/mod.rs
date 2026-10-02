@@ -3,6 +3,7 @@
 pub mod connection;
 pub(crate) mod deferred_close;
 pub(crate) mod deny;
+pub(crate) mod http;
 pub mod proxy;
 pub(crate) mod upstream;
 

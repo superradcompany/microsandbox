@@ -406,7 +406,8 @@ impl UdpRelay {
                     );
                     None
                 }
-                ResolvedOutboundProxy::HttpConnect { .. } => {
+                ResolvedOutboundProxy::HttpConnect { .. }
+                | ResolvedOutboundProxy::HttpConnectProxyDns { .. } => {
                     tracing::debug!(
                         guest_src = %guest_src,
                         guest_dst = %guest_dst,

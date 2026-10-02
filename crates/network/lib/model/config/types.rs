@@ -125,10 +125,12 @@ pub struct NetworkConfig {
     #[serde(default)]
     pub http: HttpConfig,
 
-    /// Proxy that all outbound sandbox connections are dialed through.
+    /// Proxy used for eligible outbound sandbox traffic.
     ///
-    /// Applies to TLS-intercepted and bypassed/plain TCP traffic. SOCKS5 also
-    /// relays non-DNS UDP; SOCKS4 and HTTP CONNECT block it.
+    /// HTTP CONNECT and SOCKS apply to network-stack TCP, with SOCKS5 also
+    /// relaying non-DNS UDP. The proxy-side DNS HTTP CONNECT mode applies to
+    /// HTTP clients using the injected proxy environment variables; raw TCP,
+    /// UDP, and DNS traffic retain the regular network path.
     #[serde(default)]
     pub outbound_proxy: Option<OutboundProxy>,
 }

@@ -557,10 +557,13 @@ pub struct SandboxOpts {
     #[arg(long)]
     pub trust_host_cas: bool,
 
-    /// Dial all outbound sandbox connections through this proxy.
-    /// Supports http://, socks4://, and socks5:// protocols.
+    /// Configure an outbound proxy for eligible sandbox traffic.
+    /// Supports http://, http+proxy-dns://, socks4://, and socks5:// protocols.
     #[cfg(feature = "net")]
-    #[arg(long, value_name = "http://IP:PORT|socks[4|5]://IP:PORT")]
+    #[arg(
+        long,
+        value_name = "http://IP:PORT|http+proxy-dns://IP:PORT|socks[4|5]://IP:PORT"
+    )]
     pub proxy: Option<String>,
 
     /// Optional user ID for a SOCKS4 proxy.
@@ -748,6 +751,20 @@ impl SandboxOpts {
                 Ok(Some(
                     OutboundProxyBuilder::new()
                         .http_connect(address.to_string())
+                        .build()?,
+                ))
+            }
+            OutboundProxy::HttpConnectProxyDns { address } => {
+                if self.socks4_user_id.is_some()
+                    || self.socks5_username.is_some()
+                    || self.socks5_password_env.is_some()
+                {
+                    anyhow::bail!("SOCKS authentication flags cannot be used with an HTTP proxy");
+                }
+                Ok(Some(
+                    OutboundProxyBuilder::new()
+                        .http_connect(address.to_string())
+                        .resolve_dns_via_proxy()
                         .build()?,
                 ))
             }

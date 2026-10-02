@@ -32,7 +32,9 @@ pub(crate) enum OutboundProxySelection {
 
 /// Builds an HTTP CONNECT outbound proxy.
 #[napi(js_name = "HttpConnectProxyBuilder")]
-pub struct JsHttpConnectProxyBuilder {}
+pub struct JsHttpConnectProxyBuilder {
+    selection: SharedOutboundProxySelection,
+}
 
 /// Builds a SOCKS4 outbound proxy.
 #[napi(js_name = "Socks4ProxyBuilder")]
@@ -84,7 +86,9 @@ impl JsOutboundProxyBuilder {
             .replace(Some(OutboundProxySelection::HttpConnect(
                 builder.http_connect(address),
             )));
-        Ok(JsHttpConnectProxyBuilder {})
+        Ok(JsHttpConnectProxyBuilder {
+            selection: Rc::clone(&self.selection),
+        })
     }
 
     /// Select a SOCKS4 proxy at `address`.
@@ -115,6 +119,28 @@ impl JsOutboundProxyBuilder {
         Ok(JsSocks5ProxyBuilder {
             selection: Rc::clone(&self.selection),
         })
+    }
+}
+
+#[napi]
+impl JsHttpConnectProxyBuilder {
+    /// Use the HTTP upstream proxy to resolve destination hostnames.
+    #[napi]
+    pub fn resolve_dns_via_proxy(&mut self) -> Result<&Self> {
+        let builder = self
+            .selection
+            .take()
+            .ok_or_else(|| napi::Error::from_reason("HttpConnectProxyBuilder already consumed"))?;
+        let OutboundProxySelection::HttpConnect(builder) = builder else {
+            return Err(napi::Error::from_reason(
+                "HttpConnectProxyBuilder selection was replaced",
+            ));
+        };
+        self.selection
+            .replace(Some(OutboundProxySelection::HttpConnect(
+                builder.resolve_dns_via_proxy(),
+            )));
+        Ok(self)
     }
 }
 

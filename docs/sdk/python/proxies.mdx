@@ -33,11 +33,11 @@ Frozen proxy configuration passed through `Sandbox.create(proxy=...)`.
 
 | Class method | Returns | Description |
 |--------------|---------|-------------|
-| `http_connect(address)` | `OutboundProxy` | Configure an HTTP CONNECT proxy at `IP:port` for TCP |
+| `http_connect(address, *, resolve_dns_via_proxy=False)` | `OutboundProxy` | Configure an HTTP CONNECT proxy at `IP:port`; optionally let it resolve hostnames |
 | `socks4(address, *, user_id=None)` | `OutboundProxy` | Configure a SOCKS4 proxy at `IP:port` with an optional user ID |
 | `socks5(address)` | `OutboundProxy` | Configure a SOCKS5 proxy at `IP:port` |
 
-HTTP CONNECT sends the policy-checked destination IP and port through the proxy. Destination DNS resolution remains in microsandbox. HTTP CONNECT does not support proxy authentication or UDP.
+By default, HTTP CONNECT sends the policy-checked destination IP and port through the proxy. Set `resolve_dns_via_proxy=True` to have HTTP clients use a local policy proxy that forwards HTTP requests in absolute form and HTTPS tunnels with the hostname in CONNECT. This trusts the upstream DNS result, so IP-group and CIDR restrictions cannot be applied to it. HTTP CONNECT does not support proxy authentication or UDP.
 
 The SOCKS4 `user_id` must contain 1–255 bytes and no null byte. It identifies the caller; it is not a password.
 

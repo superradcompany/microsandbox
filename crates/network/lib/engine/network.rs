@@ -28,7 +28,9 @@ use crate::netstack::{
     shared::{DEFAULT_QUEUE_CAPACITY, SharedState},
 };
 use crate::policy::{NetworkPolicy, NetworkProfile};
+use crate::proxy::ResolvedOutboundProxy;
 use crate::secrets::handle::SecretsHandle;
+use crate::tcp::http;
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -118,6 +120,10 @@ pub enum NetworkInitError {
     /// TLS interception state failed to initialize.
     #[error("TLS initialization failed: {0}")]
     Tls(#[from] TlsStateError),
+
+    /// Proxy-side DNS is incompatible with the multi-tenant outbound-proxy floor.
+    #[error("HTTP CONNECT proxy-side DNS is unavailable with the multi-tenant deployment profile")]
+    HttpProxyDnsUnavailableInMultiTenant,
 
     /// A stored rate limiter configuration failed validation.
     #[error("invalid {direction} rate limiter: {source}")]
@@ -218,6 +224,14 @@ impl SmoltcpNetwork {
         deployment_profile: DeploymentProfile,
         host_routes: HostRoutes,
     ) -> Result<Self, NetworkInitError> {
+        if deployment_profile == DeploymentProfile::MultiTenant
+            && matches!(
+                config.outbound_proxy(),
+                Some(ResolvedOutboundProxy::HttpConnectProxyDns { .. })
+            )
+        {
+            return Err(NetworkInitError::HttpProxyDnsUnavailableInMultiTenant);
+        }
         enforce_deployment_profile(&mut config, deployment_profile);
         let platform_policy = Self::platform_policy(deployment_profile);
         let resolved_config = config;
@@ -308,7 +322,6 @@ impl SmoltcpNetwork {
         } else {
             None
         };
-
         Ok(Self {
             config: resolved_config,
             platform_policy,
@@ -515,6 +528,30 @@ impl SmoltcpNetwork {
                 value: secret.placeholder.clone(),
             })
             .collect()
+    }
+
+    /// Guest default environment for the local HTTP forward proxy, when configured.
+    pub fn guest_proxy_env(&self) -> Vec<(String, String)> {
+        if self.gateway_ipv4.is_none() && self.gateway_ipv6.is_none() {
+            return Vec::new();
+        }
+        if !matches!(
+            self.config.outbound_proxy(),
+            Some(ResolvedOutboundProxy::HttpConnectProxyDns { .. })
+        ) {
+            return Vec::new();
+        }
+        let port = http::GUEST_HTTP_PROXY_PORT;
+        let proxy = format!("http://{}:{port}", crate::HOST_ALIAS);
+        let no_proxy = format!("localhost,127.0.0.1,::1,{}", crate::HOST_ALIAS);
+        vec![
+            ("HTTP_PROXY".into(), proxy.clone()),
+            ("http_proxy".into(), proxy.clone()),
+            ("HTTPS_PROXY".into(), proxy.clone()),
+            ("https_proxy".into(), proxy),
+            ("NO_PROXY".into(), no_proxy.clone()),
+            ("no_proxy".into(), no_proxy),
+        ]
     }
 
     /// CA certificate PEM bytes if TLS interception is enabled.

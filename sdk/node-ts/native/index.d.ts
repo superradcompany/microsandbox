@@ -632,7 +632,10 @@ export declare class OutboundProxyBuilder {
 export type JsOutboundProxyBuilder = OutboundProxyBuilder
 
 /** Builds an HTTP CONNECT outbound proxy. */
-export declare class HttpConnectProxyBuilder {}
+export declare class HttpConnectProxyBuilder {
+  /** Use the upstream proxy to resolve destination hostnames. */
+  resolveDnsViaProxy(): this
+}
 
 /** Fluent builder for an ordered list of pre-boot rootfs patches. */
 export declare class PatchBuilder {

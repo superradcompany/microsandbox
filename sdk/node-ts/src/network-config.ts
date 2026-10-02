@@ -101,6 +101,10 @@ export type OutboundProxy =
       readonly address: string;
     }
   | {
+      readonly protocol: "http_connect_proxy_dns";
+      readonly address: string;
+    }
+  | {
       readonly protocol: "socks4";
       readonly address: string;
       readonly userId?: string;

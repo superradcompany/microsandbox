@@ -32,11 +32,12 @@ const CONNECT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
 #[derive(Debug, Clone)]
 pub struct HttpConnectProxyBuilder {
     address: String,
+    resolve_dns_via_proxy: bool,
 }
 
 /// HTTP CONNECT wire protocol operations.
 #[cfg(feature = "engine")]
-pub(super) struct HttpConnectProtocol;
+pub(crate) struct HttpConnectProtocol;
 
 //--------------------------------------------------------------------------------------------------
 // Methods
@@ -47,7 +48,19 @@ impl HttpConnectProxyBuilder {
     pub(super) fn new(address: impl Into<String>) -> Self {
         Self {
             address: address.into(),
+            resolve_dns_via_proxy: false,
         }
+    }
+
+    /// Ask the upstream HTTP proxy to resolve destination hostnames.
+    ///
+    /// This starts a sandbox-local HTTP proxy and supplies it through the
+    /// guest's `HTTP_PROXY` and `HTTPS_PROXY` environment defaults. The
+    /// upstream proxy's DNS result is trusted; CIDR and IP-group policy rules
+    /// cannot be applied to that result.
+    pub fn resolve_dns_via_proxy(mut self) -> Self {
+        self.resolve_dns_via_proxy = true;
+        self
     }
 }
 
@@ -87,6 +100,59 @@ impl HttpConnectProtocol {
             io::ErrorKind::ConnectionRefused
         };
 
+        Err(io::Error::new(
+            kind,
+            format!("HTTP CONNECT proxy rejected the tunnel with status {status}"),
+        ))
+    }
+
+    /// Opens a tunnel while leaving hostname resolution to the proxy.
+    pub(crate) async fn connect_host(
+        address: SocketAddr,
+        hostname: &str,
+        port: u16,
+    ) -> io::Result<TcpStream> {
+        if hostname.is_empty()
+            || !hostname.is_ascii()
+            || hostname
+                .bytes()
+                .any(|byte| byte.is_ascii_whitespace() || byte.is_ascii_control())
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "HTTP CONNECT destination hostname is invalid",
+            ));
+        }
+        let authority = if hostname.contains(':') {
+            format!("[{hostname}]:{port}")
+        } else {
+            format!("{hostname}:{port}")
+        };
+        let mut stream = TcpStream::connect(address).await?;
+        let request = format!("CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n\r\n");
+        stream.write_all(request.as_bytes()).await?;
+        stream.flush().await?;
+
+        let status = timeout(
+            CONNECT_RESPONSE_TIMEOUT,
+            Self::read_connect_response_status(&mut stream),
+        )
+        .await
+        .map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::TimedOut,
+                "HTTP CONNECT proxy did not complete its response headers within 10 seconds",
+            )
+        })??;
+        if (200..300).contains(&status) {
+            return Ok(stream);
+        }
+
+        let kind = if status == 407 {
+            io::ErrorKind::PermissionDenied
+        } else {
+            io::ErrorKind::ConnectionRefused
+        };
         Err(io::Error::new(
             kind,
             format!("HTTP CONNECT proxy rejected the tunnel with status {status}"),
@@ -177,6 +243,10 @@ impl OutboundProxyConfig for HttpConnectProxyBuilder {
             }
         })?;
 
-        Ok(OutboundProxy::HttpConnect { address })
+        Ok(if self.resolve_dns_via_proxy {
+            OutboundProxy::HttpConnectProxyDns { address }
+        } else {
+            OutboundProxy::HttpConnect { address }
+        })
     }
 }

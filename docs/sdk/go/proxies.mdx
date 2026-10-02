@@ -53,6 +53,14 @@ func HTTPConnectProxy(address string) *OutboundProxy
 
 Construct an HTTP CONNECT proxy at `IP:port` for [`WithProxy`](#m-withproxy). It supports TCP only and does not support proxy authentication.
 
+### <span className="msb-recv" id="m-httpconnectproxywithproxydns">m.</span><span className="msb-hn">HTTPConnectProxyWithProxyDNS()</span>
+
+```go
+func HTTPConnectProxyWithProxyDNS(address string) *OutboundProxy
+```
+
+Construct an HTTP CONNECT proxy that resolves hostname targets itself. HTTP clients use a local policy proxy, which checks the hostname and forwards HTTP requests in absolute form or HTTPS tunnels with CONNECT. The upstream DNS result is trusted, so IP-group and CIDR restrictions cannot apply to it.
+
 ### <span className="msb-recv" id="m-socks5proxy">m.</span><span className="msb-hn">SOCKS5Proxy()</span>
 
 ```go

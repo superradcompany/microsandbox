@@ -42,6 +42,14 @@ httpConnect(address: string): HttpConnectProxyBuilder
 
 Select an HTTP CONNECT proxy at `IP:port`. It supports TCP only and does not support proxy authentication.
 
+#### resolveDnsViaProxy()
+
+```typescript
+resolveDnsViaProxy(): this
+```
+
+Ask the upstream proxy to resolve HTTP destinations. HTTP clients use an injected local policy proxy, which checks hostnames and forwards HTTP requests in absolute form or HTTPS tunnels with the hostname in CONNECT. The upstream DNS result is trusted, so IP-group and CIDR checks cannot apply to it.
+
 ### <span id="socks4">socks4()</span>
 
 ```typescript
@@ -102,6 +110,10 @@ Discriminated outbound proxy value stored in the sandbox's durable network speci
 type OutboundProxy =
   | {
       readonly protocol: "http_connect";
+      readonly address: string;
+    }
+  | {
+      readonly protocol: "http_connect_proxy_dns";
       readonly address: string;
     }
   | {

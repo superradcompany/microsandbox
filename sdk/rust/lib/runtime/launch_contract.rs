@@ -90,14 +90,31 @@ impl LaunchContract {
 
         if self.machine
             && matches!(
-                network.outbound_proxy,
-                Some(microsandbox_network::OutboundProxy::HttpConnect { .. })
+                network.outbound_proxy.as_ref(),
+                Some(
+                    microsandbox_network::OutboundProxy::HttpConnect { .. }
+                        | microsandbox_network::OutboundProxy::HttpConnectProxyDns { .. }
+                )
             )
         {
             require_capability(
                 msb_path,
                 |capabilities| capabilities.http_connect_proxy,
                 "HTTP CONNECT outbound proxies",
+            )
+            .await?;
+        }
+
+        if self.machine
+            && matches!(
+                network.outbound_proxy.as_ref(),
+                Some(microsandbox_network::OutboundProxy::HttpConnectProxyDns { .. })
+            )
+        {
+            require_capability(
+                msb_path,
+                |capabilities| capabilities.http_connect_proxy_dns,
+                "HTTP CONNECT proxy-side DNS resolution",
             )
             .await?;
         }
@@ -121,8 +138,11 @@ impl LaunchContract {
         }
 
         if matches!(
-            network.outbound_proxy,
-            Some(microsandbox_network::OutboundProxy::HttpConnect { .. })
+            network.outbound_proxy.as_ref(),
+            Some(
+                microsandbox_network::OutboundProxy::HttpConnect { .. }
+                    | microsandbox_network::OutboundProxy::HttpConnectProxyDns { .. }
+            )
         ) {
             return Err(MicrosandboxError::Runtime(upgrade_required(
                 "HTTP CONNECT outbound proxies",
